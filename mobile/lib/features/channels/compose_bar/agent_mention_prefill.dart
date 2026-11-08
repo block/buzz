@@ -59,12 +59,13 @@ void _useAgentMentionPrefill({
           viewer: ref.watch(currentPubkeyProvider),
         );
   // Current members only: an agent that has left is not carried forward.
-  final memberCandidates = source == null || source.pubkeys.isEmpty
+  final members = source == null || source.pubkeys.isEmpty
+      ? null
+      : ref.watch(channelMembersProvider(channelId)).asData?.value;
+  final memberCandidates = members == null
       ? const <MentionCandidate>[]
       : buildMentionCandidates(
-          members:
-              ref.watch(channelMembersProvider(channelId)).asData?.value ??
-              const [],
+          members: members,
           relayAgents: const [],
           sharedChannelIds: const {},
           userCache: ref.watch(userCacheProvider),
@@ -95,13 +96,28 @@ void _useAgentMentionPrefill({
   }, [controller, source?.messageId]);
 
   useEffect(() {
-    // No agents (or their names are still loading) leaves the composer as is.
-    if (source == null ||
-        agents.isEmpty ||
-        settledFor.value == source.messageId) {
+    final prefill = prefillText.value;
+    // The latest message has no agents to carry over (or they all left): take
+    // back an untouched prefill, which describes an older message. While the
+    // members are still loading, nothing is known yet, so leave it.
+    final noAgents =
+        source == null ||
+        source.pubkeys.isEmpty ||
+        (members != null && agents.isEmpty);
+    if (noAgents) {
+      if (prefill != null && controller.text == prefill) {
+        prefillText.value = null;
+        mentionMap.value.clear();
+        isModifyingText.value = true;
+        try {
+          controller.value = TextEditingValue.empty;
+        } finally {
+          isModifyingText.value = false;
+        }
+      }
       return null;
     }
-    final prefill = prefillText.value;
+    if (agents.isEmpty || settledFor.value == source.messageId) return null;
     // Fill only an empty composer, or replace this hook's own prefill.
     if (hasAttachments ||
         (controller.text.isNotEmpty && controller.text != prefill)) {
@@ -132,5 +148,5 @@ void _useAgentMentionPrefill({
       isModifyingText.value = false;
     }
     return null;
-  }, [source?.messageId, agentsKey, draftKey, hasAttachments]);
+  }, [source?.messageId, agentsKey, members == null, draftKey, hasAttachments]);
 }

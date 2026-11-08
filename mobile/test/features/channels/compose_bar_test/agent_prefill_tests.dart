@@ -115,4 +115,94 @@ void agentPrefillTests() {
     await tester.pumpAndSettle();
     expect(text(), isEmpty);
   });
+
+  testWidgets('takes back an untouched prefill once it is out of date', (
+    tester,
+  ) async {
+    final viewer = 'f' * 64;
+    final agent = 'a' * 64;
+    final person = 'b' * 64;
+    var agentInChannel = true;
+    var scope = <NostrEvent>[];
+    NostrEvent message(String id, int at, List<String> tags) => NostrEvent(
+      id: id,
+      pubkey: viewer,
+      createdAt: at,
+      kind: EventKind.streamMessage,
+      tags: [
+        const ['h', 'channel-1'],
+        for (final key in tags) ['p', key],
+      ],
+      content: '',
+      sig: '',
+    );
+    Widget build() => _buildComposeBar(
+      uploadService: _testUploadService(nostr.Keys.generate().nsec),
+      currentPubkey: viewer,
+      channels: [_makeCurrentChannel()],
+      loadMembers: () async => [
+        if (agentInChannel)
+          ChannelMember(
+            pubkey: agent,
+            displayName: 'Scout',
+            role: 'bot',
+            joinedAt: DateTime(2025),
+          ),
+      ],
+      prefillScopeEvents: scope,
+      onSend: (_, _, {mediaTags = const []}) async {},
+    );
+    bool shows(String text) => find.text(text).evaluate().isNotEmpty;
+    void dropAgent() {
+      agentInChannel = false;
+      ProviderScope.containerOf(
+        tester.element(find.byType(ComposeBar)),
+      ).invalidate(channelMembersProvider('channel-1'));
+    }
+
+    // A newer message (sent elsewhere) that tags no agent clears the prefill.
+    scope = [
+      message('1', 10, [agent]),
+    ];
+    await tester.pumpWidget(build());
+    await tester.pumpAndSettle();
+    expect(shows('@Scout'), isTrue);
+    scope = [
+      ...scope,
+      message('2', 20, [person]),
+    ];
+    await tester.pumpWidget(build());
+    await tester.pumpAndSettle();
+    expect(shows('@Scout'), isFalse);
+    expect(shows('Message…'), isTrue);
+
+    // So does the last tagged agent leaving the channel.
+    scope = [
+      ...scope,
+      message('3', 30, [agent]),
+    ];
+    await tester.pumpWidget(build());
+    await tester.pumpAndSettle();
+    expect(shows('@Scout'), isTrue);
+    dropAgent();
+    await tester.pumpAndSettle();
+    expect(shows('@Scout'), isFalse);
+    expect(shows('Message…'), isTrue);
+
+    // Text the viewer wrote is theirs, and stays.
+    agentInChannel = true;
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pumpWidget(build());
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('@Scout'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField), '@Scout hi');
+    await tester.pumpAndSettle();
+    dropAgent();
+    await tester.pumpAndSettle();
+    expect(
+      tester.widget<TextField>(find.byType(TextField)).controller!.text,
+      '@Scout hi',
+    );
+  });
 }
