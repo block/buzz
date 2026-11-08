@@ -200,7 +200,7 @@ class _InboxRow extends HookConsumerWidget {
                     child: InkWell(
                       key: ValueKey('inbox-row-${item.id}'),
                       onTap: onTap,
-                      onLongPress: () => _showRowActions(context),
+                      onLongPress: () => _showRowActions(context, ref),
                       child: Padding(
                         padding: const EdgeInsets.symmetric(
                           horizontal: Grid.gutter,
@@ -335,7 +335,18 @@ class _InboxRow extends HookConsumerWidget {
     );
   }
 
-  void _showRowActions(BuildContext context) {
+  /// Messages, not other inbox activity, can start a Solo chat.
+  bool get _canStartSoloChat =>
+      item.item.channelId != null &&
+      item.item.content.trim().isNotEmpty &&
+      const {
+        EventKind.streamMessage,
+        EventKind.streamMessageV2,
+        EventKind.forumPost,
+        EventKind.forumComment,
+      }.contains(item.item.kind);
+
+  void _showRowActions(BuildContext context, WidgetRef ref) {
     showBuzzModalBottomSheet<void>(
       context: context,
       builder: (sheetContext) => SafeArea(
@@ -366,6 +377,28 @@ class _InboxRow extends HookConsumerWidget {
                     onTap();
                   },
                 ),
+                if (_canStartSoloChat)
+                  ListTile(
+                    leading: const Icon(BuzzIcons.messageCircle),
+                    title: const Text('Start Solo chat'),
+                    onTap: () {
+                      Navigator.of(sheetContext).pop();
+                      final message = item.item;
+                      unawaited(
+                        openSoloChatFromMessage(
+                          context,
+                          ref,
+                          channel: channel,
+                          channelId: message.channelId!,
+                          messageId: message.id,
+                          threadRootId: parseThreadReference(
+                            message.tags,
+                          ).rootId,
+                          content: message.content,
+                        ),
+                      );
+                    },
+                  ),
               ],
             ),
           ),

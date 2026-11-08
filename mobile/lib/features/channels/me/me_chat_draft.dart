@@ -2,11 +2,24 @@ part of 'me_page.dart';
 
 /// A conversation draft: no channel is created until the first send.
 class _MeChatDraft extends HookConsumerWidget {
-  const _MeChatDraft();
+  const _MeChatDraft({required this.composerKey, this.focusComposer = false});
+
+  /// The composer's draft key: `new-solo`, or one per source message.
+  final String composerKey;
+
+  /// Focus the composer on open, so a seeded source is ready to add to.
+  final bool focusComposer;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final sync = ref.watch(meSyncProvider);
+    // Expand and focus the composer once, as a tap would.
+    final focused = useRef(false);
+    final focusOnOpen = useCallback((VoidCallback expandAndFocus) {
+      if (!focusComposer || focused.value) return;
+      focused.value = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) => expandAndFocus());
+    }, const []);
     final originalScope = useMemoized(() => (sync.community, sync.pubkey));
     final pending = useState(MeChatCreation.pending(sync));
     final channelId = useMemoized(() => pending.value?.id ?? const Uuid().v4());
@@ -235,7 +248,8 @@ class _MeChatDraft extends HookConsumerWidget {
                 ),
               if (!scopeChanged && pending.value == null)
                 ComposeBar(
-                  channelId: 'new-solo',
+                  channelId: composerKey,
+                  onFocusRestorerChanged: focusOnOpen,
                   interactionLocked: workspace.busy,
                   hintText: 'Message $name',
                   draftMembers: [
