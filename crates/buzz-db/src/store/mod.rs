@@ -119,3 +119,5 @@ pub mod media;
 
 #[cfg(test)]
 mod media_postgres_tests;
+#[cfg(test)]
+mod message_edit_state_postgres_tests;
