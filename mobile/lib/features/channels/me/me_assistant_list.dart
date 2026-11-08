@@ -15,10 +15,12 @@ class MeAssistantList extends ConsumerWidget {
     super.key,
     required this.choices,
     required this.selected,
+    this.onSelected,
   });
 
   final List<AgentDirectoryEntry> choices;
   final String? selected;
+  final ValueChanged<String>? onSelected;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -70,7 +72,9 @@ class MeAssistantList extends ConsumerWidget {
                           trailing: agent.pubkey == selected
                               ? const Icon(BuzzIcons.check)
                               : null,
-                          onTap: () => Navigator.pop(context, agent.pubkey),
+                          onTap: () => onSelected != null
+                              ? onSelected!(agent.pubkey)
+                              : Navigator.pop(context, agent.pubkey),
                         ),
                       ),
                   ],

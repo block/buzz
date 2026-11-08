@@ -425,16 +425,43 @@ pub fn build_diff_message(
 }
 
 /// Build an edit event targeting an existing message (kind 40003).
+///
+/// This compatibility helper removes all attachments. Use
+/// [`build_edit_with_media`] with the latest effective imeta to retain them.
 pub fn build_edit(
     channel_id: Uuid,
     target_event_id: nostr::EventId,
     new_content: &str,
 ) -> Result<EventBuilder, SdkError> {
+    build_edit_with_media(channel_id, target_event_id, new_content, &[])
+}
+
+/// Build an edit with the complete replacement attachment set (kind 40003).
+///
+/// Pass the latest live edit's imeta tags, or the original's when no edit
+/// exists, to retain attachments. An empty set explicitly removes attachments;
+/// URLs in the content alone do not retain media access. The relay still
+/// checks the signer's publication rights for every local attachment.
+pub fn build_edit_with_media(
+    channel_id: Uuid,
+    target_event_id: nostr::EventId,
+    new_content: &str,
+    media_tags: &[Vec<String>],
+) -> Result<EventBuilder, SdkError> {
     check_content(new_content, 64 * 1024)?;
-    let tags = vec![
+    let mut tags = vec![
         tag(&["h", &channel_id.to_string()])?,
         tag(&["e", &target_event_id.to_hex()])?,
     ];
+    // Only attachment metadata belongs here: a caller must not inject a
+    // competing target/channel or authorization tag through media_tags.
+    if media_tags
+        .iter()
+        .any(|t| t.first().map(String::as_str) != Some("imeta"))
+    {
+        return Err(SdkError::InvalidTag("expected imeta attachment tag".into()));
+    }
+    imeta_tags(media_tags, &mut tags)?;
     Ok(EventBuilder::new(Kind::Custom(40003), new_content).tags(tags))
 }
 
@@ -3307,6 +3334,34 @@ mod tests {
         let ev = sign(build_edit(cid, eid, "new content").unwrap());
         assert_eq!(ev.kind.as_u16(), 40003);
         assert!(has_tag(&ev, "e", &eid.to_hex()));
+    }
+
+    #[test]
+    fn edit_replaces_complete_media_set_and_rejects_non_media_tags() {
+        let cid = uuid();
+        let eid = event_id();
+        let media = vec![vec![
+            "imeta".into(),
+            "url https://example.com/a.png".into(),
+            "x ".to_owned() + &"a".repeat(64),
+            "alt full label".into(),
+            "image https://example.com/poster.png".into(),
+        ]];
+        let event = sign(build_edit_with_media(cid, eid, "new", &media).unwrap());
+        assert_eq!(
+            event
+                .tags
+                .iter()
+                .find(|t| t.as_slice()[0] == "imeta")
+                .unwrap()
+                .as_slice(),
+            media[0]
+        );
+        let cleared = sign(build_edit_with_media(cid, eid, "clear", &[]).unwrap());
+        assert!(!cleared.tags.iter().any(|t| t.as_slice()[0] == "imeta"));
+        assert!(build_edit_with_media(cid, eid, "bad", &[vec!["e".into(), eid.to_hex()]]).is_err());
+        assert!(build_edit_with_media(cid, eid, "bad", &[vec![]]).is_err());
+        assert!(build_edit_with_media(cid, eid, &"x".repeat(64 * 1024 + 1), &media).is_err());
     }
 
     #[test]
