@@ -52,6 +52,7 @@ import { useFetchOlderMessages } from "@/features/messages/useFetchOlderMessages
 import { useIndependentThreadPanel } from "@/features/messages/useIndependentThreadPanel";
 import { useThreadReplies } from "@/features/messages/useThreadReplies";
 import { useChannelTyping } from "@/features/messages/useChannelTyping";
+import { useChannelReadReceipts } from "@/features/messages/useReadReceipts";
 import type { TimelineMessage } from "@/features/messages/types";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
 import {
@@ -274,6 +275,11 @@ export function ChannelScreen({
     [resolvedMessages],
   );
   const typingEntries = useChannelTyping(
+    activeChannel,
+    currentPubkey,
+    latestMessageEvent,
+  );
+  const seenUpTo = useChannelReadReceipts(
     activeChannel,
     currentPubkey,
     latestMessageEvent,
@@ -979,6 +985,7 @@ export function ChannelScreen({
                   isJoining={joinChannelMutation.isPending}
                   onJoinChannel={joinChannelMutation.mutateAsync}
                   typingPubkeys={humanTypingPubkeys}
+                  seenUpTo={seenUpTo}
                 />
               </React.Suspense>
             )

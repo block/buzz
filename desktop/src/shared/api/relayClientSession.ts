@@ -7,6 +7,7 @@ import {
 } from "@/shared/api/tauri";
 import type { PresenceStatus, RelayEvent } from "@/shared/api/types";
 import {
+  KIND_READ_RECEIPT,
   KIND_STREAM_MESSAGE,
   KIND_TYPING_INDICATOR,
   KIND_USER_STATUS,
@@ -383,6 +384,36 @@ export class RelayClient {
     return this.subscribe(
       {
         kinds: [KIND_TYPING_INDICATOR],
+        "#h": [channelId],
+        limit: 10,
+        since: Math.floor(Date.now() / 1_000) - 10,
+      },
+      onEvent,
+    );
+  }
+
+  /** Fire-and-forget ephemeral kind:20003 read receipt for a channel. */
+  async sendReadReceipt(channelId: string) {
+    // Bail when disconnected — receipts are ephemeral and not worth a reconnect.
+    if (this.wsId === null) {
+      return;
+    }
+    const event = await signRelayEvent({
+      kind: KIND_READ_RECEIPT,
+      content: "",
+      tags: [["h", channelId]],
+    });
+    void this.sendRaw(["EVENT", event]).catch(() => {});
+  }
+
+  /** Subscribe to live kind:20003 read receipts for a channel (no backfill). */
+  async subscribeToReadReceipts(
+    channelId: string,
+    onEvent: (event: RelayEvent) => void,
+  ) {
+    return this.subscribe(
+      {
+        kinds: [KIND_READ_RECEIPT],
         "#h": [channelId],
         limit: 10,
         since: Math.floor(Date.now() / 1_000) - 10,

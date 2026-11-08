@@ -37,6 +37,8 @@ export type ChannelPaneProps = {
   channelFind: ReturnType<typeof useChannelFind>;
   channelManagementOpen?: boolean;
   currentPubkey?: string;
+  /** Newest read-receipt timestamp (seconds) from other members, or null. */
+  seenUpTo?: number | null;
   editTarget?: {
     author: string;
     body: string;

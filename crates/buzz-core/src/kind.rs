@@ -324,6 +324,10 @@ pub const KIND_PRESENCE_UPDATE: u32 = 20001;
 pub const KIND_PAIRING: u32 = 24134;
 /// Ephemeral: typing indicator for a channel.
 pub const KIND_TYPING_INDICATOR: u32 = 20002;
+/// Ephemeral: read receipt for a channel. Published by a viewer while the
+/// channel is open; `created_at` is the "seen up to" timestamp. Channel-scoped
+/// via an `h` tag; never stored.
+pub const KIND_READ_RECEIPT: u32 = 20003;
 /// Ephemeral: owner-scoped encrypted agent observer telemetry and control frame.
 pub const KIND_AGENT_OBSERVER_FRAME: u32 = 24200;
 /// Ephemeral: huddle emoji reaction burst. Channel-scoped to the ephemeral
@@ -558,6 +562,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_WINDOW_BOUNDS,
     KIND_PRESENCE_UPDATE,
     KIND_TYPING_INDICATOR,
+    KIND_READ_RECEIPT,
     KIND_HUDDLE_REACTION,
     KIND_MESH_STATUS_REPORT,
     KIND_MESH_CONNECT_REQUEST,

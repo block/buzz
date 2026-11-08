@@ -72,7 +72,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   channelFind,
   channelManagementOpen = false,
   currentPubkey,
-  editTarget = null,
+  seenUpTo = null,
   fetchOlder,
   header,
   hasOlderMessages,
@@ -146,6 +146,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   threadReplyUnreadCounts,
   threadFirstUnreadReplyId,
   typingPubkeys,
+  editTarget = null,
 }: ChannelPaneProps) {
   const timelineScrollRef = React.useRef<HTMLDivElement>(null);
   const messageTimelineRef = React.useRef<MessageTimelineHandle>(null);
@@ -361,6 +362,21 @@ export const ChannelPane = React.memo(function ChannelPane({
   const canDropInMainColumn =
     hasMainComposerOverlay && !isComposerDisabled && !isSinglePanelView;
   const hasTypingActivity = typingPubkeys.length > 0;
+  // Read receipts: "Seen" marker once another member's receipt timestamp
+  // covers the user's most recent message in the main timeline.
+  const lastOwnMessage = React.useMemo(() => {
+    if (!currentPubkey) return null;
+    const normalized = currentPubkey.toLowerCase();
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const message = messages[i];
+      if (message.author?.toLowerCase() === normalized) return message;
+    }
+    return null;
+  }, [messages, currentPubkey]);
+  const hasBeenSeen =
+    seenUpTo != null &&
+    lastOwnMessage != null &&
+    seenUpTo >= lastOwnMessage.createdAt;
   // Unified working set for the composer bar: observer-derived turns primary,
   // bot typing fallback (both folded together by agentWorkingSignal). This is
   // what makes the bar show for an agent whose observer stream is live but
@@ -758,6 +774,13 @@ export const ChannelPane = React.memo(function ChannelPane({
                         profiles={profiles}
                         typingPubkeys={typingPubkeys}
                       />
+                    ) : hasBeenSeen ? (
+                      <div
+                        className="text-2xs text-neutral-500 dark:text-neutral-400 py-0 pl-[calc(0.75rem+1px)] pr-0 sm:pl-[calc(1rem+1px)]"
+                        data-testid="read-receipt-seen"
+                      >
+                        Seen
+                      </div>
                     ) : null}
                   </div>
                 </div>
