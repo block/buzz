@@ -968,8 +968,8 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                             personalChat || resolvedChannel.isDm
                             ? null
                             : [
-                                for (final message in timelineMessages)
-                                  if (message.parentId == null) message,
+                                for (final entry in timelineEntries)
+                                  entry.message,
                               ],
                         onFocusRestorerChanged: (restoreFocus) =>
                             restoreComposerFocus.value = restoreFocus,

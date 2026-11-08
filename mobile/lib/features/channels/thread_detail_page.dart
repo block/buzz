@@ -1048,7 +1048,10 @@ class ThreadDetailPage extends HookConsumerWidget {
                         rootId: effectiveRootId,
                         prefillScopeMessages: channel?.isDm ?? true
                             ? null
-                            : [liveHead, ...replies],
+                            : [
+                                if (!liveDeletionHidesHead) liveHead,
+                                ...replies,
+                              ],
                         onFocusRequested: followThreadTailFromComposer,
                         onSend:
                             (
