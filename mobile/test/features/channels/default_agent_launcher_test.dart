@@ -1,13 +1,17 @@
 import 'dart:async';
 
 import 'package:buzz/features/channels/default_agent_launcher.dart';
+import 'package:buzz/features/channels/empty_bestie_avatar.dart';
 import 'package:buzz/features/channels/first_agent_callout.dart';
 import 'package:buzz/shared/agents/remote_agents.dart';
+import 'package:buzz/shared/community/community.dart';
+import 'package:buzz/shared/community/community_provider.dart';
 import 'package:buzz/shared/me/default_agent.dart';
 import 'package:buzz/shared/me/default_agent_writer.dart';
 import 'package:buzz/shared/me/me_sync.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
+import 'package:buzz/shared/widgets/agent_navigation_icon.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -85,6 +89,54 @@ void main() {
       expect(choices, 1);
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox());
+    },
+  );
+
+  testWidgets(
+    'self-hosted community without chosen agent shows AgentNavigationIcon and Agents label',
+    (tester) async {
+      const secret =
+          '0000000000000000000000000000000000000000000000000000000000000001';
+      final nsec = nostr.Nip19.encode(
+        prefix: nostr.Nip19Prefix.nsec,
+        data: secret,
+      );
+      final selfHosted = Community.create(
+        name: 'Self hosted',
+        relayUrl: 'wss://relay.example.com',
+        pubkey: '0' * 64,
+      );
+      final relay = FakeRelay();
+      final sync = MeSync(
+        relay,
+        RelayConfig(baseUrl: 'https://relay.example.com', nsec: nsec),
+      );
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            savedPrefsProvider.overrideWithValue(prefs),
+            meSyncProvider.overrideWithValue(sync),
+            relaySessionProvider.overrideWith(() => relay),
+            activeCommunityProvider.overrideWith((ref) async => selfHosted),
+            defaultAgentProvider.overrideWith((ref) => const AsyncData(null)),
+          ],
+          child: MaterialApp(
+            theme: AppTheme.light(),
+            home: Scaffold(
+              body: DefaultAgentLauncher(onChooseAgent: () {}),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byType(EmptyBestieAvatar), findsNothing);
+      expect(find.byType(AgentNavigationIcon), findsOneWidget);
+      final button = tester.widget<IconButton>(find.byType(IconButton));
+      expect(button.tooltip, 'Agents');
     },
   );
 }

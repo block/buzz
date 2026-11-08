@@ -9,6 +9,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/agents/owned_agent_directory.dart';
 import '../../shared/agents/remote_agents.dart';
+import '../../shared/community/community_provider.dart';
 import '../../shared/me/default_agent.dart';
 import '../../shared/animated_avatar.dart';
 import '../../shared/me/me_sync.dart';
@@ -40,6 +41,8 @@ class DefaultAgentLauncher extends HookConsumerWidget {
     final profile = profiles[pubkey];
     final opening = useState(false);
     final resolving = useState(false);
+    final community = ref.watch(activeCommunityProvider).value;
+    final remoteSupported = supportsRemoteAgents(community);
     final remoteAgents = ref.watch(remoteAgentsEnabledProvider);
     // Only someone with no agents at all is invited to make a first one.
     // Cheap checks come first, so the rest are watched only when relevant.
@@ -71,10 +74,10 @@ class DefaultAgentLauncher extends HookConsumerWidget {
       return null;
     }, [pubkey, preference.hasError, remoteAgents]);
     final label = pubkey != null
-        ? 'Chat with ${profile?.label ?? 'your Bestie'}'
+        ? 'Chat with ${profile?.label ?? (remoteSupported ? 'your Bestie' : 'agent')}'
         : preference.hasError
-        ? 'Retry Bestie'
-        : 'Bestie';
+        ? (remoteSupported ? 'Retry Bestie' : 'Retry agent')
+        : (remoteSupported ? 'Bestie' : 'Agents');
     Future<void> open() async {
       final currentPreference = ref.read(defaultAgentProvider);
       if (opening.value ||
@@ -177,7 +180,9 @@ class DefaultAgentLauncher extends HookConsumerWidget {
                       child: CircularProgressIndicator(strokeWidth: 2),
                     )
                   : pubkey == null
-                  ? preference.isLoading || preference.hasError
+                  ? preference.isLoading ||
+                          preference.hasError ||
+                          !remoteSupported
                         ? const AgentNavigationIcon(size: 24)
                         : const EmptyBestieAvatar()
                   : usesInsetAgentArtwork(profile?.avatarUrl)
