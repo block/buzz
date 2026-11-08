@@ -66,7 +66,7 @@ pub struct MintInviteRequest {
     pub max_uses: Option<i32>,
 }
 
-fn validate_mint_request(
+pub(crate) fn validate_mint_request(
     request: &MintInviteRequest,
 ) -> Result<(u64, Option<i32>), (StatusCode, Json<Value>)> {
     let ttl = request.ttl_secs.unwrap_or(DEFAULT_INVITE_TTL_SECS);
@@ -231,7 +231,7 @@ pub async fn accept_policy(
     Ok(Json(serde_json::json!({ "receipt": receipt })))
 }
 
-fn map_mint_error(error: buzz_db::DbError) -> (StatusCode, Json<Value>) {
+pub(crate) fn map_mint_error(error: buzz_db::DbError) -> (StatusCode, Json<Value>) {
     match error {
         buzz_db::DbError::InviteRestricted => api_error(StatusCode::FORBIDDEN, "invite_restricted"),
         buzz_db::DbError::InvalidData(message) | buzz_db::DbError::DeletionSafety(message) => {
@@ -414,14 +414,6 @@ async fn mint_invite_inner(
         .await
         .map_err(map_mint_error)?;
 
-    // Same TLS-posture logic as nip98_expected_url: wss deployments get an
-    // https landing page URL, ws dev/test deployments get http.
-    let scheme = if state.config.relay_url.trim_start().starts_with("wss://") {
-        "https"
-    } else {
-        "http"
-    };
-
     let minted = crate::access::Detail {
         invite_id: Some(invite.invite_id),
         expires_at: Some(invite.expires_at.timestamp()),
@@ -429,19 +421,33 @@ async fn mint_invite_inner(
         ..Default::default()
     };
 
-    // expires_at as unix seconds for the response contract.
-    let expires_at_unix = invite.expires_at.timestamp() as u64;
-
     Ok((
-        Json(serde_json::json!({
-            "code": invite.code,
-            "expires_at": expires_at_unix,
-            "max_uses": invite.max_uses,
-            "uses_remaining": invite.uses_remaining,
-            "url": format!("{scheme}://{}/invite/{}", tenant.host(), invite.code),
-        })),
+        Json(minted_invite_json(state, tenant.host(), &invite)),
         minted,
     ))
+}
+
+/// The mint response contract shared by every mint route: the code, its
+/// expiry in Unix seconds, its use limits, and the landing-page URL on `host`.
+pub(crate) fn minted_invite_json(
+    state: &AppState,
+    host: &str,
+    invite: &buzz_db::relay_invite::MintedInvite,
+) -> Value {
+    // Same TLS-posture logic as nip98_expected_url: wss deployments get an
+    // https landing page URL, ws dev/test deployments get http.
+    let scheme = if state.config.relay_url.trim_start().starts_with("wss://") {
+        "https"
+    } else {
+        "http"
+    };
+    serde_json::json!({
+        "code": invite.code,
+        "expires_at": invite.expires_at.timestamp() as u64,
+        "max_uses": invite.max_uses,
+        "uses_remaining": invite.uses_remaining,
+        "url": format!("{scheme}://{host}/invite/{}", invite.code),
+    })
 }
 
 /// Claim an invite code — `POST /api/invites/claim`, NIP-98 signed by the
