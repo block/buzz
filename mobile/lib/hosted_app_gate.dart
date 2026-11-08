@@ -16,6 +16,8 @@ import 'shared/deeplink/deep_link.dart';
 import 'shared/hosted/hosted_community_connection.dart';
 import 'shared/hosted/hosted_flow.dart';
 import 'shared/hosted/hosted_environment.dart';
+import 'shared/hosted/hosted_relay_auth.dart';
+import 'shared/hosted/organization_environment.dart';
 import 'features/onboarding/hosted_reconnect_banner.dart';
 import 'features/onboarding/organization_sign_in_banner.dart';
 
@@ -53,6 +55,21 @@ class HostedAppGate extends HookConsumerWidget {
     final inlineEntry = ref.watch(hostedInlineEntryProvider);
     // Create the organization's browser owner before any callback is handled.
     ref.watch(organizationSignInProvider);
+    useEffect(() {
+      // An internal build keeps one Builderlab session: drop any public
+      // session a previous build saved. Its communities stay stored, hidden.
+      if (OrganizationEnvironment.enabled) {
+        unawaited(
+          ref
+              .read(builderlabAccountProvider)
+              .clearLocalSession()
+              .catchError(
+                (Object error) => debugPrint('Public session cleanup: $error'),
+              ),
+        );
+      }
+      return null;
+    }, const []);
     final visible =
         flow != null &&
         flow.stage != HostedFlowStage.idle &&
@@ -70,6 +87,28 @@ class HostedAppGate extends HookConsumerWidget {
       dispatchMessageLinks: authenticated && !visible,
       onboardingHandler: (routeContext, link) async {
         final relay = link.relayUrl;
+        if (relay != null &&
+            OrganizationEnvironment.enabled &&
+            !OrganizationEnvironment.protects(Uri.parse(relay))) {
+          if (routeContext.mounted) {
+            await showDialog<void>(
+              context: routeContext,
+              builder: (context) => AlertDialog(
+                title: const Text('Community unavailable'),
+                content: const Text(
+                  'This app connects only to your organization’s community.',
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.pop(context),
+                    child: const Text('Close'),
+                  ),
+                ],
+              ),
+            );
+          }
+          return true;
+        }
         if (relay != null) {
           final host = Uri.parse(relay).host.toLowerCase();
           final requiresAuth = HostedEnvironment.requiresAuth(host);

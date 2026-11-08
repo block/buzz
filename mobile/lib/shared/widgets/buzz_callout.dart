@@ -91,7 +91,7 @@ class BuzzCallout extends HookWidget {
             right: padding.right + Grid.xs,
             top: padding.top + Grid.xs,
           ),
-          color: _calloutColors(context).$1,
+          color: context.colors.inverseSurface,
           shadowColor: appPopoverShadowColor(context),
           child: _Card(
             message: message,
@@ -125,16 +125,6 @@ class BuzzCallout extends HookWidget {
       child: child,
     );
   }
-}
-
-/// The callout's background and foreground. Inverse colors set it apart from
-/// menus and the page; in dark mode, whose inverse is a flat light gray, it
-/// uses the raised dark surface instead, as toasts do.
-(Color, Color) _calloutColors(BuildContext context) {
-  final colors = context.colors;
-  return Theme.of(context).brightness == Brightness.dark
-      ? (colors.surfaceContainer, colors.onSurface)
-      : (colors.inverseSurface, colors.onInverseSurface);
 }
 
 /// Where the card's artwork sits, after desktop's empty Agents tile: each
@@ -211,7 +201,7 @@ class _Card extends StatelessWidget {
                       message,
                       textAlign: TextAlign.center,
                       style: context.textTheme.titleLarge?.copyWith(
-                        color: _calloutColors(context).$2,
+                        color: context.colors.onInverseSurface,
                       ),
                     ),
                   ),
@@ -223,7 +213,7 @@ class _Card extends StatelessWidget {
                 child: IconButton(
                   tooltip: 'Dismiss',
                   onPressed: onDismiss,
-                  color: _calloutColors(context).$2,
+                  color: context.colors.onInverseSurface,
                   icon: const Icon(BuzzIcons.x),
                 ),
               ),

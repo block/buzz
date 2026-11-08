@@ -75,6 +75,7 @@ class VerifiedProfilesNotifier extends Notifier<Map<String, VerifiedProfile>> {
   bool _discoveryFresh = false;
   bool _connected = false;
   bool _discoveryInFlight = false;
+  Completer<void>? _discoveryDone;
   bool _scheduled = false;
   int _generation = 0;
   int _interest = 0;
@@ -126,6 +127,45 @@ class VerifiedProfilesNotifier extends Notifier<Map<String, VerifiedProfile>> {
     }
     _batches.clear();
     _checked.clear();
+  }
+
+  /// The people a profile search found ([searchedPeople]). Waits for
+  /// discovery when the relay's authority is not known yet, and keeps only
+  /// heads with a valid signature. A kept head also names its subject here,
+  /// so the search's rows show their verified names at once.
+  Future<List<SearchedPerson>> searched(List<NostrEvent> events) {
+    final heads = [
+      for (final event in events)
+        if (event.kind == verifiedProfileKind) event,
+    ];
+    // Without heads there is nothing to wait for or prove: answer at once.
+    if (heads.isEmpty) return SynchronousFuture(searchedPeople(events, null));
+    return _searchedWithHeads(events, heads);
+  }
+
+  Future<List<SearchedPerson>> _searchedWithHeads(
+    List<NostrEvent> events,
+    List<NostrEvent> heads,
+  ) async {
+    final generation = _generation;
+    if (_authority == null && !_discoveryFresh) {
+      unawaited(_refreshDiscovery(generation));
+      await _discoveryDone?.future;
+    }
+    final authority = _enabled ? _authority : null;
+    if (authority == null) return searchedPeople(events, null);
+    final proven = Set<NostrEvent>.identity()..addAll(await _prove(heads));
+    if (generation == _generation && authority == _authority && ref.mounted) {
+      track([
+        for (final head in proven) ?verifiedProfileSubject(head, authority),
+      ]);
+      _accept(proven.toList(), authority);
+      _publish();
+    }
+    return searchedPeople([
+      for (final event in events)
+        if (event.kind != verifiedProfileKind || proven.contains(event)) event,
+    ], authority);
   }
 
   /// Marks [pubkeys] relevant. Repeated calls coalesce into one scheduling pass.
@@ -190,6 +230,7 @@ class VerifiedProfilesNotifier extends Notifier<Map<String, VerifiedProfile>> {
   Future<void> _refreshDiscovery(int generation) async {
     if (_discoveryInFlight || generation != _generation || !_connected) return;
     _discoveryInFlight = true;
+    final done = _discoveryDone = Completer<void>();
     try {
       final result = await ref.read(verifiedProfileDiscoveryFetchProvider)();
       if (generation != _generation) return;
@@ -214,6 +255,8 @@ class VerifiedProfilesNotifier extends Notifier<Map<String, VerifiedProfile>> {
       if (generation == _generation) _discoveryFresh = false;
       debugPrint('[VerifiedProfiles] discovery failed: $error');
     } finally {
+      if (identical(_discoveryDone, done)) _discoveryDone = null;
+      done.complete();
       if (generation == _generation) {
         _discoveryInFlight = false;
         _armRefresh(generation);
@@ -452,23 +495,76 @@ class VerifiedProfilesNotifier extends Notifier<Map<String, VerifiedProfile>> {
     }
   }
 
+  /// Validates one head. Tests override this to count parses.
+  @visibleForTesting
+  VerifiedProfile? parseHead(
+    NostrEvent event,
+    VerifiedProfileAuthority authority, {
+    required bool checked,
+  }) => parseVerifiedProfile(event, authority, checked: checked);
+
+  /// The last parse of each subject's head. Every publish rebuilds the whole
+  /// map, so without it each batch re-validated every head already known.
+  Map<String, _ParsedHead> _parsed = const {};
+
   Map<String, VerifiedProfile> _snapshot() {
     final authority = _authority;
-    if (!_enabled || authority == null) return const {};
-    return {
-      for (final MapEntry(:key, :value) in _heads.entries)
-        key: ?parseVerifiedProfile(
-          value,
-          authority,
-          checked: _discoveryFresh && _checked.contains(key),
-        ),
-    };
+    if (!_enabled || authority == null) {
+      _parsed = const {};
+      return const {};
+    }
+    final parsed = <String, _ParsedHead>{};
+    final profiles = <String, VerifiedProfile>{};
+    for (final MapEntry(:key, :value) in _heads.entries) {
+      final checked = _discoveryFresh && _checked.contains(key);
+      final previous = _parsed[key];
+      final head =
+          previous != null &&
+              identical(previous.event, value) &&
+              previous.authority == authority
+          ? previous
+          : _ParsedHead(
+              value,
+              authority,
+              parseHead(value, authority, checked: checked),
+            );
+      parsed[key] = head;
+      if (head.withChecked(checked) case final profile?) {
+        profiles[key] = profile;
+      }
+    }
+    _parsed = parsed;
+    return profiles;
   }
 
   void _publish() {
     if (!ref.mounted) return;
     final next = _snapshot();
     if (!mapEquals(state, next)) state = next;
+  }
+}
+
+/// A head's parse, kept while the head and authority stand. Only `checked`
+/// varies between publishes, so it is applied without validating again.
+class _ParsedHead {
+  _ParsedHead(this.event, this.authority, this._profile);
+
+  final NostrEvent event;
+  final VerifiedProfileAuthority authority;
+  VerifiedProfile? _profile;
+
+  VerifiedProfile? withChecked(bool checked) {
+    final profile = _profile;
+    if (profile == null || profile.checked == checked) return profile;
+    return _profile = VerifiedProfile(
+      displayName: profile.displayName,
+      username: profile.username,
+      fullName: profile.fullName,
+      issuerLabel: profile.issuerLabel,
+      verifiedAt: profile.verifiedAt,
+      checked: checked,
+      multipleIssuers: profile.multipleIssuers,
+    );
   }
 }
 

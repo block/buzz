@@ -30,6 +30,44 @@ void main() {
     expect(startingAgentModel([opus, highOnly]), ('claude-sonnet-5', null));
   });
 
+  test('the service recommendation wins over the Sonnet fallback', () {
+    final recommendedOpus = RemoteAgentModel.fromJson(
+      {
+        'id': opus.id,
+        'display_name': opus.name,
+        'supported_reasoning_efforts': opus.efforts,
+      },
+      recommended: {'model_id': opus.id, 'reasoning_effort': 'high'},
+    );
+    expect(startingAgentModel([recommendedOpus, sonnet]), (opus.id, 'high'));
+    expect(
+      startingAgentModel(
+        [recommendedOpus, sonnet],
+        draftModel: sonnet.id,
+        draftEffort: 'low',
+      ),
+      (sonnet.id, 'low'),
+    );
+  });
+
+  test('ignores a recommendation the model does not offer', () {
+    for (final recommended in [
+      {'model_id': opus.id, 'reasoning_effort': 'max'},
+      {'model_id': 'gone', 'reasoning_effort': 'high'},
+      {'model_id': opus.id},
+      'opus',
+      null,
+    ]) {
+      final model = RemoteAgentModel.fromJson({
+        'id': opus.id,
+        'display_name': opus.name,
+        'supported_reasoning_efforts': opus.efforts,
+      }, recommended: recommended);
+      expect(model.recommendedEffort, isNull, reason: '$recommended');
+      expect(startingAgentModel([model, sonnet]), (sonnet.id, 'medium'));
+    }
+  });
+
   test('chooses nothing when no Sonnet is offered', () {
     expect(startingAgentModel([opus]), (null, null));
   });

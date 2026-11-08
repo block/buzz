@@ -5,6 +5,7 @@ import '../../shared/theme/theme.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
 import 'agent_avatar_choices.dart';
+import 'agent_avatar_backdrop.dart';
 import 'agent_avatar_geometry.dart';
 import 'agent_avatar_picker.dart';
 
@@ -56,36 +57,43 @@ class AgentAvatarEditorPage extends HookWidget {
             ),
           ],
         ),
-        body: SafeArea(
-          top: false,
-          minimum: const EdgeInsets.only(bottom: Grid.gutter),
-          child: Padding(
-            padding: EdgeInsets.fromLTRB(
-              Grid.gutter,
-              frostedAppBarHeight(context) + Grid.xxs,
-              Grid.gutter,
-              Grid.sm,
+        body: Stack(
+          children: [
+            Positioned.fill(
+              child: AgentAvatarBackdrop(selection: selection.value),
             ),
-            child: LayoutBuilder(
-              builder: (context, constraints) => SingleChildScrollView(
-                clipBehavior: Clip.none,
-                child: AgentAvatarPicker(
-                  // Fill the available height so the tray shares the page gutters.
-                  controlsHeight:
-                      (constraints.maxHeight -
-                              agentAvatarChoicesHeight(context) -
-                              Grid.sm -
-                              agentAvatarPreviewSpace)
-                          .clamp(180, double.infinity),
-                  selection: selection.value,
-                  heroTag: heroTag,
-                  onChanged: (value) => selection.value = value,
-                  disabled: false,
-                  onBusyChanged: (value) => busy.value = value,
+            SafeArea(
+              top: false,
+              minimum: const EdgeInsets.only(bottom: Grid.gutter),
+              child: Padding(
+                padding: EdgeInsets.fromLTRB(
+                  Grid.gutter,
+                  frostedAppBarHeight(context) + Grid.xxs,
+                  Grid.gutter,
+                  Grid.sm,
+                ),
+                child: LayoutBuilder(
+                  builder: (context, constraints) => SingleChildScrollView(
+                    clipBehavior: Clip.none,
+                    child: AgentAvatarPicker(
+                      // Fill the available height so the tray shares the page gutters.
+                      controlsHeight:
+                          (constraints.maxHeight -
+                                  agentAvatarChoicesHeight(context) -
+                                  Grid.sm -
+                                  agentAvatarPreviewSpace)
+                              .clamp(180, double.infinity),
+                      selection: selection.value,
+                      heroTag: heroTag,
+                      onChanged: (value) => selection.value = value,
+                      disabled: false,
+                      onBusyChanged: (value) => busy.value = value,
+                    ),
+                  ),
                 ),
               ),
             ),
-          ),
+          ],
         ),
       ),
     );

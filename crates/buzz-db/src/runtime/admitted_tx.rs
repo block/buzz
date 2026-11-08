@@ -3,6 +3,7 @@
 use std::collections::BTreeSet;
 
 use buzz_core::CommunityId;
+use chrono::{DateTime, Utc};
 use sqlx::{PgConnection, Postgres, Transaction};
 use uuid::Uuid;
 
@@ -75,7 +76,12 @@ pub struct AdmittedTx {
     /// Channels whose TTL deadline [`AdmittedTx::commit`] refreshes.
     ttl_refresh_channels: BTreeSet<Uuid>,
     push_enqueue: Option<super::push_enqueue::PushEnqueue>,
-    push_events: Vec<Vec<u8>>,
+    push_events: Vec<StagedPushEvent>,
+}
+
+struct StagedPushEvent {
+    event_id: Vec<u8>,
+    created_at: DateTime<Utc>,
 }
 
 impl AdmittedTx {
@@ -118,13 +124,21 @@ impl AdmittedTx {
         self.push_enqueue = producer;
     }
 
-    pub(crate) fn record_push_event(&mut self, event_id: &[u8], kind: i32) {
+    pub(crate) fn record_push_event(
+        &mut self,
+        event_id: &[u8],
+        created_at: DateTime<Utc>,
+        kind: i32,
+    ) {
         if self.push_enqueue.is_some()
             && crate::store::event_follow_up::PUSH_MATCH_KINDS.contains(&kind)
         {
             // Bound transaction-local staging as well as the shared worker queue.
             if self.push_events.len() < super::push_enqueue::CAPACITY {
-                self.push_events.push(event_id.to_vec());
+                self.push_events.push(StagedPushEvent {
+                    event_id: event_id.to_vec(),
+                    created_at,
+                });
             } else {
                 super::push_enqueue::record_drop("transaction_full");
             }
@@ -170,8 +184,8 @@ impl AdmittedTx {
         }
         self.tx.commit().await?;
         if let Some(producer) = self.push_enqueue {
-            for event_id in self.push_events {
-                producer.submit(self.community, event_id);
+            for event in self.push_events {
+                producer.submit(self.community, event.event_id, event.created_at);
             }
         }
         Ok(())
@@ -191,3 +205,7 @@ impl std::fmt::Debug for AdmittedTx {
             .finish_non_exhaustive()
     }
 }
+
+#[cfg(test)]
+#[path = "admitted_tx/postgres_tests.rs"]
+mod postgres_tests;

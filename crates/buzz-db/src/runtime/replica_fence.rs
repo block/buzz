@@ -48,10 +48,14 @@
 //! `RETURNING token` or an epoch change (restore/re-seed) clears the retained
 //! ring, so no stale entry can masquerade as fresh coverage.
 //!
-//! Everything fails **closed**: probe errors, masked `pg_stat_activity`
-//! visibility, an unreadable heartbeat row on the reader session, an epoch
-//! mismatch, or an observed token below every retained entry all route the
-//! request back to the writer — degraded capacity, never holes.
+//! Everything fails **closed**: an unreadable heartbeat row on the reader
+//! session, an epoch mismatch, or an observed token below every retained
+//! entry all route the request back to the writer — degraded capacity, never
+//! holes. A failed probe (a writer error or masked `pg_stat_activity`
+//! visibility) proves nothing new, so it records no entry; the entries
+//! already retained stay valid, because a proof never decays. If the probe
+//! keeps failing, the newest entry ages past [`FENCE_STALENESS`] and the
+//! fence closes.
 //!
 //! Operational bypasses (sessions without the GUC, `session_replication_role
 //! = replica` restores) are outside the proof by design and require holding
@@ -204,8 +208,9 @@ impl ReplicaFence {
         Self::default()
     }
 
-    /// Close the fence: drop all retained proofs; reads route to the writer.
-    pub fn close(&self) {
+    /// Test hook: drop all retained proofs, so reads route to the writer.
+    #[cfg(test)]
+    pub(crate) fn close(&self) {
         let mut inner = self.inner.lock().expect("fence lock poisoned");
         inner.ring.clear();
     }
@@ -538,8 +543,8 @@ struct WriterSample {
     committed_at: Instant,
 }
 
-/// Errors that close the fence. All variants are logged and treated
-/// identically: fail closed.
+/// Errors that fail one probe. All variants are logged and treated
+/// identically: the probe records no entry, and the retained entries stand.
 #[derive(Debug, thiserror::Error)]
 pub enum ProbeError {
     /// A probe query against the writer failed.
@@ -803,20 +808,24 @@ pub struct HeartbeatObservation {
     pub backend: String,
 }
 
-/// Background probe loop: commit a heartbeat token every `PROBE_INTERVAL`;
-/// close the fence on any error. Runs for the life of the process.
+/// Background probe loop: commit a heartbeat token every `PROBE_INTERVAL`.
+/// Runs for the life of the process.
 pub async fn run_probe(writer: PgPool, fence: Arc<ReplicaFence>) {
     let mut interval = tokio::time::interval(PROBE_INTERVAL);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         interval.tick().await;
-        match probe_once(&writer, &fence).await {
-            Ok(_) => {}
-            Err(e) => {
-                fence.close();
-                tracing::warn!(error = %e, "replica fence probe failed; fence closed");
-            }
-        }
+        probe_tick(&writer, &fence).await;
+    }
+}
+
+/// One probe-loop tick. A failure is logged and keeps the retained entries:
+/// they were proved by earlier handshakes and stay valid, so one failed
+/// probe must not route every read to the writer. Only staleness
+/// ([`FENCE_STALENESS`]) closes a fence whose probe keeps failing.
+async fn probe_tick(writer: &PgPool, fence: &ReplicaFence) {
+    if let Err(e) = probe_once(writer, fence).await {
+        tracing::warn!(error = %e, "replica fence probe failed; retained proofs stand");
     }
 }
 
@@ -868,6 +877,44 @@ mod postgres_tests {
         );
         // heartbeat_age is deliberately ungated (observability).
         assert!(fence.heartbeat_age().expect("entry retained") > FENCE_STALENESS);
+    }
+
+    /// A failed probe proves nothing new but must keep what earlier probes
+    /// proved: the retained entry still answers `newest()` and `resolve()`.
+    /// Closing here routed every read to the writer until the next success.
+    #[tokio::test]
+    async fn failed_probe_keeps_retained_proofs() {
+        let fence = ReplicaFence::new();
+        let epoch = Uuid::new_v4();
+        let wall = Utc::now();
+        fence.record(7, epoch, Instant::now(), wall);
+
+        let writer = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy(&crate::test_support::database_url())
+            .expect("construct lazy writer pool");
+        writer.close().await;
+        probe_once(&writer, &fence)
+            .await
+            .expect_err("a closed writer pool fails the probe");
+
+        probe_tick(&writer, &fence).await;
+
+        let newest = fence
+            .newest()
+            .expect("retained proof survives a failed probe");
+        assert_eq!((newest.token, newest.fence_wall), (7, wall));
+        assert!(matches!(
+            fence.resolve(7, epoch),
+            ResolveOutcome::Proved(entry) if entry.token == 7
+        ));
+
+        // The retained entry is also what catches an epoch-keeping restore
+        // across the outage: a rewound token is a regression, not a fresh
+        // start. An emptied ring here would accept it under the old epoch.
+        assert_eq!(
+            fence.record(5, epoch, Instant::now(), wall),
+            RecordOutcome::TokenRegression
+        );
     }
 
     /// Resolve picks the greatest retained entry <= the observed token —

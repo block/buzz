@@ -1,4 +1,4 @@
-//! Monotonic community authentication requirements and durable operator receipts.
+//! Community authentication policy management and durable operator receipts.
 //!
 //! Receipts are deployment-global and intentionally survive target deletion:
 //! an operation UUID must never acquire a new meaning after a lost response.
@@ -39,6 +39,45 @@ pub struct UpgradeRequest {
     pub operator_pubkey: String,
 }
 
+/// General policy intent; both preconditions are checked under the writer row lock.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PolicyRequest {
+    /// Canonical operation tuple. Disable uses an empty issuer.
+    pub tuple: UpgradeRequest,
+    /// Desired stored requirement.
+    pub requires_nip_fi: bool,
+    /// Last observed generation.
+    pub expected_policy_generation: i64,
+    /// Last observed stored requirement.
+    pub expected_requires_nip_fi: bool,
+}
+
+/// Durable accepted intent and the current primary-database snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, FromRow)]
+pub struct PolicyRecord {
+    /// Original operation tuple and accepted generation, never current authority.
+    #[serde(flatten)]
+    #[sqlx(flatten)]
+    pub acceptance: UpgradeRecord,
+    /// Null only for legacy, unfenced requests.
+    pub expected_policy_generation: Option<i64>,
+    /// Null only for legacy, unfenced requests.
+    pub expected_requires_nip_fi: Option<bool>,
+    /// Current target generation, absent after target deletion.
+    pub current_policy_generation: Option<i64>,
+    /// Current stored flag, absent after target deletion.
+    pub current_requires_nip_fi: Option<bool>,
+}
+
+/// Refusal or an immutable acceptance with current status.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PolicyOutcome {
+    /// Durable acceptance or identical read-only replay.
+    Accepted(Box<PolicyRecord>),
+    /// No mutation or receipt was committed.
+    Refused(&'static str),
+}
+
 /// Durable acceptance tuple plus the current availability of its target.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, FromRow)]
 pub struct UpgradeRecord {
@@ -53,15 +92,16 @@ pub struct UpgradeRecord {
     pub actor_pubkey: String,
     /// Owner precondition at acceptance.
     pub expected_owner_pubkey: String,
-    /// Issuer precondition at acceptance.
+    /// Issuer precondition at acceptance; omitted for disable.
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub expected_issuer: String,
     /// Operator authorized to recover this receipt.
     pub operator_pubkey: String,
-    /// Accepted generation; concurrent enables converge on this value.
+    /// Immutable generation accepted for this operation.
     pub policy_generation: i64,
     /// Receipt proves acceptance; availability does not undo this fact.
     pub requires_nip_fi: bool,
-    /// Pending until BUZZ-512 supplies applied-and-drained evidence.
+    /// Current availability, with no certification of fleet-wide socket closure.
     pub state: String,
     /// Extensible activation obligations; unknown reasons must remain pending.
     pub pending_reasons: Vec<String>,
@@ -79,40 +119,40 @@ impl UpgradeRecord {
     }
 }
 
-/// A refused enable never mutates policy or creates a receipt.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum UpgradeOutcome {
-    /// Committed or recovered acceptance, including current target state.
-    Accepted(UpgradeRecord),
-    /// Stable machine-readable precondition failure.
-    Refused(&'static str),
-}
-
 /// Authoritative policy for a community in the active lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, FromRow)]
 pub struct CommunityAuthPolicy {
     /// Immutable identity from the same row as this policy.
     #[sqlx(rename = "id")]
     pub community_id: Uuid,
-    /// Durable monotonic requirement. Global enforce remains an additional floor.
+    /// Durable stored requirement. Global enforce remains an additional floor.
     pub requires_nip_fi: bool,
-    /// Zero for legacy optional communities; positive after the first enable.
+    /// Zero before the first operation; increases with every accepted CAS intent.
     pub policy_generation: i64,
 }
 
 // One statement gives status a single primary-database snapshot. Missing trust,
 // host/policy drift and terminal lifecycle never become a usable active result.
-const RECEIPT: &str = "SELECT u.*, true AS requires_nip_fi,
-    CASE WHEN c.id IS NOT NULL AND c.host = u.expected_host
-        AND c.archived_at IS NULL AND c.deleted_at IS NULL
-        AND c.deletion_state = 'active' AND c.requires_nip_fi
-        AND c.policy_generation = u.policy_generation
-        AND NOT EXISTS (SELECT 1 FROM community_deletion_requests d
-            WHERE d.community_id = c.id AND d.stage <> 'aborted')
-        AND EXISTS (SELECT 1 FROM community_nip_fi_issuers i
+const RECEIPT: &str = "SELECT u.operation_id, u.target_community_id, u.expected_host,
+    u.actor_pubkey, u.expected_owner_pubkey, u.expected_issuer, u.operator_pubkey,
+    u.policy_generation, u.requested_requires_nip_fi AS requires_nip_fi,
+    u.expected_policy_generation, u.expected_requires_nip_fi,
+    c.policy_generation AS current_policy_generation,
+    c.requires_nip_fi AS current_requires_nip_fi,
+    CASE WHEN c.id IS NULL OR c.host <> u.expected_host
+        OR c.archived_at IS NOT NULL OR c.deleted_at IS NOT NULL
+        OR c.deletion_state <> 'active'
+        OR EXISTS (SELECT 1 FROM community_deletion_requests d
+            WHERE d.community_id = c.id AND d.stage <> 'aborted') THEN 'unavailable'
+    WHEN c.policy_generation <> u.policy_generation
+        OR c.requires_nip_fi <> u.requested_requires_nip_fi THEN 'superseded'
+    WHEN NOT u.requested_requires_nip_fi THEN 'applied'
+    WHEN EXISTS (SELECT 1 FROM community_nip_fi_issuers i
             WHERE i.community_id = c.id AND i.issuer = u.expected_issuer)
-    THEN 'pending' ELSE 'unavailable' END AS state,
-    ARRAY['registry_baseline_unverified']::text[] AS pending_reasons
+        THEN 'pending' ELSE 'unavailable' END AS state,
+    CASE WHEN u.requested_requires_nip_fi
+        THEN ARRAY['connection_closure_unverified']::text[]
+        ELSE ARRAY[]::text[] END AS pending_reasons
     FROM community_auth_upgrades u
     LEFT JOIN communities c ON c.id = u.target_community_id
     WHERE u.operation_id = $1";
@@ -227,37 +267,34 @@ impl Db {
             .bind(community.as_uuid()).fetch_optional(&mut *connection).await?)
     }
 
-    /// Recover a receipt only for its authenticated originating operator.
-    /// Ownership changes do not destroy the original caller's recovery authority.
-    #[datastore_span(name = "community_auth_upgrade_status", system = "postgresql")]
-    pub async fn community_auth_upgrade_status(
+    /// Recover any policy receipt for its original authenticated operator.
+    pub async fn community_auth_policy_status(
         &self,
         operation: Uuid,
         operator: &str,
-    ) -> Result<Option<UpgradeRecord>> {
+    ) -> Result<Option<PolicyRecord>> {
         let mut connection = crate::observability::acquire_writer(
             &self.pool,
             crate::observability::WriterOperation::Authorization,
         )
         .await?;
-        let record: Option<UpgradeRecord> = sqlx::query_as(RECEIPT)
+        let record: Option<PolicyRecord> = sqlx::query_as(RECEIPT)
             .bind(operation)
             .fetch_optional(&mut *connection)
             .await?;
-        Ok(record.filter(|record| record.operator_pubkey == operator))
+        Ok(record.filter(|record| record.acceptance.operator_pubkey == operator))
     }
 
-    /// Atomically enable FI and persist the full idempotency tuple.
-    ///
-    /// `configured_trust` is the relay's trusted configuration check. Stored
-    /// binding presence is rechecked under a row lock here. No issuer is added.
-    /// Retries recover acceptance before rechecking mutable preconditions.
-    #[datastore_span(name = "enable_community_nip_fi", system = "postgresql")]
-    pub async fn enable_community_nip_fi(
+    /// Apply a compare-and-set policy intent; identical committed replay is read-only.
+    pub async fn set_community_nip_fi_policy(
         &self,
-        request: &UpgradeRequest,
+        request: &PolicyRequest,
         configured_trust: std::result::Result<(), &'static str>,
-    ) -> Result<UpgradeOutcome> {
+    ) -> Result<PolicyOutcome> {
+        let desired = request.requires_nip_fi;
+        let expected_generation = request.expected_policy_generation;
+        let expected_state = request.expected_requires_nip_fi;
+        let request = &request.tuple;
         let connection = crate::observability::acquire_writer(
             &self.pool,
             crate::observability::WriterOperation::Authorization,
@@ -273,19 +310,25 @@ impl Db {
             .bind(request.operation_id.to_string())
             .execute(&mut *tx)
             .await?;
-        let existing: Option<UpgradeRecord> = sqlx::query_as(RECEIPT)
+        let existing: Option<PolicyRecord> = sqlx::query_as(RECEIPT)
             .bind(request.operation_id)
             .fetch_optional(&mut *tx)
             .await?;
         if let Some(record) = existing {
-            return Ok(if record.matches(request) {
-                UpgradeOutcome::Accepted(record)
-            } else {
-                UpgradeOutcome::Refused("idempotency_conflict")
-            });
+            return Ok(
+                if record.acceptance.matches(request)
+                    && record.acceptance.requires_nip_fi == desired
+                    && record.expected_policy_generation == Some(expected_generation)
+                    && record.expected_requires_nip_fi == Some(expected_state)
+                {
+                    PolicyOutcome::Accepted(Box::new(record))
+                } else {
+                    PolicyOutcome::Refused("idempotency_conflict")
+                },
+            );
         }
         if let Err(code) = configured_trust {
-            return Ok(UpgradeOutcome::Refused(code));
+            return Ok(PolicyOutcome::Refused(code));
         }
         let community = CommunityId::from_uuid(request.community_id);
         crate::deletion::lock_community_deletion_shared(&mut tx, community).await?;
@@ -300,10 +343,18 @@ impl Db {
         .fetch_optional(&mut *tx)
         .await?;
         let Some(row) = row else {
-            return Ok(UpgradeOutcome::Refused("community_not_found"));
+            return Ok(PolicyOutcome::Refused("community_not_found"));
         };
         if row.try_get::<String, _>("host")? != request.expected_host {
-            return Ok(UpgradeOutcome::Refused("host_conflict"));
+            return Ok(PolicyOutcome::Refused("host_conflict"));
+        }
+        let old_required: bool = row.try_get("requires_nip_fi")?;
+        let old_generation: i64 = row.try_get("policy_generation")?;
+        if expected_generation != old_generation || expected_state != old_required {
+            return Ok(PolicyOutcome::Refused("policy_conflict"));
+        }
+        if old_generation == i64::MAX {
+            return Ok(PolicyOutcome::Refused("policy_generation_exhausted"));
         }
         // Lock order: deletion-shared, community row, host lease. Fills take
         // only the shared host lease and never a community row lock. Derive
@@ -317,7 +368,7 @@ impl Db {
         // Keep the row stable while ALL optional leases expire, including
         // leases under former host keys. No remap (single or double) can
         // refill another host's optional cache while this drain is running.
-        if !row.try_get::<bool, _>("requires_nip_fi")? {
+        if desired && !old_required {
             tokio::time::sleep(POLICY_LEASE_DRAIN).await;
         }
         let deletion_pending: bool = sqlx::query_scalar(
@@ -328,7 +379,7 @@ impl Db {
         .fetch_one(&mut *tx)
         .await?;
         if !row.try_get::<bool, _>("active")? || deletion_pending {
-            return Ok(UpgradeOutcome::Refused("lifecycle_conflict"));
+            return Ok(PolicyOutcome::Refused("lifecycle_conflict"));
         }
         let owners: Vec<String> = sqlx::query_scalar(
             "SELECT pubkey FROM relay_members
@@ -340,31 +391,39 @@ impl Db {
         if owners != [request.expected_owner_pubkey.clone()]
             || request.actor_pubkey != request.expected_owner_pubkey
         {
-            return Ok(UpgradeOutcome::Refused("owner_conflict"));
+            return Ok(PolicyOutcome::Refused("owner_conflict"));
         }
-        let issuer: Option<String> = sqlx::query_scalar(
-            "SELECT issuer FROM community_nip_fi_issuers
+        if desired {
+            let issuer: Option<String> = sqlx::query_scalar(
+                "SELECT issuer FROM community_nip_fi_issuers
             WHERE community_id = $1 AND issuer = $2 FOR UPDATE",
-        )
-        .bind(request.community_id)
-        .bind(&request.expected_issuer)
-        .fetch_optional(&mut *tx)
-        .await?;
-        if issuer.is_none() {
-            return Ok(UpgradeOutcome::Refused("issuer_conflict"));
+            )
+            .bind(request.community_id)
+            .bind(&request.expected_issuer)
+            .fetch_optional(&mut *tx)
+            .await?;
+            if issuer.is_none() {
+                return Ok(PolicyOutcome::Refused("issuer_conflict"));
+            }
         }
         // Admission is also required for this communities-row mutation.
         self.deletion_store()
             .guard_transaction(&mut tx, community)
             .await?;
-        let generation: i64 = sqlx::query_scalar("UPDATE communities SET
-            policy_generation = CASE WHEN requires_nip_fi THEN policy_generation ELSE policy_generation + 1 END,
-            requires_nip_fi = true WHERE id = $1 RETURNING policy_generation")
-            .bind(request.community_id).fetch_one(&mut *tx).await?;
+        let generation = old_generation + 1;
+        sqlx::query(
+            "UPDATE communities SET policy_generation = $2, requires_nip_fi = $3 WHERE id = $1",
+        )
+        .bind(request.community_id)
+        .bind(generation)
+        .bind(desired)
+        .execute(&mut *tx)
+        .await?;
         sqlx::query(
             "INSERT INTO community_auth_upgrades
             (operation_id, target_community_id, expected_host, actor_pubkey, expected_owner_pubkey,
-             expected_issuer, operator_pubkey, policy_generation) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+             expected_issuer, operator_pubkey, policy_generation, requested_requires_nip_fi,
+             expected_policy_generation, expected_requires_nip_fi) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
         )
         .bind(request.operation_id)
         .bind(request.community_id)
@@ -374,6 +433,9 @@ impl Db {
         .bind(&request.expected_issuer)
         .bind(&request.operator_pubkey)
         .bind(generation)
+        .bind(desired)
+        .bind(expected_generation)
+        .bind(expected_state)
         .execute(&mut *tx)
         .await?;
         let record = sqlx::query_as(RECEIPT)
@@ -381,7 +443,7 @@ impl Db {
             .fetch_one(&mut *tx)
             .await?;
         tx.commit().await?;
-        Ok(UpgradeOutcome::Accepted(record))
+        Ok(PolicyOutcome::Accepted(Box::new(record)))
     }
 }
 

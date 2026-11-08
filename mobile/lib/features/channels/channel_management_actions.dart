@@ -320,7 +320,10 @@ class ChannelActions {
     if (trimmed.isEmpty) return const [];
 
     final events = await _session.searchProfiles(trimmed, limit: limit);
-    return directoryUsersFromProfileEvents(events, alphabetize: false)
+    final people = await _ref
+        .read(verifiedProfilesProvider.notifier)
+        .searched(events);
+    return directoryUsersFromSearch(people, alphabetize: false)
         .where(
           (user) =>
               _currentPubkey == null ||

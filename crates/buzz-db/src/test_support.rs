@@ -8,6 +8,14 @@ pub(crate) fn database_url() -> String {
         .unwrap_or_else(|_| DEFAULT_DATABASE_URL.to_owned())
 }
 
+/// Exercise the operator prebuild path on a small isolated upgrade fixture.
+/// Large deployments use concurrent child builds; tests own their entire database.
+pub(crate) async fn prebuild_media_edit_index(pool: &sqlx::PgPool) {
+    let expression = crate::store::media::MEDIA_EDIT_TARGET_SQL;
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE INDEX idx_events_media_edit_target ON events(community_id,channel_id,({expression}),created_at DESC,id DESC) WHERE kind=40003 AND deleted_at IS NULL")))
+        .execute(pool).await.expect("operator media index prebuild on isolated fixture");
+}
+
 /// A uniquely named database on the test server that is dropped when the
 /// guard goes out of scope, including when the test panics.
 ///
@@ -619,3 +627,6 @@ impl PausingProxy {
         self.next_session.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
+
+mod recent_pass_tests;
+pub(crate) use recent_pass_tests::replace_between_passes;

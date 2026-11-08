@@ -532,13 +532,19 @@ async fn claim_invite_authed(
         if write.outcome.owner_link_created {
             state.disconnect_unowned_agent_clusterwide(&tenant, pubkey.as_bytes());
         }
-        // The member-added delta and the auto-join only on Joined, never on
-        // other outcomes; the membership-list fan-out on every outcome.
+        // Publish the member-added delta only on Joined; successful repeated
+        // claims may still have durable default-channel work to finish.
         let joined = matches!(
             write.outcome.outcome,
             buzz_db::relay_invite::ClaimOutcome::Joined { .. }
         );
-        finish_committed_claim(&tenant, state, &claimer_hex, write.snapshot, joined).await;
+        if matches!(
+            write.outcome.outcome,
+            buzz_db::relay_invite::ClaimOutcome::Joined { .. }
+                | buzz_db::relay_invite::ClaimOutcome::AlreadyMember { .. }
+        ) {
+            finish_committed_claim(&tenant, state, &claimer_hex, write.snapshot, joined).await;
+        }
         return match write.outcome.outcome {
             buzz_db::relay_invite::ClaimOutcome::Joined { .. } => Ok(Json(serde_json::json!({
                 "status": "joined",
@@ -633,14 +639,13 @@ async fn claim_invite_authed(
 }
 
 /// The follow-up of a claim whose roster write committed: the NIP-43
-/// membership-list fan-out and, when the claim added the member (`joined`),
-/// the member-added delta and the default-channel auto-join.
+/// membership-list fan-out, the member-added delta for new members, and
+/// any unfinished default-channel joins (including on a repeated claim).
 ///
 /// It runs on its own task, which the handler awaits, so the response still
 /// waits for the joins. A client that disconnects first makes the server
 /// drop the handler's future: that detaches the task rather than cancelling
-/// it partway, which nothing would retry, because a re-claim is
-/// `already_member`.
+/// it partway. The durable token also survives a relay restart.
 async fn finish_committed_claim(
     tenant: &buzz_core::TenantContext,
     state: &Arc<AppState>,
@@ -653,13 +658,11 @@ async fn finish_committed_claim(
             (tenant.clone(), Arc::clone(state), claimer_hex.to_owned());
         async move {
             fan_out_nip43_membership_list(&tenant, &state, snapshot).await;
-            if !joined {
-                return;
+            if joined {
+                if let Err(e) = publish_nip43_member_added(&tenant, &state, &claimer_hex).await {
+                    tracing::warn!("failed to publish NIP-43 member-added delta after claim: {e}");
+                }
             }
-            if let Err(e) = publish_nip43_member_added(&tenant, &state, &claimer_hex).await {
-                tracing::warn!("failed to publish NIP-43 member-added delta after claim: {e}");
-            }
-            // A claimer joins for themselves: no third-party add policy.
             auto_join_default_channels(&tenant, &state, &claimer_hex, None).await;
         }
     });
@@ -697,6 +700,7 @@ fn claim_key_rate_limited(
 #[cfg(test)]
 mod postgres_tests {
     mod owner_admission_tests;
+    mod recovery_postgres_tests;
     mod restriction_tests;
     use std::sync::Arc;
     use std::time::Duration;
@@ -835,9 +839,7 @@ mod postgres_tests {
         let db = buzz_db::Db::from_pool(pool.clone());
         db.ensure_configured_community(host).await.ok()?;
 
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .ok()?;
+        let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).ok()?;
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await
@@ -1562,10 +1564,9 @@ mod postgres_tests {
     /// A default channel archived after the auto-join listed it is skipped:
     /// no membership row, no kind:39002 roster entry, no kind:44100 and no
     /// `member_joined` notice. The test holds an uncommitted archive of the
-    /// listed channel, so the auto-join passes the list and the shared join
-    /// body's open/unarchived check on the committed state and then waits in
-    /// `put_member`; the archive commits and the join resumes on an archived
-    /// channel. Mutation: drop the channel row lock or the archived refusal
+    /// listed channel, so the auto-join reads the committed channel state and
+    /// then waits for the membership write's channel row lock. The archive
+    /// commits and the join resumes on an archived channel. Mutation: drop the channel row lock or the archived refusal
     /// from `put_members` → RED.
     #[tokio::test]
     #[ignore = "requires Postgres"]
@@ -1593,20 +1594,28 @@ mod postgres_tests {
         let tenant = buzz_core::TenantContext::resolved(community, &host);
         let joiner = Keys::generate();
         let joiner_hex = joiner.public_key().to_hex();
-        for (keys, role) in [(&owner, "owner"), (&joiner, "member")] {
-            state
-                .db
-                .add_relay_member(
-                    community,
-                    &keys.public_key().to_hex(),
-                    role,
-                    None,
-                    &Keys::generate(),
-                )
-                .await
-                .map(|write| write.outcome)
-                .expect("seed relay member");
-        }
+        let _ = state
+            .db
+            .add_relay_member(
+                community,
+                &owner.public_key().to_hex(),
+                "owner",
+                None,
+                &Keys::generate(),
+            )
+            .await
+            .expect("seed relay owner");
+        let _ = state
+            .db
+            .add_relay_member_with_default_channels(
+                community,
+                &joiner_hex,
+                "member",
+                &joiner_hex,
+                &Keys::generate(),
+            )
+            .await
+            .expect("seed pending default-channel admission");
         let starter = create_channel(&state, &tenant, &owner, &[]).await;
         edit_channel(&state, &tenant, &owner, starter, &[&["auto_join", "true"]])
             .await
@@ -1632,8 +1641,8 @@ mod postgres_tests {
             async move { auto_join_default_channels(&tenant, &state, &joiner_hex, None).await }
         });
         // Wait until the join is blocked on the channel row lock in
-        // `put_member`, behind the archive, so it has already listed the
-        // channel and passed the join body's check.
+        // the membership write, behind the archive, so it has already listed
+        // the channel.
         wait_for_put_member_behind(&pool, archive_pid, &auto_join).await;
         archive.commit().await.expect("commit archive");
         tokio::time::timeout(Duration::from_secs(10), auto_join)

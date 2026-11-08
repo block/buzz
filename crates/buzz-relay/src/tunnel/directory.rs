@@ -12,8 +12,6 @@ use buzz_relay_mesh::{FencedHeader, MeshError, Profile, RuntimeId};
 use uuid::Uuid;
 
 const DEFAULT_LEASE_TTL: Duration = Duration::from_secs(30);
-/// Bound on one Redis pool checkout (wait, create, or recycle).
-pub(crate) const POOL_CHECKOUT_TIMEOUT: Duration = Duration::from_secs(1);
 
 const ACQUIRE_SCRIPT: &str = r#"
 local lease_key = KEYS[1]
@@ -100,7 +98,7 @@ return {current, known_generation}
 /// Redis-backed owner directory for mesh tunnel sessions.
 #[derive(Clone)]
 pub struct SessionDirectory {
-    pool: deadpool_redis::Pool,
+    pool: buzz_pubsub::RedisConnection,
     lease_ttl: Duration,
     db: Option<buzz_db::Db>,
 }
@@ -160,9 +158,6 @@ pub enum ReleaseResult {
 /// Errors from the Redis session directory.
 #[derive(Debug, thiserror::Error)]
 pub enum DirectoryError {
-    /// Redis pool checkout failed.
-    #[error("redis pool: {0}")]
-    Pool(#[from] deadpool_redis::PoolError),
     /// Redis command/script failed.
     #[error("redis: {0}")]
     Redis(#[from] redis::RedisError),
@@ -202,13 +197,13 @@ pub enum DirectoryError {
 
 impl SessionDirectory {
     /// Create a directory backed by `pool` with the default lease TTL.
-    pub fn new(pool: deadpool_redis::Pool) -> Self {
+    pub fn new(pool: buzz_pubsub::RedisConnection) -> Self {
         Self::with_lease_ttl(pool, DEFAULT_LEASE_TTL)
     }
 
     /// Create a serving directory whose Redis mutations use durable,
     /// heartbeat-backed community write leases.
-    pub fn with_db(pool: deadpool_redis::Pool, db: buzz_db::Db) -> Self {
+    pub fn with_db(pool: buzz_pubsub::RedisConnection, db: buzz_db::Db) -> Self {
         Self {
             pool,
             lease_ttl: DEFAULT_LEASE_TTL,
@@ -217,28 +212,12 @@ impl SessionDirectory {
     }
 
     /// Create a directory backed by `pool` with an explicit lease TTL.
-    pub fn with_lease_ttl(pool: deadpool_redis::Pool, lease_ttl: Duration) -> Self {
+    pub fn with_lease_ttl(pool: buzz_pubsub::RedisConnection, lease_ttl: Duration) -> Self {
         Self {
             pool,
             lease_ttl,
             db: None,
         }
-    }
-
-    /// Check out a Redis connection within [`POOL_CHECKOUT_TIMEOUT`] in total.
-    ///
-    /// Callers may hold a session effect permit, so an exhausted or unhealthy
-    /// pool must end as an ordinary error rather than an indefinite wait. One
-    /// outer deadline covers the permit wait, creation, and deadpool's
-    /// retry-on-failed-recycle loop, which per-stage `Timeouts` would each reset.
-    /// Dropping `get()` is safe: deadpool 0.13 returns the permit and detaches
-    /// any half-recycled or half-created object.
-    async fn connection(&self) -> Result<deadpool_redis::Connection, deadpool_redis::PoolError> {
-        tokio::time::timeout(POOL_CHECKOUT_TIMEOUT, self.pool.get())
-            .await
-            .unwrap_or(Err(deadpool_redis::PoolError::Timeout(
-                deadpool_redis::TimeoutType::Wait,
-            )))
     }
 
     async fn begin_serving_write(
@@ -269,13 +248,13 @@ impl SessionDirectory {
         let serving_write = self.begin_serving_write(community_id).await?;
         let keys = SessionKeys::new(community_id, session_id);
         let ttl_ms = ttl_ms(self.lease_ttl)?;
-        let mut conn = self.connection().await?;
+        let mut conn = self.pool.clone();
         let mutation = async {
             let reply = eval(ACQUIRE_SCRIPT, &keys)
                 .arg(owner_runtime_id.to_hex())
                 .arg(profile.as_wire_str())
                 .arg(ttl_ms)
-                .query_async::<(String, String, String)>(&mut *conn)
+                .query_async::<(String, String, String)>(&mut conn)
                 .await;
             #[cfg(test)]
             crate::nip_fi_test_hooks::after_directory_cas(community_id).await;
@@ -327,14 +306,14 @@ impl SessionDirectory {
     /// the key expires with its TTL.
     async fn discard_unverified(
         &self,
-        conn: &mut deadpool_redis::Connection,
+        conn: &mut buzz_pubsub::RedisConnection,
         keys: &SessionKeys,
         lease: &SessionLease,
     ) {
         let discarded = eval(RELEASE_SCRIPT, keys)
             .arg(lease.owner_runtime_id.to_hex())
             .arg(lease.generation)
-            .query_async::<(String, String, String)>(&mut **conn)
+            .query_async::<(String, String, String)>(&mut *conn)
             .await;
         if let Err(error) = discarded {
             tracing::warn!(
@@ -369,13 +348,13 @@ impl SessionDirectory {
         let serving_write = self.begin_serving_write(lease.community_id).await?;
         let keys = SessionKeys::new(lease.community_id, lease.session_id);
         let ttl_ms = ttl_ms(self.lease_ttl)?;
-        let mut conn = self.connection().await?;
+        let mut conn = self.pool.clone();
         let mutation = async {
             eval(RENEW_SCRIPT, &keys)
                 .arg(lease.owner_runtime_id.to_hex())
                 .arg(lease.generation)
                 .arg(ttl_ms)
-                .query_async(&mut *conn)
+                .query_async(&mut conn)
                 .await
         };
         let (status, value, known_generation): (String, String, String) = match &serving_write {
@@ -413,12 +392,12 @@ impl SessionDirectory {
     pub async fn release(&self, lease: &SessionLease) -> Result<ReleaseResult, DirectoryError> {
         let serving_write = self.begin_serving_write(lease.community_id).await?;
         let keys = SessionKeys::new(lease.community_id, lease.session_id);
-        let mut conn = self.connection().await?;
+        let mut conn = self.pool.clone();
         let mutation = async {
             eval(RELEASE_SCRIPT, &keys)
                 .arg(lease.owner_runtime_id.to_hex())
                 .arg(lease.generation)
-                .query_async(&mut *conn)
+                .query_async(&mut conn)
                 .await
         };
         let (status, value, known_generation): (String, String, String) = match &serving_write {
@@ -458,10 +437,10 @@ impl SessionDirectory {
         session_id: Uuid,
     ) -> Result<Option<SessionLease>, DirectoryError> {
         let keys = SessionKeys::new(community_id, session_id);
-        let mut conn = self.connection().await?;
+        let mut conn = self.pool.clone();
         let value: Option<String> = redis::cmd("GET")
             .arg(&keys.lease)
-            .query_async(&mut *conn)
+            .query_async(&mut conn)
             .await?;
         value
             .as_deref()
@@ -476,10 +455,10 @@ impl SessionDirectory {
         session_id: Uuid,
     ) -> Result<Option<u64>, DirectoryError> {
         let keys = SessionKeys::new(community_id, session_id);
-        let mut conn = self.connection().await?;
+        let mut conn = self.pool.clone();
         let value: Option<String> = redis::cmd("GET")
             .arg(&keys.generation)
-            .query_async(&mut *conn)
+            .query_async(&mut conn)
             .await?;
         match value.as_deref() {
             Some(value) => parse_optional_generation(community_id, session_id, value),
@@ -500,12 +479,9 @@ impl SessionDirectory {
         fenced: &FencedHeader,
     ) -> Result<(), MeshError> {
         let keys = SessionKeys::new(community_id, fenced.session_id);
-        let mut conn = self
-            .connection()
-            .await
-            .map_err(|e| MeshError::Transport(format!("redis pool: {e}")))?;
+        let mut conn = self.pool.clone();
         let (lease_value, known_generation): (String, String) =
-            eval(VALIDATE_SCRIPT, &keys).query_async(&mut *conn).await?;
+            eval(VALIDATE_SCRIPT, &keys).query_async(&mut conn).await?;
         let known_from_counter =
             parse_optional_generation(community_id, fenced.session_id, &known_generation)
                 .map_err(|e| MeshError::Transport(e.to_string()))?
@@ -735,18 +711,16 @@ mod tests {
         RuntimeId([byte; 32])
     }
 
-    fn pool() -> deadpool_redis::Pool {
+    fn pool() -> buzz_pubsub::RedisConnection {
         let url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
-        deadpool_redis::Config::from_url(url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("create redis pool")
+        buzz_pubsub::redis_connection(&url).expect("create redis pool")
     }
 
     async fn redis_directory_if_available() -> Option<SessionDirectory> {
         let pool = pool();
-        let mut conn = pool.get().await.ok()?;
+        let mut conn = pool.clone();
         redis::cmd("PING")
-            .query_async::<String>(&mut *conn)
+            .query_async::<String>(&mut conn)
             .await
             .ok()?;
         Some(SessionDirectory::with_lease_ttl(
@@ -757,11 +731,11 @@ mod tests {
 
     async fn clear_keys(directory: &SessionDirectory, community_id: CommunityId, session_id: Uuid) {
         let keys = SessionKeys::new(community_id, session_id);
-        let mut conn = directory.pool.get().await.expect("redis conn");
+        let mut conn = directory.pool.clone();
         let _: () = redis::cmd("DEL")
             .arg(keys.lease)
             .arg(keys.generation)
-            .query_async(&mut *conn)
+            .query_async(&mut conn)
             .await
             .expect("clear keys");
     }

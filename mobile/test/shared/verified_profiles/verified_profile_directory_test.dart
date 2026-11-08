@@ -55,6 +55,22 @@ class _CountingNotifier extends VerifiedProfilesNotifier {
   Map<String, int> newInterestMap() => _CountingMap(iterations);
 }
 
+class _ParseCountingNotifier extends VerifiedProfilesNotifier {
+  _ParseCountingNotifier(this.parses);
+
+  final List<String> parses;
+
+  @override
+  VerifiedProfile? parseHead(
+    NostrEvent event,
+    VerifiedProfileAuthority authority, {
+    required bool checked,
+  }) {
+    parses.add(verifiedProfileSubject(event, authority)!);
+    return super.parseHead(event, authority, checked: checked);
+  }
+}
+
 class Harness {
   Harness(this.async, {VerifiedProfilesNotifier Function()? notifier}) {
     container = ProviderContainer(
@@ -126,6 +142,27 @@ void main() {
         for (var i = 1024; i < 4300; i++) key(i),
       ]);
       expect(iterations, 1);
+    });
+  });
+
+  test('a later batch reuses profiles already parsed', () {
+    fakeAsync((async) {
+      final parses = <String>[];
+      final h = Harness(async, notifier: () => _ParseCountingNotifier(parses));
+      addTearDown(h.container.dispose);
+      h.relay.seed([
+        signedProjection(profileTags(subjectA)),
+        signedProjection(profileTags(subjectB)),
+      ]);
+      h.start([subjectA]);
+      expect(h.profiles[subjectA]?.checked, isTrue);
+      h.container.read(verifiedProfilesProvider.notifier).track([subjectB]);
+      h.settle();
+      // Rebatching unchecks and rechecks A; every publish rebuilds the map,
+      // but each head is validated once.
+      expect(h.profiles[subjectA]?.checked, isTrue);
+      expect(h.profiles[subjectB]?.checked, isTrue);
+      expect(parses..sort(), [subjectA, subjectB]);
     });
   });
 

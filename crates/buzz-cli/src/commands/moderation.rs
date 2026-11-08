@@ -42,7 +42,7 @@ async fn cmd_ban(
     let expiry = resolve_expiry(expires_in, expires_at);
     let builder = buzz_sdk::build_moderation_ban(pubkey, expiry, reason)
         .map_err(|e| CliError::Usage(format!("invalid ban: {e}")))?;
-    let event = client.sign_event(builder)?;
+    let event = client.sign_event(builder).await?;
     let resp = client.submit_event(event).await?;
     println!("{}", normalize_write_response(&resp));
     Ok(())
@@ -52,7 +52,7 @@ async fn cmd_unban(client: &BuzzClient, pubkey: &str) -> Result<(), CliError> {
     validate_hex64(pubkey)?;
     let builder = buzz_sdk::build_moderation_unban(pubkey)
         .map_err(|e| CliError::Usage(format!("invalid unban: {e}")))?;
-    let event = client.sign_event(builder)?;
+    let event = client.sign_event(builder).await?;
     let resp = client.submit_event(event).await?;
     println!("{}", normalize_write_response(&resp));
     Ok(())
@@ -70,7 +70,7 @@ async fn cmd_timeout(
         .ok_or_else(|| CliError::Usage("timeout requires --expires-in or --expires-at".into()))?;
     let builder = buzz_sdk::build_moderation_timeout(pubkey, expiry, reason)
         .map_err(|e| CliError::Usage(format!("invalid timeout: {e}")))?;
-    let event = client.sign_event(builder)?;
+    let event = client.sign_event(builder).await?;
     let resp = client.submit_event(event).await?;
     println!("{}", normalize_write_response(&resp));
     Ok(())
@@ -80,7 +80,7 @@ async fn cmd_untimeout(client: &BuzzClient, pubkey: &str) -> Result<(), CliError
     validate_hex64(pubkey)?;
     let builder = buzz_sdk::build_moderation_untimeout(pubkey)
         .map_err(|e| CliError::Usage(format!("invalid untimeout: {e}")))?;
-    let event = client.sign_event(builder)?;
+    let event = client.sign_event(builder).await?;
     let resp = client.submit_event(event).await?;
     println!("{}", normalize_write_response(&resp));
     Ok(())
@@ -96,7 +96,7 @@ async fn cmd_resolve(
     validate_hex64(report)?;
     let builder = buzz_sdk::build_moderation_resolve_report(report, status, action, reason)
         .map_err(|e| CliError::Usage(format!("invalid resolution: {e}")))?;
-    let event = client.sign_event(builder)?;
+    let event = client.sign_event(builder).await?;
     let resp = client.submit_event(event).await?;
     println!("{}", normalize_write_response(&resp));
     Ok(())

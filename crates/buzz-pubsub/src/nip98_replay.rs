@@ -21,12 +21,12 @@ use nostr::EventId;
 /// the TTL window return `nil`, which we surface as `Ok(false)` so the caller
 /// rejects the request as replay.
 pub struct RedisNip98ReplayGuard {
-    pool: deadpool_redis::Pool,
+    pool: crate::RedisConnection,
 }
 
 impl RedisNip98ReplayGuard {
-    /// Create a new replay guard backed by the given Redis connection pool.
-    pub fn new(pool: deadpool_redis::Pool) -> Self {
+    /// Create a new replay guard backed by the shared Redis connection.
+    pub fn new(pool: crate::RedisConnection) -> Self {
         Self { pool }
     }
 }
@@ -47,16 +47,7 @@ impl Nip98ReplayGuard for RedisNip98ReplayGuard {
             // implausibly long.
             let ttl = ttl_secs.clamp(DEFAULT_REPLAY_TTL_SECS, MAX_REPLAY_TTL_SECS);
 
-            let mut conn = self.pool.get().await.map_err(|e| {
-                // Structured field for ops; the user-facing AuthError stays a
-                // bounded category string.
-                tracing::warn!(
-                    scope = %scope,
-                    error = %e,
-                    "nip98 replay: redis pool acquire failed — caller MUST fail closed"
-                );
-                AuthError::Internal(format!("Redis pool: {e}"))
-            })?;
+            let mut conn = self.pool.clone();
 
             let key = nip98_replay_key_for_scope(scope, event_id);
 
@@ -69,7 +60,7 @@ impl Nip98ReplayGuard for RedisNip98ReplayGuard {
                 .arg("NX")
                 .arg("EX")
                 .arg(ttl)
-                .query_async(&mut *conn)
+                .query_async(&mut conn)
                 .await
                 .map_err(|e| {
                     tracing::warn!(
@@ -102,15 +93,12 @@ impl Nip98ReplayGuard for RedisNip98ReplayGuard {
 mod tests {
     use super::*;
     use buzz_core::{CommunityId, TenantContext};
-    use deadpool_redis::{Config, Runtime};
     use nostr::{EventBuilder, Keys, Kind};
     use uuid::Uuid;
 
-    fn redis_pool() -> deadpool_redis::Pool {
+    fn redis_pool() -> crate::RedisConnection {
         let url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
-        Config::from_url(url)
-            .create_pool(Some(Runtime::Tokio1))
-            .expect("create pool")
+        crate::redis_connection(&url).expect("redis connection")
     }
 
     fn fresh_ctx() -> TenantContext {
