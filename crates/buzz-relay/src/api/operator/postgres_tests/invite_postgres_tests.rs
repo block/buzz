@@ -13,12 +13,12 @@ async fn mint(state: &Arc<AppState>, operator: &Keys, body: Value) -> axum::resp
     .await
 }
 
-async fn error(response: axum::response::Response, status: StatusCode) -> String {
+/// The refusal's text, after checking its status and stable code.
+async fn error(response: axum::response::Response, status: StatusCode, code: &str) -> String {
     assert_eq!(response.status(), status);
-    read_json(response).await["error"]
-        .as_str()
-        .expect("error text")
-        .to_owned()
+    let json = read_json(response).await;
+    assert_eq!(json["code"], code, "{json}");
+    json["error"].as_str().expect("error text").to_owned()
 }
 
 /// Claim `code` on the community host the way a joining app does.
@@ -144,10 +144,13 @@ async fn operator_mints_invites_only_for_relay_owners_and_admins() {
         .await
         .expect("ban admin");
     assert_eq!(
-        mint(&state, &operator, request(&admin, serde_json::json!({})))
-            .await
-            .status(),
-        StatusCode::FORBIDDEN
+        error(
+            mint(&state, &operator, request(&admin, serde_json::json!({}))).await,
+            StatusCode::FORBIDDEN,
+            "restricted"
+        )
+        .await,
+        "invite_restricted"
     );
 
     // The relay's roster decides authority, whatever the operator asserts.
@@ -155,7 +158,8 @@ async fn operator_mints_invites_only_for_relay_owners_and_admins() {
         assert_eq!(
             error(
                 mint(&state, &operator, request(actor, serde_json::json!({}))).await,
-                StatusCode::FORBIDDEN
+                StatusCode::FORBIDDEN,
+                "not_owner"
             )
             .await,
             "only relay owners and admins can create invites"
@@ -179,40 +183,48 @@ async fn operator_mints_invites_only_for_relay_owners_and_admins() {
         let text = error(
             mint(&state, &operator, request(&owner, limits)).await,
             StatusCode::BAD_REQUEST,
+            "invalid_request",
         )
         .await;
         assert!(text.starts_with(message), "{text}");
     }
     let mut unknown = request(&owner, serde_json::json!({}));
     unknown["role"] = "owner".into();
-    assert_eq!(
-        mint(&state, &operator, unknown).await.status(),
-        StatusCode::BAD_REQUEST
-    );
+    error(
+        mint(&state, &operator, unknown).await,
+        StatusCode::BAD_REQUEST,
+        "invalid_request",
+    )
+    .await;
     let mut bad_actor = request(&owner, serde_json::json!({}));
     bad_actor["actor_pubkey"] = "not-a-pubkey".into();
-    assert_eq!(
-        mint(&state, &operator, bad_actor).await.status(),
-        StatusCode::BAD_REQUEST
-    );
-    // Only configured operators may vouch for a caller.
-    assert_eq!(
+    error(
+        mint(&state, &operator, bad_actor).await,
+        StatusCode::BAD_REQUEST,
+        "invalid_request",
+    )
+    .await;
+    // Only configured operators may vouch for a caller; that refusal is the
+    // operator's own misconfiguration, so it carries its own code.
+    error(
         mint(
             &state,
             &Keys::generate(),
-            request(&owner, serde_json::json!({}))
+            request(&owner, serde_json::json!({})),
         )
-        .await
-        .status(),
-        StatusCode::FORBIDDEN
-    );
+        .await,
+        StatusCode::FORBIDDEN,
+        "not_operator",
+    )
+    .await;
     // Unknown and archived communities have nothing to invite to.
     let mut unknown_community = request(&owner, serde_json::json!({}));
     unknown_community["community_id"] = Uuid::new_v4().to_string().into();
     assert_eq!(
         error(
             mint(&state, &operator, unknown_community).await,
-            StatusCode::NOT_FOUND
+            StatusCode::NOT_FOUND,
+            "community_not_found"
         )
         .await,
         "community not found"
@@ -221,7 +233,8 @@ async fn operator_mints_invites_only_for_relay_owners_and_admins() {
     assert_eq!(
         error(
             mint(&state, &operator, request(&owner, serde_json::json!({}))).await,
-            StatusCode::NOT_FOUND
+            StatusCode::NOT_FOUND,
+            "community_not_found"
         )
         .await,
         "community not found"
