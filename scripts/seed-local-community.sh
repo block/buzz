@@ -21,8 +21,9 @@ fi
 # migrations already use (#2479). Explicit PG* still win only when DATABASE_URL
 # is unset.
 if [[ -n "${DATABASE_URL:-}" ]]; then
-  eval "$(python3 - <<'PY'
+  seed_pg_exports=$(python3 - <<'PY'
 import os
+from shlex import quote
 from urllib.parse import unquote, urlparse
 
 url = os.environ["DATABASE_URL"]
@@ -31,12 +32,14 @@ if parsed.scheme not in {"postgres", "postgresql"}:
     raise SystemExit(f"DATABASE_URL must be postgres://…, got {parsed.scheme!r}")
 
 def sh_export(name: str, value: str) -> None:
-    print(f"export {name}={value!r}")
+    if "\0" in value:
+        raise SystemExit(f"DATABASE_URL contains a NUL byte in {name}")
+    print(f"export {name}={quote(value)}")
 
 if parsed.hostname:
     sh_export("PGHOST", parsed.hostname)
-if parsed.port is not None:
-    sh_export("PGPORT", str(parsed.port))
+port = parsed.port
+sh_export("PGPORT", str(port if port is not None else 5432))
 if parsed.username:
     sh_export("PGUSER", unquote(parsed.username))
 if parsed.password is not None:
@@ -45,7 +48,9 @@ db = (parsed.path or "").lstrip("/")
 if db:
     sh_export("PGDATABASE", unquote(db))
 PY
-)"
+)
+  eval "$seed_pg_exports"
+  unset seed_pg_exports
 fi
 
 export PGHOST="${PGHOST:-localhost}"
