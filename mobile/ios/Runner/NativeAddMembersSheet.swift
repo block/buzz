@@ -296,7 +296,8 @@ final class NativeAddMembersViewController: UITableViewController, UISearchResul
     let changed = snapshot.itemIdentifiers.filter { item in
       drawn[item].map { $0 != next[item] } ?? false
     }
-    snapshot.reconfigureItems(changed.filter(previous.itemIdentifiers.contains))
+    let shown = Set(previous.itemIdentifiers)
+    snapshot.reconfigureItems(changed.filter(shown.contains))
     drawn = next
     let animate = view.window != nil && wasChosen != chosen.map(Item.member)
       && !UIAccessibility.isReduceMotionEnabled
@@ -327,7 +328,7 @@ final class NativeAddMembersViewController: UITableViewController, UISearchResul
     cell.contentView.accessibilityElementsHidden = false
     cell.isUserInteractionEnabled = !busy
     var content = UIListContentConfiguration.subtitleCell()
-    guard case .member(let pubkey) = item, let user = member(pubkey) else {
+    guard case .member(let pubkey) = item else {
       content.text = status
       content.textProperties.color = loadError && !atLimit ? Self.errorColor : .secondaryLabel
       content.textProperties.numberOfLines = 0
@@ -336,6 +337,7 @@ final class NativeAddMembersViewController: UITableViewController, UISearchResul
       cell.contentConfiguration = content
       return
     }
+    guard let user = member(pubkey) else { preconditionFailure("A shown member row must be in the state") }
     let chosen = selected.contains { $0["pubkey"] as? String == pubkey }
     let key = user["avatarKey"] as? String
     content.text = user["name"] as? String
@@ -378,10 +380,11 @@ final class NativeAddMembersViewController: UITableViewController, UISearchResul
   override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
     tableView.deselectRow(at: indexPath, animated: true)
     guard !busy, let item = rows.itemIdentifier(for: indexPath) else { return }
-    guard case .member(let pubkey) = item, let user = member(pubkey) else {
+    guard case .member(let pubkey) = item else {
       if loadError && !atLimit { send("retry", [:]) }
       return
     }
+    guard let user = member(pubkey) else { preconditionFailure("A shown member row must be in the state") }
     if user["unavailable"] as? Bool == true { return }
     send("toggle", ["pubkey": pubkey])
     // Where asked (New DM), a pick ends its query, as an inserted mention

@@ -461,7 +461,9 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
         },
         onToggle: (pubkey) {
           if (isSubmitting.value) return;
-          if (selectedPubkeys.contains(pubkey)) {
+          // The current selection, not this build's: a second tap can land
+          // before the rebuild that reflects the first.
+          if (selectedUsers.value.any((user) => user.pubkey == pubkey)) {
             selectedUsers.value = selectedUsers.value
                 .where((user) => user.pubkey != pubkey)
                 .toList();
