@@ -1460,26 +1460,8 @@ async fn validate_edit_ownership(
     event: &Event,
     state: &AppState,
 ) -> Result<(), String> {
-    let target_hex = event
-        .tags
-        .iter()
-        .find_map(|t| {
-            if t.kind().to_string() == "e" {
-                t.content().and_then(|v| {
-                    if v.len() == 64 && v.chars().all(|c| c.is_ascii_hexdigit()) {
-                        Some(v.to_string())
-                    } else {
-                        None
-                    }
-                })
-            } else {
-                None
-            }
-        })
+    let target_bytes = buzz_core::media::first_edit_target(event)
         .ok_or_else(|| "missing e tag for edit target".to_string())?;
-
-    let target_bytes =
-        hex::decode(&target_hex).map_err(|_| "invalid target event ID".to_string())?;
     // Kind 40003 skips the generic membership gate, so this validator is the
     // only authority: a target outside the edit's `h` channel, unreadable, or
     // not the actor's to edit is denied exactly like a missing one.
@@ -2566,6 +2548,28 @@ struct ChannelCreateRequest {
     members: Vec<Vec<u8>>,
 }
 
+async fn validate_event_imeta(
+    tenant: &TenantContext,
+    state: &AppState,
+    event: &Event,
+    tenant_media_base: &str,
+) -> Result<(), IngestError> {
+    let imeta_tags: Vec<Vec<String>> = event
+        .tags
+        .iter()
+        .filter(|t| t.kind().to_string() == "imeta")
+        .map(|t| t.as_slice().iter().map(|s| s.to_string()).collect())
+        .collect();
+    if !imeta_tags.is_empty() {
+        crate::api::validate_imeta_tags(&imeta_tags, tenant_media_base)
+            .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
+        crate::api::verify_imeta_blobs(tenant, &imeta_tags, &state.media_storage)
+            .await
+            .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
+    }
+    Ok(())
+}
+
 async fn ingest_event_inner(
     state: &Arc<AppState>,
     tracer: &Arc<dyn buzz_conformance::Tracer>,
@@ -2726,6 +2730,8 @@ async fn ingest_event_inner(
     // Ban / timeout write-block. Runs before every kind-specific branch below
     // (commands, feedback, reports, moderation) so no write returns ahead of it.
     enforce_write_restriction(state, tenant, kind_u32, auth.pubkey()).await?;
+
+    super::media_access::validate_media_references(tenant, state, &event).await?;
 
     // Command kinds are routed AFTER signature verification, timestamp check,
     // pubkey/auth match, and scope validation — never before.
@@ -3155,6 +3161,9 @@ async fn ingest_event_inner(
     // Artifact revisions passed the same home-channel write gates as kind 9
     // above; they are stored and published without conversation side effects.
     if kind_u32 == buzz_core::kind::KIND_ARTIFACT {
+        let base =
+            crate::api::media::media_base_url_for_tenant(&state.config.relay_url, tenant.host());
+        validate_event_imeta(tenant, state, &event, &base).await?;
         let result = super::artifact::accept(state, tenant, &event, &auth).await?;
         if let Some(ch_id) = channel_id {
             emit(
@@ -3413,19 +3422,7 @@ async fn ingest_event_inner(
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
 
-    let imeta_tags: Vec<Vec<String>> = event
-        .tags
-        .iter()
-        .filter(|t| t.kind().to_string() == "imeta")
-        .map(|t| t.as_slice().iter().map(|s| s.to_string()).collect())
-        .collect();
-    if !imeta_tags.is_empty() {
-        crate::api::validate_imeta_tags(&imeta_tags, &tenant_media_base)
-            .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
-        crate::api::verify_imeta_blobs(tenant, &imeta_tags, &state.media_storage)
-            .await
-            .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
-    }
+    validate_event_imeta(tenant, state, &event, &tenant_media_base).await?;
 
     let thread_meta = if requires_h_channel_scope(kind_u32) {
         if let Some(ch_id) = channel_id {

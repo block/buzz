@@ -76,12 +76,16 @@ enum BuzzPushKeychain {
     }
   }
 
-  /// Replaces the shared organization session. Device-only, like the app's own copy.
-  static func replace(organizationSession: BuzzOrganizationSession?, accessGroup: String?) throws {
+  /// Replaces a shared account session, the organization's unless `account` names the hosted
+  /// one. Device-only, like the app's own copy.
+  static func replace(
+    organizationSession: BuzzOrganizationSession?, accessGroup: String?,
+    account: String = BuzzOrganizationSession.keychainAccount
+  ) throws {
     var query: [String: Any] = [
       kSecClass as String: kSecClassGenericPassword,
       kSecAttrService as String: BuzzOrganizationSession.keychainService,
-      kSecAttrAccount as String: BuzzOrganizationSession.keychainAccount,
+      kSecAttrAccount as String: account,
     ]
     if let accessGroup, !accessGroup.isEmpty {
       query[kSecAttrAccessGroup as String] = accessGroup

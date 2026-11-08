@@ -32,13 +32,24 @@ async fn fixture() -> (Db, UpgradeRequest, Keys) {
     (db, request, keys)
 }
 
+fn initial_enable(tuple: &UpgradeRequest) -> PolicyRequest {
+    PolicyRequest {
+        tuple: tuple.clone(),
+        requires_nip_fi: true,
+        expected_policy_generation: 0,
+        expected_requires_nip_fi: false,
+    }
+}
+
 async fn accepted(db: &Db, request: &UpgradeRequest) -> UpgradeRecord {
-    let UpgradeOutcome::Accepted(record) =
-        db.enable_community_nip_fi(request, Ok(())).await.unwrap()
+    let PolicyOutcome::Accepted(record) = db
+        .set_community_nip_fi_policy(&initial_enable(request), Ok(()))
+        .await
+        .unwrap()
     else {
         panic!("acceptance refused")
     };
-    record
+    record.acceptance
 }
 
 async fn policy(db: &Db, request: &UpgradeRequest) -> CommunityAuthPolicy {
@@ -58,16 +69,18 @@ async fn response_loss_recovery_and_payload_binding() {
     assert_eq!(first.policy_generation, 1);
     // Discard the POST result and recover by original operator/UUID.
     assert_eq!(
-        db.community_auth_upgrade_status(request.operation_id, &request.operator_pubkey)
+        db.community_auth_policy_status(request.operation_id, &request.operator_pubkey)
             .await
-            .unwrap(),
+            .unwrap()
+            .map(|record| record.acceptance),
         Some(first.clone())
     );
     assert_eq!(accepted(&db, &request).await, first);
     assert!(db
-        .community_auth_upgrade_status(request.operation_id, "another operator")
+        .community_auth_policy_status(request.operation_id, "another operator")
         .await
         .unwrap()
+        .map(|record| record.acceptance)
         .is_none());
     for field in 0..6 {
         let mut changed = request.clone();
@@ -80,8 +93,10 @@ async fn response_loss_recovery_and_payload_binding() {
             _ => changed.operator_pubkey = "d".repeat(64),
         }
         assert_eq!(
-            db.enable_community_nip_fi(&changed, Ok(())).await.unwrap(),
-            UpgradeOutcome::Refused("idempotency_conflict")
+            db.set_community_nip_fi_policy(&initial_enable(&changed), Ok(()))
+                .await
+                .unwrap(),
+            PolicyOutcome::Refused("idempotency_conflict")
         );
     }
     assert_eq!(policy(&db, &request).await.policy_generation, 1);
@@ -136,21 +151,29 @@ async fn response_loss_recovery_and_payload_binding() {
 #[ignore = "requires Postgres"]
 async fn concurrent_ids_and_duplicate_requests_converge() {
     let (db, request, _) = fixture().await;
-    let mut second = request.clone();
-    second.operation_id = Uuid::new_v4();
-    let (a, b, c) = tokio::join!(
-        accepted(&db, &request),
-        accepted(&db, &request),
-        accepted(&db, &second)
+    let first = initial_enable(&request);
+    let second = intent(&request, true, 0, false);
+    let (a, b) = tokio::join!(
+        db.set_community_nip_fi_policy(&first, Ok(())),
+        db.set_community_nip_fi_policy(&second, Ok(()))
     );
-    assert_eq!(a, b);
-    assert_eq!(a.policy_generation, c.policy_generation);
+    let (winner, loser) = match (a.unwrap(), b.unwrap()) {
+        (PolicyOutcome::Accepted(record), other) => (&first, (record, other)),
+        (other, PolicyOutcome::Accepted(record)) => (&second, (record, other)),
+        outcomes => panic!("no CAS winner: {outcomes:?}"),
+    };
+    assert_eq!(loser.1, PolicyOutcome::Refused("policy_conflict"));
+    assert_eq!(apply(&db, winner).await, *loser.0);
+    let (replay_a, replay_b) = tokio::join!(apply(&db, winner), apply(&db, winner));
+    assert_eq!(replay_a, replay_b);
     assert_eq!(policy(&db, &request).await.policy_generation, 1);
     let (_, mut other, _) = fixture().await;
-    other.operation_id = request.operation_id;
+    other.operation_id = winner.tuple.operation_id;
     assert_eq!(
-        db.enable_community_nip_fi(&other, Ok(())).await.unwrap(),
-        UpgradeOutcome::Refused("idempotency_conflict")
+        db.set_community_nip_fi_policy(&initial_enable(&other), Ok(()))
+            .await
+            .unwrap(),
+        PolicyOutcome::Refused("idempotency_conflict")
     );
 }
 
@@ -171,22 +194,26 @@ async fn failed_preconditions_leave_free_policy_and_no_receipt() {
             _ => changed.community_id = Uuid::new_v4(),
         }
         assert_eq!(
-            db.enable_community_nip_fi(&changed, Ok(())).await.unwrap(),
-            UpgradeOutcome::Refused(code)
+            db.set_community_nip_fi_policy(&initial_enable(&changed), Ok(()))
+                .await
+                .unwrap(),
+            PolicyOutcome::Refused(code)
         );
     }
     assert_eq!(
-        db.enable_community_nip_fi(&request, Err("authorization_unavailable"))
+        db.set_community_nip_fi_policy(&initial_enable(&request), Err("authorization_unavailable"))
             .await
             .unwrap(),
-        UpgradeOutcome::Refused("authorization_unavailable")
+        PolicyOutcome::Refused("authorization_unavailable")
     );
     db.unbind_nip_fi_issuer(CommunityId::from_uuid(request.community_id), ISSUER, true)
         .await
         .unwrap();
     assert_eq!(
-        db.enable_community_nip_fi(&request, Ok(())).await.unwrap(),
-        UpgradeOutcome::Refused("issuer_conflict")
+        db.set_community_nip_fi_policy(&initial_enable(&request), Ok(()))
+            .await
+            .unwrap(),
+        PolicyOutcome::Refused("issuer_conflict")
     );
     assert_eq!(
         policy(&db, &request).await,
@@ -197,9 +224,10 @@ async fn failed_preconditions_leave_free_policy_and_no_receipt() {
         }
     );
     assert!(db
-        .community_auth_upgrade_status(request.operation_id, &request.operator_pubkey)
+        .community_auth_policy_status(request.operation_id, &request.operator_pubkey)
         .await
         .unwrap()
+        .map(|record| record.acceptance)
         .is_none());
 }
 
@@ -210,7 +238,7 @@ async fn blocked_upgrade(
     request: &UpgradeRequest,
     locker_pid: i32,
     statement: &str,
-) -> tokio::task::JoinHandle<Result<UpgradeOutcome>> {
+) -> tokio::task::JoinHandle<Result<PolicyOutcome>> {
     use std::str::FromStr;
     let application = format!("upgrade-lock-{}", request.operation_id.simple());
     let options = sqlx::postgres::PgConnectOptions::from_str(&crate::test_support::database_url())
@@ -224,8 +252,11 @@ async fn blocked_upgrade(
             .unwrap(),
     );
     let request = request.clone();
-    let task =
-        tokio::spawn(async move { upgrade_db.enable_community_nip_fi(&request, Ok(())).await });
+    let task = tokio::spawn(async move {
+        upgrade_db
+            .set_community_nip_fi_policy(&initial_enable(&request), Ok(()))
+            .await
+    });
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
         loop {
             assert!(
@@ -261,14 +292,15 @@ async fn blocked_upgrade(
 async fn assert_refused_without_mutation(
     db: &Db,
     request: &UpgradeRequest,
-    task: tokio::task::JoinHandle<Result<UpgradeOutcome>>,
+    task: tokio::task::JoinHandle<Result<PolicyOutcome>>,
     code: &'static str,
 ) {
-    assert_eq!(task.await.unwrap().unwrap(), UpgradeOutcome::Refused(code));
+    assert_eq!(task.await.unwrap().unwrap(), PolicyOutcome::Refused(code));
     assert!(db
-        .community_auth_upgrade_status(request.operation_id, &request.operator_pubkey)
+        .community_auth_policy_status(request.operation_id, &request.operator_pubkey)
         .await
         .unwrap()
+        .map(|record| record.acceptance)
         .is_none());
     let policy: (bool, i64) =
         sqlx::query_as("SELECT requires_nip_fi, policy_generation FROM communities WHERE id = $1")
@@ -363,8 +395,18 @@ async fn accepted_receipt_survives_transfer_without_granting_fresh_owner_authori
     let mut fresh = request.clone();
     fresh.operation_id = Uuid::new_v4();
     assert_eq!(
-        db.enable_community_nip_fi(&fresh, Ok(())).await.unwrap(),
-        UpgradeOutcome::Refused("owner_conflict")
+        db.set_community_nip_fi_policy(
+            &PolicyRequest {
+                tuple: fresh.clone(),
+                requires_nip_fi: true,
+                expected_policy_generation: 1,
+                expected_requires_nip_fi: true
+            },
+            Ok(())
+        )
+        .await
+        .unwrap(),
+        PolicyOutcome::Refused("owner_conflict")
     );
 }
 
@@ -378,9 +420,12 @@ async fn authoritative_lookup_failure_is_error_not_fabricated_acceptance() {
             .unwrap(),
     );
     let (_, request, _) = fixture().await;
-    assert!(db.enable_community_nip_fi(&request, Ok(())).await.is_err());
     assert!(db
-        .community_auth_upgrade_status(request.operation_id, &request.operator_pubkey)
+        .set_community_nip_fi_policy(&initial_enable(&request), Ok(()))
+        .await
+        .is_err());
+    assert!(db
+        .community_auth_policy_status(request.operation_id, &request.operator_pubkey)
         .await
         .is_err());
 }
@@ -399,14 +444,17 @@ async fn deletion_intent_refuses_enable_before_quiescing() {
         .await
         .unwrap();
     assert_eq!(
-        db.enable_community_nip_fi(&request, Ok(())).await.unwrap(),
-        UpgradeOutcome::Refused("lifecycle_conflict")
+        db.set_community_nip_fi_policy(&initial_enable(&request), Ok(()))
+            .await
+            .unwrap(),
+        PolicyOutcome::Refused("lifecycle_conflict")
     );
     assert!(!policy(&db, &request).await.requires_nip_fi);
     assert!(db
-        .community_auth_upgrade_status(request.operation_id, &request.operator_pubkey)
+        .community_auth_policy_status(request.operation_id, &request.operator_pubkey)
         .await
         .unwrap()
+        .map(|record| record.acceptance)
         .is_none());
 }
 
@@ -482,7 +530,21 @@ async fn supported_writer_maintains_generation_while_direct_sql_is_not_constrain
     let first = accepted(&db, &request).await;
     assert_eq!(first.policy_generation, 1);
     request.operation_id = Uuid::new_v4();
-    assert_eq!(accepted(&db, &request).await.policy_generation, 1);
+    assert_eq!(
+        apply(
+            &db,
+            &PolicyRequest {
+                tuple: request.clone(),
+                requires_nip_fi: true,
+                expected_policy_generation: 1,
+                expected_requires_nip_fi: true
+            }
+        )
+        .await
+        .acceptance
+        .policy_generation,
+        2
+    );
     let invalid_receipt = sqlx::query(
         "UPDATE community_auth_upgrades SET policy_generation = 0 WHERE operation_id = $1",
     )
@@ -498,7 +560,7 @@ async fn supported_writer_maintains_generation_while_direct_sql_is_not_constrain
             .as_deref(),
         Some("23514")
     );
-    assert_eq!(policy(&db, &request).await.policy_generation, 1);
+    assert_eq!(policy(&db, &request).await.policy_generation, 2);
 }
 
 #[tokio::test]
@@ -557,4 +619,291 @@ async fn host_policy_tracks_primary_requirement_and_serving_lifecycle() {
         .await
         .unwrap()
         .is_none());
+}
+
+fn intent(tuple: &UpgradeRequest, desired: bool, generation: i64, required: bool) -> PolicyRequest {
+    let mut tuple = tuple.clone();
+    tuple.operation_id = Uuid::new_v4();
+    if !desired {
+        tuple.expected_issuer.clear();
+    }
+    PolicyRequest {
+        tuple,
+        requires_nip_fi: desired,
+        expected_policy_generation: generation,
+        expected_requires_nip_fi: required,
+    }
+}
+
+async fn apply(db: &Db, request: &PolicyRequest) -> PolicyRecord {
+    let PolicyOutcome::Accepted(record) = db
+        .set_community_nip_fi_policy(request, Ok(()))
+        .await
+        .unwrap()
+    else {
+        panic!("policy refused")
+    };
+    *record
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn policy_enable_disable_reenable_history_and_identity() {
+    let (db, tuple, _) = fixture().await;
+    let enable = intent(&tuple, true, 0, false);
+    let first = apply(&db, &enable).await;
+    assert_eq!(first.acceptance.policy_generation, 1);
+    assert_eq!(first.acceptance.state, "pending");
+    let disable = intent(&tuple, false, 1, true);
+    let second = apply(&db, &disable).await;
+    assert_eq!(second.acceptance.policy_generation, 2);
+    assert_eq!(second.acceptance.state, "applied");
+    let old = db
+        .community_auth_policy_status(enable.tuple.operation_id, &tuple.operator_pubkey)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(old.acceptance.state, "superseded");
+    assert_eq!(old.current_policy_generation, Some(2));
+    assert_eq!(old.current_requires_nip_fi, Some(false));
+    // A committed retry is history even with the mutation gate disabled.
+    assert_eq!(
+        db.set_community_nip_fi_policy(&enable, Err("upgrades_disabled"))
+            .await
+            .unwrap(),
+        PolicyOutcome::Accepted(Box::new(old))
+    );
+    let reenable = intent(&tuple, true, 2, false);
+    let third = apply(&db, &reenable).await;
+    assert_eq!(third.acceptance.policy_generation, 3);
+    assert_eq!(third.current_requires_nip_fi, Some(true));
+    for request in [&enable, &disable, &reenable] {
+        let record = db
+            .community_auth_policy_status(request.tuple.operation_id, &tuple.operator_pubkey)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.current_policy_generation, Some(3));
+        assert_eq!(
+            record.acceptance.state,
+            if request == &reenable {
+                "pending"
+            } else {
+                "superseded"
+            }
+        );
+    }
+    for change in 0..5 {
+        let mut changed = enable.clone();
+        match change {
+            0 => changed.requires_nip_fi = false,
+            1 => changed.expected_policy_generation = 2,
+            2 => changed.expected_requires_nip_fi = true,
+            3 => changed.tuple.operator_pubkey = "f".repeat(64),
+            _ => changed.tuple.expected_issuer = "https://different.example".into(),
+        }
+        assert_eq!(
+            db.set_community_nip_fi_policy(&changed, Ok(()))
+                .await
+                .unwrap(),
+            PolicyOutcome::Refused("idempotency_conflict")
+        );
+    }
+    assert_eq!(policy(&db, &tuple).await.policy_generation, 3);
+    // Reasserting required policy fences an earlier uncommitted disable too.
+    let stale_disable = intent(&tuple, false, 3, true);
+    let reassert = intent(&tuple, true, 3, true);
+    assert_eq!(apply(&db, &reassert).await.acceptance.policy_generation, 4);
+    assert_eq!(
+        db.set_community_nip_fi_policy(&stale_disable, Ok(()))
+            .await
+            .unwrap(),
+        PolicyOutcome::Refused("policy_conflict")
+    );
+    assert!(policy(&db, &tuple).await.requires_nip_fi);
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn policy_same_state_barrier_and_retained_legacy_receipt_identity() {
+    let (db, tuple, _) = fixture().await;
+    let stale = intent(&tuple, true, 0, false);
+    let barrier = intent(&tuple, false, 0, false);
+    let record = apply(&db, &barrier).await;
+    assert_eq!(record.acceptance.policy_generation, 1);
+    assert!(!record.acceptance.requires_nip_fi);
+    assert_eq!(
+        db.set_community_nip_fi_policy(&stale, Ok(()))
+            .await
+            .unwrap(),
+        PolicyOutcome::Refused("policy_conflict")
+    );
+    let wrong_state = intent(&tuple, true, 1, true);
+    assert_eq!(
+        db.set_community_nip_fi_policy(&wrong_state, Ok(()))
+            .await
+            .unwrap(),
+        PolicyOutcome::Refused("policy_conflict")
+    );
+    assert_eq!(apply(&db, &barrier).await, record);
+    let enable = intent(&tuple, true, 1, false);
+    apply(&db, &enable).await;
+    // Emulate an acceptance written before migration 0085, without restoring
+    // an unfenced writer just to create test data. Old INSERTs remain valid.
+    let legacy_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO community_auth_upgrades
+        (operation_id,target_community_id,expected_host,actor_pubkey,expected_owner_pubkey,
+         expected_issuer,operator_pubkey,policy_generation) VALUES ($1,$2,$3,$4,$4,$5,$6,2)",
+    )
+    .bind(legacy_id)
+    .bind(tuple.community_id)
+    .bind(&tuple.expected_host)
+    .bind(&tuple.actor_pubkey)
+    .bind(&tuple.expected_issuer)
+    .bind(&tuple.operator_pubkey)
+    .execute(db.pool())
+    .await
+    .unwrap();
+    let retained = db
+        .community_auth_policy_status(legacy_id, &tuple.operator_pubkey)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(retained.expected_policy_generation, None);
+    assert_eq!(retained.expected_requires_nip_fi, None);
+    assert_eq!(retained.acceptance.state, "pending");
+    let mut reuse = intent(&tuple, true, 2, true);
+    reuse.tuple.operation_id = legacy_id;
+    assert_eq!(
+        db.set_community_nip_fi_policy(&reuse, Ok(()))
+            .await
+            .unwrap(),
+        PolicyOutcome::Refused("idempotency_conflict")
+    );
+    apply(&db, &intent(&tuple, false, 2, true)).await;
+    let retained = db
+        .community_auth_policy_status(legacy_id, &tuple.operator_pubkey)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(retained.acceptance.state, "superseded");
+    assert_eq!(retained.current_policy_generation, Some(3));
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn policy_disable_guards_and_issuer_removal_then_reenable() {
+    let (db, tuple, _) = fixture().await;
+    accepted(&db, &tuple).await;
+    let disable = intent(&tuple, false, 1, true);
+    for kind in 0..4 {
+        let mut changed = disable.clone();
+        let code = match kind {
+            0 => {
+                changed.tuple.actor_pubkey = "a".repeat(64);
+                "owner_conflict"
+            }
+            1 => {
+                changed.tuple.expected_host = "wrong.example".into();
+                "host_conflict"
+            }
+            2 => {
+                changed.tuple.expected_owner_pubkey = "b".repeat(64);
+                "owner_conflict"
+            }
+            _ => {
+                changed.tuple.community_id = Uuid::new_v4();
+                "community_not_found"
+            }
+        };
+        assert_eq!(
+            db.set_community_nip_fi_policy(&changed, Ok(()))
+                .await
+                .unwrap(),
+            PolicyOutcome::Refused(code)
+        );
+    }
+    assert_eq!(
+        db.set_community_nip_fi_policy(&disable, Err("upgrades_disabled"))
+            .await
+            .unwrap(),
+        PolicyOutcome::Refused("upgrades_disabled")
+    );
+    apply(&db, &disable).await;
+    let community = CommunityId::from_uuid(tuple.community_id);
+    assert_eq!(
+        db.unbind_nip_fi_issuer(community, ISSUER, true)
+            .await
+            .unwrap(),
+        crate::NipFiUnbind::Removed
+    );
+    let enable = intent(&tuple, true, 2, false);
+    assert_eq!(
+        db.set_community_nip_fi_policy(&enable, Ok(()))
+            .await
+            .unwrap(),
+        PolicyOutcome::Refused("issuer_conflict")
+    );
+    // Disable works without a trusted/bound issuer and still advances its barrier.
+    let next = apply(&db, &intent(&tuple, false, 2, false)).await;
+    assert_eq!(next.acceptance.policy_generation, 3);
+    sqlx::query("UPDATE communities SET archived_at = now() WHERE id = $1")
+        .bind(tuple.community_id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        db.set_community_nip_fi_policy(&intent(&tuple, false, 3, false), Ok(()))
+            .await
+            .unwrap(),
+        PolicyOutcome::Refused("lifecycle_conflict")
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn policy_disable_serializes_behind_enable_drain() {
+    use std::str::FromStr;
+    let (db, tuple, _) = fixture().await;
+    let application = format!("policy-drain-{}", Uuid::new_v4().simple());
+    let options = sqlx::postgres::PgConnectOptions::from_str(&crate::test_support::database_url())
+        .unwrap()
+        .application_name(&application);
+    let writer = Db::from_pool(
+        sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap(),
+    );
+    let enable = intent(&tuple, true, 0, false);
+    let task = tokio::spawn(async move { apply(&writer, &enable).await });
+    // The lease-lock statement followed by idle-in-transaction identifies the
+    // production drain while the writer still owns its community row lock.
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            assert!(!task.is_finished(), "missed the production lease drain");
+            let draining: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name = $1 AND state = 'idle in transaction' AND query LIKE 'SELECT pg_advisory_xact_lock($1,%')")
+                .bind(&application).fetch_one(&db.pool).await.unwrap();
+            if draining { break; }
+            tokio::task::yield_now().await;
+        }
+    }).await.unwrap();
+    let disable = intent(&tuple, false, 0, false);
+    assert_eq!(
+        db.set_community_nip_fi_policy(&disable, Ok(()))
+            .await
+            .unwrap(),
+        PolicyOutcome::Refused("policy_conflict")
+    );
+    assert_eq!(task.await.unwrap().acceptance.policy_generation, 1);
+    assert!(policy(&db, &tuple).await.requires_nip_fi);
+    assert_eq!(
+        apply(&db, &intent(&tuple, false, 1, true))
+            .await
+            .acceptance
+            .policy_generation,
+        2
+    );
 }

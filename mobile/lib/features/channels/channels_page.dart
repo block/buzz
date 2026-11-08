@@ -4,6 +4,7 @@ import 'channel_unread.dart';
 import '../../shared/widgets/collapsible_section_body.dart';
 import '../../shared/me/me_sync.dart';
 import '../../shared/hosted/hosted_relay_auth.dart';
+import '../../shared/hosted/organization_environment.dart';
 import '../../shared/hosted/organization_sign_in.dart';
 
 import 'dart:async';
@@ -115,6 +116,7 @@ class ChannelsPage extends HookConsumerWidget {
     this.onSearch,
     this.messagesFilters,
     this.messagesActionsBuilder,
+    this.messagesActionsWidth = 0,
     this.soloSliver,
     this.showTeam = true,
     this.showTeamHeading = false,
@@ -132,6 +134,9 @@ class ChannelsPage extends HookConsumerWidget {
   final Widget Function(bool isCollapsed)? messagesFilters;
   final List<Widget> Function(VoidCallback openSwitcher, GlobalKey avatarKey)?
   messagesActionsBuilder;
+
+  /// Width of the trailing controls that collapsed filters must leave clear.
+  final double messagesActionsWidth;
   final Widget? soloSliver;
   final bool showTeam;
   final bool showTeamHeading;
@@ -736,10 +741,22 @@ class ChannelsPage extends HookConsumerWidget {
             ? const SizedBox.expand()
             : Padding(
                 padding: EdgeInsets.only(
-                  right: 60 * headerCollapse.value / filterContentHeight,
+                  // As soon as the rows overlap, keep the entire action
+                  // cluster clear. Interpolating this inset blocks the bell
+                  // during partial collapse even when the final layout fits.
+                  right: headerCollapse.value > 0
+                      ? messagesActionsWidth + _kTopSectionInset
+                      : 0,
                 ),
-                child: messagesFilters!(
-                  headerCollapse.value >= filterContentHeight,
+                child: ClipRect(
+                  // Native glass paints its shadows outside the viewport, but
+                  // scrolled filters must not paint over the header actions.
+                  clipBehavior: headerCollapse.value > 0
+                      ? Clip.hardEdge
+                      : Clip.none,
+                  child: messagesFilters!(
+                    headerCollapse.value >= filterContentHeight,
+                  ),
                 ),
               ),
       ),

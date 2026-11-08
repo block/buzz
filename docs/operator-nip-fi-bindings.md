@@ -5,6 +5,10 @@ A deployment that provisions communities under one host suffix, for example
 each community in `community_nip_fi_issuers`. The relay writes these rows when
 it creates a community; `buzz-admin nip-fi` backfills and edits them.
 
+To make an existing community require federated sign-in, use the separate
+[community policy management command](operator-nip-fi-upgrade.md).
+An issuer binding alone does not change that community's required policy.
+
 A host may hold a binding only when it is exactly one DNS label under the
 suffix, has no port, and is not *reserved*. A host is reserved when
 `https://<host>` is a `command_audiences` entry of any issuer in
@@ -83,7 +87,7 @@ an operator disable or a change in issuer configuration. A different owner
 retains the existing conflict. Legacy ensure and deployment bootstrap remain
 optional and do not accept an explicit initial policy.
 
-This policy is independent of `BUZZ_NIP_FI_UPGRADES_ENABLED`. Mode `off` stores
+This policy is independent of `BUZZ_NIP_FI_CHANGES`. Mode `off` stores
 it but bypasses enforcement. The production creation paths are operator
 create-only, legacy operator ensure, and deployment bootstrap; only create-only
 accepts this choice.

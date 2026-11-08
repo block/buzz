@@ -34,6 +34,8 @@ pub mod identity_archive;
 pub mod imeta;
 /// Transport-neutral event ingestion pipeline.
 pub mod ingest;
+/// Local media publication authorization.
+pub mod media_access;
 #[cfg(test)]
 mod membership_notice_postgres_tests;
 /// Community moderation authorization seam (capability helper).
