@@ -342,7 +342,8 @@ List<MentionCandidate> _chooserCandidates(
     viewer: currentPubkey,
     history: ref.watch(mentionHistoryProvider)[historyKey] ?? const {},
     presence: (key) => presence[key] ?? 'unknown',
-    bestie: ref.watch(defaultAgentProvider).asData?.value,
+    // The last known choice holds through a reconnect reload or error.
+    bestie: ref.watch(defaultAgentProvider).value,
   );
 }
 
