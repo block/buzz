@@ -314,7 +314,7 @@ private final class NavigationContentController: UIViewController {
     if #available(iOS 26.0, *) {
       // Configure the native effect before UIKit lays out the bar; the
       // platform-view configuration selects it or the material fallback.
-      scrollView.topEdgeEffect.style = .hard
+      scrollView.topEdgeEffect.style = .soft
       scrollView.bottomEdgeEffect.isHidden = true
     }
   }
@@ -334,6 +334,7 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
   private var controlBackground = UIColor.secondarySystemBackground
   private var alwaysFrosted = false
   private var backdropOnly = false
+  private var hardEdge = false
   private var usesSystemScrollEdge = false
   private var expandedBarHeight: CGFloat = 0
   private var titleIsCollapsed: Bool?
@@ -404,7 +405,7 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     guard !measuring else { return }
     let viewportHeight = container.window?.bounds.height ?? container.bounds.height
     navigation.view.frame = CGRect(x: 0, y: 0, width: container.bounds.width, height: viewportHeight)
-    if backdropOnly && usesSystemScrollEdge {
+    if hardEdge && backdropOnly && usesSystemScrollEdge {
       edgeBackdrop.layout(in: navigation.view.frame, headerHeight: container.bounds.height,
                           automaticTop: container.safeAreaInsets.top)
     }
@@ -482,6 +483,7 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     titleColor = color
     largeTitleOpacity = -1
     backdropOnly = args["backdropOnly"] as? Bool == true
+    hardEdge = args["hardEdge"] as? Bool == true
     container.isUserInteractionEnabled = !backdropOnly
     navigation.view.isUserInteractionEnabled = !backdropOnly
     navigation.view.accessibilityElementsHidden = backdropOnly
@@ -489,12 +491,12 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     alwaysFrosted = args["alwaysFrosted"] as? Bool == true
     if #available(iOS 26.0, *) {
       if #available(iOS 27.0, *) { usesSystemScrollEdge = true }
-      content.scrollView.topEdgeEffect.style = .hard
+      content.scrollView.topEdgeEffect.style = hardEdge ? .hard : .soft
       content.scrollView.topEdgeEffect.isHidden = !usesSystemScrollEdge
     }
-    edgeBackdrop.view.isHidden = !(backdropOnly && usesSystemScrollEdge)
+    edgeBackdrop.view.isHidden = !(hardEdge && backdropOnly && usesSystemScrollEdge)
     edgeBackdrop.overrideUserInterfaceStyle = navigation.overrideUserInterfaceStyle
-    navigation.view.alpha = backdropOnly && usesSystemScrollEdge ? 0 : 1
+    navigation.view.alpha = hardEdge && backdropOnly && usesSystemScrollEdge ? 0 : 1
     // Older embedded views retain material because their native edge cannot
     // sample Flutter content. On iOS 27, UIKit also suppresses its native
     // edge while the large-title inset is collapsing.

@@ -42,7 +42,7 @@ class RunnerTests: XCTestCase {
   }
 
   @MainActor
-  func testCustomFlutterHeaderUsesDecorativeHardEdge() throws {
+  func testCustomFlutterHeaderUsesDecorativeSoftEdge() throws {
     guard #available(iOS 27.0, *) else { return }
     let messenger = NavigationTestMessenger()
     let parent = UIViewController()
@@ -54,6 +54,45 @@ class RunnerTests: XCTestCase {
       withFrame: CGRect(x: 0, y: 0, width: window.bounds.width, height: 150),
       viewIdentifier: 999998,
       arguments: ["title": "", "backdropOnly": true, "alwaysFrosted": true]
+    )
+    parent.view.addSubview(bar.view())
+    parent.view.layoutIfNeeded()
+    let navigation = try XCTUnwrap(parent.children.first as? UINavigationController)
+    XCTAssertFalse(bar.view().isUserInteractionEnabled)
+    XCTAssertFalse(navigation.view.isUserInteractionEnabled)
+    XCTAssertTrue(navigation.view.accessibilityElementsHidden)
+    let scroll = try XCTUnwrap(navigation.topViewController?.view as? UIScrollView)
+    XCTAssertEqual(scroll.topEdgeEffect.style, .soft)
+    XCTAssertFalse(scroll.topEdgeEffect.isHidden)
+    XCTAssertTrue(scroll.bottomEdgeEffect.isHidden)
+    let material = try XCTUnwrap(bar.view().subviews.first as? UIVisualEffectView)
+    XCTAssertTrue(material.isHidden)
+    // Filter collapse changes the protected area without moving the Flutter
+    // controls or adding a second accessibility owner.
+    let compactHeight = bar.view().safeAreaInsets.top + navigation.navigationBar.bounds.height
+    for height in [compactHeight + 48, compactHeight] {
+      bar.view().frame.size.height = height
+      bar.view().setNeedsLayout()
+      bar.view().layoutIfNeeded()
+      let bottom = navigation.navigationBar.convert(navigation.navigationBar.bounds, to: bar.view()).maxY
+      XCTAssertEqual(bottom, height, accuracy: 1)
+    }
+  }
+
+
+  @MainActor
+  func testCustomFlutterHeaderUsesDecorativeHardEdge() throws {
+    guard #available(iOS 27.0, *) else { return }
+    let messenger = NavigationTestMessenger()
+    let parent = UIViewController()
+    let window = UIWindow(frame: UIScreen.main.bounds)
+    window.rootViewController = parent
+    window.makeKeyAndVisible()
+    defer { window.isHidden = true }
+    let bar = IosNavigationBarFactory(messenger: messenger, parent: parent).create(
+      withFrame: CGRect(x: 0, y: 0, width: window.bounds.width, height: 150),
+      viewIdentifier: 999998,
+      arguments: ["title": "", "backdropOnly": true, "alwaysFrosted": true, "hardEdge": true]
     )
     parent.view.addSubview(bar.view())
     parent.view.layoutIfNeeded()
@@ -83,9 +122,9 @@ class RunnerTests: XCTestCase {
       bar.view().frame.size.height = height
       bar.view().setNeedsLayout()
       bar.view().layoutIfNeeded()
-      XCTAssertEqual(divider.frame.maxY, height, accuracy: 0.5)
-      XCTAssertEqual(header.bounds.height, height, accuracy: 0.5)
-      XCTAssertEqual(scroll.adjustedContentInset.top, height, accuracy: 1)
+      XCTAssertEqual(divider.frame.maxY, height + 8, accuracy: 0.5)
+      XCTAssertEqual(header.bounds.height, height + 8, accuracy: 0.5)
+      XCTAssertEqual(scroll.adjustedContentInset.top, height + 8, accuracy: 1)
     }
   }
 
@@ -650,7 +689,7 @@ class RunnerTests: XCTestCase {
   }
 
   @MainActor
-  func testConversationUsesNativeHardEdgeWithoutExpandingHitArea() throws {
+  func testConversationUsesNativeSoftEdgeWithoutExpandingHitArea() throws {
     let parent = UIViewController()
     let window = UIWindow(frame: UIScreen.main.bounds)
     window.rootViewController = parent
@@ -671,7 +710,7 @@ class RunnerTests: XCTestCase {
       bar.view().layoutIfNeeded()
       if #available(iOS 27.0, *) {
         let scroll = try XCTUnwrap(navigation.topViewController?.view as? UIScrollView)
-        XCTAssertEqual(scroll.topEdgeEffect.style, .hard)
+        XCTAssertEqual(scroll.topEdgeEffect.style, .soft)
         XCTAssertFalse(scroll.topEdgeEffect.isHidden)
         XCTAssertTrue(scroll.bottomEdgeEffect.isHidden)
         XCTAssertTrue(material.isHidden, "Do not stack a uniform blur over the native fade")
@@ -744,7 +783,7 @@ class RunnerTests: XCTestCase {
   }
 
   @MainActor
-  func testCompactNavigationUsesHardEdgeWithLegacyMaterialFallback() async throws {
+  func testCompactNavigationUsesSoftEdgeWithLegacyMaterialFallback() async throws {
     let messenger = NavigationTestMessenger()
     let parent = UIViewController()
     let window = UIWindow(frame: UIScreen.main.bounds)
@@ -783,7 +822,7 @@ class RunnerTests: XCTestCase {
         let navigation = try XCTUnwrap(parent.children.first as? UINavigationController)
         let mirroredScroll = try XCTUnwrap(navigation.topViewController?.view as? UIScrollView)
         XCTAssertFalse(mirroredScroll.topEdgeEffect.isHidden)
-        XCTAssertEqual(mirroredScroll.topEdgeEffect.style, .hard)
+        XCTAssertEqual(mirroredScroll.topEdgeEffect.style, .soft)
         XCTAssertFalse(mirroredScroll.isUserInteractionEnabled)
         XCTAssertTrue(material.isHidden, "Only the native fade should be visible")
         XCTAssertTrue(mirroredScroll.bottomEdgeEffect.isHidden)
@@ -899,7 +938,7 @@ class RunnerTests: XCTestCase {
     if #available(iOS 27.0, *) {
       let scroll = try XCTUnwrap(navigation.topViewController?.view as? UIScrollView)
       XCTAssertFalse(scroll.topEdgeEffect.isHidden)
-      XCTAssertEqual(scroll.topEdgeEffect.style, .hard)
+      XCTAssertEqual(scroll.topEdgeEffect.style, .soft)
       XCTAssertFalse(scroll.isUserInteractionEnabled)
       XCTAssertFalse(material.isHidden)
       XCTAssertFalse(bar.view().clipsToBounds)
@@ -962,7 +1001,7 @@ class RunnerTests: XCTestCase {
       if #available(iOS 27.0, *) {
         let scroll = try XCTUnwrap(navigation.topViewController?.view as? UIScrollView)
         XCTAssertFalse(scroll.topEdgeEffect.isHidden, "Returning to rest retains the native edge")
-        XCTAssertEqual(scroll.topEdgeEffect.style, .hard)
+        XCTAssertEqual(scroll.topEdgeEffect.style, .soft)
         XCTAssertLessThan(scroll.contentOffset.y, 0)
       }
     }

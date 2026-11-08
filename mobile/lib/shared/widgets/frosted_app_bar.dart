@@ -146,7 +146,7 @@ class FrostedAppBar extends StatelessWidget {
   final bool nativeLargeTitle;
 
   /// Whether UIKit owns the title and actions. Custom Flutter layouts still
-  /// use the native hard-edge backdrop on iOS.
+  /// use the native soft backdrop on iOS.
   final bool useNativeNavigation;
 
   /// Duration for coordinated native header and overlapping control movement.

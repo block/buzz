@@ -8,7 +8,7 @@ import 'ios_navigation_bar.dart';
 
 /// The shared top-edge treatment, independent of a header's controls.
 ///
-/// iOS uses the same native hard edge as [IosNavigationBar]. Other platforms
+/// iOS uses the same native soft edge as [IosNavigationBar]. Other platforms
 /// use Home's translucent Flutter blur. The child remains interactive and
 /// supplies its own safe-area padding.
 class NavigationBackdrop extends StatelessWidget {
@@ -16,10 +16,14 @@ class NavigationBackdrop extends StatelessWidget {
     super.key,
     required this.child,
     this.active = true,
+    this.hardEdge = false,
     this.suppressNativeView = false,
   });
 
   final Widget child;
+
+  /// Opts into a native hard edge for layouts that need full header coverage.
+  final bool hardEdge;
 
   /// Activates the Flutter blur; UIKit owns native scroll-edge visibility.
   final bool active;
@@ -38,6 +42,7 @@ class NavigationBackdrop extends StatelessWidget {
                 child: IosNavigationBar(
                   title: '',
                   backdropOnly: true,
+                  hardEdge: hardEdge,
                   alwaysFrosted: true,
                 ),
               ),

@@ -134,6 +134,7 @@ class IosNavigationBar extends HookConsumerWidget {
     this.largeTitle = false,
     this.alwaysFrosted = false,
     this.backdropOnly = false,
+    this.hardEdge = false,
     this.leading,
     this.actions = const [],
     this.onBack,
@@ -159,6 +160,9 @@ class IosNavigationBar extends HookConsumerWidget {
 
   /// Paints only the native edge beneath custom Flutter header controls.
   final bool backdropOnly;
+
+  /// Opts into a hard edge; ordinary phone navigation retains the soft edge.
+  final bool hardEdge;
   final IosNavigationAction? leading;
   final List<IosNavigationAction> actions;
   final VoidCallback? onBack;
@@ -324,6 +328,7 @@ class IosNavigationBar extends HookConsumerWidget {
       'largeTitle': largeTitle,
       'alwaysFrosted': alwaysFrosted,
       'backdropOnly': backdropOnly,
+      'hardEdge': hardEdge,
       'back': onBack != null,
       'leading': leading == null ? null : encodeAction(leading!, 'leading'),
       'actions': [

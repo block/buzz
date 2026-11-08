@@ -24,7 +24,7 @@ final class NavigationEdgeBackdrop: UIViewController {
       UIColor.white.setFill()
       context.fill(CGRect(x: 0, y: 0, width: 1, height: 1))
     }.withRenderingMode(.alwaysTemplate)
-    divider.tintColor = .separator
+    divider.tintColor = UIColor.separator.withAlphaComponent(0.1)
     header.addSubview(divider)
     if #available(iOS 26.0, *) {
       scroll.topEdgeEffect.style = .hard
@@ -50,6 +50,9 @@ final class NavigationEdgeBackdrop: UIViewController {
         responder = current.next
       }
     }
+    // Native conversation bars leave breathing room below their controls.
+    // Extend only the decorative surface, preserving Flutter layout/hit areas.
+    let headerHeight = headerHeight + 8
     view.frame = frame
     scroll.frame = view.bounds
     scroll.contentSize = CGSize(width: frame.width, height: 10000)

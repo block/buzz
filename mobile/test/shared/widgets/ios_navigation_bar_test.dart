@@ -13,6 +13,27 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 void main() {
+  testWidgets('native edge style is soft by default and explicitly opt-in', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    for (final hard in [false, true, false]) {
+      await tester.pumpWidget(
+        _testApp(
+          home: SizedBox(
+            height: 120,
+            child: IosNavigationBar(title: 'Messages', hardEdge: hard),
+          ),
+        ),
+      );
+      expect(
+        tester.widget<UiKitView>(find.byType(UiKitView)).creationParams,
+        containsPair('hardEdge', hard),
+      );
+    }
+  });
+
   testWidgets(
     'native toolbar receives stable safe inset inside a translated route',
     (tester) async {
