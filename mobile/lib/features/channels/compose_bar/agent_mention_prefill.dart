@@ -2,28 +2,26 @@ part of '../compose_bar.dart';
 
 /// The viewer's latest message among [events], with the pubkeys it notified.
 ///
+/// [events] must be in the conversation's display order, oldest first: the
+/// channel and thread views break same-second ties differently, so the last
+/// own message in that order is the one the viewer sees as latest.
+///
 /// Only notifying `p` tags count: `mention` reference tags never notified
 /// anyone, so they are not carried forward.
 ({String messageId, List<String> pubkeys})? latestOwnMessageMentions(
-  Iterable<NostrEvent> events, {
+  List<NostrEvent> events, {
   required String? viewer,
 }) {
   final me = viewer?.toLowerCase();
   if (me == null || me.isEmpty) return null;
-  NostrEvent? latest;
-  for (final event in events) {
-    if (event.pubkey.toLowerCase() != me) continue;
-    if (event.kind != EventKind.streamMessage &&
-        event.kind != EventKind.streamMessageV2) {
-      continue;
-    }
-    if (latest == null ||
-        event.createdAt > latest.createdAt ||
-        (event.createdAt == latest.createdAt &&
-            event.id.compareTo(latest.id) > 0)) {
-      latest = event;
-    }
-  }
+  final latest = events.reversed
+      .where(
+        (event) =>
+            event.pubkey.toLowerCase() == me &&
+            (event.kind == EventKind.streamMessage ||
+                event.kind == EventKind.streamMessageV2),
+      )
+      .firstOrNull;
   if (latest == null) return null;
   final pubkeys = <String>[];
   for (final tag in latest.tags) {
@@ -52,12 +50,15 @@ void _useAgentMentionPrefill({
   required ObjectRef<bool> isModifyingText,
   required bool hasAttachments,
 }) {
-  final source = scopeEvents == null
-      ? null
-      : latestOwnMessageMentions(
-          scopeEvents,
-          viewer: ref.watch(currentPubkeyProvider),
-        );
+  final viewer = ref.watch(currentPubkeyProvider);
+  // The composer rebuilds on every keystroke; rescan only when the loaded
+  // messages or the viewer change.
+  final source = useMemoized(
+    () => scopeEvents == null
+        ? null
+        : latestOwnMessageMentions(scopeEvents, viewer: viewer),
+    [scopeEvents, viewer],
+  );
   // Current members only: an agent that has left is not carried forward.
   final members = source == null || source.pubkeys.isEmpty
       ? null

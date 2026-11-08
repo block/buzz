@@ -1,6 +1,26 @@
 part of '../compose_bar_test.dart';
 
 void agentPrefillTests() {
+  test('the latest own message follows the display order, not ids', () {
+    final viewer = 'f' * 64;
+    NostrEvent message(String id, String agent) => NostrEvent(
+      id: id,
+      pubkey: viewer,
+      createdAt: 10,
+      kind: EventKind.streamMessage,
+      tags: [
+        ['p', agent],
+      ],
+      content: '',
+      sig: '',
+    );
+    // A channel shows same-second messages in descending id order.
+    final events = [message('b', 'a' * 64), message('a', 'c' * 64)];
+    final latest = latestOwnMessageMentions(events, viewer: viewer);
+    expect(latest?.messageId, 'a');
+    expect(latest?.pubkeys, ['c' * 64]);
+  });
+
   testWidgets('prefills the agents the viewer last tagged, never as a draft', (
     tester,
   ) async {
