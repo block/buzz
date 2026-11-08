@@ -1,4 +1,5 @@
 import 'message_author_visibility.dart';
+
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 
 import 'message_swipe_reply.dart';
@@ -963,6 +964,14 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                       ComposeBar(
                         channelId: channel.id,
                         focusNode: composerFocusNode,
+                        prefillScopeEvents: personalChat || resolvedChannel.isDm
+                            ? null
+                            : [
+                                for (final event
+                                    in messagesState.value ?? const [])
+                                  if (event.threadReference.parentId == null)
+                                    event,
+                              ],
                         onFocusRestorerChanged: (restoreFocus) =>
                             restoreComposerFocus.value = restoreFocus,
                         channelName: resolvedChannel.isDm

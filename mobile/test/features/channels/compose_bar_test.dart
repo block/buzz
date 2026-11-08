@@ -31,6 +31,7 @@ import 'package:buzz/shared/custom_emoji/custom_emoji_provider.dart';
 import 'package:buzz/shared/agents/owned_agent_directory.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
+import 'package:buzz/features/activity/compose_drafts_provider.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/shared/theme/theme.dart';
@@ -43,6 +44,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 part 'compose_bar_test/exact_mention_tests.dart';
 part 'compose_bar_test/solo_draft_tests.dart';
 part 'compose_bar_test/durable_mention_tests.dart';
+part 'compose_bar_test/agent_prefill_tests.dart';
 
 final _pngBytes = Uint8List.fromList([
   0x89,
@@ -215,6 +217,7 @@ Widget _buildComposeBar({
   Future<List<UserProfile>> Function(String query)? searchPeople,
   List<OwnedAgentDirectoryEntry>? ownedAgents,
   bool ownedAgentsUnknown = false,
+  List<NostrEvent>? prefillScopeEvents,
 }) {
   return ProviderScope(
     overrides: [
@@ -302,6 +305,7 @@ Widget _buildComposeBar({
                   focusNode: focusNode,
                   onFocusRestorerChanged: onFocusRestorerChanged,
                   onFocusRequested: onFocusRequested,
+                  prefillScopeEvents: prefillScopeEvents,
                   onSend: onSend,
                 );
                 if (viewPadding == null) return composeBar;
@@ -733,6 +737,7 @@ void main() {
   soloDraftTests();
   exactMentionTests();
   durableMentionTests();
+  agentPrefillTests();
   TestWidgetsFlutterBinding.ensureInitialized();
 
   setUp(() async {

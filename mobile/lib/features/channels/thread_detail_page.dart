@@ -3,6 +3,7 @@ import 'message_swipe_reply.dart';
 import '../../shared/widgets/ios_scroll_to_top.dart';
 import 'message_footer_layout.dart';
 import 'reply_summary_link.dart';
+
 import 'dart:async';
 import 'dart:math' as math;
 
@@ -1045,6 +1046,18 @@ class ThreadDetailPage extends HookConsumerWidget {
                         hintText: 'Reply in thread\u2026',
                         threadHeadId: threadHead.id,
                         rootId: effectiveRootId,
+                        prefillScopeEvents: channel?.isDm ?? true
+                            ? null
+                            : [
+                                for (final event in mergeThreadEvents(
+                                  replyEvents ?? const [],
+                                  liveChannelEvents,
+                                ))
+                                  if (event.id == queryRootId ||
+                                      event.threadReference.rootId ==
+                                          queryRootId)
+                                    event,
+                              ],
                         onFocusRequested: followThreadTailFromComposer,
                         onSend:
                             (
