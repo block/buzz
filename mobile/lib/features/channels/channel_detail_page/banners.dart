@@ -62,6 +62,10 @@ class _ReadOnlyNotice extends HookConsumerWidget {
           if (canJoin)
             FilledButton(
               key: const ValueKey('channel-join-button'),
+              style: FilledButton.styleFrom(
+                backgroundColor: context.colors.primary,
+                foregroundColor: context.colors.onPrimary,
+              ),
               onPressed: isJoining.value ? null : join,
               child: Text(isJoining.value ? 'Joining…' : 'Join'),
             ),
