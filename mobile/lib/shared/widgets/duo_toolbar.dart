@@ -5,6 +5,10 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import 'ios_navigation_bar.dart';
 
+/// Rail top clearance on Duo's inner display until UIKit reports its regions.
+/// The package estimate describes the cover display's taller status cluster.
+const double duoInnerDisplayEstimatedRailClearance = 110;
+
 /// Whether Duo controls should use the compact cover arrangement.
 bool isCompactDuoWindow(BuildContext context) {
   // Subscribe to resizing even inside a pane whose MediaQuery is narrower.
@@ -86,7 +90,7 @@ class DuoToolbarPortal extends HookConsumerWidget {
         final topClearance = measuredTop != null
             ? measuredTop + 12
             : strip.isClearanceEstimated && windowSize.shortestSide >= 600
-            ? 110.0
+            ? duoInnerDisplayEstimatedRailClearance
             : strip.topClearance;
         return Positioned(
           left:

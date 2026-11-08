@@ -58,7 +58,7 @@ class AvatarEditorOptions extends HookWidget {
     final window = MediaQueryData.fromView(View.of(context));
     final topClearance =
         strip.isClearanceEstimated && window.size.shortestSide >= 600
-        ? 110.0
+        ? duoInnerDisplayEstimatedRailClearance
         : strip.topClearance;
     return OverlayPortal(
       overlayLocation: OverlayChildLocation.rootOverlay,

@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:duo_kit/duo_kit.dart';
+
 import 'duo_toolbar.dart';
 import 'app_route_observer.dart';
 import 'ios_navigation_metrics.dart';
@@ -109,14 +110,10 @@ class AdaptiveConversationPane extends HookConsumerWidget {
     this.listWidthFraction,
     this.preferredListWidth,
     this.persistentSelection = false,
-    this.listTopPadding = 0,
     super.key,
   });
 
   final bool persistentSelection;
-
-  /// Top spacing for the list on an open Duo.
-  final double listTopPadding;
 
   /// Optional list share of the usable width; defaults to the compact sidebar.
   final double? listWidthFraction;
@@ -134,6 +131,9 @@ class AdaptiveConversationPane extends HookConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final routeObserver = useMemoized(appRouteObserver.createNestedObserver);
     final navigator = useMemoized(() => GlobalKey<NavigatorState>());
+    // The compact detail route that fully covers the list. While a detail
+    // pushes, pops or follows a back swipe, the list stays painted beneath it.
+    final coveringDetail = useValueNotifier<Route<Object?>?>(null);
     return ConversationPaneScope(
       controller: controller,
       active: active && (ModalRoute.isCurrentOf(context) ?? true),
@@ -184,10 +184,17 @@ class AdaptiveConversationPane extends HookConsumerWidget {
                       top: 0,
                       bottom: 0,
                       width: wide ? listWidth + leftInset : listWidth,
-                      child: Offstage(
-                        offstage: !wide && selected != null,
-                        child: TickerMode(
-                          enabled: wide || selected == null,
+                      child: ValueListenableBuilder(
+                        valueListenable: coveringDetail,
+                        builder: (context, covering, list) => Offstage(
+                          offstage:
+                              !wide &&
+                              selected != null &&
+                              (covering?.isActive ?? false),
+                          child: list,
+                        ),
+                        child: _CoveredList(
+                          covered: !wide && selected != null,
                           child: MediaQuery(
                             data: media.copyWith(
                               size: Size(listWidth, constraints.maxHeight),
@@ -203,19 +210,7 @@ class AdaptiveConversationPane extends HookConsumerWidget {
                                   (selected == null ||
                                       (wide && persistentSelection)) &&
                                   (ModalRoute.isCurrentOf(context) ?? true),
-                              child: MediaQuery(
-                                data: media.copyWith(
-                                  size: Size(listWidth, constraints.maxHeight),
-                                  padding: media.padding.copyWith(
-                                    top:
-                                        media.padding.top +
-                                        (wide && strip != null
-                                            ? listTopPadding
-                                            : 0),
-                                  ),
-                                ),
-                                child: list,
-                              ),
+                              child: list,
                             ),
                           ),
                         ),
@@ -278,29 +273,37 @@ class AdaptiveConversationPane extends HookConsumerWidget {
                                               key: const ValueKey(
                                                 'conversation-placeholder',
                                               ),
-                                              child: Material(
-                                                color: context.colors.surface,
-                                                child: Center(
-                                                  child:
-                                                      emptyContent ??
-                                                      Text(
-                                                        emptyLabel,
-                                                        textAlign:
-                                                            TextAlign.center,
-                                                        style: Theme.of(context)
-                                                            .textTheme
-                                                            .bodyLarge
-                                                            ?.copyWith(
-                                                              color: Theme.of(context)
-                                                                  .colorScheme
-                                                                  .onSurfaceVariant,
-                                                              decoration:
-                                                                  TextDecoration
-                                                                      .none,
+                                              // Compact panes show the list
+                                              // through this page while a
+                                              // detail pushes or pops.
+                                              child: !wide
+                                                  ? const SizedBox.shrink()
+                                                  : Material(
+                                                      color: context
+                                                          .colors
+                                                          .surface,
+                                                      child: Center(
+                                                        child:
+                                                            emptyContent ??
+                                                            Text(
+                                                              emptyLabel,
+                                                              textAlign:
+                                                                  TextAlign
+                                                                      .center,
+                                                              style: Theme.of(context)
+                                                                  .textTheme
+                                                                  .bodyLarge
+                                                                  ?.copyWith(
+                                                                    color: Theme.of(
+                                                                      context,
+                                                                    ).colorScheme.onSurfaceVariant,
+                                                                    decoration:
+                                                                        TextDecoration
+                                                                            .none,
+                                                                  ),
                                                             ),
                                                       ),
-                                                ),
-                                              ),
+                                                    ),
                                             ),
                                           if (selected != null)
                                             if (controller.animateSelection)
@@ -308,7 +311,8 @@ class AdaptiveConversationPane extends HookConsumerWidget {
                                                 key: ValueKey<String?>(
                                                   selected,
                                                 ),
-                                                child: Builder(
+                                                child: _CoveringDetail(
+                                                  covering: coveringDetail,
                                                   builder:
                                                       controller.detailBuilder!,
                                                 ),
@@ -318,8 +322,11 @@ class AdaptiveConversationPane extends HookConsumerWidget {
                                                 key: ValueKey<String?>(
                                                   selected,
                                                 ),
-                                                builder:
-                                                    controller.detailBuilder!,
+                                                builder: (_) => _CoveringDetail(
+                                                  covering: coveringDetail,
+                                                  builder:
+                                                      controller.detailBuilder!,
+                                                ),
                                               ),
                                         ],
                                         onDidRemovePage: (page) {
@@ -358,6 +365,69 @@ class AdaptiveConversationPane extends HookConsumerWidget {
         ),
       ),
     );
+  }
+}
+
+/// Hides the compact list from input, focus and screen readers while a
+/// detail sits above it, even during a transition that still paints it.
+class _CoveredList extends StatelessWidget {
+  const _CoveredList({required this.covered, required this.child});
+
+  final bool covered;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) => TickerMode(
+    enabled: !covered,
+    child: IgnorePointer(
+      ignoring: covered,
+      child: ExcludeFocus(
+        excluding: covered,
+        child: ExcludeSemantics(excluding: covered, child: child),
+      ),
+    ),
+  );
+}
+
+/// Reports its route as [covering] once the route fully covers the compact
+/// list, and withdraws it while the route pushes, pops or follows a back swipe.
+class _CoveringDetail extends HookWidget {
+  const _CoveringDetail({required this.covering, required this.builder});
+
+  final ValueNotifier<Route<Object?>?> covering;
+  final WidgetBuilder builder;
+
+  @override
+  Widget build(BuildContext context) {
+    final route = ModalRoute.of(context);
+    final navigator = Navigator.of(context);
+    useEffect(() {
+      if (route == null) return null;
+      void sync() {
+        final settled =
+            route.animation?.status != AnimationStatus.forward &&
+            route.animation?.status != AnimationStatus.reverse &&
+            !navigator.userGestureInProgress;
+        if (settled && route.isCurrent) {
+          covering.value = route;
+        } else if (covering.value == route) {
+          covering.value = null;
+        }
+      }
+
+      void syncStatus(AnimationStatus _) => sync();
+      route.animation?.addStatusListener(syncStatus);
+      navigator.userGestureInProgressNotifier.addListener(sync);
+      // An immediate route can settle before these listeners attach.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (context.mounted) sync();
+      });
+      return () {
+        route.animation?.removeStatusListener(syncStatus);
+        navigator.userGestureInProgressNotifier.removeListener(sync);
+      };
+    }, [route, navigator]);
+    return builder(context);
   }
 }
 

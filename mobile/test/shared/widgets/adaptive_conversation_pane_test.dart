@@ -392,6 +392,75 @@ void main() {
       expect(tester.takeException(), isNull);
     },
   );
+
+  testWidgets('iPhone back swipe and back button reveal the chat list', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(402, 874);
+    addTearDown(tester.view.reset);
+    final controller = ConversationPaneController();
+    addTearDown(controller.dispose);
+    var listTaps = 0;
+    await tester.pumpWidget(
+      ProviderScope(
+        child: MaterialApp(
+          home: AdaptiveConversationPane(
+            controller: controller,
+            list: Material(
+              child: Center(
+                child: TextButton(
+                  onPressed: () => listTaps++,
+                  child: const Text('Chat list'),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    final list = find.text('Chat list');
+    final placeholder = find.text('Select a conversation');
+
+    controller.open('chat', (_) => const _Conversation());
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(list, findsOneWidget, reason: 'the list stays beneath a push');
+    await tester.pumpAndSettle();
+    expect(list, findsNothing, reason: 'a settled chat covers the list');
+
+    final swipe = await tester.startGesture(const Offset(5, 400));
+    await swipe.moveBy(const Offset(100, 0));
+    await tester.pump();
+    await swipe.moveBy(const Offset(60, 0));
+    await tester.pump();
+    expect(list, findsOneWidget);
+    expect(placeholder, findsNothing);
+    expect(
+      tester.getSemantics(list.first),
+      isNot(matchesSemantics(label: 'Chat list')),
+      reason: 'the covered list is not a screen-reader stop',
+    );
+    // Cancelling the swipe settles the chat back over the list.
+    await swipe.moveBy(const Offset(-160, 0));
+    await swipe.up();
+    await tester.pumpAndSettle();
+    expect(controller.selectedId, 'chat');
+    expect(list, findsNothing);
+
+    await tester.tap(find.byType(BackButton));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(list, findsOneWidget, reason: 'the list stays beneath a pop');
+    expect(placeholder, findsNothing);
+    await tester.pumpAndSettle();
+    expect(controller.selectedId, isNull);
+    await tester.tap(list);
+    expect(listTaps, 1);
+    debugDefaultTargetPlatformOverride = null;
+  });
 }
 
 class _Conversation extends StatelessWidget {
