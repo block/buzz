@@ -97,6 +97,10 @@ final class NativeAddMembersViewController: UITableViewController, UISearchResul
   private var state: [String: Any]
   private let send: (String, [String: Any]) -> Void
   private let loadAvatar: (String, String, @escaping (Data?) -> Void) -> Void
+  /// Loaded avatars by key. Every state update rebuilds the cells, so a row
+  /// draws its known avatar at once instead of blinking to its initial while
+  /// the image comes back over the channel.
+  private var avatars: [String: UIImage] = [:]
   private let search = UISearchController(searchResultsController: nil)
   private let pageColor: UIColor
   private let rowColor: UIColor
@@ -282,12 +286,12 @@ final class NativeAddMembersViewController: UITableViewController, UISearchResul
         .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: ", ")
       content.textProperties.numberOfLines = 0
       content.secondaryTextProperties.numberOfLines = 1
-      content.image = fallbackAvatar(user)
-      content.imageProperties.maximumSize = CGSize(width: 40, height: 40)
-      content.imageProperties.reservedLayoutSize = CGSize(width: 40, height: 40)
       if let pubkey = user["pubkey"] as? String, let key = user["avatarKey"] as? String {
         avatarRequest = (pubkey, key)
       }
+      content.image = avatarRequest.flatMap { avatars[$0.1] } ?? fallbackAvatar(user)
+      content.imageProperties.maximumSize = CGSize(width: 40, height: 40)
+      content.imageProperties.reservedLayoutSize = CGSize(width: 40, height: 40)
       cell.accessoryType = indexPath.section == 0 ? .checkmark : .none
       if unavailable {
         content.textProperties.color = .secondaryLabel
@@ -303,13 +307,15 @@ final class NativeAddMembersViewController: UITableViewController, UISearchResul
       cell.accessibilityLabel = memberLabel
       cell.contentView.accessibilityElementsHidden = true
     }
-    if let (pubkey, key) = avatarRequest {
-      cell.accessibilityIdentifier = key
-      loadAvatar(pubkey, key) { [weak cell] data in
+    if let (_, key) = avatarRequest { cell.accessibilityIdentifier = key }
+    if let (pubkey, key) = avatarRequest, avatars[key] == nil {
+      loadAvatar(pubkey, key) { [weak self, weak cell] data in
+        guard let data, let image = UIImage(data: data) else { return }
+        let avatar = image.withRenderingMode(.alwaysOriginal)
+        self?.avatars[key] = avatar
         guard let cell, cell.accessibilityIdentifier == key,
-          let data, let image = UIImage(data: data),
           var configuration = cell.contentConfiguration as? UIListContentConfiguration else { return }
-        configuration.image = image.withRenderingMode(.alwaysOriginal)
+        configuration.image = avatar
         let label = cell.accessibilityLabel
         cell.contentConfiguration = configuration
         cell.accessibilityLabel = label

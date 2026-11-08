@@ -37,6 +37,12 @@ struct AddMembersIdentityTests {
       picker.tableView(picker.tableView, didSelectRowAt: path)
     }
     precondition(selected == keys, "Each distinct label must select its own pubkey")
+    avatarReplies.removeAll()
+    picker.update(["users": users, "selected": [], "query": "", "loading": false])
+    let rebuilt = picker.tableView(picker.tableView, cellForRowAt: IndexPath(row: 0, section: 1))
+    let rebuiltImage = (rebuilt.contentConfiguration as? UIListContentConfiguration)?.image
+    precondition(avatarReplies.isEmpty, "A loaded avatar is not fetched again on update")
+    precondition(rebuiltImage?.pngData() == UIImage(data: avatar!)?.pngData(), "A rebuilt row draws its loaded avatar at once")
     picker.update(["users": users, "selected": [users[1]], "query": "", "loading": false])
     let chosen = picker.tableView(picker.tableView, cellForRowAt: IndexPath(row: 0, section: 0))
     precondition(chosen.accessibilityLabel == "\(labels[1]), Same owner", "Selected identity retains its qualifier")
