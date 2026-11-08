@@ -356,7 +356,7 @@ pub(crate) async fn handle_audio_connection(
         Uuid::new_v4(),
         community_id,
         control,
-        move || async move { check_state.db.is_community_active(community_id).await },
+        move || async move { check_state.is_community_active_cached(community_id).await },
         move |control| async move {
             let socket = socket_for_run
                 .lock()
@@ -4339,9 +4339,7 @@ mod tests {
             .connect_lazy(&config.database_url)
             .expect("lazy pg pool");
         let db = buzz_db::Db::from_pool(pool.clone());
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("redis pool");
+        let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await
@@ -5929,9 +5927,7 @@ mod tests {
         configure(&mut config);
         let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
         let db = buzz_db::Db::from_pool(pool.clone());
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("redis pool");
+        let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await
@@ -13686,9 +13682,7 @@ mod tests {
             let community = tenant.community();
             let redis_url =
                 std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
-            let redis = deadpool_redis::Config::from_url(&redis_url)
-                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-                .expect("redis pool");
+            let redis = buzz_pubsub::redis_connection(&redis_url).expect("redis pool");
             let directory = SessionDirectory::with_db(redis, state.db.clone());
             let (arrived_rx, release) =
                 crate::nip_fi_test_hooks::directory_cas_hook::arm(community);
@@ -13764,9 +13758,7 @@ mod tests {
             let relay_url = format!("ws://{}", tenant.host());
             let redis_url =
                 std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
-            let redis = deadpool_redis::Config::from_url(&redis_url)
-                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-                .expect("redis pool");
+            let redis = buzz_pubsub::redis_connection(&redis_url).expect("redis pool");
             let directory =
                 crate::tunnel::directory::SessionDirectory::with_db(redis, state.db.clone());
             let mut mesh =
@@ -13938,9 +13930,7 @@ mod tests {
             config.database_url = db_url.clone();
             config.redis_url = "redis://127.0.0.1:1".to_string();
             let db = buzz_db::Db::from_pool(pool.clone());
-            let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-                .expect("redis pool");
+            let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
             let pubsub = Arc::new(
                 buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                     .await

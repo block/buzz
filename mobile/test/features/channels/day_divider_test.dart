@@ -77,37 +77,70 @@ void main() {
     tester,
   ) async {
     final stickyDayTimestamp = ValueNotifier<int?>(null);
+    final scrollVisible = ValueNotifier(false);
+    final semantics = tester.ensureSemantics();
+
+    addTearDown(scrollVisible.dispose);
     addTearDown(stickyDayTimestamp.dispose);
 
-    await tester.pumpWidget(
-      MaterialApp(
-        theme: AppTheme.light(),
-        home: Scaffold(
-          body: DayDivider(
-            label: 'Today',
-            dayTimestamp: 1000,
-            stickyDayTimestamp: stickyDayTimestamp,
+    try {
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.light(),
+          home: Scaffold(
+            body: DayDivider(
+              label: 'Today',
+              dayTimestamp: 1000,
+              stickyDayTimestamp: stickyDayTimestamp,
+              scrollVisible: scrollVisible,
+            ),
           ),
         ),
-      ),
-    );
+      );
 
-    AnimatedOpacity opacity() => tester.widget<AnimatedOpacity>(
-      find.byKey(const ValueKey('channel-day-divider-opacity-1000')),
-    );
+      AnimatedOpacity opacity() => tester.widget<AnimatedOpacity>(
+        find.byKey(const ValueKey('channel-day-divider-opacity-1000')),
+      );
 
-    expect(opacity().opacity, 1);
+      expect(opacity().opacity, 1);
 
-    stickyDayTimestamp.value = 1000;
-    await tester.pump();
+      stickyDayTimestamp.value = 1000;
+      await tester.pump();
 
-    expect(opacity().opacity, 0);
-    expect(opacity().duration, const Duration(milliseconds: 120));
-    expect(opacity().curve, Curves.easeOutCubic);
+      expect(opacity().opacity, 1);
+      expect(find.bySemanticsLabel('Today'), findsOneWidget);
+      scrollVisible.value = true;
+      await tester.pump();
+      expect(opacity().opacity, 0);
+      expect(
+        tester
+            .widget<ExcludeSemantics>(
+              find
+                  .ancestor(
+                    of: find.byKey(
+                      const ValueKey('channel-day-divider-opacity-1000'),
+                    ),
+                    matching: find.byType(ExcludeSemantics),
+                  )
+                  .first,
+            )
+            .excluding,
+        isTrue,
+      );
+      expect(opacity().duration, const Duration(milliseconds: 120));
+      expect(opacity().curve, Curves.easeOutCubic);
 
-    stickyDayTimestamp.value = null;
-    await tester.pump();
+      scrollVisible.value = false;
+      await tester.pumpAndSettle();
+      expect(opacity().opacity, 1);
+      expect(find.bySemanticsLabel('Today'), findsOneWidget);
 
-    expect(opacity().opacity, 1);
+      stickyDayTimestamp.value = null;
+      await tester.pump();
+
+      expect(opacity().opacity, 1);
+    } finally {
+      semantics.dispose();
+    }
   });
 }

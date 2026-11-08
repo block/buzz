@@ -8,6 +8,8 @@ pub mod gifs;
 pub mod git;
 pub mod invites;
 pub mod media;
+/// Channel-aware media authorization.
+pub mod media_access;
 pub mod mesh_demo;
 pub mod nip05;
 pub mod nip_fi;
@@ -35,12 +37,22 @@ pub(crate) fn internal_error(msg: &str) -> (StatusCode, Json<serde_json::Value>)
 /// would re-run the same expensive query.
 pub(crate) const QUERY_TIMED_OUT: &str = "query timed out";
 
+/// Stable client-visible body for a read the relay could not get a database
+/// connection for (pool timeout, closed pool, socket failure), including a
+/// history read shed because the reader is busy. Transient: retry later.
+pub(crate) const DATABASE_UNAVAILABLE: &str = "database unavailable";
+
 /// Map a DB read failure: a statement-deadline cancel becomes a distinct
-/// 503 `query timed out`; anything else stays a generic 500.
+/// 503 `query timed out`, an unreachable or saturated database a 503
+/// `database unavailable`; anything else stays a generic 500.
 pub(crate) fn db_read_error(
     context: &str,
     e: &buzz_db::DbError,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    if e.is_connection_unavailable() {
+        tracing::warn!(error_kind = %e.kind(), "{context}");
+        return api_error(StatusCode::SERVICE_UNAVAILABLE, DATABASE_UNAVAILABLE);
+    }
     read_error(context, e.is_statement_cancelled(), e.kind())
 }
 
@@ -812,6 +824,19 @@ mod db_read_error_tests {
     }
 
     #[test]
+    fn unavailable_database_maps_to_retryable_503() {
+        for error in [
+            sqlx::Error::PoolTimedOut,
+            sqlx::Error::PoolClosed,
+            sqlx::Error::Io(std::io::Error::from(std::io::ErrorKind::ConnectionReset)),
+        ] {
+            let (status, body) = db_read_error("ctx", &buzz_db::DbError::Sqlx(error));
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(body.0["error"], DATABASE_UNAVAILABLE);
+        }
+    }
+
+    #[test]
     fn non_cancel_search_error_stays_generic_500() {
         let (status, body) = search_read_error(
             "ctx",
@@ -921,3 +946,6 @@ mod parse_query_tests {
 
 mod artifact;
 pub(crate) mod artifact_sync;
+
+#[cfg(test)]
+mod media_access_postgres_tests;

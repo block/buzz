@@ -19,11 +19,6 @@ void main() {
 
     for (final (host, name, expected) in [
       ('mobile.communities.buzz.xyz', 'mobile.communities.buzz.xyz', 'mobile'),
-      (
-        'mobile.communities.public.builderlabstaging.xyz',
-        'mobile.communities.public.builderlabstaging.xyz',
-        'mobile',
-      ),
       ('mobile.communities.buzz.xyz', 'Mobile Team', 'Mobile Team'),
       ('chat.example.com', 'chat.example.com', 'chat.example.com'),
       (

@@ -276,7 +276,7 @@ pub fn count_disconnect_event(
 /// Command replay guard for this pod.  Shadow claims under its own key
 /// prefix, so a shadow accept never uses up the enforce claim.
 pub fn command_replay_guard(
-    pool: deadpool_redis::Pool,
+    pool: buzz_pubsub::RedisConnection,
     mode: NipFiMode,
 ) -> Arc<dyn buzz_auth::CommandReplayGuard> {
     if mode.observes_only() {
@@ -869,9 +869,7 @@ mod route_integration_tests {
 
         let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
         let db = buzz_db::Db::from_pool(pool.clone());
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("redis pool");
+        let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await
@@ -971,9 +969,7 @@ mod route_integration_tests {
             let config = crate::config::Config::for_test();
             let pool = sqlx::PgPool::connect_lazy(&config.database_url).unwrap();
             let db = buzz_db::Db::from_pool(pool.clone());
-            let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-                .unwrap();
+            let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).unwrap();
             let pubsub = Arc::new(
                 buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                     .await
@@ -1232,9 +1228,7 @@ mod route_integration_tests {
             config.nip_fi.registry.insert(test_issuer_policy());
             let pool = sqlx::PgPool::connect_lazy(&config.database_url).unwrap();
             let db = buzz_db::Db::from_pool(pool.clone());
-            let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-                .unwrap();
+            let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).unwrap();
             let pubsub = Arc::new(
                 buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                     .await
@@ -1437,9 +1431,7 @@ mod route_integration_tests {
             config.nip_fi.registry.insert(test_issuer_policy());
             let pool = sqlx::PgPool::connect_lazy(&config.database_url).unwrap();
             let db = buzz_db::Db::from_pool(pool.clone());
-            let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-                .unwrap();
+            let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).unwrap();
             let pubsub = Arc::new(
                 buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                     .await
@@ -1632,9 +1624,7 @@ mod route_integration_tests {
             config.nip_fi.registry.insert(test_issuer_policy());
             let pool = sqlx::PgPool::connect_lazy(&config.database_url).unwrap();
             let db = buzz_db::Db::from_pool(pool.clone());
-            let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-                .unwrap();
+            let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).unwrap();
             let pubsub = Arc::new(
                 buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                     .await
@@ -1760,9 +1750,7 @@ mod route_integration_tests {
         let config = crate::config::Config::for_test();
         let pool = sqlx::PgPool::connect_lazy(&config.database_url).unwrap();
         let db = buzz_db::Db::from_pool(pool.clone());
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .unwrap();
+        let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).unwrap();
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await
@@ -1951,9 +1939,7 @@ mod route_integration_tests {
 
         let pool = sqlx::PgPool::connect_lazy(&config.database_url).unwrap();
         let db = buzz_db::Db::from_pool(pool.clone());
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .unwrap();
+        let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).unwrap();
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await
@@ -2188,9 +2174,7 @@ mod route_integration_tests {
         config.nip_fi.registry.insert(test_issuer_policy());
         let pool = sqlx::PgPool::connect_lazy(&config.database_url).unwrap();
         let db = buzz_db::Db::from_pool(pool.clone());
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .unwrap();
+        let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).unwrap();
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await
@@ -3626,9 +3610,7 @@ mod route_integration_tests {
             let url = std::env::var("BUZZ_TEST_REDIS_URL")
                 .or_else(|_| std::env::var("REDIS_URL"))
                 .unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
-            let pool = deadpool_redis::Config::from_url(url)
-                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-                .expect("redis pool");
+            let pool = buzz_pubsub::redis_connection(&url).expect("redis pool");
             Arc::new(buzz_pubsub::RedisCommandReplayGuard::new(pool))
         }
 
@@ -3678,9 +3660,7 @@ mod route_integration_tests {
             };
             let pool = sqlx::PgPool::connect_lazy(&config.database_url).unwrap();
             let db = buzz_db::Db::from_pool(pool.clone());
-            let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-                .unwrap();
+            let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).unwrap();
             let pubsub = Arc::new(
                 buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                     .await

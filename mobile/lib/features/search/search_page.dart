@@ -1,3 +1,4 @@
+import '../../shared/widgets/top_edge_fade.dart';
 import 'dart:async';
 
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
@@ -100,6 +101,16 @@ class SearchPage extends HookConsumerWidget {
         : _searchHeaderFiltersHeight(context);
 
     void activateSearch() => focusNode.requestFocus();
+
+    // Opening search as its own route means the user wants to type, so raise
+    // the keyboard right away instead of waiting for a tap on the field.
+    useEffect(() {
+      if (embedded) return null;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (context.mounted) focusNode.requestFocus();
+      });
+      return null;
+    }, const []);
 
     useEffect(() {
       final reselection = tabReselection;
@@ -239,11 +250,13 @@ class SearchPage extends HookConsumerWidget {
             ),
             const SizedBox(height: Grid.xxs),
             Expanded(
-              child: _SearchBody(
-                state: searchState,
-                filter: activeFilter.value,
-                currentPubkey: currentPubkey,
-                onRecentSearchSelected: runRecentSearch,
+              child: TopEdgeFade(
+                child: _SearchBody(
+                  state: searchState,
+                  filter: activeFilter.value,
+                  currentPubkey: currentPubkey,
+                  onRecentSearchSelected: runRecentSearch,
+                ),
               ),
             ),
           ],

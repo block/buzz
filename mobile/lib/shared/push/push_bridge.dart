@@ -261,6 +261,31 @@ Future<void> shareOrganizationSessionWithNotifications({
   }
 }
 
+/// Shares the hosted account session with the iOS notification extension, or
+/// removes it when [credential] is null, like
+/// [shareOrganizationSessionWithNotifications]. A hosted relay matches when its
+/// host is under [communityDomain] and equal to or under one of
+/// [relayDomains], as in `HostedRelayAuth`.
+Future<void> shareHostedSessionWithNotifications({
+  required Uri origin,
+  required String? credential,
+  required List<String> relayDomains,
+  required String communityDomain,
+}) async {
+  if (defaultTargetPlatform != TargetPlatform.iOS) return;
+  try {
+    await _channel.invokeMethod<void>('syncPushSnapshot', {
+      'section': 'hostedSession',
+      'origin': origin.toString(),
+      'credential': credential,
+      'relayDomains': relayDomains,
+      'communityDomain': communityDomain,
+    });
+  } on MissingPluginException {
+    // Flutter tests and non-Runner embeddings do not install the native bridge.
+  }
+}
+
 void installBuzzPushMethodHandler() {
   _channel.setMethodCallHandler((call) async {
     switch (call.method) {

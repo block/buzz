@@ -368,19 +368,23 @@ class MediaImageCooldownException implements Exception {
 
 final _relayBlobPath = RegExp(r'^/media/([0-9a-f]{64})(?:\.[a-z0-9]{1,8})?$');
 
-/// The relay's generated thumbnail for a relay-hosted image, or null when
-/// [url] is not one. Every image uploaded to a relay gets a JPEG thumbnail at
-/// `/media/<sha256>.thumb.jpg`, at most 320px on its longer side. This
-/// matches desktop's small avatars (buzz-app `mediaUrl`), including the cost:
-/// the thumbnail is a still JPEG, so transparent areas render black and
-/// animation is lost.
-String? relayThumbnailUrl(String url, MediaGetAuthService auth) {
-  if (!auth.isRelayMediaUrl(url)) return null;
+/// The relay's generated thumbnails for a relay-hosted image, best first, or
+/// empty when [url] is not one. Relays write `/media/<sha256>.thumb.webp`,
+/// which keeps transparency, beside the `.thumb.jpg` that every relay
+/// writes. Older relays, and images uploaded before WebP thumbnails, have
+/// only the JPEG. Both are at most 320px on their longer side and still, so
+/// animation is lost. This matches desktop's small avatars (buzz-app
+/// `mediaUrl`).
+List<String> relayThumbnailUrls(String url, MediaGetAuthService auth) {
+  if (!auth.isRelayMediaUrl(url)) return const [];
   final uri = Uri.parse(url);
-  if (uri.hasQuery || uri.hasFragment) return null;
+  if (uri.hasQuery || uri.hasFragment) return const [];
   final match = _relayBlobPath.firstMatch(uri.path);
-  if (match == null) return null;
-  return uri.replace(path: '/media/${match[1]}.thumb.jpg').toString();
+  if (match == null) return const [];
+  return [
+    for (final ext in ['webp', 'jpg'])
+      uri.replace(path: '/media/${match[1]}.thumb.$ext').toString(),
+  ];
 }
 
 /// Drop-in replacement for the media `Image.network` call sites.
@@ -397,7 +401,7 @@ String? relayThumbnailUrl(String url, MediaGetAuthService auth) {
 ///
 /// With [preferThumbnail], a relay image laid out small enough loads the
 /// relay's generated thumbnail instead of the original upload, falling back
-/// to the original when the relay has no thumbnail for it.
+/// to the JPEG thumbnail and then the original when the relay has none.
 class MediaImage extends ConsumerWidget {
   final String url;
   final BoxFit? fit;
@@ -475,27 +479,31 @@ class MediaImage extends ConsumerWidget {
         final cacheWidth = maxWidth.isFinite && maxWidth > 0
             ? _physicalWidth(context, maxWidth)
             : null;
-        final candidate =
+        final thumbnails =
             preferThumbnail && _fitsThumbnail(context, constraints)
-            ? relayThumbnailUrl(url, auth)
-            : null;
-        final thumbnail = _missingThumbnails.contains(candidate)
-            ? null
-            : candidate;
-        if (thumbnail == null) return _image(providerFor(url), cacheWidth);
-        return _image(
-          providerFor(thumbnail, isThumbnailFallback: true),
-          cacheWidth,
-          errorBuilder: (context, error, stackTrace) {
-            if (error is! NetworkImageLoadException ||
-                error.statusCode != 404) {
-              return errorBuilder!(context, error, stackTrace);
-            }
-            // The fetch already recorded the missing thumbnail, so later
-            // builds go straight to the original.
-            return _image(providerFor(url), cacheWidth);
-          },
-        );
+            ? relayThumbnailUrls(url, auth)
+            : const <String>[];
+        Widget source(Iterable<String> candidates) {
+          final rest = candidates
+              .skipWhile(_missingThumbnails.contains)
+              .toList();
+          if (rest.isEmpty) return _image(providerFor(url), cacheWidth);
+          return _image(
+            providerFor(rest.first, isThumbnailFallback: true),
+            cacheWidth,
+            errorBuilder: (context, error, stackTrace) {
+              if (error is! NetworkImageLoadException ||
+                  error.statusCode != 404) {
+                return errorBuilder!(context, error, stackTrace);
+              }
+              // The fetch already recorded the missing thumbnail, so later
+              // builds go straight to the next source.
+              return source(rest.skip(1));
+            },
+          );
+        }
+
+        return source(thumbnails);
       },
     );
   }

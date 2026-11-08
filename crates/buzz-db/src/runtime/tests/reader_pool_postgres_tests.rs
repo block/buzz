@@ -144,10 +144,13 @@ async fn reader_boot_ping_warms_pool_to_max_in_background() {
 /// At the production acquire budget, a reader that admits only some dials
 /// ends the warm pass bounded and partial, with no re-dialing. The pool is
 /// built by the production constructor, so each warm acquire, dial
-/// included, gets only [`Db::READER_ACQUIRE_TIMEOUT`]. The proxy relays the
-/// first 3 sessions and stalls every later dial mid-handshake: the first
-/// wave of 5 holds 3, the second wave's 5 dials all miss, and that wave's
-/// lack of progress ends the pass after exactly 10 dials.
+/// included, gets only [`Db::READER_ACQUIRE_TIMEOUT`]. The boot ping first
+/// fills the warm floor of 3, dialed outside that budget, and the proxy then
+/// stalls every later dial mid-handshake: the first wave of 5 holds the 3
+/// idle connections and its 2 dials miss, the second wave's 5 dials all
+/// miss, and that wave's lack of progress ends the pass after exactly 7
+/// dials. The pass needs no dial to beat the budget: on a loaded host every
+/// dial can miss it, which would end the pass after one empty wave.
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn reader_warm_at_production_budget_ends_partial_when_dials_stall() {
@@ -156,7 +159,6 @@ async fn reader_warm_at_production_budget_ends_partial_when_dials_stall() {
     let writer_options = writer.connect_options();
     let (host, port) = (writer_options.get_host(), writer_options.get_port());
     let proxy = crate::test_support::PausingProxy::spawn(host.to_owned(), port).await;
-    proxy.stall_from(3);
     let scratch_url = scratch.url();
     let proxied_url = scratch_url.replacen(
         &format!("{host}:{port}"),
@@ -169,6 +171,13 @@ async fn reader_warm_at_production_budget_ends_partial_when_dials_stall() {
     );
     let read_pool = Db::connect_read_pool(&DbConfig::default(), &proxied_url, max)
         .expect("production reader pool");
+    assert!(
+        Db::read_pool_boot_ping_once(read_pool.clone(), Default::default()).await,
+        "boot ping must reach the reader"
+    );
+    await_idle_floor(&read_pool, 3).await;
+    let relayed = proxy.sessions();
+    proxy.stall_from(relayed);
 
     let started = Instant::now();
     let report = Db::warm_read_pool(&read_pool).await;
@@ -179,14 +188,19 @@ async fn reader_warm_at_production_budget_ends_partial_when_dials_stall() {
         (max, 3, 7),
         "one partial wave, then one wave that opens nothing"
     );
-    assert_eq!(proxy.sessions(), 10, "the pass must stop dialing");
     assert!(
         elapsed < Duration::from_secs(2),
         "two waves at the production budget must end promptly: {elapsed:?}"
     );
     await_idle_floor(&read_pool, 3).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(proxy.sessions(), 10, "nothing re-dials after the pass");
+    // Counted after the settle: the proxy accepts on this runtime, so a dial
+    // that missed its budget can still be queued for accept when the pass ends.
+    assert_eq!(
+        proxy.sessions() - relayed,
+        7,
+        "the pass must stop dialing, and nothing re-dials after it"
+    );
 
     read_pool.close().await;
 }
@@ -297,13 +311,14 @@ async fn terminated_warm_reader_connection_fails_closed_to_writer() {
 
 /// A proof that times out while its `BEGIN` is still in flight must not
 /// return the connection to the pool with a server-side transaction open.
-/// sqlx counts the transaction only once `BEGIN` is acknowledged, so a
-/// cancelled begin queues no `ROLLBACK`, and the release ping consumes the
-/// late `BEGIN` reply: without the reader pool's release check, the
-/// connection comes back `idle in transaction` once the reader resumes.
-/// The database defaults to `REPEATABLE READ`, the isolation routed reads
-/// begin with, so the check only sees the open transaction because reader
-/// sessions pin their own default.
+/// sqlx queues a `ROLLBACK` for a begin cancelled in flight
+/// (transact-rs/sqlx#4394), so the connection comes back clean and the
+/// reader pool's release check has nothing to close. Before that fix the
+/// release ping consumed the late `BEGIN` reply and only the release check
+/// kept the connection from returning `idle in transaction`. The database
+/// defaults to `REPEATABLE READ`, the isolation routed reads begin with, so
+/// the check can only see an open transaction because reader sessions pin
+/// their own default.
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires Postgres"]
 async fn proof_timeout_mid_begin_leaves_no_reader_transaction_open() {
@@ -379,8 +394,8 @@ async fn proof_timeout_mid_begin_leaves_no_reader_transaction_open() {
     let closes = release_closes(&snapshotter);
     assert_eq!(
         closes.get("open_transaction"),
-        Some(&1),
-        "the release check must close the connection left inside BEGIN; got {closes:?}"
+        None,
+        "sqlx must roll back the cancelled BEGIN before the release check runs; got {closes:?}"
     );
 
     read_pool.close().await;
@@ -390,8 +405,9 @@ async fn proof_timeout_mid_begin_leaves_no_reader_transaction_open() {
 /// not strand the reader pool. Each stalled warm connection costs one routed
 /// read a proof timeout; once the release check gives up on those sockets,
 /// their slots are freed and routed reads reach the reader again through
-/// new connections, instead of falling back to the writer until the kernel
-/// gives up on the old sockets.
+/// new connections, instead of falling back to the writer (or, for history
+/// reads on the saturated pool, being rejected) until the kernel gives up on
+/// the old sockets.
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires Postgres"]
 async fn stalled_reader_sessions_release_their_slots_for_new_connections() {
@@ -463,9 +479,13 @@ async fn stalled_reader_sessions_release_their_slots_for_new_connections() {
             .sum::<u64>()
     };
     loop {
-        db.count_events_routed("stalled_reader_probe", &query)
-            .await
-            .expect("routed read answers");
+        // While both slots sit in the release check the reader pool is
+        // saturated, so a history read is rejected as retryable rather than
+        // moved to the writer; the caller retries, as a client would.
+        match db.count_events_routed("stalled_reader_probe", &query).await {
+            Ok(_) | Err(crate::error::DbError::Sqlx(sqlx::Error::PoolTimedOut)) => {}
+            Err(e) => panic!("routed read answers or is rejected as retryable: {e:?}"),
+        }
         for (key, n) in drain_counters(&snapshotter) {
             *totals.entry(key).or_default() += n;
         }

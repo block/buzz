@@ -124,6 +124,7 @@ class _EmptyFilterState extends StatelessWidget {
       );
     }
     final (icon, message) = switch (filter) {
+      InboxFilter.dm => (BuzzIcons.messageSquare, 'No direct messages yet'),
       InboxFilter.mention => (BuzzIcons.atSign, 'No mentions yet'),
       InboxFilter.thread => (BuzzIcons.messageSquare, 'No thread replies yet'),
       InboxFilter.needsAction => (

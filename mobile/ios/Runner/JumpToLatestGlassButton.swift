@@ -483,6 +483,7 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
     labelFontSize = (arguments?["labelFontSize"] as? NSNumber).map { CGFloat(truncating: $0) }
     showIconWithLabel = arguments?["showIconWithLabel"] as? Bool == true
     button.configuration?.imagePadding = showIconWithLabel ? 8 : 0
+    button.configuration?.imagePlacement = icon == "chevronDown" ? .trailing : .leading
     if let accessibilityLabel = arguments?["accessibilityLabel"] as? String {
       button.accessibilityLabel = accessibilityLabel
     }
@@ -543,7 +544,9 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
     case "sun": buttonIconName = "sun.max"
     case "moon": buttonIconName = "moon"
     case "trash": buttonIconName = "trash"
+    case "bell": buttonIconName = "bell"
     case "more": buttonIconName = "ellipsis"
+    case "chevronDown": buttonIconName = "chevron.down"
     case "reply": buttonIconName = "arrowshape.turn.up.left"
     case "systemAppearance": buttonIconName = "circle.lefthalf.filled"
     case "colorSwatch": buttonIconName = "circle.fill"
