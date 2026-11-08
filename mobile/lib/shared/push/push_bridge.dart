@@ -2,90 +2,14 @@ import 'dart:async';
 
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:flutter/foundation.dart';
-import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../community/community.dart';
 import '../deeplink/deep_link.dart';
 import '../relay/relay_provider.dart';
-import '../relay/app_lifecycle_provider.dart';
 import 'push_snapshot.dart';
 
 const _channel = MethodChannel('buzz/push');
-
-enum BuzzPushAuthorizationStatus {
-  notDetermined,
-  denied,
-  authorized,
-  provisional,
-  ephemeral,
-}
-
-typedef BuzzPushAuthorizationStatusReader =
-    Future<BuzzPushAuthorizationStatus> Function();
-typedef BuzzPushNotificationSettingsOpener = Future<bool> Function();
-
-final buzzPushAuthorizationStatusReaderProvider =
-    Provider<BuzzPushAuthorizationStatusReader>((ref) {
-      return readBuzzPushAuthorizationStatus;
-    });
-
-final buzzPushNotificationSettingsOpenerProvider =
-    Provider<BuzzPushNotificationSettingsOpener>((ref) {
-      return openBuzzPushNotificationSettings;
-    });
-
-final buzzPushAuthorizationStatusProvider =
-    AsyncNotifierProvider<
-      BuzzPushAuthorizationStatusNotifier,
-      BuzzPushAuthorizationStatus
-    >(BuzzPushAuthorizationStatusNotifier.new);
-
-class BuzzPushAuthorizationStatusNotifier
-    extends AsyncNotifier<BuzzPushAuthorizationStatus> {
-  @override
-  Future<BuzzPushAuthorizationStatus> build() async {
-    ref.listen(appLifecycleProvider, (previous, next) {
-      if (previous != AppLifecycleState.resumed &&
-          next == AppLifecycleState.resumed) {
-        unawaited(refresh());
-      }
-    });
-    return ref.read(buzzPushAuthorizationStatusReaderProvider)();
-  }
-
-  Future<void> refresh() async {
-    state = const AsyncLoading<BuzzPushAuthorizationStatus>();
-    state = await AsyncValue.guard(
-      ref.read(buzzPushAuthorizationStatusReaderProvider),
-    );
-  }
-}
-
-Future<BuzzPushAuthorizationStatus> readBuzzPushAuthorizationStatus() async {
-  if (defaultTargetPlatform != TargetPlatform.iOS) {
-    return BuzzPushAuthorizationStatus.authorized;
-  }
-  final raw = await _channel.invokeMethod<String>(
-    'notificationAuthorizationStatus',
-  );
-  return switch (raw) {
-    'notDetermined' => BuzzPushAuthorizationStatus.notDetermined,
-    'denied' => BuzzPushAuthorizationStatus.denied,
-    'authorized' => BuzzPushAuthorizationStatus.authorized,
-    'provisional' => BuzzPushAuthorizationStatus.provisional,
-    'ephemeral' => BuzzPushAuthorizationStatus.ephemeral,
-    _ => throw FormatException(
-      'Native push bridge returned unknown authorization status: $raw',
-    ),
-  };
-}
-
-Future<bool> openBuzzPushNotificationSettings() async {
-  if (defaultTargetPlatform != TargetPlatform.iOS) return false;
-  return await _channel.invokeMethod<bool>('openNotificationSettings') ?? false;
-}
 
 /// Latest APNs registration state, including callbacks replayed by iOS after
 /// the Flutter method channel attaches.
@@ -106,18 +30,22 @@ MessageDeepLink? _pushNotificationLink(Object? arguments) {
   final eventId = arguments['eventId'];
   final communityId = arguments['communityId'];
   final channelId = arguments['channelId'];
+  final threadRootId = arguments['threadRootId'];
   if (eventId is! String ||
       eventId.isEmpty ||
       communityId is! String ||
       communityId.isEmpty ||
       channelId is! String ||
-      channelId.isEmpty) {
+      channelId.isEmpty ||
+      (threadRootId != null &&
+          (threadRootId is! String || threadRootId.isEmpty))) {
     return null;
   }
   return MessageDeepLink(
     communityId: communityId,
     channelId: channelId,
     messageId: eventId,
+    threadRootId: threadRootId as String?,
   );
 }
 
@@ -140,7 +68,10 @@ Future<void> syncPendingBuzzPushNotificationResponse() async {
 /// requests. Display authorization is intentionally not returned or persisted:
 /// APNs registration and enrollment remain valid while display is denied.
 Future<void> startBuzzPushRegistration() async {
-  if (defaultTargetPlatform != TargetPlatform.iOS) return;
+  if (!Env.pushGatewayConfigured ||
+      defaultTargetPlatform != TargetPlatform.iOS) {
+    return;
+  }
   try {
     await _channel.invokeMethod<void>('startRegistration');
   } on MissingPluginException {
@@ -154,7 +85,6 @@ class BuzzPushEndpointGrant {
   final String installationId;
   final String endpointGrant;
   final String endpointHash;
-  final String appProfile;
   final int endpointEpoch;
   final int generation;
   final int expiresAt;
@@ -165,7 +95,6 @@ class BuzzPushEndpointGrant {
     required this.installationId,
     required this.endpointGrant,
     required this.endpointHash,
-    required this.appProfile,
     required this.endpointEpoch,
     required this.generation,
     required this.expiresAt,
@@ -179,7 +108,6 @@ class BuzzPushEndpointGrant {
       installationId: map['installationId'] as String,
       endpointGrant: map['endpointGrant'] as String,
       endpointHash: map['endpointHash'] as String,
-      appProfile: map['appProfile'] as String,
       endpointEpoch: map['endpointEpoch'] as int,
       generation: generation,
       expiresAt: map['expiresAt'] as int,
@@ -188,9 +116,14 @@ class BuzzPushEndpointGrant {
 }
 
 Future<List<BuzzPushEndpointGrant>> readBuzzPushEndpointGrants() async {
-  if (defaultTargetPlatform != TargetPlatform.iOS) return const [];
+  if (!Env.pushGatewayConfigured ||
+      defaultTargetPlatform != TargetPlatform.iOS) {
+    return const [];
+  }
   try {
-    final raw = await _channel.invokeListMethod<dynamic>('endpointGrants');
+    final raw = await _channel.invokeListMethod<dynamic>('endpointGrants', {
+      'gatewayUrl': Env.pushGatewayUrl,
+    });
     final grants = [
       for (final value in raw ?? const [])
         BuzzPushEndpointGrant.fromMap(value as Map<dynamic, dynamic>),
@@ -251,6 +184,18 @@ void reportPushLeaseCleanupError(Object error, StackTrace stackTrace) {
   debugPrintStack(stackTrace: stackTrace);
 }
 
+/// Restores notification presentation without reading community storage.
+Future<void> restoreAgeRestrictedBuzzNotifications() async {
+  if (defaultTargetPlatform != TargetPlatform.iOS) return;
+  await _channel.invokeMethod<void>('restoreAgeRestrictedNotifications');
+}
+
+/// Removes notifications rendered before a confirmed age restriction.
+Future<void> purgeAgeRestrictedBuzzNotifications() async {
+  if (defaultTargetPlatform != TargetPlatform.iOS) return;
+  await _channel.invokeMethod<void>('purgeAgeRestrictedNotifications');
+}
+
 Future<void> registerBuzzPushCommunitySnapshot(
   List<Community> communities,
 ) async {
@@ -287,6 +232,54 @@ Future<void> registerBuzzPushCommunitySnapshot(
       'section': 'communities',
       'communities': [for (final snapshot in snapshots) snapshot.toJson()],
       'signingKeys': signingKeys,
+    });
+  } on MissingPluginException {
+    // Flutter tests and non-Runner embeddings do not install the native bridge.
+  }
+}
+
+/// Shares the organization account session with the iOS notification
+/// extension, or removes it when [credential] is null. Failures propagate to
+/// the account client, which owns retrying them. Organization relays
+/// enforce NIP-FI, so the extension needs the session to mint the assertion
+/// that lets it read the message a push refers to.
+Future<void> shareOrganizationSessionWithNotifications({
+  required Uri origin,
+  required String? credential,
+  required List<String> relayHosts,
+}) async {
+  if (defaultTargetPlatform != TargetPlatform.iOS) return;
+  try {
+    await _channel.invokeMethod<void>('syncPushSnapshot', {
+      'section': 'organizationSession',
+      'origin': origin.toString(),
+      'credential': credential,
+      'relayHosts': relayHosts,
+    });
+  } on MissingPluginException {
+    // Flutter tests and non-Runner embeddings do not install the native bridge.
+  }
+}
+
+/// Shares the hosted account session with the iOS notification extension, or
+/// removes it when [credential] is null, like
+/// [shareOrganizationSessionWithNotifications]. A hosted relay matches when its
+/// host is under [communityDomain] and equal to or under one of
+/// [relayDomains], as in `HostedRelayAuth`.
+Future<void> shareHostedSessionWithNotifications({
+  required Uri origin,
+  required String? credential,
+  required List<String> relayDomains,
+  required String communityDomain,
+}) async {
+  if (defaultTargetPlatform != TargetPlatform.iOS) return;
+  try {
+    await _channel.invokeMethod<void>('syncPushSnapshot', {
+      'section': 'hostedSession',
+      'origin': origin.toString(),
+      'credential': credential,
+      'relayDomains': relayDomains,
+      'communityDomain': communityDomain,
     });
   } on MissingPluginException {
     // Flutter tests and non-Runner embeddings do not install the native bridge.

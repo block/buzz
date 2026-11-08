@@ -13,7 +13,7 @@ import {
 } from "@/features/agents/managedAgentRuntimeHooks";
 import { canonicalRelayUrl } from "@/features/agents/managedAgentRuntimeStatus";
 import type { ManagedAgentRuntimeStatus } from "@/shared/api/types";
-import { reconcileManagedAgentRuntimes } from "@/shared/api/tauriManagedAgents";
+import { reconcileConfiguredManagedAgentRuntimes } from "@/features/agents/managedAgentRelayCleanup";
 
 /**
  * Bootstrap a lazy harness pair for every auto-start local agent in every
@@ -106,10 +106,17 @@ export function useManagedAgentRuntimeReconciliation(
         managedAgentRuntimesQueryKey,
       );
 
-      void reconcileManagedAgentRuntimes(targets)
-        .then((runtimes) => {
+      void reconcileConfiguredManagedAgentRuntimes(targets)
+        .then(({ runtimes, removedRelays }) => {
           cacheReconciledManagedAgentRuntimes(queryClient, baseline, runtimes);
-          return classifyReconcileResult(pending, runtimes, canonicalRelayUrl);
+          // A relay fenced mid-call is not marked reconciled, so re-adding
+          // its community reconciles it afresh.
+          return classifyReconcileResult(
+            pending,
+            runtimes,
+            canonicalRelayUrl,
+            removedRelays,
+          );
         })
         .catch((error) => {
           console.warn("[managed-agent-runtimes] reconcile failed:", error);

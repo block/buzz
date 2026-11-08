@@ -11,6 +11,8 @@ import 'package:buzz/shared/relay/relay_socket.dart';
 import 'package:buzz/shared/relay/signed_event_relay.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
 void main() {
@@ -19,6 +21,94 @@ void main() {
   final descriptor = _descriptor(relay.public);
   final grant = _grant(relay.public);
   final now = DateTime.fromMillisecondsSinceEpoch(1752620000 * 1000);
+
+  for (final grammar in ['uuid-lowercase', 'uuid-v4-lowercase']) {
+    test('accepts the $grammar relay descriptor', () {
+      final information = _descriptorJson(relay.public);
+      (information['push'] as Map<String, dynamic>)['h_grammar'] = grammar;
+      expect(
+        BuzzPushLeaseDescriptor.fromRelayInformation(information).origin,
+        descriptor.origin,
+      );
+    });
+  }
+
+  for (final ignored in [false, true]) {
+    test(
+      'legacy relay rejects non-v4 ${ignored ? 'ignore' : 'positive'} filters before submission',
+      () async {
+        final information = _descriptorJson(relay.public);
+        (information['push'] as Map<String, dynamic>)['h_grammar'] =
+            'uuid-v4-lowercase';
+        final legacy = BuzzPushLeaseDescriptor.fromRelayInformation(
+          information,
+        );
+        final channelFilter = BuzzPushFilter(
+          kinds: const [9],
+          hTags: const ['fee88e92-da9f-5958-a910-48db3264ad38'],
+        );
+        var submissions = 0;
+        await expectLater(
+          publishBuzzDevPushLease(
+            grant: grant,
+            descriptor: legacy,
+            nsec: signer.nsec,
+            memberPubkey: signer.public,
+            subscriptions: [
+              BuzzPushSubscription(
+                filter: ignored
+                    ? BuzzPushFilter(kinds: const [9], pTags: [signer.public])
+                    : channelFilter,
+                notificationClass: 'default',
+                ignore: ignored ? [channelFilter] : const [],
+              ),
+            ],
+            now: () => now,
+            submit:
+                ({
+                  required kind,
+                  required content,
+                  required tags,
+                  createdAt,
+                }) async {
+                  submissions++;
+                  throw StateError('incompatible lease must not be sent');
+                },
+          ),
+          throwsA(isA<BuzzPushChannelGrammarException>()),
+        );
+        expect(submissions, 0);
+      },
+    );
+  }
+
+  test('legacy relay keeps compatible subscriptions and ignores intact', () {
+    final information = _descriptorJson(relay.public);
+    (information['push'] as Map<String, dynamic>)['h_grammar'] =
+        'uuid-v4-lowercase';
+    final legacy = BuzzPushLeaseDescriptor.fromRelayInformation(information);
+    final subscriptions = buildDesiredBuzzPushSubscriptions(
+      myPubkey: signer.public,
+      channelIds: const [
+        '11111111-1111-4111-8111-111111111111',
+        '22222222-2222-4222-8222-222222222222',
+      ],
+      mutedChannelIds: const ['22222222-2222-4222-8222-222222222222'],
+    );
+    final before = buzzPushSubscriptionsFingerprint(subscriptions);
+    validateBuzzPushChannelGrammar(legacy, subscriptions);
+    expect(buzzPushSubscriptionsFingerprint(subscriptions), before);
+    expect(legacy.hGrammar, 'uuid-v4-lowercase');
+  });
+
+  test('legacy capability does not enable Buzz push', () {
+    final information = _descriptorJson(relay.public);
+    information['supported_extensions'] = ['nip-pl'];
+    expect(
+      () => BuzzPushLeaseDescriptor.fromRelayInformation(information),
+      throwsFormatException,
+    );
+  });
 
   test('publishes strict kind-30350 lease and waits for accepted OK', () async {
     Map<String, dynamic>? submitted;
@@ -30,7 +120,11 @@ void main() {
       memberPubkey: signer.public,
       subscriptions: [
         BuzzPushSubscription(
-          filter: BuzzPushFilter(kinds: const [9], pTags: [signer.public]),
+          filter: BuzzPushFilter(
+            kinds: const [9],
+            pTags: [signer.public],
+            hTags: const ['fee88e92-da9f-5958-a910-48db3264ad38'],
+          ),
           notificationClass: 'default',
         ),
       ],
@@ -72,7 +166,6 @@ void main() {
     expect(jsonDecode(plaintext), {
       'v': 1,
       'origin': 'wss://tenant.example:8443',
-      'app_profile': 'buzz-ios-dogfood',
       'transport': 'apns',
       'endpoint': 'opaque-grant',
       'generation': 7,
@@ -82,6 +175,7 @@ void main() {
           'filter': {
             'kinds': [9],
             '#p': [signer.public],
+            '#h': ['fee88e92-da9f-5958-a910-48db3264ad38'],
           },
           'class': 'default',
         },
@@ -298,6 +392,110 @@ void main() {
     expect(jsonDecode(plaintext), jsonDecode(publication.plaintext));
   });
 
+  group('NIP-11 forward compatibility', () {
+    final metadata = <String, Object?>{
+      'read_state_snapshot': {
+        'version': 1,
+        'community_id': '00000000-0000-4000-8000-000000000001',
+        'max_events': 4096,
+        'max_event_array_bytes': 8388608,
+      },
+      'future_object': {
+        'nested': [1, true, null],
+      },
+      'future_array': [1, 'two'],
+      'future_scalar': false,
+      'future_null': null,
+    };
+
+    for (final entry in metadata.entries) {
+      test('ignores unrelated top-level ${entry.key}', () {
+        final information = _descriptorJson(relay.public)
+          ..[entry.key] = entry.value;
+        final parsed = BuzzPushLeaseDescriptor.fromRelayInformation(
+          information,
+        );
+        expect(parsed.origin, descriptor.origin);
+        expect(parsed.executorPubkey, descriptor.executorPubkey);
+        expect(parsed.executorKeyId, descriptor.executorKeyId);
+        expect(parsed.transport, descriptor.transport);
+        expect(parsed.maxLeaseTtlSeconds, descriptor.maxLeaseTtlSeconds);
+        expect(parsed.maxContentLength, descriptor.maxContentLength);
+        expect(parsed.maxPlaintextLength, descriptor.maxPlaintextLength);
+        expect(parsed.maxEndpointLength, descriptor.maxEndpointLength);
+        expect(parsed.maxStringLength, descriptor.maxStringLength);
+      });
+    }
+
+    test('HTTP discovery accepts unrelated metadata', () async {
+      final information = _descriptorJson(relay.public)..addAll(metadata);
+      final client = MockClient((request) async {
+        expect(request.url, Uri.parse('https://tenant.example:8443/'));
+        expect(request.headers['Accept'], 'application/nostr+json');
+        return http.Response(jsonEncode(information), 200);
+      });
+      addTearDown(client.close);
+
+      final parsed = await fetchBuzzPushLeaseDescriptor(
+        'https://tenant.example:8443',
+        client: client,
+      );
+      expect(parsed.executorPubkey, relay.public);
+      expect(parsed.origin, descriptor.origin);
+    });
+
+    for (final field in [
+      'origin',
+      'keys',
+      'push_kinds',
+      'h_grammar',
+      'class_support',
+      'limitation',
+    ]) {
+      for (final missing in [true, false]) {
+        test(
+          '${missing ? 'missing' : 'malformed'} push.$field fails with future metadata',
+          () {
+            final information = _descriptorJson(relay.public)..addAll(metadata);
+            final push = information['push'] as Map<String, dynamic>;
+            if (missing) {
+              push.remove(field);
+            } else {
+              push[field] = false;
+            }
+            expect(
+              () => BuzzPushLeaseDescriptor.fromRelayInformation(information),
+              throwsA(
+                isA<FormatException>().having(
+                  (error) => error.message,
+                  'rejected field',
+                  contains(field),
+                ),
+              ),
+            );
+          },
+        );
+      }
+    }
+
+    for (final extensions in [
+      null,
+      false,
+      <String>[],
+      ['nip-er'],
+    ]) {
+      test('invalid extension advertisement $extensions fails', () {
+        final information = _descriptorJson(relay.public)
+          ..addAll(metadata)
+          ..['supported_extensions'] = extensions;
+        expect(
+          () => BuzzPushLeaseDescriptor.fromRelayInformation(information),
+          throwsA(isA<FormatException>()),
+        );
+      });
+    }
+  });
+
   test('descriptor rejects canonical origin with a trailing slash', () {
     final information = _descriptorJson(relay.public);
     (information['push'] as Map<String, dynamic>)['origin'] =
@@ -392,17 +590,14 @@ BuzzPushLeaseDescriptor _descriptor(String relayPubkey) =>
     BuzzPushLeaseDescriptor.fromRelayInformation(_descriptorJson(relayPubkey));
 
 Map<String, dynamic> _descriptorJson(String relayPubkey) => {
-  'supported_extensions': ['nip-er', 'nip-pl'],
+  'supported_extensions': ['nip-er', 'buzz-push-v1'],
   'push': {
     'origin': 'wss://tenant.example:8443',
     'keys': [
       {'id': 'relay-v1', 'pubkey': relayPubkey, 'current': true},
     ],
-    'app_profiles': [
-      {'id': 'buzz-ios-dogfood', 'transport': 'apns'},
-    ],
     'push_kinds': [9, 40002, 45001, 45003],
-    'h_grammar': 'uuid-v4-lowercase',
+    'h_grammar': 'uuid-lowercase',
     'class_support': {
       'apns': ['default'],
     },
@@ -429,7 +624,6 @@ BuzzPushEndpointGrant _grant(String relayPubkey) => BuzzPushEndpointGrant(
   installationId: 'c' * 32,
   endpointGrant: 'opaque-grant',
   endpointHash: 'd' * 64,
-  appProfile: 'buzz-ios-dogfood',
   endpointEpoch: 1,
   generation: 1,
   expiresAt: 1756212000,

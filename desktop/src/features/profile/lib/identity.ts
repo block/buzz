@@ -1,9 +1,9 @@
 import type { Profile, UserProfileSummary } from "@/shared/api/types";
-import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
+import { normalizePubkey, truncateNpub } from "@/shared/lib/pubkey";
 
 export type UserProfileLookup = Record<string, UserProfileSummary>;
 
-export { truncatePubkey };
+export { truncateNpub };
 
 /**
  * Deep-equal two profile lookups by value. Used to stabilise the merged
@@ -128,7 +128,7 @@ export function resolveUserLabel(input: {
     return safeFallback;
   }
 
-  return truncatePubkey(pubkey);
+  return truncateNpub(pubkey);
 }
 
 /**
@@ -188,6 +188,6 @@ export function formatOwnerLabel(
   return (
     owner?.displayName?.trim() ||
     owner?.nip05Handle?.trim() ||
-    truncatePubkey(ownerPubkey)
+    truncateNpub(ownerPubkey)
   );
 }

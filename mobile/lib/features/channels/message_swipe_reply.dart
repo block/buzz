@@ -1,0 +1,285 @@
+import 'dart:async';
+import 'dart:math' show min, sin, pi;
+
+import 'package:flutter/material.dart';
+import 'package:flutter/gestures.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_hooks/flutter_hooks.dart';
+import 'package:hooks_riverpod/hooks_riverpod.dart';
+
+import '../../shared/theme/buzz_icons.dart';
+import '../../shared/theme/theme.dart';
+import 'thread_detail_page.dart';
+import 'message_reply_drag_target.dart';
+import 'timeline_message.dart';
+
+/// Reveals the existing reply action as a message is dragged to the left.
+///
+/// Leftward keeps rightward drags free for the iOS swipe-back gesture.
+class MessageSwipeReply extends HookConsumerWidget {
+  final TimelineMessage message;
+  final List<TimelineMessage>? allMessages;
+  final String channelId;
+  final String? currentPubkey;
+  final bool isMember;
+  final bool isArchived;
+  final Widget child;
+
+  /// The visible content, excluding author metadata and reply/reaction footers.
+  final GlobalKey contentKey;
+
+  const MessageSwipeReply({
+    super.key,
+    required this.message,
+    required this.allMessages,
+    required this.channelId,
+    required this.currentPubkey,
+    required this.isMember,
+    required this.isArchived,
+    required this.child,
+    required this.contentKey,
+  });
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final offset = useAnimationController(upperBound: double.infinity);
+    final pulse = useAnimationController(
+      duration: const Duration(milliseconds: 180),
+    );
+    final dragDistance = useRef(0.0);
+    final layoutKey = useMemoized(GlobalKey.new);
+    final contentCenter = useState<double?>(null);
+    final feedbackLeft = useState(0.0);
+    final dragTarget = useRef<Rect?>(null);
+    final didHaptic = useRef(false);
+    final cancelled = useRef(false);
+    final reducedMotion = MediaQuery.disableAnimationsOf(context);
+    final messages = allMessages;
+    if (messages == null || message.isSystem) return child;
+
+    void reset() {
+      pulse.stop();
+      pulse.value = 0;
+      if (reducedMotion) {
+        offset.value = 0;
+      } else {
+        unawaited(
+          offset.animateWith(
+            ScrollSpringSimulation(
+              const SpringDescription(mass: 1, stiffness: 500, damping: 36),
+              offset.value,
+              0,
+              0,
+            ),
+          ),
+        );
+      }
+    }
+
+    // Flutter ends an accepted drag on PointerCancel too. Preserve the raw
+    // cancellation signal so an interrupted gesture cannot open a reply.
+    return Listener(
+      onPointerCancel: (_) => cancelled.value = true,
+      child: RawGestureDetector(
+        behavior: HitTestBehavior.translucent,
+        excludeFromSemantics: true,
+        gestures: {
+          _MessageReplyDragRecognizer:
+              GestureRecognizerFactoryWithHandlers<_MessageReplyDragRecognizer>(
+                _MessageReplyDragRecognizer.new,
+                (recognizer) => recognizer
+                  ..canStart = (position) {
+                    final bounds = messageReplyDragTargetBounds(
+                      contentKey,
+                      position,
+                    );
+                    dragTarget.value = bounds?.shift(Offset(offset.value, 0));
+                    return bounds != null;
+                  }
+                  ..onStart = (_) {
+                    final bounds = dragTarget.value;
+                    final layoutBox = layoutKey.currentContext
+                        ?.findRenderObject();
+                    if (bounds != null && layoutBox is RenderBox) {
+                      // Sit just past the touched bubble's trailing edge, but
+                      // stay on screen beside bubbles that reach the row's end;
+                      // the bubble covers the feedback until it slides away.
+                      final trailing = layoutBox
+                          .globalToLocal(bounds.topRight)
+                          .dx;
+                      feedbackLeft.value = min(
+                        trailing + Grid.xxs,
+                        layoutBox.size.width - Grid.lg - Grid.xxs,
+                      );
+                      contentCenter.value = layoutBox
+                          .globalToLocal(bounds.center)
+                          .dy;
+                    }
+                    offset.stop();
+                    pulse.stop();
+                    pulse.value = 0;
+                    offset.value = 0;
+                    dragDistance.value = 0;
+                    didHaptic.value = false;
+                    cancelled.value = false;
+                  }
+                  ..onUpdate = (details) {
+                    dragDistance.value = (dragDistance.value - details.delta.dx)
+                        .clamp(0.0, double.infinity);
+                    // Keep pulling beyond readiness, with increasing rubber-band resistance.
+                    final excess = dragDistance.value - 72;
+                    offset.value = excess <= 0
+                        ? dragDistance.value
+                        : 72 + 40 * excess / (excess + 80);
+                    if (offset.value >= 72 && !didHaptic.value) {
+                      didHaptic.value = true;
+                      unawaited(HapticFeedback.mediumImpact());
+                      if (!reducedMotion) {
+                        unawaited(pulse.forward(from: 0));
+                      }
+                    }
+                    if (offset.value < 72) {
+                      didHaptic.value = false;
+                      pulse.stop();
+                      pulse.value = 0;
+                    }
+                  }
+                  ..onCancel = reset
+                  ..onEnd = (_) {
+                    final reply = !cancelled.value && offset.value >= 72;
+                    reset();
+                    if (!reply) return;
+                    Navigator.of(context).push(
+                      MaterialPageRoute<void>(
+                        builder: (_) => ThreadDetailPage(
+                          threadHead: message,
+                          allMessages: messages,
+                          channelId: channelId,
+                          currentPubkey: currentPubkey,
+                          isMember: isMember,
+                          isArchived: isArchived,
+                        ),
+                      ),
+                    );
+                  },
+              ),
+        },
+        child: AnimatedBuilder(
+          animation: Listenable.merge([offset, pulse]),
+          child: child,
+          builder: (context, child) {
+            final progress = (offset.value / 72).clamp(0.0, 1.0);
+            // Follows the chosen message color, like the user's own bubbles.
+            final chatColors = ChatColors.of(context);
+            final accent = chatColors.outgoing;
+            final filledForeground = chatColors.foreground;
+            return Stack(
+              key: layoutKey,
+              clipBehavior: Clip.none,
+              alignment: Alignment.centerLeft,
+              children: [
+                if (progress > 0)
+                  Positioned(
+                    left: feedbackLeft.value,
+                    top: contentCenter.value ?? 0,
+                    width: Grid.lg,
+                    child: FractionalTranslation(
+                      translation: const Offset(0, -0.5),
+                      child: ExcludeSemantics(
+                        child: Opacity(
+                          opacity: progress,
+                          child: Transform.scale(
+                            scale: reducedMotion
+                                ? 1
+                                : (0.5 + 0.5 * progress) *
+                                      (1 + 0.12 * sin(pi * pulse.value)),
+                            alignment: Alignment.center,
+                            child: SizedBox(
+                              key: const ValueKey('swipe-reply-feedback'),
+                              width: Grid.lg,
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  SizedBox.square(
+                                    dimension: Grid.lg,
+                                    child: DecoratedBox(
+                                      key: const ValueKey('swipe-reply-circle'),
+                                      decoration: BoxDecoration(
+                                        shape: BoxShape.circle,
+                                        color: progress == 1
+                                            ? accent
+                                            : Colors.transparent,
+                                      ),
+                                      child: Stack(
+                                        fit: StackFit.expand,
+                                        children: [
+                                          CircularProgressIndicator(
+                                            value: progress,
+                                            strokeWidth: 2,
+                                            strokeAlign: -1,
+                                            color: accent,
+                                            backgroundColor: Colors.transparent,
+                                          ),
+                                          Icon(
+                                            BuzzIcons.messageSquareReply,
+                                            size: 22,
+                                            color: progress == 1
+                                                ? filledForeground
+                                                : context.colors.primary,
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  ),
+                                  const SizedBox(height: Grid.quarter),
+                                  Text(
+                                    'Reply',
+                                    textAlign: TextAlign.center,
+                                    style: context.textTheme.labelSmall
+                                        ?.copyWith(
+                                          color:
+                                              context.colors.onSurfaceVariant,
+                                        ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                Transform.translate(
+                  offset: Offset(-offset.value, 0),
+                  child: child,
+                ),
+              ],
+            );
+          },
+        ),
+      ),
+    );
+  }
+}
+
+// Reject outside starts before entering the gesture arena, leaving navigation
+// and other row interactions free to recognize those drags. Only a leftward
+// drag can win, so a rightward swipe-back starting on a message still pops.
+class _MessageReplyDragRecognizer extends HorizontalDragGestureRecognizer {
+  late bool Function(Offset) canStart;
+
+  @override
+  bool isPointerAllowed(PointerEvent event) =>
+      canStart(event.position) && super.isPointerAllowed(event);
+
+  @override
+  bool hasSufficientGlobalDistanceToAccept(
+    PointerDeviceKind pointerDeviceKind,
+    double? deviceTouchSlop,
+  ) =>
+      globalDistanceMoved < 0 &&
+      super.hasSufficientGlobalDistanceToAccept(
+        pointerDeviceKind,
+        deviceTouchSlop,
+      );
+}

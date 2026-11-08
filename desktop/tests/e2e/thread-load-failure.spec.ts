@@ -54,24 +54,15 @@ async function setThreadRepliesFailing(page: Page, failing: boolean) {
   }, failing);
 }
 
-// Open the welcome thread deterministically: prefer its summary row, but fall
-// back to hovering the root message and clicking Reply. The summary row depends
-// on the channel-window query having materialized the seeded reply, which can
-// lag; the root Reply affordance opens the same thread panel without that race,
-// so the panel is reliably open before the error-card assertions run.
+// Open the welcome thread from its "1 reply" summary row. The row appears only
+// once the channel window has materialized the seeded reply, which can lag, so
+// wait for it rather than probing it once.
 async function openWelcomeThread(page: Page) {
   const summary = page.locator(
     '[data-testid="message-thread-summary"][data-thread-head-id="mock-general-welcome"]',
   );
-  if (await summary.count()) {
-    await summary.first().click();
-  } else {
-    const root = page.locator(
-      '[data-testid="message-row"][data-message-id="mock-general-welcome"]',
-    );
-    await root.hover();
-    await root.getByRole("button", { name: "Reply" }).click();
-  }
+  await expect(summary).toBeVisible();
+  await summary.click();
   await expect(page.getByTestId("message-thread-panel")).toBeVisible();
 }
 

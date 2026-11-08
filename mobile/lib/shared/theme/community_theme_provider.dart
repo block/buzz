@@ -1,12 +1,10 @@
 import 'dart:async';
 
-import 'package:flutter/material.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
 import '../crypto/nip44.dart';
 import '../relay/relay.dart';
-import 'accent_colors.dart';
 import 'community_theme_preference.dart';
 import 'community_theme_sync.dart';
 import 'theme_provider.dart';
@@ -30,7 +28,7 @@ class CommunityThemeNotifier extends Notifier<CommunityThemePreference> {
     _storage = ref.watch(communityThemeStorageProvider);
     final config = ref.watch(relayConfigProvider);
     final session = ref.watch(relaySessionProvider);
-    final pubkey = pubkeyFromNsec(config.nsec);
+    final pubkey = ref.watch(myPubkeyProvider);
     _pubkey = pubkey;
     _relayUrl = config.baseUrl;
 
@@ -65,7 +63,7 @@ class CommunityThemeNotifier extends Notifier<CommunityThemePreference> {
           session: ref.read(relaySessionProvider.notifier),
           nsec: config.nsec!,
         ),
-        crypto: _crypto(config.nsec!, pubkey),
+        crypto: ref.watch(communityThemeCryptoProvider)!,
         onRemote: (remote) => _applyRemote(manager, remote),
         onPublished: (preference) {
           if (_scopedLocalPubkey == pubkey &&
@@ -107,44 +105,6 @@ class CommunityThemeNotifier extends Notifier<CommunityThemePreference> {
       ref.onDispose(manager.dispose);
     }
     return initial;
-  }
-
-  void setMode(ThemeMode mode) {
-    var theme = state.theme;
-    if (mode == ThemeMode.system) {
-      theme = schemeForAppearanceMode(theme, mode) ?? theme;
-    } else {
-      final effective = effectiveTheme(theme, mode);
-      if (effective != null) theme = effective.name;
-    }
-    _save(
-      CommunityThemePreference(
-        theme: theme,
-        accent: state.accent,
-        followSystem: mode == ThemeMode.system,
-      ),
-    );
-  }
-
-  void setTheme(String? theme) {
-    _save(
-      CommunityThemePreference(
-        theme: theme ?? defaultSchemeName,
-        accent: state.accent,
-        followSystem: state.followSystem,
-      ),
-    );
-  }
-
-  void setAccent(int index) {
-    if (index < 0 || index >= accentColors.length) return;
-    _save(
-      CommunityThemePreference(
-        theme: state.theme,
-        accent: accentColors[index].wireValue,
-        followSystem: state.followSystem,
-      ),
-    );
   }
 
   /// Persists a complete theme-picker selection as one durable snapshot.
@@ -216,14 +176,18 @@ class CommunityThemeNotifier extends Notifier<CommunityThemePreference> {
   }
 }
 
-CommunityThemeCrypto _crypto(String nsec, String pubkey) {
-  final privateHex = nostr.Nip19.decode(payload: nsec).data;
+/// Retains theme encryption material while the same community reconnects.
+final communityThemeCryptoProvider = Provider<CommunityThemeCrypto?>((ref) {
+  final config = ref.watch(relayConfigProvider);
+  final pubkey = ref.watch(myPubkeyProvider);
+  if (pubkey == null || config.nsec == null) return null;
+  final privateHex = nostr.Nip19.decode(payload: config.nsec!).data;
   final key = getConversationKey(privateHex, pubkey);
   return CommunityThemeCrypto(
     encrypt: (plaintext) => nip44Encrypt(key, plaintext),
     decrypt: (ciphertext) => nip44Decrypt(key, ciphertext),
   );
-}
+});
 
 final communityThemeStorageProvider = Provider<CommunityThemeStorage>(
   (ref) => CommunityThemeStorage(ref.watch(savedPrefsProvider)),

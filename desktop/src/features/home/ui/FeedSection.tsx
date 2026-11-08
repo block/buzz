@@ -170,6 +170,7 @@ export function FeedSection({
             const { mentionNames, mentionPubkeysByName } = resolveMentionProps(
               item.tags,
               profiles,
+              item.content,
             );
 
             return (

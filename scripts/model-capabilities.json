@@ -433,6 +433,24 @@
   "exact_records": [
     {
       "provider": "databricks_v2",
+      "raw_model_id": "data_workflow_tools.goose.goose-claude-opus-5-5",
+      "registry_label": "Claude Opus 5.5",
+      "thinking_mode": "adaptive",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "anthropic-messages",
+      "normalization_policy": "none",
+      "_provenance": "Exact UC service: native Messages with adaptive thinking and output_config.effort=high verified by synthetic tool-result round trip on 2026-09-23. Not inferred for other UC namespaces.",
+      "source": "https://docs.databricks.com/aws/en/ai-gateway/query-model-services; https://platform.claude.com/docs/en/build-with-claude/effort"
+    },
+    {
+      "provider": "databricks_v2",
       "raw_model_id": "databricks-gpt-5-4-mini",
       "registry_label": "GPT-5.4 mini",
       "thinking_mode": "none",
@@ -473,6 +491,24 @@
       "provider": "databricks_v2",
       "raw_model_id": "databricks-claude-fable-5",
       "registry_label": "Claude Fable 5",
+      "thinking_mode": "adaptive",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "high",
+      "databricks_v2_wire_route": "anthropic-messages",
+      "normalization_policy": "none",
+      "_provenance": "all axes materialized from family:anthropic-adaptive-xhigh-fable-5",
+      "_source": "models.dev anthropic catalog label; Databricks workspace endpoint is absent from its provider catalog"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-claude-fable-5-1",
+      "registry_label": "Claude Fable 5.1",
       "thinking_mode": "adaptive",
       "supported_efforts": [
         "low",

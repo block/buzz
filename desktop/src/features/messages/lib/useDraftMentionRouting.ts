@@ -1,3 +1,4 @@
+import type { MentionPubkeyCandidate } from "./extractMentionPubkeys";
 import * as React from "react";
 
 import type { DraftMentionRef } from "./useDrafts";
@@ -9,28 +10,52 @@ import {
 } from "./draftMentionRefs";
 
 export function useDraftMentionRouting(params: {
+  memberCandidates?: readonly MentionPubkeyCandidate[];
   mentionMapRef: React.MutableRefObject<Map<string, string>>;
   personaMentionMapRef: React.MutableRefObject<Map<string, string>>;
+  selectedAgentPubkeysRef: React.MutableRefObject<Set<string>>;
   selectedAgentNamesRef: React.MutableRefObject<string[]>;
   cancelAutocomplete: () => void;
   setSelectedNames: (names: string[]) => void;
   setSelectedAgentNames: (names: string[]) => void;
 }): {
-  getDraftMentionRefs: (content: string) => DraftMentionRef[];
+  getDraftMentionRefs: (
+    content: string,
+    fallbackRefs?: readonly DraftMentionRef[],
+    competingDisplayNames?: readonly string[],
+  ) => DraftMentionRef[];
   restoreDraftMentionRefs: (refs: readonly DraftMentionRef[]) => void;
 } {
   const getDraftMentionRefs = React.useCallback(
-    (content: string) =>
+    (
+      content: string,
+      fallbackRefs: readonly DraftMentionRef[] = [],
+      competingDisplayNames: readonly string[] = [],
+    ) =>
       snapshotDraftMentionRefs(
         content,
         params.mentionMapRef.current,
         params.selectedAgentNamesRef.current,
+        params.memberCandidates,
+        params.personaMentionMapRef.current.keys(),
+        fallbackRefs,
+        competingDisplayNames,
       ),
-    [params.mentionMapRef, params.selectedAgentNamesRef],
+    [
+      params.mentionMapRef,
+      params.selectedAgentNamesRef,
+      params.memberCandidates,
+      params.personaMentionMapRef,
+    ],
   );
   const restoreDraftMentionRefs = React.useCallback(
     (refs: readonly DraftMentionRef[]) => {
       params.cancelAutocomplete();
+      params.selectedAgentPubkeysRef.current = new Set(
+        refs
+          .filter((ref) => ref.isAgent)
+          .map((ref) => ref.pubkey.toLowerCase()),
+      );
       const { names, agentNames } = replaceWithDraftMentionRefs(
         refs,
         params.mentionMapRef.current,

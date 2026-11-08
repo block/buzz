@@ -20,7 +20,7 @@ pub(crate) async fn fetch_own_repo_announcement(
 ) -> Result<Option<Event>, CliError> {
     let filter = serde_json::json!({
         "kinds": [KIND_GIT_REPO_ANNOUNCEMENT],
-        "authors": [client.keys().public_key().to_hex()],
+        "authors": [client.public_key().to_hex()],
         "#d": [repo_id],
         "limit": 1,
     });
@@ -194,7 +194,7 @@ fn validate_write_response(raw: &str) -> Result<String, CliError> {
 }
 
 async fn submit_repo_update(client: &BuzzClient, builder: EventBuilder) -> Result<(), CliError> {
-    let event = client.sign_event(builder)?;
+    let event = client.sign_event(builder).await?;
     let raw = client.submit_event(event).await?;
     println!("{}", validate_write_response(&raw)?);
     Ok(())
@@ -260,7 +260,7 @@ pub async fn cmd_create_repo(
         relays,
         channel,
     )?;
-    let event = client.sign_event(builder)?;
+    let event = client.sign_event(builder).await?;
     let owner = event.pubkey.to_hex();
     let resp = client.submit_event(event).await?;
     // `link` renders as a rich preview card in Buzz Desktop when included in
@@ -313,7 +313,7 @@ pub async fn cmd_list_repos(
             crate::validate::validate_hex64(pk)?;
             pk.to_string()
         }
-        None => client.keys().public_key().to_hex(),
+        None => client.public_key().to_hex(),
     };
 
     let mut filter = serde_json::json!({
@@ -442,6 +442,9 @@ pub async fn dispatch(cmd: crate::ReposCmd, client: &BuzzClient) -> Result<(), C
         ReposCmd::Get { id, owner } => cmd_get_repo(client, &id, owner.as_deref()).await,
         ReposCmd::List { owner, limit } => cmd_list_repos(client, owner.as_deref(), limit).await,
         ReposCmd::Bind { id, channel } => cmd_bind_repo(client, &id, &channel).await,
+        ReposCmd::DefaultBranch(command) => {
+            super::repo_default_branch::dispatch(command, client).await
+        }
         ReposCmd::Protect(command) => match command {
             ReposProtectCmd::List { id } => cmd_protect_list(client, &id).await,
             ReposProtectCmd::Set {

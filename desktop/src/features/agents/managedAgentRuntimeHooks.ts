@@ -12,11 +12,14 @@ import {
 } from "@/features/communities/communityStorage";
 import {
   listManagedAgentRuntimes,
-  reconcileManagedAgentRuntimes,
   startManagedAgentRuntime,
   stopManagedAgentRuntime,
 } from "@/shared/api/tauriManagedAgents";
 import type { ManagedAgentRuntimeStatus } from "@/shared/api/types";
+import {
+  captureRelayRemovals,
+  reconcileConfiguredManagedAgentRuntimes,
+} from "./managedAgentRelayCleanup";
 import { canonicalRelayUrl } from "./managedAgentRuntimeStatus";
 
 export const managedAgentRuntimesQueryKey = ["managed-agent-runtimes"] as const;
@@ -85,8 +88,8 @@ export function bootstrapManagedAgentRuntimePairs(
   const communities = loadCommunities().map((community) => ({
     relayUrl: community.relayUrl,
   }));
-  void reconcileManagedAgentRuntimes(communities)
-    .then((runtimes) => {
+  void reconcileConfiguredManagedAgentRuntimes(communities)
+    .then(({ runtimes }) => {
       cacheReconciledManagedAgentRuntimes(queryClient, baseline, runtimes);
     })
     .catch((error) => {
@@ -159,6 +162,8 @@ export function clearActiveTurnsForAgentOnStop(
  * - Clear fires only when stop succeeds.
  * - A failed start occurs after the clear — the badge is already gone.
  * - No clear can fire after start begins, so genuinely-new turns are safe.
+ * - A removal of the relay during the stop abandons the start with
+ *   `RELAY_REMOVED_ERROR`, even if the community was re-added since.
  */
 export async function restartManagedAgentPair(
   pubkey: string,
@@ -173,8 +178,10 @@ export async function restartManagedAgentPair(
     relayUrl: string,
   ) => Promise<ManagedAgentRuntimeStatus>,
 ): Promise<ManagedAgentRuntimeStatus> {
+  const assertRelayNotRemoved = captureRelayRemovals(relayUrl);
   await stop(pubkey, relayUrl);
   clear(pubkey, relayUrl);
+  assertRelayNotRemoved();
   return start(pubkey, relayUrl);
 }
 

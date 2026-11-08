@@ -239,6 +239,18 @@ mod tests {
         StatusCode::OK
     }
 
+    #[test]
+    fn apns_payload_matches_normative_contract_and_models() {
+        let body = std::str::from_utf8(APNS_RECONNECT_PAYLOAD).unwrap();
+        for contract in [
+            include_str!("../../../docs/nips/NIP-PL.md"),
+            include_str!("../../../docs/formal/nip-pl/delivery.py"),
+            include_str!("../../../docs/formal/nip-pl/fixed_payload.py"),
+        ] {
+            assert!(contract.contains(body), "APNs fixed-body contract drift");
+        }
+    }
+
     #[tokio::test]
     async fn certificate_transport_sends_no_bearer_and_exact_body_for_every_attempt() {
         let requests = Arc::new(Mutex::new(Vec::new()));
@@ -274,6 +286,11 @@ mod tests {
         }
         let captured = requests.lock().unwrap();
         assert_eq!(captured.len(), 2);
+        for request in captured.iter() {
+            let payload: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            assert_eq!(payload["aps"]["sound"], "default");
+            assert_eq!(payload["aps"]["mutable-content"], 1);
+        }
         assert!(captured
             .iter()
             .all(|request| request.body.as_slice() == APNS_RECONNECT_PAYLOAD));
@@ -287,12 +304,12 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires the exported dogfood Apple Push Services PEM"]
+    #[ignore = "requires the exported configured Apple Push Services PEM"]
     async fn live_sandbox_probe_reports_literal_status_and_body() {
         let cert_path = std::env::var("BUZZ_PUSH_LIVE_APNS_CERT_PATH")
-            .expect("set BUZZ_PUSH_LIVE_APNS_CERT_PATH to the dogfood identity PEM");
+            .expect("set BUZZ_PUSH_LIVE_APNS_CERT_PATH to the configured identity PEM");
         let topic = std::env::var("BUZZ_PUSH_LIVE_APNS_TOPIC")
-            .expect("set BUZZ_PUSH_LIVE_APNS_TOPIC to the dogfood bundle id");
+            .expect("set BUZZ_PUSH_LIVE_APNS_TOPIC to the configured bundle id");
         let identity = std::fs::read(cert_path).unwrap();
         let transport =
             ApnsTransport::certificate(&identity, topic, ApnsEnvironment::Sandbox).unwrap();
