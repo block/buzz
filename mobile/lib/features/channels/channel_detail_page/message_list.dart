@@ -70,6 +70,13 @@ class _MessageList extends HookConsumerWidget {
     final itemScrollController = useMemoized(ItemScrollController.new);
     final itemPositionsListener = useMemoized(ItemPositionsListener.create);
     final stickyDayTimestamp = useValueNotifier<int?>(null);
+    final stickyTop =
+        frostedAppBarHeight(
+          context,
+          titleContentHeight: appBarTitleContentHeight,
+        ) +
+        frostedAppBarEdgeClearance(context) +
+        Grid.twelve;
     final timelineViewportHeight = useRef(MediaQuery.sizeOf(context).height);
     final isLoadingOlder = useState(false);
     final navigatingOldest = useRef(false);
@@ -297,12 +304,6 @@ class _MessageList extends HookConsumerWidget {
         return;
       }
 
-      final stickyTop =
-          frostedAppBarHeight(
-            context,
-            titleContentHeight: appBarTitleContentHeight,
-          ) +
-          Grid.twelve;
       double physicalTop(ItemPosition position) =>
           viewportHeight * (1 - position.itemTrailingEdge);
       double physicalBottom(ItemPosition position) =>
@@ -599,6 +600,7 @@ class _MessageList extends HookConsumerWidget {
         entries.length,
         itemPositionsListener,
         appBarTitleContentHeight,
+        stickyTop,
         composerBottomInset,
         showUnreadNavigation,
         stickyDateHeaderState,

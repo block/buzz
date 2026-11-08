@@ -13,6 +13,48 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 void main() {
+  testWidgets(
+    'native layout scope opts into pane geometry and restores defaults',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      for (final pane in [false, true, false]) {
+        final layout = pane
+            ? const NavigationHeaderLayout(
+                hardEdge: true,
+                paneControls: true,
+                titleInsets: EdgeInsets.only(left: 24, right: 8),
+                topSpacing: 24,
+                centerInVisibleHeight: true,
+                nativeEdgeClearance: 16,
+              )
+            : const NavigationHeaderLayout();
+        await tester.pumpWidget(
+          _testApp(
+            home: NavigationHeaderScope(
+              layout: layout,
+              child: const SizedBox(
+                height: 120,
+                child: IosNavigationBar(title: 'Messages', largeTitle: true),
+              ),
+            ),
+          ),
+        );
+        final payload =
+            tester.widget<UiKitView>(find.byType(UiKitView)).creationParams
+                as Map;
+        expect(payload['hardEdge'], pane);
+        expect(payload['horizontalControls'], pane);
+        expect(payload['alignCollapsedTitleToLeading'], pane);
+        expect(payload['centerInVisibleHeight'], pane);
+        expect(payload['titleInsetLeft'], pane ? 24 : 0);
+        expect(payload['edgeClearance'], pane ? 16 : 8);
+      }
+      await tester.pumpWidget(const SizedBox());
+      debugDefaultTargetPlatformOverride = null;
+    },
+  );
+
   testWidgets('native edge style is soft by default and explicitly opt-in', (
     tester,
   ) async {

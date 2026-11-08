@@ -37,7 +37,7 @@ final class NavigationEdgeBackdrop: UIViewController {
     }
   }
 
-  func layout(in frame: CGRect, headerHeight: CGFloat, automaticTop: CGFloat) {
+  func layout(in frame: CGRect, headerHeight: CGFloat, automaticTop: CGFloat, lowerClearance: CGFloat = 8) {
     // Implicit Flutter engines may register the factory before a controller
     // exists. Resolve containment after the platform view enters its hierarchy.
     if parent == nil {
@@ -53,7 +53,7 @@ final class NavigationEdgeBackdrop: UIViewController {
     }
     // Native conversation bars leave breathing room below their controls.
     // Extend only the decorative surface, preserving Flutter layout/hit areas.
-    let headerHeight = headerHeight + 8
+    let headerHeight = headerHeight + lowerClearance
     view.frame = frame
     scroll.frame = view.bounds
     scroll.contentSize = CGSize(width: frame.width, height: 10000)

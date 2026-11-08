@@ -3,6 +3,7 @@ import 'message_swipe_reply.dart';
 import '../../shared/widgets/ios_scroll_to_top.dart';
 import 'message_footer_layout.dart';
 import 'reply_summary_link.dart';
+
 import 'dart:async';
 import 'dart:math' as math;
 
@@ -321,11 +322,15 @@ class ThreadDetailPage extends HookConsumerWidget {
       replies: replies,
     );
 
+    final stickyTop =
+        frostedAppBarHeight(context) +
+        frostedAppBarEdgeClearance(context) +
+        Grid.twelve;
     void updateStickyDateHeader(Iterable<ItemPosition> positions) {
       final update = stickyDateIndex.resolve(
         positions: positions,
         viewportHeight: viewportHeight,
-        stickyTop: frostedAppBarHeight(context) + Grid.twelve,
+        stickyTop: stickyTop,
         stickyHeaderHeight: StickyDateHeader.heightOf(context),
       );
       stickyDateHeaderState.value = update.state;
@@ -480,16 +485,24 @@ class ThreadDetailPage extends HookConsumerWidget {
           }
         }
 
+        var disposed = false;
         itemPositionsListener.itemPositions.addListener(onPositionsChanged);
-        return () => itemPositionsListener.itemPositions.removeListener(
-          onPositionsChanged,
-        );
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!disposed && context.mounted) onPositionsChanged();
+        });
+        return () {
+          disposed = true;
+          itemPositionsListener.itemPositions.removeListener(
+            onPositionsChanged,
+          );
+        };
       },
       [
         itemPositionsListener,
         replies.length,
         liveHead.createdAt,
         viewportHeight,
+        stickyTop,
       ],
     );
 
@@ -935,7 +948,7 @@ class ThreadDetailPage extends HookConsumerWidget {
                 Positioned(
                   left: 0,
                   right: 0,
-                  top: frostedAppBarHeight(context) + Grid.twelve,
+                  top: stickyTop,
                   child: StickyDateHeader(
                     key: const ValueKey('thread-sticky-date-header'),
                     state: stickyDateHeaderState,

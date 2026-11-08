@@ -15,8 +15,20 @@ pub(crate) const MEDIA_EDIT_TARGET_SQL: &str = r#"decode(lower(jsonb_path_query_
 pub(super) const MEDIA_LOOKUP_SETTINGS_SQL: &str =
     "SET LOCAL statement_timeout = '2s'; SET LOCAL jit = off";
 
+fn edit_governed_kinds_sql() -> String {
+    buzz_core::media::EDIT_GOVERNED_KINDS
+        .iter()
+        .map(u16::to_string)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 fn edit_target(alias: &str) -> String {
     MEDIA_EDIT_TARGET_SQL.replacen("(tags,", &format!("({alias}.tags,"), 1)
+}
+
+pub(super) fn latest_message_edit_sql() -> String {
+    format!("SELECT e.* FROM events e WHERE e.community_id=$1 AND e.channel_id=$2 AND e.kind=40003 AND e.deleted_at IS NULL AND {}=$3 ORDER BY e.created_at DESC,e.id DESC LIMIT 1", edit_target("e"))
 }
 
 /// Result of a complete live-reference lookup, for bounded denial metrics.
@@ -32,7 +44,69 @@ pub enum MediaAccess {
     Restricted,
 }
 
+/// Original message and its latest live edit in one primary-database snapshot.
+#[derive(Debug)]
+pub struct MessageEditState {
+    /// Live original, authorized for the reader's explicitly named channel.
+    pub original: nostr::Event,
+    /// Complete replacement, if a live edit exists.
+    pub edit: Option<nostr::Event>,
+}
+
 impl Db {
+    /// Read effective edit metadata using the normalized-target
+    /// index. Channel membership, source liveness and edit selection share a
+    /// repeatable-read primary snapshot; no replica or membership cache is used.
+    pub async fn message_edit_state(
+        &self,
+        community: CommunityId,
+        channel: uuid::Uuid,
+        target: &[u8],
+        reader: &[u8],
+    ) -> Result<Option<MessageEditState>> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::raw_sql(MEDIA_LOOKUP_SETTINGS_SQL)
+            .execute(&mut *tx)
+            .await?;
+        // Mirrors channel_members::{get_accessible_channel_ids,
+        // get_readable_named_only_channels}.
+        // The channel is explicitly named by this read, so open unlisted and
+        // named-only channels follow the normal explicit-channel read policy.
+        let original_sql = format!("SELECT e.* FROM events e JOIN channels c ON c.community_id=e.community_id AND c.id=e.channel_id WHERE e.community_id=$1 AND e.channel_id=$2 AND e.id=$3 AND e.kind IN ({}) AND e.deleted_at IS NULL AND c.deleted_at IS NULL AND (c.visibility='open' OR EXISTS (SELECT 1 FROM channel_members cm WHERE cm.community_id=c.community_id AND cm.channel_id=c.id AND cm.pubkey=$4 AND cm.removed_at IS NULL))", edit_governed_kinds_sql());
+        let original = sqlx::query(sqlx::AssertSqlSafe(original_sql))
+            .bind(community.as_uuid())
+            .bind(channel)
+            .bind(target)
+            .bind(reader)
+            .fetch_optional(&mut *tx)
+            .await?;
+        let Some(original) = original else {
+            tx.commit().await?;
+            return Ok(None);
+        };
+        let original = super::event::row_to_stored_event(original)?
+            .ok_or_else(|| DbError::InvalidData("unreadable original message row".into()))?
+            .event;
+        let sql = latest_message_edit_sql();
+        let edit = sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(community.as_uuid())
+            .bind(channel)
+            .bind(target)
+            .fetch_optional(&mut *tx)
+            .await?
+            .map(|row| {
+                super::event::row_to_stored_event(row)?
+                    .map(|stored| stored.event)
+                    .ok_or_else(|| DbError::InvalidData("unreadable latest edit row".into()))
+            })
+            .transpose()?;
+        tx.commit().await?;
+        Ok(Some(MessageEditState { original, edit }))
+    }
+
     /// Record possession after the upload pipeline verified the actual bytes.
     /// Independent of optional audit and moderation records; admission fences deletion.
     #[datastore_span(name = "record_media_upload", system = "postgresql")]
@@ -242,12 +316,13 @@ pub(super) fn media_reference_query(
             );
     query
         .push_bind(pubkey)
-        .push(
+        .push(format!(
             ")))) AND (e.kind <> 40003 OR EXISTS (SELECT 1 FROM events original \
                 WHERE original.community_id=e.community_id AND original.channel_id=e.channel_id \
-                AND original.deleted_at IS NULL AND original.kind IN (9,40002) \
+                AND original.deleted_at IS NULL AND original.kind IN ({}) \
                 AND ",
-        )
+            edit_governed_kinds_sql(),
+        ))
         .push(edit_target("e"))
         .push(
             "=original.id AND NOT EXISTS (SELECT 1 FROM events newer \
@@ -260,11 +335,11 @@ pub(super) fn media_reference_query(
     if probe == 3 {
         // The renderer retains snapshots unless the original or any live
         // edit suppresses them; later body edits never undo suppression.
-        query.push("AND e.kind IN (9,40002) AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(e.tags) marker(value) WHERE marker.value='[\"link-preview\",\"none\"]'::jsonb) AND EXISTS (SELECT 1 FROM events edit WHERE edit.community_id=e.community_id AND edit.channel_id=e.channel_id AND edit.kind=40003 AND edit.deleted_at IS NULL AND ")
+        query.push(format!("AND e.kind IN ({}) AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(e.tags) marker(value) WHERE marker.value='[\"link-preview\",\"none\"]'::jsonb) AND EXISTS (SELECT 1 FROM events edit WHERE edit.community_id=e.community_id AND edit.channel_id=e.channel_id AND edit.kind=40003 AND edit.deleted_at IS NULL AND ", edit_governed_kinds_sql()))
             .push(edit_target("edit")).push("=e.id) AND NOT EXISTS (SELECT 1 FROM events suppressed WHERE suppressed.community_id=e.community_id AND suppressed.channel_id=e.channel_id AND suppressed.kind=40003 AND suppressed.deleted_at IS NULL AND ")
             .push(edit_target("suppressed")).push("=e.id AND EXISTS (SELECT 1 FROM jsonb_array_elements(suppressed.tags) marker(value) WHERE marker.value='[\"link-preview\",\"none\"]'::jsonb))");
     } else {
-        query.push("AND (e.kind NOT IN (9,40002) OR NOT EXISTS (SELECT 1 FROM events edit WHERE edit.community_id=e.community_id AND edit.channel_id=e.channel_id AND edit.kind=40003 AND edit.deleted_at IS NULL AND ")
+        query.push(format!("AND (e.kind NOT IN ({}) OR NOT EXISTS (SELECT 1 FROM events edit WHERE edit.community_id=e.community_id AND edit.channel_id=e.channel_id AND edit.kind=40003 AND edit.deleted_at IS NULL AND ", edit_governed_kinds_sql()))
             .push(edit_target("edit")).push("=e.id))");
     }
     query

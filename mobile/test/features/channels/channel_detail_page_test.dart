@@ -69,6 +69,7 @@ import 'package:buzz/features/channels/reaction_row.dart';
 import 'package:buzz/features/channels/mentions/mention_candidates_provider.dart';
 import 'package:buzz/features/channels/message_mention_pill.dart';
 import 'package:buzz/features/channels/thread_detail_page.dart';
+import 'package:buzz/features/channels/sticky_date_header.dart';
 import 'package:buzz/features/channels/thread_replies_provider.dart';
 import 'package:buzz/features/channels/timeline_message.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
@@ -247,6 +248,7 @@ NostrEvent _edit({
 );
 
 Widget _buildTestable({
+  List<AgentDirectoryEntry> soloAgents = const [],
   String? bestie,
   bool useRealChannelProviders = false,
   ProfileNotifier? profileNotifier,
@@ -351,7 +353,7 @@ Widget _buildTestable({
           ),
         ),
         meMessagesProvider(_channelId).overrideWith(() => fakeMessagesNotifier),
-        meAssistantsProvider.overrideWith((ref) async => []),
+        meAssistantsProvider.overrideWith((ref) async => soloAgents),
       ],
       channelMessagesProvider(_channelId).overrideWith(
         () => personalChat
@@ -497,6 +499,7 @@ Widget _buildTestable({
       savedPrefsProvider.overrideWithValue(_testPrefs),
     ],
     child: MaterialApp(
+      debugShowCheckedModeBanner: false,
       navigatorKey: navigatorKey,
       theme: chatColor != null
           ? mobileAppearanceTheme(
@@ -608,6 +611,170 @@ const _directoryAlice =
 const _directoryBob =
     'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
 void main() {
+  testWidgets('Solo ellipsis opens agent and workspace settings directly', (
+    tester,
+  ) async {
+    await _loadPresenceFonts(tester);
+    if (Platform.environment['PRESENCE_SCREENSHOTS'] != null) {
+      await (FontLoader(
+        'BuzzTabler',
+      )..addFont(rootBundle.load('assets/fonts/TablerIcons.ttf'))).load();
+    }
+    final avatarBytes = await rootBundle.load('assets/images/buzz-icon.png');
+    final avatarUrl =
+        'data:image/png;base64,${base64Encode(avatarBytes.buffer.asUint8List())}';
+    await tester.pumpWidget(
+      RepaintBoundary(
+        child: _buildTestable(
+          personalChat: true,
+          messages: const [],
+          soloAgents: const [
+            AgentDirectoryEntry(pubkey: 'agent', displayName: 'Terp'),
+          ],
+          members: [
+            ChannelMember(
+              pubkey: 'self',
+              role: 'owner',
+              joinedAt: DateTime(2025),
+            ),
+            ChannelMember(
+              pubkey: 'agent',
+              role: 'bot',
+              joinedAt: DateTime(2025),
+            ),
+          ],
+          users: {
+            'agent': UserProfile(
+              pubkey: 'agent',
+              displayName: 'Terp',
+              avatarUrl: avatarUrl,
+            ),
+          },
+          organization: Stream.value(
+            const MeGroups(
+              channels: [_channelId],
+              groups: [
+                {'id': 'buzz', 'name': 'Buzz', 'defaultTemplateId': ''},
+              ],
+              assignments: {_channelId: 'buzz'},
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await _capturePresence(tester, 'solo-header-after');
+    await tester.tap(find.byKey(const ValueKey('me-chat-settings-button')));
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.text('Chat settings'));
+    await tester.pumpAndSettle();
+    expect(find.text('Chat settings'), findsOneWidget);
+    expect(find.text('Workspace'), findsOneWidget);
+    expect(find.text('Buzz'), findsOneWidget);
+    expect(find.byType(ChannelDetailsPage), findsNothing);
+    expect(
+      find.byWidgetPredicate(
+        (widget) =>
+            widget is AvatarImage &&
+            widget.imageUrl == avatarUrl &&
+            widget.isAgent,
+      ),
+      findsOneWidget,
+    );
+    final avatarImage = find.descendant(
+      of: find.byWidgetPredicate(
+        (widget) => widget is AvatarImage && widget.imageUrl == avatarUrl,
+      ),
+      matching: find.byType(Image),
+    );
+    await tester.runAsync(
+      () => precacheImage(
+        tester.widget<Image>(avatarImage).image,
+        tester.element(avatarImage),
+      ),
+    );
+    await tester.pump();
+    await _capturePresence(tester, 'solo-settings-after');
+    final settingsRoute = ModalRoute.of(
+      tester.element(find.text('Chat settings')),
+    )!;
+    final barrier = tester.element(find.byType(ModalBarrier).last);
+    Future<void> expectStableMask() async {
+      final sheet = find.byType(BottomSheet);
+      final before = tester.getSize(sheet).height;
+      await tester.pump();
+      expect(tester.getSize(sheet).height, closeTo(before, 0.01));
+      await tester.pump(const Duration(milliseconds: 100));
+      final middle = tester.getSize(sheet).height;
+      expect(barrier.mounted, isTrue);
+      expect(settingsRoute.isCurrent, isTrue);
+      expect(settingsRoute.animation!.value, 1);
+      await tester.pump(const Duration(milliseconds: 250));
+      final after = tester.getSize(sheet).height;
+      expect(middle, greaterThan(before < after ? before : after));
+      expect(middle, lessThan(before > after ? before : after));
+      expect(barrier.mounted, isTrue);
+      expect(settingsRoute.isCurrent, isTrue);
+      expect(settingsRoute.animation!.value, 1);
+    }
+
+    await tester.ensureVisible(find.text('Workspace'));
+    await tester.tap(find.text('Workspace'));
+    await expectStableMask();
+    await tester.pumpAndSettle();
+    expect(find.text('No Workspace'), findsOneWidget);
+    expect(find.text('Buzz'), findsOneWidget);
+    expect(
+      find.ancestor(
+        of: find.text('No Workspace'),
+        matching: find.byType(AppListCard),
+      ),
+      findsOneWidget,
+    );
+    await _capturePresence(tester, 'solo-workspace-section');
+    await tester.tap(find.byTooltip('Close sheet'));
+    await expectStableMask();
+    await tester.pumpAndSettle();
+    expect(find.text('Chat settings'), findsOneWidget);
+    await tester.tap(find.text('Agent'));
+    await expectStableMask();
+    await tester.pumpAndSettle();
+    expect(find.text('Chat settings'), findsNothing);
+    await tester.tap(find.byTooltip('Close sheet'));
+    await expectStableMask();
+    await tester.pumpAndSettle();
+    expect(find.text('Chat settings'), findsOneWidget);
+    expect(find.text('Workspace'), findsOneWidget);
+    await tester.tap(find.byTooltip('Close sheet'));
+    await tester.pumpAndSettle();
+    expect(find.text('Chat settings'), findsNothing);
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pumpWidget(
+      _buildTestable(
+        personalChat: true,
+        disableAnimations: true,
+        messages: const [],
+        organization: Stream.value(const MeGroups(channels: [_channelId])),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('me-chat-settings-button')));
+    await tester.pumpAndSettle();
+    final settingsHeight = tester.getSize(find.byType(BottomSheet)).height;
+    await tester.tap(find.text('Workspace'));
+    await tester.pump();
+    await tester.pump();
+    final reducedHeight = tester.getSize(find.byType(BottomSheet)).height;
+    expect(reducedHeight, isNot(settingsHeight));
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(tester.getSize(find.byType(BottomSheet)).height, reducedHeight);
+    await tester.tap(find.byTooltip('Close sheet'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Close sheet'));
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+  });
+
   for (final fromLauncher in [false, true]) {
     testWidgets(
       'Bestie DM preserves thread replies and ordinary sends: launcher=$fromLauncher',
@@ -6655,6 +6822,10 @@ void main() {
     testWidgets(
       'pins the current day below the app bar after its divider scrolls away',
       (tester) async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+        addTearDown(() => debugDefaultTargetPlatformOverride = null);
+        final headerLayout = ValueNotifier(const NavigationHeaderLayout());
+        addTearDown(headerLayout.dispose);
         tester.view.physicalSize = const Size(400, 600);
         tester.view.devicePixelRatio = 1;
         addTearDown(tester.view.resetPhysicalSize);
@@ -6674,11 +6845,16 @@ void main() {
         ];
 
         await tester.pumpWidget(
-          _buildTestable(
-            messages: messages,
-            users: const {
-              'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
-            },
+          ValueListenableBuilder<NavigationHeaderLayout>(
+            valueListenable: headerLayout,
+            builder: (_, layout, child) =>
+                NavigationHeaderScope(layout: layout, child: child!),
+            child: _buildTestable(
+              messages: messages,
+              users: const {
+                'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+              },
+            ),
           ),
         );
         await tester.pumpAndSettle();
@@ -6723,7 +6899,11 @@ void main() {
         expect(
           find.descendant(
             of: stickyHeader,
-            matching: find.text(formatDayHeading(firstDay + 86400)),
+            matching: find.byWidgetPredicate(
+              (widget) =>
+                  widget is Semantics &&
+                  widget.properties.label == formatDayHeading(firstDay + 86400),
+            ),
           ),
           findsOneWidget,
         );
@@ -6741,12 +6921,40 @@ void main() {
           ),
         );
         expect(
-          find.descendant(
-            of: stickyHeader,
-            matching: find.byType(BackdropFilter),
-          ),
+          find.descendant(of: stickyHeader, matching: find.byType(UiKitView)),
           findsOneWidget,
         );
+        for (final layout in [
+          const NavigationHeaderLayout(hardEdge: true, nativeEdgeClearance: 8),
+          const NavigationHeaderLayout(
+            hardEdge: true,
+            paneControls: true,
+            topSpacing: 24,
+            nativeEdgeClearance: 8,
+          ),
+          const NavigationHeaderLayout(hardEdge: true, nativeEdgeClearance: 16),
+          const NavigationHeaderLayout(),
+        ]) {
+          headerLayout.value = layout;
+          await tester.pumpAndSettle();
+          final headerContext = tester.element(stickyHeader);
+          final header = tester.widget<FrostedAppBar>(
+            find.byType(FrostedAppBar).last,
+          );
+          expect(
+            tester.getTopLeft(stickyHeader).dy,
+            closeTo(
+              frostedAppBarHeight(
+                    headerContext,
+                    titleContentHeight: header.titleContentHeight,
+                  ) +
+                  frostedAppBarEdgeClearance(headerContext) +
+                  Grid.twelve,
+              1,
+            ),
+          );
+        }
+
         final floatingOpacity = find
             .descendant(
               of: stickyHeader,
@@ -6760,6 +6968,8 @@ void main() {
         await tester.pumpAndSettle();
         await tester.pump(const Duration(seconds: 1));
         expect(tester.widget<AnimatedOpacity>(floatingOpacity).opacity, 0);
+        await tester.pumpWidget(const SizedBox());
+        debugDefaultTargetPlatformOverride = null;
       },
     );
 
@@ -11776,7 +11986,10 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    expect(find.byKey(const ValueKey('me-assistant-button')), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('me-chat-settings-button')),
+      findsOneWidget,
+    );
     await expectLater(
       tester
           .widget<ComposeBar>(find.byType(ComposeBar))
@@ -11977,7 +12190,10 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      expect(find.byKey(const ValueKey('me-assistant-button')), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('me-chat-settings-button')),
+        findsOneWidget,
+      );
       expect(findRichText('Agent answer'), findsOneWidget);
       expect(find.byType(ThreadDetailPage), findsNothing);
       final container = ProviderScope.containerOf(
@@ -15198,6 +15414,10 @@ void main() {
     testWidgets('thread pins and updates the active date while scrolling', (
       tester,
     ) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      final headerLayout = ValueNotifier(const NavigationHeaderLayout());
+      addTearDown(headerLayout.dispose);
       tester.view.physicalSize = const Size(400, 800);
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.resetPhysicalSize);
@@ -15226,13 +15446,18 @@ void main() {
       ];
 
       await tester.pumpWidget(
-        _buildTestable(
-          messages: [rootEvent],
-          threadReplies: {threadIdStickyDashThreadDashRoot: replies},
-          users: const {
-            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
-            'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
-          },
+        ValueListenableBuilder<NavigationHeaderLayout>(
+          valueListenable: headerLayout,
+          builder: (_, layout, child) =>
+              NavigationHeaderScope(layout: layout, child: child!),
+          child: _buildTestable(
+            messages: [rootEvent],
+            threadReplies: {threadIdStickyDashThreadDashRoot: replies},
+            users: const {
+              'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+              'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+            },
+          ),
         ),
       );
       await tester.pumpAndSettle();
@@ -15284,17 +15509,83 @@ void main() {
       expect(
         find.descendant(
           of: stickyHeader,
-          matching: find.text(formatDayHeading(timestampForDay(2, 0))),
+          matching: find.byWidgetPredicate(
+            (widget) =>
+                widget is Semantics &&
+                widget.properties.label ==
+                    formatDayHeading(timestampForDay(2, 0)),
+          ),
         ),
         findsOneWidget,
       );
       expect(
-        find.descendant(
-          of: stickyHeader,
-          matching: find.byType(BackdropFilter),
-        ),
+        find.descendant(of: stickyHeader, matching: find.byType(UiKitView)),
         findsOneWidget,
       );
+
+      for (final layout in [
+        const NavigationHeaderLayout(hardEdge: true, nativeEdgeClearance: 8),
+        const NavigationHeaderLayout(
+          hardEdge: true,
+          paneControls: true,
+          topSpacing: 24,
+          nativeEdgeClearance: 8,
+        ),
+        const NavigationHeaderLayout(hardEdge: true, nativeEdgeClearance: 16),
+        const NavigationHeaderLayout(),
+      ]) {
+        headerLayout.value = layout;
+        await tester.pumpAndSettle();
+        final headerContext = tester.element(stickyHeader);
+        final header = tester.widget<FrostedAppBar>(
+          find.byType(FrostedAppBar).last,
+        );
+        expect(
+          tester.getTopLeft(stickyHeader).dy,
+          closeTo(
+            frostedAppBarHeight(
+                  headerContext,
+                  titleContentHeight: header.titleContentHeight,
+                ) +
+                frostedAppBarEdgeClearance(headerContext) +
+                Grid.twelve,
+            1,
+          ),
+        );
+      }
+
+      // Move the next day's divider just below the sticky boundary. Increasing
+      // navigation row spacing must select that day without another scroll.
+      headerLayout.value = const NavigationHeaderLayout(hardEdge: true);
+      await tester.pumpAndSettle();
+      final stickyContext = tester.element(stickyHeader);
+      final boundary =
+          frostedAppBarHeight(stickyContext) +
+          frostedAppBarEdgeClearance(stickyContext) +
+          Grid.twelve;
+      list.itemScrollController!.jumpTo(
+        index: 31,
+        alignment: (boundary + 12) / tester.getSize(listFinder).height,
+      );
+      await tester.pumpAndSettle();
+      expect(
+        tester.widget<StickyDateHeader>(stickyHeader).state.value.label,
+        formatDayHeading(timestampForDay(1, 0)),
+      );
+      headerLayout.value = const NavigationHeaderLayout(
+        hardEdge: true,
+        paneControls: true,
+        topSpacing: 24,
+      );
+      await tester.pumpAndSettle();
+      expect(
+        tester.widget<StickyDateHeader>(stickyHeader).state.value.label,
+        formatDayHeading(timestampForDay(2, 0)),
+      );
+      headerLayout.value = const NavigationHeaderLayout();
+      await tester.pumpAndSettle();
+      list.itemScrollController!.jumpTo(index: 40);
+      await tester.pumpAndSettle();
 
       final floatingOpacity = find
           .descendant(of: stickyHeader, matching: find.byType(AnimatedOpacity))
@@ -15331,10 +15622,17 @@ void main() {
       expect(
         find.descendant(
           of: stickyHeader,
-          matching: find.text(formatDayHeading(timestampForDay(3, 0))),
+          matching: find.byWidgetPredicate(
+            (widget) =>
+                widget is Semantics &&
+                widget.properties.label ==
+                    formatDayHeading(timestampForDay(3, 0)),
+          ),
         ),
         findsOneWidget,
       );
+      await tester.pumpWidget(const SizedBox());
+      debugDefaultTargetPlatformOverride = null;
     });
 
     testWidgets('thread keeps its tail above a growing composer dock', (

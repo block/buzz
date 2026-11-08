@@ -81,6 +81,76 @@ class RunnerTests: XCTestCase {
 
 
   @MainActor
+  func testPaneNavigationAlignmentChangesAndRestoresPhoneLayout() throws {
+    guard #available(iOS 27.0, *) else { return }
+    for leading in [false, true] {
+      let parent = UIViewController()
+      let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 950, height: 669))
+      window.rootViewController = parent
+      window.makeKeyAndVisible()
+      defer { window.isHidden = true }
+      let messenger = NavigationTestMessenger()
+      let bar = IosNavigationBarFactory(messenger: messenger, parent: parent).create(
+        withFrame: CGRect(x: 0, y: 0, width: 375, height: 68),
+        viewIdentifier: 999985, arguments: ["title": "general"])
+      parent.view.addSubview(bar.view())
+      let base: [String: Any] = [
+        "title": "general", "largeTitle": leading, "hardEdge": true,
+        "alignCollapsedTitleToLeading": leading, "centerTitleInPane": !leading,
+        "horizontalControls": true, "topSpacing": 24,
+        "actions": [["id": "options", "label": "Options", "symbol": "ellipsis", "enabled": true],
+                    ["id": "edit", "label": "Edit", "plain": true, "sharesBackground": false, "enabled": true]]]
+      // Geometry is supplied explicitly; it works regardless of window width.
+      for (height, camera, clearance) in [(68.0, nil as Double?, 8.0), (120.0, nil, 8.0),
+                                         (68.0, 45.0, 16.0), (68.0, nil, 8.0)] {
+        var args = base
+        args["centerInVisibleHeight"] = camera == nil
+        args["edgeClearance"] = clearance
+        args["controlCenterY"] = camera
+        messenger.configure(args)
+        bar.view().frame.size.height = height
+        messenger.scroll(to: height == 120 ? 0 : 200)
+        bar.view().setNeedsLayout()
+        bar.view().layoutIfNeeded()
+        let navigation = try XCTUnwrap(parent.children.compactMap { $0 as? UINavigationController }.first)
+        let label = try XCTUnwrap(descendants(of: bar.view()).compactMap { $0 as? UILabel }
+          .first { $0.text == "general" && !$0.isDescendant(of: navigation.view) })
+        if leading {
+          XCTAssertEqual(label.superview?.accessibilityElementsHidden, height == 120)
+        }
+        let center = camera ?? (leading ? min(46, (height + clearance) / 2) : (height + clearance) / 2)
+        XCTAssertEqual(label.convert(label.bounds, to: bar.view()).midY, center, accuracy: 0.5)
+        let button = try XCTUnwrap(descendants(of: bar.view()).compactMap { $0 as? UIButton }
+          .first { $0.accessibilityLabel == "Options" })
+        XCTAssertEqual(button.convert(button.bounds, to: bar.view()).midY, center, accuracy: 0.5)
+        let edit = try XCTUnwrap(descendants(of: bar.view()).compactMap { $0 as? UIButton }
+          .first { $0.accessibilityLabel == "Edit" })
+        XCTAssertEqual(edit.convert(edit.bounds, to: bar.view()).midY, center, accuracy: 0.5)
+        XCTAssertFalse(edit.superview is UIVisualEffectView)
+        if height == 68 && camera == nil && !leading {
+          let image = UIGraphicsImageRenderer(bounds: bar.view().bounds).image { _ in
+            bar.view().drawHierarchy(in: bar.view().bounds, afterScreenUpdates: true)
+          }
+          let attachment = XCTAttachment(image: image)
+          attachment.name = "Standalone native pane header with centered title and action"
+          attachment.lifetime = .keepAlways
+          add(attachment)
+        }
+      }
+      messenger.configure(["title": "Phone", "largeTitle": leading])
+      bar.view().setNeedsLayout()
+      bar.view().layoutIfNeeded()
+      let navigation = try XCTUnwrap(parent.children.compactMap { $0 as? UINavigationController }.first)
+      XCTAssertFalse(navigation.view.isHidden)
+      XCTAssertEqual(navigation.additionalSafeAreaInsets.top, 0, accuracy: 0.5)
+      let scroll = try XCTUnwrap(navigation.topViewController?.view as? UIScrollView)
+      XCTAssertEqual(scroll.topEdgeEffect.style, .soft)
+      XCTAssertFalse(descendants(of: bar.view()).compactMap { $0 as? UILabel }
+        .contains { $0.text == "general" && !$0.isDescendant(of: navigation.view) })
+    }
+  }
+
+  @MainActor
   func testCustomFlutterHeaderUsesDecorativeHardEdge() throws {
     guard #available(iOS 27.0, *) else { return }
     let messenger = NavigationTestMessenger()
