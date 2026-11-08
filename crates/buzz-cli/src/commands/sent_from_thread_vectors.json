@@ -1,0 +1,2558 @@
+[
+ {
+  "input": "",
+  "expected": null
+ },
+ {
+  "input": "   ",
+  "expected": null
+ },
+ {
+  "input": "hello",
+  "expected": "hello"
+ },
+ {
+  "input": "  hello\n\tworld  ",
+  "expected": "hello world"
+ },
+ {
+  "input": "**bold** _it_ `code` ~~x~~ > q # h",
+  "expected": "bold it code x q h"
+ },
+ {
+  "input": "see [the doc](https://x.io/a) now",
+  "expected": "see the doc now"
+ },
+ {
+  "input": "a ![alt](https://x.io/i.png) b",
+  "expected": "a b"
+ },
+ {
+  "input": "a ||secret | x|| b",
+  "expected": "a b"
+ },
+ {
+  "input": "a ||unclosed b",
+  "expected": "a unclosed b"
+ },
+ {
+  "input": "||a|||b||",
+  "expected": "b"
+ },
+ {
+  "input": "||||",
+  "expected": null
+ },
+ {
+  "input": "|||",
+  "expected": null
+ },
+ {
+  "input": "go <https://x.io/a?b=1> and http://y.io z",
+  "expected": "go and z"
+ },
+ {
+  "input": "http:// x",
+  "expected": "http:// x"
+ },
+ {
+  "input": "https://",
+  "expected": "https://"
+ },
+ {
+  "input": "[](x) [a]b",
+  "expected": "[](x) [a]b"
+ },
+ {
+  "input": "[a[b](c)",
+  "expected": "a[b"
+ },
+ {
+  "input": "![a](b",
+  "expected": "![a](b"
+ },
+ {
+  "input": "![](x)",
+  "expected": null
+ },
+ {
+  "input": "[a](b(c)d)",
+  "expected": "ad)"
+ },
+ {
+  "input": "a\u0000bcd",
+  "expected": "a b c d"
+ },
+ {
+  "input": "a﻿b c d",
+  "expected": "a b c d"
+ },
+ {
+  "input": "***  ||x|| ![i](u)",
+  "expected": null
+ },
+ {
+  "input": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "expected": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+ },
+ {
+  "input": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "expected": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa…"
+ },
+ {
+  "input": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "expected": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa…"
+ },
+ {
+  "input": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "expected": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb…"
+ },
+ {
+  "input": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "expected": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa…"
+ },
+ {
+  "input": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "expected": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa…"
+ },
+ {
+  "input": "ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé",
+  "expected": "ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé…"
+ },
+ {
+  "input": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀",
+  "expected": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀"
+ },
+ {
+  "input": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀",
+  "expected": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀…"
+ },
+ {
+  "input": "漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢",
+  "expected": "漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢…"
+ },
+ {
+  "input": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "expected": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb…"
+ },
+ {
+  "input": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "expected": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀…"
+ },
+ {
+  "input": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "expected": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb…"
+ },
+ {
+  "input": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀a bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "expected": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀a bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb…"
+ },
+ {
+  "input": "x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x ",
+  "expected": "x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x…"
+ },
+ {
+  "input": "ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab  z",
+  "expected": "ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab…"
+ },
+ {
+  "input": "](漢!__\n﻿`#~)>\né||**>﻿  http://x.io`)![[\u0000﻿]]#",
+  "expected": "](漢! ) é ]]"
+ },
+ {
+  "input": "  ]([https://y.io/p!http://x.io~**",
+  "expected": "](["
+ },
+ {
+  "input": "﻿#](😀 ` éword_[_||[]]]a||",
+  "expected": "](😀 éword ["
+ },
+ {
+  "input": "_a![![]**",
+  "expected": "a![![]"
+ },
+ {
+  "input": "http://x.io😀 漢_a😀<https://y.io/p|![http://x.io**https://y.io/p\u0000漢a||[#_![>!http://x.io\né_ é_wordword||",
+  "expected": "漢 a😀 漢a"
+ },
+ {
+  "input": "#]( ||#]]a](`#>!é ](a||https://y.io/p|_",
+  "expected": "]("
+ },
+ {
+  "input": "http://x.io|\u0000_ é**_<](_)[||]( 😀!`https://y.io/p##](http://x.iohttp://x.io  ﻿)a漢[",
+  "expected": "é <]( ) a漢["
+ },
+ {
+  "input": "   >`",
+  "expected": null
+ },
+ {
+  "input": ")**http://x.io\u0000](word﻿)!**||é!||`](#![https://y.io/p`https://y.io/p__![  >a http://x.io<)_",
+  "expected": ") ](word )! ]( ![ a"
+ },
+ {
+  "input": "é)<<é](\u0000\u0000漢]﻿![b][!a][\n﻿![`!>http://x.io_",
+  "expected": "é)<<é]( 漢] ![b][ !a][ ![ !"
+ },
+ {
+  "input": "](>é漢😀word\u0000~a|![#`https://y.io/p﻿** **\u0000>![]( >_`\n##~**  word||)http://x.iohttp://x.iob](漢",
+  "expected": "]( é漢😀word a"
+ },
+ {
+  "input": "\nb||>http://x.io|é #<|漢]( é😀>]b!>>||\n_\u0000]http://x.io!_http://x.io_https://y.io/phttps://y.io/p``![||b   ",
+  "expected": "b ]"
+ },
+ {
+  "input": "](a !#é!>`#!|_  >)_http://x.io\u0000<a_ ",
+  "expected": "](a ! é! ! ) <a"
+ },
+ {
+  "input": "!]<b\u0000<漢",
+  "expected": "!]<b <漢"
+ },
+ {
+  "input": ">>[**`ba ] |||  wordéé|word![||word\n ![  http://x.io\u0000b`_]a  \n_#|**http://x.io**>a![](",
+  "expected": "[ ba ] word ![ b ]a"
+ },
+ {
+  "input": "]]wordb﻿wordhttps://y.io/p#\nb**\u0000>)](word",
+  "expected": "]]wordb word b ) ](word"
+ },
+ {
+  "input": "|http://x.io<http://x.io|😀a😀﻿~﻿)http://x.io  😀](http://x.io",
+  "expected": ") 😀]("
+ },
+ {
+  "input": "http://x.io]#http://x.io[]#😀\u0000 é`![http://x.io   ![word  #\na~![﻿**[**]**[`http://x.io",
+  "expected": "é ![ ![word a ![ [ ] ["
+ },
+ {
+  "input": "|_\u0000~](~wordé||<ahttps://y.io/p>#<~éb  a[[ [http://x.ioé>😀a aé",
+  "expected": "]( wordé <a a[[ [ aé"
+ },
+ {
+  "input": "))",
+  "expected": "))"
+ },
+ {
+  "input": "  ](!é",
+  "expected": "](!é"
+ },
+ {
+  "input": "]﻿word><<](>\u0000](漢\n漢http://x.io😀a](]( **\né# 漢   # |> é]﻿漢** ![\u0000",
+  "expected": "] word <<]( ](漢 漢 é 漢 é] 漢 !["
+ },
+ {
+  "input": " ~a﻿!~![    \n)﻿)`**![漢é]<]![||`]( _#http://x.io",
+  "expected": "a ! ![ ) ) ![漢é]<]![ ]("
+ },
+ {
+  "input": "a](http://x.io!﻿#\n_http://x.iohttp://x.io!\u0000a |>﻿|)![|``**)`漢[]",
+  "expected": "a]( a )![ ) 漢[]"
+ },
+ {
+  "input": "﻿~https://y.io/p  !|<http://x.io  _\u0000\u0000||>~b![é漢]wordhttps://y.io/p<)**https://y.io/p\u0000b_  |~>]()[)] ",
+  "expected": "! b![é漢]word b ]()[)]"
+ },
+ {
+  "input": "\u0000||﻿~😀>",
+  "expected": "😀"
+ },
+ {
+  "input": "﻿[||wordword  >![`[|![~é**|http://x.io**a!`>]",
+  "expected": "[ wordword ![ [ ![ é"
+ },
+ {
+  "input": " ﻿`https://y.io/p﻿_~﻿aahttp://x.iohttp://x.iob😀** >![  https://y.io/p[  [`a**http://x.io||https://y.io/p_😀\n||ééhttp://x.io](![![é﻿",
+  "expected": "aa ![ [ a éé"
+ },
+ {
+  "input": "é😀😀 https://y.io/pb\u0000",
+  "expected": "é 😀😀"
+ },
+ {
+  "input": "![b﻿a",
+  "expected": "![b a"
+ },
+ {
+  "input": "_bé>\n_﻿ http://x.ioéaéhttps://y.io/p `",
+  "expected": "bé"
+ },
+ {
+  "input": "b) \né`_",
+  "expected": "b) é"
+ },
+ {
+  "input": "~﻿https://y.io/pa😀 a http://x.io**`aabwordé]~ http://x.io_||word~\n]( >\u0000![",
+  "expected": "a ]( !["
+ },
+ {
+  "input": "a![﻿http://x.io",
+  "expected": "a!["
+ },
+ {
+  "input": "]| ][😀![  ",
+  "expected": "] ] [😀!["
+ },
+ {
+  "input": "http://x.iob_﻿||😀![![~**é[|\n| **\nb",
+  "expected": "😀![![ é[ b"
+ },
+ {
+  "input": "](>\u0000](\n  > |**|<~_aé#é]",
+  "expected": "]( ]( < aé é]"
+ },
+ {
+  "input": "![](  b> ~|\u0000漢[a \n\n https://y.io/p])~![|é\nword![https://y.io/pword﻿** ab﻿|]||!>!é",
+  "expected": "![ é word![ ab ] ! ! é"
+ },
+ {
+  "input": "~>>bhttps://y.io/p![漢wordé![  é漢`﻿](<[漢é#]\n[|b~**!漢word#word😀|é",
+  "expected": "b é漢 ](<[漢é ] [ b ! 漢word word😀 é"
+ },
+ {
+  "input": "<https://y.io/p b**!\n漢https://y.io/p_漢http://x.io`|b|_",
+  "expected": "b ! 漢"
+ },
+ {
+  "input": "]\u0000漢<|b**[#http://x.ioa漢a😀\u0000 http://x.io||]( ",
+  "expected": "] 漢< b ["
+ },
+ {
+  "input": "https://y.io/phttps://y.io/p]|~é😀<word\u0000)**é**[>😀é](https://y.io/p#漢><é>||![ [",
+  "expected": ") é [ 😀é]( ["
+ },
+ {
+  "input": "https://y.io/p**a\u0000](a |#\u0000< 😀\u0000é`]\n <漢_|| word|| [ b\u0000<[ahttps://y.io/pword[word  é",
+  "expected": "](a < 😀 é ] <漢 [ b <[a é"
+ },
+ {
+  "input": "![_word😀 ![>_wordhttp://x.io**||**)漢![!﻿]![~<😀﻿https://y.io/p>)\n <`",
+  "expected": "![ word😀 ![ word ![! ]![ <😀 <"
+ },
+ {
+  "input": "`﻿b漢<#﻿😀word]\n<|",
+  "expected": "b漢< 😀word] <"
+ },
+ {
+  "input": "[](http://x.io[>]<\n<   \u0000word😀﻿\u0000![\u0000#_](word![**word",
+  "expected": "[]( ]< < word😀 ![ ](word![ word"
+ },
+ {
+  "input": "  ](\u0000https://y.io/p#)ahttps://y.io/p||~😀wordbbword ]> _a漢",
+  "expected": "]( 😀wordbbword ] a漢"
+ },
+ {
+  "input": "#漢a||]_~![](b😀é![\u0000\n||http://x.io<_   éhttps://y.io/p|word\u0000#](漢ahttps://y.io/p||﻿a漢!||]漢b\u0000",
+  "expected": "漢a é ](漢a ]漢b"
+ },
+ {
+  "input": "`|#\n]https://y.io/p`](>漢~",
+  "expected": "]"
+ },
+ {
+  "input": "**<a﻿\u0000_||#  \n😀\u0000>#[>\nbbb>  ",
+  "expected": "<a 😀 [ bbb"
+ },
+ {
+  "input": "\nab`#**﻿>b>  a|a|)bbhttp://x.io\na﻿_",
+  "expected": "ab b a a )b b a"
+ },
+ {
+  "input": "]<]éa\nhttp://x.io) **[http://x.io\nhttp://x.io漢   b !||#![>",
+  "expected": "]<]éa [ b ! !["
+ },
+ {
+  "input": "a~\u0000😀﻿ ]",
+  "expected": "a 😀 ]"
+ },
+ {
+  "input": "   `word![![!",
+  "expected": "word![![!"
+ },
+ {
+  "input": "~!~`](]( 😀  <<![_ _](é]word漢]é[ ]![漢\n  _http://x.io!)  word\n\n]﻿`",
+  "expected": "! ](]( 😀 << word ]"
+ },
+ {
+  "input": "#word ",
+  "expected": "word"
+ },
+ {
+  "input": "_[]\n!\n>_ )http://x.ioa`||>b`| [http://x.ioé#﻿`~[http://x.io",
+  "expected": "[] ! ) [ ["
+ },
+ {
+  "input": "a _~漢_|https://y.io/p<)\u0000>>>![>~#<||**\u0000\n!é~a|#[ word",
+  "expected": "a 漢 ![ < !é a [ word"
+ },
+ {
+  "input": "`)~http://x.io||a](word<||||`#",
+  "expected": ")"
+ },
+ {
+  "input": "> https://y.io/p!](<word_|漢)#\u0000!#``😀]😀<漢||😀_é]![ [﻿>>`)aa",
+  "expected": "! 😀]😀<漢 😀 é]![ [ )aa"
+ },
+ {
+  "input": "![![_](  ~漢http://x.io||",
+  "expected": "![![ ]( 漢"
+ },
+ {
+  "input": "\u0000![漢😀](>[!a~)|word漢[||**",
+  "expected": "word漢["
+ },
+ {
+  "input": "~![😀))[",
+  "expected": "![😀 ) )["
+ },
+ {
+  "input": "**#<    [ **<﻿]( a\u0000](!﻿](#  ~<[](~   ||b  ",
+  "expected": "< [ < ]( a ](! ]( <[]( b"
+ },
+ {
+  "input": "~]) ﻿[  _ ﻿](||~)b~﻿bé||😀[\u0000<éa<﻿word\n     ![!_b",
+  "expected": "]) [ ]( 😀[ <éa< word ![! b"
+ },
+ {
+  "input": "_|﻿~a#!]",
+  "expected": "a !]"
+ },
+ {
+  "input": "`| ![![﻿<\n!漢<](<#||__ || #!~)<](a>b_\n",
+  "expected": "<](a b"
+ },
+ {
+  "input": "\u0000http://x.io <![b~\n||  ># |b )<>  `<http://x.io \n ",
+  "expected": "<![b b )<"
+ },
+ {
+  "input": ")a  漢`) a\u0000 https://y.io/pa",
+  "expected": ")a 漢 ) a"
+ },
+ {
+  "input": ")b﻿ahttps://y.io/p[)  [`#|\u0000\n|`😀https://y.io/p\u0000",
+  "expected": ")b a [ 😀"
+ },
+ {
+  "input": "!# ||http://x.io[[https://y.io/p`![ #](",
+  "expected": "! ]("
+ },
+ {
+  "input": "漢  ``![😀![)b_>😀   ](`b<﻿  漢a`😀_[bhttp://x.io) ||_😀😀﻿ b!~",
+  "expected": "漢 😀😀 b!"
+ },
+ {
+  "input": "[b",
+  "expected": "[b"
+ },
+ {
+  "input": "`漢  https://y.io/p)word  http://x.io﻿|||![` <😀😀](\nwordhttps://y.io/p**",
+  "expected": "漢 ![ <😀😀]( word"
+ },
+ {
+  "input": "wordhttp://x.ioaéé]a![http://x.io![](>\u0000\n](",
+  "expected": "word ]("
+ },
+ {
+  "input": "**[é`!>漢||\u0000 aword😀 é<https://y.io/p![é\u0000#**_| ![http://x.iohttps://y.io/péhttps://y.io/p~#",
+  "expected": "[ é ! 漢 aword😀 é !["
+ },
+ {
+  "input": " ~#",
+  "expected": null
+ },
+ {
+  "input": "https://y.io/p😀\n||  ]( `|# http://x.io<é**http://x.io\u0000>< ![]﻿ ![",
+  "expected": "]( < ![] !["
+ },
+ {
+  "input": "\u0000#ahttps://y.io/p](﻿word>)https://y.io/p!~>#https://y.io/pba﻿](http://x.io😀a`[http://x.io**_https://y.io/p[https://y.io/p  ~http://x.iohttps://y.io/p]https://y.io/p]( `",
+  "expected": "a word ) ]("
+ },
+ {
+  "input": "|]|| ",
+  "expected": "]"
+ },
+ {
+  "input": "  #!![!**é\n<!﻿|![||**]",
+  "expected": "!![! é <! ![ ]"
+ },
+ {
+  "input": "a漢\u0000漢b\nword< _ ~)😀**﻿word !wordword \n||a",
+  "expected": "a漢 漢b word< )😀 word !wordword a"
+ },
+ {
+  "input": "|<)漢  http://x.io|[﻿` >#a ]`漢﻿﻿|]_😀http://x.io>)`é`",
+  "expected": "<)漢 a ] 漢 ] 😀"
+ },
+ {
+  "input": "#﻿\n😀😀|[漢 é",
+  "expected": "😀😀 [漢 é"
+ },
+ {
+  "input": "漢",
+  "expected": "漢"
+ },
+ {
+  "input": "]~)![word😀\nhttps://y.io/p**||word\u0000 \n ||漢 😀#https://y.io/p  ||||﻿word><~b  漢[http://x.io",
+  "expected": "] )![word😀 漢 😀 word < b 漢["
+ },
+ {
+  "input": ">! http://x.io)~word ﻿<#word )](word",
+  "expected": "! < word )]( word"
+ },
+ {
+  "input": "é>a!>~   `~ 😀!|`<😀![|| |[>\nword[~bhttps://y.io/p||[https://y.io/p!https://y.io/pab)漢\n",
+  "expected": "é a! 😀! <😀![ ["
+ },
+ {
+  "input": "[_a<]|>\u0000é漢word",
+  "expected": "[ a<] é漢word"
+ },
+ {
+  "input": "[   😀~!~~`~](_b😀**http://x.io||_>!>ba**😀https://y.io/p",
+  "expected": "[ 😀 ! ]( b😀 ! ba 😀"
+ },
+ {
+  "input": "é|  ****![~\u0000éaword](<<[word ]#\nab`!word_😀**](||#   \u0000) || 漢#  `",
+  "expected": "é ![ éaword](< <[word ] ab !word 😀 ]( 漢"
+ },
+ {
+  "input": "_!word**<\u0000http://x.io漢](漢 `#😀",
+  "expected": "!word < 😀"
+ },
+ {
+  "input": "word﻿|b~)﻿  a`>\u0000a>~",
+  "expected": "word b ) a a"
+ },
+ {
+  "input": "﻿<](**  |**😀\n\u0000😀<https://y.io/p|>![漢﻿[]\u0000](**",
+  "expected": "< ]( 😀 😀 [] ]("
+ },
+ {
+  "input": "![https://y.io/p)a[b﻿ <#wordhttp://x.io|[>>>~#b!   >",
+  "expected": "![ < word"
+ },
+ {
+  "input": "a`  ",
+  "expected": "a"
+ },
+ {
+  "input": "word![_>bé  <#word",
+  "expected": "word![ bé < word"
+ },
+ {
+  "input": "_|<[  ) !wordb漢`﻿#~ ])﻿__漢~[!` https://y.io/phttp://x.io||)漢b\u0000é😀https://y.io/pword>]>![",
+  "expected": "<[ ) !wordb漢 ]) 漢 [! é😀"
+ },
+ {
+  "input": "é)>!",
+  "expected": "é) !"
+ },
+ {
+  "input": "](",
+  "expected": "]("
+ },
+ {
+  "input": " b   ﻿word  !a",
+  "expected": "b word !a"
+ },
+ {
+  "input": " ](||#||`](   ]﻿https://y.io/p`  ﻿!https://y.io/p>😀wordword😀http://x.io||#>`>~)😀",
+  "expected": "]( ]( ] !"
+ },
+ {
+  "input": "**`[\n )![  !http://x.io[ [https://y.io/p! https://y.io/p漢_word`😀﻿#<http://x.io||||!http://x.io https://y.io/p \u0000)||http://x.iohttps://y.io/p!||",
+  "expected": "[ )![ ! [ ! )"
+ },
+ {
+  "input": "word[é#http://x.io!http://x.io!![||漢a﻿||![**|https://y.io/p!)>  `_!https://y.io/p>](https://y.io/p﻿ )漢",
+  "expected": "word[é ! 漢"
+ },
+ {
+  "input": "a ﻿]é_![![# word~~ [漢< \u0000  ",
+  "expected": "a ]é ![![ word [漢<"
+ },
+ {
+  "input": "\n😀![!😀[>>é b](]( word|||)**](||word_\n漢word`漢﻿﻿  #\u0000|<😀😀<  ",
+  "expected": "😀![!😀[ é b](]( word word 漢word 漢 <😀😀<"
+ },
+ {
+  "input": "|a#http://x.io[https://y.io/p[ <|word# |漢https://y.io/p||﻿\u0000b[)) 漢[ #|<!﻿![)<😀||]😀>!",
+  "expected": "a < word 漢 ]😀 !"
+ },
+ {
+  "input": "b\u0000#http://x.io[\n||> \u0000 https://y.io/pword`!   é http://x.io](é﻿||~\u0000 漢||😀word ",
+  "expected": "b 漢 😀word"
+ },
+ {
+  "input": "_)![<https://y.io/phttp://x.io_![![﻿_[[)|a\u0000)|<https://y.io/p]https://y.io/p||﻿** a`",
+  "expected": ")![ [[) a ) a"
+ },
+ {
+  "input": "| é_<>`ahttp://x.io\u0000word<http://x.io#![_~_)\u0000word>>!b](`b_  )~é\n[)]é\n~]([",
+  "expected": "é < a word é [)]é ](["
+ },
+ {
+  "input": "`http://x.iohttp://x.io\néa![![﻿😀\n \u0000)b~漢![  \u0000 ",
+  "expected": "éa![![ 😀 )b 漢!["
+ },
+ {
+  "input": " \u0000﻿\u0000!a**|é﻿a漢",
+  "expected": "!a é a漢"
+ },
+ {
+  "input": " b||😀 _  ]>~|) https://y.io/phttps://y.io/p||a<!a  |>!   😀﻿||**https://y.io/p",
+  "expected": "b a<!a ! 😀"
+ },
+ {
+  "input": "\n! ~漢#![",
+  "expected": "! 漢 !["
+ },
+ {
+  "input": "é||é**~_https://y.io/pword<https://y.io/p|||﻿!   #)[ |#https://y.io/p",
+  "expected": "é ! )["
+ },
+ {
+  "input": "b> < _!😀|**|漢__\u0000éhttp://x.io漢_é||  ~]﻿)😀漢漢",
+  "expected": "b < !😀 漢 é ] )😀漢漢"
+ },
+ {
+  "input": "http://x.io\n<\né>>é|aword!\n]http://x.io![worda]",
+  "expected": "< é é aword! ]"
+ },
+ {
+  "input": "[aé]![\u0000a<||<漢",
+  "expected": "[ aé] ![ a< <漢"
+ },
+ {
+  "input": "b~a",
+  "expected": "b a"
+ },
+ {
+  "input": "`[é  https://y.io/p](http://x.ioword~b`||]éahttps://y.io/p😀http://x.io ahttps://y.io/p[ !||é!\n[",
+  "expected": "[é é! ["
+ },
+ {
+  "input": "]_#wordé",
+  "expected": "] wordé"
+ },
+ {
+  "input": "﻿|http://x.io|!||[`﻿\u0000)[https://y.io/phttp://x.io![ [http://x.io\n!https://y.io/p_https://y.io/p~word_\n|_https://y.io/p>漢)word]>",
+  "expected": ")[ [ !"
+ },
+ {
+  "input": "word  ﻿ )  ~https://y.io/pb**  _b!<\u0000[\n _![[>https://y.io/phttps://y.io/p](\n",
+  "expected": "word ) b!< [ ![["
+ },
+ {
+  "input": "~éa#word![>https://y.io/p\u0000😀😀ahttp://x.io]|",
+  "expected": "éa word![ 😀 😀a"
+ },
+ {
+  "input": "<`é!~]!)#https://y.io/p<~](~http://x.io>",
+  "expected": "< é! ]!)"
+ },
+ {
+  "input": "~\u0000https://y.io/pa<](![****\nhttp://x.io||![_\u0000",
+  "expected": null
+ },
+ {
+  "input": "漢éhttp://x.ioword _😀`[|_ a\u0000 >||  |http://x.io||~\u0000**||~b wordb><a|a b",
+  "expected": "漢é 😀 [ a b word b < a a b"
+ },
+ {
+  "input": "😀[\u0000http://x.io![\u0000",
+  "expected": "😀["
+ },
+ {
+  "input": "![\n",
+  "expected": "!["
+ },
+ {
+  "input": " ](<|\nb\u0000b ](ba>      !\n||`![]**||##[    ![!é\n_😀!\nhttps://y.io/p﻿",
+  "expected": "](< b b ](ba ! [ ![!é 😀!"
+ },
+ {
+  "input": ">\n>https://y.io/pword)word é ![](https://y.io/p#\u0000**#|\u0000~||``** ﻿![",
+  "expected": "é ![]( !["
+ },
+ {
+  "input": "b  😀é !]( ﻿\nhttps://y.io/p﻿https://y.io/p\n#  [﻿](  `)b漢",
+  "expected": "b 😀é !]( b漢"
+ },
+ {
+  "input": "#  ||![漢 )||> é http://x.io[😀  http://x.io#\n  😀 ![**[",
+  "expected": "é 😀 ![ ["
+ },
+ {
+  "input": "[b漢a**\n",
+  "expected": "[b 漢a"
+ },
+ {
+  "input": "http://x.ioé﻿)http://x.iohttp://x.iob)#[b_]",
+  "expected": ") ]"
+ },
+ {
+  "input": "  [https://y.io/p`\n||[~[﻿",
+  "expected": "[ [ ["
+ },
+ {
+  "input": "﻿> |||]<<||b漢](||~#[word  )é漢é漢\n﻿_**word﻿!\n",
+  "expected": "b漢]( [word )é漢é漢 word !"
+ },
+ {
+  "input": ")漢<![",
+  "expected": ")漢<!["
+ },
+ {
+  "input": "]#||﻿ #`word)a|\u0000\n**><](\u0000 https://y.io/p)) ",
+  "expected": "] word)a <]("
+ },
+ {
+  "input": "]](b]]wordé\u0000\u0000",
+  "expected": "]](b]]wordé"
+ },
+ {
+  "input": "!_http://x.io#http://x.io![a__ b](https://y.io/p_>http://x.io😀é   ![\u0000漢",
+  "expected": "! b]( ![ 漢"
+ },
+ {
+  "input": "wordhttps://y.io/p](word#![) ) ~漢](\u0000 ||  ~||\n`_bhttp://x.io![~)_![😀",
+  "expected": "word ![😀"
+ },
+ {
+  "input": ">_",
+  "expected": null
+ },
+ {
+  "input": "\u0000 bwordhttp://x.io\u0000![#漢`word<",
+  "expected": "bword ![ 漢 word<"
+ },
+ {
+  "input": " http://x.io<é﻿ ",
+  "expected": "<é"
+ },
+ {
+  "input": "![\n>**![]\né!|😀|~# ||漢",
+  "expected": "![ ![] é! 😀 漢"
+ },
+ {
+  "input": "\n](>http://x.io <",
+  "expected": "]( <"
+ },
+ {
+  "input": "``é\né!_é ",
+  "expected": "é é! é"
+ },
+ {
+  "input": "!word!éé😀b  )!#](word#!http://x.io😀![ <  `a![  ||**`a![﻿",
+  "expected": "!word!éé😀b )! ](word ! < a![ a!["
+ },
+ {
+  "input": "![]!b!é﻿##漢https://y.io/p`!##  é漢<![ahttps://y.io/p  ",
+  "expected": "![]!b!é 漢 é漢<![a"
+ },
+ {
+  "input": "漢[[![ wordhttps://y.io/p![~https://y.io/p!﻿漢\n]**bé||\u0000**!﻿`",
+  "expected": "漢[[![ word 漢 ] bé !"
+ },
+ {
+  "input": "漢word\nb` b|||_)||![\u0000é!|https://y.io/p#)https://y.io/p~](   \u0000)|http://x.io",
+  "expected": "漢word b b"
+ },
+ {
+  "input": "]😀  ﻿",
+  "expected": "]😀"
+ },
+ {
+  "input": "||﻿\u0000<_<",
+  "expected": "< <"
+ },
+ {
+  "input": "b#~![](_bbb😀]>漢 ]( # \u0000[**https://y.io/p#漢a\u0000!#`http://x.io_](😀[**_https://y.io/p||#",
+  "expected": "b ![]( bbb😀] 漢 ]( [ !"
+ },
+ {
+  "input": "~\nword](",
+  "expected": "word]("
+ },
+ {
+  "input": "#word](\u0000#!**||😀https://y.io/pbhttps://y.io/phttp://x.io!https://y.io/p<\n\u0000>😀a![![!![_[é﻿",
+  "expected": "word]( ! 😀 😀a![![!![ [é"
+ },
+ {
+  "input": "![[~﻿éhttp://x.io`_😀`漢﻿|http://x.io`  **\n|a](漢]https://y.io/p<**  ﻿]",
+  "expected": "![[ é a](漢] ]"
+ },
+ {
+  "input": "]!b|\u0000漢http://x.io||https://y.io/p! )  \u0000   é**|~http://x.io#[😀](~b",
+  "expected": "]!b 漢 ) é b"
+ },
+ {
+  "input": "||漢]<  ~\n]  \u0000bword](#aé\nb]<\u0000bhttps://y.io/p",
+  "expected": "漢]< ] bword]( aé b]< b"
+ },
+ {
+  "input": ")\u0000[**\n**#word",
+  "expected": ") [ word"
+ },
+ {
+  "input": "]()😀漢_||](_b]https://y.io/p< \u0000bword \nhttps://y.io/p\u0000~]\né  !![__**😀b   )[ [](||[漢",
+  "expected": "]()😀漢 [漢"
+ },
+ {
+  "input": "|[~_ ![ 漢a[word漢  https://y.io/p![﻿  ]()|b ~é|\n~_#éé #😀 https://y.io/p[#>_[",
+  "expected": "[ b é éé 😀"
+ },
+ {
+  "input": "**]**]a)|| b﻿http://x.io__**~****  #[|| \n",
+  "expected": "] ]a)"
+ },
+ {
+  "input": "]word]b><]",
+  "expected": "]word]b <]"
+ },
+ {
+  "input": "word)\né😀http://x.io https://y.io/p ! [#é|é\u0000  ****http://x.io﻿\u0000`https://y.io/p|| **b é**word`|![\n||\nhttp://x.io",
+  "expected": "word) é😀 ! [ é é"
+ },
+ {
+  "input": "a||! a\n)_[a﻿**#<",
+  "expected": "a ! a ) [a <"
+ },
+ {
+  "input": "\u0000![漢!\u0000#!\n_**  ](漢)!https://y.io/p~>](~ab]b|| a漢##",
+  "expected": "! a漢"
+ },
+ {
+  "input": "http://x.io",
+  "expected": null
+ },
+ {
+  "input": "ba  !](_>]**<https://y.io/p!`\u0000 `![ ||b  é  ) é# |>a]_>漢漢éword|😀é",
+  "expected": "ba !]( ] ![ b é ) é a] 漢漢éword 😀é"
+ },
+ {
+  "input": "](#漢|>![漢**)| **https://y.io/p_>|\u0000>\u0000ba|||![](`)`>漢\u0000",
+  "expected": "]( 漢 漢"
+ },
+ {
+  "input": " ]é😀漢](a😀\n_||)a|word~]]!](\n_",
+  "expected": "]é😀漢](a😀 )a word ]]!]("
+ },
+ {
+  "input": "word\n>![b`",
+  "expected": "word ![b"
+ },
+ {
+  "input": "](****<<![http://x.ioword!  # ﻿|漢~| \u0000a\n[`|a_😀é﻿  \u0000\u0000word##**",
+  "expected": "]( <<![ 漢 a [ a 😀é word"
+ },
+ {
+  "input": "\n!",
+  "expected": "!"
+ },
+ {
+  "input": " ||http://x.io]>a![](**https://y.io/phttp://x.io ](**b||a﻿||] \u0000b](_",
+  "expected": "a ] b]("
+ },
+ {
+  "input": "<_",
+  "expected": "<"
+ },
+ {
+  "input": ")`!word||   ![😀](|_)||] _**http://x.ioword **\n ",
+  "expected": ") !word ]"
+ },
+ {
+  "input": "\n>http://x.iohttps://y.io/p!) ~  😀`😀\n_)﻿`a**",
+  "expected": "😀 😀 ) a"
+ },
+ {
+  "input": "`b< ]http://x.io~  ~😀",
+  "expected": "b< ] 😀"
+ },
+ {
+  "input": "||é)** ﻿😀`﻿!#  漢<\n[||漢\n﻿a|)~﻿#﻿`>  #\n",
+  "expected": "漢 a )"
+ },
+ {
+  "input": "漢\n  ﻿https://y.io/p||<b word\u0000`a_[<ahttp://x.io_![﻿é word]b!  _|<word**]|`",
+  "expected": "漢 b word a [<a é word]b! <word ]"
+ },
+ {
+  "input": "!~😀\nword[https://y.io/pb\u0000!](](😀_||\n[",
+  "expected": "! 😀 word[ !](]( 😀 ["
+ },
+ {
+  "input": "b[[  ﻿|a`#!https://y.io/p||\nword漢>b",
+  "expected": "b[[ a ! word漢 b"
+ },
+ {
+  "input": "https://y.io/p",
+  "expected": null
+ },
+ {
+  "input": "https://y.io/phttps://y.io/p![https://y.io/p))<http://x.io|",
+  "expected": null
+ },
+ {
+  "input": "[`\n|﻿ 😀漢[ \n**😀](",
+  "expected": "[ 😀漢[ 😀]("
+ },
+ {
+  "input": "a![)ahttp://x.io > ]",
+  "expected": "a![)a ]"
+ },
+ {
+  "input": "a  `http://x.iob<# https://y.io/pwordé]~||",
+  "expected": "a"
+ },
+ {
+  "input": "#é](![``http://x.io`]` #**aahttp://x.io] ",
+  "expected": "é](![ aa"
+ },
+ {
+  "input": "![](\n\u0000![ >漢b~>~**||﻿\n﻿\n<漢a  word漢_)word#漢!😀wordhttp://x.iobé**http://x.io<http://x.ioword",
+  "expected": "word 漢!😀word"
+ },
+ {
+  "input": "**#http://x.io﻿]**\n![漢<word<_)😀#😀||😀\u0000**![)] 漢a\u0000",
+  "expected": "] ![漢<word< )😀 😀 😀 ![)] 漢a"
+ },
+ {
+  "input": "_ ~b**http://x.io😀||!﻿word]( ~`﻿](https://y.io/p]( 😀b)﻿![!<漢\n||[  |",
+  "expected": "b ["
+ },
+ {
+  "input": "_]( #😀wordwordhttps://y.io/p",
+  "expected": "]( 😀wordword"
+ },
+ {
+  "input": "word[><<![**#word](é![b é>word~\n)[<😀﻿|![~",
+  "expected": "word[ << [<😀 !["
+ },
+ {
+  "input": "#|||https://y.io/p_https://y.io/p!éb[)\u0000](é>#]~",
+  "expected": "](é ]"
+ },
+ {
+  "input": "﻿](aword  |a<https://y.io/p<|\u0000https://y.io/p||||>] 漢_]   #_|](漢 **漢éword",
+  "expected": "](aword a ] 漢 ] ](漢 漢éword"
+ },
+ {
+  "input": "!http://x.io]漢",
+  "expected": "!"
+ },
+ {
+  "input": "a <https://y.io/p||😀 https://y.io/p[[~#漢b**` !<éwordhttps://y.io/phttps://y.io/p||é >b![é\u0000https://y.io/p||  b<﻿_**",
+  "expected": "a é b![é b<"
+ },
+ {
+  "input": "\u0000 `>  >é\u0000[_]<>||_)b``_](#_ https://y.io/pb![`\nb",
+  "expected": "é [ ]< )b ]( b"
+ },
+ {
+  "input": "](word~word\u0000word](]漢\u0000\na \n\u0000漢 ]||` http://x.ioaahttps://y.io/p b>](![>b]\u0000b#[word",
+  "expected": "](word word word](]漢 a 漢 ] b ](![ b] b [word"
+ },
+ {
+  "input": "``b<http://x.io[**![**word  #b﻿\u0000)||[|)<\u0000b  漢`http://x.io|https://y.io/p_é b#https://y.io/p|\u0000~](",
+  "expected": "b b ) [ )< b 漢 b ]("
+ },
+ {
+  "input": ">a<\u0000<é)[_` `<\u0000](  漢>😀!  !b) <",
+  "expected": "a< <é) < <"
+ },
+ {
+  "input": "漢﻿|a||word  > )",
+  "expected": "漢 a word )"
+ },
+ {
+  "input": "||  ``é_﻿ #](a",
+  "expected": "é ](a"
+ },
+ {
+  "input": " <#_漢http://x.io!﻿﻿![#a![ \n**)",
+  "expected": "< 漢 ![ a![ )"
+ },
+ {
+  "input": "!é>![",
+  "expected": "!é !["
+ },
+ {
+  "input": "\nhttps://y.io/phttps://y.io/p](",
+  "expected": null
+ },
+ {
+  "input": "a!`[https://y.io/p ](https://y.io/p`<![😀\n![](b||<",
+  "expected": "a! [ ]( ![](b <"
+ },
+ {
+  "input": ")< !<~wordhttps://y.io/p|![漢ab`é[|>![||)  [** \n\n#http://x.io]😀\u0000`bhttps://y.io/p[~😀",
+  "expected": ")< !< word ![ ) [ b"
+ },
+ {
+  "input": "\u0000é😀<漢b~😀~#](漢][word﻿﻿\nhttps://y.io/p\u0000\u0000>﻿",
+  "expected": "é😀<漢 b 😀 ](漢] [word"
+ },
+ {
+  "input": "a`]漢[\u0000ba😀](﻿b!||漢[  ~b>#|https://y.io/p ~bhttps://y.io/phttps://y.io/p 😀b😀_](~",
+  "expected": "a ]漢[ ba 😀]( b! 漢[ b b 😀b😀 ]("
+ },
+ {
+  "input": "**😀 )]![é",
+  "expected": "😀 )]![é"
+ },
+ {
+  "input": ">漢[wordé[`| ~http://x.io a[](] ~` ||a![[**b)_<a**",
+  "expected": "漢wordé [ a[ < a"
+ },
+ {
+  "input": "ééé#||!![ ` ](é`]**_https://y.io/p]||[!漢\né http://x.io",
+  "expected": "ééé [!漢 é"
+ },
+ {
+  "input": "漢https://y.io/p**~> b😀** https://y.io/p`)https://y.io/p|",
+  "expected": "漢 b😀"
+ },
+ {
+  "input": "https://y.io/p`﻿<>漢  )|>**bhttp://x.io",
+  "expected": "< 漢 ) b"
+ },
+ {
+  "input": "](bhttps://y.io/p!﻿https://y.io/p    b_\u0000](﻿漢a!word|b",
+  "expected": "](b b ]( 漢a!word b"
+ },
+ {
+  "input": "﻿`[\u0000  ||a word   ||~~](>\n<~`>]![http://x.io\u0000aé![é![]( http://x.io\u0000||~|]([>word]bhttps://y.io/p",
+  "expected": "[ ]( < ]![ aé![é![]( ]([ word]b"
+ },
+ {
+  "input": "![||bhttp://x.io!_||_]||",
+  "expected": "![ ]"
+ },
+ {
+  "input": "https://y.io/p](",
+  "expected": null
+ },
+ {
+  "input": ">😀` é>漢`  <_  ﻿http://x.io_",
+  "expected": "😀 é 漢 <"
+ },
+ {
+  "input": "~<b![a  b!https://y.io/p  ||bhttp://x.iohttp://x.io~#)a>)~#_\n\n漢!a) ﻿\u0000[|_~]( https://y.io/p",
+  "expected": "<b![a b! b 漢!a) [ ]("
+ },
+ {
+  "input": ">b) [https://y.io/p**||>ahttps://y.io/p﻿a😀word |**||<",
+  "expected": "b) [ <"
+ },
+ {
+  "input": "#a\u0000b\n|[<<__\u0000漢\u0000](||é`漢word~ \n  漢**﻿﻿é[|wordé  漢**https://y.io/p**",
+  "expected": "a b [<< 漢 ]( é 漢word 漢 é[ wordé 漢"
+ },
+ {
+  "input": "~|﻿漢b   \u0000",
+  "expected": "漢b"
+ },
+ {
+  "input": "\u0000漢bé||<~",
+  "expected": "漢bé <"
+ },
+ {
+  "input": "[_é|](wordhttp://x.io\u0000 |",
+  "expected": "[ é ](word"
+ },
+ {
+  "input": ">_ https://y.io/p])#>|**  漢 >)`",
+  "expected": "漢 )"
+ },
+ {
+  "input": "漢",
+  "expected": "漢"
+ },
+ {
+  "input": "#!#b||_\u0000漢**|\n\u0000b`awordword`>)||wordhttps://y.io/p<  \n\na[)](漢\u0000![😀!b![😀",
+  "expected": "! b word a[)](漢 ![😀!b![😀"
+ },
+ {
+  "input": "||  ! [😀   _![ <",
+  "expected": "! [😀 ![ <"
+ },
+ {
+  "input": "_]|﻿   ba漢\n[  b||`",
+  "expected": "] ba漢 [ b"
+ },
+ {
+  "input": " ![_!)!",
+  "expected": "![ !)!"
+ },
+ {
+  "input": "﻿<![]!https://y.io/p      `~😀)<[> \u0000|| |!b_|![![😀<b<||",
+  "expected": "<![]! 😀)< ["
+ },
+ {
+  "input": "!é![|| !> ](worda\u0000| ||| )~](~~)]",
+  "expected": "!é ]"
+ },
+ {
+  "input": "漢||)\n)_",
+  "expected": "漢 ) )"
+ },
+ {
+  "input": "#**>漢b<\u0000)![`[http://x.iohttp://x.iohttps://y.io/p]()!<!word_  \u0000#a**漢  word||#!http://x.io  ~http://x.io_漢",
+  "expected": "漢b< ) !<!word a 漢 word !"
+ },
+ {
+  "input": "](é<|![b  < https://y.io/pword))😀https://y.io/pword\u0000[a<<",
+  "expected": "](é< ![b < [a<<"
+ },
+ {
+  "input": "https://y.io/p😀é",
+  "expected": null
+ },
+ {
+  "input": "#",
+  "expected": null
+ },
+ {
+  "input": "](https://y.io/pb!!b]( ||~😀||",
+  "expected": "]("
+ },
+ {
+  "input": "\n_)[]![😀**word~",
+  "expected": ")[ ]![😀 word"
+ },
+ {
+  "input": "](>",
+  "expected": "]("
+ },
+ {
+  "input": "b _ \n||wordhttps://y.io/p)]~é||\n[_ahttps://y.io/p||![b😀http://x.ioa](!  !`|https://y.io/pword😀\n> ",
+  "expected": "b [ a !"
+ },
+ {
+  "input": " \nb漢a |b) \nword]>😀http://x.iob) )b>)[",
+  "expected": "b漢a b) word ] 😀 ) b )["
+ },
+ {
+  "input": "`  _<\u0000http://x.io\u0000﻿||)éword #!漢`😀||~>#||](](!http://x.io\n)",
+  "expected": "< ](](! )"
+ },
+ {
+  "input": "http://x.iohttp://x.iohttp://x.ioé<é~](é[\u0000**b_漢`é`a||\n漢é`é! **[a﻿﻿](**https://y.io/p😀~http://x.io😀﻿",
+  "expected": "[ b 漢 é a 漢é é! [a ]("
+ },
+ {
+  "input": "a](](😀`word![😀﻿|](\na]\n)a<)word",
+  "expected": "a](](😀 word a<)word"
+ },
+ {
+  "input": "~])#b漢  #b",
+  "expected": "]) b漢 b"
+ },
+ {
+  "input": "é**\u0000_](#](<|||<  ",
+  "expected": "é ]( ](< <"
+ },
+ {
+  "input": "#é~https://y.io/p﻿https://y.io/p)http://x.io  !\u0000word[   \u0000 [é<![)\nhttp://x.io<﻿](`#)﻿#[\u0000 ![http://x.io#http://x.io",
+  "expected": "é ! word[ [é< [ !["
+ },
+ {
+  "input": "` \u0000  😀\u0000!é**wordword\n #![![!~!_",
+  "expected": "😀 !é wordword ![![! !"
+ },
+ {
+  "input": "﻿https://y.io/p||[😀b||`_😀]|**😀!~\u0000]|[ a||﻿**<>>http://x.io",
+  "expected": "😀] 😀! ] [ a <"
+ },
+ {
+  "input": "\u0000|**>😀https://y.io/p  |**![\n\u0000_\u0000[漢😀`**]~`http://x.io)",
+  "expected": "😀 ![ [漢😀 ]"
+ },
+ {
+  "input": "﻿**[](a~|~<é![!!\u0000##](http://x.io [**word﻿~[**http://x.io\n",
+  "expected": "[](a <é![!! ]( [ word ["
+ },
+ {
+  "input": ">http://x.io~https://y.io/p\u0000|]word**![)>**https://y.io/p))!",
+  "expected": "]word ![)"
+ },
+ {
+  "input": " \u0000)||``![",
+  "expected": ") !["
+ },
+ {
+  "input": " ﻿word![  _漢b|﻿~",
+  "expected": "word ![ 漢b"
+ },
+ {
+  "input": ">!bbhttps://y.io/p>  wordhttp://x.ioé~😀a\u0000#<\u0000<a](a<![<||abé< ",
+  "expected": "!bb word < <a](a<![< abé<"
+ },
+ {
+  "input": "é  é](](**a\n||~ http://x.io﻿](\u0000[`😀a\u0000**\u0000![word~~\u0000漢a#\u0000wordb\n漢",
+  "expected": "é é](]( a ]( [ 😀a ![word 漢a word b 漢"
+ },
+ {
+  "input": "!é  a** b|| \n_ #||word **`bhttps://y.io/p ||b](  ]_![ #﻿a",
+  "expected": "!é a b word b b]( ] ![ a"
+ },
+ {
+  "input": "http://x.ioa**![﻿漢||a)a\n`\n!|||`>\u0000b  !https://y.io/p||)[http://x.io||>  漢**)",
+  "expected": "漢 b ! 漢 )"
+ },
+ {
+  "input": "\n![ <]  #`https://y.io/pword#]ahttps://y.io/p](",
+  "expected": "![ <]"
+ },
+ {
+  "input": ">~  **||éb\u0000https://y.io/pé﻿ a~_ **https://y.io/p~_)a\u0000||)**https://y.io/p~",
+  "expected": ")"
+ },
+ {
+  "input": "|\na||é  😀`[ _",
+  "expected": "a é 😀 ["
+ },
+ {
+  "input": "﻿<**﻿a ](漢     ]",
+  "expected": "< a ](漢 ]"
+ },
+ {
+  "input": "﻿](||)~||_[\u0000",
+  "expected": "]( ["
+ },
+ {
+  "input": "<||!é\u0000   word😀](<>  !#  ** \u0000﻿_[b]` !",
+  "expected": "< !é word😀](< ! [b] !"
+ },
+ {
+  "input": "http://x.io||\u0000_\u0000_>a\u0000a#`<  😀_",
+  "expected": "a a < 😀"
+ },
+ {
+  "input": "é](`",
+  "expected": "é]("
+ },
+ {
+  "input": " <é<a! 漢>![](b] >_)!漢  word`http://x.io|)#é<  )#é\u0000http://x.io!>https://y.io/p",
+  "expected": "<é<a! 漢 !漢 word ) é"
+ },
+ {
+  "input": ")http://x.io😀\u0000https://y.io/pb<😀![",
+  "expected": ")"
+ },
+ {
+  "input": " !https://y.io/p![**",
+  "expected": "!"
+ },
+ {
+  "input": "  <~[_**b\u0000http://x.ioa|!**😀b  \u0000_]()!   \n😀>  https://y.io/p](https://y.io/p>](",
+  "expected": "< b ! 😀b ! 😀"
+ },
+ {
+  "input": "#)  **[||`﻿word![\n  word ](]||_)#  ﻿](éaaé||[word<)||||`😀",
+  "expected": ") [ ) ](éaaé 😀"
+ },
+ {
+  "input": "\u0000[>#word\n|https://y.io/p<)|😀https://y.io/p[||﻿<]漢#!>",
+  "expected": "[ word <]漢 !"
+ },
+ {
+  "input": "<**)||\u0000![]<~![﻿b\u0000**a﻿https://y.io/p||",
+  "expected": "< )"
+ },
+ {
+  "input": "b﻿a`word~~](_漢#|)||﻿![**  http://x.io#\nbword#word |_|\u0000!https://y.io/p~é",
+  "expected": "b a word ]( 漢 ) ![ bword word !"
+ },
+ {
+  "input": "[](😀`<[||https://y.io/p)http://x.io😀#![|﻿ ﻿]  <\n**é﻿>word漢﻿ ",
+  "expected": "[](😀 <[ ] < é word漢"
+ },
+ {
+  "input": ")||#😀`#word#||é",
+  "expected": ") é"
+ },
+ {
+  "input": "~http://x.io|| !~[~  ` _漢|b",
+  "expected": "! [ 漢 b"
+ },
+ {
+  "input": " \n!`![﻿` _a ||||  éa]😀`)<\u0000![`  ",
+  "expected": "! ![ a éa]😀 )< !["
+ },
+ {
+  "input": " _😀http://x.io~é\nhttp://x.io[)!!漢b😀a ~word>](](   `word!😀](~😀\u0000**  ](||word](",
+  "expected": "😀 word ](]( word!😀]( 😀 ]( word]("
+ },
+ {
+  "input": "  😀](<",
+  "expected": "😀](<"
+ },
+ {
+  "input": "😀\n |_)\u0000|~)\n\u0000<http://x.io~**http://x.io",
+  "expected": "😀 ) )"
+ },
+ {
+  "input": "a](![![é|_a漢 [](<||漢aword",
+  "expected": "a](![![é a漢 []( < 漢aword"
+ },
+ {
+  "input": "b]word)`",
+  "expected": "b]word)"
+ },
+ {
+  "input": "[](word||]a",
+  "expected": "[](word ]a"
+ },
+ {
+  "input": "  http://x.io\u0000)]http://x.io",
+  "expected": ")]"
+ },
+ {
+  "input": "[word漢漢||<漢",
+  "expected": "[word漢漢 <漢"
+ },
+ {
+  "input": "\u0000||漢 ||~",
+  "expected": null
+ },
+ {
+  "input": "b**!word~](**](word**<**",
+  "expected": "b !word ]( ](word <"
+ },
+ {
+  "input": "`|# ~||_<word]![漢word_😀",
+  "expected": "<word]![漢word 😀"
+ },
+ {
+  "input": "<\n![a![http://x.iob]   漢#|bhttp://x.io",
+  "expected": "< ![a![ 漢 b"
+ },
+ {
+  "input": " b)﻿|~_😀é\n![**a**\u0000😀`",
+  "expected": "b) 😀é ![ a 😀"
+ },
+ {
+  "input": ")  https://y.io/pa||]\u0000[a ﻿**﻿[||[]﻿ http://x.io>_https://y.io/péa \u0000é  |漢  <||<",
+  "expected": ") [] é 漢 < <"
+ },
+ {
+  "input": "b\u0000! word#a ",
+  "expected": "b ! word a"
+ },
+ {
+  "input": "é)]`| #\u0000   |`\n",
+  "expected": "é)]"
+ },
+ {
+  "input": "_word_",
+  "expected": "word"
+ },
+ {
+  "input": "ahttp://x.io~)\u0000\u0000word漢https://y.io/pa#)**https://y.io/p>_!_http://x.io>~||](_\nahttp://x.io word![",
+  "expected": "a word漢 a word!["
+ },
+ {
+  "input": "bhttps://y.io/p**https://y.io/p||\nb[_`  ![https://y.io/pb",
+  "expected": "b b[ !["
+ },
+ {
+  "input": "😀\u0000[]https://y.io/p>\u0000<éb",
+  "expected": "😀 [] <é b"
+ },
+ {
+  "input": "word **`[\n)éhttp://x.io    **](http://x.io|  **`http://x.io\n  [||]!b_ ]()![éword](#é﻿`**||||https://y.io/p#)",
+  "expected": "word )é"
+ },
+ {
+  "input": "](worda\n😀]> [) aa>|> 😀word\n!http://x.io![|  ![| 漢[#[||https://y.io/p",
+  "expected": "](worda 😀] [) aa 😀word ! ![ 漢[ ["
+ },
+ {
+  "input": "word",
+  "expected": "word"
+ },
+ {
+  "input": "http://x.io ])`﻿_    _![](`||![~   ||",
+  "expected": "]) ![]("
+ },
+ {
+  "input": "😀[**  [ ****é|>>)bb漢[](**)![![`[\u0000word](![]é||http://x.io[ ",
+  "expected": "😀 [ é )bb漢[![![ [ word](![]é"
+ },
+ {
+  "input": "](#]|﻿漢`](#é~漢 ~https://y.io/pb😀|﻿]",
+  "expected": "]( ] 漢 ]( é 漢 ]"
+ },
+ {
+  "input": "b#!!  |><  https://y.io/phttps://y.io/p<](http://x.io  \u0000 漢b漢 ]éword 😀****>﻿~",
+  "expected": "b !! < 漢b 漢 ]éword 😀"
+ },
+ {
+  "input": "_]<]![[]**<||](漢b|]b<> 😀\n**_||a#)![\u0000![b漢",
+  "expected": "]<]![[] < a )![ ![b漢"
+ },
+ {
+  "input": "b~a<<﻿_http://x.ioa<😀>#a😀https://y.io/p<>![",
+  "expected": "b a<<"
+ },
+ {
+  "input": ")﻿ **https://y.io/pword<😀_\u0000`  😀 b  😀#)](a!<) \u0000漢![word",
+  "expected": ") 😀 b 😀 )]( a!<) 漢![word"
+ },
+ {
+  "input": "!>]<https://y.io/p **\u0000]![b!<`\u0000>||](>![ <#é ||😀a** 漢>< )http://x.io!",
+  "expected": "! ] ]![b!< 😀a 漢 < )"
+ },
+ {
+  "input": " ||[**||https://y.io/pword]word",
+  "expected": null
+ },
+ {
+  "input": ")http://x.iohttps://y.io/p  😀   https://y.io/p](https://y.io/p😀]](http://x.io>https://y.io/p\n](**😀**\u0000]( ||a_aawordhttp://x.io![😀)﻿][\n>漢",
+  "expected": ") 😀 ]( 😀 ]( a aaword ][ 漢"
+ },
+ {
+  "input": "]![`https://y.io/pword`)\n!\né||~éword|  )http://x.io漢    #~é\n_\n  <**]\u0000\néé||<)b wordb",
+  "expected": "]![ ! é <)b wordb"
+ },
+ {
+  "input": "_﻿#éé)__ |||ahttp://x.io",
+  "expected": "éé) a"
+ },
+ {
+  "input": " ",
+  "expected": null
+ },
+ {
+  "input": "﻿https://y.io/phttps://y.io/p**_\u0000#](é\n<>![  ]漢]https://y.io/pb#b[![",
+  "expected": "](é < ![ ]漢]"
+ },
+ {
+  "input": "b>#**~_é![!﻿é😀>\n<éa)~![![![ é﻿ !||](#|>word﻿",
+  "expected": "b é![! é😀 <éa) ![![![ é ! ]( word"
+ },
+ {
+  "input": "]](]  é**é\u0000_******#!**#]#**]](\n",
+  "expected": "]](] é é ! ] ]]("
+ },
+ {
+  "input": "\u0000\n  _|http://x.io>_)]))>])a~_é|**< 漢]#<  >b~ <`\u0000#b**<",
+  "expected": ")) ])a é < 漢] < b < b <"
+ },
+ {
+  "input": "||`))**a|https://y.io/p>[>[_",
+  "expected": ")) a"
+ },
+ {
+  "input": "  é  ﻿[ ](https://y.io/pé|﻿`<漢<]https://y.io/p",
+  "expected": "é [ ]( <漢< ]"
+ },
+ {
+  "input": "a漢]|<>😀  \nhttp://x.io~**||~|http://x.io**#<<",
+  "expected": "a漢] < 😀"
+ },
+ {
+  "input": "![https://y.io/p[#|>b||>_|😀漢||é\na`https://y.io/p<![|)",
+  "expected": "![ é a"
+ },
+ {
+  "input": "https://y.io/p<]https://y.io/p<~ !!\u0000https://y.io/p[||b",
+  "expected": "!! b"
+ },
+ {
+  "input": "word](é\n~ #漢`](|[]é~#漢>😀!😀  ](",
+  "expected": "word](é 漢 ]( []é 漢 😀!😀 ]("
+ },
+ {
+  "input": "`!  漢<** ` !https://y.io/pa\u0000 `)bab﻿  é<~**https://y.io/p](!<\n  ",
+  "expected": "! 漢< ! )bab é<"
+ },
+ {
+  "input": "#😀é![]>漢_b]é\n\u0000**![é  ~**https://y.io/p\u0000é||word__||||![_",
+  "expected": "😀é![] 漢 b]é ![é é !["
+ },
+ {
+  "input": "<",
+  "expected": "<"
+ },
+ {
+  "input": ">**~|](![] http://x.io~|😀!a#~https://y.io/pa[b >](word~[😀>>|`]a~ \n_http://x.io>éhttp://x.io\n!",
+  "expected": "](![] ](word [😀 ]a !"
+ },
+ {
+  "input": "!](!http://x.io<\n_~]#||`https://y.io/p`](<](**﻿https://y.io/p|é\n~ #>![<)~![#![#!",
+  "expected": "!](! ] ![<) ![ ![ !"
+ },
+ {
+  "input": "\n\n﻿#>||||b)http://x.iobwordé<",
+  "expected": "b)"
+ },
+ {
+  "input": ">||a![|!http://x.io word)﻿ )﻿)https://y.io/p_ http://x.io****` \u0000![]|a|](漢#**#** [](**](",
+  "expected": "a![ ! word) ) ) ![] a ](漢 []( ]("
+ },
+ {
+  "input": ">😀`!![>é漢b漢](<![`",
+  "expected": "😀 !![ é漢b漢](<!["
+ },
+ {
+  "input": "~|#![b ",
+  "expected": "![b"
+ },
+ {
+  "input": "漢>http://x.io~||😀\u0000https://y.io/p\u0000b﻿ é[![\n #![!>[b](\n😀[b_\u0000_>`http://x.io﻿\u0000**﻿](😀\n`](|",
+  "expected": "漢 b é[![ ![! [b]( 😀[b ](😀 ]("
+ },
+ {
+  "input": ">`**﻿||****😀\u0000é](<http://x.io\nword||wordb!##]()||]]]](http://x.iobhttps://y.io/p﻿**",
+  "expected": "wordb! ]() ]]]]("
+ },
+ {
+  "input": "!_\u0000b![﻿#\u0000`a[😀** word  https://y.io/pb>漢http://x.iob",
+  "expected": "! b![ a[😀 word 漢"
+ },
+ {
+  "input": "~word![é\nhttp://x.io**https://y.io/p!http://x.io[](\n](!éaa!`é][**http://x.io](word~bé)  ",
+  "expected": "word"
+ },
+ {
+  "input": "b~a![~😀<word\u0000",
+  "expected": "b a![ 😀<word"
+ },
+ {
+  "input": "**![]#![a漢\n#**b~`é﻿http://x.io\u0000b[http://x.io~a[ **  \u0000!word![>é😀||",
+  "expected": "![] ![a漢 b é b[ !word![ é😀"
+ },
+ {
+  "input": "|a😀]http://x.io\u0000 !﻿!漢  漢https://y.io/p\nhttp://x.io  \n 漢",
+  "expected": "a😀] ! !漢 漢 漢"
+ },
+ {
+  "input": "﻿!é",
+  "expected": "!é"
+ },
+ {
+  "input": "|a]|bhttps://y.io/p",
+  "expected": "a] b"
+ },
+ {
+  "input": "~~|é# é`#<﻿[\n<#]﻿b]https://y.io/p  \n!a﻿https://y.io/p😀~)  bb",
+  "expected": "é é < [ < ] b] !a bb"
+ },
+ {
+  "input": "![!**_<|])   ||[>)[ 漢#﻿_b ",
+  "expected": "![! < ]) [ )[ 漢 b"
+ },
+ {
+  "input": "<word)http://x.io_|)﻿é]~#**`!**_https://y.io/p   _http://x.ioé|<](word",
+  "expected": "<word) ) é] !"
+ },
+ {
+  "input": "😀[漢 ||\u0000http://x.io!﻿  ]b )](~http://x.ioword)<!\né!😀漢|https://y.io/p\n](\u0000[https://y.io/p<😀~https://y.io/p",
+  "expected": "😀[漢 ]b )]( é!😀漢 ]( ["
+ },
+ {
+  "input": "](https://y.io/phttps://y.io/p[||![![!a!![~http://x.io]http://x.io]😀_\n[\u0000﻿ ![`a`http://x.ioa](>https://y.io/p](éhttp://x.io\u0000||\u0000http://x.io~**😀",
+  "expected": "]("
+ },
+ {
+  "input": "`b é  |\na﻿ é!",
+  "expected": "b é a é!"
+ },
+ {
+  "input": "漢﻿`](https://y.io/p>]()\n! ||~   ",
+  "expected": "漢 ]( !"
+ },
+ {
+  "input": "](<!![😀[)http://x.ioword|!|\n😀 **_éhttps://y.io/p|||﻿https://y.io/p|)>~ >~#\nword",
+  "expected": "](<!![😀[) 😀 é word"
+ },
+ {
+  "input": "<[[b]!😀_~\n\u0000 !] word]**<!😀",
+  "expected": "<[[b]!😀 !] word] <!😀"
+ },
+ {
+  "input": "\n|﻿",
+  "expected": null
+ },
+ {
+  "input": "`)漢_  [_>  b ﻿~a<||>a~|[~😀é||aa` ",
+  "expected": ")漢 [ b a< aa"
+ },
+ {
+  "input": "a﻿﻿)[",
+  "expected": "a )["
+ },
+ {
+  "input": "#https://y.io/p 😀 word#||!#<[[  _`!!é`**  http://x.iohttp://x.io<\u0000!_[漢a  )`**`!",
+  "expected": "😀 word ! <[[ !!é ! [漢a ) !"
+ },
+ {
+  "input": "!!http://x.io",
+  "expected": "!!"
+ },
+ {
+  "input": "\u0000|||😀﻿a\nhttp://x.io` 😀_b!**  é漢aé\u0000]a aa![",
+  "expected": "😀 a 😀 b! é漢aé ]a aa!["
+ },
+ {
+  "input": "|| aword`!  ](~#`b||](****   #http://x.io](a`_]([  😀word   \u0000",
+  "expected": "]( 😀word"
+ },
+ {
+  "input": "\nword  [http://x.io)])][http://x.iohttp://x.io](#]( ﻿<||aé\u0000||!>]||b  \u0000\u0000😀é]",
+  "expected": "word [ < ! ] b 😀é]"
+ },
+ {
+  "input": "http://x.io]([_]﻿#漢https://y.io/p😀|\u0000#!b] ||||>)  !",
+  "expected": "漢 !b] ) !"
+ },
+ {
+  "input": "http://x.io**wordhttps://y.io/pa![ ] a!**[** ](<_\néa😀b](﻿>https://y.io/p>",
+  "expected": "] a! [ ](< éa😀b]("
+ },
+ {
+  "input": " a _))**word||\n<![!http://x.io]\u0000)https://y.io/pé漢  ",
+  "expected": "a )) word <![! )"
+ },
+ {
+  "input": "]bé",
+  "expected": "]bé"
+ },
+ {
+  "input": "!",
+  "expected": "!"
+ },
+ {
+  "input": "**~_>>\n﻿b﻿b`\n||  \u0000||  \u0000>]",
+  "expected": "b b ]"
+ },
+ {
+  "input": " ![",
+  "expected": "!["
+ },
+ {
+  "input": "`\n](|| 漢![﻿#]](](~_漢![ 😀**  [b\u0000b",
+  "expected": "]( 漢![ ]](]( 漢![ 😀 [b b"
+ },
+ {
+  "input": "a<#a#http://x.io||<a~ https://y.io/pba[| #a漢!  !`]~]﻿_>  😀a![]",
+  "expected": "a< a a漢! ! ] ] 😀a![]"
+ },
+ {
+  "input": " 漢a`[|é  ` ||http://x.io😀",
+  "expected": "漢a [ é"
+ },
+ {
+  "input": "||)\n",
+  "expected": ")"
+ },
+ {
+  "input": "<|",
+  "expected": "<"
+ },
+ {
+  "input": "<[!_\u0000漢|]﻿\u0000    \u0000!]() **漢[https://y.io/p)#>)||<b![a漢a 😀_\u0000!)😀漢`",
+  "expected": "<[! 漢 ] !]() 漢[ ) <b![a 漢a 😀 !)😀漢"
+ },
+ {
+  "input": "](![)!é!>",
+  "expected": "](![)!é!"
+ },
+ {
+  "input": "![`https://y.io/p`](   \n😀~||)!**`]**>~**﻿wordhttp://x.io`﻿ [\nword)]!](|< **\n<\n<﻿漢",
+  "expected": "! ] word [ word)]!]( < < < 漢"
+ },
+ {
+  "input": "![﻿https://y.io/p|||>](|﻿\n\u0000",
+  "expected": "!["
+ },
+ {
+  "input": " <~**﻿https://y.io/p  )|**`﻿😀|﻿﻿**a😀# ![)~# ]([)  <]]](<word[a|\nhttp://x.iohttp://x.io!",
+  "expected": "< ) 😀 a😀 <]]](<word[a"
+ },
+ {
+  "input": "\n<]`<https://y.io/phttp://x.io![|**漢>http://x.io _\u0000#<\u0000**b",
+  "expected": "<] < b"
+ },
+ {
+  "input": "aéhttps://y.io/p#~[||﻿é#[`ahttps://y.io/p \n<>aword😀﻿<>https://y.io/p](|a~!漢](!﻿b]\n|| !",
+  "expected": "aé !"
+ },
+ {
+  "input": "||",
+  "expected": null
+ },
+ {
+  "input": "! \u0000||http://x.io<`b_  \u0000\n 漢http://x.io|| a!😀]https://y.io/p![||~>>aé||a~>",
+  "expected": "! a!😀] a"
+ },
+ {
+  "input": "a||`http://x.io`\u0000",
+  "expected": "a"
+ },
+ {
+  "input": "\u0000﻿\n漢![![😀﻿]\n😀\u0000](wordéé~||http://x.io!![",
+  "expected": "漢![![😀 ] 😀 ](wordéé"
+ },
+ {
+  "input": "b**😀![!#]﻿![)>﻿!  [﻿\n\n>\n|a#  ](wordéhttp://x.io[**b](_`é\n\n",
+  "expected": "b 😀![! ] ![) ! [ a ](wordé"
+ },
+ {
+  "input": " ||_][\n](漢_||!>é  )é >word~https://y.io/p!a![  é漢\u0000b |#é!](",
+  "expected": "! é )é word é漢 b é!]("
+ },
+ {
+  "input": "﻿](~a_\u0000word﻿`)\n😀<)😀`#",
+  "expected": "]( a word ) 😀<)😀"
+ },
+ {
+  "input": "**>![`https://y.io/p #!http://x.iohttps://y.io/p_ word`>_wordhttp://x.io😀**_#éa#a_",
+  "expected": "![ ! word word"
+ },
+ {
+  "input": "b|[word_ [a](**é#﻿)http://x.io#😀!|word![\u0000b\n>https://y.io/pa﻿漢**]( ![](]||wordhttps://y.io/p!|é",
+  "expected": "b word [ a b 漢 ]( ![](] word"
+ },
+ {
+  "input": "![漢\nb\u0000|_]a[**http://x.io)b]||>~漢)漢😀 **|\u0000`||  http://x.io](é\u0000http://x.io ~é",
+  "expected": "![漢 b ]a[ é"
+ },
+ {
+  "input": "😀~https://y.io/p[  http://x.io!_><漢>a`[  #<word漢漢😀 a**![#~b<\n`é!\n",
+  "expected": "😀 <word漢漢😀 a ![ b< é!"
+ },
+ {
+  "input": "http://x.io![﻿#https://y.io/p`)   ![![漢 \n>wordword  a\nword\n<﻿a)",
+  "expected": "![![漢 wordword a word < a)"
+ },
+ {
+  "input": "![) >)_ http://x.io😀|\naa`>##a",
+  "expected": "![) ) aa a"
+ },
+ {
+  "input": "`~_﻿]http://x.io]([||)漢﻿wordééa _a  http://x.io#!#|word**a>#~﻿",
+  "expected": "] wordééa a a"
+ },
+ {
+  "input": "**\nhttps://y.io/p",
+  "expected": null
+ },
+ {
+  "input": "a`<a\na_ ![http://x.io漢漢bhttp://x.io~\n﻿http://x.ioé😀`",
+  "expected": "a <a a !["
+ },
+ {
+  "input": " word **< ]`\u0000😀)https://y.io/p😀]]**!|wordword  ﻿\n)a😀||http://x.ioword](a",
+  "expected": "word < ] 😀) )a😀"
+ },
+ {
+  "input": "! https://y.io/p\n#!|)![😀!a﻿http://x.io**﻿>b**",
+  "expected": "! ! )![😀!a b"
+ },
+ {
+  "input": "_https://y.io/pa\u0000😀  ~   >[\u0000||  |>漢|é~é<#`漢  ||http://x.io >漢![漢\n)",
+  "expected": "😀 [ 漢![漢 )"
+ },
+ {
+  "input": " >_]<**\u0000\u0000`😀b![)**https://y.io/p﻿**漢b",
+  "expected": "]< 😀b![) 漢b"
+ },
+ {
+  "input": "[é~](_)]([[\nhttps://y.io/p\u0000 `\n|!_\u0000|https://y.io/p  #",
+  "expected": "é ]([[ !"
+ },
+ {
+  "input": "word😀  a\u0000 https://y.io/pb\u0000漢漢#`](é [http://x.io\u0000_~!漢~]]word\u0000",
+  "expected": "word😀 a 漢漢 ](é [ !漢 ]]word"
+ },
+ {
+  "input": "\u0000[http://x.io~**😀>![\n||)](https://y.io/p**https://y.io/p漢)word",
+  "expected": "[ word"
+ },
+ {
+  "input": "漢 wordé||](﻿] ﻿|😀 ﻿http://x.ioa[\nword﻿[b]!😀||\u0000\u0000 a\u0000!\na\u0000\n]",
+  "expected": "漢 wordé a ! a ]"
+ },
+ {
+  "input": "😀#漢|é)a) word)https://y.io/p#  <  a_ \u0000|漢éhttps://y.io/phttps://y.io/pé_a﻿|||]||  a](]word",
+  "expected": "😀 漢 é)a) word) < a 漢é a](]word"
+ },
+ {
+  "input": "\u0000😀http://x.io!﻿![a**~http://x.io|<**[bb)a#😀[](~\n![![<﻿éa\u0000﻿<[ [**# <>é",
+  "expected": "😀 ![a a 😀[]( ![![< éa <[ [ < é"
+ },
+ {
+  "input": "~漢\u0000![![||éhttp://x.io<](http://x.io!é ﻿! ﻿**)é![",
+  "expected": "漢 é!["
+ },
+ {
+  "input": "\n_>",
+  "expected": null
+ },
+ {
+  "input": "_>]b[\u0000<**]([<`",
+  "expected": "]b [ < ]([<"
+ },
+ {
+  "input": " |\u0000<https://y.io/p||! #   ](\u0000a",
+  "expected": "]( a"
+ },
+ {
+  "input": "|😀![#)b  漢漢 ~漢https://y.io/p_[word﻿  ﻿](**\n![<!éworda>",
+  "expected": "😀![ )b 漢漢 漢 ]( ![ <!éworda"
+ },
+ {
+  "input": "](  éé<word漢 ](https://y.io/pb ]([|||**a **<éword~ 😀",
+  "expected": "]( éé<word漢 ]( ]( [ a <éword 😀"
+ },
+ {
+  "input": "b \u0000﻿<[word b~~~  a)\u0000\na[http://x.io_  word[~http://x.io \n]||漢\u0000<",
+  "expected": "b <[word b a) a[ word[ ] 漢 <"
+ },
+ {
+  "input": "`é](wordé||#> http://x.io😀#漢\n_> 漢\u0000 **> )](a|**#><)|**<",
+  "expected": "é](wordé 漢 )](a <) <"
+ },
+ {
+  "input": "`http://x.io😀     #b**",
+  "expected": "b"
+ },
+ {
+  "input": " https://y.io/phttp://x.io>]é😀\u0000<![https://y.io/p><ééé~#~_#[] !  ||é\nwordword`#",
+  "expected": "<![ ! é wordword"
+ },
+ {
+  "input": "  \n||\nword _漢)_  漢http://x.io",
+  "expected": "word 漢) 漢"
+ },
+ {
+  "input": "`![!https://y.io/p#http://x.io#]😀_!](https://y.io/pbb﻿漢 ! **_****😀[`![😀b漢<http://x.io\u0000",
+  "expected": "![! ]😀 !]( 漢 ! 😀[ ![😀b漢"
+ },
+ {
+  "input": "<~ahttp://x.io",
+  "expected": "< a"
+ },
+ {
+  "input": "**`<http://x.io<![ `",
+  "expected": null
+ },
+ {
+  "input": "😀~漢](http://x.iohttp://x.iohttps://y.io/p  |||!]_~é>﻿![  ]",
+  "expected": "😀 漢]( !] é ![ ]"
+ },
+ {
+  "input": "**||\u0000#>é[!](_漢\n)[**\n_#>\n]||﻿é)  ![]a>http://x.iohttp://x.io|",
+  "expected": "é) ![]a"
+ },
+ {
+  "input": "﻿_b]( <<\n😀`]😀~éhttp://x.iob漢#[\néword[**a**![\u0000~",
+  "expected": "b]( << 😀 ]😀 é éword[ a !["
+ },
+ {
+  "input": "![  b|[_",
+  "expected": "![ b ["
+ },
+ {
+  "input": "\n  https://y.io/p  ~**_||])[word",
+  "expected": "])[word"
+ },
+ {
+  "input": "[http://x.io )<`](😀 ~](`漢)!",
+  "expected": ")< !"
+ },
+ {
+  "input": " http://x.ioword!  `~](\u0000  ](  http://x.io]",
+  "expected": "]( ]("
+ },
+ {
+  "input": "#]",
+  "expected": "]"
+ },
+ {
+  "input": "[http://x.iohttps://y.io/p \u0000|~[|http://x.io![http://x.io  é\n![  <  )\néb\n![﻿|<!#",
+  "expected": "[ [ é ![ < ) éb ![ <!"
+ },
+ {
+  "input": "[#||**",
+  "expected": "["
+ },
+ {
+  "input": "`https://y.io/p﻿<_a**  _~a  ",
+  "expected": "< a a"
+ },
+ {
+  "input": "﻿ahttp://x.io**https://y.io/p[**|#[\nword~  ]http://x.io😀",
+  "expected": "a word ]"
+ },
+ {
+  "input": "~> <**\u0000😀http://x.io ~<word\na]`word||éhttp://x.io﻿# ] é﻿http://x.io![word**||![#|",
+  "expected": "< 😀 <word a] word !["
+ },
+ {
+  "input": "~[[a b😀é!![]",
+  "expected": "[[a b😀é!![]"
+ },
+ {
+  "input": "]](`a_\nhttps://y.io/p  ﻿||`word﻿word😀~` ](**  \n[[b`](  __[b)é<",
+  "expected": "]]( a word word😀 ]( [b é<"
+ },
+ {
+  "input": "b  |https://y.io/p  ) |>_😀||![>",
+  "expected": "b ) 😀 !["
+ },
+ {
+  "input": "**!漢)漢 ~https://y.io/p|# ||!_éhttp://x.iohttp://x.io",
+  "expected": "!漢)漢 ! é"
+ },
+ {
+  "input": "|||])",
+  "expected": "])"
+ },
+ {
+  "input": "bword!![漢[ <|||﻿",
+  "expected": "bword!![漢[ <"
+ },
+ {
+  "input": "https://y.io/p>_漢\n~~[|_![https://y.io/p<![漢﻿)a**b**﻿)[[wordb\u0000b](#a😀",
+  "expected": "[ ![ ![漢 )a b ) [[wordb b]( a😀"
+ },
+ {
+  "input": "  ||<#\u0000b>#\n",
+  "expected": "< b"
+ },
+ {
+  "input": "aawordhttp://x.io<b<**\n#\u0000  >é\u0000|",
+  "expected": "aaword é"
+ },
+ {
+  "input": "<_![|**\u0000漢😀 [ba😀`https://y.io/p<](wordhttp://x.io![   ](] #é﻿_",
+  "expected": "< ![ 漢😀 [ba😀 ](] é"
+ },
+ {
+  "input": "😀]()\u0000﻿\u0000word#~http://x.io ~#😀**[a)a>é )http://x.io)<!||",
+  "expected": "😀]() word 😀 [a)a é )"
+ },
+ {
+  "input": "é<![~](a漢[ _>)]https://y.io/p!~)**` #||](]",
+  "expected": "é< ] ](]"
+ },
+ {
+  "input": "http://x.ioaword😀﻿](\u0000\n)\n]\u0000\u0000[\n漢éé)\n\u0000a)",
+  "expected": "]( ) ] [ 漢é é) a)"
+ },
+ {
+  "input": "﻿**![!\nhttps://y.io/p﻿b![~a\n漢`  ](漢",
+  "expected": "![! b ![ a 漢 ](漢"
+ },
+ {
+  "input": "_|a!a# ](|< é! [  |>\u0000](a~_https://y.io/p",
+  "expected": "a!a ]( < é! [ ](a"
+ },
+ {
+  "input": "http://x.io#!漢http://x.io",
+  "expected": "!漢"
+ },
+ {
+  "input": "_😀éhttp://x.io  ![[!﻿﻿_  http://x.iob_!😀](b漢a)a# ﻿~b",
+  "expected": "😀é a b"
+ },
+ {
+  "input": "||b]<![a~  )]\n!https://y.io/p!<![😀",
+  "expected": "b]<![a ) ] !"
+ },
+ {
+  "input": "[]~#[~ https://y.io/p)﻿])\nb#\n**_",
+  "expected": "[] [ ]) b"
+ },
+ {
+  "input": "😀\n])https://y.io/p||||\u0000](`https://y.io/p](_ a>**!https://y.io/p#﻿>",
+  "expected": "😀 ]) ]( ]( a !"
+ },
+ {
+  "input": "#||~**é!\n~![﻿](]( éhttp://x.io ](http://x.io<é![|bhttps://y.io/p~﻿\u0000 )|![**",
+  "expected": "é! !["
+ },
+ {
+  "input": "  [😀 ||é#漢ééb\n[漢~>~](b  #||`",
+  "expected": "[😀"
+ },
+ {
+  "input": "﻿!>漢<word|||~#\n<](\n漢>  `a>é||]![\u0000﻿ 😀漢\u0000_<_  https://y.io/p",
+  "expected": "! 漢< word ]![ 😀漢 <"
+ },
+ {
+  "input": "<||<word||aword||`é😀word_ `http://x.io~|[ ]  word漢**https://y.io/p||",
+  "expected": "< aword"
+ },
+ {
+  "input": "_\u0000 \u0000||<)  ](  **![![](**﻿https://y.io/p😀]|](|>a_b😀[**_**b|![ a",
+  "expected": "<) ]( ![![]( a"
+ },
+ {
+  "input": "~![# >_  [é_<)😀b)![]|#**||](http://x.io**\nword",
+  "expected": "![ [é <)😀b)![] ]( word"
+ },
+ {
+  "input": "漢)\n![http://x.io \n",
+  "expected": "漢) !["
+ },
+ {
+  "input": "a漢!a)**word![  #  ",
+  "expected": "a漢 !a) word!["
+ },
+ {
+  "input": "**",
+  "expected": null
+ },
+ {
+  "input": "漢|_éhttps://y.io/phttps://y.io/phttps://y.io/paé)\u0000https://y.io/p# >http://x.ioé##![漢)](>||>](]\u0000]é😀  ahttps://y.io/p||)  ",
+  "expected": "漢 é"
+ },
+ {
+  "input": "!b| ||éword](~`** ](\u0000~**[a)éword",
+  "expected": "!b éword ]( ]( [a)éword"
+ },
+ {
+  "input": "https://y.io/pa**[`!﻿   >||[` ]  <]#!!#a](![😀a)_﻿>",
+  "expected": "[ ! [ ] <] !! a](![😀a)"
+ },
+ {
+  "input": "[~||~ ",
+  "expected": "["
+ },
+ {
+  "input": "é||\n 😀http://x.io#漢  **||!<",
+  "expected": "é !<"
+ },
+ {
+  "input": "\u0000  !)])\u0000\né~http://x.iowordhttp://x.io ~word  !||a_   |é![",
+  "expected": "!)]) é word ! a é!["
+ },
+ {
+  "input": "http://x.io[! ||)😀http://x.iohttp://x.io😀\n\n**)](a)  ]b**漢wordéword!][ wordhttp://x.iob ",
+  "expected": ")😀 ) ] b 漢wordéword!][ word"
+ },
+ {
+  "input": "||! ![http://x.io)! ||éhttps://y.io/p",
+  "expected": "é"
+ },
+ {
+  "input": "_~https://y.io/p  ﻿<漢\n>http://x.io_b漢**![|https://y.io/p**é`http://x.iohttp://x.io!<  `![https://y.io/p~ **||\u0000\n ]!![﻿\u0000a",
+  "expected": "<漢 ![ ]!![ a"
+ },
+ {
+  "input": "#😀#|****é`﻿**\u0000!**a]http://x.io[](\u0000_<)]https://y.io/p ![https://y.io/pb http://x.io",
+  "expected": "😀 é ! a] <)] !["
+ },
+ {
+  "input": "https://y.io/pbb`> a#ab__#|\n#😀](~] [漢\n",
+  "expected": "a ab 😀]( ] [漢"
+ },
+ {
+  "input": " é)_**word[>😀!﻿>#a",
+  "expected": "é) word[ 😀! a"
+ },
+ {
+  "input": "﻿ \nhttp://x.io😀http://x.io",
+  "expected": null
+ },
+ {
+  "input": "#]漢",
+  "expected": "]漢"
+ },
+ {
+  "input": "b!![~",
+  "expected": "b! !["
+ },
+ {
+  "input": "#  _ ",
+  "expected": null
+ },
+ {
+  "input": "](😀https://y.io/p é![>#é**<﻿  漢 ",
+  "expected": "](😀 é![ é < 漢"
+ },
+ {
+  "input": "word😀\n\u0000word[||~[ \u0000![  ||<",
+  "expected": "word😀 word[ <"
+ },
+ {
+  "input": "[](!)<|漢😀 _]é[  |**]http://x.iob😀",
+  "expected": "[](!)< 漢😀 ]é[ ]"
+ },
+ {
+  "input": "**`﻿_b\nhttp://x.io !é\n[<_ |#﻿<_ |]b",
+  "expected": "b !é [< < ]b"
+ },
+ {
+  "input": "**<))||http://x.io#**`|\n   )<a]![](https://y.io/p]word~)>~>** >a😀 \u0000_))﻿漢",
+  "expected": "<)) )<a] a😀 )) 漢"
+ },
+ {
+  "input": "][** 漢b`\u0000😀漢",
+  "expected": "][ 漢b 😀漢"
+ },
+ {
+  "input": "<]",
+  "expected": "<]"
+ },
+ {
+  "input": "b)`  | é😀😀](![b word😀~_|**]\nb_\n",
+  "expected": "b) é😀😀](![b word😀 ] b"
+ },
+ {
+  "input": "**😀)😀)**]http://x.iohttps://y.io/p aword<😀\u0000\n<漢\n]漢![漢_\u0000~",
+  "expected": "😀)😀) ] aword<😀 <漢 ]漢![漢"
+ },
+ {
+  "input": "a#b)",
+  "expected": "a b)"
+ },
+ {
+  "input": ")`é]( a漢_https://y.io/phttps://y.io/p",
+  "expected": ") é]( a漢"
+ },
+ {
+  "input": "a]()漢﻿ ||é|a\u0000 https://y.io/p>  >>>b~é ﻿![`# http://x.iohttp://x.io漢http://x.io ~**> a漢![||https://y.io/p_a",
+  "expected": "a]()漢"
+ },
+ {
+  "input": "  a`ab>`https://y.io/p>é",
+  "expected": "a ab"
+ },
+ {
+  "input": "**http://x.io\n\n﻿\n< ﻿\u0000)é]**a](! )](﻿é)[é](**!﻿wordword",
+  "expected": "< )é] a](! )]( é)[é]( ! wordword"
+ },
+ {
+  "input": "~]ba[]#\n![`\n",
+  "expected": "]ba [] !["
+ },
+ {
+  "input": "😀`﻿||é_a~[\n**>",
+  "expected": "😀 é a ["
+ },
+ {
+  "input": "a||[漢\n\n漢 ~  éword]![]![a\u0000",
+  "expected": "a [漢 漢 éword]![]![a"
+ },
+ {
+  "input": "`http://x.io  ![](_[>b||https://y.io/p[﻿ `é||](https://y.io/p﻿﻿a![` ](b |)_word  ~_\u0000] ]\n#`",
+  "expected": "word ] ]"
+ },
+ {
+  "input": "_\n** ](a`﻿😀)`~\n http://x.io~  ##)>漢 ||![~]﻿]",
+  "expected": "](a 😀) ) 漢 ![ ] ]"
+ },
+ {
+  "input": "|||http://x.io||é_",
+  "expected": "é"
+ },
+ {
+  "input": "|| aéhttps://y.io/phttps://y.io/p](awordhttp://x.ioa😀éword https://y.io/p_!http://x.io",
+  "expected": "aé"
+ },
+ {
+  "input": ">|| 漢\u0000b~bb _word__\n  _ [![]é",
+  "expected": "漢 b bb word [![]é"
+ },
+ {
+  "input": "`漢http://x.io\n]([`![]~\u0000_b",
+  "expected": "漢 ]([ ![] b"
+ },
+ {
+  "input": "_b_#<b\n\n](漢a  漢_![_**)",
+  "expected": "b <b ](漢a 漢 ![ )"
+ },
+ {
+  "input": " <  !  a`||`a![~😀word😀 ",
+  "expected": "< ! a a![ 😀word😀"
+ },
+ {
+  "input": "|![    http://x.io)#漢\n#﻿|_a﻿ >](😀word﻿https://y.io/p||word]😀 a>﻿)# ~`>﻿http://x.io!b",
+  "expected": null
+ },
+ {
+  "input": "  _﻿é`!`😀!_](_﻿  [http://x.io",
+  "expected": "é ! 😀! ]( ["
+ },
+ {
+  "input": "b\n|漢b   漢  ~|word_>https://y.io/p ﻿漢b](~< [ https://y.io/p#[`< \n\u0000é!)http://x.io|  ",
+  "expected": "b 漢 b 漢 word 漢b]( < [ < é!)"
+ },
+ {
+  "input": ">#http://x.ioword**](😀b`\nhttps://y.io/p[\n~|]()[|**  漢~|`bé`)| a[><![",
+  "expected": "[ 漢 bé ) a[ <!["
+ },
+ {
+  "input": "b_[",
+  "expected": "b ["
+ },
+ {
+  "input": "\u0000",
+  "expected": null
+ },
+ {
+  "input": "\n﻿",
+  "expected": null
+ },
+ {
+  "input": "~https://y.io/p|aa||",
+  "expected": null
+ },
+ {
+  "input": "**`\n` `漢漢[https://y.io/p](`>b[|![http://x.io",
+  "expected": "漢漢[ ]( b[ !["
+ },
+ {
+  "input": "  éhttps://y.io/p>  a  ![<漢<##😀>漢  _ 😀\n**http://x.io](\u0000)[>!<\u0000#_ ](||)",
+  "expected": "é a !<"
+ },
+ {
+  "input": "  😀https://y.io/p<**漢||éhttp://x.io\u0000😀😀!`b`!<漢**\nhttp://x.ioa   !](http://x.io\n\n__)http://x.io](http://x.io",
+  "expected": "😀 😀😀! b !<漢 !]( )"
+ },
+ {
+  "input": "  é]😀!\u0000[﻿\u0000)](`https://y.io/p~http://x.io>\u0000 ](![)](<éhttps://y.io/p\u0000` ",
+  "expected": "é]😀! )](<é"
+ },
+ {
+  "input": "  )b ",
+  "expected": ")b"
+ },
+ {
+  "input": "![http://x.io > ~**漢https://y.io/p<😀é [b﻿b😀  |",
+  "expected": "![ 漢 [b b😀"
+ },
+ {
+  "input": "||😀<****https://y.io/p_||](wordhttp://x.io]word!<**>http://x.iohttps://y.io/p!<||  ﻿![a漢**|![](![[b**!![[!word",
+  "expected": "](word ![a漢 ![](![[b !![[!word"
+ },
+ {
+  "input": "|",
+  "expected": null
+ },
+ {
+  "input": "😀|bé漢https://y.io/p||**<\nb<http://x.io_|~~ ||https://y.io/p|>  [`漢﻿  漢||漢>]漢word)[ ",
+  "expected": "😀 bé漢 [ 漢 漢 漢 ]漢word)["
+ },
+ {
+  "input": "`~|||éba <![ahttp://x.iohttps://y.io/phttp://x.io\n ![[",
+  "expected": "éba <![a ![["
+ },
+ {
+  "input": "a! https://y.io/p\n#![< ]😀﻿word漢﻿`|![﻿漢_\n](![]`\n#<||https://y.io/p😀|![><_![漢",
+  "expected": "a! ![ < ]😀 word漢 ![ 漢 ](![] < ![漢"
+ },
+ {
+  "input": "\u0000]http://x.io](﻿\u0000](![~é]>](](😀<[)]http://x.ioé[https://y.io/p)éhttps://y.io/phttp://x.io\u0000word  ~)http://x.io![﻿  😀_>",
+  "expected": "] ](![ é] ](](😀 <[)] word ) 😀"
+ },
+ {
+  "input": "a漢\n漢](http://x.io|>\u0000[😀~!a_|` <**|**é😀﻿\u0000  ![   ﻿||<b 😀word😀](b|a!#",
+  "expected": "a漢 漢]( [😀 !a < é😀 ![ <b 😀 word😀](b a!"
+ },
+ {
+  "input": "\nb https://y.io/p]\n**b `  ]~a\u0000\n😀**[`word)﻿ ﻿https://y.io/paword﻿ >😀http://x.io\u0000#http://x.ioab]]([word\n  ",
+  "expected": "b b ] a 😀 [ word) 😀"
+ },
+ {
+  "input": "http://x.io😀 a漢|https://y.io/pwordhttps://y.io/p~<` ﻿\u0000",
+  "expected": "a漢"
+ },
+ {
+  "input": "word<!~`!bwordword_éab`||  a_**#**﻿\u0000#",
+  "expected": "word<! !bwordword éab a"
+ },
+ {
+  "input": "!#<http://x.io)😀)https://y.io/p](https://y.io/pbhttp://x.ioa",
+  "expected": "!"
+ },
+ {
+  "input": "**http://x.io\n>  !)\u0000||a~\u0000a  )é[!]\n[[<😀https://y.io/pé![_\u0000#> >漢!** https://y.io/pb!﻿!)",
+  "expected": "!) a a )é[!] [[<😀 漢! !)"
+ },
+ {
+  "input": "word😀😀\u0000[漢",
+  "expected": "word😀😀 [漢"
+ },
+ {
+  "input": "[漢﻿éa wordb]",
+  "expected": "[漢 é a wordb]"
+ },
+ {
+  "input": ">_![|word]||![b~]`word]https://y.io/p|!_https://y.io/p|a![http://x.io<é`![ 漢https://y.io/p  a  **  ](!ahttp://x.io|",
+  "expected": "![ word] ![b ] word] 漢 a ](!a"
+ },
+ {
+  "input": "<[!﻿~![  😀\u0000**a![**   ! b**https://y.io/p_\u0000`~http://x.io漢漢#漢**_😀|| !~[!😀http://x.ioword",
+  "expected": "<[! ![ 😀 a![ ! b ! [!😀"
+ },
+ {
+  "input": "||wordhttps://y.io/phttps://y.io/p![ word~#)https://y.io/péb #>]!\nhttp://x.ioé[](#_http://x.io_]**[**",
+  "expected": "word word ) ]!"
+ },
+ {
+  "input": "漢😀é> _[b]( http://x.io**<](|[`worda>| ||~!word  ](![﻿![[![\u0000b漢`",
+  "expected": "漢😀é [b]( !word ](![ ![[![ b漢"
+ },
+ {
+  "input": "word!﻿_\u0000_~#><<||😀  !\n<![é",
+  "expected": "word! << 😀 ! <![é"
+ },
+ {
+  "input": "  😀\u0000](<![|[>**a](\nhttp://x.io** _)!_😀[",
+  "expected": "😀 ](< ! 😀["
+ },
+ {
+  "input": "![](_||\n||\n﻿_word[😀)",
+  "expected": null
+ },
+ {
+  "input": "#|](😀é<\n![](||![漢\n||_# )﻿https://y.io/p!\u0000`\n||>b[] word!>😀",
+  "expected": "](😀é< b [ ] word! 😀"
+ },
+ {
+  "input": "#~a] **`  **`|!]http://x.io**[[]﻿  ]http://x.io﻿#_\u0000~<a]>!https://y.io/p  _||",
+  "expected": "a] !] ] <a] !"
+ },
+ {
+  "input": "`[ #é\u0000  \u0000漢 b<\n``<_b! 😀  ||\n#\u0000\u0000#\u0000] http://x.io)",
+  "expected": "[ é 漢 b< < b! 😀 ]"
+ },
+ {
+  "input": "!é]**word😀  `||b<](a]a[é~é  😀****\u0000  \u0000a#\u0000https://y.io/p[[_a #",
+  "expected": "!é] word😀 b<](a]a[é é 😀 a"
+ },
+ {
+  "input": "#http://x.io\u0000b﻿>~](http://x.ioé`bab|b#https://y.io/p",
+  "expected": "b ]("
+ },
+ {
+  "input": ")](aa﻿漢漢**a# ab ![\u0000\u0000|😀![ <éé`_  >`~",
+  "expected": ")](aa 漢漢 a ab ![ 😀![ <éé"
+ },
+ {
+  "input": "](https://y.io/p~ ![]([<|](<a**>b#|﻿",
+  "expected": "]( ![]([< ](<a b"
+ },
+ {
+  "input": "![  #![﻿](**éword漢](!http://x.iobhttp://x.io",
+  "expected": "![ ![ ]( éword漢](!"
+ },
+ {
+  "input": ">é😀\u0000漢>é]é`_b`\u0000\n  <<]![]><  ﻿é[<   _||||<",
+  "expected": "é😀 漢 é]é b <<]![] < é[< <"
+ },
+ {
+  "input": "<>`\u0000<>  http://x.ioa😀#**\u0000](é`﻿https://y.io/p)😀_!😀>😀漢",
+  "expected": "< < ](é"
+ },
+ {
+  "input": "||||`a [**!b  éhttp://x.iohttps://y.io/pé😀é﻿ `ahttp://x.io",
+  "expected": "a [ !b é a"
+ },
+ {
+  "input": "\u0000#http://x.io",
+  "expected": null
+ },
+ {
+  "input": "](word<|﻿﻿`||wordé`b  éa**",
+  "expected": "](word< wordé b éa"
+ },
+ {
+  "input": "﻿https://y.io/p漢漢worda ![ `http://x.io![**b  <![b word \n~`😀﻿é []`#\n~><![﻿>wordb_baé",
+  "expected": "![ <![b word 😀 é [] <![ wordb baé"
+ },
+ {
+  "input": "#) <![<|** **!word>)](\u0000![)`>word",
+  "expected": ") < word"
+ },
+ {
+  "input": "`  !](<|b ~\u0000漢😀https://y.io/p~a>é> http://x.io ](﻿ ~|||\n[漢 [||https://y.io/p`_<_|_]~https://y.io/p)||",
+  "expected": "!](< b 漢😀 ]("
+ },
+ {
+  "input": "a漢ab#`worda||https://y.io/p]( ]![_!**`<#[  😀a#|](aba漢 > ># ﻿wordé é[",
+  "expected": "a漢ab worda ]![ ! < [ 😀a ](aba漢 word é é["
+ },
+ {
+  "input": "\u0000 **<\u0000word#https://y.io/p#>!#",
+  "expected": "< word !"
+ },
+ {
+  "input": "a[](`word[😀[|﻿<\u0000`http://x.io!http://x.iohttp://x.ioa]\u0000![**||||﻿http://x.io)|\u0000![    ~\n#https://y.io/p](https://y.io/p",
+  "expected": "a !["
+ },
+ {
+  "input": "])aéaba﻿",
+  "expected": "])aéaba"
+ },
+ {
+  "input": "😀**",
+  "expected": "😀"
+ },
+ {
+  "input": "😀﻿\u0000>word|| word\nhttp://x.io]**`_é#~漢#😀**_!\n_**\u0000**#b)b!http://x.io # \u0000b  ",
+  "expected": "😀 word word b)b! b"
+ },
+ {
+  "input": "|é# )\u0000",
+  "expected": "é )"
+ },
+ {
+  "input": " !![![word|﻿<😀#[word#a**\n``<é)word\u0000   [\u0000\u0000http://x.io<é>[)\u0000\u0000![#é word\nhttps://y.io/p ",
+  "expected": "!![![word <😀 [word a <é)word [ <é [) ![ é word"
+ },
+ {
+  "input": "] ~||<[漢>` < ]b",
+  "expected": "] <[漢 < ]b"
+ },
+ {
+  "input": "aaéé>||_[\n~#<😀a!\n é](\u0000||<é漢[`http://x.io_<\u0000](![<b>a~<漢",
+  "expected": "aaéé <é漢[ ]( ![<b a <漢"
+ },
+ {
+  "input": "~ |<http://x.io😀#[`word<a|| #!<éhttp://x.io||![<[<![word😀ahttp://x.io])\u0000",
+  "expected": "![<[<![word😀a"
+ },
+ {
+  "input": "😀> http://x.io",
+  "expected": "😀"
+ },
+ {
+  "input": "😀\u0000b**](é![ba**éword  \n![  \u0000",
+  "expected": "😀 b ](é![ba éword !["
+ },
+ {
+  "input": "[漢 **|<é![ [>",
+  "expected": "[漢 <é![ ["
+ },
+ {
+  "input": "http://x.io](é漢)\u0000b\u0000>😀a## [﻿||é![|https://y.io/p)!bhttps://y.io/p\n#`]",
+  "expected": "b 😀a [ é![ ]"
+ },
+ {
+  "input": "b漢<](># _http://x.io﻿||~<baword😀![!`\n\nhttps://y.io/phttps://y.io/p#\u0000](word  ",
+  "expected": "b漢<]( <baword😀![! ](word"
+ },
+ {
+  "input": "漢[|~!~éé😀_]( ~#    éa]a![|]https://y.io/pahttp://x.io))`",
+  "expected": "漢 ! éé😀 )"
+ },
+ {
+  "input": " http://x.ioword#http://x.ioé >|漢word||#a!b漢!|ahttp://x.ioword)b||](](\n**",
+  "expected": "漢word ](]("
+ },
+ {
+  "input": "`](﻿﻿`|| < _\n😀<\u0000 **` _😀https://y.io/p#é| #|`http://x.io # word>",
+  "expected": "]( < 😀< 😀 word"
+ },
+ {
+  "input": "![  http://x.io#",
+  "expected": "!["
+ },
+ {
+  "input": "!]()~a||[||** 😀_a)![_<!](||><](  ]( ",
+  "expected": "!]() a 😀 a)![ <!]( <]( ]("
+ },
+ {
+  "input": "![)~]aa||é#\u0000>_    >b `﻿https://y.io/p  漢#`\u0000a>",
+  "expected": "![) ]aa é b 漢 a"
+ },
+ {
+  "input": "!\n`](~éé]([wordb\u0000`)é#|ahttp://x.iohttps://y.io/p_|#\u0000**",
+  "expected": "! ]( éé]([wordb )é a"
+ },
+ {
+  "input": " é  | https://y.io/p||😀   !  #||﻿]#<![||||~a\u0000",
+  "expected": "é ] <![ a"
+ },
+ {
+  "input": "|![](]😀 worda漢|| !`[<\u0000[](http://x.iohttps://y.io/p](>word`!||https://y.io/p~😀http://x.iohttps://y.io/p\n_**﻿>[**\n<",
+  "expected": "![](]😀 worda漢 [ <"
+ },
+ {
+  "input": "_  ![||~||word]  ]<`]**  !|﻿ \n|~﻿\n> |  [||>)!\u0000a~😀||é|",
+  "expected": "![ word] ]< ] ! [ é"
+ },
+ {
+  "input": "  😀https://y.io/p![_**漢> bé",
+  "expected": "😀 bé"
+ },
+ {
+  "input": "|aword~](!﻿a!",
+  "expected": "aword ](! a!"
+ },
+ {
+  "input": "**]()_~~http://x.iob[a![漢 _https://y.io/pa[~|word**![",
+  "expected": "]()"
+ },
+ {
+  "input": "﻿>a><wordword!]_![#é<<``)! \u0000#< ]b#_a||!  a\u0000! [http://x.io\n",
+  "expected": "a <wordword!] ![ é<< )! < ]b a ! a ! ["
+ },
+ {
+  "input": "#aé[a>|https://y.io/pa😀|😀http://x.io>﻿  ****word\n)éhttp://x.io word😀b é",
+  "expected": "aé[a word )é word😀b é"
+ },
+ {
+  "input": "![**  http://x.iohttp://x.io**`](b\u0000 ![﻿]﻿]( _ !\n﻿word[\u0000]| b😀  _b",
+  "expected": "![ ![ ] ]( ! word[ ] b😀 b"
+ },
+ {
+  "input": "a][word\u0000b",
+  "expected": "a][word b"
+ },
+ {
+  "input": " ](`[<[word]` ![|word ~漢<[http://x.iohttp://x.io![](**[`﻿[_😀[~** >漢#é>﻿##http://x.io  ||",
+  "expected": "]( [<[word] ![ word 漢<[ [ 😀[ 漢 é"
+ },
+ {
+  "input": "****#**[_b[](😀  word#! é word)word😀http://x.io||`😀](**",
+  "expected": "b[word😀"
+ },
+ {
+  "input": "||\n#\u0000>![https://y.io/p    || \u0000 http://x.io\u0000>](﻿word<[a)a~_ ~  >)﻿béb!http://x.iohttps://y.io/p >\u0000! ",
+  "expected": "]( word<[a)a ) béb! !"
+ },
+ {
+  "input": "_\n**a)word)﻿~![  )éa  ](https://y.io/pword﻿~`\u0000]( !![#漢~﻿!](\u0000!~ )",
+  "expected": "a)word)"
+ },
+ {
+  "input": "é[)\u0000  b]<![﻿|||\u0000﻿a_<**a漢",
+  "expected": "é[) b]<![ a < a漢"
+ },
+ {
+  "input": "!#![|](!a",
+  "expected": "! ![ ](!a"
+ },
+ {
+  "input": "#!#\u0000\n!",
+  "expected": "! !"
+ },
+ {
+  "input": "~![﻿https://y.io/p\n﻿`b|>< **a)\n<b`_http://x.io**#]>﻿`![]# ]]!word[😀",
+  "expected": "![ b < a) <b ![] ]]!word[😀"
+ },
+ {
+  "input": " `< ﻿>~#![<a#< https://y.io/p  _é**﻿>é](\n**漢﻿https://y.io/phttps://y.io/p[_<  **﻿\n",
+  "expected": "< ![< a < é é]( 漢"
+ },
+ {
+  "input": "https://y.io/p  <![` ~<<_>﻿aéhttps://y.io/p!word **漢|](  \n  ~word漢﻿😀>![](  _https://y.io/p ])](漢||😀http://x.io",
+  "expected": "< ](漢 😀"
+ }
+]

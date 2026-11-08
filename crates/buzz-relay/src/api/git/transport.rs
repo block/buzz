@@ -89,6 +89,38 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
         parts: &mut axum::http::request::Parts,
         state: &Arc<AppState>,
     ) -> Result<Self, Self::Rejection> {
+        let global = state.config.nip_fi.mode;
+        if !global.evaluates() {
+            return Self::from_parts_with_policy(parts, state, global).await;
+        }
+        match crate::nip_fi_policy::resolve(state, &parts.headers).await {
+            Ok(policy) => {
+                crate::nip_fi_policy::with_policy(policy, async {
+                    let mode = crate::nip_fi_policy::mode(state, &parts.headers).await;
+                    Self::from_parts_with_policy(parts, state, mode).await
+                })
+                .await
+            }
+            Err(response) => {
+                // Preserve the early gate's legacy host-miss ordering. A failed
+                // lookup is never turned into a usable optional policy scope.
+                let mode = if response.status() == StatusCode::NOT_FOUND {
+                    global
+                } else {
+                    buzz_auth::NipFiMode::unavailable()
+                };
+                Self::from_parts_with_policy(parts, state, mode).await
+            }
+        }
+    }
+}
+
+impl GitAuth {
+    async fn from_parts_with_policy(
+        parts: &mut axum::http::request::Parts,
+        state: &Arc<AppState>,
+        mode: buzz_auth::NipFiMode,
+    ) -> Result<Self, Response> {
         let method = parts.method.as_str();
 
         // Off mode: parse and validate the Authorization header BEFORE tenant
@@ -96,7 +128,8 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
         // missing credentials → 401 + WWW-Authenticate challenge;
         // malformed credentials (bad base64, bad UTF-8) → 401 without challenge;
         // regardless of whether the Host resolves to a known community.  No
-        // database work for syntactically bad requests in Off mode.
+        // tenant-binding work for syntactically bad requests. In evaluating modes,
+        // policy resolution first prevents a required row taking the legacy path.
         //
         // Enforce: the header syntax is validated
         // inside the NIP-FI admission closure below, where proof failures are
@@ -105,7 +138,6 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
         // admission (immediately after this block) because the signed `u` tag
         // must be verified against the tenant-bound host, not a process-global
         // domain.
-        let mode = state.config.nip_fi.mode;
         let slot = AccessSlot::of(parts);
         if !mode.restricts() {
             if let Err(rejection) = parse_git_auth_header(&parts.headers, method) {
@@ -2540,9 +2572,7 @@ mod track_c_tests {
             .expect("connect test DB");
         let db = buzz_db::Db::from_pool(pool.clone());
         db.migrate().await.expect("migrate test DB");
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("redis pool");
+        let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await
@@ -4246,9 +4276,7 @@ mod off_mode_precedence_tests {
 
             let pool = sqlx::PgPool::connect(&config.database_url).await.ok()?;
             let db = buzz_db::Db::from_pool(pool.clone());
-            let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-                .ok()?;
+            let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).ok()?;
             let pubsub = Arc::new(
                 buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                     .await
@@ -4588,7 +4616,7 @@ mod off_mode_precedence_tests {
         // and bad-UTF8 do NOT (those use `into_response()` without the header).
         #[tokio::test]
         #[ignore = "requires Postgres"]
-        async fn off_mode_unmapped_host_missing_auth_returns_401_before_db() {
+        async fn off_mode_unmapped_host_missing_auth_returns_401_before_tenant_binding() {
             let Some(state) = off_mode_state().await else {
                 panic!("local Postgres not reachable");
             };
@@ -4631,7 +4659,7 @@ mod off_mode_precedence_tests {
         // Falsifying mutation: delete transport.rs:101-104 → 404.
         #[tokio::test]
         #[ignore = "requires Postgres"]
-        async fn off_mode_unmapped_host_wrong_scheme_returns_401_before_db() {
+        async fn off_mode_unmapped_host_wrong_scheme_returns_401_before_tenant_binding() {
             let Some(state) = off_mode_state().await else {
                 panic!("local Postgres not reachable");
             };
@@ -4671,7 +4699,7 @@ mod off_mode_precedence_tests {
         // Falsifying mutation: delete transport.rs:101-104 → 404.
         #[tokio::test]
         #[ignore = "requires Postgres"]
-        async fn off_mode_unmapped_host_invalid_base64_returns_401_before_db() {
+        async fn off_mode_unmapped_host_invalid_base64_returns_401_before_tenant_binding() {
             let Some(state) = off_mode_state().await else {
                 panic!("local Postgres not reachable");
             };
@@ -4705,7 +4733,7 @@ mod off_mode_precedence_tests {
         // Falsifying mutation: delete transport.rs:101-104 → 404.
         #[tokio::test]
         #[ignore = "requires Postgres"]
-        async fn off_mode_unmapped_host_bad_utf8_returns_401_before_db() {
+        async fn off_mode_unmapped_host_bad_utf8_returns_401_before_tenant_binding() {
             let Some(state) = off_mode_state().await else {
                 panic!("local Postgres not reachable");
             };
@@ -4910,9 +4938,7 @@ mod off_mode_precedence_tests {
                 Err(_) => panic!("local Postgres not reachable (enforce git)"),
             };
             let db = buzz_db::Db::from_pool(pool.clone());
-            let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-                .expect("redis pool");
+            let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
             let pubsub = Arc::new(
                 buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                     .await
@@ -5049,9 +5075,7 @@ mod off_mode_precedence_tests {
                 Err(_) => panic!("local Postgres not reachable (pack routes)"),
             };
             let db = buzz_db::Db::from_pool(pool.clone());
-            let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-                .expect("redis pool");
+            let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
             let pubsub = Arc::new(
                 buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                     .await

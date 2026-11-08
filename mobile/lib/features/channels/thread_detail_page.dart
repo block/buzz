@@ -62,6 +62,7 @@ import 'reaction_row.dart';
 import '../../shared/read_state/read_state_provider.dart';
 import 'send_message_provider.dart';
 import 'sticky_date_header.dart';
+import 'date_header_scroll_activity.dart';
 import 'reading_marks.dart';
 import 'timeline_message.dart';
 
@@ -266,6 +267,7 @@ class ThreadDetailPage extends HookConsumerWidget {
     final itemPositionsListener = useMemoized(ItemPositionsListener.create);
     final listViewport = useMemoized(LaidOutViewport.new);
     useEffect(() => listViewport.dispose, [listViewport]);
+    final dateScrollActivity = useDateHeaderScrollActivity(threadHead.id);
     final stickyDateHeaderState = useValueNotifier(
       StickyDateHeaderState.hidden,
     );
@@ -943,6 +945,7 @@ class ThreadDetailPage extends HookConsumerWidget {
                   child: StickyDateHeader(
                     key: const ValueKey('thread-sticky-date-header'),
                     state: stickyDateHeaderState,
+                    scrollVisible: dateScrollActivity,
                   ),
                 ),
               ],
@@ -982,6 +985,7 @@ class ThreadDetailPage extends HookConsumerWidget {
                     return false;
                   },
                   child: _ThreadMessageList(
+                    dateScrollActivity: dateScrollActivity,
                     headHeight: headHeight.value ?? 0,
                     onHeadHeightChanged: (height) {
                       if (context.mounted) headHeight.value = height;

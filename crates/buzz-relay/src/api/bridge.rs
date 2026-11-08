@@ -3,6 +3,8 @@
 //! These endpoints provide HTTP access to the relay's Nostr protocol,
 //! authenticated via NIP-98 signed events.
 
+mod effective_edit;
+mod membership_snapshot;
 mod read_state_snapshot;
 pub(crate) mod search_slots;
 
@@ -1083,7 +1085,7 @@ async fn handle_channel_window_filter(
             kind_filter.as_deref(),
         )
         .await
-        .map_err(|e| internal_error(&format!("channel window error: {e}")))?;
+        .map_err(|e| db_read_error("channel window error", &e))?;
 
     // 1. Rows, in keyset order.
     let mut row_ids_hex = Vec::with_capacity(window.rows.len());
@@ -1256,11 +1258,15 @@ pub async fn submit_event(
     // In NIP-FI enforce/deny-protected mode, a real NIP-98 event is mandatory —
     // the X-Pubkey dev-mode fallback must never satisfy the pairing requirement.
     // [NIP-FI.md:594-607, FI-TRACE-HTTP-INGRESS]
-    let nip_fi_active = state.config.nip_fi.mode.restricts();
+    let nip_fi_active = crate::nip_fi_policy::mode(&state, &headers)
+        .await
+        .restricts();
     // POST /events carries an authorization-relevant body (the event determines
     // resource, effect, and state change), so a payload tag is required in
     // NIP-FI enforce mode. [NIP-FI.md:619-637]
-    let nip_fi_enforce = state.config.nip_fi.mode.enforces();
+    let nip_fi_enforce = crate::nip_fi_policy::mode(&state, &headers)
+        .await
+        .enforces();
 
     // NIP-FI admission: NIP-98 extraction runs inside the closure, followed by
     // assertion verify → pair → deny-map in fixed order. The proven pubkey is
@@ -1605,11 +1611,20 @@ pub async fn query_events(
     let url = nip98_expected_url(&state.config.relay_url, &tenant, "/query");
     // In NIP-FI enforce/deny-protected mode, a real NIP-98 event is mandatory.
     // [NIP-FI.md:594-607, FI-TRACE-HTTP-INGRESS]
-    let nip_fi_active = state.config.nip_fi.mode.restricts();
+    let nip_fi_active = crate::nip_fi_policy::mode(&state, &headers)
+        .await
+        .restricts();
     // POST /query carries an authorization-relevant body (filter selects the
     // resources returned), so a payload tag is required in enforce mode.
     // [NIP-FI.md:619-637]
-    let nip_fi_enforce = state.config.nip_fi.mode.enforces();
+    let nip_fi_enforce = crate::nip_fi_policy::mode(&state, &headers)
+        .await
+        .enforces();
+
+    // This authority surface always needs payload-bound NIP-98, including dev.
+    // Detect before admission, and before Filter can drop the extension key.
+    let compact_membership = serde_json::from_slice::<Vec<Value>>(&body)
+        .is_ok_and(|filters| membership_snapshot::requested(&filters));
 
     // NIP-FI admission. [FI-TRACE-AUTHORITY-UNIFORM]
     let proof = crate::nip_fi_shadow::EnforcedProof::new(&state, &headers, "bridge");
@@ -1625,8 +1640,8 @@ pub async fn query_events(
                 "POST",
                 &url,
                 Some(&body),
-                state.config.require_auth_token || nip_fi_active,
-                nip_fi_enforce,
+                state.config.require_auth_token || nip_fi_active || compact_membership,
+                nip_fi_enforce || compact_membership,
             ))
             .map(|auth| auth.proof((auth.event_id_bytes, auth.signed_created_at)))
             .map_err(|e| e.into_response())
@@ -1705,6 +1720,17 @@ async fn query_member_events(
     // depth_limit, feed_types) that nostr::Filter silently drops.
     let raw_filters: Vec<Value> = serde_json::from_slice(body)
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("invalid filters: {e}")))?;
+    if membership_snapshot::requested(&raw_filters) {
+        caller.read_artifact(&raw_filters);
+        return membership_snapshot::query(
+            state,
+            tenant,
+            &pubkey,
+            caller.event_id_bytes,
+            &raw_filters,
+        )
+        .await;
+    }
     let routed = || caller.read_artifact(&raw_filters);
     if let Some(result) =
         super::artifact::query(state, tenant, &pubkey, &raw_filters, false, routed).await
@@ -1762,6 +1788,9 @@ async fn query_member_events(
             )
         })?
         .map(|events| Json(Value::Array(events)));
+    }
+    if effective_edit::requested(&raw_filters) {
+        return effective_edit::query(state, tenant, &pubkey, &raw_filters).await;
     }
     if read_state_snapshot::requested(&raw_filters) {
         return read_state_snapshot::query(state, tenant, &pubkey, &raw_filters).await;
@@ -1922,7 +1951,7 @@ async fn query_member_events(
                         remaining,
                     )
                     .await
-                    .map_err(|e| internal_error(&format!("feed mentions error: {e}")))?,
+                    .map_err(|e| db_read_error("feed mentions error", &e))?,
                 "needs_action" => state
                     .db
                     .query_feed_needs_action_routed(
@@ -1934,7 +1963,7 @@ async fn query_member_events(
                         remaining,
                     )
                     .await
-                    .map_err(|e| internal_error(&format!("feed needs_action error: {e}")))?,
+                    .map_err(|e| db_read_error("feed needs_action error", &e))?,
                 "activity" => state
                     .db
                     .query_feed_activity_routed(
@@ -1945,7 +1974,7 @@ async fn query_member_events(
                         remaining,
                     )
                     .await
-                    .map_err(|e| internal_error(&format!("feed activity error: {e}")))?,
+                    .map_err(|e| db_read_error("feed activity error", &e))?,
                 _ => continue,
             };
             for se in type_events {
@@ -2019,7 +2048,7 @@ async fn query_member_events(
                 thread_cursor.as_deref(),
             )
             .await
-            .map_err(|e| internal_error(&format!("thread query error: {e}")))?;
+            .map_err(|e| db_read_error("thread query error", &e))?;
 
         let mut thread_row_ids = Vec::with_capacity(thread_replies.len() + 1);
         thread_row_ids.push(root_hex.to_string());
@@ -2294,11 +2323,15 @@ pub async fn count_events(
     let url = nip98_expected_url(&state.config.relay_url, &tenant, "/count");
     // In NIP-FI enforce/deny-protected mode, a real NIP-98 event is mandatory.
     // [NIP-FI.md:594-607, FI-TRACE-HTTP-INGRESS]
-    let nip_fi_active = state.config.nip_fi.mode.restricts();
+    let nip_fi_active = crate::nip_fi_policy::mode(&state, &headers)
+        .await
+        .restricts();
     // POST /count carries an authorization-relevant body (filter selects what
     // is counted), so a payload tag is required in enforce mode.
     // [NIP-FI.md:619-637]
-    let nip_fi_enforce = state.config.nip_fi.mode.enforces();
+    let nip_fi_enforce = crate::nip_fi_policy::mode(&state, &headers)
+        .await
+        .enforces();
 
     // NIP-FI admission. [FI-TRACE-AUTHORITY-UNIFORM]
     let proof = crate::nip_fi_shadow::EnforcedProof::new(&state, &headers, "bridge");
@@ -2527,7 +2560,7 @@ async fn count_member_events(
             } else {
                 // Fallback: query + post-filter for non-pushable constraints.
                 let mut q = query;
-                crate::handlers::req::apply_count_fallback_limit(&mut q);
+                crate::handlers::req::prepare_count_fallback(&mut q);
                 match state
                     .db
                     .query_events_routed_bounded("bridge_count_fallback", &q)
@@ -2600,7 +2633,7 @@ async fn count_member_events(
                 }
             } else {
                 // Fallback: query a bounded candidate set + post-filter.
-                crate::handlers::req::apply_count_fallback_limit(&mut query);
+                crate::handlers::req::prepare_count_fallback(&mut query);
                 match state
                     .db
                     .query_events_routed_bounded("bridge_count_fallback", &query)
@@ -2774,18 +2807,21 @@ async fn handle_bridge_search(
             .await
             .map_err(|e| search_read_error("search error", &e))?;
 
-        // Fetch full events from DB by ID. Hit ids are already raw 32-byte
+        // Fetch full events by exact hit keys. Hit ids are already raw 32-byte
         // arrays from the FTS layer — no hex decode.
-        let hit_ids: Vec<[u8; 32]> = search_result.hits.into_iter().map(|h| h.event_id).collect();
+        let hit_keys: Vec<_> = search_result
+            .hits
+            .iter()
+            .map(|h| (h.event_id, h.created_at))
+            .collect();
 
-        if hit_ids.is_empty() {
+        if hit_keys.is_empty() {
             continue;
         }
 
-        let id_refs: Vec<&[u8]> = hit_ids.iter().map(|b| b.as_slice()).collect();
         let stored_events = state
             .db
-            .get_events_by_ids_routed("bridge_search_hydrate", tenant.community(), &id_refs)
+            .get_events_by_ids_at_routed("bridge_search_hydrate", tenant.community(), &hit_keys)
             .await
             .map_err(|e| db_read_error("search fetch error", &e))?;
 
@@ -2795,7 +2831,7 @@ async fn handle_bridge_search(
             .map(|ev| (ev.event.id.to_bytes(), ev))
             .collect();
 
-        for id_array in &hit_ids {
+        for (id_array, _) in &hit_keys {
             let stored = match event_map.get(id_array) {
                 Some(ev) => ev,
                 None => continue,
@@ -3147,7 +3183,7 @@ async fn authorize_moderation_read(
     // In NIP-FI enforce/deny-protected mode a real NIP-98 event is mandatory —
     // the X-Pubkey dev-mode fallback must never satisfy the pairing requirement.
     // [NIP-FI.md:594-607, FI-TRACE-HTTP-INGRESS]
-    let nip_fi_active = state.config.nip_fi.mode.restricts();
+    let nip_fi_active = crate::nip_fi_policy::mode(state, headers).await.restricts();
 
     // NIP-FI admission. [FI-TRACE-AUTHORITY-UNIFORM]
     let proof = crate::nip_fi_shadow::EnforcedProof::new(state, headers, "bridge");
@@ -3429,11 +3465,9 @@ pub(crate) mod postgres_tests {
     use nostr::{Alphabet, EventBuilder, Keys, Kind, SingleLetterTag, Tag};
     use std::sync::Mutex;
 
-    fn redis_pool() -> deadpool_redis::Pool {
+    fn redis_pool() -> buzz_pubsub::RedisConnection {
         let url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
-        deadpool_redis::Config::from_url(url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("create redis pool")
+        buzz_pubsub::redis_connection(&url).expect("create redis pool")
     }
 
     fn fresh_tenant(host: &str) -> TenantContext {
@@ -3528,9 +3562,8 @@ pub(crate) mod postgres_tests {
         use buzz_core::kind::KIND_PRESENCE_SNAPSHOT;
 
         // Pool at a closed port: get_presence_bulk's connection attempt fails.
-        let dead_pool = deadpool_redis::Config::from_url("redis://127.0.0.1:1")
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("pool builds lazily");
+        let dead_pool =
+            buzz_pubsub::redis_connection("redis://127.0.0.1:1").expect("pool builds lazily");
         let pubsub = buzz_pubsub::PubSubManager::new("redis://127.0.0.1:1", dead_pool)
             .await
             .expect("PubSubManager::new performs no IO");
@@ -4956,9 +4989,7 @@ pub(crate) mod postgres_tests {
 
         let pool = sqlx::PgPool::connect(database_url).await.ok()?;
         let db = buzz_db::Db::from_pool(pool.clone());
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .ok()?;
+        let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).ok()?;
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await
@@ -5754,9 +5785,7 @@ pub(crate) mod postgres_tests {
             .await
             .ok()?;
         let db = buzz_db::Db::from_pool(pool.clone());
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .ok()?;
+        let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).ok()?;
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await
@@ -5867,9 +5896,7 @@ pub(crate) mod postgres_tests {
             .await
             .ok()?;
         let db = buzz_db::Db::from_pool(pool.clone());
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .ok()?;
+        let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).ok()?;
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await
@@ -5915,9 +5942,7 @@ pub(crate) mod postgres_tests {
             .await
             .ok()?;
         let db = buzz_db::Db::from_pool(pool.clone());
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .ok()?;
+        let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).ok()?;
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await
@@ -6530,9 +6555,7 @@ pub(crate) mod postgres_tests {
         assert_one_auth_line(&lines, "denied", Some("quota_exceeded"));
 
         let mut unavailable = (*base).clone();
-        let dead = deadpool_redis::Config::from_url("redis://127.0.0.1:1")
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("redis pool");
+        let dead = buzz_pubsub::redis_connection("redis://127.0.0.1:1").expect("redis pool");
         unavailable.admission_rate_limiter =
             Arc::new(buzz_pubsub::rate_limiter::RedisRateLimiter::new(dead));
         let (status, lines) =
@@ -8262,11 +8285,10 @@ pub(crate) mod postgres_tests {
                                 .ban_community_member(community, &key, &actor, None, None)
                                 .await
                                 .expect("ban");
-                            state.invalidate_restriction_cache(community, &key);
                         }
-                        state.invalidate_restriction_cache(community, &target);
+                        state.invalidate_restrictions_local(community);
                     } else {
-                        state.invalidate_restriction_cache(community, &target);
+                        state.invalidate_restrictions_local(community);
                         state.db.pool().close().await;
                     }
                     release.notify_one();
@@ -9028,9 +9050,7 @@ pub(crate) mod postgres_tests {
                 .await
                 .ok()?;
             let db = buzz_db::Db::from_pool(pool.clone());
-            let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-                .ok()?;
+            let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).ok()?;
             let pubsub = Arc::new(
                 buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                     .await
@@ -9269,9 +9289,7 @@ pub(crate) mod postgres_tests {
                 .await
                 .ok()?;
             let db = buzz_db::Db::from_pool(pool.clone());
-            let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-                .ok()?;
+            let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).ok()?;
             let pubsub = Arc::new(
                 buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                     .await
@@ -9410,9 +9428,7 @@ pub(crate) mod postgres_tests {
                 .await
                 .ok()?;
             let db = buzz_db::Db::from_pool(pool.clone());
-            let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-                .ok()?;
+            let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).ok()?;
             let pubsub = Arc::new(
                 buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                     .await
@@ -10011,9 +10027,7 @@ pub(crate) mod postgres_tests {
             db.fence().force_open_for_tests(chrono::Utc::now());
             db.set_replica_read_max_age_for_tests(Some(std::time::Duration::from_secs(5)));
 
-            let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-                .expect("redis pool");
+            let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
             let pubsub = Arc::new(
                 buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                     .await
@@ -10183,7 +10197,17 @@ pub(crate) mod postgres_tests {
                 .await
                 .expect("replica statement_timeout");
             }
-            let pool = sqlx::PgPool::connect(&format!("{base}/{name}"))
+            // The replica gets a short acquire timeout, like production's
+            // reader pool, so a shed read against a held-full replica fails
+            // fast instead of waiting out sqlx's 30s default.
+            let options = sqlx::postgres::PgPoolOptions::new();
+            let options = if role == "r" {
+                options.acquire_timeout(std::time::Duration::from_secs(1))
+            } else {
+                options
+            };
+            let pool = options
+                .connect(&format!("{base}/{name}"))
                 .await
                 .expect("connect scratch");
             buzz_db::migration::run_migrations(&pool)
@@ -10239,9 +10263,7 @@ pub(crate) mod postgres_tests {
         let mut db = buzz_db::Db::from_pools(writer.clone(), replica.clone());
         db.fence().force_open_for_tests(chrono::Utc::now());
         db.set_replica_read_max_age_for_tests(Some(std::time::Duration::from_secs(5)));
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("redis pool");
+        let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await
@@ -10332,6 +10354,12 @@ pub(crate) mod postgres_tests {
             use axum::body::Body;
             use axum::http::{header, Request};
             use tower::ServiceExt;
+            // Keep the deliberately divergent replica selected for each
+            // cancellation probe, independent of earlier probes' elapsed time.
+            self.state
+                .db
+                .fence()
+                .force_open_for_tests(chrono::Utc::now());
             let mut request = Request::builder()
                 .method("POST")
                 .uri(uri)
@@ -10361,6 +10389,10 @@ pub(crate) mod postgres_tests {
             F: FnOnce(Arc<crate::connection::ConnectionState>) -> Fut,
             Fut: std::future::Future<Output = ()>,
         {
+            self.state
+                .db
+                .fence()
+                .force_open_for_tests(chrono::Utc::now());
             let (conn, mut send_rx) = self.ws_conn();
             drive(conn).await;
             match send_rx.try_recv().expect("handler sent a frame") {
@@ -10539,6 +10571,79 @@ pub(crate) mod postgres_tests {
             "WS COUNT {arm} ordinary error: {frame}"
         );
 
+        fx.drop().await;
+    }
+
+    /// A shed history read answers 503 `database unavailable` on every
+    /// bridge `/query` branch that serves one: channel window, the three
+    /// feeds, legacy thread replies and search hydration. A WS search whose
+    /// hydration is shed closes with the retryable `error: database error`
+    /// instead of an EOSE that would read as "no matches". A saturated reader
+    /// (every connection checked out, none idle) rejects history reads
+    /// instead of moving them to the writer, the same `PoolTimedOut` as a
+    /// full history gate. Mutations: map any of these branches through
+    /// `internal_error`, or let a failed WS hydration fall through to EOSE
+    /// → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn shed_history_read_maps_to_503_on_every_bridge_branch() {
+        let fx = cancel_fixture().await;
+        let h = [&fx.channel];
+        let cases = [
+            (
+                "channel window",
+                serde_json::json!({"kinds": [9], "#h": h, "top_level": true}),
+            ),
+            (
+                "feed mentions",
+                serde_json::json!({"kinds": [9], "feed_types": ["mentions"]}),
+            ),
+            (
+                "feed needs_action",
+                serde_json::json!({"kinds": [9], "feed_types": ["needs_action"]}),
+            ),
+            (
+                "feed activity",
+                serde_json::json!({"kinds": [9], "feed_types": ["activity"]}),
+            ),
+            (
+                "thread replies",
+                serde_json::json!({"kinds": [9], "#e": [&fx.root], "depth_limit": 1}),
+            ),
+            ("search hydrate", fx.search_filter()),
+        ];
+        for (branch, filter) in &cases {
+            let (status, body) = fx.http("/query", filter).await;
+            assert_eq!(status, StatusCode::OK, "healthy {branch}: {body}");
+        }
+        let frame = fx.ws_search().await;
+        assert!(frame.contains("root needle"), "healthy WS search: {frame}");
+
+        let mut held = Vec::new();
+        for _ in 0..fx.replica.options().get_max_connections() {
+            held.push(fx.replica.acquire().await.expect("hold reader connection"));
+        }
+        for (branch, filter) in &cases {
+            let (status, body) = fx.http("/query", filter).await;
+            assert_eq!(
+                (status, body["error"].as_str()),
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Some(super::super::DATABASE_UNAVAILABLE)
+                ),
+                "shed {branch}: {body}"
+            );
+        }
+        assert_eq!(
+            fx.ws_search().await,
+            format!(
+                r#"["CLOSED","s","{}"]"#,
+                crate::handlers::req::DATABASE_ERROR_CLOSED
+            ),
+            "shed WS search hydration"
+        );
+
+        drop(held);
         fx.drop().await;
     }
 

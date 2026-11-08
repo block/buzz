@@ -1513,41 +1513,51 @@ async fn actor_is_relay_operator(
         .map_err(|e| anyhow::anyhow!("relay staff lookup failed: {}", e.message))
 }
 
-/// Sign, store (replacing previous), and fan-out a single addressable discovery event.
+/// Sign, store (replacing previous), and fan-out one of a channel's
+/// relay-signed kind:39000/39001 events, with the tags `build_tags` makes
+/// from the channel and its members.
+///
+/// The inputs, the timestamp and the replacement all sit behind the event's
+/// replacement lock (see `LockedGroupStateSnapshot`). Read outside it, an
+/// auto-join that read `auto_join` before a racing kind:9002 cleared it
+/// stored its snapshot after the edit's, at the same or a later second, and
+/// the stale tag stayed live.
 async fn emit_addressable_discovery_event(
     tenant: &TenantContext,
     state: &Arc<AppState>,
     channel_id: Uuid,
     kind: u32,
-    tags: Vec<Tag>,
     relay_pubkey_hex: &str,
+    build_tags: impl FnOnce(
+        &buzz_db::channel::ChannelRecord,
+        &[MemberRecord],
+    ) -> anyhow::Result<Vec<Tag>>,
 ) -> anyhow::Result<()> {
-    // Ensure the new event's created_at is strictly greater than any existing event
-    // of the same (kind, pubkey, channel_id). Without this, rapid successive updates
-    // (e.g. set topic then set purpose in the same second) can produce events with
-    // identical created_at, causing the second to be rejected by stale-write protection
-    // (NIP-16 tiebreaker: lower event ID wins, which is random).
+    #[cfg(test)]
+    crate::nip_fi_test_hooks::before_group_state_lock(tenant.community()).await;
+    let snapshot = state
+        .db
+        .lock_group_state_snapshot(
+            tenant.community(),
+            channel_id,
+            kind as i32,
+            &state.relay_keypair.public_key().to_bytes(),
+        )
+        .await?;
+    #[cfg(test)]
+    crate::nip_fi_test_hooks::after_group_state_read(tenant.community()).await;
+    let tags = build_tags(&snapshot.channel, &snapshot.members)?;
+    // One second past the live event, so the replacement never loses a
+    // same-second tiebreak (NIP-16: lower event ID wins, which is random).
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let min_ts = {
-        let existing = state
-            .db
-            .query_events_for_event_write(&buzz_db::event::EventQuery {
-                kinds: Some(vec![kind as i32]),
-                channel_id: Some(channel_id),
-                limit: Some(1),
-                ..buzz_db::event::EventQuery::for_community(tenant.community())
-            })
-            .await
-            .unwrap_or_default();
-        existing
-            .first()
-            .map(|e| e.event.created_at.as_secs() + 1)
-            .unwrap_or(now)
-    };
-    let ts = now.max(min_ts);
+    let ts = snapshot
+        .latest_created_at
+        .map(|timestamp| timestamp + 1)
+        .unwrap_or(now)
+        .max(now);
 
     let event = EventBuilder::new(Kind::Custom(kind as u16), "")
         .tags(tags)
@@ -1555,9 +1565,8 @@ async fn emit_addressable_discovery_event(
         .sign_with_keys(&state.relay_keypair)
         .map_err(|e| anyhow::anyhow!("failed to sign kind:{kind}: {e}"))?;
 
-    let (stored, was_inserted) = state
-        .db
-        .replace_addressable_event(tenant.community(), &event, Some(channel_id))
+    let (stored, was_inserted) = snapshot
+        .replace(&event)
         .await
         .map_err(|e| anyhow::anyhow!("channel state write failed: {}", e.kind()))?;
     if was_inserted {
@@ -1667,58 +1676,45 @@ pub async fn emit_group_discovery_events(
     state: &Arc<AppState>,
     channel_id: Uuid,
 ) -> anyhow::Result<()> {
-    let channel = state
-        .db
-        .get_channel_for_event_write(tenant.community(), channel_id)
-        .await?;
-    let members = state
-        .db
-        .get_members_for_event_write(tenant.community(), channel_id)
-        .await?;
-
     let relay_pubkey_hex = hex::encode(state.relay_keypair.public_key().to_bytes());
     let group_id = channel_id.to_string();
 
-    {
-        let tags = buzz_db::channel::group_metadata_tags(&channel, &members)
-            .into_iter()
-            .map(Tag::parse)
-            .collect::<Result<Vec<_>, _>>()?;
-        emit_addressable_discovery_event(
-            tenant,
-            state,
-            channel_id,
-            KIND_NIP29_GROUP_METADATA,
-            tags,
-            &relay_pubkey_hex,
-        )
-        .await?;
-    }
+    emit_addressable_discovery_event(
+        tenant,
+        state,
+        channel_id,
+        KIND_NIP29_GROUP_METADATA,
+        &relay_pubkey_hex,
+        |channel, members| {
+            Ok(buzz_db::channel::group_metadata_tags(channel, members)
+                .into_iter()
+                .map(Tag::parse)
+                .collect::<Result<Vec<_>, _>>()?)
+        },
+    )
+    .await?;
 
-    {
-        let mut tags: Vec<Tag> = vec![Tag::parse(["d", &group_id])?];
-        tags.extend(group_state_identity_tags(&channel.identity())?);
-        for m in members
-            .iter()
-            .filter(|m| m.role == "owner" || m.role == "admin")
-        {
-            let pubkey_hex = hex::encode(&m.pubkey);
-            tags.push(Tag::parse(["p", &pubkey_hex, &m.role])?);
-        }
-        emit_addressable_discovery_event(
-            tenant,
-            state,
-            channel_id,
-            KIND_NIP29_GROUP_ADMINS,
-            tags,
-            &relay_pubkey_hex,
-        )
-        .await?;
-    }
+    emit_addressable_discovery_event(
+        tenant,
+        state,
+        channel_id,
+        KIND_NIP29_GROUP_ADMINS,
+        &relay_pubkey_hex,
+        |channel, members| {
+            let mut tags: Vec<Tag> = vec![Tag::parse(["d", &group_id])?];
+            tags.extend(group_state_identity_tags(&channel.identity())?);
+            // The snapshot already scoped `members` to `GROUP_ADMIN_ROLES`.
+            for m in members {
+                let pubkey_hex = hex::encode(&m.pubkey);
+                tags.push(Tag::parse(["p", &pubkey_hex, &m.role])?);
+            }
+            Ok(tags)
+        },
+    )
+    .await?;
 
-    // Re-capture membership behind the writer lock immediately before the
-    // authoritative 39002 replacement. Metadata/admin snapshots retain their
-    // existing behavior; only membership publication needs this freshness fence.
+    // The roster takes the same fence behind the channel's membership lock,
+    // which its replacement also validates against.
     let relay_pubkey = state.relay_keypair.public_key().to_bytes();
     let mut member_snapshot = state
         .db
@@ -3035,79 +3031,131 @@ async fn announce_self_join(
     Ok(())
 }
 
-/// Join a new community member to every effective `auto_join` channel, as
-/// kind:9021 self-joins. Runs inline at the roster write sites (invite
-/// claim, kind:9030) and nowhere else, so a later kind:9022 leave stands. A
-/// community without a roster joins on admission instead
-/// ([`auto_join_never_joined_channels`]).
-///
-/// Best effort: the relay membership has already committed, so a channel
-/// that fails is logged and counted, never retried, and never fails the
-/// caller. The `auto_join` tag on kind:39000 is the durable record a client
-/// reconciles against. A channel archived or made private after the list
-/// was read is one such failure: `put_member` refuses it under its locks.
-///
-/// `added_by` is the actor of a third-party add (kind:9030), `None` when the
-/// member joined by themselves (an invite claim). A third-party add first
-/// asks the member's `channel_add_policy`, once, as a kind:9000 from the same
-/// actor would; a refusal skips every default channel, logged and counted.
+/// Process the durable default-channel work of this roster admission.
+/// Failed reads or writes retain the token for a later claim or admission.
+/// Leaves made during this admission are preserved.
 pub(crate) async fn auto_join_default_channels(
     tenant: &TenantContext,
     state: &Arc<AppState>,
     pubkey_hex: &str,
-    added_by: Option<&[u8]>,
+    gate: Option<&Arc<crate::nip_fi_gate::SessionAdmissionGate>>,
 ) {
-    let Ok(pubkey) = hex::decode(pubkey_hex) else {
-        warn!(member = %pubkey_hex, "auto-join skipped: member pubkey is not hex");
-        return;
-    };
-    let channels = match state.db.list_auto_join_channels(tenant.community()).await {
-        Ok(channels) => channels,
-        Err(e) => {
-            warn!(member = %pubkey_hex, error = %e, "auto-join skipped: listing default channels failed");
-            metrics::counter!("buzz_auto_join_failures_total").increment(1);
-            return;
+    if let Err(e) = finish_default_channel_joins(tenant, state, pubkey_hex, gate).await {
+        warn!(member = %pubkey_hex, error = %e, "default-channel joins remain pending");
+        metrics::counter!("buzz_auto_join_failures_total").increment(1);
+    }
+}
+
+async fn finish_default_channel_joins(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    pubkey_hex: &str,
+    gate: Option<&Arc<crate::nip_fi_gate::SessionAdmissionGate>>,
+) -> anyhow::Result<()> {
+    // A socket's AUTH retry runs on every admission, so it reads the replica
+    // and keeps the writer pool free. A roster write (no gate) reads the
+    // writer, where it has just committed the token.
+    let pending = match gate {
+        Some(_) => {
+            state
+                .db
+                .pending_default_channel_join_routed(tenant.community(), pubkey_hex)
+                .await?
+        }
+        None => {
+            state
+                .db
+                .pending_default_channel_join(tenant.community(), pubkey_hex)
+                .await?
         }
     };
-    if channels.is_empty() {
-        return;
-    }
-    if let Some(actor) = added_by.filter(|actor| *actor != pubkey.as_slice()) {
-        match state
+    let Some(admission) = pending else {
+        return Ok(());
+    };
+    let pubkey = hex::decode(pubkey_hex)?;
+    // Use the persisted original actor even when a retry comes from the member.
+    let actor = admission
+        .added_by
+        .as_deref()
+        .filter(|actor| *actor != "invite")
+        .map(hex::decode)
+        .transpose()?;
+    if let Some(actor) = actor.as_deref().filter(|actor| *actor != pubkey.as_slice()) {
+        if let Some((policy, owner)) = state
             .db
             .get_agent_channel_policy(tenant.community(), &pubkey)
-            .await
+            .await?
         {
-            Ok(None) => {}
-            Ok(Some((policy, owner))) => {
-                if let Err(denied) =
-                    channel_authz::decide_channel_add_policy(&policy, owner.as_deref(), actor)
-                {
-                    warn!(member = %pubkey_hex, error = %denied, "auto-join skipped: the member's channel_add_policy refuses the actor");
-                    metrics::counter!("buzz_auto_join_failures_total").increment(1);
-                    return;
-                }
-            }
-            Err(e) => {
-                warn!(member = %pubkey_hex, error = %e, "auto-join skipped: reading the member's channel_add_policy failed");
-                metrics::counter!("buzz_auto_join_failures_total").increment(1);
-                return;
+            if let Err(denied) =
+                channel_authz::decide_channel_add_policy(&policy, owner.as_deref(), actor)
+            {
+                info!(member = %pubkey_hex, error = %denied, "default-channel add refused by member policy");
+                state
+                    .db
+                    .finish_default_channel_join(tenant.community(), pubkey_hex, admission.token)
+                    .await?;
+                return Ok(());
             }
         }
     }
+    let channels = state.db.list_auto_join_channels(tenant.community()).await?;
+    let mut failure = None;
     for channel in channels {
-        match join_channel_as_self(tenant, state, channel.id, &pubkey).await {
-            Ok(SelfJoinOutcome::Joined) => {
-                metrics::counter!("buzz_auto_join_channels_total").increment(1);
-                info!(channel = %channel.id, member = %pubkey_hex, "auto-joined default channel");
-            }
-            Ok(SelfJoinOutcome::AlreadyMember) => {}
-            Err(e) => {
-                metrics::counter!("buzz_auto_join_failures_total").increment(1);
-                warn!(channel = %channel.id, member = %pubkey_hex, error = %e, "auto-join of default channel failed");
-            }
+        #[cfg(test)]
+        if gate.is_some() {
+            crate::nip_fi_test_hooks::before_auto_join_channel(tenant.community()).await;
+        }
+        let _permit = match gate {
+            Some(gate) => match gate.acquire_effect().await {
+                Ok(permit) => Some(permit),
+                Err(_) => return Ok(()), // Pending work belongs to the next admission.
+            },
+            None => None,
+        };
+        if let Err(error) =
+            finish_default_channel_join(tenant, state, channel.id, &pubkey, &admission).await
+        {
+            warn!(channel = %channel.id, member = %pubkey_hex, error = %error,
+                "default-channel join remains pending; continuing other channels");
+            failure = Some(error);
         }
     }
+    if let Some(error) = failure {
+        return Err(error);
+    }
+    state
+        .db
+        .finish_default_channel_join(tenant.community(), pubkey_hex, admission.token)
+        .await?;
+    Ok(())
+}
+
+async fn finish_default_channel_join(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    channel: Uuid,
+    pubkey: &[u8],
+    admission: &buzz_db::relay_members::PendingDefaultChannelJoin,
+) -> anyhow::Result<()> {
+    match state
+        .db
+        .put_pending_default_member(tenant.community(), channel, pubkey, admission.token)
+        .await
+    {
+        Ok(Some(_)) => {
+            // Membership is durable now. Announcements keep their existing
+            // failure handling; retries must not replay them for active members.
+            if let Err(error) = announce_self_join(tenant, state, channel, pubkey).await {
+                warn!(channel = %channel, error = %error, "default-channel announcement failed");
+                metrics::counter!("buzz_auto_join_failures_total").increment(1);
+            }
+            metrics::counter!("buzz_auto_join_channels_total").increment(1);
+        }
+        Ok(None) => {}
+        Err(buzz_db::DbError::ChannelNotFound(_)) => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
 }
 
 /// Join a person admitted to a community that keeps no membership roster
@@ -3491,12 +3539,19 @@ pub(crate) async fn persist_deletion(
     };
     let targets: Vec<buzz_db::DeletionTarget<'_>> = planned
         .iter()
-        .map(|p| buzz_db::DeletionTarget {
-            event_id: &p.id,
-            parent_event_id: p.parent_id.as_deref(),
-            root_event_id: p.root_id.as_deref(),
+        .map(|p| {
+            Ok(buzz_db::DeletionTarget {
+                event_id: &p.id,
+                created_at: chrono::DateTime::from_timestamp(
+                    p.target.event.created_at.as_secs() as i64,
+                    0,
+                )
+                .ok_or_else(|| anyhow::anyhow!("invalid deletion target timestamp"))?,
+                parent_event_id: p.parent_id.as_deref(),
+                root_event_id: p.root_id.as_deref(),
+            })
         })
-        .collect();
+        .collect::<anyhow::Result<_>>()?;
     let (stored, inserted, deleted) = state
         .db
         .insert_deletion_event(tenant.community(), event, channel_id, thread_meta, &targets)

@@ -127,10 +127,6 @@ pub struct Config {
     /// `0` (the default) disables bounded-staleness replica routing; see
     /// [`buzz_db::DbConfig::replica_read_max_age_ms`].
     pub replica_read_max_age_ms: u64,
-    /// Replica freshness budget for fleet usage telemetry
-    /// (`BUZZ_USAGE_METRICS_REPLICA_MAX_AGE_MS`). Independent of serving-read
-    /// routing; defaults to 30 seconds and `0` disables telemetry DB queries.
-    pub usage_metrics_replica_max_age_ms: u64,
 
     /// Upper bound, in milliseconds, of the per-connection random delay applied
     /// when sending the `1012 Service Restart` close frame during graceful
@@ -147,12 +143,6 @@ pub struct Config {
     pub drain_jitter_ms: u64,
     /// Redis connection URL used by the pub/sub manager.
     pub redis_url: String,
-    /// Maximum connections in the shared Redis pool. Defaults to 16.
-    ///
-    /// deadpool's own default is `CPU_COUNT * 2`, which on a 2-vCPU relay
-    /// pod is only 4 — small enough that rate-limit checks, presence, and
-    /// pub/sub publishes queue behind each other under load.
-    pub redis_pool_size: usize,
     /// Maximum connections in the Postgres writer/reader pools. Defaults to 50.
     ///
     /// The `buzz-db` default of 20 was sized for a handful of pods against
@@ -190,6 +180,10 @@ pub struct Config {
     pub require_auth_token: bool,
     /// Opt-in private accessory API; disabled until explicitly deployed.
     pub buzz_v1_enabled: bool,
+    /// Opt-in NIP-CL compact membership projection; dark by default.
+    pub membership_snapshot_enabled: bool,
+    /// Opt-in NIP-CL public memberships, independent of self discovery.
+    pub membership_public_enabled: bool,
     /// Author-time unread tracking duration, independent of NIP-RS retention.
     pub buzz_v1_retention_seconds: u32,
     /// Comma-separated list of allowed CORS origins.
@@ -319,6 +313,8 @@ pub struct Config {
 
     /// Media storage configuration (S3/MinIO).
     pub media: buzz_media::MediaConfig,
+    /// Channel media authorization rollout: off, shadow, or enforce.
+    pub media_read_mode: crate::api::media_access::MediaReadMode,
     /// Maximum concurrent media uploads handled by one relay process.
     pub media_max_concurrent_uploads: usize,
     /// Maximum concurrent media uploads accepted from one pubkey.
@@ -413,6 +409,10 @@ pub struct Config {
     /// (`BUZZ_NIP_FI_PROVISION_BINDING`). `None` binds nothing at creation.
     /// Parsed whatever the NIP-FI mode, since creation happens in every mode.
     pub nip_fi_provision_binding: Option<buzz_auth::ProvisionBindingPolicy>,
+
+    /// Permit new community FI policy enables and disables. Default off; receipt
+    /// recovery/status remain available (`BUZZ_NIP_FI_CHANGES`).
+    pub nip_fi_changes: bool,
 
     /// Database resolver bounds (`BUZZ_NIP_FI_RESOLVER_*`,
     /// `BUZZ_NIP_FI_SNAPSHOT_*`). Validated in every mode, so a bad value
@@ -708,16 +708,6 @@ impl Config {
             })?,
             Err(_) => 0,
         };
-        let usage_metrics_replica_max_age_ms =
-            match std::env::var("BUZZ_USAGE_METRICS_REPLICA_MAX_AGE_MS") {
-                Ok(raw) => raw.trim().parse::<u64>().map_err(|_| {
-                    ConfigError::InvalidValue(
-                        "BUZZ_USAGE_METRICS_REPLICA_MAX_AGE_MS must be a non-negative integer"
-                            .to_string(),
-                    )
-                })?,
-                Err(_) => 30_000,
-            };
 
         // Drain jitter: 0 = off (default). Clamp oversized values so every
         // delayed close is initiated with ten seconds left in the relay's
@@ -740,12 +730,6 @@ impl Config {
 
         let redis_url =
             std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".to_string());
-
-        let redis_pool_size = std::env::var("BUZZ_REDIS_POOL_SIZE")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .filter(|&v| v > 0)
-            .unwrap_or(16);
 
         let db_pool_size = std::env::var("BUZZ_DB_POOL_SIZE")
             .ok()
@@ -1026,6 +1010,15 @@ impl Config {
                     "BUZZ_S3_ADDRESSING_STYLE must be valid Unicode and one of 'path' or 'virtual'"
                         .to_string(),
                 ));
+            }
+        };
+        let media_read_mode = match std::env::var("BUZZ_MEDIA_READ_MODE") {
+            Ok(value) => value.parse().map_err(ConfigError::InvalidValue)?,
+            Err(std::env::VarError::NotPresent) => crate::api::media_access::MediaReadMode::Off,
+            Err(_) => {
+                return Err(ConfigError::InvalidValue(
+                    "BUZZ_MEDIA_READ_MODE must be valid Unicode".into(),
+                ))
             }
         };
         let media = buzz_media::MediaConfig {
@@ -1460,10 +1453,8 @@ impl Config {
             database_url,
             read_database_url,
             replica_read_max_age_ms,
-            usage_metrics_replica_max_age_ms,
             drain_jitter_ms,
             redis_url,
-            redis_pool_size,
             db_pool_size,
             db_read_pool_size,
             relay_url,
@@ -1477,6 +1468,10 @@ impl Config {
             auth,
             require_auth_token,
             buzz_v1_enabled,
+            membership_snapshot_enabled: std::env::var("BUZZ_MEMBERSHIP_SNAPSHOT_ENABLED")
+                .is_ok_and(|v| v == "true"),
+            membership_public_enabled: std::env::var("BUZZ_MEMBERSHIP_PUBLIC_ENABLED")
+                .is_ok_and(|v| v == "true"),
             buzz_v1_retention_seconds,
             cors_origins,
             relay_private_key,
@@ -1499,6 +1494,7 @@ impl Config {
             allow_nip_oa_auth,
             klipy,
             media,
+            media_read_mode,
             media_max_concurrent_uploads,
             media_max_concurrent_uploads_per_pubkey,
             media_uploads_per_minute,
@@ -1524,6 +1520,7 @@ impl Config {
             web_dir,
             serve_git_web_gui,
             nip_fi_provision_binding,
+            nip_fi_changes: parse_bool("BUZZ_NIP_FI_CHANGES", false)?,
             nip_fi_resolver_bounds,
             nip_fi,
         })
@@ -1594,6 +1591,31 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let cfg = ENV_MUTEX.lock().unwrap();
         (fi, cfg)
+    }
+
+    #[test]
+    fn nip_fi_changes_are_explicitly_default_off() {
+        let (_fi, _cfg) = env_guards();
+        let before = std::env::var("BUZZ_NIP_FI_CHANGES").ok();
+        std::env::remove_var("BUZZ_NIP_FI_CHANGES");
+        assert!(!Config::from_env().unwrap().nip_fi_changes);
+        for value in ["true", "TRUE", "1", "on", " On "] {
+            std::env::set_var("BUZZ_NIP_FI_CHANGES", value);
+            assert!(Config::from_env().unwrap().nip_fi_changes, "{value}");
+        }
+        for value in ["false", "FALSE", "0", "off", "", " Off "] {
+            std::env::set_var("BUZZ_NIP_FI_CHANGES", value);
+            assert!(!Config::from_env().unwrap().nip_fi_changes, "{value}");
+        }
+        std::env::set_var("BUZZ_NIP_FI_CHANGES", "treu");
+        assert!(
+            matches!(Config::from_env(), Err(ConfigError::InvalidValue(message))
+            if message.contains("BUZZ_NIP_FI_CHANGES must be true or false"))
+        );
+        match before {
+            Some(value) => std::env::set_var("BUZZ_NIP_FI_CHANGES", value),
+            None => std::env::remove_var("BUZZ_NIP_FI_CHANGES"),
+        }
     }
 
     // The three `source=database` startup guards. Mutation: dropping any one
@@ -1733,7 +1755,6 @@ mod tests {
         assert!(config.bind_addr.port() > 0);
         assert!(!config.database_url.is_empty());
         assert!(!config.redis_url.is_empty());
-        assert_eq!(config.redis_pool_size, 16);
         assert_eq!(config.db_pool_size, 50);
         assert!(config.max_connections > 0);
         assert!(config.send_buffer_size > 0);
@@ -2331,31 +2352,6 @@ mod tests {
     }
 
     #[test]
-    fn redis_pool_size_env_override_and_invalid_fallback() {
-        let _guards = env_guards();
-        let previous = std::env::var_os("BUZZ_REDIS_POOL_SIZE");
-
-        std::env::set_var("BUZZ_REDIS_POOL_SIZE", "32");
-        let overridden = Config::from_env().expect("config").redis_pool_size;
-
-        std::env::set_var("BUZZ_REDIS_POOL_SIZE", "0");
-        let zero = Config::from_env().expect("config").redis_pool_size;
-
-        std::env::set_var("BUZZ_REDIS_POOL_SIZE", "not-a-number");
-        let junk = Config::from_env().expect("config").redis_pool_size;
-
-        if let Some(value) = previous {
-            std::env::set_var("BUZZ_REDIS_POOL_SIZE", value);
-        } else {
-            std::env::remove_var("BUZZ_REDIS_POOL_SIZE");
-        }
-
-        assert_eq!(overridden, 32);
-        assert_eq!(zero, 16, "zero must fall back to the default");
-        assert_eq!(junk, 16, "unparsable value must fall back to the default");
-    }
-
-    #[test]
     fn db_pool_size_env_override_and_invalid_fallback() {
         let _guards = env_guards();
         let previous = std::env::var_os("BUZZ_DB_POOL_SIZE");
@@ -2487,35 +2483,6 @@ mod tests {
             ),
             other => panic!("old env name must hard-fail startup, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn usage_metrics_replica_budget_defaults_on_independently_of_serving_reads() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        let previous_usage = std::env::var_os("BUZZ_USAGE_METRICS_REPLICA_MAX_AGE_MS");
-        let previous_serving = std::env::var_os("BUZZ_REPLICA_READ_MAX_AGE_MS");
-
-        std::env::remove_var("BUZZ_USAGE_METRICS_REPLICA_MAX_AGE_MS");
-        std::env::remove_var("BUZZ_REPLICA_READ_MAX_AGE_MS");
-        let defaults = Config::from_env().expect("config");
-
-        std::env::set_var("BUZZ_USAGE_METRICS_REPLICA_MAX_AGE_MS", "0");
-        let disabled = Config::from_env().expect("config");
-
-        if let Some(value) = previous_usage {
-            std::env::set_var("BUZZ_USAGE_METRICS_REPLICA_MAX_AGE_MS", value);
-        } else {
-            std::env::remove_var("BUZZ_USAGE_METRICS_REPLICA_MAX_AGE_MS");
-        }
-        if let Some(value) = previous_serving {
-            std::env::set_var("BUZZ_REPLICA_READ_MAX_AGE_MS", value);
-        } else {
-            std::env::remove_var("BUZZ_REPLICA_READ_MAX_AGE_MS");
-        }
-
-        assert_eq!(defaults.replica_read_max_age_ms, 0);
-        assert_eq!(defaults.usage_metrics_replica_max_age_ms, 30_000);
-        assert_eq!(disabled.usage_metrics_replica_max_age_ms, 0);
     }
 
     #[test]

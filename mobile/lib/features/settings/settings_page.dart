@@ -14,6 +14,8 @@ import 'package:package_info_plus/package_info_plus.dart';
 import '../../shared/auth/auth.dart';
 import '../../shared/identity_transfer/nsec_export_sheet.dart';
 import '../../shared/clipboard_utils.dart';
+import '../../shared/hosted/organization_environment.dart';
+import '../../shared/hosted/organization_sign_out.dart';
 import '../../shared/push/push_relay_capability_provider.dart';
 import '../../shared/push/push_bootstrap.dart';
 import '../../shared/relay/relay.dart';
@@ -130,6 +132,21 @@ class SettingsPage extends HookConsumerWidget {
             _ConnectionSection(
               identityRecoveryPageBuilder: identityRecoveryPageBuilder,
             ),
+            // An internal build's only way out of its organization, rarely
+            // needed, so it sits last.
+            if (OrganizationEnvironment.enabled)
+              AppListCard(
+                verticalPadding: Grid.twelve,
+                children: [
+                  AppListRow(
+                    key: const Key('settings-sign-out'),
+                    icon: BuzzIcons.logOut,
+                    title: 'Sign out',
+                    titleColor: context.colors.error,
+                    onTap: () => confirmOrganizationSignOut(context, ref),
+                  ),
+                ],
+              ),
             if (packageInfo.hasData)
               _VersionFooter(
                 version: packageInfo.data!.version,

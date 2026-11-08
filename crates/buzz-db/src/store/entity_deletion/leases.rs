@@ -105,9 +105,8 @@ impl EntityDeletionStore {
     /// can be renewed only while nobody has reclaimed it.
     ///
     /// One autocommit statement: the worker drops this future whenever its
-    /// stage handler finishes first, and sqlx 0.9 queues no `ROLLBACK` for a
-    /// `begin()` dropped while its `BEGIN` is in flight, so the pooled
-    /// connection would carry an open transaction into the next write.
+    /// stage handler finishes first, so the renewal leaves no transaction
+    /// to roll back.
     pub async fn heartbeat(&self, lease: &EntityLease, duration: Duration) -> Result<()> {
         let millis = duration_millis(duration)?;
         // `lock_owned`'s predicate. After a row-lock wait, Postgres re-checks it

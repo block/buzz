@@ -366,6 +366,86 @@ void main() {
     }
   });
 
+  test('a publish with nothing new skips the snapshot', () async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final keychain = nostr.Keys.generate();
+    final crypto = ReadStateCrypto.tryCreate(
+      nsec: keychain.nsec,
+      pubkey: keychain.public,
+    )!;
+    final relay = _FakeRelaySession();
+    final signer = _FakeSignedEventRelay();
+    final manager = ReadStateManager(
+      pubkey: keychain.public,
+      relayUrl: _relayUrl,
+      prefs: prefs,
+      crypto: crypto,
+      relaySession: relay,
+      signedEventRelay: signer,
+      remoteEnabled: true,
+      onChanged: () {},
+      now: () => 2000,
+    );
+
+    manager.markContextRead('a', 10);
+    await manager.flush();
+    expect(relay.fetchCount, 1);
+    expect(signer.submitCount, 1);
+
+    // Each resume schedules a publish after its re-sync. With nothing
+    // unpublished it must not download the whole read state again.
+    await manager.flush();
+    expect(relay.fetchCount, 1);
+    expect(signer.submitCount, 1);
+
+    manager.markContextRead('b', 20);
+    await manager.flush();
+    expect(relay.fetchCount, 2);
+    expect(signer.submitCount, 2);
+    final blob = decodeReadStateBlob(crypto.decrypt(signer.contents.last))!;
+    expect(blob.contexts, {'a': 10, 'b': 20});
+
+    manager.dispose(flushPending: false);
+  });
+
+  test(
+    'a skipped publish clears an error a later snapshot recovered',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final keychain = nostr.Keys.generate();
+      final crypto = ReadStateCrypto.tryCreate(
+        nsec: keychain.nsec,
+        pubkey: keychain.public,
+      )!;
+      final relay = _FakeRelaySession()..failNextFetch = true;
+      final manager = ReadStateManager(
+        pubkey: keychain.public,
+        relayUrl: _relayUrl,
+        prefs: prefs,
+        crypto: crypto,
+        relaySession: relay,
+        signedEventRelay: _FakeSignedEventRelay(),
+        remoteEnabled: true,
+        onChanged: () {},
+      );
+
+      await manager.initialize();
+      expect(manager.syncError, isNotNull);
+      // A publish with nothing to send keeps the error without new evidence.
+      await manager.flush();
+      expect(manager.syncError, isNotNull);
+
+      await manager.reinitializeRemote();
+      await manager.flush();
+      expect(manager.syncError, isNull);
+      expect(relay.fetchCount, 2);
+
+      manager.dispose(flushPending: false);
+    },
+  );
+
   test(
     'retains recent frontiers without a count eviction across restart',
     () async {

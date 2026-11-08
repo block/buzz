@@ -109,10 +109,12 @@ void main() {
       final provider = (image.image as ResizeImage).imageProvider;
       return (provider as MediaImageProvider).url;
     });
-    expect(shown, ['$relay/media/$hash.thumb.jpg', original]);
+    expect(shown, ['$relay/media/$hash.thumb.webp', original]);
   });
 
-  testWidgets('a missing thumbnail falls back to the original', (tester) async {
+  testWidgets('missing thumbnails fall back to the JPEG, then the original', (
+    tester,
+  ) async {
     const relay = 'https://relay.example';
     final missing = '$relay/media/${'cd' * 32}.jpg';
     final broken = '$relay/media/${'ef' * 32}.jpg';
@@ -157,9 +159,19 @@ void main() {
       await tester.pump();
     }
 
-    String thumb(String url) => url.replaceFirst('.jpg', '.thumb.jpg');
-    // A 404 retries the original; any other failure shows the fallback.
-    expect(requested, containsAll([thumb(missing), missing, thumb(broken)]));
+    String thumb(String url, String ext) =>
+        url.replaceFirst('.jpg', '.thumb.$ext');
+    // A 404 tries the next source; any other failure shows the fallback.
+    expect(
+      requested,
+      containsAll([
+        thumb(missing, 'webp'),
+        thumb(missing, 'jpg'),
+        missing,
+        thumb(broken, 'webp'),
+      ]),
+    );
+    expect(requested, isNot(contains(thumb(broken, 'jpg'))));
     expect(requested, isNot(contains(broken)));
     expect(find.text('B'), findsOneWidget);
   });
@@ -213,7 +225,7 @@ void main() {
     expect(MediaImage.debugMissingThumbnailCount, 256);
     expect(
       MediaImageProvider.debugCooldownUrls.where(
-        (url) => url.endsWith('.thumb.jpg'),
+        (url) => url.contains('.thumb.'),
       ),
       isEmpty,
     );
@@ -243,9 +255,11 @@ void main() {
     }) async {
       tester.view.devicePixelRatio = 3;
       addTearDown(tester.view.resetDevicePixelRatio);
-      final client = http_testing.MockClient((request) {
+      final client = http_testing.MockClient((request) async {
         final url = request.url.toString();
         requested.add(url);
+        // These journeys run against a relay from before WebP thumbnails.
+        if (url.endsWith('.thumb.webp')) return http.Response('', 404);
         return respond(url);
       });
       await tester.pumpWidget(
@@ -306,7 +320,7 @@ void main() {
             fallback: const Text('M'),
           ),
         );
-        expect(requested, [thumbnail]);
+        expect(requested, [thumbnail.replaceFirst('.jpg', '.webp'), thumbnail]);
         await show(tester, const SizedBox());
         slow404.complete(http.Response('', 404));
         await show(tester, const SizedBox());

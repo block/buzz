@@ -55,6 +55,22 @@ class _CountingNotifier extends VerifiedProfilesNotifier {
   Map<String, int> newInterestMap() => _CountingMap(iterations);
 }
 
+class _ParseCountingNotifier extends VerifiedProfilesNotifier {
+  _ParseCountingNotifier(this.parses);
+
+  final List<String> parses;
+
+  @override
+  VerifiedProfile? parseHead(
+    NostrEvent event,
+    VerifiedProfileAuthority authority, {
+    required bool checked,
+  }) {
+    parses.add(verifiedProfileSubject(event, authority)!);
+    return super.parseHead(event, authority, checked: checked);
+  }
+}
+
 class Harness {
   Harness(this.async, {VerifiedProfilesNotifier Function()? notifier}) {
     container = ProviderContainer(
@@ -129,6 +145,27 @@ void main() {
     });
   });
 
+  test('a later batch reuses profiles already parsed', () {
+    fakeAsync((async) {
+      final parses = <String>[];
+      final h = Harness(async, notifier: () => _ParseCountingNotifier(parses));
+      addTearDown(h.container.dispose);
+      h.relay.seed([
+        signedProjection(profileTags(subjectA)),
+        signedProjection(profileTags(subjectB)),
+      ]);
+      h.start([subjectA]);
+      expect(h.profiles[subjectA]?.checked, isTrue);
+      h.container.read(verifiedProfilesProvider.notifier).track([subjectB]);
+      h.settle();
+      // Rebatching unchecks and rechecks A; every publish rebuilds the map,
+      // but each head is validated once.
+      expect(h.profiles[subjectA]?.checked, isTrue);
+      expect(h.profiles[subjectB]?.checked, isTrue);
+      expect(parses..sort(), [subjectA, subjectB]);
+    });
+  });
+
   journey('no marks until discovery succeeds and advertises public_profile', (
     h,
   ) {
@@ -180,6 +217,25 @@ void main() {
         ...(f['#d'] as List).cast<String>(),
     };
     expect(subscribed, {for (var i = 4300 - 1024; i < 4300; i++) key(i)});
+  });
+
+  journey('a subject evicted by a large roster keeps its last known name', (h) {
+    String key(int i) => i.toRadixString(16).padLeft(64, '0');
+    h.relay.seed([signedProjection(profileTags(subjectA))]);
+    h.start([subjectA]);
+    expect(h.profiles[subjectA]?.checked, isTrue);
+
+    final notifier = h.container.read(verifiedProfilesProvider.notifier);
+    notifier.track([for (var i = 0; i < 1100; i++) key(i)]);
+    h.settle();
+    // Untracked, so no longer confirmed, but the name stays on screen rather
+    // than falling back to a profile name or an npub.
+    expect(h.profiles[subjectA]?.displayName, 'Ada Lovelace');
+    expect(h.profiles[subjectA]?.checked, isFalse);
+
+    notifier.track([subjectA]);
+    h.settle();
+    expect(h.profiles[subjectA]?.checked, isTrue);
   });
 
   journey('live updates, retractions and ordering apply on the subscription', (

@@ -5,9 +5,11 @@ import 'package:flutter/material.dart';
 
 import '../theme/theme.dart';
 
-const _popoverEnterDuration = Duration(milliseconds: 150);
+/// How app popovers enter: a quick fade while scaling up from slightly small.
+const appPopoverEnterDuration = Duration(milliseconds: 150);
+const appPopoverEnterCurve = Curves.easeOutCubic;
+const appPopoverStartScale = 0.96;
 const _popoverExitDuration = Duration(milliseconds: 110);
-const _popoverStartScale = 0.96;
 
 /// Elevation shared by anchored menus and composer popover surfaces.
 const appPopoverElevation = 8.0;
@@ -142,7 +144,7 @@ class _AnchoredPopoverRoute<T> extends PopupRoute<T> {
 
   @override
   Duration get transitionDuration =>
-      reducedMotion ? Duration.zero : _popoverEnterDuration;
+      reducedMotion ? Duration.zero : appPopoverEnterDuration;
 
   @override
   Duration get reverseTransitionDuration =>
@@ -155,10 +157,10 @@ class _AnchoredPopoverRoute<T> extends PopupRoute<T> {
     Animation<double> secondaryAnimation,
   ) {
     final curvedAnimation = animation.drive(
-      CurveTween(curve: Curves.easeOutCubic),
+      CurveTween(curve: appPopoverEnterCurve),
     );
     final scaleAnimation = Tween<double>(
-      begin: _popoverStartScale,
+      begin: appPopoverStartScale,
       end: 1,
     ).animate(curvedAnimation);
     final transformOrigin = switch (alignment) {

@@ -12,7 +12,11 @@ class ToastCapsuleContent extends StatelessWidget {
     this.destructiveAction = false,
     this.secondaryAction,
     this.onAction,
+    this.stackActions = false,
   });
+
+  /// Places actions below the message when enlarged text needs more width.
+  final bool stackActions;
 
   final String message;
   final Color foreground;
@@ -70,7 +74,7 @@ class ToastCapsuleContent extends StatelessWidget {
       child: Text(label),
     );
     final secondary = secondaryAction;
-    if (secondary != null) {
+    if (secondary != null || stackActions) {
       return Padding(
         padding: const EdgeInsets.fromLTRB(
           Grid.twelve,
@@ -84,8 +88,10 @@ class ToastCapsuleContent extends StatelessWidget {
           children: [
             text,
             action(actionLabel, onAction!, destructive: destructiveAction),
-            const SizedBox(height: 6),
-            action(secondary.label, secondary.onPressed, secondary: true),
+            if (secondary != null) ...[
+              const SizedBox(height: 6),
+              action(secondary.label, secondary.onPressed, secondary: true),
+            ],
           ],
         ),
       );

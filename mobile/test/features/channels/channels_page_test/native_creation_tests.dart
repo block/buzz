@@ -17,19 +17,13 @@ void registerNativeCreationTests(Widget Function(List<Override>) buildPage) {
         messenger.setMockMethodCallHandler(bridge, null);
         debugDefaultTargetPlatformOverride = null;
       });
-      final users = [
-        for (var i = 0; i < 10; i++)
-          DirectoryUser(pubkey: 'person$i', displayName: 'Person $i'),
-      ];
+      final people = {for (var i = 0; i < 10; i++) _dmKey(i): 'Person $i'};
       final actions = _NativeDmActions();
       await tester.pumpWidget(
         buildPage([
           channelsProvider.overrideWith(() => _FakeNotifier([])),
-          relayDirectoryUsersProvider.overrideWith((ref) async => users),
-          relayDirectorySearchProvider.overrideWith(
-            (ref, query) async => users
-                .where((u) => u.label.toLowerCase().contains(query))
-                .toList(),
+          relaySessionProvider.overrideWith(
+            () => RecipientDirectorySession(people),
           ),
           channelActionsProvider.overrideWithValue(actions),
         ]),
@@ -41,8 +35,9 @@ void registerNativeCreationTests(Widget Function(List<Override>) buildPage) {
       await tester.tap(find.text('New DM'));
       await tester.pumpAndSettle();
       expect(find.byType(BottomSheet), findsNothing);
-      expect(states.last['title'], 'New message');
+      expect(states.last['title'], 'New DM');
       expect(states.last['confirmWithCheckmark'], true);
+      expect(states.last['clearQueryOnPick'], true);
       final session = states.last['session'];
       Future<void> event(
         String method, [
@@ -63,11 +58,14 @@ void registerNativeCreationTests(Widget Function(List<Override>) buildPage) {
       }
 
       await event('query', {'value': 'person 2'});
-      expect((states.last['users'] as List).single['pubkey'], 'person2');
-      await event('toggle', {'pubkey': 'person2'});
-      await event('query', {'value': ''});
-      for (final user in users) {
-        await event('toggle', {'pubkey': user.pubkey});
+      final found = (states.last['users'] as List).single as Map;
+      expect(found['pubkey'], _dmKey(2));
+      // People carry no key or handle line, as in the mention chooser.
+      expect(found['detail'], isNull);
+      await event('toggle', {'pubkey': _dmKey(2)});
+      await event('query', {'value': 'Person'});
+      for (final key in people.keys) {
+        await event('toggle', {'pubkey': key});
       }
       expect(states.last['selected'] as List, hasLength(8));
       await event('submit');

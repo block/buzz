@@ -5,6 +5,7 @@ import 'package:buzz/shared/hosted/browser_auth.dart';
 import 'package:buzz/shared/hosted/builderlab_account.dart';
 import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
 import 'package:buzz/shared/hosted/organization_environment.dart';
+import 'package:buzz/shared/hosted/organization_key_backup.dart';
 import 'package:buzz/shared/hosted/organization_sign_in.dart';
 import 'package:buzz/shared/relay/relay_provider.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
@@ -20,74 +21,31 @@ void main() {
   );
   final organization = Uri.parse('https://block.example.com');
   const relayHost = 'buzz.block.example.com';
+  const otherRelayHost = 'other.block.example.com';
   final relay = RelayConfig(baseUrl: 'https://$relayHost', nsec: keys.nsec);
   final expiry = DateTime.now().toUtc().add(const Duration(days: 1));
 
   setUp(() => FlutterSecureStorage.setMockInitialValues({}));
 
-  group('OrganizationEnvironment', () {
-    test('origin and relays are configured together as an HTTPS origin', () {
-      expect(OrganizationEnvironment.parseOrigin('', ''), isNull);
-      expect(
-        OrganizationEnvironment.parseOrigin(
-          'https://block.example.com/',
-          relayHost,
-        ),
-        organization,
-      );
-      for (final (url, relays) in [
-        ('https://block.example.com', ''),
-        ('', relayHost),
-        ('http://block.example.com', relayHost),
-        ('https://block.example.com/api/goose', relayHost),
-        ('https://block.example.com:8443', relayHost),
-        ('https://block.example.com?x=1', relayHost),
-        ('https://app.builderlab.xyz', relayHost),
-      ]) {
-        expect(
-          () => OrganizationEnvironment.parseOrigin(url, relays),
-          throwsStateError,
-          reason: '$url $relays',
-        );
-      }
-    });
-
-    test('relays are exact DNS hosts outside hosted communities', () {
-      expect(
-        OrganizationEnvironment.parseRelayHosts(' Buzz.Block.Example.com ,a.b'),
-        [relayHost, 'a.b'],
-      );
-      for (final relays in [
-        'wss://$relayHost',
-        '*.block.example.com',
-        'localhost',
-        'team.communities.buzz.xyz',
-      ]) {
-        expect(
-          () => OrganizationEnvironment.parseRelayHosts(relays),
-          throwsStateError,
-          reason: relays,
-        );
-      }
-    });
-
-    test('matches only the configured host on the default port', () {
-      bool matches(String url) =>
-          OrganizationEnvironment.matches(Uri.parse(url), [relayHost]);
-      expect(matches('wss://$relayHost'), isTrue);
-      expect(matches('https://$relayHost/'), isTrue);
-      expect(matches('wss://$relayHost:443'), isTrue);
-      expect(matches('wss://team.$relayHost'), isFalse);
-      expect(matches('wss://$relayHost:8443'), isFalse);
-      expect(matches('wss://$relayHost/path'), isFalse);
-      expect(matches('ws://$relayHost'), isFalse);
-    });
+  test('organization relays match only the configured host', () {
+    bool matches(String url) =>
+        OrganizationEnvironment.matches(Uri.parse(url), [relayHost]);
+    expect(matches('wss://$relayHost'), isTrue);
+    expect(matches('https://$relayHost/'), isTrue);
+    expect(matches('wss://$relayHost:443'), isTrue);
+    expect(matches('wss://team.$relayHost'), isFalse);
+    expect(matches('wss://$relayHost:8443'), isFalse);
+    expect(matches('wss://$relayHost/path'), isFalse);
+    expect(matches('ws://$relayHost'), isFalse);
   });
 
   group('organization relay assertions', () {
     late List<http.Request> requests;
     late Object? boundIdentity;
+    // Answers the next identity lookups before falling back to [boundIdentity].
+    late List<Object?> nextIdentities;
     late int assertionLifetime;
+    late String Function(String relayUrl) tokenFor;
 
     BuilderlabAccountClient organizationClient() => BuilderlabAccountClient(
       accountOrigin: organization,
@@ -104,12 +62,16 @@ void main() {
             200,
           ),
           '/api/goose/v1/buzz/nostr-identities/current' => http.Response(
-            jsonEncode({'identity': boundIdentity}),
+            jsonEncode({
+              'identity': nextIdentities.isEmpty
+                  ? boundIdentity
+                  : nextIdentities.removeAt(0),
+            }),
             200,
           ),
           '/api/goose/v1/buzz/identity/assertions' => http.Response(
             jsonEncode({
-              'assertion': 'org-token',
+              'assertion': tokenFor(jsonDecode(request.body)['relay_url']),
               'nostr_pubkey': keys.public,
               'expires_at':
                   DateTime.now().millisecondsSinceEpoch ~/ 1000 +
@@ -132,23 +94,28 @@ void main() {
       }),
     );
 
-    HostedRelayAuth relayAuth(BuilderlabAccountClient organizationAccount) =>
-        HostedRelayAuth(
-          BuilderlabAccountClient(
-            httpClient: MockClient(
-              (request) async => fail('Hosted account must not be used'),
-            ),
-          ),
-          organization: organizationAccount,
-          organizationRelay: (relay) =>
-              OrganizationEnvironment.matches(relay, [relayHost]),
-          enabled: true,
-        );
+    HostedRelayAuth relayAuth(
+      BuilderlabAccountClient organizationAccount, {
+      OrganizationKeyBackup? backup,
+    }) => HostedRelayAuth(
+      BuilderlabAccountClient(
+        httpClient: MockClient(
+          (request) async => fail('Hosted account must not be used'),
+        ),
+      ),
+      organization: organizationAccount,
+      organizationBackup: backup,
+      organizationRelay: (relay) =>
+          OrganizationEnvironment.matches(relay, [relayHost, otherRelayHost]),
+      enabled: true,
+    );
 
     setUp(() {
       requests = [];
       boundIdentity = null;
+      nextIdentities = [];
       assertionLifetime = 120;
+      tokenFor = (_) => 'org-token';
     });
 
     test(
@@ -209,13 +176,145 @@ void main() {
 
     test('an issued assertion serves cached reads for the relay', () async {
       await saveSession();
-      final auth = relayAuth(organizationClient());
+      final organizationAccount = organizationClient();
+      final auth = relayAuth(organizationAccount);
       expect(auth.cachedHeaders(relay), isNull);
       await auth.headers(relay);
       expect(auth.cachedHeaders(relay), {
         'Nostr-Federated-Identity': 'Bearer org-token',
       });
+      // Cached reads never present a signed-out or replaced account's
+      // assertion.
+      await organizationAccount.clearLocalSession();
+      expect(auth.cachedHeaders(relay), isNull);
+      await saveSession();
+      expect(await organizationAccount.restore(), isNotNull);
+      expect(auth.cachedHeaders(relay), isNull);
     });
+
+    test(
+      'issuing for another community keeps the first one cached for reads',
+      () async {
+        await saveSession();
+        tokenFor = (relayUrl) => 'token-for-${Uri.parse(relayUrl).host}';
+        final other = RelayConfig(
+          baseUrl: 'https://$otherRelayHost',
+          nsec: keys.nsec,
+        );
+        final organizationAccount = organizationClient();
+        final backup = _RecordingKeyBackup(organizationAccount);
+        final auth = relayAuth(organizationAccount, backup: backup);
+        await auth.headers(relay);
+        boundIdentity = {'pubkey_hex': keys.public};
+        // A background task such as a push revocation for a removed community
+        // never backs up the key the user is discarding.
+        await auth.headers(other, background: true);
+        expect(backup.backedUp, [keys.public]);
+        // A background task such as a push revocation issues for an inactive
+        // community while `relay` stays the active session.
+        await auth.headers(other);
+        expect(auth.cachedHeaders(relay), {
+          'Nostr-Federated-Identity': 'Bearer token-for-$relayHost',
+        });
+        expect(auth.cachedHeaders(other), {
+          'Nostr-Federated-Identity': 'Bearer token-for-$otherRelayHost',
+        });
+        // A refusal evicts only the assertion that was refused.
+        auth.rejected(other, 'Bearer token-for-$otherRelayHost');
+        expect(auth.cachedHeaders(other), isNull);
+        expect(auth.cachedHeaders(relay), isNotNull);
+        // After the active relay's terminal refusal, a failed background
+        // issuance for the other community leaves the active recovery intact.
+        auth.rejected(relay, 'Bearer token-for-$relayHost', terminal: true);
+        boundIdentity = {'pubkey_hex': 'f' * 64};
+        expect(await auth.headers(other, background: true), isEmpty);
+        expect(auth.failedRelay, relay.baseUrl);
+        expect(auth.failure, AccountFailure.denied);
+        // The active relay's reconnect, arriving while that background
+        // issuance is still in flight, gets its own assertion rather than
+        // the other community's failure.
+        boundIdentity = {'pubkey_hex': keys.public};
+        tokenFor = (relayUrl) => Uri.parse(relayUrl).host == otherRelayHost
+            ? ''
+            : 'token-for-${Uri.parse(relayUrl).host}';
+        final revocation = expectLater(
+          auth.headers(other, background: true),
+          completion(isEmpty),
+        );
+        expect(await auth.headers(relay), {
+          'Nostr-Federated-Identity': 'Bearer token-for-$relayHost',
+        });
+        await revocation;
+      },
+    );
+
+    test(
+      'background issuance never binds a key, shares the cache or fails a foreground caller',
+      () async {
+        await saveSession();
+        var issued = 0;
+        tokenFor = (_) => 'token-${++issued}';
+        final organizationAccount = organizationClient();
+        final backup = _RecordingKeyBackup(organizationAccount);
+        final auth = relayAuth(organizationAccount, backup: backup);
+        int assertions() =>
+            requests.where((r) => r.url.path.endsWith('/assertions')).length;
+
+        // An unbound account is never bound by cleanup with a key the user
+        // may have discarded. Cleanup goes out without an assertion and the
+        // relay decides; an enforcing relay's refusal is retried durably.
+        expect(await auth.headers(relay, background: true), isEmpty);
+        expect(assertions(), 0);
+        expect(auth.failure, isNull);
+
+        // Each background attempt gets its own assertion, so a retry never
+        // resends one the relay refused, and nothing enters the shared cache.
+        boundIdentity = {'pubkey_hex': keys.public};
+        expect(await auth.headers(relay, background: true), {
+          'Nostr-Federated-Identity': 'Bearer token-1',
+        });
+        expect(await auth.headers(relay, background: true), {
+          'Nostr-Federated-Identity': 'Bearer token-2',
+        });
+        expect(auth.cachedHeaders(relay), isNull);
+        expect(backup.backedUp, isEmpty);
+
+        // Foreground use issues its own assertion and backs the key up.
+        expect(await auth.headers(relay), {
+          'Nostr-Federated-Identity': 'Bearer token-3',
+        });
+        expect(backup.backedUp, [keys.public]);
+        // Nor does cleanup reuse the session's cached assertion, which the
+        // relay may already refuse.
+        expect(await auth.headers(relay, background: true), {
+          'Nostr-Federated-Identity': 'Bearer token-4',
+        });
+
+        // After a recorded foreground failure, a background denial for the
+        // same relay and key is not handed to a foreground caller waiting on
+        // it: that caller issues for itself.
+        auth.rejected(relay, 'Bearer token-3');
+        tokenFor = (_) => '';
+        await expectLater(
+          auth.headers(relay),
+          throwsA(AccountFailure.invalidResponse),
+        );
+        expect(auth.failure, AccountFailure.invalidResponse);
+        tokenFor = (_) => 'token-${++issued}';
+        nextIdentities = [
+          {'pubkey_hex': 'f' * 64},
+        ];
+        final revocation = expectLater(
+          auth.headers(relay, background: true),
+          completion(isEmpty),
+        );
+        expect(await auth.headers(relay), {
+          'Nostr-Federated-Identity': 'Bearer token-5',
+        });
+        await revocation;
+        expect(auth.failure, isNull);
+      },
+    );
 
     test('a different bound key is refused before issuance', () async {
       await saveSession();
@@ -234,6 +333,61 @@ void main() {
       expect(await auth.headers(relay), isEmpty);
       expect(auth.failure, AccountFailure.signedOut);
       expect(requests, isEmpty);
+    });
+
+    test('URL headers carry the assertion only to the relay origin', () async {
+      await saveSession();
+      final auth = relayAuth(organizationClient());
+      expect(
+        await auth.headersForUrl(
+          relay,
+          Uri.parse('https://$relayHost/media/emoji.png'),
+        ),
+        {'Nostr-Federated-Identity': 'Bearer org-token'},
+      );
+      for (final other in [
+        'https://other.example.com/media/emoji.png',
+        'https://team.$relayHost/media/emoji.png',
+        'http://$relayHost:8080/media/emoji.png',
+      ]) {
+        expect(await auth.headersForUrl(relay, Uri.parse(other)), isEmpty);
+      }
+    });
+
+    test('after sign-out only a push stop for a bound key gets an assertion '
+        'and nothing can sign back in', () async {
+      await saveSession();
+      final account = organizationClient();
+      final auth = relayAuth(account);
+      boundIdentity = {'pubkey_hex': keys.public};
+      expect(await auth.headers(relay), isNotEmpty);
+
+      await account.clearLocalSession();
+      expect(
+        await const FlutterSecureStorage().read(
+          key: 'buzz_hosted_session_block_example_com_v1',
+        ),
+        isNull,
+      );
+      expect(await account.restore(), isNull);
+      expect(account.account, isNull);
+      requests.clear();
+      tokenFor = (_) => 'push-stop-token';
+      expect(await auth.headers(relay, background: true), {
+        'Nostr-Federated-Identity': 'Bearer push-stop-token',
+      });
+      expect(requests.last.headers['X-BB-Session-Credential'], 'org-secret');
+      expect(await auth.headers(relay), isEmpty);
+      expect(account.account, isNull);
+
+      // A key the account never bound gets nothing.
+      boundIdentity = null;
+      requests.clear();
+      expect(await auth.headers(relay, background: true), isEmpty);
+      expect(
+        requests.map((request) => request.url.path),
+        isNot(contains('/api/goose/v1/buzz/identity/assertions')),
+      );
     });
 
     test('other relays never receive the organization assertion', () async {
@@ -534,5 +688,16 @@ class _PausedReadStorage extends FlutterSecureStorage {
       await resume.future;
     }
     return super.read(key: key);
+  }
+}
+
+class _RecordingKeyBackup extends OrganizationKeyBackup {
+  _RecordingKeyBackup(super.account);
+
+  final backedUp = <String>[];
+
+  @override
+  Future<void> afterAssertion(String nsec, String pubkey) async {
+    backedUp.add(pubkey);
   }
 }

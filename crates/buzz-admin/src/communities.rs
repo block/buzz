@@ -152,9 +152,8 @@ async fn unarchive(
 
 async fn publish_disconnect(tenant: &TenantContext, command: &ConnControl) -> Result<i64> {
     let redis_url = std::env::var("REDIS_URL").context("REDIS_URL is required")?;
-    let redis_pool = deadpool_redis::Config::from_url(&redis_url)
-        .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-        .context("Redis pool creation failed")?;
+    let redis_pool =
+        buzz_pubsub::redis_connection(&redis_url).context("Redis connection setup failed")?;
     let pubsub = PubSubManager::new(&redis_url, redis_pool)
         .await
         .context("PubSub init failed")?;

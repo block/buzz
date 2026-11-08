@@ -34,6 +34,8 @@ pub mod identity_archive;
 pub mod imeta;
 /// Transport-neutral event ingestion pipeline.
 pub mod ingest;
+/// Local media publication authorization.
+pub mod media_access;
 #[cfg(test)]
 mod membership_notice_postgres_tests;
 /// Community moderation authorization seam (capability helper).
@@ -42,6 +44,8 @@ pub mod moderation_authz;
 pub mod moderation_commands;
 /// Relay-signed moderation notice DMs.
 pub mod moderation_notices;
+/// Multi-node fan-out: Redis events to local subscribers, with lossless lag handling.
+pub mod multinode_fanout;
 /// Product-feedback validation + deployment sidecar persistence.
 pub mod product_feedback;
 #[allow(dead_code, missing_docs)]

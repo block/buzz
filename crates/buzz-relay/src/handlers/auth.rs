@@ -511,6 +511,10 @@ pub fn extract_auth_tag_json(event: &nostr::Event) -> Option<String> {
     serde_json::to_string(first.as_slice()).ok()
 }
 
+/// How long a verified AUTH waits for an [`AppState::auth_gate`] permit before
+/// it is shed. Well inside every client's own AUTH timeout.
+const AUTH_PERMIT_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Handle a NIP-42 AUTH message: verify the challenge response and transition
 /// the connection to authenticated state.
 ///
@@ -579,6 +583,20 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
         Ok(mut auth_ctx) => {
             let pubkey = auth_ctx.pubkey;
             let attempt = AuthAttempt::nip42(&conn, pubkey, true);
+            // Concurrency cap (`buzz.relay.concurrency.auth`, unbounded unless set).
+            // The signature is proven, so only real logins queue for the
+            // database checks below, and the permit is held through them. A
+            // shed login gets a bare close, as an auth timeout does: clients
+            // reconnect from that on their jittered backoff, while an `OK
+            // false` parks some clients and retries others in lockstep.
+            let Some(_concurrency_permit) = state.auth_gate.admit(AUTH_PERMIT_WAIT).await else {
+                metrics::counter!("buzz_auth_failures_total", "reason" => "concurrency_limit")
+                    .increment(1);
+                if attempt.reject(&conn, AuthOutcome::ConcurrencyLimit) {
+                    conn.cancel.cancel();
+                }
+                return;
+            };
 
             conn.community_control.prove_nip_fi_line(pubkey);
             let shadow = conn.community_control.nip_fi_shadow();
@@ -998,25 +1016,31 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
             // the ones they have never been in, under this socket's effect
             // permits. Agents are not.
             let auto_join = !state.config.require_relay_membership && !admitted_agent;
-            if auto_join {
+            {
                 let state = Arc::clone(&state);
                 let tenant = conn.tenant.clone();
                 let gate = Arc::clone(&conn.nip_fi_gate);
                 tokio::spawn(async move {
-                    crate::handlers::side_effects::auto_join_never_joined_channels(
+                    crate::handlers::side_effects::auto_join_default_channels(
                         &tenant,
                         &state,
-                        &pubkey.to_bytes(),
-                        &gate,
+                        &pubkey.to_hex(),
+                        Some(&gate),
                     )
                     .await;
+                    if auto_join {
+                        crate::handlers::side_effects::auto_join_never_joined_channels(
+                            &tenant,
+                            &state,
+                            &pubkey.to_bytes(),
+                            &gate,
+                        )
+                        .await;
+                    } else {
+                        #[cfg(test)]
+                        crate::nip_fi_test_hooks::after_auto_join(tenant.community()).await;
+                    }
                 });
-            }
-            // A test waits on every admission's auto-join outcome, so a skip
-            // reports here as the spawned task does when it finishes.
-            #[cfg(test)]
-            if !auto_join {
-                crate::nip_fi_test_hooks::after_auto_join(conn.tenant.community()).await;
             }
             // _auth_permit drops here — expiry's write guard may proceed.
         }
@@ -1082,6 +1106,95 @@ mod tests {
                 Some(*value)
             })
             .unwrap_or_default()
+    }
+
+    /// The AUTH cap sheds a verified login with a bare close once its bounded
+    /// wait runs out; a free permit lets the next login through to its
+    /// database checks.
+    #[tokio::test]
+    async fn auth_cap_sheds_a_verified_login_with_a_bare_close() {
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _recorder_guard = metrics::set_default_local_recorder(&recorder);
+        let state = auth_test_state().await;
+        assert_eq!(state.auth_gate.set_limit(1), 1);
+        let held = state
+            .auth_gate
+            .admit(super::AUTH_PERMIT_WAIT)
+            .await
+            .expect("the only permit");
+
+        let mut shed = AuthHarness::new(false);
+        let started = std::time::Instant::now();
+        shed.run(shed.auth_event(), std::sync::Arc::clone(&state))
+            .await;
+        assert!(
+            started.elapsed() >= super::AUTH_PERMIT_WAIT,
+            "a login waits for a permit before it is shed"
+        );
+        assert!(matches!(shed.conn.auth_state_snapshot(), AuthState::Failed));
+        assert!(
+            shed.send_rx.try_recv().is_err(),
+            "no OK on the data channel"
+        );
+        assert!(
+            shed.ctrl_rx.try_recv().is_err(),
+            "no OK on the ctrl channel"
+        );
+        assert_eq!(
+            shed.wire_frames().await,
+            vec![WsMessage::Close(None)],
+            "a shed login sees only a bare close, as on an auth timeout"
+        );
+
+        drop(held);
+        let admitted = AuthHarness::new(false);
+        admitted
+            .run(admitted.auth_event(), std::sync::Arc::clone(&state))
+            .await;
+        // Every AUTH records exactly one outcome. The admitted login's is the
+        // stub database's failure, so it got past the gate to its checks.
+        let mut outcomes: Vec<(String, u64)> = snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .filter(|(key, ..)| key.key().name() == "buzz_auth_outcomes_total")
+            .map(|(key, _, _, value)| {
+                let outcome = key
+                    .key()
+                    .labels()
+                    .find(|label| label.key() == "outcome")
+                    .map(|label| label.value().to_owned())
+                    .unwrap_or_default();
+                let DebugValue::Counter(count) = value else {
+                    panic!("buzz_auth_outcomes_total must be a counter");
+                };
+                (outcome, count)
+            })
+            .filter(|(_, count)| *count > 0)
+            .collect();
+        outcomes.sort();
+        assert_eq!(outcomes.len(), 2, "one outcome per login: {outcomes:?}");
+        assert!(
+            outcomes
+                .iter()
+                .any(|(outcome, count)| outcome == "concurrency_limit" && *count == 1),
+            "the first login is shed: {outcomes:?}"
+        );
+        assert!(
+            outcomes
+                .iter()
+                .any(|(outcome, count)| outcome != "concurrency_limit" && *count == 1),
+            "the second login, with a free permit, passes the gate: {outcomes:?}"
+        );
+        assert!(
+            state
+                .auth_gate
+                .admit(std::time::Duration::from_millis(10))
+                .await
+                .is_some(),
+            "the admitted login returns its permit"
+        );
     }
 
     fn pending(challenge: &str) -> AuthState {
@@ -1169,9 +1282,7 @@ mod tests {
             .connect_lazy(&config.database_url)
             .expect("lazy pg pool");
         let db = buzz_db::Db::from_pool(pool.clone());
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("redis pool");
+        let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await
@@ -1587,9 +1698,7 @@ mod tests {
         config.require_relay_membership = false;
         config.redis_url = "redis://127.0.0.1:1".to_string();
         configure(&mut config);
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("redis pool");
+        let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await
@@ -2982,6 +3091,98 @@ mod tests {
             assert_eq!(role(&person).await, None, "a leave stands");
         }
 
+        /// Durable roster work is retried by real AUTH admission, including
+        /// agents. Completed work must not enroll members in defaults added later.
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn root_auth_recovers_pending_roster_default_joins() {
+            let mut state = auth_test_state_real_db_expect().await;
+            std::sync::Arc::make_mut(
+                &mut std::sync::Arc::get_mut(&mut state)
+                    .expect("unique test state")
+                    .config,
+            )
+            .require_relay_membership = true;
+            let community = seeded_community(&state).await;
+            let (owner, person, agent) = (Keys::generate(), Keys::generate(), Keys::generate());
+            let channel = default_channels(&state, community, &owner, &["recovered"]).await[0];
+            for keys in [&person, &agent] {
+                let _ = state
+                    .db
+                    .add_relay_member_with_default_channels(
+                        community,
+                        &keys.public_key().to_hex(),
+                        "member",
+                        "invite",
+                        &state.relay_keypair,
+                    )
+                    .await
+                    .expect("admit with pending work");
+            }
+            let credential = buzz_sdk::nip_oa::compute_auth_tag(&owner, &agent.public_key(), "")
+                .expect("credential");
+            let tag: Vec<String> = serde_json::from_str(&credential).expect("tag");
+            for (keys, tag, challenge) in [
+                (&person, None, "recover-person"),
+                (&agent, Some(tag), "recover-agent"),
+            ] {
+                admit_and_settle(&state, community, keys, challenge, tag).await;
+                assert_eq!(
+                    state
+                        .db
+                        .get_member_role(community, channel, &keys.public_key().to_bytes())
+                        .await
+                        .expect("membership")
+                        .as_deref(),
+                    Some("member")
+                );
+                assert!(state
+                    .db
+                    .pending_default_channel_join(community, &keys.public_key().to_hex())
+                    .await
+                    .expect("pending")
+                    .is_none());
+            }
+            // The operator CLI uses roster-only admission. AUTH must not
+            // turn that into default-channel enrollment.
+            let roster_only = Keys::generate();
+            let _ = state
+                .db
+                .add_relay_member(
+                    community,
+                    &roster_only.public_key().to_hex(),
+                    "member",
+                    None,
+                    &state.relay_keypair,
+                )
+                .await
+                .expect("roster-only add");
+            assert!(state
+                .db
+                .pending_default_channel_join(community, &roster_only.public_key().to_hex())
+                .await
+                .expect("pending")
+                .is_none());
+            admit_and_settle(&state, community, &roster_only, "roster-only", None).await;
+            assert!(state
+                .db
+                .get_member_role(community, channel, &roster_only.public_key().to_bytes())
+                .await
+                .expect("membership")
+                .is_none());
+            let later = default_channels(&state, community, &owner, &["later"]).await[0];
+            admit_and_settle(&state, community, &person, "recover-completed", None).await;
+            assert!(
+                state
+                    .db
+                    .get_member_role(community, later, &person.public_key().to_bytes())
+                    .await
+                    .expect("membership")
+                    .is_none(),
+                "completed work must not become ongoing auto-enrollment"
+            );
+        }
+
         /// The admission auto-join holds the socket's effect permit for each
         /// channel, so a session that ends before a channel's write joins
         /// nothing more: cancelled before the first channel, nothing; between
@@ -2994,67 +3195,90 @@ mod tests {
         #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
         async fn admission_auto_join_stops_when_the_session_ends() {
             use crate::nip_fi_test_hooks::{auto_join_channel_hook, auto_join_done_hook};
-            let state = auth_test_state_real_db_expect().await;
-            let community = seeded_community(&state).await;
-            let owner = Keys::generate();
-            let channels =
-                default_channels(&state, community, &owner, &["general", "announcements"]).await;
-            let roles = |keys: &Keys| {
-                let state = std::sync::Arc::clone(&state);
-                let pubkey = keys.public_key().to_bytes();
-                let channels = channels.clone();
-                async move {
-                    let mut roles = Vec::new();
-                    for channel in channels {
-                        roles.push(
-                            state
-                                .db
-                                .get_member_role(community, channel, &pubkey)
-                                .await
-                                .expect("member role"),
-                        );
-                    }
-                    roles
-                }
-            };
-            let member = Some("member".to_string());
-
-            // `stop_before` channels pass, then the socket is cancelled.
-            for (stop_before, expected) in [(0, [None, None]), (1, [member.clone(), None])] {
-                let person = Keys::generate();
-                let (done, done_release) = auto_join_done_hook::arm(community);
-                let (mut reached, mut release) = auto_join_channel_hook::arm(community);
-                let (conn, _ctrl) = registered_pending_conn(&state, community, "auto-join-stop");
-                handle_auth(
-                    signed_auth(&person, "auto-join-stop", None),
-                    std::sync::Arc::clone(&conn),
-                    std::sync::Arc::clone(&state),
+            for roster in [false, true] {
+                let mut state = auth_test_state_real_db_expect().await;
+                std::sync::Arc::make_mut(
+                    &mut std::sync::Arc::get_mut(&mut state)
+                        .expect("unique test state")
+                        .config,
                 )
-                .await;
-                assert!(matches!(
-                    conn.auth_state_snapshot(),
-                    AuthState::Authenticated(_)
-                ));
-                for _ in 0..stop_before {
-                    reached.await.expect("task reaches a channel");
-                    // Re-arm before the task can run again: this task does
-                    // not yield between the release and the arm.
-                    release.notify_one();
-                    (reached, release) = auto_join_channel_hook::arm(community);
-                }
-                reached.await.expect("task reaches the stop channel");
-                conn.cancel.cancel();
-                release.notify_one();
-                done.await.expect("task finishes");
-                done_release.notify_one();
-                assert_eq!(roles(&person).await, expected, "stop before {stop_before}");
+                .require_relay_membership = roster;
+                let community = seeded_community(&state).await;
+                let owner = Keys::generate();
+                let channels =
+                    default_channels(&state, community, &owner, &["general", "announcements"])
+                        .await;
+                let roles = |keys: &Keys| {
+                    let state = std::sync::Arc::clone(&state);
+                    let pubkey = keys.public_key().to_bytes();
+                    let channels = channels.clone();
+                    async move {
+                        let mut roles = Vec::new();
+                        for channel in channels {
+                            roles.push(
+                                state
+                                    .db
+                                    .get_member_role(community, channel, &pubkey)
+                                    .await
+                                    .expect("member role"),
+                            );
+                        }
+                        roles
+                    }
+                };
+                let member = Some("member".to_string());
 
-                admit_and_settle(&state, community, &person, "auto-join-resume", None).await;
-                assert_eq!(
-                    roles(&person).await,
-                    [member.clone(), member.clone()],
-                    "the next admission joins what was skipped"
-                );
+                // `stop_before` channels pass, then the socket is cancelled.
+                for (stop_before, expected) in [(0, [None, None]), (1, [member.clone(), None])] {
+                    let person = Keys::generate();
+                    if roster {
+                        let _ = state
+                            .db
+                            .add_relay_member_with_default_channels(
+                                community,
+                                &person.public_key().to_hex(),
+                                "member",
+                                "invite",
+                                &state.relay_keypair,
+                            )
+                            .await
+                            .expect("pending roster work");
+                    }
+                    let (done, done_release) = auto_join_done_hook::arm(community);
+                    let (mut reached, mut release) = auto_join_channel_hook::arm(community);
+                    let (conn, _ctrl) =
+                        registered_pending_conn(&state, community, "auto-join-stop");
+                    handle_auth(
+                        signed_auth(&person, "auto-join-stop", None),
+                        std::sync::Arc::clone(&conn),
+                        std::sync::Arc::clone(&state),
+                    )
+                    .await;
+                    assert!(matches!(
+                        conn.auth_state_snapshot(),
+                        AuthState::Authenticated(_)
+                    ));
+                    for _ in 0..stop_before {
+                        reached.await.expect("task reaches a channel");
+                        // Re-arm before the task can run again: this task does
+                        // not yield between the release and the arm.
+                        release.notify_one();
+                        (reached, release) = auto_join_channel_hook::arm(community);
+                    }
+                    reached.await.expect("task reaches the stop channel");
+                    conn.cancel.cancel();
+                    release.notify_one();
+                    done.await.expect("task finishes");
+                    done_release.notify_one();
+                    assert_eq!(roles(&person).await, expected, "stop before {stop_before}");
+
+                    admit_and_settle(&state, community, &person, "auto-join-resume", None).await;
+                    assert_eq!(
+                        roles(&person).await,
+                        [member.clone(), member.clone()],
+                        "the next admission joins what was skipped"
+                    );
+                }
             }
         }
 
@@ -3195,9 +3419,7 @@ mod tests {
             config.database_url = db_url.clone();
             config.redis_url = "redis://127.0.0.1:1".to_string();
             let db = buzz_db::Db::from_pool(pool.clone());
-            let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-                .expect("redis pool");
+            let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
             let pubsub = Arc::new(
                 buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                     .await
@@ -4116,9 +4338,7 @@ mod tests {
             config.database_url = db_url.clone();
             config.redis_url = "redis://127.0.0.1:1".to_string();
             let db = buzz_db::Db::from_pool(pool.clone());
-            let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-                .expect("redis pool");
+            let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
             let pubsub = Arc::new(
                 buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                     .await

@@ -9,10 +9,14 @@ class NavigationButtonSurface extends StatelessWidget {
   const NavigationButtonSurface({
     required this.child,
     this.capsule = false,
+    this.backgroundColor,
     super.key,
   });
 
   final Widget child;
+
+  /// Optional Material background; native iOS glass retains its own treatment.
+  final Color? backgroundColor;
 
   /// Uses fully rounded ends instead of device-concentric corners.
   final bool capsule;
@@ -22,7 +26,7 @@ class NavigationButtonSurface extends StatelessWidget {
     if (NavigationGlassGroup.maybeOf(context)) return child;
     if (defaultTargetPlatform != TargetPlatform.iOS) {
       return Material(
-        color: context.controlSurface,
+        color: backgroundColor ?? context.controlSurface,
         shape: const StadiumBorder(),
         clipBehavior: Clip.antiAlias,
         child: child,

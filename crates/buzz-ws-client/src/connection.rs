@@ -1,8 +1,8 @@
 use std::collections::VecDeque;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
-use nostr::{Event, Keys, Tag};
+use nostr::{Event, NostrSigner, Tag};
 use serde_json::{json, Value};
 use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -26,38 +26,54 @@ pub const AUTH_OK_TIMEOUT_SECS: u64 = 20;
 /// Seconds to wait for the relay's OK response to a published event.
 pub const PUBLISH_OK_TIMEOUT_SECS: u64 = 30;
 
+/// Cap on a graceful close.
+pub const CLOSE_TIMEOUT_SECS: u64 = 5;
+
+/// Run one network phase, writes included, within its read `wait` plus a
+/// second, so a read that times out reports its own error first.
+async fn phase<T>(
+    wait: Duration,
+    io: impl std::future::Future<Output = Result<T, WsClientError>>,
+) -> Result<T, WsClientError> {
+    tokio::time::timeout(wait + Duration::from_secs(1), io)
+        .await
+        .map_err(|_| WsClientError::Timeout)?
+}
+
 /// A NIP-42-capable WebSocket connection to a Nostr relay.
 pub struct NostrWsConnection {
     ws: WsStream,
-    buffer: VecDeque<RelayMessage>,
+    /// Messages read while waiting for something else, each with when it
+    /// was read.
+    buffer: VecDeque<(Instant, RelayMessage)>,
     pending_challenge: Option<String>,
     relay_url: String,
 }
 
 impl NostrWsConnection {
-    /// Connects to the relay at `url` and performs NIP-42 authentication with `keys`.
+    /// Connects to the relay at `url` and performs NIP-42 authentication with `signer`.
     ///
     /// Pass `auth_tag` to include a NIP-OA authorization tag in the AUTH event.
-    pub async fn connect_authenticated(
+    pub async fn connect_authenticated<S: NostrSigner>(
         url: &str,
-        keys: &Keys,
+        signer: &S,
         auth_tag: Option<&Tag>,
     ) -> Result<Self, WsClientError> {
-        Self::connect_authenticated_with_headers(url, keys, auth_tag, HeaderMap::new()).await
+        Self::connect_authenticated_with_headers(url, signer, auth_tag, HeaderMap::new()).await
     }
 
     /// [`Self::connect_authenticated`], sending `headers` on the WebSocket upgrade request.
     ///
     /// Use this for credentials the relay checks at upgrade time, such as a NIP-FI
     /// `Nostr-Federated-Identity` assertion that must pair with the NIP-42 AUTH key.
-    pub async fn connect_authenticated_with_headers(
+    pub async fn connect_authenticated_with_headers<S: NostrSigner>(
         url: &str,
-        keys: &Keys,
+        signer: &S,
         auth_tag: Option<&Tag>,
         headers: HeaderMap,
     ) -> Result<Self, WsClientError> {
         let mut conn = Self::connect_with_headers(url, headers).await?;
-        conn.authenticate(keys, auth_tag).await?;
+        conn.authenticate(signer, auth_tag).await?;
         Ok(conn)
     }
 
@@ -123,26 +139,29 @@ impl NostrWsConnection {
         }
     }
 
-    /// Performs NIP-42 authentication using `keys` against the connected relay.
+    /// Performs NIP-42 authentication using `signer` against the connected relay.
     ///
     /// Pass `auth_tag` to include a NIP-OA authorization tag in the AUTH event.
-    pub async fn authenticate(
+    pub async fn authenticate<S: NostrSigner>(
         &mut self,
-        keys: &Keys,
+        signer: &S,
         auth_tag: Option<&Tag>,
     ) -> Result<(), WsClientError> {
-        let challenge = self
-            .wait_for_auth_challenge(Duration::from_secs(AUTH_CHALLENGE_TIMEOUT_SECS))
-            .await?;
+        // Each network phase is capped as a whole, writes (and Pongs sent
+        // while reading) included. Signing between them is the signer's to
+        // bound: a remote signer may hold it for a person's decision.
+        let wait = Duration::from_secs(AUTH_CHALLENGE_TIMEOUT_SECS);
+        let challenge = phase(wait, self.wait_for_auth_challenge(wait)).await?;
 
-        let auth_event = build_auth_event(&challenge, &self.relay_url, keys, auth_tag)?;
+        let auth_event = build_auth_event(&challenge, &self.relay_url, signer, auth_tag).await?;
         let event_id = auth_event.id.to_hex();
 
-        self.send_raw(&json!(["AUTH", auth_event])).await?;
-
-        let ok = self
-            .wait_for_ok(&event_id, Duration::from_secs(AUTH_OK_TIMEOUT_SECS))
-            .await?;
+        let wait = Duration::from_secs(AUTH_OK_TIMEOUT_SECS);
+        let ok = phase(wait, async {
+            self.send_raw(&json!(["AUTH", auth_event])).await?;
+            self.wait_for_ok(&event_id, wait).await
+        })
+        .await?;
         if !ok.accepted {
             return Err(WsClientError::AuthFailed(ok.message));
         }
@@ -154,9 +173,12 @@ impl NostrWsConnection {
     /// Sends a signed event to the relay and waits for the OK response.
     pub async fn send_event(&mut self, event: Event) -> Result<OkResponse, WsClientError> {
         let event_id = event.id.to_hex();
-        self.send_raw(&json!(["EVENT", event])).await?;
-        self.wait_for_ok(&event_id, Duration::from_secs(PUBLISH_OK_TIMEOUT_SECS))
-            .await
+        let wait = Duration::from_secs(PUBLISH_OK_TIMEOUT_SECS);
+        phase(wait, async {
+            self.send_raw(&json!(["EVENT", event])).await?;
+            self.wait_for_ok(&event_id, wait).await
+        })
+        .await
     }
 
     /// Receives the next relay message, waiting up to `timeout_dur`.
@@ -164,15 +186,30 @@ impl NostrWsConnection {
         &mut self,
         timeout_dur: Duration,
     ) -> Result<RelayMessage, WsClientError> {
-        if let Some(msg) = self.buffer.pop_front() {
-            return Ok(msg);
-        }
-        self.recv_one(timeout_dur).await
+        Ok(self.next_event_received(timeout_dur).await?.1)
     }
 
-    /// Closes the WebSocket connection gracefully.
+    /// [`Self::next_event`], with when the message was read off the socket.
+    ///
+    /// A message that arrived while another call, such as
+    /// [`Self::send_event`], waited for something else is returned later,
+    /// with the instant it arrived rather than the instant it is returned.
+    pub async fn next_event_received(
+        &mut self,
+        timeout_dur: Duration,
+    ) -> Result<(Instant, RelayMessage), WsClientError> {
+        if let Some(entry) = self.buffer.pop_front() {
+            return Ok(entry);
+        }
+        let msg = self.recv_one(timeout_dur).await?;
+        Ok((Instant::now(), msg))
+    }
+
+    /// Closes the WebSocket connection gracefully, within [`CLOSE_TIMEOUT_SECS`].
     pub async fn disconnect(mut self) -> Result<(), WsClientError> {
-        self.ws.close(None).await?;
+        tokio::time::timeout(Duration::from_secs(CLOSE_TIMEOUT_SECS), self.ws.close(None))
+            .await
+            .map_err(|_| WsClientError::Timeout)??;
         Ok(())
     }
 
@@ -185,10 +222,6 @@ impl NostrWsConnection {
     }
 
     async fn recv_one(&mut self, timeout_dur: Duration) -> Result<RelayMessage, WsClientError> {
-        if let Some(msg) = self.buffer.pop_front() {
-            return Ok(msg);
-        }
-
         loop {
             let raw = timeout(timeout_dur, self.ws.next())
                 .await
@@ -207,7 +240,7 @@ impl NostrWsConnection {
                 Message::Ping(data) => {
                     self.ws.send(Message::Pong(data)).await?;
                 }
-                Message::Close(_) => return Err(WsClientError::ConnectionClosed),
+                Message::Close(frame) => return Err(closed(frame)),
                 _ => {}
             }
         }
@@ -224,9 +257,9 @@ impl NostrWsConnection {
         if let Some(idx) = self
             .buffer
             .iter()
-            .position(|m| matches!(m, RelayMessage::Auth { .. }))
+            .position(|(_, m)| matches!(m, RelayMessage::Auth { .. }))
         {
-            match self.buffer.remove(idx).unwrap() {
+            match self.buffer.remove(idx).unwrap().1 {
                 RelayMessage::Auth { challenge } => return Ok(challenge),
                 _ => unreachable!(),
             }
@@ -261,13 +294,13 @@ impl NostrWsConnection {
                             }
                             return Ok(challenge);
                         }
-                        other => self.buffer.push_back(other),
+                        other => self.buffer.push_back((Instant::now(), other)),
                     }
                 }
                 Message::Ping(data) => {
                     self.ws.send(Message::Pong(data)).await?;
                 }
-                Message::Close(_) => return Err(WsClientError::ConnectionClosed),
+                Message::Close(frame) => return Err(closed(frame)),
                 _ => {}
             }
         }
@@ -283,9 +316,9 @@ impl NostrWsConnection {
         if let Some(idx) = self
             .buffer
             .iter()
-            .position(|m| matches!(m, RelayMessage::Ok(ok) if ok.event_id == event_id))
+            .position(|(_, m)| matches!(m, RelayMessage::Ok(ok) if ok.event_id == event_id))
         {
-            match self.buffer.remove(idx).unwrap() {
+            match self.buffer.remove(idx).unwrap().1 {
                 RelayMessage::Ok(ok) => return Ok(ok),
                 _ => unreachable!(),
             }
@@ -313,15 +346,15 @@ impl NostrWsConnection {
                         RelayMessage::Ok(ok) if ok.event_id == event_id => return Ok(ok),
                         RelayMessage::Auth { ref challenge } => {
                             self.pending_challenge = Some(challenge.clone());
-                            self.buffer.push_back(msg);
+                            self.buffer.push_back((Instant::now(), msg));
                         }
-                        other => self.buffer.push_back(other),
+                        other => self.buffer.push_back((Instant::now(), other)),
                     }
                 }
                 Message::Ping(data) => {
                     self.ws.send(Message::Pong(data)).await?;
                 }
-                Message::Close(_) => return Err(WsClientError::ConnectionClosed),
+                Message::Close(frame) => return Err(closed(frame)),
                 _ => {}
             }
         }
@@ -330,19 +363,24 @@ impl NostrWsConnection {
 
 /// One-shot helper: connect, authenticate, send one event, disconnect.
 ///
-/// Establishes a fresh WebSocket connection, completes NIP-42 authentication,
-/// publishes `event`, waits for the relay's OK response, then closes the
-/// connection. The entire operation is bounded by `timeout_secs`.
-pub async fn publish_event(
+/// Establishes a fresh WebSocket connection carrying `headers` on the upgrade
+/// (e.g. a NIP-FI `Nostr-Federated-Identity` assertion), completes NIP-42
+/// authentication with `signer`, publishes `event`, waits for the relay's OK
+/// response, then closes the connection. The entire operation is bounded by
+/// `timeout_secs`.
+pub async fn publish_event<S: NostrSigner>(
     relay_url: &str,
     event: Event,
-    keys: &Keys,
+    signer: &S,
     auth_tag: Option<&Tag>,
+    headers: HeaderMap,
     timeout_secs: u64,
 ) -> Result<OkResponse, WsClientError> {
     let result = tokio::time::timeout(Duration::from_secs(timeout_secs), async {
-        let mut conn = NostrWsConnection::connect(relay_url).await?;
-        conn.authenticate(keys, auth_tag).await?;
+        let mut conn = NostrWsConnection::connect_authenticated_with_headers(
+            relay_url, signer, auth_tag, headers,
+        )
+        .await?;
         let ok = conn.send_event(event).await?;
         let _ = conn.disconnect().await;
         Ok::<_, WsClientError>(ok)
@@ -350,6 +388,18 @@ pub async fn publish_event(
     .await
     .map_err(|_| WsClientError::Timeout)?;
     result
+}
+
+/// The error for a close frame: a policy close keeps its reason, since a
+/// relay denial is not an ordinary connection loss.
+fn closed(frame: Option<tokio_tungstenite::tungstenite::protocol::CloseFrame>) -> WsClientError {
+    use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+    match frame {
+        Some(frame) if frame.code == CloseCode::Policy => {
+            WsClientError::PolicyClose(frame.reason.to_string())
+        }
+        _ => WsClientError::ConnectionClosed,
+    }
 }
 
 #[cfg(test)]
@@ -408,5 +458,43 @@ mod tests {
             server.await.unwrap(),
             Some(HeaderValue::from_static("Bearer header.payload.signature"))
         );
+    }
+
+    /// A relay that answers NIP-42 AUTH by closing with `code`, as the relay
+    /// does on a NIP-FI key mismatch (1008).
+    async fn close_after_auth(code: u16) -> WsClientError {
+        use tokio_tungstenite::tungstenite::protocol::{frame::coding::CloseCode, CloseFrame};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            ws.send(Message::Text(r#"["AUTH","challenge"]"#.into()))
+                .await
+                .unwrap();
+            let _auth = ws.next().await;
+            ws.send(Message::Close(Some(CloseFrame {
+                code: CloseCode::from(code),
+                reason: "auth-required: key mismatch".into(),
+            })))
+            .await
+            .unwrap();
+        });
+        NostrWsConnection::connect_authenticated(&url, &nostr::Keys::generate(), None)
+            .await
+            .err()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_policy_close_keeps_its_reason_and_other_closes_do_not() {
+        let err = close_after_auth(1008).await;
+        assert!(
+            matches!(&err, WsClientError::PolicyClose(r) if r.contains("key mismatch")),
+            "{err:?}"
+        );
+        let err = close_after_auth(1000).await;
+        assert!(matches!(err, WsClientError::ConnectionClosed), "{err:?}");
     }
 }

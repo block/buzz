@@ -551,7 +551,7 @@ class _FakeVoiceNotePlayer extends VoiceNotePlayerController {
   @override
   Future<void> loadRemote(
     String url, {
-    required Map<String, String> Function() headers,
+    required FutureOr<Map<String, String>> Function() headers,
     required Duration fallbackDuration,
   }) => loadLocal(url, fallbackDuration: fallbackDuration);
 
@@ -1142,6 +1142,40 @@ void main() {
       expect(focusNode.hasFocus, isTrue);
       tester.view.viewInsets = const FakeViewPadding(bottom: 300);
       addTearDown(tester.view.reset);
+      await tester.pump();
+
+      // iOS drops the inset while Control Center or the app switcher covers
+      // the app, reports `resumed` with it still at zero, and restores the
+      // keyboard natively a moment later. That is not a dismissal.
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+      tester.view.viewInsets = FakeViewPadding.zero;
+      await tester.pumpAndSettle();
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      await tester.pump(const Duration(milliseconds: 400));
+      tester.view.viewInsets = const FakeViewPadding(bottom: 40);
+      await tester.pump();
+      tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+      await tester.pump(const Duration(seconds: 1));
+      await tester.pumpAndSettle();
+      expect(find.byType(TextField), findsOneWidget);
+      expect(focusNode.hasFocus, isTrue);
+
+      // A keyboard that stays down after the app resumes still collapses the
+      // composer once the restore grace has passed.
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+      tester.view.viewInsets = FakeViewPadding.zero;
+      await tester.pumpAndSettle();
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(find.byType(TextField), findsOneWidget);
+      await tester.pump(const Duration(seconds: 1));
+      await tester.pumpAndSettle();
+      expect(find.byType(TextField), findsNothing);
+      expect(focusNode.hasFocus, isFalse);
+
+      await tester.tap(find.text('Message…'));
+      await tester.pumpAndSettle();
+      tester.view.viewInsets = const FakeViewPadding(bottom: 300);
       await tester.pump();
 
       tester.view.viewInsets = FakeViewPadding.zero;
@@ -3952,19 +3986,18 @@ void main() {
       );
 
       await _expandComposer(tester);
-      await tester.enterText(find.byType(TextField), urls.join(' '));
+      final full = '${urls.join(' ')} ';
+      await tester.enterText(find.byType(TextField), full);
       await tester.pump();
 
-      expect(
-        find.byWidgetPredicate(
-          (widget) =>
-              widget.key is ValueKey<String> &&
-              (widget.key! as ValueKey<String>).value.startsWith(
-                'composer-buzz-link-chip:',
-              ),
-        ),
-        findsNWidgets(5),
+      Finder linkChips() => find.byWidgetPredicate(
+        (widget) =>
+            widget.key is ValueKey<String> &&
+            (widget.key! as ValueKey<String>).value.startsWith(
+              'composer-buzz-link-chip:',
+            ),
       );
+      expect(linkChips(), findsNWidgets(5));
       expect(
         find.byKey(
           const ValueKey('composer-buzz-link-chip:engineering · cdcdcdcd'),
@@ -3983,10 +4016,238 @@ void main() {
         find.byKey(const ValueKey('composer-buzz-link-chip:buzz · cdcdcdcd')),
         findsNWidgets(2),
       );
-      expect(
-        tester.widget<TextField>(find.byType(TextField)).controller!.text,
-        urls.join(' '),
+      final controller = tester
+          .widget<TextField>(find.byType(TextField))
+          .controller!;
+      expect(controller.text, full);
+      Future<void> setValue(String text, int caret) async {
+        controller.value = TextEditingValue(
+          text: text,
+          selection: TextSelection.collapsed(offset: caret),
+        );
+        await tester.pump();
+      }
+
+      // An IME edit that leaves text composing is never rewritten, so the
+      // composition stays intact.
+      tester.testTextInput.updateEditingValue(
+        TextEditingValue(
+          text: full.substring(0, full.length - 1),
+          selection: TextSelection.collapsed(offset: full.length - 1),
+          composing: TextRange(start: full.length - 2, end: full.length - 1),
+        ),
       );
+      await tester.pump();
+      expect(controller.text, full.substring(0, full.length - 1));
+      await setValue(full, full.length);
+
+      // Soft-keyboard backspace removes the space, which reveals the link's
+      // URL; the next backspace edits it one character at a time.
+      tester.testTextInput.updateEditingValue(
+        TextEditingValue(
+          text: urls.join(' '),
+          selection: TextSelection.collapsed(offset: full.length - 1),
+        ),
+      );
+      await tester.pump();
+      expect(controller.text, urls.join(' '));
+      expect(linkChips(), findsNWidgets(4));
+      await tester.sendKeyEvent(LogicalKeyboardKey.backspace);
+      await tester.pump();
+      expect(controller.text, full.substring(0, full.length - 2));
+      expect(linkChips(), findsNWidgets(4));
+
+      // Moving the caret back past the space reveals the link too, and
+      // moving it away turns the link back into a chip.
+      await setValue(full, full.length);
+      expect(linkChips(), findsNWidgets(5));
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowLeft);
+      await tester.pump();
+      expect(controller.selection.baseOffset, full.length - 1);
+      expect(linkChips(), findsNWidgets(4));
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
+      await tester.pump();
+      expect(linkChips(), findsNWidgets(5));
+
+      // Hardware backspace right after a chip, with the caret past the space
+      // next to it, still removes only the space.
+      final secondEnd = urls[0].length + 1 + urls[1].length;
+      await setValue(full, secondEnd + 1);
+      await tester.sendKeyEvent(LogicalKeyboardKey.backspace);
+      await tester.pump();
+      expect(controller.text, full.replaceRange(secondEnd, secondEnd + 1, ''));
+      expect(controller.selection.baseOffset, secondEnd);
+
+      // A chip draws as one glyph at its first offset. A tap on its left
+      // half lands before it, and one on its right half (just after the
+      // glyph) goes after it, wherever the caret was.
+      await setValue(full, full.length);
+      controller.selection = const TextSelection.collapsed(offset: 1);
+      await tester.pump();
+      expect(controller.selection.baseOffset, urls[0].length);
+      controller.selection = const TextSelection.collapsed(offset: 0);
+      await tester.pump();
+      controller.selection = const TextSelection.collapsed(offset: 1);
+      await tester.pump();
+      expect(controller.selection.baseOffset, urls[0].length);
+      // A move left into the hidden source, such as a word left, steps over
+      // the chip to its start, and an arrow right from its start steps over
+      // it to its end.
+      await setValue(full, full.length);
+      controller.selection = const TextSelection.collapsed(offset: 3);
+      await tester.pump();
+      expect(controller.selection, const TextSelection.collapsed(offset: 0));
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
+      await tester.pump();
+      expect(controller.selection.baseOffset, urls[0].length);
+      // A selection that covers part of a chip grows to cover all of it.
+      await setValue(full, full.length);
+      controller.selection = TextSelection(
+        baseOffset: urls[0].length - 3,
+        extentOffset: urls[0].length + 4,
+      );
+      await tester.pump();
+      expect(
+        controller.selection,
+        TextSelection(
+          baseOffset: 0,
+          extentOffset: urls[0].length + 1 + urls[1].length,
+        ),
+      );
+
+      // A word delete that runs from past a chip into it removes the whole
+      // chip, not just the end of its hidden URL.
+      await setValue('a ${urls[1]} b', 3 + urls[1].length);
+      tester.testTextInput.updateEditingValue(
+        TextEditingValue(
+          text: 'a ${urls[1].substring(0, urls[1].length - 4)}b',
+          selection: TextSelection.collapsed(offset: urls[1].length - 2),
+        ),
+      );
+      await tester.pump();
+      expect(controller.text, 'a b');
+      expect(controller.selection.baseOffset, 2);
+
+      // Forward delete before a chip removes it whole, and stays forward
+      // when the character before the caret matches the chip's first
+      // character (`b|buzz://...`).
+      await setValue(full, 0);
+      await tester.sendKeyEvent(LogicalKeyboardKey.delete);
+      await tester.pump();
+      expect(controller.text, full.substring(urls[0].length));
+      expect(controller.selection.baseOffset, 0);
+      expect(linkChips(), findsNWidgets(4));
+      await setValue('b${urls[1]} ', 1);
+      await tester.sendKeyEvent(LogicalKeyboardKey.delete);
+      await tester.pump();
+      expect(controller.text, 'b ');
+      expect(controller.selection.baseOffset, 1);
+
+      // Pasting exactly one link adds a space so it is a chip at once.
+      await setValue('see ', 4);
+      tester.testTextInput.updateEditingValue(
+        TextEditingValue(
+          text: 'see ${urls[2]}',
+          selection: TextSelection.collapsed(offset: 4 + urls[2].length),
+        ),
+      );
+      await tester.pump();
+      expect(controller.text, 'see ${urls[2]} ');
+      expect(controller.selection.baseOffset, controller.text.length);
+      expect(linkChips(), findsOneWidget);
+      // A paste that already has a boundary after it, such as punctuation
+      // ending a sentence, leaves the surrounding text alone.
+      await setValue('See word. ', 4);
+      controller.selection = const TextSelection(
+        baseOffset: 4,
+        extentOffset: 8,
+      );
+      await tester.pump();
+      tester.testTextInput.updateEditingValue(
+        TextEditingValue(
+          text: 'See ${urls[2]}. ',
+          selection: TextSelection.collapsed(offset: 4 + urls[2].length),
+        ),
+      );
+      await tester.pump();
+      expect(controller.text, 'See ${urls[2]}. ');
+      // A link pasted into code stays exactly as pasted; code never shows
+      // chips.
+      await setValue('``', 1);
+      tester.testTextInput.updateEditingValue(
+        TextEditingValue(
+          text: '`${urls[2]}`',
+          selection: TextSelection.collapsed(offset: 1 + urls[2].length),
+        ),
+      );
+      await tester.pump();
+      expect(controller.text, '`${urls[2]}`');
+      // So does a link the composer can't show as a chip.
+      await setValue('', 0);
+      tester.testTextInput.updateEditingValue(
+        const TextEditingValue(
+          text: 'buzz://repo?x=1',
+          selection: TextSelection.collapsed(offset: 15),
+        ),
+      );
+      await tester.pump();
+      expect(controller.text, 'buzz://repo?x=1');
+      // A selection that leaves a revealed link, which turns it back into a
+      // chip, still covers the whole chip.
+      final revealedText = 'see ${urls[1]} end';
+      await setValue(revealedText, 4 + urls[1].length);
+      await setValue(revealedText, 14);
+      expect(linkChips(), findsNothing);
+      controller.selection = TextSelection(
+        baseOffset: 14,
+        extentOffset: revealedText.length,
+      );
+      await tester.pump();
+      expect(
+        controller.selection,
+        TextSelection(baseOffset: 4, extentOffset: revealedText.length),
+      );
+      expect(linkChips(), findsOneWidget);
+
+      await setValue('see ${urls[2]} ', 5 + urls[2].length);
+
+      // Undo after typing at the end of a revealed link restores it rather
+      // than deleting the link.
+      await tester.sendKeyEvent(LogicalKeyboardKey.backspace);
+      await tester.pump(const Duration(seconds: 1));
+      expect(controller.text, 'see ${urls[2]}');
+      await tester.enterText(find.byType(TextField), 'see ${urls[2]}x');
+      await tester.pump(const Duration(seconds: 1));
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+      await tester.sendKeyEvent(LogicalKeyboardKey.keyZ);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+      await tester.pump();
+      expect(controller.text, 'see ${urls[2]}');
+
+      // Undo that removes part of a chip along with what follows it restores
+      // the shorter text instead of deleting the whole link.
+      await tester.enterText(find.byType(TextField), 'buzz://channel/580c');
+      await tester.pump(const Duration(seconds: 1));
+      await tester.enterText(find.byType(TextField), '${urls[1]} ');
+      await tester.pump(const Duration(seconds: 1));
+      expect(linkChips(), findsOneWidget);
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+      await tester.sendKeyEvent(LogicalKeyboardKey.keyZ);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+      await tester.pump();
+      expect(controller.text, 'buzz://channel/580c');
+
+      // Undo that brings back a whole link restores it as it was, without
+      // the space a paste would add.
+      await tester.enterText(find.byType(TextField), 'see ${urls[1]}');
+      await tester.pump(const Duration(seconds: 1));
+      await tester.enterText(find.byType(TextField), 'see ');
+      await tester.pump(const Duration(seconds: 1));
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+      await tester.sendKeyEvent(LogicalKeyboardKey.keyZ);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+      await tester.pump();
+      expect(controller.text, 'see ${urls[1]}');
     });
 
     testWidgets('preserves underscore d-tags and Markdown delimiters', (
@@ -4017,6 +4278,85 @@ void main() {
       expect(
         tester.widget<TextField>(find.byType(TextField)).controller!.text,
         source,
+      );
+
+      // A caret after a closing italic or strikethrough delimiter is past the
+      // link, so the link stays a chip.
+      final plain = 'buzz://repo?owner=$owner&d=buzz';
+      for (final wrapped in ['_${plain}_', '~~$plain~~']) {
+        await tester.enterText(find.byType(TextField), wrapped);
+        await tester.pump();
+        expect(
+          find.byKey(const ValueKey('composer-buzz-link-chip:buzz')),
+          findsOneWidget,
+          reason: wrapped,
+        );
+      }
+
+      // A link pasted over a formatted word already ends at the closing
+      // delimiter, so the paste adds no space before the prose after it.
+      for (final (open, close) in [('**', '**'), ('_', '_'), ('~~', '~~')]) {
+        final before = '${open}word${close}more';
+        await tester.enterText(find.byType(TextField), before);
+        await tester.pump();
+        final controller = tester
+            .widget<TextField>(find.byType(TextField))
+            .controller!;
+        controller.selection = TextSelection(
+          baseOffset: open.length,
+          extentOffset: open.length + 4,
+        );
+        await tester.pump();
+        final pasted = '$open$plain${close}more';
+        tester.testTextInput.updateEditingValue(
+          TextEditingValue(
+            text: pasted,
+            selection: TextSelection.collapsed(
+              offset: open.length + plain.length,
+            ),
+          ),
+        );
+        await tester.pump();
+        expect(controller.text, pasted, reason: before);
+        controller.selection = const TextSelection.collapsed(offset: 0);
+        await tester.pump();
+        expect(
+          find.byKey(const ValueKey('composer-buzz-link-chip:buzz')),
+          findsOneWidget,
+          reason: before,
+        );
+      }
+
+      // Selection updates can arrive before a frame draws a pasted link as a
+      // chip. They still snap to the whole chip.
+      await tester.enterText(find.byType(TextField), '');
+      await tester.pump();
+      tester.testTextInput.updateEditingValue(
+        TextEditingValue(
+          text: plain,
+          selection: TextSelection.collapsed(offset: plain.length),
+        ),
+      );
+      final pastedText = '$plain ';
+      for (final extent in [plain.length, plain.length - 1]) {
+        tester.testTextInput.updateEditingValue(
+          TextEditingValue(
+            text: pastedText,
+            selection: TextSelection(
+              baseOffset: pastedText.length,
+              extentOffset: extent,
+            ),
+          ),
+        );
+      }
+      await tester.pump();
+      final pasteController = tester
+          .widget<TextField>(find.byType(TextField))
+          .controller!;
+      expect(pasteController.text, pastedText);
+      expect(
+        pasteController.selection,
+        TextSelection(baseOffset: pastedText.length, extentOffset: 0),
       );
     });
 
@@ -4885,6 +5225,239 @@ void main() {
           find.byKey(const ValueKey('composer-agent-mention-chip')),
           findsOneWidget,
         );
+
+        // Backspace right after the chip removes the whole `@label`.
+        textField.controller!.value = const TextEditingValue(
+          text: '@Helper Bot typing',
+          selection: TextSelection.collapsed(offset: 11),
+        );
+        await tester.pump();
+        tester.testTextInput.updateEditingValue(
+          const TextEditingValue(
+            text: '@Helper Bo typing',
+            selection: TextSelection.collapsed(offset: 10),
+          ),
+        );
+        await tester.pump();
+        expect(textField.controller!.text, ' typing');
+        expect(textField.controller!.selection.baseOffset, 0);
+        expect(
+          find.byKey(const ValueKey('composer-agent-mention-chip')),
+          findsNothing,
+        );
+
+        // A word left from after the chip steps over it, and a word delete
+        // that runs past it removes the whole mention.
+        await tester.enterText(find.byType(TextField), '@hel');
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Helper Bot'));
+        await tester.pumpAndSettle();
+        textField.controller!.value = const TextEditingValue(
+          text: '@Helper Bot typing',
+          selection: TextSelection.collapsed(offset: 11),
+        );
+        await tester.pump();
+        textField.controller!.selection = const TextSelection.collapsed(
+          offset: 8,
+        );
+        await tester.pump();
+        expect(textField.controller!.selection.baseOffset, 0);
+        textField.controller!.selection = const TextSelection.collapsed(
+          offset: 12,
+        );
+        await tester.pump();
+        tester.testTextInput.updateEditingValue(
+          const TextEditingValue(
+            text: '@Helper typing',
+            selection: TextSelection.collapsed(offset: 8),
+          ),
+        );
+        await tester.pump();
+        expect(textField.controller!.text, 'typing');
+        expect(textField.controller!.selection.baseOffset, 0);
+
+        // Gboard composes the word before the caret, here the chip's hidden
+        // label. The chip still draws, and backspace still removes it whole.
+        await tester.enterText(find.byType(TextField), '@hel');
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Helper Bot'));
+        await tester.pumpAndSettle();
+        textField.controller!.value = const TextEditingValue(
+          text: '@Helper Bot ',
+          selection: TextSelection.collapsed(offset: 12),
+        );
+        await tester.pump();
+        tester.testTextInput.updateEditingValue(
+          const TextEditingValue(
+            text: '@Helper Bot',
+            selection: TextSelection.collapsed(offset: 11),
+            composing: TextRange(start: 8, end: 11),
+          ),
+        );
+        await tester.pump();
+        expect(
+          find.byKey(const ValueKey('composer-agent-mention-chip')),
+          findsOneWidget,
+        );
+        tester.testTextInput.updateEditingValue(
+          const TextEditingValue(
+            text: '@Helper Bo',
+            selection: TextSelection.collapsed(offset: 10),
+            composing: TextRange(start: 8, end: 10),
+          ),
+        );
+        await tester.pump();
+        expect(textField.controller!.text, '');
+        expect(textField.controller!.value.composing, TextRange.empty);
+
+        // Two backspaces can arrive before a frame redraws the composer.
+        // The second still removes the whole chip.
+        await tester.enterText(find.byType(TextField), '@hel');
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Helper Bot'));
+        await tester.pumpAndSettle();
+        textField.controller!.value = const TextEditingValue(
+          text: '@Helper Bot ',
+          selection: TextSelection.collapsed(offset: 12),
+        );
+        await tester.pump();
+        tester.testTextInput.updateEditingValue(
+          const TextEditingValue(
+            text: '@Helper Bot',
+            selection: TextSelection.collapsed(offset: 11),
+          ),
+        );
+        tester.testTextInput.updateEditingValue(
+          const TextEditingValue(
+            text: '@Helper Bo',
+            selection: TextSelection.collapsed(offset: 10),
+          ),
+        );
+        await tester.pump();
+        expect(textField.controller!.text, '');
+
+        // A selection covering part of a chip grows to cover all of it, and
+        // edits over a selection replace exactly the selection, so typed
+        // text is kept and Cut removes only what it copies.
+        Future<void> typeOver(TextSelection selected, String typed) async {
+          await tester.enterText(find.byType(TextField), '@hel');
+          await tester.pumpAndSettle();
+          await tester.tap(find.text('Helper Bot'));
+          await tester.pumpAndSettle();
+          textField.controller!.value = const TextEditingValue(
+            text: '@Helper Bot typing',
+            selection: TextSelection.collapsed(offset: 18),
+          );
+          await tester.pump();
+          expect(
+            find.byKey(const ValueKey('composer-agent-mention-chip')),
+            findsOneWidget,
+          );
+          textField.controller!.selection = selected;
+          await tester.pump();
+          final selection = textField.controller!.selection;
+          tester.testTextInput.updateEditingValue(
+            TextEditingValue(
+              text: '@Helper Bot typing'.replaceRange(
+                selection.start,
+                selection.end,
+                typed,
+              ),
+              selection: TextSelection.collapsed(
+                offset: selection.start + typed.length,
+              ),
+            ),
+          );
+          await tester.pump();
+        }
+
+        await typeOver(
+          const TextSelection(baseOffset: 0, extentOffset: 18),
+          '@',
+        );
+        expect(textField.controller!.text, '@');
+        await typeOver(
+          const TextSelection(baseOffset: 5, extentOffset: 13),
+          'x',
+        );
+        expect(textField.controller!.text, 'xyping');
+
+        // Undo after typing the last letter of a mention restores the
+        // partial mention instead of removing the whole chip.
+        await tester.enterText(find.byType(TextField), '@hel');
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Helper Bot'));
+        await tester.pumpAndSettle();
+        textField.controller!.value = const TextEditingValue(
+          text: '@Helper Bot @Helper Bo and some more words',
+          selection: TextSelection.collapsed(offset: 22),
+        );
+        await tester.pump(const Duration(seconds: 1));
+        tester.testTextInput.updateEditingValue(
+          const TextEditingValue(
+            text: '@Helper Bot @Helper Bot and some more words',
+            selection: TextSelection.collapsed(offset: 23),
+          ),
+        );
+        await tester.pump(const Duration(seconds: 1));
+        expect(
+          find.byKey(const ValueKey('composer-agent-mention-chip')),
+          findsNWidgets(2),
+        );
+        // Moving the selection around a lot first changes nothing.
+        for (var base = 24; base < 43; base++) {
+          for (var extent = base + 1; extent <= 43; extent++) {
+            textField.controller!.selection = TextSelection(
+              baseOffset: base,
+              extentOffset: extent,
+            );
+          }
+        }
+        textField.controller!.selection = const TextSelection.collapsed(
+          offset: 23,
+        );
+        await tester.pump();
+        // So do many later edits, undone back to the completed mention.
+        const edits = 101;
+        for (var i = 1; i <= edits; i++) {
+          tester.testTextInput.updateEditingValue(
+            TextEditingValue(
+              text: '@Helper Bot @Helper Bot and some more words${'.' * i}',
+              selection: TextSelection.collapsed(offset: 43 + i),
+            ),
+          );
+          await tester.pump(const Duration(seconds: 1));
+        }
+        for (var i = 0; i < edits; i++) {
+          await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+          await tester.sendKeyEvent(LogicalKeyboardKey.keyZ);
+          await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+          await tester.pump();
+        }
+        expect(
+          textField.controller!.text,
+          '@Helper Bot @Helper Bot and some more words',
+        );
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+        await tester.sendKeyEvent(LogicalKeyboardKey.keyZ);
+        await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+        await tester.pump();
+        expect(
+          textField.controller!.text,
+          '@Helper Bot @Helper Bo and some more words',
+        );
+
+        // Text that is not drawn as a chip still deletes one character.
+        await tester.enterText(find.byType(TextField), '`@Helper Bot`');
+        await tester.pump();
+        tester.testTextInput.updateEditingValue(
+          const TextEditingValue(
+            text: '`@Helper Bo`',
+            selection: TextSelection.collapsed(offset: 11),
+          ),
+        );
+        await tester.pump();
+        expect(textField.controller!.text, '`@Helper Bo`');
         await tester.pump(const Duration(milliseconds: 250));
         semantics.dispose();
       },

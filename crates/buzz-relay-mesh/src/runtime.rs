@@ -9,7 +9,7 @@
 //!   runtime id is present in the (attested) membership table; unknown ids get
 //!   one registry rescan before rejection. Membership is a hint — admission
 //!   here gates *dialability*, never session ownership.
-//! - **Reconcile loop**: periodically rescans the Redis ready registry and
+//! - **Reconcile loop**: periodically reads the Redis ready-registry index and
 //!   dials every known, non-draining peer we are not yet connected to. This is
 //!   what makes the mesh *warm*: failover is "next frame goes elsewhere," not
 //!   "wait for a handshake."
@@ -41,10 +41,22 @@ use crate::{InboundHandler, MeshDatagram, MeshError, MeshStream, RelayPeerTransp
 
 /// How often the reconcile loop rescans the registry and dials missing peers.
 pub const DEFAULT_RECONCILE_INTERVAL: Duration = Duration::from_secs(5);
+/// How often a reconcile pass also runs the full-keyspace legacy SCAN, so peers
+/// running a relay that predates the ready-record index stay in the table
+/// during a mixed-version rollout (membership peer records expire after five
+/// minutes). Measured in elapsed time, not passes: a pass waits on its dials,
+/// so a pass count would stretch exactly while peers are unreachable. Delete
+/// with [`ReadyRegistry::legacy_scan_ready`].
+pub const LEGACY_SCAN_INTERVAL: Duration = Duration::from_secs(60);
 /// How often each side sends a gossip digest on every control stream.
 pub const DEFAULT_GOSSIP_INTERVAL: Duration = Duration::from_secs(2);
 /// Bound on queued control-stream frames per peer before backpressure.
 const CONTROL_QUEUE_DEPTH: usize = 64;
+/// Bound on one outbound connect attempt. Without it a dial to a dead
+/// address (a stale ready record left by a crashed pod) waits out QUIC's
+/// 30s idle timeout. Peers are in-cluster, so a live handshake takes
+/// milliseconds.
+pub const DIAL_TIMEOUT: Duration = Duration::from_secs(2);
 
 struct PeerEntry {
     peer: MeshPeer,
@@ -149,7 +161,7 @@ impl MeshRuntime {
     /// Force one reconcile pass right now (bootstrap fast-path: dial the seed
     /// records without waiting for the first interval tick).
     pub async fn reconcile_now(&self) {
-        reconcile_once(&self.inner).await;
+        reconcile_once(&self.inner, RegistryRead::LegacyScan).await;
     }
 
     /// Stop all loops and drop all peer connections.
@@ -316,29 +328,88 @@ async fn accept_loop(inner: Arc<Inner>) {
 }
 
 /// Admission check for inbound connections: the runtime id must appear in the
-/// attested membership table. Unknown ids get one registry rescan (covers the
-/// bootstrap race where a fresh pod dials us before our next reconcile tick).
+/// attested membership table. Unknown ids get one index read, then one legacy
+/// scan (covers the bootstrap race where a fresh pod dials us before our next
+/// reconcile tick, including a pod running a relay that predates the index).
 async fn is_known_peer(inner: &Arc<Inner>, runtime_id: RuntimeId) -> bool {
     if inner.membership.has_peer(runtime_id) {
         return true;
     }
-    if let Some(registry) = &inner.registry {
-        match registry.scan_ready().await {
-            Ok(records) => inner.membership.apply_ready_records(records),
-            Err(err) => tracing::warn!(%err, "mesh: registry rescan on inbound failed"),
+    for read in [RegistryRead::Index, RegistryRead::LegacyScan] {
+        refresh_from_registry(inner, read).await;
+        if inner.membership.has_peer(runtime_id) {
+            return true;
         }
     }
-    inner.membership.has_peer(runtime_id)
+    false
+}
+
+/// How a reconcile pass reads the ready registry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RegistryRead {
+    /// O(peers): the ready-record index.
+    Index,
+    /// O(total Redis keys): also finds peers that predate the index.
+    LegacyScan,
+}
+
+impl RegistryRead {
+    /// Steady-state choice for a pass starting `since_last_scan` after the
+    /// previous legacy scan: the legacy scan once [`LEGACY_SCAN_INTERVAL`] has
+    /// elapsed, the index otherwise.
+    fn due(since_last_scan: Duration) -> Self {
+        if since_last_scan >= LEGACY_SCAN_INTERVAL {
+            Self::LegacyScan
+        } else {
+            Self::Index
+        }
+    }
+}
+
+async fn refresh_from_registry(inner: &Arc<Inner>, read: RegistryRead) {
+    let Some(registry) = &inner.registry else {
+        return;
+    };
+    let result = match read {
+        RegistryRead::Index => registry.ready_records().await,
+        RegistryRead::LegacyScan => registry.legacy_scan_ready().await,
+    };
+    match result {
+        Ok(records) => inner.membership.apply_ready_records(records),
+        Err(err) => tracing::warn!(%err, ?read, "mesh: registry read failed"),
+    }
+}
+
+/// When the reconcile loop last ran the legacy scan.
+struct LegacyScanClock {
+    last_scan: Instant,
+}
+
+impl LegacyScanClock {
+    /// `reconcile_now` scans at boot, so the clock starts with the loop.
+    fn starting_at(now: Instant) -> Self {
+        Self { last_scan: now }
+    }
+
+    /// The read for a pass starting at `now`; a due scan restarts the clock.
+    fn next_read(&mut self, now: Instant) -> RegistryRead {
+        let read = RegistryRead::due(now.saturating_duration_since(self.last_scan));
+        if read == RegistryRead::LegacyScan {
+            self.last_scan = now;
+        }
+        read
+    }
 }
 
 async fn reconcile_loop(inner: Arc<Inner>) {
+    let mut clock = LegacyScanClock::starting_at(Instant::now());
     loop {
-        reconcile_once(&inner).await;
+        reconcile_once(&inner, clock.next_read(Instant::now())).await;
         tokio::time::sleep(inner.reconcile_interval).await;
     }
 }
 
-async fn reconcile_once(inner: &Arc<Inner>) {
+async fn reconcile_once(inner: &Arc<Inner>, read: RegistryRead) {
     let started = Instant::now();
     {
         let peers = inner.peers.read().expect("peer lock poisoned");
@@ -351,19 +422,19 @@ async fn reconcile_once(inner: &Arc<Inner>) {
         tracing::info!(pruned, "mesh: pruned expired peer records");
     }
 
-    if let Some(registry) = &inner.registry {
-        match registry.scan_ready().await {
-            Ok(records) => inner.membership.apply_ready_records(records),
-            Err(err) => tracing::warn!(%err, "mesh: registry scan failed"),
-        }
-    }
+    refresh_from_registry(inner, read).await;
     inner.membership.publish_table_metrics();
 
     let candidates = dial_candidates(inner);
     metrics::gauge!(telemetry::RECONCILE_CANDIDATES).set(candidates.len() as f64);
-    for runtime_id in candidates {
-        dial_peer(inner, runtime_id).await;
-    }
+    // Dial concurrently so one unreachable peer cannot delay the rest. The
+    // candidate set is bounded by the membership table.
+    futures_util::future::join_all(
+        candidates
+            .into_iter()
+            .map(|runtime_id| dial_peer(inner, runtime_id)),
+    )
+    .await;
     metrics::histogram!(telemetry::RECONCILE_PASS_SECONDS).record(started.elapsed().as_secs_f64());
 }
 
@@ -384,8 +455,8 @@ fn dial_candidates(inner: &Inner) -> Vec<RuntimeId> {
         .collect()
 }
 
-/// Dial `runtime_id`'s addresses in turn. Each dial can take a minute against
-/// a dead runtime, so before every attempt this re-reads the record and stops
+/// Dial `runtime_id`'s addresses in turn. Each attempt is capped at
+/// `DIAL_TIMEOUT`, and before every attempt this re-reads the record and stops
 /// once it has expired or started draining, or a connection has landed
 /// (inbound accept, or a tie-break).
 async fn dial_peer(inner: &Arc<Inner>, runtime_id: RuntimeId) {
@@ -413,7 +484,13 @@ async fn dial_peer(inner: &Arc<Inner>, runtime_id: RuntimeId) {
             }
         };
         let started = Instant::now();
-        let result = inner.endpoint.connect(endpoint_addr).await;
+        let result =
+            match tokio::time::timeout(DIAL_TIMEOUT, inner.endpoint.connect(endpoint_addr)).await {
+                Ok(result) => result,
+                Err(_) => Err(MeshError::Transport(format!(
+                    "connect timed out after {DIAL_TIMEOUT:?}"
+                ))),
+            };
         telemetry::record_dial(result.is_ok(), started.elapsed());
         match result {
             Ok(peer) => {
@@ -663,6 +740,45 @@ mod tests {
 
     fn loopback_any() -> SocketAddr {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)
+    }
+
+    #[test]
+    fn steady_state_reads_the_index_and_scans_on_elapsed_time() {
+        let cases = [
+            (Duration::ZERO, RegistryRead::Index),
+            (DEFAULT_RECONCILE_INTERVAL, RegistryRead::Index),
+            (
+                LEGACY_SCAN_INTERVAL - Duration::from_millis(1),
+                RegistryRead::Index,
+            ),
+            (LEGACY_SCAN_INTERVAL, RegistryRead::LegacyScan),
+            // One pass that sat on slow dials past the interval: the very next
+            // pass scans, however few passes have run.
+            (2 * LEGACY_SCAN_INTERVAL, RegistryRead::LegacyScan),
+        ];
+        for (since_last_scan, want) in cases {
+            assert_eq!(
+                RegistryRead::due(since_last_scan),
+                want,
+                "{since_last_scan:?} since the last scan"
+            );
+        }
+        // A legacy scan per interval keeps pre-index peers fresher than the
+        // membership peer-record TTL.
+        assert!(LEGACY_SCAN_INTERVAL < crate::membership::DEFAULT_PEER_RECORD_TTL);
+    }
+
+    #[test]
+    fn a_legacy_scan_restarts_the_clock() {
+        let start = Instant::now();
+        let mut clock = LegacyScanClock::starting_at(start);
+        let at = |secs| start + Duration::from_secs(secs);
+        assert_eq!(clock.next_read(at(5)), RegistryRead::Index);
+        assert_eq!(clock.next_read(at(60)), RegistryRead::LegacyScan);
+        // The next passes read the index until another interval elapses.
+        assert_eq!(clock.next_read(at(65)), RegistryRead::Index);
+        assert_eq!(clock.next_read(at(119)), RegistryRead::Index);
+        assert_eq!(clock.next_read(at(120)), RegistryRead::LegacyScan);
     }
 
     const RECONCILE_INTERVAL: Duration = Duration::from_millis(200);
@@ -1069,6 +1185,57 @@ mod tests {
         assert!(saw_candidates && saw_max_age);
         a.shutdown();
         b_accept.abort();
+    }
+
+    /// Regression: a stale ready record (a crashed pod's address) held the
+    /// boot-time reconcile pass for QUIC's 30s idle timeout, once per dead
+    /// peer. Each dial is bounded by `DIAL_TIMEOUT` and the pass dials
+    /// concurrently, so three dead peers cost one timeout and the live peer
+    /// still connects in the same pass.
+    #[tokio::test]
+    async fn reconcile_pass_bounds_dials_to_unresponsive_peers() {
+        let (a, _) = runtime_with(30, |membership| membership, QUIET).await;
+        let (live, live_addrs, live_accept) = accepting_endpoint(31, false).await;
+        a.membership()
+            .apply_gossip_record(GossipRecord::new(live.runtime_id(), live_addrs, 1));
+
+        // Bound UDP sockets that never read: handshakes vanish without an
+        // ICMP refusal, exactly like a vacated pod IP.
+        let mut black_holes = Vec::new();
+        let mut dead_ids = Vec::new();
+        for key_byte in 32..35u8 {
+            let socket = std::net::UdpSocket::bind(loopback_any()).unwrap();
+            let id = crate::endpoint::runtime_id_from_public_key(
+                SecretKey::from_bytes(&[key_byte; 32]).public(),
+            );
+            a.membership().apply_gossip_record(GossipRecord::new(
+                id,
+                vec![socket.local_addr().unwrap().to_string()],
+                1,
+            ));
+            black_holes.push(socket);
+            dead_ids.push(id);
+        }
+
+        let started = Instant::now();
+        timeout(DIAL_TIMEOUT * 2, a.reconcile_now())
+            .await
+            .expect("dead peers must cost one dial timeout, not one each");
+        assert!(
+            started.elapsed() >= DIAL_TIMEOUT,
+            "dead dials ran to the timeout"
+        );
+
+        assert_eq!(
+            state_of(&a, live.runtime_id()),
+            Some(ConnectionState::Connected)
+        );
+        for id in dead_ids {
+            assert_eq!(state_of(&a, id), Some(ConnectionState::Disconnected));
+        }
+        a.shutdown();
+        live_accept.abort();
+        drop(black_holes);
     }
 
     #[tokio::test]

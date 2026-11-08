@@ -85,8 +85,10 @@ class HostedConnectSheet extends HookConsumerWidget {
             ? 'Securing your account and finding communities…'
             : 'Adding ${flow.addingCommunityName}…',
       HostedFlowStage.setupIdentity =>
-        flow.canCreateIdentity
-            ? 'Your Buzz identity is how communities recognize you. Create a new one, or import your existing identity if you already use Buzz.'
+        flow.requiredIdentityPubkey == null
+            ? flow.canCreateIdentity
+                  ? 'Create a new Buzz identity, or import the identity you already use.'
+                  : 'Bring your existing Buzz identity from your other device.'
             : 'Your identity hasn’t been backed up yet. Bring it from your other device to keep using the same Buzz account.',
       HostedFlowStage.chooseCommunities => 'Select a community',
       HostedFlowStage.communityConflict =>
@@ -97,7 +99,7 @@ class HostedConnectSheet extends HookConsumerWidget {
             ? 'Choose a backed-up identity to connect to Builderlab. Your other backups and saved community keys will be kept. This app cannot change the selected Builderlab identity later.'
             : flow.identityChoices.any((choice) => choice.fromCloud)
             ? 'Use your Builderlab identity on this device? It differs from your saved community identities. Those keys and your cloud backups will be kept. This app cannot change the selected Builderlab identity later.'
-            : 'Choose the identity to connect to Builderlab. It will be bound to your account and backed up. Existing keys will be kept. This app cannot change the selected Builderlab identity later.',
+            : 'Choose the identity to connect to Builderlab${flow.canCreateIdentity ? ', or create a new one' : ''}. It will be bound to your account and backed up. Existing keys will be kept. This app cannot change the selected Builderlab identity later.',
       HostedFlowStage.profile =>
         'What should people in this community call you? You can add a photo in Settings.',
       HostedFlowStage.acceptPolicy =>
@@ -130,8 +132,10 @@ class HostedConnectSheet extends HookConsumerWidget {
     final children = <Widget>[
       if (!fullScreen && stage == HostedFlowStage.setupIdentity) ...[
         Text(
-          flow.canCreateIdentity
-              ? 'Create or import a Buzz identity'
+          flow.requiredIdentityPubkey == null
+              ? flow.canCreateIdentity
+                    ? 'Create or import a Buzz identity'
+                    : 'Import your Buzz identity'
               : 'Bring your identity with you',
           style: context.textTheme.titleLarge?.copyWith(
             fontWeight: FontWeight.w600,
@@ -157,38 +161,35 @@ class HostedConnectSheet extends HookConsumerWidget {
             ),
           ),
         ),
+      if (stage == HostedFlowStage.chooseIdentity && flow.canCreateIdentity)
+        FilledButton(
+          style: actionStyle,
+          onPressed: flow.createIdentity,
+          child: const Text('Create a new identity'),
+        ),
       if (stage == HostedFlowStage.setupIdentity) ...[
         if (flow.canCreateIdentity) ...[
           FilledButton(
-            style: actionStyle.copyWith(
-              backgroundColor: WidgetStatePropertyAll(context.colors.primary),
-              foregroundColor: WidgetStatePropertyAll(context.colors.onPrimary),
-            ),
+            style: actionStyle,
             onPressed: flow.createIdentity,
             child: const Text('Create my Buzz identity'),
           ),
           const SizedBox(height: Grid.xxs),
-          TextButton(
-            style: actionStyle,
-            onPressed: importIdentity,
-            child: const Text('Import existing identity'),
-          ),
-        ] else ...[
-          FilledButton(
-            style: actionStyle.copyWith(
-              backgroundColor: WidgetStatePropertyAll(context.colors.primary),
-              foregroundColor: WidgetStatePropertyAll(context.colors.onPrimary),
-            ),
-            onPressed: importIdentity,
-            child: const Text('Import existing identity'),
-          ),
-          const SizedBox(height: Grid.twelve),
-          Text(
-            'We’ll securely back it up so your next sign-in is easier.',
-            textAlign: TextAlign.center,
-            style: context.textTheme.bodySmall,
-          ),
         ],
+        FilledButton(
+          style: actionStyle.copyWith(
+            backgroundColor: WidgetStatePropertyAll(context.colors.primary),
+            foregroundColor: WidgetStatePropertyAll(context.colors.onPrimary),
+          ),
+          onPressed: importIdentity,
+          child: const Text('Import existing identity'),
+        ),
+        const SizedBox(height: Grid.twelve),
+        Text(
+          'We’ll securely back it up so your next sign-in is easier.',
+          textAlign: TextAlign.center,
+          style: context.textTheme.bodySmall,
+        ),
         if (flow.requiredIdentityPubkey != null) ...[
           const SizedBox(height: Grid.xxs),
           TextButton(
@@ -222,6 +223,11 @@ class HostedConnectSheet extends HookConsumerWidget {
         FilledButton(
           onPressed: flow.skipConflictingCommunity,
           child: const Text('Keep saved identity and skip'),
+        ),
+      if (flow.canChooseDifferentIdentity)
+        FilledButton(
+          onPressed: flow.chooseDifferentIdentity,
+          child: const Text('Choose a different identity'),
         ),
       if (flow.canSkipFailedCommunity)
         TextButton(
@@ -271,15 +277,20 @@ class HostedConnectSheet extends HookConsumerWidget {
     }
     final title = switch (stage) {
       HostedFlowStage.setupIdentity =>
-        flow.canCreateIdentity
-            ? 'Create or import a Buzz identity'
+        flow.requiredIdentityPubkey == null
+            ? flow.canCreateIdentity
+                  ? 'Create or import a Buzz identity'
+                  : 'Import your Buzz identity'
             : 'Bring your identity with you',
       HostedFlowStage.chooseIdentity => 'Choose your identity',
       HostedFlowStage.working =>
         flow.addingCommunityName == null
             ? 'Getting ready…'
             : 'Joining your community',
-      HostedFlowStage.blocked => 'Let’s try that again',
+      HostedFlowStage.blocked =>
+        flow.failedCommunityName == null
+            ? 'Let’s try that again'
+            : 'Couldn’t open ${flow.failedCommunityName}',
       HostedFlowStage.communityConflict => 'Keep your saved identity',
       HostedFlowStage.browserReturned => 'Continue in your browser',
       _ => 'Connect to Builderlab',

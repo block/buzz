@@ -16,6 +16,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/features/channels/channel.dart';
+import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/me/me_page.dart';
 import 'package:buzz/shared/me/me_groups.dart';
@@ -115,6 +116,66 @@ void main() {
     expect(find.text('Someone else chat'), findsNothing);
     expect(find.text('Inaccessible labeled chat'), findsNothing);
     expect(find.text('A place to work with your agents'), findsNothing);
+  });
+
+  testWidgets('long-pressing a chat opens its details as a sheet', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          defaultAgentProvider.overrideWith((ref) => Stream.value(null)),
+          myPubkeyProvider.overrideWithValue('owner'),
+          currentPubkeyProvider.overrideWith((ref) => 'owner'),
+          channelsProvider.overrideWith(LabeledChannels.new),
+          channelMembersProvider('loose').overrideWith(
+            (ref) async => [
+              ChannelMember(
+                pubkey: 'owner',
+                role: 'owner',
+                joinedAt: DateTime(2026),
+              ),
+            ],
+          ),
+          agentOwnersProvider.overrideWithValue(
+            const AsyncValue.data(<String, String>{}),
+          ),
+          meGroupsProvider.overrideWith(
+            (ref) => Stream.value(const MeGroups(groups: [], assignments: {})),
+          ),
+        ],
+        child: MaterialApp(theme: AppTheme.light(), home: const MePage()),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.longPress(find.text('Unfiled labeled chat'));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(BottomSheet), findsOneWidget);
+    expect(
+      find.descendant(
+        of: find.byType(BottomSheet),
+        matching: find.byKey(const ValueKey('channel-details-page-list')),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: find.byType(BottomSheet),
+        matching: find.text('Unfiled labeled chat'),
+      ),
+      findsOneWidget,
+    );
+
+    await tester.drag(
+      find.byKey(const ValueKey('channel-details-page-list')),
+      const Offset(0, -600),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Leave channel'), findsOneWidget);
+    // Solo chats move between Solo workspaces, not channel sections.
+    expect(find.text('Move to section…'), findsNothing);
   });
 
   testWidgets('empty workspace stays centered behind the New chat keyboard', (
@@ -365,99 +426,111 @@ void main() {
     },
   );
 
-  for (final resume in [true]) {
-    testWidgets('iOS new chat recovers a durable creation: resume=$resume', (
-      tester,
-    ) async {
-      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
-      addTearDown(() => debugDefaultTargetPlatformOverride = null);
-      const channel = MethodChannel('buzz/profile_text_editor');
-      final calls = <MethodCall>[];
-      var directoryLoads = 0;
-      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(channel, (
-        call,
-      ) async {
-        calls.add(call);
-        return null;
-      });
-      addTearDown(
-        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+  for (final resume in [true, false]) {
+    testWidgets(
+      'new chat resumes a named creation in the draft: resume=$resume',
+      (tester) async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+        addTearDown(() => debugDefaultTargetPlatformOverride = null);
+        const channel = MethodChannel('buzz/profile_text_editor');
+        final calls = <MethodCall>[];
+        var directoryLoads = 0;
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
           channel,
-          null,
-        ),
-      );
-      SharedPreferences.setMockInitialValues({});
-      final prefs = await SharedPreferences.getInstance();
-      final sync = MeSync(
-        RelaySessionNotifier(),
-        RelayConfig(
-          baseUrl: 'https://relay.test',
-          nsec: nostr.Nip19.encode(
-            prefix: nostr.Nip19Prefix.nsec,
-            data:
-                '0000000000000000000000000000000000000000000000000000000000000001',
+          (call) async {
+            calls.add(call);
+            return null;
+          },
+        );
+        addTearDown(
+          () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            channel,
+            null,
           ),
-        ),
-        prefs: prefs,
-      );
-      await const MeChatCreation(
-        'same-id',
-        'Unfinished chat',
-        'agent',
-        project: 'mobile',
-      ).save(sync);
-      final restarted = MeSync(
-        RelaySessionNotifier(),
-        sync.config,
-        prefs: prefs,
-      );
-      await tester.pumpWidget(
-        ProviderScope(
-          overrides: [
-            defaultAgentProvider.overrideWith((ref) => Stream.value(null)),
-            meGroupsProvider.overrideWith(
-              (ref) => Stream.value(const MeGroups()),
+        );
+        SharedPreferences.setMockInitialValues({});
+        final prefs = await SharedPreferences.getInstance();
+        final sync = MeSync(
+          RelaySessionNotifier(),
+          RelayConfig(
+            baseUrl: 'https://relay.test',
+            nsec: nostr.Nip19.encode(
+              prefix: nostr.Nip19Prefix.nsec,
+              data:
+                  '0000000000000000000000000000000000000000000000000000000000000001',
             ),
-            meSyncProvider.overrideWithValue(restarted),
-            channelsProvider.overrideWith(FakeChannels.new),
-            meAssistantsProvider.overrideWith((ref) async {
-              directoryLoads++;
-              return [];
-            }),
-          ],
-          child: MaterialApp(theme: AppTheme.light(), home: const MePage()),
-        ),
-      );
-      await tester.pumpAndSettle();
+          ),
+          prefs: prefs,
+        );
+        await const MeChatCreation(
+          'same-id',
+          'Unfinished chat',
+          'agent',
+          project: 'mobile',
+        ).save(sync);
+        final restarted = MeSync(
+          RelaySessionNotifier(),
+          sync.config,
+          prefs: prefs,
+        );
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              savedPrefsProvider.overrideWithValue(prefs),
+              agentDirectoryProvider.overrideWith((ref) async => []),
+              agentOwnersProvider.overrideWith((ref) async => {}),
+              customEmojiListProvider.overrideWithValue([]),
+              defaultAgentProvider.overrideWith((ref) => Stream.value(null)),
+              meGroupsProvider.overrideWith(
+                (ref) => Stream.value(const MeGroups()),
+              ),
+              meSyncProvider.overrideWithValue(restarted),
+              channelsProvider.overrideWith(FakeChannels.new),
+              meAssistantsProvider.overrideWith((ref) async {
+                directoryLoads++;
+                return [];
+              }),
+            ],
+            child: MaterialApp(theme: AppTheme.light(), home: const MePage()),
+          ),
+        );
+        await tester.pumpAndSettle();
 
-      final bar = tester.widget<FrostedAppBar>(find.byType(FrostedAppBar));
-      bar.nativeActions!
-          .firstWhere((action) => action.label == 'New chat')
-          .onPressed!();
-      await tester.pumpAndSettle();
-      await tester.tap(find.text(resume ? 'Resume' : 'Discard setup'));
-      await tester.pumpAndSettle();
-      expect(directoryLoads, 1);
-      expect(calls, hasLength(1));
-      expect(calls.single.method, 'presentChat');
-      final args = calls.single.arguments as Map;
-      expect(args['title'], 'New chat');
-      expect(args['initialValue'], resume ? 'Unfinished chat' : '');
-      expect(args['selectedAssistant'], resume ? 'agent' : isNull);
-      expect(args['selectedProject'], resume ? 'mobile' : isNull);
-      expect(args['fieldsLocked'], resume);
-      expect(args['error'], resume ? contains('Resume') : isNull);
-      expect(
-        MeChatCreation.pending(restarted)?.id,
-        resume ? 'same-id' : isNull,
-      );
-      expect(args['placeholder'], resume ? 'Chat name' : 'Message');
-      expect(args['assistants'], isEmpty);
-      expect(args['containerCornerRadius'], Radii.container);
-      expect(find.byType(BottomSheet), findsNothing);
-      await tester.pumpWidget(const SizedBox.shrink());
-      debugDefaultTargetPlatformOverride = null;
-    });
+        final bar = tester.widget<FrostedAppBar>(find.byType(FrostedAppBar));
+        bar.nativeActions!
+            .firstWhere((action) => action.label == 'New chat')
+            .onPressed!();
+        await tester.pumpAndSettle();
+        await tester.tap(find.text(resume ? 'Resume' : 'Discard setup'));
+        await tester.pumpAndSettle();
+        expect(directoryLoads, 1);
+        expect(calls, isEmpty, reason: 'No native New chat sheet remains');
+        expect(find.byType(BottomSheet), findsNothing);
+        // A resumed creation finishes with its saved name and agent; a
+        // discarded one leaves a fresh draft.
+        expect(find.text('Retry'), resume ? findsOneWidget : findsNothing);
+        expect(find.byType(ComposeBar), resume ? findsNothing : findsOneWidget);
+        expect(
+          find.text('Unfinished chat'),
+          resume ? findsOneWidget : findsNothing,
+        );
+        expect(
+          MeChatCreation.pending(restarted)?.id,
+          resume ? 'same-id' : isNull,
+        );
+        final agent = tester
+            .widget<FrostedAppBar>(find.byType(FrostedAppBar).last)
+            .nativeActions!
+            .last;
+        expect(
+          agent.onPressed,
+          resume ? isNull : isNotNull,
+          reason: 'A resumed creation keeps its saved agent',
+        );
+        await tester.pumpWidget(const SizedBox.shrink());
+        debugDefaultTargetPlatformOverride = null;
+      },
+    );
   }
 
   testWidgets('unavailable preferences show retry instead of empty state', (
