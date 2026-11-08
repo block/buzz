@@ -7,14 +7,23 @@ import 'me_assistant_list.dart';
 
 /// Opens immediately with cached assistants; first-load progress stays in-sheet.
 class MeAssistantPickerSheet extends ConsumerWidget {
-  const MeAssistantPickerSheet({super.key, required this.selected});
+  const MeAssistantPickerSheet({
+    super.key,
+    required this.selected,
+    this.onSelected,
+  });
   final String? selected;
+  final ValueChanged<String>? onSelected;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final assistants = ref.watch(meAssistantsProvider);
     if (assistants.value case final choices?) {
-      return MeAssistantList(choices: choices, selected: selected);
+      return MeAssistantList(
+        choices: choices,
+        selected: selected,
+        onSelected: onSelected,
+      );
     }
     return SizedBox(
       height: 240,
