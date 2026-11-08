@@ -375,7 +375,7 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     container.addSubview(navigation.view)
     navigation.didMove(toParent: parent)
     parent?.addChild(edgeBackdrop)
-    container.addSubview(edgeBackdrop.view)
+    container.insertSubview(edgeBackdrop.view, belowSubview: navigation.view)
     edgeBackdrop.didMove(toParent: parent)
     container.onLayout = { [weak self] in self?.layout() }
     channel.setMethodCallHandler { [weak self] call, result in
@@ -405,7 +405,7 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     guard !measuring else { return }
     let viewportHeight = container.window?.bounds.height ?? container.bounds.height
     navigation.view.frame = CGRect(x: 0, y: 0, width: container.bounds.width, height: viewportHeight)
-    if hardEdge && backdropOnly && usesSystemScrollEdge {
+    if hardEdge && usesSystemScrollEdge {
       edgeBackdrop.layout(in: navigation.view.frame, headerHeight: container.bounds.height,
                           automaticTop: container.safeAreaInsets.top)
     }
@@ -492,9 +492,9 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     if #available(iOS 26.0, *) {
       if #available(iOS 27.0, *) { usesSystemScrollEdge = true }
       content.scrollView.topEdgeEffect.style = hardEdge ? .hard : .soft
-      content.scrollView.topEdgeEffect.isHidden = !usesSystemScrollEdge
+      content.scrollView.topEdgeEffect.isHidden = !usesSystemScrollEdge || hardEdge
     }
-    edgeBackdrop.view.isHidden = !(hardEdge && backdropOnly && usesSystemScrollEdge)
+    edgeBackdrop.view.isHidden = !(hardEdge && usesSystemScrollEdge)
     edgeBackdrop.overrideUserInterfaceStyle = navigation.overrideUserInterfaceStyle
     navigation.view.alpha = hardEdge && backdropOnly && usesSystemScrollEdge ? 0 : 1
     // Older embedded views retain material because their native edge cannot
@@ -502,12 +502,12 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     // edge while the large-title inset is collapsing.
     // Keep the graduated material throughout that transition so partial
     // scrolling never leaves the title and status area unprotected.
-    material.isHidden = usesSystemScrollEdge && !largeTitle
+    material.isHidden = usesSystemScrollEdge && (hardEdge || !largeTitle)
     // Let the native fade extend past the bar without enlarging its hit area.
     // The mirrored content is transparent and the bottom edge is hidden.
     container.clipsToBounds = !usesSystemScrollEdge
     let appearance = UINavigationBarAppearance()
-    if usesSystemScrollEdge {
+    if usesSystemScrollEdge && !hardEdge {
       appearance.configureWithDefaultBackground()
     } else {
       appearance.configureWithTransparentBackground()

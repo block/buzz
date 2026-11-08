@@ -129,6 +129,46 @@ class RunnerTests: XCTestCase {
   }
 
   @MainActor
+  func testNativeHardHeaderKeepsControlsAboveDecorativeBackdrop() throws {
+    guard #available(iOS 27.0, *) else { return }
+    let parent = UIViewController()
+    let window = UIWindow(frame: UIScreen.main.bounds)
+    window.rootViewController = parent
+    window.makeKeyAndVisible()
+    defer { window.isHidden = true }
+    let bar = IosNavigationBarFactory(messenger: NavigationTestMessenger(), parent: parent).create(
+      withFrame: CGRect(x: 0, y: 0, width: window.bounds.width, height: 150),
+      viewIdentifier: 999997,
+      arguments: ["title": "Conversation", "largeTitle": true, "hardEdge": true,
+                  "alwaysFrosted": true]
+    )
+    parent.view.addSubview(bar.view())
+    parent.view.layoutIfNeeded()
+    let navigation = try XCTUnwrap(parent.children.compactMap { $0 as? UINavigationController }.first)
+    let backdrop = try XCTUnwrap(parent.children.compactMap { $0 as? NavigationEdgeBackdrop }.first)
+    XCTAssertFalse(backdrop.view.isHidden)
+    XCTAssertFalse(backdrop.view.isUserInteractionEnabled)
+    XCTAssertTrue(backdrop.view.accessibilityElementsHidden)
+    XCTAssertEqual(navigation.view.alpha, 1)
+    XCTAssertTrue(navigation.view.isUserInteractionEnabled)
+    XCTAssertFalse(navigation.view.accessibilityElementsHidden)
+    let views = bar.view().subviews
+    XCTAssertLessThan(try XCTUnwrap(views.firstIndex(of: backdrop.view)),
+                      try XCTUnwrap(views.firstIndex(of: navigation.view)))
+    let material = try XCTUnwrap(views.first as? UIVisualEffectView)
+    XCTAssertTrue(material.isHidden)
+    let scroll = try XCTUnwrap(navigation.topViewController?.view as? UIScrollView)
+    XCTAssertTrue(scroll.topEdgeEffect.isHidden)
+    let header = try XCTUnwrap(backdrop.view.subviews.last)
+    for height: CGFloat in [150, 90, 150] {
+      bar.view().frame.size.height = height
+      bar.view().setNeedsLayout()
+      bar.view().layoutIfNeeded()
+      XCTAssertEqual(header.frame.maxY, height + 8, accuracy: 0.5)
+    }
+  }
+
+  @MainActor
   func testNativeSheetTopEdgeIsSoftWithoutAnOpaqueNavigationFill() throws {
     guard #available(iOS 26.0, *) else { return }
     let picker = NativeAddMembersViewController(

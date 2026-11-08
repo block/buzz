@@ -1,6 +1,6 @@
 import UIKit
 
-/// System hard-edge treatment beneath a custom Flutter navigation header.
+/// System hard-edge treatment beneath Flutter and native navigation headers.
 final class NavigationEdgeBackdrop: UIViewController {
   private let scroll = UIScrollView()
   private let header = UIView()
@@ -9,6 +9,7 @@ final class NavigationEdgeBackdrop: UIViewController {
   override func viewDidLoad() {
     super.viewDidLoad()
     view.backgroundColor = .clear
+    view.isUserInteractionEnabled = false
     scroll.isUserInteractionEnabled = false
     view.accessibilityElementsHidden = true
     scroll.backgroundColor = .clear
