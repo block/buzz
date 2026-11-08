@@ -139,7 +139,10 @@ class OrganizationAppEntry extends HookConsumerWidget {
                 'Sign in on a device that has it, then try again.',
           null => null,
         } ??
-        (signIn.failure != null ? 'Couldn’t sign in. Try again.' : null);
+        switch (signIn.failureCode) {
+          null => null,
+          final code => 'Couldn’t sign in ($code). Try again.',
+        };
 
     return PairingPage(
       connectionLanding: true,
