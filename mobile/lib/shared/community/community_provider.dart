@@ -10,6 +10,7 @@ import 'package:nostr/nostr.dart' as nostr;
 import '../auth/auth_provider.dart';
 import '../channels/channel_list_snapshot.dart';
 import '../hosted/community_entry_requirements.dart';
+import '../hosted/known_communities_store.dart';
 import '../push/dev_push_lease.dart';
 import '../push/push_bridge.dart';
 import '../push/push_lease_revocation_outbox.dart';
@@ -336,6 +337,18 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
         )(current[removedIndex]);
       }
       await storage.remove(id);
+      if (removedIndex >= 0) {
+        // Queued after the local leave, so a sync reading the saved list
+        // cannot take the membership for a fresh join. A failed write keeps
+        // the intent in memory for the store's next write; the leave stands.
+        try {
+          await ref
+              .read(knownCommunitiesStoreProvider)
+              .left(current[removedIndex].relayUrl);
+        } catch (error) {
+          developer.log('Known community leave not saved: $error');
+        }
+      }
 
       final updatedList = current.where((w) => w.id != id).toList();
       await _removeOrphanChannelListSnapshots(updatedList);
