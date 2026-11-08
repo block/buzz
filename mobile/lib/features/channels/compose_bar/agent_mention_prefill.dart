@@ -1,25 +1,23 @@
 part of '../compose_bar.dart';
 
-/// The viewer's latest message among [events], with the pubkeys it notified.
+/// The viewer's latest message among [messages], with the pubkeys it notified.
 ///
-/// [events] must be in the conversation's display order, oldest first: the
-/// channel and thread views break same-second ties differently, so the last
-/// own message in that order is the one the viewer sees as latest.
+/// [messages] are what the conversation displays, oldest first: deleted
+/// messages are already gone, and the channel and thread views break
+/// same-second ties differently, so the last own message in that order is the
+/// one the viewer sees as latest.
 ///
 /// Only notifying `p` tags count: `mention` reference tags never notified
 /// anyone, so they are not carried forward.
 ({String messageId, List<String> pubkeys})? latestOwnMessageMentions(
-  List<NostrEvent> events, {
+  List<TimelineMessage> messages, {
   required String? viewer,
 }) {
   final me = viewer?.toLowerCase();
   if (me == null || me.isEmpty) return null;
-  final latest = events.reversed
+  final latest = messages.reversed
       .where(
-        (event) =>
-            event.pubkey.toLowerCase() == me &&
-            (event.kind == EventKind.streamMessage ||
-                event.kind == EventKind.streamMessageV2),
+        (message) => !message.isSystem && message.pubkey.toLowerCase() == me,
       )
       .firstOrNull;
   if (latest == null) return null;
@@ -42,7 +40,7 @@ part of '../compose_bar.dart';
 void _useAgentMentionPrefill({
   required WidgetRef ref,
   required String channelId,
-  required List<NostrEvent>? scopeEvents,
+  required List<TimelineMessage>? scopeMessages,
   required String draftKey,
   required _MarkdownEditingController controller,
   required ObjectRef<Map<String, MentionCandidate>> mentionMap,
@@ -54,10 +52,10 @@ void _useAgentMentionPrefill({
   // The composer rebuilds on every keystroke; rescan only when the loaded
   // messages or the viewer change.
   final source = useMemoized(
-    () => scopeEvents == null
+    () => scopeMessages == null
         ? null
-        : latestOwnMessageMentions(scopeEvents, viewer: viewer),
-    [scopeEvents, viewer],
+        : latestOwnMessageMentions(scopeMessages, viewer: viewer),
+    [scopeMessages, viewer],
   );
   // Current members only: an agent that has left is not carried forward.
   final members = source == null || source.pubkeys.isEmpty

@@ -964,13 +964,12 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                       ComposeBar(
                         channelId: channel.id,
                         focusNode: composerFocusNode,
-                        prefillScopeEvents: personalChat || resolvedChannel.isDm
+                        prefillScopeMessages:
+                            personalChat || resolvedChannel.isDm
                             ? null
                             : [
-                                for (final event
-                                    in messagesState.value ?? const [])
-                                  if (event.threadReference.parentId == null)
-                                    event,
+                                for (final message in timelineMessages)
+                                  if (message.parentId == null) message,
                               ],
                         onFocusRestorerChanged: (restoreFocus) =>
                             restoreComposerFocus.value = restoreFocus,

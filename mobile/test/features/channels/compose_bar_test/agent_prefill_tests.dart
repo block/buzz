@@ -3,16 +3,14 @@ part of '../compose_bar_test.dart';
 void agentPrefillTests() {
   test('the latest own message follows the display order, not ids', () {
     final viewer = 'f' * 64;
-    NostrEvent message(String id, String agent) => NostrEvent(
+    TimelineMessage message(String id, String agent) => TimelineMessage(
       id: id,
       pubkey: viewer,
       createdAt: 10,
-      kind: EventKind.streamMessage,
+      content: '',
       tags: [
         ['p', agent],
       ],
-      content: '',
-      sig: '',
     );
     // A channel shows same-second messages in descending id order.
     final events = [message('b', 'a' * 64), message('a', 'c' * 64)];
@@ -29,21 +27,23 @@ void agentPrefillTests() {
     final person = 'b' * 64;
     var agentInChannel = true;
     var agentName = 'Scout';
-    var scope = <NostrEvent>[];
+    var scope = <TimelineMessage>[];
     List<String>? sent;
-    NostrEvent message(String id, String author, int at, List<String> tags) =>
-        NostrEvent(
-          id: id,
-          pubkey: author,
-          createdAt: at,
-          kind: EventKind.streamMessage,
-          tags: [
-            const ['h', 'channel-1'],
-            for (final key in tags) ['p', key],
-          ],
-          content: '',
-          sig: '',
-        );
+    TimelineMessage message(
+      String id,
+      String author,
+      int at,
+      List<String> tags,
+    ) => TimelineMessage(
+      id: id,
+      pubkey: author,
+      createdAt: at,
+      content: '',
+      tags: [
+        const ['h', 'channel-1'],
+        for (final key in tags) ['p', key],
+      ],
+    );
     Widget build() => _buildComposeBar(
       uploadService: _testUploadService(nostr.Keys.generate().nsec),
       currentPubkey: viewer,
@@ -63,7 +63,7 @@ void agentPrefillTests() {
           joinedAt: DateTime(2025),
         ),
       ],
-      prefillScopeEvents: scope,
+      prefillScopeMessages: scope,
       onSend: (_, mentions, {mediaTags = const []}) async => sent = mentions,
     );
     // The collapsed composer previews its trimmed text, or the hint.
@@ -143,19 +143,18 @@ void agentPrefillTests() {
     final agent = 'a' * 64;
     final person = 'b' * 64;
     var agentInChannel = true;
-    var scope = <NostrEvent>[];
-    NostrEvent message(String id, int at, List<String> tags) => NostrEvent(
-      id: id,
-      pubkey: viewer,
-      createdAt: at,
-      kind: EventKind.streamMessage,
-      tags: [
-        const ['h', 'channel-1'],
-        for (final key in tags) ['p', key],
-      ],
-      content: '',
-      sig: '',
-    );
+    var scope = <TimelineMessage>[];
+    TimelineMessage message(String id, int at, List<String> tags) =>
+        TimelineMessage(
+          id: id,
+          pubkey: viewer,
+          createdAt: at,
+          content: '',
+          tags: [
+            const ['h', 'channel-1'],
+            for (final key in tags) ['p', key],
+          ],
+        );
     Widget build() => _buildComposeBar(
       uploadService: _testUploadService(nostr.Keys.generate().nsec),
       currentPubkey: viewer,
@@ -169,7 +168,7 @@ void agentPrefillTests() {
             joinedAt: DateTime(2025),
           ),
       ],
-      prefillScopeEvents: scope,
+      prefillScopeMessages: scope,
       onSend: (_, _, {mediaTags = const []}) async {},
     );
     bool shows(String text) => find.text(text).evaluate().isNotEmpty;

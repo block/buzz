@@ -46,6 +46,7 @@ import 'camera_capture_cleanup.dart';
 import 'channel.dart';
 import 'channel_management_provider.dart';
 import 'channels_provider.dart';
+import 'timeline_message.dart';
 import '../../shared/emoji/emoji_picker.dart';
 import 'mentions/mention_candidates.dart';
 import 'mentions/mention_candidates_provider.dart';

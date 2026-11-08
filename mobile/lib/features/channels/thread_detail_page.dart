@@ -1046,18 +1046,9 @@ class ThreadDetailPage extends HookConsumerWidget {
                         hintText: 'Reply in thread\u2026',
                         threadHeadId: threadHead.id,
                         rootId: effectiveRootId,
-                        prefillScopeEvents: channel?.isDm ?? true
+                        prefillScopeMessages: channel?.isDm ?? true
                             ? null
-                            : [
-                                for (final event in mergeThreadEvents(
-                                  replyEvents ?? const [],
-                                  liveChannelEvents,
-                                ))
-                                  if (event.id == queryRootId ||
-                                      event.threadReference.rootId ==
-                                          queryRootId)
-                                    event,
-                              ],
+                            : [liveHead, ...replies],
                         onFocusRequested: followThreadTailFromComposer,
                         onSend:
                             (

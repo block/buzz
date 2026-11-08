@@ -18,6 +18,7 @@ import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
+import 'package:buzz/features/channels/timeline_message.dart';
 import 'package:buzz/features/channels/compose_bar.dart';
 import 'package:buzz/features/channels/mentions/mention_candidates_provider.dart';
 import 'package:buzz/features/channels/send_message_provider.dart';
@@ -217,7 +218,7 @@ Widget _buildComposeBar({
   Future<List<UserProfile>> Function(String query)? searchPeople,
   List<OwnedAgentDirectoryEntry>? ownedAgents,
   bool ownedAgentsUnknown = false,
-  List<NostrEvent>? prefillScopeEvents,
+  List<TimelineMessage>? prefillScopeMessages,
 }) {
   return ProviderScope(
     overrides: [
@@ -305,7 +306,7 @@ Widget _buildComposeBar({
                   focusNode: focusNode,
                   onFocusRestorerChanged: onFocusRestorerChanged,
                   onFocusRequested: onFocusRequested,
-                  prefillScopeEvents: prefillScopeEvents,
+                  prefillScopeMessages: prefillScopeMessages,
                   onSend: onSend,
                 );
                 if (viewPadding == null) return composeBar;

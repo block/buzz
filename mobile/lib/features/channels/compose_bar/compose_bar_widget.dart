@@ -29,9 +29,9 @@ class ComposeBar extends HookConsumerWidget {
   final String? threadHeadId;
   final String? rootId;
 
-  /// The conversation's loaded messages; prefills the agents the viewer's
-  /// latest one notified. Null turns the prefill off.
-  final List<NostrEvent>? prefillScopeEvents;
+  /// The conversation's displayed messages, oldest first; prefills the agents
+  /// the viewer's latest one notified. Null turns the prefill off.
+  final List<TimelineMessage>? prefillScopeMessages;
   const ComposeBar({
     super.key,
     required this.channelId,
@@ -45,7 +45,7 @@ class ComposeBar extends HookConsumerWidget {
     this.focusNode,
     this.onFocusRestorerChanged,
     this.onFocusRequested,
-    this.prefillScopeEvents,
+    this.prefillScopeMessages,
     required this.onSend,
   });
   @override
@@ -357,7 +357,7 @@ class ComposeBar extends HookConsumerWidget {
     _useAgentMentionPrefill(
       ref: ref,
       channelId: channelId,
-      scopeEvents: prefillScopeEvents,
+      scopeMessages: prefillScopeMessages,
       draftKey: draftKey,
       controller: controller,
       mentionMap: mentionMap,
