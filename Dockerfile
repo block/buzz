@@ -2,7 +2,7 @@
 #
 # Public Buzz relay image — published as ghcr.io/block/buzz:<tag>.
 #
-# Builds the `buzz-relay` binary (Rust 1.95) and the `buzz-web` static bundle
+# Builds the `buzz-relay` binary (Rust 1.98) and the `buzz-web` static bundle
 # (pnpm + vite), then assembles them into a small debian-slim runtime with
 # `git` available (the relay shells out to git for repo hydrate / receive-pack
 # / upload-pack — see crates/buzz-relay/src/api/git).
@@ -11,7 +11,7 @@
 # native arm64 runners (see .github/workflows/docker.yml). The Dockerfile
 # itself is platform-agnostic; do not add --platform pins.
 
-ARG RUST_VERSION=1.95
+ARG RUST_VERSION=1.98
 ARG NODE_VERSION=24
 ARG DEBIAN_VERSION=bookworm
 
@@ -54,6 +54,7 @@ FROM chef AS builder
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         build-essential \
+        cmake \
         pkg-config \
         libssl-dev \
         ca-certificates \
@@ -67,6 +68,14 @@ COPY --from=planner /build/recipe.json recipe.json
 # scoping to -p buzz-relay misses transitive deps and re-builds them later.
 RUN cargo chef cook --release --recipe-path recipe.json
 COPY . .
+# Compile immutable artifact identity into the relay. Defaults preserve local
+# and third-party builds that do not run in provenance-aware CI.
+ARG BUZZ_SOURCE_SHA=unknown
+ARG BUZZ_BUILD_ID=local
+ARG BUZZ_BUILD_URL=unknown
+ENV BUZZ_SOURCE_SHA=${BUZZ_SOURCE_SHA} \
+    BUZZ_BUILD_ID=${BUZZ_BUILD_ID} \
+    BUZZ_BUILD_URL=${BUZZ_BUILD_URL}
 RUN cargo build --release --locked -p buzz-relay --bin buzz-relay \
                                    -p buzz-admin --bin buzz-admin \
                                    -p buzz-pair-relay --bin buzz-pair-relay

@@ -15,7 +15,7 @@ type StageCharacter = {
 const STAGE_CHARACTERS: readonly StageCharacter[] = [
   { name: "Fizz", animationUrl: "/onboarding/starter-team/fizz.png" },
   { name: "Honey", animationUrl: "/onboarding/starter-team/honey.png" },
-  { name: "Bumble", animationUrl: "/onboarding/starter-team/bumble.png" },
+  { name: "Pollen", animationUrl: "/onboarding/starter-team/pollen.png" },
 ];
 
 const STAGE_EXIT_ANIMATION = "motion-kickoff-stage-exit";

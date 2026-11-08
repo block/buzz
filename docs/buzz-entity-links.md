@@ -5,16 +5,23 @@ Status: **partially implemented**. Done on this branch:
 - Slice 0 — HTTPS relay git clone URLs (`{relay-origin}/git/<pubkey>/<repo>`)
   render as Buzz repository preview cards in chat
   (`desktop/src/shared/lib/linkPreview.ts`).
-- Slice 1 — `buzz://pr|issue|repo` deep links: `entityLink.ts`
-  builders/parser, preview cards with relay title enrichment, in-timeline
-  click navigation to `/projects/$projectId`.
+- Slice 1 — `buzz://pr|issue|repo|project` deep links: `entityLink.ts`
+  builders/parser, preview cards with relay title enrichment (repo and
+  project titles resolve from their announcement events), in-timeline click
+  navigation to `/projects/$projectId`.
+- Slice 2 — OS-level deep links: the `repo`/`project`/`pr`/`issue` hosts in
+  `desktop/src-tauri/src/deep_link.rs` emit `deep-link-entity`, and
+  `useEntityDeepLinks` routes them through the same handler as in-timeline
+  clicks.
 - Slice 3 (create-command part) — `crates/buzz-cli/src/links.rs`, `link`
-  output field on `pr open` / `issues create` / `repos create`, base prompt
-  guidance, cross-language golden-format tests.
+  output field on `pr open` / `issues create` / `repos create` /
+  `projects create`, base prompt guidance, cross-language golden-format tests.
+- Sharing from the UI — `lib/projectShareLinks.ts` maps the Projects read
+  models onto links, surfaced as "Copy link" in the project, repository,
+  issue, and pull request row menus and as a copy button in the project,
+  issue, and pull request detail headers.
 
-Still unimplemented: OS-level deep links (slice 2), `link` on get commands,
-the `buzz://project` scheme (waiting on NIP-MP landing), and the follow-ups
-in slice 4.
+Still unimplemented: `link` on get commands and the follow-ups in slice 4.
 
 ## Problem
 
@@ -71,8 +78,8 @@ free.
 Extend the existing `buzz://` scheme, mirroring `buzz://message`:
 
 ```
-buzz://repo?owner=<pubkey-hex>&d=<repo-dtag>
-buzz://project?owner=<pubkey-hex>&d=<project-dtag>
+buzz://repo?owner=<pubkey-hex>&d=<repo-dtag>[&tab=<tab>]
+buzz://project?owner=<pubkey-hex>&d=<project-dtag>[&tab=<tab>]
 buzz://pr?id=<event-id-hex>&owner=<pubkey-hex>&d=<repo-dtag>
 buzz://issue?id=<event-id-hex>&owner=<pubkey-hex>&d=<repo-dtag>
 ```
@@ -82,6 +89,13 @@ buzz://issue?id=<event-id-hex>&owner=<pubkey-hex>&d=<repo-dtag>
 - `d` is the addressable `d`-tag. For `repo`/`project` links the
   (`owner`, `d`) pair is the full `30617:<owner>:<d>` /
   `30621:<owner>:<d>` coordinate.
+- `tab` (coordinate links only, optional) selects a workspace tab instead
+  of the default readme overview: `files`, `commits`, `issues`, `prs`,
+  `contributors`, or `channels`. The overview has no spelling (canonical links omit the
+  parameter), unknown values are rejected, and event links accept no `tab`.
+  The desktop's copy-link button emits it automatically when a non-overview
+  tab is active, so "link to the PR list" is just the project link copied
+  from the Pull Request tab.
 - For `pr`/`issue` links, `id` identifies the kind `1618` / `1621` event;
   `owner` + `d` are the routing coordinate that lets the client navigate
   (and render a fallback card) without an event lookup. **v1 decision:** the
@@ -154,11 +168,15 @@ a nice-to-have and explicitly deferred to a follow-up.
 the projects feature so `linkPreview.ts` — also `shared/lib` — can import
 it without a feature→shared boundary violation):
 
-- `buildRepoLink`, `buildPullRequestLink`, `buildIssueLink`
-  (`buildProjectLink` deferred with the `project` scheme)
+- `buildRepoLink`, `buildProjectLink`, `buildPullRequestLink`,
+  `buildIssueLink`
 - `parseEntityLink(url): EntityLinkParseResult` (discriminated union, same
   shape as `parseMessageLink`)
 - `isEntityLink(href)` cheap pre-check for the markdown renderer
+- `isLinkableCoordinate(owner, dtag)` — addressable d-tags allow a wider
+  charset (and 1024 bytes) than the link format's
+  `[a-zA-Z0-9._-]{1,64}`, so callers that build links from read models check
+  first and hide the share affordance instead of surfacing a builder throw
 
 Detection: extend `extractSupportedLinkPreviews` in `linkPreview.ts` with a
 `buzz://` pattern (new `SupportedLinkPreviewKind` members
@@ -184,10 +202,14 @@ unresolved routes at runtime:
 If resolution fails (entity not visible in this community), show the same
 kind of toast fallback used for unresolvable message links.
 
-**OS-level**: register `repo` / `project` / `pr` / `issue` hosts in
-`desktop/src-tauri/src/deep_link.rs` and dispatch to a new listener hook
-(sibling to `useMessageDeepLinks.ts`). This makes links pasted outside Buzz
-(e.g. in a terminal or another app) open the desktop app correctly.
+**OS-level** *(implemented)*: the `repo` / `project` / `pr` / `issue` hosts
+in `desktop/src-tauri/src/deep_link.rs` validate the link's canonical form
+(so a malformed link does not raise and focus the window for a navigation
+that would then be declined), then emit `deep-link-entity` with the URL
+verbatim. `useEntityDeepLinks` — sibling to `useMessageDeepLinks.ts`, mounted
+in `AppShell` for the main window only — re-parses it with `parseEntityLink`
+and reuses `useOpenEntityLink`, so a link opened from the OS lands on the
+same view as one clicked in a message.
 
 ## CLI (`buzz-cli`)
 
@@ -241,12 +263,12 @@ No persona changes needed — the base prompt applies to all managed agents.
    enrichment (with `resetLinkPreviewTitleCache()` wired into
    `resetCommunityState()`). Unit tests (`entityLink.test.mjs`, extended
    `linkPreview.test.mjs`).
-2. **OS deep links** — `deep_link.rs` + listener hook + `deep-link.ts`
-   parity tests.
+2. **OS deep links** *(done, this branch)* — `deep_link.rs` +
+   `useEntityDeepLinks` + `deep-link.ts` parity tests.
 3. **CLI + agent prompt** *(create commands done, this branch)* — `links.rs`
    helper, `link` output field on `pr open` / `issues create` /
-   `repos create`, base prompt paragraph, cross-language golden-format test.
-   Still open: `link` on the get commands.
+   `repos create` / `projects create`, base prompt paragraph, cross-language
+   golden-format test. Still open: `link` on the get commands.
 4. **Follow-ups (separate)** — status chips on PR/issue cards, mobile
    pill/card rendering, web PR/issue routes + HTTPS link recognition,
    cross-community `relay=` parameter.

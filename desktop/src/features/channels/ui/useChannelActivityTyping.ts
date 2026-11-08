@@ -10,6 +10,7 @@ import type {
   RelayAgent,
 } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
+import { channelAgentMembers } from "@/shared/lib/rosterDerivations";
 import {
   buildChannelAgentSessionCandidates,
   getChannelAgentSessionAgents,
@@ -178,9 +179,12 @@ export function mergeMemberAgentFlagsIntoProfiles(
     | readonly Pick<ChannelMember, "pubkey" | "role" | "isAgent">[]
     | undefined,
 ): UserProfileLookup {
-  const agentMembers = (channelMembers ?? []).filter(
-    (member) => member.role === "bot" || member.isAgent,
-  );
+  if (!channelMembers) {
+    return profiles;
+  }
+  // Identity-cached: this merge re-runs whenever the profile lookup re-keys,
+  // and the filter walked the full roster (10k+ members) each time.
+  const agentMembers = channelAgentMembers(channelMembers);
   if (agentMembers.length === 0) {
     return profiles;
   }

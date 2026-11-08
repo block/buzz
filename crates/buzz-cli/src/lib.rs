@@ -1,14 +1,19 @@
 pub mod agent_management;
+mod cached_assertion;
 mod client;
 mod commands;
+mod credentials;
+#[cfg(unix)]
+mod desktop_provider;
 mod error;
+mod federated_identity;
+mod help_tree;
 mod links;
 mod validate;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use client::BuzzClient;
 use error::CliError;
-use nostr::Keys;
 use uuid::Uuid;
 
 /// Run the Buzz CLI from raw arguments (including `argv[0]`).
@@ -38,7 +43,7 @@ where
     // double-install returns Err and is harmless.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let cli = match Cli::try_parse_from(args) {
+    let cli = match parse_args(args) {
         Ok(cli) => cli,
         Err(e) => {
             if e.use_stderr() {
@@ -60,6 +65,61 @@ where
     }
 }
 
+/// Root help layout. Identical to clap's default except that `{subcommands}`
+/// is dropped and the command tree arrives through `{after-help}` instead, so
+/// the group list is not printed twice. `{options}` and `{subcommands}` emit no
+/// heading of their own — clap writes those from `write_all_args`, which this
+/// template bypasses — so the headings are spelled out here.
+const ROOT_HELP_TEMPLATE: &str = "\
+{before-help}{about-with-newline}
+{usage-heading} {usage}{after-help}
+
+Options:
+{options}";
+
+/// The root command with the agent-friendly command tree installed.
+///
+/// clap picks `after_long_help` for `--help` and falls back to `after_help`
+/// for `-h`, which is what gives the two depths: `-h` keeps the group-level
+/// summary, `--help` shows every subcommand under every group.
+fn build_command() -> clap::Command {
+    let cmd = Cli::command();
+    let groups = help_tree::render(&cmd, 1);
+    let full = help_tree::render(&cmd, usize::MAX);
+    cmd.help_template(ROOT_HELP_TEMPLATE)
+        .after_help(format!("Commands:\n{groups}"))
+        .after_long_help(format!("Commands:\n{full}"))
+}
+
+fn parse_args<I, S>(args: I) -> Result<Cli, clap::Error>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<std::ffi::OsString> + Clone,
+{
+    let matches = build_command().try_get_matches_from(args)?;
+    let mut cli = Cli::from_arg_matches(&matches)?;
+    if matches.value_source("format") == Some(clap::parser::ValueSource::DefaultValue) {
+        cli.format = env_output_format(std::env::var_os("BUZZ_OUTPUT_FORMAT").as_deref());
+    }
+    Ok(cli)
+}
+
+/// `BUZZ_OUTPUT_FORMAT` only picks the default `--format`, so an empty or
+/// unknown value (e.g. one a newer harness sets) falls back to `json` rather
+/// than failing every command, writes included.
+fn env_output_format(value: Option<&std::ffi::OsStr>) -> OutputFormat {
+    let Some(value) = value.filter(|value| !value.is_empty()) else {
+        return OutputFormat::default();
+    };
+    value
+        .to_str()
+        .and_then(|value| OutputFormat::from_str(value, false).ok())
+        .unwrap_or_else(|| {
+            eprintln!("warning: ignoring unsupported BUZZ_OUTPUT_FORMAT={value:?}; using json");
+            OutputFormat::default()
+        })
+}
+
 #[derive(Parser)]
 #[command(
     name = "buzz",
@@ -68,9 +128,19 @@ where
 Buzz CLI — interact with a Buzz relay
 
 Configuration (flags override env vars):
-  BUZZ_RELAY_URL     Relay base URL        [default: http://localhost:3000]
-  BUZZ_PRIVATE_KEY   Nostr private key (hex or nsec)  [required]
+  BUZZ_RELAY_URL     Relay base URL        [default: the relay an agent's inherited
+                     Buzz desktop credential acts on; else, with no private key,
+                     the one relay a running Buzz desktop accepts this CLI's
+                     pairing for (see `buzz auth desktop list`); else
+                     http://localhost:3000]
+  BUZZ_PRIVATE_KEY   Nostr private key (hex or nsec)  [unless a Buzz desktop provides it]
   BUZZ_AUTH_TAG      NIP-OA auth tag JSON  [optional]
+  BUZZ_FEDERATED_IDENTITY_TOKEN    Your NIP-FA sign-in session token  [optional]
+  BUZZ_FEDERATED_IDENTITY_ADAPTER  NIP-FA adapter base URL  [optional]
+    Set both for relays that enforce federated identity (NIP-FI). The token
+    is a human session for your own key, not an agent grant. The CLI requests
+    an assertion, the adapter mints it, and the CLI sends it on every request.
+  BUZZ_OUTPUT_FORMAT Default --format; unknown values fall back to json  [optional]
 
 The 'pack' subcommand runs locally and does not require a relay connection.
 
@@ -79,8 +149,11 @@ Errors are JSON on stderr: {\"error\": \"<category>\", \"message\": \"<detail>\"
 )]
 struct Cli {
     /// Relay URL (http:// or https://). Overrides BUZZ_RELAY_URL env var.
-    #[arg(long, env = "BUZZ_RELAY_URL", default_value = "http://localhost:3000")]
-    relay: String,
+    /// Without either, the relay an agent's inherited Buzz desktop credential
+    /// acts on; else, with no private key, the one relay a running Buzz
+    /// desktop accepts this CLI's pairing for; otherwise http://localhost:3000.
+    #[arg(long, env = "BUZZ_RELAY_URL")]
+    relay: Option<String>,
 
     /// Nostr private key (hex or nsec). This is the CLI's identity.
     #[arg(long, env = "BUZZ_PRIVATE_KEY", hide_env_values = true)]
@@ -90,7 +163,9 @@ struct Cli {
     #[arg(long, env = "BUZZ_AUTH_TAG", hide_env_values = true)]
     auth_tag: Option<String>,
 
-    /// Output format: 'json' (default, full fields) or 'compact' (reduced fields).
+    /// Output format: 'json' (default, full fields), 'compact' (reduced fields),
+    /// or 'agent' (event reads without signature material). Defaults to
+    /// `BUZZ_OUTPUT_FORMAT` when that names a known format.
     #[arg(long, value_enum, default_value = "json")]
     format: OutputFormat,
 
@@ -128,6 +203,27 @@ impl std::fmt::Display for ChannelVisibility {
         match self {
             Self::Open => write!(f, "open"),
             Self::Private => write!(f, "private"),
+        }
+    }
+}
+
+/// The role a new person gets in a channel (`join_role`).
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum ChannelJoinRoleArg {
+    /// New people become members (default).
+    #[value(name = "member")]
+    Member,
+    /// New people become guests, who can read but not write. On an open
+    /// channel this makes an announce channel.
+    #[value(name = "guest")]
+    Guest,
+}
+
+impl From<ChannelJoinRoleArg> for buzz_sdk::ChannelJoinRole {
+    fn from(value: ChannelJoinRoleArg) -> Self {
+        match value {
+            ChannelJoinRoleArg::Member => Self::Member,
+            ChannelJoinRoleArg::Guest => Self::Guest,
         }
     }
 }
@@ -170,6 +266,12 @@ pub enum OutputFormat {
     /// Reduced fields for agent scanning
     #[value(name = "compact")]
     Compact,
+    /// Event reads drop signature material (`sig`, NIP-OA `auth` conditions and
+    /// signature) and fold NIP-10 thread markers into `reply_to`/`thread_root`;
+    /// other reads match `json`.
+    /// Default for harness-managed agents.
+    #[value(name = "agent")]
+    Agent,
 }
 
 #[derive(Subcommand)]
@@ -186,15 +288,24 @@ enum Cmd {
     /// Get and set channel canvas documents
     #[command(subcommand)]
     Canvas(CanvasCmd),
+    /// Organize your own sidebar: sections, sort modes, stars, mutes, and project pins
+    #[command(subcommand)]
+    Sidebar(SidebarCmd),
     /// Add, remove, and list emoji reactions
     #[command(subcommand)]
     Reactions(ReactionsCmd),
     /// Manage your custom emoji set (workspace palette is the union of all members' sets)
     #[command(subcommand)]
     Emoji(EmojiCmd),
+    /// Search and share GIFs via the relay's KLIPY proxy
+    #[command(subcommand)]
+    Gifs(GifsCmd),
     /// List, open, and manage direct messages
     #[command(subcommand)]
     Dms(DmsCmd),
+    /// List huddles and their participants (read-only)
+    #[command(subcommand)]
+    Huddles(HuddlesCmd),
     /// Look up users and manage profiles and presence
     #[command(subcommand)]
     Users(UsersCmd),
@@ -237,9 +348,134 @@ enum Cmd {
     /// Persona pack operations (local, no relay connection needed)
     #[command(subcommand)]
     Pack(PackCmd),
+    /// Credentials: pair this CLI with the running Buzz desktop
+    #[command(subcommand)]
+    Auth(AuthCmd),
     /// Community moderation — reports queue, bans, timeouts, audit trail
     #[command(subcommand)]
     Moderation(ModerationCmd),
+}
+
+#[derive(Subcommand)]
+enum AuthCmd {
+    /// The Buzz desktop as a credential provider (macOS and Linux)
+    #[command(subcommand)]
+    Desktop(DesktopAuthCmd),
+}
+
+#[derive(Subcommand)]
+enum DesktopAuthCmd {
+    /// Ask the running Buzz desktop to let this CLI act as you on --relay.
+    /// Approve in Buzz; the token is stored in the OS keychain.
+    Pair {
+        /// Name shown in the desktop's approval prompt
+        #[arg(long, default_value = "buzz CLI")]
+        name: String,
+        /// Desktop instance, when more than one is running
+        #[arg(long)]
+        instance: Option<String>,
+    },
+    /// Forget paired tokens (all instances unless --instance). Local only.
+    Unpair {
+        #[arg(long)]
+        instance: Option<String>,
+    },
+    /// List this CLI's pairings: instance, relays, pubkey, and whether a
+    /// running Buzz desktop accepts each now. Never prints tokens; needs no
+    /// relay.
+    List,
+}
+
+/// The relay for a command given none: the one an agent's inherited Buzz
+/// desktop credential acts on; else, without an explicit key, the one relay
+/// a running Buzz desktop still accepts this CLI's pairing for; else
+/// `http://localhost:3000`. Local-only unpairing never asks the desktop,
+/// and pairing never asks for other pairings.
+async fn default_relay(command: &Cmd, explicit_key: bool) -> Result<String, CliError> {
+    #[cfg(unix)]
+    let (inherited, paired) = (
+        desktop_provider::inherited_relay(),
+        desktop_provider::paired_relay(),
+    );
+    #[cfg(not(unix))]
+    let (inherited, paired) = (async { Ok(None) }, async { Ok(None) });
+    default_relay_with(command, explicit_key, inherited, paired).await
+}
+
+/// [`default_relay`], with the agent and paired-person selectors (each
+/// awaited only when needed) parameters so a test can run it against a fake
+/// desktop.
+pub(crate) async fn default_relay_with(
+    command: &Cmd,
+    explicit_key: bool,
+    inherited: impl std::future::Future<Output = Result<Option<String>, CliError>>,
+    paired: impl std::future::Future<Output = Result<Option<String>, CliError>>,
+) -> Result<String, CliError> {
+    #[cfg(unix)]
+    if !matches!(
+        command,
+        Cmd::Auth(AuthCmd::Desktop(DesktopAuthCmd::Unpair { .. }))
+    ) {
+        if let Some(relay) = inherited.await? {
+            return Ok(relay);
+        }
+        // Pairing asks its own desktop; another desktop's answer is moot.
+        let pairing = matches!(
+            command,
+            Cmd::Auth(AuthCmd::Desktop(DesktopAuthCmd::Pair { .. }))
+        );
+        if !explicit_key && !pairing {
+            if let Some(relay) = paired.await? {
+                return Ok(relay);
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (command, explicit_key, inherited, paired);
+    Ok("http://localhost:3000".to_owned())
+}
+
+#[cfg(unix)]
+async fn run_auth(cmd: AuthCmd, relay_url: &str) -> Result<(), CliError> {
+    let AuthCmd::Desktop(cmd) = cmd;
+    let out = match cmd {
+        DesktopAuthCmd::Pair { name, instance } => {
+            desktop_provider::pair(relay_url, &name, instance.as_deref()).await?
+        }
+        DesktopAuthCmd::Unpair { instance } => desktop_provider::unpair(instance.as_deref())?,
+        DesktopAuthCmd::List => unreachable!("listing runs before any relay is chosen"),
+    };
+    println!("{out}");
+    Ok(())
+}
+
+/// `auth desktop list`, in `format`: `compact` drops the pubkey.
+#[cfg(unix)]
+async fn list_pairings(format: &OutputFormat) -> Result<(), CliError> {
+    let mut listed = desktop_provider::list().await?;
+    if matches!(format, OutputFormat::Compact) {
+        for pairing in &mut listed {
+            if let Some(fields) = pairing.as_object_mut() {
+                fields.remove("pubkey");
+            }
+        }
+    }
+    println!("{}", serde_json::Value::Array(listed));
+    Ok(())
+}
+
+#[cfg(not(unix))]
+async fn list_pairings(_: &OutputFormat) -> Result<(), CliError> {
+    Err(CliError::Usage(
+        "the Buzz desktop credential provider is not available on Windows yet".into(),
+    ))
+}
+
+#[cfg(not(unix))]
+async fn run_auth(_: AuthCmd, _: &str) -> Result<(), CliError> {
+    Err(CliError::Usage(
+        "the Buzz desktop credential provider is not available on Windows yet".into(),
+    ))
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -371,7 +607,7 @@ buzz agents archived"
 pub enum MessagesCmd {
     /// Send a message to a channel
     #[command(
-        after_help = "Examples:\n  buzz messages send --channel <UUID> --content \"hello\"\n  buzz messages send --channel <UUID> --content \"@alice check this\"\n  echo \"hello from stdin\" | buzz messages send --channel <UUID> --content -"
+        after_help = "Examples:\n  buzz messages send --channel <UUID> --content \"hello\"\n  buzz messages send --channel <UUID> --content \"@alice check this\"\n  echo \"hello from stdin\" | buzz messages send --channel <UUID> --content -\n  buzz messages send --channel <UUID> --content \"decision: ship it\" --from-thread <ROOT_EVENT_ID>"
     )]
     Send {
         /// Channel UUID (from 'buzz channels list')
@@ -386,6 +622,9 @@ pub enum MessagesCmd {
         /// Event ID to reply to (creates a thread)
         #[arg(long)]
         reply_to: Option<String>,
+        /// Thread root event ID: send this as a new top-level message tagged as sent from that thread (like desktop's "Send to channel")
+        #[arg(long, conflicts_with_all = ["reply_to", "broadcast"])]
+        from_thread: Option<String>,
         /// Also publish to the Nostr network
         #[arg(long, default_value_t = false)]
         broadcast: bool,
@@ -459,6 +698,31 @@ pub enum MessagesCmd {
         #[arg(long)]
         public_reason: Option<String>,
     },
+    /// Report a message or user to the community moderators (NIP-56)
+    #[command(
+        group = clap::ArgGroup::new("target").required(true).args(["event", "pubkey"]),
+        after_help = "Examples:\n  buzz messages report --event <EVENT_ID> --reason spam\n  buzz messages report --channel <UUID> --event <EVENT_ID> --reason other --note \"off-topic ads\"\n  buzz messages report --pubkey <PUBKEY> --reason impersonation\n\nReasons: illegal, nudity, malware, spam, impersonation, profanity, other.\nA report goes to the moderation queue only; it is never shown in the channel."
+    )]
+    Report {
+        /// Channel UUID the message is in; checked against the message when given
+        #[arg(long, conflicts_with = "pubkey")]
+        channel: Option<String>,
+        /// Event ID of the message to report (64-char hex)
+        #[arg(long)]
+        event: Option<String>,
+        /// Pubkey of a user to report without a message (64-char hex)
+        #[arg(long)]
+        pubkey: Option<String>,
+        /// Why you are reporting
+        #[arg(
+            long,
+            value_parser = clap::builder::PossibleValuesParser::new(buzz_sdk::REPORT_TYPES)
+        )]
+        reason: String,
+        /// Optional note for the moderators
+        #[arg(long)]
+        note: Option<String>,
+    },
     /// Retrieve messages from a channel
     #[command(
         after_help = "Examples:\n  buzz messages get --channel <UUID>\n  buzz messages get --channel <UUID> --limit 50 --kinds 1,1984"
@@ -480,14 +744,20 @@ pub enum MessagesCmd {
         #[arg(long)]
         kinds: Option<String>,
     },
-    /// Get a message thread (replies to a root message)
+    /// Get the containing thread for a message or Buzz message link
+    #[command(
+        after_help = "Examples:\n  buzz messages thread --channel <UUID> --event <EVENT_ID>\n  buzz messages thread --link 'buzz://message?channel=<UUID>&id=<EVENT_ID>&thread=<ROOT_ID>'"
+    )]
     Thread {
-        /// Channel UUID
-        #[arg(long)]
-        channel: String,
-        /// Root message event ID (64-char hex)
-        #[arg(long)]
-        event: String,
+        /// Channel UUID; required unless --link is supplied
+        #[arg(long, required_unless_present = "link", conflicts_with = "link")]
+        channel: Option<String>,
+        /// Message event ID (64-char hex); required unless --link is supplied
+        #[arg(long, required_unless_present = "link", conflicts_with = "link")]
+        event: Option<String>,
+        /// Canonical buzz://message deep link; uses the configured relay and identity
+        #[arg(long, conflicts_with_all = ["channel", "event"])]
+        link: Option<String>,
         /// Maximum number of results to return
         #[arg(long)]
         limit: Option<u32>,
@@ -541,6 +811,19 @@ pub enum ChannelsCmd {
         #[arg(long)]
         limit: Option<u32>,
     },
+    /// Unread message counts from your synced read state (read-only)
+    #[command(
+        after_help = "Examples:\n  buzz channels unread\n  buzz channels unread --channel <uuid> --channel <uuid>\n  buzz channels unread --limit 20\n\nOutput: [{channel_id, name, last_read_at, unread_count, capped}]. `capped: true` means unread_count is a lower bound. When more channels exist than --limit (at most 200), the rest are listed in a stderr warning count and not counted. Fails if a read-state slot cannot be decrypted or decoded."
+    )]
+    Unread {
+        /// Count only these channels (repeatable, at most 200). Default: every
+        /// non-archived channel you are a member of
+        #[arg(long)]
+        channel: Vec<String>,
+        /// Most channels to count [default: 200, max: 200]
+        #[arg(long)]
+        limit: Option<u32>,
+    },
     /// Get details for a single channel
     Get {
         /// Channel UUID
@@ -567,7 +850,7 @@ pub enum ChannelsCmd {
     },
     /// Create a new channel
     #[command(
-        after_help = "Examples:\n  buzz channels create --name general --type stream --visibility open\n  buzz channels create --name design --type forum --visibility open --description \"Design discussions\"\n  buzz channels create --name standup --type stream --visibility open --ttl 3600  # ephemeral, archived after 1h idle\n  buzz channels create --name project-x --template \"Buzz Team\"  # type/visibility/canvas/roster from the template; explicit flags override"
+        after_help = "Examples:\n  buzz channels create --name general --type stream --visibility open\n  buzz channels create --name design --type forum --visibility open --description \"Design discussions\"\n  buzz channels create --name standup --type stream --visibility open --ttl 3600  # ephemeral, archived after 1h idle\n  buzz channels create --name project-x --template \"Buzz Team\"  # type/visibility/canvas/roster from the template; explicit flags override\n  buzz channels create --name notes --type stream --visibility private --unlisted  # never listed, even after it is made open"
     )]
     Create {
         /// Channel name
@@ -582,10 +865,18 @@ pub enum ChannelsCmd {
         /// Channel description
         #[arg(long)]
         description: Option<String>,
-        /// Make the channel ephemeral: lifetime in seconds. The relay archives
-        /// it once this many seconds pass without a new message.
+        /// Make the channel temporary/ephemeral: idle lifetime in seconds. If
+        /// omitted, the channel is permanent. The relay archives it once this
+        /// many seconds pass without a new message.
         #[arg(long, value_name = "SECONDS")]
         ttl: Option<i64>,
+        /// Create the channel unlisted: left out of channel lists for people
+        /// who are not members. Anyone can still read and join an unlisted
+        /// open channel by its id. Change it later with `channels update
+        /// --unlisted`. Refused if the relay does not advertise
+        /// `buzz-unlisted-channels`.
+        #[arg(long)]
+        unlisted: bool,
         /// Apply a desktop-local channel template by name (case-insensitive):
         /// supplies default type/visibility/description/canvas, and resolves
         /// its agent roster against the relay to add as members.
@@ -596,9 +887,9 @@ pub enum ChannelsCmd {
         #[arg(long, value_name = "PATH")]
         templates_file: Option<String>,
     },
-    /// Update channel name, description, visibility, or ephemeral TTL
+    /// Update channel name, description, visibility, join role, unlisted, auto-join, or ephemeral TTL
     #[command(
-        after_help = "Examples:\n  buzz channels update --channel <uuid> --name general\n  buzz channels update --channel <uuid> --visibility open\n  buzz channels update --channel <uuid> --visibility private"
+        after_help = "Examples:\n  buzz channels update --channel <uuid> --name general\n  buzz channels update --channel <uuid> --visibility open\n  buzz channels update --channel <uuid> --visibility private\n  buzz channels update --channel <uuid> --join-role guest\n  buzz channels update --channel <uuid> --visibility open --unlisted true\n  buzz channels update --channel <uuid> --auto-join true"
     )]
     Update {
         /// Channel UUID
@@ -620,6 +911,23 @@ pub enum ChannelsCmd {
         /// Clear an existing TTL, making the channel permanent.
         #[arg(long)]
         no_ttl: bool,
+        /// The role a new person gets when nobody picks one. `guest` on an
+        /// open channel makes an announce channel: people who join can read
+        /// but not write. Does not change existing members. Owner/admin only.
+        #[arg(long, value_enum)]
+        join_role: Option<ChannelJoinRoleArg>,
+        /// Leave the channel out of channel lists for people who are not
+        /// members (`true`), or list it again (`false`). Anyone can still read
+        /// and join an unlisted open channel by its id. Matters only while the
+        /// channel is open. Owner/admin only. `true` is refused if the relay
+        /// does not advertise `buzz-unlisted-channels`.
+        #[arg(long, value_name = "BOOL", action = clap::ArgAction::Set)]
+        unlisted: Option<bool>,
+        /// Whether the relay joins every new community member into this
+        /// channel (a default channel). Relay owner/admin only; accepted only
+        /// on an open, unarchived stream channel.
+        #[arg(long, value_name = "true|false")]
+        auto_join: Option<bool>,
     },
     /// Set the channel topic
     Topic {
@@ -714,6 +1022,10 @@ pub enum CanvasCmd {
         /// Channel UUID
         #[arg(long)]
         channel: String,
+        /// Fetch a specific historical revision by event ID (64-char hex);
+        /// defaults to the current head
+        #[arg(long)]
+        revision: Option<String>,
     },
     /// Set (replace) the canvas document for a channel
     Set {
@@ -723,6 +1035,24 @@ pub enum CanvasCmd {
         /// Canvas content (markdown; use '-' to read from stdin)
         #[arg(long)]
         content: String,
+    },
+    /// List canvas revision history for a channel, newest first
+    History {
+        /// Channel UUID
+        #[arg(long)]
+        channel: String,
+        /// Maximum number of revisions to return (1–10000)
+        #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u32).range(1..=10_000))]
+        limit: u32,
+    },
+    /// Restore the canvas to a previous revision by re-publishing its content
+    Restore {
+        /// Channel UUID
+        #[arg(long)]
+        channel: String,
+        /// Revision event ID to restore (64-char hex)
+        #[arg(long)]
+        revision: String,
     },
 }
 
@@ -754,6 +1084,156 @@ pub enum ReactionsCmd {
         /// Event ID (64-char hex)
         #[arg(long)]
         event: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum SidebarCmd {
+    /// List, create, and arrange your channel sections (synced with Buzz desktop)
+    ///
+    /// Each edit reads your current sections and publishes the full result.
+    /// Concurrent edits from another CLI run or another client can overwrite
+    /// each other, and the last publish wins.
+    #[command(subcommand)]
+    Sections(SidebarSectionsCmd),
+    /// List and set how each sidebar group is sorted (synced with Buzz desktop)
+    #[command(subcommand)]
+    Sort(SidebarSortCmd),
+    /// List, star, and unstar your channels (synced with Buzz desktop)
+    #[command(subcommand)]
+    Stars(SidebarChannelFlagCmd),
+    /// List, mute, and unmute your channels (synced with Buzz desktop)
+    #[command(subcommand)]
+    Mutes(SidebarChannelFlagCmd),
+    /// List, pin, and unpin your sidebar projects (synced with Buzz desktop)
+    #[command(subcommand)]
+    Projects(SidebarProjectsCmd),
+}
+
+/// How a sidebar group orders its channels.
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum SidebarSortMode {
+    /// By name, A to Z
+    Alpha,
+    /// By last message, newest first
+    Recent,
+}
+
+/// `--group` takes `starred`, `channels`, `forums`, `dms`, `section:<id>`, or
+/// the name of a section.
+#[derive(Subcommand)]
+pub enum SidebarSortCmd {
+    /// List the groups that have a sort mode set
+    List,
+    /// Sort a group by name or by recent activity
+    Set {
+        /// Group to sort
+        #[arg(long)]
+        group: String,
+        /// Sort mode
+        #[arg(long, value_enum)]
+        mode: SidebarSortMode,
+    },
+    /// Return a group to the default sort (alpha)
+    Reset {
+        /// Group to reset
+        #[arg(long)]
+        group: String,
+    },
+}
+
+/// Shared by `sidebar stars` and `sidebar mutes`.
+#[derive(Subcommand)]
+pub enum SidebarChannelFlagCmd {
+    /// List the channels that are set
+    List,
+    /// Set one or more channels
+    Add {
+        /// Channel UUID (repeatable)
+        #[arg(long = "channel", required = true)]
+        channels: Vec<String>,
+    },
+    /// Clear one or more channels
+    Remove {
+        /// Channel UUID (repeatable)
+        #[arg(long = "channel", required = true)]
+        channels: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum SidebarProjectsCmd {
+    /// List the projects pinned to your sidebar
+    List,
+    /// Pin one or more projects
+    Add {
+        /// Project address `30621:<owner-pubkey>:<d-tag>` (repeatable)
+        #[arg(long = "project", required = true)]
+        projects: Vec<String>,
+    },
+    /// Unpin one or more projects
+    Remove {
+        /// Project address `30621:<owner-pubkey>:<d-tag>` (repeatable)
+        #[arg(long = "project", required = true)]
+        projects: Vec<String>,
+    },
+}
+
+/// `--section` takes a section id, or a section name that is unique.
+#[derive(Subcommand)]
+pub enum SidebarSectionsCmd {
+    /// List your sections and the channels assigned to each one
+    List,
+    /// Create a section at the end of your sidebar
+    Create {
+        /// Section name
+        #[arg(long)]
+        name: String,
+        /// Emoji shown next to the section name
+        #[arg(long)]
+        icon: Option<String>,
+    },
+    /// Rename a section or change its icon
+    Update {
+        /// Section id or unique name
+        #[arg(long)]
+        section: String,
+        /// New section name
+        #[arg(long)]
+        name: Option<String>,
+        /// New emoji icon
+        #[arg(long, conflicts_with = "clear_icon")]
+        icon: Option<String>,
+        /// Remove the section icon
+        #[arg(long, default_value_t = false)]
+        clear_icon: bool,
+    },
+    /// Delete a section; its channels return to the default channel list
+    Delete {
+        /// Section id or unique name
+        #[arg(long)]
+        section: String,
+    },
+    /// Put sections in order; unlisted sections keep their order after them
+    Reorder {
+        /// Section id or unique name, in the new order (repeatable)
+        #[arg(long = "section", required = true)]
+        sections: Vec<String>,
+    },
+    /// Move one or more channels into a section
+    Move {
+        /// Channel UUID (repeatable)
+        #[arg(long = "channel", required = true)]
+        channels: Vec<String>,
+        /// Section id or unique name
+        #[arg(long)]
+        section: String,
+    },
+    /// Return one or more channels to the default channel list
+    Unassign {
+        /// Channel UUID (repeatable)
+        #[arg(long = "channel", required = true)]
+        channels: Vec<String>,
     },
 }
 
@@ -796,6 +1276,31 @@ pub enum EmojiCmd {
         /// Print what would be published without writing
         #[arg(long, default_value_t = false)]
         dry_run: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum GifsCmd {
+    /// Search or browse trending GIFs via the relay's KLIPY proxy.
+    ///
+    /// Omitting --query returns trending GIFs. The output is a JSON array of
+    /// GIF objects; paste the `cdn_url` field directly into
+    /// `buzz messages send --content` to share a GIF.
+    Search {
+        /// Search text; omit or leave empty for trending
+        #[arg(long)]
+        query: Option<String>,
+        /// BCP 47 locale for provider results (default: $LANG or en_US)
+        #[arg(long)]
+        locale: Option<String>,
+    },
+    /// Report a selected GIF to the provider so it enters your Recents.
+    ///
+    /// The slug is the provider identifier in the search result objects.
+    Share {
+        /// Provider GIF slug from a search result
+        #[arg(long)]
+        slug: String,
     },
 }
 
@@ -883,8 +1388,18 @@ pub enum UsersCmd {
         #[arg(long)]
         emoji: Option<String>,
         /// Remove your status entirely
-        #[arg(long, conflicts_with_all = ["text", "emoji"])]
+        #[arg(long, conflicts_with_all = ["text", "emoji", "expires"])]
         clear: bool,
+        /// Clear the status automatically: a future unix timestamp or a
+        /// duration such as 30m, 2h, 1d, 1w
+        #[arg(long)]
+        expires: Option<String>,
+    },
+    /// Read user statuses (NIP-38 kind:30315); expired or cleared statuses are omitted
+    Status {
+        /// Pubkey (hex or npub) or exact display name (repeatable, max 100; default: you)
+        #[arg(long = "pubkey")]
+        pubkeys: Vec<String>,
     },
 }
 
@@ -964,6 +1479,31 @@ pub enum WorkflowsCmd {
         /// Optional note to include with the approval/denial
         #[arg(long)]
         note: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum HuddlesCmd {
+    /// List a channel's huddles with their state and start/end times
+    List {
+        /// Channel UUID the huddles were started in
+        #[arg(long)]
+        channel: String,
+        /// Only huddles that are still active
+        #[arg(long)]
+        active: bool,
+        /// Maximum number of huddles to return, newest first
+        #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u32).range(1..=200))]
+        limit: u32,
+    },
+    /// Show who is currently in a huddle
+    Participants {
+        /// Channel UUID the huddle was started in
+        #[arg(long)]
+        channel: String,
+        /// Huddle ID (the `huddle` field of `huddles list`)
+        #[arg(long)]
+        huddle: String,
     },
 }
 
@@ -1202,6 +1742,38 @@ pub enum ReposCmd {
     /// Manage branch and tag protection rules on one of your repositories.
     #[command(subcommand)]
     Protect(ReposProtectCmd),
+    /// Inspect or change the relay-hosted repository's default branch.
+    #[command(subcommand)]
+    DefaultBranch(ReposDefaultBranchCmd),
+}
+
+/// Commands for the authoritative Git default branch, not announcement metadata.
+#[derive(Subcommand)]
+pub enum ReposDefaultBranchCmd {
+    /// Read the default branch and observed manifest version.
+    Get {
+        /// Repository identifier.
+        #[arg(long)]
+        id: String,
+        /// Repository owner (64-char hex). Defaults to your signing identity.
+        #[arg(long)]
+        owner: Option<String>,
+    },
+    /// Select an existing branch without moving or deleting any refs.
+    Set {
+        /// Repository identifier.
+        #[arg(long)]
+        id: String,
+        /// Repository owner (64-char hex). Defaults to your signing identity.
+        #[arg(long)]
+        owner: Option<String>,
+        /// Short branch name, e.g. main or release/v1 (not refs/heads/main).
+        #[arg(long)]
+        branch: String,
+        /// Manifest digest returned by get. Omit to read it before updating.
+        #[arg(long)]
+        expected_manifest: Option<String>,
+    },
 }
 
 /// Commands for inspecting and changing repository protection rules.
@@ -1278,14 +1850,15 @@ impl ProjectVisibility {
 pub enum ProjectsCmd {
     /// Create a new multi-repo project (NIP-MP kind:30621)
     ///
-    /// Requires at least one --repo. Fails with Conflict if the project already exists.
+    /// With no `--repo`, creates a default repository bound to `--channel`.
+    /// Fails with Conflict if the project already exists.
     Create {
         /// Project identifier (slug), up to 1024 bytes
         slug: String,
         /// Member repository coordinate: bare Buzz repo id (e.g. `buzz`) or full
         /// `30617:<owner-hex>:<repo-d>` for cross-owner or colon-bearing repo ids.
-        /// At least one --repo is required.
-        #[arg(long = "repo", required = true)]
+        /// Omit to create a default repository named after the slug (requires `--channel`).
+        #[arg(long = "repo")]
         repo: Vec<String>,
         /// Display name (≤256 bytes)
         #[arg(long)]
@@ -1325,6 +1898,28 @@ pub enum ProjectsCmd {
         /// Member repository coordinate (bare id or full `30617:<owner-hex>:<repo-d>`)
         #[arg(long = "repo", required = true)]
         repo: Vec<String>,
+    },
+    /// Draft a project-linked channel for owner review in Buzz Desktop
+    #[command(name = "add-channel")]
+    AddChannel {
+        /// Project home channel UUID from the current ACP [Context]
+        #[arg(long)]
+        home_channel: String,
+        /// New channel name
+        #[arg(long)]
+        name: String,
+        /// Optional channel description
+        #[arg(long)]
+        description: Option<String>,
+        /// Channel visibility
+        #[arg(long, value_enum, default_value = "open")]
+        visibility: ChannelVisibility,
+        /// Optional temporary-channel lifetime in seconds
+        #[arg(long)]
+        ttl: Option<u64>,
+        /// Optional Desktop channel-template name
+        #[arg(long)]
+        template: Option<String>,
     },
     /// Remove one or more member repositories from a project
     #[command(name = "remove-repo")]
@@ -1626,12 +2221,18 @@ pub enum PrCmd {
 pub enum IssuesCmd {
     /// Create a git issue (NIP-34 kind:1621)
     Create {
-        /// Repo owner pubkey (64-char hex)
+        /// Repo owner pubkey (64-char hex). Optional when `--channel` (or
+        /// `BUZZ_GIT_ORIGIN_CHANNEL_ID`) names a project home.
         #[arg(long)]
-        repo_owner: String,
-        /// Repo identifier (d-tag)
+        repo_owner: Option<String>,
+        /// Repo identifier (d-tag). Optional when `--channel` (or
+        /// `BUZZ_GIT_ORIGIN_CHANNEL_ID`) names a project home.
         #[arg(long)]
-        repo_id: String,
+        repo_id: Option<String>,
+        /// Project home channel. Infers the repository, creating one bound to
+        /// this project when none exists. Defaults to `BUZZ_GIT_ORIGIN_CHANNEL_ID`.
+        #[arg(long)]
+        channel: Option<String>,
         /// Issue title
         #[arg(long, alias = "subject")]
         title: String,
@@ -1694,6 +2295,47 @@ pub enum IssuesCmd {
         /// given) — e.g. the issue author. Can be specified multiple times.
         #[arg(long = "to")]
         to: Vec<String>,
+    },
+    /// Assign an issue to one or more people or agents. Only assignments
+    /// signed by the issue author or repo owner are trusted by clients;
+    /// anyone may assign themselves (sole assignee = your own pubkey).
+    Assign {
+        /// Issue event id (64-char hex)
+        #[arg(long)]
+        issue: String,
+        /// Repo owner pubkey (64-char hex)
+        #[arg(long)]
+        repo_owner: String,
+        /// Repo identifier (d-tag)
+        #[arg(long)]
+        repo_id: String,
+        /// Assignee pubkey (64-char hex) — can be specified multiple times
+        #[arg(long = "assignee", required = true)]
+        assignee: Vec<String>,
+        /// Human-readable assignee name(s) for the note body, e.g. "Thomas".
+        /// Defaults to the truncated assignee pubkeys.
+        #[arg(long)]
+        label: Option<String>,
+    },
+    /// Remove one or more assignees from an issue. Issue authors and repo
+    /// owners may remove anyone; other users may remove only themselves.
+    Unassign {
+        /// Issue event id (64-char hex)
+        #[arg(long)]
+        issue: String,
+        /// Repo owner pubkey (64-char hex)
+        #[arg(long)]
+        repo_owner: String,
+        /// Repo identifier (d-tag)
+        #[arg(long)]
+        repo_id: String,
+        /// Assignee pubkey to remove — can be specified multiple times
+        #[arg(long = "assignee", required = true)]
+        assignee: Vec<String>,
+        /// Human-readable assignee name(s) for the note body.
+        /// Defaults to the truncated assignee pubkeys.
+        #[arg(long)]
+        label: Option<String>,
     },
 }
 
@@ -1927,7 +2569,7 @@ pub enum ModerationCmd {
 /// and the BIP-340 signature. Inputs that are already valid JSON — or not
 /// recognizable as the shorthand — are returned unchanged so the strict
 /// parser reports the error on the original bytes.
-fn normalize_auth_tag_input(input: &str) -> String {
+pub(crate) fn normalize_auth_tag_input(input: &str) -> String {
     let trimmed = input.trim();
     if serde_json::from_str::<serde_json::Value>(trimmed).is_ok() {
         return trimmed.to_owned();
@@ -1948,9 +2590,28 @@ fn normalize_auth_tag_input(input: &str) -> String {
     trimmed.to_owned()
 }
 
-async fn run(cli: Cli) -> Result<(), CliError> {
-    let relay_url = client::normalize_relay_url(&cli.relay);
+/// Binds the configured community: `auth` pairs it, anything else builds
+/// the client. A desktop binds the whole community URL, trailing slash
+/// included, so pairing and the credential chain take it as configured; only
+/// requests use the trimmed base, which the client derives. The two steps are parameters so a test can
+/// run them against a fake desktop.
+pub(crate) async fn connect(
+    configured: &str,
+    command: Cmd,
+    pair: impl AsyncFnOnce(AuthCmd, &str) -> Result<(), CliError>,
+    credentials: impl AsyncFnOnce(&str) -> Result<credentials::Credentials, CliError>,
+) -> Result<Option<(Cmd, BuzzClient)>, CliError> {
+    // Pairing runs before any credential exists.
+    if let Cmd::Auth(sub) = command {
+        pair(sub, configured).await?;
+        return Ok(None);
+    }
+    let credentials = credentials(configured).await?;
+    let client = BuzzClient::new(configured.to_owned(), credentials)?;
+    Ok(Some((command, client)))
+}
 
+async fn run(cli: Cli) -> Result<(), CliError> {
     // Pack commands are local-only — no relay connection needed.
     if let Cmd::Pack(ref sub) = cli.command {
         return match sub {
@@ -1959,51 +2620,42 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         };
     }
 
-    // Auth: private key is required for all relay operations.
-    // The keypair IS the identity — no tokens, no other auth.
-    let private_key_str = cli.private_key.ok_or_else(|| {
-        CliError::Auth("BUZZ_PRIVATE_KEY is required (use --private-key or set env var)".into())
-    })?;
-    let keys = Keys::parse(&private_key_str)
-        .map_err(|e| CliError::Key(format!("invalid BUZZ_PRIVATE_KEY: {e}")))?;
-
-    // NIP-OA: parse and verify the auth tag if provided.
-    //
-    // `BUZZ_AUTH_TAG` is hand-authored configuration, so the unquoted raw
-    // shorthand `[auth,hex,,hex]` is normalized to JSON here — at this input
-    // edge only. The SDK grammar and the `x-auth-tag` wire format stay strict
-    // JSON; all validation and signature verification happen on the strict
-    // path below, unchanged.
-    let (auth_tag, auth_tag_json) = match cli.auth_tag {
-        Some(ref input) if !input.is_empty() => {
-            let json = normalize_auth_tag_input(input);
-            let tag = buzz_sdk::nip_oa::parse_auth_tag(&json)
-                .map_err(|e| CliError::Auth(format!("BUZZ_AUTH_TAG is malformed: {e}")))?;
-            buzz_sdk::nip_oa::verify_auth_tag(&json, &keys.public_key()).map_err(|e| {
-                CliError::Auth(format!(
-                    "BUZZ_AUTH_TAG verification failed for pubkey {}: {e}",
-                    keys.public_key().to_hex()
-                ))
-            })?;
-            // Canonical wire form derives from the parsed-and-verified tag
-            // (same shape as buzz-acp's RestClient), never from raw input.
-            let canonical = serde_json::to_string(tag.as_slice())
-                .map_err(|e| CliError::Auth(format!("BUZZ_AUTH_TAG serialization failed: {e}")))?;
-            (Some(tag), Some(canonical))
-        }
-        _ => (None, None),
+    // Credential chain: the first link that applies to this relay is the
+    // identity (see `credentials`).
+    let settings = credentials::Settings {
+        private_key: cli.private_key,
+        auth_tag: cli.auth_tag,
+        ..Default::default()
+    }
+    .with_env_evidence();
+    // Listing pairings is local: it needs no relay and runs no discovery.
+    if let Cmd::Auth(AuthCmd::Desktop(DesktopAuthCmd::List)) = cli.command {
+        return list_pairings(&cli.format).await;
+    }
+    let explicit_key = settings.private_key.is_some();
+    let relay = match cli.relay {
+        Some(relay) => relay,
+        None => default_relay(&cli.command, explicit_key).await?,
+    };
+    let Some((command, client)) = connect(&relay, cli.command, run_auth, async |relay| {
+        credentials::resolve(settings, relay).await
+    })
+    .await?
+    else {
+        return Ok(());
     };
 
-    let client = BuzzClient::new(relay_url, keys, auth_tag, auth_tag_json)?;
-
-    match cli.command {
+    match command {
         Cmd::Agents(sub) => commands::agents::dispatch(sub, &client).await,
         Cmd::Messages(sub) => commands::messages::dispatch(sub, &client, &cli.format).await,
         Cmd::Channels(sub) => commands::channels::dispatch(sub, &client, &cli.format).await,
         Cmd::Canvas(sub) => commands::channels::dispatch_canvas(sub, &client).await,
+        Cmd::Sidebar(sub) => commands::sidebar::dispatch(sub, &client).await,
         Cmd::Reactions(sub) => commands::reactions::dispatch(sub, &client).await,
         Cmd::Emoji(sub) => commands::emoji::dispatch(sub, &client).await,
+        Cmd::Gifs(sub) => commands::gifs::dispatch(sub, &client).await,
         Cmd::Dms(sub) => commands::dms::dispatch(sub, &client).await,
+        Cmd::Huddles(sub) => commands::huddles::dispatch(sub, &client).await,
         Cmd::Users(sub) => commands::users::dispatch(sub, &client, &cli.format).await,
         Cmd::Workflows(sub) => commands::workflows::dispatch(sub, &client).await,
         Cmd::Feed(sub) => commands::feed::dispatch(sub, &client, &cli.format).await,
@@ -2018,7 +2670,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Upload(sub) => commands::upload::dispatch(sub, &client).await,
         Cmd::Mem(sub) => commands::mem::dispatch(sub, &client).await,
         Cmd::Moderation(sub) => commands::moderation::dispatch(sub, &client, &cli.format).await,
-        Cmd::Pack(_) => unreachable!("handled above"),
+        Cmd::Pack(_) | Cmd::Auth(_) => unreachable!("handled above"),
     }
 }
 
@@ -2074,8 +2726,145 @@ mod tests {
 
     /// Smoke test: CLI definition is valid and parseable.
     #[test]
+    fn output_format_env_is_a_lenient_default_but_the_flag_stays_strict() {
+        use std::ffi::OsStr;
+        assert!(matches!(env_output_format(None), OutputFormat::Json));
+        for ignored in ["", "agent-v2"] {
+            assert!(matches!(
+                env_output_format(Some(OsStr::new(ignored))),
+                OutputFormat::Json
+            ));
+        }
+        assert!(matches!(
+            env_output_format(Some(OsStr::new("agent"))),
+            OutputFormat::Agent
+        ));
+        assert!(parse_args(["buzz", "--format", "agent", "pack", "validate", "x"]).is_ok());
+        assert!(parse_args(["buzz", "--format", "agent-v2", "pack", "validate", "x"]).is_err());
+    }
+
+    #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    /// Relay selection asks only what a command needs: an explicit key never
+    /// asks for a pairing, unpairing asks nothing, pairing asks for no other
+    /// pairing, and an agent's inherited relay comes first. `None` for
+    /// `inherited` means it must not be asked; the paired lookup never is.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn relay_selection_asks_only_what_a_command_needs() {
+        use clap::Parser;
+        const INHERITED: &str = "wss://inherited.example/";
+        const DEFAULT: &str = "http://localhost:3000";
+        let cases = [
+            ("users get", true, Some(None), DEFAULT),
+            ("auth desktop unpair", false, None, DEFAULT),
+            ("auth desktop pair", false, Some(None), DEFAULT),
+            ("users get", false, Some(Some(INHERITED)), INHERITED),
+        ];
+        for (args, explicit_key, inherited, want) in cases {
+            let argv = std::iter::once("buzz").chain(args.split(' '));
+            let cli = Cli::try_parse_from(argv).unwrap();
+            let inherited = async move {
+                Ok(inherited
+                    .unwrap_or_else(|| panic!("`{args}` asked for an inherited relay"))
+                    .map(str::to_owned))
+            };
+            let paired = async { panic!("`{args}` asked for a paired relay") };
+            let relay = default_relay_with(&cli.command, explicit_key, inherited, paired)
+                .await
+                .unwrap();
+            assert_eq!(relay, want, "`{args}`");
+        }
+    }
+
+    #[test]
+    fn messages_send_from_thread_conflicts_with_reply_and_broadcast() {
+        let base = [
+            "buzz",
+            "messages",
+            "send",
+            "--channel",
+            "123e4567-e89b-12d3-a456-426614174000",
+            "--content",
+            "x",
+            "--from-thread",
+        ];
+        let with = |extra: &[&'static str]| {
+            let mut args = base.to_vec();
+            args.push("a");
+            args.extend(extra);
+            Cli::try_parse_from(args)
+        };
+        assert!(with(&[]).is_ok());
+        assert!(with(&["--reply-to", "b"]).is_err());
+        assert!(with(&["--broadcast"]).is_err());
+    }
+
+    #[test]
+    fn messages_thread_accepts_link_or_explicit_identifiers() {
+        let channel = "123e4567-e89b-12d3-a456-426614174000";
+        let event = "a".repeat(64);
+        let link = format!("buzz://message?channel={channel}&id={event}");
+
+        assert!(
+            Cli::try_parse_from(["buzz", "messages", "thread", "--link", link.as_str(),]).is_ok()
+        );
+        assert!(Cli::try_parse_from([
+            "buzz",
+            "messages",
+            "thread",
+            "--channel",
+            channel,
+            "--event",
+            event.as_str(),
+        ])
+        .is_ok());
+    }
+
+    #[test]
+    fn messages_thread_rejects_partial_or_mixed_targets() {
+        let channel = "123e4567-e89b-12d3-a456-426614174000";
+        let event = "a".repeat(64);
+        let link = format!("buzz://message?channel={channel}&id={event}");
+
+        assert!(Cli::try_parse_from(["buzz", "messages", "thread"]).is_err());
+        assert!(Cli::try_parse_from(["buzz", "messages", "thread", "--channel", channel]).is_err());
+        assert!(Cli::try_parse_from([
+            "buzz",
+            "messages",
+            "thread",
+            "--link",
+            link.as_str(),
+            "--event",
+            event.as_str(),
+        ])
+        .is_err());
+    }
+
+    /// `canvas history --limit` is bounded 1–10000 at parse time: zero and
+    /// max+1 reject, the maximum is accepted, and the max stays above one
+    /// 1,000-row relay page so the >1,000 pagination path remains reachable.
+    #[test]
+    fn canvas_history_limit_is_bounded() {
+        let channel = "123e4567-e89b-12d3-a456-426614174000";
+        let parse = |limit: &str| {
+            Cli::try_parse_from([
+                "buzz",
+                "canvas",
+                "history",
+                "--channel",
+                channel,
+                "--limit",
+                limit,
+            ])
+        };
+        assert!(parse("0").is_err(), "zero must reject");
+        assert!(parse("10001").is_err(), "max+1 must reject");
+        assert!(parse("10000").is_ok(), "maximum must be accepted");
+        assert!(parse("1000").is_ok(), "one relay page must be reachable");
     }
 
     #[test]
@@ -2106,11 +2895,14 @@ mod tests {
     fn command_inventory_is_stable() {
         let expected_groups: Vec<&str> = vec![
             "agents",
+            "auth",
             "canvas",
             "channels",
             "dms",
             "emoji",
             "feed",
+            "gifs",
+            "huddles",
             "issues",
             "media",
             "mem",
@@ -2123,6 +2915,7 @@ mod tests {
             "projects",
             "reactions",
             "repos",
+            "sidebar",
             "social",
             "upload",
             "users",
@@ -2184,6 +2977,7 @@ mod tests {
                 "delete",
                 "edit",
                 "get",
+                "report",
                 "search",
                 "send",
                 "send-diff",
@@ -2209,10 +3003,14 @@ mod tests {
                 "set-add-policy",
                 "topic",
                 "unarchive",
+                "unread",
                 "update"
             ]
         );
-        assert_eq!(names(&cmd, "canvas"), vec!["get", "set"]);
+        assert_eq!(
+            names(&cmd, "canvas"),
+            vec!["get", "history", "restore", "set"]
+        );
         assert_eq!(names(&cmd, "reactions"), vec!["add", "get", "remove"]);
         assert_eq!(
             names(&cmd, "emoji"),
@@ -2229,7 +3027,8 @@ mod tests {
                 "presence",
                 "set-presence",
                 "set-profile",
-                "set-status"
+                "set-status",
+                "status"
             ]
         );
         assert_eq!(
@@ -2251,12 +3050,13 @@ mod tests {
         );
         assert_eq!(
             names(&cmd, "repos"),
-            vec!["bind", "create", "get", "list", "protect"]
+            vec!["bind", "create", "default-branch", "get", "list", "protect"]
         );
         let repos = cmd
             .get_subcommands()
             .find(|subcommand| subcommand.get_name() == "repos")
             .expect("repos command");
+        assert_eq!(names(repos, "default-branch"), vec!["get", "set"]);
         let protect = repos
             .get_subcommands()
             .find(|subcommand| subcommand.get_name() == "protect")
@@ -2279,6 +3079,7 @@ mod tests {
         assert_eq!(
             names(&cmd, "projects"),
             vec![
+                "add-channel",
                 "add-repo",
                 "create",
                 "delete",
@@ -2290,7 +3091,7 @@ mod tests {
         );
         assert_eq!(
             names(&cmd, "issues"),
-            vec!["create", "get", "list", "status"]
+            vec!["assign", "create", "get", "list", "status", "unassign"]
         );
         assert_eq!(names(&cmd, "media"), vec!["get"]);
         assert_eq!(names(&cmd, "upload"), vec!["file"]);
@@ -2314,23 +3115,24 @@ mod tests {
     fn subcommand_counts_are_stable() {
         let expected: Vec<(&str, usize)> = vec![
             ("agents", 5),
-            ("canvas", 2),
-            ("channels", 16),
+            ("canvas", 4),
+            ("channels", 17),
             ("dms", 4),
             ("emoji", 5),
             ("feed", 1),
-            ("issues", 4),
+            ("huddles", 2),
+            ("issues", 6),
             ("media", 1),
-            ("messages", 8),
+            ("messages", 9),
             ("pack", 2),
             ("patches", 4),
             ("pr", 5),
-            ("projects", 7),
+            ("projects", 8),
             ("reactions", 3),
-            ("repos", 5),
+            ("repos", 6),
             ("social", 7),
             ("upload", 1),
-            ("users", 5),
+            ("users", 6),
             ("workflows", 8),
         ];
 
@@ -2395,6 +3197,25 @@ mod tests {
     }
 
     // ── projects update mutation group ────────────────────────────────────────
+
+    /// Project-channel requests accept the owner-review metadata.
+    #[test]
+    fn projects_add_channel_accepts_owner_review_fields() {
+        assert!(Cli::try_parse_from([
+            "buzz",
+            "projects",
+            "add-channel",
+            "--home-channel",
+            "11111111-1111-4111-8111-111111111111",
+            "--name",
+            "release-planning",
+            "--visibility",
+            "private",
+            "--template",
+            "Release team",
+        ])
+        .is_ok());
+    }
 
     /// Multiple independent fields must be accepted in the same invocation.
     #[test]

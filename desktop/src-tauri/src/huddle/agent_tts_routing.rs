@@ -25,8 +25,9 @@ pub(super) fn classify_agent_tts_runtime(
 }
 
 /// Maximum text length accepted for TTS synthesis.
-/// ~2000 chars is 1–2 minutes of speech. Longer messages are truncated.
-pub(super) const MAX_TTS_TEXT_LEN: usize = 2000;
+/// This high safety cap keeps unexpectedly large events bounded while allowing
+/// normal long-form huddle replies to play in full.
+pub(super) const MAX_TTS_TEXT_LEN: usize = 8_096;
 
 pub(super) fn normalize_agent_tts_text(text: String) -> String {
     if text.chars().count() > MAX_TTS_TEXT_LEN {

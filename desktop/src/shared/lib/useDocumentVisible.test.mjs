@@ -197,6 +197,60 @@ describe("visibility-gated hooks", () => {
     dom.window.close();
   });
 
+  it("useNow consumers with the same interval share one timer", async () => {
+    mock.timers.enable({ apis: ["Date", "setInterval"], now: 1_000 });
+    const dom = new JSDOM(
+      "<!doctype html><html><body><div id='root'></div></body></html>",
+    );
+    Object.defineProperty(dom.window.document, "visibilityState", {
+      configurable: true,
+      value: "visible",
+    });
+    Object.assign(globalThis, {
+      document: dom.window.document,
+      HTMLElement: dom.window.HTMLElement,
+      IS_REACT_ACT_ENVIRONMENT: true,
+      window: dom.window,
+    });
+    const setIntervalSpy = mock.method(globalThis, "setInterval");
+    const observed = [];
+    function Clock({ id }) {
+      const now = useNow(1_000);
+      React.useEffect(() => {
+        observed.push([id, now]);
+      }, [id, now]);
+      return null;
+    }
+    const root = createRoot(document.getElementById("root"));
+
+    await act(async () =>
+      root.render(
+        React.createElement(
+          React.Fragment,
+          null,
+          React.createElement(Clock, { id: "a" }),
+          React.createElement(Clock, { id: "b" }),
+          React.createElement(Clock, { id: "c" }),
+        ),
+      ),
+    );
+    assert.equal(setIntervalSpy.mock.callCount(), 1);
+
+    await act(async () => mock.timers.tick(1_000));
+    assert.deepEqual(observed.filter(([, now]) => now === 2_000).length, 3);
+
+    // Last unmount releases the shared timer; a fresh mount recreates it.
+    await act(async () => root.unmount());
+    const secondRoot = createRoot(document.getElementById("root"));
+    await act(async () =>
+      secondRoot.render(React.createElement(Clock, { id: "d" })),
+    );
+    assert.equal(setIntervalSpy.mock.callCount(), 2);
+
+    await act(async () => secondRoot.unmount());
+    dom.window.close();
+  });
+
   it("focused polling pauses on blur and resumes after activation yields", async () => {
     const dom = new JSDOM(
       "<!doctype html><html><body><div id='root'></div></body></html>",

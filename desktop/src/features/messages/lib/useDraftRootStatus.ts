@@ -1,6 +1,7 @@
 import { useQueries } from "@tanstack/react-query";
 
 import { getEventById } from "@/shared/api/tauri";
+import { isDefinitiveEventNotFound } from "@/shared/lib/eventLookupError";
 
 /**
  * Root-existence status for a thread-draft's parent event.
@@ -18,18 +19,8 @@ import { getEventById } from "@/shared/api/tauri";
  */
 export type RootStatus = "checking" | "available" | "deleted" | "error";
 
-const EVENT_NOT_FOUND_MESSAGE = "event not found";
-
 export function classifyError(err: unknown): RootStatus {
-  // Only the definitive relay-returned string maps to `deleted`.
-  // Every other failure (transport, auth, serialization) is `error`.
-  if (typeof err === "string" && err.includes(EVENT_NOT_FOUND_MESSAGE)) {
-    return "deleted";
-  }
-  if (err instanceof Error && err.message.includes(EVENT_NOT_FOUND_MESSAGE)) {
-    return "deleted";
-  }
-  return "error";
+  return isDefinitiveEventNotFound(err) ? "deleted" : "error";
 }
 
 /**

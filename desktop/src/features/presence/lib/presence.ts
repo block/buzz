@@ -15,6 +15,19 @@ export function parseLivePresenceEvent(event: {
   return { pubkey: event.pubkey.toLowerCase(), status };
 }
 
+export function activePresencePubkeys(
+  queries: Array<{ queryKey: readonly unknown[]; isActive: () => boolean }>,
+): string[] {
+  const pubkeys = new Set<string>();
+  for (const query of queries) {
+    if (!query.isActive() || query.queryKey[0] !== "presence") continue;
+    for (const value of query.queryKey.slice(1)) {
+      if (typeof value === "string" && value) pubkeys.add(value.toLowerCase());
+    }
+  }
+  return [...pubkeys].sort();
+}
+
 // Presence query keys are ["presence", ...normalizedSortedPubkeys]; a query
 // "wants" an update only for a pubkey it actually requested.
 export function presenceQueryWantsPubkey(

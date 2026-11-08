@@ -416,9 +416,23 @@ pub fn build_remove_reaction(reaction_event_id: EventId) -> Result<EventBuilder,
 // ── Canvas ───────────────────────────────────────────────────────────────────
 
 /// Kind 40100 — set canvas.
-pub fn build_set_canvas(channel_id: Uuid, content: &str) -> Result<EventBuilder, String> {
+///
+/// When `expected_revision` is `Some`, an `["expected-revision", <event-id>]`
+/// tag is attached. The relay enforces this tag as a compare-and-swap (CAS):
+/// it reads the canonical live head under an advisory lock and rejects writes
+/// whose precondition no longer matches. Client-side checks (stale-edit before
+/// submit and `canvas_write_survived` after) are secondary confirmations.
+/// Omitting the tag preserves the historical unconditional-append behavior.
+pub fn build_set_canvas(
+    channel_id: Uuid,
+    content: &str,
+    expected_revision: Option<&str>,
+) -> Result<EventBuilder, String> {
     check_content(content)?;
-    let tags = vec![tag(vec!["h", &channel_id.to_string()])?];
+    let mut tags = vec![tag(vec!["h", &channel_id.to_string()])?];
+    if let Some(revision) = expected_revision {
+        tags.push(tag(vec!["expected-revision", revision])?);
+    }
     Ok(EventBuilder::new(Kind::Custom(40100), content).tags(tags))
 }
 
@@ -756,47 +770,12 @@ pub fn build_dm_hide(channel_id: &str) -> Result<EventBuilder, String> {
     Ok(EventBuilder::new(Kind::Custom(41012), "").tags(tags))
 }
 
-/// Kind 30620 — replaceable workflow definition.
-///
-/// The `d` tag carries the workflow id; `h` tag carries the channel id; the
-/// content is the YAML definition. Same (pubkey, d) replaces the prior version.
-pub fn build_workflow_definition(
-    workflow_id: &str,
-    channel_id: &str,
-    yaml_definition: &str,
-) -> Result<EventBuilder, String> {
-    check_content(yaml_definition)?;
-    let tags = vec![tag(vec!["d", workflow_id])?, tag(vec!["h", channel_id])?];
-    Ok(EventBuilder::new(Kind::Custom(30620), yaml_definition.to_string()).tags(tags))
-}
+mod workflows;
 
-/// Kind 5 — NIP-09 deletion targeting a kind:30620 workflow definition.
-pub fn build_workflow_delete(
-    workflow_id: &str,
-    owner_pubkey_hex: &str,
-) -> Result<EventBuilder, String> {
-    let coord = format!("30620:{owner_pubkey_hex}:{workflow_id}");
-    let tags = vec![tag(vec!["a", &coord])?];
-    Ok(EventBuilder::new(Kind::Custom(5), "").tags(tags))
-}
-
-/// Kind 46020 — trigger a workflow run by id.
-pub fn build_workflow_trigger(workflow_id: &str) -> Result<EventBuilder, String> {
-    let tags = vec![tag(vec!["d", workflow_id])?];
-    Ok(EventBuilder::new(Kind::Custom(46020), "").tags(tags))
-}
-
-/// Kind 46030 — grant an approval token (with optional note).
-pub fn build_approval_grant(token: &str, note: Option<&str>) -> Result<EventBuilder, String> {
-    let tags = vec![tag(vec!["t", token])?];
-    Ok(EventBuilder::new(Kind::Custom(46030), note.unwrap_or("")).tags(tags))
-}
-
-/// Kind 46031 — deny an approval token (with optional note).
-pub fn build_approval_deny(token: &str, note: Option<&str>) -> Result<EventBuilder, String> {
-    let tags = vec![tag(vec!["t", token])?];
-    Ok(EventBuilder::new(Kind::Custom(46031), note.unwrap_or("")).tags(tags))
-}
+pub use workflows::{
+    build_approval_deny, build_approval_grant, build_workflow_definition, build_workflow_delete,
+    build_workflow_trigger,
+};
 
 // ── Transport ────────────────────────────────────────────────────────────────
 

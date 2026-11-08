@@ -17,18 +17,42 @@ export type ProjectsRepositoryScope =
   | "local"
   | "buzz"
   | "linked";
-export type ProjectsWorkItemScope = "all" | "mine";
+export type ProjectsWorkItemScope = "all" | "mine" | "assigned";
 export type ProjectsFilter =
   | "all"
   | "mine"
   | "local"
   | "projects"
   | "repositories"
+  | "channels"
   | "prs"
   | "issues"
   | "agents"
   | "users";
 export type ProjectsSort = "updated" | "created" | "name";
+
+export const REPOSITORY_ENTRY_PAGE_SIZE = 200;
+
+export function formatLastChangedAt(timestamp: number | null) {
+  if (!timestamp) return "—";
+  return new Date(timestamp * 1_000).toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+export function formatFileSize(size: number | null) {
+  if (size === null) return "—";
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+export function nextRepositoryEntryLimit(current: number, total: number) {
+  return Math.min(current + REPOSITORY_ENTRY_PAGE_SIZE, total);
+}
 
 const PROJECTS_VIEW_MODE_STORAGE_KEY = "buzz.projects.viewMode";
 const PROJECTS_FILTER_STORAGE_KEY = "buzz.projects.filter";
@@ -64,6 +88,7 @@ export function readStoredFilter(): ProjectsFilter {
       value === "local" ||
       value === "projects" ||
       value === "repositories" ||
+      value === "channels" ||
       value === "prs" ||
       value === "issues" ||
       value === "agents" ||
@@ -119,9 +144,13 @@ export function writeStoredRepositoryScope(scope: ProjectsRepositoryScope) {
   }
 }
 
-function readStoredWorkItemScope(key: string): ProjectsWorkItemScope {
+function readStoredWorkItemScope(
+  key: string,
+  allowed: ProjectsWorkItemScope[],
+): ProjectsWorkItemScope {
   try {
-    return globalThis.localStorage?.getItem(key) === "mine" ? "mine" : "all";
+    const value = globalThis.localStorage?.getItem(key);
+    return allowed.find((scope) => scope === value) ?? "all";
   } catch {
     return "all";
   }
@@ -136,7 +165,9 @@ function writeStoredWorkItemScope(key: string, scope: ProjectsWorkItemScope) {
 }
 
 export function readStoredPullRequestScope(): ProjectsWorkItemScope {
-  return readStoredWorkItemScope(PROJECTS_PULL_REQUEST_SCOPE_STORAGE_KEY);
+  return readStoredWorkItemScope(PROJECTS_PULL_REQUEST_SCOPE_STORAGE_KEY, [
+    "mine",
+  ]);
 }
 
 export function writeStoredPullRequestScope(scope: ProjectsWorkItemScope) {
@@ -144,7 +175,10 @@ export function writeStoredPullRequestScope(scope: ProjectsWorkItemScope) {
 }
 
 export function readStoredIssueScope(): ProjectsWorkItemScope {
-  return readStoredWorkItemScope(PROJECTS_ISSUE_SCOPE_STORAGE_KEY);
+  return readStoredWorkItemScope(PROJECTS_ISSUE_SCOPE_STORAGE_KEY, [
+    "mine",
+    "assigned",
+  ]);
 }
 
 export function writeStoredIssueScope(scope: ProjectsWorkItemScope) {
@@ -202,6 +236,24 @@ export function markdownToPlainText(input: string): string {
       // Inline code — keep the inner text.
       .replace(/`([^`]+)`/g, "$1")
   );
+}
+
+/** One-line list subtitle. Empty, whitespace-only, and title-duplicate bodies stay hidden. */
+export function listRowDescription(
+  value: string | null | undefined,
+  title?: string,
+): string | undefined {
+  const text = markdownToPlainText(value ?? "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (text.length === 0) return undefined;
+  if (
+    title &&
+    text.localeCompare(title.trim(), undefined, { sensitivity: "accent" }) === 0
+  ) {
+    return undefined;
+  }
+  return text;
 }
 
 export function formatCreatedDate(createdAt: number) {
@@ -324,8 +376,8 @@ export function getActivityLabel(summary: ProjectActivitySummary | undefined) {
 
   return [
     pluralize(summary.commitCount, "commit"),
-    pluralize(summary.prCount, "PR"),
-    pluralize(summary.issueCount, "issue"),
+    pluralize(summary.prCount, "review"),
+    pluralize(summary.issueCount, "task"),
   ].join(" · ");
 }
 

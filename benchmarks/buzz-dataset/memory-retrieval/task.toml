@@ -1,0 +1,25 @@
+schema_version = "1.3"
+
+[task]
+name = "buzz-native/memory-retrieval"
+description = "Answer a question using a harness-seeded cold-memory rule."
+authors = [{ name = "Buzz" }]
+keywords = ["buzz-native", "agents", "memory", "retrieval"]
+
+[metadata]
+evaluation_layer = "regression"
+difficulty = "hard"
+category = "collaboration"
+tags = ["agents", "memory", "retrieval"]
+
+[agent]
+timeout_sec = 300.0
+
+[verifier]
+timeout_sec = 30.0
+
+[environment]
+network_mode = "public"
+cpus = 1
+memory_mb = 1024
+storage_mb = 1024

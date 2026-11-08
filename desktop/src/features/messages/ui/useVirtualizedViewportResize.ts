@@ -4,15 +4,17 @@ export type VirtualizedViewportSize = { width: number; height: number };
 
 export function shouldSettleVirtualizedViewportResize({
   virtualizerAtBottom,
+  targetHeld,
   previousSize,
   nextSize,
 }: {
   virtualizerAtBottom: boolean;
-  /** Last size this observer acted on, or null before the first delivery. */
+  targetHeld: boolean;
+  /** Last size delivered to this observer, or null before the first delivery. */
   previousSize?: VirtualizedViewportSize | null;
   nextSize?: VirtualizedViewportSize | null;
 }): boolean {
-  if (!virtualizerAtBottom) return false;
+  if (!virtualizerAtBottom || targetHeld) return false;
   // No baseline yet (or no readable box): the first delivery still settles, as
   // it always has.
   if (!previousSize || !nextSize) return true;
@@ -27,13 +29,13 @@ export function shouldSettleVirtualizedViewportResize({
 export function readObservedViewportSize(
   entry: ResizeObserverEntry,
 ): VirtualizedViewportSize | null {
-  const borderBox = entry.borderBoxSize?.[0];
-  if (borderBox) {
-    return { width: borderBox.inlineSize, height: borderBox.blockSize };
-  }
+  // observe() uses the content box, which can change when a scrollbar appears.
   const rect = entry.contentRect;
-  if (!rect) return null;
-  return { width: rect.width, height: rect.height };
+  if (rect) return { width: rect.width, height: rect.height };
+  const borderBox = entry.borderBoxSize?.[0];
+  return borderBox
+    ? { width: borderBox.inlineSize, height: borderBox.blockSize }
+    : null;
 }
 
 /**
@@ -49,12 +51,16 @@ export function readObservedViewportSize(
  */
 export function createVirtualizedViewportResizeHandler({
   virtualizerAtBottomRef,
+  targetHoldRef,
   settleAtBottom,
+  reanchorHeldTarget,
   requestFrame,
   cancelFrame,
 }: {
   virtualizerAtBottomRef: { current: boolean };
+  targetHoldRef: { current: boolean };
   settleAtBottom: () => void;
+  reanchorHeldTarget?: () => void;
   requestFrame: (cb: () => void) => number;
   cancelFrame: (handle: number) => void;
 }) {
@@ -67,14 +73,20 @@ export function createVirtualizedViewportResizeHandler({
       const nextSize = entry ? readObservedViewportSize(entry) : null;
       const settle = shouldSettleVirtualizedViewportResize({
         virtualizerAtBottom: virtualizerAtBottomRef.current,
+        targetHeld: targetHoldRef.current,
         previousSize,
         nextSize,
       });
       if (nextSize) previousSize = nextSize;
-      if (!settle || frame !== null) return;
+      if (frame !== null || (!settle && !targetHoldRef.current)) return;
       frame = requestFrame(() => {
         frame = null;
-        settleAtBottom();
+        // Navigation and reader scroll can change which position we own.
+        if (targetHoldRef.current) {
+          reanchorHeldTarget?.();
+        } else if (virtualizerAtBottomRef.current) {
+          settleAtBottom();
+        }
       });
     },
     cancel() {
@@ -86,11 +98,13 @@ export function createVirtualizedViewportResizeHandler({
   };
 }
 
-/** Re-settles a bottom-pinned virtualized timeline after viewport reflow. */
+/** Re-anchors a held navigation target or bottom-pinned timeline after reflow. */
 export function useVirtualizedViewportResize(
   scrollContainerRef: React.RefObject<HTMLDivElement | null>,
   virtualizerAtBottomRef: React.RefObject<boolean>,
+  targetHoldRef: React.RefObject<boolean>,
   settleAtBottom?: () => void,
+  reanchorHeldTarget?: () => void,
 ) {
   React.useEffect(() => {
     const container = scrollContainerRef.current;
@@ -104,7 +118,9 @@ export function useVirtualizedViewportResize(
 
     const handler = createVirtualizedViewportResizeHandler({
       virtualizerAtBottomRef,
+      targetHoldRef,
       settleAtBottom,
+      reanchorHeldTarget,
       requestFrame: requestAnimationFrame,
       cancelFrame: cancelAnimationFrame,
     });
@@ -114,5 +130,11 @@ export function useVirtualizedViewportResize(
       observer.disconnect();
       handler.cancel();
     };
-  }, [scrollContainerRef, settleAtBottom, virtualizerAtBottomRef]);
+  }, [
+    reanchorHeldTarget,
+    scrollContainerRef,
+    settleAtBottom,
+    targetHoldRef,
+    virtualizerAtBottomRef,
+  ]);
 }

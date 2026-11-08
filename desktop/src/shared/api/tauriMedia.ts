@@ -17,6 +17,7 @@ export async function uploadMediaFile(
   file: File,
   progressId?: string,
   signal?: AbortSignal,
+  onDispatch?: () => void,
 ): Promise<BlobDescriptor> {
   const headers: Record<string, string> = {
     "x-buzz-filename": encodeRawIpcHeader(file.name),
@@ -28,15 +29,39 @@ export async function uploadMediaFile(
   if (signal?.aborted) throw new Error("upload cancelled");
   const bytes = new Uint8Array(await file.arrayBuffer());
   if (signal?.aborted) throw new Error("upload cancelled");
-
-  return invokeTauriRaw<BlobDescriptor>("upload_media_bytes_raw", bytes, {
-    headers,
-  });
+  onDispatch?.();
+  try {
+    return await invokeTauriRaw<BlobDescriptor>(
+      "upload_media_bytes_raw",
+      bytes,
+      {
+        headers,
+      },
+    );
+  } catch (error) {
+    if (error instanceof Error) throw error;
+    if (typeof error === "string" && error.trim()) throw new Error(error);
+    if (
+      typeof error === "object" &&
+      error !== null &&
+      "message" in error &&
+      typeof error.message === "string" &&
+      error.message.trim()
+    ) {
+      throw new Error(error.message);
+    }
+    throw new Error("Media upload failed.");
+  }
 }
 
 /** Stop the native HTTP request associated with a background media upload. */
 export async function cancelMediaUpload(progressId: string): Promise<void> {
   await invokeTauri("cancel_media_upload", { progressId });
+}
+
+/** Release the renderer's cancellation ownership after an upload settles. */
+export async function releaseMediaUpload(progressId: string): Promise<void> {
+  await invokeTauri("release_media_upload", { progressId });
 }
 
 /**
@@ -59,11 +84,45 @@ export async function pickAndUploadImage(): Promise<BlobDescriptor | null> {
  */
 export async function fetchMediaBytes(
   url: string,
+  signal?: AbortSignal,
 ): Promise<Uint8Array<ArrayBuffer>> {
+  if (signal?.aborted) {
+    throw new DOMException("Media fetch cancelled", "AbortError");
+  }
+
+  const requestId = signal ? crypto.randomUUID() : undefined;
   // The Rust command replies with `tauri::ipc::Response`, so the bytes
   // arrive as a raw ArrayBuffer rather than a JSON number array.
-  const bytes = await invokeTauri<ArrayBuffer>("fetch_media_bytes", { url });
-  return new Uint8Array(bytes);
+  const request = invokeTauri<ArrayBuffer>("fetch_media_bytes", {
+    requestId,
+    url,
+  });
+  if (!signal || !requestId) return new Uint8Array(await request);
+
+  let rejectCancellation: ((reason?: unknown) => void) | undefined;
+  const cancellation = new Promise<never>((_resolve, reject) => {
+    rejectCancellation = reject;
+  });
+  const onAbort = () => {
+    void invokeTauri("cancel_media_fetch", { requestId })
+      .catch(() => undefined)
+      .finally(() => {
+        rejectCancellation?.(
+          new DOMException("Media fetch cancelled", "AbortError"),
+        );
+      });
+  };
+  signal.addEventListener("abort", onAbort, { once: true });
+
+  try {
+    const bytes = await Promise.race([request, cancellation]);
+    return new Uint8Array(bytes);
+  } finally {
+    signal.removeEventListener("abort", onAbort);
+    await invokeTauri("release_media_fetch", { requestId }).catch(
+      () => undefined,
+    );
+  }
 }
 
 /** Read plain text without depending on embedded-webview clipboard grants. */

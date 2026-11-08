@@ -5,6 +5,8 @@ use super::*;
 
 fn agent(persona_id: &str, name: &str, display_name: Option<&str>) -> ManagedAgentRecord {
     ManagedAgentRecord {
+        session_policy: Default::default(),
+        description: None,
         pubkey: format!("pubkey-{name}"),
         name: name.to_string(),
         persona_id: Some(persona_id.to_string()),
@@ -31,6 +33,7 @@ fn agent(persona_id: &str, name: &str, display_name: Option<&str>) -> ManagedAge
         runtime_pid: None,
         backend: Default::default(),
         backend_agent_id: None,
+        provider_policy_pending: false,
         provider_binary_path: None,
         team_id: None,
         persona_team_dir: None,
@@ -54,10 +57,12 @@ fn agent(persona_id: &str, name: &str, display_name: Option<&str>) -> ManagedAge
         source_team: None,
         source_team_persona_slug: None,
         catalog_source: None,
+        team_catalog_source: None,
         definition_respond_to: None,
         definition_respond_to_allowlist: vec![],
         definition_parallelism: None,
         relay_mesh: None,
+        effort_level: None,
     }
 }
 
@@ -136,6 +141,52 @@ fn test_rename_only_affects_linked_persona() {
 }
 
 #[test]
+fn description_only_update_syncs_without_mutating_record_and_preserves_legacy_persona_avatar() {
+    let mut record = agent("persona-1", "Paul", Some("Paul"));
+    record.avatar_url = None;
+    record.slug = Some("persona-1".to_string());
+    let before = record.clone();
+    let mut persona = record
+        .clone()
+        .to_definition_view()
+        .expect("test record projects to a definition");
+    persona.id = "persona-1".to_string();
+    persona.avatar_url = Some("https://example.com/paul.png".to_string());
+
+    let update = prepare_linked_profile_update(&mut record, &persona, false, false, true);
+
+    assert!(update.profile_sync_required, "about-only edits must sync");
+    assert!(
+        !update.record_changed,
+        "about-only edits must not write the agent store"
+    );
+    assert_eq!(
+        record, before,
+        "description-only edits leave instance bytes untouched"
+    );
+    assert_eq!(
+        update.profile_avatar.as_deref(),
+        Some("https://example.com/paul.png"),
+        "complete kind:0 replacement must not clear a legacy agent avatar"
+    );
+}
+
+#[test]
+fn unchanged_identity_needs_neither_store_write_nor_profile_sync() {
+    let mut record = agent("persona-1", "Paul", Some("Paul"));
+    record.slug = Some("persona-1".to_string());
+    let persona = record
+        .clone()
+        .to_definition_view()
+        .expect("test record projects to a definition");
+
+    let update = prepare_linked_profile_update(&mut record, &persona, false, false, false);
+
+    assert!(!update.record_changed);
+    assert!(!update.profile_sync_required);
+}
+
+#[test]
 fn test_rename_renames_all_matching_instances_in_one_pass() {
     // Several instances may carry the definition name (multi-instance deploys
     // without a name pool): one call renames every match and reports each
@@ -157,4 +208,25 @@ fn test_rename_renames_all_matching_instances_in_one_pass() {
     assert_eq!(records[0].name, "Duncan Idaho");
     assert_eq!(records[1].name, "Duncan Idaho");
     assert_eq!(records[2].name, "Birch", "pool-named instance untouched");
+}
+
+#[test]
+fn missing_signer_refuses_the_whole_avatar_plan_and_key_recovery_can_retry() {
+    let mut record = agent("persona-1", "Keyless", None);
+    record.slug = Some("persona-1".into());
+    record.avatar_url = Some("https://example.org/old.png".into());
+    let mut persona = record.clone().to_definition_view().unwrap();
+    persona.id = "persona-1".into();
+    let previous = serde_json::to_value(&record).unwrap();
+    persona.avatar_url = Some("https://example.org/new.png".into());
+    let error = plan_persona_avatar_transfers(&persona, &[record.clone()], "wss://example.org")
+        .err()
+        .unwrap();
+    assert!(error.contains("Keyless") && error.contains("Restore") && error.contains("unlink"));
+    assert_eq!(serde_json::to_value(&record).unwrap(), previous);
+    let keys = nostr::Keys::generate();
+    record.private_key_nsec = keys.secret_key().to_secret_hex();
+    let plan = plan_persona_avatar_transfers(&persona, &[record], "wss://example.org").unwrap();
+    assert_eq!(plan.len(), 1);
+    assert_eq!(plan[0].2, persona.avatar_url);
 }

@@ -23,7 +23,7 @@ const EXPECTED_NAV_CENTER_Y = 23;
 // The macOS traffic lights are native chrome: with `trafficLightPosition`
 // x:16 they occupy roughly x 16–68 regardless of the app's Cmd +/- text
 // zoom. The top-chrome nav row must clear that band in fixed px, so the
-// clearance cannot shrink when the root font size scales down.
+// clearance cannot change when text scales.
 const TRAFFIC_LIGHT_RIGHT_EDGE = 72;
 
 async function spoofMacPlatform(page: import("@playwright/test").Page) {
@@ -90,6 +90,9 @@ async function seedTextScale(
   }, scale);
 }
 
+// Cmd +/- scales the real root font-size so every rem in the app zooms. The
+// top chrome below must stay fixed *despite* that, which is what these tests
+// guard.
 async function expectRootFontSize(
   page: import("@playwright/test").Page,
   fontSize: string,
@@ -143,7 +146,7 @@ test.describe("top chrome macOS traffic-light clearance under text zoom", () => 
     await installMockBridge(page);
     await page.goto("/");
 
-    // Confirm the zoomed-out scale actually applied to the root font size.
+    // Confirm the zoomed-out scale reached the root.
     await expectRootFontSize(page, "12px");
 
     expect(await firstNavButtonX(page)).toBeGreaterThanOrEqual(

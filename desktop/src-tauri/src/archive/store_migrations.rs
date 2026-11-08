@@ -4,7 +4,7 @@
 //! `archive_migrations`, so a migration that already ran is a no-op.
 //!
 //! Kept in a sibling file (not `store.rs`) to keep that file under the
-//! 1000-line gate, per the existing `metric_store.rs` / `pipeline.rs`
+//! 1500-line gate, per the existing `metric_store.rs` / `pipeline.rs`
 //! precedent.
 
 use rusqlite::{params, Connection};
@@ -17,11 +17,13 @@ use rusqlite::{params, Connection};
 ///
 /// Ordering: M2 (column additions) runs before M1 (index rebuild) so that
 /// the M1 rebuild, which calls `insert_metric_index_row`, always operates
-/// against a schema that includes the cache-read columns.
+/// against a schema that includes the cache-read columns. M4 (`archive_meta`
+/// + scope-age index) runs last; it is independent of M1–M3.
 pub(super) fn apply_schema_migrations(conn: &Connection) -> Result<(), String> {
     migrate_add_cache_read_tokens(conn)?;
     migrate_add_cache_write_and_pricing(conn)?;
-    migrate_add_harness_to_metric_index(conn)
+    migrate_add_harness_to_metric_index(conn)?;
+    migrate_add_archive_meta(conn)
 }
 
 /// M1: add `harness TEXT` column to `agent_metric_index` and rebuild index
@@ -322,4 +324,136 @@ fn migrate_add_cache_write_and_pricing(conn: &Connection) -> Result<(), String> 
         .map_err(|e| format!("migration M3: commit: {e}"))?;
 
     Ok(())
+}
+
+/// M4: create the retention config storage — `archive_meta` (k/v state holding
+/// the observer-frame retention window and the Phase-2 prune timestamp) and the
+/// `archived_at`-covering scope-age index — then seed the default observer
+/// retention window (`observer_retention_days = 30`).
+///
+/// Unlike M1–M3, M4 CANNOT use the "check marker → `BEGIN DEFERRED`" pattern.
+/// On a fresh DB two connections can open concurrently (the observer- and
+/// metric-archive seed hooks each `open_archive_db`), both read no marker, and
+/// a `DEFERRED` transaction lets both proceed on the same snapshot — the loser
+/// hits `SQLITE_BUSY_SNAPSHOT` or double-seeds. Instead M4 takes the write lock
+/// up front with `BEGIN IMMEDIATE` and **rechecks the marker inside the lock**:
+/// the race loser blocks on `busy_timeout`, then observes the winner's
+/// committed marker and no-ops. The cheap pre-lock guard keeps steady-state
+/// opens off the write lock entirely (M4 only takes it until the marker lands).
+///
+/// The table uses plain `CREATE TABLE` behind a fail-closed guard (a
+/// pre-existing `archive_meta` with no marker is an externally-created object
+/// M4 refuses to certify) and the index is dropped and recreated
+/// unconditionally; the seed is `ON CONFLICT DO NOTHING`. The marker is written
+/// last inside the same transaction, so a crash before COMMIT rolls back every
+/// object and the next open re-runs from scratch.
+fn migrate_add_archive_meta(conn: &Connection) -> Result<(), String> {
+    // Cheap pre-lock guard: steady-state opens (marker already present) never
+    // take the write lock. The marker is written last in M4's transaction, so
+    // its presence implies the full schema + seed committed.
+    if archive_meta_migration_applied(conn)? {
+        return Ok(());
+    }
+
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .map_err(|e| format!("migration M4: begin immediate: {e}"))?;
+
+    let result = migrate_add_archive_meta_locked(conn);
+
+    if result.is_ok() {
+        conn.execute_batch("COMMIT")
+            .map_err(|e| format!("migration M4: commit: {e}"))?;
+    } else {
+        // Best-effort rollback; surface the original error to the caller.
+        let _ = conn.execute_batch("ROLLBACK");
+    }
+    result
+}
+
+/// M4 body, run under the `BEGIN IMMEDIATE` write lock held by
+/// `migrate_add_archive_meta`.
+fn migrate_add_archive_meta_locked(conn: &Connection) -> Result<(), String> {
+    // In-lock recheck: a concurrent first-opener may have committed the marker
+    // while we were blocked on the write lock. If so, this connection has
+    // nothing to do — the winner already created the schema and seeded.
+    if archive_meta_migration_applied(conn)? {
+        return Ok(());
+    }
+
+    // Fail closed on an externally-created table. M4's whole body runs inside
+    // one `BEGIN IMMEDIATE` transaction with the marker written last, and
+    // SQLite DDL is transactional — a crash anywhere rolls the whole thing
+    // back. So no shipped code path can leave the table present without the
+    // marker; the only way to reach here with it already existing is a
+    // hand-edited DB or a foreign tool. Rather than certify a table we did not
+    // create, refuse: roll back with no marker and let a corrected DB re-run.
+    let exists: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'archive_meta'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .map_err(|e| format!("migration M4: probe archive_meta: {e}"))?
+        > 0;
+    if exists {
+        return Err(
+            "migration M4: archive_meta already exists without the M4 marker — \
+             refusing to certify an externally-created table"
+                .to_string(),
+        );
+    }
+
+    conn.execute_batch(super::retention::ARCHIVE_META_SCHEMA)
+        .map_err(|e| format!("migration M4: create archive_meta: {e}"))?;
+
+    // Unconditionally rebuild the scope-age index. It carries no data, so a
+    // fresh `CREATE` is always correct; dropping any index that happens to
+    // share the name costs one rebuild and needs no shape inspection.
+    conn.execute_batch(&format!(
+        "DROP INDEX IF EXISTS {}",
+        super::retention::SCOPE_AGE_INDEX_NAME
+    ))
+    .map_err(|e| format!("migration M4: drop any pre-existing scope-age index: {e}"))?;
+    conn.execute_batch(super::retention::SCOPE_AGE_INDEX_DDL)
+        .map_err(|e| format!("migration M4: create scope-age index: {e}"))?;
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+
+    // Seed the default observer-frame retention window. `ON CONFLICT DO NOTHING`
+    // in the underlying insert makes this a no-op if a value is somehow already
+    // present — an existing choice always wins.
+    conn.execute(
+        "INSERT INTO archive_meta (key, value) VALUES (?1, ?2)
+         ON CONFLICT (key) DO NOTHING",
+        params![
+            super::retention::OBSERVER_RETENTION_DAYS_KEY,
+            super::retention::DEFAULT_OBSERVER_RETENTION_DAYS.to_string()
+        ],
+    )
+    .map_err(|e| format!("migration M4: seed observer retention days: {e}"))?;
+
+    conn.execute(
+        "INSERT OR IGNORE INTO archive_migrations (name, applied_at) \
+         VALUES ('add_archive_meta', ?1)",
+        params![now],
+    )
+    .map_err(|e| format!("migration M4: record marker: {e}"))?;
+
+    Ok(())
+}
+
+/// Whether the M4 marker is present. Its presence implies the retention schema
+/// and default seed committed (the marker is written last in M4's transaction).
+fn archive_meta_migration_applied(conn: &Connection) -> Result<bool, String> {
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM archive_migrations WHERE name = 'add_archive_meta'",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(|e| format!("migration M4: guard check: {e}"))?;
+    Ok(count > 0)
 }

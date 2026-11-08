@@ -39,6 +39,7 @@ import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { cn } from "@/shared/lib/cn";
 import type { ProjectRepoDiff, ProjectRepoDiffFile } from "@/shared/api/types";
+import { BuzzLoadingState } from "@/shared/ui/BuzzLoadingState";
 import { PROJECT_DETAIL_PANEL_CLASS } from "./projectPanelStyles";
 import { ProjectPullRequestInlineCommentThread } from "./ProjectPullRequestInlineComments";
 
@@ -690,7 +691,7 @@ export function ProjectPullRequestFilesChangedPanel({
       mediaTags?: string[][],
       decision?: "request-changes",
     ) => {
-      if (!pullRequest) throw new Error("No pull request selected.");
+      if (!pullRequest) throw new Error("No review selected.");
       try {
         await postComment({
           anchor,
@@ -726,7 +727,7 @@ export function ProjectPullRequestFilesChangedPanel({
       focusedAnchor={focusedAnchor}
       headerLabel={
         pullRequest
-          ? `${pullRequest.title} · ${pullRequest.commit?.slice(0, 7) ?? "PR"}`
+          ? `${pullRequest.title} · ${pullRequest.commit?.slice(0, 7) ?? "Review"}`
           : ""
       }
       inlineComments={
@@ -748,14 +749,16 @@ export function ProjectPullRequestFilesChangedPanel({
           : undefined
       }
       isLoading={isLoading}
-      subjectLabel="pull request"
+      subjectLabel="review"
     />
   );
 }
 
 export function ProjectDiffFilesPanel({
+  className,
   error,
   diff,
+  fileTreeClassName,
   isLoading,
   embedded = false,
   focusedAnchor,
@@ -763,6 +766,10 @@ export function ProjectDiffFilesPanel({
   inlineComments,
   subjectLabel,
 }: {
+  /** Extra classes for the file-tree/diff grid container. */
+  className?: string;
+  /** Overrides the file tree's default `max-h-96` cap, e.g. for full-height layouts. */
+  fileTreeClassName?: string;
   error: unknown;
   diff: ProjectRepoDiff | null | undefined;
   isLoading: boolean;
@@ -813,18 +820,11 @@ export function ProjectDiffFilesPanel({
     }
   }, [filteredFiles, selectedPath]);
 
-  if (isLoading) {
-    return (
-      <div
-        className={cn("p-4 text-sm text-muted-foreground", outerBorderClass)}
-        data-project-detail-panel={embedded ? undefined : true}
-      >
-        Loading changed files…
-      </div>
-    );
+  if (isLoading && !diff) {
+    return <BuzzLoadingState label="Loading changed files" />;
   }
 
-  if (error) {
+  if (error && !diff) {
     const message = errorMessage(error);
     return (
       <div
@@ -863,6 +863,7 @@ export function ProjectDiffFilesPanel({
       className={cn(
         "grid min-h-0 overflow-hidden lg:grid-cols-[17rem_minmax(0,1fr)]",
         outerBorderClass,
+        className,
       )}
       data-project-detail-panel={embedded ? undefined : true}
     >
@@ -882,7 +883,12 @@ export function ProjectDiffFilesPanel({
             />
           </label>
         </div>
-        <nav className="max-h-96 overflow-auto border-border/50 border-t py-1">
+        <nav
+          className={cn(
+            "max-h-96 overflow-auto border-border/50 border-t py-1",
+            fileTreeClassName,
+          )}
+        >
           <FileTreeItems
             node={fileTree}
             onSelect={setSelectedPath}

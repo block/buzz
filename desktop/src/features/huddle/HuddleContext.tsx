@@ -11,8 +11,12 @@ import {
   useHuddlePttState,
 } from "./lib/useHuddlePttState";
 import { useHuddleSpeakerActivity } from "./lib/useHuddleSpeakerActivity";
+import { useMicLevelAnalyser } from "./lib/useMicLevelAnalyser";
 import { useTtsSubscription } from "./lib/useTtsSubscription";
-import type { HuddleContextValue } from "./HuddleContext.types";
+import type {
+  HuddleContextValue,
+  HuddleLevelsValue,
+} from "./HuddleContext.types";
 
 /**
  * Huddle lifecycle (React context):
@@ -47,22 +51,8 @@ const HUDDLE_AUDIO_COMMAND_EVENT = "huddle-audio-command";
 const HUDDLE_AUDIO_STATE_EVENT = "huddle-audio-state";
 const HUDDLE_AUDIO_LEVEL_EVENT = "huddle-audio-level";
 
-const MIC_ANALYSER_UPDATE_INTERVAL_MS = 33;
-const MIC_INITIAL_NOISE_FLOOR = 0.01;
-const MIC_VOICE_GATE_ON_RMS = 0.018;
-const MIC_VOICE_GATE_OFF_RMS = 0.012;
-const MIC_VOICE_GATE_MARGIN_RMS = 0.012;
-const MIC_LEVEL_ACTIVE_RANGE_RMS = 0.11;
-const MIC_MIN_ACTIVE_LEVEL = 0.18;
-const MIC_LEVEL_ATTACK = 0.58;
-const MIC_ACTIVE_NOISE_FLOOR_RISE = 0.006;
-
 function isRedundantHuddlePhaseError(message: string): boolean {
   return /^cannot (?:start|join) huddle: already in phase /i.test(message);
-}
-
-function clamp01(value: number): number {
-  return Math.min(1, Math.max(0, value));
 }
 
 function interruptAgentSpeech(agentPubkey: string) {
@@ -70,6 +60,7 @@ function interruptAgentSpeech(agentPubkey: string) {
 }
 
 const HuddleContext = React.createContext<HuddleContextValue | null>(null);
+const HuddleLevelsContext = React.createContext<HuddleLevelsValue | null>(null);
 
 export function HuddleProvider({
   children,
@@ -110,7 +101,6 @@ export function HuddleProvider({
   const [mirroredAudioState, setMirroredAudioState] =
     React.useState<HuddleAudioMirrorState | null>(null);
   const [mirroredMicLevel, setMirroredMicLevel] = React.useState(0);
-  const [micLevel, setMicLevel] = React.useState(0);
   const {
     getVoiceInputMode,
     pttActive,
@@ -238,6 +228,10 @@ export function HuddleProvider({
     async (mode: VoiceInputMode) => {
       await invoke("set_voice_input_mode", { mode });
       setVoiceInputModeState(mode);
+      // Re-sync the PTT-only STT gate with the visible mute state (best-effort).
+      void invoke("set_huddle_manual_mic_unmuted", {
+        enabled: !isMutedRef.current,
+      }).catch(() => {});
       if (ownsAudioSession) {
         workletRef.current?.setMode(mode);
       } else {
@@ -640,8 +634,10 @@ export function HuddleProvider({
       tokenRef.current += 1;
       const myToken = tokenRef.current;
 
-      isMutedRef.current = false;
-      setIsMuted(false);
+      // PTT starts muted (must match the Rust manual_mic_unmuted default).
+      const startMuted = getVoiceInputMode() === "push_to_talk";
+      isMutedRef.current = startMuted;
+      setIsMuted(startMuted);
       setHuddleError(null);
       setIsStarting(true);
       onHuddleStartPendingChange?.(true);
@@ -691,6 +687,7 @@ export function HuddleProvider({
       cleanupFailedStart,
       cleanupSupersededStart,
       connectAndSetupMedia,
+      getVoiceInputMode,
       onHuddleStartPendingChange,
       onHuddleStarted,
     ],
@@ -715,8 +712,9 @@ export function HuddleProvider({
       busyRef.current = true;
       tokenRef.current += 1;
       const myToken = tokenRef.current;
-      isMutedRef.current = false;
-      setIsMuted(false);
+      const startMuted = getVoiceInputMode() === "push_to_talk";
+      isMutedRef.current = startMuted;
+      setIsMuted(startMuted);
       setHuddleError(null);
       setIsStarting(true);
 
@@ -766,6 +764,7 @@ export function HuddleProvider({
       cleanupFailedStart,
       cleanupSupersededStart,
       connectAndSetupMedia,
+      getVoiceInputMode,
       onHuddleStarted,
     ],
   );
@@ -781,77 +780,7 @@ export function HuddleProvider({
   usePipelineHotstart(ephemeralChannelId);
 
   // Mic level analyser — drives the voice activity indicator
-  React.useEffect(() => {
-    if (!localAudioTrack || !micConnected) {
-      setMicLevel(0);
-      return;
-    }
-
-    const ctx = new AudioContext();
-    const analyser = ctx.createAnalyser();
-    analyser.fftSize = 512;
-    const source = ctx.createMediaStreamSource(
-      new MediaStream([localAudioTrack]),
-    );
-    source.connect(analyser);
-    const buf = new Float32Array(analyser.fftSize);
-
-    let raf = 0;
-    let lastUpdate = 0;
-    let voiceActive = false;
-    let noiseFloor = MIC_INITIAL_NOISE_FLOOR;
-    let smoothedLevel = 0;
-    function tick(now: number) {
-      raf = requestAnimationFrame(tick);
-      if (now - lastUpdate < MIC_ANALYSER_UPDATE_INTERVAL_MS) return;
-      lastUpdate = now;
-      analyser.getFloatTimeDomainData(buf);
-
-      let sumSquares = 0;
-      for (let i = 0; i < buf.length; i += 1) {
-        sumSquares += buf[i] * buf[i];
-      }
-
-      const rms = Math.sqrt(sumSquares / buf.length);
-      const activeThreshold = Math.max(
-        MIC_VOICE_GATE_ON_RMS,
-        noiseFloor + MIC_VOICE_GATE_MARGIN_RMS,
-      );
-      const idleThreshold = Math.max(
-        MIC_VOICE_GATE_OFF_RMS,
-        noiseFloor + MIC_VOICE_GATE_MARGIN_RMS * 0.55,
-      );
-      voiceActive = voiceActive ? rms > idleThreshold : rms > activeThreshold;
-
-      const floorRate =
-        rms < noiseFloor
-          ? 0.18
-          : voiceActive
-            ? MIC_ACTIVE_NOISE_FLOOR_RISE
-            : 0.025;
-      noiseFloor += (rms - noiseFloor) * floorRate;
-
-      if (!voiceActive) {
-        smoothedLevel = 0;
-        setMicLevel(0);
-        return;
-      }
-
-      const normalized = clamp01(
-        (rms - noiseFloor) / MIC_LEVEL_ACTIVE_RANGE_RMS,
-      );
-      const targetLevel = Math.max(normalized, MIC_MIN_ACTIVE_LEVEL);
-      smoothedLevel += (targetLevel - smoothedLevel) * MIC_LEVEL_ATTACK;
-      setMicLevel(smoothedLevel);
-    }
-    raf = requestAnimationFrame(tick);
-
-    return () => {
-      cancelAnimationFrame(raf);
-      source.disconnect();
-      void ctx.close();
-    };
-  }, [localAudioTrack, micConnected]);
+  const micLevel = useMicLevelAnalyser(localAudioTrack, micConnected);
 
   React.useEffect(() => {
     if (ownsAudioSession) {
@@ -941,42 +870,87 @@ export function HuddleProvider({
     };
   }, [ownsAudioSession]);
 
+  // High-frequency (20-30 Hz) audio levels live in their own context so their
+  // churn re-renders only the meter components, not every useHuddle consumer.
+  const levelsValue = React.useMemo<HuddleLevelsValue>(
+    () => ({
+      micLevel: ownsAudioSession ? micLevel : mirroredMicLevel,
+      activeSpeakers,
+      speakerLevels,
+    }),
+    [
+      activeSpeakers,
+      micLevel,
+      mirroredMicLevel,
+      ownsAudioSession,
+      speakerLevels,
+    ],
+  );
+
+  const effectiveMicConnected = ownsAudioSession
+    ? micConnected
+    : (mirroredAudioState?.micConnected ?? false);
+  const contextValue = React.useMemo<HuddleContextValue>(
+    () => ({
+      localAudioTrack,
+      isStarting,
+      huddleError,
+      clearHuddleError,
+      micConnected: effectiveMicConnected,
+      isMuted: effectiveIsMuted,
+      toggleMute,
+      interruptAgentSpeech,
+      pttActive,
+      voiceInputMode: effectiveVoiceInputMode,
+      setVoiceInputMode,
+      audioDevices,
+      selectedDeviceId,
+      setSelectedDeviceId,
+      micGain,
+      setMicGain,
+      outputDevices,
+      selectedOutputDevice,
+      setSelectedOutputDevice,
+      activeEphemeralChannelId: ephemeralChannelId,
+      showHuddleInMainApp,
+      viewHuddleChannel,
+      startHuddle,
+      joinHuddle,
+      leaveHuddle,
+    }),
+    [
+      audioDevices,
+      clearHuddleError,
+      effectiveIsMuted,
+      effectiveMicConnected,
+      effectiveVoiceInputMode,
+      ephemeralChannelId,
+      huddleError,
+      isStarting,
+      joinHuddle,
+      leaveHuddle,
+      localAudioTrack,
+      micGain,
+      outputDevices,
+      pttActive,
+      selectedDeviceId,
+      selectedOutputDevice,
+      setMicGain,
+      setSelectedDeviceId,
+      setSelectedOutputDevice,
+      setVoiceInputMode,
+      showHuddleInMainApp,
+      startHuddle,
+      toggleMute,
+      viewHuddleChannel,
+    ],
+  );
+
   return (
-    <HuddleContext.Provider
-      value={{
-        localAudioTrack,
-        isStarting,
-        huddleError,
-        clearHuddleError,
-        micConnected: ownsAudioSession
-          ? micConnected
-          : (mirroredAudioState?.micConnected ?? false),
-        isMuted: effectiveIsMuted,
-        toggleMute,
-        interruptAgentSpeech,
-        micLevel: ownsAudioSession ? micLevel : mirroredMicLevel,
-        pttActive,
-        voiceInputMode: effectiveVoiceInputMode,
-        setVoiceInputMode,
-        activeSpeakers,
-        speakerLevels,
-        audioDevices,
-        selectedDeviceId,
-        setSelectedDeviceId,
-        micGain,
-        setMicGain,
-        outputDevices,
-        selectedOutputDevice,
-        setSelectedOutputDevice,
-        activeEphemeralChannelId: ephemeralChannelId,
-        showHuddleInMainApp,
-        viewHuddleChannel,
-        startHuddle,
-        joinHuddle,
-        leaveHuddle,
-      }}
-    >
-      {children}
+    <HuddleContext.Provider value={contextValue}>
+      <HuddleLevelsContext.Provider value={levelsValue}>
+        {children}
+      </HuddleLevelsContext.Provider>
     </HuddleContext.Provider>
   );
 }
@@ -985,6 +959,19 @@ export function useHuddle(): HuddleContextValue {
   const ctx = React.useContext(HuddleContext);
   if (!ctx) {
     throw new Error("useHuddle must be used within a HuddleProvider");
+  }
+  return ctx;
+}
+
+/**
+ * High-frequency (20-30 Hz) mic/speaker levels. Consume only from components
+ * that render audio meters; everything else should use {@link useHuddle} so it
+ * is insulated from level churn.
+ */
+export function useHuddleLevels(): HuddleLevelsValue {
+  const ctx = React.useContext(HuddleLevelsContext);
+  if (!ctx) {
+    throw new Error("useHuddleLevels must be used within a HuddleProvider");
   }
   return ctx;
 }

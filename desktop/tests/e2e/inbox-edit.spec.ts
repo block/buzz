@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test";
 
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
+import { clearComposer } from "../helpers/composer";
 
 const GENERAL_CHANNEL_ID = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
 const CURRENT_PUBKEY = "deadbeef".repeat(8);
@@ -158,8 +159,7 @@ async function submitEmptyEdit(
   await expect(detail.getByTestId("edit-target")).toBeVisible();
   const input = detail.getByTestId("message-input");
   await expect(input).not.toBeEmpty();
-  await input.fill("");
-  await expect(input).toBeEmpty();
+  await clearComposer(input);
   await page.keyboard.press("Enter");
 }
 
@@ -265,9 +265,9 @@ test("editing an immediate attachment reply preserves its media tags", async ({
     .locator('[data-testid="home-inbox-context-message"]')
     .filter({ hasText: "Attachment reply before editing." });
   await expect(reply).toBeVisible();
-  await expect(
-    reply.getByRole("link", { name: ATTACHMENT_FILENAME }),
-  ).toHaveAttribute("href", ATTACHMENT_URL);
+  await expect(reply.getByTestId("file-card")).toContainText(
+    ATTACHMENT_FILENAME,
+  );
   const replyId = await reply.getAttribute("data-message-id");
   expect(replyId).not.toBeNull();
   const replyRow = detail.locator(`[data-message-id="${replyId}"]`);
@@ -317,12 +317,12 @@ test("editing an immediate attachment reply preserves its media tags", async ({
   expect(releasedEchoes).toBe(1);
 
   await expect(replyRow).toContainText("Attachment reply after editing.");
-  await expect(
-    replyRow.getByRole("link", { name: ATTACHMENT_FILENAME }),
-  ).toHaveAttribute("href", ATTACHMENT_URL);
+  await expect(replyRow.getByTestId("file-card")).toContainText(
+    ATTACHMENT_FILENAME,
+  );
 });
 
-test("Inbox offers a working Edit action only for manageable messages", async ({
+test("Inbox offers Edit and Delete actions only for manageable messages", async ({
   page,
 }) => {
   await installMockBridge(page);
@@ -398,6 +398,9 @@ test("Inbox offers a working Edit action only for manageable messages", async ({
   await expect(
     page.getByTestId(`edit-message-${OWN_MESSAGE_ID}`),
   ).toBeVisible();
+  await expect(
+    page.getByTestId(`delete-message-${OWN_MESSAGE_ID}`),
+  ).toBeVisible();
   await waitForAnimations(page);
   await page.screenshot({ path: `${SHOTS}/01-edit-action.png` });
   await page.getByTestId(`edit-message-${OWN_MESSAGE_ID}`).click();
@@ -423,6 +426,9 @@ test("Inbox offers a working Edit action only for manageable messages", async ({
   await expect(
     page.getByTestId(`edit-message-${FOREIGN_MESSAGE_ID}`),
   ).toHaveCount(0);
+  await expect(
+    page.getByTestId(`delete-message-${FOREIGN_MESSAGE_ID}`),
+  ).toHaveCount(0);
   await page.keyboard.press("Escape");
 
   await page.evaluate(async (channelId) => {
@@ -442,6 +448,77 @@ test("Inbox offers a working Edit action only for manageable messages", async ({
   await openMoreActions(page, OWN_MESSAGE_ID);
   await expect(page.getByTestId(`edit-message-${OWN_MESSAGE_ID}`)).toHaveCount(
     0,
+  );
+  await expect(
+    page.getByTestId(`delete-message-${OWN_MESSAGE_ID}`),
+  ).toHaveCount(0);
+});
+
+test("cancelling explicit Inbox deletion preserves the message and selection", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await page.goto("/");
+  await expect(page.getByTestId("home-inbox-list")).toBeVisible();
+  const { detail, rootRow } = await seedEmptyDeleteThread(page);
+  const selectedReplyRow = detail.locator(
+    `[data-message-id="${EMPTY_DELETE_REPLY_ID}"]`,
+  );
+
+  await openMoreActions(page, EMPTY_DELETE_ROOT_ID);
+  await page.getByTestId(`delete-message-${EMPTY_DELETE_ROOT_ID}`).click();
+  const dialog = page.getByRole("alertdialog");
+  await expect(dialog).toContainText("Delete message?");
+  await dialog.getByRole("button", { name: "Cancel" }).click();
+
+  await expect(dialog).toBeHidden();
+  await expect(rootRow).toContainText(EMPTY_DELETE_ROOT_CONTENT);
+  await expect(selectedReplyRow).toContainText(EMPTY_DELETE_REPLY_CONTENT);
+  await expect(selectedReplyRow).toHaveAttribute(
+    "data-testid",
+    "home-inbox-selected-message",
+  );
+  expect(
+    await page.evaluate(
+      () =>
+        ((window as MockWindow).__BUZZ_E2E_COMMAND_PAYLOADS__ ?? []).filter(
+          (entry) => entry.command === "delete_message",
+        ).length,
+    ),
+  ).toBe(0);
+});
+
+test("explicit Inbox deletion targets the chosen non-selected message", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await page.goto("/");
+  await expect(page.getByTestId("home-inbox-list")).toBeVisible();
+  const { detail, rootRow } = await seedEmptyDeleteThread(page);
+  const selectedReplyRow = detail.locator(
+    `[data-message-id="${EMPTY_DELETE_REPLY_ID}"]`,
+  );
+
+  await openMoreActions(page, EMPTY_DELETE_ROOT_ID);
+  await page.getByTestId(`delete-message-${EMPTY_DELETE_ROOT_ID}`).click();
+  const dialog = page.getByRole("alertdialog");
+  await expect(dialog).toContainText("Delete message?");
+  await dialog.getByRole("button", { name: "Delete" }).click();
+
+  await expect(dialog).toBeHidden();
+  await expect(rootRow).toBeHidden();
+  await expect(selectedReplyRow).toContainText(EMPTY_DELETE_REPLY_CONTENT);
+  await expect(selectedReplyRow).toHaveAttribute(
+    "data-testid",
+    "home-inbox-selected-message",
+  );
+  const deletePayload = await page.evaluate(() => {
+    const payloads = (window as MockWindow).__BUZZ_E2E_COMMAND_PAYLOADS__ ?? [];
+    return payloads.findLast((entry) => entry.command === "delete_message")
+      ?.payload;
+  });
+  expect(deletePayload).toEqual(
+    expect.objectContaining({ eventId: EMPTY_DELETE_ROOT_ID }),
   );
 });
 

@@ -20,7 +20,6 @@ export function UpdateChecker() {
         {status.state === "idle" && (
           <SettingsOptionRow>
             <div className="min-w-0">
-              <p className="text-sm font-medium">Update status</p>
               <p
                 className="text-sm font-normal text-muted-foreground/70"
                 data-settings-subcopy
@@ -37,7 +36,6 @@ export function UpdateChecker() {
         {status.state === "checking" && (
           <SettingsOptionRow>
             <div className="min-w-0">
-              <p className="text-sm font-medium">Update status</p>
               <p
                 className="text-sm font-normal text-muted-foreground/70"
                 data-settings-subcopy
@@ -51,7 +49,6 @@ export function UpdateChecker() {
         {status.state === "up-to-date" && (
           <SettingsOptionRow>
             <div className="min-w-0">
-              <p className="text-sm font-medium">Update status</p>
               <p
                 className="text-sm font-normal text-muted-foreground/70"
                 data-settings-subcopy
@@ -68,7 +65,6 @@ export function UpdateChecker() {
         {status.state === "unavailable" && (
           <SettingsOptionRow>
             <div className="min-w-0">
-              <p className="text-sm font-medium">Update status</p>
               <p
                 className="text-sm font-normal text-muted-foreground/70"
                 data-settings-subcopy
@@ -107,7 +103,6 @@ export function UpdateChecker() {
         {status.state === "available" && (
           <SettingsOptionRow>
             <div className="min-w-0">
-              <p className="text-sm font-medium">Update status</p>
               <p
                 className="text-sm font-normal text-muted-foreground/70"
                 data-settings-subcopy
@@ -121,7 +116,6 @@ export function UpdateChecker() {
         {status.state === "downloading" && (
           <SettingsOptionRow>
             <div className="min-w-0">
-              <p className="text-sm font-medium">Update status</p>
               <p
                 className="text-sm font-normal text-muted-foreground/70"
                 data-settings-subcopy
@@ -135,7 +129,6 @@ export function UpdateChecker() {
         {status.state === "installing" && (
           <SettingsOptionRow>
             <div className="min-w-0">
-              <p className="text-sm font-medium">Update status</p>
               <p
                 className="text-sm font-normal text-muted-foreground/70"
                 data-settings-subcopy
@@ -149,7 +142,6 @@ export function UpdateChecker() {
         {status.state === "ready" && (
           <SettingsOptionRow>
             <div className="min-w-0">
-              <p className="text-sm font-medium">Update status</p>
               <p
                 className="text-sm font-normal text-muted-foreground/70"
                 data-settings-subcopy
@@ -166,7 +158,6 @@ export function UpdateChecker() {
         {status.state === "error" && (
           <SettingsOptionRow>
             <div className="min-w-0">
-              <p className="text-sm font-medium">Update status</p>
               <p className="text-sm font-normal text-destructive">
                 Update failed: {status.message}
               </p>

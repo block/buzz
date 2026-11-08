@@ -185,12 +185,15 @@ export function useCreateWorkflowMutation(channelId: string) {
   });
 }
 
-export function useUpdateWorkflowMutation(workflowId: string) {
+export function useUpdateWorkflowMutation(
+  workflowId: string,
+  workflowRevision: string,
+) {
   const queryClient = useQueryClient();
 
   return useMutation({
     mutationFn: (yamlDefinition: string) =>
-      updateWorkflow(workflowId, yamlDefinition),
+      updateWorkflow(workflowId, yamlDefinition, workflowRevision),
     onSuccess: () => {
       void queryClient.invalidateQueries({
         queryKey: workflowQueryKey(workflowId),

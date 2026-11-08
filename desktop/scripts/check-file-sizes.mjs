@@ -1,61 +1,21 @@
+import { realpathSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { runFileSizeCheck } from "../../scripts/check-file-sizes-core.mjs";
+import { rules } from "./file-size-policy.mjs";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const projectRoot = path.resolve(__dirname, "..");
+const scriptPath = realpathSync(fileURLToPath(import.meta.url));
+const projectRoot = path.resolve(path.dirname(scriptPath), "..");
 
-const MAX_LINES = 1000;
-
-const rules = [
-  { root: "src-tauri/src", extensions: new Set([".rs"]), maxLines: MAX_LINES },
-  // Workspace member crates. Without this the ratchet's only Rust root is
-  // `src-tauri/src`, and a crate under `src-tauri/crates/` is born outside the
-  // repo's one size discipline -- silently, since the check still exits 0.
-  {
-    root: "src-tauri/crates",
-    extensions: new Set([".rs"]),
-    maxLines: MAX_LINES,
-  },
-  {
-    root: "src/app",
-    extensions: new Set([".ts", ".tsx"]),
-    maxLines: MAX_LINES,
-  },
-  {
-    root: "src/features",
-    extensions: new Set([".ts", ".tsx"]),
-    maxLines: MAX_LINES,
-  },
-  {
-    root: "src/shared/api",
-    extensions: new Set([".ts", ".tsx"]),
-    maxLines: MAX_LINES,
-  },
-  {
-    root: "src/shared/context",
-    extensions: new Set([".ts", ".tsx"]),
-    maxLines: MAX_LINES,
-  },
-  {
-    root: "src/shared/lib",
-    extensions: new Set([".ts", ".tsx"]),
-    maxLines: MAX_LINES,
-  },
-  {
-    root: "src/shared/ui",
-    extensions: new Set([".ts", ".tsx"]),
-    maxLines: MAX_LINES,
-  },
-  {
-    root: "src/shared/styles",
-    extensions: new Set([".css"]),
-    maxLines: MAX_LINES,
-  },
-];
-
-await runFileSizeCheck({
+export const policy = {
   projectRoot,
   rules,
   label: "Desktop",
-});
+};
+
+if (
+  process.argv[1] &&
+  realpathSync(path.resolve(process.argv[1])) === scriptPath
+) {
+  await runFileSizeCheck(policy);
+}

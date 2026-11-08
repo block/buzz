@@ -1,35 +1,62 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
+  buildCommitLink,
   buildIssueLink,
+  buildProjectLink,
   buildPullRequestLink,
   buildRepoLink,
   entityLinkProjectRouteId,
+  ENTITY_LINK_TABS,
   isEntityLink,
+  isLinkableCoordinate,
   parseEntityLink,
 } from "./entityLink.ts";
 
-const OWNER =
-  "71d67180ba17e749ee825fc8819c9c6ee7003617e1c126504f9b658070ab9224";
-const EVENT_ID =
-  "c3b589fa5713ba25bad6dc095e2de00a4ac8f50050fdea00fc6444e603be1dd1";
+const GOLDEN = JSON.parse(
+  readFileSync(
+    new URL("../../../../test-fixtures/entity-links.json", import.meta.url),
+    "utf8",
+  ),
+);
+const OWNER = GOLDEN.owner;
+const EVENT_ID = GOLDEN.eventId;
 
-// Golden format strings — must match the Rust builder in
-// crates/buzz-cli/src/links.rs (`golden_format_matches_desktop` test).
+// This fixture is also consumed by buzz-cli and the Tauri deep-link validator.
 test("builders emit the canonical cross-language link format", () => {
   assert.equal(
-    buildPullRequestLink({ id: EVENT_ID, owner: OWNER, dtag: "buzz-world" }),
-    `buzz://pr?id=${EVENT_ID}&owner=${OWNER}&d=buzz-world`,
+    buildPullRequestLink({ id: EVENT_ID, owner: OWNER, dtag: GOLDEN.dtag }),
+    GOLDEN.links.pullRequest,
   );
   assert.equal(
-    buildIssueLink({ id: EVENT_ID, owner: OWNER, dtag: "buzz-world" }),
-    `buzz://issue?id=${EVENT_ID}&owner=${OWNER}&d=buzz-world`,
+    buildIssueLink({ id: EVENT_ID, owner: OWNER, dtag: GOLDEN.dtag }),
+    GOLDEN.links.issue,
   );
   assert.equal(
-    buildRepoLink({ owner: OWNER, dtag: "buzz-world" }),
-    `buzz://repo?owner=${OWNER}&d=buzz-world`,
+    buildRepoLink({ owner: OWNER, dtag: GOLDEN.dtag }),
+    GOLDEN.links.repository,
   );
+  assert.equal(
+    buildProjectLink({ owner: OWNER, dtag: GOLDEN.dtag }),
+    GOLDEN.links.project,
+  );
+  assert.equal(
+    buildCommitLink({
+      commitHash: EVENT_ID,
+      owner: OWNER,
+      dtag: GOLDEN.dtag,
+    }),
+    GOLDEN.links.commit,
+  );
+  assert.deepEqual(ENTITY_LINK_TABS, GOLDEN.tabs);
+  for (const dtag of GOLDEN.validDtags) {
+    assert.equal(isLinkableCoordinate(OWNER, dtag), true);
+  }
+  for (const dtag of GOLDEN.invalidDtags) {
+    assert.equal(isLinkableCoordinate(OWNER, dtag), false);
+  }
 });
 
 test("builders reject invalid identifiers", () => {
@@ -59,6 +86,40 @@ test("parseEntityLink round-trips built links", () => {
     ok: true,
     value: { type: "repo", owner: OWNER, dtag: "buzz-world" },
   });
+
+  const projectLink = buildProjectLink({ owner: OWNER, dtag: "buzz-world" });
+  assert.deepEqual(parseEntityLink(projectLink), {
+    ok: true,
+    value: { type: "project", owner: OWNER, dtag: "buzz-world" },
+  });
+});
+
+test("commit links select an exact repository commit", () => {
+  const link = buildCommitLink({
+    commitHash: EVENT_ID,
+    owner: OWNER,
+    dtag: "buzz-world",
+  });
+  assert.equal(
+    link,
+    `buzz://repo?owner=${OWNER}&d=buzz-world&tab=commits&commit=${EVENT_ID}`,
+  );
+  assert.deepEqual(parseEntityLink(link), {
+    ok: true,
+    value: {
+      type: "repo",
+      owner: OWNER,
+      dtag: "buzz-world",
+      tab: "commits",
+      commitHash: EVENT_ID,
+    },
+  });
+  assert.deepEqual(
+    parseEntityLink(
+      `buzz://repo?owner=${OWNER}&d=buzz-world&tab=files&commit=${EVENT_ID}`,
+    ),
+    { ok: false, reason: "invalid-commit" },
+  );
 });
 
 test("parseEntityLink lowercase-normalizes hex identifiers", () => {
@@ -91,6 +152,7 @@ test("isEntityLink matches entity hosts and excludes message links", () => {
   assert.equal(isEntityLink(`buzz://pr?id=${EVENT_ID}`), true);
   assert.equal(isEntityLink(`buzz://issue?id=${EVENT_ID}`), true);
   assert.equal(isEntityLink(`buzz://repo?owner=${OWNER}`), true);
+  assert.equal(isEntityLink(`buzz://project?owner=${OWNER}`), true);
   assert.equal(isEntityLink("buzz://message?channel=x&id=y"), false);
   assert.equal(isEntityLink("https://github.com/block/buzz"), false);
   assert.equal(isEntityLink(null), false);
@@ -105,6 +167,70 @@ test("entityLinkProjectRouteId emits the canonical 30617 coordinate route id", (
     entityLinkProjectRouteId(parsed.value),
     `30617:${OWNER}:buzz-world`,
   );
+});
+
+test("entityLinkProjectRouteId routes project links to the 30621 coordinate", () => {
+  const parsed = parseEntityLink(
+    buildProjectLink({ owner: OWNER, dtag: "buzz-world" }),
+  );
+  assert.ok(parsed.ok);
+  assert.equal(
+    entityLinkProjectRouteId(parsed.value),
+    `30621:${OWNER}:buzz-world`,
+  );
+});
+
+test("coordinate links carry an optional workspace tab", () => {
+  const link = buildProjectLink({
+    owner: OWNER,
+    dtag: "buzz-world",
+    tab: "prs",
+  });
+  assert.equal(link, `buzz://project?owner=${OWNER}&d=buzz-world&tab=prs`);
+  assert.deepEqual(parseEntityLink(link), {
+    ok: true,
+    value: { type: "project", owner: OWNER, dtag: "buzz-world", tab: "prs" },
+  });
+
+  const repoLink = buildRepoLink({
+    owner: OWNER,
+    dtag: "buzz-world",
+    tab: "issues",
+  });
+  assert.deepEqual(parseEntityLink(repoLink), {
+    ok: true,
+    value: { type: "repo", owner: OWNER, dtag: "buzz-world", tab: "issues" },
+  });
+
+  // The default overview has no tab spelling; unknown values are rejected
+  // rather than silently dropped, and event links accept no tab at all.
+  assert.throws(() =>
+    buildRepoLink({ owner: OWNER, dtag: "buzz-world", tab: "overview" }),
+  );
+  assert.deepEqual(
+    parseEntityLink(`buzz://repo?owner=${OWNER}&d=buzz-world&tab=overview`),
+    { ok: false, reason: "invalid-tab" },
+  );
+  assert.deepEqual(
+    parseEntityLink(`buzz://repo?owner=${OWNER}&d=buzz-world&tab=`),
+    { ok: false, reason: "invalid-tab" },
+  );
+  assert.deepEqual(
+    parseEntityLink(
+      `buzz://pr?id=${EVENT_ID}&owner=${OWNER}&d=buzz-world&tab=prs`,
+    ),
+    { ok: false, reason: "unknown-param" },
+  );
+});
+
+test("isLinkableCoordinate gates coordinates the link format cannot express", () => {
+  assert.equal(isLinkableCoordinate(OWNER, "buzz-world"), true);
+  assert.equal(isLinkableCoordinate(OWNER, "a".repeat(64)), true);
+  // Addressable d-tags allow far more than the link charset does.
+  assert.equal(isLinkableCoordinate(OWNER, "a".repeat(65)), false);
+  assert.equal(isLinkableCoordinate(OWNER, "has space"), false);
+  assert.equal(isLinkableCoordinate(OWNER, ".hidden"), false);
+  assert.equal(isLinkableCoordinate("not-a-pubkey", "buzz-world"), false);
 });
 
 test("parseEntityLink rejects noncanonical extras", () => {

@@ -1,27 +1,24 @@
 import {
   BookOpen,
-  CircleAlert,
-  CloudOff,
   DownloadCloud,
   ExternalLink,
-  GitBranch,
   Globe,
   Loader2,
-  LockKeyhole,
-  RefreshCw,
+  MessageCircle,
 } from "lucide-react";
 
-import { useAppNavigation } from "@/app/navigation/useAppNavigation";
-import { useChannelsQuery } from "@/features/channels/hooks";
 import type { ProjectRepoFile } from "@/features/projects/hooks";
+import { projectExternalRefUrl } from "@/features/projects/lib/projectExternalUrl";
 import type { ProjectRepoUnavailableReason } from "@/features/projects/lib/projectRepoAvailability";
+import { formatLastChangedAt } from "@/features/projects/lib/projectsViewHelpers";
 import { Button } from "@/shared/ui/button";
+import { BuzzLoadingState } from "@/shared/ui/BuzzLoadingState";
 import { Markdown, SyntaxHighlightedCode } from "@/shared/ui/markdown";
+import { baseName, languageForPath } from "./ProjectRepositoryPanel";
 import {
-  baseName,
-  formatLastChangedAt,
-  languageForPath,
-} from "./ProjectRepositoryPanel";
+  type RepositoryFileContentSource,
+  useRepositoryFileContent,
+} from "./useRepositoryFileContent";
 import {
   type RepoSourceHeaderControls,
   RepoSourceDropdown,
@@ -29,6 +26,8 @@ import {
   RepositoryBranchDropdown,
 } from "./ProjectRepositorySource";
 import { GitHubMark } from "./GitHubMark";
+import { ProjectRepositoryUnavailableState } from "./ProjectRepositoryUnavailableState";
+import { ProjectPanelState } from "./ProjectPanelState";
 
 export function findReadmeFile(files: ProjectRepoFile[]) {
   const readmes = files.filter((file) =>
@@ -92,70 +91,47 @@ function normalizeReadmeMarkdown(content: string) {
     .trim();
 }
 
-/**
- * Description for the access-restricted state. Links to the bound channel
- * when it is visible to the viewer (public channels appear in the channel
- * list even before joining); private channels fall back to generic copy.
- */
-function AccessRestrictedDescription({
-  accessChannelId,
-}: {
-  accessChannelId: string;
-}) {
-  const { goChannel } = useAppNavigation();
-  const channelsQuery = useChannelsQuery();
-  const channel = channelsQuery.data?.find(
-    (candidate) => candidate.id === accessChannelId,
-  );
-
-  if (!channel) {
-    return (
-      <>
-        Repository access is granted through a channel you can’t see. Ask the
-        repository owner for an invite.
-      </>
-    );
-  }
-
-  return (
-    <>
-      Repository access is granted through{" "}
-      <button
-        aria-label={`Open repository access channel #${channel.name}`}
-        className="font-medium text-foreground underline-offset-2 hover:underline"
-        onClick={() => void goChannel(channel.id)}
-        type="button"
-      >
-        #{channel.name}
-      </button>
-      , and you’re not a member. Join the channel or ask the repository owner
-      for an invite.
-    </>
-  );
-}
-
 export function ReadmePanel({
   accessChannelId,
   file,
+  fileContentSource,
   gitDataState,
   externalHost,
   externalUrl,
+  hideHeader,
+  ownerAvatarUrl,
+  ownerIsAgent,
+  ownerName,
   sourceControls,
   unavailableReason,
 }: {
   /** `buzz-channel` binding of the repository, for access-restricted copy. */
   accessChannelId?: string | null;
   file: ProjectRepoFile | null;
+  fileContentSource?: RepositoryFileContentSource;
   gitDataState: "checking" | "available" | "empty" | "unavailable";
   externalHost?: string;
   externalUrl?: string | null;
+  /**
+   * Skip the header rows entirely — the workspace layout renders the source
+   * controls and last-changed timestamp itself.
+   */
+  hideHeader?: boolean;
+  ownerAvatarUrl?: string | null;
+  ownerIsAgent?: boolean;
+  ownerName?: string;
   unavailableReason?: ProjectRepoUnavailableReason;
   /** Branch picker + remote/local toggle rendered in the panel header. */
   sourceControls?: RepoSourceHeaderControls;
 }) {
+  const fileContent = useRepositoryFileContent(file, fileContentSource);
+  const externalOpenUrl = projectExternalRefUrl(
+    externalUrl,
+    sourceControls?.selectedTag ?? sourceControls?.branch,
+  );
   // Two header rows, mirroring the files panel: controls on top, then the
   // file identity row.
-  const header = (
+  const header = hideHeader ? null : (
     <>
       {sourceControls ? (
         <div className="flex min-h-14 min-w-0 items-center gap-1 border-border/50 border-b px-3 py-3">
@@ -163,7 +139,6 @@ export function ReadmePanel({
           <RepositoryBranchDropdown
             branch={sourceControls.branch}
             branchOptions={sourceControls.branchOptions}
-            compact
             createBranchDisabled={sourceControls.createBranchDisabled}
             createBranchTitle={sourceControls.createBranchTitle}
             deleteBranchDisabled={sourceControls.deleteBranchDisabled}
@@ -198,69 +173,28 @@ export function ReadmePanel({
     return (
       <section className="overflow-hidden">
         {header}
-        <div className="flex items-center gap-2 p-6 text-sm text-muted-foreground">
-          <Loader2 className="h-4 w-4 animate-spin" />
-          Loading repository…
-        </div>
+        <BuzzLoadingState label="Loading repository" />
       </section>
     );
   }
 
   if (gitDataState === "unavailable") {
-    const reason = unavailableReason ?? "unknown";
-    const unavailableContent = {
-      authentication: {
-        description:
-          "Buzz could not authenticate with this repository. Check your access and try again.",
-        icon: LockKeyhole,
-        title: "Repository access failed",
-      },
-      missing: {
-        description:
-          "The project announcement exists, but its git repository was not found on the Buzz relay.",
-        icon: CircleAlert,
-        title: "Repository not initialized",
-      },
-      access: {
-        description:
-          "Repository access is granted through its channel, and you’re not a member of the channel bound to this repository. Ask the repository owner for an invite.",
-        icon: LockKeyhole,
-        title: "Repository access restricted",
-      },
-      unbound: {
-        description:
-          "This repository has no access channel binding, so the relay cannot authorize anyone to read it. The repository owner can bind a channel from the Access menu.",
-        icon: LockKeyhole,
-        title: "No access channel bound",
-      },
-      network: {
-        description:
-          "The Buzz git service could not be reached. Check your connection and try again.",
-        icon: CloudOff,
-        title: "Couldn’t reach repository",
-      },
-      ref: {
-        description:
-          "The selected branch is advertised by the project but is missing from its git remote.",
-        icon: GitBranch,
-        title: "Branch unavailable",
-      },
-      unknown: {
-        description:
-          "Buzz could not load this repository. Try again or contact the project owner.",
-        icon: CircleAlert,
-        title: "Repository unavailable",
-      },
-    } satisfies Record<
-      ProjectRepoUnavailableReason,
-      {
-        description: string;
-        icon: typeof CircleAlert;
-        title: string;
-      }
-    >;
-    const unavailable = unavailableContent[reason];
-    const UnavailableIcon = unavailable.icon;
+    if (!externalHost) {
+      return (
+        <section className="overflow-hidden">
+          <ProjectRepositoryUnavailableState
+            accessChannelId={accessChannelId}
+            onAskForAccess={sourceControls?.onAskForAccess}
+            onRetry={sourceControls?.onFetch}
+            ownerAvatarUrl={ownerAvatarUrl}
+            ownerIsAgent={ownerIsAgent}
+            ownerName={ownerName}
+            reason={unavailableReason}
+            retryPending={sourceControls?.fetchPending}
+          />
+        </section>
+      );
+    }
 
     return (
       <section className="overflow-hidden">
@@ -268,53 +202,29 @@ export function ReadmePanel({
           <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-xl border border-border/60 bg-muted/40 text-muted-foreground">
             {externalHost === "github.com" ? (
               <GitHubMark className="h-6 w-6" />
-            ) : externalHost ? (
-              <Globe className="h-6 w-6" />
             ) : (
-              <UnavailableIcon className="h-6 w-6" />
+              <Globe className="h-6 w-6" />
             )}
           </div>
           <h3 className="text-base font-semibold text-foreground">
-            {externalHost
-              ? `Code hosted on ${externalHost}`
-              : unavailable.title}
+            Code hosted on {externalHost}
           </h3>
           <p className="mt-1 max-w-lg text-sm text-muted-foreground">
-            {externalHost ? (
-              "Clone this repository locally to explore its files, commits, and contributors in Buzz."
-            ) : reason === "access" && accessChannelId ? (
-              <AccessRestrictedDescription accessChannelId={accessChannelId} />
-            ) : (
-              unavailable.description
-            )}
+            Clone this repository locally to explore its files, commits, and
+            contributors in Buzz.
           </p>
-          {externalUrl ? (
+          {externalOpenUrl ? (
             <a
               className="mt-2 max-w-lg truncate font-mono text-xs text-primary hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-              href={externalUrl}
+              href={externalOpenUrl}
               rel="noreferrer"
               target="_blank"
             >
-              {externalUrl}
+              {externalOpenUrl}
             </a>
           ) : null}
           <div className="mt-4 flex flex-wrap items-center justify-center gap-2">
-            {!externalHost && sourceControls?.onFetch ? (
-              <Button
-                disabled={sourceControls.fetchPending}
-                onClick={sourceControls.onFetch}
-                size="sm"
-                variant="outline"
-              >
-                {sourceControls.fetchPending ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
-                  <RefreshCw className="h-4 w-4" />
-                )}
-                {sourceControls.fetchPending ? "Retrying…" : "Retry"}
-              </Button>
-            ) : null}
-            {externalHost && sourceControls?.onCloneLocal ? (
+            {sourceControls?.onCloneLocal ? (
               <Button
                 disabled={sourceControls.clonePending}
                 onClick={sourceControls.onCloneLocal}
@@ -328,9 +238,9 @@ export function ReadmePanel({
                 {sourceControls.clonePending ? "Cloning…" : "Clone locally"}
               </Button>
             ) : null}
-            {externalUrl ? (
+            {externalOpenUrl ? (
               <Button asChild size="sm" variant="outline">
-                <a href={externalUrl} rel="noreferrer" target="_blank">
+                <a href={externalOpenUrl} rel="noreferrer" target="_blank">
                   <ExternalLink className="h-4 w-4" />
                   Open on {externalHost}
                 </a>
@@ -342,15 +252,47 @@ export function ReadmePanel({
     );
   }
 
-  if (!file?.previewContent) {
+  if (fileContent.isLoading) {
     return (
       <section className="overflow-hidden">
         {header}
-        <div className="p-6 text-sm text-muted-foreground">
-          {gitDataState === "empty"
-            ? "No files have been pushed to this repository yet."
-            : "Add a README to this repository to describe setup, usage, and project context."}
-        </div>
+        <BuzzLoadingState label="Loading README" />
+      </section>
+    );
+  }
+
+  if (!file || !fileContent.content) {
+    const loadError = Boolean(fileContent.error);
+    const emptyRepository = gitDataState === "empty";
+    return (
+      <section className="flex min-h-0 flex-1 flex-col overflow-hidden">
+        {header}
+        <ProjectPanelState
+          action={
+            sourceControls?.onAskForAccess ? (
+              <Button onClick={sourceControls.onAskForAccess} size="sm">
+                <MessageCircle className="h-4 w-4" />
+                Chat with an agent
+              </Button>
+            ) : undefined
+          }
+          description={
+            loadError
+              ? "Refresh the repository or ask an agent to investigate."
+              : emptyRepository
+                ? "Ask an agent to create the initial codebase or connect an existing repository."
+                : "Add a README to describe setup, usage, and project context."
+          }
+          error={loadError}
+          panel={false}
+          title={
+            loadError
+              ? "Could not load the README"
+              : emptyRepository
+                ? "No files have been pushed yet"
+                : "No README yet"
+          }
+        />
       </section>
     );
   }
@@ -358,31 +300,33 @@ export function ReadmePanel({
   const language = languageForPath(file.path);
   const isMarkdown = /\.(?:md|markdown|mdx)$/i.test(file.path);
   const readmeContent = isMarkdown
-    ? normalizeReadmeMarkdown(file.previewContent)
-    : file.previewContent;
+    ? normalizeReadmeMarkdown(fileContent.content)
+    : fileContent.content;
 
   return (
     <section className="overflow-hidden">
       {header}
-      <div className="p-4">
+      <div className="min-w-0 px-8 py-6">
         {isMarkdown ? (
           <Markdown
+            blockCode
             className="text-sm"
             content={readmeContent}
+            hardLineBreaks={false}
             interactive={false}
           />
         ) : language ? (
           <pre className="overflow-x-auto bg-muted/40 p-4">
             <SyntaxHighlightedCode
               className="text-xs leading-relaxed"
-              code={file.previewContent}
+              code={fileContent.content}
               language={language}
             />
           </pre>
         ) : (
           <pre className="overflow-x-auto bg-muted/40 p-4">
             <code className="block min-w-full whitespace-pre font-mono text-xs leading-relaxed text-foreground">
-              {file.previewContent}
+              {fileContent.content}
             </code>
           </pre>
         )}

@@ -1,5 +1,8 @@
 import type { ResolvedLinkPreview } from "@/shared/lib/useResolvedLinkPreviews";
-import { useLinkPreviewStyle } from "@/shared/lib/linkPreviewStylePreference";
+import {
+  type LinkPreviewStyle,
+  useLinkPreviewStyle,
+} from "@/shared/lib/linkPreviewStylePreference";
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
 import { useMediaProxyPort } from "@/shared/lib/useMediaProxyPort";
 import { CompactLinkPreviewAttachment } from "@/shared/ui/compact-link-preview-attachment";
@@ -8,21 +11,59 @@ import {
   RichLinkPreviewAttachment,
 } from "@/shared/ui/rich-link-preview-attachment";
 
-export function LinkPreviewAttachment({
-  className,
-  ImageLightbox,
-  onOpen,
-  onRemove,
-  preview,
-  showControls,
-}: {
+type LinkPreviewAttachmentProps = {
   className?: string;
   ImageLightbox: LinkPreviewImageLightboxComponent;
   onOpen?: () => void;
   onRemove?: () => void;
   preview: ResolvedLinkPreview;
   showControls?: boolean;
+  showExpandControl?: boolean;
+};
+
+/** Renders a link preview with an explicit presentation style. */
+export function LinkPreviewAttachmentPresentation({
+  className,
+  ImageLightbox,
+  onOpen,
+  onRemove,
+  preview,
+  showControls,
+  showExpandControl,
+  style,
+}: LinkPreviewAttachmentProps & {
+  style: LinkPreviewStyle;
 }) {
+  if (style === "rich") {
+    return (
+      <RichLinkPreviewAttachment
+        className={className}
+        ImageLightbox={ImageLightbox}
+        onOpen={onOpen}
+        onRemove={onRemove}
+        preview={preview}
+        showControls={showControls}
+        showExpandControl={showExpandControl}
+      />
+    );
+  }
+
+  return (
+    <CompactLinkPreviewAttachment
+      className={className}
+      onOpen={onOpen}
+      onRemove={onRemove}
+      preview={preview}
+      showControls={showControls}
+    />
+  );
+}
+
+/** Renders a link preview using the user's saved presentation preference. */
+export function LinkPreviewAttachment({
+  preview,
+  ...props
+}: LinkPreviewAttachmentProps) {
   useMediaProxyPort();
   const renderedPreview = {
     ...preview,
@@ -34,26 +75,12 @@ export function LinkPreviewAttachment({
       : null,
   };
   const style = useLinkPreviewStyle();
-  if (style === "rich") {
-    return (
-      <RichLinkPreviewAttachment
-        className={className}
-        ImageLightbox={ImageLightbox}
-        onOpen={onOpen}
-        onRemove={onRemove}
-        preview={renderedPreview}
-        showControls={showControls}
-      />
-    );
-  }
 
   return (
-    <CompactLinkPreviewAttachment
-      className={className}
-      onOpen={onOpen}
-      onRemove={onRemove}
+    <LinkPreviewAttachmentPresentation
+      {...props}
       preview={renderedPreview}
-      showControls={showControls}
+      style={style}
     />
   );
 }

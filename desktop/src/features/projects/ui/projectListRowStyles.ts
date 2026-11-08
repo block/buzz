@@ -1,6 +1,6 @@
 /** Inbox-aligned spacing and typography for top-level Projects list rows. */
 export const PROJECT_LIST_CONTAINER_CLASS =
-  "divide-y divide-border/60 overflow-hidden rounded-xl border border-border/60 bg-transparent";
+  "overflow-hidden rounded-xl border border-border/60 bg-transparent";
 
 export const PROJECT_LIST_ROW_CLASS =
   "group relative px-3 py-3 transition-colors duration-150 hover:bg-muted/20";
@@ -17,7 +17,7 @@ export const PROJECT_LIST_ROW_META_TEXT_CLASS =
 export const PROJECT_LIST_ROW_META_CLASS = `flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 ${PROJECT_LIST_ROW_META_TEXT_CLASS}`;
 
 export const PROJECT_LIST_ROW_SUBTEXT_CLASS =
-  "mt-0.5 text-sm leading-5 text-muted-foreground";
+  "mt-0.5 text-xs leading-4 text-muted-foreground";
 
 export const PROJECT_LIST_ROW_PREVIEW_CLASS = `line-clamp-1 ${PROJECT_LIST_ROW_SUBTEXT_CLASS}`;
 

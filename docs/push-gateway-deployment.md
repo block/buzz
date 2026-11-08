@@ -1,10 +1,10 @@
 # Buzz Push Gateway deployment
 
-`buzz-push-gateway` is the standalone public APNs last hop intended for `push.buzz.xyz`. Build it with `Dockerfile.push-gateway`; do not run it in the relay image or give relays APNs credentials.
+`buzz-push-gateway` is a standalone APNs last hop. Build it with `Dockerfile.push-gateway`; do not run it in the relay image or give relays APNs credentials.
 
 ## Network and health
 
-- Public listener: `BUZZ_PUSH_BIND_ADDR` (default `0.0.0.0:8080`). Route `https://push.buzz.xyz` to this port.
+- Public listener: `BUZZ_PUSH_BIND_ADDR` (default `0.0.0.0:8080`). Route the deployment hostname to this port; the binary needs no public-origin setting.
 - Private health listener: `BUZZ_PUSH_HEALTH_ADDR` (default `0.0.0.0:8081`). Probe `/_liveness` and `/_readiness`; do not expose this port publicly. The chart has no pod-ingress allowance for 8081; Kubernetes node/kubelet-origin probe traffic is exempt from NetworkPolicy. Add a narrowly selected monitoring source only if the target CNI requires pod-origin health scraping.
 - Readiness fails when PostgreSQL authority is unavailable. Graceful shutdown stops accepting new requests before draining in-flight APNs calls.
 
@@ -13,28 +13,79 @@
 | Variable | Purpose |
 |---|---|
 | `DATABASE_URL` | PostgreSQL authority/admission store. Runtime credentials need DML on the six gateway tables, not DDL. |
-| `BUZZ_PUSH_PUBLIC_DELIVERY_URL` | Exact externally signed URL, normally `https://push.buzz.xyz/v1/deliveries/apns`. |
 | `BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS` | Maximum delegation capability lifetime (`1..=31536000`). |
 | `BUZZ_PUSH_MAX_INSTALLATION_LIFETIME_SECONDS` | Maximum encrypted-token installation lifetime (default 90 days, max one year). Clients must renew before expiry. |
-| `BUZZ_PUSH_ENABLED_PROFILES` | Comma-separated `buzz-ios-production` and/or `buzz-ios-sandbox`. |
-| `BUZZ_PUSH_APP_ATTEST_APP_ID` | Exact Apple App Attest application identifier (`TEAMID.bundle-id`). |
 | `BUZZ_PUSH_APP_ATTEST_ROOT_CERT_PATH` | Read-only mounted Apple App Attest root certificate PEM. |
-| `BUZZ_PUSH_APNS_KEY_PATH` | Read-only mounted Apple APNs `.p8` provider key. |
-| `BUZZ_PUSH_APNS_KEY_ID` | APNs provider key id. |
-| `BUZZ_PUSH_APNS_TEAM_ID` | Apple developer team id. |
-| `BUZZ_PUSH_APNS_TOPIC` | Buzz iOS bundle id. |
+| `BUZZ_PUSH_APP_ATTEST_APP_ID` | Exact server-owned Apple App Attest application identifier (`TEAMID.bundle-id`). |
+| `BUZZ_PUSH_APNS_TOPIC` | Server-owned APNs topic. Never accepted from a client. |
+| `BUZZ_PUSH_APNS_ENVIRONMENT` | `production` or `sandbox`, selected by deployment configuration. |
+| `BUZZ_PUSH_APNS_CERT_PATH` | Read-only certificate/private-key PEM. |
 | `BUZZ_PUSH_GRANT_KEYS` | Capability AEAD keyring, `id:base64-32-bytes[,predecessor...]`; current key first. |
 | `BUZZ_PUSH_TOKEN_KEYS` | Independent token-custody AEAD keyring in the same format. Never reuse grant keys. |
 
+Each gateway serves one configured Apple application. App Attest validates
+`application.appAttestAppId` (`TEAMID.bundle-id`) before enrollment. APNs uses
+the configured topic, certificate and environment. Clients and relay grants
+cannot select or override that identity. Separate applications use separate
+gateway deployments and authority databases.
+
+See [Buzz push notes](buzz-push.md) for the current experimental contract.
+
 Optional endpoint quota policy variables are `BUZZ_PUSH_ENDPOINT_QUOTA_WINDOW_SECONDS` (default `10`, max `86400`) and `BUZZ_PUSH_ENDPOINT_QUOTA_MAX_DELIVERIES` (default `10`, max `10000`). These are Buzz policy hypotheses, not Apple-published limits; tune under load while retaining a hard ceiling.
+
+## Personal device development
+
+A development-signed iOS app uses Apple's development App Attest environment.
+The ordinary gateway binary rejects those attestations. For an isolated personal
+stack, build with Cargo feature `personal-dev-app-attest` (Docker build argument
+`BUZZ_PUSH_CARGO_FEATURES=personal-dev-app-attest`) and set
+`BUZZ_PUSH_APP_ATTEST_ENVIRONMENT=development`. The default remains `production`,
+including in that special build; ordinary builds reject the development setting.
+The gateway accepts exactly the selected AAGUID and still verifies the pinned
+Apple root, certificate chain, nonce, application identity, public key,
+credential ID, and counter. This is not a simulator or attestation bypass.
+
+Set `BUZZ_PUSH_APP_ATTEST_APP_ID` to the personal `TEAMID.bundle-id`,
+`BUZZ_PUSH_APNS_TOPIC` to that same bundle ID,
+`BUZZ_PUSH_APNS_ENVIRONMENT=sandbox`, and supply its APNs certificate.
+This isolated stack uses its own server-configured application identity.
+Do not point distributed clients at this personal gateway.
+
+Build the mobile client with the personal team and parent bundle ID, its matching
+`.NotificationService` extension, development APNs/App Attest entitlements, and
+an explicit `BUZZ_PUSH_GATEWAY_URL`. See `mobile/README.md` for gitignored signing
+overrides. Both targets need matching provisioning profiles; the parent profile
+must include the capabilities in `Runner.entitlements`. Validate enrollment and
+notification presentation on a physical device, not a simulator.
 
 ## Secret and key rotation rules
 
-Mount the App Attest root read-only and startup will reject any byte mismatch. The sole accepted artifact is Apple’s **Apple App Attestation Root CA** from `https://www.apple.com/certificateauthority/Apple_App_Attestation_Root_CA.pem`: certificate SHA-256 fingerprint `1C:B9:82:3B:A2:8B:A6:AD:2D:33:A0:06:94:1D:E2:AE:4F:51:3E:F1:D4:E8:31:B9:F7:E0:FA:7B:62:42:C9:32`; exact PEM-file SHA-256 `c778d09ac341f7fd9f8f3b19e2b815af6aed4ad4490e1e92c05cb355212a5013`. Treat an Apple root rotation as a reviewed code/config rollout, not an unpinned mount replacement. Mount the APNs key and both AEAD keyrings from a secret manager; never place values in an image, manifest, log, or metrics label. Keep the current AEAD key first and retain decrypt-only predecessors until every capability/token encrypted under them has expired or been re-encrypted. Grant and token key ids and bytes must be distinct. Rotation is an operator rollout: add the new current key while retaining predecessors, deploy, wait through the retention window, then remove the old key.
+Mount the App Attest root read-only and startup will reject any byte mismatch. The sole accepted artifact is Apple’s **Apple App Attestation Root CA** from `https://www.apple.com/certificateauthority/Apple_App_Attestation_Root_CA.pem`: certificate SHA-256 fingerprint `1C:B9:82:3B:A2:8B:A6:AD:2D:33:A0:06:94:1D:E2:AE:4F:51:3E:F1:D4:E8:31:B9:F7:E0:FA:7B:62:42:C9:32`; exact PEM-file SHA-256 `c778d09ac341f7fd9f8f3b19e2b815af6aed4ad4490e1e92c05cb355212a5013`. Treat an Apple root rotation as a reviewed code/config rollout, not an unpinned mount replacement. Mount the APNs certificate identity and both AEAD keyrings from a secret manager; never place values in an image, manifest, log, or metrics label. Keep the current AEAD key first and retain decrypt-only predecessors until every capability/token encrypted under them has expired or been re-encrypted. Grant and token key ids and bytes must be distinct. Rotation is an operator rollout: add the new current key while retaining predecessors, deploy, wait through the retention window, then remove the old key.
 
 The gateway stores APNs tokens encrypted in PostgreSQL. Database backups therefore contain ciphertext plus authority metadata and must receive the same access controls and retention treatment as the service secrets.
 
 ## PostgreSQL and replicas
+
+### First deployment, not a legacy upgrade
+
+This gateway has never been deployed outside personal development infrastructure.
+This release supports a fresh dedicated database, not migration of existing
+development authority. Before running any schema migrations, `--migrate-only`
+refuses a non-empty database that has not completed gateway initialization
+(migration 0005). The error names the populated table and tells the operator to
+stop the development gateway and provision a fresh database. It does not delete
+or migrate that data. Normal deployments of an already initialized gateway may
+retain their data.
+
+Do not run a rolling upgrade from a pre-launch development binary. Stop that
+deployment before initialization, use the fresh database, and do not roll back
+to a pre-launch binary against the new database. The rolling strategy is for
+compatible versions after initial deployment; no legacy writer compatibility or
+mobile configured-to-unconfigured migration is supported. Push has no existing
+enabled users. After enabling push, retain gateway configuration in updates to
+that app identity; omitting it is not a push shutdown mechanism.
+
+The gateway's dedicated pool does not consume the relay-oriented `BUZZ_DB_LOCK_TIMEOUT_MS`, `BUZZ_DB_IDLE_TXN_TIMEOUT_MS`, or `BUZZ_DB_STATEMENT_TIMEOUT_MS` settings. Its session-timeout policy remains separate from the `buzz-db` writer policy and must be designed and rolled out independently.
 
 All replicas must share one PostgreSQL database. Delivery authority, replay admission, and endpoint quota reservation are transactional there, so replica count does not multiply the abuse ceiling. The gateway owns a scoped migration history under `crates/buzz-push-gateway/migrations`; it creates only the six `push_gateway_*` authority tables plus SQLx's migration-history table and never runs relay migrations.
 
@@ -44,27 +95,56 @@ The service reaps expired challenges and replay rows, idle quota rows, expired/r
 
 ## Metrics and alerting
 
-The gateway serves Prometheus metrics at `GET /metrics` on the **private health listener** (`BUZZ_PUSH_HEALTH_ADDR`, default `0.0.0.0:8081`) — the same port as the probes, never on the public `8080`. All series are sanitized and bounded-cardinality: label values are drawn only from closed sets (the six APNs outcome classes, the fixed admission results, the static error codes already returned to callers, and the readiness causes). No endpoint, device token, relay pubkey, request id, or any request-scoped identifier is ever used as a label.
+The gateway serves Prometheus metrics at `GET /metrics` on the **private health listener** (`BUZZ_PUSH_HEALTH_ADDR`, default `0.0.0.0:8081`) — the same port as the probes, never on the public `8080`. All series are sanitized and bounded-cardinality: label values are drawn only from closed sets (the five APNs outcome classes, the fixed admission results, the static error codes already returned to callers, and the readiness causes). No endpoint, device token, relay pubkey, request id, or any request-scoped identifier is ever used as a label.
 
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
-| `push_gateway_apns_deliveries_total` | counter | `outcome` = `accepted` \| `invalid_endpoint` \| `retry` \| `refresh_credential` \| `configuration_fault` \| `permanent_request_fault` | Terminal APNs send outcomes. |
+| `push_gateway_apns_send_attempts_total` | counter | none | Entries into the concrete APNs HTTP send seam. Compare with terminal outcomes to detect work that never reached transport. |
+| `push_gateway_apns_deliveries_total` | counter | `outcome` = `accepted` \| `invalid_endpoint` \| `retry` \| `configuration_fault` \| `permanent_request_fault` | Terminal APNs send outcomes. |
 | `push_gateway_apns_delivery_seconds` | histogram | — | APNs send round-trip latency (seconds). |
-| `push_gateway_apns_credential_refreshes_total` | counter | — | Provider JWT refreshed after APNs reported expiry. |
 | `push_gateway_admissions_total` | counter | `result` = `admitted` \| `rejected` \| `unavailable` | Outcome at the `authorize_delivery` replay/quota fence. |
 | `push_gateway_delivery_errors_total` | counter | `class` (static) | Selected delivery-handler exit classes only (see note). |
 | `push_gateway_reaper_failures_total` | counter | — | Retention reaper sweep failures. |
 | `push_gateway_readiness_failures_total` | counter | `cause` = `not_accepting` \| `authority` | Readiness probe failures by cause. |
 
-`push_gateway_delivery_errors_total` is intentionally **narrow**: it counts only selected exit classes of the `/v1/deliveries/apns` handler — `class` ∈ `invalid_grant` (grant rejected at the admission seam, before a permit is issued), `temporarily_unavailable` (authority unavailable at the admission seam), `profile_mismatch`, `token_custody` (endpoint-token open failure), `finish_failed` (detached disposition/join failure returned as 503). Request/auth/attestation/grant validation on the enrollment, delegation, rotation, and revocation handlers is **not** counted by this metric; it is a delivery-hot-path signal, not a total error rate across the API.
+`push_gateway_delivery_errors_total` is intentionally **narrow**: it counts only selected exit classes of the `/v1/deliveries/apns` handler. `class` ∈ `invalid_grant` (grant rejected at the admission seam, before a permit is issued), `rate_limited`, `temporarily_unavailable` (authority unavailable at the admission seam), `profile_mismatch`, `profile_disabled`, `token_custody` (endpoint-token open failure), `finish_failed` (detached disposition/join failure returned as 503). Request/auth/attestation/grant validation on the enrollment, delegation, rotation, and revocation handlers is **not** counted by this metric; it is a delivery-hot-path signal, not a total error rate across the API.
 
-Scraping is **opt-in** and off by default, so the default chart render is unchanged and `8081` keeps no pod ingress. To enable it, set `podMonitor.enabled=true` (renders a prometheus-operator `PodMonitor` scraping the `health` port `/metrics`) and `networkPolicy.monitoring.enabled=true` with `networkPolicy.monitoring.namespaceSelector` / `podSelector` naming your scraper — this adds a single `8081` ingress rule scoped to that source, never a blanket allowance. Node/kubelet-origin probe traffic remains exempt from NetworkPolicy regardless.
+Scraping is **opt-in** and off by default, so the default chart render is unchanged and `8081` keeps no pod ingress. For prometheus-operator, set `podMonitor.enabled=true` and `networkPolicy.monitoring.enabled=true` with `networkPolicy.monitoring.namespaceSelector` / `podSelector` naming your scraper. For Datadog Autodiscovery, leave `podMonitor.enabled=false`, supply the OpenMetrics check through `podAnnotations`, and enable the same narrowly selected NetworkPolicy ingress:
+
+```yaml
+podAnnotations:
+  ad.datadoghq.com/gateway.checks: |
+    {
+      "openmetrics": {
+        "init_config": {},
+        "instances": [{
+          "openmetrics_endpoint": "http://%%host%%:8081/metrics",
+          "service": "buzz-push-gateway",
+          "namespace": "block.buzz_push_gateway",
+          "metrics": ["push_gateway_.*"],
+          "histogram_buckets_as_distributions": true,
+          "send_distribution_buckets": true,
+          "send_monotonic_counter": true,
+          "collect_counters_with_distributions": true
+        }]
+      }
+    }
+networkPolicy:
+  monitoring:
+    enabled: true
+    namespaceSelector: # replace with the Datadog Agent namespace labels
+      kubernetes.io/metadata.name: datadog
+    podSelector: # replace with the Datadog Agent pod labels
+      app.kubernetes.io/name: datadog-agent
+```
+
+Both modes add one `8081` ingress rule scoped to the configured source, never a blanket allowance. Node/kubelet-origin probe traffic remains exempt from NetworkPolicy regardless. Do not enable `PodMonitor` in clusters without its CRD.
 
 Alerting rules ship as an opt-in prometheus-operator `PrometheusRule` (`prometheusRule.enabled=true`). Thresholds and operator actions:
 
 | Alert | Fires when | Severity | Action |
 |---|---|---|---|
-| `PushGatewayConfigurationFault` | any `configuration_fault` outcomes for 10m | critical | APNs provider token/topic is unhealthy. Check the `.p8` key, `BUZZ_PUSH_APNS_KEY_ID`, `..._TEAM_ID`, and `..._TOPIC`. No endpoints are being invalidated, but nothing is delivering. |
+| `PushGatewayConfigurationFault` | any `configuration_fault` outcomes for 10m | critical | The APNs certificate/topic/environment is unhealthy. Check `BUZZ_PUSH_APNS_*` configuration. No endpoints are being invalidated. |
 | `PushGatewayAdmissionUnavailable` | any admission `unavailable` for 5m | critical | PostgreSQL authority store is unreachable. Check DB connectivity and the pod's `postgresEgressCidrs` NetworkPolicy. |
 | `PushGatewayReadinessAuthorityFailing` | readiness `authority` failures for 5m | warning | Replicas are being pulled from the Service on DB check failure. Fix DB health before capacity drops below the PodDisruptionBudget. |
 | `PushGatewayReaperFailing` | reaper failed ≥2 times within 30m (runs every 5m) | warning | Expired reservations aren't being swept, growing the bounded-until-expiry window. Check DB write availability. |
@@ -72,22 +152,170 @@ Alerting rules ship as an opt-in prometheus-operator `PrometheusRule` (`promethe
 
 ## Relay configuration
 
-Relays default `BUZZ_PUSH_GATEWAY_DELIVERY_URL` to the exact public delivery URL
-`https://push.buzz.xyz/v1/deliveries/apns`. Operators can override it with
-another exact HTTPS `/v1/deliveries/apns` URL, or explicitly disable NIP-PL push
-by setting the variable to an empty string. When enabled, the relay advertises
-its host-scoped NIP-PL descriptor in NIP-11 and starts the matcher and delivery
-worker. Relays retain lease matching, authorization, coalescing, durable
+Relay push is an explicit deployment opt-in through `BUZZ_PUSH_ENABLED=true`;
+the established strict boolean parser rejects unknown values and the default is
+false. When enabled, `BUZZ_PUSH_GATEWAY_DELIVERY_URL` is required and must be an
+exact HTTP(S) `/v1/deliveries/apns` URL. Credentials, query and fragment are
+not accepted. The relay signs and sends the same configured URL. An absent or explicitly empty URL while
+enabled is a startup error. Only an enabled relay
+advertises its host-scoped NIP-PL descriptor, accepts leases, and starts the
+matcher and delivery worker. Relays retain lease matching, authorization, durable
 jobs/retries, and generation checks; they receive only opaque capabilities and
 never APNs tokens or provider credentials.
+
+An enabled relay exports the following bounded-cardinality series on its
+existing Prometheus endpoint. None carries a community, account, relay key,
+installation, event, or request identifier as a label.
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `buzz_push_enabled` | gauge | — | `1` only when the deployment opt-in is active. |
+| `buzz_push_enqueue_total` | counter | `result` = `completed` \| `full` \| `transaction_full` \| `closed` \| `error` \| `timeout` \| `shutdown` | Best-effort post-commit enqueue outcomes. |
+| `buzz_push_match_jobs_total` | counter | `result` = `matched` \| `unmatched` \| `error` \| `context_error` | Accepted message events evaluated by the matcher. |
+| `buzz_push_match_queue_seconds` | histogram | — | Relay receipt to matcher evaluation latency. |
+| `buzz_push_wakes_total` | counter | `result` = `enqueued` \| `duplicate` \| `inactive_lease` | Durable wake-enqueue outcomes. |
+| `buzz_push_wake_enqueue_errors_total` | counter | — | Set-wise outbox transactions that failed. |
+| `buzz_push_wake_queue_seconds` | histogram | — | First-attempt outbox enqueue-to-worker latency. |
+| `buzz_push_gateway_requests_total` | counter | — | Relay requests that reached the gateway transport seam. |
+| `buzz_push_gateway_request_seconds` | histogram | — | Relay-observed gateway request latency. |
+| `buzz_push_deliveries_total` | counter | `outcome` (static closed set) | Accepted, retried, suppressed, exhausted, invalid, or failed relay delivery outcomes. |
 
 ## Relay integration status
 
 The operational relay integration is complete: per-origin event matching with
 read-authorization checks, durable enqueue, send-time revalidation, and NIP-98
-delivery run whenever the gateway URL is enabled. End-to-end use still requires
+delivery run only when `BUZZ_PUSH_ENABLED=true`. End-to-end use still requires
 the client App Attest enrollment/delegation flow to place a gateway-issued opaque
 capability—not a raw APNs token—into the encrypted relay lease.
+
+## Evaluation and rollout
+
+Enable push only after a physical-device test with the deployment's configured
+application identity, APNs topic, certificate and environment. Updated clients
+require the NIP-11 `buzz-push-v1` capability. Keep `nip-pl` disabled on production
+relays throughout the cutover.
+
+Build a signed release candidate with both the app and Notification Service
+Extension provisioned. Verify APNs delivery, fetched and signature-verified
+notification content, and exact-message tap routing. Enable Apple's Communication
+Notifications capability on the parent App ID for rich message presentation.
+
+For each evaluation cohort, measure relay receipt-to-match, wake queue, relay-to-
+gateway, and gateway-to-APNs latencies from the histograms above. Track the
+ratio of accepted or replay-terminal relay outcomes to newly enqueued wakes,
+gateway APNs accepted/retry/invalid/configuration outcomes, retry exhaustion,
+and NSE resolution fallback. APNs acceptance cannot prove device presentation:
+record a small manual physical-device sample with event-created, banner-visible,
+and notification-tap timestamps, and verify that the visible title/body came
+from fetched, signature-verified relay content and that the tap opened the exact
+triggering message. Keep fallback-to-channel and placeholder/failure cases as
+explicit counts in the manual sample until privacy-preserving client telemetry
+is designed.
+
+### Relay push-trigger retirement gate
+
+Migration 0063 removes the push trigger for supported relay message paths.
+Before merge, verify that the deployed primary and profiler relays use the
+bounded post-commit application producer and immediate worker-stop behavior from
+[#8216](https://github.com/block/buzz/pull/8216), or a verified equivalent.
+Investigate any concrete supported path that creates notification-eligible
+messages outside those relays. Hypothetical external SQL clients and unattributed
+database sessions do not require a privileged audit or block retirement.
+
+Rollback disables push while retaining the qualified image and schema; image
+downgrades are excluded after retirement. Pending migrations must also be
+considered: migration 0062 adds system channels, which older images cannot read
+or filter correctly. The push producer floor alone is not sufficient to justify
+an image downgrade.
+
+Before separately authorized migration or deployment, bind the qualified release
+and profiler image digests to the reviewed source and rollback policy. Pull
+requests build images without publishing them; final published digest binding is
+a release gate, not a prerequisite for merging the source change. Keep automatic
+migration disabled during the transition. Resolve overlapping retirement
+migrations and verify the published migration ledger before execution. Migration
+0063's lock timeout bounds acquisition waits, not lock-hold or statement duration.
+
+After migration 0063, verify that `events_enqueue_push_match` is absent from
+the parent and every partition and `enqueue_push_match_job()` is absent.
+Migration 0065 then retires `events_refresh_channel_ttl` and
+`refresh_channel_ttl_after_event_insert()` the same way; after it, raw SQL
+writers no longer refresh ephemeral-channel deadlines. Verify application
+enqueueing and flag-only rollback on the exact deployed candidate. Legacy images and raw SQL
+writers without the application producer are unsupported after this point:
+their messages may commit without producing notifications or extending
+ephemeral-channel deadlines (so those channels can expire early). Do not restore
+either trigger or downgrade an image as an urgent rollback step. Reintroducing legacy
+writer support requires a separate reviewed forward migration and compatibility
+plan; never edit published migrations or their checksums.
+
+### Relay rollback and reactivation
+
+Set `BUZZ_PUSH_ENABLED=false` in the approved configuration for **every writer
+workload in the affected database scope**, then replace all previously enabled
+relay processes. This is a startup setting, not a live configuration reload.
+Keep the delivery URL, image, relay keys, schema, leases, client preferences and
+gateway grants unchanged. Do not stop a shared gateway as part of relay rollback.
+
+The relay copies the flag into `DbConfig::push_enabled`. Every physical writer
+connection, including the audit pool and replacement connections, sets the
+`buzz.push_enabled` PostgreSQL session setting. Other `DbConfig` callers default
+to disabled. Updated writers also set `buzz.push_async_enqueue=on`, which makes
+any surviving pre-0063 trigger skip enqueueing regardless of the enabled flag. The
+application producer is created only when enabled. Disabled writes perform no
+push locks, lease scans or queue writes.
+Before retirement, the overlap migration updates only an existing trigger
+function; it does not recreate a retired trigger or function. Deploy it before
+relying on the flag with a surviving trigger. On these pre-0063 schemas, older
+images and raw SQL writers with a missing setting retain legacy enqueue behavior;
+inventory and replace or explicitly disable all such connections before declaring
+rollback complete. After 0063, only the application producer can enqueue push
+work, and the retirement gate above excludes those legacy writers and images.
+
+On SIGTERM/Ctrl-C, the relay cancels enqueue, matcher and delivery futures immediately,
+before its listener drain. Uncommitted transactions roll back; committed claims
+remain leased until their normal expiry. No cancellation cleanup deletes or
+acknowledges queue entries. An HTTP request already accepted by the gateway may
+still produce a notification. The process shutdown deadline remains the hard
+backstop; a stalled replacement with old workers alive is incomplete rollback.
+
+Verify all old writer sessions and workers have exited, eligible messages still
+store and arrive in chat, no new matcher jobs appear, and gateway attempts stop
+once in-flight work settles. Inspect enqueue activity as well as queue counts:
+a stable count alone can conceal additions and removals. Ordinary reads, writes,
+authentication and reconnects must remain healthy.
+
+When enabled, updated application writers stage at most 256 event IDs per
+transaction and submit them only after successful commit using a non-waiting
+send. One background worker has a 256-item queue and a dedicated one-connection
+pool; it never borrows a message-write connection. Each attempt has a two-second
+deadline, a 500 ms lock timeout and a 1.5 second statement timeout. Saturation,
+errors, deadlines, process loss and shutdown can drop notifications. They cannot
+reject or roll back a committed message, and there is no replay/backfill of
+in-memory work. Monitor `buzz_push_enqueue_total` by result (`completed`, `full`,
+`transaction_full`, `closed`, `error`, `timeout`, `shutdown`). `completed` includes
+jobs with no eligible lease. Database enqueue is conditional on a live event and
+an eligible lease whose recorded update timestamp is no later than event receipt.
+These timestamps do not establish transaction commit order. When registration
+and message arrival overlap, either sending or suppressing the notification is
+acceptable; there is no exact enrollment-order guarantee. A concurrent lease
+update, including renewal of an active lease, can also suppress a notification
+under this best-effort contract. Activation never scans
+historical messages or deliberately backfills older notifications.
+
+Before 0063, this isolation requires the overlap migration and updated writers;
+legacy writers can still execute the transactional trigger. After 0063, the
+trigger is absent and all supported writers must use the application producer.
+
+Pending matcher jobs and pending/claimed delivery jobs remain dormant. Do not
+process or delete them during urgent rollback. **Before re-enabling**, inspect
+retained work across the full affected scope and record an explicit disposition
+decision. Cleanup size, batching and scoped commands are an operator decision;
+preserve leases and handle completed records through retention policy. There is
+no automatic purge or startup queue interlock: enabling workers resumes eligible
+retained work under existing expiry/retry rules. Thus an unchecked nonempty queue
+must not be silently reactivated. Messages stored while disabled are not
+backfilled on lease activation or re-enablement.
 
 ## Helm production inputs
 
@@ -96,21 +324,42 @@ The chart defaults to the `main` image tag because `.github/workflows/docker.yml
 ```bash
 gh attestation verify \
   oci://ghcr.io/block/buzz-push-gateway@sha256:<64-lowercase-hex> \
-  --owner block
+  --repo block/buzz \
+  --signer-workflow block/buzz/.github/workflows/docker.yml \
+  --source-digest <40-lowercase-hex-source-commit>
 ```
 
-Only after that command succeeds, set the exact digest as `image.digest`; the chart then renders `ghcr.io/block/buzz-push-gateway@sha256:...` and ignores the mutable tag. `values-production.yaml` is an intentionally invalid production-input contract: deployment CI must inject this verified `image.digest`, the provisioned Apple application identifier, an environment-owned Gateway parent reference, and the actual PostgreSQL network. Schema validation rejects the artifact when any remains empty; the render guard proves both rejection and a fully injected render.
+Only after that command succeeds, inject the exact digest as `image.digest` in
+the environment's GitOps values; the chart then renders
+`ghcr.io/block/buzz-push-gateway@sha256:...` and ignores the mutable tag.
+`values-production.yaml` remains an intentionally invalid production-input
+contract: deployment CI must inject the verified image digest, the provisioned
+distributed Apple application identifier, its matching APNs topic, and the actual PostgreSQL network. Set
+`gatewayOrigin` only when enabling the chart’s optional HTTPRoute; it supplies
+the routing hostname and is not passed to the gateway binary. In an
+environment with an existing ingress or service mesh route, keep
+`httpRoute.enabled=false`. If this chart owns a Gateway API route, enable it and
+inject an environment-owned `parentRef`; schema validation rejects an enabled
+route with no parent. The render guard proves both rejection of missing required
+inputs and fully injected renders.
 
 Network policy keeps APNs HTTPS and PostgreSQL egress in separate CIDR lists. APNs currently requires broad TCP/443 reachability; `networkPolicy.postgresEgressCidrs` must be narrowed to the production database network, and the DNS namespace/pod selectors must match the cluster DNS deployment. The sample private CIDR is not a claim about the production topology.
 
-Kubernetes does not restart pods when referenced Secret bytes change. AEAD or APNs credential rotation therefore requires an explicit rolling restart after the secret manager update (for example, `kubectl rollout restart deployment/<release>-buzz-push-gateway`) and readiness verification before removing predecessor keys. Service-account token automount is disabled.
+Kubernetes does not restart pods when referenced Secret bytes change. AEAD or APNs certificate rotation therefore requires an explicit rolling restart after the secret manager update (for example, `kubectl rollout restart deployment/<release>-buzz-push-gateway`) and readiness verification before removing predecessor keys. Service-account token automount is disabled.
 
 ## Gateway chart release
 
 The gateway chart has a collision-free release lane separate from the main
-`buzz` chart. To publish version `X.Y.Z`, update both `version` and `appVersion`
-in `deploy/charts/buzz-push-gateway/Chart.yaml`, validate the chart, and open a
-same-repository PR whose branch is exactly `push-chart-release/X.Y.Z`:
+`buzz` chart. To publish chart version `X.Y.Z`, update `version` in
+`deploy/charts/buzz-push-gateway/Chart.yaml` and keep `appVersion` equal to the
+gateway binary's workspace package version.
+
+The render tests require Helm, Ruby, and the repository's Rust toolchain. They
+pass rendered environment values into the gateway's configuration parser with
+synthetic credentials; no running gateway or database is needed.
+
+Validate the chart, then open a same-repository PR whose branch is exactly
+`push-chart-release/X.Y.Z`:
 
 ```bash
 deploy/charts/buzz-push-gateway/tests/render.sh
@@ -127,3 +376,21 @@ version. The publisher verifies the checked-out commit is the tag target and the
 chart version equals `X.Y.Z` before pushing
 `oci://ghcr.io/block/buzz/charts/buzz-push-gateway`. A manually pushed
 `push-chart-vX.Y.Z` tag is the documented rescue path and runs the same checks.
+After the publisher succeeds, inspect and fetch the published chart version
+before use:
+
+```bash
+helm show chart oci://ghcr.io/block/buzz/charts/buzz-push-gateway --version X.Y.Z
+helm pull oci://ghcr.io/block/buzz/charts/buzz-push-gateway --version X.Y.Z
+```
+
+
+### Delivery URL at the gateway
+
+The gateway verifies the signed method and delivery path using the NIP-98 event
+format, rather than matching the full incoming HTTP(S) request URL. The signed
+method must be `POST`; the signed URL path must be `/v1/deliveries/apns`, without
+query, fragment or credentials. Incoming request queries are rejected.
+Host and forwarding headers do not participate in delivery authentication.
+Event signatures, body hashes, timestamps, grant checks and replay protection
+remain enforced. No mobile App Attest audiences or relay activation settings change.

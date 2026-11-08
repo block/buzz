@@ -68,9 +68,11 @@ export function SystemMessageAvatar({
     );
     const avatar = (
       <UserAvatar
+        accent={isSingleAgent}
         avatarUrl={resolveAvatarUrl(singlePubkey, profiles)}
         className="!h-9 !w-9 shrink-0 text-2xs"
         displayName={actorLabel}
+        shape={isSingleAgent ? "squircle" : "circle"}
         testId="system-message-avatar"
       />
     );
@@ -82,7 +84,10 @@ export function SystemMessageAvatar({
           role={isSingleAgent ? "bot" : undefined}
         >
           <button
-            className="shrink-0 rounded-full focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+            className={cn(
+              "shrink-0 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
+              isSingleAgent ? "rounded-[30%]" : "rounded-full",
+            )}
             data-testid="system-message-avatar"
             type="button"
           >
@@ -106,20 +111,30 @@ export function SystemMessageAvatar({
     profiles,
     preferResolvedSelfLabel: true,
   });
+  const isTargetAgent = isKnownAgentPubkey(
+    targetPubkey,
+    profiles,
+    personaLookup,
+    agentPubkeys,
+  );
   const dualAvatar = (
     <div
       className="relative h-9 w-9 shrink-0"
       data-testid="system-message-avatar"
     >
       <UserAvatar
+        accent={isActorAgent}
         avatarUrl={resolveAvatarUrl(actorPubkey, profiles)}
         className="!h-7 !w-7 border-2 border-background text-2xs"
         displayName={actorLabel}
+        shape={isActorAgent ? "squircle" : "circle"}
       />
       <UserAvatar
+        accent={isTargetAgent}
         avatarUrl={resolveAvatarUrl(targetPubkey, profiles)}
         className="!absolute !bottom-0 !right-0 !h-7 !w-7 border-2 border-background text-2xs"
         displayName={targetLabel}
+        shape={isTargetAgent ? "squircle" : "circle"}
       />
     </div>
   );
@@ -130,7 +145,10 @@ export function SystemMessageAvatar({
       role={isActorAgent ? "bot" : undefined}
     >
       <button
-        className="shrink-0 rounded-full focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+        className={cn(
+          "shrink-0 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
+          isActorAgent ? "rounded-[30%]" : "rounded-full",
+        )}
         type="button"
       >
         {dualAvatar}
@@ -140,11 +158,15 @@ export function SystemMessageAvatar({
 }
 
 export function MembershipAvatarStack({
+  agentPubkeys,
   currentPubkey,
+  personaLookup,
   profiles,
   pubkeys,
 }: {
+  agentPubkeys?: ReadonlySet<string>;
   currentPubkey: string | undefined;
+  personaLookup?: Map<string, string>;
   profiles: UserProfileLookup | undefined;
   pubkeys: readonly string[];
 }) {
@@ -158,6 +180,12 @@ export function MembershipAvatarStack({
       role="img"
     >
       {visiblePubkeys.map((pubkey, index) => {
+        const isAgent = isKnownAgentPubkey(
+          pubkey,
+          profiles,
+          personaLookup,
+          agentPubkeys,
+        );
         const label = resolveUserLabel({
           pubkey,
           currentPubkey,
@@ -171,20 +199,16 @@ export function MembershipAvatarStack({
             key={pubkey}
             style={{ zIndex: index + 1 }}
           >
-            <span
-              className="block"
-              style={{
-                ...(index < visiblePubkeys.length - 1 && {
-                  mask: "radial-gradient(circle 14px at calc(100% + 6px) 50%, transparent 99%, #fff 100%)",
-                  WebkitMask:
-                    "radial-gradient(circle 14px at calc(100% + 6px) 50%, transparent 99%, #fff 100%)",
-                }),
-              }}
-            >
+            <span className="block">
               <UserAvatar
+                accent={isAgent}
                 avatarUrl={resolveAvatarUrl(pubkey, profiles)}
-                className="h-6 w-6 text-2xs"
+                className={cn(
+                  "h-6 w-6 text-2xs",
+                  index < visiblePubkeys.length - 1 && "ring-2 ring-background",
+                )}
                 displayName={label}
+                shape={isAgent ? "squircle" : "circle"}
                 size="sm"
               />
             </span>

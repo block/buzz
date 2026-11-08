@@ -75,7 +75,9 @@ test("image annotation overlay and editor controls", async ({ page }) => {
   await page.getByRole("button", { name: "Attach file" }).click();
 
   const composer = page.getByTestId("message-composer");
-  await expect(composer.getByAltText("Attachment aaaa")).toBeVisible();
+  await expect(
+    composer.getByRole("button", { name: "Attachment aaaa", exact: true }),
+  ).toBeVisible();
   await composer.getByTestId("composer-media-attachment").hover();
   await expect(page.getByTestId("composer-attachment-annotate")).toBeVisible();
   await waitForAnimations(page);
@@ -104,7 +106,9 @@ test("draw on an uploaded image, save replaces it, revert restores in place", as
   // Attach the original image via the mocked paperclip flow.
   await page.getByRole("button", { name: "Attach file" }).click();
   const composer = page.getByTestId("message-composer");
-  await expect(composer.getByAltText("Attachment aaaa")).toBeVisible();
+  await expect(
+    composer.getByRole("button", { name: "Attachment aaaa", exact: true }),
+  ).toBeVisible();
 
   // Open the composer lightbox.
   await composer.getByTestId("composer-media-attachment").hover();
@@ -146,7 +150,9 @@ test("draw on an uploaded image, save replaces it, revert restores in place", as
   // Saving closes the lightbox; the composer thumbnail now shows the
   // annotated image.
   await expect(dialog).toHaveCount(0);
-  await expect(composer.getByAltText("Attachment bbbb")).toBeVisible();
+  await expect(
+    composer.getByRole("button", { name: "Attachment bbbb", exact: true }),
+  ).toBeVisible();
 
   // The annotated PNG went through the real upload command.
   const uploadCommandCount = await page.evaluate(
@@ -174,7 +180,9 @@ test("draw on an uploaded image, save replaces it, revert restores in place", as
   // Closing the dialog shows the (restored) original thumbnail.
   await page.keyboard.press("Escape");
   await expect(dialog).toHaveCount(0);
-  await expect(composer.getByAltText("Attachment aaaa")).toBeVisible();
+  await expect(
+    composer.getByRole("button", { name: "Attachment aaaa", exact: true }),
+  ).toBeVisible();
 });
 
 test("spoiler marking survives drawing on the attachment", async ({ page }) => {
@@ -184,7 +192,9 @@ test("spoiler marking survives drawing on the attachment", async ({ page }) => {
 
   await page.getByRole("button", { name: "Attach file" }).click();
   const composer = page.getByTestId("message-composer");
-  await expect(composer.getByAltText("Attachment aaaa")).toBeVisible();
+  await expect(
+    composer.getByRole("button", { name: "Attachment aaaa", exact: true }),
+  ).toBeVisible();
 
   // Spoiler the attachment from its lightbox (media spoilers are
   // per-attachment; the text spoiler control no longer affects media),
@@ -215,6 +225,8 @@ test("spoiler marking survives drawing on the attachment", async ({ page }) => {
   await expect(page.getByRole("dialog")).toHaveCount(0);
 
   // The annotated replacement is still marked as a spoiler.
-  await expect(composer.getByAltText("Attachment bbbb")).toBeVisible();
+  await expect(
+    composer.getByRole("button", { name: "Attachment bbbb", exact: true }),
+  ).toBeVisible();
   await expect(composer.locator("[data-composer-media-spoiler]")).toBeVisible();
 });

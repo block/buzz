@@ -23,8 +23,12 @@ import type { CustomEmoji } from "@/shared/lib/remarkCustomEmoji";
  * live event is missed. Mirrors `user-status/hooks.ts`.
  */
 
-/** Keeps focused polling at the established 2-minute backstop cadence. */
-export const CUSTOM_EMOJI_REFETCH_INTERVAL_MS = 120_000;
+/** Poll backstop cadence. The live subscription (invalidate on any member's
+ * new 30030) and the reconnect invalidation are the freshness paths; this
+ * poll exists only to cover a silently dropped live event, so it can be
+ * rare. At the previous 2-minute cadence it refetched every member's full
+ * set (~300 KB burst) often enough to dominate desktop relay traffic. */
+export const CUSTOM_EMOJI_REFETCH_INTERVAL_MS = 20 * 60_000;
 /** Suppresses the focus refetch until emoji data is genuinely stale.
  * The live subscription (invalidateQueries) is the primary freshness path. */
 export const CUSTOM_EMOJI_FOCUS_STALE_TIME_MS = 5 * 60_000;

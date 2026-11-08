@@ -345,3 +345,104 @@ test("buildProjectPatchTemplate catches duplicate d in live head via full-envelo
     /NIP-MP.*'d'/,
   );
 });
+
+// ── buildAddedRepositoryEventTemplatesFromHead: partial-publish recovery ────
+//
+// addRepo publishes two events sequentially (project head, then repository).
+// If the repository publish fails after the project head lands, the head
+// references a coordinate with no repository event — a dangling member.
+// Retry must heal it: when the live head already lists the coordinate but no
+// kind-30617 head exists there, the builder returns resume templates instead
+// of throwing the "already contains" race error.
+
+test("retry after event 2 fails (event 1 succeeded) returns resume templates that heal the dangling member", () => {
+  const OWNER = "a".repeat(64);
+  const existingAddress = `30617:${OWNER}:desktop`;
+  const newAddress = `30617:${OWNER}:mobile`;
+  const accessChannelId = "11111111-1111-4111-8111-111111111111";
+  const preAddHead = {
+    id: "e".repeat(64),
+    kind: 30621,
+    pubkey: OWNER,
+    created_at: 100,
+    content: "",
+    tags: [
+      ["d", "platform"],
+      ["buzz-channel", accessChannelId],
+      ["a", existingAddress],
+    ],
+  };
+
+  // Attempt 1: fresh add. Project template gains the address; the repository
+  // head at the coordinate does not exist yet.
+  const attempt1 = buildAddedRepositoryEventTemplatesFromHead({
+    accessChannelId,
+    existingRepositoryAddresses: [existingAddress],
+    liveHead: preAddHead,
+    name: "Mobile",
+    ownerPubkey: OWNER,
+    repositoryHeadExists: false,
+  });
+  assert.equal(attempt1.resume, false);
+  assert.deepEqual(
+    attempt1.project.tags.filter((tag) => tag[0] === "a").map((tag) => tag[1]),
+    [existingAddress, newAddress],
+  );
+
+  // Event 1 (project head) lands; event 2 (repository) fails. The live head
+  // now references the coordinate, but no repository head exists.
+  const danglingHead = {
+    ...preAddHead,
+    id: "f".repeat(64),
+    created_at: 101,
+    tags: [...preAddHead.tags, ["a", newAddress]],
+  };
+
+  // Attempt 2 (retry): must not throw "already contains" — it must resume.
+  const attempt2 = buildAddedRepositoryEventTemplatesFromHead({
+    accessChannelId,
+    existingRepositoryAddresses: [existingAddress, newAddress],
+    liveHead: danglingHead,
+    name: "Mobile",
+    ownerPubkey: OWNER,
+    repositoryHeadExists: false,
+  });
+  assert.equal(attempt2.resume, true);
+  // The project template must not double-add the coordinate.
+  assert.deepEqual(
+    attempt2.project.tags.filter((tag) => tag[0] === "a").map((tag) => tag[1]),
+    [existingAddress, newAddress],
+  );
+  // The repository template is the same missing event the first attempt
+  // failed to publish.
+  assert.deepEqual(attempt2.repository, attempt1.repository);
+  assert.equal(attempt2.repositoryAddress, newAddress);
+});
+
+test("a coordinate in the live head WITH a live repository head is still a concurrent-add conflict", () => {
+  const OWNER = "a".repeat(64);
+  const newAddress = `30617:${OWNER}:mobile`;
+  const liveHead = {
+    id: "e".repeat(64),
+    kind: 30621,
+    pubkey: OWNER,
+    created_at: 100,
+    content: "",
+    tags: [
+      ["d", "platform"],
+      ["a", newAddress],
+    ],
+  };
+  assert.throws(
+    () =>
+      buildAddedRepositoryEventTemplatesFromHead({
+        accessChannelId: "11111111-1111-4111-8111-111111111111",
+        existingRepositoryAddresses: [],
+        liveHead,
+        name: "Mobile",
+        ownerPubkey: OWNER,
+        repositoryHeadExists: true,
+      }),
+    /already contains.*mobile.*another session/,
+  );
+});

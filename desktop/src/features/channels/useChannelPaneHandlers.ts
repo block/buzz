@@ -1,4 +1,5 @@
 import * as React from "react";
+import { toast } from "sonner";
 
 import type {
   useDeleteMessageMutation,
@@ -24,6 +25,7 @@ export function useChannelPaneHandlers({
   deleteMessageMutation,
   editMessageMutation,
   editTargetId,
+  editTargetIsThreadReply,
   expandedThreadReplyIds,
   getFirstReplyIdForMessage,
   getReplyDescendantIdsForMessage,
@@ -45,6 +47,7 @@ export function useChannelPaneHandlers({
   deleteMessageMutation: ReturnType<typeof useDeleteMessageMutation>;
   editMessageMutation: ReturnType<typeof useEditMessageMutation>;
   editTargetId: string | null;
+  editTargetIsThreadReply: boolean;
   expandedThreadReplyIds: ReadonlySet<string>;
   getFirstReplyIdForMessage: (messageId: string) => string | null;
   getReplyDescendantIdsForMessage: (messageId: string) => string[];
@@ -74,6 +77,8 @@ export function useChannelPaneHandlers({
 
   const editTargetIdRef = React.useRef(editTargetId);
   editTargetIdRef.current = editTargetId;
+  const editTargetIsThreadReplyRef = React.useRef(editTargetIsThreadReply);
+  editTargetIsThreadReplyRef.current = editTargetIsThreadReply;
 
   const expandedThreadReplyIdsRef = React.useRef(expandedThreadReplyIds);
   expandedThreadReplyIdsRef.current = expandedThreadReplyIds;
@@ -117,7 +122,16 @@ export function useChannelPaneHandlers({
     setThreadReplyTargetId(openThreadHeadIdRef.current);
   }, [setThreadReplyTargetId]);
 
+  const requireThreadEditResolution = React.useCallback(() => {
+    if (!editTargetIsThreadReplyRef.current) return true;
+    toast.info("Finish or cancel your edit before leaving the thread.");
+    return false;
+  }, []);
+
   const handleCloseThread = React.useCallback(() => {
+    if (!requireThreadEditResolution()) {
+      return;
+    }
     deferPanelState(() => {
       onOptimisticOpenThreadHeadIdChange(null);
       setOpenThreadHeadId(null);
@@ -128,6 +142,7 @@ export function useChannelPaneHandlers({
   }, [
     deferPanelState,
     onOptimisticOpenThreadHeadIdChange,
+    requireThreadEditResolution,
     setExpandedThreadReplyIds,
     setOpenThreadHeadId,
     setThreadReplyTargetId,
@@ -135,6 +150,8 @@ export function useChannelPaneHandlers({
   ]);
 
   const handleCancelEdit = React.useCallback(() => {
+    editTargetIdRef.current = null;
+    editTargetIsThreadReplyRef.current = false;
     setEditTargetId(null);
   }, [setEditTargetId]);
 
@@ -198,6 +215,7 @@ export function useChannelPaneHandlers({
 
   const handleOpenThread = React.useCallback(
     (message: { id: string }) => {
+      if (!requireThreadEditResolution()) return;
       if (openThreadHeadIdRef.current === message.id) {
         deferPanelState(() => {
           onOptimisticOpenThreadHeadIdChange(null);
@@ -222,6 +240,7 @@ export function useChannelPaneHandlers({
     [
       deferPanelState,
       onOptimisticOpenThreadHeadIdChange,
+      requireThreadEditResolution,
       setEditTargetId,
       setExpandedThreadReplyIds,
       setOpenThreadHeadId,
@@ -284,12 +303,18 @@ export function useChannelPaneHandlers({
       mentionPubkeys: string[],
       mediaTags?: string[][],
       channelId?: string | null,
+      _threadContext?: {
+        parentEventId: string | null;
+        threadHeadId: string | null;
+      } | null,
+      forceRest?: boolean,
     ) => {
       await sendMutateRef.current({
         content,
         mentionPubkeys,
         mediaTags,
         channelId: channelId ?? undefined,
+        forceRest,
       });
     },
     [],
@@ -327,6 +352,7 @@ export function useChannelPaneHandlers({
         parentEventId: string | null;
         threadHeadId: string | null;
       } | null,
+      forceRest?: boolean,
     ) => {
       // Resolve target using captured submit-time context (race-free) or live
       // refs (legacy path). When threadContext is supplied, no live-ref reads
@@ -359,6 +385,7 @@ export function useChannelPaneHandlers({
         parentEventId,
         mediaTags,
         channelId: channelId ?? undefined,
+        forceRest,
       });
 
       // Only update thread UI state if the user is still viewing the same
@@ -405,6 +432,7 @@ export function useChannelPaneHandlers({
     handleEditSave,
     handleExpandThreadReplies,
     handleOpenThread,
+    requireThreadEditResolution,
     handleSendMessage,
     handleSendToChannel,
     handleSendThreadReply,
