@@ -544,8 +544,9 @@ void main() {
       );
 
       expect(session.publishedEvents.single.kind, 9021);
-      expect(session.historyFilters, hasLength(4));
-      for (final filter in session.historyFilters) {
+      expect(session.historyQueryCount, 0);
+      expect(session.queryFilters, hasLength(4));
+      for (final filter in session.queryFilters) {
         expect(filter.toJson(), {
           'kinds': [39002],
           'limit': 1,
@@ -863,7 +864,7 @@ const _memberPubkey =
 
 class _RecordingPublishRelaySession extends RelaySessionNotifier {
   final publishedEvents = <NostrEvent>[];
-  final historyFilters = <NostrFilter>[];
+  final queryFilters = <NostrFilter>[];
   int historyQueryCount = 0;
 
   @override
@@ -884,7 +885,15 @@ class _RecordingPublishRelaySession extends RelaySessionNotifier {
     Duration timeout = const Duration(seconds: 8),
   }) async {
     historyQueryCount++;
-    historyFilters.add(filter);
+    return const [];
+  }
+
+  @override
+  Future<List<NostrEvent>> queryRelay(
+    List<NostrFilter> filters, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    queryFilters.addAll(filters);
     return const [];
   }
 }

@@ -253,7 +253,9 @@ class ChannelActions {
     for (final delay in _joinConfirmationDelays) {
       if (delay > Duration.zero) await Future<void>.delayed(delay);
       _ensureCommunityValid();
-      final rosters = await _session.fetchHistory(
+      // Only the relay's HTTP query path honors `consistency`; a WebSocket
+      // REQ reads replicas.
+      final rosters = await _session.queryRelay([
         NostrFilter(
           kinds: const [39002],
           tags: {
@@ -263,7 +265,7 @@ class ChannelActions {
           limit: 1,
           extensions: const {'consistency': 'strong'},
         ),
-      );
+      ]);
       if (rosters.any(
         (event) => event.kind == 39002 && event.getTagValue('d') == channelId,
       )) {
