@@ -10,6 +10,7 @@ use crate::auth::{PkceOAuthConfig, PkceOAuthTokenSource, StaticTokenSource, Toke
 use crate::config::{
     is_openai_host, normalize_effort_for_anthropic_route, normalize_effort_for_databricks_v2,
     normalize_effort_for_provider, Config, OpenAiApi, Provider, ThinkingEffort,
+    MAX_TOOL_CALLS_PER_TURN,
 };
 use crate::types::{
     AgentError, HistoryItem, LlmResponse, ProviderStop, ToolCall, ToolDef, ToolResultContent,
@@ -58,9 +59,16 @@ pub struct Llm {
 /// network/reachability problem, not a slow generation.
 const LLM_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// `User-Agent` sent on every LLM request. reqwest sends no User-Agent by
+/// default, so OpenAI-compatible providers that identify clients by product
+/// token saw buzz-agent as an anonymous caller. The version is the crate
+/// version, matching the `agentInfo` reported over ACP.
+const LLM_USER_AGENT: &str = concat!("buzz-agent/", env!("CARGO_PKG_VERSION"));
+
 impl Llm {
     pub fn new(cfg: &Config) -> Result<Self, AgentError> {
         let http = Client::builder()
+            .user_agent(LLM_USER_AGENT)
             .connect_timeout(LLM_CONNECT_TIMEOUT)
             // No client-level read_timeout: we apply a per-request total
             // timeout via RequestBuilder::timeout() so that escalated budgets
@@ -588,9 +596,21 @@ fn anthropic_body(
             HistoryItem::Assistant {
                 text,
                 tool_calls,
-                reasoning_details: _,
+                reasoning_details,
             } => {
                 flush(&mut messages, &mut pending);
+                // Native Anthropic blocks carry signed, potentially interleaved
+                // thinking. Replay the original order, not flattened text/calls.
+                if let Some(blocks) = reasoning_details
+                    .as_ref()
+                    .and_then(|v| v.get("anthropic_content"))
+                    .and_then(Value::as_array)
+                {
+                    if !blocks.is_empty() {
+                        messages.push(json!({ "role": "assistant", "content": blocks }));
+                    }
+                    continue;
+                }
                 let mut content: Vec<Value> = Vec::new();
                 if !text.is_empty() {
                     content.push(json!({ "type": "text", "text": text }));
@@ -688,6 +708,9 @@ fn stamp_rolling_cache_breakpoint(messages: &mut [Value]) {
             .get_mut("content")
             .and_then(Value::as_array_mut)
             .and_then(|c| c.last_mut())
+            // Thinking blocks must remain byte-for-byte unchanged, and cannot
+            // carry an explicit cache breakpoint.
+            .filter(|b| !matches!(b["type"].as_str(), Some("thinking" | "redacted_thinking")))
             .and_then(Value::as_object_mut)
         {
             block.insert("cache_control".into(), json!({ "type": "ephemeral" }));
@@ -746,7 +769,9 @@ fn openai_body(
                 let mut msg = serde_json::Map::new();
                 msg.insert("role".into(), json!("assistant"));
                 msg.insert("content".into(), json!(text.as_str()));
-                if let Some(details) = reasoning_details {
+                // OpenRouter owns the array shape; native Anthropic state must
+                // not leak into Chat requests after a session model switch.
+                if let Some(details) = reasoning_details.as_ref().filter(|v| v.is_array()) {
                     msg.insert("reasoning_details".into(), details.clone());
                 }
                 if !tool_calls.is_empty() {
@@ -1386,6 +1411,14 @@ fn parse_anthropic(v: Value) -> Result<LlmResponse, AgentError> {
             }
         }
     }
+    // The run loop caps other providers' calls by truncating them. Native
+    // content must be replayed intact, so reject oversized turns before any
+    // tools execute rather than silently altering signed/interleaved state.
+    if tool_calls.len() > MAX_TOOL_CALLS_PER_TURN {
+        return Err(AgentError::Llm(format!(
+            "Anthropic response exceeds {MAX_TOOL_CALLS_PER_TURN} tool calls; cannot truncate native content"
+        )));
+    }
     // anthropic_input_tokens() returns Option<SumUsageResult> because it sums
     // three fields that can collectively overflow u64. Propagate the overflow
     // signal via `input_tokens_overflowed` so the run loop can poison the
@@ -1415,7 +1448,13 @@ fn parse_anthropic(v: Value) -> Result<LlmResponse, AgentError> {
         // total from them. Always None for this provider.
         total_tokens: None,
         reasoning,
-        reasoning_details: None,
+        // Truncated content is not a valid signed assistant turn; the run loop
+        // keeps only its text and never executes its tool calls.
+        reasoning_details: v
+            .get("content")
+            .filter(|v| v.is_array())
+            .filter(|_| stop != ProviderStop::MaxTokens)
+            .map(|blocks| json!({ "anthropic_content": blocks })),
         // Stamped by the dispatch layer (complete) after parse.
         request_model: None,
     })
@@ -2570,6 +2609,7 @@ fn apply_anthropic_cache_control(body: &mut serde_json::Map<String, Value>) {
 
 #[cfg(test)]
 mod tests {
+    include!("llm_fqn_tests.rs");
     use super::*;
     use crate::config::{Config, HookServers, OpenAiApi, Provider, ThinkingSummary};
     use crate::types::{HistoryItem, ToolCall, ToolResult, ToolResultContent};
@@ -2621,6 +2661,7 @@ mod tests {
     struct CapturedHttpRequest {
         method: String,
         path: String,
+        user_agent: Option<String>,
         body: Option<Value>,
     }
 
@@ -2695,6 +2736,11 @@ mod tests {
                         Ok(read) => bytes.extend_from_slice(&chunk[..read]),
                     }
                 }
+                let user_agent = header_text.lines().find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("user-agent")
+                        .then(|| value.trim().to_string())
+                });
                 let mut request_line = header_text.lines().next().unwrap_or_default().split(' ');
                 let method = request_line.next().unwrap_or_default().to_string();
                 let path = request_line.next().unwrap_or_default().to_string();
@@ -2703,10 +2749,12 @@ mod tests {
                 } else {
                     serde_json::from_slice(&bytes[header_end..header_end + content_length]).ok()
                 };
-                captured_for_server
-                    .lock()
-                    .await
-                    .push(CapturedHttpRequest { method, path, body });
+                captured_for_server.lock().await.push(CapturedHttpRequest {
+                    method,
+                    path,
+                    user_agent,
+                    body,
+                });
 
                 let response = responses.lock().await.pop_front().unwrap_or_else(|| {
                     StubHttpResponse::error(500, "stub response sequence exhausted")
@@ -2767,6 +2815,23 @@ mod tests {
             .collect()
     }
 
+    /// Every LLM request identifies the client to the provider via the
+    /// first User-Agent product token.
+    #[tokio::test]
+    async fn llm_requests_carry_buzz_agent_user_agent() {
+        let (base_url, captured) =
+            spawn_sequence_stub(vec![StubHttpResponse::ok(chat_response("ok"))]).await;
+        let mut config = cfg(Provider::OpenAi);
+        config.base_url = base_url;
+        let llm = Llm::new(&config).unwrap();
+
+        complete_model(&llm, &config, "gpt-test").await.unwrap();
+        let requests = captured.lock().await;
+        let expected = format!("buzz-agent/{}", env!("CARGO_PKG_VERSION"));
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].user_agent.as_deref(), Some(expected.as_str()));
+    }
+
     /// An explicit model is sent verbatim and never rewritten to something
     /// else. A server error is retried under the *same* model (the ordinary
     /// transport retry) and then surfaced -- there is no second model to fall
@@ -2823,10 +2888,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn databricks_v2_model_service_fqn_summary_uses_mlflow_chat() {
+    async fn databricks_v2_claude_model_service_fqn_summary_uses_anthropic_messages() {
         let model = "catalog.schema.claude-gpt-5";
-        let (base_url, captured) =
-            spawn_sequence_stub(vec![StubHttpResponse::ok(chat_response("summary"))]).await;
+        let response = json!({
+            "content": [{"type": "text", "text": "summary"}],
+            "stop_reason": "end_turn"
+        });
+        let (base_url, captured) = spawn_sequence_stub(vec![StubHttpResponse::ok(response)]).await;
         let mut config = cfg(Provider::DatabricksV2);
         config.base_url = base_url;
         let llm = Llm::new(&config).unwrap();
@@ -2842,11 +2910,11 @@ mod tests {
             .iter()
             .find(|request| request.method == "POST")
             .expect("summary must issue one POST");
-        assert_eq!(request.path, "/v1/ai-gateway/mlflow/v1/chat/completions");
+        assert_eq!(request.path, "/v1/ai-gateway/anthropic/v1/messages");
         let body = request.body.as_ref().expect("summary body");
         assert_eq!(body["model"], model);
         assert!(body["messages"].is_array());
-        assert_eq!(body["max_completion_tokens"], 128);
+        assert_eq!(body["max_tokens"], 128);
     }
 
     fn image_history() -> Vec<HistoryItem> {
@@ -3262,10 +3330,19 @@ mod tests {
     fn databricks_v2_model_service_fqn_shape_is_strict_and_precedes_manifest() {
         use crate::model_capabilities::{resolve, DatabricksV2Route as Manifest};
 
-        for model in [
-            "catalog.schema.service",
-            "catalog.schema.claude-gpt-5",
-            "data_tools.goose.kimi-k3",
+        for (model, expected) in [
+            (
+                "catalog.schema.service",
+                DatabricksV2Route::MlflowChatCompletions,
+            ),
+            (
+                "catalog.schema.claude-gpt-5",
+                DatabricksV2Route::AnthropicMessages,
+            ),
+            (
+                "data_tools.goose.kimi-k3",
+                DatabricksV2Route::MlflowChatCompletions,
+            ),
         ] {
             assert!(
                 crate::model_capabilities::is_databricks_model_service_fqn(model),
@@ -3273,8 +3350,8 @@ mod tests {
             );
             assert_eq!(
                 databricks_v2_route(model),
-                DatabricksV2Route::MlflowChatCompletions,
-                "FQN route must precede manifest family inference: {model}"
+                expected,
+                "only a Claude service component may select Anthropic Messages: {model}"
             );
         }
 

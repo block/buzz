@@ -7,7 +7,7 @@ import 'package:buzz/features/profile/profile_avatar_crop_page.dart';
 import 'package:buzz/features/profile/avatar_background_grid.dart';
 import 'package:buzz/features/profile/avatar_editor_option_button.dart';
 import 'package:buzz/features/profile/animated_avatar_capture.dart';
-import 'package:buzz/features/profile/emoji_avatar_tile.dart';
+import 'package:buzz/shared/widgets/emoji_avatar_tile.dart';
 import 'package:buzz/features/profile/image_avatar_capture.dart';
 import 'package:buzz/shared/widgets/immediate_page_route.dart';
 import 'package:buzz/features/profile/profile_provider.dart';
@@ -40,6 +40,56 @@ part 'profile_edit_page_test/image_selection_tests.dart';
 const _editorControlBottomForTest = Grid.xl + Grid.xxs;
 
 void main() {
+  testWidgets('native profile title follows every photo editor entry', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    const channel = MethodChannel('buzz/ios_navigation_bar/842');
+    final calls = <MethodCall>[];
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(channel, (
+      call,
+    ) async {
+      calls.add(call);
+      return null;
+    });
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        channel,
+        null,
+      ),
+    );
+    final header = find.byWidgetPredicate(
+      (widget) =>
+          widget is UiKitView && widget.viewType == 'buzz/ios_navigation_bar',
+    );
+    Widget page({bool direct = false}) => WidgetHelpers.testable(
+      overrides: [profileProvider.overrideWith(_FakeProfileNotifier.new)],
+      child: ProfileEditPage(startInPhotoEditor: direct),
+    );
+    await tester.pumpWidget(page());
+    await tester.pumpAndSettle();
+    final native = tester.widget<UiKitView>(header);
+    expect(native.creationParams, containsPair('title', 'Profile'));
+    native.onPlatformViewCreated!(842);
+    await tester.pump();
+    await tester.tap(find.text('Edit Photo'));
+    await tester.pumpAndSettle();
+    expect(
+      calls.where((call) => call.method == 'configure').last.arguments,
+      containsPair('title', 'Edit Photo'),
+    );
+    await tester.pumpWidget(const SizedBox());
+    await tester.pumpWidget(page(direct: true));
+    await tester.pumpAndSettle();
+    expect(
+      tester.widget<UiKitView>(header).creationParams,
+      containsPair('title', 'Edit Photo'),
+    );
+    await tester.pumpWidget(const SizedBox());
+    debugDefaultTargetPlatformOverride = null;
+  });
+
   testWidgets('keeps crop Save disabled while dimensions decode', (
     tester,
   ) async {
@@ -376,14 +426,15 @@ void main() {
     await tester.tap(find.text('Photo Library'));
     await _waitForAvatarCropToLoad(tester);
     expect(find.text('Position Photo'), findsOneWidget);
+    expect(tester.getSize(find.text('Position Photo')).width, greaterThan(0));
     final cancelButton = find.ancestor(
-      of: find.text('Cancel'),
+      of: find.text('Back'),
       matching: find.byType(TextButton),
     );
     final saveButton = find.byKey(const ValueKey('avatar-crop-use-photo'));
     expect(tester.getRect(cancelButton).left, Grid.gutter);
     expect(
-      tester.getSize(find.text('Cancel')).width,
+      tester.getSize(find.text('Back')).width,
       lessThan(tester.getSize(cancelButton).width),
     );
     expect(
@@ -1009,7 +1060,6 @@ class _FakeMediaUploadService extends MediaUploadService {
          pickGalleryVideo: () async => null,
        );
 
-  var _camera = false;
   final bool delayGallery;
   final bool failImagePreparation;
   final _gallerySelection = Completer<XFile?>();
@@ -1023,18 +1073,11 @@ class _FakeMediaUploadService extends MediaUploadService {
 
   @override
   Future<XFile?> pickGalleryImage() async {
-    _camera = false;
     if (delayGallery) return _gallerySelection.future;
     return _image();
   }
 
   void completeGallerySelection() => _gallerySelection.complete(_image());
-
-  @override
-  Future<XFile?> captureImage() async {
-    _camera = true;
-    return _image();
-  }
 
   @override
   Future<Uint8List> prepareImageBytes(XFile image) async {
@@ -1051,10 +1094,8 @@ class _FakeMediaUploadService extends MediaUploadService {
   }) async {
     uploadCount++;
     return BlobDescriptor(
-      url: _camera
-          ? 'https://relay.example/camera.png'
-          : 'https://relay.example/profile.png',
-      sha256: _camera ? 'camera-hash' : 'hash',
+      url: 'https://relay.example/profile.png',
+      sha256: 'hash',
       size: bytes.length,
       type: mimeType,
       uploaded: 1,

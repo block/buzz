@@ -1,0 +1,532 @@
+import '../storage/serial_queue.dart';
+
+import 'dart:async';
+import 'dart:convert';
+
+import 'package:flutter/foundation.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+
+import 'package:http/http.dart' as http;
+
+import '../storage/secure_storage.dart';
+
+import 'hosted_environment.dart';
+import 'bounded_http_response.dart';
+import '../relay/relay_session.dart';
+import 'account_identity_store.dart';
+
+/// Errors contain no response bodies, credentials, or recovered private keys.
+/// Only [AccountFailure.signedOut] means "no session"; every other failure
+/// leaves the account state unknown.
+enum AccountFailure {
+  signedOut,
+  denied,
+  accountSetupRequired,
+  unavailable,
+  invalidResponse,
+  storage,
+
+  /// Login completed for a different account than the stored session.
+  differentAccount,
+
+  /// The server definitively refused this request (400/404/409/422); sending
+  /// it again unchanged cannot succeed.
+  rejected,
+}
+
+class BuilderlabAccount {
+  const BuilderlabAccount({
+    required this.subject,
+    required this.expiresAt,
+    this.email,
+    this.needsAccountSetup = false,
+  });
+  final bool needsAccountSetup;
+  final String subject;
+  final String? email;
+  final DateTime expiresAt;
+}
+
+/// Builderlab's CLI and NIP-FA adapter use the same server-side CLI credential.
+/// This client uses the native header, never a browser cookie. Browser handoff
+/// is deliberately a separate boundary: an app link is not an account session.
+///
+/// One session per device, scoped to its account subject. A login for another
+/// subject is refused until the caller clears the session and every fact it
+/// holds for the previous subject.
+class BuilderlabAccountClient {
+  /// [accountOrigin] defaults to the hosted account environment. An
+  /// organization client uses its own trusted origin and session record.
+  BuilderlabAccountClient({
+    http.Client? httpClient,
+    FlutterSecureStorage? storage,
+    Uri? accountOrigin,
+    this.onSessionChanged,
+  }) : _http = httpClient ?? http.Client(),
+       _storage = storage ?? defaultStorage,
+       accountOrigin = accountOrigin ?? origin;
+
+  /// Device-only: the session never syncs or restores onto another device.
+  @visibleForTesting
+  static const defaultStorage = accountSecureStorage;
+
+  static final origin = HostedEnvironment.origin;
+  final Uri accountOrigin;
+
+  /// Receives the session credential each time one is adopted, and null when
+  /// it is cleared or a restore finds no session. Only a trusted owner of
+  /// [accountOrigin]'s session may set it, for example to share the session
+  /// with the notification extension. A failed clear fails the operation that
+  /// cleared, so a signed-out session is never left shared; a failed share of
+  /// an adopted session is retried at the next adopt.
+  final Future<void> Function(String? credential)? onSessionChanged;
+  static const _prefix = '/api/goose';
+
+  /// Remote-agent registry routes, shared with desktop.
+  /// Safe request diagnostics: no headers, credentials, bodies or user data.
+  ({String path, int status})? lastRejectedRequest;
+
+  static const _beekeeperRoutes = {
+    '/v3/beekeeper/get-model-catalog',
+    '/v3/beekeeper/register-agent',
+    '/v3/beekeeper/update-agent',
+    '/v3/beekeeper/delete-agent',
+    '/v3/beekeeper/attest-agent',
+    '/v3/beekeeper/list-agents',
+  };
+
+  /// Agent listings carry each agent's instructions (up to 20,000 characters
+  /// apiece), so they get room for many full agents; every other route keeps
+  /// the default bound.
+  static int _responseLimit(String path) =>
+      path == '/v3/beekeeper/list-agents' ? 4 * 1024 * 1024 : 65536;
+
+  /// Sessions are scoped per origin so staging never reads production state.
+  late final _storageKey =
+      'buzz_hosted_session_${accountOrigin.host.replaceAll('.', '_')}_v1';
+  final http.Client _http;
+  final FlutterSecureStorage _storage;
+  String? _credential;
+  // The adopted credential while the notification extension lacks its copy.
+  String? _unshared;
+  bool _sharing = false;
+  BuilderlabAccount? _account;
+  // The session that last signed out, in memory only, so push-stop requests
+  // already pending can still reach their relays for a short while.
+  ({String credential, DateTime until})? _signedOut;
+  final _queue = SerialQueue();
+
+  /// How long after sign-out [pushStopAssertion] can still issue.
+  static const pushStopWindow = Duration(minutes: 10);
+  bool _disposed = false;
+
+  BuilderlabAccount? get account => _account;
+
+  /// The signed-in subject, notifying when an account signs in, out or changes.
+  ValueListenable<String?> get subjectChanges => _subject;
+  final _subject = ValueNotifier<String?>(null);
+
+  /// Runs operations one at a time in call order, so a callback exchange that
+  /// arrives during startup restore waits instead of failing.
+  Future<T> _serial<T>(Future<T> Function() operation) {
+    final result = _queue.run(() {
+      if (_disposed) throw AccountFailure.unavailable;
+      return operation();
+    });
+    return result;
+  }
+
+  /// Concurrent callers share one restore, so a second one cannot replace the
+  /// account the first adopted while its callers still hold that session.
+  Future<BuilderlabAccount?> restore() =>
+      _restoring ??= _restore().whenComplete(() => _restoring = null);
+  Future<BuilderlabAccount?>? _restoring;
+  Future<BuilderlabAccount?> _restore() => _serial(() async {
+    final record = await _readRecord();
+    if (record == null) {
+      // Retries a removal that failed after an earlier sign-out.
+      await _unshare();
+      return null;
+    }
+    try {
+      final verified = await _verify(record.credential);
+      if (verified.subject != record.subject) {
+        throw AccountFailure.invalidResponse;
+      }
+      return _adopt(record.credential, verified);
+    } on AccountFailure catch (failure) {
+      if (failure == AccountFailure.signedOut) {
+        await _clear();
+        return null;
+      }
+      rethrow;
+    }
+  });
+
+  /// Receives a one-use code only from a validated browser callback. PKCE is
+  /// verified by Builderlab; state and callback origin are checked by the caller.
+  /// [isCurrent] is checked just before the session is saved, so a caller can
+  /// abandon an exchange without it later replacing a newer session.
+  Future<BuilderlabAccount> exchange({
+    required String code,
+    required String verifier,
+    bool Function()? isCurrent,
+  }) => _serial(() async {
+    if (code.isEmpty ||
+        !RegExp(r'^[A-Za-z0-9._~-]{43,128}$').hasMatch(verifier)) {
+      throw AccountFailure.invalidResponse;
+    }
+    final stored = await _readRecord();
+    final result = await _request(
+      '/v1/auth/login/exchange',
+      body: {'code': code, 'code_verifier': verifier},
+    );
+    final credential = result['session_credential'];
+    if (credential is! String ||
+        credential.isEmpty ||
+        credential.length > 512) {
+      throw AccountFailure.invalidResponse;
+    }
+    final verified = await _verify(credential);
+    if (DateTime.tryParse(
+          result['expires_at'] is String ? result['expires_at'] as String : '',
+        ) !=
+        verified.expiresAt) {
+      throw AccountFailure.invalidResponse;
+    }
+    if (stored != null && stored.subject != verified.subject) {
+      throw AccountFailure.differentAccount;
+    }
+    if (_disposed || (isCurrent != null && !isCurrent())) {
+      throw AccountFailure.unavailable;
+    }
+    final record = jsonEncode({
+      'origin': accountOrigin.toString(),
+      'credential': credential,
+      'subject': verified.subject,
+      'expires_at': verified.expiresAt.toIso8601String(),
+    });
+    try {
+      await _storage.write(key: _storageKey, value: record);
+      if (await _storage.read(key: _storageKey) != record) {
+        throw AccountFailure.storage;
+      }
+    } catch (_) {
+      throw AccountFailure.storage;
+    }
+    return _adopt(credential, verified);
+  });
+
+  /// An unreadable record is a storage failure, never an absent session: its
+  /// subject is unknown, so only an explicit [clearLocalSession] may drop it.
+  Future<({String credential, String subject})?> _readRecord() async {
+    final String? saved;
+    try {
+      saved = await _storage.read(key: _storageKey);
+    } catch (_) {
+      throw AccountFailure.storage;
+    }
+    if (saved == null) return null;
+    try {
+      final value = jsonDecode(saved);
+      if (value is Map<String, dynamic> &&
+          value['origin'] == accountOrigin.toString() &&
+          value['credential'] is String &&
+          value['subject'] is String) {
+        return (
+          credential: value['credential'] as String,
+          subject: value['subject'] as String,
+        );
+      }
+    } on FormatException {
+      // Falls through to the storage failure below.
+    }
+    throw AccountFailure.storage;
+  }
+
+  BuilderlabAccount _adopt(String credential, BuilderlabAccount verified) {
+    if (_disposed) throw AccountFailure.unavailable;
+    _credential = credential;
+    // Assigned before notifying, so subject listeners see the new account.
+    _account = verified;
+    _subject.value = verified.subject;
+    _unshared = credential;
+    _share();
+    return verified;
+  }
+
+  /// Shares the adopted credential with the notification extension. Sharing is
+  /// push enrichment and must never gate sign-in, so a failure is retried by
+  /// the next account request instead of being thrown.
+  void _share() {
+    final share = onSessionChanged;
+    final credential = _unshared;
+    if (share == null || credential == null || _sharing) return;
+    _sharing = true;
+    unawaited(
+      share(credential)
+          .then((_) {
+            if (_unshared == credential) _unshared = null;
+          })
+          .catchError(
+            (Object error) => debugPrint('Session share failed: $error'),
+          )
+          .whenComplete(() {
+            _sharing = false;
+            // A newer credential adopted while this write was in flight still needs sharing.
+            final pending = _unshared;
+            if (pending != null && pending != credential) _share();
+          }),
+    );
+  }
+
+  Future<BuilderlabAccount> _verify(String credential) async {
+    final result = await _request('/v1/auth/me', credential: credential);
+    final subject = result['subject'];
+    final expiry = result['expires_at'];
+    final parsed = expiry is String ? DateTime.tryParse(expiry) : null;
+    if (subject is! String || subject.isEmpty || parsed == null) {
+      throw AccountFailure.invalidResponse;
+    }
+    if (!parsed.isAfter(DateTime.now().toUtc())) throw AccountFailure.signedOut;
+    final needsSetup =
+        result['account_status'] == 'ACCOUNT_STATUS_NEEDS_DETAILS';
+    return BuilderlabAccount(
+      subject: subject,
+      email: result['email'] is String ? result['email'] as String : null,
+      expiresAt: parsed,
+      needsAccountSetup: needsSetup,
+    );
+  }
+
+  /// Public identity metadata only. Private-key recovery belongs to the identity
+  /// storage owner, which must derive and verify the key before any persistence.
+  Future<Map<String, dynamic>> currentIdentity() =>
+      post('/v1/buzz/nostr-identities/current', {});
+
+  /// Saves a successfully admitted destination to the same account, even if
+  /// another session operation was queued before this request runs.
+  Future<void> rememberCommunity(
+    String relay, {
+    required String expectedSubject,
+  }) async {
+    final result = await _post('/v1/buzz/known-communities/add', {
+      'community_url': relay,
+    }, expectedSubject: expectedSubject);
+    if (result['error'] != null) throw AccountFailure.rejected;
+  }
+
+  /// Authenticated JSON POST to a Buzz account route on the fixed origin. The
+  /// credential never leaves this client. A 401 clears the stored session only
+  /// when the session check also rejects it; otherwise it is [AccountFailure.denied].
+  Future<Map<String, dynamic>> post(
+    String path,
+    Map<String, dynamic> body, {
+    String? expectedSubject,
+  }) => _post(path, body, expectedSubject: expectedSubject);
+
+  Future<Map<String, dynamic>> _post(
+    String path,
+    Map<String, dynamic> body, {
+    String? signingKey,
+    String? expectedSubject,
+  }) {
+    if (!RegExp(r'^/v1/buzz(/[a-z0-9_-]+)+$').hasMatch(path) &&
+        !_beekeeperRoutes.contains(path)) {
+      throw ArgumentError.value(
+        path,
+        'path',
+        'not an allowed Builderlab route',
+      );
+    }
+    return _serial(() async {
+      final credential = _credential;
+      if (credential == null) throw AccountFailure.signedOut;
+      _share();
+      if (expectedSubject != null && _account?.subject != expectedSubject) {
+        throw AccountFailure.denied;
+      }
+      try {
+        return await _request(
+          path,
+          credential: credential,
+          body: body,
+          signingKey: signingKey,
+        );
+      } on AccountFailure catch (failure) {
+        if (failure == AccountFailure.denied &&
+            _account?.needsAccountSetup == true) {
+          throw AccountFailure.accountSetupRequired;
+        }
+        if (failure != AccountFailure.signedOut) rethrow;
+      }
+      // Routes also answer 401 for authorization failures, so only a rejected
+      // session check ends the session.
+      try {
+        await _verify(credential);
+      } on AccountFailure catch (failure) {
+        if (failure == AccountFailure.signedOut) await _clear();
+        rethrow;
+      }
+      throw AccountFailure.denied;
+    });
+  }
+
+  /// Proves the saved key. The issuer may establish its first account binding;
+  /// conflicting or retired bindings are refused atomically by the backend.
+  Future<Map<String, dynamic>> relayAssertion(
+    String relay,
+    String nsec, {
+    required String expectedSubject,
+  }) => _post(
+    '/v1/buzz/identity/assertions',
+    {
+      'relay_url': relay,
+      'nostr_pubkey': AccountIdentityStore.publicKeyForNsec(nsec),
+    },
+    signingKey: nsec,
+    expectedSubject: expectedSubject,
+  );
+
+  /// A relay assertion from the session that signed out within
+  /// [pushStopWindow], for a push-stop request only. That session is never
+  /// stored, shared or used for anything else, so it cannot sign back in.
+  Future<Map<String, dynamic>> pushStopAssertion(String relay, String nsec) =>
+      _serial(() async {
+        final signedOut = _signedOut;
+        if (signedOut == null || !DateTime.now().isBefore(signedOut.until)) {
+          _signedOut = null;
+          throw AccountFailure.signedOut;
+        }
+        final pubkey = AccountIdentityStore.publicKeyForNsec(nsec);
+        // Never creates a binding: the key must already belong to the account.
+        final current = await _request(
+          '/v1/buzz/nostr-identities/current',
+          credential: signedOut.credential,
+          body: {},
+        );
+        final identity = current['identity'];
+        if (identity is! Map || identity['pubkey_hex'] != pubkey) {
+          throw AccountFailure.denied;
+        }
+        return _request(
+          '/v1/buzz/identity/assertions',
+          credential: signedOut.credential,
+          body: {'relay_url': relay, 'nostr_pubkey': pubkey},
+          signingKey: nsec,
+        );
+      });
+
+  Future<void> clearLocalSession() => _serial(_clear);
+  Future<void> _clear() async {
+    // Attempt both removals so one failure never leaves the other copy live.
+    var failed = false;
+    try {
+      await _storage.delete(key: _storageKey);
+    } catch (_) {
+      failed = true;
+    }
+    try {
+      await _unshare();
+    } on AccountFailure {
+      failed = true;
+    }
+    if (failed) {
+      // The account stays signed in, so the extension gets its copy back.
+      _unshared = _credential;
+      _share();
+      throw AccountFailure.storage;
+    }
+    final credential = _credential;
+    if (credential != null) {
+      _signedOut = (
+        credential: credential,
+        until: DateTime.now().add(pushStopWindow),
+      );
+    }
+    _credential = null;
+    _unshared = null;
+    _account = null;
+    if (!_disposed) _subject.value = null;
+  }
+
+  Future<void> _unshare() async {
+    final share = onSessionChanged;
+    if (share == null) return;
+    try {
+      await share(null);
+    } catch (_) {
+      throw AccountFailure.storage;
+    }
+  }
+
+  Future<Map<String, dynamic>> _request(
+    String path, {
+    String? credential,
+    Map<String, dynamic>? body,
+    String? signingKey,
+  }) async {
+    try {
+      final request =
+          http.Request(
+              body == null ? 'GET' : 'POST',
+              accountOrigin.replace(path: '$_prefix$path'),
+            )
+            ..followRedirects = false
+            ..headers['Accept'] = 'application/json';
+      if (credential != null) {
+        request.headers['X-BB-Session-Credential'] = credential;
+      }
+      if (body != null) {
+        request.headers['Content-Type'] = 'application/json';
+        request.headers['Origin'] = accountOrigin.toString();
+        request.body = jsonEncode(body);
+        if (signingKey != null) {
+          request.headers['Authorization'] = buildNip98AuthHeader(
+            method: 'POST',
+            url: request.url.toString(),
+            bodyBytes: request.bodyBytes,
+            nsec: signingKey,
+          );
+        }
+      }
+      final response = await boundedHttpResponse(
+        _http,
+        request,
+        maxBytes: _responseLimit(path),
+      );
+      if (kDebugMode && response.statusCode >= 400) {
+        debugPrint(
+          'Builderlab ${accountOrigin.host} ${request.method} $path: HTTP ${response.statusCode} contentType=${response.headers['content-type']?.split(';').first}',
+        );
+      }
+      if (response.statusCode == 401) throw AccountFailure.signedOut;
+      if (response.statusCode == 403) throw AccountFailure.denied;
+      if (const {400, 404, 409, 422}.contains(response.statusCode)) {
+        lastRejectedRequest = (path: path, status: response.statusCode);
+        throw AccountFailure.rejected;
+      }
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw AccountFailure.unavailable;
+      }
+      final value = jsonDecode(utf8.decode(response.bodyBytes));
+      if (value is! Map<String, dynamic>) throw AccountFailure.invalidResponse;
+      return value;
+    } on AccountFailure {
+      rethrow;
+    } on FormatException {
+      throw AccountFailure.invalidResponse;
+    } catch (_) {
+      throw AccountFailure.unavailable;
+    }
+  }
+
+  void dispose() {
+    _disposed = true;
+    _credential = null;
+    _signedOut = null;
+    _account = null;
+    _subject.dispose();
+    _http.close();
+  }
+}

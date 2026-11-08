@@ -1,6 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
+import { waitForAnimations } from "../helpers/animations";
 
 const AGENT_PUBKEY = TEST_IDENTITIES.charlie.pubkey;
 const RESTORED_UNSCOPED_AGENT_PUBKEY = TEST_IDENTITIES.outsider.pubkey;
@@ -170,6 +171,49 @@ test.describe("agent control browser regressions", () => {
   test("Stop publishes from a channelId-only panel with no Channel object", async ({
     page,
   }) => {
+    // Hold the actual observer IPC send across the click to prove ordering.
+    await page.addInitScript(() => {
+      let internals: Record<string, unknown>;
+      const probe = window as Window & {
+        __observerOrder?: string[];
+        __releaseObserver?: () => void;
+      };
+      probe.__observerOrder = [];
+      Object.defineProperty(window, "__TAURI_INTERNALS__", {
+        configurable: true,
+        get: () => internals,
+        set(value) {
+          internals = value;
+          let invoke: (command: string, args: unknown) => Promise<unknown>;
+          Object.defineProperty(value, "invoke", {
+            configurable: true,
+            get: () => invoke,
+            set(original) {
+              invoke = async (command, args) => {
+                if (command === "plugin:websocket|send") {
+                  const message = (args as { message: { data: string } })
+                    .message;
+                  const frame = JSON.parse(message.data);
+                  if (
+                    frame[0] === "REQ" &&
+                    frame[1].startsWith("live-") &&
+                    frame[2].kinds?.includes(24200)
+                  ) {
+                    await new Promise<void>((resolve) => {
+                      probe.__releaseObserver = resolve;
+                    });
+                    probe.__observerOrder?.push("observer");
+                  }
+                  if (frame[0] === "EVENT" && frame[1].kind === 24200)
+                    probe.__observerOrder?.push("control");
+                }
+                return original(command, args);
+              };
+            },
+          });
+        },
+      });
+    });
     await installMockBridge(page, {
       observerControlResults: [{ type: "cancel_turn", status: "sent" }],
     });
@@ -195,7 +239,17 @@ test.describe("agent control browser regressions", () => {
     await page.getByTestId("agent-session-settings-menu-trigger").click();
     const stop = page.getByTestId("agent-session-stop-turn");
     await expect(stop).toBeEnabled();
+    await page.waitForFunction(
+      () =>
+        typeof (window as Window & { __releaseObserver?: unknown })
+          .__releaseObserver === "function",
+    );
     await stop.click();
+    await page.evaluate(() =>
+      (
+        window as Window & { __releaseObserver?: () => void }
+      ).__releaseObserver?.(),
+    );
     await expect
       .poll(() => readControlRequests(page))
       .toEqual(
@@ -211,6 +265,12 @@ test.describe("agent control browser regressions", () => {
         ]),
       );
     await expect(page.getByText(/Stop signal sent to charlie/)).toBeVisible();
+    expect(
+      await page.evaluate(
+        () =>
+          (window as Window & { __observerOrder?: string[] }).__observerOrder,
+      ),
+    ).toEqual(["observer", "control"]);
   });
 
   test("Stop reports ambiguous_target without claiming success", async ({
@@ -258,10 +318,26 @@ test.describe("agent control browser regressions", () => {
         },
       ],
     });
-    await page.clock.install({ time: new Date("2026-08-30T17:00:00.000Z") });
     await openAgentActivity(page, CHANNEL_AGENTS);
 
-    await clickStop(page);
+    // Open the settings menu on real time so the DropdownMenuContent's 150ms
+    // CSS enter-animation (zoom-in-95) can complete before the fake clock is
+    // installed. Once the clock is active, every setTimeout — including those
+    // used by the correlation timeout the test exercises — is fake-controlled.
+    await page.getByTestId("agent-session-settings-menu-trigger").click();
+    const stop = page.getByTestId("agent-session-stop-turn");
+    await expect(stop).toBeVisible();
+    await expect(stop).toBeEnabled();
+    // Settle the enter-animation before installing the fake clock. Real
+    // setTimeout here; waitForAnimations works normally with no fake clock.
+    await waitForAnimations(page);
+
+    // Install the fake clock NOW — after the menu is open and stable. Any
+    // setTimeout scheduled from this point forward (e.g. the 8-second
+    // correlation timeout) will be fake-clock-controlled.
+    await page.clock.install({ time: new Date("2026-08-30T17:00:00.000Z") });
+
+    await stop.click();
     await expect
       .poll(() => readControlRequests(page))
       .toEqual(

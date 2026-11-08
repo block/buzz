@@ -14,6 +14,10 @@ use crate::Result;
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
 
+#[cfg(test)]
+#[path = "tests/schema_fence_bootstrap_postgres_tests.rs"]
+mod schema_fence_bootstrap_postgres_tests;
+
 /// Run all pending Buzz database migrations.
 ///
 /// The entire run holds the exclusive [`SCHEMA_DESTRUCTION_LOCK_KEY`] session
@@ -49,6 +53,10 @@ pub(crate) async fn run_migrations_through(pool: &PgPool, target: i64) -> Result
 
 async fn run_migrations_locked(conn: &mut PgConnection) -> Result<()> {
     reject_legacy_nip_rs_cardinality_ambiguity(conn).await?;
+    for (version, doc, indexes) in INLINE_INDEX_BUILDS {
+        MIGRATOR.run_to(version - 1, &mut *conn).await?;
+        build_indexes_before_migration(conn, *version, doc, indexes).await?;
+    }
     MIGRATOR.run(&mut *conn).await?;
     // The replica-fence proof (see `replica_fence`) requires the commit-time
     // `created_at` floor trigger from migration 0021 — correctly shaped — on
@@ -58,8 +66,123 @@ async fn run_migrations_locked(conn: &mut PgConnection) -> Result<()> {
     // guard, so migration fails closed if any is missing. (The fence probe
     // re-runs this same check at startup on non-migrating relays.)
     crate::replica_fence::verify_floor_guard_catalog(&mut *conn).await?;
-    crate::channel::verify_channel_roster_fence_catalog(&mut *conn).await?;
     Ok(())
+}
+
+/// Indexes that a migration verifies but refuses to build on a populated
+/// table, keyed by that migration's version, with the document that describes
+/// its concurrent prebuild, as `(name, definition)`.
+///
+/// Migrations 0076, 0078 and 0081 are checksum-frozen and expect every
+/// populated database to prebuild these indexes with `CREATE INDEX
+/// CONCURRENTLY`. Startup migration builds a missing index here instead, under
+/// the same bounded budgets 0049 uses, so a small populated database upgrades
+/// like an empty one and a large one still fails closed. `CONCURRENTLY` is not
+/// used: a replica blocked on the migration lock holds a snapshot that a
+/// concurrent build would wait for. New migrations build their own indexes
+/// inline (docs/database.md Rule 6); the `frozen_prebuild_guards_have_inline_builds`
+/// test keeps this list equal to the migrations that refuse populated tables.
+type InlineIndexBuilds = &'static [(&'static str, &'static str)];
+
+const INLINE_INDEX_BUILDS: &[(i64, &str, InlineIndexBuilds)] = &[
+    (
+        76,
+        "docs/artifact-sync-deployment.md",
+        &[(
+            "idx_artifact_revisions_artifact",
+            "CREATE INDEX idx_artifact_revisions_artifact \
+             ON public.artifact_revisions (community_id, artifact_id)",
+        )],
+    ),
+    (
+        78,
+        "docs/artifact-sync-deployment.md",
+        &[
+            (
+                "artifact_heads_modified",
+                "CREATE INDEX artifact_heads_modified \
+                 ON public.artifact_heads (community_id, modified_at, artifact_id)",
+            ),
+            (
+                "artifact_heads_channel",
+                "CREATE INDEX artifact_heads_channel \
+                 ON public.artifact_heads (community_id, channel_id, artifact_id)",
+            ),
+            (
+                "channel_members_sync",
+                "CREATE INDEX channel_members_sync \
+                 ON public.channel_members (community_id, pubkey, sync_modified_at, channel_id)",
+            ),
+            (
+                "artifact_revisions_moves",
+                "CREATE INDEX artifact_revisions_moves \
+                 ON public.artifact_revisions (community_id, modified_at, event_id) \
+                 WHERE source_channel_id IS NOT NULL",
+            ),
+        ],
+    ),
+    (
+        81,
+        "docs/profile-search.md",
+        &[(
+            "idx_nip_fi_profile_heads_names",
+            // The exact pg_get_indexdef form migration 0081 verifies.
+            r#"CREATE INDEX idx_nip_fi_profile_heads_names ON public.nip_fi_profile_heads USING gin (to_tsvector('simple'::regconfig, ((((COALESCE((jsonb_path_query_first(event, 'strict $."tags"[*]?(@[0] == "display_name")[1]'::jsonpath, '{}'::jsonb, true) #>> '{}'::text[]), ''::text) || ' '::text) || COALESCE((jsonb_path_query_first(event, 'strict $."tags"[*]?(@[0] == "username")[1]'::jsonpath, '{}'::jsonb, true) #>> '{}'::text[]), ''::text)) || ' '::text) || COALESCE((jsonb_path_query_first(event, 'strict $."tags"[*]?(@[0] == "full_name")[1]'::jsonpath, '{}'::jsonb, true) #>> '{}'::text[]), ''::text))))"#,
+        )],
+    ),
+];
+
+/// Build each missing index in `indexes` in its own bounded transaction
+/// unless migration `version` is already recorded, so no build holds its
+/// writer-conflicting lock past its own budget. An existing index, valid or
+/// not, is left for the migration to verify, and is skipped before
+/// `CREATE INDEX` so a prebuilt deployment never requests that lock.
+async fn build_indexes_before_migration(
+    conn: &mut PgConnection,
+    version: i64,
+    doc: &str,
+    indexes: InlineIndexBuilds,
+) -> Result<()> {
+    let applied: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM _sqlx_migrations WHERE version = $1)")
+            .bind(version)
+            .fetch_one(&mut *conn)
+            .await?;
+    if applied {
+        return Ok(());
+    }
+    let build = async {
+        for (name, definition) in indexes {
+            let exists: bool = sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
+                .bind(format!("public.{name}"))
+                .fetch_one(&mut *conn)
+                .await?;
+            if !exists {
+                let mut tx = conn.begin().await?;
+                sqlx::raw_sql("SET LOCAL lock_timeout = '1s'; SET LOCAL statement_timeout = '5s'")
+                    .execute(&mut *tx)
+                    .await?;
+                sqlx::raw_sql(*definition).execute(&mut *tx).await?;
+                tx.commit().await?;
+            }
+        }
+        Ok::<(), sqlx::Error>(())
+    };
+    build.await.map_err(|error| {
+        // Only a lock or statement timeout means the table is too large or
+        // too busy for the startup budget; pass any other failure through.
+        let over_budget = error
+            .as_database_error()
+            .and_then(|db| db.code())
+            .is_some_and(|code| code == "55P03" || code == "57014");
+        if !over_budget {
+            return error.into();
+        }
+        crate::DbError::InvalidData(format!(
+            "migration {version} blocked: building its indexes within the startup budget failed \
+             ({error}); prebuild them concurrently as described in {doc}, then retry"
+        ))
+    })
 }
 
 /// Run `op` while holding the exclusive schema/destruction session lock.
@@ -82,9 +205,12 @@ where
     F: FnOnce(PgConnection) -> Fut,
     Fut: Future<Output = (PgConnection, Result<T>)>,
 {
-    let mut lock_conn = crate::observability::acquire(pool, crate::observability::PoolRole::Writer)
-        .await?
-        .detach();
+    let mut lock_conn = crate::observability::acquire_writer_with_legacy_metrics(
+        pool,
+        crate::observability::WriterOperation::Bootstrap,
+    )
+    .await?
+    .detach();
     // This dedicated connection intentionally waits for the current migration
     // or schema-destruction owner and may then run long DDL. Exempt those two
     // phases from runtime lock/statement budgets. Keep the idle-in-transaction
@@ -183,8 +309,17 @@ async fn reject_legacy_nip_rs_cardinality_ambiguity(conn: &mut PgConnection) -> 
 }
 
 #[cfg(test)]
+#[path = "follow_up_retirement_tests.rs"]
+mod retirement_postgres_tests;
+
+#[cfg(test)]
+#[path = "media_index_prebuild_postgres_tests.rs"]
+mod media_index_prebuild_postgres_tests;
+
+#[cfg(test)]
 mod postgres_tests {
     use super::*;
+    use crate::test_support::ScratchDb;
     use std::{
         collections::BTreeSet,
         fs,
@@ -193,8 +328,8 @@ mod postgres_tests {
 
     const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1
 
-    /// Connection parameters parsed out of a `postgres://user:pass@host:port/db`
-    /// URL so the parity test can pass them to the `bin/pgschema` binary, which
+    /// Connection parameters parsed out of a PostgreSQL URL so the parity test
+    /// can pass them to the `bin/pgschema` binary, which
     /// takes discrete `--host/--port/--user/--password/--db` flags rather than a
     /// URL. Only the shapes this test emits (`BUZZ_TEST_DATABASE_URL` /
     /// `DATABASE_URL` / `TEST_DB_URL`) are supported.
@@ -227,6 +362,66 @@ mod postgres_tests {
             .map(|(_, pass)| pass.to_owned())
             .or_else(|| std::env::var("PGPASSWORD").ok())
             .unwrap_or_default()
+    }
+
+    /// Runs `bin/pgschema <command>` against `db`, which doubles as the plan
+    /// database (`--plan-*`): that avoids the embedded-Postgres download and
+    /// matches start-relay-for-tests.sh. Runs from the repository root, like
+    /// every pgschema caller, so `.pgschemaignore` applies.
+    fn pgschema(conn: &PgConn, db: &str, command: &[&str]) -> std::process::Output {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let port = conn.port.to_string();
+        std::process::Command::new(repo_root.join("bin/pgschema"))
+            .current_dir(&repo_root)
+            .args(command)
+            .args([
+                "--file",
+                "schema/schema.sql",
+                "--host",
+                &conn.host,
+                "--port",
+                &port,
+                "--user",
+                &conn.user,
+                "--password",
+                &conn.password,
+                "--db",
+                db,
+                "--plan-host",
+                &conn.host,
+                "--plan-port",
+                &port,
+                "--plan-user",
+                &conn.user,
+                "--plan-password",
+                &conn.password,
+                "--plan-db",
+                db,
+            ])
+            .output()
+            .expect("run bin/pgschema (hermit env required)")
+    }
+
+    /// Dated monthlies `schema/partitions/` declares, e.g. `events_p2026_01`.
+    fn declared_monthlies() -> BTreeSet<String> {
+        let dir = crate::test_support::desired_state_schema_dir().join("partitions");
+        let mut names = BTreeSet::new();
+        for entry in fs::read_dir(&dir).expect("read schema/partitions") {
+            let sql = fs::read_to_string(entry.expect("partition file").path())
+                .expect("read partition file");
+            names.extend(
+                sql.lines()
+                    .filter_map(|line| line.strip_prefix("CREATE TABLE "))
+                    .filter_map(|rest| rest.split_whitespace().next())
+                    .filter(|name| {
+                        name.rsplit_once("_p").is_some_and(|(_, month)| {
+                            month.starts_with(|c: char| c.is_ascii_digit())
+                        })
+                    })
+                    .map(str::to_owned),
+            );
+        }
+        names
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -476,6 +671,10 @@ mod postgres_tests {
             "product_feedback",
             "replica_heartbeat",
             "community_deletion_requests",
+            "entity_deletion_approvals",
+            "entity_deletion_requests",
+            "entity_deletion_stage_history",
+            "user_deletion_fences",
             "community_deletion_approvals",
             "community_deletion_checkpoints",
             "community_deletion_manifest_keys",
@@ -486,6 +685,10 @@ mod postgres_tests {
             "relay_admin_actions",
             "relay_admin_outbox",
             "relay_operator_audit",
+            "storage_accounting_snapshots",
+            "operator_listener_pubkeys",
+            "operator_listener_outbox",
+            "community_auth_upgrades",
         ] {
             if normalized[insert_pos..].contains(&format!("'{value}'")) {
                 globals.insert(value.to_owned());
@@ -699,7 +902,146 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 42);
+        assert_eq!(migrations.len(), 86);
+        assert!(migrations[83]
+            .sql
+            .as_str()
+            .contains("ADD COLUMN auto_join_pending UUID"));
+        assert!(migrations[84]
+            .sql
+            .as_str()
+            .contains("ADD COLUMN requested_requires_nip_fi BOOLEAN NOT NULL DEFAULT true"));
+        assert!(migrations[85]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE media_uploaders"));
+        for (index, migration) in migrations.iter().enumerate() {
+            assert_eq!(migration.version, (index + 1) as i64);
+        }
+        assert!(migrations[79]
+            .sql
+            .as_str()
+            .contains("ADD COLUMN auto_join BOOLEAN NOT NULL DEFAULT false"));
+        // Listed channel names (0083): a bounded contract index that refuses
+        // to build over unrepaired duplicates. The desired schema carries the
+        // same plain index.
+        assert_eq!(migrations[82].version, 83);
+        let listed_names = strip_sql_comments(migrations[82].sql.as_str());
+        assert!(listed_names.contains("SET LOCAL lock_timeout = '1s';"));
+        assert!(listed_names.contains("SET LOCAL statement_timeout = '5s';"));
+        assert!(listed_names.contains("CREATE UNIQUE INDEX idx_channels_listed_name"));
+        assert!(!listed_names.contains("CONCURRENTLY"));
+        assert!(crate::test_support::desired_state_schema_sql().contains(
+            "CREATE UNIQUE INDEX idx_channels_listed_name ON channels (community_id, lower(name))"
+        ));
+        assert!(migrations[70]
+            .sql
+            .as_str()
+            .contains("ADD COLUMN unlisted BOOLEAN NOT NULL DEFAULT FALSE"));
+        assert_eq!(migrations[67].version, 68);
+        assert!(migrations[67]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE entity_deletion_requests"));
+        assert_eq!(migrations[64].version, 65);
+        let retire_ttl = strip_sql_comments(migrations[64].sql.as_str());
+        for statement in [
+            "SET LOCAL lock_timeout = '5s';",
+            "DROP TRIGGER events_refresh_channel_ttl ON events;",
+            "DROP FUNCTION refresh_channel_ttl_after_event_insert();",
+        ] {
+            assert!(retire_ttl.contains(statement), "0065 must run {statement}");
+        }
+        let desired_schema = crate::test_support::desired_state_schema_sql();
+        assert!(!desired_schema.contains("events_refresh_channel_ttl"));
+        assert!(!desired_schema.contains("refresh_channel_ttl_after_event_insert"));
+        assert!(desired_schema.contains("legacy_admission BOOLEAN NOT NULL DEFAULT true"));
+        assert_eq!(migrations[65].version, 66);
+        assert!(migrations[65]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE community_nip_fi_issuers"));
+        assert_eq!(migrations[74].version, 75);
+        let invite_migration = strip_sql_comments(migrations[74].sql.as_str());
+        assert!(invite_migration.contains("SET LOCAL lock_timeout = '5s'"));
+        assert!(invite_migration.contains("SET LOCAL statement_timeout = '30s'"));
+        assert!(
+            invite_migration.contains("ADD COLUMN legacy_admission BOOLEAN NOT NULL DEFAULT true")
+        );
+        assert!(invite_migration.contains("ADD COLUMN revoked_at TIMESTAMPTZ"));
+        assert!(!invite_migration.to_ascii_uppercase().contains("UPDATE "));
+        assert!(!invite_migration
+            .to_ascii_uppercase()
+            .contains("CREATE FUNCTION"));
+        assert!(!desired_schema.contains("invite_admission_lock"));
+
+        assert_eq!(migrations[58].version, 59);
+        assert!(migrations[58].sql.as_str().contains("buzz.push_enabled"));
+        assert_eq!(migrations[59].version, 60);
+        assert!(migrations[59]
+            .sql
+            .as_str()
+            .contains("ALTER TABLE push_leases DROP COLUMN app_profile"));
+        assert_eq!(migrations[60].version, 61);
+        assert!(migrations[60].sql.as_str().contains("ADD COLUMN labels"));
+        assert_eq!(migrations[61].version, 62);
+        assert!(migrations[61]
+            .sql
+            .as_str()
+            .contains("ALTER TYPE channel_type ADD VALUE IF NOT EXISTS 'system'"));
+        assert_eq!(migrations[63].version, 64);
+        assert!(migrations[63]
+            .sql
+            .as_str()
+            .contains("CREATE FUNCTION profile_name_fields"));
+        assert_eq!(migrations[55].version, 56);
+        assert!(migrations[55]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE personal_read_accounts"));
+        assert_eq!(migrations[56].version, 57);
+        assert!(migrations[56]
+            .sql
+            .as_str()
+            .contains("ALTER TABLE personal_read_accounts ADD COLUMN started_at"));
+        assert_eq!(migrations[57].version, 58);
+        assert!(migrations[57]
+            .sql
+            .as_str()
+            .contains("ADD COLUMN through_message_id"));
+        assert_eq!(migrations[66].version, 67);
+        assert!(migrations[66]
+            .sql
+            .as_str()
+            .contains("ADD COLUMN join_role TEXT NOT NULL DEFAULT 'member'"));
+        assert_eq!(migrations[48].version, 49);
+        assert_eq!(migrations[49].version, 50);
+        assert_eq!(migrations[50].version, 51);
+        assert_eq!(migrations[51].version, 52);
+        assert_eq!(migrations[52].version, 53);
+        assert_eq!(migrations[53].version, 54);
+        assert_eq!(migrations[54].version, 55);
+        assert!(migrations[48]
+            .sql
+            .as_str()
+            .contains("idx_thread_metadata_window"));
+        assert!(migrations[50]
+            .sql
+            .as_str()
+            .contains("community_deletion_owner_provenance"));
+        assert!(migrations[52].sql.as_str().contains("approval_origin"));
+        assert!(migrations[52]
+            .sql
+            .as_str()
+            .contains("community_deletion_requests_owner_preparable"));
+        assert!(migrations[53]
+            .sql
+            .as_str()
+            .contains("community_deletion_requests_owner_quota_reservations"));
+        assert!(migrations[54]
+            .sql
+            .as_str()
+            .contains("idx_relay_admin_actions_direct_request"));
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -751,6 +1093,11 @@ mod postgres_tests {
             .as_str()
             .contains("CREATE INDEX idx_events_tags_gin"));
         assert!(!migrations[0].sql.as_str().contains("idx_events_tags_gin"));
+        // schema.sql (CI / isolated relay bootstrap) must carry the same index,
+        // or e-tag reads there run on plans prod never sees.
+        assert!(crate::test_support::desired_state_schema_sql().contains(
+            "CREATE INDEX idx_events_tags_gin ON events USING GIN (tags jsonb_path_ops)"
+        ));
 
         // NIP-AM (kind 44200) FTS exclusion: additive migration, never folded
         // into 0001 — folding would change 0001's checksum and break brownfield
@@ -907,7 +1254,7 @@ mod postgres_tests {
         assert!(migrations[32].sql.as_str().contains("kind = 30179"));
         assert!(migrations[32].sql.as_str().contains("search_tsv"));
         assert!(!migrations[0].sql.as_str().contains("30179"));
-        assert!(include_str!("../../../../schema/schema.sql")
+        assert!(crate::test_support::desired_state_schema_sql()
             .contains("kind IN (1059, 30179, 30300, 30350, 30622, 44100, 44101, 44200)"));
 
         // Public push-gateway authority is intentionally deployment-global and
@@ -1050,7 +1397,7 @@ mod postgres_tests {
             .contains("CREATE INDEX relay_invites_expires_at_idx ON relay_invites (expires_at)"));
         assert!(!relay_invites.contains("_operator_global_tables"));
 
-        let desired_schema = include_str!("../../../../schema/schema.sql");
+        let desired_schema = crate::test_support::desired_state_schema_sql();
         assert!(
             desired_schema.contains("CREATE TABLE join_policy_acceptances"),
             "desired-state schema must include join-policy evidence used by invite claims",
@@ -1141,17 +1488,28 @@ mod postgres_tests {
         // Fresh desired-state bootstrap must install the identical executable
         // fence as migration 0032. CI and isolated relay startup use schema.sql
         // without running migrations, so drift reopens rolling-deploy races.
-        fn extract_roster_fence(sql: &str) -> &str {
-            let fence_start = "CREATE OR REPLACE FUNCTION guard_channel_roster_snapshot()";
-            let fence_end = "    FOR EACH ROW EXECUTE FUNCTION guard_channel_roster_snapshot();";
-            let start = sql.find(fence_start).expect("roster fence function");
-            let relative_end = sql[start..].find(fence_end).expect("roster fence trigger");
-            &sql[start..start + relative_end + fence_end.len()]
+        // The desired state keeps the function and its trigger in separate
+        // files, so compare each statement rather than one contiguous span.
+        fn extract_span<'a>(sql: &'a str, start: &str, end: &str) -> &'a str {
+            let begin = sql.find(start).expect("span start");
+            let relative_end = sql[begin..].find(end).expect("span end");
+            &sql[begin..begin + relative_end + end.len()]
         }
-        assert_eq!(
-            extract_roster_fence(roster_fence),
-            extract_roster_fence(desired_schema)
-        );
+        for (start, end) in [
+            (
+                "CREATE OR REPLACE FUNCTION guard_channel_roster_snapshot()",
+                "$$ LANGUAGE plpgsql;",
+            ),
+            (
+                "CREATE TRIGGER trg_events_guard_channel_roster_snapshot",
+                "    FOR EACH ROW EXECUTE FUNCTION guard_channel_roster_snapshot();",
+            ),
+        ] {
+            assert_eq!(
+                extract_span(roster_fence, start, end),
+                extract_span(&desired_schema, start, end)
+            );
+        }
 
         // The single-row heartbeat table is updated continuously. Prevent
         // autovacuum from truncating its heap so standby queries are not
@@ -1242,44 +1600,111 @@ mod postgres_tests {
             "migration 39 must register relay_operator_audit in _operator_global_tables"
         );
 
-        // NIP-FI core identity + base-lifecycle foundation (migration 0041) and
-        // final-admission foundation (0042). Both widen the single SQL source of
-        // truth `community_write_fence_excluded_table` so their durable,
-        // immutable ledger relations are never fence-attached, purged, or
-        // counted as tenant-scoped drift. schema.sql keeps one consolidated
-        // definition of that function whose body must match 0042's exactly.
         assert_eq!(migrations[40].version, 41);
         let identity_foundation = migrations[40].sql.as_str();
         assert!(identity_foundation.contains("CREATE TABLE identity_bindings"));
         assert!(identity_foundation.contains("CREATE TABLE identity_lifecycle_history"));
-        assert!(identity_foundation
-            .contains("CREATE OR REPLACE FUNCTION community_write_fence_excluded_table"));
-        assert!(identity_foundation.contains("'identity_bindings'"));
 
         assert_eq!(migrations[41].version, 42);
         let authorization_foundation = migrations[41].sql.as_str();
         assert!(authorization_foundation.contains("CREATE TABLE authorization_events"));
         assert!(authorization_foundation.contains("CREATE TABLE protected_object_authority"));
-        assert!(authorization_foundation.contains("CREATE TABLE authorization_admission_results"));
 
-        // The consolidated desired-state exclusion function must byte-match
-        // migration 0042's CREATE OR REPLACE body, or a future schema
-        // consolidation would silently drop NIP-FI relations from the ledger.
-        fn extract_excluded_table_array(sql: &str) -> &str {
-            let anchor = "community_write_fence_excluded_table(target NAME) RETURNS BOOLEAN";
-            let start = sql.find(anchor).expect("exclusion function definition");
-            let array_start = sql[start..].find("ARRAY[").expect("exclusion array") + start;
-            let array_end = sql[array_start..]
-                .find("]::TEXT[]")
-                .expect("exclusion array end")
-                + array_start;
-            &sql[array_start..array_end]
+        // Brownfield relay databases created through SQLx still carry the
+        // production/sandbox constraint from 0015. Converge them to the same
+        // dogfood-only authority declared by the desired-state schema.
+        assert_eq!(migrations[42].version, 43);
+        let dogfood_profile = migrations[42].sql.as_str();
+        assert!(dogfood_profile.contains("DELETE FROM push_gateway_delegations"));
+        assert!(dogfood_profile.contains("DELETE FROM push_gateway_installations"));
+        assert!(dogfood_profile
+            .contains("DROP CONSTRAINT push_gateway_installations_app_profile_check"));
+        assert!(dogfood_profile.contains("CHECK (app_profile = 'buzz-ios-dogfood')"));
+        assert!(!desired_schema.contains("app_profile"));
+
+        // Drop the Phase-A NIP-FI relay-side authority ledger (0041 + 0042).
+        // OSS Buzz is stateless for identity (spec v2, PR #7214); the durable
+        // ledger tables are dead code. Restores community_write_fence_excluded_table
+        // to its pre-0041 body so the deletion catalog no longer includes the
+        // removed relations.
+        assert_eq!(migrations[43].version, 44);
+        let ledger_removal = migrations[43].sql.as_str();
+        assert!(ledger_removal.contains("DROP TABLE authorization_operation_receipts"));
+        assert!(ledger_removal.contains("DROP TABLE identity_bindings"));
+        assert!(ledger_removal.contains("DROP TABLE authorization_events"));
+        assert!(ledger_removal
+            .contains("CREATE OR REPLACE FUNCTION community_write_fence_excluded_table"));
+        // The restored exclusion function must NOT list any NIP-FI relation.
+        assert!(!ledger_removal.contains("'authorization_operation_receipts'"));
+        assert!(!ledger_removal.contains("'identity_bindings'"));
+        assert_eq!(migrations[45].version, 46);
+        assert!(migrations[45]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE storage_accounting_snapshots"));
+        assert_eq!(migrations[47].version, 48);
+        assert!(migrations[47]
+            .sql
+            .as_str()
+            .contains("ADD COLUMN hash_version SMALLINT"));
+        assert_eq!(migrations[49].version, 50);
+        assert!(migrations[49]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE operator_listener_pubkeys"));
+        assert!(migrations[49]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE operator_listener_outbox"));
+        assert!(migrations[49]
+            .sql
+            .as_str()
+            .contains("CREATE OR REPLACE FUNCTION community_write_fence_excluded_table"));
+        assert!(migrations[49]
+            .sql
+            .as_str()
+            .contains("'rate_limit_violations', 'operator_listener_outbox'"));
+        for index in [
+            "operator_listener_pubkeys_target",
+            "operator_listener_pubkeys_created_at",
+            "operator_listener_outbox_due",
+            "operator_listener_outbox_recovery",
+            "operator_listener_outbox_created_at",
+        ] {
+            assert!(
+                migrations[49].sql.as_str().contains(index),
+                "migration 0050 must declare {index}"
+            );
+            assert!(
+                desired_schema.contains(index),
+                "schema.sql must declare {index}"
+            );
         }
-        assert_eq!(
-            extract_excluded_table_array(authorization_foundation),
-            extract_excluded_table_array(desired_schema),
-            "schema.sql exclusion list drifted from migration 0042"
+        for index_shape in [
+            "ON operator_listener_outbox (next_attempt_at, created_at, id)",
+            "ON operator_listener_outbox (lease_until, created_at, id)",
+        ] {
+            assert!(
+                migrations[49].sql.as_str().contains(index_shape),
+                "migration 0050 must declare {index_shape}"
+            );
+            assert!(
+                desired_schema.contains(index_shape),
+                "schema.sql must declare {index_shape}"
+            );
+        }
+        // schema.sql keeps the restored (pre-0041) deletion exclusions and also
+        // leaves the deployment-global listener outbox outside tenant fencing.
+        assert!(
+            desired_schema
+                .contains("'rate_limit_violations', 'operator_listener_outbox'\n    ]::TEXT[])"),
+            "schema.sql must exclude the deployment-global listener outbox from tenant fencing"
         );
+        assert_eq!(migrations[51].version, 52);
+        assert!(migrations[51]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE artifact_heads"));
     }
 
     #[test]
@@ -1340,6 +1765,58 @@ mod postgres_tests {
         );
     }
 
+    /// The reconcile script repairs `events_pkey` after every apply, and
+    /// `start-relay-for-tests.sh` runs the same repair before apply so a reused
+    /// database reconciled before the repair existed can still be applied.
+    #[test]
+    fn events_pkey_repair_runs_before_reused_apply_and_matches_reconcile() {
+        let repair = include_str!("../../../../scripts/repair-events-pkey.sql");
+        let block = &repair[repair.find("DO $$").expect("repair script has a DO block")..];
+        assert!(
+            include_str!("../../../../scripts/reconcile-schema-after-pgschema.sql").contains(block),
+            "scripts/reconcile-schema-after-pgschema.sql must carry scripts/repair-events-pkey.sql's \
+             DO block verbatim"
+        );
+
+        let launcher = include_str!("../../../../scripts/start-relay-for-tests.sh");
+        let repair_at = launcher
+            .find("scripts/repair-events-pkey.sql")
+            .expect("start-relay-for-tests.sh runs scripts/repair-events-pkey.sql");
+        let apply_at = launcher
+            .find("./bin/pgschema apply")
+            .expect("start-relay-for-tests.sh runs pgschema apply");
+        assert!(
+            repair_at < apply_at,
+            "start-relay-for-tests.sh must repair events_pkey before pgschema apply"
+        );
+    }
+
+    /// `.pgschemaignore` hides dated monthlies from pgschema so a re-apply
+    /// cannot drop the ones the relay created at runtime. Each monthly
+    /// `schema/partitions/` declares must be exempt, or pgschema would stop
+    /// creating it on a fresh database.
+    #[test]
+    fn pgschemaignore_exempts_exactly_the_declared_monthlies() {
+        let ignore =
+            fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.pgschemaignore"))
+                .expect("read .pgschemaignore");
+        let exempt: BTreeSet<String> = ignore
+            .lines()
+            .filter_map(|line| {
+                line.trim()
+                    .trim_end_matches(',')
+                    .strip_prefix("\"!")?
+                    .strip_suffix('"')
+            })
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(
+            exempt,
+            declared_monthlies(),
+            ".pgschemaignore `!` exemptions must match the monthlies schema/partitions/ declares"
+        );
+    }
+
     #[test]
     fn workflow_run_error_codes_are_additive_and_backfilled_without_parsing_diagnostics() {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
@@ -1358,7 +1835,162 @@ mod postgres_tests {
             .sql
             .as_str()
             .contains("error_code"));
-        assert!(include_str!("../../../../schema/schema.sql").contains("error_code          TEXT"));
+        assert!(
+            crate::test_support::desired_state_schema_sql().contains("error_code          TEXT")
+        );
+    }
+
+    /// `schema/schema.sql` includes every desired-state file exactly once, and
+    /// `schema/tables/public/` (the SchemaBot schema directory's `public`
+    /// namespace) holds only one table per file: its CREATE TABLE plus the
+    /// CREATE INDEX statements on it. Types, functions, partitions, triggers
+    /// and seed rows belong in the sibling directories SchemaBot never reads.
+    #[test]
+    fn desired_state_schema_layout_is_complete_and_schemabot_shaped() {
+        use std::collections::BTreeSet;
+
+        fn sql_files(dir: &std::path::Path, root: &std::path::Path, out: &mut Vec<String>) {
+            for entry in std::fs::read_dir(dir).expect("read schema directory") {
+                let path = entry.expect("schema directory entry").path();
+                if path.is_dir() {
+                    sql_files(&path, root, out);
+                } else if path.extension().is_some_and(|ext| ext == "sql") {
+                    let relative = path.strip_prefix(root).expect("schema-relative path");
+                    out.push(relative.to_str().expect("utf-8 path").replace('\\', "/"));
+                }
+            }
+        }
+
+        let schema_dir = crate::test_support::desired_state_schema_dir();
+        let manifest =
+            std::fs::read_to_string(schema_dir.join("schema.sql")).expect("read schema/schema.sql");
+        let mut included = Vec::new();
+        for line in manifest.lines() {
+            if let Some(include) = line.strip_prefix("\\i ") {
+                included.push(include.trim().to_owned());
+            }
+        }
+        let included_set: BTreeSet<_> = included.iter().cloned().collect();
+        assert_eq!(
+            included.len(),
+            included_set.len(),
+            "schema.sql includes a file twice"
+        );
+
+        let mut on_disk = Vec::new();
+        sql_files(&schema_dir, &schema_dir, &mut on_disk);
+        let on_disk: BTreeSet<_> = on_disk.into_iter().filter(|f| f != "schema.sql").collect();
+        assert_eq!(
+            on_disk, included_set,
+            "every schema/ file must be included by schema/schema.sql exactly once"
+        );
+
+        fn strip_comments(text: &str) -> String {
+            text.lines()
+                .map(|line| line.split_once("--").map_or(line, |(code, _)| code))
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+
+        // Table and index DDL must live in its table file, where SchemaBot
+        // reads it. A merge conflict resolved by pasting DDL into the manifest,
+        // or DDL in a sibling directory, would still build and pass CI.
+        for line in strip_comments(&manifest).lines().map(str::trim) {
+            assert!(
+                line.is_empty()
+                    || line.starts_with("\\i ")
+                    || line.to_ascii_uppercase().starts_with("CREATE EXTENSION "),
+                "schema/schema.sql may only hold \\i includes and CREATE EXTENSION; \
+                 put table DDL in tables/public/<table>.sql: {line:.80}"
+            );
+        }
+        let non_table_files = std::iter::once("schema.sql").chain(
+            included
+                .iter()
+                .map(String::as_str)
+                .filter(|f| !f.starts_with("tables/public/")),
+        );
+        for file in non_table_files {
+            let text = std::fs::read_to_string(schema_dir.join(file)).expect("read schema file");
+            for statement in strip_comments(&text).to_ascii_uppercase().split(';') {
+                let tokens: Vec<_> = statement.split_whitespace().collect();
+                assert!(
+                    !tokens.windows(2).any(|pair| matches!(
+                        pair,
+                        ["CREATE" | "UNIQUE", "INDEX"] | ["DROP" | "ALTER", "TABLE" | "INDEX"]
+                    )),
+                    "{file} may not create, alter or drop tables or indexes; \
+                     change tables/public/<table>.sql instead"
+                );
+                let creates_table = tokens.iter().enumerate().any(|(i, token)| {
+                    *token == "CREATE"
+                        && tokens[i + 1..].iter().find(|t| {
+                            !matches!(**t, "UNLOGGED" | "TEMP" | "TEMPORARY" | "GLOBAL" | "LOCAL")
+                        }) == Some(&"TABLE")
+                });
+                assert!(
+                    !creates_table
+                        || (file.starts_with("partitions/")
+                            && tokens.windows(2).any(|pair| pair == ["PARTITION", "OF"])),
+                    "{file} may not CREATE TABLE; only partitions/ may, and only PARTITION OF. \
+                     Declare tables in tables/public/<table>.sql"
+                );
+            }
+        }
+
+        let tables_dir = schema_dir.join("tables");
+        for entry in std::fs::read_dir(&tables_dir).expect("read schema/tables") {
+            let path = entry.expect("schema/tables entry").path();
+            assert!(
+                path.is_dir() && path.file_name().is_some_and(|name| name == "public"),
+                "schema/tables may contain only the `public` namespace: {}",
+                path.display()
+            );
+        }
+        let mut tables = 0;
+        for file in included.iter().filter(|f| f.starts_with("tables/public/")) {
+            let table = file
+                .strip_prefix("tables/public/")
+                .and_then(|name| name.strip_suffix(".sql"))
+                .expect("table file name");
+            let text = std::fs::read_to_string(schema_dir.join(file)).expect("read table file");
+            let code = strip_comments(&text);
+            let mut creates = 0;
+            for statement in code
+                .split(';')
+                .map(|s| s.split_whitespace().collect::<Vec<_>>().join(" "))
+            {
+                if statement.is_empty() {
+                    continue;
+                }
+                if let Some(rest) = statement.strip_prefix("CREATE TABLE ") {
+                    assert!(
+                        rest.starts_with(&format!("{table} (")) && !rest.contains(" PARTITION OF "),
+                        "{file} may only create table {table}: {statement:.80}"
+                    );
+                    creates += 1;
+                } else {
+                    let index = statement
+                        .strip_prefix("CREATE INDEX ")
+                        .or_else(|| statement.strip_prefix("CREATE UNIQUE INDEX "))
+                        .unwrap_or_else(|| {
+                            panic!("{file} may only hold CREATE TABLE/INDEX: {statement:.80}")
+                        });
+                    assert!(
+                        !index.starts_with("IF NOT EXISTS ")
+                            && !index.starts_with("CONCURRENTLY "),
+                        "{file} must use a plain CREATE INDEX (SchemaBot refuses IF NOT EXISTS and CONCURRENTLY): {statement:.80}"
+                    );
+                    assert!(
+                        index.contains(&format!(" ON {table} ")),
+                        "{file} may only index {table}: {statement:.80}"
+                    );
+                }
+            }
+            assert_eq!(creates, 1, "{file} must create exactly one table");
+            tables += 1;
+        }
+        assert!(tables > 0, "schema/tables/public declares no tables");
     }
 
     #[test]
@@ -1372,8 +2004,9 @@ mod postgres_tests {
         assert!(sql.contains("NEW.kind IN (9, 40002, 45001, 45003)"));
         assert!(!sql.contains("NEW.kind IN (7, 9, 1059, 40007, 46010)"));
 
-        let desired_schema = include_str!("../../../../schema/schema.sql");
-        assert!(desired_schema.contains("NEW.kind IN (9, 40002, 45001, 45003)"));
+        let desired_schema = crate::test_support::desired_state_schema_sql();
+        assert!(!desired_schema.contains("enqueue_push_match_job"));
+        assert!(!desired_schema.contains("events_enqueue_push_match"));
         assert!(!desired_schema.contains("NEW.kind IN (7, 9, 1059, 40007, 46010)"));
     }
 
@@ -1577,9 +2210,9 @@ mod postgres_tests {
             if *path == this_file {
                 assert_eq!(
                     (macro_hits, run_hits, run_to_hits),
-                    (1, 1, 1),
+                    (1, 1, 2),
                     "migration.rs must embed the migrator once, run it once in production, \
-                     and expose exactly one test-only bounded run"
+                     and have one test-only and one production bounded run"
                 );
             } else if *path == push_gateway_exception {
                 continue;
@@ -1616,9 +2249,16 @@ mod postgres_tests {
             source[entry..locked].contains("with_exclusive_schema_destruction_lock("),
             "run_migrations must delegate through the exclusive schema/destruction lock"
         );
+        let production_run_to_site = source[run_to_site + 1..]
+            .find(&migrator_run_to)
+            .map(|offset| run_to_site + 1 + offset)
+            .expect("production bounded migrator run site");
         assert!(
-            run_site > locked && run_site < wrapper,
-            "the production migrator run site must live inside run_migrations_locked"
+            run_site > locked
+                && run_site < wrapper
+                && production_run_to_site > locked
+                && production_run_to_site < run_site,
+            "the production migrator run sites must live inside run_migrations_locked"
         );
         assert!(
             run_to_site > entry
@@ -1632,6 +2272,48 @@ mod postgres_tests {
                 && source[wrapper..].contains("pg_advisory_unlock($1)"),
             "the lock wrapper must acquire and explicitly release the session lock"
         );
+    }
+
+    #[test]
+    fn owner_deletion_auto_approval_migration_matches_desired_schema() {
+        let migration = MIGRATOR
+            .iter()
+            .find(|migration| migration.version == 53)
+            .expect("embedded migration 0053")
+            .sql
+            .as_ref()
+            .to_ascii_lowercase();
+        let schema = crate::test_support::desired_state_schema_sql().to_ascii_lowercase();
+
+        for sql in [&migration, &schema] {
+            assert!(sql.contains("approval_origin text not null default 'operator'"));
+            assert!(sql.contains("approval_origin in ('operator', 'owner_automatic')"));
+            assert!(sql.contains("'submitted', 'approved', 'fenced'"));
+            assert!(sql.contains("community_deletion_requests_owner_preparable"));
+            assert!(sql.contains("request_origin = 'owner'"));
+            assert!(sql.contains("stage = 'submitted'"));
+        }
+        assert!(migration.contains("set local lock_timeout = '5s'"));
+    }
+
+    #[test]
+    fn owner_deletion_quota_reservation_index_matches_desired_schema() {
+        let migration = MIGRATOR
+            .iter()
+            .find(|migration| migration.version == 54)
+            .expect("embedded migration 0054")
+            .sql
+            .as_ref()
+            .to_ascii_lowercase();
+        let schema = crate::test_support::desired_state_schema_sql().to_ascii_lowercase();
+
+        for sql in [&migration, &schema] {
+            assert!(sql.contains("community_deletion_requests_owner_quota_reservations"));
+            assert!(sql.contains("request_origin = 'owner'"));
+            assert!(sql.contains("stage <> 'aborted'"));
+            assert!(sql.contains("include (community_id, completed_at)"));
+        }
+        assert!(migration.contains("set local lock_timeout = '5s'"));
     }
 
     /// Structural parity between migration 0029's deletion surface and the
@@ -1747,14 +2429,16 @@ mod postgres_tests {
             .expect("embedded migration 0029")
             .sql
             .as_ref();
-        let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(std::path::Path::parent)
-            .expect("workspace root");
-        let schema_sql = std::fs::read_to_string(workspace_root.join("schema/schema.sql"))
-            .expect("read schema/schema.sql");
+        let migration_0051: &str = MIGRATOR
+            .iter()
+            .find(|migration| migration.version == 51)
+            .expect("embedded migration 0051")
+            .sql
+            .as_ref();
+        let schema_sql = crate::test_support::desired_state_schema_sql();
 
         let migration = surface(migration_0029);
+        let owner_admission_migration = surface(migration_0051);
         let schema = surface(&schema_sql);
 
         assert_eq!(
@@ -1771,24 +2455,90 @@ mod postgres_tests {
                 .tables
                 .get(table)
                 .unwrap_or_else(|| panic!("schema.sql is missing deletion table {table}"));
-            if table != "community_deletion_requests" {
+            if table != "community_deletion_requests" && table != "community_deletion_approvals" {
                 assert_eq!(
                     in_schema, definition,
                     "schema.sql definition of {table} drifted from migration 0029"
                 );
             }
         }
+        let migration_approval_table = migration
+            .tables
+            .get("community_deletion_approvals")
+            .expect("0029 approval table");
+        let schema_approval_table = schema
+            .tables
+            .get("community_deletion_approvals")
+            .expect("schema.sql approval table");
+        for invariant in [
+            "inventory_digest bytea not null check (length(inventory_digest) = 32)",
+            "foreign key (request_id, community_id, inventory_digest) references community_deletion_requests(id, community_id, inventory_digest) on delete restrict",
+        ] {
+            assert!(
+                migration_approval_table.contains(invariant),
+                "0029 deletion approvals are missing {invariant}"
+            );
+            assert!(
+                schema_approval_table.contains(invariant),
+                "schema.sql deletion approvals are missing {invariant}"
+            );
+        }
+        let migration_request_table = migration
+            .tables
+            .get("community_deletion_requests")
+            .expect("0029 deletion request table");
+        for request_table in [
+            migration_request_table,
+            schema
+                .tables
+                .get("community_deletion_requests")
+                .expect("schema.sql deletion request table"),
+        ] {
+            assert!(
+                request_table.contains("unique (id, community_id, inventory_digest)"),
+                "deletion requests must expose the exact composite approval target"
+            );
+        }
         for (function, definition) in &migration.functions {
             let in_schema = schema
                 .functions
                 .get(function)
                 .unwrap_or_else(|| panic!("schema.sql is missing deletion function {function}"));
-            if function != "community_write_fence_excluded_table" {
+            if function != "community_write_fence_excluded_table"
+                && function != "prevent_community_deletion_request_retargeting"
+            {
                 assert_eq!(
                     in_schema, definition,
                     "schema.sql definition of {function}() drifted from migration 0029"
                 );
             }
+        }
+        assert_eq!(
+            schema
+                .functions
+                .get("prevent_community_deletion_request_retargeting")
+                .expect("schema.sql deletion retargeting guard"),
+            owner_admission_migration
+                .functions
+                .get("prevent_community_deletion_request_retargeting")
+                .expect("0051 deletion retargeting guard"),
+            "schema.sql must carry the latest immutable owner-provenance guard"
+        );
+        let request_table = schema
+            .tables
+            .get("community_deletion_requests")
+            .expect("schema.sql deletion request table");
+        for owner_provenance_fragment in [
+            "request_origin text not null default 'operator'",
+            "owner_pubkey text",
+            "mediating_operator_pubkey text",
+            "acknowledgement_version integer",
+            "constraint community_deletion_owner_provenance check",
+        ] {
+            assert!(
+                request_table.contains(owner_provenance_fragment),
+                "schema.sql deletion requests are missing {owner_provenance_fragment}"
+            );
         }
         for (trigger, definition) in &migration.triggers {
             let in_schema = schema
@@ -1815,6 +2565,70 @@ mod postgres_tests {
         let mut expected_fences = migration.fence_attachments.clone();
         expected_fences.remove("product_feedback");
         expected_fences.remove("rate_limit_violations");
+        let personal = surface(
+            MIGRATOR
+                .iter()
+                .find(|m| m.version == 56)
+                .expect("personal read migration")
+                .sql
+                .as_ref(),
+        );
+        // 0057 adds personal_read_accounts.started_at after 0056's CREATE TABLE.
+        let started_at_column = "started_at timestamptz, ";
+        assert!(MIGRATOR
+            .iter()
+            .find(|m| m.version == 57)
+            .expect("personal read start migration")
+            .sql
+            .as_str()
+            .contains("ADD COLUMN started_at TIMESTAMPTZ"));
+        assert!(schema
+            .tables
+            .get("personal_read_accounts")
+            .expect("schema.sql personal read accounts")
+            .contains(started_at_column));
+        // 0058 replaces the frontier's whole-channel cut with its anchor ID.
+        let threads_through_column = "threads_through_timestamp timestamptz \
+            check (threads_through_timestamp is null or root_id = ''::bytea), ";
+        let through_message_column =
+            "through_message_id bytea check (octet_length(through_message_id) = 32), ";
+        let through_message = MIGRATOR
+            .iter()
+            .find(|m| m.version == 58)
+            .expect("personal read anchor migration")
+            .sql
+            .as_str();
+        assert!(through_message.contains("DROP COLUMN threads_through_timestamp"));
+        for (table, definition) in personal.tables {
+            let in_schema = schema.tables.get(&table).map(|schema_definition| {
+                if table == "personal_read_accounts" {
+                    schema_definition.replacen(started_at_column, "", 1)
+                } else {
+                    schema_definition.clone()
+                }
+            });
+            let definition = if table == "personal_read_frontiers" {
+                definition.replacen(threads_through_column, through_message_column, 1)
+            } else {
+                definition
+            };
+            assert_eq!(
+                in_schema.as_ref(),
+                Some(&definition),
+                "personal read table {table} differs"
+            );
+        }
+        expected_fences.extend(personal.fence_attachments);
+        expected_fences.extend(["artifact_heads", "artifact_revisions"].map(str::to_owned));
+        // 0066 fences the NIP-FI issuer bindings table.
+        assert!(MIGRATOR
+            .iter()
+            .find(|m| m.version == 66)
+            .expect("NIP-FI binding migration")
+            .sql
+            .as_str()
+            .contains("attach_community_write_fence('community_nip_fi_issuers')"));
+        expected_fences.insert("community_nip_fi_issuers".to_owned());
         assert_eq!(
             expected_fences, schema.fence_attachments,
             "write-fence attachment targets differ after recovery policy"
@@ -1914,23 +2728,13 @@ mod postgres_tests {
     async fn cancelled_migration_cannot_expose_shared_lock_while_ddl_backend_lives() {
         use std::time::Instant;
 
-        use sqlx::AssertSqlSafe;
-
         // Dedicated database: the probe table and the orphaned backend must
         // stay invisible to concurrent tests in the shared database.
         let base_url = std::env::var("BUZZ_TEST_DATABASE_URL")
             .or_else(|_| std::env::var("DATABASE_URL"))
             .unwrap_or_else(|_| TEST_DB_URL.to_owned());
-        let admin = PgPool::connect(&base_url)
-            .await
-            .expect("connect admin database");
-        let probe_db = format!("buzz_lock_cancel_{}", uuid::Uuid::new_v4().simple());
-        sqlx::query(AssertSqlSafe(format!("CREATE DATABASE {probe_db}")))
-            .execute(&admin)
-            .await
-            .expect("create probe database");
-        let (base_prefix, _) = base_url.rsplit_once('/').expect("database url has a path");
-        let pool = PgPool::connect(&format!("{base_prefix}/{probe_db}"))
+        let probe_db = ScratchDb::create(&base_url, "buzz_lock_cancel").await;
+        let pool = PgPool::connect(probe_db.url())
             .await
             .expect("connect probe database");
         sqlx::query("CREATE TABLE schema_lock_cancel_probe (id int)")
@@ -2063,17 +2867,9 @@ mod postgres_tests {
             committed,
             "orphaned migration DDL commits after cancellation; the lock must cover it"
         );
-
-        pool.close().await;
-        sqlx::query(AssertSqlSafe(format!(
-            "DROP DATABASE {probe_db} WITH (FORCE)"
-        )))
-        .execute(&admin)
-        .await
-        .expect("drop probe database");
     }
 
-    async fn connect_test_pool() -> PgPool {
+    pub(super) async fn connect_test_pool() -> PgPool {
         let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
             .or_else(|_| std::env::var("DATABASE_URL"))
             .unwrap_or_else(|_| TEST_DB_URL.to_owned());
@@ -2083,7 +2879,7 @@ mod postgres_tests {
             .expect("connect to test DB")
     }
 
-    async fn reset_public_schema(pool: &PgPool) {
+    pub(super) async fn reset_public_schema(pool: &PgPool) {
         sqlx::query("DROP SCHEMA IF EXISTS public CASCADE")
             .execute(pool)
             .await
@@ -2111,13 +2907,18 @@ mod postgres_tests {
     ///
     /// This bootstraps one probe database from `schema.sql` **through the real
     /// `bin/pgschema apply` binary** — the exact path CI (`ci.yml`) and both
-    /// test-relay launchers take — and migrates another through 1–38, then
-    /// asserts the three admin tables have identical column definitions (name,
-    /// type, nullability, default) and identical index shapes, including each
-    /// key's catalog sort/null options (`pg_index.indoption`). Columns are keyed
+    /// test-relay launchers take — and migrates another through the latest
+    /// migration, then asserts the admin and entity-intake tables have identical
+    /// column definitions (name, type, nullability, default) and index shapes, including each
+    /// key's catalog sort/null options (`pg_index.indoption`), and that the
+    /// `channels` columns match. Columns are keyed
     /// by name, not ordinal, because migrations append via `ALTER TABLE` while
     /// `schema.sql` declares them inline — positions legitimately differ, shapes
-    /// must not.
+    /// must not. Entity-intake constraints are also compared in the live catalog.
+    /// `events` and its partitions must carry the same primary key on both
+    /// probes, so the reconcile script's `events_pkey` rebuild cannot drift from
+    /// the migrations. Partitions are compared as a set of key definitions
+    /// because the two paths create different months.
     ///
     /// Driving the real binary is load-bearing: `pgschema` 1.7.4 discards
     /// per-key `NULLS FIRST`/`NULLS LAST` when it re-emits an index, so a naive
@@ -2129,8 +2930,6 @@ mod postgres_tests {
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn admin_schema_parity_between_desired_state_and_migrations() {
-        use sqlx::AssertSqlSafe;
-
         async fn columns(
             pool: &PgPool,
             table: &str,
@@ -2175,63 +2974,49 @@ mod postgres_tests {
             .expect("read index shapes")
         }
 
+        async fn constraints(pool: &PgPool, table: &str) -> Vec<(String, String, bool)> {
+            sqlx::query_as(
+                "SELECT con.conname, pg_get_constraintdef(con.oid), con.convalidated \
+                 FROM pg_constraint con \
+                 JOIN pg_class t ON t.oid = con.conrelid \
+                 JOIN pg_namespace n ON n.oid = t.relnamespace \
+                 WHERE n.nspname = 'public' AND t.relname = $1 \
+                 ORDER BY con.conname",
+            )
+            .bind(table)
+            .fetch_all(pool)
+            .await
+            .expect("read constraint definitions")
+        }
+
+        // Distinct (is the parent, key definition) pairs across events and its
+        // partitions.
+        async fn events_key_defs(pool: &PgPool) -> Vec<(bool, String)> {
+            sqlx::query_as(
+                "SELECT DISTINCT conrelid = 'events'::regclass, pg_get_constraintdef(oid) \
+                 FROM pg_constraint \
+                 WHERE contype = 'p' AND conrelid IN ( \
+                     SELECT 'events'::regclass \
+                     UNION ALL \
+                     SELECT inhrelid FROM pg_inherits WHERE inhparent = 'events'::regclass) \
+                 ORDER BY 1, 2",
+            )
+            .fetch_all(pool)
+            .await
+            .expect("read events key definitions")
+        }
+
         let base_url = std::env::var("BUZZ_TEST_DATABASE_URL")
             .or_else(|_| std::env::var("DATABASE_URL"))
             .unwrap_or_else(|_| TEST_DB_URL.to_owned());
         let conn = parse_pg_url(&base_url);
-        let admin = PgPool::connect(&base_url)
-            .await
-            .expect("connect admin database");
-        let (base_prefix, _) = base_url.rsplit_once('/').expect("database url has a path");
 
-        let desired_db = format!("buzz_admin_desired_{}", uuid::Uuid::new_v4().simple());
-        let migrated_db = format!("buzz_admin_migrated_{}", uuid::Uuid::new_v4().simple());
-        sqlx::query(AssertSqlSafe(format!("CREATE DATABASE {desired_db}")))
-            .execute(&admin)
-            .await
-            .expect("create desired-state probe database");
-        sqlx::query(AssertSqlSafe(format!("CREATE DATABASE {migrated_db}")))
-            .execute(&admin)
-            .await
-            .expect("create migrated probe database");
+        let desired_db = ScratchDb::create(&base_url, "buzz_admin_desired").await;
+        let migrated_db = ScratchDb::create(&base_url, "buzz_admin_migrated").await;
 
-        // Bootstrap the desired-state probe through the real pgschema binary, the
-        // same invocation the test-relay launchers use. The freshly-created probe
-        // db doubles as pgschema's plan database (--plan-*), which avoids the
-        // embedded-Postgres download and matches start-relay-for-tests.sh.
-        let pgschema = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bin/pgschema");
-        let schema_file =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../schema/schema.sql");
-        let port = conn.port.to_string();
-        let apply = std::process::Command::new(&pgschema)
-            .args([
-                "apply",
-                "--auto-approve",
-                "--file",
-                schema_file.to_str().expect("schema path utf-8"),
-                "--host",
-                &conn.host,
-                "--port",
-                &port,
-                "--user",
-                &conn.user,
-                "--password",
-                &conn.password,
-                "--db",
-                &desired_db,
-                "--plan-host",
-                &conn.host,
-                "--plan-port",
-                &port,
-                "--plan-user",
-                &conn.user,
-                "--plan-password",
-                &conn.password,
-                "--plan-db",
-                &desired_db,
-            ])
-            .output()
-            .expect("run bin/pgschema apply (hermit env required)");
+        // Bootstrap the desired-state probe the way the test-relay launchers do:
+        // the real pgschema binary, then the post-apply reconcile script.
+        let apply = pgschema(&conn, desired_db.name(), &["apply", "--auto-approve"]);
         assert!(
             apply.status.success(),
             "pgschema apply failed: {}\n{}",
@@ -2239,21 +3024,39 @@ mod postgres_tests {
             String::from_utf8_lossy(&apply.stderr),
         );
 
-        let desired = PgPool::connect(&format!("{base_prefix}/{desired_db}"))
+        let desired = PgPool::connect(desired_db.url())
             .await
             .expect("connect desired-state probe database");
-        let migrated = PgPool::connect(&format!("{base_prefix}/{migrated_db}"))
+        sqlx::raw_sql(include_str!(
+            "../../../../scripts/reconcile-schema-after-pgschema.sql"
+        ))
+        .execute(&desired)
+        .await
+        .expect("reconcile desired-state probe database");
+        let migrated = PgPool::connect(migrated_db.url())
             .await
             .expect("connect migrated probe database");
         MIGRATOR
-            .run_to(39, &migrated)
+            .run(&migrated)
             .await
-            .expect("apply migrations 1-39");
+            .expect("apply migrations for schema parity");
 
         for table in [
+            "media_uploaders",
+            "media_publications",
+            "relay_members",
             "relay_admin_actions",
             "relay_admin_outbox",
             "relay_operator_audit",
+            "community_auth_upgrades",
+            "entity_deletion_approvals",
+            "entity_deletion_requests",
+            "artifact_heads",
+            "artifact_revisions",
+            "channel_members",
+            "communities",
+            "entity_deletion_stage_history",
+            "user_deletion_fences",
         ] {
             assert_eq!(
                 columns(&desired, table).await,
@@ -2270,17 +3073,451 @@ mod postgres_tests {
                  migration and schema.sql must both use a representable shape."
             );
         }
-
-        desired.close().await;
-        migrated.close().await;
-        for probe_db in [desired_db, migrated_db] {
-            sqlx::query(AssertSqlSafe(format!(
-                "DROP DATABASE {probe_db} WITH (FORCE)"
-            )))
-            .execute(&admin)
-            .await
-            .expect("drop probe database");
+        async fn media_edit_index(pool: &PgPool) -> (String, String, String) {
+            sqlx::query_as("SELECT pg_get_indexdef(indexrelid),indoption::text,pg_get_expr(indexprs,indrelid) FROM pg_index WHERE indexrelid='public.idx_events_media_edit_target'::regclass AND indisvalid AND indisready AND indislive")
+                .fetch_one(pool).await.expect("valid media edit index")
         }
+        assert_eq!(
+            media_edit_index(&desired).await,
+            media_edit_index(&migrated).await
+        );
+        // `channels` columns only: pgschema re-emits `idx_channels_id_live`
+        // without its `INCLUDE (community_id)`, an index drift that predates
+        // this check.
+        assert_eq!(
+            columns(&desired, "channels").await,
+            columns(&migrated, "channels").await,
+            "column parity mismatch for channels: schema.sql desired state has drifted \
+             from the migrations; update schema/tables/public/channels.sql to match"
+        );
+        // The listed-name index (0083) is compared on its own for that reason.
+        let listed_name = |shapes: Vec<(String, String, String)>| {
+            shapes
+                .into_iter()
+                .filter(|(name, _, _)| name == "idx_channels_listed_name")
+                .collect::<Vec<_>>()
+        };
+        let desired_listed_name = listed_name(index_shapes(&desired, "channels").await);
+        assert_eq!(desired_listed_name.len(), 1, "desired state has the index");
+        assert_eq!(
+            desired_listed_name,
+            listed_name(index_shapes(&migrated, "channels").await),
+            "idx_channels_listed_name parity mismatch: update \
+             schema/tables/public/channels.sql to match migration 0083"
+        );
+        assert_eq!(
+            events_key_defs(&desired).await,
+            events_key_defs(&migrated).await,
+            "events primary-key parity mismatch: the pgschema-bootstrapped, reconciled \
+             desired state has drifted from the migrations; update the events_pkey block in \
+             scripts/reconcile-schema-after-pgschema.sql and scripts/repair-events-pkey.sql"
+        );
+
+        for table in [
+            "communities",
+            "community_auth_upgrades",
+            "entity_deletion_requests",
+            "entity_deletion_stage_history",
+            "user_deletion_fences",
+            "entity_deletion_approvals",
+        ] {
+            assert_eq!(
+                constraints(&desired, table).await,
+                constraints(&migrated, table).await,
+                "constraint parity mismatch for {table}"
+            );
+        }
+    }
+
+    /// Re-applying `schema/schema.sql` to a database bootstrapped the way every
+    /// caller does it (pgschema apply, then the reconcile script) and then used
+    /// by a relay plans nothing. pgschema does not compare partition bounds, so
+    /// the advanced catch-alls do not show up in the plan. Two things keep the
+    /// rest of it empty:
+    ///
+    /// - `.pgschemaignore` hides the monthlies the partition manager created
+    ///   at runtime, which pgschema would otherwise drop, rows included, with
+    ///   `DROP TABLE IF EXISTS ... CASCADE`.
+    /// - The reconcile script rebuilds `events_pkey` in its declared order.
+    ///   pgschema creates it with the partition key first, then plans to drop
+    ///   and re-add it and every declared child's key, which fails once the
+    ///   children are attached.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn pgschema_reapply_keeps_runtime_partitions() {
+        use crate::store::partition::{
+            maintain_partitions, PartitionMaintenancePolicy, PARTITION_MANAGER_MONTHS_AHEAD,
+        };
+
+        let base_url = crate::test_support::database_url();
+        let conn = parse_pg_url(&base_url);
+        let database = ScratchDb::create(&base_url, "buzz_pgschema_reapply").await;
+
+        let pool = PgPool::connect(database.url())
+            .await
+            .expect("connect probe database");
+        // The bootstrap every pgschema caller runs; the reconcile script
+        // attaches the declared children.
+        let bootstrap = |round: &str| {
+            let apply = pgschema(&conn, database.name(), &["apply", "--auto-approve"]);
+            assert!(
+                apply.status.success(),
+                "{round} pgschema apply failed: {}\n{}",
+                String::from_utf8_lossy(&apply.stdout),
+                String::from_utf8_lossy(&apply.stderr),
+            );
+            sqlx::raw_sql(include_str!(
+                "../../../../scripts/reconcile-schema-after-pgschema.sql"
+            ))
+            .execute(&pool)
+        };
+        bootstrap("first")
+            .await
+            .expect("first post-apply reconciliation");
+        async fn catch_all_bounds(pool: &PgPool) -> Vec<(String, Option<String>)> {
+            sqlx::query_as(
+                "SELECT relname::text, pg_get_expr(relpartbound, oid) FROM pg_class \
+                 WHERE relname IN ('events_p_future', 'delivery_log_p_future') \
+                 ORDER BY relname",
+            )
+            .fetch_all(pool)
+            .await
+            .expect("read catch-all bounds")
+        }
+        let declared_bounds = catch_all_bounds(&pool).await;
+        assert!(
+            declared_bounds.len() == 2 && declared_bounds.iter().all(|(_, bound)| bound.is_some()),
+            "reconcile did not attach both catch-alls: {declared_bounds:?}"
+        );
+
+        // The relay's default startup pass advances each catch-all into dated
+        // monthlies schema/partitions/ does not declare.
+        maintain_partitions(
+            &pool,
+            PARTITION_MANAGER_MONTHS_AHEAD,
+            PartitionMaintenancePolicy {
+                create_enabled: true,
+                advance_enabled: true,
+            },
+        )
+        .await
+        .expect("maintain partitions");
+        let advanced_bounds = catch_all_bounds(&pool).await;
+        assert!(
+            advanced_bounds.len() == 2 && advanced_bounds.iter().all(|(_, bound)| bound.is_some()),
+            "maintenance dropped or detached a catch-all: {advanced_bounds:?}"
+        );
+        for (declared, advanced) in declared_bounds.iter().zip(&advanced_bounds) {
+            assert_ne!(declared, advanced, "catch-all did not advance");
+        }
+        let children: Vec<(String, String)> = sqlx::query_as(
+            "SELECT p.relname::text, c.relname::text FROM pg_inherits i \
+             JOIN pg_class c ON c.oid = i.inhrelid \
+             JOIN pg_class p ON p.oid = i.inhparent \
+             WHERE p.relname IN ('events', 'delivery_log')",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("list partitions");
+        let declared = declared_monthlies();
+        let runtime: Vec<_> = children
+            .iter()
+            .filter(|(parent, child)| {
+                child.starts_with(&format!("{parent}_p2")) && !declared.contains(child)
+            })
+            .collect();
+        for (catch_all, bound) in &declared_bounds {
+            // The first month the declared catch-all served, from its
+            // `FOR VALUES FROM ('YYYY-MM-01 ...')` lower bound.
+            let parent = catch_all
+                .strip_suffix("_p_future")
+                .expect("catch-all is named <parent>_p_future");
+            let month = bound
+                .as_deref()
+                .and_then(|bound| bound.split_once("FROM ('"))
+                .and_then(|(_, rest)| rest.get(..7))
+                .expect("declared catch-all has a dated lower bound");
+            let first = format!("{parent}_p{}", month.replace('-', "_"));
+            assert!(
+                runtime.iter().any(|(_, child)| *child == first),
+                "maintenance did not advance into {first}: {children:?}"
+            );
+        }
+
+        let plan = pgschema(&conn, database.name(), &["plan", "--output-sql", "stdout"]);
+        let plan_sql = String::from_utf8_lossy(&plan.stdout);
+        assert!(
+            plan.status.success(),
+            "pgschema plan failed: {plan_sql}\n{}",
+            String::from_utf8_lossy(&plan.stderr),
+        );
+        assert!(
+            plan_sql.trim().is_empty(),
+            "re-applying schema.sql to a reconciled database must plan nothing; \
+             runtime monthlies {runtime:?}:\n{plan_sql}"
+        );
+        bootstrap("second")
+            .await
+            .expect("second post-apply reconciliation");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn policy_receipt_expand_preserves_populated_rows_and_legacy_inserts() {
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+        run_migrations_through(&pool, 84).await.unwrap();
+        let insert = "INSERT INTO community_auth_upgrades
+            (operation_id,target_community_id,expected_host,actor_pubkey,expected_owner_pubkey,
+             expected_issuer,operator_pubkey,policy_generation)
+            VALUES ($1,$2,'team.example.org','actor','owner','https://issuer.example.org','operator',1)";
+        let first = uuid::Uuid::new_v4();
+        sqlx::query(insert)
+            .bind(first)
+            .bind(uuid::Uuid::new_v4())
+            .execute(&pool)
+            .await
+            .unwrap();
+        run_migrations(&pool).await.unwrap();
+        let second = uuid::Uuid::new_v4();
+        sqlx::query(insert)
+            .bind(second)
+            .bind(uuid::Uuid::new_v4())
+            .execute(&pool)
+            .await
+            .unwrap();
+        for id in [first, second] {
+            let row: (bool, Option<i64>, Option<bool>, i64) = sqlx::query_as(
+                "SELECT requested_requires_nip_fi, expected_policy_generation,
+                    expected_requires_nip_fi, policy_generation
+                 FROM community_auth_upgrades WHERE operation_id=$1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(row, (true, None, None, 1));
+        }
+    }
+
+    /// Migrations 0076 and 0078 refuse a populated table whose index was not
+    /// prebuilt concurrently. A relay that auto-migrated through earlier
+    /// releases and holds artifact data must still boot through every migration. When a
+    /// bounded inline build cannot take its lock it must fail closed without
+    /// recording that migration, keeping earlier migrations and each index
+    /// already built in its own transaction.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn populated_artifact_tables_auto_migrate_through_every_migration() {
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+        MIGRATOR
+            .run_to(75, &pool)
+            .await
+            .expect("apply migrations 1-75");
+
+        let community_id = uuid::Uuid::new_v4();
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(community_id)
+            .bind(format!("artifact-{}.example", community_id.simple()))
+            .execute(&pool)
+            .await
+            .expect("insert community");
+        let artifact_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO artifact_revisions (community_id, event_id, artifact_id) \
+             VALUES ($1, $2, $3)",
+        )
+        .bind(community_id)
+        .bind(vec![1_u8; 32])
+        .bind(artifact_id)
+        .execute(&pool)
+        .await
+        .expect("insert artifact revision");
+        sqlx::query(
+            "INSERT INTO artifact_heads \
+             (community_id, artifact_id, event_id, channel_id, artifact_type) \
+             VALUES ($1, $2, $3, $4, 'doc')",
+        )
+        .bind(community_id)
+        .bind(artifact_id)
+        .bind(vec![1_u8; 32])
+        .bind(uuid::Uuid::new_v4())
+        .execute(&pool)
+        .await
+        .expect("insert artifact head");
+
+        let mut holder = pool.begin().await.expect("begin lock holder");
+        sqlx::query("LOCK TABLE artifact_revisions IN ROW EXCLUSIVE MODE")
+            .execute(&mut *holder)
+            .await
+            .expect("hold a writer lock");
+        let blocked = run_migrations(&pool)
+            .await
+            .expect_err("a build that cannot take its lock must fail closed")
+            .to_string();
+        assert!(
+            blocked.contains("migration 76 blocked")
+                && blocked.contains("docs/artifact-sync-deployment.md"),
+            "unexpected error: {blocked}"
+        );
+        assert_eq!(applied_versions(&pool).await.last().copied(), Some(75));
+        holder.rollback().await.expect("release writer lock");
+
+        // A prebuilt index is skipped without requesting the build lock, so
+        // the same held writer lock first blocks 0077's ALTER TABLE instead.
+        sqlx::query(
+            "CREATE INDEX idx_artifact_revisions_artifact \
+             ON public.artifact_revisions (community_id, artifact_id)",
+        )
+        .execute(&pool)
+        .await
+        .expect("prebuild the 0076 index");
+        let mut holder = pool.begin().await.expect("begin second lock holder");
+        sqlx::query("LOCK TABLE artifact_revisions IN ROW EXCLUSIVE MODE")
+            .execute(&mut *holder)
+            .await
+            .expect("hold a writer lock again");
+        let blocked = run_migrations(&pool)
+            .await
+            .expect_err("0077 cannot alter a table under a held writer lock")
+            .to_string();
+        assert!(
+            !blocked.contains("migration 76 blocked"),
+            "a prebuilt index must not be rebuilt: {blocked}"
+        );
+        assert_eq!(applied_versions(&pool).await.last().copied(), Some(76));
+        holder.rollback().await.expect("release second writer lock");
+
+        // Block the third 0078 build. The two artifact_heads builds before it
+        // commit separately, so neither holds its lock while the third waits.
+        run_migrations_through(&pool, 77)
+            .await
+            .expect("apply migration 77");
+        let mut holder = pool.begin().await.expect("begin third lock holder");
+        sqlx::query("LOCK TABLE channel_members IN ROW EXCLUSIVE MODE")
+            .execute(&mut *holder)
+            .await
+            .expect("hold a channel_members writer lock");
+        let blocked = run_migrations(&pool)
+            .await
+            .expect_err("a blocked 0078 build must fail closed")
+            .to_string();
+        assert!(
+            blocked.contains("migration 78 blocked"),
+            "unexpected error: {blocked}"
+        );
+        assert_eq!(applied_versions(&pool).await.last().copied(), Some(77));
+        let committed: bool =
+            sqlx::query_scalar("SELECT to_regclass('public.artifact_heads_modified') IS NOT NULL")
+                .fetch_one(&pool)
+                .await
+                .expect("read earlier 0078 build");
+        assert!(
+            committed,
+            "an earlier build must commit before the next one"
+        );
+        holder.rollback().await.expect("release third writer lock");
+
+        run_migrations(&pool)
+            .await
+            .expect("populated small database auto-migrates");
+        assert_boots_through_every_migration(&pool).await;
+        assert_eq!(
+            valid_indexes(
+                &pool,
+                &[
+                    "idx_artifact_revisions_artifact",
+                    "artifact_heads_modified",
+                    "artifact_heads_channel",
+                    "channel_members_sync",
+                    "artifact_revisions_moves",
+                ]
+            )
+            .await,
+            5
+        );
+    }
+
+    /// Migration 0081 refuses a populated `nip_fi_profile_heads`. A relay that
+    /// has published NIP-FI verified profiles must still boot through every
+    /// migration.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn populated_verified_profiles_auto_migrate_through_every_migration() {
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+        MIGRATOR
+            .run_to(80, &pool)
+            .await
+            .expect("apply migrations 1-80");
+        sqlx::query(
+            "INSERT INTO nip_fi_profile_heads (community_id, pubkey, issuer, issued_at, event) \
+             VALUES ($1, $2, $3, 1, $4)",
+        )
+        .bind(uuid::Uuid::new_v4())
+        .bind("a".repeat(64))
+        .bind("b".repeat(64))
+        .bind(serde_json::json!({"tags": [["display_name", "Wes Johnson"]]}))
+        .execute(&pool)
+        .await
+        .expect("insert verified profile head");
+
+        run_migrations(&pool)
+            .await
+            .expect("database with verified profiles auto-migrates");
+        assert_boots_through_every_migration(&pool).await;
+        assert_eq!(
+            valid_indexes(&pool, &["idx_nip_fi_profile_heads_names"]).await,
+            1
+        );
+    }
+
+    async fn assert_boots_through_every_migration(pool: &PgPool) {
+        let embedded: Vec<i64> = MIGRATOR.iter().map(|migration| migration.version).collect();
+        assert_eq!(
+            applied_versions(pool).await,
+            embedded,
+            "a populated database must boot through every embedded migration"
+        );
+    }
+
+    async fn valid_indexes(pool: &PgPool, names: &[&str]) -> i64 {
+        sqlx::query_scalar(
+            "SELECT count(*) FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid \
+             WHERE c.relname = ANY($1) AND i.indisvalid AND i.indisready AND i.indislive",
+        )
+        .bind(names)
+        .fetch_one(pool)
+        .await
+        .expect("read index flags")
+    }
+
+    /// A migration that refuses a populated table crash-loops every
+    /// auto-migrating relay with data. Only the frozen ones may, and each must
+    /// have an inline build the startup runner applies first.
+    #[test]
+    fn frozen_prebuild_guards_have_inline_builds() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations");
+        let mut guarded: Vec<i64> = std::fs::read_dir(&dir)
+            .expect("read migrations dir")
+            .filter_map(|entry| {
+                let path = entry.expect("read migration entry").path();
+                let name = path.file_name()?.to_str()?.to_owned();
+                let version: i64 = name.split('_').next()?.parse().ok()?;
+                let sql = std::fs::read_to_string(&path).expect("read migration");
+                sql.contains("RAISE EXCEPTION 'prebuild ")
+                    .then_some(version)
+            })
+            .collect();
+        guarded.sort_unstable();
+        let inline: Vec<i64> = INLINE_INDEX_BUILDS.iter().map(|(v, _, _)| *v).collect();
+        assert_eq!(
+            guarded, inline,
+            "a migration must build its own index instead of refusing a populated table \
+             (docs/database.md Rule 6); only frozen guards listed in INLINE_INDEX_BUILDS may remain"
+        );
+        assert_eq!(inline, [76, 78, 81], "do not add new prebuild guards");
     }
 
     #[tokio::test]
@@ -2347,6 +3584,7 @@ mod postgres_tests {
             .execute(&pool)
             .await
             .expect("repair ambiguous row");
+        crate::test_support::prebuild_media_edit_index(&pool).await;
         run_migrations(&pool)
             .await
             .expect("retry succeeds after operator repair");
@@ -2426,6 +3664,7 @@ mod postgres_tests {
             vec![(1, Some(true)), (30_179, Some(true)), (30_350, None)]
         );
 
+        crate::test_support::prebuild_media_edit_index(&pool).await;
         run_migrations(&pool)
             .await
             .expect("apply remaining migrations to populated database");
@@ -2437,6 +3676,22 @@ mod postgres_tests {
         .await
         .expect("read post-upgrade search behavior");
         assert_eq!(after, vec![(1, Some(true)), (30_179, None), (30_350, None)]);
+    }
+
+    /// Migration-upgrade half of the owner-provenance contract.
+    ///
+    /// The desired-state bootstrap half lives in
+    /// `store::deletion::postgres_tests` and asserts the same shared case
+    /// table, so `schema/schema.sql` cannot admit owner rows the migration
+    /// path refuses (or the reverse).
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn migrated_schema_enforces_owner_provenance_contract() {
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+        run_migrations(&pool).await.expect("run migrations");
+
+        crate::store::deletion::owner_provenance_contract::assert_contract(&pool).await;
     }
 
     #[tokio::test]
@@ -2658,104 +3913,13 @@ mod postgres_tests {
             .expect("drop late-table fixtures");
     }
 
-    /// NIP-FI intermediate state: migration 0041 (identity + base lifecycle)
-    /// alone must present a coherent catalog. Its five community-scoped ledger
-    /// relations are immutable and durable, so they are registered in the
-    /// write-fence exclusion — never counted as tenant-scoped drift, never
-    /// fence-attached — and the exact deletion catalog must still validate.
+    /// Verify migration 0044 applies cleanly against a DB that has rows in
+    /// the NIP-FI 0041+0042 tables. The immutability guards (no_delete,
+    /// no_truncate) are enforced via triggers; DROP TABLE bypasses them and
+    /// must succeed even when rows are present.
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn migration_0041_identity_foundation_is_durable_ledger_after_migration_a() {
-        let pool = connect_test_pool().await;
-        reset_public_schema(&pool).await;
-        MIGRATOR
-            .run_to(41, &pool)
-            .await
-            .expect("apply migrations 1-41");
-
-        // The five identity relations exist.
-        let identity_tables = [
-            "authorization_operation_receipts",
-            "identity_enrollment_policies",
-            "identity_bindings",
-            "identity_lifecycle_history",
-            "identity_lifecycle_selectors",
-        ];
-        for table in identity_tables {
-            let exists = sqlx::query_scalar::<_, bool>(
-                "SELECT EXISTS (SELECT 1 FROM information_schema.tables \
-                 WHERE table_schema = 'public' AND table_name = $1)",
-            )
-            .bind(table)
-            .fetch_one(&pool)
-            .await
-            .unwrap_or_else(|err| panic!("check table {table}: {err}"));
-            assert!(exists, "migration 0041 must create {table}");
-        }
-
-        // Migration B's relations must NOT exist yet.
-        for table in ["authorization_events", "protected_object_authority"] {
-            let exists = sqlx::query_scalar::<_, bool>(
-                "SELECT EXISTS (SELECT 1 FROM information_schema.tables \
-                 WHERE table_schema = 'public' AND table_name = $1)",
-            )
-            .bind(table)
-            .fetch_one(&pool)
-            .await
-            .unwrap_or_else(|err| panic!("check table {table}: {err}"));
-            assert!(!exists, "{table} belongs to migration 0042, not 0041");
-        }
-
-        // Every identity relation is excluded from the write fence: none may
-        // appear as tenant-scoped drift or carry the fence trigger.
-        let scoped_or_fenced: Vec<String> = sqlx::query_scalar(
-            "WITH scoped AS ( \
-                 SELECT c.relname FROM pg_class c \
-                 JOIN pg_namespace n ON n.oid = c.relnamespace \
-                 JOIN pg_attribute a ON a.attrelid = c.oid \
-                 WHERE n.nspname = 'public' AND c.relkind IN ('r','p') \
-                   AND NOT c.relispartition AND a.attname = 'community_id' \
-                   AND NOT a.attisdropped \
-                   AND NOT community_write_fence_excluded_table(c.relname) \
-             ) \
-             SELECT relname FROM scoped \
-             WHERE relname = ANY($1) ORDER BY relname",
-        )
-        .bind(&identity_tables[..])
-        .fetch_all(&pool)
-        .await
-        .expect("read scoped identity relations");
-        assert!(
-            scoped_or_fenced.is_empty(),
-            "identity ledger relations must be write-fence excluded, not scoped: {scoped_or_fenced:?}"
-        );
-
-        // The exact deletion catalog validates: the excluded ledger relations
-        // do not perturb the scoped-table/fence equality check.
-        crate::deletion::DeletionStore::new(pool.clone())
-            .validate_catalog()
-            .await
-            .expect("deletion catalog validates after migration 0041");
-
-        // The immutability contract is enforced, not merely declared. TRUNCATE
-        // fires the statement-level guard unconditionally, so this proves the
-        // rejection without constructing a fully valid ledger row.
-        let rejected = sqlx::query("TRUNCATE identity_lifecycle_selectors")
-            .execute(&pool)
-            .await
-            .expect_err("identity_lifecycle_selectors truncation must be rejected");
-        assert!(
-            rejected.to_string().contains("cannot be truncated"),
-            "expected immutability rejection, got: {rejected}"
-        );
-    }
-
-    /// NIP-FI full state: migrations 0041 + 0042 together must present a
-    /// coherent 15-relation catalog with zero dangling foreign keys, all
-    /// relations write-fence excluded, and an intact exact deletion catalog.
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn nip_fi_foundation_is_a_closed_durable_ledger_after_migrations_a_and_b() {
+    async fn migration_0044_drops_populated_nip_fi_ledger_cleanly() {
         let pool = connect_test_pool().await;
         reset_public_schema(&pool).await;
         MIGRATOR
@@ -2763,6 +3927,49 @@ mod postgres_tests {
             .await
             .expect("apply migrations 1-42");
 
+        // Seed a community and minimal rows in a selection of 0041+0042 tables.
+        let community_id = uuid::Uuid::new_v4();
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(community_id)
+            .bind(format!("drop-test-{}.example", community_id.simple()))
+            .execute(&pool)
+            .await
+            .expect("seed community");
+
+        // Seed a receipt (used as FK anchor for several 0042 tables).
+        let operation_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO authorization_operation_receipts \
+             (community_id, operation_id, request_fingerprint, operation_kind, \
+              actor_fingerprint, outcome_code, result_digest) \
+             VALUES ($1, $2, $3, 12, $4, 1, $5)",
+        )
+        .bind(community_id)
+        .bind(operation_id)
+        .bind(vec![0xAA_u8; 32])
+        .bind(vec![0xBB_u8; 32])
+        .bind(vec![0xCC_u8; 32])
+        .execute(&pool)
+        .await
+        .expect("seed operation receipt");
+
+        // Seed an invalidation domain (0042 table with no FK to receipts).
+        sqlx::query(
+            "INSERT INTO authorization_invalidation_domains \
+             (community_id, current_generation) VALUES ($1, 0)",
+        )
+        .bind(community_id)
+        .execute(&pool)
+        .await
+        .expect("seed invalidation domain");
+
+        // Apply migration 0043 (dogfood profile) and 0044 (ledger removal).
+        MIGRATOR
+            .run_to(44, &pool)
+            .await
+            .expect("migration 0044 must apply cleanly against a populated NIP-FI DB");
+
+        // All NIP-FI tables must be gone.
         let nip_fi_tables = [
             "authorization_admission_results",
             "authorization_authentication_denial_attempts",
@@ -2780,2455 +3987,217 @@ mod postgres_tests {
             "identity_lifecycle_selectors",
             "protected_object_authority",
         ];
-
-        // All fifteen relations exist.
         let present: Vec<String> = sqlx::query_scalar(
             "SELECT table_name FROM information_schema.tables \
-             WHERE table_schema = 'public' AND table_name = ANY($1) ORDER BY table_name",
+             WHERE table_schema = 'public' AND table_name = ANY($1)",
         )
         .bind(&nip_fi_tables[..])
         .fetch_all(&pool)
         .await
-        .expect("read NIP-FI table catalog");
-        let mut expected: Vec<String> = nip_fi_tables.iter().map(|t| t.to_string()).collect();
-        expected.sort();
-        assert_eq!(
-            present, expected,
-            "all NIP-FI relations must exist after 0042"
-        );
-
-        // Zero dangling foreign keys: every FK target is a live relation.
-        let invalid_fks: i64 = sqlx::query_scalar(
-            "SELECT count(*)::BIGINT FROM pg_constraint \
-             WHERE contype = 'f' AND NOT convalidated",
-        )
-        .fetch_one(&pool)
-        .await
-        .expect("read FK validity");
-        assert_eq!(
-            invalid_fks, 0,
-            "no NIP-FI foreign key may be left unvalidated"
-        );
-
-        // None of the fifteen appear as tenant-scoped drift; all are excluded.
-        let scoped: Vec<String> = sqlx::query_scalar(
-            "SELECT c.relname FROM pg_class c \
-             JOIN pg_namespace n ON n.oid = c.relnamespace \
-             JOIN pg_attribute a ON a.attrelid = c.oid \
-             WHERE n.nspname = 'public' AND c.relkind IN ('r','p') \
-               AND NOT c.relispartition AND a.attname = 'community_id' \
-               AND NOT a.attisdropped \
-               AND NOT community_write_fence_excluded_table(c.relname) \
-               AND c.relname = ANY($1) ORDER BY c.relname",
-        )
-        .bind(&nip_fi_tables[..])
-        .fetch_all(&pool)
-        .await
-        .expect("read scoped NIP-FI relations");
+        .expect("catalog check after ledger removal");
         assert!(
-            scoped.is_empty(),
-            "all NIP-FI ledger relations must be write-fence excluded: {scoped:?}"
+            present.is_empty(),
+            "all NIP-FI tables must be absent after migration 0044: {present:?}"
         );
 
-        // The exact deletion catalog validates with the full ledger present.
+        // Complete later additive migrations before comparing to the current
+        // binary's complete tenant-table inventory.
+        run_migrations(&pool)
+            .await
+            .expect("complete current migrations");
+        // The deletion catalog must validate with ledger relations gone.
         crate::deletion::DeletionStore::new(pool.clone())
             .validate_catalog()
             .await
-            .expect("deletion catalog validates after migrations 0041 + 0042");
-
-        // A migration-B relation is immutable too. TRUNCATE fires the
-        // statement-level guard unconditionally.
-        let rejected = sqlx::query("TRUNCATE authorization_admission_results")
-            .execute(&pool)
-            .await
-            .expect_err("authorization_admission_results truncation must be rejected");
-        assert!(
-            rejected.to_string().contains("cannot be truncated"),
-            "expected immutability rejection, got: {rejected}"
-        );
+            .expect("deletion catalog validates after migration 0044");
     }
 
-    /// NIP-FI monotonic invalidation-floor advancement must actually run
-    /// through the `BEFORE UPDATE` guard. PL/pgSQL defers record-field
-    /// resolution to execution, so a guard that references a column absent from
-    /// its Phase-A table passes every catalog/parity test yet aborts the first
-    /// real advancement. This test exercises live UPDATEs: legitimate forward
-    /// moves on `floor_generation` and `binding_version_floor` must commit, and
-    /// equal/regressive moves must be rejected.
+    /// Migration 0055's `relay_admin_actions_direct_shape` rejects a direct
+    /// timeout carrying only one of duration and expiry on the migrated
+    /// schema. The desired-state (pgschema + reconcile) path is covered by
+    /// `direct_timeout_shape_check_holds_on_desired_state_schema` in buzz-relay.
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn authorization_invalidation_floor_advances_through_guard() {
+    async fn migration_0055_rejects_half_filled_direct_timeout() {
         let pool = connect_test_pool().await;
         reset_public_schema(&pool).await;
         MIGRATOR
-            .run_to(42, &pool)
+            .run_to(55, &pool)
             .await
-            .expect("apply migrations 1-42");
-
-        let community_id = uuid::Uuid::new_v4();
-        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
-            .bind(community_id)
-            .bind(format!("floor-guard-{}.example", community_id.simple()))
-            .execute(&pool)
-            .await
-            .expect("insert community");
-
-        // Each floor state points at an operation receipt via
-        // (community_id, operation_id, request_fingerprint). Seed one receipt
-        // per operation the test advances through.
-        let operations: [(uuid::Uuid, u8); 4] = [
-            (uuid::Uuid::new_v4(), 0x11),
-            (uuid::Uuid::new_v4(), 0x22),
-            (uuid::Uuid::new_v4(), 0x33),
-            (uuid::Uuid::new_v4(), 0x44),
-        ];
-        for (operation_id, fp_byte) in operations {
-            sqlx::query(
-                "INSERT INTO authorization_operation_receipts \
-                 (community_id, operation_id, request_fingerprint, operation_kind, \
-                  actor_fingerprint, outcome_code, result_digest) \
-                 VALUES ($1, $2, $3, 12, $4, 1, $5)",
+            .expect("apply migrations 1-55");
+        for (secs, until) in [(Some(60i64), None), (None, Some(chrono::Utc::now()))] {
+            let err = sqlx::query(
+                "INSERT INTO relay_admin_actions (report_community_id, request_id, actor_pubkey, \
+                 actor_role, action, timeout_secs, timeout_until, enforcement_target_pubkey) \
+                 VALUES (gen_random_uuid(), gen_random_uuid(), $1, 'operator', 'timeout', $2, $3, $1)",
             )
-            .bind(community_id)
-            .bind(operation_id)
-            .bind(vec![fp_byte; 32])
-            .bind(vec![0xAA_u8; 32])
-            .bind(vec![0xBB_u8; 32])
+            .bind([9u8; 32].as_slice())
+            .bind(secs)
+            .bind(until)
             .execute(&pool)
             .await
-            .expect("seed operation receipt");
-        }
-
-        // selector_kind 3 requires binding_version_floor, so this row exercises
-        // both monotonic dimensions the guard still governs.
-        let selector_fingerprint = vec![0xCC_u8; 32];
-        sqlx::query(
-            "INSERT INTO authorization_invalidation_floors \
-             (community_id, selector_kind, selector_fingerprint, floor_generation, \
-              binding_version_floor, operation_id, request_fingerprint, updated_at) \
-             VALUES ($1, 3, $2, 1, 1, $3, $4, '2026-01-01T00:00:00Z')",
-        )
-        .bind(community_id)
-        .bind(&selector_fingerprint)
-        .bind(operations[0].0)
-        .bind(vec![operations[0].1; 32])
-        .execute(&pool)
-        .await
-        .expect("insert initial invalidation floor");
-
-        let advance =
-            |generation: i64, binding_floor: i64, op_index: usize, updated_at: &'static str| {
-                sqlx::query(
-                    "UPDATE authorization_invalidation_floors \
-                 SET floor_generation = $1, binding_version_floor = $2, \
-                     operation_id = $3, request_fingerprint = $4, updated_at = $5::timestamptz \
-                 WHERE community_id = $6 AND selector_kind = 3 AND selector_fingerprint = $7",
-                )
-                .bind(generation)
-                .bind(binding_floor)
-                .bind(operations[op_index].0)
-                .bind(vec![operations[op_index].1; 32])
-                .bind(updated_at)
-                .bind(community_id)
-                .bind(selector_fingerprint.clone())
-                .execute(&pool)
-            };
-
-        // Forward generation advance commits.
-        advance(2, 1, 1, "2026-01-01T00:01:00Z")
-            .await
-            .expect("forward floor_generation advance must pass the guard");
-
-        // Forward binding_version_floor advance commits (generation unchanged).
-        advance(2, 2, 2, "2026-01-01T00:02:00Z")
-            .await
-            .expect("forward binding_version_floor advance must pass the guard");
-
-        // Regressive generation is rejected.
-        let regressive = advance(1, 2, 3, "2026-01-01T00:03:00Z")
-            .await
-            .expect_err("regressive floor_generation must be rejected");
-        assert!(
-            regressive.to_string().contains("cannot move backward"),
-            "expected monotonic rejection, got: {regressive}"
-        );
-
-        // Equal floors with only a new operation is a rejected no-op advance.
-        let no_op = advance(2, 2, 3, "2026-01-01T00:03:00Z")
-            .await
-            .expect_err("equal-floor no-op advance must be rejected");
-        assert!(
-            no_op.to_string().contains("cannot move backward"),
-            "expected no-op rejection, got: {no_op}"
-        );
-
-        // The committed state reflects only the two accepted advances.
-        let (generation, binding_floor): (i64, i64) = sqlx::query_as(
-            "SELECT floor_generation, binding_version_floor \
-             FROM authorization_invalidation_floors \
-             WHERE community_id = $1 AND selector_kind = 3 AND selector_fingerprint = $2",
-        )
-        .bind(community_id)
-        .bind(&selector_fingerprint)
-        .fetch_one(&pool)
-        .await
-        .expect("read final floor state");
-        assert_eq!(
-            (generation, binding_floor),
-            (2, 2),
-            "only the accepted forward advances may persist"
-        );
-    }
-
-    /// NIP-FI identity FK contract: a binding's provenance is determined from
-    /// operation evidence and is independent of the enrollment policy's mode.
-    /// The corrected FK references only `(community_id, policy_revision)`;
-    /// the original composite FK `(community_id, policy_revision,
-    /// binding_provenance) → (community_id, policy_revision, enrollment_mode)`
-    /// would have rejected valid admissions such as TOFU policy +
-    /// attested-key provenance (NIP-FI.md §352, §424).
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn identity_binding_provenance_is_independent_of_enrollment_mode() {
-        let pool = connect_test_pool().await;
-        reset_public_schema(&pool).await;
-        MIGRATOR
-            .run_to(41, &pool)
-            .await
-            .expect("apply migrations 1-41");
-
-        let community_id = uuid::Uuid::new_v4();
-        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
-            .bind(community_id)
-            .bind(format!("provenance-{}.example", community_id.simple()))
-            .execute(&pool)
-            .await
-            .expect("insert community");
-
-        // Enrollment policy: mode 3 (TOFU).
-        let policy_revision: i64 = 1;
-        sqlx::query(
-            "INSERT INTO identity_enrollment_policies \
-             (community_id, policy_revision, enrollment_mode, policy_digest, effective_at) \
-             VALUES ($1, $2, 3, $3, '2026-01-01T00:00:00Z')",
-        )
-        .bind(community_id)
-        .bind(policy_revision)
-        .bind(vec![0xA0_u8; 32]) // policy_digest
-        .execute(&pool)
-        .await
-        .expect("insert TOFU enrollment policy");
-
-        // Insert a binding with provenance 1 (attested-key) under the TOFU
-        // policy.  The circular deferred FK between identity_bindings and
-        // identity_lifecycle_history requires both to be committed in one
-        // transaction; all cross-table FKs in this pair are DEFERRABLE
-        // INITIALLY DEFERRED.  A pinned connection is required so that BEGIN
-        // and each subsequent statement share the same session/transaction.
-        let binding_id = uuid::Uuid::new_v4();
-        let history_id = uuid::Uuid::new_v4();
-        let operation_id = uuid::Uuid::new_v4();
-        let request_fingerprint = vec![0xAB_u8; 32];
-
-        let mut conn = pool.acquire().await.expect("acquire connection");
-
-        sqlx::query("BEGIN")
-            .execute(&mut *conn)
-            .await
-            .expect("begin");
-
-        // Enrollment history must be inserted BEFORE the operation receipt:
-        // authorization_operation_receipt_history_guard_v1 fires AFTER INSERT
-        // on authorization_operation_receipts and checks that lifecycle receipts
-        // already have exactly one history row.  The history → receipt FK is
-        // DEFERRABLE INITIALLY DEFERRED, so this order is safe.
-        sqlx::query(
-            "INSERT INTO identity_lifecycle_history \
-             (community_id, history_id, transition_kind, outcome_code, \
-              successor_binding_id, successor_binding_version, \
-              successor_lifecycle_revision, successor_state, \
-              operation_id, request_fingerprint, transition_digest) \
-             VALUES ($1, $2, 1, 1, $3, 1, 1, 1, $4, $5, $6)",
-        )
-        .bind(community_id)
-        .bind(history_id)
-        .bind(binding_id)
-        .bind(operation_id)
-        .bind(&request_fingerprint)
-        .bind(vec![0xAE_u8; 32])
-        .execute(&mut *conn)
-        .await
-        .expect("insert lifecycle history");
-
-        // Operation receipt: kind 1 (enroll), outcome 1 (applied).
-        // The receipt_history_cardinality trigger fires here and validates the
-        // history row inserted above.
-        sqlx::query(
-            "INSERT INTO authorization_operation_receipts \
-             (community_id, operation_id, request_fingerprint, operation_kind, \
-              actor_fingerprint, outcome_code, result_digest) \
-             VALUES ($1, $2, $3, 1, $4, 1, $5)",
-        )
-        .bind(community_id)
-        .bind(operation_id)
-        .bind(&request_fingerprint)
-        .bind(vec![0xAC_u8; 32])
-        .bind(vec![0xAD_u8; 32])
-        .execute(&mut *conn)
-        .await
-        .expect("insert operation receipt");
-
-        // Binding: provenance 1 (attested-key) under TOFU-mode policy.
-        // Before the FK fix this INSERT would fail at commit with a FK
-        // violation because 1 (attested-key) ≠ 3 (TOFU mode).
-        sqlx::query(
-            "INSERT INTO identity_bindings \
-             (community_id, binding_id, issuer, subject, \
-              principal_fingerprint, event_author_pubkey, \
-              binding_state, lifecycle_revision, binding_provenance, \
-              policy_revision, enrollment_evidence_digest, \
-              birth_history_id, creation_operation_id, \
-              creation_request_fingerprint) \
-             VALUES ($1, $2, 'https://issuer.example', 'sub-01', \
-                     $3, $4, 1, 1, 1, $5, $6, $7, $8, $9)",
-        )
-        .bind(community_id)
-        .bind(binding_id)
-        .bind(vec![0xAF_u8; 32]) // principal_fingerprint
-        .bind(vec![0xB0_u8; 32]) // event_author_pubkey
-        .bind(policy_revision)
-        .bind(vec![0xB1_u8; 32]) // enrollment_evidence_digest
-        .bind(history_id)
-        .bind(operation_id)
-        .bind(&request_fingerprint)
-        .execute(&mut *conn)
-        .await
-        .expect("insert binding");
-
-        sqlx::query("COMMIT")
-            .execute(&mut *conn)
-            .await
-            .expect("attested-key binding under TOFU policy must commit — FK is on (community_id, policy_revision) only");
-
-        // Confirm the binding persisted with provenance 1, policy mode 3.
-        let (stored_provenance, stored_mode): (i16, i16) = sqlx::query_as(
-            "SELECT b.binding_provenance, p.enrollment_mode \
-             FROM identity_bindings b \
-             JOIN identity_enrollment_policies p \
-               ON p.community_id = b.community_id AND p.policy_revision = b.policy_revision \
-             WHERE b.community_id = $1 AND b.binding_id = $2",
-        )
-        .bind(community_id)
-        .bind(binding_id)
-        .fetch_one(&pool)
-        .await
-        .expect("read persisted binding");
-        assert_eq!(stored_provenance, 1, "provenance must be attested-key (1)");
-        assert_eq!(stored_mode, 3, "enrollment mode must be TOFU (3)");
-        assert_ne!(
-            stored_provenance, stored_mode,
-            "provenance and mode are independent: they must differ here"
-        );
-
-        // --- Negative half: absent policy revision ---
-        //
-        // Two-sided mutation sensitivity requires that a FK dropped or neutered
-        // entirely is also detected.  A second otherwise-valid deferred
-        // transaction uses a nonexistent policy_revision (999) and must fail
-        // with SQLSTATE 23503 — the narrowed FK
-        // identity_bindings(community_id, policy_revision)
-        //   → identity_enrollment_policies(community_id, policy_revision)
-        // rejects the row.  This FK is not deferred, so it fires at INSERT
-        // time; a `COMMIT` is unnecessary and not reached.  If the FK were
-        // absent the INSERT would succeed and this assertion would catch the
-        // regression.
-        let absent_binding_id = uuid::Uuid::new_v4();
-        let absent_history_id = uuid::Uuid::new_v4();
-        let absent_operation_id = uuid::Uuid::new_v4();
-        let absent_fp = vec![0xC0_u8; 32];
-        let nonexistent_policy_revision: i64 = 999;
-
-        let mut conn2 = pool.acquire().await.expect("acquire second connection");
-
-        sqlx::query("BEGIN")
-            .execute(&mut *conn2)
-            .await
-            .expect("begin absent-policy transaction");
-
-        // History first (receipt_history_cardinality guard fires on receipt
-        // insert and requires the history row to already exist).
-        sqlx::query(
-            "INSERT INTO identity_lifecycle_history \
-             (community_id, history_id, transition_kind, outcome_code, \
-              successor_binding_id, successor_binding_version, \
-              successor_lifecycle_revision, successor_state, \
-              operation_id, request_fingerprint, transition_digest) \
-             VALUES ($1, $2, 1, 1, $3, 2, 1, 1, $4, $5, $6)",
-        )
-        .bind(community_id)
-        .bind(absent_history_id)
-        .bind(absent_binding_id)
-        .bind(absent_operation_id)
-        .bind(&absent_fp)
-        .bind(vec![0xC1_u8; 32])
-        .execute(&mut *conn2)
-        .await
-        .expect("insert absent-policy lifecycle history");
-
-        sqlx::query(
-            "INSERT INTO authorization_operation_receipts \
-             (community_id, operation_id, request_fingerprint, operation_kind, \
-              actor_fingerprint, outcome_code, result_digest) \
-             VALUES ($1, $2, $3, 1, $4, 1, $5)",
-        )
-        .bind(community_id)
-        .bind(absent_operation_id)
-        .bind(&absent_fp)
-        .bind(vec![0xC2_u8; 32])
-        .bind(vec![0xC3_u8; 32])
-        .execute(&mut *conn2)
-        .await
-        .expect("insert absent-policy operation receipt");
-
-        // The policy FK is not deferred; it fires at INSERT, not COMMIT.
-        let absent_policy_err = sqlx::query(
-            "INSERT INTO identity_bindings \
-             (community_id, binding_id, issuer, subject, \
-              principal_fingerprint, event_author_pubkey, \
-              binding_state, lifecycle_revision, binding_provenance, \
-              policy_revision, enrollment_evidence_digest, \
-              birth_history_id, creation_operation_id, \
-              creation_request_fingerprint) \
-             VALUES ($1, $2, 'https://issuer.example', 'sub-02', \
-                     $3, $4, 1, 1, 1, $5, $6, $7, $8, $9)",
-        )
-        .bind(community_id)
-        .bind(absent_binding_id)
-        .bind(vec![0xC4_u8; 32]) // principal_fingerprint (unique, different from first binding)
-        .bind(vec![0xC5_u8; 32]) // event_author_pubkey (unique, different from first binding)
-        .bind(nonexistent_policy_revision)
-        .bind(vec![0xC6_u8; 32]) // enrollment_evidence_digest
-        .bind(absent_history_id)
-        .bind(absent_operation_id)
-        .bind(&absent_fp)
-        .execute(&mut *conn2)
-        .await
-        .expect_err("binding with nonexistent policy_revision must be rejected by the FK");
-        assert!(
-            absent_policy_err
-                .as_database_error()
-                .map(|e| e.code().as_deref() == Some("23503"))
-                .unwrap_or(false),
-            "expected FK violation (23503) for absent policy_revision, got: {absent_policy_err}"
-        );
-
-        sqlx::query("ROLLBACK")
-            .execute(&mut *conn2)
-            .await
-            .expect("rollback absent-policy transaction");
-    }
-
-    /// NIP-FI policy-revision monotonicity: each new policy revision for a
-    /// community must strictly exceed the current maximum revision
-    /// (FI-INV-06 — stable assertion policy). `effective_at` ordering is
-    /// deliberately not enforced — the downstream constructor stamps every
-    /// immediately-effective revision with Unix epoch.
-    ///
-    /// Mutation sensitivity is two-sided:
-    /// - neutering the guard lets a replayed or backfilled revision through
-    ///   (the positive half detects insertion into a guarded table);
-    /// - leaving the guard intact rejects equal/regressive inserts (negative
-    ///   halves detect that each rejection fires).
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn identity_enrollment_policy_revision_is_monotonic() {
-        let pool = connect_test_pool().await;
-        reset_public_schema(&pool).await;
-        MIGRATOR
-            .run_to(41, &pool)
-            .await
-            .expect("apply migrations 1-41");
-
-        let community_id = uuid::Uuid::new_v4();
-        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
-            .bind(community_id)
-            .bind(format!("policy-mono-{}.example", community_id.simple()))
-            .execute(&pool)
-            .await
-            .expect("insert community");
-
-        // First insertion: no prior rows — should always succeed.
-        sqlx::query(
-            "INSERT INTO identity_enrollment_policies \
-             (community_id, policy_revision, enrollment_mode, policy_digest, effective_at) \
-             VALUES ($1, 1, 1, $2, '2026-01-01T00:00:00Z')",
-        )
-        .bind(community_id)
-        .bind(vec![0xA1_u8; 32])
-        .execute(&pool)
-        .await
-        .expect("first policy insertion (revision 1) must succeed");
-
-        // Forward advance: revision 2.
-        sqlx::query(
-            "INSERT INTO identity_enrollment_policies \
-             (community_id, policy_revision, enrollment_mode, policy_digest, effective_at) \
-             VALUES ($1, 2, 1, $2, '2026-06-01T00:00:00Z')",
-        )
-        .bind(community_id)
-        .bind(vec![0xA2_u8; 32])
-        .execute(&pool)
-        .await
-        .expect("forward advance to revision 2 must succeed");
-
-        // Seed a gap: skip from 2 to 100, then advance to 101.
-        sqlx::query(
-            "INSERT INTO identity_enrollment_policies \
-             (community_id, policy_revision, enrollment_mode, policy_digest, effective_at) \
-             VALUES ($1, 100, 1, $2, '2027-01-01T00:00:00Z')",
-        )
-        .bind(community_id)
-        .bind(vec![0xA3_u8; 32])
-        .execute(&pool)
-        .await
-        .expect("jump to revision 100 must succeed");
-
-        sqlx::query(
-            "INSERT INTO identity_enrollment_policies \
-             (community_id, policy_revision, enrollment_mode, policy_digest, effective_at) \
-             VALUES ($1, 101, 1, $2, '2027-06-01T00:00:00Z')",
-        )
-        .bind(community_id)
-        .bind(vec![0xA4_u8; 32])
-        .execute(&pool)
-        .await
-        .expect("advance to revision 101 must succeed");
-
-        // Negative: unused lower revision 99 — not a PK duplicate (never inserted),
-        // but the guard must reject it because 99 < MAX(100, 101). This is the
-        // case a plain PK constraint cannot catch; the named guard must fire.
-        let backfill_err = sqlx::query(
-            "INSERT INTO identity_enrollment_policies \
-             (community_id, policy_revision, enrollment_mode, policy_digest, effective_at) \
-             VALUES ($1, 99, 1, $2, '2028-01-01T00:00:00Z')",
-        )
-        .bind(community_id)
-        .bind(vec![0xA5_u8; 32])
-        .execute(&pool)
-        .await
-        .expect_err("unused lower revision 99 must be rejected by the guard");
-        assert!(
-            backfill_err
-                .as_database_error()
-                .map(|e| e.code().as_deref() == Some("23514"))
-                .unwrap_or(false),
-            "expected check_violation (23514) from identity_enrollment_policy_revision_monotonic \
-             guard for backfilled revision 99, got: {backfill_err}"
-        );
-
-        // Negative: equal revision (101 <= 101). The PK is (community_id, policy_revision)
-        // so this is a PK duplicate regardless of policy_digest; either 23505 from the PK
-        // or 23514 from the guard fires first. This case is secondary — the load-bearing
-        // proof is the unused-99 case above, which is not a PK duplicate.
-        let replay_err = sqlx::query(
-            "INSERT INTO identity_enrollment_policies \
-             (community_id, policy_revision, enrollment_mode, policy_digest, effective_at) \
-             VALUES ($1, 101, 2, $2, '2028-01-01T00:00:00Z')",
-        )
-        .bind(community_id)
-        .bind(vec![0xA6_u8; 32])
-        .execute(&pool)
-        .await
-        .expect_err("equal revision must be rejected");
-        // PK (23505) or guard (23514) — either proves the insert cannot commit.
-        assert!(
-            replay_err
-                .as_database_error()
-                .map(|e| {
-                    let code = e.code();
-                    let c = code.as_deref().unwrap_or("");
-                    c == "23514" || c == "23505"
-                })
-                .unwrap_or(false),
-            "expected check_violation (23514) or unique_violation (23505) for replayed revision, \
-             got: {replay_err}"
-        );
-
-        // Concurrency regression: prove the advisory lock is load-bearing. The
-        // test uses a controlled two-connection schedule:
-        //
-        //   1. tx1 opens a transaction and inserts revision 102. The BEFORE INSERT
-        //      trigger acquires `pg_advisory_xact_lock(lock_key)` and completes the
-        //      INSERT — tx1 now holds the advisory lock until it commits.
-        //   2. tx2 opens a transaction on a second backend and issues INSERT for
-        //      revision 103. The trigger fires and blocks inside
-        //      `pg_advisory_xact_lock(lock_key)` waiting for tx1 to release.
-        //   3. We observe tx2's backend entering a Lock-wait state via
-        //      pg_stat_activity (wait_event_type='Lock', wait_event='advisory'),
-        //      with a bounded timeout — not a sleep. If the advisory-lock call is
-        //      removed from the guard, the trigger returns immediately; tx2 never
-        //      enters the advisory wait, and the poll times out, failing the test.
-        //      This is the mutation-sensitivity guarantee.
-        //   4. tx1 commits, releasing the advisory lock. tx2 unblocks, its trigger
-        //      reads the fresh MAX=102, and the INSERT succeeds (103 > 102).
-        //   5. tx2 commits. Both revisions 102 and 103 are present.
-        use std::time::Instant;
-
-        // tx1: open a transaction and insert revision 102. The INSERT returns after
-        // the trigger acquires the lock and succeeds; the advisory lock stays held
-        // until the transaction commits.
-        let mut conn1 = pool.acquire().await.expect("acquire conn1");
-        sqlx::query("BEGIN")
-            .execute(&mut *conn1)
-            .await
-            .expect("begin tx1");
-        sqlx::query(
-            "INSERT INTO identity_enrollment_policies \
-             (community_id, policy_revision, enrollment_mode, policy_digest, effective_at) \
-             VALUES ($1, 102, 1, $2, '2029-01-01T00:00:00Z')",
-        )
-        .bind(community_id)
-        .bind(vec![0xB1_u8; 32])
-        .execute(&mut *conn1)
-        .await
-        .expect("tx1 INSERT revision 102 must succeed");
-        // tx1 holds the advisory lock. Do NOT commit yet.
-
-        // tx2: acquire a separate backend, record its PID, then issue the INSERT.
-        // The trigger will block on the advisory lock held by tx1.
-        let pool2 = pool.clone();
-        let pool3 = pool.clone();
-        let (pid_tx, pid_rx) = tokio::sync::oneshot::channel::<i32>();
-        let tx2_task = tokio::spawn(async move {
-            let mut conn2 = pool2.acquire().await.expect("acquire conn2");
-            // Report this backend's PID so the observer can poll pg_stat_activity.
-            let backend_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-                .fetch_one(&mut *conn2)
-                .await
-                .expect("get conn2 backend pid");
-            let _ = pid_tx.send(backend_pid);
-            sqlx::query("BEGIN")
-                .execute(&mut *conn2)
-                .await
-                .expect("begin tx2");
-            // This INSERT will block inside the trigger waiting for tx1's advisory lock.
-            let insert_r = sqlx::query(
-                "INSERT INTO identity_enrollment_policies \
-                 (community_id, policy_revision, enrollment_mode, policy_digest, effective_at) \
-                 VALUES ($1, 103, 1, $2, '2029-06-01T00:00:00Z')",
-            )
-            .bind(community_id)
-            .bind(vec![0xB2_u8; 32])
-            .execute(&mut *conn2)
-            .await;
-            let commit_r = sqlx::query("COMMIT").execute(&mut *conn2).await;
-            (insert_r, commit_r)
-        });
-
-        // Receive tx2's backend PID and wait until it enters an advisory-lock wait.
-        // Mutation proof: without pg_advisory_xact_lock in the guard, the trigger
-        // returns immediately; tx2 never parks on an advisory lock; the poll below
-        // times out and panics, making this test deterministically red.
-        let tx2_pid = pid_rx.await.expect("tx2 reports its backend pid");
-        let deadline = Instant::now() + std::time::Duration::from_secs(10);
-        loop {
-            let waiting: bool = sqlx::query_scalar(
-                "SELECT EXISTS (\
-                     SELECT 1 FROM pg_stat_activity \
-                     WHERE pid = $1 \
-                       AND wait_event_type = 'Lock' \
-                       AND wait_event = 'advisory'\
-                 )",
-            )
-            .bind(tx2_pid)
-            .fetch_one(&pool3)
-            .await
-            .expect("poll tx2 advisory-lock wait");
-            if waiting {
-                break;
-            }
+            .expect_err("half-filled timeout must violate the CHECK");
             assert!(
-                Instant::now() < deadline,
-                "tx2 never entered advisory-lock wait — pg_advisory_xact_lock \
-                 must be present in the guard for the lock to serialize writers"
+                err.to_string().contains("relay_admin_actions_direct_shape"),
+                "{err}"
             );
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
-
-        // tx2 is observably blocked. Commit tx1, releasing the advisory lock.
-        sqlx::query("COMMIT")
-            .execute(&mut *conn1)
+    }
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn migration_0060_refuses_active_legacy_leases_without_mutation() {
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+        run_migrations_through(&pool, 59)
             .await
-            .expect("tx1 COMMIT must succeed");
-
-        // tx2 unblocks: the trigger re-runs its SELECT MAX, sees committed 102,
-        // and INSERT 103 succeeds. Both the INSERT and COMMIT must complete.
-        let (insert2, commit2) = tx2_task.await.expect("tx2 task completed");
-        insert2.expect("tx2 INSERT revision 103 must succeed after tx1 commits");
-        commit2.expect("tx2 COMMIT must succeed");
-
-        // Both revisions 102 and 103 must be present (total: 1, 2, 100, 101, 102, 103).
+            .expect("legacy schema");
+        let community = uuid::Uuid::new_v4();
+        sqlx::query("INSERT INTO communities(id,host) VALUES($1,'push-cutover.example')")
+            .bind(community)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO push_leases(community_id,author,installation_id,source_event_id,source_created_at,generation,active,app_profile,endpoint_hash,endpoint_grant,max_class,subscriptions,expires_at) VALUES($1,$2,'legacy',$3,1,1,true,'buzz-ios-dogfood',$4,'opaque','default','[]',2000000000)")
+            .bind(community).bind(vec![1_u8;32]).bind(vec![2_u8;32]).bind(vec![3_u8;32])
+            .execute(&pool).await.unwrap();
+        let error = run_migrations(&pool)
+            .await
+            .expect_err("active legacy lease blocks cutover");
+        assert!(
+            error.to_string().contains("no active legacy push leases"),
+            "{error}"
+        );
+        let preserved: (bool, String) =
+            sqlx::query_as("SELECT active,app_profile FROM push_leases WHERE community_id=$1")
+                .bind(community)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(preserved, (true, "buzz-ios-dogfood".to_owned()));
+        sqlx::query("UPDATE push_leases SET active=false,app_profile=NULL,endpoint_hash=NULL,endpoint_grant=NULL,max_class=NULL,subscriptions=NULL WHERE community_id=$1")
+            .bind(community).execute(&pool).await.unwrap();
+        run_migrations(&pool)
+            .await
+            .expect("inactive legacy lease permits cutover");
         let count: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM identity_enrollment_policies WHERE community_id = $1",
+            "SELECT count(*) FROM push_leases WHERE community_id=$1 AND NOT active",
         )
-        .bind(community_id)
+        .bind(community)
         .fetch_one(&pool)
         .await
-        .expect("count persisted policy revisions");
-        assert_eq!(
-            count, 6,
-            "exactly six revisions must persist after the controlled concurrency sequence"
-        );
-    }
-
-    /// NIP-FI admission-result ↔ kind-11 receipt cardinality: a kind-11
-    /// (protected-mutation) receipt must commit with exactly one admission
-    /// result; an admission result must commit against a kind-11 receipt.
-    ///
-    /// Mutation sensitivity is two-sided:
-    /// - the guard is load-bearing when a kind-11 receipt has no result row
-    ///   (negative A) — without the guard this commits silently;
-    /// - the guard is load-bearing when a result attaches to a non-kind-11
-    ///   receipt (negative B) — without the guard this commits silently.
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn authorization_admission_result_requires_kind_11_receipt_bidirectional() {
-        let pool = connect_test_pool().await;
-        reset_public_schema(&pool).await;
-        MIGRATOR
-            .run_to(42, &pool)
-            .await
-            .expect("apply migrations 1-42");
-
-        let community_id = uuid::Uuid::new_v4();
-        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
-            .bind(community_id)
-            .bind(format!("adm-result-{}.example", community_id.simple()))
+        .unwrap();
+        assert_eq!(count, 1);
+        assert!(sqlx::query("SELECT app_profile FROM push_leases")
             .execute(&pool)
             .await
-            .expect("insert community");
-
-        // Capacity must exist for authorization_events inserts; admission-result
-        // tests exercise only authorization_operation_receipts and
-        // authorization_admission_results — no authorization_events rows are
-        // needed here, but insert capacity anyway to satisfy any trigger
-        // that reads the policy row defensively.
-        sqlx::query(
-            "INSERT INTO authorization_event_capacity \
-             (community_id, max_events_per_domain, max_bytes_per_domain, max_envelope_bytes) \
-             VALUES ($1, 1000, 16777216, 16384)",
-        )
-        .bind(community_id)
-        .execute(&pool)
-        .await
-        .expect("insert event capacity");
-
-        let mut conn = pool.acquire().await.expect("acquire connection");
-
-        // --- Positive: kind-11 receipt + admission result in one transaction ---
-        let op1 = uuid::Uuid::new_v4();
-        let fp1 = vec![0xB1_u8; 32];
-
-        sqlx::query("BEGIN")
-            .execute(&mut *conn)
-            .await
-            .expect("begin");
-
-        sqlx::query(
-            "INSERT INTO authorization_operation_receipts \
-             (community_id, operation_id, request_fingerprint, operation_kind, \
-              actor_fingerprint, outcome_code, result_digest) \
-             VALUES ($1, $2, $3, 11, $4, 1, $5)",
-        )
-        .bind(community_id)
-        .bind(op1)
-        .bind(&fp1)
-        .bind(vec![0xB2_u8; 32])
-        .bind(vec![0xB3_u8; 32])
-        .execute(&mut *conn)
-        .await
-        .expect("insert kind-11 receipt");
-
-        sqlx::query(
-            "INSERT INTO authorization_admission_results \
-             (community_id, operation_id, request_fingerprint, semantic_fingerprint, \
-              object_kind, object_key) \
-             VALUES ($1, $2, $3, $4, 1, $5)",
-        )
-        .bind(community_id)
-        .bind(op1)
-        .bind(&fp1)
-        .bind(vec![0xB4_u8; 32]) // semantic_fingerprint
-        .bind(vec![0xB5_u8; 32]) // object_key
-        .execute(&mut *conn)
-        .await
-        .expect("insert admission result");
-
-        sqlx::query("COMMIT")
-            .execute(&mut *conn)
-            .await
-            .expect("kind-11 receipt + result must commit");
-        drop(conn);
-
-        // --- Negative A: kind-11 receipt without result must be rejected ---
-        let op2 = uuid::Uuid::new_v4();
-        let fp2 = vec![0xC1_u8; 32];
-
-        let mut conn_a = pool.acquire().await.expect("acquire connection A");
-        sqlx::query("BEGIN")
-            .execute(&mut *conn_a)
-            .await
-            .expect("begin");
-
-        sqlx::query(
-            "INSERT INTO authorization_operation_receipts \
-             (community_id, operation_id, request_fingerprint, operation_kind, \
-              actor_fingerprint, outcome_code, result_digest) \
-             VALUES ($1, $2, $3, 11, $4, 1, $5)",
-        )
-        .bind(community_id)
-        .bind(op2)
-        .bind(&fp2)
-        .bind(vec![0xC2_u8; 32])
-        .bind(vec![0xC3_u8; 32])
-        .execute(&mut *conn_a)
-        .await
-        .expect("insert kind-11 receipt for negative A");
-
-        let no_result_err = sqlx::query("COMMIT")
-            .execute(&mut *conn_a)
-            .await
-            .expect_err("kind-11 receipt without result must be rejected at commit");
-        assert!(
-            no_result_err
-                .as_database_error()
-                .map(|e| e.code().as_deref() == Some("23514"))
-                .unwrap_or(false),
-            "expected check_violation (23514) for kind-11 without result, got: {no_result_err}"
-        );
-        drop(conn_a);
-
-        // --- Negative B: admission result against non-kind-11 receipt ---
-        // Use operation_kind 12 (invalidation) — no admission result should
-        // ever attach to it. The guard fires at COMMIT (deferred trigger).
-        let op3 = uuid::Uuid::new_v4();
-        let fp3 = vec![0xD1_u8; 32];
-
-        let mut conn_b = pool.acquire().await.expect("acquire connection B");
-        sqlx::query("BEGIN")
-            .execute(&mut *conn_b)
-            .await
-            .expect("begin");
-
-        sqlx::query(
-            "INSERT INTO authorization_operation_receipts \
-             (community_id, operation_id, request_fingerprint, operation_kind, \
-              actor_fingerprint, outcome_code, result_digest) \
-             VALUES ($1, $2, $3, 12, $4, 1, $5)",
-        )
-        .bind(community_id)
-        .bind(op3)
-        .bind(&fp3)
-        .bind(vec![0xD2_u8; 32])
-        .bind(vec![0xD3_u8; 32])
-        .execute(&mut *conn_b)
-        .await
-        .expect("insert kind-12 receipt");
-
-        // The guard is deferred: the INSERT succeeds; the violation surfaces
-        // at COMMIT when the guard checks that the receipt is kind-11.
-        sqlx::query(
-            "INSERT INTO authorization_admission_results \
-             (community_id, operation_id, request_fingerprint, semantic_fingerprint, \
-              object_kind, object_key) \
-             VALUES ($1, $2, $3, $4, 1, $5)",
-        )
-        .bind(community_id)
-        .bind(op3)
-        .bind(&fp3)
-        .bind(vec![0xD4_u8; 32])
-        .bind(vec![0xD5_u8; 32])
-        .execute(&mut *conn_b)
-        .await
-        .expect("result insert must pass — deferred guard fires at commit, not here");
-
-        let wrong_kind_err = sqlx::query("COMMIT")
-            .execute(&mut *conn_b)
-            .await
-            .expect_err("result against non-kind-11 receipt must be rejected at commit");
-        assert!(
-            wrong_kind_err
-                .as_database_error()
-                .map(|e| e.code().as_deref() == Some("23514"))
-                .unwrap_or(false),
-            "expected check_violation (23514) for result against non-kind-11 receipt, got: {wrong_kind_err}"
-        );
-        drop(conn_b);
-
-        // --- Negative C: mismatched request_fingerprint rejected by composite FK ---
-        // The admission result table has an immediate composite FK
-        //   (community_id, operation_id, request_fingerprint)
-        //   REFERENCES authorization_operation_receipts(...)
-        // A result referencing a receipt that exists but with a different
-        // request_fingerprint must be rejected. This exercises the semantic half
-        // of Carl finding 2 — cardinality is handled by the deferred trigger;
-        // coordinate binding is handled by the structural FK.
-        let op4 = uuid::Uuid::new_v4();
-        let fp4_receipt = vec![0xE1_u8; 32]; // fingerprint stored in the receipt
-        let fp4_wrong = vec![0xE2_u8; 32]; // wrong fingerprint used in the result
-
-        let mut conn_c = pool.acquire().await.expect("acquire connection C");
-        sqlx::query("BEGIN")
-            .execute(&mut *conn_c)
-            .await
-            .expect("begin");
-
-        sqlx::query(
-            "INSERT INTO authorization_operation_receipts \
-             (community_id, operation_id, request_fingerprint, operation_kind, \
-              actor_fingerprint, outcome_code, result_digest) \
-             VALUES ($1, $2, $3, 11, $4, 1, $5)",
-        )
-        .bind(community_id)
-        .bind(op4)
-        .bind(&fp4_receipt)
-        .bind(vec![0xE3_u8; 32])
-        .bind(vec![0xE4_u8; 32])
-        .execute(&mut *conn_c)
-        .await
-        .expect("insert kind-11 receipt for negative C");
-
-        // The admission result FK is immediate (not deferred), so the INSERT
-        // itself rejects a fingerprint with no matching receipt row.
-        let wrong_fp_err = sqlx::query(
-            "INSERT INTO authorization_admission_results \
-             (community_id, operation_id, request_fingerprint, semantic_fingerprint, \
-              object_kind, object_key) \
-             VALUES ($1, $2, $3, $4, 1, $5)",
-        )
-        .bind(community_id)
-        .bind(op4)
-        .bind(&fp4_wrong) // wrong fingerprint — no matching receipt row
-        .bind(vec![0xE5_u8; 32])
-        .bind(vec![0xE6_u8; 32])
-        .execute(&mut *conn_c)
-        .await
-        .expect_err("result with mismatched request_fingerprint must be rejected at INSERT");
-        // Immediate composite FK fires as foreign_key_violation (23503).
-        assert!(
-            wrong_fp_err
-                .as_database_error()
-                .map(|e| e.code().as_deref() == Some("23503"))
-                .unwrap_or(false),
-            "expected foreign_key_violation (23503) for mismatched request_fingerprint, got: {wrong_fp_err}"
-        );
-        sqlx::query("ROLLBACK").execute(&mut *conn_c).await.ok();
+            .is_err());
     }
-
-    /// NIP-FI denial-attempt ↔ kind-9 event cardinality: a kind-9
-    /// (pre-authentication denial) audit event must commit with exactly one
-    /// denial attempt; a denial attempt must commit with a matching kind-9
-    /// audit event.
-    ///
-    /// Mutation sensitivity is two-sided:
-    /// - the event-side guard is load-bearing when a kind-9 event has no
-    ///   attempt row (negative A) — without it this commits silently, making
-    ///   replay reconstruction impossible;
-    /// - the attempt-side guard is load-bearing for semantic mismatches (negatives
-    ///   B1–B3) — the old deferred FK only checks event existence/kind and would
-    ///   not catch a correlation, reason_code, or attempt_id mismatch.
+    /// Small populated upgrades build inline; contention stays bounded and a
+    /// verified prebuild avoids requesting the writer-conflicting index lock.
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn authorization_denial_attempt_requires_kind_9_event_bidirectional() {
+    async fn media_edit_index_upgrade_builds_inline_or_verifies_prebuild() {
         let pool = connect_test_pool().await;
-        reset_public_schema(&pool).await;
-        MIGRATOR
-            .run_to(42, &pool)
-            .await
-            .expect("apply migrations 1-42");
-
-        let community_id = uuid::Uuid::new_v4();
-        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
-            .bind(community_id)
-            .bind(format!("denial-attempt-{}.example", community_id.simple()))
+        for prebuilt in [false, true] {
+            reset_public_schema(&pool).await;
+            run_migrations_through(&pool, 85).await.unwrap();
+            let community = uuid::Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO communities(id,host) VALUES($1,'media-index-upgrade.example')",
+            )
+            .bind(community)
             .execute(&pool)
             .await
-            .expect("insert community");
-
-        // Capacity is required by the authorization_events BEFORE INSERT trigger.
-        sqlx::query(
-            "INSERT INTO authorization_event_capacity \
-             (community_id, max_events_per_domain, max_bytes_per_domain, max_envelope_bytes) \
-             VALUES ($1, 1000, 16777216, 16384)",
-        )
-        .bind(community_id)
-        .execute(&pool)
-        .await
-        .expect("insert event capacity");
-
-        let mut conn = pool.acquire().await.expect("acquire connection");
-
-        // --- Positive: kind-9 event + denial attempt in one transaction ---
-        let op1 = uuid::Uuid::new_v4();
-        let event1 = uuid::Uuid::new_v4();
-        let corr1 = uuid::Uuid::new_v4();
-        let attempt1_id = uuid::Uuid::new_v4();
-
-        sqlx::query("BEGIN")
-            .execute(&mut *conn)
-            .await
-            .expect("begin");
-
-        // Insert denial attempt first (FKs are deferred).
-        sqlx::query(
-            "INSERT INTO authorization_authentication_denial_attempts \
-             (community_id, operation_id, correlation_id, semantic_fingerprint, \
-              denial_reason, expected_revision, action, reason_code, \
-              attempt_id, audit_event_id, audit_event_kind) \
-             VALUES ($1, $2, $3, $4, 1, 1, 1, 2, $5, $6, 9)",
-        )
-        .bind(community_id)
-        .bind(op1)
-        .bind(corr1)
-        .bind(vec![0xE1_u8; 32]) // semantic_fingerprint
-        .bind(attempt1_id)
-        .bind(event1)
-        .execute(&mut *conn)
-        .await
-        .expect("insert denial attempt before event");
-
-        // Insert the kind-9 event (actor_kind 4, no request_fingerprint).
-        sqlx::query(
-            "INSERT INTO authorization_events \
-             (community_id, event_id, event_kind, outcome_code, reason_code, \
-              actor_kind, operation_id, correlation_id, attempt_id, \
-              semantic_fingerprint, occurred_at, canonical_envelope, envelope_digest) \
-             VALUES ($1, $2, 9, 2, 2, 4, $3, $4, $5, \
-                     $6, '2026-01-01T00:00:00Z', $7, $8)",
-        )
-        .bind(community_id)
-        .bind(event1)
-        .bind(op1)
-        .bind(corr1)
-        .bind(attempt1_id)
-        .bind(vec![0xE1_u8; 32]) // semantic_fingerprint matches denial attempt
-        .bind(vec![0xE2_u8; 64]) // canonical_envelope (≤16384 bytes)
-        .bind(vec![0xE3_u8; 32]) // envelope_digest
-        .execute(&mut *conn)
-        .await
-        .expect("insert kind-9 event");
-
-        sqlx::query("COMMIT")
-            .execute(&mut *conn)
-            .await
-            .expect("kind-9 event + denial attempt must commit");
-        drop(conn);
-
-        // --- Negative A: kind-9 event alone must be rejected at commit ---
-        let op2 = uuid::Uuid::new_v4();
-        let event2 = uuid::Uuid::new_v4();
-        let corr2 = uuid::Uuid::new_v4();
-        let attempt2_id = uuid::Uuid::new_v4();
-
-        let mut conn_a = pool.acquire().await.expect("acquire connection A");
-        sqlx::query("BEGIN")
-            .execute(&mut *conn_a)
-            .await
-            .expect("begin");
-
-        sqlx::query(
-            "INSERT INTO authorization_events \
-             (community_id, event_id, event_kind, outcome_code, reason_code, \
-              actor_kind, operation_id, correlation_id, attempt_id, \
-              semantic_fingerprint, occurred_at, canonical_envelope, envelope_digest) \
-             VALUES ($1, $2, 9, 2, 1, 4, $3, $4, $5, \
-                     $6, '2026-01-01T00:00:00Z', $7, $8)",
-        )
-        .bind(community_id)
-        .bind(event2)
-        .bind(op2)
-        .bind(corr2)
-        .bind(attempt2_id)
-        .bind(vec![0xF0_u8; 32]) // semantic_fingerprint (non-zero)
-        .bind(vec![0xF1_u8; 64])
-        .bind(vec![0xF2_u8; 32])
-        .execute(&mut *conn_a)
-        .await
-        .expect("insert kind-9 event without attempt");
-
-        let no_attempt_err = sqlx::query("COMMIT")
-            .execute(&mut *conn_a)
-            .await
-            .expect_err("kind-9 event without denial attempt must be rejected at commit");
-        assert!(
-            no_attempt_err
-                .as_database_error()
-                .map(|e| e.code().as_deref() == Some("23514"))
-                .unwrap_or(false),
-            "expected check_violation (23514) for kind-9 event without attempt, got: {no_attempt_err}"
-        );
-        drop(conn_a);
-
-        // --- Negatives B1-B3: semantic coordinate mismatches, each attributed to
-        // the named guard (23514), not the old deferred FK (23503). Each case
-        // inserts a valid event then a denial attempt that matches everywhere
-        // except one coordinate; the guard must fire for that mismatch.
-
-        // B1: correlation_id mismatch — attempt carries a different correlation
-        // than the event it references.
-        let op_b1 = uuid::Uuid::new_v4();
-        let event_b1 = uuid::Uuid::new_v4();
-        let corr_b1_event = uuid::Uuid::new_v4();
-        let corr_b1_wrong = uuid::Uuid::new_v4(); // different from corr_b1_event
-        let attempt_b1 = uuid::Uuid::new_v4();
-
-        let mut conn_b1 = pool.acquire().await.expect("acquire connection B1");
-        sqlx::query("BEGIN")
-            .execute(&mut *conn_b1)
-            .await
-            .expect("begin B1");
-
-        // Insert the event first (deferred FK allows this ordering).
-        sqlx::query(
-            "INSERT INTO authorization_events \
-             (community_id, event_id, event_kind, outcome_code, reason_code, \
-              actor_kind, operation_id, correlation_id, attempt_id, \
-              semantic_fingerprint, occurred_at, canonical_envelope, envelope_digest) \
-             VALUES ($1, $2, 9, 2, 2, 4, $3, $4, $5, \
-                     $6, '2026-01-01T00:00:00Z', $7, $8)",
-        )
-        .bind(community_id)
-        .bind(event_b1)
-        .bind(op_b1)
-        .bind(corr_b1_event)
-        .bind(attempt_b1)
-        .bind(vec![0xB3_u8; 32]) // semantic_fingerprint matches denial attempt
-        .bind(vec![0xB1_u8; 64])
-        .bind(vec![0xB2_u8; 32])
-        .execute(&mut *conn_b1)
-        .await
-        .expect("insert kind-9 event for B1");
-
-        sqlx::query(
-            "INSERT INTO authorization_authentication_denial_attempts \
-             (community_id, operation_id, correlation_id, semantic_fingerprint, \
-              denial_reason, expected_revision, action, reason_code, \
-              attempt_id, audit_event_id, audit_event_kind) \
-             VALUES ($1, $2, $3, $4, 1, 1, 1, 2, $5, $6, 9)",
-        )
-        .bind(community_id)
-        .bind(op_b1)
-        .bind(corr_b1_wrong) // wrong correlation_id
-        .bind(vec![0xB3_u8; 32])
-        .bind(attempt_b1)
-        .bind(event_b1)
-        .execute(&mut *conn_b1)
-        .await
-        .expect("insert denial attempt with wrong correlation_id (guard deferred)");
-
-        let corr_err = sqlx::query("COMMIT")
-            .execute(&mut *conn_b1)
-            .await
-            .expect_err("mismatched correlation_id must be rejected at commit");
-        assert!(
-            corr_err
-                .as_database_error()
-                .map(|e| e.code().as_deref() == Some("23514"))
-                .unwrap_or(false),
-            "expected check_violation (23514) from authorization_denial_attempt_semantic_binding \
-             for correlation_id mismatch, got: {corr_err}"
-        );
-        drop(conn_b1);
-
-        // B2: reason_code mismatch — attempt carries denial_reason=1 (MissingCredential,
-        // requires reason_code=2 per canonical mapping), but event carries reason_code=1.
-        // The attempt INSERT passes (denial_reason=1↔reason_code=2 is a valid mapping pair),
-        // then the deferred guard fires at commit because event reason_code=1 ≠ attempt
-        // reason_code=2.
-        let op_b2 = uuid::Uuid::new_v4();
-        let event_b2 = uuid::Uuid::new_v4();
-        let corr_b2 = uuid::Uuid::new_v4();
-        let attempt_b2 = uuid::Uuid::new_v4();
-
-        let mut conn_b2 = pool.acquire().await.expect("acquire connection B2");
-        sqlx::query("BEGIN")
-            .execute(&mut *conn_b2)
-            .await
-            .expect("begin B2");
-
-        sqlx::query(
-            "INSERT INTO authorization_events \
-             (community_id, event_id, event_kind, outcome_code, reason_code, \
-              actor_kind, operation_id, correlation_id, attempt_id, \
-              semantic_fingerprint, occurred_at, canonical_envelope, envelope_digest) \
-             VALUES ($1, $2, 9, 2, 1, 4, $3, $4, $5, \
-                     $6, '2026-01-01T00:00:00Z', $7, $8)",
-        )
-        .bind(community_id)
-        .bind(event_b2)
-        .bind(op_b2)
-        .bind(corr_b2)
-        .bind(attempt_b2)
-        .bind(vec![0xC3_u8; 32]) // semantic_fingerprint matches denial attempt
-        .bind(vec![0xC1_u8; 64])
-        .bind(vec![0xC2_u8; 32])
-        .execute(&mut *conn_b2)
-        .await
-        .expect("insert kind-9 event for B2 (reason_code=1)");
-
-        sqlx::query(
-            "INSERT INTO authorization_authentication_denial_attempts \
-             (community_id, operation_id, correlation_id, semantic_fingerprint, \
-              denial_reason, expected_revision, action, reason_code, \
-              attempt_id, audit_event_id, audit_event_kind) \
-             VALUES ($1, $2, $3, $4, 1, 1, 1, 2, $5, $6, 9)",
-            // reason_code = 2 but event has reason_code = 1
-        )
-        .bind(community_id)
-        .bind(op_b2)
-        .bind(corr_b2)
-        .bind(vec![0xC3_u8; 32])
-        .bind(attempt_b2)
-        .bind(event_b2)
-        .execute(&mut *conn_b2)
-        .await
-        .expect(
-            "insert denial attempt with wrong reason_code (deferred guard will fire at commit)",
-        );
-
-        let reason_err = sqlx::query("COMMIT")
-            .execute(&mut *conn_b2)
-            .await
-            .expect_err("mismatched reason_code must be rejected at commit");
-        assert!(
-            reason_err
-                .as_database_error()
-                .map(|e| e.code().as_deref() == Some("23514"))
-                .unwrap_or(false),
-            "expected check_violation (23514) from authorization_denial_attempt_semantic_binding \
-             for reason_code mismatch, got: {reason_err}"
-        );
-        drop(conn_b2);
-
-        // B3: attempt_id mismatch — the denial attempt's attempt_id FK references
-        // a different event (attempt_b3_wrong) than the one being paired (event_b3).
-        // The attempt_id FK on the denial attempt table binds
-        //   (community_id, operation_id, audit_event_kind, attempt_id)
-        //   -> authorization_events(community_id, operation_id, event_kind, attempt_id)
-        // so using a different attempt_id that doesn't exist for this operation
-        // will be caught as a FK violation (23503) at commit.
-        let op_b3 = uuid::Uuid::new_v4();
-        let event_b3 = uuid::Uuid::new_v4();
-        let corr_b3 = uuid::Uuid::new_v4();
-        let attempt_b3_correct = uuid::Uuid::new_v4();
-        let attempt_b3_wrong = uuid::Uuid::new_v4(); // not registered for this operation
-
-        let mut conn_b3 = pool.acquire().await.expect("acquire connection B3");
-        sqlx::query("BEGIN")
-            .execute(&mut *conn_b3)
-            .await
-            .expect("begin B3");
-
-        sqlx::query(
-            "INSERT INTO authorization_events \
-             (community_id, event_id, event_kind, outcome_code, reason_code, \
-              actor_kind, operation_id, correlation_id, attempt_id, \
-              semantic_fingerprint, occurred_at, canonical_envelope, envelope_digest) \
-             VALUES ($1, $2, 9, 2, 2, 4, $3, $4, $5, \
-                     $6, '2026-01-01T00:00:00Z', $7, $8)",
-        )
-        .bind(community_id)
-        .bind(event_b3)
-        .bind(op_b3)
-        .bind(corr_b3)
-        .bind(attempt_b3_correct)
-        .bind(vec![0xD3_u8; 32]) // semantic_fingerprint (matches denial attempt)
-        .bind(vec![0xD1_u8; 64])
-        .bind(vec![0xD2_u8; 32])
-        .execute(&mut *conn_b3)
-        .await
-        .expect("insert kind-9 event for B3");
-
-        sqlx::query(
-            "INSERT INTO authorization_authentication_denial_attempts \
-             (community_id, operation_id, correlation_id, semantic_fingerprint, \
-              denial_reason, expected_revision, action, reason_code, \
-              attempt_id, audit_event_id, audit_event_kind) \
-             VALUES ($1, $2, $3, $4, 1, 1, 1, 2, $5, $6, 9)",
-        )
-        .bind(community_id)
-        .bind(op_b3)
-        .bind(corr_b3)
-        .bind(vec![0xD3_u8; 32])
-        .bind(attempt_b3_wrong) // wrong attempt_id — no matching UNIQUE row on events
-        .bind(event_b3)
-        .execute(&mut *conn_b3)
-        .await
-        .expect("insert denial attempt with wrong attempt_id (FK is deferred)");
-
-        let attempt_err = sqlx::query("COMMIT")
-            .execute(&mut *conn_b3)
-            .await
-            .expect_err("mismatched attempt_id must be rejected at commit");
-        // The attempt_id FK is deferred and fires as foreign_key_violation (23503).
-        assert!(
-            attempt_err
-                .as_database_error()
-                .map(|e| e.code().as_deref() == Some("23503"))
-                .unwrap_or(false),
-            "expected foreign_key_violation (23503) for attempt_id mismatch \
-             (deferred FK on denial attempt), got: {attempt_err}"
-        );
-
-        // B4: denial_reason ↔ reason_code mapping violation — the denial attempt
-        // row carries denial_reason=2 (InvalidCredential) but reason_code=2
-        // (Missing). The canonical mapping requires InvalidCredential(2)↔Invalid(3);
-        // reason_code=2 is only valid for MissingCredential(denial_reason=1).
-        // The immediate CHECK constraint authorization_denial_reason_reason_code_binding
-        // fires at INSERT, not commit. Mutation-sensitive: removing the CHECK lets
-        // this INSERT succeed (the guard does not compare denial_reason; only the
-        // paired event's reason_code is checked at commit).
-        let op_b4 = uuid::Uuid::new_v4();
-        let event_b4 = uuid::Uuid::new_v4();
-        let corr_b4 = uuid::Uuid::new_v4();
-        let attempt_b4 = uuid::Uuid::new_v4();
-
-        let mut conn_b4 = pool.acquire().await.expect("acquire connection B4");
-        sqlx::query("BEGIN")
-            .execute(&mut *conn_b4)
-            .await
-            .expect("begin B4");
-
-        // Insert the matching kind-9 event first.
-        sqlx::query(
-            "INSERT INTO authorization_events \
-             (community_id, event_id, event_kind, outcome_code, reason_code, \
-              actor_kind, operation_id, correlation_id, attempt_id, \
-              semantic_fingerprint, occurred_at, canonical_envelope, envelope_digest) \
-             VALUES ($1, $2, 9, 2, 2, 4, $3, $4, $5, \
-                     $6, '2026-01-01T00:00:00Z', $7, $8)",
-        )
-        .bind(community_id)
-        .bind(event_b4)
-        .bind(op_b4)
-        .bind(corr_b4)
-        .bind(attempt_b4)
-        .bind(vec![0xE4_u8; 32]) // semantic_fingerprint
-        .bind(vec![0xE5_u8; 64])
-        .bind(vec![0xE6_u8; 32])
-        .execute(&mut *conn_b4)
-        .await
-        .expect("insert kind-9 event for B4");
-
-        // Insert denial attempt with denial_reason=2 (InvalidCredential) but
-        // reason_code=2 (Missing) — violates the canonical mapping (requires reason_code=3).
-        let denial_reason_err = sqlx::query(
-            "INSERT INTO authorization_authentication_denial_attempts \
-             (community_id, operation_id, correlation_id, semantic_fingerprint, \
-              denial_reason, expected_revision, action, reason_code, \
-              attempt_id, audit_event_id, audit_event_kind) \
-             VALUES ($1, $2, $3, $4, 2, 1, 1, 2, $5, $6, 9)",
-            // denial_reason=2 (InvalidCredential) requires reason_code=3; reason_code=2 is wrong
-        )
-        .bind(community_id)
-        .bind(op_b4)
-        .bind(corr_b4)
-        .bind(vec![0xE4_u8; 32])
-        .bind(attempt_b4)
-        .bind(event_b4)
-        .execute(&mut *conn_b4)
-        .await
-        .expect_err("denial_reason/reason_code mapping violation must be rejected at INSERT");
-
-        assert!(
-            denial_reason_err
-                .as_database_error()
-                .map(|e| e.code().as_deref() == Some("23514"))
-                .unwrap_or(false),
-            "expected check_violation (23514) from \
-             authorization_denial_reason_reason_code_binding for denial_reason mismatch, \
-             got: {denial_reason_err}"
-        );
-
-        // B5: semantic_fingerprint mismatch — the event carries semantic_fingerprint
-        // 0xB5…B5 while the denial attempt carries 0xB6…B6. correlation_id, reason_code,
-        // and attempt_id all match; only the fingerprint differs. The deferred guard
-        // authorization_denial_attempt_guard_v1 fires at COMMIT on the denial-attempt
-        // side, compares found_semantic_fingerprint (from the event) with
-        // NEW.semantic_fingerprint (from the attempt), and raises 23514 with named
-        // constraint authorization_denial_attempt_semantic_binding.
-        // Mutation-sensitive: removing the semantic_fingerprint comparison block from
-        // the guard function lets this transaction commit.
-        let op_b5 = uuid::Uuid::new_v4();
-        let event_b5 = uuid::Uuid::new_v4();
-        let corr_b5 = uuid::Uuid::new_v4();
-        let attempt_b5 = uuid::Uuid::new_v4();
-        let fp_event_b5 = vec![0xB5_u8; 32]; // event semantic_fingerprint
-        let fp_attempt_b5 = vec![0xB6_u8; 32]; // mismatched attempt semantic_fingerprint
-
-        let mut conn_b5 = pool.acquire().await.expect("acquire connection B5");
-        sqlx::query("BEGIN")
-            .execute(&mut *conn_b5)
-            .await
-            .expect("begin B5");
-
-        // Insert the kind-9 event with fingerprint 0xB5…B5.
-        sqlx::query(
-            "INSERT INTO authorization_events \
-             (community_id, event_id, event_kind, outcome_code, reason_code, \
-              actor_kind, operation_id, correlation_id, attempt_id, \
-              semantic_fingerprint, occurred_at, canonical_envelope, envelope_digest) \
-             VALUES ($1, $2, 9, 2, 2, 4, $3, $4, $5, \
-                     $6, '2026-01-01T00:00:00Z', $7, $8)",
-        )
-        .bind(community_id)
-        .bind(event_b5)
-        .bind(op_b5)
-        .bind(corr_b5)
-        .bind(attempt_b5)
-        .bind(fp_event_b5)
-        .bind(vec![0xB7_u8; 64]) // canonical_envelope
-        .bind(vec![0xB8_u8; 32]) // envelope_digest
-        .execute(&mut *conn_b5)
-        .await
-        .expect("insert kind-9 event for B5");
-
-        // Insert denial attempt with the WRONG semantic_fingerprint (0xB6…B6).
-        // correlation_id, reason_code=2, denial_reason=1 (MissingCredential↔Missing),
-        // and attempt_id all match the event — only semantic_fingerprint differs.
-        sqlx::query(
-            "INSERT INTO authorization_authentication_denial_attempts \
-             (community_id, operation_id, correlation_id, semantic_fingerprint, \
-              denial_reason, expected_revision, action, reason_code, \
-              attempt_id, audit_event_id, audit_event_kind) \
-             VALUES ($1, $2, $3, $4, 1, 1, 1, 2, $5, $6, 9)",
-        )
-        .bind(community_id)
-        .bind(op_b5)
-        .bind(corr_b5)
-        .bind(fp_attempt_b5) // 0xB6…B6 ≠ event's 0xB5…B5
-        .bind(attempt_b5)
-        .bind(event_b5)
-        .execute(&mut *conn_b5)
-        .await
-        .expect(
-            "insert denial attempt with mismatched fingerprint (deferred guard fires at commit)",
-        );
-
-        let fp_mismatch_err = sqlx::query("COMMIT")
-            .execute(&mut *conn_b5)
-            .await
-            .expect_err("commit with mismatched semantic_fingerprint must be rejected");
-
-        assert!(
-            fp_mismatch_err
-                .as_database_error()
-                .map(|e| e.code().as_deref() == Some("23514"))
-                .unwrap_or(false),
-            "expected check_violation (23514) from \
-             authorization_denial_attempt_semantic_binding for semantic_fingerprint mismatch, \
-             got: {fp_mismatch_err}"
-        );
-    }
-
-    /// NIP-FI authenticated kind-9 OperatorDenied denial: an authenticated
-    /// kind-9 event (actor_kind 1–3, non-null request_fingerprint) must commit
-    /// without an authorization_authentication_denial_attempts row and must
-    /// reject any attempt to attach one.
-    ///
-    /// Mutation sensitivity:
-    /// - Removing the `actor_kind <> 4` guard from the event-side trigger makes
-    ///   positive A red: the COMMIT fails because the guard now requires a
-    ///   denial-attempt row for the authenticated event and none is present.
-    /// - Removing the `actor_kind <> 4` shape guard from the attempt-side
-    ///   trigger makes negative B red: the COMMIT is rejected by the pre-existing
-    ///   `authorization_denial_attempt_semantic_binding` guard instead (non-null
-    ///   attempt `semantic_fingerprint` vs. null on the authenticated event), so
-    ///   `assert_eq!` on the constraint name fails. The exact constraint name
-    ///   assertion is therefore the load-bearing proof that the new shape guard —
-    ///   not the pre-existing semantic-binding check — is what fires.
-    ///
-    /// The unresolved pre-auth positive path (actor_kind 4) is exercised in
-    /// `authorization_denial_attempt_requires_kind_9_event_bidirectional` and
-    /// is unchanged by this fix.
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn authenticated_kind_9_denial_commits_without_denial_attempt() {
-        let pool = connect_test_pool().await;
-        reset_public_schema(&pool).await;
-        MIGRATOR
-            .run_to(42, &pool)
-            .await
-            .expect("apply migrations 1-42");
-
-        let community_id = uuid::Uuid::new_v4();
-        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
-            .bind(community_id)
-            .bind(format!("auth-denial-{}.example", community_id.simple()))
-            .execute(&pool)
-            .await
-            .expect("insert community");
-
-        sqlx::query(
-            "INSERT INTO authorization_event_capacity \
-             (community_id, max_events_per_domain, max_bytes_per_domain, max_envelope_bytes) \
-             VALUES ($1, 1000, 16777216, 16384)",
-        )
-        .bind(community_id)
-        .execute(&pool)
-        .await
-        .expect("insert event capacity");
-
-        // Seed an operation receipt for the authenticated denial. Use
-        // operation_kind = 12 (invalidation) with outcome_code = 2 (denied):
-        // this satisfies the receipt CHECK constraints without triggering the
-        // lifecycle history guard (expected_count = 0 for non-lifecycle kinds)
-        // and without requiring a lifecycle event (expected_event_kind = NULL).
-        // The authorization_events FK on (community_id, operation_id,
-        // request_fingerprint) requires a receipt row.
-        let op_auth = uuid::Uuid::new_v4();
-        let fp_auth = vec![0xA1_u8; 32];
-
-        sqlx::query(
-            "INSERT INTO authorization_operation_receipts \
-             (community_id, operation_id, request_fingerprint, operation_kind, \
-              actor_fingerprint, outcome_code, result_digest) \
-             VALUES ($1, $2, $3, 12, $4, 2, $5)",
-            // operation_kind 12 (invalidation), outcome_code 2 (denied)
-        )
-        .bind(community_id)
-        .bind(op_auth)
-        .bind(&fp_auth)
-        .bind(vec![0xA2_u8; 32]) // actor_fingerprint
-        .bind(vec![0xA3_u8; 32]) // result_digest
-        .execute(&pool)
-        .await
-        .expect("seed authenticated denial receipt");
-
-        let event_auth = uuid::Uuid::new_v4();
-        let corr_auth = uuid::Uuid::new_v4();
-        let attempt_auth = uuid::Uuid::new_v4();
-
-        // --- Positive A: authenticated kind-9 denial (actor_kind = 1) commits
-        // without any denial-attempt row. The semantic_fingerprint must be NULL
-        // per the corrected shape CHECK. The deferred cardinality guard must
-        // skip this event because actor_kind ≠ 4.
-        let mut conn = pool.acquire().await.expect("acquire connection");
-        sqlx::query("BEGIN")
-            .execute(&mut *conn)
-            .await
-            .expect("begin");
-
-        sqlx::query(
-            "INSERT INTO authorization_events \
-             (community_id, event_id, event_kind, outcome_code, reason_code, \
-              actor_kind, actor_fingerprint, operation_id, request_fingerprint, \
-              correlation_id, attempt_id, semantic_fingerprint, \
-              occurred_at, canonical_envelope, envelope_digest) \
-             VALUES ($1, $2, 9, 2, 4, 1, $3, $4, $5, $6, $7, NULL, \
-                     '2026-01-01T00:00:00Z', $8, $9)",
-        )
-        .bind(community_id)
-        .bind(event_auth)
-        .bind(vec![0xA4_u8; 32]) // actor_fingerprint (required for actor_kind 1)
-        .bind(op_auth)
-        .bind(&fp_auth) // non-null request_fingerprint (authenticated shape)
-        .bind(corr_auth)
-        .bind(attempt_auth)
-        // semantic_fingerprint = NULL: authenticated kind-9 must not carry one
-        .bind(vec![0xA5_u8; 64]) // canonical_envelope
-        .bind(vec![0xA6_u8; 32]) // envelope_digest
-        .execute(&mut *conn)
-        .await
-        .expect("insert authenticated kind-9 event");
-
-        sqlx::query("COMMIT").execute(&mut *conn).await.expect(
-            "authenticated kind-9 denial must commit without a denial-attempt row \
-                 — the event-side cardinality guard must skip actor_kind 1",
-        );
-        drop(conn);
-
-        // Confirm no denial attempt was needed: the table must have zero rows
-        // for this event.
-        let attempt_count: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM authorization_authentication_denial_attempts \
-             WHERE community_id = $1 AND audit_event_id = $2",
-        )
-        .bind(community_id)
-        .bind(event_auth)
-        .fetch_one(&pool)
-        .await
-        .expect("count denial attempts for authenticated event");
-        assert_eq!(
-            attempt_count, 0,
-            "no denial-attempt row should exist for an authenticated kind-9 event"
-        );
-
-        // --- Negative B: a denial attempt cannot bind to the authenticated kind-9
-        // event. The attempt-side shape guard must reject this at commit because
-        // the referenced event has actor_kind = 1 (not 4). The rejection must
-        // name the exact shape constraint (authorization_denial_attempt_event_kind)
-        // rather than merely returning 23514, proving the new actor/request-fingerprint
-        // guard fires — not the pre-existing semantic_fingerprint equality check
-        // (which would fire as authorization_denial_attempt_semantic_binding if
-        // the shape guard were absent, because the attempt carries a non-null
-        // semantic_fingerprint while the authenticated event has null).
-        //
-        // Reuse attempt_auth from the committed event so the deferred attempt_id
-        // FK resolves (wrong attempt_id would activate that FK first and make the
-        // negative non-isolated to the new guard).
-        let mut conn_b = pool.acquire().await.expect("acquire connection B");
-        sqlx::query("BEGIN")
-            .execute(&mut *conn_b)
-            .await
-            .expect("begin B");
-
-        // Insert the denial attempt referencing the authenticated event.
-        // The attempt table FKs are deferred, so this INSERT succeeds;
-        // the shape guard fires at COMMIT.
-        sqlx::query(
-            "INSERT INTO authorization_authentication_denial_attempts \
-             (community_id, operation_id, correlation_id, semantic_fingerprint, \
-              denial_reason, expected_revision, action, reason_code, \
-              attempt_id, audit_event_id, audit_event_kind) \
-             VALUES ($1, $2, $3, $4, 1, 1, 1, 2, $5, $6, 9)",
-        )
-        .bind(community_id)
-        .bind(op_auth)
-        .bind(corr_auth)
-        .bind(vec![0xA7_u8; 32]) // semantic_fingerprint on the attempt (non-null)
-        .bind(attempt_auth) // reuse the event's attempt_id — FK isolation
-        .bind(event_auth) // references the authenticated event (actor_kind = 1)
-        .execute(&mut *conn_b)
-        .await
-        .expect("attempt INSERT must pass — shape guard is deferred");
-
-        let cross_shape_err = sqlx::query("COMMIT")
-            .execute(&mut *conn_b)
-            .await
-            .expect_err(
-                "denial attempt binding to authenticated kind-9 event must be rejected at commit",
-            );
-        // The exact constraint name must be authorization_denial_attempt_event_kind —
-        // the new actor/request_fingerprint shape guard. If the shape guard were
-        // removed, the pre-existing semantic_fingerprint equality check would fire
-        // instead, named authorization_denial_attempt_semantic_binding. Requiring
-        // the exact name makes the mutation reliably red.
-        assert_eq!(
-            cross_shape_err
-                .as_database_error()
-                .and_then(|e| e.constraint()),
-            Some("authorization_denial_attempt_event_kind"),
-            "rejection must be attributed to authorization_denial_attempt_event_kind \
-             shape guard (not an incidental FK or semantic-binding check), \
-             got: {cross_shape_err}"
-        );
-    }
-
-    /// NIP-FI denied lifecycle receipt: a denied core lifecycle receipt
-    /// (outcome_code = 2) must commit without a paired audit event. Requiring
-    /// one would falsely record that the lifecycle transition occurred.
-    ///
-    /// The denied branch forbids any event from the complete core
-    /// success-transition class (kinds 1, 2, 3, 6). This test uses the mapped
-    /// kind (kind 1 for enroll). Cross-kind rejection — a wrong success-transition
-    /// kind on a denied receipt — is exercised by
-    /// `denied_lifecycle_receipt_wrong_kind_receipt_side` (receipt-side trigger)
-    /// and `denied_lifecycle_receipt_wrong_kind_event_side` (event-side trigger).
-    ///
-    /// Mutation sensitivity:
-    /// - Removing the `outcome_code IN (1, 3)` branch entirely (or replacing it with a
-    ///   blanket early-return) makes the positive case red — the denied enroll receipt
-    ///   cannot commit alone because the guard then demands a paired enroll audit event
-    ///   (expected_event_kind = 1) that is absent.
-    /// - Removing the `ELSIF outcome_code = 2` zero-event branch makes the
-    ///   receipt-then-event negative below green (COMMIT succeeds when it must not),
-    ///   failing `expect_err`. The event-side isolation in
-    ///   `denied_lifecycle_receipt_event_side_trigger_isolated` independently confirms
-    ///   the same branch using only the `authorization_event_receipt_cardinality`
-    ///   trigger direction.
-    /// Applied/no-op lifecycle cardinality is exercised by
-    /// `applied_lifecycle_receipt_requires_exactly_one_event`.
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn denied_lifecycle_receipt_commits_without_audit_event() {
-        let pool = connect_test_pool().await;
-        reset_public_schema(&pool).await;
-        MIGRATOR
-            .run_to(42, &pool)
-            .await
-            .expect("apply migrations 1-42");
-
-        let community_id = uuid::Uuid::new_v4();
-        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
-            .bind(community_id)
-            .bind(format!(
-                "denied-lifecycle-{}.example",
-                community_id.simple()
-            ))
-            .execute(&pool)
-            .await
-            .expect("insert community");
-
-        // Denied enroll receipt (operation_kind = 1, outcome_code = 2) must commit
-        // without any paired authorization_events row. The guard must skip it
-        // because outcome_code = 2 is not in (1, 3).
-        //
-        // The receipt history guard (migration 0041) uses `outcome_code IN (1, 3)`
-        // for lifecycle receipts, so a denied enroll receipt (outcome_code = 2)
-        // expects zero lifecycle history rows — no history setup is needed.
-        let op_denied = uuid::Uuid::new_v4();
-        let fp_denied = vec![0xB1_u8; 32];
-
-        sqlx::query(
-            "INSERT INTO authorization_operation_receipts \
-             (community_id, operation_id, request_fingerprint, operation_kind, \
-              actor_fingerprint, outcome_code, result_digest) \
-             VALUES ($1, $2, $3, 1, $4, 2, $5)",
-            // operation_kind 1 (enroll), outcome_code 2 (denied)
-        )
-        .bind(community_id)
-        .bind(op_denied)
-        .bind(&fp_denied)
-        .bind(vec![0xB2_u8; 32])
-        .bind(vec![0xB3_u8; 32])
-        .execute(&pool)
-        .await
-        .expect("denied enroll receipt must commit without a paired audit event");
-
-        // No audit event for this operation; confirm the table is empty for it.
-        let event_count: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM authorization_events \
-             WHERE community_id = $1 AND operation_id = $2",
-        )
-        .bind(community_id)
-        .bind(op_denied)
-        .fetch_one(&pool)
-        .await
-        .expect("count events for denied receipt");
-        assert_eq!(
-            event_count, 0,
-            "no audit event should be required or present for a denied lifecycle receipt"
-        );
-
-        // --- Negative: denied enroll receipt paired with its mapped success-
-        // transition event (event_kind = 1, enrolled) must be rejected at COMMIT.
-        // The receipt-side deferred trigger fires here (receipt was inserted in
-        // this same transaction). The event-side trigger direction is isolated in
-        // `denied_lifecycle_receipt_event_side_trigger_isolated`.
-        //
-        // Seed event capacity; the authorization_events BEFORE INSERT trigger
-        // requires a capacity row. No lifecycle history is needed: denied receipts
-        // (outcome_code = 2) expect zero history rows per the history guard.
-        sqlx::query(
-            "INSERT INTO authorization_event_capacity \
-             (community_id, max_events_per_domain, max_bytes_per_domain, max_envelope_bytes) \
-             VALUES ($1, 1000, 16777216, 16384)",
-        )
-        .bind(community_id)
-        .execute(&pool)
-        .await
-        .expect("insert event capacity");
-
-        let op_neg = uuid::Uuid::new_v4();
-        let fp_neg = vec![0xD1_u8; 32];
-        let event_neg = uuid::Uuid::new_v4();
-        let corr_neg = uuid::Uuid::new_v4();
-        let attempt_neg = uuid::Uuid::new_v4();
-
-        let mut conn_neg = pool.acquire().await.expect("acquire connection neg");
-        sqlx::query("BEGIN")
-            .execute(&mut *conn_neg)
-            .await
-            .expect("begin neg");
-
-        // Denied enroll receipt — no history row needed (outcome_code = 2).
-        sqlx::query(
-            "INSERT INTO authorization_operation_receipts \
-             (community_id, operation_id, request_fingerprint, operation_kind, \
-              actor_fingerprint, outcome_code, result_digest) \
-             VALUES ($1, $2, $3, 1, $4, 2, $5)",
-        )
-        .bind(community_id)
-        .bind(op_neg)
-        .bind(&fp_neg)
-        .bind(vec![0xD2_u8; 32])
-        .bind(vec![0xD3_u8; 32])
-        .execute(&mut *conn_neg)
-        .await
-        .expect("insert denied receipt — event guard is deferred");
-
-        // Insert the mapped success-transition event (event_kind = 1, enrolled).
-        // actor_kind = 1 requires a non-null actor_fingerprint and a matching
-        // receipt FK (satisfied by the denied receipt above, which shares the
-        // same (community_id, operation_id, request_fingerprint)).
-        sqlx::query(
-            "INSERT INTO authorization_events \
-             (community_id, event_id, event_kind, outcome_code, reason_code, \
-              actor_kind, actor_fingerprint, operation_id, request_fingerprint, \
-              correlation_id, attempt_id, semantic_fingerprint, \
-              occurred_at, canonical_envelope, envelope_digest) \
-             VALUES ($1, $2, 1, 1, 4, 1, $3, $4, $5, $6, $7, NULL, \
-                     '2026-01-01T00:00:00Z', $8, $9)",
-            // event_kind 1 (enrolled) — the mapped success transition for enroll
-        )
-        .bind(community_id)
-        .bind(event_neg)
-        .bind(vec![0xD4_u8; 32]) // actor_fingerprint
-        .bind(op_neg)
-        .bind(&fp_neg)
-        .bind(corr_neg)
-        .bind(attempt_neg)
-        .bind(vec![0xD5_u8; 64]) // canonical_envelope
-        .bind(vec![0xD6_u8; 32]) // envelope_digest
-        .execute(&mut *conn_neg)
-        .await
-        .expect("event INSERT must pass — deferred guard fires at COMMIT");
-
-        let contradiction_err = sqlx::query("COMMIT")
-            .execute(&mut *conn_neg)
-            .await
-            .expect_err(
-                "denied receipt + mapped success event must be rejected at COMMIT \
-                 — contradictory durable facts must not be permitted",
-            );
-        assert_eq!(
-            contradiction_err
-                .as_database_error()
-                .and_then(|e| e.constraint()),
-            Some("authorization_denied_lifecycle_receipt_no_success_event"),
-            "expected authorization_denied_lifecycle_receipt_no_success_event constraint \
-             rejection for denied receipt + success event, got: {contradiction_err}"
-        );
-    }
-
-    /// NIP-FI event-side trigger isolation: when a denied enroll receipt is already
-    /// committed (auto-commit via pool), a new independent transaction that inserts
-    /// only the mapped success-transition event must be rejected at COMMIT by
-    /// `authorization_event_receipt_cardinality` (the event-side deferred trigger).
-    ///
-    /// This isolates the `authorization_event_receipt_cardinality` trigger path.
-    /// In `denied_lifecycle_receipt_commits_without_audit_event`'s receipt-then-event
-    /// negative, the receipt-side trigger (`authorization_operation_receipt_event_cardinality`)
-    /// also fires. Here the committed receipt produces no deferred trigger, so rejection
-    /// can only come from the event-side trigger. Uses the mapped kind (kind 1 for
-    /// enroll). Wrong-kind event-side isolation is in
-    /// `denied_lifecycle_receipt_wrong_kind_event_side`.
-    ///
-    /// Mutation sensitivity: disabling the
-    /// `authorization_event_receipt_cardinality` trigger (DROP or ALTER TABLE
-    /// DISABLE TRIGGER) makes this negative green — the COMMIT succeeds when it
-    /// must not, so `expect_err` panics.
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn denied_lifecycle_receipt_event_side_trigger_isolated() {
-        let pool = connect_test_pool().await;
-        reset_public_schema(&pool).await;
-        MIGRATOR
-            .run_to(42, &pool)
-            .await
-            .expect("apply migrations 1-42");
-
-        let community_id = uuid::Uuid::new_v4();
-        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
-            .bind(community_id)
-            .bind(format!("evt-side-{}.example", community_id.simple()))
-            .execute(&pool)
-            .await
-            .expect("insert community");
-
-        // Seed event capacity before any event insert.
-        sqlx::query(
-            "INSERT INTO authorization_event_capacity \
-             (community_id, max_events_per_domain, max_bytes_per_domain, max_envelope_bytes) \
-             VALUES ($1, 1000, 16777216, 16384)",
-        )
-        .bind(community_id)
-        .execute(&pool)
-        .await
-        .expect("insert event capacity");
-
-        // Commit a denied enroll receipt in auto-commit mode (no explicit BEGIN).
-        // This receipt produces no deferred trigger — the receipt-side deferred
-        // trigger only fires within the transaction that inserts the receipt row.
-        let op_id = uuid::Uuid::new_v4();
-        let fp = vec![0xE1_u8; 32];
-        sqlx::query(
-            "INSERT INTO authorization_operation_receipts \
-             (community_id, operation_id, request_fingerprint, operation_kind, \
-              actor_fingerprint, outcome_code, result_digest) \
-             VALUES ($1, $2, $3, 1, $4, 2, $5)",
-        )
-        .bind(community_id)
-        .bind(op_id)
-        .bind(&fp)
-        .bind(vec![0xE2_u8; 32])
-        .bind(vec![0xE3_u8; 32])
-        .execute(&pool)
-        .await
-        .expect("denied receipt must commit alone in auto-commit mode");
-
-        // Now open a NEW transaction and insert only the mapped success-transition
-        // event (event_kind = 1, enrolled). The receipt is already committed and
-        // its deferred trigger is no longer active. Rejection at COMMIT must come
-        // from authorization_event_receipt_cardinality (the event-side trigger).
-        let event_id = uuid::Uuid::new_v4();
-        let corr_id = uuid::Uuid::new_v4();
-        let attempt_id = uuid::Uuid::new_v4();
-
-        let mut conn = pool
-            .acquire()
-            .await
-            .expect("acquire connection for event-side test");
-        sqlx::query("BEGIN")
-            .execute(&mut *conn)
-            .await
-            .expect("begin event-side transaction");
-
-        sqlx::query(
-            "INSERT INTO authorization_events \
-             (community_id, event_id, event_kind, outcome_code, reason_code, \
-              actor_kind, actor_fingerprint, operation_id, request_fingerprint, \
-              correlation_id, attempt_id, semantic_fingerprint, \
-              occurred_at, canonical_envelope, envelope_digest) \
-             VALUES ($1, $2, 1, 1, 4, 1, $3, $4, $5, $6, $7, NULL, \
-                     '2026-01-01T00:00:00Z', $8, $9)",
-        )
-        .bind(community_id)
-        .bind(event_id)
-        .bind(vec![0xE4_u8; 32]) // actor_fingerprint
-        .bind(op_id)
-        .bind(&fp)
-        .bind(corr_id)
-        .bind(attempt_id)
-        .bind(vec![0xE5_u8; 64]) // canonical_envelope
-        .bind(vec![0xE6_u8; 32]) // envelope_digest
-        .execute(&mut *conn)
-        .await
-        .expect("event INSERT must pass — event-side deferred guard fires at COMMIT");
-
-        let event_side_err = sqlx::query("COMMIT").execute(&mut *conn).await.expect_err(
-            "mapping a success-transition event to a committed denied receipt \
-                 must be rejected at COMMIT by the event-side trigger",
-        );
-        assert_eq!(
-            event_side_err
-                .as_database_error()
-                .and_then(|e| e.constraint()),
-            Some("authorization_denied_lifecycle_receipt_no_success_event"),
-            "event-side trigger must reject with authorization_denied_lifecycle_receipt_no_success_event, \
-             got: {event_side_err}"
-        );
-    }
-
-    /// NIP-FI applied lifecycle receipt: an applied core lifecycle enroll receipt
-    /// (outcome_code = 1) requires exactly one mapped success-transition event
-    /// (event_kind = 1, enrolled). This exercises the `outcome_code IN (1, 3)`
-    /// branch of `authorization_operation_receipt_event_guard_v1` at migration 42.
-    ///
-    /// Mutation sensitivity:
-    /// - Removing/bypassing the applied/no-op branch (replacing it with a blanket
-    ///   RETURN NULL) makes the positive transaction commit without an event, leaving
-    ///   the contract silently unenforced. The negative below requires the cardinality
-    ///   constraint to fire when the event is absent.
-    /// - Removing the negative assertion: the absent-event case would commit when it
-    ///   must not.
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn applied_lifecycle_receipt_requires_exactly_one_event() {
-        let pool = connect_test_pool().await;
-        reset_public_schema(&pool).await;
-        MIGRATOR
-            .run_to(42, &pool)
-            .await
-            .expect("apply migrations 1-42");
-
-        let community_id = uuid::Uuid::new_v4();
-        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
-            .bind(community_id)
-            .bind(format!(
-                "applied-lifecycle-{}.example",
-                community_id.simple()
-            ))
-            .execute(&pool)
-            .await
-            .expect("insert community");
-
-        // Enrollment policy (TOFU, mode 3).
-        let policy_revision: i64 = 1;
-        sqlx::query(
-            "INSERT INTO identity_enrollment_policies \
-             (community_id, policy_revision, enrollment_mode, policy_digest, effective_at) \
-             VALUES ($1, $2, 3, $3, '2026-01-01T00:00:00Z')",
-        )
-        .bind(community_id)
-        .bind(policy_revision)
-        .bind(vec![0xF0_u8; 32])
-        .execute(&pool)
-        .await
-        .expect("insert enrollment policy");
-
-        // Event capacity — required by authorization_event_capacity_before_insert_v1.
-        sqlx::query(
-            "INSERT INTO authorization_event_capacity \
-             (community_id, max_events_per_domain, max_bytes_per_domain, max_envelope_bytes) \
-             VALUES ($1, 1000, 16777216, 16384)",
-        )
-        .bind(community_id)
-        .execute(&pool)
-        .await
-        .expect("insert event capacity");
-
-        // --- Positive: applied enroll commits with exactly one mapped event ---
-        //
-        // All cross-table FKs between identity_lifecycle_history, identity_bindings,
-        // authorization_operation_receipts, and authorization_events are
-        // DEFERRABLE INITIALLY DEFERRED — insert order within the transaction is
-        // flexible, but a pinned connection is required for BEGIN/COMMIT to share
-        // the same session. The receipt_history_cardinality trigger (migration 0041)
-        // fires at COMMIT and requires exactly one history row for applied enroll.
-        let op_id = uuid::Uuid::new_v4();
-        let binding_id = uuid::Uuid::new_v4();
-        let history_id = uuid::Uuid::new_v4();
-        let fp = vec![0xF1_u8; 32];
-        let event_id = uuid::Uuid::new_v4();
-        let corr_id = uuid::Uuid::new_v4();
-        let attempt_id = uuid::Uuid::new_v4();
-
-        let mut conn = pool
-            .acquire()
-            .await
-            .expect("acquire connection for positive case");
-        sqlx::query("BEGIN")
-            .execute(&mut *conn)
-            .await
-            .expect("begin positive transaction");
-
-        // History first: the receipt_history_cardinality AFTER INSERT trigger
-        // on authorization_operation_receipts is DEFERRED and checks at COMMIT
-        // time, but inserting history before receipt is idiomatic.
-        // successor_binding_version = 1 because binding_version is an identity
-        // sequence starting at 1 per community; this is the first binding.
-        sqlx::query(
-            "INSERT INTO identity_lifecycle_history \
-             (community_id, history_id, transition_kind, outcome_code, \
-              successor_binding_id, successor_binding_version, \
-              successor_lifecycle_revision, successor_state, \
-              operation_id, request_fingerprint, transition_digest) \
-             VALUES ($1, $2, 1, 1, $3, 1, 1, 1, $4, $5, $6)",
-        )
-        .bind(community_id)
-        .bind(history_id)
-        .bind(binding_id)
-        .bind(op_id)
-        .bind(&fp)
-        .bind(vec![0xF2_u8; 32])
-        .execute(&mut *conn)
-        .await
-        .expect("insert lifecycle history");
-
-        // Applied enroll receipt (operation_kind = 1, outcome_code = 1).
-        sqlx::query(
-            "INSERT INTO authorization_operation_receipts \
-             (community_id, operation_id, request_fingerprint, operation_kind, \
-              actor_fingerprint, outcome_code, result_digest) \
-             VALUES ($1, $2, $3, 1, $4, 1, $5)",
-        )
-        .bind(community_id)
-        .bind(op_id)
-        .bind(&fp)
-        .bind(vec![0xF3_u8; 32])
-        .bind(vec![0xF4_u8; 32])
-        .execute(&mut *conn)
-        .await
-        .expect("insert applied enroll receipt");
-
-        // Binding — birth_history_id FK is deferred; binding_version is generated.
-        sqlx::query(
-            "INSERT INTO identity_bindings \
-             (community_id, binding_id, issuer, subject, \
-              principal_fingerprint, event_author_pubkey, \
-              binding_state, lifecycle_revision, binding_provenance, \
-              policy_revision, enrollment_evidence_digest, \
-              birth_history_id, creation_operation_id, \
-              creation_request_fingerprint) \
-             VALUES ($1, $2, 'https://issuer.example', 'sub-applied', \
-                     $3, $4, 1, 1, 1, $5, $6, $7, $8, $9)",
-        )
-        .bind(community_id)
-        .bind(binding_id)
-        .bind(vec![0xF5_u8; 32]) // principal_fingerprint
-        .bind(vec![0xF6_u8; 32]) // event_author_pubkey
-        .bind(policy_revision)
-        .bind(vec![0xF7_u8; 32]) // enrollment_evidence_digest
-        .bind(history_id)
-        .bind(op_id)
-        .bind(&fp)
-        .execute(&mut *conn)
-        .await
-        .expect("insert identity binding");
-
-        // Mapped success-transition event (event_kind = 1, enrolled).
-        // actor_kind = 1 requires non-null actor_fingerprint and matching receipt FK.
-        sqlx::query(
-            "INSERT INTO authorization_events \
-             (community_id, event_id, event_kind, outcome_code, reason_code, \
-              actor_kind, actor_fingerprint, operation_id, request_fingerprint, \
-              correlation_id, attempt_id, semantic_fingerprint, \
-              occurred_at, canonical_envelope, envelope_digest) \
-             VALUES ($1, $2, 1, 1, 4, 1, $3, $4, $5, $6, $7, NULL, \
-                     '2026-01-01T00:00:00Z', $8, $9)",
-        )
-        .bind(community_id)
-        .bind(event_id)
-        .bind(vec![0xF8_u8; 32]) // actor_fingerprint
-        .bind(op_id)
-        .bind(&fp)
-        .bind(corr_id)
-        .bind(attempt_id)
-        .bind(vec![0xF9_u8; 64]) // canonical_envelope
-        .bind(vec![0xFA_u8; 32]) // envelope_digest
-        .execute(&mut *conn)
-        .await
-        .expect("insert mapped success-transition event");
-
-        sqlx::query("COMMIT").execute(&mut *conn).await.expect(
-            "applied enroll receipt + exactly one mapped event must commit — \
-                 authorization_operation_receipt_event_guard_v1 applied/no-op branch",
-        );
-
-        // Confirm exactly one event committed for this operation.
-        let event_count: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM authorization_events \
-             WHERE community_id = $1 AND operation_id = $2",
-        )
-        .bind(community_id)
-        .bind(op_id)
-        .fetch_one(&pool)
-        .await
-        .expect("count events for applied receipt");
-        assert_eq!(
-            event_count, 1,
-            "exactly one audit event must be present for an applied enroll receipt"
-        );
-
-        // --- Negative: applied enroll receipt without a mapped event must reject ---
-        //
-        // A second applied enroll transaction that commits receipt + history + binding
-        // but no event must be rejected with authorization_operation_receipt_event_cardinality.
-        let op_neg = uuid::Uuid::new_v4();
-        let binding_neg = uuid::Uuid::new_v4();
-        let history_neg = uuid::Uuid::new_v4();
-        let fp_neg = vec![0xFB_u8; 32];
-
-        let mut conn_neg = pool
-            .acquire()
-            .await
-            .expect("acquire connection for negative case");
-        sqlx::query("BEGIN")
-            .execute(&mut *conn_neg)
-            .await
-            .expect("begin negative transaction");
-
-        sqlx::query(
-            "INSERT INTO identity_lifecycle_history \
-             (community_id, history_id, transition_kind, outcome_code, \
-              successor_binding_id, successor_binding_version, \
-              successor_lifecycle_revision, successor_state, \
-              operation_id, request_fingerprint, transition_digest) \
-             VALUES ($1, $2, 1, 1, $3, 2, 1, 1, $4, $5, $6)",
-            // successor_binding_version = 2: second binding in this community
-        )
-        .bind(community_id)
-        .bind(history_neg)
-        .bind(binding_neg)
-        .bind(op_neg)
-        .bind(&fp_neg)
-        .bind(vec![0xFC_u8; 32])
-        .execute(&mut *conn_neg)
-        .await
-        .expect("insert negative lifecycle history");
-
-        sqlx::query(
-            "INSERT INTO authorization_operation_receipts \
-             (community_id, operation_id, request_fingerprint, operation_kind, \
-              actor_fingerprint, outcome_code, result_digest) \
-             VALUES ($1, $2, $3, 1, $4, 1, $5)",
-        )
-        .bind(community_id)
-        .bind(op_neg)
-        .bind(&fp_neg)
-        .bind(vec![0xFD_u8; 32])
-        .bind(vec![0xFE_u8; 32])
-        .execute(&mut *conn_neg)
-        .await
-        .expect("insert negative applied receipt");
-
-        sqlx::query(
-            "INSERT INTO identity_bindings \
-             (community_id, binding_id, issuer, subject, \
-              principal_fingerprint, event_author_pubkey, \
-              binding_state, lifecycle_revision, binding_provenance, \
-              policy_revision, enrollment_evidence_digest, \
-              birth_history_id, creation_operation_id, \
-              creation_request_fingerprint) \
-             VALUES ($1, $2, 'https://issuer.example', 'sub-applied-neg', \
-                     $3, $4, 1, 1, 1, $5, $6, $7, $8, $9)",
-        )
-        .bind(community_id)
-        .bind(binding_neg)
-        .bind(vec![0xE7_u8; 32]) // principal_fingerprint (distinct from positive)
-        .bind(vec![0xE8_u8; 32]) // event_author_pubkey (distinct from positive)
-        .bind(policy_revision)
-        .bind(vec![0xE9_u8; 32])
-        .bind(history_neg)
-        .bind(op_neg)
-        .bind(&fp_neg)
-        .execute(&mut *conn_neg)
-        .await
-        .expect("insert negative binding — no event inserted");
-
-        // Commit without the mapped event — guard must reject.
-        let absent_event_err = sqlx::query("COMMIT")
-            .execute(&mut *conn_neg)
-            .await
-            .expect_err(
-                "applied enroll receipt without a mapped success-transition event \
-                 must be rejected at COMMIT",
-            );
-        assert_eq!(
-            absent_event_err
-                .as_database_error()
-                .and_then(|e| e.constraint()),
-            Some("authorization_operation_receipt_event_cardinality"),
-            "expected authorization_operation_receipt_event_cardinality rejection \
-             for applied receipt without event, got: {absent_event_err}"
-        );
-    }
-
-    /// NIP-FI cross-kind denied lifecycle: a wrong success-transition kind paired
-    /// with a denied lifecycle receipt must be rejected through the receipt-side
-    /// deferred trigger. Uses a denied enroll receipt (operation_kind = 1, mapped
-    /// kind = 1) with a kind-6 (retired) event — a different success-transition
-    /// kind that is equally forbidden by the class-based guard (kinds 1, 2, 3, 6).
-    ///
-    /// Both the receipt and the wrong-kind event are inserted in the same
-    /// transaction, so the receipt-side deferred trigger
-    /// (`authorization_operation_receipt_event_cardinality`) fires at COMMIT.
-    ///
-    /// Mutation sensitivity: narrowing the denied filter back to
-    /// `event_kind = expected_event_kind` (the mapped kind, 1) removes kind 6
-    /// from the forbidden set, causing this negative to turn green — COMMIT
-    /// succeeds when it must not, failing `expect_err`.
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn denied_lifecycle_receipt_wrong_kind_receipt_side() {
-        let pool = connect_test_pool().await;
-        reset_public_schema(&pool).await;
-        MIGRATOR
-            .run_to(42, &pool)
-            .await
-            .expect("apply migrations 1-42");
-
-        let community_id = uuid::Uuid::new_v4();
-        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
-            .bind(community_id)
-            .bind(format!("wrong-kind-rcpt-{}.example", community_id.simple()))
-            .execute(&pool)
-            .await
-            .expect("insert community");
-
-        sqlx::query(
-            "INSERT INTO authorization_event_capacity \
-             (community_id, max_events_per_domain, max_bytes_per_domain, max_envelope_bytes) \
-             VALUES ($1, 1000, 16777216, 16384)",
-        )
-        .bind(community_id)
-        .execute(&pool)
-        .await
-        .expect("insert event capacity");
-
-        let op_id = uuid::Uuid::new_v4();
-        let fp = vec![0xA0_u8; 32];
-        let event_id = uuid::Uuid::new_v4();
-        let corr_id = uuid::Uuid::new_v4();
-        let attempt_id = uuid::Uuid::new_v4();
-
-        let mut conn = pool
-            .acquire()
-            .await
-            .expect("acquire connection for wrong-kind receipt-side test");
-        sqlx::query("BEGIN")
-            .execute(&mut *conn)
-            .await
-            .expect("begin");
-
-        // Denied enroll receipt (operation_kind = 1, outcome_code = 2).
-        // No history row needed: outcome_code = 2 expects zero history rows.
-        sqlx::query(
-            "INSERT INTO authorization_operation_receipts \
-             (community_id, operation_id, request_fingerprint, operation_kind, \
-              actor_fingerprint, outcome_code, result_digest) \
-             VALUES ($1, $2, $3, 1, $4, 2, $5)",
-        )
-        .bind(community_id)
-        .bind(op_id)
-        .bind(&fp)
-        .bind(vec![0xA1_u8; 32])
-        .bind(vec![0xA2_u8; 32])
-        .execute(&mut *conn)
-        .await
-        .expect("insert denied enroll receipt — deferred guard");
-
-        // Wrong success-transition kind: event_kind = 6 (retired), not the mapped
-        // kind 1 (enrolled). Both are in the forbidden class (1, 2, 3, 6).
-        sqlx::query(
-            "INSERT INTO authorization_events \
-             (community_id, event_id, event_kind, outcome_code, reason_code, \
-              actor_kind, actor_fingerprint, operation_id, request_fingerprint, \
-              correlation_id, attempt_id, semantic_fingerprint, \
-              occurred_at, canonical_envelope, envelope_digest) \
-             VALUES ($1, $2, 6, 1, 4, 1, $3, $4, $5, $6, $7, NULL, \
-                     '2026-01-01T00:00:00Z', $8, $9)",
-            // event_kind 6 (retired) — wrong kind for a denied enroll receipt
-        )
-        .bind(community_id)
-        .bind(event_id)
-        .bind(vec![0xA3_u8; 32]) // actor_fingerprint
-        .bind(op_id)
-        .bind(&fp)
-        .bind(corr_id)
-        .bind(attempt_id)
-        .bind(vec![0xA4_u8; 64]) // canonical_envelope
-        .bind(vec![0xA5_u8; 32]) // envelope_digest
-        .execute(&mut *conn)
-        .await
-        .expect("event INSERT must pass — deferred guard fires at COMMIT");
-
-        let wrong_kind_err = sqlx::query("COMMIT").execute(&mut *conn).await.expect_err(
-            "denied receipt + wrong success-transition kind (6) must be rejected at COMMIT \
-                 — class-based guard forbids all of kinds 1, 2, 3, 6",
-        );
-        assert_eq!(
-            wrong_kind_err
-                .as_database_error()
-                .and_then(|e| e.constraint()),
-            Some("authorization_denied_lifecycle_receipt_no_success_event"),
-            "expected authorization_denied_lifecycle_receipt_no_success_event for \
-             denied receipt + wrong kind (6), got: {wrong_kind_err}"
-        );
-    }
-
-    /// NIP-FI cross-kind denied lifecycle event-side: after a denied enroll
-    /// receipt is committed alone (auto-commit), a new transaction that inserts
-    /// only a wrong success-transition kind (kind 6, retired) must be rejected at
-    /// COMMIT by `authorization_event_receipt_cardinality` (event-side trigger).
-    ///
-    /// This isolates the event-side trigger path for the cross-kind case.
-    /// The committed receipt produces no active deferred trigger, so rejection
-    /// can only come from the event-side trigger.
-    ///
-    /// Mutation sensitivity: narrowing the denied filter to
-    /// `event_kind = expected_event_kind` (kind 1) removes kind 6 from the
-    /// forbidden set, making this negative green — COMMIT succeeds when it must
-    /// not, failing `expect_err`.
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn denied_lifecycle_receipt_wrong_kind_event_side() {
-        let pool = connect_test_pool().await;
-        reset_public_schema(&pool).await;
-        MIGRATOR
-            .run_to(42, &pool)
-            .await
-            .expect("apply migrations 1-42");
-
-        let community_id = uuid::Uuid::new_v4();
-        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
-            .bind(community_id)
-            .bind(format!("wrong-kind-evt-{}.example", community_id.simple()))
-            .execute(&pool)
-            .await
-            .expect("insert community");
-
-        sqlx::query(
-            "INSERT INTO authorization_event_capacity \
-             (community_id, max_events_per_domain, max_bytes_per_domain, max_envelope_bytes) \
-             VALUES ($1, 1000, 16777216, 16384)",
-        )
-        .bind(community_id)
-        .execute(&pool)
-        .await
-        .expect("insert event capacity");
-
-        // Commit a denied enroll receipt in auto-commit mode. No deferred trigger
-        // is active after this commit; the receipt-side trigger fires only within
-        // the transaction that inserts the receipt.
-        let op_id = uuid::Uuid::new_v4();
-        let fp = vec![0xB0_u8; 32];
-        sqlx::query(
-            "INSERT INTO authorization_operation_receipts \
-             (community_id, operation_id, request_fingerprint, operation_kind, \
-              actor_fingerprint, outcome_code, result_digest) \
-             VALUES ($1, $2, $3, 1, $4, 2, $5)",
-        )
-        .bind(community_id)
-        .bind(op_id)
-        .bind(&fp)
-        .bind(vec![0xB1_u8; 32])
-        .bind(vec![0xB2_u8; 32])
-        .execute(&pool)
-        .await
-        .expect("denied receipt must commit alone in auto-commit mode");
-
-        // New transaction: insert only a kind-6 (retired) event for the same
-        // operation. The event-side trigger is the only active deferred trigger.
-        let event_id = uuid::Uuid::new_v4();
-        let corr_id = uuid::Uuid::new_v4();
-        let attempt_id = uuid::Uuid::new_v4();
-
-        let mut conn = pool
-            .acquire()
-            .await
-            .expect("acquire connection for wrong-kind event-side test");
-        sqlx::query("BEGIN")
-            .execute(&mut *conn)
-            .await
-            .expect("begin event-side wrong-kind transaction");
-
-        sqlx::query(
-            "INSERT INTO authorization_events \
-             (community_id, event_id, event_kind, outcome_code, reason_code, \
-              actor_kind, actor_fingerprint, operation_id, request_fingerprint, \
-              correlation_id, attempt_id, semantic_fingerprint, \
-              occurred_at, canonical_envelope, envelope_digest) \
-             VALUES ($1, $2, 6, 1, 4, 1, $3, $4, $5, $6, $7, NULL, \
-                     '2026-01-01T00:00:00Z', $8, $9)",
-            // event_kind 6 (retired) — wrong kind for the denied enroll receipt
-        )
-        .bind(community_id)
-        .bind(event_id)
-        .bind(vec![0xB3_u8; 32]) // actor_fingerprint
-        .bind(op_id)
-        .bind(&fp)
-        .bind(corr_id)
-        .bind(attempt_id)
-        .bind(vec![0xB4_u8; 64]) // canonical_envelope
-        .bind(vec![0xB5_u8; 32]) // envelope_digest
-        .execute(&mut *conn)
-        .await
-        .expect("event INSERT must pass — event-side deferred guard fires at COMMIT");
-
-        let wrong_kind_evt_err = sqlx::query("COMMIT").execute(&mut *conn).await.expect_err(
-            "kind-6 event paired with a committed denied enroll receipt must be \
-                 rejected at COMMIT by the event-side trigger",
-        );
-        assert_eq!(
-            wrong_kind_evt_err
-                .as_database_error()
-                .and_then(|e| e.constraint()),
-            Some("authorization_denied_lifecycle_receipt_no_success_event"),
-            "event-side trigger must reject with authorization_denied_lifecycle_receipt_no_success_event \
-             for wrong kind (6) against denied receipt, got: {wrong_kind_evt_err}"
-        );
+            .unwrap();
+            sqlx::query("INSERT INTO events(community_id,id,pubkey,created_at,kind,tags,content,sig) VALUES($1,decode(repeat('a',64),'hex'),decode(repeat('b',64),'hex'),now(),9,'[]','media',decode(repeat('c',128),'hex'))")
+                .bind(community).execute(&pool).await.unwrap();
+            if prebuilt {
+                sqlx::query("CREATE INDEX idx_events_media_edit_target ON events(community_id,id)")
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+                let error = run_migrations(&pool).await.unwrap_err();
+                assert!(
+                    error.to_string().contains("invalid or wrong definition"),
+                    "{error}"
+                );
+                sqlx::query("DROP INDEX idx_events_media_edit_target")
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+                crate::test_support::prebuild_media_edit_index(&pool).await;
+            }
+            let mut writer = pool.begin().await.unwrap();
+            sqlx::query("LOCK TABLE public.events IN ROW EXCLUSIVE MODE")
+                .execute(&mut *writer)
+                .await
+                .unwrap();
+            if prebuilt {
+                run_migrations(&pool)
+                    .await
+                    .expect("verified prebuild does not request an index-build lock");
+                writer.rollback().await.unwrap();
+            } else {
+                let error = run_migrations(&pool).await.unwrap_err();
+                assert!(
+                    error.to_string().contains("lock timeout"),
+                    "index build must obey its lock budget: {error}"
+                );
+                let applied: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version>=86)",
+                )
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                assert!(
+                    !applied,
+                    "failed first new migration must leave version 85 intact"
+                );
+                let old_migrator = sqlx::migrate::Migrator {
+                    migrations: std::borrow::Cow::Owned(
+                        MIGRATOR
+                            .iter()
+                            .filter(|migration| migration.version <= 85)
+                            .cloned()
+                            .collect(),
+                    ),
+                    ..sqlx::migrate::Migrator::DEFAULT
+                };
+                with_exclusive_schema_destruction_lock(&pool, |mut conn| async move {
+                    let result = old_migrator
+                        .run(&mut conn)
+                        .await
+                        .map_err(crate::DbError::from);
+                    (conn, result)
+                })
+                .await
+                .expect("old binary's migrator must still restart after the failed index build");
+                let tables: bool = sqlx::query_scalar("SELECT to_regclass('public.media_uploaders') IS NOT NULL OR to_regclass('public.media_publications') IS NOT NULL")
+                    .fetch_one(&pool).await.unwrap();
+                assert!(
+                    !tables,
+                    "media table expansion must follow the fallible index build"
+                );
+                let recovery_column: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='relay_members' AND column_name='auto_join_pending')")
+                    .fetch_one(&pool).await.unwrap();
+                assert!(recovery_column, "main's migration 84 must remain intact");
+                let policy_columns: i64 = sqlx::query_scalar("SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='community_auth_upgrades' AND column_name IN ('requested_requires_nip_fi','expected_policy_generation','expected_requires_nip_fi')")
+                    .fetch_one(&pool).await.unwrap();
+                assert_eq!(policy_columns, 3, "base migration 85 must remain intact");
+                writer.rollback().await.unwrap();
+                run_migrations(&pool).await.expect(
+                    "small populated database builds its index without operator intervention",
+                );
+            }
+            run_migrations(&pool).await.unwrap();
+            let valid: bool = sqlx::query_scalar("SELECT indisvalid AND indisready FROM pg_index WHERE indexrelid='public.idx_events_media_edit_target'::regclass")
+                .fetch_one(&pool).await.unwrap();
+            assert!(valid, "both upgrade paths must leave a valid index");
+            let count: i64 = sqlx::query_scalar("SELECT count(*) FROM events")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(count, 1, "upgrade preserves old relay rows");
+        }
     }
 }

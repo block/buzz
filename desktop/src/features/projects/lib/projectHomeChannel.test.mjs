@@ -139,3 +139,19 @@ test("findProjectHomeByChannelId prefers the oldest listed authoritative home", 
   ]);
   assert.equal(selected?.id, "original");
 });
+
+test("findProjectHomeByChannelId falls back to an unlisted authoritative home", () => {
+  const selected = findProjectHomeByChannelId("channel-a", [
+    {
+      createdAt: 50,
+      id: "unlisted-home",
+      legacy: false,
+      owner: OWNER,
+      projectChannelId: "channel-a",
+      repositories: [{ channelId: "channel-a", owner: OWNER }],
+      visibility: "unlisted",
+    },
+  ]);
+
+  assert.equal(selected?.id, "unlisted-home");
+});

@@ -240,6 +240,7 @@ async fn maybe_reply(
         &[&event.pubkey.to_hex()],
         false,
         &[],
+        &[],
     )?;
     let reply_event = builder.sign_with_keys(&config.bot_keys)?;
     let reply_event_id = reply_event.id.to_hex();

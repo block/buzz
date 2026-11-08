@@ -83,7 +83,8 @@ We review as capacity allows — focused PRs that follow this guide move fastest
 | Rust | 1.88+ | Install via [rustup](https://rustup.rs/) |
 | Node.js | 24+ | Required for desktop app commands and `just ci` |
 | pnpm | 10+ | Required for desktop app commands and `just ci` |
-| Flutter | 3.41+ | Required for mobile app — install via [flutter.dev](https://docs.flutter.dev/get-started/install) |
+| Flutter | 3.47.7+ | Required for mobile app — install via [flutter.dev](https://docs.flutter.dev/get-started/install) |
+| Xcode | 27.1 recommended; 26 supported | Required for iOS builds; see [iOS toolchain setup](mobile/README.md#ios-toolchain) |
 | Docker | 24+ | For Postgres, Redis, MinIO |
 | `just` | latest | Task runner — `cargo install just` |
 | `lefthook` | 2.1.3 (Hermit-pinned) | Auto-installed by `just hooks` — no manual install needed |
@@ -303,6 +304,34 @@ just ci
 This is the same check that runs in CI. PRs that fail `just ci` will not be
 merged. If `just ci` fails on formatting, `just fix-all` fixes it in one shot (`rustfmt` + Tauri fmt + desktop, web, and mobile formatters).
 
+Pull requests also get an advisory **flake check**. `scripts/flake-check.mjs
+select` maps the diff against the base branch to the Rust tests (in the root
+and desktop Tauri workspaces), desktop `node --test` files, Playwright smoke
+journeys and Flutter test files it changed: a hunk inside a test body selects
+that test; a change anywhere else in a test file (imports, helpers, hooks,
+the code under test beside Rust tests) or a new file selects the whole file.
+An integration test binary's tests include those of the file modules its
+root declares (`mod x;`, `#[path = "…"] mod x;`), and a change to a helper
+module under a crate's `tests/` selects every integration test binary that
+includes it. The `Flake check (…)` lanes then
+run that selection ten times with retries off; a repetition that fails is
+usually a race in the test or the code under it, worth fixing before it
+lands, though a test that needs infrastructure or the regular lane's
+cross-file concurrency can fail every repetition instead. Some changed tests
+are deliberately not repeated: `#[ignore]`d and Postgres-backed Rust tests,
+Playwright specs outside the `smoke` project, `*.perf.ts` measurements, and a
+selection too large for its lane (over 64 KiB of entries, or more Playwright
+journeys than ten repetitions can finish within the lane's timeout).
+A Rust test repeats in every feature graph the regular lanes test its
+package in that lists it (LaunchDarkly, the App Attest development feature,
+the desktop crate's lib under `mesh-llm`), since a `#[cfg(feature = …)]` arm
+compiles only in its own graph; the step summary marks a row from a feature
+graph with that feature. A selected test that no such graph lists on the
+Linux runner, such as a macOS-only one, fails its lane by name rather than
+passing unrepeated.
+The lanes skip when no test changed and are not required to merge; their
+step summaries show the selection and the test × iteration table.
+
 ---
 
 ## Code Style
@@ -413,6 +442,11 @@ because we can't safely review them without prior discussion:
 - **Cosmetic renames or style-only churn** that doesn't fix a bug or improve
   clarity
 - **Entirely new features** with no prior discussion
+- **Feature work in `desktop/`** — `desktop/` is the deprecated Buzz 0.X
+  desktop app. Build desktop features in
+  [block/buzz-app](https://github.com/block/buzz-app) instead; change
+  `desktop/` here only to fix a 0.X bug or to keep it compiling after a shared
+  crate change
 - **Drive-by changes bundled into an unrelated fix** — split them out
 
 If you're considering any of these, open an issue first and we'll tell you
@@ -453,15 +487,18 @@ to existing clients.
 ## Ecosystem
 
 Buzz is developed across multiple repositories. This repo (`block/buzz`)
-is the open-source home for all application code — the relay, desktop app,
-mobile app, CLI, and agent harness. Internal repositories handle
+is the open-source home for the relay, mobile app, CLI, and agent harness.
+It also holds `desktop/`, the deprecated Buzz 0.X desktop app. The Buzz 1.0
+desktop and web app lives in [block/buzz-app](https://github.com/block/buzz-app),
+and all new desktop feature work goes there. Internal repositories handle
 enterprise-signed builds and infrastructure deployment.
 
 See [AGENTS.md § Ecosystem](AGENTS.md#ecosystem) for the full repo table and
 dependency diagram.
 
-**External contributors:** Fork `block/buzz`, open a PR, and CI runs
-automatically. No special access is required.
+**External contributors:** Fork `block/buzz` (or `block/buzz-app` for
+desktop work), open a PR, and CI runs automatically. No special access is
+required.
 
 **Block team members:** See the internal
 [sprout-releases CONTRIBUTING.md](https://github.com/squareup/sprout-releases/blob/main/CONTRIBUTING.md)

@@ -7,7 +7,7 @@ transient release, revocation ordering, custody, and the constant APNs body.
 """
 from itertools import permutations, product
 
-FIXED_BODY = b'{"aps":{"alert":{"body":"Reconnect to your relay now"},"mutable-content":1}}'
+FIXED_BODY = b'{"aps":{"alert":{"body":"Reconnect to your relay now"},"sound":"default","mutable-content":1}}'
 
 class Gateway:
     def __init__(self):

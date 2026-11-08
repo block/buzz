@@ -7,7 +7,9 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:share_plus/share_plus.dart';
 
+import '../../shared/hosted/hosted_relay_auth.dart';
 import '../../shared/community/community_membership_provider.dart';
+import '../../shared/utils/string_utils.dart';
 import '../../shared/relay/relay.dart';
 
 /// The default lifetime of a newly minted community invite link.
@@ -112,36 +114,28 @@ class CommunityInviteDirectoryUser {
     if (display != null && display.isNotEmpty) return display;
     final nip05 = nip05Handle?.trim();
     if (nip05 != null && nip05.isNotEmpty) return nip05;
-    return shortCommunityInvitePubkey(pubkey);
+    return shortPubkey(pubkey);
   }
 
   /// A supporting identity label distinct from [label].
   String get secondaryLabel {
     final nip05 = nip05Handle?.trim();
     if (nip05 != null && nip05.isNotEmpty && nip05 != label) return nip05;
-    return pubkey.length > 16 ? '${pubkey.substring(0, 16)}…' : pubkey;
+    // The primary label is already the compact key when no name or NIP-05
+    // exists; a second key-shaped line would only duplicate it.
+    final display = displayName?.trim();
+    return display != null && display.isNotEmpty ? shortPubkey(pubkey) : '';
   }
 
-  /// The uppercase first character of [label], or `?` when unavailable.
-  String get initial => label.isEmpty ? '?' : label[0].toUpperCase();
-}
-
-/// Abbreviates a hexadecimal public key for compact display.
-String shortCommunityInvitePubkey(String pubkey) =>
-    pubkey.length > 8 ? '${pubkey.substring(0, 8)}…' : pubkey;
-
-/// Encodes and abbreviates a hexadecimal public key as an npub.
-String shortCommunityInviteNpub(String pubkey) {
-  try {
-    final npub = nostr.Nip19.encode(
-      prefix: nostr.Nip19Prefix.npub,
-      data: pubkey,
-    );
-    return npub.length > 20
-        ? '${npub.substring(0, 12)}…${npub.substring(npub.length - 6)}'
-        : npub;
-  } catch (_) {
-    return shortCommunityInvitePubkey(pubkey);
+  /// Avatar initial — name-derived when available, otherwise keyed to the
+  /// hex public key so unnamed identities keep distinct initials (a compact
+  /// npub would render `N` for everyone).
+  String get initial {
+    final display = displayName?.trim();
+    if (display != null && display.isNotEmpty) return display[0].toUpperCase();
+    final nip05 = nip05Handle?.trim();
+    if (nip05 != null && nip05.isNotEmpty) return nip05[0].toUpperCase();
+    return pubkey.isNotEmpty ? pubkey[0].toUpperCase() : '?';
   }
 }
 
@@ -284,7 +278,7 @@ class RelayCommunityInviteActions implements CommunityInviteActions {
 
 /// Supplies the HTTP client used to mint community invite links.
 final communityInviteHttpClientProvider = Provider<http.Client>((ref) {
-  final client = http.Client();
+  final client = ref.watch(hostedHttpClientFactoryProvider)();
   ref.onDispose(client.close);
   return client;
 });
@@ -351,63 +345,6 @@ final communityInviteProfileProvider = FutureProvider.autoDispose
         if (user.pubkey == normalized) return user;
       }
       return CommunityInviteDirectoryUser(pubkey: normalized);
-    });
-
-/// Lists inviteable relay identities, excluding the signed-in user.
-final communityInviteDirectoryProvider =
-    FutureProvider.autoDispose<List<CommunityInviteDirectoryUser>>((ref) async {
-      ref.watch(relayConfigProvider);
-      final currentPubkey = ref.watch(myPubkeyProvider)?.toLowerCase();
-      final events = await ref.watch(relaySessionProvider.notifier).queryRelay([
-        const NostrFilter(kinds: [0], limit: 50, extensions: {'page': 1}),
-      ]);
-      final directoryUsers = _directoryUsersFromEvents(
-        events,
-      ).where((user) => user.pubkey != currentPubkey).toList();
-      if (directoryUsers.isNotEmpty) return directoryUsers;
-
-      // Match the existing mobile person picker: older relays may not support
-      // a paged kind:0 directory, so fall back to the membership snapshot and
-      // hydrate whatever profiles are available.
-      final membership = await ref.watch(communityMembershipProvider.future);
-      final memberPubkeys = membership.pubkeys
-          .where((pubkey) => pubkey != currentPubkey)
-          .toList();
-      if (memberPubkeys.isEmpty) return const [];
-      final profileEvents = await ref
-          .watch(relaySessionProvider.notifier)
-          .queryRelay([NostrFilters.profilesBatch(memberPubkeys)]);
-      final profilesByPubkey = {
-        for (final user in _directoryUsersFromEvents(profileEvents))
-          user.pubkey: user,
-      };
-      final fallbackUsers = [
-        for (final pubkey in memberPubkeys)
-          profilesByPubkey[pubkey] ??
-              CommunityInviteDirectoryUser(pubkey: pubkey),
-      ];
-      fallbackUsers.sort((a, b) {
-        final byLabel = a.label.toLowerCase().compareTo(b.label.toLowerCase());
-        return byLabel != 0 ? byLabel : a.pubkey.compareTo(b.pubkey);
-      });
-      return fallbackUsers;
-    });
-
-/// Searches the active relay for inviteable identities matching a query.
-final communityInviteDirectorySearchProvider = FutureProvider.autoDispose
-    .family<List<CommunityInviteDirectoryUser>, String>((ref, query) async {
-      final trimmed = query.trim();
-      if (trimmed.isEmpty) {
-        return ref.watch(communityInviteDirectoryProvider.future);
-      }
-      ref.watch(relayConfigProvider);
-      final currentPubkey = ref.watch(myPubkeyProvider)?.toLowerCase();
-      final events = await ref.watch(relaySessionProvider.notifier).queryRelay([
-        NostrFilters.searchUsers(trimmed, limit: 50),
-      ]);
-      return _directoryUsersFromEvents(
-        events,
-      ).where((user) => user.pubkey != currentPubkey).toList();
     });
 
 /// Shares [inviteUrl] from an optional platform anchor rectangle.
