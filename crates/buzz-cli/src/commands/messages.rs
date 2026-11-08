@@ -1,3 +1,5 @@
+mod edit;
+
 use buzz_sdk::{DeleteMessageOptions, DiffMeta, ThreadRef, VoteDirection};
 use nostr::PublicKey;
 use uuid::Uuid;
@@ -347,10 +349,7 @@ pub async fn cmd_get_messages(
 
     // If specific kinds requested, override
     if let Some(k) = kinds {
-        let kind_list: Vec<u64> = k.split(',').filter_map(|s| s.trim().parse().ok()).collect();
-        if !kind_list.is_empty() {
-            filter["kinds"] = serde_json::json!(kind_list);
-        }
+        filter["kinds"] = serde_json::json!(parse_kinds(k)?);
     }
 
     if let Some(b) = before {
@@ -674,18 +673,13 @@ pub async fn cmd_send_message(
     let mut media_tags: Vec<Vec<String>> = Vec::new();
     let mut media_content = String::new();
     for file_path in &p.files {
-        let desc = client
-            .upload_file(file_path)
-            .await
-            .map_err(|e| CliError::Other(format!("upload failed for {file_path}: {e}")))?;
-        media_tags.push(crate::client::build_imeta_tag(&desc));
-        if desc.mime_type.starts_with("video/") {
-            media_content.push_str("\n![video](");
-        } else {
-            media_content.push_str("\n![image](");
-        }
-        media_content.push_str(&desc.url);
-        media_content.push(')');
+        let desc = client.upload_file(file_path).await?;
+        let name = attachment_name(file_path);
+        let mut tag = crate::client::build_imeta_tag(&desc);
+        tag.push(format!("filename {name}"));
+        media_tags.push(tag);
+        media_content.push('\n');
+        media_content.push_str(&attachment_markdown(&name, &desc));
     }
     let final_content = if media_content.is_empty() {
         p.content.clone()
@@ -903,29 +897,6 @@ pub async fn cmd_delete_message(
     Ok(())
 }
 
-/// Edit a message you previously sent.
-pub async fn cmd_edit_message(
-    client: &BuzzClient,
-    event_id: &str,
-    content: &str,
-) -> Result<(), CliError> {
-    validate_hex64(event_id)?;
-    validate_content_size(content)?;
-
-    // Resolve channel_id from the event's h-tag
-    let channel_uuid = resolve_channel_id(client, event_id).await?;
-    let target_eid = parse_event_id(event_id)?;
-
-    let builder = buzz_sdk::build_edit(channel_uuid, target_eid, content)
-        .map_err(|e| CliError::Other(format!("build_edit failed: {e}")))?;
-
-    let event = client.sign_event(builder).await?;
-
-    let resp = client.submit_event(event).await?;
-    println!("{}", normalize_write_response(&resp));
-    Ok(())
-}
-
 /// Vote on a forum post or comment.
 pub async fn cmd_vote_on_post(
     client: &BuzzClient,
@@ -1022,7 +993,11 @@ pub async fn dispatch(
             )
             .await
         }
-        MessagesCmd::Edit { event, content } => cmd_edit_message(client, &event, &content).await,
+        MessagesCmd::Edit {
+            event,
+            content,
+            clear_attachments,
+        } => edit::edit_message(client, &event, &content, clear_attachments).await,
         MessagesCmd::Delete {
             event,
             action_id,
@@ -1129,8 +1104,99 @@ pub async fn dispatch(
     }
 }
 
+/// A file's name as relay filename metadata takes it: its basename with
+/// control characters and path separators as spaces, capped at 255 UTF-8 bytes.
+fn attachment_name(file_path: &str) -> String {
+    let base = std::path::Path::new(file_path)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let mut name = String::new();
+    for c in base.chars() {
+        let c = if c.is_control() || c == '/' || c == '\\' {
+            ' '
+        } else {
+            c
+        };
+        if name.len() + c.len_utf8() > 255 {
+            break;
+        }
+        name.push(c);
+    }
+    match name.trim() {
+        "" => "File".to_string(),
+        trimmed => trimmed.to_string(),
+    }
+}
+
+/// An uploaded file's Markdown link: inline media embeds, other files link.
+fn attachment_markdown(name: &str, desc: &crate::client::BlobDescriptor) -> String {
+    let mut label = String::new();
+    for c in name.chars() {
+        if "\\`*_{}[]()!<>&".contains(c) {
+            label.push('\\');
+        }
+        label.push(c);
+    }
+    let embed = matches!(
+        desc.mime_type.as_str(),
+        "image/jpeg" | "image/png" | "image/gif" | "image/webp" | "video/mp4"
+    );
+    format!("{}[{label}](<{}>)", if embed { "!" } else { "" }, desc.url)
+}
+
+/// A `--kinds` list: comma-separated event kinds, each 0–65535.
+fn parse_kinds(list: &str) -> Result<Vec<u16>, CliError> {
+    list.split(',')
+        .map(|s| {
+            s.trim()
+                .parse()
+                .map_err(|_| CliError::Usage(format!("--kinds: invalid kind {s:?}")))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn parse_kinds_rejects_any_invalid_kind() {
+        use super::{parse_kinds, CliError};
+        assert_eq!(parse_kinds("9, 40002").unwrap(), vec![9, 40002]);
+        for bad in ["bad", "65536", "9,typo", "", "-1"] {
+            assert!(matches!(parse_kinds(bad), Err(CliError::Usage(_))), "{bad}");
+        }
+    }
+
+    #[test]
+    fn attachments_embed_media_and_link_other_files() {
+        use super::{attachment_markdown, attachment_name};
+        let blob = |mime: &str| crate::client::BlobDescriptor {
+            url: "https://r.example/media/x.bin".into(),
+            sha256: "x".into(),
+            size: 1,
+            mime_type: mime.into(),
+            uploaded: 0,
+            dim: None,
+            blurhash: None,
+            thumb: None,
+            duration: None,
+        };
+        assert_eq!(
+            attachment_markdown("notes [v1].txt", &blob("application/octet-stream")),
+            "[notes \\[v1\\].txt](<https://r.example/media/x.bin>)"
+        );
+        assert_eq!(
+            attachment_markdown("a.png", &blob("image/png")),
+            "![a.png](<https://r.example/media/x.bin>)"
+        );
+        assert_eq!(attachment_name("/tmp/dir/report.pdf"), "report.pdf");
+        assert_eq!(attachment_name("/tmp/a\nb.txt"), "a b.txt");
+        assert_eq!(attachment_name("/"), "File");
+        // On Windows a backslash is a path separator, not part of the name.
+        #[cfg(unix)]
+        assert_eq!(attachment_name("/tmp/a\\b.txt"), "a b.txt");
+    }
+
     use super::{
         channel_id_from_event, cmd_get_thread, cmd_send_message, event_mention_pubkeys,
         find_root_from_tags, match_profiles_by_name, merge_message_mentions, missing_members,

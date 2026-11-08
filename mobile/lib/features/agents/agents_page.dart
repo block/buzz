@@ -6,6 +6,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/agents/owned_agent_directory.dart';
 import '../../shared/widgets/bee_refresh_indicator.dart';
+import '../../shared/widgets/buzz_toast.dart';
 import '../../shared/agents/remote_agents.dart';
 import '../../shared/deeplink/deep_link.dart';
 import '../../shared/widgets/feedback_snackbar.dart';
@@ -625,6 +626,20 @@ class AgentsPage extends HookConsumerWidget {
               physics: const AlwaysScrollableScrollPhysics(),
               slivers: [
                 SliverToBoxAdapter(child: SizedBox(height: topHeight)),
+                if (signInNeeded)
+                  SliverToBoxAdapter(
+                    child: ReconnectCapsule(
+                      inline: true,
+                      message: signingIn
+                          ? 'Finish sign-in in browser'
+                          : 'Reconnect to Builderlab',
+                      actionLabel: signingIn ? 'Cancel' : 'Sign in',
+                      destructiveAction: signingIn,
+                      onSignIn: () => unawaited(
+                        signingIn ? flow.leave() : flow.reconnectAccount(),
+                      ),
+                    ),
+                  ),
                 SliverToBoxAdapter(
                   child: Column(
                     children: [
@@ -643,18 +658,6 @@ class AgentsPage extends HookConsumerWidget {
                           trailing: TextButton(
                             onPressed: refresh,
                             child: const Text('Retry'),
-                          ),
-                        ),
-                      if (signInNeeded)
-                        ListTile(
-                          title: const Text(
-                            'Sign in to Builderlab to manage remote agents',
-                          ),
-                          trailing: TextButton(
-                            onPressed: signingIn
-                                ? null
-                                : () => flow.reconnectAccount(),
-                            child: const Text('Sign in'),
                           ),
                         ),
                       if (!loading && !failed && !needsSignIn && keys.isEmpty)

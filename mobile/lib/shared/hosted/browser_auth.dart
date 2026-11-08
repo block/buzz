@@ -12,6 +12,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import '../storage/secure_storage.dart';
 
 import 'hosted_environment.dart';
+import 'organization_environment.dart';
 
 /// Safe to show as a generic retry prompt. Never carries a URL or server text.
 enum BrowserAuthFailure { restartLogin, cancelled, unavailable, storage }
@@ -143,8 +144,10 @@ class BrowserAuth {
         throw BrowserAuthFailure.storage;
       }
       // Public accounts must finish web setup before native code issuance.
-      // Organization accounts retain their existing direct CLI login.
-      final publicAccount = origin == HostedEnvironment.origin;
+      // Organization accounts go straight to their single sign-on.
+      final publicAccount =
+          !OrganizationEnvironment.enabled &&
+          origin == HostedEnvironment.origin;
       return origin.replace(
         path: publicAccount ? '/auth/native' : '/api/goose/v1/auth/login',
         queryParameters: {

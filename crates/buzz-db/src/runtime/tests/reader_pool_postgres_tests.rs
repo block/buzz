@@ -311,13 +311,14 @@ async fn terminated_warm_reader_connection_fails_closed_to_writer() {
 
 /// A proof that times out while its `BEGIN` is still in flight must not
 /// return the connection to the pool with a server-side transaction open.
-/// sqlx counts the transaction only once `BEGIN` is acknowledged, so a
-/// cancelled begin queues no `ROLLBACK`, and the release ping consumes the
-/// late `BEGIN` reply: without the reader pool's release check, the
-/// connection comes back `idle in transaction` once the reader resumes.
-/// The database defaults to `REPEATABLE READ`, the isolation routed reads
-/// begin with, so the check only sees the open transaction because reader
-/// sessions pin their own default.
+/// sqlx queues a `ROLLBACK` for a begin cancelled in flight
+/// (transact-rs/sqlx#4394), so the connection comes back clean and the
+/// reader pool's release check has nothing to close. Before that fix the
+/// release ping consumed the late `BEGIN` reply and only the release check
+/// kept the connection from returning `idle in transaction`. The database
+/// defaults to `REPEATABLE READ`, the isolation routed reads begin with, so
+/// the check can only see an open transaction because reader sessions pin
+/// their own default.
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires Postgres"]
 async fn proof_timeout_mid_begin_leaves_no_reader_transaction_open() {
@@ -393,8 +394,8 @@ async fn proof_timeout_mid_begin_leaves_no_reader_transaction_open() {
     let closes = release_closes(&snapshotter);
     assert_eq!(
         closes.get("open_transaction"),
-        Some(&1),
-        "the release check must close the connection left inside BEGIN; got {closes:?}"
+        None,
+        "sqlx must roll back the cancelled BEGIN before the release check runs; got {closes:?}"
     );
 
     read_pool.close().await;

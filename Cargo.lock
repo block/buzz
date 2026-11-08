@@ -969,6 +969,8 @@ name = "buzz-admin"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
+ "base64 0.22.1",
  "buzz-audit",
  "buzz-auth",
  "buzz-core",
@@ -981,10 +983,13 @@ dependencies = [
  "clap",
  "hex",
  "nostr 0.44.7",
+ "reqwest 0.13.4",
  "rustls",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "sqlx",
+ "tempfile",
  "tokio",
  "tracing",
  "url",
@@ -1265,7 +1270,6 @@ dependencies = [
  "http",
  "launchdarkly-server-sdk",
  "serde_json",
- "tempfile",
  "thiserror 2.0.18",
  "tokio",
 ]
@@ -1439,11 +1443,13 @@ dependencies = [
  "base64 0.22.1",
  "buzz-audit",
  "buzz-auth",
+ "buzz-cli",
  "buzz-conformance",
  "buzz-core",
  "buzz-datastore-tracing",
  "buzz-db",
  "buzz-deletion",
+ "buzz-feature-flags",
  "buzz-media",
  "buzz-pubsub",
  "buzz-relay-mesh",
@@ -9915,10 +9921,9 @@ dependencies = [
 [[package]]
 name = "sqlx"
 version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "378620ccc25c62c89d8be1c819e76a88d59bdcc3304733330788948e619bfd71"
+source = "git+https://github.com/launchbadge/sqlx?rev=f1e94ec34dd5f11ad6488a3a8ac7988439a3f757#f1e94ec34dd5f11ad6488a3a8ac7988439a3f757"
 dependencies = [
- "sqlx-core 0.9.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "sqlx-core",
  "sqlx-macros",
  "sqlx-mysql",
  "sqlx-postgres",
@@ -9928,8 +9933,7 @@ dependencies = [
 [[package]]
 name = "sqlx-core"
 version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "05b44e85bf579a8eeb4ceaa77a3a523baf2bf0e9bac7e40f405d537b5d2d5ccb"
+source = "git+https://github.com/launchbadge/sqlx?rev=f1e94ec34dd5f11ad6488a3a8ac7988439a3f757#f1e94ec34dd5f11ad6488a3a8ac7988439a3f757"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -9952,7 +9956,7 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "smallvec",
  "thiserror 2.0.18",
  "tokio",
@@ -9964,47 +9968,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "sqlx-core"
-version = "0.9.0"
-source = "git+https://github.com/launchbadge/sqlx?rev=94aafe3a68884d923b0798a767c8d7f6cfda89d2#94aafe3a68884d923b0798a767c8d7f6cfda89d2"
-dependencies = [
- "base64 0.22.1",
- "bytes",
- "cfg-if 1.0.4",
- "chrono",
- "crc",
- "crossbeam-queue",
- "either",
- "event-listener",
- "futures-core",
- "futures-intrusive",
- "futures-io",
- "futures-util",
- "hashbrown 0.16.1",
- "hashlink",
- "indexmap 2.14.0",
- "log",
- "memchr",
- "percent-encoding",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "smallvec",
- "thiserror 2.0.18",
- "tracing",
- "url",
- "uuid",
-]
-
-[[package]]
 name = "sqlx-macros"
 version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bd2b84f2bc39a5705ef27ec785a11c934a41bbd4a24941e257927cddc26b60bf"
+source = "git+https://github.com/launchbadge/sqlx?rev=f1e94ec34dd5f11ad6488a3a8ac7988439a3f757#f1e94ec34dd5f11ad6488a3a8ac7988439a3f757"
 dependencies = [
  "proc-macro2",
  "quote",
- "sqlx-core 0.9.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "sqlx-core",
  "sqlx-macros-core",
  "syn 2.0.117",
 ]
@@ -10012,8 +9982,7 @@ dependencies = [
 [[package]]
 name = "sqlx-macros-core"
 version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fb8d96de5fdc85a5c4ec813432b523ec637e80ba98f046555f75f7908ddac7c3"
+source = "git+https://github.com/launchbadge/sqlx?rev=f1e94ec34dd5f11ad6488a3a8ac7988439a3f757#f1e94ec34dd5f11ad6488a3a8ac7988439a3f757"
 dependencies = [
  "cfg-if 1.0.4",
  "dotenvy",
@@ -10024,8 +9993,8 @@ dependencies = [
  "quote",
  "serde",
  "serde_json",
- "sha2 0.10.9",
- "sqlx-core 0.9.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "sha2 0.11.0",
+ "sqlx-core",
  "sqlx-mysql",
  "sqlx-postgres",
  "sqlx-sqlite",
@@ -10038,8 +10007,7 @@ dependencies = [
 [[package]]
 name = "sqlx-mysql"
 version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "90b8020fe17c5f2c245bfa2505d7ef59c5604839527c740266ad2214acebea27"
+source = "git+https://github.com/launchbadge/sqlx?rev=f1e94ec34dd5f11ad6488a3a8ac7988439a3f757#f1e94ec34dd5f11ad6488a3a8ac7988439a3f757"
 dependencies = [
  "bitflags 2.13.0",
  "byteorder",
@@ -10057,7 +10025,7 @@ dependencies = [
  "serde",
  "sha1 0.11.0",
  "sha2 0.11.0",
- "sqlx-core 0.9.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "sqlx-core",
  "thiserror 2.0.18",
  "tracing",
  "uuid",
@@ -10066,8 +10034,7 @@ dependencies = [
 [[package]]
 name = "sqlx-postgres"
 version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "87a2bdd6e83f6b3ea525ca9fee568030508b58355a43d0b2c1674d5f79dcd65e"
+source = "git+https://github.com/launchbadge/sqlx?rev=f1e94ec34dd5f11ad6488a3a8ac7988439a3f757#f1e94ec34dd5f11ad6488a3a8ac7988439a3f757"
 dependencies = [
  "atoi",
  "base64 0.22.1",
@@ -10092,7 +10059,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "smallvec",
- "sqlx-core 0.9.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "sqlx-core",
  "stringprep",
  "thiserror 2.0.18",
  "tracing",
@@ -10103,7 +10070,7 @@ dependencies = [
 [[package]]
 name = "sqlx-sqlite"
 version = "0.9.0"
-source = "git+https://github.com/launchbadge/sqlx?rev=94aafe3a68884d923b0798a767c8d7f6cfda89d2#94aafe3a68884d923b0798a767c8d7f6cfda89d2"
+source = "git+https://github.com/launchbadge/sqlx?rev=f1e94ec34dd5f11ad6488a3a8ac7988439a3f757#f1e94ec34dd5f11ad6488a3a8ac7988439a3f757"
 dependencies = [
  "atoi",
  "chrono",
@@ -10118,7 +10085,7 @@ dependencies = [
  "log",
  "percent-encoding",
  "serde",
- "sqlx-core 0.9.0 (git+https://github.com/launchbadge/sqlx?rev=94aafe3a68884d923b0798a767c8d7f6cfda89d2)",
+ "sqlx-core",
  "thiserror 2.0.18",
  "tracing",
  "url",

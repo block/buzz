@@ -23,6 +23,7 @@ pub use legacy_migration::migrate_legacy_retention_db;
 /// their relay heads and pending publications are not. Keeping a separate
 /// database per `(relay_url, owner_pubkey)` prevents a pending write created in
 /// community A from being drained into community B after a workspace switch.
+#[derive(Clone)]
 pub struct RetentionScope {
     pub db_path: PathBuf,
     pub relay_url: String,

@@ -81,11 +81,37 @@ pub async fn resolve(settings: Settings, relay_url: &str) -> Result<Credentials,
         }
         return Credentials::from_desktop(provider).await;
     }
-    Err(CliError::Auth(
-        "no credentials: set BUZZ_PRIVATE_KEY, pass --private-key, or run \
-         `buzz auth desktop pair` with Buzz running"
-            .into(),
-    ))
+    #[cfg(unix)]
+    let paired = crate::desktop_provider::paired_relays();
+    #[cfg(not(unix))]
+    let paired = Vec::new();
+    Err(no_credentials(relay_url, &paired))
+}
+
+/// The error for a relay no link serves, naming it and the relays this CLI
+/// is paired for, so a missing `--relay` is plain.
+fn no_credentials(relay_url: &str, paired: &[String]) -> CliError {
+    let fix = "set BUZZ_PRIVATE_KEY, pass --private-key, or run `buzz auth desktop pair` \
+               with Buzz running";
+    #[cfg(unix)]
+    let this_one = crate::desktop_provider::provider_relay_url(relay_url)
+        .is_ok_and(|relay| paired.contains(&relay));
+    #[cfg(not(unix))]
+    let this_one = false;
+    CliError::Auth(if paired.is_empty() {
+        format!("no credentials for {relay_url}: {fix}")
+    } else if this_one {
+        format!(
+            "no credentials for {relay_url}: this CLI is paired for it, but no running Buzz \
+             desktop accepts the pairing; open Buzz and retry, or check `buzz auth desktop list`"
+        )
+    } else {
+        format!(
+            "no credentials for {relay_url}: this CLI is paired with Buzz only for {}; pass \
+             --relay (or set BUZZ_RELAY_URL) to use a pairing, or {fix}",
+            paired.join(", ")
+        )
+    })
 }
 
 /// The explicit-key link, with its headless evidence source. Without an
@@ -801,5 +827,34 @@ mod tests {
             "no local key: a random id, not a key derivation"
         );
         assert_eq!(id.len(), 32);
+    }
+
+    #[test]
+    fn no_credentials_names_the_relay_and_the_paired_ones() {
+        let message = |relay: &str, paired: &[&str]| {
+            let paired: Vec<String> = paired.iter().map(|r| (*r).to_owned()).collect();
+            match no_credentials(relay, &paired) {
+                CliError::Auth(m) => m,
+                other => panic!("{other:?}"),
+            }
+        };
+        let none = message("http://localhost:3000", &[]);
+        assert!(none.starts_with("no credentials for http://localhost:3000: set BUZZ_PRIVATE_KEY"));
+
+        let elsewhere = message("http://localhost:3000", &["wss://team.example/"]);
+        assert!(
+            elsewhere.contains("paired with Buzz only for wss://team.example/"),
+            "{elsewhere}"
+        );
+        assert!(elsewhere.contains("pass --relay"), "{elsewhere}");
+
+        #[cfg(unix)]
+        {
+            let here = message("https://team.example", &["wss://team.example/"]);
+            assert!(
+                here.contains("no running Buzz desktop accepts the pairing"),
+                "{here}"
+            );
+        }
     }
 }

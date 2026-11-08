@@ -22,6 +22,13 @@
 //!    passes read one snapshot (the stores run them in one `REPEATABLE READ`
 //!    transaction, `ReadTransaction`).
 //!
+//! A read whose own `since` is at or above the floor matches no row below
+//! it, so its recent pass is the whole read and no older pass follows. The
+//! floor literal is still worth adding: `since` is a bind parameter, which a
+//! cached generic plan prunes only at execution, after it has locked every
+//! partition. Live REQs with a recent `since` (agents reconnecting, `#p`
+//! mention reads) are that read.
+//!
 //! The bounds are SQL literals, so Postgres prunes when it plans the
 //! statement, cached generic plans included. They change about once a month,
 //! so the prepared-statement cache keeps one statement per pass and shape.
@@ -52,6 +59,10 @@ pub(crate) struct Split {
     /// The recent pass reads below it, when set. No row the read can match
     /// sits at or above it.
     pub(crate) ceiling: Option<DateTime<Utc>>,
+    /// Whether rows below the floor can match, so a short recent pass is
+    /// followed by the older pass. False when the read's own `since` is at
+    /// or above the floor: the recent pass is then the whole read.
+    pub(crate) older: bool,
 }
 
 /// The `created_at` range one pass of a page read covers.
@@ -122,11 +133,13 @@ pub(crate) fn ceiling_at(now: DateTime<Utc>) -> DateTime<Utc> {
     month_start(now + MAX_FUTURE, 1)
 }
 
-/// Where to split a page read, or `None` to read it whole: its own
-/// bounds already exclude everything older than the floor or everything
-/// newer, or its rows are latest-state records that rarely fill a page above
-/// the floor, so a split would only add a second statement. The recent pass
-/// has a ceiling only when every kind is regular (see [`MAX_FUTURE`]).
+/// Where to split a page read, or `None` to read it whole: its own bounds
+/// already exclude everything newer than the floor, or its rows are
+/// latest-state records that rarely fill a page above the floor, so a split
+/// would only add a second statement. A read whose `since` is at or above the
+/// floor gets a recent pass with no older pass after it (see the module
+/// docs), whatever its kinds. The recent pass has a ceiling only when every
+/// kind is regular (see [`MAX_FUTURE`]).
 ///
 /// `kinds` are the read's kinds (`None`: any); `since`/`until` its bounds.
 pub(crate) fn split_for(
@@ -146,10 +159,15 @@ pub(crate) fn split_for(
     let regular_only = kinds.is_some_and(|ks| !ks.iter().any(|&k| latest_state(k)));
     let since_prunes = since.is_some_and(|s| s >= floor);
     let until_before_floor = until.is_some_and(|u| u < floor);
-    (!latest_state_only && !since_prunes && !until_before_floor).then(|| Split {
+    let split = |older| Split {
         floor,
         ceiling: regular_only.then(|| ceiling_at(now)),
-    })
+        older,
+    };
+    if since_prunes {
+        return (!until_before_floor).then(|| split(false));
+    }
+    (!latest_state_only && !until_before_floor).then(|| split(true))
 }
 
 /// The pass to run after `range` once the read holds `found` of its `limit`
@@ -160,7 +178,7 @@ pub(crate) fn next(range: Range, found: usize, limit: i64) -> Option<(Range, i64
         return None;
     };
     let found = i64::try_from(found).unwrap_or(i64::MAX);
-    (found < limit).then(|| (Range::Older(split.floor), limit - found))
+    (split.older && found < limit).then(|| (Range::Older(split.floor), limit - found))
 }
 
 #[cfg(test)]
@@ -219,6 +237,7 @@ mod tests {
         let split = Split {
             floor,
             ceiling: Some(midnight(2026, 12, 1)),
+            older: true,
         };
         assert_eq!(Range::All.predicate("e.created_at"), None);
         assert_eq!(
@@ -242,13 +261,18 @@ mod tests {
         );
     }
 
-    /// Which reads are split, and which recent passes stop at the ceiling:
-    /// (kinds, since, until) → `WHOLE` (not split), `CEILED` or `OPEN`.
+    /// Which reads are split, which recent passes stop at the ceiling, and
+    /// which are the whole read: (kinds, since, until) → `WHOLE` (not split),
+    /// `CEILED` or `OPEN` (recent pass, then the older pass if short), or
+    /// `CEILED_ONLY` or `OPEN_ONLY` (recent pass, no older pass).
     #[test]
     fn split_eligibility() {
-        const WHOLE: Option<bool> = None;
-        const CEILED: Option<bool> = Some(true);
-        const OPEN: Option<bool> = Some(false);
+        // (ceiled, older)
+        const WHOLE: Option<(bool, bool)> = None;
+        const CEILED: Option<(bool, bool)> = Some((true, true));
+        const OPEN: Option<(bool, bool)> = Some((false, true));
+        const CEILED_ONLY: Option<(bool, bool)> = Some((true, false));
+        const OPEN_ONLY: Option<(bool, bool)> = Some((false, false));
         let now = at(2026, 11, 4);
         let floor = floor_at(now);
         let day = Duration::days(1);
@@ -258,7 +282,7 @@ mod tests {
             Option<&'a [i32]>,
             Option<DateTime<Utc>>,
             Option<DateTime<Utc>>,
-            Option<bool>,
+            Option<(bool, bool)>,
         );
         let cases: &[Case] = &[
             ("unbounded messages", Some(&[9, 40002]), None, None, CEILED),
@@ -272,17 +296,38 @@ mod tests {
                 CEILED,
             ),
             (
-                "since at the floor already prunes",
+                "since at the floor",
                 Some(&[9]),
                 Some(floor),
                 None,
-                WHOLE,
+                CEILED_ONLY,
             ),
             (
-                "recent since already prunes",
+                "recent since",
                 Some(&[9]),
                 Some(now - day),
                 None,
+                CEILED_ONLY,
+            ),
+            (
+                "recent since, any kind",
+                None,
+                Some(now - day),
+                None,
+                OPEN_ONLY,
+            ),
+            (
+                "recent since, addressable only",
+                Some(&[39002]),
+                Some(now - day),
+                None,
+                OPEN_ONLY,
+            ),
+            (
+                "recent since, until before the floor",
+                Some(&[9]),
+                Some(now - day),
+                Some(floor - day),
                 WHOLE,
             ),
             ("until at the floor", Some(&[9]), None, Some(floor), CEILED),
@@ -318,9 +363,10 @@ mod tests {
             ),
         ];
         for &(label, kinds, since, until, outcome) in cases {
-            let expected = outcome.map(|ceiled| Split {
+            let expected = outcome.map(|(ceiled, older)| Split {
                 floor,
                 ceiling: ceiled.then(|| ceiling_at(now)),
+                older,
             });
             assert_eq!(split_for(now, kinds, since, until), expected, "{label}");
         }
@@ -350,12 +396,25 @@ mod tests {
             let ceiled = Split {
                 floor,
                 ceiling: Some(ceiling),
+                older: true,
             };
             let open = Split {
                 ceiling: None,
                 ..ceiled
             };
-            for split in [None, Some(ceiled), Some(open)] {
+            // A read whose `since` is at or above the floor: only the rows
+            // at or above it match.
+            let since_floor = Split {
+                older: false,
+                ..ceiled
+            };
+            for split in [None, Some(ceiled), Some(open), Some(since_floor)] {
+                let expected: Vec<_> = match split {
+                    Some(s) if !s.older => {
+                        expected.iter().copied().filter(|&t| t >= floor).collect()
+                    }
+                    _ => expected.clone(),
+                };
                 let mut passes = Vec::new();
                 let mut rows = Vec::new();
                 let mut pass = Some((split.map_or(Range::All, Range::Recent), limit));
@@ -377,7 +436,7 @@ mod tests {
                 assert_eq!(rows, expected, "split {split:?}, limit {limit}");
                 let expected_passes = match split {
                     None => vec![(Range::All, limit)],
-                    Some(s) if limit <= recent => vec![(Range::Recent(s), limit)],
+                    Some(s) if limit <= recent || !s.older => vec![(Range::Recent(s), limit)],
                     Some(s) => vec![
                         (Range::Recent(s), limit),
                         (Range::Older(s.floor), limit - recent),

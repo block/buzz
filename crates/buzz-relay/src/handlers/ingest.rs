@@ -1460,26 +1460,8 @@ async fn validate_edit_ownership(
     event: &Event,
     state: &AppState,
 ) -> Result<(), String> {
-    let target_hex = event
-        .tags
-        .iter()
-        .find_map(|t| {
-            if t.kind().to_string() == "e" {
-                t.content().and_then(|v| {
-                    if v.len() == 64 && v.chars().all(|c| c.is_ascii_hexdigit()) {
-                        Some(v.to_string())
-                    } else {
-                        None
-                    }
-                })
-            } else {
-                None
-            }
-        })
+    let target_bytes = buzz_core::media::first_edit_target(event)
         .ok_or_else(|| "missing e tag for edit target".to_string())?;
-
-    let target_bytes =
-        hex::decode(&target_hex).map_err(|_| "invalid target event ID".to_string())?;
     // Kind 40003 skips the generic membership gate, so this validator is the
     // only authority: a target outside the edit's `h` channel, unreadable, or
     // not the actor's to edit is denied exactly like a missing one.
@@ -2432,7 +2414,9 @@ fn write_restriction_denial(
 /// for a missed disconnect and for HTTP writes. A timeout has no auth-seam
 /// presence, so this is where it is enforced. It runs per write, so it reads
 /// through [`AppState::restriction_state_cached`]: a restriction change takes
-/// effect within [`crate::state::RESTRICTION_CACHE_MAX_AGE`]. The verdict is
+/// effect when its write invalidates the cache, or within
+/// [`crate::state::RESTRICTION_CACHE_MAX_AGE`] on a pod that misses that
+/// notification. The verdict is
 /// still taken at `now`, so a cached timeout lifts on time. Fails closed on a
 /// DB error.
 pub(crate) async fn enforce_write_restriction(
@@ -2562,6 +2546,28 @@ struct ChannelCreateRequest {
     labels: Vec<String>,
     unlisted: bool,
     members: Vec<Vec<u8>>,
+}
+
+async fn validate_event_imeta(
+    tenant: &TenantContext,
+    state: &AppState,
+    event: &Event,
+    tenant_media_base: &str,
+) -> Result<(), IngestError> {
+    let imeta_tags: Vec<Vec<String>> = event
+        .tags
+        .iter()
+        .filter(|t| t.kind().to_string() == "imeta")
+        .map(|t| t.as_slice().iter().map(|s| s.to_string()).collect())
+        .collect();
+    if !imeta_tags.is_empty() {
+        crate::api::validate_imeta_tags(&imeta_tags, tenant_media_base)
+            .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
+        crate::api::verify_imeta_blobs(tenant, &imeta_tags, &state.media_storage)
+            .await
+            .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
+    }
+    Ok(())
 }
 
 async fn ingest_event_inner(
@@ -2724,6 +2730,8 @@ async fn ingest_event_inner(
     // Ban / timeout write-block. Runs before every kind-specific branch below
     // (commands, feedback, reports, moderation) so no write returns ahead of it.
     enforce_write_restriction(state, tenant, kind_u32, auth.pubkey()).await?;
+
+    super::media_access::validate_media_references(tenant, state, &event).await?;
 
     // Command kinds are routed AFTER signature verification, timestamp check,
     // pubkey/auth match, and scope validation — never before.
@@ -3153,6 +3161,9 @@ async fn ingest_event_inner(
     // Artifact revisions passed the same home-channel write gates as kind 9
     // above; they are stored and published without conversation side effects.
     if kind_u32 == buzz_core::kind::KIND_ARTIFACT {
+        let base =
+            crate::api::media::media_base_url_for_tenant(&state.config.relay_url, tenant.host());
+        validate_event_imeta(tenant, state, &event, &base).await?;
         let result = super::artifact::accept(state, tenant, &event, &auth).await?;
         if let Some(ch_id) = channel_id {
             emit(
@@ -3411,19 +3422,7 @@ async fn ingest_event_inner(
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
 
-    let imeta_tags: Vec<Vec<String>> = event
-        .tags
-        .iter()
-        .filter(|t| t.kind().to_string() == "imeta")
-        .map(|t| t.as_slice().iter().map(|s| s.to_string()).collect())
-        .collect();
-    if !imeta_tags.is_empty() {
-        crate::api::validate_imeta_tags(&imeta_tags, &tenant_media_base)
-            .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
-        crate::api::verify_imeta_blobs(tenant, &imeta_tags, &state.media_storage)
-            .await
-            .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
-    }
+    validate_event_imeta(tenant, state, &event, &tenant_media_base).await?;
 
     let thread_meta = if requires_h_channel_scope(kind_u32) {
         if let Some(ch_id) = channel_id {
@@ -3892,7 +3891,7 @@ mod postgres_tests {
         let tenant = TenantContext::resolved(community, "archive.test");
         let keys = nostr::Keys::generate();
         let channel_id = Uuid::new_v4();
-        state.membership_cache.insert(
+        state.membership_cache.seed_member(
             (community, channel_id, keys.public_key().to_bytes().to_vec()),
             true,
         );
@@ -7106,12 +7105,14 @@ mod postgres_tests {
             );
 
             // Control: a working lookup reaches the archive gate.
-            healthy.membership_cache.insert(member_key.clone(), true);
+            healthy
+                .membership_cache
+                .seed_member(member_key.clone(), true);
             let control =
                 ingest_event_inner(&healthy, &tracer, &tenant, post("control"), auth()).await;
 
             // Only the channel lookup fails: the post must be denied and not stored.
-            failing.membership_cache.insert(member_key, true);
+            failing.membership_cache.seed_member(member_key, true);
             let event = post("lookup fails");
             let event_id = event.id.to_bytes().to_vec();
             let denied = ingest_event_inner(&failing, &tracer, &tenant, event, auth()).await;
@@ -7228,7 +7229,7 @@ mod postgres_tests {
                 scopes: vec![Scope::MessagesWrite],
                 auth_method: HttpAuthMethod::Nip98,
             };
-            failing.membership_cache.insert(
+            failing.membership_cache.seed_member(
                 (community, source, author.public_key().to_bytes().to_vec()),
                 true,
             );
@@ -7954,11 +7955,9 @@ mod postgres_tests {
             .unban_community_member(tenant.community(), &owner_bytes, &owner_bytes)
             .await
             .expect("unban owner");
-        // The unban command clears the owner's entry; the agent's entry
-        // carries the owner's ban until it ages out
-        // (`RESTRICTION_CACHE_MAX_AGE`).
-        state.invalidate_restriction_cache(tenant.community(), &owner_bytes);
-        state.invalidate_restriction_cache(tenant.community(), &agent.public_key().to_bytes());
+        // As the unban command does: drops the community's rows, the
+        // agent's (which carries the owner's ban) included.
+        state.invalidate_restrictions_local(tenant.community());
         enforce_write_restriction(&state, &tenant, KIND_REACTION, &agent.public_key())
             .await
             .expect("unbanning the owner restores the agent");
@@ -8008,7 +8007,7 @@ mod postgres_tests {
             .await
             .expect("unban owner");
         // As the unban command does on its own pod.
-        state.invalidate_restriction_cache(tenant.community(), &owner_bytes);
+        state.invalidate_restrictions_local(tenant.community());
         crate::api::relay_members::enforce_relay_membership(
             &state,
             &tenant,
@@ -8134,6 +8133,41 @@ mod postgres_tests {
                 "authorization denied\n".to_owned()
             ))
         );
+    }
+
+    /// Recording an agent's owner drops the agent's cached restriction row.
+    /// HTTP admission caches the agent's row before it links the token
+    /// owner, and only checks bans, so the owner's timeout must still reach
+    /// the agent's first write.
+    /// Mutation: drop `invalidate_restrictions` from
+    /// `disconnect_unowned_agent_clusterwide` → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn owner_link_drops_the_agents_cached_restriction_row() {
+        let state = ingest_state().await;
+        let (tenant, owner, agent) = token_owner_fixture(&state, "owner-link-timeout").await;
+        state
+            .db
+            .timeout_community_member(
+                tenant.community(),
+                owner.public_key().as_bytes(),
+                owner.public_key().as_bytes(),
+                Utc::now() + chrono::Duration::hours(1),
+                None,
+            )
+            .await
+            .expect("timeout owner");
+
+        http_membership(&state, &tenant, &agent, Some(owner.public_key()))
+            .await
+            .expect("a timeout does not refuse HTTP admission");
+        match enforce_write_restriction(&state, &tenant, KIND_REACTION, &agent.public_key()).await {
+            Err(IngestError::AuthFailed(msg)) => assert!(
+                msg.starts_with("restricted: you are timed out until "),
+                "got {msg:?}"
+            ),
+            other => panic!("a timed-out owner's newly linked agent must not write: {other:?}"),
+        }
     }
 
     /// The token owner's ban reaches an agent that is itself a member, on a

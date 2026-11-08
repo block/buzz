@@ -85,6 +85,8 @@ final class BuzzPushSnapshotBridge {
       syncCommunities(arguments, result: result)
     case "organizationSession":
       syncOrganizationSession(arguments, result: result)
+    case "hostedSession":
+      syncHostedSession(arguments, result: result)
     default: return false
     }
     return true
@@ -172,6 +174,53 @@ final class BuzzPushSnapshotBridge {
           value: FlutterError(
             code: "snapshot_sync_failed",
             message: "Unable to share the organization session.",
+            details: error.localizedDescription
+          )
+        )
+      }
+    }
+  }
+
+  /// Shares the hosted account session with the notification extension, or removes it, so the
+  /// extension can mint NIP-FI assertions for hosted communities that enforce it.
+  private func syncHostedSession(
+    _ arguments: [String: Any],
+    result: @escaping FlutterResult
+  ) {
+    let session: BuzzOrganizationSession?
+    if arguments["credential"] is NSNull || arguments["credential"] == nil {
+      session = nil
+    } else if let origin = arguments["origin"] as? String,
+      let credential = arguments["credential"] as? String, !credential.isEmpty,
+      credential.utf8.count <= 512,
+      let relayDomains = arguments["relayDomains"] as? [String], !relayDomains.isEmpty,
+      let communityDomain = arguments["communityDomain"] as? String, !communityDomain.isEmpty
+    {
+      session = BuzzOrganizationSession(
+        origin: origin, credential: credential, relayHosts: [], relayDomains: relayDomains,
+        communityDomain: communityDomain)
+    } else {
+      result(
+        FlutterError(
+          code: "invalid_arguments",
+          message: "Expected a hosted origin, credential, relay domains and community domain.",
+          details: nil
+        )
+      )
+      return
+    }
+    queue.async { [weak self] in
+      do {
+        try BuzzPushKeychain.replace(
+          organizationSession: session, accessGroup: self?.keychainAccessGroup,
+          account: BuzzOrganizationSession.hostedKeychainAccount)
+        Self.complete(result, value: nil)
+      } catch {
+        Self.complete(
+          result,
+          value: FlutterError(
+            code: "snapshot_sync_failed",
+            message: "Unable to share the hosted session.",
             details: error.localizedDescription
           )
         )

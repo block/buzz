@@ -341,6 +341,9 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         "Prometheus metrics exporter started"
     );
 
+    // Before the database: a provider misconfiguration fails startup at once.
+    let feature_flags = Arc::new(buzz_relay::feature_flags::FeatureFlags::from_env().await?);
+
     let db_config = DbConfig {
         push_enabled: config.push_enabled,
         database_url: config.database_url.clone(),
@@ -746,6 +749,16 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         },
     );
     let state = Arc::new(app_state);
+    // Concurrency caps follow their flags from the first request: apply them
+    // once before serving, then keep re-reading them.
+    let concurrency_gates = buzz_relay::concurrency_limits::relay_gates(&state);
+    buzz_relay::concurrency_limits::apply(&feature_flags, &concurrency_gates);
+    let concurrency_limits_cancel = CancellationToken::new();
+    tokio::spawn(buzz_relay::concurrency_limits::run(
+        Arc::clone(&feature_flags),
+        concurrency_gates,
+        concurrency_limits_cancel.clone(),
+    ));
     if let Some(tenant) = &deployment_community {
         buzz_relay::handlers::side_effects::fan_out_nip43_membership_list(
             tenant,
@@ -1287,37 +1300,12 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         &state,
     )));
 
-    // Multi-node fan-out consumer: receive events from Redis pub/sub
-    // (published by other relay instances) and fan out to local WS subscribers.
-    {
-        let state_for_sub = Arc::clone(&state);
-        let mut rx = state_for_sub.pubsub.subscribe_local();
-        tokio::spawn(async move {
-            loop {
-                match rx.recv().await {
-                    Ok(channel_event) => {
-                        buzz_relay::handlers::event::fan_out_pubsub_event(
-                            &state_for_sub,
-                            channel_event,
-                        )
-                        .await;
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        metrics::counter!("buzz_multinode_fanout_lag_total").increment(n);
-                        tracing::warn!("Multi-node fan-out lagged by {n} messages");
-                        // Skipped messages are not replayed (NIP-AR Sync rule 5).
-                        state_for_sub
-                            .artifact_syncs
-                            .resync_all("resync: live delivery lagged");
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                        tracing::error!("Multi-node fan-out broadcast channel closed");
-                        break;
-                    }
-                }
-            }
-        });
-    }
+    // Multi-node fan-out: deliver events other relay instances published to
+    // Redis to local WS subscribers (see `handlers::multinode_fanout`).
+    buzz_relay::handlers::multinode_fanout::spawn(
+        Arc::clone(&state),
+        state.pubsub.subscribe_local(),
+    );
 
     // Cross-pod cache-invalidation consumer: receive cache-key drops from Redis
     // pub/sub (published by other relay instances when membership/visibility
@@ -1565,6 +1553,7 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         }
     }
     state.community_revalidator_cancel.cancel();
+    concurrency_limits_cancel.cancel();
     state.dependency_sampler_cancel.cancel();
     state.dependency_completion_publisher_cancel.cancel();
 
@@ -1574,6 +1563,9 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
     audit_shutdown
         .drain(std::time::Duration::from_secs(5))
         .await;
+
+    // Last of the drains, and bounded: LaunchDarkly's final analytics flush.
+    feature_flags.close().await;
 
     // Flush pending OTEL spans before exit.
     if let telemetry::TracerInit::Enabled(tp) = tracer_init {

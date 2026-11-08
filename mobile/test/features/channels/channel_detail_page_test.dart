@@ -247,6 +247,7 @@ NostrEvent _edit({
 );
 
 Widget _buildTestable({
+  List<AgentDirectoryEntry> soloAgents = const [],
   String? bestie,
   bool useRealChannelProviders = false,
   ProfileNotifier? profileNotifier,
@@ -351,7 +352,7 @@ Widget _buildTestable({
           ),
         ),
         meMessagesProvider(_channelId).overrideWith(() => fakeMessagesNotifier),
-        meAssistantsProvider.overrideWith((ref) async => []),
+        meAssistantsProvider.overrideWith((ref) async => soloAgents),
       ],
       channelMessagesProvider(_channelId).overrideWith(
         () => personalChat
@@ -497,6 +498,7 @@ Widget _buildTestable({
       savedPrefsProvider.overrideWithValue(_testPrefs),
     ],
     child: MaterialApp(
+      debugShowCheckedModeBanner: false,
       navigatorKey: navigatorKey,
       theme: chatColor != null
           ? mobileAppearanceTheme(
@@ -608,6 +610,170 @@ const _directoryAlice =
 const _directoryBob =
     'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
 void main() {
+  testWidgets('Solo ellipsis opens agent and workspace settings directly', (
+    tester,
+  ) async {
+    await _loadPresenceFonts(tester);
+    if (Platform.environment['PRESENCE_SCREENSHOTS'] != null) {
+      await (FontLoader(
+        'BuzzTabler',
+      )..addFont(rootBundle.load('assets/fonts/TablerIcons.ttf'))).load();
+    }
+    final avatarBytes = await rootBundle.load('assets/images/buzz-icon.png');
+    final avatarUrl =
+        'data:image/png;base64,${base64Encode(avatarBytes.buffer.asUint8List())}';
+    await tester.pumpWidget(
+      RepaintBoundary(
+        child: _buildTestable(
+          personalChat: true,
+          messages: const [],
+          soloAgents: const [
+            AgentDirectoryEntry(pubkey: 'agent', displayName: 'Terp'),
+          ],
+          members: [
+            ChannelMember(
+              pubkey: 'self',
+              role: 'owner',
+              joinedAt: DateTime(2025),
+            ),
+            ChannelMember(
+              pubkey: 'agent',
+              role: 'bot',
+              joinedAt: DateTime(2025),
+            ),
+          ],
+          users: {
+            'agent': UserProfile(
+              pubkey: 'agent',
+              displayName: 'Terp',
+              avatarUrl: avatarUrl,
+            ),
+          },
+          organization: Stream.value(
+            const MeGroups(
+              channels: [_channelId],
+              groups: [
+                {'id': 'buzz', 'name': 'Buzz', 'defaultTemplateId': ''},
+              ],
+              assignments: {_channelId: 'buzz'},
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await _capturePresence(tester, 'solo-header-after');
+    await tester.tap(find.byKey(const ValueKey('me-chat-settings-button')));
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.text('Chat settings'));
+    await tester.pumpAndSettle();
+    expect(find.text('Chat settings'), findsOneWidget);
+    expect(find.text('Workspace'), findsOneWidget);
+    expect(find.text('Buzz'), findsOneWidget);
+    expect(find.byType(ChannelDetailsPage), findsNothing);
+    expect(
+      find.byWidgetPredicate(
+        (widget) =>
+            widget is AvatarImage &&
+            widget.imageUrl == avatarUrl &&
+            widget.isAgent,
+      ),
+      findsOneWidget,
+    );
+    final avatarImage = find.descendant(
+      of: find.byWidgetPredicate(
+        (widget) => widget is AvatarImage && widget.imageUrl == avatarUrl,
+      ),
+      matching: find.byType(Image),
+    );
+    await tester.runAsync(
+      () => precacheImage(
+        tester.widget<Image>(avatarImage).image,
+        tester.element(avatarImage),
+      ),
+    );
+    await tester.pump();
+    await _capturePresence(tester, 'solo-settings-after');
+    final settingsRoute = ModalRoute.of(
+      tester.element(find.text('Chat settings')),
+    )!;
+    final barrier = tester.element(find.byType(ModalBarrier).last);
+    Future<void> expectStableMask() async {
+      final sheet = find.byType(BottomSheet);
+      final before = tester.getSize(sheet).height;
+      await tester.pump();
+      expect(tester.getSize(sheet).height, closeTo(before, 0.01));
+      await tester.pump(const Duration(milliseconds: 100));
+      final middle = tester.getSize(sheet).height;
+      expect(barrier.mounted, isTrue);
+      expect(settingsRoute.isCurrent, isTrue);
+      expect(settingsRoute.animation!.value, 1);
+      await tester.pump(const Duration(milliseconds: 250));
+      final after = tester.getSize(sheet).height;
+      expect(middle, greaterThan(before < after ? before : after));
+      expect(middle, lessThan(before > after ? before : after));
+      expect(barrier.mounted, isTrue);
+      expect(settingsRoute.isCurrent, isTrue);
+      expect(settingsRoute.animation!.value, 1);
+    }
+
+    await tester.ensureVisible(find.text('Workspace'));
+    await tester.tap(find.text('Workspace'));
+    await expectStableMask();
+    await tester.pumpAndSettle();
+    expect(find.text('No Workspace'), findsOneWidget);
+    expect(find.text('Buzz'), findsOneWidget);
+    expect(
+      find.ancestor(
+        of: find.text('No Workspace'),
+        matching: find.byType(AppListCard),
+      ),
+      findsOneWidget,
+    );
+    await _capturePresence(tester, 'solo-workspace-section');
+    await tester.tap(find.byTooltip('Close sheet'));
+    await expectStableMask();
+    await tester.pumpAndSettle();
+    expect(find.text('Chat settings'), findsOneWidget);
+    await tester.tap(find.text('Agent'));
+    await expectStableMask();
+    await tester.pumpAndSettle();
+    expect(find.text('Chat settings'), findsNothing);
+    await tester.tap(find.byTooltip('Close sheet'));
+    await expectStableMask();
+    await tester.pumpAndSettle();
+    expect(find.text('Chat settings'), findsOneWidget);
+    expect(find.text('Workspace'), findsOneWidget);
+    await tester.tap(find.byTooltip('Close sheet'));
+    await tester.pumpAndSettle();
+    expect(find.text('Chat settings'), findsNothing);
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pumpWidget(
+      _buildTestable(
+        personalChat: true,
+        disableAnimations: true,
+        messages: const [],
+        organization: Stream.value(const MeGroups(channels: [_channelId])),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('me-chat-settings-button')));
+    await tester.pumpAndSettle();
+    final settingsHeight = tester.getSize(find.byType(BottomSheet)).height;
+    await tester.tap(find.text('Workspace'));
+    await tester.pump();
+    await tester.pump();
+    final reducedHeight = tester.getSize(find.byType(BottomSheet)).height;
+    expect(reducedHeight, isNot(settingsHeight));
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(tester.getSize(find.byType(BottomSheet)).height, reducedHeight);
+    await tester.tap(find.byTooltip('Close sheet'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Close sheet'));
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+  });
+
   for (final fromLauncher in [false, true]) {
     testWidgets(
       'Bestie DM preserves thread replies and ordinary sends: launcher=$fromLauncher',
@@ -708,7 +874,7 @@ void main() {
                 matching: find.byType(LocalSendBubbleSurface),
               )
               .first,
-          const Offset(220, 0),
+          const Offset(-220, 0),
         );
         await tester.pumpAndSettle();
         expect(find.byType(ThreadDetailPage), findsOneWidget);
@@ -959,6 +1125,7 @@ void main() {
   bubbleLayoutTests();
   messageWidthTests();
   swipeReplyTests();
+  swipeReplyLinkTests();
   reviewAvatarTests();
   setUp(() async {
     SharedPreferences.setMockInitialValues({});
@@ -6746,6 +6913,19 @@ void main() {
           ),
           findsOneWidget,
         );
+        final floatingOpacity = find
+            .descendant(
+              of: stickyHeader,
+              matching: find.byType(AnimatedOpacity),
+            )
+            .first;
+        expect(tester.widget<AnimatedOpacity>(floatingOpacity).opacity, 0);
+        await tester.drag(messageList, const Offset(0, 60));
+        await tester.pump();
+        expect(tester.widget<AnimatedOpacity>(floatingOpacity).opacity, 1);
+        await tester.pumpAndSettle();
+        await tester.pump(const Duration(seconds: 1));
+        expect(tester.widget<AnimatedOpacity>(floatingOpacity).opacity, 0);
       },
     );
 
@@ -11762,7 +11942,10 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    expect(find.byKey(const ValueKey('me-assistant-button')), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('me-chat-settings-button')),
+      findsOneWidget,
+    );
     await expectLater(
       tester
           .widget<ComposeBar>(find.byType(ComposeBar))
@@ -11963,7 +12146,10 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      expect(find.byKey(const ValueKey('me-assistant-button')), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('me-chat-settings-button')),
+        findsOneWidget,
+      );
       expect(findRichText('Agent answer'), findsOneWidget);
       expect(find.byType(ThreadDetailPage), findsNothing);
       final container = ProviderScope.containerOf(
@@ -15281,6 +15467,36 @@ void main() {
         ),
         findsOneWidget,
       );
+
+      final floatingOpacity = find
+          .descendant(of: stickyHeader, matching: find.byType(AnimatedOpacity))
+          .first;
+      expect(tester.widget<AnimatedOpacity>(floatingOpacity).opacity, 0);
+      await tester.drag(listFinder, const Offset(0, -60));
+      await tester.pump();
+      expect(tester.widget<AnimatedOpacity>(floatingOpacity).opacity, 1);
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(seconds: 1));
+      expect(tester.widget<AnimatedOpacity>(floatingOpacity).opacity, 0);
+
+      // Returning to the head must restore the in-flow date after idle,
+      // even though the date index still identifies it as the active day.
+      list.itemScrollController!.jumpTo(index: 0);
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(seconds: 1));
+      await tester.pumpAndSettle();
+      final inlineDate = find
+          .byKey(
+            ValueKey('channel-day-divider-opacity-${timestampForDay(1, 0)}'),
+          )
+          .last;
+      expect(tester.widget<AnimatedOpacity>(inlineDate).opacity, 1);
+      final inlineSemantics = tester.widget<ExcludeSemantics>(
+        find
+            .ancestor(of: inlineDate, matching: find.byType(ExcludeSemantics))
+            .first,
+      );
+      expect(inlineSemantics.excluding, isFalse);
 
       list.itemScrollController!.jumpTo(index: 70);
       await tester.pumpAndSettle();

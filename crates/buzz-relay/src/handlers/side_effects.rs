@@ -3031,79 +3031,131 @@ async fn announce_self_join(
     Ok(())
 }
 
-/// Join a new community member to every effective `auto_join` channel, as
-/// kind:9021 self-joins. Runs inline at the roster write sites (invite
-/// claim, kind:9030) and nowhere else, so a later kind:9022 leave stands. A
-/// community without a roster joins on admission instead
-/// ([`auto_join_never_joined_channels`]).
-///
-/// Best effort: the relay membership has already committed, so a channel
-/// that fails is logged and counted, never retried, and never fails the
-/// caller. The `auto_join` tag on kind:39000 is the durable record a client
-/// reconciles against. A channel archived or made private after the list
-/// was read is one such failure: `put_member` refuses it under its locks.
-///
-/// `added_by` is the actor of a third-party add (kind:9030), `None` when the
-/// member joined by themselves (an invite claim). A third-party add first
-/// asks the member's `channel_add_policy`, once, as a kind:9000 from the same
-/// actor would; a refusal skips every default channel, logged and counted.
+/// Process the durable default-channel work of this roster admission.
+/// Failed reads or writes retain the token for a later claim or admission.
+/// Leaves made during this admission are preserved.
 pub(crate) async fn auto_join_default_channels(
     tenant: &TenantContext,
     state: &Arc<AppState>,
     pubkey_hex: &str,
-    added_by: Option<&[u8]>,
+    gate: Option<&Arc<crate::nip_fi_gate::SessionAdmissionGate>>,
 ) {
-    let Ok(pubkey) = hex::decode(pubkey_hex) else {
-        warn!(member = %pubkey_hex, "auto-join skipped: member pubkey is not hex");
-        return;
-    };
-    let channels = match state.db.list_auto_join_channels(tenant.community()).await {
-        Ok(channels) => channels,
-        Err(e) => {
-            warn!(member = %pubkey_hex, error = %e, "auto-join skipped: listing default channels failed");
-            metrics::counter!("buzz_auto_join_failures_total").increment(1);
-            return;
+    if let Err(e) = finish_default_channel_joins(tenant, state, pubkey_hex, gate).await {
+        warn!(member = %pubkey_hex, error = %e, "default-channel joins remain pending");
+        metrics::counter!("buzz_auto_join_failures_total").increment(1);
+    }
+}
+
+async fn finish_default_channel_joins(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    pubkey_hex: &str,
+    gate: Option<&Arc<crate::nip_fi_gate::SessionAdmissionGate>>,
+) -> anyhow::Result<()> {
+    // A socket's AUTH retry runs on every admission, so it reads the replica
+    // and keeps the writer pool free. A roster write (no gate) reads the
+    // writer, where it has just committed the token.
+    let pending = match gate {
+        Some(_) => {
+            state
+                .db
+                .pending_default_channel_join_routed(tenant.community(), pubkey_hex)
+                .await?
+        }
+        None => {
+            state
+                .db
+                .pending_default_channel_join(tenant.community(), pubkey_hex)
+                .await?
         }
     };
-    if channels.is_empty() {
-        return;
-    }
-    if let Some(actor) = added_by.filter(|actor| *actor != pubkey.as_slice()) {
-        match state
+    let Some(admission) = pending else {
+        return Ok(());
+    };
+    let pubkey = hex::decode(pubkey_hex)?;
+    // Use the persisted original actor even when a retry comes from the member.
+    let actor = admission
+        .added_by
+        .as_deref()
+        .filter(|actor| *actor != "invite")
+        .map(hex::decode)
+        .transpose()?;
+    if let Some(actor) = actor.as_deref().filter(|actor| *actor != pubkey.as_slice()) {
+        if let Some((policy, owner)) = state
             .db
             .get_agent_channel_policy(tenant.community(), &pubkey)
-            .await
+            .await?
         {
-            Ok(None) => {}
-            Ok(Some((policy, owner))) => {
-                if let Err(denied) =
-                    channel_authz::decide_channel_add_policy(&policy, owner.as_deref(), actor)
-                {
-                    warn!(member = %pubkey_hex, error = %denied, "auto-join skipped: the member's channel_add_policy refuses the actor");
-                    metrics::counter!("buzz_auto_join_failures_total").increment(1);
-                    return;
-                }
-            }
-            Err(e) => {
-                warn!(member = %pubkey_hex, error = %e, "auto-join skipped: reading the member's channel_add_policy failed");
-                metrics::counter!("buzz_auto_join_failures_total").increment(1);
-                return;
+            if let Err(denied) =
+                channel_authz::decide_channel_add_policy(&policy, owner.as_deref(), actor)
+            {
+                info!(member = %pubkey_hex, error = %denied, "default-channel add refused by member policy");
+                state
+                    .db
+                    .finish_default_channel_join(tenant.community(), pubkey_hex, admission.token)
+                    .await?;
+                return Ok(());
             }
         }
     }
+    let channels = state.db.list_auto_join_channels(tenant.community()).await?;
+    let mut failure = None;
     for channel in channels {
-        match join_channel_as_self(tenant, state, channel.id, &pubkey).await {
-            Ok(SelfJoinOutcome::Joined) => {
-                metrics::counter!("buzz_auto_join_channels_total").increment(1);
-                info!(channel = %channel.id, member = %pubkey_hex, "auto-joined default channel");
-            }
-            Ok(SelfJoinOutcome::AlreadyMember) => {}
-            Err(e) => {
-                metrics::counter!("buzz_auto_join_failures_total").increment(1);
-                warn!(channel = %channel.id, member = %pubkey_hex, error = %e, "auto-join of default channel failed");
-            }
+        #[cfg(test)]
+        if gate.is_some() {
+            crate::nip_fi_test_hooks::before_auto_join_channel(tenant.community()).await;
+        }
+        let _permit = match gate {
+            Some(gate) => match gate.acquire_effect().await {
+                Ok(permit) => Some(permit),
+                Err(_) => return Ok(()), // Pending work belongs to the next admission.
+            },
+            None => None,
+        };
+        if let Err(error) =
+            finish_default_channel_join(tenant, state, channel.id, &pubkey, &admission).await
+        {
+            warn!(channel = %channel.id, member = %pubkey_hex, error = %error,
+                "default-channel join remains pending; continuing other channels");
+            failure = Some(error);
         }
     }
+    if let Some(error) = failure {
+        return Err(error);
+    }
+    state
+        .db
+        .finish_default_channel_join(tenant.community(), pubkey_hex, admission.token)
+        .await?;
+    Ok(())
+}
+
+async fn finish_default_channel_join(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    channel: Uuid,
+    pubkey: &[u8],
+    admission: &buzz_db::relay_members::PendingDefaultChannelJoin,
+) -> anyhow::Result<()> {
+    match state
+        .db
+        .put_pending_default_member(tenant.community(), channel, pubkey, admission.token)
+        .await
+    {
+        Ok(Some(_)) => {
+            // Membership is durable now. Announcements keep their existing
+            // failure handling; retries must not replay them for active members.
+            if let Err(error) = announce_self_join(tenant, state, channel, pubkey).await {
+                warn!(channel = %channel, error = %error, "default-channel announcement failed");
+                metrics::counter!("buzz_auto_join_failures_total").increment(1);
+            }
+            metrics::counter!("buzz_auto_join_channels_total").increment(1);
+        }
+        Ok(None) => {}
+        Err(buzz_db::DbError::ChannelNotFound(_)) => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
 }
 
 /// Join a person admitted to a community that keeps no membership roster

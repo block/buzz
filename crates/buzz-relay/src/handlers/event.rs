@@ -367,31 +367,55 @@ pub(crate) async fn fan_out_event_to_local_subscribers(
 /// Fan out one event received from Redis pub/sub to this relay's local subscribers.
 #[tracing::instrument(skip_all)]
 pub async fn fan_out_pubsub_event(state: &Arc<AppState>, channel_event: buzz_pubsub::ChannelEvent) {
-    // The Redis topic carries the tenant-local routing scope explicitly:
-    // `Channel(id)` for a per-channel event, `Global` for a channel-less one.
-    // Convert back to the `Option<Uuid>` channel id `fan_out()` indexes on —
-    // `Global` selects the global subscriber index.
+    if take_local_echo(state, &channel_event) {
+        return;
+    }
+    let community_id = channel_event.community_id;
+    deliver_pubsub_event(state, community_id, &pubsub_stored_event(channel_event)).await;
+}
+
+/// Report whether `channel_event` is the Redis echo of an event this relay
+/// already fanned out in-process, consuming the echo record if so.
+///
+/// The dedup key is `(community_id, event_id)` — a same-id event arriving for a
+/// *different* community is a distinct delivery and must not be suppressed.
+/// The cache has TTL-based eviction (60s) so entries are bounded regardless of
+/// subscriber health.
+pub(crate) fn take_local_echo(state: &AppState, channel_event: &buzz_pubsub::ChannelEvent) -> bool {
+    let echo_key = (
+        channel_event.community_id,
+        channel_event.event.id.to_bytes(),
+    );
+    if state.local_event_ids.get(&echo_key).is_some() {
+        state.local_event_ids.invalidate(&echo_key);
+        return true;
+    }
+    false
+}
+
+/// The `StoredEvent` a Redis event fans out as.
+///
+/// The Redis topic carries the tenant-local routing scope explicitly:
+/// `Channel(id)` for a per-channel event, `Global` for a channel-less one.
+/// Convert back to the `Option<Uuid>` channel id `fan_out()` indexes on —
+/// `Global` selects the global subscriber index.
+pub(crate) fn pubsub_stored_event(channel_event: buzz_pubsub::ChannelEvent) -> StoredEvent {
     let channel_id = match channel_event.topic {
         buzz_pubsub::EventTopic::Channel(id) => Some(id),
         buzz_pubsub::EventTopic::Global => None,
     };
-    let community_id = channel_event.community_id;
-    let stored = StoredEvent::new(channel_event.event, channel_id);
+    StoredEvent::new(channel_event.event, channel_id)
+}
 
-    // Skip events that were already fanned out in-process (local echo). The
-    // dedup key is `(community_id, event_id)` — a same-id event arriving for a
-    // *different* community is a distinct delivery and must not be suppressed.
-    // The cache has TTL-based eviction (60s) so entries are bounded regardless
-    // of subscriber health.
-    let event_id_bytes = stored.event.id.to_bytes();
-    let echo_key = (community_id, event_id_bytes);
-    if state.local_event_ids.get(&echo_key).is_some() {
-        state.local_event_ids.invalidate(&echo_key);
-        return;
-    }
-
-    let matches = state.sub_registry.fan_out_scoped(community_id, &stored);
-    let matches = route_fanout_matches(state, community_id, &stored, matches, None).await;
+/// Deliver one Redis event that is not a local echo to this relay's local
+/// subscribers, through the access gate.
+pub(crate) async fn deliver_pubsub_event(
+    state: &Arc<AppState>,
+    community_id: CommunityId,
+    stored: &StoredEvent,
+) {
+    let matches = state.sub_registry.fan_out_scoped(community_id, stored);
+    let matches = route_fanout_matches(state, community_id, stored, matches, None).await;
     metrics::counter!("buzz_multinode_fanout_total").increment(1);
     if matches.is_empty() {
         return;
@@ -2464,6 +2488,7 @@ mod tests {
                             community_id: buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
                             topic: EventTopic::Global,
                             event,
+                            received_at: tokio::time::Instant::now(),
                         },
                     )
                     .await;
@@ -2559,6 +2584,7 @@ mod tests {
                     community_id: buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
                     topic: EventTopic::Global,
                     event,
+                    received_at: tokio::time::Instant::now(),
                 },
             )
             .await;
@@ -2582,6 +2608,7 @@ mod tests {
                     community_id: community,
                     topic: EventTopic::Global,
                     event,
+                    received_at: tokio::time::Instant::now(),
                 },
             )
             .await;
@@ -2624,6 +2651,7 @@ mod tests {
                     community_id: community_b,
                     topic: EventTopic::Global,
                     event,
+                    received_at: tokio::time::Instant::now(),
                 },
             )
             .await;
@@ -2653,6 +2681,7 @@ mod tests {
                     community_id: buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
                     topic: EventTopic::Global,
                     event,
+                    received_at: tokio::time::Instant::now(),
                 },
             )
             .await;
@@ -3223,10 +3252,10 @@ mod tests {
             let non_member_pk = vec![2u8; 32];
             state
                 .membership_cache
-                .insert((community_id, channel_id, member_pk.clone()), true);
+                .seed_member((community_id, channel_id, member_pk.clone()), true);
             state
                 .membership_cache
-                .insert((community_id, channel_id, non_member_pk.clone()), false);
+                .seed_member((community_id, channel_id, non_member_pk.clone()), false);
 
             let member = register_conn(&state, Some(member_pk));
             let non_member = register_conn(&state, Some(non_member_pk));
@@ -3342,10 +3371,10 @@ mod tests {
             let non_member_pk = vec![2u8; 32];
             state
                 .membership_cache
-                .insert((community_id, channel_id, member_pk.clone()), true);
+                .seed_member((community_id, channel_id, member_pk.clone()), true);
             state
                 .membership_cache
-                .insert((community_id, channel_id, non_member_pk.clone()), false);
+                .seed_member((community_id, channel_id, non_member_pk.clone()), false);
 
             let threaded = crate::state::ThreadedChannelVisibility {
                 community_id,
@@ -3437,7 +3466,7 @@ mod tests {
             private(known);
             state
                 .membership_cache
-                .insert((community_id, known, pk.clone()), true);
+                .seed_member((community_id, known, pk.clone()), true);
             let conn = sync_on(known);
             super::super::fan_out_event_to_local_subscribers(
                 &state,
@@ -3462,6 +3491,8 @@ mod tests {
                 "visibility lookup"
             );
 
+            // Drop the known user's whole snapshot so this must read the DB.
+            state.membership_cache.invalidate(community_id, &pk);
             // The membership lookup fails (Redis fan-out).
             let channel_id = Uuid::new_v4();
             private(channel_id);
@@ -3472,6 +3503,7 @@ mod tests {
                     community_id,
                     topic: buzz_pubsub::EventTopic::Channel(channel_id),
                     event: artifact(channel_id).event,
+                    received_at: tokio::time::Instant::now(),
                 },
             )
             .await;
@@ -3955,15 +3987,15 @@ mod tests {
             assert_eq!(
                 state
                     .community_active
-                    .entry(tenant.community())
+                    .entry(&tenant.community())
                     .map(|(active, _)| active),
                 Some(true)
             );
             assert_eq!(
                 state
                     .restriction_cache
-                    .get(&(tenant.community(), user.public_key().to_bytes().to_vec()))
-                    .map(|cached| cached.state),
+                    .entry(&(tenant.community(), user.public_key().to_bytes().to_vec()))
+                    .map(|(state, _)| state),
                 Some(buzz_db::moderation::RestrictionState::default())
             );
         }
@@ -3975,12 +4007,15 @@ mod tests {
         }
 
         /// Stored writes read the restriction through the cache, and only
-        /// while the entry is younger than `RESTRICTION_CACHE_MAX_AGE`: a
-        /// fresh cached ban on a sender Postgres has never restricted refuses
-        /// a stored write, and the same row past that age is reread and
-        /// admits it.
-        /// Mutation: make ingest read the restriction uncached, or drop the
-        /// max-age check from `restriction_state_cached` → RED.
+        /// while the entry is younger than 10 s: a cached ban on a sender
+        /// Postgres has never restricted refuses a stored write while fresh
+        /// and 9 s old, and the same row 10 s old is reread and admits it.
+        /// The ages are literals, so the bound a pod that misses an
+        /// invalidation serves stale rows for is pinned independently of
+        /// `RESTRICTION_CACHE_MAX_AGE`.
+        /// Mutation: make ingest read the restriction uncached, drop the
+        /// max-age check, or raise `RESTRICTION_CACHE_MAX_AGE` above 10 s
+        /// → RED.
         #[tokio::test]
         #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
         async fn stored_writes_honor_cached_ban_until_it_ages_out() {
@@ -4001,15 +4036,22 @@ mod tests {
                 "a fresh cached ban must refuse a stored write; got {frame}"
             );
 
-            state.restriction_cache.insert(
-                key,
-                crate::state::CachedRestriction {
-                    state: banned,
-                    read_at: std::time::Instant::now()
-                        .checked_sub(crate::state::RESTRICTION_CACHE_MAX_AGE)
-                        .expect("instant past max age"),
-                },
+            let aged = |secs| {
+                std::time::Instant::now()
+                    .checked_sub(std::time::Duration::from_secs(secs))
+                    .expect("instant in the past")
+            };
+            state
+                .restriction_cache
+                .seed_read_at(key.clone(), banned.clone(), aged(9));
+            let frame =
+                ok_frame_scoped(&state, &tenant, &user, text_note(&user), scopes.clone()).await;
+            assert!(
+                frame.contains("blocked: you are banned"),
+                "a 9 s old cached ban must still refuse a stored write; got {frame}"
             );
+
+            state.restriction_cache.seed_read_at(key, banned, aged(10));
             let frame = ok_frame_scoped(&state, &tenant, &user, text_note(&user), scopes).await;
             assert!(
                 frame.contains(",true,"),
