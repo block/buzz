@@ -447,13 +447,16 @@ void main() {
         container = createContainer();
         await container.read(communityListProvider.future);
         final notifier = container.read(communityListProvider.notifier);
+        final keys = nostr.Keys('1'.padLeft(64, '0'));
         final hosted = Community.create(
           name: 'Team',
           relayUrl: 'wss://Team.communities.buzz.xyz/',
+          nsec: keys.nsec,
         );
         final other = Community.create(
           name: 'Other',
           relayUrl: 'wss://relay.example.com',
+          nsec: keys.nsec,
         );
         await notifier.addCommunity(hosted);
         await notifier.addCommunity(other);
@@ -464,7 +467,11 @@ void main() {
 
         // Only destinations the account session can enter are uploaded.
         expect(await store.pending(), [
-          (url: 'wss://team.communities.buzz.xyz', removed: true),
+          (
+            url: 'wss://team.communities.buzz.xyz',
+            removed: true,
+            pubkey: keys.public,
+          ),
         ]);
       },
     );

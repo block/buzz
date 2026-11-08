@@ -7,8 +7,12 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../storage/serial_queue.dart';
 import 'hosted_environment.dart';
 
-/// One queued upload to the account's known-communities list.
-typedef KnownCommunityIntent = ({String url, bool removed});
+/// One queued upload to the account's known-communities list, by the key the
+/// membership was joined or left with: only that key's account sends it.
+typedef KnownCommunityIntent = ({String url, bool removed, String pubkey});
+
+/// A saved community: its relay URL and the public key it was joined with.
+typedef KnownCommunityMembership = ({String relayUrl, String? pubkey});
 
 /// The account service's spelling of a saved destination this build's account
 /// session can enter, `wss://host`; null for any other relay.
@@ -24,7 +28,8 @@ String? knownCommunityAddress(String relayUrl) {
 /// subject. So a membership another device removed is not uploaded again, and
 /// removals made elsewhere are not followed. The outbox holds the latest
 /// intent per destination and survives sign-out and account changes. Not
-/// secret: destinations only, never keys or credentials.
+/// secret: destinations and public keys only, never private keys or
+/// credentials.
 class KnownCommunitiesStore extends ChangeNotifier {
   KnownCommunitiesStore({Future<SharedPreferences> Function()? preferences})
     : _preferences = preferences ?? SharedPreferences.getInstance;
@@ -34,24 +39,25 @@ class KnownCommunitiesStore extends ChangeNotifier {
   final _queue = SerialQueue();
   String? _subject;
   Set<String> _known = {};
-  Map<String, bool> _outbox = {};
+  // Insertion-ordered, oldest first.
+  Map<String, ({bool removed, String pubkey})> _outbox = {};
   bool _loaded = false;
 
   /// Pending intents, oldest first.
   Future<List<KnownCommunityIntent>> pending() => _serial(
     () async => [
-      for (final entry in _outbox.entries)
-        (url: entry.key, removed: entry.value),
+      for (final MapEntry(:key, :value) in _outbox.entries)
+        (url: key, removed: value.removed, pubkey: value.pubkey),
     ],
   );
 
   /// Leaving always queues a removal, in case another device saved it.
-  Future<void> left(String relayUrl) async {
+  Future<void> left(String relayUrl, String? pubkey) async {
     final url = knownCommunityAddress(relayUrl);
-    if (url == null) return;
+    if (url == null || pubkey == null) return;
     await _serial(() async {
       _outbox.remove(url);
-      _outbox[url] = true;
+      _outbox[url] = (removed: true, pubkey: pubkey.toLowerCase());
       await _save();
     });
     notifyListeners();
@@ -68,25 +74,29 @@ class KnownCommunitiesStore extends ChangeNotifier {
     return _save();
   });
 
-  /// Queues an add for each saved membership the account is not known to hold
-  /// and replaces a pending removal of one joined again. [saved] is read inside
-  /// the queue, so a removal queued after its leave is never undone by an older
-  /// read of the saved list.
+  /// Queues an add for each membership joined with [pubkey], the signed-in
+  /// account's key, that the account is not known to hold, and replaces a
+  /// pending removal of one joined again. [saved] is read inside the queue,
+  /// so a removal queued after its leave is never undone by an older read of
+  /// the saved list.
   Future<void> joined(
     String subject,
-    Future<Iterable<String>> Function() saved,
+    String pubkey,
+    Future<Iterable<KnownCommunityMembership>> Function() saved,
   ) => _serial(() async {
     if (_subject != subject) return;
+    final key = pubkey.toLowerCase();
     var changed = false;
-    for (final relay in await saved()) {
-      final url = knownCommunityAddress(relay);
-      if (url == null) continue;
+    for (final membership in await saved()) {
+      final url = knownCommunityAddress(membership.relayUrl);
+      if (url == null || membership.pubkey?.toLowerCase() != key) continue;
       final pending = _outbox[url];
-      if (pending == false || (pending == null && _known.contains(url))) {
+      if ((pending != null && !pending.removed) ||
+          (pending == null && _known.contains(url))) {
         continue;
       }
       _outbox.remove(url);
-      _outbox[url] = false;
+      _outbox[url] = (removed: false, pubkey: key);
       changed = true;
     }
     if (changed) await _save();
@@ -102,7 +112,10 @@ class KnownCommunitiesStore extends ChangeNotifier {
             _known.add(intent.url);
           }
         }
-        if (_outbox[intent.url] == intent.removed) _outbox.remove(intent.url);
+        if (_outbox[intent.url] ==
+            (removed: intent.removed, pubkey: intent.pubkey)) {
+          _outbox.remove(intent.url);
+        }
         return _save();
       });
 
@@ -123,10 +136,17 @@ class KnownCommunitiesStore extends ChangeNotifier {
           if (url is String && knownCommunityAddress(url) == url) url,
       };
       _outbox = {
-        for (final entry in (value['outbox'] as Map<String, dynamic>).entries)
-          if (entry.value is bool &&
-              knownCommunityAddress(entry.key) == entry.key)
-            entry.key: entry.value as bool,
+        for (final MapEntry(:key, :value)
+            in (value['outbox'] as Map<String, dynamic>).entries)
+          // A malformed entry is dropped on its own.
+          if (knownCommunityAddress(key) == key &&
+              value is Map &&
+              value['removed'] is bool &&
+              value['pubkey'] is String)
+            key: (
+              removed: value['removed'] as bool,
+              pubkey: value['pubkey'] as String,
+            ),
       };
     } catch (_) {
       // A record this reader cannot understand reads as empty.
@@ -142,7 +162,10 @@ class KnownCommunitiesStore extends ChangeNotifier {
       jsonEncode({
         'subject': _subject,
         'known': _known.toList(),
-        'outbox': _outbox,
+        'outbox': {
+          for (final MapEntry(:key, :value) in _outbox.entries)
+            key: {'removed': value.removed, 'pubkey': value.pubkey},
+        },
       }),
     );
   }

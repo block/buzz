@@ -6,8 +6,10 @@ import 'package:flutter/widgets.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../auth/auth_provider.dart';
+import '../community/community.dart';
 import '../community/community_provider.dart';
 import '../deeplink/deep_link.dart';
+import '../relay/relay_provider.dart' show pubkeyFromNsec;
 import 'account_identity_store.dart';
 import 'builderlab_account.dart';
 import 'hosted_admission.dart';
@@ -18,20 +20,23 @@ import 'hosted_relay_auth.dart';
 import 'known_communities_store.dart';
 
 /// Keeps this device's communities in step with the Builderlab account's
-/// known-communities list, the rule desktop follows. While signed in, each
-/// span (sign-in, restored session, or the app returning to the foreground)
-/// merges the complete list: a listed community that is not saved here and has
-/// no pending intent is joined silently, without activating it, and one that
-/// cannot be joined now waits for the next span. Then each destination's latest
-/// join or leave is sent one at a time. A failure to reach the service retries
-/// at 1·2·4… s, capped at a minute; a refused upload is skipped until it is
+/// known-communities list, the rule desktop follows. Each signed-in span (a
+/// sign-in, a restored session, or a return to the foreground at least
+/// [relistAfter] after the last complete list) merges the complete list: a
+/// listed community that is not saved here and has no pending intent is
+/// joined silently, without activating it, and one that cannot be joined now
+/// waits for the next span. Then each destination's latest join or leave made
+/// with the account's own key is sent one at a time; memberships of other
+/// keys are never the account's. A failure to reach the service retries at
+/// 1·2·4… s, capped at a minute; a refused upload is skipped until it is
 /// replaced or the next span; a refused account or an unreadable list stops
-/// sync until the next span. Signing out abandons in-flight work and keeps the
-/// outbox.
+/// sync until the next span. Signing out abandons in-flight work and keeps
+/// the outbox.
 class KnownCommunitiesSync {
   KnownCommunitiesSync({
     required this.subject,
     required this.store,
+    required this.identity,
     required this.list,
     required this.upload,
     required this.saved,
@@ -42,18 +47,23 @@ class KnownCommunitiesSync {
     _onSubject();
   }
 
+  /// A return to the foreground sooner than this only sends the outbox.
+  static const relistAfter = Duration(minutes: 15);
+
   /// The signed-in account subject, null while signed out.
   final ValueListenable<String?> subject;
   final KnownCommunitiesStore store;
+
+  /// The public key of [subject]'s identity on this device, if it has one.
+  final Future<String?> Function(String subject) identity;
   final Future<List<AddCommunityDeepLink>> Function() list;
   final Future<void> Function(String subject, KnownCommunityIntent intent)
   upload;
-
-  /// Relay URLs of every saved community.
-  final Future<Iterable<String>> Function() saved;
+  final Future<Iterable<KnownCommunityMembership>> Function() saved;
   final Future<void> Function(
     AddCommunityDeepLink community,
     String subject,
+    String pubkey,
     bool Function() isCurrent,
   )
   join;
@@ -67,12 +77,19 @@ class KnownCommunitiesSync {
   bool _disposed = false;
   int _failures = 0;
   Timer? _timer;
+  // Running while the last complete list is recent enough to reuse.
+  Timer? _fresh;
   final _parked = <KnownCommunityIntent>{};
 
-  /// Starts a new span: the list is read again and refused work retried.
-  void refresh() {
+  /// A return to the foreground: a new span once the list is stale, otherwise
+  /// only the outbox is sent.
+  void resumed() {
     if (_disposed || _spanSubject == null) return;
-    _startSpan(_spanSubject);
+    if (_fresh?.isActive ?? false) {
+      kick();
+    } else {
+      _startSpan(_spanSubject);
+    }
   }
 
   /// Runs now, or again once the run in flight settles.
@@ -91,6 +108,7 @@ class KnownCommunitiesSync {
     _disposed = true;
     _span++;
     _timer?.cancel();
+    _fresh?.cancel();
     subject.removeListener(_onSubject);
     store.removeListener(kick);
   }
@@ -104,6 +122,7 @@ class KnownCommunitiesSync {
     _spanSubject = signedIn;
     _listed = false;
     _halted = false;
+    _fresh?.cancel();
     _parked.clear();
     kick();
   }
@@ -116,34 +135,43 @@ class KnownCommunitiesSync {
     _running = true;
     _rerun = false;
     try {
+      final pubkey = (await identity(account))?.toLowerCase();
+      if (!current()) return;
       if (!_listed) {
         final communities = await list();
         if (!current()) return;
         await store.listed(account, communities.map((item) => item.relayUrl));
         final pending = {for (final op in await store.pending()) op.url};
         final here = {
-          for (final relay in await saved()) ?knownCommunityAddress(relay),
+          for (final membership in await saved())
+            ?knownCommunityAddress(membership.relayUrl),
         };
         for (final community in communities) {
           if (!current()) return;
+          // Joining needs this device to hold the account's identity.
+          if (pubkey == null) break;
           if (here.contains(community.relayUrl) ||
               pending.contains(community.relayUrl)) {
             continue;
           }
           try {
-            await join(community, account, current);
+            await join(community, account, pubkey, current);
           } catch (error) {
             debugPrint('Known community join skipped until next sync: $error');
           }
         }
         if (!current()) return;
         _listed = true;
+        _fresh = Timer(relistAfter, () {});
       }
-      await store.joined(account, saved);
+      if (pubkey == null) return;
+      await store.joined(account, pubkey, saved);
       for (;;) {
         if (!current()) return;
         final op = (await store.pending())
-            .where((entry) => !_parked.contains(entry))
+            .where(
+              (entry) => entry.pubkey == pubkey && !_parked.contains(entry),
+            )
             .firstOrNull;
         if (op == null) break;
         try {
@@ -185,7 +213,15 @@ class KnownCommunitiesSync {
 }
 
 /// Runs [KnownCommunitiesSync] in a public build while it is watched.
-final knownCommunitiesSyncProvider = Provider.autoDispose<void>((ref) {
+final knownCommunitiesSyncProvider = Provider.autoDispose<void>(
+  createKnownCommunitiesSync,
+);
+
+/// The production wiring, with an injectable relay probe for tests.
+void createKnownCommunitiesSync(
+  Ref ref, {
+  Future<void> Function(Community)? probe,
+}) {
   if (!HostedEnvironment.enabled) return;
   final account = ref.read(builderlabAccountProvider);
   final identities = AccountIdentityStore();
@@ -193,11 +229,14 @@ final knownCommunitiesSyncProvider = Provider.autoDispose<void>((ref) {
     relayAuth: ref.read(hostedRelayAuthProvider),
     account: account,
     store: identities,
+    probe: probe,
   );
   final storage = ref.read(communityStorageProvider);
   final sync = KnownCommunitiesSync(
     subject: account.subjectChanges,
     store: ref.read(knownCommunitiesStoreProvider),
+    identity: (subject) async =>
+        (await identities.forSubject(subject).read())?.pubkey,
     list: () => loadKnownHostedCommunities(account),
     upload: (subject, op) async {
       final result = await account.post(
@@ -208,34 +247,33 @@ final knownCommunitiesSyncProvider = Provider.autoDispose<void>((ref) {
       if (result['error'] != null) throw AccountFailure.rejected;
     },
     saved: () async => [
-      for (final item in await storage.loadAll()) item.relayUrl,
+      for (final item in await storage.loadAll())
+        (
+          relayUrl: item.relayUrl,
+          pubkey: pubkeyFromNsec(item.nsec?.trim()) ?? item.pubkey,
+        ),
     ],
-    join: (community, subject, isCurrent) async {
-      final identity = await identities.forSubject(subject).read();
-      // Setting up an identity here needs the person; leave it to entry.
-      if (identity == null || !isCurrent()) return;
-      await connectHostedCommunity(
-        link: community,
-        subject: subject,
-        pubkey: identity.pubkey,
-        isCurrent: isCurrent,
-        storage: storage,
-        admission: admission,
-        // Saved without switching to it: the merge is silent.
-        persist: (saved, current) => ref
-            .read(authProvider.notifier)
-            .authenticateWithCommunity(
-              saved,
-              shouldContinue: current,
-              activate: false,
-            ),
-        recoverStarterChannels: (_, _) async {},
-      );
-    },
+    join: (community, subject, pubkey, isCurrent) => connectHostedCommunity(
+      link: community,
+      subject: subject,
+      pubkey: pubkey,
+      isCurrent: isCurrent,
+      storage: storage,
+      admission: admission,
+      // Saved without switching to it: the merge is silent.
+      persist: (saved, current) => ref
+          .read(authProvider.notifier)
+          .authenticateWithCommunity(
+            saved,
+            shouldContinue: current,
+            activate: false,
+          ),
+      recoverStarterChannels: (_, _) async {},
+    ),
   );
   // A join or a leave reaches the store or the saved list.
   ref.listen(communityListProvider, (_, _) => sync.kick());
-  final lifecycle = AppLifecycleListener(onResume: sync.refresh);
+  final lifecycle = AppLifecycleListener(onResume: sync.resumed);
   // A saved session is otherwise restored only when a relay first needs it.
   if (account.account == null) {
     unawaited(account.restore().catchError((_) => null));
@@ -245,4 +283,4 @@ final knownCommunitiesSyncProvider = Provider.autoDispose<void>((ref) {
     sync.dispose();
     admission.dispose();
   });
-});
+}

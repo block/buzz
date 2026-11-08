@@ -344,7 +344,10 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
         try {
           await ref
               .read(knownCommunitiesStoreProvider)
-              .left(current[removedIndex].relayUrl);
+              .left(
+                current[removedIndex].relayUrl,
+                _channelSnapshotPubkey(current[removedIndex]),
+              );
         } catch (error) {
           developer.log('Known community leave not saved: $error');
         }

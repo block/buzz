@@ -93,6 +93,48 @@ void main() {
     },
   );
 
+  test('concurrent joins of one relay with one key save one record', () async {
+    final storage = CommunityStorage(secure: FakeSecureStorage());
+    final keys = nostr.Keys('1'.padLeft(64, '0'));
+    final other = nostr.Keys('2'.padLeft(64, '0'));
+    final container = ProviderContainer(
+      overrides: [communityStorageProvider.overrideWithValue(storage)],
+    );
+    addTearDown(container.dispose);
+    await container.read(authProvider.future);
+    final auth = container.read(authProvider.notifier);
+    final first = Community.create(
+      name: 'Team',
+      relayUrl: 'wss://team.example',
+      pubkey: keys.public,
+      nsec: keys.nsec,
+    );
+    // Built independently, as an invite and the account sync each do.
+    final second = Community.create(
+      name: 'Team',
+      relayUrl: 'wss://team.example:443',
+      pubkey: keys.public,
+      nsec: keys.nsec,
+    ).copyWith(starterSetupIncomplete: true);
+    final otherKey = Community.create(
+      name: 'Team',
+      relayUrl: 'wss://team.example',
+      nsec: other.nsec,
+    );
+
+    await Future.wait([
+      auth.authenticateWithCommunity(first),
+      auth.authenticateWithCommunity(second),
+    ]);
+    await auth.authenticateWithCommunity(otherKey, activate: false);
+
+    final saved = await storage.loadAll();
+    expect(saved.map((item) => item.id), [first.id, otherKey.id]);
+    expect(saved.first.starterSetupIncomplete, isTrue);
+    expect(await storage.loadActiveId(), first.id);
+    expect(container.read(authProvider).value?.community?.id, first.id);
+  });
+
   test('waits for transition teardown before removing credentials', () async {
     final storage = CommunityStorage(secure: FakeSecureStorage());
     final community = Community.create(

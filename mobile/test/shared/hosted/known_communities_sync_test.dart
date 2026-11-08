@@ -10,24 +10,24 @@ import 'package:shared_preferences/shared_preferences.dart';
 // Builds without Builderlab settings recognize the public communities domain.
 String relay(String name) => 'wss://$name.communities.buzz.xyz';
 
-/// The account service and this device, faked at their network and storage
-/// boundaries; the store and the sync are the production ones.
-class _World {
-  _World() {
-    store = KnownCommunitiesStore();
-  }
+final _keys = {'alice': 'aa' * 32, 'bob': 'bb' * 32};
 
+/// The account service, this device's identities and its saved communities,
+/// faked at their boundaries; the store and the sync are the production ones.
+class _World {
   final subject = ValueNotifier<String?>(null);
-  late KnownCommunitiesStore store;
+  final store = KnownCommunitiesStore();
   KnownCommunitiesSync? sync;
   final server = <String, Set<String>>{};
-  final local = <String>[];
+  // Saved communities: relay URL to the key it was joined with.
+  final local = <String, String>{};
   final joins = <String>[];
   final uploads = <String>[];
   final refuseJoin = <String>{};
   // Failures the next uploads answer with, in order.
   final failures = <AccountFailure>[];
   AccountFailure? listFailure;
+  int lists = 0;
 
   Set<String> get account => server.putIfAbsent(subject.value!, () => {});
 
@@ -35,7 +35,9 @@ class _World {
     sync = KnownCommunitiesSync(
       subject: subject,
       store: store,
+      identity: (who) async => _keys[who],
       list: () async {
+        lists++;
         if (listFailure != null) throw listFailure!;
         return [
           for (final url in account)
@@ -48,20 +50,23 @@ class _World {
         final set = server.putIfAbsent(who, () => {});
         op.removed ? set.remove(op.url) : set.add(op.url);
       },
-      saved: () async => List.of(local),
-      join: (community, who, isCurrent) async {
+      saved: () async => [
+        for (final MapEntry(:key, :value) in local.entries)
+          (relayUrl: key, pubkey: value),
+      ],
+      join: (community, who, pubkey, isCurrent) async {
         if (refuseJoin.contains(community.relayUrl)) {
           throw AccountFailure.denied;
         }
         joins.add(community.relayUrl);
-        local.add(community.relayUrl);
+        local[community.relayUrl] = pubkey;
       },
     );
   }
 
   Future<void> leave(String url) async {
-    local.remove(url);
-    await store.left(url);
+    final key = local.remove(url);
+    await store.left(url, key);
   }
 }
 
@@ -72,11 +77,13 @@ void main() {
     fakeAsync((async) {
       final w = _World()..start();
       w.server['alice'] = {relay('desk'), relay('both')};
-      w.local.addAll([
-        relay('both'),
-        relay('phone'),
-        'wss://relay.example.com',
-      ]);
+      w.local.addAll({
+        relay('both'): _keys['alice']!,
+        relay('phone'): _keys['alice']!,
+        'wss://relay.example.com': _keys['alice']!,
+        // Joined with another key: never alice's membership.
+        relay('stranger'): 'cc' * 32,
+      });
 
       // Signing in joins what desktop saved and uploads what only this phone
       // holds; a relay this build's account cannot enter is left alone.
@@ -99,46 +106,65 @@ void main() {
       ]);
       w.leave(relay('both'));
       async.flushMicrotasks();
-      expect(w.uploads.where((u) => u == '-${relay('both')}'), hasLength(1));
+      int removals() => w.uploads.where((u) => u == '-${relay('both')}').length;
+      expect(removals(), 1);
       async.elapse(const Duration(milliseconds: 999));
-      expect(w.uploads.where((u) => u == '-${relay('both')}'), hasLength(1));
+      expect(removals(), 1);
       async.elapse(const Duration(milliseconds: 1));
-      expect(w.uploads.where((u) => u == '-${relay('both')}'), hasLength(2));
+      expect(removals(), 2);
       async.elapse(const Duration(seconds: 2));
-      expect(w.uploads.where((u) => u == '-${relay('both')}'), hasLength(3));
+      expect(removals(), 3);
       expect(w.server['alice'], {relay('desk')});
 
-      // Another device removes `desk`. The phone keeps it and, because the
-      // account once held it, does not upload it again on the next span.
+      // A quick return to the foreground only sends the outbox; the list is
+      // read again once it is 15 minutes old.
       w.server['alice']!.remove(relay('desk'));
-      final before = w.uploads.length;
-      w.sync!.refresh();
+      w.server['alice']!.add(relay('later'));
+      w.sync!.resumed();
       async.flushMicrotasks();
-      expect(w.local, contains(relay('desk')));
+      expect(w.lists, 1);
+      expect(w.local.keys, isNot(contains(relay('later'))));
+      async.elapse(KnownCommunitiesSync.relistAfter);
+      final before = w.uploads.length;
+      w.sync!.resumed();
+      async.flushMicrotasks();
+      expect(w.lists, 2);
+      expect(w.joins.last, relay('later'));
+      // Another device removed `desk`. The phone keeps it and, because the
+      // account once held it, does not upload it again.
+      expect(w.local.keys, contains(relay('desk')));
       expect(w.uploads, hasLength(before));
 
       // A refused upload is skipped, not retried, until the next span.
       w.failures.add(AccountFailure.rejected);
-      w.local.add(relay('new'));
+      w.local[relay('new')] = _keys['alice']!;
       w.sync!.kick();
       async.flushMicrotasks();
       expect(w.uploads.last, '+${relay('new')}');
       final refused = w.uploads.length;
       w.sync!.kick();
-      async.elapse(const Duration(minutes: 2));
+      async.elapse(KnownCommunitiesSync.relistAfter);
       expect(w.uploads, hasLength(refused));
-      w.sync!.refresh();
+      w.sync!.resumed();
       async.flushMicrotasks();
       expect(w.uploads, hasLength(refused + 1));
       expect(w.server['alice'], contains(relay('new')));
 
-      // A different account knows nothing yet, so every membership goes up,
-      // and nothing of alice's list is joined.
+      // Another account on this phone never inherits alice's memberships,
+      // and alice's list is not joined with bob's key.
       w.joins.clear();
+      w.subject.value = null;
+      async.flushMicrotasks();
+      w.leave(relay('new'));
       w.subject.value = 'bob';
       async.flushMicrotasks();
       expect(w.joins, isEmpty);
-      expect(w.server['bob'], {relay('desk'), relay('new')});
+      expect(w.server['bob'] ?? {}, isEmpty);
+      expect(w.server['alice'], contains(relay('new')));
+      // Alice's leave waits for alice.
+      w.subject.value = 'alice';
+      async.flushMicrotasks();
+      expect(w.server['alice'], isNot(contains(relay('new'))));
       w.sync!.dispose();
     });
   });
@@ -147,7 +173,7 @@ void main() {
     fakeAsync((async) {
       final first = _World()..start();
       first.server['alice'] = {relay('team')};
-      first.local.add(relay('team'));
+      first.local[relay('team')] = _keys['alice']!;
       first.leave(relay('team'));
       async.flushMicrotasks();
       expect(first.uploads, isEmpty);
@@ -178,9 +204,10 @@ void main() {
       expect(w.uploads, isEmpty);
 
       w.listFailure = AccountFailure.rejected;
-      w.sync!.refresh();
+      async.elapse(KnownCommunitiesSync.relistAfter);
+      w.sync!.resumed();
       async.flushMicrotasks();
-      w.local.add(relay('later'));
+      w.local[relay('later')] = _keys['alice']!;
       w.sync!.kick();
       async.elapse(const Duration(minutes: 2));
       expect(w.uploads, isEmpty);

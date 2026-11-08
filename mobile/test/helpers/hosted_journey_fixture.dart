@@ -20,6 +20,7 @@ import 'package:buzz/shared/hosted/browser_auth.dart';
 import 'package:buzz/shared/hosted/builderlab_account.dart';
 import 'package:buzz/shared/hosted/hosted_flow.dart';
 import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
+import 'package:buzz/shared/hosted/known_communities_sync.dart';
 import 'package:buzz/shared/hosted/organization_sign_in.dart';
 import 'package:buzz/shared/relay/relay_provider.dart';
 import 'package:buzz/shared/relay/relay_session.dart';
@@ -100,6 +101,10 @@ class HostedJourneyFixture {
   bool rejectList = false;
   int saveFailures = 0;
   final knownSaved = <String>{};
+  final removedKnown = <String>[];
+
+  /// An `error` the account list's remove route answers with, with 200.
+  String? removeError;
   bool missingList = false;
   bool loseCreateResponse = false;
   bool loseClaimResponse = false;
@@ -304,6 +309,9 @@ class HostedJourneyFixture {
       result = {
         'community': {'community_url': url},
       };
+    } else if (path.endsWith('/known-communities/remove')) {
+      removedKnown.add(jsonDecode(request.body)['community_url'] as String);
+      result = {'error': ?removeError};
     } else if (path.endsWith('/communities/joined')) {
       if (rejectList) return http.Response('{}', 503);
       if (missingList) return http.Response('{}', 404);
@@ -439,6 +447,12 @@ class HostedJourneyFixture {
         disableAnimations: true,
         overrides: [
           hostedFlowProvider.overrideWith(createFlow),
+          knownCommunitiesSyncProvider.overrideWith(
+            (ref) => createKnownCommunitiesSync(
+              ref,
+              probe: (community) async => probes.add(community),
+            ),
+          ),
           if (pairingValidator != null || pairingSocketFactory != null)
             pairingProvider.overrideWith(
               () => PairingNotifier(
