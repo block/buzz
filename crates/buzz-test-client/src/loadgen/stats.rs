@@ -21,6 +21,8 @@ pub enum Op {
     Subscribe,
     HotReply,
     ThreadFetch,
+    /// Agent turn: an HTTP `/query` context read at the start of a turn.
+    TurnContext,
     /// Desktop client: NIP-11 `GET /` on connect.
     DesktopNip11,
     /// Desktop client: EOSE of a live subscription (global or channel batch).
@@ -46,7 +48,7 @@ pub enum Op {
 }
 
 impl Op {
-    pub const ALL: [Op; 28] = [
+    pub const ALL: [Op; 29] = [
         Op::WsConnect,
         Op::History,
         Op::PublishEphemeral,
@@ -58,6 +60,7 @@ impl Op {
         Op::Subscribe,
         Op::HotReply,
         Op::ThreadFetch,
+        Op::TurnContext,
         Op::DesktopNip11,
         Op::DesktopLive,
         Op::DesktopReplay,
@@ -90,6 +93,7 @@ impl Op {
             Op::Subscribe => "subscribe_eose",
             Op::HotReply => "hot_reply",
             Op::ThreadFetch => "thread_fetch",
+            Op::TurnContext => "turn_context",
             Op::DesktopNip11 => "desktop_nip11",
             Op::DesktopLive => "desktop_live_eose",
             Op::DesktopReplay => "desktop_replay_eose",
@@ -312,7 +316,7 @@ const QUOTA_EXCEEDED: &str = "rate-limited: quota exceeded";
 /// Quota rejections only: an HTTP 429 status or the relay's quota text. Other
 /// `rate-limited:` rejections, such as `shared admission unavailable` when the
 /// relay's admission store is down, are relay failures and count as errors.
-fn is_throttle(reason: &str) -> bool {
+pub(super) fn is_throttle(reason: &str) -> bool {
     reason.starts_with(HTTP_TOO_MANY_REQUESTS) || reason.contains(QUOTA_EXCEEDED)
 }
 

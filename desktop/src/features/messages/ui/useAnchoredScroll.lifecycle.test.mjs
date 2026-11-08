@@ -918,7 +918,7 @@ const RELEASES = [
   [
     "own send",
     async ({ fake, render, state }) => {
-      state().scrollToBottomOnNextUpdate();
+      state().scrollToBottomOnNextUpdate("conversation");
       fake.messages = [...fake.messages, { createdAt: 600, id: "sent" }];
       await render({});
     },
@@ -1085,3 +1085,200 @@ test("reader input at the floor resumes following live messages", async () => {
   assert.deepEqual(held.settles, ["settle"]);
   await act(async () => held.root.unmount());
 });
+
+// A failed send may add no row, so its cancel must drop the one-shot and the
+// pending send. The next tail is then someone else's arrival and must not pull
+// a reader who left the floor, while a later send still pins.
+test("a cancelled own send leaves the next tail with the reader", async () => {
+  globalThis.ResizeObserver = class {
+    disconnect() {}
+    observe() {}
+  };
+  const scroller = document.createElement("div");
+  scroller.querySelector = () => null;
+  const settles = [];
+  const fake = {
+    content: { current: null },
+    messages: [{ createdAt: 500, id: "latest" }],
+    scrollToBottom: () => settles.push("jump"),
+    scrollToMessage: () => true,
+    scroller: { current: scroller },
+    settleAtBottom: () => settles.push("settle"),
+  };
+  let state = null;
+  const root = createRoot(document.createElement("div"));
+  const render = () =>
+    act(async () =>
+      root.render(
+        React.createElement(TargetHoldHarness, {
+          fake,
+          onState: (next) => {
+            state = next;
+          },
+        }),
+      ),
+    );
+  await render();
+  // Let the mount's settling frame run, or its pin lands after the clear.
+  await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+  await act(async () => state.onVirtualizerAtBottomStateChange(true));
+  settles.length = 0; // the mount's own bottom pins
+
+  state.scrollToBottomOnNextUpdate("conversation");
+  assert.equal(state.isOwnSendPending(), true);
+  state.cancelScrollToBottomOnNextUpdate();
+  assert.equal(state.isOwnSendPending(), false);
+
+  await act(async () => state.onVirtualizerAtBottomStateChange(false));
+  fake.messages = [...fake.messages, { createdAt: 600, id: "live" }];
+  await render();
+  assert.deepEqual(settles, [], "the arrival does not move the reader");
+  assert.equal(state.isAtBottom, false);
+
+  state.scrollToBottomOnNextUpdate("conversation");
+  fake.messages = [...fake.messages, { createdAt: 700, id: "sent" }];
+  await render();
+  assert.deepEqual(settles, ["jump"], "a later send still pins");
+  assert.equal(state.isOwnSendPending(), false);
+  await act(async () => root.unmount());
+});
+
+// MessageTimeline's cancel of a failed send freezes the tail only when both
+// gates read through: the send is still pending (its row never landed, so the
+// hold may have skipped a freeze), and the virtualizer last reported the reader
+// off the floor. An arm for a channel this hook doesn't show is refused, as a
+// send that settles after a channel switch would make one.
+const OWN_SEND_STEPS = {
+  "send here": ({ armed, state }) =>
+    armed.push(state().scrollToBottomOnNextUpdate("conversation")),
+  "send to other": ({ armed, state }) =>
+    armed.push(state().scrollToBottomOnNextUpdate("other")),
+  "row as tail": ({ fake, render }) => {
+    fake.messages = [...fake.messages, { createdAt: 600, id: "sent" }];
+    return render();
+  },
+  "row above tail": ({ fake, render }) => {
+    const [first, ...rest] = fake.messages;
+    fake.messages = [first, { createdAt: 400, id: "sent" }, ...rest];
+    return render();
+  },
+  "channel change": ({ render }) => render({ channelId: "other" }),
+  floor: ({ state }) =>
+    act(async () => state().onVirtualizerAtBottomStateChange(true)),
+  "off floor": ({ state }) =>
+    act(async () => state().onVirtualizerAtBottomStateChange(false)),
+};
+
+const OWN_SEND_GATES = [
+  ["nothing sent", [], { armed: [], atBottom: true, pending: false }],
+  [
+    "a send whose row has not landed",
+    ["send here"],
+    { armed: [true], atBottom: true, pending: true },
+  ],
+  [
+    "a send whose row landed as the tail",
+    ["send here", "row as tail"],
+    { armed: [true], atBottom: true, pending: false },
+  ],
+  [
+    "a send whose row landed above the tail",
+    ["send here", "row above tail"],
+    { armed: [true], atBottom: true, pending: false },
+  ],
+  [
+    "a send to another channel",
+    ["send to other"],
+    { armed: [false], atBottom: true, pending: false },
+  ],
+  [
+    "a send, then a channel change",
+    ["send here", "channel change"],
+    { armed: [true], atBottom: true, pending: false },
+  ],
+  [
+    "a channel change, then a send there",
+    ["channel change", "send to other"],
+    { armed: [true], atBottom: true, pending: true },
+  ],
+  [
+    "the reader off the floor",
+    ["floor", "off floor"],
+    { armed: [], atBottom: false, pending: false },
+  ],
+  [
+    "the reader back at the floor",
+    ["floor", "off floor", "floor"],
+    { armed: [], atBottom: true, pending: false },
+  ],
+  [
+    "a channel change off the floor",
+    ["floor", "off floor", "channel change"],
+    { armed: [], atBottom: true, pending: false },
+  ],
+  [
+    "a pending send with the reader off the floor",
+    ["floor", "send here", "off floor"],
+    { armed: [true], atBottom: false, pending: true },
+  ],
+];
+
+for (const [name, steps, expected] of OWN_SEND_GATES) {
+  test(`own-send gates: ${name}`, async () => {
+    globalThis.ResizeObserver = class {
+      disconnect() {}
+      observe() {}
+    };
+    const scroller = document.createElement("div");
+    scroller.querySelector = () => null;
+    const fake = {
+      content: { current: null },
+      messages: [
+        { createdAt: 100, id: "first" },
+        { createdAt: 500, id: "latest" },
+      ],
+      scrollToBottom: () => {},
+      scrollToMessage: () => true,
+      scroller: { current: scroller },
+      settleAtBottom: () => {},
+    };
+    let state = null;
+    let props = {};
+    const root = createRoot(document.createElement("div"));
+    const render = (next = {}) => {
+      props = { ...props, ...next };
+      return act(async () =>
+        root.render(
+          React.createElement(TargetHoldHarness, {
+            fake,
+            onState: (current) => {
+              state = current;
+            },
+            ...props,
+          }),
+        ),
+      );
+    };
+    await render();
+
+    const results = [];
+    for (const step of steps) {
+      await OWN_SEND_STEPS[step]({
+        armed: results,
+        fake,
+        render,
+        state: () => state,
+      });
+    }
+
+    assert.deepEqual(
+      {
+        armed: results,
+        atBottom: state.isVirtualizerAtBottom(),
+        pending: state.isOwnSendPending(),
+      },
+      expected,
+    );
+    await act(async () => root.unmount());
+  });
+}

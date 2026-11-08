@@ -67,18 +67,27 @@ final class NotificationService: UNNotificationServiceExtension {
       Bundle.main.object(forInfoDictionaryKey: "BuzzKeychainAccessGroup") as? String
     return BuzzRelayAssertionIssuer(
       session: URLSession(configuration: .ephemeral),
-      loadSession: { loadOrganizationSession(keychainAccessGroup: keychainAccessGroup) }
+      loadSession: {
+        loadSharedSession(
+          account: BuzzOrganizationSession.keychainAccount,
+          keychainAccessGroup: keychainAccessGroup)
+      },
+      loadHostedSession: {
+        loadSharedSession(
+          account: BuzzOrganizationSession.hostedKeychainAccount,
+          keychainAccessGroup: keychainAccessGroup)
+      }
     )
   }()
 
-  /// The organization account session the app shares for NIP-FI assertion issuance.
-  private static func loadOrganizationSession(
-    keychainAccessGroup: String?
+  /// An account session the app shares for NIP-FI assertion issuance.
+  private static func loadSharedSession(
+    account: String, keychainAccessGroup: String?
   ) -> BuzzOrganizationSession? {
     var query: [String: Any] = [
       kSecClass as String: kSecClassGenericPassword,
       kSecAttrService as String: BuzzOrganizationSession.keychainService,
-      kSecAttrAccount as String: BuzzOrganizationSession.keychainAccount,
+      kSecAttrAccount as String: account,
       kSecReturnData as String: true,
       kSecMatchLimit as String: kSecMatchLimitOne,
     ]

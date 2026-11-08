@@ -293,3 +293,55 @@ VerifiedProfile? parseVerifiedProfile(
     multipleIssuers: authority.multipleIssuers,
   );
 }
+
+/// The verified names besides the display name that the relay's profile
+/// search matches: the full name, when there is one, and the username.
+List<String> verifiedAliases(VerifiedProfile profile) => [
+  ?profile.fullName,
+  profile.username,
+];
+
+/// One person a profile search found: their newest kind:0, or, for someone
+/// with none, their verified profile.
+typedef SearchedPerson = ({
+  String pubkey,
+  NostrEvent? profile,
+  VerifiedProfile? verified,
+});
+
+/// The people a profile search page found, in the relay's order: each
+/// person's newest kind:0, and for a person with none, the head [authority]
+/// signed, when it is an active verified profile. Any other event finds
+/// nobody. Callers must have verified each head's id and signature
+/// ([VerifiedProfilesNotifier.searched] does).
+List<SearchedPerson> searchedPeople(
+  List<NostrEvent> events,
+  VerifiedProfileAuthority? authority,
+) {
+  final order = <String>{};
+  final profiles = <String, NostrEvent>{};
+  final heads = <String, NostrEvent>{};
+  for (final event in events) {
+    if (event.kind == 0) {
+      final pubkey = event.pubkey.toLowerCase();
+      order.add(pubkey);
+      final current = profiles[pubkey];
+      if (current == null || event.createdAt > current.createdAt) {
+        profiles[pubkey] = event;
+      }
+    } else if (authority != null) {
+      final subject = verifiedProfileSubject(event, authority);
+      if (subject == null) continue;
+      order.add(subject);
+      if (supersedes(event, heads[subject])) heads[subject] = event;
+    }
+  }
+  return [
+    for (final pubkey in order)
+      if (profiles[pubkey] case final profile?)
+        (pubkey: pubkey, profile: profile, verified: null)
+      else if (parseVerifiedProfile(heads[pubkey]!, authority!, checked: false)
+          case final verified?)
+        (pubkey: pubkey, profile: null, verified: verified),
+  ];
+}

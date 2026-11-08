@@ -184,12 +184,19 @@ impl Default for HumanProfile {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AgentProfile {
-    /// Mean interval between HTTP `/query` polls.
+    /// Mean interval between HTTP `/query` polls (0 disables polling).
     pub query_interval_secs: f64,
     /// Messages posted through HTTP `/events` per hour.
     pub events_per_hour: f64,
-    /// Encrypted kind:24200 observer frames sent to the owner per hour.
+    /// Encrypted kind:24200 observer frames sent to the owner per hour,
+    /// outside turns.
     pub observer_frames_per_hour: f64,
+    /// Seconds between presence heartbeats (0 sends none).
+    pub presence_interval_secs: f64,
+    /// Open one live REQ per channel for the agent's mentions there, as the
+    /// agent harness does, instead of relying on HTTP polling.
+    pub channel_subscriptions: bool,
+    pub turn: AgentTurn,
 }
 
 impl Default for AgentProfile {
@@ -198,9 +205,51 @@ impl Default for AgentProfile {
             query_interval_secs: 5.0,
             events_per_hour: 60.0,
             observer_frames_per_hour: 60.0,
+            presence_interval_secs: 0.0,
+            channel_subscriptions: false,
+            turn: AgentTurn::default(),
         }
     }
 }
+
+/// Agent turns: bursts of work in one channel, as an agent harness runs a
+/// prompt. A turn starts with context reads and two reactions, streams
+/// typing and observer frames while it runs, makes `reads` tool reads, and
+/// ends with a reply and the reactions' removal. Disabled at 0 `per_hour`.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AgentTurn {
+    /// Turns started per hour while the agent is idle. An agent runs one
+    /// turn at a time.
+    pub per_hour: f64,
+    /// Mean turn length. Each turn lasts 0.5–1.5 times this.
+    pub mean_secs: f64,
+    /// Seconds between observer frames during a turn (0 sends none).
+    pub frame_secs: f64,
+    /// Plaintext size of each observer frame, before encryption.
+    pub frame_bytes: usize,
+    /// Seconds between typing indicators during a turn (0 sends none).
+    pub typing_secs: f64,
+    /// Channel reads over HTTP `/query` during a turn, as tool calls.
+    pub reads: usize,
+}
+
+impl Default for AgentTurn {
+    fn default() -> Self {
+        Self {
+            per_hour: 0.0,
+            mean_secs: 60.0,
+            frame_secs: 1.0,
+            frame_bytes: 1024,
+            typing_secs: 3.0,
+            reads: 2,
+        }
+    }
+}
+
+/// Largest observer frame plaintext: NIP-44 encrypts at most 65,535 bytes,
+/// and the frame's JSON envelope needs some of them.
+pub const MAX_FRAME_BYTES: usize = 60_000;
 
 /// One thread in community 0, channel 0 that keeps growing: seeded with
 /// many direct replies, then replied to and read throughout the run.
@@ -416,11 +465,13 @@ impl Scenario {
         if self.ramp.is_empty() {
             return Err("ramp needs at least one step".into());
         }
-        // Clients are only ever added, so a step can never shrink the population.
+        // Clients are only ever added, so a step can never shrink the
+        // population. Repeating a level splits a long hold into reported,
+        // judged windows.
         let mut previous = 0.0;
         for step in &self.ramp {
-            if !step.users.is_finite() || step.users <= previous {
-                return Err("ramp users must be finite and increase every step".into());
+            if !step.users.is_finite() || step.users <= 0.0 || step.users < previous {
+                return Err("ramp users must be finite, above 0 and never decrease".into());
             }
             previous = step.users;
         }
@@ -434,7 +485,7 @@ impl Scenario {
                 "population.connect_rate_per_sec",
                 self.population.connect_rate_per_sec,
             ),
-            ("agent.query_interval_secs", a.query_interval_secs),
+            ("agent.turn.mean_secs", a.turn.mean_secs),
             ("abort.max_p99_ms", self.abort.max_p99_ms),
             ("desktop.backstop_secs", self.desktop.backstop_secs),
         ];
@@ -455,6 +506,26 @@ impl Scenario {
         if !d.renewal_secs.is_finite() || !(d.renewal_secs == 0.0 || d.renewal_secs >= 1.0) {
             return Err("desktop.renewal_secs must be 0 or a finite number >= 1".into());
         }
+        // Agent intervals are 0 (off) or slow enough to schedule.
+        let intervals = [
+            (
+                "agent.presence_interval_secs",
+                a.presence_interval_secs,
+                1.0,
+            ),
+            ("agent.turn.frame_secs", a.turn.frame_secs, 0.1),
+            ("agent.turn.typing_secs", a.turn.typing_secs, 0.1),
+        ];
+        for (name, value, min) in intervals {
+            if !value.is_finite() || !(value == 0.0 || value >= min) {
+                return Err(format!("{name} must be 0 or a finite number >= {min}"));
+            }
+        }
+        if a.turn.frame_bytes > MAX_FRAME_BYTES {
+            return Err(format!(
+                "agent.turn.frame_bytes must be at most {MAX_FRAME_BYTES}"
+            ));
+        }
         let non_negative = [
             ("human.typing_per_hour", h.typing_per_hour),
             ("human.messages_per_hour", h.messages_per_hour),
@@ -462,6 +533,8 @@ impl Scenario {
             ("human.mean_session_secs", h.mean_session_secs),
             ("agent.events_per_hour", a.events_per_hour),
             ("agent.observer_frames_per_hour", a.observer_frames_per_hour),
+            ("agent.query_interval_secs", a.query_interval_secs),
+            ("agent.turn.per_hour", a.turn.per_hour),
             (
                 "hot_thread.replies_per_hour",
                 self.hot_thread.replies_per_hour,
@@ -700,12 +773,18 @@ hold_secs = 10
             "[human]\nthread_reply_fraction = 1.5\n",
             "[agent]\nquery_interval_secs = nan\n",
             "[agent]\nobserver_frames_per_hour = inf\n",
+            "[agent]\nquery_interval_secs = -1.0\n",
+            "[agent]\npresence_interval_secs = 0.5\n",
+            "[agent.turn]\nper_hour = -1.0\n",
+            "[agent.turn]\nmean_secs = 0.0\n",
+            "[agent.turn]\nframe_secs = 0.05\n",
+            "[agent.turn]\ntyping_secs = nan\n",
+            "[agent.turn]\nframe_bytes = 60001\n",
             "[abort]\nmax_error_rate = nan\n",
             "[abort]\nmax_p99_ms = inf\n",
             "[[ramp]]\nusers = inf\nhold_secs = 10\n",
             // A down-ramp would report a smaller population than is running.
             "[[ramp]]\nusers = 0.5\nhold_secs = 10\n",
-            "[[ramp]]\nusers = 1.0\nhold_secs = 10\n",
         ];
         for case in cases {
             let text = format!("{MINIMAL}{case}");
@@ -718,6 +797,15 @@ hold_secs = 10
         assert!(Scenario::parse(&text).is_err());
         let up = format!("{MINIMAL}[[ramp]]\nusers = 2.0\nhold_secs = 10\n");
         assert!(Scenario::parse(&up).is_ok());
+        // A repeated level splits a long hold into judged windows.
+        let held = format!("{MINIMAL}[[ramp]]\nusers = 1.0\nhold_secs = 10\n");
+        assert!(Scenario::parse(&held).is_ok());
+        // Polling, presence, frames and typing can each be switched off.
+        let off = format!(
+            "{MINIMAL}[agent]\nquery_interval_secs = 0.0\npresence_interval_secs = 0.0\n\
+             [agent.turn]\nper_hour = 6.0\nframe_secs = 0.0\ntyping_secs = 0.0\n"
+        );
+        assert!(Scenario::parse(&off).is_ok());
     }
 
     #[test]
