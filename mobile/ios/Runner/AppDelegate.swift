@@ -52,6 +52,7 @@ import os.log
   private var nativeProfileTextEditorCoordinator: NativeProfileTextEditorCoordinator?
   private var identityFilePlugin: IdentityFilePlugin?
   private var hostedHpkeChannel: FlutterMethodChannel?
+  private var platformInfoChannel: FlutterMethodChannel?
   private var browserAuthBridge: BuzzBrowserAuthBridge?
   private var huddleMediaPlugin: HuddleMediaPlugin?
 
@@ -90,6 +91,15 @@ import os.log
     }
     identityFilePlugin = IdentityFilePlugin(messenger: messenger)
     browserAuthBridge = BuzzBrowserAuthBridge(messenger: messenger)
+    platformInfoChannel = FlutterMethodChannel(name: "buzz/platform_info", binaryMessenger: messenger)
+    platformInfoChannel?.setMethodCallHandler { call, result in
+      guard call.method == "isIosAppOnMac" else { result(FlutterMethodNotImplemented); return }
+      if #available(iOS 14.0, *) {
+        result(ProcessInfo.processInfo.isiOSAppOnMac)
+      } else {
+        result(false)
+      }
+    }
     hostedHpkeChannel = FlutterMethodChannel(name: "buzz/hosted_hpke", binaryMessenger: messenger)
     hostedHpkeChannel?.setMethodCallHandler { call, result in
       if call.method == "isSupported" {
