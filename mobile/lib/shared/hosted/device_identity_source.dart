@@ -5,6 +5,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import '../storage/secure_storage.dart';
 
 import 'account_identity_store.dart';
+import 'organization_environment.dart';
 import '../profile/user_profile.dart';
 import '../relay/relay_provider.dart';
 
@@ -28,8 +29,9 @@ class DeviceIdentitySource {
       DeviceIdentityChoice(entry.key, entry.value.label),
   ];
 
-  /// Read profile metadata only from communities already saved for this key.
-  /// A failed/offline community does not prevent trying another saved source.
+  /// Read profile metadata only from communities already saved for this key,
+  /// and in an internal build only from its organization's relay. A
+  /// failed/offline community does not prevent trying another saved source.
   Future<UserProfile?> loadProfile(
     String pubkey,
     Future<UserProfile?> Function(RelayConfig config) fetch,
@@ -45,6 +47,8 @@ class DeviceIdentitySource {
           final relay = value['relayUrl'] as String?;
           if (nsec == null ||
               relay == null ||
+              (OrganizationEnvironment.enabled &&
+                  !OrganizationEnvironment.protects(Uri.parse(relay))) ||
               AccountIdentityStore.publicKeyForNsec(nsec) != pubkey ||
               (value['pubkey'] != null && value['pubkey'] != pubkey)) {
             continue;
@@ -61,6 +65,11 @@ class DeviceIdentitySource {
     }
     return null;
   }
+
+  /// Whether a saved community or previous device record holds exactly [nsec].
+  Future<bool> holds(String nsec) async =>
+      (await _read())[AccountIdentityStore.publicKeyForNsec(nsec)]?.nsec ==
+      nsec;
 
   /// Reread and validate the chosen key immediately before create-only adoption.
   Future<AccountIdentitySnapshot> adopt(

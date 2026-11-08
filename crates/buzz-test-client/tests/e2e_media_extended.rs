@@ -882,3 +882,128 @@ async fn test_ws_invalid_imeta_missing_fields() {
 
     client.disconnect().await.unwrap();
 }
+
+/// Run against an isolated relay with BUZZ_MEDIA_READ_MODE=enforce.
+#[tokio::test]
+#[ignore = "requires a relay with channel media enforcement"]
+async fn test_private_channel_media_revocation() {
+    use buzz_test_client::BuzzTestClient;
+    let owner = Keys::generate();
+    let member = Keys::generate();
+    let survivor = Keys::generate();
+    let mut owner_ws = BuzzTestClient::connect(&relay_ws_url(), &owner)
+        .await
+        .unwrap();
+    let mut member_ws = BuzzTestClient::connect(&relay_ws_url(), &member)
+        .await
+        .unwrap();
+    let survivor_ws = BuzzTestClient::connect(&relay_ws_url(), &survivor)
+        .await
+        .unwrap();
+    let channel = uuid::Uuid::new_v4().to_string();
+    let create = EventBuilder::new(Kind::Custom(9007), "")
+        .tags([
+            Tag::parse(["h", &channel]).unwrap(),
+            Tag::parse(["name", &format!("private-{channel}")]).unwrap(),
+            Tag::parse(["channel_type", "stream"]).unwrap(),
+            Tag::parse(["visibility", "private"]).unwrap(),
+        ])
+        .sign_with_keys(&owner)
+        .unwrap();
+    let ok = owner_ws.send_event(create).await.unwrap();
+    assert!(ok.accepted, "create: {}", ok.message);
+    for keys in [&member, &survivor] {
+        let add = EventBuilder::new(Kind::Custom(9000), "")
+            .tags([
+                Tag::parse(["h", &channel]).unwrap(),
+                Tag::parse(["p", &keys.public_key().to_hex()]).unwrap(),
+            ])
+            .sign_with_keys(&owner)
+            .unwrap();
+        let ok = owner_ws.send_event(add).await.unwrap();
+        assert!(ok.accepted, "add: {}", ok.message);
+    }
+    let http = http_client();
+    let bytes = format!("private attachment {channel}").into_bytes();
+    let hash = hex::encode(Sha256::digest(&bytes));
+    let response = upload(&http, &owner, &bytes).await;
+    assert_eq!(response.status(), 200);
+    let descriptor: serde_json::Value = response.json().await.unwrap();
+    let url = descriptor["url"].as_str().unwrap();
+    let post = EventBuilder::new(Kind::Custom(9), "private media")
+        .tags([
+            Tag::parse(["h", &channel]).unwrap(),
+            Tag::parse([
+                "imeta",
+                &format!("url {url}"),
+                &format!("x {hash}"),
+                "m application/octet-stream",
+                &format!("size {}", bytes.len()),
+            ])
+            .unwrap(),
+        ])
+        .sign_with_keys(&owner)
+        .unwrap();
+    let ok = owner_ws.send_event(post).await.unwrap();
+    assert!(ok.accepted, "post: {}", ok.message);
+    let auth = || blossom_auth_header(&sign_blossom_get_auth(&member, &hash));
+    let response = http
+        .get(url)
+        .header("Authorization", auth())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.headers()["cache-control"], "private, no-store");
+    let remove = EventBuilder::new(Kind::Custom(9001), "")
+        .tags([
+            Tag::parse(["h", &channel]).unwrap(),
+            Tag::parse(["p", &member.public_key().to_hex()]).unwrap(),
+        ])
+        .sign_with_keys(&owner)
+        .unwrap();
+    let ok = owner_ws.send_event(remove).await.unwrap();
+    assert!(ok.accepted, "remove: {}", ok.message);
+    for (method, range) in [
+        (reqwest::Method::GET, None),
+        (reqwest::Method::HEAD, None),
+        (reqwest::Method::GET, Some("bytes=0-3")),
+        (reqwest::Method::GET, Some("bytes=999999-")),
+    ] {
+        let mut request = http
+            .request(method.clone(), url)
+            .header("Authorization", auth());
+        if let Some(range) = range {
+            request = request.header("Range", range);
+        }
+        let response = request.send().await.unwrap();
+        assert_eq!(response.status(), 404, "{method} {range:?}");
+        assert!(!response.headers().contains_key("content-range"));
+    }
+    for keys in [&owner, &survivor] {
+        let response = http
+            .get(url)
+            .header(
+                "Authorization",
+                blossom_auth_header(&sign_blossom_get_auth(keys, &hash)),
+            )
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200, "positive control");
+    }
+    let copy = EventBuilder::new(
+        Kind::Metadata,
+        serde_json::json!({"picture":url}).to_string(),
+    )
+    .sign_with_keys(&member)
+    .unwrap();
+    let ok = member_ws.send_event(copy).await.unwrap();
+    assert!(
+        !ok.accepted && ok.message.contains("attachment is not accessible"),
+        "copy: {ok:?}"
+    );
+    owner_ws.disconnect().await.unwrap();
+    member_ws.disconnect().await.unwrap();
+    survivor_ws.disconnect().await.unwrap();
+}

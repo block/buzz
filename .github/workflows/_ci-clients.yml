@@ -137,17 +137,27 @@ jobs:
       - name: Test native secp256k1 package
         if: matrix.lane == 'checks'
         run: cd mobile/packages/buzz_secp256k1 && dart pub get && dart test
-      - name: Test configured authentication domains
+      - name: Test internal build
         if: matrix.lane == 'checks'
         run: >-
           cd mobile && flutter test
           --dart-define=BUZZ_PUSH_GATEWAY_URL=https://push.example
-          --dart-define=BUZZ_AUTH_DOMAINS=buzz.xyz,builderlab.xyz,builderlabstaging.xyz
+          --dart-define=BUZZ_DISTRIBUTION=internal
+          --dart-define=BUZZ_BUILDERLAB_URL=https://id.example.org
+          --dart-define=BUZZ_BUILDERLAB_RELAYS=buzz.example.org
+          test/features/onboarding/internal_build_entry_test.dart
+      - name: Test public build
+        if: matrix.lane == 'checks'
+        run: >-
+          cd mobile && flutter test
+          --dart-define=BUZZ_PUSH_GATEWAY_URL=https://push.example
+          --dart-define=BUZZ_DISTRIBUTION=public
+          --dart-define=BUZZ_BUILDERLAB_URL=https://app.builderlab.xyz
+          --dart-define=BUZZ_BUILDERLAB_RELAYS=communities.buzz.xyz
           test/shared/auth/community_entry_requirements_test.dart
           test/features/agents/agent_creation_link_journey_test.dart
           test/features/invites/invite_join_provider_test.dart
           test/features/onboarding/onboarding_entry_routes_test.dart
-          test/shared/hosted/hosted_environment_test.dart
           test/shared/hosted/self_hosted_entry_test.dart
           test/features/agents/agents_signed_out_prompt_test.dart
           test/features/agents/agents_restore_prompt_test.dart

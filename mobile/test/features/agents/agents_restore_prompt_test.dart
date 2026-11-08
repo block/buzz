@@ -16,10 +16,10 @@ void main() {
       h.registry.restoreGate = restore;
       await h.open(tester, directory: []);
 
-      const prompt = 'Sign in to Builderlab to manage remote agents';
+      const prompt = 'Reconnect to Builderlab';
       expect(h.controller.busy, isTrue);
       expect(find.text(prompt), findsNothing);
-      expect(find.widgetWithText(TextButton, 'Sign in'), findsNothing);
+      expect(find.widgetWithText(FilledButton, 'Sign in'), findsNothing);
       expect(find.text('You haven’t added any agents yet.'), findsNothing);
 
       // No saved session after all: now the prompt is the way forward.

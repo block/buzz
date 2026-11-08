@@ -1,9 +1,11 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:buzz/shared/auth/auth_provider.dart';
 import 'package:buzz/shared/hosted/builderlab_account.dart';
 import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
+import 'package:buzz/shared/relay/read_state_snapshot.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -112,6 +114,56 @@ void main() {
       );
     },
   );
+
+  test('inflates gzip discovery and snapshot bodies', () async {
+    // The query transport keeps gzip bodies compressed, and the relay's CDN
+    // gzips both responses. Decoding the raw bytes failed every snapshot.
+    http.StreamedResponse gzipped(String body) => http.StreamedResponse(
+      Stream.value(gzip.encode(utf8.encode(body))),
+      200,
+      headers: {'content-type': 'application/json', 'content-encoding': 'gzip'},
+    );
+    final h = harness(
+      _StreamClient(
+        (request) async => gzipped(
+          request.method == 'GET' ? discovery : jsonEncode(envelope()),
+        ),
+      ),
+    );
+    final events = await h.session.fetchReadStateSnapshot();
+    expect(events.single.id, event()['id']);
+  });
+
+  test('rejects a gzip body that inflates past the snapshot cap', () async {
+    // Transport caps see only compressed bytes; a few KB of gzip can expand
+    // to many megabytes.
+    final padded = utf8.encode(
+      '${jsonEncode(envelope())}${' ' * 2 * readStateSnapshotMaxBytes}',
+    );
+    final h = harness(
+      _StreamClient(
+        (request) async => http.StreamedResponse(
+          Stream.value(
+            gzip.encode(
+              request.method == 'GET' ? utf8.encode(discovery) : padded,
+            ),
+          ),
+          200,
+          headers: {'content-type': 'application/json'},
+        ),
+      ),
+    );
+    await expectLater(
+      h.session.fetchReadStateSnapshot(),
+      throwsA(
+        isA<FormatException>().having(
+          (error) => error.message,
+          'message',
+          contains('after inflating'),
+        ),
+      ),
+    );
+  });
 
   test(
     'accepts complete empty state and unrelated own kind-30078 coordinates',
@@ -520,7 +572,11 @@ class _SnapshotAuth extends HostedRelayAuth {
   bool protects(RelayConfig config) => true;
 
   @override
-  Future<Map<String, String>> headers(RelayConfig config) async {
+  Future<Map<String, String>> headers(
+    RelayConfig config, {
+    bool background = false,
+    bool fresh = false,
+  }) async {
     await beforeHeaders?.call();
     return {'Nostr-Federated-Identity': 'assertion'};
   }

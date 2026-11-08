@@ -245,6 +245,41 @@ class AccountIdentityStore implements BackupIdentity {
     return identities.values.toList();
   });
 
+  /// Release this slot's unconfirmed copy of [pubkey] so a definitively
+  /// rejected choice can be made again. Refuses (false) unless another saved
+  /// slot or [heldElsewhere] holds the same key; never releases a receipt.
+  /// An already-empty slot counts as released, so a retry after a partial
+  /// failure or restart converges.
+  Future<bool> releaseUnconfirmed(
+    String pubkey, {
+    required Future<bool> Function(String nsec) heldElsewhere,
+    required void Function() checkCurrent,
+  }) => _serialized(() async {
+    final record = await _read();
+    if (record == null) return true;
+    if (record.pubkey != pubkey || record.backup != null) return false;
+    var kept = false;
+    for (final key in await _identityKeys(pubkey: pubkey)) {
+      if (key == _key) continue;
+      try {
+        if ((await _atKey(key)._read())?.nsec == record.nsec) kept = true;
+      } on AccountIdentityFailure {
+        // An unreadable slot is never evidence of a copy.
+      }
+    }
+    if (!kept && !await heldElsewhere(record.nsec)) return false;
+    checkCurrent();
+    try {
+      await _storage.delete(key: _key);
+    } catch (_) {
+      throw AccountIdentityFailure.unreadable;
+    }
+    if (await _storage.read(key: _key) != null) {
+      throw AccountIdentityFailure.unreadable;
+    }
+    return true;
+  });
+
   /// Copy a chosen saved account key without deleting its original owner.
   Future<AccountIdentitySnapshot> adoptSaved(
     String pubkey, {

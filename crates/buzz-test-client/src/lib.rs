@@ -71,7 +71,10 @@ impl From<WsClientError> for TestClientError {
             WsClientError::EventBuilder(s) => TestClientError::EventBuilder(s),
             WsClientError::Url(s) => TestClientError::Url(s),
             WsClientError::Timeout => TestClientError::Timeout,
-            WsClientError::ConnectionClosed => TestClientError::ConnectionClosed,
+            // Relay e2e tests treat a policy close as a close.
+            WsClientError::ConnectionClosed | WsClientError::PolicyClose(_) => {
+                TestClientError::ConnectionClosed
+            }
             WsClientError::UnexpectedMessage(s) => TestClientError::UnexpectedMessage(s),
             WsClientError::AuthFailed(s) => TestClientError::AuthFailed(s),
             WsClientError::EventRejected(s) => TestClientError::EventRejected(s),

@@ -17,8 +17,9 @@ Before planning or reviewing a non-trivial change:
 4. For any change to `migrations/`, `schema/`, or schema-dependent `buzz-db`
    queries, read [docs/database.md](docs/database.md): no new triggers,
    functions, or foreign keys; no data backfills in migrations; update every
-   schema location; and keep every migration compatible with the relay that
-   is currently deployed.
+   schema location; keep every migration compatible with the relay that
+   is currently deployed; and never make a migration refuse a populated
+   table.
 5. Check that the proposed design advances, or at least does not contradict,
    that product intent. Call out any intentional tension explicitly.
 
@@ -72,25 +73,26 @@ confirmation, not app runs.
 - Agents post reviews as comments, never Request Changes. Humans decide which
   findings must be fixed.
 
+## Open-source boundary
+
+This repository is public and contains the relay, NIP specifications, legacy desktop app, and mobile clients. Never commit values that only make sense inside Block: the employee-only bb-block community and its hosts (`block.builderlab.xyz`, `buzz.block.builderlab.xyz`, `*.communities.block.xyz`), private GitHub organizations or repositories, organization-specific SSH users, internal hosts, cloud accounts, IAM roles or buckets, internal ticket keys, `go/` links, internal Slack channels, or real employees' names and personal setups. Public Builderlab (`app.builderlab.xyz`, `*.communities.builderlab.xyz`) is supported and fine.
+
+Distributor-specific values belong in the relevant release configuration: build-time settings for clients and deployment configuration for the relay. If a setting is missing, add a generic one; never hardcode a Block-only value or special-case a host or organization.
+
+The rule covers functionality, not only identifiers. Every feature here must be generic: useful to any operator or distributor, with no knowledge of one company's internal services, workflows or identity setup. Functionality that only serves Block lives in Block's private repositories (release builds, deployment configuration, private plugins) and reaches this code only through generic settings or documented extension points that never name, detect or special-case a specific organization, plugin or service. Review judges a change's purpose and approach, not just its strings.
+
+Tests, fixtures, docs, and examples use example values (`example.org`, `example-org`, fictional names).
+
+Reviewers treat a violation as a blocking finding.
+
 ## Ecosystem
 
-Buzz spans five repos. This one (`block/buzz`) is the OSS source for the relay, desktop, mobile, and CLI. The others handle internal builds and deployment:
+This repository (`block/buzz`) is the OSS source for the relay, mobile, CLI, and the deprecated Buzz 0.X desktop app. [block/buzz-app](https://github.com/block/buzz-app) is the OSS source for the Buzz 1.0 desktop and web app. Block's internal builds and deployments live in private repositories.
 
 | Repo | Purpose |
 |------|---------|
-| [block/buzz](https://github.com/block/buzz) | OSS source — relay, desktop app, mobile app, CLI, agent harness |
-| [squareup/buzz-releases](https://github.com/squareup/buzz-releases) | Buildkite pipelines producing Block-signed macOS + iOS builds with `-block` desktop version suffix |
-| [squareup/sprout-oss](https://github.com/squareup/sprout-oss) | CI pipeline building the relay Docker image and pushing to internal ECR |
-| [squareup/block-coder-tf-stacks](https://github.com/squareup/block-coder-tf-stacks) | Terraform + ArgoCD deploying the relay to the staging Kubernetes cluster |
-| [squareup/sprout-backend-blox](https://github.com/squareup/sprout-backend-blox) | Desktop backend provider script connecting Blox workstation agents to the relay |
-
-```
-block/buzz (source)
-  ├─► buzz-releases      (desktop + mobile builds → Artifactory, GitHub, Mobile Releases)
-  ├─► sprout-oss         (relay Docker image → ECR)
-  │     └─► block-coder-tf-stacks  (Helm chart → ArgoCD → staging cluster)
-  └─── sprout-backend-blox         (Blox compute provider for Desktop agent launch)
-```
+| [block/buzz](https://github.com/block/buzz) | OSS source — relay, mobile app, CLI, agent harness, deprecated Buzz 0.X desktop app |
+| [block/buzz-app](https://github.com/block/buzz-app) | OSS source — Buzz 1.0 desktop and web app; all new desktop feature work |
 
 See [RELEASING.md](RELEASING.md) for the desktop release flow and
 [CONTRIBUTING.md § Ecosystem](CONTRIBUTING.md#ecosystem) for contributor
@@ -130,7 +132,7 @@ crates/
   buzz-test-client    # Integration test client and E2E test suite
   sprig               # All-in-one harness bundling ACP, agent, and dev MCP
 
-desktop/              # Legacy Tauri 2 + React 19 desktop app (being replaced by block/buzz-app)
+desktop/              # Buzz 0.X Tauri desktop app (deprecated: new desktop work goes to block/buzz-app)
 web/                  # Browser web client (repo browser, served by the relay)
 mobile/               # Flutter mobile app
 migrations/           # SQL migrations (run at relay startup when BUZZ_AUTO_MIGRATE is on: binary default off, Helm default on; deployments at scale apply them out of band — see docs/database.md)
@@ -646,9 +648,15 @@ description. See [PR #803](https://github.com/block/buzz/pull/803).
 
 ## Desktop App
 
-> **Legacy.** `desktop/` will soon be superseded by
-> [block/buzz-app](https://github.com/block/buzz-app). Never use it as an
-> implementation or design reference for the mobile app, which is current.
+> **`desktop/` is deprecated.** It is the Buzz 0.X desktop app. The Buzz 1.0
+> desktop app lives in [block/buzz-app](https://github.com/block/buzz-app).
+> Do not open block/buzz PRs that add features to `desktop/`; build desktop
+> features in block/buzz-app (or as a Buzz plugin) instead. Change `desktop/`
+> here only to fix a 0.X bug, or to keep it compiling when a shared crate it
+> depends on changes. This includes agent guidance bundled with the 0.X app,
+> such as `desktop/src-tauri/src/managed_agents/nest_skill.md`: CLI PRs do not
+> need to update it. Never use it as an implementation or design reference for
+> the mobile app, which is current.
 
 The desktop app is Tauri 2 + React 19 + Vite + Tailwind CSS. Features are
 organized under `desktop/src/features/`. Biome handles linting and formatting.
