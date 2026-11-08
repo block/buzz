@@ -57,26 +57,36 @@ class _MeSettingsSheetState extends State<MeSettingsSheet> {
   }
 
   @override
-  Widget build(BuildContext context) => PopScope(
-    canPop: _picker == null,
-    onPopInvokedWithResult: (didPop, result) {
-      if (!didPop && _picker != null) _finish();
-    },
-    child: BuzzTitledSheetLayout(
-      title: _title ?? 'Chat settings',
-      showDragHandle: true,
-      onClose: () {
-        if (_picker != null) {
-          _finish();
-        } else {
-          Navigator.of(context).pop();
-        }
+  Widget build(BuildContext context) {
+    final content =
+        _picker ??
+        widget.builder(_present, () {
+          if (mounted) setState(() {});
+        });
+    return PopScope(
+      canPop: _picker == null,
+      onPopInvokedWithResult: (didPop, result) {
+        if (!didPop && _picker != null) _finish();
       },
-      child:
-          _picker ??
-          widget.builder(_present, () {
-            if (mounted) setState(() {});
-          }),
-    ),
-  );
+      child: BuzzTitledSheetLayout(
+        title: _title ?? 'Chat settings',
+        showDragHandle: true,
+        onClose: () {
+          if (_picker != null) {
+            _finish();
+          } else {
+            Navigator.of(context).pop();
+          }
+        },
+        child: MediaQuery.disableAnimationsOf(context)
+            ? content
+            : AnimatedSize(
+                duration: const Duration(milliseconds: 220),
+                curve: Curves.easeOutCubic,
+                alignment: Alignment.topCenter,
+                child: content,
+              ),
+      ),
+    );
+  }
 }

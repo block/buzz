@@ -699,16 +699,22 @@ void main() {
     )!;
     final barrier = tester.element(find.byType(ModalBarrier).last);
     Future<void> expectStableMask() async {
-      for (final elapsed in [
-        Duration.zero,
-        const Duration(milliseconds: 100),
-        const Duration(milliseconds: 250),
-      ]) {
-        await tester.pump(elapsed);
-        expect(barrier.mounted, isTrue);
-        expect(settingsRoute.isCurrent, isTrue);
-        expect(settingsRoute.animation!.value, 1);
-      }
+      final sheet = find.byType(BottomSheet);
+      final before = tester.getSize(sheet).height;
+      await tester.pump();
+      expect(tester.getSize(sheet).height, closeTo(before, 0.01));
+      await tester.pump(const Duration(milliseconds: 100));
+      final middle = tester.getSize(sheet).height;
+      expect(barrier.mounted, isTrue);
+      expect(settingsRoute.isCurrent, isTrue);
+      expect(settingsRoute.animation!.value, 1);
+      await tester.pump(const Duration(milliseconds: 250));
+      final after = tester.getSize(sheet).height;
+      expect(middle, greaterThan(before < after ? before : after));
+      expect(middle, lessThan(before > after ? before : after));
+      expect(barrier.mounted, isTrue);
+      expect(settingsRoute.isCurrent, isTrue);
+      expect(settingsRoute.animation!.value, 1);
     }
 
     await tester.ensureVisible(find.text('Workspace'));
@@ -741,6 +747,30 @@ void main() {
     await tester.tap(find.byTooltip('Close sheet'));
     await tester.pumpAndSettle();
     expect(find.text('Chat settings'), findsNothing);
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pumpWidget(
+      _buildTestable(
+        personalChat: true,
+        disableAnimations: true,
+        messages: const [],
+        organization: Stream.value(const MeGroups(channels: [_channelId])),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('me-chat-settings-button')));
+    await tester.pumpAndSettle();
+    final settingsHeight = tester.getSize(find.byType(BottomSheet)).height;
+    await tester.tap(find.text('Workspace'));
+    await tester.pump();
+    await tester.pump();
+    final reducedHeight = tester.getSize(find.byType(BottomSheet)).height;
+    expect(reducedHeight, isNot(settingsHeight));
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(tester.getSize(find.byType(BottomSheet)).height, reducedHeight);
+    await tester.tap(find.byTooltip('Close sheet'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Close sheet'));
+    await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
   });
 
