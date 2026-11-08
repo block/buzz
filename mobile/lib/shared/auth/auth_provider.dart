@@ -93,6 +93,11 @@ class AuthNotifier extends AsyncNotifier<AuthState> {
       final saved =
           duplicate?.copyWith(
             nsec: community.nsec,
+            // A join that asks for protection keeps it, whichever saved first.
+            sensitiveActionPolicy:
+                community.sensitiveActionPolicy == SensitiveActionPolicy.enabled
+                ? SensitiveActionPolicy.enabled
+                : null,
             starterSetupIncomplete:
                 duplicate.starterSetupIncomplete ||
                 community.starterSetupIncomplete,

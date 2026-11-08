@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:math';
 
+import 'package:clock/clock.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -77,15 +78,17 @@ class KnownCommunitiesSync {
   bool _disposed = false;
   int _failures = 0;
   Timer? _timer;
-  // Running while the last complete list is recent enough to reuse.
-  Timer? _fresh;
+  // When the last complete list was read, by wall clock: a monotonic timer
+  // would not count time the device spent asleep.
+  DateTime? _listedAt;
   final _parked = <KnownCommunityIntent>{};
 
   /// A return to the foreground: a new span once the list is stale, otherwise
   /// only the outbox is sent.
   void resumed() {
     if (_disposed || _spanSubject == null) return;
-    if (_fresh?.isActive ?? false) {
+    final listedAt = _listedAt;
+    if (listedAt != null && clock.now().difference(listedAt) < relistAfter) {
       kick();
     } else {
       _startSpan(_spanSubject);
@@ -108,7 +111,6 @@ class KnownCommunitiesSync {
     _disposed = true;
     _span++;
     _timer?.cancel();
-    _fresh?.cancel();
     subject.removeListener(_onSubject);
     store.removeListener(kick);
   }
@@ -122,7 +124,7 @@ class KnownCommunitiesSync {
     _spanSubject = signedIn;
     _listed = false;
     _halted = false;
-    _fresh?.cancel();
+    _listedAt = null;
     _parked.clear();
     kick();
   }
@@ -162,7 +164,7 @@ class KnownCommunitiesSync {
         }
         if (!current()) return;
         _listed = true;
-        _fresh = Timer(relistAfter, () {});
+        _listedAt = clock.now();
       }
       if (pubkey == null) return;
       await store.joined(account, pubkey, saved);

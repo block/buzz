@@ -110,12 +110,16 @@ void main() {
       nsec: keys.nsec,
     );
     // Built independently, as an invite and the account sync each do.
-    final second = Community.create(
-      name: 'Team',
-      relayUrl: 'wss://team.example:443',
-      pubkey: keys.public,
-      nsec: keys.nsec,
-    ).copyWith(starterSetupIncomplete: true);
+    final second =
+        Community.create(
+          name: 'Team',
+          relayUrl: 'wss://team.example:443',
+          pubkey: keys.public,
+          nsec: keys.nsec,
+        ).copyWith(
+          starterSetupIncomplete: true,
+          sensitiveActionPolicy: SensitiveActionPolicy.enabled,
+        );
     final otherKey = Community.create(
       name: 'Team',
       relayUrl: 'wss://team.example',
@@ -131,6 +135,7 @@ void main() {
     final saved = await storage.loadAll();
     expect(saved.map((item) => item.id), [first.id, otherKey.id]);
     expect(saved.first.starterSetupIncomplete, isTrue);
+    expect(saved.first.sensitiveActionPolicy, SensitiveActionPolicy.enabled);
     expect(await storage.loadActiveId(), first.id);
     expect(container.read(authProvider).value?.community?.id, first.id);
   });

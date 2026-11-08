@@ -15,6 +15,9 @@ dependencies:
   # nothing but emoji. Already present transitively via the Flutter SDK;
   # declared here because we import it directly.
   characters: ^1.4.0
+  # Wall-clock time that fake_async drives in tests; already present
+  # transitively via the Flutter SDK.
+  clock: ^1.1.2
   hooks_riverpod: ^3.0.3
   flutter_hooks: ^0.21.3
   http: ^1.4.0
