@@ -7,6 +7,8 @@ import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/modal_presentation.dart';
+import '../../shared/widgets/duo_toolbar.dart';
+import '../../shared/widgets/adaptive_conversation_pane.dart';
 
 const appearanceModeOptions = <({ThemeMode mode, String label, IconData icon})>[
   (mode: ThemeMode.light, label: 'Light', icon: BuzzIcons.sun),
@@ -27,6 +29,9 @@ Future<void> showAccentColorPickerSheet({
   title: 'Chat color',
   showDragHandle: true,
   builder: (_) => _AccentColorPicker(
+    compact:
+        DuoToolbarScope.maybeOf(context)?.strip != null &&
+        usesConversationPanes(context),
     colorScheme: colorScheme,
     initialIndex: selectedIndex,
     onSelected: onSelected,
@@ -36,11 +41,13 @@ Future<void> showAccentColorPickerSheet({
 class _AccentColorPicker extends HookWidget {
   const _AccentColorPicker({
     required this.colorScheme,
+    required this.compact,
     required this.initialIndex,
     required this.onSelected,
   });
 
   final ColorScheme colorScheme;
+  final bool compact;
   final int initialIndex;
   final ValueChanged<int> onSelected;
 
@@ -56,26 +63,34 @@ class _AccentColorPicker extends HookWidget {
           Grid.gutter,
           Grid.xs,
         ),
-        child: GridView.builder(
-          key: const ValueKey('accent-selection-grid'),
-          shrinkWrap: true,
-          primary: false,
-          padding: EdgeInsets.zero,
-          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-            crossAxisCount: 4,
-            crossAxisSpacing: Grid.xxs,
-            mainAxisSpacing: Grid.xs,
-          ),
-          itemCount: chatColorChoices.length,
-          itemBuilder: (context, index) => _AccentSheetOption(
-            index: index,
-            color: chatColorForScheme(colorScheme, index),
-            selected: selected.value == index,
-            onTap: () {
-              unawaited(HapticFeedback.selectionClick());
-              selected.value = index;
-              onSelected(index);
-            },
+        child: Align(
+          heightFactor: 1,
+          child: ConstrainedBox(
+            constraints: BoxConstraints(
+              maxWidth: compact ? 320 : double.infinity,
+            ),
+            child: GridView.builder(
+              key: const ValueKey('accent-selection-grid'),
+              shrinkWrap: true,
+              primary: false,
+              padding: EdgeInsets.zero,
+              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: 4,
+                crossAxisSpacing: Grid.xxs,
+                mainAxisSpacing: Grid.xs,
+              ),
+              itemCount: chatColorChoices.length,
+              itemBuilder: (context, index) => _AccentSheetOption(
+                index: index,
+                color: chatColorForScheme(colorScheme, index),
+                selected: selected.value == index,
+                onTap: () {
+                  unawaited(HapticFeedback.selectionClick());
+                  selected.value = index;
+                  onSelected(index);
+                },
+              ),
+            ),
           ),
         ),
       ),

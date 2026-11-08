@@ -359,10 +359,11 @@ void main() {
     expect(material.surfaceTintColor, Colors.transparent);
     expect(material.clipBehavior, Clip.antiAlias);
 
-    final items = tester.widgetList<PopupMenuItem<String>>(
-      find.byType(PopupMenuItem<String>),
+    final items = tester.widgetList<CheckedPopupMenuItem<String>>(
+      find.byType(CheckedPopupMenuItem<String>),
     );
     expect(items, hasLength(3));
+    expect(items.singleWhere((item) => item.checked).value, 'Anyone');
     expect(
       items.every((item) => item.height >= Grid.xl),
       isTrue,

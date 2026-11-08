@@ -16,6 +16,7 @@ import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/agent_navigation_icon.dart';
+import '../../shared/widgets/adaptive_conversation_pane.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/preset_agent_avatar.dart';
 import '../../shared/widgets/navigation_button_surface.dart';
@@ -123,13 +124,18 @@ class DefaultAgentLauncher extends HookConsumerWidget {
             ref.read(defaultAgentProvider).value != pubkey) {
           return;
         }
-        await Navigator.of(context).push<void>(
-          MaterialPageRoute(
-            // Native glass and video layers must track the live route.
-            allowSnapshotting: false,
-            builder: (_) => ChannelDetailPage(channel: channel),
-          ),
-        );
+        final pane = ConversationPaneScope.maybeOf(context);
+        if (pane != null) {
+          pane.open(channel.id, (_) => ChannelDetailPage(channel: channel));
+        } else {
+          await Navigator.of(context).push<void>(
+            MaterialPageRoute(
+              // Native glass and video layers must track the live route.
+              allowSnapshotting: false,
+              builder: (_) => ChannelDetailPage(channel: channel),
+            ),
+          );
+        }
       } catch (error) {
         if (context.mounted) {
           ScaffoldMessenger.of(context).showFeedbackSnackBar(

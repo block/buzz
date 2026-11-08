@@ -90,6 +90,63 @@ void main() {
     }
   }
 
+  for (final left in [false, true]) {
+    for (final width in [480.0, 900.0]) {
+      testWidgets(
+        'bounded sheet localizes rail inset left=$left width=$width',
+        (tester) async {
+          debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+          tester.view.physicalSize = const Size(951, 669);
+          tester.view.devicePixelRatio = 1;
+          final padding = FakeViewPadding(
+            left: left ? 76 : 0,
+            right: left ? 0 : 76,
+            bottom: 21,
+          );
+          tester.view.padding = padding;
+          tester.view.viewPadding = padding;
+          addTearDown(() {
+            tester.view.reset();
+            debugDefaultTargetPlatformOverride = null;
+          });
+          EdgeInsets? local;
+          await tester.pumpWidget(
+            MaterialApp(
+              theme: AppTheme.light(),
+              home: Builder(
+                builder: (context) => Scaffold(
+                  body: TextButton(
+                    onPressed: () => showBuzzModalBottomSheet<void>(
+                      context: context,
+                      useDuoFullWidth: false,
+                      constraints: BoxConstraints(maxWidth: width),
+                      showCloseButton: false,
+                      builder: (context) {
+                        local = MediaQuery.paddingOf(context);
+                        return const SizedBox(
+                          height: 100,
+                          width: double.infinity,
+                        );
+                      },
+                    ),
+                    child: const Text('Open'),
+                  ),
+                ),
+              ),
+            ),
+          );
+          await tester.tap(find.text('Open'));
+          await tester.pumpAndSettle();
+          final overlap = (76 - (951 - width) / 2).clamp(0.0, double.infinity);
+          expect(local!.left, left ? overlap : 0);
+          expect(local!.right, left ? 0 : overlap);
+          expect(tester.takeException(), isNull);
+          debugDefaultTargetPlatformOverride = null;
+        },
+      );
+    }
+  }
+
   Border sheetHeaderBorder(WidgetTester tester) {
     final decoration =
         tester
@@ -157,6 +214,56 @@ void main() {
         await tester.pump();
 
         expect(find.byType(UiKitView), findsOneWidget);
+        final nativeView = tester.widget<UiKitView>(find.byType(UiKitView));
+        expect(
+          nativeView.creationParams,
+          containsPair('independentCorners', true),
+        );
+        const viewChannel = MethodChannel('buzz/concentric_sheet_surface/73');
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          viewChannel,
+          (call) async => call.method == 'getCornerRadii'
+              ? {
+                  'topLeft': 24.0,
+                  'topRight': 24.0,
+                  'bottomLeft': 62.0,
+                  'bottomRight': 48.0,
+                }
+              : null,
+        );
+        nativeView.onPlatformViewCreated!(73);
+        await tester.pumpAndSettle();
+        BorderRadius clipRadius() =>
+            tester
+                    .widget<ClipRSuperellipse>(
+                      find.byKey(
+                        const ValueKey('concentric-sheet-content-clip'),
+                      ),
+                    )
+                    .borderRadius
+                as BorderRadius;
+        expect(clipRadius().bottomLeft, const Radius.circular(62));
+        expect(clipRadius().bottomRight, const Radius.circular(48));
+        // Rotation/folding can change each corner independently.
+        await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+          viewChannel.name,
+          const StandardMethodCodec().encodeMethodCall(
+            const MethodCall('cornerRadiiChanged', {
+              'topLeft': 48.0,
+              'topRight': 62.0,
+              'bottomLeft': 24.0,
+              'bottomRight': 24.0,
+            }),
+          ),
+          (_) {},
+        );
+        await tester.pump();
+        expect(clipRadius().topRight, const Radius.circular(62));
+        expect(clipRadius().bottomLeft, const Radius.circular(24));
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          viewChannel,
+          null,
+        );
         expect(
           tester.widget<UiKitView>(find.byType(UiKitView)).hitTestBehavior,
           PlatformViewHitTestBehavior.translucent,
