@@ -8,7 +8,7 @@ import 'ios_navigation_bar.dart';
 
 /// The shared top-edge treatment, independent of a header's controls.
 ///
-/// iOS uses the same native soft edge as [IosNavigationBar]. Other platforms
+/// iOS uses the same native hard edge as [IosNavigationBar]. Other platforms
 /// use Home's translucent Flutter blur. The child remains interactive and
 /// supplies its own safe-area padding.
 class NavigationBackdrop extends StatelessWidget {

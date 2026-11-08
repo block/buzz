@@ -314,7 +314,7 @@ private final class NavigationContentController: UIViewController {
     if #available(iOS 26.0, *) {
       // Configure the native effect before UIKit lays out the bar; the
       // platform-view configuration selects it or the material fallback.
-      scrollView.topEdgeEffect.style = .soft
+      scrollView.topEdgeEffect.style = .hard
       scrollView.bottomEdgeEffect.isHidden = true
     }
   }
@@ -327,6 +327,7 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
   private let material = UIVisualEffectView(effect: UIBlurEffect(style: .systemUltraThinMaterial))
   private let materialFade = CAGradientLayer()
   private let content = NavigationContentController()
+  private let edgeBackdrop = NavigationEdgeBackdrop()
   private let navigation: UINavigationController
   private let channel: FlutterMethodChannel
   private var offset: CGFloat = 0
@@ -372,6 +373,9 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     parent?.addChild(navigation)
     container.addSubview(navigation.view)
     navigation.didMove(toParent: parent)
+    parent?.addChild(edgeBackdrop)
+    container.addSubview(edgeBackdrop.view)
+    edgeBackdrop.didMove(toParent: parent)
     container.onLayout = { [weak self] in self?.layout() }
     channel.setMethodCallHandler { [weak self] call, result in
       switch call.method {
@@ -400,6 +404,10 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     guard !measuring else { return }
     let viewportHeight = container.window?.bounds.height ?? container.bounds.height
     navigation.view.frame = CGRect(x: 0, y: 0, width: container.bounds.width, height: viewportHeight)
+    if backdropOnly && usesSystemScrollEdge {
+      edgeBackdrop.layout(in: navigation.view.frame, headerHeight: container.bounds.height,
+                          automaticTop: container.safeAreaInsets.top)
+    }
     // Flutter's route can begin offscreen, where UIKit infers a zero safe area.
     // Keep the toolbar below the status region throughout that transition.
     // Read the unmodified host inset, never the inset we are adjusting.
@@ -481,9 +489,12 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     alwaysFrosted = args["alwaysFrosted"] as? Bool == true
     if #available(iOS 26.0, *) {
       if #available(iOS 27.0, *) { usesSystemScrollEdge = true }
-      content.scrollView.topEdgeEffect.style = .soft
+      content.scrollView.topEdgeEffect.style = .hard
       content.scrollView.topEdgeEffect.isHidden = !usesSystemScrollEdge
     }
+    edgeBackdrop.view.isHidden = !(backdropOnly && usesSystemScrollEdge)
+    edgeBackdrop.overrideUserInterfaceStyle = navigation.overrideUserInterfaceStyle
+    navigation.view.alpha = backdropOnly && usesSystemScrollEdge ? 0 : 1
     // Older embedded views retain material because their native edge cannot
     // sample Flutter content. On iOS 27, UIKit also suppresses its native
     // edge while the large-title inset is collapsing.
@@ -898,6 +909,9 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
   }
 
   deinit {
+    edgeBackdrop.willMove(toParent: nil)
+    edgeBackdrop.view.removeFromSuperview()
+    edgeBackdrop.removeFromParent()
     channel.setMethodCallHandler(nil)
     navigation.willMove(toParent: nil)
     navigation.view.removeFromSuperview()
