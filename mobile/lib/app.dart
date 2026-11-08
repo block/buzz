@@ -7,6 +7,7 @@ import 'dart:async';
 import 'hosted_app_gate.dart';
 import 'onboarding_app_entry.dart';
 import 'organization_app_entry.dart';
+import 'shared/hosted/known_communities_sync.dart';
 import 'shared/hosted/organization_environment.dart';
 import 'shared/widgets/ios_navigation_metrics.dart';
 import 'shared/community/paired_community_landing.dart';
@@ -393,6 +394,8 @@ class App extends HookConsumerWidget {
       ref.listen(activityProvider, (_, _) {});
       // Preserve initial read seeding even while Solo is hidden.
       ref.listen(meUnreadChannelIdsProvider, (_, _) {});
+      // Joins the account's communities from other devices and uploads ours.
+      ref.listen(knownCommunitiesSyncProvider, (_, _) {});
     }
 
     // Start listening for buzz:// links immediately (even pre-auth) so a

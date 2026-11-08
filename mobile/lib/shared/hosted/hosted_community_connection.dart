@@ -60,6 +60,16 @@ Future<void> connectHostedCommunity({
   await persist(community, isCurrent);
   if (!isCurrent()) return;
   if (community.starterSetupIncomplete) {
-    await recoverStarterChannels(community, isCurrent);
+    // A concurrent join of the same relay and key may have saved first, and
+    // persistence then updated that record rather than adding this one.
+    final saved = (await storage.loadAll())
+        .where(
+          (item) =>
+              item.pubkey == pubkey &&
+              relayIdentity(item.relayUrl) == relayIdentity(relay),
+        )
+        .firstOrNull;
+    if (!isCurrent()) return;
+    await recoverStarterChannels(saved ?? community, isCurrent);
   }
 }

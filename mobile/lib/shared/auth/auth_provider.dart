@@ -5,6 +5,8 @@ import 'package:nostr/nostr.dart' as nostr;
 import '../community/community.dart';
 import '../community/community_provider.dart';
 import '../hosted/community_entry_requirements.dart';
+import '../hosted/hosted_community_connection.dart' show relayIdentity;
+import '../relay/relay_provider.dart' show pubkeyFromNsec;
 
 enum AuthStatus { unknown, unauthenticated, authenticated }
 
@@ -73,8 +75,36 @@ class AuthNotifier extends AsyncNotifier<AuthState> {
       if (activate) await ref.read(communityTransitionProvider).run();
       if (shouldContinue != null && !shouldContinue()) return;
       final storage = ref.read(communityStorageProvider);
-      await storage.save(community);
-      if (activate) await storage.saveActiveId(community.id);
+      // Concurrent joins of one relay with one key (a link racing the account
+      // sync, say) each built a fresh record; checked here, inside the
+      // exclusive section, the later one updates the saved record instead.
+      final key = _identityKey(community);
+      final duplicate = key == null
+          ? null
+          : (await storage.loadAll())
+                .where(
+                  (saved) =>
+                      saved.id != community.id &&
+                      _identityKey(saved) == key &&
+                      relayIdentity(saved.relayUrl) ==
+                          relayIdentity(community.relayUrl),
+                )
+                .firstOrNull;
+      final saved =
+          duplicate?.copyWith(
+            nsec: community.nsec,
+            // A join that asks for protection keeps it, whichever saved first.
+            sensitiveActionPolicy:
+                community.sensitiveActionPolicy == SensitiveActionPolicy.enabled
+                ? SensitiveActionPolicy.enabled
+                : null,
+            starterSetupIncomplete:
+                duplicate.starterSetupIncomplete ||
+                community.starterSetupIncomplete,
+          ) ??
+          community;
+      await storage.save(saved);
+      if (activate) await storage.saveActiveId(saved.id);
       await syncStoredCommunitySnapshot(ref);
 
       // Invalidate community providers so other consumers pick up the new data.
@@ -83,12 +113,15 @@ class AuthNotifier extends AsyncNotifier<AuthState> {
 
       if (activate) {
         state = AsyncData(
-          AuthState(status: AuthStatus.authenticated, community: community),
+          AuthState(status: AuthStatus.authenticated, community: saved),
         );
       }
     });
   }
 }
+
+String? _identityKey(Community community) =>
+    (pubkeyFromNsec(community.nsec?.trim()) ?? community.pubkey)?.toLowerCase();
 
 bool _hasValidNsec(String? nsec) {
   if (nsec == null || nsec.isEmpty) return false;

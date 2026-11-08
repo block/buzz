@@ -12,6 +12,7 @@ import 'package:buzz/shared/relay/relay_provider.dart' show RelayConfig;
 import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/community/community_provider.dart';
 import 'package:buzz/shared/community/community_storage.dart';
+import 'package:buzz/shared/hosted/known_communities_store.dart';
 import 'package:buzz/shared/push/push_subscription.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
@@ -438,6 +439,42 @@ void main() {
       expect(deactivatedCommunityIds, isEmpty);
       expect(revocationTriggers, 1);
     });
+
+    test(
+      'leaving a hosted community queues its account list removal',
+      () async {
+        SharedPreferences.setMockInitialValues({});
+        container = createContainer();
+        await container.read(communityListProvider.future);
+        final notifier = container.read(communityListProvider.notifier);
+        final keys = nostr.Keys('1'.padLeft(64, '0'));
+        final hosted = Community.create(
+          name: 'Team',
+          relayUrl: 'wss://Team.communities.buzz.xyz/',
+          nsec: keys.nsec,
+        );
+        final other = Community.create(
+          name: 'Other',
+          relayUrl: 'wss://relay.example.com',
+          nsec: keys.nsec,
+        );
+        await notifier.addCommunity(hosted);
+        await notifier.addCommunity(other);
+        final store = container.read(knownCommunitiesStoreProvider);
+
+        await notifier.removeCommunity(hosted.id);
+        await notifier.removeCommunity(other.id);
+
+        // Only destinations the account session can enter are uploaded.
+        expect(await store.pending(), [
+          (
+            url: 'wss://team.communities.buzz.xyz',
+            removed: true,
+            pubkey: keys.public,
+          ),
+        ]);
+      },
+    );
 
     test(
       'removal deletes the channel list snapshot and retires writers',
