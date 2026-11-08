@@ -1,0 +1,83 @@
+{
+  "emitted": [
+    {
+      "family": "Gray",
+      "accent": "neutral",
+      "desktop": "Neutral"
+    },
+    {
+      "family": "Chartreuse",
+      "accent": "#d7d72e",
+      "desktop": "Chartreuse"
+    },
+    {
+      "family": "Flame",
+      "accent": "#f97316",
+      "desktop": "Orange"
+    },
+    {
+      "family": "Magenta",
+      "accent": "#ec4899",
+      "desktop": "Pink"
+    },
+    {
+      "family": "Iris",
+      "accent": "#c0a2f1",
+      "desktop": "Lilac"
+    },
+    {
+      "family": "Cobalt",
+      "accent": "#3b82f6",
+      "desktop": "Blue"
+    },
+    {
+      "family": "Jade",
+      "accent": "#22c55e",
+      "desktop": "Green"
+    }
+  ],
+  "legacy": [
+    {
+      "accent": "#06b6d4",
+      "desktop": "Cyan",
+      "family": "Jade"
+    },
+    {
+      "accent": "#ef4444",
+      "desktop": "Red",
+      "family": "Magenta"
+    },
+    {
+      "accent": "#a855f7",
+      "desktop": "Purple",
+      "family": "Iris"
+    },
+    {
+      "accent": "#6366f1",
+      "desktop": "Indigo",
+      "family": "Cobalt"
+    }
+  ],
+  "rejected": [
+    "url(image)",
+    "#123456",
+    "Chartreuse",
+    "cyan",
+    ""
+  ],
+  "baseReaders": {
+    "note": "v1 accents accepted by Mobile and Desktop before Chartreuse; anything a client publishes without a picker action must stay in this set",
+    "accepted": [
+      "neutral",
+      "#3b82f6",
+      "#06b6d4",
+      "#22c55e",
+      "#f97316",
+      "#ef4444",
+      "#ec4899",
+      "#c0a2f1",
+      "#a855f7",
+      "#6366f1"
+    ]
+  }
+}

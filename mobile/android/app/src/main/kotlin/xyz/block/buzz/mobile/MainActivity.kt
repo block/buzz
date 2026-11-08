@@ -1,6 +1,7 @@
 package xyz.block.buzz.mobile
 
 
+import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
@@ -130,9 +131,21 @@ class MainActivity : FlutterFragmentActivity() {
     private var ageSignalChannel: MethodChannel? = null
     private val ageSignalRequest = AgeSignalRequest()
     private var huddleMediaPlugin: HuddleMediaPlugin? = null
+    private var hapticsPlugin: HapticsPlugin? = null
+    private var hostedHpkePlugin: HostedHpkePlugin? = null
+    private var identityFilePlugin: IdentityFilePlugin? = null
+    private var browserAuthPlugin: BrowserAuthPlugin? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        flutterEngine.platformViewsController.registry.registerViewFactory(
+            "buzz/transparent-avatar",
+            TransparentAvatarViewFactory(flutterEngine.dartExecutor.binaryMessenger),
+        )
+        hostedHpkePlugin = HostedHpkePlugin(flutterEngine.dartExecutor.binaryMessenger)
+        identityFilePlugin = IdentityFilePlugin(this, flutterEngine.dartExecutor.binaryMessenger)
+        browserAuthPlugin = BrowserAuthPlugin(this, flutterEngine.dartExecutor.binaryMessenger)
+        hapticsPlugin = HapticsPlugin(this, flutterEngine.dartExecutor.binaryMessenger)
 
         huddleMediaPlugin = HuddleMediaPlugin(
             this,
@@ -192,6 +205,27 @@ class MainActivity : FlutterFragmentActivity() {
         }
     }
 
+    override fun onNewIntent(intent: Intent) {
+        // Resolve the browser session before resume can report cancellation.
+        browserAuthPlugin?.onNewIntent(intent)
+        super.onNewIntent(intent)
+    }
+
+    override fun onPause() {
+        browserAuthPlugin?.onPause()
+        super.onPause()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        browserAuthPlugin?.onResume()
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        identityFilePlugin?.onActivityResult(requestCode, resultCode, data)
+    }
+
     override fun onRequestPermissionsResult(
         requestCode: Int,
         permissions: Array<out String>,
@@ -202,6 +236,14 @@ class MainActivity : FlutterFragmentActivity() {
     }
 
     override fun onDestroy() {
+        browserAuthPlugin?.dispose()
+        browserAuthPlugin = null
+        identityFilePlugin?.dispose()
+        identityFilePlugin = null
+        hostedHpkePlugin?.dispose()
+        hostedHpkePlugin = null
+        hapticsPlugin?.dispose()
+        hapticsPlugin = null
         ageSignalRequest.retire()
         huddleMediaPlugin?.dispose()
         huddleMediaPlugin = null

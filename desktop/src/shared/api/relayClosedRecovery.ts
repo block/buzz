@@ -1,4 +1,5 @@
 import { classifyRelayClosed } from "@/shared/api/relayClosedPolicy";
+import { isQueryDeadlineError } from "@/shared/lib/relayError";
 import {
   activateRateLimit,
   parseRateLimitHint,
@@ -131,8 +132,17 @@ function recoverLiveSubscriptionFromClosed({
 }) {
   subscription.resolveReady?.("closed");
   subscription.resolveReady = undefined;
+  // The relay dropped this subscription: it is no longer live on this socket,
+  // so closing the socket must not stamp a `liveUntil` for it.
+  subscription.eoseGeneration = undefined;
 
-  const closedClass = classifyRelayClosed(message);
+  // A deadline on a live sub is treated as retryable: resubscribe with the
+  // same filter under the 1-30s backoff, which can keep retrying at the cap.
+  // `since` is deliberately not advanced to now; that could skip events
+  // missed while the sub was closed.
+  const closedClass = isQueryDeadlineError(message)
+    ? "retryable"
+    : classifyRelayClosed(message);
 
   if (closedClass === "terminal") {
     // Auth/access/filter failure — permanently remove the subscription so it
@@ -250,8 +260,10 @@ export function markReconnectLiveEose(
   generation: number,
 ) {
   const replay = subscription.reconnectReplay;
-  if (!replay || replay.generation !== generation) return;
+  if (!replay || replay.generation !== generation || replay.ignoreEose) return;
   replay.liveEose = true;
+  replay.liveEoseWaiter?.();
+  replay.liveEoseWaiter = undefined;
   if (replay.repairDone) subscription.reconnectReplay = undefined;
 }
 
@@ -279,8 +291,10 @@ export function handleSubscriptionEose({
   const subscription = subscriptions.get(subId);
   if (!subscription) return;
   if (subscription.mode === "live") {
-    if (generation !== undefined)
+    if (generation !== undefined) {
+      subscription.eoseGeneration = generation;
       markReconnectLiveEose(subscription, generation);
+    }
     subscription.resolveReady?.("eose");
     subscription.resolveReady = undefined;
     subscription.closedRetryAttempt = 0;

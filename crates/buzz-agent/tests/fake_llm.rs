@@ -956,10 +956,18 @@ async fn steer_rejected_when_no_active_run() {
 async fn steer_rejected_on_run_id_mismatch() {
     // A live run, but the caller targets a stale/wrong run id → invalid_params,
     // so the client falls back to cancel+merge instead of injecting blind.
-    let (url, _captures) = spawn_capturing_fake_llm(vec![
-        openai_tool_call("call_x", "fake__noop", json!({})),
-        openai_text("done"),
-    ])
+    // Hold the provider response until the rejection is observed. Otherwise
+    // the turn can finish before the client sends or receives the steer.
+    let (gate_tx, gate_rx) = tokio::sync::oneshot::channel();
+    let responses = vec![CannedResponse {
+        status: 200,
+        body: openai_text("done"),
+    }];
+    let (url, _) = spawn_gated_capturing_fake_llm(
+        responses,
+        Arc::new(Mutex::new(Vec::new())),
+        Arc::new(Mutex::new(Some(gate_rx))),
+    )
     .await;
     let mut h = Harness::spawn(&url).await;
     let sid = init_session(&mut h).await;
@@ -983,21 +991,14 @@ async fn steer_rejected_on_run_id_mismatch() {
         )
         .await;
 
-    let mut saw_reject = false;
-    for _ in 0..40 {
-        let v = h.recv().await;
-        if v["id"] == json!(s_id) {
-            assert_eq!(
-                v["error"]["code"], -32602,
-                "mismatched runId must be rejected"
-            );
-            saw_reject = true;
-        } else if v["id"] == json!(p_id) {
-            // Turn finishes normally regardless of the rejected steer.
-            break;
-        }
-    }
-    assert!(saw_reject, "run-id mismatch was not rejected");
+    let rejected = h.recv_until(|v| v["id"] == json!(s_id)).await;
+    assert_eq!(
+        rejected["error"]["code"], -32602,
+        "mismatched runId must be rejected"
+    );
+    gate_tx.send(()).expect("provider gate should remain live");
+    let completed = h.recv_until(|v| v["id"] == json!(p_id)).await;
+    assert_eq!(completed["result"]["stopReason"], "end_turn");
     h.shutdown().await;
 }
 

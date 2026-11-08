@@ -134,15 +134,31 @@ void main() {
     });
   });
 
-  test('mergeReadStateContexts keeps the maximum timestamp per context', () {
-    expect(
-      mergeReadStateContexts([
-        {'channel-a': 10, 'channel-b': 5},
-        {'channel-a': 7, 'channel-c': 1},
-        {'channel-b': 12},
-      ]),
-      {'channel-a': 10, 'channel-b': 12, 'channel-c': 1},
-    );
+  test('pruneStaleContexts prunes all old hints without count eviction', () {
+    const now = 10 * readStateHorizonSeconds;
+    final fresh = now - 60;
+    final stale = now - readStateHorizonSeconds - 1;
+    final contexts = <String, int>{
+      'channel-1': stale,
+      'activity:channel-1': stale,
+      'thread-activity:root': stale,
+      'msg:stale': stale,
+      'thread:stale': stale,
+      for (var index = 0; index < 1010; index++) 'msg:$index': fresh + index,
+    };
+
+    final kept = pruneStaleContexts(contexts, nowUnixSeconds: now);
+
+    expect(kept, isNot(contains('channel-1')));
+    expect(kept, isNot(contains('activity:channel-1')));
+    expect(kept, isNot(contains('thread-activity:root')));
+    expect(kept, isNot(contains('msg:stale')));
+    expect(kept, isNot(contains('thread:stale')));
+    final messages = kept.keys.where((key) => key.startsWith('msg:'));
+    expect(messages.length, 1010);
+    // Every recent mark survives, including the oldest.
+    expect(kept, contains('msg:0'));
+    expect(kept, contains('msg:1009'));
   });
 }
 

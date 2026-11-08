@@ -3,7 +3,8 @@
 use serde_json::{json, Value};
 use std::{
     fs,
-    io::Write,
+    io::{ErrorKind, Write},
+    os::unix::{io::OwnedFd, net::UnixStream},
     path::PathBuf,
     process::{Child, Command, Output, Stdio},
     time::{Duration, Instant},
@@ -97,7 +98,8 @@ fn terminal(output: &Output, code: i32, status: &str) -> Value {
     assert_eq!(
         output.status.code(),
         Some(code),
-        "stderr={} stdout={}",
+        "exit={:?} stderr={} stdout={}",
+        output.status,
         String::from_utf8_lossy(&output.stderr),
         String::from_utf8_lossy(&output.stdout)
     );
@@ -182,6 +184,7 @@ fn file_and_stdin_run_one_fresh_equipped_session_without_service() {
         for proc in spawned {
             assert_eq!(proc["key"], KEY);
             assert_eq!(proc["relay"], "ws://127.0.0.1:1");
+            assert_eq!(proc["outputFormat"], "agent");
             assert_dead(proc["pid"].as_u64().unwrap() as u32);
             assert!(!std::path::Path::new(proc["gitKeyfile"].as_str().unwrap()).exists());
         }
@@ -196,6 +199,13 @@ fn file_and_stdin_run_one_fresh_equipped_session_without_service() {
             .collect();
         assert_eq!(prompts.len(), 2);
         for (session, prompt) in sessions.iter().zip(prompts) {
+            let mcp_env = session["params"]["mcpServers"][0]["env"]
+                .as_array()
+                .unwrap();
+            let format = mcp_env
+                .iter()
+                .find(|entry| entry["name"] == "BUZZ_OUTPUT_FORMAT");
+            assert_eq!(format.map(|entry| &entry["value"]), Some(&json!("agent")));
             let setup = session["params"].to_string();
             assert!(setup.contains("/test/mcp"));
             assert!(setup.contains("task title"));
@@ -411,6 +421,32 @@ fn deadline_covers_initialize_session_and_turn_and_cleans_descendants() {
     }
 }
 
+fn backpressured_stdin() -> (UnixStream, UnixStream) {
+    let (reader, mut writer) = UnixStream::pair().unwrap();
+    writer.set_nonblocking(true).unwrap();
+    // Fill before spawning: the next write cannot finish until the runner reads
+    // stdin, which happens after signal registration. Keep below the task limit
+    // and leave the writer open so read_to_end still awaits EOF when cancelled.
+    let mut queued = 0;
+    loop {
+        match writer.write(b" ") {
+            Ok(0) => panic!("stdin fixture stopped accepting bytes"),
+            Ok(n) => {
+                queued += n;
+                assert!(queued < 1024 * 1024 - 1, "stdin fixture exceeds task limit");
+            }
+            Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+            Err(error) if error.kind() == ErrorKind::WouldBlock => break,
+            Err(error) => panic!("cannot fill stdin fixture: {error}"),
+        }
+    }
+    writer.set_nonblocking(false).unwrap();
+    writer
+        .set_write_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    (reader, writer)
+}
+
 #[test]
 fn signals_cancel_startup_turn_and_pending_stdin_without_hanging() {
     use nix::{
@@ -427,9 +463,20 @@ fn signals_cancel_startup_turn_and_pending_stdin_without_hanging() {
         command
             .env("TASK_AGENT_MODE", mode)
             .args(["--no-memory", "--task", "-"]);
+        let mut held_stdin = if mode == "stdin" {
+            let (reader, writer) = backpressured_stdin();
+            command.stdin(Stdio::from(OwnedFd::from(reader)));
+            Some(writer)
+        } else {
+            None
+        };
         let mut child = command.spawn().unwrap();
-        let held_stdin = if mode == "stdin" {
-            child.stdin.take()
+        if let Some(writer) = held_stdin.as_mut() {
+            if let Err(error) = writer.write_all(b" ") {
+                let status = child.try_wait();
+                let _ = child.kill();
+                panic!("{mode} never drained pending input: {error}; status={status:?}");
+            }
         } else {
             child
                 .stdin
@@ -437,24 +484,34 @@ fn signals_cancel_startup_turn_and_pending_stdin_without_hanging() {
                 .unwrap()
                 .write_all(f.task().to_string().as_bytes())
                 .unwrap();
-            None
-        };
-        let until = Instant::now() + Duration::from_secs(3);
-        if mode == "stdin" {
-            std::thread::sleep(Duration::from_millis(250));
-        } else {
+            let until = Instant::now() + Duration::from_secs(3);
             let method = if mode == "turn-hang" {
                 "session/prompt"
             } else {
                 "initialize"
             };
             while !f.wire().iter().any(|v| v["method"] == method) {
-                assert!(Instant::now() < until);
+                if Instant::now() >= until {
+                    let status = child.try_wait();
+                    let _ = child.kill();
+                    panic!("{mode} never reached {method}: status={status:?}");
+                }
                 std::thread::sleep(Duration::from_millis(10));
             }
         }
+        eprintln!(
+            "cancelling case={mode} signal={signal:?} pid={}",
+            child.id()
+        );
         kill(Pid::from_raw(child.id() as i32), signal).unwrap();
-        terminal(&wait(child), code, "cancelled");
+        let result = terminal(&wait(child), code, "cancelled");
+        if mode == "stdin" {
+            assert!(result["taskId"].is_null());
+            assert!(
+                f.wire().is_empty(),
+                "incomplete input must not start an agent"
+            );
+        }
         drop(held_stdin);
         for frame in f.wire() {
             if let Some(pid) = frame["pid"].as_u64() {
@@ -576,4 +633,38 @@ async fn memory_is_loaded_before_session_and_opt_out_makes_no_request() {
             }
         }
     }
+}
+
+#[test]
+fn launch_prefix_wraps_the_shipped_local_task_entrypoint() {
+    let f = Fixture::new();
+    let mut command = f.command();
+    command
+        .env(
+            "BUZZ_ACP_LAUNCH_PREFIX",
+            json!([
+                "/bin/sh",
+                "-c",
+                "printf invoked > wrapper-called; exec \"$@\"",
+                "fixture-launcher"
+            ])
+            .to_string(),
+        )
+        .args(["--no-memory", "--task", "-"]);
+    let mut child = command.spawn().unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(f.task().to_string().as_bytes())
+        .unwrap();
+    terminal(&wait(child), 0, "completed");
+    assert_eq!(
+        fs::read_to_string(f.dir.join("wrapper-called")).unwrap(),
+        "invoked"
+    );
+    assert!(f
+        .wire()
+        .iter()
+        .any(|message| message["method"] == "session/prompt"));
 }

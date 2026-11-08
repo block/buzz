@@ -12,8 +12,14 @@ created: 2026-08-28
 routing**: the read may be served from a read replica when
 `BUZZ_REPLICA_READ_MAX_AGE_MS` is set, subject to the soundness predicate
 `RoutePredicate::for_query` derives from the query shape. The seam fails closed
-to the writer at every error and is a genuine no-op until the budget is
-configured (`crates/buzz-db/src/lib.rs`).
+to the writer on replica errors, with one deliberate exception: a statement
+cancelled by `statement_timeout` (SQLSTATE `57014`) is surfaced rather than
+re-run, because the writer would run the same slow statement. A busy reader
+is the other exception: a subscription-history read that cannot get a reader
+connection within its bounded wait is rejected as retryable instead of moving
+to the writer, and history reads are capped per pod below the reader pool
+size (`Db::route_read`). It is a genuine no-op until the budget is configured
+(`crates/buzz-db/src/lib.rs`).
 
 ## Routing rule
 
@@ -53,7 +59,7 @@ in `crates/buzz-relay/src/api/bridge.rs` (`extract_consistency`).
 Rows below are every `query_events_routed` / `query_events_routed_bounded`
 call site at head, plus the writer-pinned canvas row this change adds. (The
 `count` and feed routed families — `count_events_routed`,
-`get_events_by_ids_routed`, `query_feed_*_routed`, and the `get_channel_window`
+`get_events_by_ids_at_routed`, `query_feed_*_routed`, and the `get_channel_window`
 cursor/head reads — are all display or bounded-count surfaces on the routed
 path; they carry their own soundness notes at their definitions in
 `crates/buzz-db/src/lib.rs` and are out of scope for this table.)

@@ -5,8 +5,8 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::app_state::AppState;
 use crate::managed_agents::{
-    effective_repos_dir, ensure_repos_symlink, nest_dir, restore_managed_agents_on_launch,
-    try_regenerate_nest, write_persisted_repos_dir,
+    effective_repos_dir, ensure_repos_symlink, nest_dir, try_regenerate_nest,
+    write_persisted_repos_dir,
 };
 use crate::relay;
 
@@ -148,6 +148,34 @@ pub fn set_agent_avatar_communities(
         .lock()
         .map_err(|e| e.to_string())? = relay_urls;
     Ok(())
+}
+
+/// Refuse local agent pairs on a community's relay after it is removed from
+/// this device; see `managed_agents::remove_relay`. The frontend calls this
+/// only when no other saved community uses the relay, before its stop sweep.
+///
+/// Leaves `relay_url_override` untouched: the outgoing relay stays applied
+/// until the next `apply_workspace` replaces it. Never takes
+/// `workspace_apply_lock`, which launch restore holds while waiting on the
+/// transition lock this takes.
+#[tauri::command]
+pub async fn remove_community_relay(relay_url: String, app: AppHandle) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        crate::managed_agents::remove_relay(&app.state::<AppState>(), &relay_url)
+    })
+    .await
+    .map_err(|e| format!("remove_community_relay task failed: {e}"))?
+}
+
+/// Admit local agent pairs on a relay again after a saved community on it is
+/// explicitly re-added, whether or not it becomes the active community.
+#[tauri::command]
+pub async fn readd_community_relay(relay_url: String, app: AppHandle) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        crate::managed_agents::readd_relay(&app.state::<AppState>(), &relay_url)
+    })
+    .await
+    .map_err(|e| format!("readd_community_relay task failed: {e}"))?
 }
 
 /// Apply a workspace's configuration to the backend session.
@@ -331,6 +359,14 @@ pub async fn apply_workspace(
     let restore_pending = state
         .managed_agent_restore_pending
         .swap(false, Ordering::AcqRel);
+    // Scheduled (admission captured) before the task is spawned: a community
+    // removal that lands before restore begins must still refuse it.
+    let restore = restore_pending.then(|| {
+        crate::managed_agents::launch_restore_task(
+            restore_app.clone(),
+            crate::managed_agents::live_process_sweeps,
+        )
+    });
 
     // Transfer the apply guard to launch restoration. The command can return
     // promptly, but a queued workspace cannot mutate relay/identity until the
@@ -350,10 +386,8 @@ pub async fn apply_workspace(
                 }
             }
             crate::mesh_llm::publish_current_status_once(&app, "workspace apply").await;
-            if restore_pending {
-                if let Err(error) =
-                    restore_managed_agents_on_launch(&app, &state.shutdown_started).await
-                {
+            if let Some(restore) = restore {
+                if let Err(error) = restore.await {
                     eprintln!("buzz-desktop: failed to restore managed agents: {error}");
                 }
             }
@@ -362,15 +396,11 @@ pub async fn apply_workspace(
     }
 
     #[cfg(not(feature = "mesh-llm"))]
-    if restore_pending {
+    if let Some(restore) = restore {
         let restore_lock = apply_guard;
-        let app = restore_app.clone();
         tauri::async_runtime::spawn(async move {
             let _restore_lock = restore_lock;
-            let state = app.state::<AppState>();
-            if let Err(error) =
-                restore_managed_agents_on_launch(&app, &state.shutdown_started).await
-            {
+            if let Err(error) = restore.await {
                 eprintln!("buzz-desktop: failed to restore managed agents: {error}");
             }
         });

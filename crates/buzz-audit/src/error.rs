@@ -14,6 +14,10 @@ pub enum AuditError {
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
 
+    /// Community write admission failed before the audit chain was locked.
+    #[error("audit write admission failed")]
+    Admission(#[from] buzz_db::DbError),
+
     /// The `prev_hash` of an entry does not match the hash of the preceding
     /// entry in the same community's chain.
     #[error(
@@ -77,6 +81,9 @@ mod tests {
             AuditError::HashMismatch { seq: 42 },
             AuditError::UnknownAction,
             AuditError::UnsupportedHashVersion { version: 99 },
+            AuditError::Admission(buzz_db::DbError::AccessDenied(format!(
+                "community {community} is write-fenced"
+            ))),
         ];
 
         for err in &domain_errors {

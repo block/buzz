@@ -670,6 +670,35 @@ test("terminal CLOSED deletes subscription and does not retry", () => {
   assert.equal(firedAt.length, 0, "terminal CLOSED must not retry");
 });
 
+test("live CLOSED query deadline retries with backoff instead of removing", () => {
+  resetAll(0);
+  const firedAt = [];
+  const subscriptions = new Map([
+    [
+      "live-1",
+      {
+        mode: "live",
+        filter: { kinds: [9], "#h": ["ch-1"], limit: 1000 },
+        onEvent: () => {},
+        resolveReady: () => {},
+      },
+    ],
+  ]);
+  handleRelayClosed({
+    subscriptions,
+    subId: "live-1",
+    message: "error: query timed out",
+    sendReq: () => {
+      firedAt.push(fakeNow);
+      return Promise.resolve();
+    },
+  });
+  assert.equal(subscriptions.has("live-1"), true, "live sub must survive");
+  assert.equal(firedAt.length, 0, "retry waits for backoff");
+  tickTo(10_000);
+  assert.equal(firedAt.length, 1, "live sub must be re-sent after backoff");
+});
+
 // ── Test: rejecting closeSubscription does not produce an unhandled rejection ─
 //
 // Load-bearing for the `.catch(() => {})` guard on the op-timeout CLOSE send.
@@ -754,6 +783,36 @@ test("relayClientSession wires closeSubscription into handleRelayClosed", async 
 });
 
 // ── Teardown ──────────────────────────────────────────────────────────────────
+
+test("live EOSE records the connection generation; retryable CLOSED clears it", () => {
+  resetAll(0);
+  const subscription = {
+    mode: "live",
+    filter: { kinds: [9], limit: 10 },
+    onEvent: () => {},
+  };
+  const subscriptions = new Map([["live-1", subscription]]);
+  handleSubscriptionEose({
+    subscriptions,
+    subId: "live-1",
+    closeSubscription: async () => {},
+    generation: 5,
+  });
+  assert.equal(subscription.eoseGeneration, 5);
+
+  handleRelayClosed({
+    subscriptions,
+    subId: "live-1",
+    message: "error: database error",
+    sendReq: async () => {},
+  });
+  assert.equal(
+    subscription.eoseGeneration,
+    undefined,
+    "a relay-closed subscription is not live, so closing the socket must not stamp it",
+  );
+  window.clearTimeout(subscription.closedRetryTimeout);
+});
 
 test("teardown — restore Date.now", () => {
   Date.now = origDateNow;

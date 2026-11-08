@@ -58,7 +58,16 @@ use helpers::{
 pub(crate) mod error;
 
 mod attachment;
+#[cfg(test)]
+mod read_stub;
+mod reads;
+mod restrictions;
 pub use error::AdminMutationError;
+pub use reads::{
+    admin_connected_community_host, admin_get_event, admin_get_member, admin_list_communities,
+    admin_search_members,
+};
+pub use restrictions::{admin_lift_restriction, admin_list_restrictions};
 
 // ── Typed probe result ────────────────────────────────────────────────────
 
@@ -159,6 +168,7 @@ async fn admin_probe_inner(
 ) -> Result<AdminProbeResult, String> {
     let origin = origin::AdminOrigin::parse(origin)?;
     let url = origin.route_url(&routes::AdminRoute::Probe, &routes::AdminQuery::default());
+    crate::egress_guard::assert_no_key_backup(&url, "admin API request URL")?;
 
     let http_client = client::ADMIN_CLIENT
         .get()
@@ -465,6 +475,7 @@ pub async fn admin_list_reports(
         scope: query.scope,
         cursor: None,
         community_host: None,
+        q: None,
     };
     let url = origin.route_url(&routes::AdminRoute::ReportsList, &q);
     let bytes = fetch_admin_json(&url, SUCCESS_JSON_CAP, &state).await?;
@@ -655,7 +666,7 @@ pub async fn admin_put_operator(
 ) -> Result<serde_json::Value, AdminMutationError> {
     let origin = origin::AdminOrigin::parse(&origin)?;
     let pubkey =
-        routes::HexPubkey::parse(&pubkey).map_err(|e| format!("invalid operator pubkey: {e}"))?;
+        routes::Hex64::parse(&pubkey).map_err(|e| format!("invalid operator pubkey: {e}"))?;
     let url = origin.route_url(
         &routes::AdminRoute::OperatorPut { pubkey },
         &routes::AdminQuery::default(),
@@ -677,7 +688,7 @@ pub async fn admin_delete_operator(
 ) -> Result<serde_json::Value, AdminMutationError> {
     let origin = origin::AdminOrigin::parse(&origin)?;
     let pubkey =
-        routes::HexPubkey::parse(&pubkey).map_err(|e| format!("invalid operator pubkey: {e}"))?;
+        routes::Hex64::parse(&pubkey).map_err(|e| format!("invalid operator pubkey: {e}"))?;
     let url = origin.route_url(
         &routes::AdminRoute::OperatorDelete { pubkey },
         &routes::AdminQuery::default(),
@@ -747,119 +758,123 @@ pub async fn admin_save_attachment(
     .await
 }
 
-// ── Member restrictions ───────────────────────────────────────────────────
+// ── Direct moderation actions ─────────────────────────────────────────────
 
-/// Shown by the UI when a restriction call targets a relay other than the one
-/// its list loaded from.
-const RELAY_SCOPE_CHANGED: &str =
-    "active community changed since restrictions loaded; nothing was sent. Reload to continue.";
+/// A direct ban, timeout, or delete as the confirm dialog froze it. The same
+/// intent (including `request_id`) is resent verbatim on every retry; only the
+/// NIP-98 signature is minted fresh per attempt.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminDirectIntent {
+    pub origin: String,
+    /// Relay the intent was confirmed against.
+    pub expected_relay: String,
+    /// Signer the intent was confirmed under.
+    pub expected_pubkey: String,
+    /// Typed community host; sent only as the `communityHost` query parameter.
+    pub community_host: String,
+    pub action: DirectAction,
+    /// Member pubkey for ban/timeout, event id for delete (64 lowercase hex).
+    pub target: String,
+    pub request_id: uuid::Uuid,
+    pub reason: Option<String>,
+    pub expiration_secs: Option<u64>,
+}
 
-/// Build a restrictions-route URL scoped to the active relay's community.
-///
-/// The community is named by the active relay's host authority — the same
-/// `relay_url_authority` the relay's own connection binding uses — so the relay
-/// resolves its tenant. The desktop's local community ids are never sent.
-///
-/// `expected_relay` is the relay the caller's restriction list loaded from. The
-/// native relay is read once; if it no longer matches, the call fails before
-/// any request so a workspace switch cannot retarget a page or removal.
-fn restrictions_url(
-    origin: &str,
-    route: &routes::AdminRoute,
-    cursor: Option<String>,
-    expected_relay: &str,
-    state: &crate::app_state::AppState,
-) -> Result<String, String> {
-    let origin = origin::AdminOrigin::parse(origin)?;
-    let relay_base = crate::relay::relay_api_base_url_with_override(state);
-    if expected_relay.trim().is_empty()
-        || crate::relay::assert_expected_relay_scope(Some(expected_relay), &relay_base).is_err()
+#[derive(Debug, Clone, Copy, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DirectAction {
+    Ban,
+    Timeout,
+    Delete,
+}
+
+/// Build the URL and body for a direct action, refusing it before any request
+/// when the active relay or signer no longer matches what was confirmed.
+fn direct_action_request(
+    intent: &AdminDirectIntent,
+    relay_base: &str,
+    signer_hex: &str,
+) -> Result<(String, Vec<u8>), String> {
+    let origin = origin::AdminOrigin::parse(&intent.origin)?;
+    if intent.expected_relay.trim().is_empty()
+        || crate::relay::assert_expected_relay_scope(Some(&intent.expected_relay), relay_base)
+            .is_err()
     {
-        return Err(RELAY_SCOPE_CHANGED.to_string());
+        return Err(
+            "active relay changed since the action was confirmed; nothing was sent".to_string(),
+        );
     }
-    let host = buzz_core_pkg::tenant::relay_url_authority(&relay_base);
-    if host.is_empty() {
-        return Err("admin_community_host_unresolved".to_string());
+    if intent.expected_pubkey.trim().is_empty()
+        || crate::relay::assert_expected_signer(Some(&intent.expected_pubkey), signer_hex).is_err()
+    {
+        return Err(
+            "active identity changed since the action was confirmed; nothing was sent".to_string(),
+        );
+    }
+    let host = buzz_core_pkg::tenant::validate_community_host(intent.community_host.trim())
+        .map_err(|e| format!("invalid community host: {e}"))?;
+    let target =
+        routes::Hex64::parse(&intent.target).map_err(|e| format!("invalid target: {e}"))?;
+    let route = match intent.action {
+        DirectAction::Ban => routes::AdminRoute::MemberBan { pubkey: target },
+        DirectAction::Timeout => routes::AdminRoute::MemberTimeout { pubkey: target },
+        DirectAction::Delete => routes::AdminRoute::EventDelete { id: target },
+    };
+    let expiration_secs = match (intent.action, intent.expiration_secs) {
+        (DirectAction::Timeout, Some(secs)) if secs > 0 => Some(secs),
+        (DirectAction::Timeout, _) => return Err("timeout needs a positive duration".to_string()),
+        (_, Some(_)) => return Err("only a timeout takes a duration".to_string()),
+        (_, None) => None,
+    };
+    let mut body = serde_json::json!({ "requestId": intent.request_id });
+    if let Some(reason) = &intent.reason {
+        body["reason"] = reason.clone().into();
+    }
+    if let Some(secs) = expiration_secs {
+        body["expirationSecs"] = secs.into();
     }
     let q = routes::AdminQuery {
         community_host: Some(host),
-        cursor,
         ..Default::default()
     };
-    Ok(origin.route_url(route, &q))
+    let body = serde_json::to_vec(&body).map_err(|e| format!("failed to serialise body: {e}"))?;
+    Ok((origin.route_url(&route, &q), body))
 }
 
-/// List active bans and timeouts for the active relay's community —
-/// GET /api/admin/v1/members/restrictions?communityHost={host}[&cursor={token}].
+/// Ban, time out, or delete without a report — POST
+/// /api/admin/v1/{members/{pubkey}/ban|members/{pubkey}/timeout|events/{id}/delete}?communityHost=.
 ///
-/// Returns `{ items: [...], nextCursor: string|null }`. Pass the previous
-/// page's `nextCursor` as `cursor` to fetch the next page (relay page size 200).
+/// Returns the relay's `{actionId, state, replayed}` (200) or `{state:"pending"}` (202).
 #[tauri::command]
-pub async fn admin_list_restrictions(
-    origin: String,
-    cursor: Option<String>,
-    expected_relay: String,
+pub async fn admin_direct_action(
+    intent: AdminDirectIntent,
     state: tauri::State<'_, crate::app_state::AppState>,
-) -> Result<serde_json::Value, String> {
-    let url = restrictions_url(
-        &origin,
-        &routes::AdminRoute::MemberRestrictionsList,
-        cursor,
-        &expected_relay,
-        &state,
-    )?;
-    let bytes = fetch_admin_json(&url, SUCCESS_JSON_CAP, &state).await?;
-    serde_json::from_slice(&bytes).map_err(|e| format!("invalid JSON from relay: {e}"))
+) -> Result<serde_json::Value, AdminMutationError> {
+    let keys = state.signing_keys().map_err(AdminMutationError::not_sent)?;
+    send_direct_action(&intent, keys, &state).await
 }
 
-/// Lift an active ban — DELETE /api/admin/v1/members/{pubkey}/ban?communityHost={host}.
-///
-/// Returns 204 on success, 409 when no active ban exists for this member.
-/// A 409 is surfaced as an `AdminMutationError` so the UI can handle it
-/// gracefully ("no active ban").
-#[tauri::command]
-pub async fn admin_lift_ban(
-    origin: String,
-    pubkey: String,
-    expected_relay: String,
-    state: tauri::State<'_, crate::app_state::AppState>,
-) -> Result<(), AdminMutationError> {
-    let pubkey =
-        routes::HexPubkey::parse(&pubkey).map_err(|e| format!("invalid member pubkey: {e}"))?;
-    let url = restrictions_url(
-        &origin,
-        &routes::AdminRoute::MemberBanDelete { pubkey },
-        None,
-        &expected_relay,
-        &state,
-    )?;
-    // 204 No Content: empty body is the success signal. delete_admin_json
-    // returns Ok(vec![]) for 204; we discard the bytes and return ().
-    let _bytes = delete_admin_json(&url, SUCCESS_JSON_CAP, &state).await?;
-    Ok(())
-}
-
-/// Lift an active timeout — DELETE /api/admin/v1/members/{pubkey}/timeout?communityHost={host}.
-///
-/// Returns 204 on success, 409 when no active timeout exists for this member.
-#[tauri::command]
-pub async fn admin_lift_timeout(
-    origin: String,
-    pubkey: String,
-    expected_relay: String,
-    state: tauri::State<'_, crate::app_state::AppState>,
-) -> Result<(), AdminMutationError> {
-    let pubkey =
-        routes::HexPubkey::parse(&pubkey).map_err(|e| format!("invalid member pubkey: {e}"))?;
-    let url = restrictions_url(
-        &origin,
-        &routes::AdminRoute::MemberTimeoutDelete { pubkey },
-        None,
-        &expected_relay,
-        &state,
-    )?;
-    let _bytes = delete_admin_json(&url, SUCCESS_JSON_CAP, &state).await?;
-    Ok(())
+/// Validate `intent` against the `keys` snapshot and sign every request with
+/// that same snapshot, so an identity swapped in after the snapshot can never
+/// sign an action confirmed under the previous one.
+async fn send_direct_action(
+    intent: &AdminDirectIntent,
+    keys: nostr::Keys,
+    state: &crate::app_state::AppState,
+) -> Result<serde_json::Value, AdminMutationError> {
+    let relay_base = crate::relay::relay_api_base_url_with_override(state);
+    let (url, body) = direct_action_request(intent, &relay_base, &keys.public_key().to_hex())
+        .map_err(AdminMutationError::not_sent)?;
+    let bytes = helpers::send_admin_mutation(
+        &keys,
+        reqwest::Method::POST,
+        &url,
+        Some(&body),
+        SUCCESS_JSON_CAP,
+    )
+    .await?;
+    serde_json::from_slice(&bytes).map_err(|e| format!("invalid JSON from relay: {e}").into())
 }
 
 // ── Origin storage commands ───────────────────────────────────────────────

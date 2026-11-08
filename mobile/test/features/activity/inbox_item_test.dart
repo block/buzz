@@ -2,6 +2,8 @@ import 'package:buzz/features/activity/feed_item.dart';
 import 'package:buzz/features/activity/inbox_item.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import '../../helpers/thread_ids.dart';
+
 FeedItem item({
   required String id,
   int createdAt = 100,
@@ -29,20 +31,55 @@ List<List<String>> replyTags(String rootId, String parentId) => [
 ];
 
 void main() {
+  test(
+    'Inbox groups mixed-case replies despite trailing malformed markers',
+    () {
+      final root = 'a' * 64;
+      final parent = 'b' * 64;
+      final tags = [
+        ['e', root.toUpperCase(), '', 'root'],
+        ['e', parent.toUpperCase(), '', 'reply'],
+        ['e', 'bad', '', 'reply'],
+        ['e', '', '', 'root'],
+      ];
+      final target = item(id: 'target', createdAt: 20, tags: tags);
+      final rows = buildInboxItems([
+        item(id: 'earlier', createdAt: 10, tags: replyTags(root, parent)),
+        target,
+      ]);
+      expect(rows, hasLength(1));
+      expect(rows.single.conversationId, root);
+      expect(rows.single.threadRootId, root);
+      expect(rows.single.deepLinkTarget((e) => e.createdAt <= 10).id, 'target');
+      expect(threadReferenceOf(target.tags).parentId, parent);
+      expect(isThreadReply(tags), isTrue);
+      expect(
+        isThreadReply([
+          ...tags,
+          ['broadcast', '1'],
+        ]),
+        isFalse,
+      );
+    },
+  );
+
   group('inboxConversationId', () {
     test('uses root id when present', () {
       expect(
-        inboxConversationId(replyTags('root1', 'parent1'), 'ev1'),
-        'root1',
+        inboxConversationId(
+          replyTags(threadIdInboxRoot1, threadIdParent1),
+          'ev1',
+        ),
+        threadIdInboxRoot1,
       );
     });
 
     test('falls back to parent id without a root tag', () {
       expect(
         inboxConversationId([
-          ['e', 'parent1', '', 'reply'],
+          ['e', threadIdParent1, '', 'reply'],
         ], 'ev1'),
-        'parent1',
+        threadIdParent1,
       );
     });
 
@@ -53,13 +90,13 @@ void main() {
 
   group('isThreadReply', () {
     test('true for reply-tagged events', () {
-      expect(isThreadReply(replyTags('r', 'p')), isTrue);
+      expect(isThreadReply(replyTags(threadIdInboxR, threadIdInboxP)), isTrue);
     });
 
     test('false for broadcast replies', () {
       expect(
         isThreadReply([
-          ...replyTags('r', 'p'),
+          ...replyTags(threadIdInboxR, threadIdInboxP),
           ['broadcast', '1'],
         ]),
         isFalse,
@@ -74,17 +111,27 @@ void main() {
   group('buildInboxItems', () {
     test('groups thread events into one conversation row', () {
       final rows = buildInboxItems([
-        item(id: 'a', createdAt: 10, tags: replyTags('root1', 'root1')),
-        item(id: 'b', createdAt: 20, tags: replyTags('root1', 'a')),
+        item(
+          id: threadIdInboxA,
+          createdAt: 10,
+          tags: replyTags(threadIdInboxRoot1, threadIdInboxRoot1),
+        ),
+        item(
+          id: threadIdInboxB,
+          createdAt: 20,
+          tags: replyTags(threadIdInboxRoot1, threadIdInboxA),
+        ),
         item(id: 'c', createdAt: 15),
       ]);
 
       expect(rows, hasLength(2));
-      final threadRow = rows.firstWhere((r) => r.conversationId == 'root1');
-      expect(threadRow.id, 'b'); // latest event represents the row
+      final threadRow = rows.firstWhere(
+        (r) => r.conversationId == threadIdInboxRoot1,
+      );
+      expect(threadRow.id, threadIdInboxB); // latest event represents the row
       expect(threadRow.groupItems, hasLength(2));
       expect(threadRow.latestActivityAt, 20);
-      expect(threadRow.threadRootId, 'root1');
+      expect(threadRow.threadRootId, threadIdInboxRoot1);
     });
 
     test('sorts rows by latest activity, newest first', () {
@@ -114,35 +161,36 @@ void main() {
       expect(dmRow.latestActivityAt, 30);
     });
 
-    test('thread replies inside a DM still group by thread root', () {
+    test('thread replies inside a DM stay in the DM conversation', () {
       bool isDm(String channelId) => channelId == 'dm1';
       final rows = buildInboxItems([
-        item(id: 'top', createdAt: 10, channelId: 'dm1'),
+        item(id: threadIdInboxTop, createdAt: 10, channelId: 'dm1'),
         item(
           id: 'reply',
           createdAt: 20,
           channelId: 'dm1',
-          tags: replyTags('top', 'top'),
+          tags: replyTags(threadIdInboxTop, threadIdInboxTop),
         ),
       ], isDmChannel: isDm);
 
-      expect(rows, hasLength(2));
-      expect(rows.map((r) => r.conversationId).toSet(), {'dm:dm1', 'top'});
+      expect(rows, hasLength(1));
+      expect(rows.single.conversationId, 'dm:dm1');
+      expect(rows.single.groupItems, hasLength(2));
     });
 
     test('categories are priority sorted and set isActionRequired', () {
       final rows = buildInboxItems([
         item(
-          id: 'a',
+          id: threadIdInboxA,
           createdAt: 10,
           category: 'activity',
-          tags: replyTags('root1', 'root1'),
+          tags: replyTags(threadIdInboxRoot1, threadIdInboxRoot1),
         ),
         item(
-          id: 'b',
+          id: threadIdInboxB,
           createdAt: 20,
           category: 'needs_action',
-          tags: replyTags('root1', 'a'),
+          tags: replyTags(threadIdInboxRoot1, threadIdInboxA),
         ),
       ]);
       expect(rows.single.categories.first, 'needs_action');
@@ -152,25 +200,46 @@ void main() {
 
   group('InboxItem.deepLinkTarget', () {
     final rows = buildInboxItems([
-      item(id: 'a', createdAt: 10, tags: replyTags('root1', 'root1')),
-      item(id: 'b', createdAt: 20, tags: replyTags('root1', 'a')),
-      item(id: 'c', createdAt: 30, tags: replyTags('root1', 'b')),
+      item(
+        id: threadIdInboxA,
+        createdAt: 10,
+        tags: replyTags(threadIdInboxRoot1, threadIdInboxRoot1),
+      ),
+      item(
+        id: threadIdInboxB,
+        createdAt: 20,
+        tags: replyTags(threadIdInboxRoot1, threadIdInboxA),
+      ),
+      item(
+        id: 'c',
+        createdAt: 30,
+        tags: replyTags(threadIdInboxRoot1, threadIdInboxB),
+      ),
     ]);
 
+    bool readUpTo(int time, FeedItem event) => event.createdAt <= time;
+
     test('targets the oldest unread event', () {
-      expect(rows.single.deepLinkTarget(15).id, 'b');
+      expect(
+        rows.single.deepLinkTarget((e) => readUpTo(15, e)).id,
+        threadIdInboxB,
+      );
     });
 
     test('targets the oldest event when nothing is read', () {
-      expect(rows.single.deepLinkTarget(5).id, 'a');
+      expect(rows.single.deepLinkTarget((_) => false).id, threadIdInboxA);
     });
 
     test('falls back to the latest event when all are read', () {
-      expect(rows.single.deepLinkTarget(99).id, 'c');
+      expect(rows.single.deepLinkTarget((_) => true).id, 'c');
     });
 
-    test('falls back to the latest event without a read marker', () {
-      expect(rows.single.deepLinkTarget(null).id, 'c');
+    test('checks each event, not a single time', () {
+      // Only the middle reply is unread, though the newest is read.
+      expect(
+        rows.single.deepLinkTarget((e) => e.id != threadIdInboxB).id,
+        threadIdInboxB,
+      );
     });
   });
 
@@ -178,31 +247,72 @@ void main() {
     InboxItem rowOf(FeedItem feedItem) => buildInboxItems([feedItem]).single;
 
     test('all matches everything', () {
-      expect(matchesInboxFilter(rowOf(item(id: 'a')), InboxFilter.all), isTrue);
+      expect(
+        matchesInboxFilter(rowOf(item(id: threadIdInboxA)), InboxFilter.all),
+        isTrue,
+      );
     });
 
     test('thread filter needs a thread reply in the group', () {
       expect(
-        matchesInboxFilter(rowOf(item(id: 'a')), InboxFilter.thread),
+        matchesInboxFilter(rowOf(item(id: threadIdInboxA)), InboxFilter.thread),
         isFalse,
       );
       expect(
         matchesInboxFilter(
-          rowOf(item(id: 'a', tags: replyTags('r', 'p'))),
+          rowOf(
+            item(
+              id: threadIdInboxA,
+              tags: replyTags(threadIdInboxR, threadIdInboxP),
+            ),
+          ),
           InboxFilter.thread,
         ),
         isTrue,
       );
     });
 
+    test('DM filter matches DM conversations, including thread replies', () {
+      bool isDm(String channelId) => channelId == 'dm1';
+      InboxItem row(FeedItem feedItem) =>
+          buildInboxItems([feedItem], isDmChannel: isDm).single;
+      expect(
+        matchesInboxFilter(
+          row(item(id: threadIdInboxA, channelId: 'dm1')),
+          InboxFilter.dm,
+        ),
+        isTrue,
+      );
+      expect(
+        matchesInboxFilter(
+          row(
+            item(
+              id: threadIdInboxA,
+              channelId: 'dm1',
+              tags: replyTags(threadIdInboxR, threadIdInboxP),
+            ),
+          ),
+          InboxFilter.dm,
+        ),
+        isTrue,
+      );
+      expect(
+        matchesInboxFilter(
+          row(item(id: threadIdInboxA, channelId: 'general')),
+          InboxFilter.dm,
+        ),
+        isFalse,
+      );
+    });
+
     test('category filters match their category', () {
-      final mention = rowOf(item(id: 'a', category: 'mention'));
+      final mention = rowOf(item(id: threadIdInboxA, category: 'mention'));
       expect(matchesInboxFilter(mention, InboxFilter.mention), isTrue);
       expect(matchesInboxFilter(mention, InboxFilter.needsAction), isFalse);
       expect(matchesInboxFilter(mention, InboxFilter.activity), isFalse);
       expect(
         matchesInboxFilter(
-          rowOf(item(id: 'b', category: 'agent_activity')),
+          rowOf(item(id: threadIdInboxB, category: 'agent_activity')),
           InboxFilter.agentActivity,
         ),
         isTrue,
@@ -210,7 +320,7 @@ void main() {
     });
 
     test('reminders and drafts are separate surfaces', () {
-      final row = rowOf(item(id: 'a'));
+      final row = rowOf(item(id: threadIdInboxA));
       expect(matchesInboxFilter(row, InboxFilter.reminders), isFalse);
       expect(matchesInboxFilter(row, InboxFilter.drafts), isFalse);
     });
@@ -221,7 +331,7 @@ void main() {
 
     test('DM rows lead with the sender', () {
       final label = inboxTypeLabel(
-        rowOf(item(id: 'a', category: 'activity')),
+        rowOf(item(id: threadIdInboxA, category: 'activity')),
         channelName: null,
         isDm: true,
         senderLabel: 'Alice',
@@ -232,7 +342,7 @@ void main() {
 
     test('mention rows say Mentioned in #channel', () {
       final label = inboxTypeLabel(
-        rowOf(item(id: 'a', category: 'mention')),
+        rowOf(item(id: threadIdInboxA, category: 'mention')),
         channelName: 'general',
         isDm: false,
         senderLabel: 'Alice',
@@ -244,7 +354,11 @@ void main() {
     test('needs action wins over thread context', () {
       final label = inboxTypeLabel(
         rowOf(
-          item(id: 'a', category: 'needs_action', tags: replyTags('r', 'p')),
+          item(
+            id: threadIdInboxA,
+            category: 'needs_action',
+            tags: replyTags(threadIdInboxR, threadIdInboxP),
+          ),
         ),
         channelName: 'general',
         isDm: false,
@@ -255,31 +369,18 @@ void main() {
 
     test('plain thread replies say Thread in', () {
       final label = inboxTypeLabel(
-        rowOf(item(id: 'a', category: 'activity', tags: replyTags('r', 'p'))),
+        rowOf(
+          item(
+            id: threadIdInboxA,
+            category: 'activity',
+            tags: replyTags(threadIdInboxR, threadIdInboxP),
+          ),
+        ),
         channelName: 'general',
         isDm: false,
         senderLabel: 'Alice',
       );
       expect(label.text, 'Thread in');
-    });
-  });
-
-  group('inboxDayLabel', () {
-    final now = DateTime(2026, 7, 25, 12);
-    int at(DateTime d) => d.millisecondsSinceEpoch ~/ 1000;
-
-    test('today / yesterday / weekday / date buckets', () {
-      expect(inboxDayLabel(at(DateTime(2026, 7, 25, 9)), now: now), 'Today');
-      expect(
-        inboxDayLabel(at(DateTime(2026, 7, 24, 9)), now: now),
-        'Yesterday',
-      );
-      expect(inboxDayLabel(at(DateTime(2026, 7, 21, 9)), now: now), 'Tuesday');
-      expect(inboxDayLabel(at(DateTime(2026, 1, 2)), now: now), 'Jan 2');
-      expect(
-        inboxDayLabel(at(DateTime(2025, 12, 31)), now: now),
-        'Dec 31, 2025',
-      );
     });
   });
 }

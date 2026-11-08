@@ -2,7 +2,7 @@
 # Multi-arch is produced by building this file on native amd64 and arm64 runners.
 # Keep both bases pinned to manifest-list digests so either architecture resolves
 # to immutable source bytes.
-FROM rust:1.95-alpine3.22@sha256:064dfc925d68d1a63f4fd2871bd7dc6e6ea56692989a487185855d62885d90aa AS builder
+FROM rust:1.98-alpine3.22@sha256:a1796ca6fa216d6727b5f61c69e4c665b120b1a4dcb969639e2f25f1ed309456 AS builder
 
 RUN apk add --no-cache \
       build-base \

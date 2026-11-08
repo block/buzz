@@ -33,6 +33,7 @@ import { AddAgentDialog, type AgentAddResult } from "./AddAgentDialog";
 import type { HuddleAgentVoiceSettings } from "./AgentVoiceMenu";
 import { MicControls, SpeakerControls } from "./MicControls";
 import { HuddleParticipantsControl } from "./ParticipantList";
+import { beginChannelMembershipWrite } from "@/shared/api/channelMembershipWrites";
 import { truncateNpub } from "@/shared/lib/pubkey";
 
 // Mirrors HuddleState in src-tauri/src/huddle/mod.rs.
@@ -640,11 +641,19 @@ export function HuddleBar({
           onClose={() => setShowAddAgent(false)}
           onAdd={async (pubkey: string): Promise<AgentAddResult> => {
             setAgentAddError(null);
+            const record = beginChannelMembershipWrite();
             try {
               const result = await invoke<AgentAddResult>(
                 "add_agent_to_huddle",
                 { agentPubkey: pubkey },
               );
+              if (barState?.ephemeral_channel_id) {
+                record(barState.ephemeral_channel_id);
+              }
+              // The agent may also have been added to the parent channel.
+              if (result.parent_added && barState?.parent_channel_id) {
+                record(barState.parent_channel_id);
+              }
               // Refresh huddle state so the participant list updates immediately.
               const s = await invoke<HuddleState>("get_huddle_state");
               setState(s);
@@ -719,10 +728,14 @@ export function HuddleBar({
                   "Remove this agent from the huddle?",
                 );
                 if (!confirmed) return;
+                const record = beginChannelMembershipWrite();
                 try {
                   await invoke("remove_agent_from_huddle", {
                     agentPubkey: pubkey,
                   });
+                  if (barState?.ephemeral_channel_id) {
+                    record(barState.ephemeral_channel_id);
+                  }
                   setState((prev) => {
                     if (!prev) return prev;
                     return {

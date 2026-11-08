@@ -156,7 +156,7 @@ export async function setup({ lifecycle = false } = {}) {
     "@/features/messages/lib/imetaMediaMarkdown": {
       buildOutgoingMessage: (text) => ({ content: text, mediaTags: [] }),
     },
-    "@/shared/api/tauri": { invokeTauri: async () => {} },
+    "@/shared/api/tauriChannels": { syncAgentsToActiveHuddle: async () => {} },
     "@/shared/lib/pubkey": {
       normalizePubkey: (key) => key.toLowerCase(),
       truncatePubkey: (key) => key,

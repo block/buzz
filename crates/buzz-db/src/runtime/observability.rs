@@ -163,16 +163,18 @@ pub(crate) enum LockType {
     PushGate,
     Deletion,
     MigrationSchemaSafety,
+    PartitionMaintenance,
 }
 
 impl LockType {
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 5] = [
+    pub(crate) const ALL: [Self; 6] = [
         Self::Replacement,
         Self::Membership,
         Self::PushGate,
         Self::Deletion,
         Self::MigrationSchemaSafety,
+        Self::PartitionMaintenance,
     ];
 
     pub(crate) const fn as_str(self) -> &'static str {
@@ -182,6 +184,7 @@ impl LockType {
             Self::PushGate => "push_gate",
             Self::Deletion => "deletion",
             Self::MigrationSchemaSafety => "migration_schema_safety",
+            Self::PartitionMaintenance => "partition_maintenance",
         }
     }
 }
@@ -222,31 +225,49 @@ impl Outcome {
 pub(crate) enum TransactionOperation {
     ReplaceParameterizedEvent,
     ReplaceAddressableEvent,
-    PublishNip43MembershipLocked,
     AcceptPushLeaseEvent,
     BeginCommunityDeletionQuiescing,
     FenceCommunityDeletion,
+    CommunityArchiveFence,
+    InactiveCommunityFence,
 }
 
 impl TransactionOperation {
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 6] = [
+    pub(crate) const ALL: [Self; 7] = [
         Self::ReplaceParameterizedEvent,
         Self::ReplaceAddressableEvent,
-        Self::PublishNip43MembershipLocked,
         Self::AcceptPushLeaseEvent,
         Self::BeginCommunityDeletionQuiescing,
         Self::FenceCommunityDeletion,
+        Self::CommunityArchiveFence,
+        Self::InactiveCommunityFence,
     ];
 
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::ReplaceParameterizedEvent => "replace_parameterized_event",
             Self::ReplaceAddressableEvent => "replace_addressable_event",
-            Self::PublishNip43MembershipLocked => "publish_nip43_membership_locked",
             Self::AcceptPushLeaseEvent => "accept_push_lease_event",
             Self::BeginCommunityDeletionQuiescing => "begin_community_deletion_quiescing",
             Self::FenceCommunityDeletion => "fence_community_deletion",
+            Self::CommunityArchiveFence => "community_archive_fence",
+            Self::InactiveCommunityFence => "inactive_community_fence",
+        }
+    }
+
+    /// Whether this transaction's writer checkout also feeds the legacy
+    /// `buzz_db_pool_acquire_wait_seconds` / `buzz_db_pool_acquisitions_total`
+    /// families. Only seams that predate operation-labelled pool metrics do;
+    /// later seams must not change those families' observed population.
+    const fn emits_legacy_pool_metrics(self) -> bool {
+        match self {
+            Self::ReplaceParameterizedEvent
+            | Self::ReplaceAddressableEvent
+            | Self::AcceptPushLeaseEvent
+            | Self::BeginCommunityDeletionQuiescing
+            | Self::FenceCommunityDeletion => true,
+            Self::CommunityArchiveFence | Self::InactiveCommunityFence => false,
         }
     }
 
@@ -254,11 +275,11 @@ impl TransactionOperation {
         match self {
             Self::ReplaceParameterizedEvent
             | Self::ReplaceAddressableEvent
-            | Self::PublishNip43MembershipLocked
             | Self::AcceptPushLeaseEvent => WriterOperation::EventWrite,
-            Self::BeginCommunityDeletionQuiescing | Self::FenceCommunityDeletion => {
-                WriterOperation::Maintenance
-            }
+            Self::BeginCommunityDeletionQuiescing
+            | Self::FenceCommunityDeletion
+            | Self::CommunityArchiveFence
+            | Self::InactiveCommunityFence => WriterOperation::Maintenance,
         }
     }
 }
@@ -271,17 +292,21 @@ fn record_pool_acquire(
 ) {
     // Preserve the original observed population for existing dashboards.
     // Newly instrumented raw-pool seams must not create a deployment-time
-    // discontinuity in these compatibility families.
+    // discontinuity in these compatibility families. They carry `operation`
+    // so a breakdown by it attributes every sample instead of reporting it
+    // as unlabelled; summing over `operation` gives the original series.
     if emit_legacy && outcome != Outcome::Cancelled {
         metrics::histogram!(
             "buzz_db_pool_acquire_wait_seconds",
             "pool_role" => pair.pool_role(),
+            "operation" => pair.operation(),
             "outcome" => outcome.as_str(),
         )
         .record(elapsed.as_secs_f64());
         metrics::counter!(
             "buzz_db_pool_acquisitions_total",
             "pool_role" => pair.pool_role(),
+            "operation" => pair.operation(),
             "outcome" => outcome.as_str(),
         )
         .increment(1);
@@ -504,7 +529,12 @@ pub(crate) async fn begin_transaction(
     pool: &sqlx::PgPool,
     operation: TransactionOperation,
 ) -> sqlx::Result<(sqlx::Transaction<'static, sqlx::Postgres>, TransactionTimer)> {
-    let connection = acquire_writer_with_legacy_metrics(pool, operation.writer_operation()).await?;
+    let writer = operation.writer_operation();
+    let connection = if operation.emits_legacy_pool_metrics() {
+        acquire_writer_with_legacy_metrics(pool, writer).await?
+    } else {
+        acquire_writer(pool, writer).await?
+    };
     let transaction = sqlx::Transaction::begin(connection, None).await?;
     Ok((transaction, TransactionTimer::start(operation)))
 }
@@ -576,9 +606,9 @@ impl Drop for TransactionTimer {
 mod tests {
     use super::{
         acquire_reader_with_legacy_metrics, acquire_writer, acquire_writer_with_legacy_metrics,
-        observe_advisory_lock, record_pool_acquire, refresh_pool_waiters, LockType, Outcome,
-        PoolAcquireAttempt, PoolOperation, ReaderOperation, TransactionOperation, TransactionTimer,
-        WriterOperation,
+        begin_transaction, observe_advisory_lock, record_pool_acquire, refresh_pool_waiters,
+        LockType, Outcome, PoolAcquireAttempt, PoolOperation, ReaderOperation,
+        TransactionOperation, TransactionTimer, WriterOperation,
     };
     use metrics_util::debugging::{DebugValue, DebuggingRecorder};
     use std::collections::{BTreeMap, BTreeSet};
@@ -621,6 +651,7 @@ mod tests {
                 "push_gate",
                 "deletion",
                 "migration_schema_safety",
+                "partition_maintenance",
             ]
         );
         assert_eq!(
@@ -632,10 +663,11 @@ mod tests {
             [
                 "replace_parameterized_event",
                 "replace_addressable_event",
-                "publish_nip43_membership_locked",
                 "accept_push_lease_event",
                 "begin_community_deletion_quiescing",
                 "fence_community_deletion",
+                "community_archive_fence",
+                "inactive_community_fence",
             ]
         );
     }
@@ -736,15 +768,24 @@ mod tests {
             })
             .collect::<BTreeSet<_>>();
 
+        for name in [
+            "buzz_db_pool_acquire_wait_seconds",
+            "buzz_db_pool_acquisitions_total",
+        ] {
+            let labels = [
+                ("operation", "subscription_history"),
+                ("outcome", "timeout"),
+                ("pool_role", "reader"),
+            ]
+            .into_iter()
+            .map(|(key, value)| (key.to_owned(), value.to_owned()))
+            .collect::<BTreeMap<_, _>>();
+            assert!(
+                keys.contains(&(name.to_owned(), labels)),
+                "legacy family {name} must carry the operation label; got {keys:?}"
+            );
+        }
         for expected in [
-            (
-                "buzz_db_pool_acquire_wait_seconds",
-                [("outcome", "timeout"), ("pool_role", "reader")],
-            ),
-            (
-                "buzz_db_pool_acquisitions_total",
-                [("outcome", "timeout"), ("pool_role", "reader")],
-            ),
             (
                 "buzz_db_advisory_lock_wait_seconds",
                 [("lock_type", "replacement"), ("outcome", "success")],
@@ -791,15 +832,8 @@ mod tests {
             "buzz_db_pool_acquisitions_total",
         ] {
             assert!(
-                !keys.contains(&(
-                    name.to_owned(),
-                    [
-                        ("outcome".to_owned(), "success".to_owned()),
-                        ("pool_role".to_owned(), "writer".to_owned()),
-                    ]
-                    .into_iter()
-                    .collect(),
-                )),
+                !keys.iter().any(|(key, labels)| key == name
+                    && labels.get("pool_role").map(String::as_str) == Some("writer")),
                 "newly instrumented seams must not expand legacy metric population"
             );
         }
@@ -985,6 +1019,21 @@ mod tests {
             0
         );
 
+        for operation in [
+            TransactionOperation::CommunityArchiveFence,
+            TransactionOperation::InactiveCommunityFence,
+        ] {
+            let Err(error) = begin_transaction(&pool, operation).await else {
+                panic!("closed newly instrumented transaction seam errors");
+            };
+            assert!(matches!(error, sqlx::Error::PoolClosed));
+        }
+        assert_eq!(
+            legacy_acquisition_count(&snapshotter.snapshot().into_vec()),
+            0,
+            "community lifecycle fences must not expand the legacy pool families"
+        );
+
         let error = acquire_writer_with_legacy_metrics(&pool, WriterOperation::EventWrite)
             .await
             .expect_err("closed legacy seam errors");
@@ -992,6 +1041,20 @@ mod tests {
         assert_eq!(
             legacy_acquisition_count(&snapshotter.snapshot().into_vec()),
             1
+        );
+
+        let Err(error) =
+            begin_transaction(&pool, TransactionOperation::FenceCommunityDeletion).await
+        else {
+            panic!("closed legacy transaction seam errors");
+        };
+        assert!(matches!(error, sqlx::Error::PoolClosed));
+        // `snapshot()` drains counters, so each assertion sees only the
+        // acquisitions recorded since the previous snapshot.
+        assert_eq!(
+            legacy_acquisition_count(&snapshotter.snapshot().into_vec()),
+            1,
+            "pre-existing deletion fences keep their legacy pool population"
         );
     }
 
@@ -1421,8 +1484,10 @@ mod tests {
             .create_community_with_owner(
                 &format!("pool-operation-matrix-{}.invalid", Uuid::new_v4().simple()),
                 &"b".repeat(64),
+                &nostr::Keys::generate(),
             )
-            .await;
+            .await
+            .map(|write| write.outcome);
         let _ = writer_db
             .archive_community_owned_by(
                 "pool-operation-matrix.invalid",
@@ -1479,18 +1544,12 @@ mod tests {
         let _ = writer_db
             .query_events_routed("pool_operation_matrix_writer", &query)
             .await;
-        let write_tx = writer_db
-            .begin_event_write_transaction()
-            .await
-            .expect("event-write semantic entry point begins a real transaction");
-        write_tx
-            .rollback()
-            .await
-            .expect("rollback operation-label fixture");
+        // The scope is not a live community, so admission rejects it after the
+        // writer acquisition has been attributed to `event_write`.
+        let _ = writer_db.begin_event_write_transaction(test_scope).await;
         let _ = writer_db
-            .is_community_active_for_maintenance(test_scope)
+            .with_inactive_community_fence(test_scope, |_| ())
             .await;
-        let _ = writer_db.usage_community_count().await;
         let _ = writer_db.reap_expired_ephemeral_channels().await;
         let deletion_store = writer_db.deletion_store();
         let _ = deletion_store.reap_expired_serving_write_leases(1).await;

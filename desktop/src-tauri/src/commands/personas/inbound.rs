@@ -77,6 +77,9 @@ pub async fn reconcile_inbound_persona_event(
     arrival_relay_url: String,
     app: AppHandle,
 ) -> Result<(), String> {
+    // Captured before the blocking reconcile stops the runtime: a community
+    // removed while this restart runs refuses its start.
+    let admission = crate::managed_agents::AdmissionSnapshot::capture(&app.state::<AppState>());
     let blocking_app = app.clone();
     let restart = tokio::task::spawn_blocking(move || {
         reconcile_inbound_persona_event_blocking(event_json, arrival_relay_url, blocking_app)
@@ -92,6 +95,7 @@ pub async fn reconcile_inbound_persona_event(
                 &state,
                 &pubkey,
                 &relay_urls,
+                &admission,
             )
             .await
             .map_err(|error| {

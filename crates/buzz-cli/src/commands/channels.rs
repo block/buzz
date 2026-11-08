@@ -36,7 +36,7 @@ pub async fn cmd_list_channels(
     let effective_limit = limit.unwrap_or(500);
     let events = if member == Some(true) {
         // Step 1: find channel IDs where we're a member (kind:39002)
-        let my_pk = client.keys().public_key().to_hex();
+        let my_pk = client.public_key().to_hex();
         let member_filter = serde_json::json!({
             "kinds": [39002],
             "#p": [my_pk],
@@ -109,7 +109,9 @@ pub async fn cmd_list_channels(
                 .collect();
             serde_json::to_string(&compact).unwrap_or_default()
         }
-        crate::OutputFormat::Json => serde_json::to_string(&channels).unwrap_or_default(),
+        crate::OutputFormat::Json | crate::OutputFormat::Agent => {
+            serde_json::to_string(&channels).unwrap_or_default()
+        }
     };
     println!("{output}");
     Ok(())
@@ -192,7 +194,8 @@ impl ChannelSummary {
             match key {
                 "d" => channel_id = val.map(str::to_string),
                 "name" => name = val.map(str::to_string),
-                "t" => channel_type = val.map(str::to_string),
+                // The first `t` is the channel type; later `t` tags are labels.
+                "t" if channel_type.is_none() => channel_type = val.map(str::to_string),
                 // NIP-29 emits both `private` and `public` (Buzz adds the latter).
                 // The presence of either tag is the source of truth; tag value is unused.
                 "private" => visibility = Some("private".to_string()),
@@ -454,7 +457,7 @@ pub async fn cmd_restore_canvas(
     let builder =
         buzz_sdk::build_set_canvas_after_head(channel_uuid, &content, head_id, head_created_at)
             .map_err(|e| CliError::Other(format!("build_set_canvas failed: {e}")))?;
-    let event = client.sign_event(builder)?;
+    let event = client.sign_event(builder).await?;
     let our_id = event.id.to_hex();
     let submit_result = client.submit_event(event).await;
 
@@ -652,6 +655,30 @@ fn extract_head_expected_revision(head: &serde_json::Value) -> Option<String> {
         .map(str::to_string)
 }
 
+/// The NIP-11 extension a relay advertises when it honors the `unlisted` tag.
+const UNLISTED_EXTENSION: &str = "buzz-unlisted-channels";
+
+/// Refuse to unlist a channel on a relay that does not advertise
+/// [`UNLISTED_EXTENSION`]. Such a relay applies the rest of the event and
+/// ignores `unlisted`, so an open channel would end up listed. Call it before
+/// anything is written.
+async fn require_unlisted_support(client: &BuzzClient) -> Result<(), CliError> {
+    let raw = client.get_public("/info").await?;
+    let info: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|e| CliError::Other(format!("invalid NIP-11 response: {e}")))?;
+    let supported = info
+        .get("supported_extensions")
+        .and_then(|v| v.as_array())
+        .is_some_and(|exts| exts.iter().any(|e| e.as_str() == Some(UNLISTED_EXTENSION)));
+    if supported {
+        Ok(())
+    } else {
+        Err(CliError::Other(format!(
+            "this relay does not support unlisted channels (missing \"{UNLISTED_EXTENSION}\" in supported_extensions); it would ignore --unlisted and list the channel"
+        )))
+    }
+}
+
 pub async fn cmd_create_channel(
     client: &BuzzClient,
     name: &str,
@@ -659,6 +686,7 @@ pub async fn cmd_create_channel(
     visibility: &str,
     description: Option<&str>,
     ttl: Option<i64>,
+    unlisted: bool,
 ) -> Result<(), CliError> {
     match channel_type {
         "stream" | "forum" => {}
@@ -678,6 +706,9 @@ pub async fn cmd_create_channel(
     }
 
     let ttl = ttl.map(validate_ttl_seconds).transpose()?;
+    if unlisted {
+        require_unlisted_support(client).await?;
+    }
 
     let channel_uuid = Uuid::new_v4();
 
@@ -691,11 +722,18 @@ pub async fn cmd_create_channel(
         "forum" => buzz_sdk::ChannelKind::Forum,
         _ => unreachable!(),
     };
-    let builder =
-        buzz_sdk::build_create_channel(channel_uuid, name, Some(vis), Some(ct), description, ttl)
-            .map_err(|e| CliError::Other(format!("build_create_channel failed: {e}")))?;
+    let builder = buzz_sdk::build_create_channel(
+        channel_uuid,
+        name,
+        Some(vis),
+        Some(ct),
+        description,
+        ttl,
+        unlisted,
+    )
+    .map_err(|e| CliError::Other(format!("build_create_channel failed: {e}")))?;
 
-    let event = client.sign_event(builder)?;
+    let event = client.sign_event(builder).await?;
     let resp = client.submit_event(event).await?;
     print_create_response(&resp, "channel_id", &channel_uuid.to_string());
     Ok(())
@@ -1420,6 +1458,7 @@ pub async fn cmd_create_channel_from_template(
     visibility_override: Option<&str>,
     description: Option<&str>,
     ttl: Option<i64>,
+    unlisted: bool,
 ) -> Result<(), CliError> {
     let templates_path = channel_templates::resolve_templates_path(templates_file)?;
     let template: ChannelTemplateRecord =
@@ -1444,6 +1483,9 @@ pub async fn cmd_create_channel_from_template(
         }
     }
     let ttl = ttl.map(validate_ttl_seconds).transpose()?;
+    if unlisted {
+        require_unlisted_support(client).await?;
+    }
 
     // Owner invariant (F1): the auth-tag owner (already verified against the
     // signer at startup) if present, else the signing pubkey. No sole-author
@@ -1451,7 +1493,7 @@ pub async fn cmd_create_channel_from_template(
     // be selected.
     let owner = client
         .auth_tag_owner_hex()
-        .unwrap_or_else(|| client.keys().public_key().to_hex());
+        .unwrap_or_else(|| client.public_key().to_hex());
 
     let resolved = build_roster_resolution(client, &owner, &template.agents).await?;
 
@@ -1474,9 +1516,10 @@ pub async fn cmd_create_channel_from_template(
         Some(ct),
         effective_description,
         ttl,
+        unlisted,
     )
     .map_err(|e| CliError::Other(format!("build_create_channel failed: {e}")))?;
-    let event = client.sign_event(builder)?;
+    let event = client.sign_event(builder).await?;
     client.submit_event(event).await?;
 
     let mut canvas_applied = false;
@@ -1489,7 +1532,7 @@ pub async fn cmd_create_channel_from_template(
             // `Some("none")` to match the create-assertion convention.
             let builder = buzz_sdk::build_set_canvas(channel_uuid, &content, Some("none"))
                 .map_err(|e| CliError::Other(format!("build_set_canvas failed: {e}")))?;
-            let event = client.sign_event(builder)?;
+            let event = client.sign_event(builder).await?;
             client.submit_event(event).await?;
             Ok(())
         }
@@ -1511,7 +1554,7 @@ pub async fn cmd_create_channel_from_template(
                 Some(buzz_sdk::MemberRole::Bot),
             )
             .map_err(|e| CliError::Other(format!("build_add_member failed: {e}")))?;
-            let event = client.sign_event(builder)?;
+            let event = client.sign_event(builder).await?;
             client.submit_event(event).await?;
             Ok(())
         }
@@ -1595,16 +1638,27 @@ fn validate_update_channel_fields(
     description: Option<&str>,
     visibility: Option<&str>,
     ttl_change: Option<Option<i32>>,
+    join_role: Option<buzz_sdk::ChannelJoinRole>,
+    unlisted: Option<bool>,
+    auto_join: Option<bool>,
 ) -> Result<(), CliError> {
-    if name.is_none() && description.is_none() && visibility.is_none() && ttl_change.is_none() {
+    if name.is_none()
+        && description.is_none()
+        && visibility.is_none()
+        && ttl_change.is_none()
+        && join_role.is_none()
+        && unlisted.is_none()
+        && auto_join.is_none()
+    {
         return Err(CliError::Usage(
-            "at least one field required (--name, --description, --visibility, --ttl, --no-ttl)"
+            "at least one field required (--name, --description, --visibility, --ttl, --no-ttl, --join-role, --unlisted, --auto-join)"
                 .into(),
         ));
     }
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn cmd_update_channel(
     client: &BuzzClient,
     channel_id: &str,
@@ -1613,6 +1667,9 @@ pub async fn cmd_update_channel(
     visibility: Option<&str>,
     ttl: Option<i64>,
     no_ttl: bool,
+    join_role: Option<buzz_sdk::ChannelJoinRole>,
+    unlisted: Option<bool>,
+    auto_join: Option<bool>,
 ) -> Result<(), CliError> {
     // Outer Option: None leaves TTL unchanged. Inner: Some(secs) sets it,
     // None (from --no-ttl) clears it, making the channel permanent.
@@ -1622,14 +1679,35 @@ pub async fn cmd_update_channel(
         (None, false) => None,
     };
 
-    validate_update_channel_fields(name, description, visibility, ttl_change)?;
+    validate_update_channel_fields(
+        name,
+        description,
+        visibility,
+        ttl_change,
+        join_role,
+        unlisted,
+        auto_join,
+    )?;
     let channel_uuid = parse_uuid(channel_id)?;
+    // `--unlisted false` needs no check: a relay without the extension lists
+    // every open channel already.
+    if unlisted == Some(true) {
+        require_unlisted_support(client).await?;
+    }
 
-    let builder =
-        buzz_sdk::build_update_channel(channel_uuid, name, description, visibility, ttl_change)
-            .map_err(|e| CliError::Other(format!("build_update_channel failed: {e}")))?;
+    let builder = buzz_sdk::build_update_channel(
+        channel_uuid,
+        name,
+        description,
+        visibility,
+        ttl_change,
+        join_role,
+        unlisted,
+        auto_join,
+    )
+    .map_err(|e| CliError::Other(format!("build_update_channel failed: {e}")))?;
 
-    let event = client.sign_event(builder)?;
+    let event = client.sign_event(builder).await?;
     let resp = client.submit_event(event).await?;
     println!("{}", normalize_write_response(&resp));
     Ok(())
@@ -1645,7 +1723,7 @@ pub async fn cmd_set_channel_topic(
     let builder = buzz_sdk::build_set_topic(channel_uuid, topic)
         .map_err(|e| CliError::Other(format!("build_set_topic failed: {e}")))?;
 
-    let event = client.sign_event(builder)?;
+    let event = client.sign_event(builder).await?;
     let resp = client.submit_event(event).await?;
     println!("{}", normalize_write_response(&resp));
     Ok(())
@@ -1661,7 +1739,7 @@ pub async fn cmd_set_channel_purpose(
     let builder = buzz_sdk::build_set_purpose(channel_uuid, purpose)
         .map_err(|e| CliError::Other(format!("build_set_purpose failed: {e}")))?;
 
-    let event = client.sign_event(builder)?;
+    let event = client.sign_event(builder).await?;
     let resp = client.submit_event(event).await?;
     println!("{}", normalize_write_response(&resp));
     Ok(())
@@ -1673,7 +1751,7 @@ pub async fn cmd_join_channel(client: &BuzzClient, channel_id: &str) -> Result<(
     let builder = buzz_sdk::build_join(channel_uuid)
         .map_err(|e| CliError::Other(format!("build_join failed: {e}")))?;
 
-    let event = client.sign_event(builder)?;
+    let event = client.sign_event(builder).await?;
     let resp = client.submit_event(event).await?;
     println!("{}", normalize_write_response(&resp));
     Ok(())
@@ -1685,7 +1763,7 @@ pub async fn cmd_leave_channel(client: &BuzzClient, channel_id: &str) -> Result<
     let builder = buzz_sdk::build_leave(channel_uuid)
         .map_err(|e| CliError::Other(format!("build_leave failed: {e}")))?;
 
-    let event = client.sign_event(builder)?;
+    let event = client.sign_event(builder).await?;
     let resp = client.submit_event(event).await?;
     println!("{}", normalize_write_response(&resp));
     Ok(())
@@ -1697,7 +1775,7 @@ pub async fn cmd_archive_channel(client: &BuzzClient, channel_id: &str) -> Resul
     let builder = buzz_sdk::build_archive(channel_uuid)
         .map_err(|e| CliError::Other(format!("build_archive failed: {e}")))?;
 
-    let event = client.sign_event(builder)?;
+    let event = client.sign_event(builder).await?;
     let resp = client.submit_event(event).await?;
     println!("{}", normalize_write_response(&resp));
     Ok(())
@@ -1709,7 +1787,7 @@ pub async fn cmd_unarchive_channel(client: &BuzzClient, channel_id: &str) -> Res
     let builder = buzz_sdk::build_unarchive(channel_uuid)
         .map_err(|e| CliError::Other(format!("build_unarchive failed: {e}")))?;
 
-    let event = client.sign_event(builder)?;
+    let event = client.sign_event(builder).await?;
     let resp = client.submit_event(event).await?;
     println!("{}", normalize_write_response(&resp));
     Ok(())
@@ -1721,7 +1799,7 @@ pub async fn cmd_delete_channel(client: &BuzzClient, channel_id: &str) -> Result
     let builder = buzz_sdk::build_delete_channel(channel_uuid)
         .map_err(|e| CliError::Other(format!("build_delete_channel failed: {e}")))?;
 
-    let event = client.sign_event(builder)?;
+    let event = client.sign_event(builder).await?;
     let resp = client.submit_event(event).await?;
     println!("{}", normalize_write_response(&resp));
     Ok(())
@@ -1752,7 +1830,7 @@ pub async fn cmd_add_channel_member(
     let builder = buzz_sdk::build_add_member(channel_uuid, pubkey, typed_role)
         .map_err(|e| CliError::Other(format!("build_add_member failed: {e}")))?;
 
-    let event = client.sign_event(builder)?;
+    let event = client.sign_event(builder).await?;
     let resp = client.submit_event(event).await?;
     println!("{}", normalize_write_response(&resp));
     Ok(())
@@ -1769,7 +1847,7 @@ pub async fn cmd_remove_channel_member(
     let builder = buzz_sdk::build_remove_member(channel_uuid, pubkey)
         .map_err(|e| CliError::Other(format!("build_remove_member failed: {e}")))?;
 
-    let event = client.sign_event(builder)?;
+    let event = client.sign_event(builder).await?;
     let resp = client.submit_event(event).await?;
     println!("{}", normalize_write_response(&resp));
     Ok(())
@@ -1813,7 +1891,7 @@ pub async fn cmd_set_add_policy(client: &BuzzClient, policy: &str) -> Result<(),
         &content,
     )
     .tags([]);
-    let event = client.sign_event(builder)?;
+    let event = client.sign_event(builder).await?;
 
     let resp = client.submit_event(event).await?;
     println!("{}", normalize_write_response(&resp));
@@ -1854,7 +1932,7 @@ pub async fn cmd_set_canvas(
     }
     .map_err(|e| CliError::Other(format!("build_set_canvas failed: {e}")))?;
 
-    let event = client.sign_event(builder)?;
+    let event = client.sign_event(builder).await?;
     let resp = client.submit_event(event).await?;
     println!("{}", normalize_write_response(&resp));
     Ok(())
@@ -1875,6 +1953,9 @@ pub async fn dispatch(
             let vis_str = visibility.as_ref().map(|v| v.to_string());
             cmd_list_channels(client, vis_str.as_deref(), Some(member), limit, format).await
         }
+        ChannelsCmd::Unread { channel, limit } => {
+            crate::commands::channel_unread::cmd_unread(client, &channel, limit).await
+        }
         ChannelsCmd::Get { channel } => cmd_get_channel(client, &channel).await,
         ChannelsCmd::Search {
             query,
@@ -1888,6 +1969,7 @@ pub async fn dispatch(
             visibility,
             description,
             ttl,
+            unlisted,
             template,
             templates_file,
         } => {
@@ -1901,6 +1983,7 @@ pub async fn dispatch(
                     visibility.as_ref().map(|v| v.to_string()).as_deref(),
                     description.as_deref(),
                     ttl,
+                    unlisted,
                 )
                 .await
             } else {
@@ -1917,6 +2000,7 @@ pub async fn dispatch(
                     &visibility.to_string(),
                     description.as_deref(),
                     ttl,
+                    unlisted,
                 )
                 .await
             }
@@ -1928,6 +2012,9 @@ pub async fn dispatch(
             visibility,
             ttl,
             no_ttl,
+            join_role,
+            unlisted,
+            auto_join,
         } => {
             let visibility = visibility.as_ref().map(|v| v.to_string());
             cmd_update_channel(
@@ -1938,6 +2025,9 @@ pub async fn dispatch(
                 visibility.as_deref(),
                 ttl,
                 no_ttl,
+                join_role.map(Into::into),
+                unlisted,
+                auto_join,
             )
             .await
         }
@@ -2006,6 +2096,19 @@ mod tests {
             presence: presence.map(str::to_string),
             profile_updated_at,
         }
+    }
+
+    #[test]
+    fn from_event_reads_the_type_from_the_first_t_tag() {
+        let ev = event(json!([
+            ["d", "11111111-1111-1111-1111-111111111111"],
+            ["name", "labeled"],
+            ["t", "forum"],
+            ["t", "workspace"],
+            ["P", "ab".repeat(32)],
+        ]));
+        let s = ChannelSummary::from_event(&ev).expect("parse");
+        assert_eq!(s.channel_type.as_deref(), Some("forum"));
     }
 
     #[test]
@@ -2114,7 +2217,7 @@ mod tests {
 
     #[test]
     fn update_channel_fields_rejects_empty_update() {
-        let result = validate_update_channel_fields(None, None, None, None);
+        let result = validate_update_channel_fields(None, None, None, None, None, None, None);
         assert!(matches!(result, Err(CliError::Usage(_))));
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("at least one field required"));
@@ -2123,7 +2226,8 @@ mod tests {
 
     #[test]
     fn update_channel_fields_accepts_visibility_only_update() {
-        let result = validate_update_channel_fields(None, None, Some("open"), None);
+        let result =
+            validate_update_channel_fields(None, None, Some("open"), None, None, None, None);
         assert!(result.is_ok(), "visibility-only update should be accepted");
     }
 
@@ -2190,8 +2294,11 @@ mod tests {
         let keys =
             nostr::Keys::parse("0000000000000000000000000000000000000000000000000000000000000001")
                 .expect("valid test key");
-        BuzzClient::new("ws://localhost:3000".to_string(), keys, None, None)
-            .expect("client construction should not fail")
+        BuzzClient::new(
+            "ws://localhost:3000".to_string(),
+            crate::credentials::Credentials::from_keys(keys),
+        )
+        .expect("client construction should not fail")
     }
 
     #[tokio::test]
@@ -3298,8 +3405,11 @@ mod tests {
         let keys =
             nostr::Keys::parse("0000000000000000000000000000000000000000000000000000000000000001")
                 .expect("valid test key");
-        let client = BuzzClient::new(format!("http://{addr}"), keys, None, None)
-            .expect("client construction should not fail");
+        let client = BuzzClient::new(
+            format!("http://{addr}"),
+            crate::credentials::Credentials::from_keys(keys),
+        )
+        .expect("client construction should not fail");
 
         let map = fetch_candidate_hints(
             &client,
@@ -3416,7 +3526,11 @@ mod set_canvas_tests {
     }
 
     fn client(base_url: &str) -> BuzzClient {
-        BuzzClient::new(base_url.to_string(), Keys::generate(), None, None).unwrap()
+        BuzzClient::new(
+            base_url.to_string(),
+            crate::credentials::Credentials::from_keys(Keys::generate()),
+        )
+        .unwrap()
     }
 
     fn tag_value(event: &Value, key: &str) -> Option<String> {
@@ -3785,7 +3899,11 @@ mod restore_canvas_tests {
     }
 
     fn client(base_url: &str) -> BuzzClient {
-        BuzzClient::new(base_url.to_string(), Keys::generate(), None, None).unwrap()
+        BuzzClient::new(
+            base_url.to_string(),
+            crate::credentials::Credentials::from_keys(Keys::generate()),
+        )
+        .unwrap()
     }
 
     /// Return all filter objects from all /query calls flattened into one vec.
@@ -4611,7 +4729,11 @@ mod restore_canvas_already_current_tests {
     }
 
     fn client(base_url: &str) -> BuzzClient {
-        BuzzClient::new(base_url.to_string(), Keys::generate(), None, None).unwrap()
+        BuzzClient::new(
+            base_url.to_string(),
+            crate::credentials::Credentials::from_keys(Keys::generate()),
+        )
+        .unwrap()
     }
 
     /// The already-current short-circuit must return Ok (exit 0) AND emit
@@ -4647,5 +4769,154 @@ mod restore_canvas_already_current_tests {
             json.get("message").and_then(|v| v.as_str()).is_some(),
             "message field must be present: {json}"
         );
+    }
+}
+
+#[cfg(test)]
+mod unlisted_support_tests {
+    use std::sync::{Arc, Mutex};
+
+    use axum::body::Bytes;
+    use axum::extract::State;
+    use axum::routing::{get, post};
+    use axum::Router;
+    use nostr::Keys;
+    use serde_json::Value;
+    use tokio::net::TcpListener;
+
+    use super::{cmd_create_channel, cmd_update_channel};
+    use crate::client::BuzzClient;
+
+    const CHANNEL: &str = "326d56bc-c96c-4af0-86a1-5e804cd1b467";
+
+    /// A relay whose NIP-11 advertises `extensions`, recording every event
+    /// posted to `/events`.
+    async fn relay(extensions: &'static str) -> (String, Arc<Mutex<Vec<Value>>>) {
+        let submitted: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let app = Router::new()
+            .route(
+                "/info",
+                get(move || async move {
+                    (
+                        [("content-type", "application/nostr+json")],
+                        format!(r#"{{"supported_extensions":{extensions}}}"#),
+                    )
+                }),
+            )
+            .route(
+                "/events",
+                post(
+                    |State(s): State<Arc<Mutex<Vec<Value>>>>, body: Bytes| async move {
+                        let event: Value = serde_json::from_slice(&body).expect("event json");
+                        s.lock().unwrap().push(event);
+                        r#"{"event_id":"deadbeef","accepted":true,"message":""}"#.to_string()
+                    },
+                ),
+            )
+            .with_state(submitted.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{addr}"), submitted)
+    }
+
+    fn client(base_url: &str) -> BuzzClient {
+        BuzzClient::new(
+            base_url.to_string(),
+            crate::credentials::Credentials::from_keys(Keys::generate()),
+        )
+        .unwrap()
+    }
+
+    fn has_unlisted_true(event: &Value) -> bool {
+        event["tags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t[0] == "unlisted" && t[1] == "true")
+    }
+
+    #[tokio::test]
+    async fn unlisting_is_refused_without_the_extension() {
+        let (url, submitted) = relay(r#"["buzz-gif"]"#).await;
+        let client = client(&url);
+
+        let err = cmd_create_channel(&client, "solo", "stream", "open", None, None, true)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("buzz-unlisted-channels"), "{err}");
+
+        let err = cmd_update_channel(
+            &client,
+            CHANNEL,
+            None,
+            None,
+            Some("open"),
+            None,
+            false,
+            None,
+            Some(true),
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("buzz-unlisted-channels"), "{err}");
+
+        assert!(submitted.lock().unwrap().is_empty(), "nothing is sent");
+    }
+
+    #[tokio::test]
+    async fn unlisting_is_sent_with_the_extension() {
+        let (url, submitted) = relay(r#"["buzz-unlisted-channels"]"#).await;
+        let client = client(&url);
+
+        cmd_create_channel(&client, "solo", "stream", "open", None, None, true)
+            .await
+            .unwrap();
+        cmd_update_channel(
+            &client,
+            CHANNEL,
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+            Some(true),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let submitted = submitted.lock().unwrap();
+        assert_eq!(submitted.len(), 2);
+        assert!(submitted.iter().all(has_unlisted_true));
+    }
+
+    #[tokio::test]
+    async fn listed_writes_skip_the_check() {
+        // The relay advertises no extensions, so a check would fail the command.
+        let (url, submitted) = relay(r#"[]"#).await;
+        let client = client(&url);
+
+        cmd_create_channel(&client, "solo", "stream", "open", None, None, false)
+            .await
+            .unwrap();
+        cmd_update_channel(
+            &client,
+            CHANNEL,
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+            Some(false),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(submitted.lock().unwrap().len(), 2);
     }
 }

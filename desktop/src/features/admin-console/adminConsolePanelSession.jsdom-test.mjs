@@ -281,7 +281,7 @@ test("detail-navigation: stale detail result is discarded after navigating away"
   let clickedReport = false;
   for (const btn of allButtons) {
     const testid = btn.getAttribute("data-testid") ?? "";
-    if (testid.startsWith("admin-tab")) continue;
+    if (/^(admin-tab|community-badge)/.test(testid)) continue;
     await act(async () => {
       fireEvent.click(btn);
       await new Promise((r) => setTimeout(r, 0));
@@ -428,7 +428,7 @@ test("blob-leak-on-back-navigation: loadGenRef cleanup prevents orphaned blob UR
   let navigatedToDetail = false;
   for (const btn of container.querySelectorAll("button")) {
     const testid = btn.getAttribute("data-testid") ?? "";
-    if (testid.startsWith("admin-tab")) continue;
+    if (/^(admin-tab|community-badge)/.test(testid)) continue;
     await act(async () => {
       fireEvent.click(btn);
       await new Promise((r) => setTimeout(r, 30));
@@ -1148,7 +1148,7 @@ test("settings-card-self-demotion-reruns-probe: self-demotion through SettingsCa
 
   // After initial probe: operator role → Staffing tab must be visible.
   const staffingTabBefore = container.querySelector(
-    "[data-testid='admin-tab-staffing']",
+    "[data-testid='admin-tab-operators']",
   );
   assert.ok(
     staffingTabBefore !== null,
@@ -1188,7 +1188,7 @@ test("settings-card-self-demotion-reruns-probe: self-demotion through SettingsCa
 
   // After the second probe returns moderator: Staffing tab must be gone.
   const staffingTabAfter = container.querySelector(
-    "[data-testid='admin-tab-staffing']",
+    "[data-testid='admin-tab-operators']",
   );
   assert.equal(
     staffingTabAfter,
@@ -1257,7 +1257,7 @@ test("settings-card-other-demotion-does-not-reruns-probe: demoting a different o
 
   // Navigate to the Staffing tab.
   const staffingTab = container.querySelector(
-    "[data-testid='admin-tab-staffing']",
+    "[data-testid='admin-tab-operators']",
   );
   assert.ok(staffingTab !== null, "Staffing tab must be visible for operator");
   await act(async () => {
@@ -1289,7 +1289,7 @@ test("settings-card-other-demotion-does-not-reruns-probe: demoting a different o
 
   // Staffing tab must remain visible (self is still operator).
   const staffingTabAfter = container.querySelector(
-    "[data-testid='admin-tab-staffing']",
+    "[data-testid='admin-tab-operators']",
   );
   assert.ok(
     staffingTabAfter !== null,
@@ -1371,7 +1371,7 @@ test("settings-card-stale-self-mutation-ignored-after-origin-switch: stale self-
 
   assert.equal(probeCount, 1, "should have probed once on mount for A");
   const staffingTab = container.querySelector(
-    "[data-testid='admin-tab-staffing']",
+    "[data-testid='admin-tab-operators']",
   );
   assert.ok(
     staffingTab !== null,
@@ -1565,7 +1565,7 @@ test("settings-card-stale-self-mutation-ignored-after-session-teardown: deferred
   );
 
   const staffingTab = container.querySelector(
-    "[data-testid='admin-tab-staffing']",
+    "[data-testid='admin-tab-operators']",
   );
   assert.ok(staffingTab !== null, "Staffing tab must be visible (operator)");
 

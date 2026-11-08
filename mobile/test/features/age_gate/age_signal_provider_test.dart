@@ -22,22 +22,25 @@ void main() {
     return container;
   }
 
-  test('production provider respects the explicit dogfood opt-in', () async {
-    var calls = 0;
-    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-        .setMockMethodCallHandler(ageSignalChannel, (_) async {
-          calls += 1;
-          return {'status': 'signal', 'ageUpper': 17};
-        });
-    final container = ProviderContainer();
-    addTearDown(container.dispose);
-    await container.read(ageSignalProvider.notifier).request();
-    expect(
-      container.read(ageSignalProvider),
-      ageGatingEnabled ? AgeSignalState.restricted : AgeSignalState.allowed,
-    );
-    expect(calls, ageGatingEnabled ? 1 : 0);
-  });
+  test(
+    'production provider respects the explicit pre-release testing opt-in',
+    () async {
+      var calls = 0;
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(ageSignalChannel, (_) async {
+            calls += 1;
+            return {'status': 'signal', 'ageUpper': 17};
+          });
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      await container.read(ageSignalProvider.notifier).request();
+      expect(
+        container.read(ageSignalProvider),
+        ageGatingEnabled ? AgeSignalState.restricted : AgeSignalState.allowed,
+      );
+      expect(calls, ageGatingEnabled ? 1 : 0);
+    },
+  );
 
   for (final upper in [-100, -1, 0, 1, 12, 16, 17, 18, 19, 120, 999999]) {
     test('native inclusive upper bound $upper', () async {

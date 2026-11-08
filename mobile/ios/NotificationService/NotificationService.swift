@@ -6,6 +6,7 @@ import UserNotifications
 
 final class NotificationService: UNNotificationServiceExtension {
   private var handoff: BuzzNotificationHandoff<UNNotificationContent>?
+  private var resolvedScope: BuzzNotificationCacheScope?
   private var bestAttemptContent: UNMutableNotificationContent?
   private var restrictedFallbackContent: UNMutableNotificationContent?
   private lazy var interactionCleanup = BuzzInteractionCleanupRetry(
@@ -33,13 +34,18 @@ final class NotificationService: UNNotificationServiceExtension {
     Bundle.main.object(
       forInfoDictionaryKey: "BuzzAppGroupIdentifier"
     ) as? String
-  private lazy var resolver: BuzzPushNotificationResolving = {
+  // A session per notification keeps a long-lived extension process from reusing
+  // connections that went stale when the network path changed (for example a VPN
+  // coming up or dropping).
+  private var session: URLSession?
+  private var resolver: BuzzPushNotificationResolving?
+  private func makeResolver(session: URLSession) -> BuzzPushNotificationResolving {
     let keychainAccessGroup =
       Bundle.main.object(
         forInfoDictionaryKey: "BuzzKeychainAccessGroup"
       ) as? String
     return BuzzPushNotificationResolver(
-      session: .shared,
+      session: session,
       loadCommunitiesData: { [self] in
         Self.loadPushSnapshotData(appGroupIdentifier: self.appGroupIdentifier)
       },
@@ -49,30 +55,128 @@ final class NotificationService: UNNotificationServiceExtension {
           keychainAccessGroup: keychainAccessGroup
         )
       },
-      loadPresentationCacheData: { [self] in
-        Self.loadPushSnapshotData(appGroupIdentifier: self.appGroupIdentifier)
+      notificationCache: notificationCache,
+      avatarLoader: notificationAvatarLoader,
+      assertionIssuer: Self.assertionIssuer
+    )
+  }
+
+  /// Process-wide, so consecutive notifications reuse an assertion until it nears expiry.
+  private static let assertionIssuer: BuzzRelayAssertionIssuer = {
+    let keychainAccessGroup =
+      Bundle.main.object(forInfoDictionaryKey: "BuzzKeychainAccessGroup") as? String
+    return BuzzRelayAssertionIssuer(
+      session: URLSession(configuration: .ephemeral),
+      loadSession: {
+        loadSharedSession(
+          account: BuzzOrganizationSession.keychainAccount,
+          keychainAccessGroup: keychainAccessGroup)
+      },
+      loadHostedSession: {
+        loadSharedSession(
+          account: BuzzOrganizationSession.hostedKeychainAccount,
+          keychainAccessGroup: keychainAccessGroup)
       }
     )
   }()
+
+  /// An account session the app shares for NIP-FI assertion issuance.
+  private static func loadSharedSession(
+    account: String, keychainAccessGroup: String?
+  ) -> BuzzOrganizationSession? {
+    var query: [String: Any] = [
+      kSecClass as String: kSecClassGenericPassword,
+      kSecAttrService as String: BuzzOrganizationSession.keychainService,
+      kSecAttrAccount as String: account,
+      kSecReturnData as String: true,
+      kSecMatchLimit as String: kSecMatchLimitOne,
+    ]
+    if let keychainAccessGroup, !keychainAccessGroup.isEmpty {
+      query[kSecAttrAccessGroup as String] = keychainAccessGroup
+    }
+    var item: CFTypeRef?
+    guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
+      let data = item as? Data
+    else { return nil }
+    return try? JSONDecoder().decode(BuzzOrganizationSession.self, from: data)
+  }
+
+  private var notificationCacheRoot: URL? {
+    FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first?
+      .appendingPathComponent("notification-enrichment-v1", isDirectory: true)
+  }
+
+  private lazy var notificationCache: BuzzNotificationCache? = {
+    guard let directory = notificationCacheRoot else { return nil }
+    let cache = BuzzNotificationCache(directory: directory, isCurrent: { [weak self] scope in
+      self?.isCurrent(scope) == true
+    })
+    let scopes = Self.communities(appGroupIdentifier: appGroupIdentifier)
+      .compactMap(BuzzNotificationCacheScope.init(community:))
+    do { try cache.removeRevokedScopes(keeping: scopes) }
+    catch { NSLog("Notification cache cleanup failed: %@", String(describing: error)) }
+    return cache
+  }()
+
+  private lazy var notificationAvatarLoader: BuzzNotificationAvatarLoader? = {
+    guard let directory = notificationCacheRoot else { return nil }
+    let accessGroup = Bundle.main.object(forInfoDictionaryKey: "BuzzKeychainAccessGroup") as? String
+    return BuzzNotificationAvatarLoader(directory: directory,
+      privateKey: { Self.loadPrivateKey(communityID: $0, keychainAccessGroup: accessGroup) },
+      isCurrent: { [weak self] in self?.isCurrent($0) == true },
+      assertionIssuer: Self.assertionIssuer)
+  }()
+
+  private func isCurrent(_ scope: BuzzNotificationCacheScope) -> Bool {
+    let accessGroup = Bundle.main.object(forInfoDictionaryKey: "BuzzKeychainAccessGroup") as? String
+    return Self.communities(appGroupIdentifier: appGroupIdentifier).contains {
+      BuzzNotificationCacheScope(community: $0) == scope
+    } && scope.matchesAccountKey(
+      Self.loadPrivateKey(communityID: scope.communityID, keychainAccessGroup: accessGroup))
+  }
+
+  private static func communities(appGroupIdentifier: String?) -> [PushLeaseCommunity] {
+    guard let data = loadPushSnapshotData(appGroupIdentifier: appGroupIdentifier),
+      let snapshot = try? JSONDecoder().decode(PushLeaseSnapshot.self, from: data)
+    else { return [] }
+    return snapshot.communities
+  }
 
   override func didReceive(
     _ request: UNNotificationRequest,
     withContentHandler contentHandler: @escaping (UNNotificationContent) -> Void
   ) {
+    resolvedScope = nil
     handoff = BuzzNotificationHandoff(handler: contentHandler)
-    restrictedFallbackContent = Self.restrictedFallback(from: request.content)
     guard let content = request.content.mutableCopy() as? UNMutableNotificationContent else {
       finish(request.content)
       return
     }
+    // Workaround until https://github.com/block/buzz/pull/8431 lands.
+    if content.sound == nil { content.sound = .default }
+    // Shown if the relay can't be reached in time. The gateway's fixed body is meant
+    // to be replaced and reads like an instruction to the user.
+    content.body = "You have a new message."
+    restrictedFallbackContent = Self.restrictedFallback(from: content)
     bestAttemptContent = content
     var cleanUserInfo = content.userInfo
     cleanUserInfo.removeValue(forKey: BuzzPushNavigationTarget.userInfoKey)
     content.userInfo = cleanUserInfo
 
+    let session = URLSession(configuration: .ephemeral)
+    self.session = session
+    let resolver = makeResolver(session: session)
+    self.resolver = resolver
     resolver.resolve { [weak self] resolution in
       guard let self else { return }
       if let resolution {
+        guard let scope = resolution.notificationScope, self.isCurrent(scope),
+          self.resolver?.isStillAuthorized() == true
+        else {
+          self.finish(Self.restrictedFallback(from: content))
+          return
+        }
+        self.resolvedScope = scope
         content.title = resolution.title
         content.body = resolution.body
         if let subtitle = resolution.subtitle {
@@ -91,7 +195,9 @@ final class NotificationService: UNNotificationServiceExtension {
           ordinaryContent: content,
           resolution: resolution,
           isStillAllowed: { [weak self] in
-            !(self?.isAgeRestricted() ?? false)
+            guard let self else { return false }
+            return self.isCurrent(scope) && self.resolver?.isStillAuthorized() == true
+              && !self.isAgeRestricted()
           },
           onDeletionFailure: { error in
             NSLog("Notification cleanup retry failed: %@", String(describing: error))
@@ -112,8 +218,13 @@ final class NotificationService: UNNotificationServiceExtension {
   }
 
   private func finish(_ content: UNNotificationContent) {
+    // Cancelling on expiry also stops a retry that is running or about to start.
+    resolver?.cancel()
+    session?.invalidateAndCancel()
+    session = nil
     handoff?.finish(
-      content,
+      resolvedScope.map { isCurrent($0) && resolver?.isStillAuthorized() != false } == false
+        ? Self.restrictedFallback(from: content) : content,
       restrictedFallback: restrictedFallbackContent ?? Self.restrictedFallback(from: content),
       handoffIfAllowed: { deliver in
         BuzzAgeRestrictionSession.handoffIfAllowed(

@@ -1,16 +1,21 @@
+import '../hosted/hosted_relay_auth.dart';
 import 'dart:async';
 import 'dart:developer' as developer;
 import 'dart:math';
 
+import 'package:buzz/shared/crypto/event_signing.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
 import '../auth/auth_provider.dart';
+import '../channels/channel_list_snapshot.dart';
+import '../hosted/community_entry_requirements.dart';
 import '../push/dev_push_lease.dart';
 import '../push/push_bridge.dart';
 import '../push/push_lease_revocation_outbox.dart';
 import '../push/push_subscription.dart';
 import '../relay/signed_event_relay.dart';
+import '../relay/relay_provider.dart' show RelayConfig, pubkeyFromNsec;
 import 'community.dart';
 import 'community_storage.dart';
 
@@ -96,8 +101,11 @@ typedef CommunityPushLeaseDeactivator =
 
 final communityPushLeaseDeactivatorProvider =
     Provider<CommunityPushLeaseDeactivator>((ref) {
-      return (community, {generation}) =>
-          _deactivateCommunityPushLease(community, generation: generation);
+      return (community, {generation}) => _deactivateCommunityPushLease(
+        community,
+        generation: generation,
+        relayAuth: ref.read(hostedRelayAuthProvider),
+      );
     });
 
 typedef CommunityPushLeaseRevocationEnqueuer =
@@ -105,19 +113,20 @@ typedef CommunityPushLeaseRevocationEnqueuer =
 
 final communityPushLeaseRevocationEnqueuerProvider =
     Provider<CommunityPushLeaseRevocationEnqueuer>((ref) {
-      return ref.read(buzzPushLeaseRevocationOutboxProvider).enqueueCommunity;
+      return ref.watch(buzzPushLeaseRevocationOutboxProvider).enqueueCommunity;
     });
 
 typedef CommunityPushLeaseRevocationTrigger = Future<void> Function();
 
 final communityPushLeaseRevocationTriggerProvider =
     Provider<CommunityPushLeaseRevocationTrigger>((ref) {
-      return ref.read(buzzPushLeaseRevocationOutboxProvider).trigger;
+      return ref.watch(buzzPushLeaseRevocationOutboxProvider).trigger;
     });
 
 Future<void> _deactivateCommunityPushLease(
   Community community, {
   int? generation,
+  required HostedRelayAuth relayAuth,
 }) async {
   final state = community.pushSubscriptionState;
   final acceptedGeneration = state.acceptedGeneration;
@@ -129,14 +138,12 @@ Future<void> _deactivateCommunityPushLease(
     throw StateError('Push lease tombstone requires community signing key.');
   }
   final decoded = nostr.Nip19.decode(payload: nsec);
-  final memberPubkey = community.pubkey ?? nostr.Keys(decoded.data).public;
-  final descriptor = await fetchBuzzPushLeaseDescriptor(community.relayUrl);
+  final memberPubkey = community.pubkey ?? derivePublicKeyHex(decoded.data);
+  final descriptor = await fetchBuzzPushLeaseDescriptor(
+    canonicalBuzzPushRelayHttpUrl(community.relayUrl),
+  );
   final matchingGrant = (await readBuzzPushEndpointGrants())
-      .where(
-        (grant) =>
-            grant.relayOrigin == descriptor.origin &&
-            grant.appProfile == buzzDevPushAppProfile,
-      )
+      .where((grant) => grant.relayOrigin == descriptor.origin)
       .firstOrNull;
   if (matchingGrant == null) {
     throw StateError('No endpoint grant exists for push lease tombstone.');
@@ -151,6 +158,12 @@ Future<void> _deactivateCommunityPushLease(
   };
   final wsScheme = httpScheme == 'https' ? 'wss' : 'ws';
   final wsUrl = uri.replace(scheme: wsScheme).toString();
+  // The community being removed may not be the active session, so ask for its
+  // own assertion: a hosted relay refuses the socket upgrade without one.
+  final relayConfig = RelayConfig(
+    baseUrl: uri.replace(scheme: httpScheme).toString(),
+    nsec: nsec,
+  );
   // Skip over the one renewal generation that could already be in flight
   // when removal begins. Strict relay monotonicity then makes any stale
   // active publication lose to this tombstone.
@@ -162,15 +175,21 @@ Future<void> _deactivateCommunityPushLease(
     generation: tombstoneGeneration,
     nsec: nsec,
     memberPubkey: memberPubkey,
-    submit: ({required kind, required content, required tags, createdAt}) =>
-        submitSignedEventOnce(
-          wsUrl: wsUrl,
-          nsec: nsec,
-          kind: kind,
-          content: content,
-          tags: tags,
-          createdAt: createdAt,
-        ),
+    submit:
+        ({required kind, required content, required tags, createdAt}) async =>
+            submitSignedEventOnce(
+              wsUrl: wsUrl,
+              headers: await relayAuth.headers(
+                relayConfig,
+                background: true,
+                fresh: true,
+              ),
+              nsec: nsec,
+              kind: kind,
+              content: content,
+              tags: tags,
+              createdAt: createdAt,
+            ),
   );
   pushLeaseCleanupError.value = null;
 }
@@ -248,6 +267,7 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
   Future<List<Community>> build() async {
     final storage = ref.read(communityStorageProvider);
     final communities = await storage.loadAll();
+    unawaited(_removeOrphanChannelListSnapshots(communities));
     await syncCommunitySnapshot(ref, communities);
     return communities;
   }
@@ -255,6 +275,10 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
   /// Add a community. If one with the same relay URL already exists, update
   /// its credentials instead. Returns the effective community ID.
   Future<String> addCommunity(Community community) async {
+    await CommunityEntryRequirements.verify(
+      community,
+      ref.read(builderlabAccountProvider),
+    );
     final storage = ref.read(communityStorageProvider);
     final current = state.value ?? [];
 
@@ -269,10 +293,15 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
         pubkey: community.pubkey,
         nsec: community.nsec,
       );
+      if (_channelSnapshotPubkey(existing)?.toLowerCase() !=
+          _channelSnapshotPubkey(updated)?.toLowerCase()) {
+        await _removeChannelListSnapshot(existing);
+      }
       await storage.save(updated);
       final updatedList = [...current];
       updatedList[existingIndex] = updated;
       state = AsyncData(updatedList);
+      await _removeOrphanChannelListSnapshots(updatedList);
       await syncCommunitySnapshot(ref, updatedList);
       return existing.id;
     }
@@ -280,28 +309,16 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
     await storage.save(community);
     final updatedList = [...current, community];
     state = AsyncData(updatedList);
+    await _removeOrphanChannelListSnapshots(updatedList);
     await syncCommunitySnapshot(ref, updatedList);
     return community.id;
   }
 
-  Future<void> removeCommunity(String id) =>
-      _removeCommunity(id, invalidateAuthentication: true);
-
-  /// Removes the active community through the same local-first path as the
-  /// community list while allowing [AuthNotifier] to publish its final state.
-  Future<void> removeActiveCommunityForSignOut() =>
-      _removeCommunity(null, invalidateAuthentication: false);
-
-  Future<void> _removeCommunity(
-    String? requestedId, {
-    required bool invalidateAuthentication,
-  }) {
+  Future<void> removeCommunity(String id) {
     return ref.read(communityTransitionProvider).runExclusive(() async {
       var revocationJournaled = false;
       final storage = ref.read(communityStorageProvider);
       final activeId = await storage.loadActiveId();
-      final id = requestedId ?? activeId;
-      if (id == null) return;
       if (activeId == id) {
         await ref.read(communityTransitionProvider).run();
       }
@@ -310,6 +327,7 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
         (community) => community.id == id,
       );
       if (removedIndex >= 0) {
+        await _removeChannelListSnapshot(current[removedIndex]);
         // Persist every remote-cleanup dependency before erasing credentials.
         // This local transaction is the only removal prerequisite. Relay I/O
         // starts after the community and NSE snapshot have been removed.
@@ -320,6 +338,7 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
       await storage.remove(id);
 
       final updatedList = current.where((w) => w.id != id).toList();
+      await _removeOrphanChannelListSnapshots(updatedList);
       state = AsyncData(updatedList);
       await syncCommunitySnapshot(ref, updatedList);
 
@@ -330,12 +349,12 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
           await storage.saveActiveId(remaining.first.id);
           // Reassign list state so activeCommunityProvider picks up the new ID.
           state = AsyncData([...remaining]);
-          if (invalidateAuthentication) ref.invalidate(authProvider);
+          ref.invalidate(authProvider);
         } else {
           await storage.clearActiveId();
           // Invalidate auth so it re-evaluates against the now-empty storage
           // and transitions to unauthenticated.
-          if (invalidateAuthentication) ref.invalidate(authProvider);
+          ref.invalidate(authProvider);
         }
       }
       if (revocationJournaled) {
@@ -348,6 +367,39 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
           }),
         );
       }
+    });
+  }
+
+  String? _channelSnapshotPubkey(Community community) =>
+      pubkeyFromNsec(community.nsec?.trim()) ?? community.pubkey;
+
+  Future<void> _removeChannelListSnapshot(Community community) async {
+    final snapshots = ref.read(channelListSnapshotStorageProvider);
+    final pubkey = _channelSnapshotPubkey(community);
+    if (snapshots == null || pubkey == null) return;
+    try {
+      // Retire writers before the revocation journal or credential changes.
+      // A disposable cache must never prevent local sign-out.
+      await snapshots.remove(pubkey, community.relayUrl);
+    } catch (error, stackTrace) {
+      developer.log(
+        'Channel snapshot deletion failed; orphan cleanup will retry',
+        name: 'buzz.community',
+        error: error,
+        stackTrace: stackTrace,
+      );
+    }
+  }
+
+  Future<void> _removeOrphanChannelListSnapshots(
+    List<Community> communities,
+  ) async {
+    final snapshots = ref.read(channelListSnapshotStorageProvider);
+    if (snapshots == null) return;
+    await snapshots.removeOrphans({
+      for (final community in communities)
+        if (_channelSnapshotPubkey(community) case final pubkey?)
+          ChannelListSnapshotStorage.key(pubkey, community.relayUrl),
     });
   }
 
@@ -587,21 +639,6 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
         state = AsyncData(updatedList);
         await syncCommunitySnapshot(ref, updatedList);
       });
-
-  Future<void> renameCommunity(String id, String name) async {
-    final storage = ref.read(communityStorageProvider);
-    final current = state.value ?? [];
-    final index = current.indexWhere((w) => w.id == id);
-    if (index < 0) return;
-
-    final updated = current[index].copyWith(name: name);
-    await storage.save(updated);
-
-    final updatedList = [...current];
-    updatedList[index] = updated;
-    state = AsyncData(updatedList);
-    await syncCommunitySnapshot(ref, updatedList);
-  }
 }
 
 final communityListProvider =
@@ -618,21 +655,11 @@ final activeCommunityProvider = FutureProvider<Community?>((ref) async {
 
   if (communities.isEmpty) return null;
 
-  if (activeId == null) {
-    // No active ID stored but communities exist — fall back to first.
-    await storage.saveActiveId(communities.first.id);
-    return communities.first;
-  }
-
-  try {
-    return communities.firstWhere((w) => w.id == activeId);
-  } on StateError {
-    // Active ID points to a community that no longer exists.
-    // Fall back to first community.
-    if (communities.isNotEmpty) {
-      await storage.saveActiveId(communities.first.id);
-      return communities.first;
-    }
-    return null;
-  }
+  // This projection can outlive the list it captured above. Never persist a
+  // fallback here: a newer authentication may already have selected a community
+  // absent from that list. Authentication owns durable active-ID repair.
+  return communities.firstWhere(
+    (community) => community.id == activeId,
+    orElse: () => communities.first,
+  );
 });

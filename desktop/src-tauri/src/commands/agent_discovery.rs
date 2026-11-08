@@ -514,7 +514,8 @@ async fn restart_single_agent_after_install(
     let app_for_stop = app.clone();
     let pubkey_owned = pubkey.to_string();
     let runtime_id_owned = runtime_id.to_string();
-
+    let state = app.state::<AppState>();
+    let gate = crate::managed_agents::AdmissionSnapshot::capture(&state);
     let stop_result = tokio::task::spawn_blocking(move || {
         let state = app_for_stop.state::<AppState>();
 
@@ -610,9 +611,8 @@ async fn restart_single_agent_after_install(
         }
     };
 
-    let relay_urls: Vec<_> = runtime_keys.into_iter().map(|key| key.relay_url).collect();
-    let state = app.state::<AppState>();
-    match super::agents::start_local_agent_pairs_with_preflight(app, &state, pubkey, &relay_urls)
+    let urls: Vec<_> = runtime_keys.into_iter().map(|key| key.relay_url).collect();
+    match super::agents::start_local_agent_pairs_with_preflight(app, &state, pubkey, &urls, &gate)
         .await
     {
         Ok(_) => {

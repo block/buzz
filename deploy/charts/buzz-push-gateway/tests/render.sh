@@ -1,22 +1,28 @@
 #!/usr/bin/env bash
 set -euo pipefail
+bash deploy/charts/buzz-push-gateway/tests/runtime-options.sh
 bash deploy/charts/buzz-push-gateway/tests/grant-lifetime.sh
+bash deploy/charts/buzz-push-gateway/tests/migration-annotations.sh
 out=$(mktemp); production_out=$(mktemp); route_out=$(mktemp); datadog_out=$(mktemp)
 trap 'rm -f "$out" "$production_out" "$route_out" "$datadog_out" "${monitoring_out:-}"' EXIT
 gateway_origin_arg=(--set 'gatewayOrigin=https://push.example')
 
-# Generic values require the deployment-owned gateway origin.
-helm lint deploy/charts/buzz-push-gateway "${gateway_origin_arg[@]}" >/dev/null
-helm template push deploy/charts/buzz-push-gateway "${gateway_origin_arg[@]}" >"$out"
+# Generic values work without an application origin.
+helm lint deploy/charts/buzz-push-gateway >/dev/null
+helm template push deploy/charts/buzz-push-gateway >"$out"
 # Production values support a platform-owned ingress without rendering an
 # HTTPRoute. The environment-owned inputs remain mandatory.
 production_args=(
   -f deploy/charts/buzz-push-gateway/values-production.yaml
   --set 'image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-  --set 'gatewayOrigin=https://push.example'
-  --set 'profiles.dogfood.appAttestAppId=REALTEAM.xyz.block.buzz.dogfood.mobile'
+  --set 'application.appAttestAppId=REALTEAM.com.example.production'
   --set 'networkPolicy.postgresEgressCidrs[0]=10.42.0.0/16'
 )
+if helm template push deploy/charts/buzz-push-gateway "${production_args[@]}" >/dev/null 2>&1; then
+  echo 'expected production values without an APNs topic to fail' >&2
+  exit 1
+fi
+production_args+=(--set 'application.apnsTopic=com.example.production')
 helm lint deploy/charts/buzz-push-gateway "${production_args[@]}" >/dev/null
 helm template push deploy/charts/buzz-push-gateway "${production_args[@]}" >"$production_out"
 
@@ -76,17 +82,14 @@ assert!(j.dig("metadata", "annotations") == {
 env_names = d.dig("spec", "template", "spec", "containers", 0, "env")
   .map { |entry| entry["name"] }.to_set
 required = Set.new(%w[
-  DATABASE_URL BUZZ_PUSH_DOGFOOD_APNS_CERT_PATH
-  BUZZ_PUSH_DOGFOOD_APNS_TOPIC BUZZ_PUSH_DOGFOOD_APP_ATTEST_APP_ID
+  DATABASE_URL BUZZ_PUSH_APNS_CERT_PATH
+  BUZZ_PUSH_APNS_TOPIC BUZZ_PUSH_APP_ATTEST_APP_ID
   BUZZ_PUSH_GRANT_KEYS BUZZ_PUSH_TOKEN_KEYS BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS
-  BUZZ_PUSH_GATEWAY_ORIGIN
 ])
 assert!(required.subset?(env_names))
-gateway_origin = d.dig("spec", "template", "spec", "containers", 0, "env")
-  .find { |entry| entry["name"] == "BUZZ_PUSH_GATEWAY_ORIGIN" }
-assert!(gateway_origin["value"] == "https://push.example")
+assert!(!env_names.include?("BUZZ_PUSH_GATEWAY_ORIGIN"))
 assert!(!env_names.any? { |name| name.include?("APP_STORE") })
-apns_volume = d.dig("spec", "template", "spec", "volumes").find { |volume| volume["name"] == "apns-dogfood" }
+apns_volume = d.dig("spec", "template", "spec", "volumes").find { |volume| volume["name"] == "apns" }
 assert!(apns_volume.dig("secret", "defaultMode") == 0o400, apns_volume.inspect)
 assert!(d.dig("spec", "replicas") >= 2)
 assert!(!xs.any? { |x| x["kind"] == "HTTPRoute" })
@@ -118,14 +121,17 @@ assert!(!production.any? { |x| x["kind"] == "HTTPRoute" })
 production_deployment = production.find { |x| x["kind"] == "Deployment" }
 production_image = production_deployment.dig("spec", "template", "spec", "containers", 0, "image")
 assert!(production_image == "ghcr.io/block/buzz-push-gateway@sha256:#{"a" * 64}", production_image.inspect)
+production_env = production_deployment.dig("spec", "template", "spec", "containers", 0, "env")
+assert!(production_env.find { |env| env["name"] == "BUZZ_PUSH_APNS_TOPIC" }["value"] == "com.example.production")
 route = YAML.load_stream(File.read(ARGV[2])).compact.find { |x| x["kind"] == "HTTPRoute" }
 assert!(!route.dig("spec", "parentRefs").empty?)
 assert!(route.dig("spec", "hostnames") == ["push.example"])
 RUBY
 
-# A gateway origin is a required deployment input, even when HTTPRoute is off.
-if helm template push deploy/charts/buzz-push-gateway >/dev/null 2>&1; then
-  echo 'expected missing gatewayOrigin to fail' >&2
+# An origin is needed only to produce the optional routing hostname.
+if helm template push deploy/charts/buzz-push-gateway \
+  --set httpRoute.enabled=true --set 'httpRoute.parentRefs[0].name=gateway' >/dev/null 2>&1; then
+  echo 'expected enabled HTTPRoute without gatewayOrigin to fail' >&2
   exit 1
 fi
 for invalid_origin in 'http://push.example' 'https://push.example:8443' 'https://push.example/base'; do
