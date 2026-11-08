@@ -1,6 +1,7 @@
 import 'message_reply_drag_target.dart';
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 import 'dart:async';
+import 'dart:convert';
 import '../../shared/widgets/ios_media_carousel.dart';
 import '../../shared/widgets/message_attachment_corners.dart';
 import 'dart:io';
@@ -10,6 +11,7 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/semantics.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:gpt_markdown/gpt_markdown.dart';
@@ -38,6 +40,7 @@ import '../../shared/emoji/emoji_only.dart';
 import 'channel_ids_by_name_provider.dart';
 import 'local_send_bubble_surface.dart';
 import 'media_viewer_page.dart';
+import 'native_photo_zoom_preview.dart';
 import 'message_content/link_normalizer.dart';
 import 'message_content/markdown_escapes.dart';
 import 'message_content/preview_text.dart';
@@ -54,6 +57,8 @@ import 'message_media_geometry.dart';
 import 'voice_note_attachment.dart';
 
 part 'message_content/media_carousel.dart';
+part 'message_content/media_stack.dart';
+part 'message_content/media_stack_tuning.dart';
 part 'message_content/message_preview.dart';
 part 'message_content/bubble_shape.dart';
 part 'message_content/inline_components.dart';
@@ -158,6 +163,7 @@ class MessageContent extends HookConsumerWidget {
 
   /// Opens message-specific actions for an image in the full-screen viewer.
   final MediaViewerMoreAction? onMediaMore;
+  final NativePhotoActions? nativePhotoActions;
 
   final TextStyle? baseStyle;
 
@@ -199,6 +205,7 @@ class MessageContent extends HookConsumerWidget {
     this.onMentionTap,
     this.onMediaReply,
     this.onMediaMore,
+    this.nativePhotoActions,
     this.baseStyle,
     this.textAlign,
     this.maxLines,
@@ -537,6 +544,17 @@ class MessageContent extends HookConsumerWidget {
           : CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
+        if (bubble)
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: Grid.xs),
+            child: Text(
+              '${trailingGallery.items.length} photos',
+              key: const ValueKey('message-media-stack-count'),
+              style: context.textTheme.labelSmall?.copyWith(
+                color: context.colors.onSurfaceVariant,
+              ),
+            ),
+          ),
         if (trailingGallery.content.trim().isNotEmpty) markdown,
         MessageReplyDragTarget(
           child: MessageAttachmentCorners(
@@ -544,17 +562,32 @@ class MessageContent extends HookConsumerWidget {
               start: bubbleStart && trailingGallery.content.trim().isEmpty,
               end: bubbleEnd,
             ),
-            child: _MessageImageCarousel(
-              key: ValueKey(
-                trailingGallery.items.map((item) => item.url).join('\u0000'),
-              ),
-              items: trailingGallery.items,
-              mirrored: ownMessage,
-              leadingOverflow: mediaCarouselLeadingOverflow,
-              trailingOverflow: mediaCarouselTrailingOverflow,
-              onReply: onMediaReply,
-              onMore: onMediaMore,
-            ),
+            child: bubble
+                ? _MessageImageStack(
+                    key: ValueKey(
+                      trailingGallery.items
+                          .map((item) => item.url)
+                          .join('\u0000'),
+                    ),
+                    items: trailingGallery.items,
+                    mirrored: ownMessage,
+                    nativeActions: nativePhotoActions,
+                    onReply: onMediaReply,
+                    onMore: onMediaMore,
+                  )
+                : _MessageImageCarousel(
+                    key: ValueKey(
+                      trailingGallery.items
+                          .map((item) => item.url)
+                          .join('\u0000'),
+                    ),
+                    items: trailingGallery.items,
+                    mirrored: ownMessage,
+                    leadingOverflow: mediaCarouselLeadingOverflow,
+                    trailingOverflow: mediaCarouselTrailingOverflow,
+                    onReply: onMediaReply,
+                    onMore: onMediaMore,
+                  ),
           ),
         ),
       ],

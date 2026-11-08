@@ -364,6 +364,13 @@ class _ThreadMessage extends HookConsumerWidget {
                                                 ),
                                               );
                                             },
+                                      nativePhotoActions: nativeImageActions(
+                                        context: context,
+                                        ref: ref,
+                                        message: message,
+                                        channelId: channelId,
+                                        canManageMessage: canManageMessage,
+                                      ),
                                       onMediaMore: (viewerContext, imageUrl) =>
                                           showImageActions(
                                             context: viewerContext,
