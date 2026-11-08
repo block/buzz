@@ -75,12 +75,12 @@ class _CachedChannels extends ChannelsNotifier {
   @override
   Future<void> refresh({
     bool fetchDirectory = false,
-    bool strongMemberships = false,
+    bool strong = false,
   }) async {}
   @override
   Future<List<Channel>> fetchFresh({
     bool fetchDirectory = false,
-    bool strongMemberships = false,
+    bool strong = false,
   }) async {
     freshReads++;
     throw StateError('membership fetch failed');

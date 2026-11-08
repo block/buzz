@@ -100,7 +100,7 @@ class _Channels extends ChannelsNotifier {
   @override
   Future<List<Channel>> fetchFresh({
     bool fetchDirectory = false,
-    bool strongMemberships = false,
+    bool strong = false,
   }) async {
     freshReads++;
     return _starters;

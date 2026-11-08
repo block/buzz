@@ -396,7 +396,7 @@ class ChannelActions {
     _ensureCommunityValid();
     await _ref
         .read(channelsProvider.notifier)
-        .refresh(strongMemberships: strongMemberships);
+        .refresh(strong: strongMemberships);
     _ensureCommunityValid();
     _ref.invalidate(channelDetailsProvider(channelId));
     _ref.invalidate(channelMembersProvider(channelId));
