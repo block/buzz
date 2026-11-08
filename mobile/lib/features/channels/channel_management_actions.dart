@@ -14,6 +14,14 @@ List<List<String>> buildDeleteChannelTags(String channelId) => [
   ['h', channelId],
 ];
 
+/// Re-read schedule while confirming a join, matching desktop's.
+const _joinConfirmationDelays = [
+  Duration.zero,
+  Duration(milliseconds: 250),
+  Duration(milliseconds: 750),
+  Duration(milliseconds: 1500),
+];
+
 class ChannelActions {
   final Ref _ref;
   final RelaySessionNotifier _session;
@@ -227,8 +235,42 @@ class ChannelActions {
         ['h', channelId],
       ],
     );
+    await _confirmJoined(channelId);
     _ensureCommunityValid();
-    await _refreshChannelState(channelId);
+    await _refreshChannelState(channelId, strongMemberships: true);
+  }
+
+  /// Waits for the relay's roster to list the current user after a join.
+  ///
+  /// The relay can acknowledge the join before its roster reflects it, and
+  /// replicas can lag the writer for many seconds, so each read pins the
+  /// writer pool with `consistency: strong`.
+  Future<void> _confirmJoined(String channelId) async {
+    final pubkey = _currentPubkey;
+    if (pubkey == null) {
+      throw StateError('No signing identity available');
+    }
+    for (final delay in _joinConfirmationDelays) {
+      if (delay > Duration.zero) await Future<void>.delayed(delay);
+      _ensureCommunityValid();
+      final rosters = await _session.fetchHistory(
+        NostrFilter(
+          kinds: const [39002],
+          tags: {
+            '#d': [channelId],
+            '#p': [pubkey],
+          },
+          limit: 1,
+          extensions: const {'consistency': 'strong'},
+        ),
+      );
+      if (rosters.any(
+        (event) => event.kind == 39002 && event.getTagValue('d') == channelId,
+      )) {
+        return;
+      }
+    }
+    throw StateError('Join was sent but is not confirmed yet');
   }
 
   Future<void> leaveChannel(String channelId) async {
@@ -345,9 +387,14 @@ class ChannelActions {
     );
   }
 
-  Future<void> _refreshChannelState(String channelId) async {
+  Future<void> _refreshChannelState(
+    String channelId, {
+    bool strongMemberships = false,
+  }) async {
     _ensureCommunityValid();
-    await _ref.read(channelsProvider.notifier).refresh();
+    await _ref
+        .read(channelsProvider.notifier)
+        .refresh(strongMemberships: strongMemberships);
     _ensureCommunityValid();
     _ref.invalidate(channelDetailsProvider(channelId));
     _ref.invalidate(channelMembersProvider(channelId));

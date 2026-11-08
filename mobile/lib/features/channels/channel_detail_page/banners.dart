@@ -1,12 +1,39 @@
 part of '../channel_detail_page.dart';
 
-class _ReadOnlyNotice extends StatelessWidget {
+class _ReadOnlyNotice extends HookConsumerWidget {
   final Channel channel;
 
   const _ReadOnlyNotice({required this.channel});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    final isJoining = useState(false);
+    final place = channel.isForum ? 'forum' : 'channel';
+    final canJoin = channel.visibility == 'open' && !channel.isArchived;
+
+    Future<void> join() async {
+      if (isJoining.value) return;
+      isJoining.value = true;
+      try {
+        await ref.read(channelActionsProvider).joinChannel(channel.id);
+      } catch (_) {
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showFeedbackSnackBar(
+            SnackBar(content: Text('Couldn’t join $place. Try again.')),
+            kind: ToastKind.error,
+          );
+        }
+      } finally {
+        if (context.mounted) isJoining.value = false;
+      }
+    }
+
+    final message = channel.isArchived
+        ? 'This $place is archived and read-only on mobile.'
+        : canJoin
+        ? 'Join $place to send messages'
+        : 'You’re previewing this $place';
+
     return Container(
       width: double.infinity,
       padding: EdgeInsets.only(
@@ -19,14 +46,26 @@ class _ReadOnlyNotice extends StatelessWidget {
         border: Border(top: BorderSide(color: context.colors.outlineVariant)),
         color: context.colors.surface,
       ),
-      child: Text(
-        channel.isArchived
-            ? 'This ${channel.isForum ? 'forum' : 'channel'} is archived and read-only on mobile.'
-            : 'Join this ${channel.isForum ? 'forum' : 'channel'} from Manage to participate.',
-        style: context.textTheme.bodySmall?.copyWith(
-          color: context.colors.onSurfaceVariant,
-        ),
-        textAlign: TextAlign.center,
+      child: Wrap(
+        alignment: WrapAlignment.center,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        spacing: Grid.xxs,
+        runSpacing: Grid.half,
+        children: [
+          Text(
+            message,
+            style: context.textTheme.bodySmall?.copyWith(
+              color: context.colors.onSurfaceVariant,
+            ),
+            textAlign: TextAlign.center,
+          ),
+          if (canJoin)
+            FilledButton(
+              key: const ValueKey('channel-join-button'),
+              onPressed: isJoining.value ? null : join,
+              child: Text(isJoining.value ? 'Joining…' : 'Join'),
+            ),
+        ],
       ),
     );
   }

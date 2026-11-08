@@ -342,11 +342,13 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     bool subscribeLive = false,
     bool fetchLastMessage = true,
     bool fetchDirectory = false,
+    bool strongMemberships = false,
   }) async {
     final channels = await _fetchChannels(
       subscribeLive: subscribeLive,
       fetchLastMessage: fetchLastMessage,
       fetchDirectory: fetchDirectory,
+      strongMemberships: strongMemberships,
     );
     _hasLoaded = true;
     return channels;
@@ -356,6 +358,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     bool subscribeLive = false,
     bool fetchLastMessage = true,
     bool fetchDirectory = false,
+    bool strongMemberships = false,
   }) async {
     final myPk = ref.read(myPubkeyProvider);
     if (myPk == null) throw StateError('No signing identity available');
@@ -378,7 +381,10 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
 
     // Step 1: find the channels I'm a member of via kind:39002.
     final memberships = _latestChannelEvents(
-      await _fenced(fence, _fetchChannelMemberships(session, myPk)),
+      await _fenced(
+        fence,
+        _fetchChannelMemberships(session, myPk, strong: strongMemberships),
+      ),
       kind: 39002,
     );
     final memberChannelIds = memberships
@@ -995,7 +1001,14 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   ///
   /// Unlike background refresh, failures (including disconnection or a retired
   /// request) propagate. Cached UI state stays visible while the request runs.
-  Future<List<Channel>> fetchFresh({bool fetchDirectory = false}) async {
+  ///
+  /// [strongMemberships] reads memberships from the relay's writer pool, for
+  /// a refresh that must reflect this client's own just-accepted membership
+  /// change.
+  Future<List<Channel>> fetchFresh({
+    bool fetchDirectory = false,
+    bool strongMemberships = false,
+  }) async {
     final generation = _buildGeneration;
     try {
       await future;
@@ -1011,6 +1024,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     final channels = await _fetch(
       subscribeLive: true,
       fetchDirectory: fetchDirectory,
+      strongMemberships: strongMemberships,
     );
     state = AsyncData(channels);
     return channels;
@@ -1019,7 +1033,10 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   /// Best-effort refresh of memberships and, optionally, the open directory.
   /// Keeps usable UI state on failure. Decisions requiring fresh membership
   /// must use [fetchFresh] to receive the fetch error instead.
-  Future<void> refresh({bool fetchDirectory = false}) async {
+  Future<void> refresh({
+    bool fetchDirectory = false,
+    bool strongMemberships = false,
+  }) async {
     final sessionState = ref.read(relaySessionProvider);
     // Don't attempt to fetch when the session isn't connected — fetchHistory
     // would send REQs over an unauthenticated socket that either time out
@@ -1028,7 +1045,10 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     // when the session transitions to connected.
     if (sessionState.status != SessionStatus.connected) return;
     try {
-      await fetchFresh(fetchDirectory: fetchDirectory);
+      await fetchFresh(
+        fetchDirectory: fetchDirectory,
+        strongMemberships: strongMemberships,
+      );
     } on _StaleChannelRefresh {
       return;
     } catch (error, stackTrace) {
