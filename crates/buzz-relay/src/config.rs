@@ -127,6 +127,11 @@ pub struct Config {
     /// `0` (the default) disables bounded-staleness replica routing; see
     /// [`buzz_db::DbConfig::replica_read_max_age_ms`].
     pub replica_read_max_age_ms: u64,
+    /// Replica fence heartbeat interval in milliseconds
+    /// (`BUZZ_REPLICA_FENCE_PROBE_INTERVAL_MS`). Unset (`0`) selects the
+    /// default; set values must lie within the accepted range. See
+    /// [`buzz_db::DbConfig::replica_fence_probe_interval_ms`].
+    pub replica_fence_probe_interval_ms: u64,
 
     /// Upper bound, in milliseconds, of the per-connection random delay applied
     /// when sending the `1012 Service Restart` close frame during graceful
@@ -708,6 +713,28 @@ impl Config {
             })?,
             Err(_) => 0,
         };
+
+        // Fence heartbeat interval: unset or empty selects the default. An
+        // out-of-range value fails startup rather than being clamped, so the
+        // deployed cadence is always the configured one.
+        let replica_fence_probe_interval_ms =
+            match std::env::var("BUZZ_REPLICA_FENCE_PROBE_INTERVAL_MS") {
+                Ok(raw) if !raw.trim().is_empty() => {
+                    let min = buzz_db::replica_fence::MIN_PROBE_INTERVAL.as_millis() as u64;
+                    let max = buzz_db::replica_fence::MAX_PROBE_INTERVAL.as_millis() as u64;
+                    raw.trim()
+                        .parse::<u64>()
+                        .ok()
+                        .filter(|ms| (min..=max).contains(ms))
+                        .ok_or_else(|| {
+                            ConfigError::InvalidValue(format!(
+                                "BUZZ_REPLICA_FENCE_PROBE_INTERVAL_MS must be an integer \
+                                 between {min} and {max}"
+                            ))
+                        })?
+                }
+                _ => 0,
+            };
 
         // Drain jitter: 0 = off (default). Clamp oversized values so every
         // delayed close is initiated with ten seconds left in the relay's
@@ -1453,6 +1480,7 @@ impl Config {
             database_url,
             read_database_url,
             replica_read_max_age_ms,
+            replica_fence_probe_interval_ms,
             drain_jitter_ms,
             redis_url,
             db_pool_size,
@@ -2482,6 +2510,44 @@ mod tests {
                 "the error must name the replacement env var, got: {message}"
             ),
             other => panic!("old env name must hard-fail startup, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn replica_fence_probe_interval_defaults_and_rejects_out_of_range() {
+        let _guards = env_guards();
+        let previous = std::env::var_os("BUZZ_REPLICA_FENCE_PROBE_INTERVAL_MS");
+        let read = |value: Option<&str>| {
+            match value {
+                Some(value) => std::env::set_var("BUZZ_REPLICA_FENCE_PROBE_INTERVAL_MS", value),
+                None => std::env::remove_var("BUZZ_REPLICA_FENCE_PROBE_INTERVAL_MS"),
+            }
+            Config::from_env().map(|config| config.replica_fence_probe_interval_ms)
+        };
+
+        let unset = read(None);
+        let empty = read(Some(" "));
+        let set = read(Some("500"));
+        let rejected =
+            ["soon", "0", "299", "10001", "-400"].map(|value| (value, read(Some(value))));
+
+        if let Some(value) = previous {
+            std::env::set_var("BUZZ_REPLICA_FENCE_PROBE_INTERVAL_MS", value);
+        } else {
+            std::env::remove_var("BUZZ_REPLICA_FENCE_PROBE_INTERVAL_MS");
+        }
+
+        assert_eq!(unset.expect("unset"), 0, "unset selects the default");
+        assert_eq!(empty.expect("empty"), 0, "empty selects the default");
+        assert_eq!(set.expect("set"), 500);
+        for (value, result) in rejected {
+            match result {
+                Err(ConfigError::InvalidValue(message)) => assert!(
+                    message.contains("BUZZ_REPLICA_FENCE_PROBE_INTERVAL_MS"),
+                    "{value}: {message}"
+                ),
+                other => panic!("{value} must fail startup, got {other:?}"),
+            }
         }
     }
 

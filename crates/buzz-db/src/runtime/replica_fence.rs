@@ -66,7 +66,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
-use sqlx::{PgConnection, PgPool, Row};
+use sqlx::pool::PoolConnection;
+use sqlx::postgres::PgPoolOptions;
+use sqlx::{PgConnection, PgPool, Postgres, Row};
 use uuid::Uuid;
 
 use buzz_datastore_tracing::datastore_span;
@@ -95,14 +97,52 @@ pub const REPLICA_FLOOR_LOCK_KEY: i64 = 0x62757a7a666c6f72;
 /// between machines.
 pub const FENCE_CLOCK_MARGIN_SECS: i64 = 5;
 
-/// How often the probe samples the writer and commits a heartbeat token.
+/// Default interval at which the probe samples the writer and commits a
+/// heartbeat token (env `BUZZ_REPLICA_FENCE_PROBE_INTERVAL_MS`).
 ///
-/// 500ms keeps the cadence at least 2x under the smallest sensible bounded
-/// budget (`BUZZ_REPLICA_READ_MAX_AGE_MS`, deploy plan 1000ms) so
-/// eligibility doesn't flap between beats. Cost is one single-row UPDATE
-/// tuple of WAL per beat per pod — ~20 beats/s fleet-wide, <0.1% of the
-/// writer.
-pub const PROBE_INTERVAL: Duration = Duration::from_millis(500);
+/// Every beat takes the deployment-wide exclusive floor lock, and channel
+/// writes queue behind it while it is held, so beating faster costs more
+/// lock drains per pod, not just WAL. Tolerating a slow beat is the read
+/// budget's job (see [`min_read_budget`]), not the interval's.
+pub const DEFAULT_PROBE_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Shortest accepted probe interval. Bounded by the retained ring, which
+/// must hold more history than [`FENCE_STALENESS`] (see the assertion at
+/// [`RING_CAPACITY`]), and by the writer cost of beating faster.
+pub const MIN_PROBE_INTERVAL: Duration = Duration::from_millis(300);
+
+/// Longest accepted probe interval: a probe slower than this leaves only a
+/// few beats inside [`FENCE_STALENESS`] and needs a multi-second read
+/// budget to route at all.
+pub const MAX_PROBE_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Map a configured probe interval in milliseconds to the effective one:
+/// `0` selects [`DEFAULT_PROBE_INTERVAL`]; other values are clamped to
+/// [`MIN_PROBE_INTERVAL`]..=[`MAX_PROBE_INTERVAL`].
+pub fn probe_interval_from_ms(ms: u64) -> Duration {
+    if ms == 0 {
+        return DEFAULT_PROBE_INTERVAL;
+    }
+    Duration::from_millis(ms).clamp(MIN_PROBE_INTERVAL, MAX_PROBE_INTERVAL)
+}
+
+/// Commit and scheduling latency a bounded-read budget should absorb on
+/// top of one lock-timed-out beat.
+const READ_BUDGET_LATENCY_MARGIN: Duration = Duration::from_millis(200);
+
+/// Smallest bounded-read budget (`BUZZ_REPLICA_READ_MAX_AGE_MS`) that
+/// survives one beat failing on [`PROBE_LOCK_TIMEOUT`] at `probe_interval`:
+/// the newest entry is one interval old when that beat starts, ages by the
+/// lock wait, and the next beat (fired at once, since missed ticks are
+/// delayed rather than skipped) commits after
+/// [`READ_BUDGET_LATENCY_MARGIN`]. 1700ms at the default interval. A
+/// smaller budget still works, but bounded reads spill to the writer
+/// whenever a beat waits out the floor lock; the relay warns at startup.
+pub const fn min_read_budget(probe_interval: Duration) -> Duration {
+    probe_interval
+        .saturating_add(PROBE_LOCK_TIMEOUT)
+        .saturating_add(READ_BUDGET_LATENCY_MARGIN)
+}
 
 /// A fence whose newest entry is older than this is stale: the probe has
 /// stopped committing tokens and routing eligibility closes until a new
@@ -114,8 +154,43 @@ pub const PROBE_INTERVAL: Duration = Duration::from_millis(500);
 /// just stops spending reader checkouts once the probe is evidently dead.
 pub const FENCE_STALENESS: Duration = Duration::from_secs(30);
 
+/// `application_name` of the probe's dedicated connection, so it is
+/// identifiable in `pg_stat_activity` and database-side wait reports.
+pub const PROBE_APPLICATION_NAME: &str = "buzz-replica-fence-probe";
+
+/// Bound on waiting for the probe's connection. The probe loop is the
+/// pool's only, strictly sequential user, so this only ever covers a
+/// (re)dial — never queueing behind serving traffic.
+const PROBE_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Session `lock_timeout` on the probe connection.
+///
+/// While the probe waits for the exclusive floor lock, new shared
+/// requesters (channel-event writes) queue behind it, so a long wait
+/// stalls channel writes deployment-wide. A beat that gives up costs
+/// nothing — retained proofs stand — so fail fast instead of inheriting
+/// the serving writer's longer lock budget.
+///
+/// Every pod's probe takes the same exclusive lock and the same heartbeat
+/// row lock, so probes also queue behind each other. Each holds them for a
+/// few milliseconds, so this budget assumes well under a hundred relay
+/// processes per writer.
+const PROBE_LOCK_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Session `statement_timeout` and `idle_in_transaction_session_timeout`
+/// on the probe connection. Every probe statement is a sub-millisecond
+/// point operation; the idle bound reaps a stalled client that still
+/// holds the exclusive floor lock.
+const PROBE_STATEMENT_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Client-side bound on one whole probe, covering stalls no server-side
+/// timeout observes (for example a dead TCP peer). Comfortably above the
+/// acquire timeout plus one lock wait plus the remaining statements.
+const PROBE_DEADLINE: Duration = Duration::from_secs(5);
+
 /// How many `(token, fence_wall)` entries the fence retains. At one probe
-/// per [`PROBE_INTERVAL`] (500ms) this is ~60 seconds of history — a reader
+/// per [`DEFAULT_PROBE_INTERVAL`] (500ms) this is ~60 seconds of history,
+/// and at least 36 seconds at [`MIN_PROBE_INTERVAL`] — a reader
 /// session lagging further than that behind the newest token fails closed
 /// (routes to the writer) rather than proving from thin air. Aurora reader
 /// lag is typically tens of milliseconds; a reader minutes behind is a
@@ -128,7 +203,8 @@ const RING_CAPACITY: usize = 120;
 // for capacity rather than lag. Compile-checked so a future cadence or
 // capacity tweak can't silently shrink the window below the gate.
 const _: () = assert!(
-    RING_CAPACITY as u64 * PROBE_INTERVAL.as_millis() as u64 > FENCE_STALENESS.as_millis() as u64,
+    RING_CAPACITY as u64 * MIN_PROBE_INTERVAL.as_millis() as u64
+        > FENCE_STALENESS.as_millis() as u64,
     "fence ring must retain more history than the staleness gate"
 );
 
@@ -281,8 +357,13 @@ impl ReplicaFence {
     /// Age of the newest retained entry, ungated (observability: how long
     /// since the probe last committed a token).
     pub fn heartbeat_age(&self) -> Option<Duration> {
+        self.last_committed_at().map(|at| at.elapsed())
+    }
+
+    /// Commit instant of the newest retained entry, ungated.
+    fn last_committed_at(&self) -> Option<Instant> {
         let inner = self.inner.lock().expect("fence lock poisoned");
-        inner.ring.back().map(|entry| entry.committed_at.elapsed())
+        inner.ring.back().map(|entry| entry.committed_at)
     }
 
     /// The newest fence wall, or `None` when closed or stale.
@@ -563,6 +644,146 @@ pub enum ProbeError {
     /// The single heartbeat row (migration 0026) is missing on the writer.
     #[error("replica_heartbeat row missing on the writer — migration 0026 not applied?")]
     HeartbeatRowMissing,
+    /// The whole probe overran [`PROBE_DEADLINE`] without any server-side
+    /// timeout firing (for example a stalled connection).
+    #[error("replica fence probe exceeded its {0:?} deadline")]
+    Deadline(Duration),
+}
+
+impl ProbeError {
+    /// Stable, low-cardinality failure class for spans and logs.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Writer(sqlx::Error::PoolTimedOut) => "acquire_timeout",
+            Self::Writer(sqlx::Error::PoolClosed) => "pool_closed",
+            Self::Writer(sqlx::Error::Database(e)) => match e.code().as_deref() {
+                // lock_not_available: the probe's `lock_timeout` fired.
+                Some("55P03") => "lock_timeout",
+                // query_canceled: the probe's `statement_timeout` fired.
+                Some("57014") => "statement_timeout",
+                _ => "database",
+            },
+            Self::Writer(sqlx::Error::Io(_)) => "io",
+            Self::Writer(_) => "writer",
+            Self::MaskedActivity { .. } => "masked_activity",
+            Self::HeartbeatRowMissing => "heartbeat_row_missing",
+            Self::Deadline(_) => "deadline",
+        }
+    }
+}
+
+/// Connect the probe's dedicated one-connection pool.
+///
+/// The probe must not borrow the serving writer pool: under load its beat
+/// then queues behind request traffic for up to that pool's acquire
+/// timeout, every pod's newest token ages past the bounded-read budget at
+/// once, and reads spill onto the writer that is already saturated. A pool
+/// of its own keeps the beat independent of serving load, the way the push
+/// producer's pool keeps push work off it. It costs one extra writer
+/// connection per relay process.
+///
+/// It reuses the writer's credentials and connection lifetime, so it
+/// follows writer failover the same way. It does not run the writer pool's
+/// `after_connect` policy: the probe never writes `events`, so it needs no
+/// floor-guard arming, and it installs its own tighter timeouts (see
+/// [`PROBE_LOCK_TIMEOUT`], [`PROBE_STATEMENT_TIMEOUT`]). The pool is lazy,
+/// so a writer outage cannot make startup depend on it.
+pub fn connect_probe_pool(writer: &PgPool) -> PgPool {
+    PgPoolOptions::new()
+        .max_connections(1)
+        .min_connections(1)
+        .acquire_timeout(PROBE_ACQUIRE_TIMEOUT)
+        .max_lifetime(writer.options().get_max_lifetime())
+        .after_connect(|conn, _meta| {
+            Box::pin(async move {
+                sqlx::query(
+                    "SELECT set_config('lock_timeout', $1, false), \
+                            set_config('statement_timeout', $2, false), \
+                            set_config('idle_in_transaction_session_timeout', $2, false)",
+                )
+                .bind(millis(PROBE_LOCK_TIMEOUT).to_string())
+                .bind(millis(PROBE_STATEMENT_TIMEOUT).to_string())
+                .execute(&mut *conn)
+                .await?;
+                Ok(())
+            })
+        })
+        .connect_lazy_with(
+            (*writer.connect_options())
+                .clone()
+                .application_name(PROBE_APPLICATION_NAME),
+        )
+}
+
+/// Wall time of each probe phase, recorded on the probe span and in the
+/// failure log. Phases a failed probe never reached stay zero.
+#[derive(Debug, Default, Clone, Copy)]
+struct ProbeTimings {
+    /// Waiting for the probe connection (a dial, at most).
+    acquire: Duration,
+    /// `BEGIN` plus waiting for the exclusive floor lock.
+    lock: Duration,
+    /// Sampling `S` and scanning `pg_stat_activity`.
+    scan: Duration,
+    /// The heartbeat `UPDATE ... RETURNING`.
+    heartbeat: Duration,
+    /// `COMMIT`.
+    commit: Duration,
+}
+
+/// What one probe observed about itself, beyond its result.
+#[derive(Debug, Default, Clone, Copy)]
+struct ProbeTrace {
+    timings: ProbeTimings,
+    /// Time between the previously retained beat and this one's commit;
+    /// `None` before the first beat or when this probe failed.
+    beat_gap: Option<Duration>,
+}
+
+fn millis(elapsed: Duration) -> u64 {
+    u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+}
+
+/// Await `phase`, storing its wall time in `slot` whatever its outcome.
+///
+/// The time is stored on drop, so a phase cut off by [`PROBE_DEADLINE`]
+/// still reports how long it had been running — the stalled phase is the
+/// one the failure log most needs to name.
+async fn timed<T>(slot: &mut Duration, phase: impl std::future::Future<Output = T>) -> T {
+    struct Stamp<'a> {
+        slot: &'a mut Duration,
+        started: Instant,
+    }
+    impl Drop for Stamp<'_> {
+        fn drop(&mut self) {
+            *self.slot = self.started.elapsed();
+        }
+    }
+    let _stamp = Stamp {
+        slot,
+        started: Instant::now(),
+    };
+    phase.await
+}
+
+/// Check out the probe connection. Its own span (and the
+/// `buzz_db_operation_duration_seconds` series the span macro records)
+/// makes the probe's connection wait directly visible.
+#[datastore_span(name = "replica_fence_probe_acquire", system = "postgresql")]
+async fn acquire_probe_connection(pool: &PgPool) -> Result<PoolConnection<Postgres>, sqlx::Error> {
+    pool.acquire().await
+}
+
+/// Take the exclusive replica-floor lock, draining compliant shared-lock
+/// channel writers. Spanned separately: this is the probe's only wait on
+/// other database sessions.
+#[datastore_span(name = "replica_fence_probe_lock", system = "postgresql")]
+async fn take_floor_lock(conn: &mut PgConnection) -> Result<(), sqlx::Error> {
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(REPLICA_FLOOR_LOCK_KEY)
+        .execute(conn)
+        .await?;
+    Ok(())
 }
 
 /// Take one ordered writer sample: under the exclusive replica-floor lock,
@@ -571,75 +792,79 @@ pub enum ProbeError {
 /// The statements are separately awaited on one pinned writer transaction;
 /// a single SELECT would not guarantee evaluation order across the
 /// subexpressions, reopening the race this ordering exists to close.
-async fn sample_writer(writer: &PgPool) -> Result<WriterSample, ProbeError> {
-    let connection = crate::observability::acquire_writer(
-        writer,
-        crate::observability::WriterOperation::Maintenance,
-    )
+async fn sample_writer(
+    writer: &PgPool,
+    timings: &mut ProbeTimings,
+) -> Result<WriterSample, ProbeError> {
+    let connection = timed(&mut timings.acquire, acquire_probe_connection(writer)).await?;
+
+    let mut tx = timed(&mut timings.lock, async {
+        let mut tx = sqlx::Transaction::begin(connection, None).await?;
+        take_floor_lock(&mut tx).await?;
+        Ok::<_, sqlx::Error>(tx)
+    })
     .await?;
-    let mut tx = sqlx::Transaction::begin(connection, None).await?;
 
-    sqlx::query("SELECT pg_advisory_xact_lock($1)")
-        .bind(REPLICA_FLOOR_LOCK_KEY)
-        .execute(&mut *tx)
-        .await?;
+    let (sampled_at, oldest_xact_start) = timed(&mut timings.scan, async {
+        // 1. S first.
+        let sampled_at: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(&mut *tx)
+            .await?;
 
-    // 1. S first.
-    let sampled_at: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+        // 2. Activity scan. Classification (fail closed on anything unknown):
+        //    - `backend_type IS NULL` → masked. CRITICAL: an unprivileged view
+        //      masks `backend_type` itself along with `state`/`xact_start`
+        //      (verified on PG 16/17), so filtering on
+        //      `backend_type = 'client backend'` would silently EXCLUDE masked
+        //      rows and fail open. Masked rows must be detected before any
+        //      backend-type filter;
+        //    - client backend with `state IS NULL`, or a transactional/unknown
+        //      state with NULL `xact_start` → masked → error;
+        //    - client backend, `state = 'idle'`, NULL `xact_start`
+        //                                 → no transaction → safely ignore;
+        //    - any row with non-NULL `xact_start` (any backend type)
+        //                                 → include in the minimum. Background
+        //      workers cannot insert events rows, but counting them is the
+        //      conservative direction (a long autovacuum merely holds the fence
+        //      back), and it keeps the classification simple.
+        //    Scope is every other backend regardless of role or application
+        //    name: an admin psql transaction writes under the same trigger and
+        //    must be representable in the oldest-xact term.
+        //
+        //    Prepared transactions (2PC) are a bucket of their own: while
+        //    prepared they have left `pg_stat_activity` but can still commit
+        //    after the token. Their deferred floor guard already ran at PREPARE,
+        //    so `pg_prepared_xacts.prepared` bounds their rows exactly like
+        //    `xact_start`; fold it into the same minimum.
+        let row = sqlx::query(
+            r#"
+            SELECT
+                least(
+                    (SELECT min(xact_start)
+                       FROM pg_stat_activity
+                      WHERE pid <> pg_backend_pid()),
+                    (SELECT min(prepared) FROM pg_prepared_xacts)
+                ) AS oldest_xact_start,
+                (SELECT count(*)
+                   FROM pg_stat_activity
+                  WHERE pid <> pg_backend_pid()
+                    AND (backend_type IS NULL
+                         OR (backend_type = 'client backend'
+                             AND (state IS NULL
+                                  OR (state <> 'idle' AND xact_start IS NULL))))
+                ) AS masked
+            "#,
+        )
         .fetch_one(&mut *tx)
         .await?;
-
-    // 2. Activity scan. Classification (fail closed on anything unknown):
-    //    - `backend_type IS NULL` → masked. CRITICAL: an unprivileged view
-    //      masks `backend_type` itself along with `state`/`xact_start`
-    //      (verified on PG 16/17), so filtering on
-    //      `backend_type = 'client backend'` would silently EXCLUDE masked
-    //      rows and fail open. Masked rows must be detected before any
-    //      backend-type filter;
-    //    - client backend with `state IS NULL`, or a transactional/unknown
-    //      state with NULL `xact_start` → masked → error;
-    //    - client backend, `state = 'idle'`, NULL `xact_start`
-    //                                 → no transaction → safely ignore;
-    //    - any row with non-NULL `xact_start` (any backend type)
-    //                                 → include in the minimum. Background
-    //      workers cannot insert events rows, but counting them is the
-    //      conservative direction (a long autovacuum merely holds the fence
-    //      back), and it keeps the classification simple.
-    //    Scope is every other backend regardless of role or application
-    //    name: an admin psql transaction writes under the same trigger and
-    //    must be representable in the oldest-xact term.
-    //
-    //    Prepared transactions (2PC) are a bucket of their own: while
-    //    prepared they have left `pg_stat_activity` but can still commit
-    //    after the token. Their deferred floor guard already ran at PREPARE,
-    //    so `pg_prepared_xacts.prepared` bounds their rows exactly like
-    //    `xact_start`; fold it into the same minimum.
-    let row = sqlx::query(
-        r#"
-        SELECT
-            least(
-                (SELECT min(xact_start)
-                   FROM pg_stat_activity
-                  WHERE pid <> pg_backend_pid()),
-                (SELECT min(prepared) FROM pg_prepared_xacts)
-            ) AS oldest_xact_start,
-            (SELECT count(*)
-               FROM pg_stat_activity
-              WHERE pid <> pg_backend_pid()
-                AND (backend_type IS NULL
-                     OR (backend_type = 'client backend'
-                         AND (state IS NULL
-                              OR (state <> 'idle' AND xact_start IS NULL))))
-            ) AS masked
-        "#,
-    )
-    .fetch_one(&mut *tx)
+        let masked: i64 = row.get("masked");
+        if masked > 0 {
+            return Err(ProbeError::MaskedActivity { masked });
+        }
+        let oldest_xact_start: Option<DateTime<Utc>> = row.get("oldest_xact_start");
+        Ok((sampled_at, oldest_xact_start))
+    })
     .await?;
-    let masked: i64 = row.get("masked");
-    if masked > 0 {
-        return Err(ProbeError::MaskedActivity { masked });
-    }
-    let oldest_xact_start: Option<DateTime<Utc>> = row.get("oldest_xact_start");
 
     // 3. Token commit LAST, on the same pinned connection. The single-row
     //    UPDATE serializes concurrent pods' probes, so RETURNING token is
@@ -647,10 +872,13 @@ async fn sample_writer(writer: &PgPool) -> Result<WriterSample, ProbeError> {
     //    round trip so `elapsed()` over-estimates the observation's age —
     //    the conservative direction for the head-freshness bound.
     let committed_at = Instant::now();
-    let row = sqlx::query(
-        "UPDATE replica_heartbeat SET token = token + 1 WHERE id = 1 RETURNING token, epoch",
+    let row = timed(
+        &mut timings.heartbeat,
+        sqlx::query(
+            "UPDATE replica_heartbeat SET token = token + 1 WHERE id = 1 RETURNING token, epoch",
+        )
+        .fetch_optional(&mut *tx),
     )
-    .fetch_optional(&mut *tx)
     .await?
     .ok_or(ProbeError::HeartbeatRowMissing)?;
 
@@ -661,7 +889,7 @@ async fn sample_writer(writer: &PgPool) -> Result<WriterSample, ProbeError> {
         epoch: row.get("epoch"),
         committed_at,
     };
-    tx.commit().await?;
+    timed(&mut timings.commit, tx.commit()).await?;
     Ok(sample)
 }
 
@@ -685,8 +913,75 @@ fn fence_wall(sample_s: DateTime<Utc>, oldest_xact_start: Option<DateTime<Utc>>)
 /// writer and records the rotated token, so a reader still serving the
 /// pre-rewind timeline (whose old, higher token would otherwise satisfy
 /// `token >= M`) fails the epoch check instead of proving stale coverage.
+///
+/// `writer` is the probe's own pool in production ([`connect_probe_pool`]).
 pub async fn probe_once(writer: &PgPool, fence: &ReplicaFence) -> Result<TokenEntry, ProbeError> {
-    let sample = sample_writer(writer).await?;
+    probe_traced(writer, fence, &mut ProbeTrace::default()).await
+}
+
+/// [`probe_once`] under one span carrying every phase's wall time, the gap
+/// since the previous beat, and the failure class, bounded by
+/// [`PROBE_DEADLINE`].
+#[datastore_span(
+    name = "replica_fence_probe",
+    system = "postgresql",
+    fields(
+        acquire_ms = ::tracing::field::Empty,
+        lock_ms = ::tracing::field::Empty,
+        scan_ms = ::tracing::field::Empty,
+        heartbeat_ms = ::tracing::field::Empty,
+        commit_ms = ::tracing::field::Empty,
+        beat_gap_ms = ::tracing::field::Empty,
+        token = ::tracing::field::Empty,
+        error_kind = ::tracing::field::Empty,
+    )
+)]
+async fn probe_traced(
+    writer: &PgPool,
+    fence: &ReplicaFence,
+    trace: &mut ProbeTrace,
+) -> Result<TokenEntry, ProbeError> {
+    let previous = fence.last_committed_at();
+    let result = match tokio::time::timeout(
+        PROBE_DEADLINE,
+        probe_untraced(writer, fence, &mut trace.timings),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => Err(ProbeError::Deadline(PROBE_DEADLINE)),
+    };
+    if let Ok(entry) = &result {
+        trace.beat_gap = previous.map(|at| entry.committed_at.saturating_duration_since(at));
+    }
+
+    let span = tracing::Span::current();
+    let timings = trace.timings;
+    span.record("acquire_ms", millis(timings.acquire));
+    span.record("lock_ms", millis(timings.lock));
+    span.record("scan_ms", millis(timings.scan));
+    span.record("heartbeat_ms", millis(timings.heartbeat));
+    span.record("commit_ms", millis(timings.commit));
+    match &result {
+        Ok(entry) => {
+            span.record("token", entry.token);
+            if let Some(gap) = trace.beat_gap {
+                span.record("beat_gap_ms", millis(gap));
+            }
+        }
+        Err(error) => {
+            span.record("error_kind", error.kind());
+        }
+    }
+    result
+}
+
+async fn probe_untraced(
+    writer: &PgPool,
+    fence: &ReplicaFence,
+    timings: &mut ProbeTimings,
+) -> Result<TokenEntry, ProbeError> {
+    let sample = sample_writer(writer, timings).await?;
     let wall = fence_wall(sample.sampled_at, sample.oldest_xact_start);
     match fence.record(sample.token, sample.epoch, sample.committed_at, wall) {
         RecordOutcome::Recorded => Ok(TokenEntry {
@@ -703,11 +998,7 @@ pub async fn probe_once(writer: &PgPool, fence: &ReplicaFence) -> Result<TokenEn
             // so the same three-bucket argument (and the same wall) holds
             // for the rotated token.
             let committed_at = Instant::now();
-            let mut connection = crate::observability::acquire_writer(
-                writer,
-                crate::observability::WriterOperation::Maintenance,
-            )
-            .await?;
+            let mut connection = acquire_probe_connection(writer).await?;
             let row = sqlx::query(
                 "UPDATE replica_heartbeat SET epoch = gen_random_uuid(), token = token + 1 \
                  WHERE id = 1 RETURNING token, epoch",
@@ -808,24 +1099,99 @@ pub struct HeartbeatObservation {
     pub backend: String,
 }
 
-/// Background probe loop: commit a heartbeat token every `PROBE_INTERVAL`.
-/// Runs for the life of the process.
-pub async fn run_probe(writer: PgPool, fence: Arc<ReplicaFence>) {
-    let mut interval = tokio::time::interval(PROBE_INTERVAL);
+/// Background probe loop: commit a heartbeat token every `probe_interval`
+/// (see [`probe_interval_from_ms`]). Runs for the life of the process.
+/// `writer` is the probe's own pool ([`connect_probe_pool`]), never the
+/// serving writer pool.
+pub async fn run_probe(writer: PgPool, fence: Arc<ReplicaFence>, probe_interval: Duration) {
+    let mut interval = tokio::time::interval(probe_interval);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut state = ProbeLoopState::default();
     loop {
         interval.tick().await;
-        probe_tick(&writer, &fence).await;
+        probe_tick(&writer, &fence, &mut state).await;
     }
+}
+
+/// How often a run of failed, slow or late beats is logged. Every beat is
+/// still on its span; the log only marks the
+/// episode, so a degraded writer cannot turn the probe cadence into a log
+/// flood.
+const PROBE_LOG_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Admits at most one log line per [`PROBE_LOG_INTERVAL`], counting the
+/// rest.
+#[derive(Debug, Default)]
+struct LogThrottle {
+    last: Option<Instant>,
+    suppressed: u64,
+}
+
+impl LogThrottle {
+    /// `Some(suppressed since the last admitted line)` when a line may be
+    /// logged now.
+    fn admit(&mut self, now: Instant) -> Option<u64> {
+        if self
+            .last
+            .is_some_and(|at| now.duration_since(at) < PROBE_LOG_INTERVAL)
+        {
+            self.suppressed += 1;
+            return None;
+        }
+        self.last = Some(now);
+        Some(std::mem::take(&mut self.suppressed))
+    }
+}
+
+/// Log state carried across probe ticks.
+#[derive(Debug, Default)]
+struct ProbeLoopState {
+    /// Failed probes since the last success.
+    consecutive_failures: u64,
+    /// Failure lines; reset on recovery so a new run's first failure
+    /// always logs.
+    failure_log: LogThrottle,
 }
 
 /// One probe-loop tick. A failure is logged and keeps the retained entries:
 /// they were proved by earlier handshakes and stay valid, so one failed
 /// probe must not route every read to the writer. Only staleness
 /// ([`FENCE_STALENESS`]) closes a fence whose probe keeps failing.
-async fn probe_tick(writer: &PgPool, fence: &ReplicaFence) {
-    if let Err(e) = probe_once(writer, fence).await {
-        tracing::warn!(error = %e, "replica fence probe failed; retained proofs stand");
+async fn probe_tick(writer: &PgPool, fence: &ReplicaFence, state: &mut ProbeLoopState) {
+    let mut trace = ProbeTrace::default();
+    let result = probe_traced(writer, fence, &mut trace).await;
+    let timings = trace.timings;
+    match result {
+        Err(e) => {
+            state.consecutive_failures += 1;
+            let Some(suppressed) = state.failure_log.admit(Instant::now()) else {
+                return;
+            };
+            tracing::warn!(
+                error = %e,
+                error_kind = e.kind(),
+                consecutive_failures = state.consecutive_failures,
+                suppressed,
+                heartbeat_age_ms = fence.heartbeat_age().map(millis),
+                acquire_ms = millis(timings.acquire),
+                lock_ms = millis(timings.lock),
+                scan_ms = millis(timings.scan),
+                heartbeat_ms = millis(timings.heartbeat),
+                commit_ms = millis(timings.commit),
+                "replica fence probe failed; retained proofs stand"
+            );
+        }
+        Ok(entry) if state.consecutive_failures > 0 => {
+            tracing::info!(
+                token = entry.token,
+                failed_probes = state.consecutive_failures,
+                beat_gap_ms = trace.beat_gap.map(millis),
+                "replica fence probe recovered"
+            );
+            state.consecutive_failures = 0;
+            state.failure_log = LogThrottle::default();
+        }
+        Ok(_) => {}
     }
 }
 
@@ -897,7 +1263,7 @@ mod postgres_tests {
             .await
             .expect_err("a closed writer pool fails the probe");
 
-        probe_tick(&writer, &fence).await;
+        probe_tick(&writer, &fence, &mut ProbeLoopState::default()).await;
 
         let newest = fence
             .newest()
@@ -915,6 +1281,41 @@ mod postgres_tests {
             fence.record(5, epoch, Instant::now(), wall),
             RecordOutcome::TokenRegression
         );
+    }
+
+    /// An unset interval selects the default, a set one is clamped to the
+    /// accepted range, and the budget floor covers one lock-timed-out beat.
+    #[test]
+    fn probe_interval_defaults_and_clamps() {
+        assert_eq!(probe_interval_from_ms(0), DEFAULT_PROBE_INTERVAL);
+        assert_eq!(probe_interval_from_ms(400), Duration::from_millis(400));
+        assert_eq!(probe_interval_from_ms(1), MIN_PROBE_INTERVAL);
+        assert_eq!(probe_interval_from_ms(u64::MAX), MAX_PROBE_INTERVAL);
+        assert_eq!(
+            min_read_budget(DEFAULT_PROBE_INTERVAL),
+            Duration::from_millis(1700)
+        );
+        assert_eq!(
+            min_read_budget(Duration::from_millis(400)),
+            Duration::from_millis(1600)
+        );
+    }
+
+    /// The probe's log throttle admits one line per interval and reports
+    /// how many it held back.
+    #[test]
+    fn probe_log_throttle_admits_one_line_per_interval() {
+        let mut throttle = LogThrottle::default();
+        let start = Instant::now();
+        assert_eq!(throttle.admit(start), Some(0), "first line always logs");
+        assert_eq!(throttle.admit(start + Duration::from_secs(1)), None);
+        assert_eq!(throttle.admit(start + Duration::from_secs(2)), None);
+        assert_eq!(
+            throttle.admit(start + PROBE_LOG_INTERVAL),
+            Some(2),
+            "next line reports what was suppressed"
+        );
+        assert_eq!(throttle.admit(start + PROBE_LOG_INTERVAL), None);
     }
 
     /// Resolve picks the greatest retained entry <= the observed token —
@@ -1038,7 +1439,9 @@ mod postgres_tests {
             .expect("connect idle");
         let _idle_conn = idle_pool.acquire().await.expect("idle conn");
 
-        let before = sample_writer(&pool).await.expect("sample without tx");
+        let before = sample_writer(&pool, &mut ProbeTimings::default())
+            .await
+            .expect("sample without tx");
 
         // Now hold a transaction open on a second connection.
         let tx_pool = PgPool::connect(&crate::test_support::database_url())
@@ -1050,7 +1453,9 @@ mod postgres_tests {
             .await
             .expect("touch tx");
 
-        let during = sample_writer(&pool).await.expect("sample with open tx");
+        let during = sample_writer(&pool, &mut ProbeTimings::default())
+            .await
+            .expect("sample with open tx");
         let oldest = during
             .oldest_xact_start
             .expect("open transaction must appear in the oldest-xact term");
@@ -1070,6 +1475,67 @@ mod postgres_tests {
         tx.rollback().await.expect("rollback");
     }
 
+    /// The probe pool installs its own lock budget: while a shared floor
+    /// lock outlives it, the probe fails fast with `lock_timeout` rather
+    /// than holding an exclusive request (which queues every new channel
+    /// write behind it) for the serving writer's longer budget. Retained
+    /// proofs are untouched and the next beat succeeds once the lock clears.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn cluster_global_probe_pool_bounds_the_floor_lock_wait() {
+        let (pool, _scratch) = scratch_db().await;
+        let probe_pool = connect_probe_pool(&pool);
+        let fence = ReplicaFence::new();
+        let first = probe_once(&probe_pool, &fence)
+            .await
+            .expect("probe through its own pool");
+        let (statement, idle): (String, String) = sqlx::query_as(
+            "SELECT current_setting('statement_timeout'), \
+                    current_setting('idle_in_transaction_session_timeout')",
+        )
+        .fetch_one(&probe_pool)
+        .await
+        .expect("read probe session timeouts");
+        // PROBE_STATEMENT_TIMEOUT, as Postgres renders it.
+        assert_eq!(
+            (statement.as_str(), idle.as_str()),
+            ("2s", "2s"),
+            "probe session must bound statements and idle transactions"
+        );
+
+        let mut blocker = pool.begin().await.expect("begin shared-lock blocker");
+        sqlx::query("SELECT pg_advisory_xact_lock_shared($1)")
+            .bind(REPLICA_FLOOR_LOCK_KEY)
+            .execute(&mut *blocker)
+            .await
+            .expect("hold shared floor lock");
+
+        let started = Instant::now();
+        let err = probe_once(&probe_pool, &fence)
+            .await
+            .expect_err("a held shared floor lock must time the probe out");
+        let waited = started.elapsed();
+        assert_eq!(err.kind(), "lock_timeout", "unexpected error: {err:?}");
+        assert!(
+            waited >= PROBE_LOCK_TIMEOUT && waited < PROBE_LOCK_TIMEOUT + Duration::from_secs(1),
+            "probe waited {waited:?}, expected about {PROBE_LOCK_TIMEOUT:?}"
+        );
+        assert_eq!(
+            fence.newest().map(|entry| entry.token),
+            Some(first.token),
+            "a timed-out beat keeps the retained proof"
+        );
+
+        blocker
+            .rollback()
+            .await
+            .expect("release shared-lock blocker");
+        let next = probe_once(&probe_pool, &fence)
+            .await
+            .expect("probe recovers once the lock clears");
+        assert!(next.token > first.token);
+    }
+
     /// The sample must not capture `S` while a compliant shared writer lock is
     /// still held. It must block until release, then sample.
     #[tokio::test]
@@ -1085,7 +1551,10 @@ mod postgres_tests {
             .expect("hold shared floor lock");
 
         let sample_pool = pool.clone();
-        let mut sampling = tokio::spawn(async move { sample_writer(&sample_pool).await });
+        let mut sampling =
+            tokio::spawn(
+                async move { sample_writer(&sample_pool, &mut ProbeTimings::default()).await },
+            );
         assert!(
             tokio::time::timeout(Duration::from_millis(100), &mut sampling)
                 .await
@@ -1155,7 +1624,7 @@ mod postgres_tests {
         };
         let unpriv = PgPool::connect(&unpriv_url).await.expect("connect unpriv");
 
-        let err = sample_writer(&unpriv)
+        let err = sample_writer(&unpriv, &mut ProbeTimings::default())
             .await
             .expect_err("masked pg_stat_activity must fail closed");
         assert!(
@@ -1263,9 +1732,12 @@ mod postgres_tests {
     #[ignore = "requires Postgres"]
     async fn cluster_global_probe_rotates_epoch_on_same_epoch_token_regression() {
         let (pool, _scratch) = scratch_db().await;
+        // Through the production one-connection pool: rotation re-acquires
+        // after the sample has released its connection.
+        let probe_pool = connect_probe_pool(&pool);
         let fence = ReplicaFence::new();
 
-        let before = probe_once(&pool, &fence).await.expect("probe");
+        let before = probe_once(&probe_pool, &fence).await.expect("probe");
         let mut conn = pool.acquire().await.expect("conn");
         let old_epoch = observe_heartbeat(&mut conn, false)
             .await
@@ -1279,7 +1751,9 @@ mod postgres_tests {
             .await
             .expect("rewind token");
 
-        let after = probe_once(&pool, &fence).await.expect("recovery probe");
+        let after = probe_once(&probe_pool, &fence)
+            .await
+            .expect("recovery probe");
         // The pre-rewind observation must no longer prove anything.
         assert_eq!(
             fence.resolve(before.token, old_epoch),
