@@ -25,6 +25,62 @@ use crate::test_support::database_url;
 
 const PK: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
+#[tokio::test]
+async fn ownership_preview_requires_signed_operator_and_binds_the_full_target() {
+    let key = test_operator_keys();
+    let state = nip98_state(vec![key.public_key().to_hex()]).await;
+    let uri = format!("/members/{PK}/ownership?communityHost=a.example");
+    let unsigned = Request::builder()
+        .uri(&uri)
+        .header(header::HOST, "admin.example")
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(send(&state, unsigned).await.0, StatusCode::UNAUTHORIZED);
+    let tampered = uri.replace("a.example", "b.example");
+    assert_eq!(
+        send(&state, signed_as(&key, "GET", "GET", &uri, &tampered))
+            .await
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        send(&state, signed_as(&key, "HEAD", "GET", &uri, &uri))
+            .await
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    let disabled = disabled_mode_state().await;
+    assert_eq!(get(&disabled, &key, &uri).await.0, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn ownership_preview_refuses_moderators_and_returns_a_scoped_operator_snapshot() {
+    let (pool, state) = fixture().await;
+    let host = unique_host("ownership");
+    let c = community(&pool, &host).await;
+    let moderator = nostr::Keys::generate();
+    state
+        .db
+        .upsert_relay_operator(
+            &moderator.public_key().to_bytes(),
+            "moderator",
+            &[1; 32],
+            true,
+        )
+        .await
+        .unwrap();
+    let uri = format!("/members/{PK}/ownership?communityHost={host}");
+    assert_eq!(get(&state, &moderator, &uri).await.0, StatusCode::FORBIDDEN);
+    let (status, body) = get(&state, &test_operator_keys(), &uri).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["pubkey"], PK);
+    assert_eq!(body["communityId"], c.to_string());
+    assert_eq!(body["communityHost"], host);
+    assert_eq!(body["identities"].as_array().unwrap().len(), 1);
+    assert_eq!(body["workflows"].as_array().unwrap().len(), 0);
+}
+
 fn community_read_routes(host: &str) -> Vec<String> {
     vec![
         "/communities".to_string(),
@@ -899,6 +955,7 @@ fn every_route() -> Vec<(&'static str, String, Check)> {
         ("GET", "/communities".into(), View),
         ("GET", format!("/members/search?{host}&q=a"), View),
         ("GET", format!("/members/{PK}?{host}"), View),
+        ("GET", format!("/members/{PK}/ownership?{host}"), Operator),
         ("GET", format!("/events/{PK}?{host}"), View),
         ("GET", format!("/members/restrictions?{host}"), View),
         ("DELETE", format!("/members/{PK}/ban?{host}"), Act),

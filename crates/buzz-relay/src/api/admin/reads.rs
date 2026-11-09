@@ -25,6 +25,30 @@ use crate::state::AppState;
 
 type AppStateRef = State<Arc<AppState>>;
 
+/// Operator-only ownership preview; never a retirement command or complete
+/// inventory of external agent hosts, issuer enrollments, or credentials.
+pub(super) async fn identity_inventory(
+    State(state): AppStateRef,
+    slot: crate::access::AccessSlot,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    Path(pubkey_hex): Path<String>,
+    Query(query): Query<CommunityQuery>,
+) -> Result<Json<buzz_db::admin_moderation::IdentityInventory>, ApiError> {
+    authorize_read(&state, &slot, &headers, &method, &uri)
+        .await?
+        .operator(&slot)?;
+    let pubkey = decode_hex_pubkey(&pubkey_hex)?;
+    let community = community_for_host(&state, &query.community_host).await?;
+    Ok(Json(
+        state
+            .db
+            .admin_identity_inventory(community, &pubkey)
+            .await?,
+    ))
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct CommunitiesQuery {

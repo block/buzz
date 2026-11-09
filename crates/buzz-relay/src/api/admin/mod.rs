@@ -67,6 +67,10 @@ pub fn router(state: Arc<crate::state::AppState>) -> Router {
         .route("/communities", get(reads::communities))
         .route("/members/search", get(reads::search_members))
         .route("/members/{pubkey}", get(reads::lookup_member))
+        .route(
+            "/members/{pubkey}/ownership",
+            get(reads::identity_inventory),
+        )
         .route("/events/{id}", get(reads::event_preview))
         .route("/members/restrictions", get(list_member_restrictions))
         .route("/members/{pubkey}/ban", delete(unban_member))
