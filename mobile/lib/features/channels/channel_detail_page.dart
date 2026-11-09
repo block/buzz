@@ -87,6 +87,7 @@ import 'jump_to_latest_switcher.dart';
 import 'local_message_send_animation_provider.dart';
 import 'local_message_send_transition.dart';
 import 'mobile_huddle_controller.dart';
+import 'dm_voice_agent_provider.dart';
 import 'message_actions.dart';
 import 'message_action_backdrop_state.dart';
 import 'message_long_press_region.dart';
@@ -564,10 +565,18 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
             memberProfilesPreloadState.connectionState !=
                 ConnectionState.done ||
             memberProfilesPreloadState.data != true);
+    final isAgentDm = _isOneToOneAgentDm(resolvedChannel, agentPubkeys);
+    final voiceAgent = isAgentDm
+        ? dmVoiceAgent(
+            resolvedChannel,
+            ref.watch(myPubkeyProvider),
+            ref.watch(ownedCodexVoiceAgentsProvider).value ?? const {},
+          )
+        : null;
     final showsHuddleAction =
         showsComposer &&
         !isAgentIdentityUnresolved &&
-        !_isOneToOneAgentDm(resolvedChannel, agentPubkeys);
+        (!isAgentDm || voiceAgent != null);
     final messagesNotifier = ref.read(messagesProvider.notifier);
     final isConnectionInProgress =
         sessionStatus == SessionStatus.connecting ||
@@ -833,7 +842,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
             _huddleNavigationAction(context, ref, resolvedChannel, [
               ...messagesState.value ?? const [],
               ...huddleLifecycle,
-            ]),
+            ], voiceAgent: voiceAgent),
         ],
         iconColor: context.colors.primary,
         titleContentHeight: appBarTitleContentHeight,
@@ -856,6 +865,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
             )
           else if (resolvedChannel.isDm ? showsHuddleAction : showsComposer)
             _HuddleButton(
+              voiceAgent: voiceAgent,
               channel: resolvedChannel,
               events: [...messagesState.value ?? const [], ...huddleLifecycle],
             ),

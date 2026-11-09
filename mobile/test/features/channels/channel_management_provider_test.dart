@@ -515,7 +515,9 @@ void main() {
         addTearDown(container.dispose);
 
         final actions = container.read(actionsProvider);
-        final backingChannelId = await actions.createHuddleBackingChannel();
+        final backingChannelId = await actions.createHuddleBackingChannel(
+          parentChannelId: _channelId,
+        );
         final started = await actions.announceHuddleStarted(
           parentChannelId: _channelId,
           ephemeralChannelId: backingChannelId,
@@ -529,6 +531,15 @@ void main() {
         expect(create.tags, contains(equals(['visibility', 'private'])));
         expect(create.tags, contains(equals(['channel_type', 'stream'])));
         expect(create.tags, contains(equals(['ttl', '3600'])));
+        expect(
+          create.tags,
+          contains(
+            equals([
+              'about',
+              'Buzz Huddle (buzz.huddles/v1)\nparent:$_channelId',
+            ]),
+          ),
+        );
 
         final start = session.publishedEvents.last;
         expect(start.kind, EventKind.huddleStarted);

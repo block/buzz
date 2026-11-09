@@ -82,6 +82,7 @@ void main() {
   NostrEvent listing(
     String pubkey, {
     String name = 'Saved agent',
+    String? runtime,
     int time = 1,
     String? content,
   }) => NostrEvent.fromJson(
@@ -98,6 +99,7 @@ void main() {
       createdAt: time,
       tags: [
         ['d', pubkey],
+        if (runtime != null) ['runtime', runtime],
       ],
     ).toMap(),
   );
@@ -124,6 +126,26 @@ void main() {
     addTearDown(container.dispose);
     return container;
   }
+
+  test('runtime eligibility uses the newest signed inventory head', () async {
+    final relay = _Relay(
+      [],
+      inventory: [listing(agent.public, runtime: 'buzz.codex/codex')],
+    );
+    final container = setup(relay);
+    final sync = container.read(meSyncProvider);
+    expect(
+      await loadMeAgentInventory(sync, runtime: 'buzz.codex/codex'),
+      contains(agent.public),
+    );
+    relay.inventory!.add(
+      listing(agent.public, runtime: 'buzz.claude/claude', time: 2),
+    );
+    expect(
+      await loadMeAgentInventory(sync, runtime: 'buzz.codex/codex'),
+      isEmpty,
+    );
+  });
 
   test(
     'lists current inventory with verified ownership, name and artwork',

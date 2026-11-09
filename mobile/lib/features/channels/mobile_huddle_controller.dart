@@ -128,19 +128,26 @@ final class MobileHuddleController extends Notifier<bool> {
 
   Future<void>? _startFuture;
 
-  Future<void> start({required String parentChannelId}) {
+  Future<void> start({required String parentChannelId, String? agentPubkey}) {
     final inFlight = _startFuture;
     if (inFlight != null) return inFlight;
 
     late final Future<void> startFuture;
-    startFuture = _start(parentChannelId: parentChannelId).whenComplete(() {
-      if (identical(_startFuture, startFuture)) _startFuture = null;
-    });
+    startFuture =
+        _start(
+          parentChannelId: parentChannelId,
+          agentPubkey: agentPubkey,
+        ).whenComplete(() {
+          if (identical(_startFuture, startFuture)) _startFuture = null;
+        });
     _startFuture = startFuture;
     return startFuture;
   }
 
-  Future<void> _start({required String parentChannelId}) async {
+  Future<void> _start({
+    required String parentChannelId,
+    String? agentPubkey,
+  }) async {
     if (state) return;
     final generation = ++_generation;
     final admissionEpoch = ++_admissionEpoch;
@@ -149,9 +156,19 @@ final class MobileHuddleController extends Notifier<bool> {
     String? backingChannelId;
     var announced = false;
     try {
-      backingChannelId = await actions.createHuddleBackingChannel();
+      backingChannelId = await actions.createHuddleBackingChannel(
+        parentChannelId: parentChannelId,
+      );
       _latestAdmissionTargetBackingChannelId = backingChannelId;
       _ensureCurrent(generation);
+      if (agentPubkey != null) {
+        await actions.addMembers(
+          channelId: backingChannelId,
+          pubkeys: [agentPubkey],
+          role: 'bot',
+        );
+        _ensureCurrent(generation);
+      }
       final start = await actions.announceHuddleStarted(
         parentChannelId: parentChannelId,
         ephemeralChannelId: backingChannelId,

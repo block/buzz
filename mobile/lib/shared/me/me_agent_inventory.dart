@@ -8,7 +8,10 @@ import 'me_sync.dart';
 
 /// Desktop's owner-authored agent inventory. A historical kind:0 ownership
 /// attestation alone does not mean an agent is still in this inventory.
-Future<Map<String, String>> loadMeAgentInventory(MeSync sync) async {
+Future<Map<String, String>> loadMeAgentInventory(
+  MeSync sync, {
+  String? runtime,
+}) async {
   const pageSize = 200;
   final events = <NostrEvent>[];
   int? until;
@@ -32,7 +35,7 @@ Future<Map<String, String>> loadMeAgentInventory(MeSync sync) async {
     events.addAll(batch);
     if (batch.length < pageSize) {
       final owner = sync.pubkey;
-      return _parseInventory(events, owner);
+      return _parseInventory(events, owner, runtime);
     }
     final ordered = [...batch]
       ..sort((a, b) {
@@ -54,9 +57,14 @@ Future<Map<String, String>> loadMeAgentInventory(MeSync sync) async {
 Future<Map<String, String>> _parseInventory(
   List<NostrEvent> events,
   String owner,
-) => Isolate.run(() => _inventoryNames(events, owner));
+  String? runtime,
+) => Isolate.run(() => _inventoryNames(events, owner, runtime));
 
-Map<String, String> _inventoryNames(List<NostrEvent> events, String owner) {
+Map<String, String> _inventoryNames(
+  List<NostrEvent> events,
+  String owner,
+  String? runtime,
+) {
   final heads = <String, NostrEvent>{};
   for (final event in events) {
     if (event.pubkey != owner) continue;
@@ -76,7 +84,8 @@ Map<String, String> _inventoryNames(List<NostrEvent> events, String owner) {
   // listing.
   return {
     for (final MapEntry(key: id, value: head) in heads.entries)
-      id: ?_supportedPolicyName(head),
+      if (runtime == null || head.getTagValue('runtime') == runtime)
+        id: ?_supportedPolicyName(head),
   };
 }
 

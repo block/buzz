@@ -173,14 +173,25 @@ class _HuddleInvite {
 }
 
 class _HuddleButton extends ConsumerWidget {
-  const _HuddleButton({required this.channel, required this.events});
+  const _HuddleButton({
+    required this.channel,
+    required this.events,
+    this.voiceAgent,
+  });
 
   final Channel channel;
   final List<NostrEvent> events;
+  final String? voiceAgent;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final action = _huddleNavigationAction(context, ref, channel, events);
+    final action = _huddleNavigationAction(
+      context,
+      ref,
+      channel,
+      events,
+      voiceAgent: voiceAgent,
+    );
     return IconButton(
       key: const ValueKey('channel-huddle-button'),
       color: context.colors.primary,
@@ -195,8 +206,9 @@ IosNavigationAction _huddleNavigationAction(
   BuildContext context,
   WidgetRef ref,
   Channel channel,
-  List<NostrEvent> events,
-) {
+  List<NostrEvent> events, {
+  String? voiceAgent,
+}) {
   final session = ref.watch(huddleSessionProvider);
   final latestStart = _activeHuddleStart(events);
   final unavailableFailure =
@@ -247,15 +259,25 @@ IosNavigationAction _huddleNavigationAction(
             final confirmed = await showConfirmation(
               context: context,
               title: 'Start a Huddle?',
-              message:
-                  'Your microphone will turn on, and others in this conversation can join.',
+              message: voiceAgent == null
+                  ? 'Your microphone will turn on, and others in this conversation can join.'
+                  : 'Your microphone will turn on and your Codex agent will join. Keep Buzz open on the desktop running this agent.',
               confirmLabel: 'Start Huddle',
             );
             if (!confirmed || !context.mounted) return;
             try {
+              if (voiceAgent != null &&
+                  !(await ref.read(
+                    ownedCodexVoiceAgentsProvider.future,
+                  )).contains(voiceAgent)) {
+                throw StateError(
+                  'This agent is no longer available for voice.',
+                );
+              }
+              if (!context.mounted) return;
               await ref
                   .read(mobileHuddleControllerProvider.notifier)
-                  .start(parentChannelId: channel.id);
+                  .start(parentChannelId: channel.id, agentPubkey: voiceAgent);
               if (!context.mounted) return;
               final started = ref.read(huddleSessionProvider);
               final ephemeralChannelId = started.ephemeralChannelId;

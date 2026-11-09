@@ -1,3 +1,4 @@
+import 'package:buzz/features/channels/dm_voice_agent_provider.dart';
 import 'package:buzz/features/channels/default_agent_launcher.dart';
 import 'package:buzz/features/channels/bestie_welcome.dart';
 import 'package:buzz/features/channels/bestie_welcome_storage.dart';
@@ -262,6 +263,7 @@ Widget _buildTestable({
   Map<String, UserProfile> users = const {},
   Set<String>? knownAgentPubkeys,
   Set<String> inventoryAgents = const {},
+  Set<String> voiceAgents = const {},
   Future<Set<String>> Function()? loadChannelBotPubkeys,
   bool watchChannelMembershipUpdates = false,
   Future<List<AgentDirectoryEntry>> Function()? loadAgentDirectory,
@@ -323,6 +325,7 @@ Widget _buildTestable({
   return ProviderScope(
     retry: providerRetry ?? (disableRetries ? (_, _) => null : null),
     overrides: [
+      ownedCodexVoiceAgentsProvider.overrideWith((ref) async => voiceAgents),
       if (bestie != null)
         defaultAgentProvider.overrideWith((ref) => Stream.value(bestie)),
       if (sender != null) sendMessageProvider.overrideWithValue(sender),
@@ -1578,6 +1581,71 @@ void main() {
       expect(find.byKey(const ValueKey('dm-header-avatar')), findsNothing);
       expect(find.byKey(const ValueKey('channel-huddle-button')), findsNothing);
       expect(find.byTooltip('Start Huddle'), findsNothing);
+    });
+
+    testWidgets('starts a Codex DM huddle and invites the agent before audio', (
+      tester,
+    ) async {
+      final dm = Channel(
+        id: _channelId,
+        name: 'Codex',
+        description: '',
+        channelType: 'dm',
+        visibility: 'private',
+        createdBy: 'self',
+        createdAt: DateTime(2025),
+        memberCount: 2,
+        participants: const ['Self', 'Agent'],
+        participantPubkeys: const ['self', 'agent'],
+        isMember: true,
+      );
+      final relay = _VoiceDmRelaySession();
+      List<String>? invited;
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          channel: dm,
+          signingPubkey: 'self',
+          voiceAgents: const {'agent'},
+          users: const {
+            'agent': UserProfile(
+              pubkey: 'agent',
+              displayName: 'Codex',
+              ownerPubkey: 'self',
+            ),
+          },
+          relayConfigNotifier: _HuddleRelayConfigNotifier(),
+          relaySessionNotifier: relay,
+          huddleCurrentPubkey: 'self',
+          huddleMediaFactory: _HuddleTestMedia.new,
+          huddleTransportFactory: (_) {
+            expect(invited, ['agent']);
+            return _HuddleTestTransport();
+          },
+          createChannelActions: (ref) => _FakeChannelActions(
+            ref,
+            onAddMembers: (_, pubkeys) async => invited = pubkeys,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byTooltip('Start Huddle'), findsOneWidget);
+      await tester.tap(find.byKey(const ValueKey('channel-huddle-button')));
+      await tester.pumpAndSettle();
+      expect(
+        find.textContaining('Keep Buzz open on the desktop'),
+        findsOneWidget,
+      );
+      await tester.tap(find.widgetWithText(FilledButton, 'Start Huddle'));
+      await tester.pumpAndSettle();
+      expect(invited, ['agent']);
+      expect(relay.publishedKinds, contains(EventKind.huddleStarted));
+      expect(
+        find.byKey(const ValueKey('huddle-local-participant')),
+        findsOneWidget,
+      );
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump(const Duration(milliseconds: 100));
     });
 
     testWidgets('hides the Huddle action for a channel bot DM', (tester) async {
@@ -18849,6 +18917,18 @@ class _TrackingRelaySession extends RelaySessionNotifier {
       visibleChannels.remove(channelId);
       release();
     };
+  }
+}
+
+class _VoiceDmRelaySession extends _IdentityUpdateRelaySession {
+  final List<int> publishedKinds = [];
+  @override
+  Future<NostrEvent> publish(
+    NostrEvent event, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    publishedKinds.add(event.kind);
+    return event;
   }
 }
 
