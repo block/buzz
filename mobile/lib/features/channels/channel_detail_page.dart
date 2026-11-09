@@ -974,6 +974,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                                           null),
                               channelId: channel.id,
                               isDm: resolvedChannel.isDm,
+                              flat: personalChat,
                               currentPubkey: currentPubkey,
                               isMember: resolvedChannel.isMember,
                               isArchived: resolvedChannel.isArchived,

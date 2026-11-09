@@ -2830,6 +2830,229 @@ void main() {
       expect(tester.takeException(), isNull);
     });
 
+    testWidgets('reading the bottom of an archived Solo chat reads a tall '
+        'newest mention', (tester) async {
+      final readState = _SynchronousReadStateNotifier(
+        const ReadStateState(
+          isReady: true,
+          pubkey: 'self',
+          contexts: {},
+          version: 0,
+        ),
+      );
+      final solo = Channel(
+        id: _channelId,
+        name: 'Solo',
+        channelType: 'stream',
+        visibility: 'private',
+        labels: const ['buzz.solo'],
+        description: '',
+        createdBy: 'self',
+        createdAt: DateTime(2025),
+        memberCount: 2,
+        isMember: true,
+        archivedAt: DateTime.utc(2025, 1, 2),
+      );
+      final messages = [
+        _textMsg(
+          id: 'tall',
+          pubkey: 'alice',
+          content: List.filled(120, 'A long answer line.').join('\n\n'),
+          createdAt: 1100,
+          extraTags: const [
+            ['p', 'self'],
+          ],
+        ),
+      ];
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: messages,
+          channel: solo,
+          personalChat: true,
+          signingPubkey: 'self',
+          channelMessagesNotifier: _FakeMessagesNotifier(messages),
+          readStateNotifier: readState,
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(
+        find.text('This channel is archived and read-only on mobile.'),
+        findsOneWidget,
+      );
+      // Only its end shows at the bottom, so it neither fits nor fills the
+      // screen; being the newest message reads it.
+      expect(readState.markedContexts, {
+        'activity:$_channelId': 1100,
+        'msg:tall': 1100,
+      });
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('a tall row away from the bottom is read once it fills the '
+        'screen', (tester) async {
+      final readState = _SynchronousReadStateNotifier(
+        const ReadStateState(
+          isReady: true,
+          pubkey: 'self',
+          contexts: {},
+          version: 0,
+        ),
+      );
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _textMsg(
+              id: 'tall',
+              pubkey: 'alice',
+              content: List.filled(120, 'A long answer line.').join('\n\n'),
+              createdAt: 1100,
+              extraTags: const [
+                ['p', 'self'],
+              ],
+            ),
+            for (var i = 0; i < 3; i++)
+              _textMsg(
+                id: 'later$i',
+                pubkey: 'alice',
+                content: List.filled(40, 'Later line.').join('\n\n'),
+                createdAt: 1200 + i,
+              ),
+          ],
+          readStateNotifier: readState,
+        ),
+      );
+      await tester.pumpAndSettle();
+      readState.markedContexts.clear();
+
+      final messageList = find.byKey(const ValueKey('channel-message-list'));
+      tester
+          .widget<ScrollablePositionedList>(messageList)
+          .itemScrollController!
+          .jumpTo(index: 3, alignment: -0.5);
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      final row = tester.getRect(
+        find.byKey(const ValueKey('channel-message-group-tall')),
+      );
+      final screen = tester.getRect(messageList);
+      expect(row.top, lessThan(screen.top));
+      expect(row.bottom, greaterThan(screen.bottom));
+      expect(readState.markedContexts, {'msg:tall': 1100});
+    });
+
+    testWidgets('a tall linked message is read when the jump leaves it cut '
+        'off', (tester) async {
+      final readState = _SynchronousReadStateNotifier(
+        const ReadStateState(
+          isReady: true,
+          pubkey: 'self',
+          contexts: {},
+          version: 0,
+        ),
+      );
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _textMsg(
+              id: 'tall',
+              pubkey: 'alice',
+              content: List.filled(120, 'A long answer line.').join('\n\n'),
+              createdAt: 1100,
+              extraTags: const [
+                ['p', 'self'],
+              ],
+            ),
+            for (var i = 0; i < 3; i++)
+              _textMsg(
+                id: 'later$i',
+                pubkey: 'alice',
+                content: List.filled(40, 'Later line.').join('\n\n'),
+                createdAt: 1200 + i,
+              ),
+          ],
+          initialMessageId: 'tall',
+          readStateNotifier: readState,
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      final row = tester.getRect(
+        find.byKey(const ValueKey('channel-message-group-tall')),
+      );
+      final screen = tester.getRect(
+        find.byKey(const ValueKey('channel-message-list')),
+      );
+      // The jump leaves the row's top above the screen, with later messages
+      // below it, so it neither fits nor fills the screen.
+      expect(row.top, lessThan(screen.top));
+      expect(row.bottom, lessThan(screen.bottom));
+      expect(readState.markedContexts, {'msg:tall': 1100});
+    });
+
+    testWidgets('reading the bottom of a Solo chat reads a tall newest '
+        'inline reply mention', (tester) async {
+      final readState = _SynchronousReadStateNotifier(
+        const ReadStateState(
+          isReady: true,
+          pubkey: 'self',
+          contexts: {},
+          version: 0,
+        ),
+      );
+      final solo = Channel(
+        id: _channelId,
+        name: 'Solo',
+        channelType: 'stream',
+        visibility: 'private',
+        labels: const ['buzz.solo'],
+        description: '',
+        createdBy: 'self',
+        createdAt: DateTime(2025),
+        memberCount: 2,
+        isMember: true,
+      );
+      final rootId = 'a' * 64;
+      final messages = [
+        _textMsg(
+          id: 'root',
+          pubkey: 'self',
+          content: 'Question',
+          createdAt: 1000,
+        ),
+        _textMsg(
+          id: 'tall-reply',
+          pubkey: 'alice',
+          content: List.filled(120, 'A long answer line.').join('\n\n'),
+          createdAt: 1100,
+          extraTags: [
+            ['e', rootId, '', 'reply'],
+            ['p', 'self'],
+          ],
+        ),
+      ];
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: messages,
+          channel: solo,
+          personalChat: true,
+          signingPubkey: 'self',
+          channelMessagesNotifier: _FakeMessagesNotifier(messages),
+          readStateNotifier: readState,
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(readState.markedContexts['msg:tall-reply'], 1100);
+      expect(tester.takeException(), isNull);
+    });
+
     testWidgets('hidden huddle end does not block bottom catch-up', (
       tester,
     ) async {
@@ -3278,6 +3501,179 @@ void main() {
       await tester.pump(const Duration(milliseconds: 300));
 
       expect(readState.markedContexts, {'msg:$threadIdRoot': 1000});
+    });
+
+    testWidgets('a tall linked thread reply is read when the jump leaves it '
+        'cut off', (tester) async {
+      final readState = _SynchronousReadStateNotifier(
+        const ReadStateState(
+          isReady: true,
+          pubkey: 'self',
+          contexts: {},
+          version: 0,
+        ),
+      );
+      final root = _textMsg(
+        id: threadIdRoot,
+        pubkey: 'self',
+        content: 'Question',
+        createdAt: 1000,
+      );
+      final tall = _textMsg(
+        id: threadIdReplyZero,
+        pubkey: 'alice',
+        content: List.filled(120, 'A long answer line.').join('\n\n'),
+        createdAt: 1100,
+        extraTags: const [
+          ['e', threadIdRoot, '', 'reply'],
+          ['p', 'self'],
+        ],
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [root, tall],
+          threadReplies: {
+            threadIdRoot: [tall],
+          },
+          readStateNotifier: readState,
+          home: ThreadDetailPage(
+            threadHead: formatTimeline([root]).single,
+            allMessages: formatTimeline([root, tall]),
+            channelId: _channelId,
+            currentPubkey: 'self',
+            isMember: true,
+            isArchived: false,
+            initialMessageId: threadIdReplyZero,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      final row = tester.getRect(
+        find.byKey(const ValueKey('thread-message-group-$threadIdReplyZero')),
+      );
+      final screen = tester.getRect(
+        find.byKey(const ValueKey('thread-message-list')),
+      );
+      // The jump leaves the reply's bottom below the screen, and its top
+      // well inside it, so it neither fits nor fills the screen.
+      expect(row.top, greaterThan(screen.top));
+      expect(row.bottom, greaterThan(screen.bottom));
+      expect(readState.markedContexts['msg:$threadIdReplyZero'], 1100);
+    });
+
+    group('tall thread replies', () {
+      Future<_SynchronousReadStateNotifier> openThread(
+        WidgetTester tester,
+        List<NostrEvent> replies,
+      ) async {
+        final readState = _SynchronousReadStateNotifier(
+          const ReadStateState(
+            isReady: true,
+            pubkey: 'self',
+            contexts: {},
+            version: 0,
+          ),
+        );
+        final root = _textMsg(
+          id: threadIdRoot,
+          pubkey: 'self',
+          content: 'Question',
+          createdAt: 1000,
+        );
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [root, ...replies],
+            threadReplies: {threadIdRoot: replies},
+            readStateNotifier: readState,
+            home: ThreadDetailPage(
+              threadHead: formatTimeline([root]).single,
+              allMessages: formatTimeline([root, ...replies]),
+              channelId: _channelId,
+              currentPubkey: 'self',
+              isMember: true,
+              isArchived: false,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        await tester.pump(const Duration(milliseconds: 300));
+        return readState;
+      }
+
+      NostrEvent reply(String id, int createdAt, String content) => _textMsg(
+        id: id,
+        pubkey: 'alice',
+        content: content,
+        createdAt: createdAt,
+        extraTags: const [
+          ['e', threadIdRoot, '', 'reply'],
+          ['p', 'self'],
+        ],
+      );
+
+      final tallContent = List.filled(120, 'A long answer line.').join('\n\n');
+
+      Rect rowOf(WidgetTester tester, String id) =>
+          tester.getRect(find.byKey(ValueKey('thread-message-group-$id')));
+      Rect screenOf(WidgetTester tester) =>
+          tester.getRect(find.byKey(const ValueKey('thread-message-list')));
+
+      testWidgets('the last reply is read at the end of the thread', (
+        tester,
+      ) async {
+        final readState = await openThread(tester, [
+          reply(threadIdReplyZero, 1100, tallContent),
+        ]);
+        await tester.fling(
+          find.byKey(const ValueKey('thread-message-list')),
+          const Offset(0, -20000),
+          4000,
+        );
+        await tester.pumpAndSettle();
+        await tester.pump(const Duration(milliseconds: 300));
+
+        // Resting at the end, its top is off screen, so it never fits or
+        // fills the screen.
+        final row = rowOf(tester, threadIdReplyZero);
+        expect(row.top, lessThan(screenOf(tester).top));
+        expect(row.bottom, lessThan(screenOf(tester).bottom));
+        expect(readState.markedContexts['msg:$threadIdReplyZero'], 1100);
+      });
+
+      testWidgets('an earlier reply is read once it fills the screen', (
+        tester,
+      ) async {
+        final later = indexedThreadId('reply-1');
+        final readState = await openThread(tester, [
+          reply(threadIdReplyZero, 1100, tallContent),
+          reply(later, 1200, 'Short follow-up'),
+        ]);
+        final screen = screenOf(tester);
+        // The thread opens at its end: the tall reply's top is cut off, so
+        // it is not read yet.
+        var row = rowOf(tester, threadIdReplyZero);
+        expect(row.top, lessThan(screen.top));
+        expect(row.bottom, lessThan(screen.bottom));
+        expect(
+          readState.markedContexts,
+          isNot(contains('msg:$threadIdReplyZero')),
+        );
+
+        await tester.drag(
+          find.byKey(const ValueKey('thread-message-list')),
+          Offset(0, screen.bottom - row.bottom + screen.height / 2),
+        );
+        await tester.pumpAndSettle();
+        await tester.pump(const Duration(milliseconds: 300));
+
+        row = rowOf(tester, threadIdReplyZero);
+        expect(row.top, lessThan(screen.top));
+        expect(row.bottom, greaterThan(screen.bottom));
+        expect(readState.markedContexts['msg:$threadIdReplyZero'], 1100);
+      });
     });
 
     testWidgets('rows under the Android keyboard are not read in history', (
