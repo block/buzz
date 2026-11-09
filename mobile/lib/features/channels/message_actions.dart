@@ -842,6 +842,10 @@ void _showEditSheet({
               ),
               const SizedBox(width: Grid.half),
               FilledButton(
+                style: FilledButton.styleFrom(
+                  backgroundColor: Theme.of(sheetContext).colorScheme.primary,
+                  foregroundColor: Theme.of(sheetContext).colorScheme.onPrimary,
+                ),
                 onPressed: () {
                   final text = controller.text.trim();
                   if (text.isEmpty || text == message.content) {
