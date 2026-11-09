@@ -120,7 +120,10 @@ function isAtBottomNow(
   );
 }
 
-/** Longest the highlight waits for its row to reach the viewport. */
+/**
+ * Longest the highlight waits for its row to reach the viewport after the
+ * scroll is accepted. Past it the target is not highlighted at all.
+ */
 const HIGHLIGHT_VISIBLE_WAIT_MS = 5_000;
 
 function intersectsViewport(el: HTMLElement, container: HTMLElement): boolean {
@@ -454,6 +457,13 @@ export function useAnchoredScroll({
       if (!container) return;
       anchorRef.current = { kind: "at-bottom" };
       targetHoldRef.current = false;
+      // Leaving for the bottom abandons a target still waiting to reach the
+      // viewport, or scrolling back past it would flash it late. Only the wait
+      // is cancelled: an applied highlight keeps its timer, so it still clears.
+      if (highlightWaitRafRef.current !== null) {
+        cancelAnimationFrame(highlightWaitRafRef.current);
+        highlightWaitRafRef.current = null;
+      }
       // A programmatic jump-to-bottom is not atomic, even for `behavior: "auto"`:
       // the browser can emit `scroll` while the list is still settling row
       // measurements. During that window `computeAnchor` may read the transient
@@ -542,7 +552,8 @@ export function useAnchoredScroll({
       // row can take several measure passes, and the virtualizer can mount it
       // off screen first, so apply the class only once the row is on screen:
       // a flash that runs off screen holds at opacity 0 and is never seen.
-      // A row that never becomes visible is not highlighted.
+      // A row not on screen within HIGHLIGHT_VISIBLE_WAIT_MS of this call (the
+      // scroll being accepted) is not highlighted at all.
       const deadline = performance.now() + HIGHLIGHT_VISIBLE_WAIT_MS;
       const waitForVisible = () => {
         highlightWaitRafRef.current = null;

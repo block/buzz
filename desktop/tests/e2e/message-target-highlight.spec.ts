@@ -112,9 +112,12 @@ for (const targetCase of CASES) {
     const flashedOnScreen = await page.evaluate(
       ([targetId, generalPath, highlightClass]) =>
         new Promise<boolean>((resolve) => {
-          // The flash is timed from when the row is on screen, so this only
-          // bounds how long a slow runner may take to mount the channel and
-          // reach the row (a starved page needs seconds between renders).
+          // The flash starts once the row is on screen, but the product gives
+          // up highlighting if the row is not on screen within 5 s of the
+          // scroll being accepted (HIGHLIGHT_VISIBLE_WAIT_MS in
+          // useAnchoredScroll.ts). This 10 s budget also covers mounting the
+          // channel before acceptance. A starved runner can therefore miss the
+          // flash well inside it; check that 5 s cap first.
           const deadline = performance.now() + 10_000;
           const tick = () => {
             const timelineEl = document.querySelector(
