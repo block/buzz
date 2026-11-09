@@ -125,8 +125,9 @@ async fn store_relay_signed(
 
 /// A reaction is indexed under its target's effective author, so the author
 /// reads it by `#p` and the reactor does not, with or without a `p` tag, and
-/// COUNT agrees with REQ. Mutation: drop the derived mention insert, or the
-/// `#p` match on `derived_recipients` → RED.
+/// COUNT agrees with REQ, for one `#p` value or several. Mutation: drop the
+/// derived mention insert, the `#p` match on `derived_recipients`, or the
+/// multi-value `#p` recipient load → RED.
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn a_reaction_is_indexed_under_its_targets_effective_author() {
@@ -222,6 +223,18 @@ async fn a_reaction_is_indexed_under_its_targets_effective_author() {
         expected.len() as u64,
         "COUNT agrees with REQ"
     );
+    // A multi-value `#p` is not pushed into SQL; the post-filter still
+    // matches the reactions indexed under the author.
+    let by_either = json!({"kinds": [7], "#p": [author_hex, reactor_hex]});
+    assert_eq!(
+        sorted(req_event_ids(&state, &tenant, &author, by_either.clone()).await),
+        expected
+    );
+    assert_eq!(
+        count(&state, &tenant, &author, by_either).await,
+        expected.len() as u64,
+        "multi-value #p COUNT agrees with REQ"
+    );
 
     // A relay-signed message that names no author falls back to the relay key.
     let anonymous = store_relay_signed(&state, &tenant, channel_id, &[]).await;
@@ -278,14 +291,18 @@ async fn a_mention_row_without_a_p_tag_matches_only_for_reactions() {
     .await
     .expect("index the attribution as a mention");
 
-    assert_eq!(
-        req_event_ids(
-            &state,
-            &tenant,
-            &owner,
-            json!({"kinds": [9], "#p": [owner_hex]})
-        )
-        .await,
-        Vec::<String>::new()
-    );
+    let other_hex = Keys::generate().public_key().to_hex();
+    for p_values in [vec![owner_hex.clone()], vec![owner_hex.clone(), other_hex]] {
+        assert_eq!(
+            req_event_ids(
+                &state,
+                &tenant,
+                &owner,
+                json!({"kinds": [9], "#p": p_values})
+            )
+            .await,
+            Vec::<String>::new(),
+            "#p {p_values:?}"
+        );
+    }
 }
