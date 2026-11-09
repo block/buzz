@@ -241,4 +241,141 @@ mod postgres_tests {
             "community not found"
         );
     }
+
+    /// Mint on a task while `holder` keeps an uncommitted change, wait until
+    /// the mint is blocked on it, then commit it and return the mint response.
+    async fn mint_across_commit(
+        state: &Arc<AppState>,
+        operator: &Keys,
+        body: Value,
+        mut holder: sqlx::Transaction<'static, sqlx::Postgres>,
+    ) -> axum::response::Response {
+        let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *holder)
+            .await
+            .expect("holder pid");
+        let task = tokio::spawn({
+            let (state, operator) = (state.clone(), operator.clone());
+            async move { mint(&state, &operator, body).await }
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let blocked: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity \
+                 WHERE $1 = ANY(pg_blocking_pids(pid)))",
+            )
+            .bind(holder_pid)
+            .fetch_one(state.db.pool())
+            .await
+            .expect("read lock waiters");
+            if blocked {
+                break;
+            }
+            assert!(!task.is_finished(), "the mint finished without waiting");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the mint never waited for the uncommitted change"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        holder.commit().await.expect("commit holder");
+        task.await.expect("mint task")
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn operator_mint_rechecks_role_and_lifecycle_inside_the_mint() {
+        let operator = Keys::generate();
+        let Some(state) = operator_test_state(std::slice::from_ref(&operator)).await else {
+            return;
+        };
+        let [owner, admin] = std::array::from_fn(|_| Keys::generate());
+        let host = format!("community-{}.example", Uuid::new_v4().simple());
+        assert_eq!(
+            provision_community(state.clone(), &operator, &host, &owner)
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        let community = state
+            .db
+            .lookup_community_by_host(&host)
+            .await
+            .expect("lookup community")
+            .expect("community exists")
+            .id;
+        let admin_hex = admin.public_key().to_hex();
+        state
+            .db
+            .add_relay_member(community, &admin_hex, "admin", None, &state.relay_keypair)
+            .await
+            .map(|write| write.outcome)
+            .expect("seed admin");
+        let request = |actor: &Keys| {
+            serde_json::json!({
+                "community_id": community.to_string(),
+                "actor_pubkey": actor.public_key().to_hex(),
+            })
+        };
+        let invites = || async {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM relay_invites WHERE community_id = $1",
+            )
+            .bind(community.as_uuid())
+            .fetch_one(state.db.pool())
+            .await
+            .expect("count invites")
+        };
+
+        // A demotion that lands while the mint is in flight refuses it.
+        let mut holder = state.db.pool().begin().await.expect("begin demotion");
+        sqlx::query(
+            "UPDATE relay_members SET role = 'member' WHERE community_id = $1 AND pubkey = $2",
+        )
+        .bind(community.as_uuid())
+        .bind(&admin_hex)
+        .execute(&mut *holder)
+        .await
+        .expect("demote admin");
+        error(
+            mint_across_commit(&state, &operator, request(&admin), holder).await,
+            StatusCode::FORBIDDEN,
+            "not_owner",
+        )
+        .await;
+        assert_eq!(invites().await, 0, "a refused mint must not persist");
+
+        // A deletion fence that lands after the host lookup refuses it too.
+        let mut holder = state.db.pool().begin().await.expect("begin fence");
+        sqlx::query("SELECT pg_advisory_xact_lock(community_deletion_lock_key($1))")
+            .bind(community.as_uuid())
+            .execute(&mut *holder)
+            .await
+            .expect("take deletion lock");
+        // Fence as the deletion executor does, so the tombstone guard admits it.
+        sqlx::query(
+            "SELECT set_config('buzz.deletion_executor_community', $1::text, true), \
+             set_config('buzz.deletion_fence_generation', (deletion_fence_generation + 1)::text, true) \
+             FROM communities WHERE id = $1",
+        )
+        .bind(community.as_uuid())
+        .execute(&mut *holder)
+        .await
+        .expect("act as deletion executor");
+        sqlx::query(
+            "UPDATE communities SET deletion_state = 'quiescing', \
+             deletion_fence_generation = deletion_fence_generation + 1 WHERE id = $1",
+        )
+        .bind(community.as_uuid())
+        .execute(&mut *holder)
+        .await
+        .expect("fence community");
+        error(
+            mint_across_commit(&state, &operator, request(&owner), holder).await,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "unavailable",
+        )
+        .await;
+        assert_eq!(invites().await, 0, "a fenced mint must not persist");
+    }
 }

@@ -5,6 +5,7 @@
 //! membership data at mint time, exactly as `POST /api/invites` does.
 
 use super::*;
+use crate::access::AuthReason;
 use crate::api::invites::{
     map_mint_error, minted_invite_json, validate_mint_request, MintInviteRequest,
 };
@@ -50,21 +51,17 @@ pub async fn mint_community_invite(
             _ => error,
         })?;
     let request: Request = serde_json::from_slice(&body).map_err(|e| {
-        with_code(
-            api_error(
-                StatusCode::BAD_REQUEST,
-                &format!("invalid community-invite JSON: {e}"),
-            ),
+        coded_api_error(
+            StatusCode::BAD_REQUEST,
             "invalid_request",
+            &format!("invalid community-invite JSON: {e}"),
         )
     })?;
     let actor = validate_pubkey_hex(&request.actor_pubkey).ok_or_else(|| {
-        with_code(
-            api_error(
-                StatusCode::BAD_REQUEST,
-                "invalid actor_pubkey: expected 64-char hex pubkey",
-            ),
+        coded_api_error(
+            StatusCode::BAD_REQUEST,
             "invalid_request",
+            "invalid actor_pubkey: expected 64-char hex pubkey",
         )
     })?;
     let (ttl, max_uses) = validate_mint_request(&MintInviteRequest {
@@ -80,38 +77,40 @@ pub async fn mint_community_invite(
         .await
         .map_err(|e| internal_error(&format!("community invite host lookup: {e}")))?
         .ok_or_else(|| {
-            with_code(
-                api_error(StatusCode::NOT_FOUND, "community not found"),
+            coded_api_error(
+                StatusCode::NOT_FOUND,
                 "community_not_found",
+                "community not found",
             )
         })?;
-    let role = state
-        .db
-        .get_relay_member(community, &actor)
-        .await
-        .map_err(|e| internal_error(&format!("community invite role lookup: {e}")))?
-        .map(|member| member.role);
-    if !matches!(role.as_deref(), Some("owner" | "admin")) {
-        return Err(with_code(
-            api_error(
-                StatusCode::FORBIDDEN,
-                "only relay owners and admins can create invites",
-            ),
-            "not_owner",
-        ));
-    }
-    // The mint re-checks lifecycle and the actor's restriction atomically.
+    slot.in_community(community);
+    // The mint checks the actor's role and restriction, and the community's
+    // deletion state, in one transaction. It does not re-check archiving: an
+    // invite minted while an archive lands cannot be claimed while archived.
     let invite = state
         .db
-        .mint_relay_invite(community, &actor, ttl, max_uses)
+        .mint_relay_invite_as_admin(community, &actor, ttl, max_uses)
         .await
-        .map_err(|error| {
-            let error = map_mint_error(error);
-            match error.0 {
-                StatusCode::FORBIDDEN => with_code(error, "restricted"),
-                StatusCode::SERVICE_UNAVAILABLE => with_code(error, "unavailable"),
-                StatusCode::BAD_REQUEST => with_code(error, "invalid_request"),
-                _ => error,
+        .map_err(|error| match error {
+            buzz_db::DbError::InviteIssuerNotAdmin => {
+                slot.finish(AuthResult::Denied(AuthReason::NotRelayAdmin));
+                coded_api_error(
+                    StatusCode::FORBIDDEN,
+                    "not_owner",
+                    "only relay owners and admins can create invites",
+                )
+            }
+            buzz_db::DbError::InviteRestricted => {
+                slot.finish(AuthResult::Denied(AuthReason::Restricted));
+                with_code(map_mint_error(error), "restricted")
+            }
+            error => {
+                let error = map_mint_error(error);
+                match error.0 {
+                    StatusCode::SERVICE_UNAVAILABLE => with_code(error, "unavailable"),
+                    StatusCode::BAD_REQUEST => with_code(error, "invalid_request"),
+                    _ => error,
+                }
             }
         })?;
     slot.detail(crate::access::Detail {

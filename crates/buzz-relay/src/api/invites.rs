@@ -234,6 +234,10 @@ pub async fn accept_policy(
 pub(crate) fn map_mint_error(error: buzz_db::DbError) -> (StatusCode, Json<Value>) {
     match error {
         buzz_db::DbError::InviteRestricted => api_error(StatusCode::FORBIDDEN, "invite_restricted"),
+        buzz_db::DbError::InviteIssuerNotAdmin => api_error(
+            StatusCode::FORBIDDEN,
+            "only relay owners and admins can create invites",
+        ),
         buzz_db::DbError::InvalidData(message) | buzz_db::DbError::DeletionSafety(message) => {
             api_error(StatusCode::BAD_REQUEST, &message)
         }
@@ -410,7 +414,7 @@ async fn mint_invite_inner(
     // Mint a v2 opaque, database-backed invite.
     let invite = state
         .db
-        .mint_relay_invite(tenant.community(), &sender_hex, ttl, max_uses)
+        .mint_relay_invite_as_admin(tenant.community(), &sender_hex, ttl, max_uses)
         .await
         .map_err(map_mint_error)?;
 
