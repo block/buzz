@@ -446,12 +446,7 @@ pub(super) async fn run_invite_repair_script(pool: &PgPool) -> String {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
-    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    assert!(
-        stdout.lines().any(|line| line.trim() == "0"),
-        "repair validation did not return zero unrepaired invites:\n{stdout}"
-    );
-    stdout
+    String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
 async fn invite_revocation_state(pool: &PgPool) -> Vec<(Uuid, Option<DateTime<Utc>>, bool)> {

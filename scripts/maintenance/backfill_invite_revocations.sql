@@ -148,7 +148,7 @@ $$;
 -- Expected result: 0. Every legacy marker in an active community has been
 -- examined and cleared; every currently active ban has durably revoked its
 -- invite. Markers in fenced communities remain for a later repair run.
-SELECT count(*) AS unrepaired_invites
+SELECT count(*) AS unrepaired_invites, count(*) = 0 AS repair_complete
 FROM relay_invites AS invite
 JOIN communities AS community ON community.id = invite.community_id
 CROSS JOIN LATERAL (
@@ -182,4 +182,12 @@ WHERE community.deletion_state = 'active'
                OR restriction.ban_expires_at > clock_timestamp())
       )
     )
-  );
+  )\gset
+\echo unrepaired_invites
+\echo :unrepaired_invites
+\if :repair_complete
+\else
+DO $$ BEGIN
+    RAISE EXCEPTION 'invite repair incomplete; keep admission closed and rerun';
+END $$;
+\endif
