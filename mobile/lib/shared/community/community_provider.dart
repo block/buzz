@@ -16,7 +16,6 @@ import '../channels/channel_list_snapshot.dart';
 import '../channels/saved_message_store.dart';
 import '../diagnostics/diagnostic_reporter.dart';
 import '../hosted/community_entry_requirements.dart';
-import '../hosted/known_communities_sync.dart';
 import '../profile/profile_snapshot.dart';
 import '../push/dev_push_lease.dart';
 import '../push/push_bridge.dart';
@@ -340,10 +339,14 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
 
   /// Removes a saved identity without letting awaited cleanup change the account
   /// that confirmed its remote edit. An explicit null confirmation is local-only.
+  /// The Builderlab account learns of the leave unless [reportToAccount] is
+  /// false: a sign-out removes the community from this device only, not from
+  /// any account's list.
   Future<void> removeCommunity(
     String id, {
     String? confirmedSubject,
     bool accountConfirmed = false,
+    bool reportToAccount = true,
   }) async {
     final account = ref.read(builderlabAccountProvider);
     final sync = ref.read(knownCommunitySyncProvider);
@@ -374,12 +377,12 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
         revocationJournaled = await ref.read(
           communityPushLeaseRevocationEnqueuerProvider,
         )(current[removedIndex]);
-        // The account's list must learn of the leave once the device has
-        // forgotten the community, or the next sign-in would add it back;
-        // a record that will not write keeps the community for a retry.
-        await ref
-            .read(knownCommunitiesOutboxProvider)
-            .record(current[removedIndex].relayUrl, removed: true);
+        // The account's list learns of the leave before the device forgets
+        // the community, so the next sign-in does not add it back. The leave
+        // itself never waits on or fails for that record.
+        if (reportToAccount) {
+          await recordKnownCommunityLeave(ref, current[removedIndex].relayUrl);
+        }
       }
       // A durable revocation commits this removal to its confirmed account.
       // Finish local deletion even if the account changed during journaling;

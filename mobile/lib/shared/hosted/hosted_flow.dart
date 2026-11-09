@@ -814,12 +814,29 @@ class HostedFlow extends ChangeNotifier {
     return true;
   }
 
+  /// Told of the listed communities the user saw in the picker and left
+  /// unchosen, so a background join does not add them anyway. Set by the
+  /// known-communities sync owner.
+  void Function(Iterable<String> relayUrls)? onCommunitiesDeclined;
+
+  void _declineCommunities(Iterable<String> relayUrls) {
+    final declined = List.of(relayUrls);
+    if (declined.isNotEmpty) onCommunitiesDeclined?.call(declined);
+  }
+
   Future<void> addSelectedCommunities({bool returnToAddedCommunity = false}) {
     if (!accountOnly ||
         stage != HostedFlowStage.chooseCommunities ||
         selectedRelays.isEmpty) {
       return Future.value();
     }
+    // Finishing the picker with a subset declines the rest.
+    _declineCommunities([
+      for (final community in communities)
+        if (!selectedRelays.contains(community.relayUrl) &&
+            !_addedRelays.contains(community.relayUrl))
+          community.relayUrl,
+    ]);
     _returnToAddedCommunity = returnToAddedCommunity || _returnToAddedCommunity;
     _discoverOnly = false;
     _addingCommunities = true;
@@ -844,6 +861,7 @@ class HostedFlow extends ChangeNotifier {
     selectedRelays = Set.unmodifiable(
       selectedRelays.where((item) => item != relay),
     );
+    _declineCommunities([relay]);
     _failedRelay = null;
     final generation = _nextGeneration();
     _set(HostedFlowStage.working);
@@ -858,6 +876,7 @@ class HostedFlow extends ChangeNotifier {
     selectedRelays = Set.unmodifiable(
       selectedRelays.where((item) => item != relay),
     );
+    _declineCommunities([relay]);
     _conflictingRelay = null;
     final generation = _nextGeneration();
     _set(HostedFlowStage.working);

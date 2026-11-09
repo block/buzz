@@ -4822,6 +4822,7 @@ class _FakeCommunityListNotifier extends CommunityListNotifier {
     String id, {
     String? confirmedSubject,
     bool accountConfirmed = false,
+    bool reportToAccount = true,
   }) async {
     removedIds.add(id);
     _communities = _communities
