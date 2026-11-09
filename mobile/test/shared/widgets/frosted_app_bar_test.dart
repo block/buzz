@@ -6,6 +6,7 @@ import 'package:buzz/shared/widgets/ios_navigation_bar.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/rendering.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
@@ -104,6 +105,114 @@ void main() {
             }
             expect(tester.takeException(), isNull);
           }
+        }
+      }
+      await tester.pumpWidget(const SizedBox());
+      debugDefaultTargetPlatformOverride = null;
+    },
+  );
+
+  testWidgets(
+    'explicit axes keep native controls inside shared header bounds',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      final messenger = tester.binding.defaultBinaryMessenger;
+      final channels = <MethodChannel>[];
+      messenger.setMockMethodCallHandler(SystemChannels.platform_views, (
+        call,
+      ) async {
+        if (call.method == 'create') {
+          final id = (call.arguments as Map)['id'];
+          final channel = MethodChannel('${IosNavigationBar.viewType}/$id');
+          channels.add(channel);
+          messenger.setMockMethodCallHandler(channel, (_) async => null);
+        }
+        return null;
+      });
+      addTearDown(() {
+        messenger.setMockMethodCallHandler(SystemChannels.platform_views, null);
+        for (final channel in channels) {
+          messenger.setMockMethodCallHandler(channel, null);
+        }
+      });
+      for (final axis in [119.0, 179.0]) {
+        for (final native in [false, true]) {
+          late double bodyTop;
+          late double stickyTop;
+          await tester.pumpWidget(
+            ProviderScope(
+              child: MaterialApp(
+                theme: AppTheme.light(),
+                home: MediaQuery(
+                  data: const MediaQueryData(
+                    padding: EdgeInsets.only(top: 59),
+                    viewPadding: EdgeInsets.only(top: 59),
+                  ),
+                  child: NavigationHeaderScope(
+                    layout: NavigationHeaderLayout(
+                      hardEdge: true,
+                      paneControls: true,
+                      topSpacing: 24,
+                      centerInVisibleHeight: true,
+                      controlCenterY: axis,
+                      nativeEdgeClearance: 16,
+                    ),
+                    child: Builder(
+                      builder: (context) {
+                        bodyTop = frostedAppBarHeight(
+                          context,
+                          useNativeNavigation: native,
+                        );
+                        stickyTop =
+                            bodyTop + frostedAppBarEdgeClearance(context);
+                        return Stack(
+                          children: [
+                            FrostedAppBar(
+                              useNativeNavigation: native,
+                              title: const SizedBox(
+                                key: ValueKey('axis-title'),
+                                height: 44,
+                                child: Text('Messages'),
+                              ),
+                            ),
+                          ],
+                        );
+                      },
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          );
+          await tester.pump();
+          await tester.pump();
+          expect(bodyTop, axis + 34);
+          expect(stickyTop, axis + 50);
+          final bounds = native
+              ? tester.getRect(find.byType(UiKitView))
+              : tester.getRect(find.byType(FrostedAppBar));
+          expect(bounds.bottom, bodyTop);
+          final lowerControlPoint = Offset(bounds.center.dx, axis + 21);
+          expect(bounds.contains(lowerControlPoint), isTrue);
+          if (native) {
+            final view = tester.renderObject<RenderBox>(find.byType(UiKitView));
+            final hit = BoxHitTestResult();
+            expect(
+              view.hitTest(
+                hit,
+                position: view.globalToLocal(lowerControlPoint),
+              ),
+              isTrue,
+            );
+          } else {
+            final title = tester.getRect(
+              find.byKey(const ValueKey('axis-title')),
+            );
+            expect(title.center.dy, axis);
+            expect(title.bottom, lessThanOrEqualTo(bounds.bottom));
+          }
+          expect(tester.takeException(), isNull);
         }
       }
       await tester.pumpWidget(const SizedBox());

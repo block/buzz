@@ -57,6 +57,20 @@ double _barContentHeight(
   return alignedHeight > height ? alignedHeight : height;
 }
 
+// Reserve the full row around an explicit axis inside the platform view's hit
+// bounds. Body spacing and the native view must use exactly the same extent.
+double _nativeBarContentHeight(BuildContext context) {
+  final layout = NavigationHeaderScope.of(context);
+  final compact = IosNavigationMetrics.of(context).compactHeight;
+  if (!layout.paneControls) return compact;
+  final height = compact.clamp(44.0, double.infinity) + layout.topSpacing;
+  final axis = layout.controlCenterY;
+  final alignedHeight = axis == null
+      ? height
+      : axis - MediaQuery.paddingOf(context).top + height / 2;
+  return alignedHeight > height ? alignedHeight : height;
+}
+
 /// Returns the total height of the [FrostedAppBar] including safe area padding.
 ///
 /// Use this to add top spacing to body content so it starts below the bar.
@@ -71,12 +85,8 @@ double frostedAppBarHeight(
   bool useNativeNavigation = true,
 }) {
   if (useNativeNavigation && defaultTargetPlatform == TargetPlatform.iOS) {
-    final layout = NavigationHeaderScope.of(context);
-    final compact = IosNavigationMetrics.of(context).compactHeight;
     return MediaQuery.paddingOf(context).top +
-        (layout.paneControls
-            ? compact.clamp(44.0, double.infinity) + layout.topSpacing
-            : compact) +
+        _nativeBarContentHeight(context) +
         (nativeLargeTitle
             ? IosNavigationMetrics.of(context).largeTitleHeight
             : 0) +
@@ -257,12 +267,7 @@ class FrostedAppBar extends StatelessWidget {
             : 0.0;
         final barHeight =
             MediaQuery.paddingOf(context).top +
-            (layout.paneControls
-                ? IosNavigationMetrics.of(
-                        context,
-                      ).compactHeight.clamp(44.0, double.infinity) +
-                      layout.topSpacing
-                : IosNavigationMetrics.of(context).compactHeight) +
+            _nativeBarContentHeight(context) +
             extra;
         return AnimatedPositioned(
           duration: layoutDuration,

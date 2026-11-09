@@ -467,8 +467,7 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
       ? [0, NSNumber(value: Double(max(0, height - 12) / max(1, height))), 1]
       : (navigation.navigationBar.prefersLargeTitles ? [0, 0.55, 1] : [0, 0.85, 1])
     CATransaction.commit()
-    let centersInHardEdge = hardEdge && usesSystemScrollEdge
-      && centerInVisibleHeight
+    let centersInHardEdge = hardEdge && centerInVisibleHeight
     // Match Flutter: the automatic row starts below the protected top inset.
     // Header height includes that inset; it is not part of the usable row.
     let contentMidpoint = (flutterSafeTop + container.bounds.height) / 2

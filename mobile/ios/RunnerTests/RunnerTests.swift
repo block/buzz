@@ -82,7 +82,6 @@ class RunnerTests: XCTestCase {
 
   @MainActor
   func testPaneNavigationAlignmentChangesAndRestoresPhoneLayout() throws {
-    guard #available(iOS 27.0, *) else { return }
     for (leading, safeTop) in [(false, 0.0), (true, 0.0), (false, 59.0), (true, 59.0)] {
       let parent = UIViewController()
       let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 950, height: 669))
@@ -102,7 +101,8 @@ class RunnerTests: XCTestCase {
                     ["id": "edit", "label": "Edit", "plain": true, "sharesBackground": false, "enabled": true]]]
       // Geometry is supplied explicitly; it works regardless of window width.
       for (height, camera, clearance) in [(68.0, nil as Double?, 8.0), (120.0, nil, 8.0),
-                                         (68.0, 45.0, 16.0), (68.0, nil, 8.0)] {
+                                         (79.0, 45.0, 16.0), (94.0, 60.0, 16.0),
+                                         (154.0, 120.0, 16.0), (68.0, nil, 8.0)] {
         var args = base
         args["centerInVisibleHeight"] = camera == nil
         args["edgeClearance"] = clearance
@@ -125,6 +125,13 @@ class RunnerTests: XCTestCase {
         let buttonFrame = button.convert(button.bounds, to: bar.view())
         XCTAssertEqual(buttonFrame.midY, center, accuracy: 0.5)
         XCTAssertGreaterThanOrEqual(buttonFrame.minY, safeTop)
+        XCTAssertLessThanOrEqual(buttonFrame.maxY, bar.view().bounds.maxY)
+        if camera != nil {
+          // This lower portion was outside the old safeTop + 68 platform bounds.
+          let point = CGPoint(x: buttonFrame.midX, y: buttonFrame.maxY - 1)
+          let hit = bar.view().hitTest(point, with: nil)
+          XCTAssertTrue(hit === button || hit?.isDescendant(of: button) == true)
+        }
         if safeTop == 59 && height == 68 && camera == nil {
           XCTAssertEqual(buttonFrame.midY, 97, accuracy: 0.5)
         }
@@ -149,7 +156,9 @@ class RunnerTests: XCTestCase {
       XCTAssertFalse(navigation.view.isHidden)
       XCTAssertEqual(navigation.additionalSafeAreaInsets.top, 0, accuracy: 0.5)
       let scroll = try XCTUnwrap(navigation.topViewController?.view as? UIScrollView)
-      XCTAssertEqual(scroll.topEdgeEffect.style, .soft)
+      if #available(iOS 27.0, *) {
+        XCTAssertEqual(scroll.topEdgeEffect.style, .soft)
+      }
       XCTAssertFalse(descendants(of: bar.view()).compactMap { $0 as? UILabel }
         .contains { $0.text == "general" && !$0.isDescendant(of: navigation.view) })
     }

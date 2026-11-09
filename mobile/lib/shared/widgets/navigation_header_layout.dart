@@ -31,6 +31,7 @@ class NavigationHeaderLayout {
 
   /// Optional control axis in header-local coordinates, for camera alignment.
   /// The host converts any window occlusion geometry into the header space.
+  /// Pane headers grow to contain the row around this axis, including hit bounds.
   final double? controlCenterY;
 
   /// Centers collapsed controls within the visible hard backdrop, including
@@ -38,6 +39,7 @@ class NavigationHeaderLayout {
   /// automatic center is safeTop + (contentHeight + clearance) / 2, where
   /// contentHeight excludes safeTop. An explicit [controlCenterY] overrides
   /// this center in header-local coordinates. Expanded titles stay unchanged.
+  /// Geometry is the same on older iOS versions with a softer material fallback.
   final bool centerInVisibleHeight;
 
   /// Centers a collapsing custom bottom row on the title/control row without
