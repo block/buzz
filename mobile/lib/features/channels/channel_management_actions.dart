@@ -166,8 +166,9 @@ class ChannelActions {
     return channel;
   }
 
-  /// Adds [pubkeys] to the channel with [role]. Pubkeys in [agentPubkeys] are
-  /// added with the `bot` role instead: clients read that role as the signal
+  /// Adds [pubkeys] to the channel with [role]. Those of [pubkeys] that also
+  /// appear in [agentPubkeys] are added with the `bot` role instead; entries
+  /// of [agentPubkeys] alone add nothing. Clients read that role as the signal
   /// that a member is an agent, as the Desktop add flow and the compose bar's
   /// mention-add already record it.
   Future<void> addMembers({

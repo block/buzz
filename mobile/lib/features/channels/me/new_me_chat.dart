@@ -107,8 +107,11 @@ Future<Channel> _createMeChat(
       final members = await ref.read(channelMembersProvider(channelId).future);
       return members.any((m) => m.pubkey == assistant);
     },
-    addAgent: () =>
-        actions.addMembers(channelId: channelId, pubkeys: [assistant]),
+    addAgent: () => actions.addMembers(
+      channelId: channelId,
+      pubkeys: [assistant],
+      agentPubkeys: {assistant},
+    ),
     isPlaced: () async {
       final latest = await sync.head();
       if (latest == null) return false;
