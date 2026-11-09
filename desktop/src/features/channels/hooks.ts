@@ -273,8 +273,11 @@ export async function invalidateChannelState(
 export function refreshRelayAgentsAfterMembersAdded(
   queryClient: ReturnType<typeof useQueryClient>,
   result: AddChannelMembersResult | undefined,
+  role: AddChannelMembersInput["role"],
 ) {
-  if (!result || result.added.length === 0) {
+  // Desktop adds agents with the bot role; other adds cannot change the
+  // directory's bot-role candidates, so they skip the rebuild.
+  if (role !== "bot" || !result || result.added.length === 0) {
     return;
   }
   void queryClient
@@ -876,7 +879,7 @@ export function useAddChannelMembersMutation(channelId: string | null) {
       }
     },
     onSettled: async (data, _err, variables) => {
-      refreshRelayAgentsAfterMembersAdded(queryClient, data);
+      refreshRelayAgentsAfterMembersAdded(queryClient, data, variables?.role);
       // Invalidate the effective channel (the one actually mutated) not the
       // live hook-closure channel, which may have changed mid-send.
       const effectiveChannelId = variables?.channelId ?? channelId;

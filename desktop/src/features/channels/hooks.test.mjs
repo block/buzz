@@ -386,10 +386,11 @@ test("refreshRelayAgentsAfterMembersAdded refreshes the directory without blocki
     },
   };
 
-  const returned = refreshRelayAgentsAfterMembersAdded(queryClient, {
-    added: ["a".repeat(64)],
-    errors: [],
-  });
+  const returned = refreshRelayAgentsAfterMembersAdded(
+    queryClient,
+    { added: ["a".repeat(64)], errors: [] },
+    "bot",
+  );
 
   // Returns before the refetch settles: an add must not wait on the rebuild.
   assert.equal(returned, undefined);
@@ -405,11 +406,18 @@ test("refreshRelayAgentsAfterMembersAdded skips adds that changed nothing", () =
     },
   };
 
-  refreshRelayAgentsAfterMembersAdded(queryClient, undefined);
-  refreshRelayAgentsAfterMembersAdded(queryClient, {
-    added: [],
-    errors: [{ pubkey: "b".repeat(64), error: "rejected" }],
-  });
+  refreshRelayAgentsAfterMembersAdded(queryClient, undefined, "bot");
+  refreshRelayAgentsAfterMembersAdded(
+    queryClient,
+    { added: [], errors: [{ pubkey: "b".repeat(64), error: "rejected" }] },
+    "bot",
+  );
+  // A people-only add cannot change the bot-role candidates.
+  refreshRelayAgentsAfterMembersAdded(
+    queryClient,
+    { added: ["c".repeat(64)], errors: [] },
+    "member",
+  );
 
   assert.deepEqual(invalidated, []);
 });
