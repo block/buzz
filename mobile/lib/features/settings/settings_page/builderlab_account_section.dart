@@ -27,9 +27,15 @@ class _BuilderlabAccountSection extends ConsumerWidget {
             color: context.colors.onSurfaceVariant,
           ),
           onTap: () async {
-            final opened = await ref.read(builderlabWebLauncherProvider)(
-              HostedEnvironment.origin,
-            );
+            bool opened;
+            try {
+              opened = await ref.read(builderlabWebLauncherProvider)(
+                HostedEnvironment.origin,
+              );
+            } on PlatformException {
+              // launchUrl throws instead of returning false on some failures.
+              opened = false;
+            }
             if (opened || !context.mounted) return;
             ScaffoldMessenger.of(context).showFeedbackSnackBar(
               const SnackBar(content: Text('Couldn’t open Builderlab.')),

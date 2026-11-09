@@ -3,6 +3,7 @@ import 'package:buzz/shared/community/community_membership_provider.dart';
 import 'package:buzz/shared/hosted/hosted_environment.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:package_info_plus/package_info_plus.dart';
@@ -12,6 +13,7 @@ void main() {
   Future<List<Uri>> pumpSettings(
     WidgetTester tester, {
     bool opens = true,
+    bool throws = false,
   }) async {
     PackageInfo.setMockInitialValues(
       appName: 'Buzz',
@@ -32,6 +34,7 @@ void main() {
           ),
           builderlabWebLauncherProvider.overrideWithValue((uri) async {
             opened.add(uri);
+            if (throws) throw PlatformException(code: 'ACTIVITY_NOT_FOUND');
             return opens;
           }),
         ],
@@ -61,13 +64,19 @@ void main() {
     expect(find.text('Couldn’t open Builderlab.'), findsNothing);
   }, skip: !HostedEnvironment.enabled);
 
-  testWidgets('says so when the browser does not open', (tester) async {
-    await pumpSettings(tester, opens: false);
-    await tester.scrollUntilVisible(row, 200);
-    await tester.tap(row);
-    await tester.pumpAndSettle();
-    expect(find.text('Couldn’t open Builderlab.'), findsOneWidget);
-  }, skip: !HostedEnvironment.enabled);
+  for (final throws in [false, true]) {
+    testWidgets(
+      'says so when the browser ${throws ? 'throws' : 'does not open'}',
+      (tester) async {
+        await pumpSettings(tester, opens: false, throws: throws);
+        await tester.scrollUntilVisible(row, 200);
+        await tester.tap(row);
+        await tester.pumpAndSettle();
+        expect(find.text('Couldn’t open Builderlab.'), findsOneWidget);
+      },
+      skip: !HostedEnvironment.enabled,
+    );
+  }
 
   testWidgets('is absent outside a public build', (tester) async {
     await pumpSettings(tester);
