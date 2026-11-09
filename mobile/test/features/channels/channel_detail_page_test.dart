@@ -2781,6 +2781,56 @@ void main() {
       expect(readState.markedContexts, {'msg:tall': 1100});
     });
 
+    testWidgets('a tall linked message is read when the jump leaves it cut '
+        'off', (tester) async {
+      final readState = _SynchronousReadStateNotifier(
+        const ReadStateState(
+          isReady: true,
+          pubkey: 'self',
+          contexts: {},
+          version: 0,
+        ),
+      );
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _textMsg(
+              id: 'tall',
+              pubkey: 'alice',
+              content: List.filled(120, 'A long answer line.').join('\n\n'),
+              createdAt: 1100,
+              extraTags: const [
+                ['p', 'self'],
+              ],
+            ),
+            for (var i = 0; i < 3; i++)
+              _textMsg(
+                id: 'later$i',
+                pubkey: 'alice',
+                content: List.filled(40, 'Later line.').join('\n\n'),
+                createdAt: 1200 + i,
+              ),
+          ],
+          initialMessageId: 'tall',
+          readStateNotifier: readState,
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      final row = tester.getRect(
+        find.byKey(const ValueKey('channel-message-group-tall')),
+      );
+      final screen = tester.getRect(
+        find.byKey(const ValueKey('channel-message-list')),
+      );
+      // The jump leaves the row's top above the screen, with later messages
+      // below it, so it neither fits nor fills the screen.
+      expect(row.top, lessThan(screen.top));
+      expect(row.bottom, lessThan(screen.bottom));
+      expect(readState.markedContexts, {'msg:tall': 1100});
+    });
+
     testWidgets('reading the bottom of a Solo chat reads an inline reply '
         'mention', (tester) async {
       final readState = _SynchronousReadStateNotifier(
@@ -3297,6 +3347,67 @@ void main() {
       await tester.pump(const Duration(milliseconds: 300));
 
       expect(readState.markedContexts, {'msg:$threadIdRoot': 1000});
+    });
+
+    testWidgets('a tall linked thread reply is read when the jump leaves it '
+        'cut off', (tester) async {
+      final readState = _SynchronousReadStateNotifier(
+        const ReadStateState(
+          isReady: true,
+          pubkey: 'self',
+          contexts: {},
+          version: 0,
+        ),
+      );
+      final root = _textMsg(
+        id: threadIdRoot,
+        pubkey: 'self',
+        content: 'Question',
+        createdAt: 1000,
+      );
+      final tall = _textMsg(
+        id: threadIdReplyZero,
+        pubkey: 'alice',
+        content: List.filled(120, 'A long answer line.').join('\n\n'),
+        createdAt: 1100,
+        extraTags: const [
+          ['e', threadIdRoot, '', 'reply'],
+          ['p', 'self'],
+        ],
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [root, tall],
+          threadReplies: {
+            threadIdRoot: [tall],
+          },
+          readStateNotifier: readState,
+          home: ThreadDetailPage(
+            threadHead: formatTimeline([root]).single,
+            allMessages: formatTimeline([root, tall]),
+            channelId: _channelId,
+            currentPubkey: 'self',
+            isMember: true,
+            isArchived: false,
+            initialMessageId: threadIdReplyZero,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      final row = tester.getRect(
+        find.byKey(const ValueKey('thread-message-group-$threadIdReplyZero')),
+      );
+      final screen = tester.getRect(
+        find.byKey(const ValueKey('thread-message-list')),
+      );
+      // The jump leaves the reply's bottom below the screen, and its top
+      // well inside it, so it neither fits nor fills the screen.
+      expect(row.top, greaterThan(screen.top));
+      expect(row.bottom, greaterThan(screen.bottom));
+      expect(readState.markedContexts['msg:$threadIdReplyZero'], 1100);
     });
 
     testWidgets('rows under the Android keyboard are not read in history', (

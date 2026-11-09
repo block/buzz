@@ -454,6 +454,24 @@ void main() {
       expect(readable(0.5, 2), isFalse);
       expect(readable(-1, 0.5), isFalse);
     });
+
+    test('reads a linked row once any part is inside the reading area', () {
+      bool linked(double leading, double trailing) => isReadableRow(
+        ItemPosition(
+          index: 0,
+          itemLeadingEdge: leading,
+          itemTrailingEdge: trailing,
+        ),
+        start: 0.1,
+        end: 0.9,
+        linked: true,
+      );
+      expect(linked(0.35, 2), isTrue);
+      expect(linked(-1, 0.5), isTrue);
+      expect(linked(0.2, 0.8), isTrue);
+      expect(linked(-1, 0.1), isFalse);
+      expect(linked(0.9, 2), isFalse);
+    });
   });
 
   group('thread', () {

@@ -633,13 +633,16 @@ class _MessageList extends HookConsumerWidget {
           0.01;
       final visible = <TimelineMessage>[];
       for (final position in itemPositionsListener.itemPositions.value) {
-        if (position.index >= displayEntries.length ||
-            !isReadableRow(position, start: bottomEdge, end: topEdge)) {
-          continue;
+        if (position.index >= displayEntries.length) continue;
+        final group = displayEntries.reversed.elementAt(position.index);
+        if (isReadableRow(
+          position,
+          start: bottomEdge,
+          end: topEdge,
+          linked: group.any((e) => e.message.id == initialMessageId),
+        )) {
+          visible.addAll(group.map((entry) => entry.message));
         }
-        final group =
-            displayEntries[displayEntries.length - 1 - position.index];
-        visible.addAll(group.map((entry) => entry.message));
       }
       final latest = entries.last.message;
       final atBottom =

@@ -11,8 +11,8 @@ import '../../shared/read_state/read_state_provider.dart';
 import 'timeline_message.dart';
 import 'unread_badge/is_high_priority_event.dart';
 
-/// How long a row must stay fully visible before it counts as read. This is
-/// the same dwell the web and desktop app (`buzz-app`) uses.
+/// How long a row must stay readable ([isReadableRow]) before it counts as
+/// read. This is the same dwell the web and desktop app (`buzz-app`) uses.
 const readingDwell = Duration(milliseconds: 300);
 
 /// The read marks to write after a reading dwell, following `buzz-app`'s
@@ -27,15 +27,17 @@ const readingDwell = Duration(milliseconds: 300);
 ///   timeline, each mention through it, replies included), at most the newest
 ///   [catchUpMessageMarkLimit], so a mention taller than the screen is still
 ///   read. Messages the reader marked unread keep that intent.
-/// - Each fully visible message gets its own `msg:` mark unless its own mark,
+/// - Each readable message (see [isReadableRow]) gets its own `msg:` mark unless its own mark,
 ///   the channel mark, or (for an ordinary top-level message) `activity:`
 ///   already reads it. A thread mark never counts here: a reply finds its
 ///   thread only while the root is loaded, so `buzz-app` keeps reply marks.
+///   Unlike `buzz-app`, the message a link opened is readable once any part
+///   of it shows, since a phone often cannot fit a long one.
 /// - Automatic reading never writes the channel mark. Only an explicit
 ///   Mark read does that.
 ///
 /// [loaded] is every message loaded for the channel or thread, including
-/// replies. [visible] is the messages fully visible for the whole dwell; see
+/// replies. [visible] is the messages readable for the whole dwell; see
 /// [isReadableRow].
 /// [bottom] is the newest message when its bottom edge is visible at the
 /// bottom of the list; otherwise null. Set [threadRootId] when reading a
@@ -126,14 +128,18 @@ const catchUpMessageMarkLimit = 128;
 
 /// Whether a row at [position] counts as read: it lies inside the reading
 /// area from [start] to [end], or it is taller than that area and covers all
-/// of it.
+/// of it. A [linked] row, the message a link opened, counts once any part of
+/// it is inside: the jump can leave a long one cut off.
 bool isReadableRow(
   ItemPosition position, {
   required double start,
   required double end,
-}) =>
-    (position.itemLeadingEdge >= start && position.itemTrailingEdge <= end) ||
-    (position.itemLeadingEdge <= start && position.itemTrailingEdge >= end);
+  bool linked = false,
+}) => linked
+    ? position.itemLeadingEdge < end && position.itemTrailingEdge > start
+    : (position.itemLeadingEdge >= start && position.itemTrailingEdge <= end) ||
+          (position.itemLeadingEdge <= start &&
+              position.itemTrailingEdge >= end);
 
 /// Whether [bottom] is the live bottom. A loaded message newer than the
 /// bottom row means the list does not show it, for example after a jump
