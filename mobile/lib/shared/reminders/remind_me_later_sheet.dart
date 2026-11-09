@@ -12,10 +12,16 @@ import 'reminder_time_presets.dart';
 /// Bottom sheet for "Remind me later": desktop-parity presets plus a native
 /// date/time picker, publishing the same author-private kind-30300 reminder
 /// events desktop reads.
+///
+/// With [existing], the chosen time reschedules that pending reminder (same
+/// `d` tag, note kept) instead of adding a second one. [onSaved] runs after
+/// the relay accepts the reminder.
 void showRemindMeLaterSheet({
   required BuildContext context,
   required WidgetRef ref,
   required ReminderTarget target,
+  ({String dTag, String? note})? existing,
+  VoidCallback? onSaved,
 }) {
   final service = ref.read(reminderServiceProvider);
   final messenger = ScaffoldMessenger.of(context);
@@ -29,9 +35,17 @@ void showRemindMeLaterSheet({
 
   Future<void> submit(int notBefore) async {
     try {
-      await service.createReminder(target: target, notBefore: notBefore);
+      await service.createReminder(
+        target: target,
+        notBefore: notBefore,
+        note: existing?.note,
+        replacingDTag: existing?.dTag,
+      );
+      onSaved?.call();
       messenger.showFeedbackSnackBar(
-        const SnackBar(content: Text('Reminder set')),
+        SnackBar(
+          content: Text(existing == null ? 'Reminder set' : 'Reminder updated'),
+        ),
         kind: ToastKind.success,
       );
     } catch (error) {

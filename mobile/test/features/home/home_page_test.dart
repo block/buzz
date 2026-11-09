@@ -12,6 +12,7 @@ import 'package:buzz/features/home/messages_filters.dart';
 import 'package:buzz/features/home/messages_navigation_bar.dart';
 import 'package:buzz/shared/widgets/ios_message_create_button.dart';
 import 'package:buzz/shared/widgets/ios_glass_navigation_button.dart';
+import 'package:buzz/shared/widgets/ios_navigation_bar.dart';
 import 'package:buzz/features/search/search_page.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:flutter/foundation.dart';
@@ -576,6 +577,20 @@ void main() {
       await tester.pumpAndSettle();
       expect(tester.widget<Opacity>(homeOpacity).opacity, 1);
       expect(find.text('Messages'), findsOneWidget);
+      // A sheet's dim barrier can't composite over the native header edge.
+      final headerNativeView = find.descendant(
+        of: find.byType(FrostedAppBar),
+        matching: find.byType(IosNavigationBar),
+      );
+      expect(headerNativeView, findsOneWidget);
+      await tester.longPress(find.text('General'));
+      await tester.pumpAndSettle();
+      expect(find.text('Copy channel name'), findsOneWidget);
+      expect(headerNativeView, findsNothing);
+      await tester.tapAt(const Offset(20, 20));
+      await tester.pumpAndSettle();
+      expect(find.text('Copy channel name'), findsNothing);
+      expect(headerNativeView, findsOneWidget);
       await tester.pumpWidget(const SizedBox.shrink());
       debugDefaultTargetPlatformOverride = null;
     },
