@@ -113,6 +113,12 @@ run_unit_tests() {
   run_test_step "buzz-cli tests" \
     cargo test -p buzz-cli -- --nocapture
 
+  run_test_step "buzz-ws-client tests" \
+    cargo test -p buzz-ws-client -- --nocapture
+
+  run_test_step "buzz-pairing-cli tests" \
+    cargo test -p buzz-pairing-cli -- --nocapture
+
   # buzz-sdk builder/validation unit tests: pure event-builder and input
   # validation, no infra. Mirrors the nextest path in `just test-unit` — the
   # two lists must stay in step. `--lib` matches the nextest invocation and
@@ -164,6 +170,9 @@ run_unit_tests() {
 
   run_test_step "buzz-admin NIP-FI binding command tests" \
     cargo test -p buzz-admin nip_fi::tests -- --nocapture
+
+  run_test_step "buzz-admin NIP-FI policy command tests" \
+    cargo test -p buzz-admin nip_fi_policy::tests -- --nocapture
 
   run_test_step "buzz-admin user-deletion intake command tests" \
     cargo test -p buzz-admin user_deletions::tests -- --nocapture
@@ -263,6 +272,9 @@ run_unit_tests() {
   run_test_step "buzz-relay subscription registry tests" \
     cargo test -p buzz-relay --lib subscription::tests:: -- --nocapture
 
+  run_test_step "buzz-relay multi-node fan-out tests" \
+    cargo test -p buzz-relay --lib handlers::multinode_fanout::tests:: -- --nocapture
+
   # telemetry and config tests mutate process env. libtest runs one process
   # with many threads (nextest, used by `just test-unit`, isolates each test),
   # so run them single-threaded here. `--skip` keeps the substring filter
@@ -320,6 +332,11 @@ run_unit_tests() {
       api::bridge::postgres_tests::moderation_read_audit_query_bearing_nip98_event_verifies \
       api::bridge::postgres_tests::moderation_read_restricted_no_query_still_verifies \
       connection::tests::aborting_lifecycle_owner_is_drop_safe \
+      connection::tests::missed_pongs_close_with_their_reason_and_count \
+      connection::tests::client_reply_to_a_jittered_restart_closes_as_shutdown \
+      connection::tests::client_close_racing_a_policy_disconnect_keeps_the_policy_reason \
+      connection::tests::server_close_reason_ranks_shutdown_policy_then_cancellation \
+      connection::tests::auth_timeout_after_a_rejected_auth_closes_as_auth_failed \
       connection::tests::shutdown_terminalizes_auth_stalled_on_database_before_late_success \
       connection::terminal_close_delivery_tests::upgrade_would_deny_line_without_auth_logs_absent_at_close \
       handlers::event::tests::observer_owner_cache_is_scoped_to_community \
@@ -519,6 +536,13 @@ run_unit_tests() {
     cargo test -p buzz-relay --lib invite_token:: -- --nocapture
   run_test_step "buzz-relay invitation cutoff configuration" \
     cargo test -p buzz-relay --lib config::invite_cutoff_tests:: -- --nocapture
+
+  run_test_step "buzz-relay runtime concurrency caps" \
+    cargo test -p buzz-relay --lib concurrency_limits::tests:: -- --nocapture
+  run_test_step "buzz-relay feature-flag provider selection" \
+    cargo test -p buzz-relay --lib feature_flags::tests:: -- --nocapture
+  run_test_step "buzz-relay AUTH concurrency shed" \
+    cargo test -p buzz-relay --lib handlers::auth::tests::auth_cap_sheds_a_verified_login_with_a_bare_close -- --exact --nocapture
 
   run_test_step "buzz-relay mesh receive lifetime regression" \
     cargo test -p buzz-relay --lib mesh_boot::tests::demo_echo_retains_pending_receive_across_housekeeping_ticks -- --exact --nocapture

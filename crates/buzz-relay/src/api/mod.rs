@@ -8,6 +8,8 @@ pub mod gifs;
 pub mod git;
 pub mod invites;
 pub mod media;
+/// Channel-aware media authorization.
+pub mod media_access;
 pub mod mesh_demo;
 pub mod nip05;
 pub mod nip_fi;
@@ -944,3 +946,6 @@ mod parse_query_tests {
 
 mod artifact;
 pub(crate) mod artifact_sync;
+
+#[cfg(test)]
+mod media_access_postgres_tests;

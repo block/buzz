@@ -16,6 +16,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/features/channels/channel.dart';
+import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/me/me_page.dart';
 import 'package:buzz/shared/me/me_groups.dart';
@@ -115,6 +116,66 @@ void main() {
     expect(find.text('Someone else chat'), findsNothing);
     expect(find.text('Inaccessible labeled chat'), findsNothing);
     expect(find.text('A place to work with your agents'), findsNothing);
+  });
+
+  testWidgets('long-pressing a chat opens its details as a sheet', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          defaultAgentProvider.overrideWith((ref) => Stream.value(null)),
+          myPubkeyProvider.overrideWithValue('owner'),
+          currentPubkeyProvider.overrideWith((ref) => 'owner'),
+          channelsProvider.overrideWith(LabeledChannels.new),
+          channelMembersProvider('loose').overrideWith(
+            (ref) async => [
+              ChannelMember(
+                pubkey: 'owner',
+                role: 'owner',
+                joinedAt: DateTime(2026),
+              ),
+            ],
+          ),
+          agentOwnersProvider.overrideWithValue(
+            const AsyncValue.data(<String, String>{}),
+          ),
+          meGroupsProvider.overrideWith(
+            (ref) => Stream.value(const MeGroups(groups: [], assignments: {})),
+          ),
+        ],
+        child: MaterialApp(theme: AppTheme.light(), home: const MePage()),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.longPress(find.text('Unfiled labeled chat'));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(BottomSheet), findsOneWidget);
+    expect(
+      find.descendant(
+        of: find.byType(BottomSheet),
+        matching: find.byKey(const ValueKey('channel-details-page-list')),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: find.byType(BottomSheet),
+        matching: find.text('Unfiled labeled chat'),
+      ),
+      findsOneWidget,
+    );
+
+    await tester.drag(
+      find.byKey(const ValueKey('channel-details-page-list')),
+      const Offset(0, -600),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Leave channel'), findsOneWidget);
+    // Solo chats move between Solo workspaces, not channel sections.
+    expect(find.text('Move to section…'), findsNothing);
   });
 
   testWidgets('empty workspace stays centered behind the New chat keyboard', (

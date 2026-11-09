@@ -116,8 +116,8 @@ pub async fn claim_relay_membership_with_owner(
         return Err(DbError::InviteRestricted);
     }
     let inserted = sqlx::query(
-        "INSERT INTO relay_members (community_id, pubkey, role, added_by) \
-         VALUES ($1, $2, $3, 'invite') \
+        "INSERT INTO relay_members (community_id, pubkey, role, added_by, auto_join_pending) \
+         VALUES ($1, $2, $3, 'invite', gen_random_uuid()) \
          ON CONFLICT (community_id, pubkey) DO NOTHING",
     )
     .bind(community.as_uuid())

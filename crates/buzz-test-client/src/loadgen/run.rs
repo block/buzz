@@ -28,7 +28,9 @@ use super::desktop;
 use super::identity::{self, Role};
 use super::net::{http_reason, Net};
 use super::scenario::{AgentTurn, Community, HumanProfile, Members, Scenario, WideSplit};
-use super::seed::{find_roots, hot_root_keys, reply_tags, HOT_ROOT_PREFIX, ROOT_PREFIX};
+use super::seed::{
+    channel_creator, find_roots, hot_root_keys, reply_tags, HOT_ROOT_PREFIX, ROOT_PREFIX,
+};
 use super::stats::{abort_reason, ops_json, Op, Pending, Stats};
 
 /// Content prefix of timed messages: `lg:<send unix micros>`.
@@ -74,6 +76,9 @@ pub(super) struct Shared {
     pub(super) stop: watch::Receiver<bool>,
     /// Seeded thread roots per channel id, resolved lazily by whichever client needs them first.
     roots: Mutex<HashMap<String, Arc<Vec<String>>>>,
+    /// Index within its community of every channel id, to name the
+    /// [`channel_creator`] whose roots a lookup searches for.
+    channel_indices: HashMap<String, usize>,
     /// Channel members and human pubkeys, built once by the first desktop
     /// client that needs them.
     pub(super) directory: tokio::sync::OnceCell<Arc<Directory>>,
@@ -93,6 +98,15 @@ impl Shared {
         stats: Arc<Stats>,
         stop: watch::Receiver<bool>,
     ) -> Self {
+        let channel_indices = (0..scenario.shape.communities)
+            .flat_map(|community| {
+                scenario
+                    .channel_ids(community)
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, id)| (id, index))
+            })
+            .collect();
         Self {
             communities: scenario.communities(),
             scenario,
@@ -100,6 +114,7 @@ impl Shared {
             stats,
             stop,
             roots: Mutex::new(HashMap::new()),
+            channel_indices,
             directory: tokio::sync::OnceCell::new(),
         }
     }
@@ -562,9 +577,17 @@ pub(super) async fn roots(
     if let Some(found) = shared.roots.lock().await.get(channel) {
         return found.clone();
     }
-    let owner = identity::keys(&shared.scenario.run_id, Role::Owner, community.index);
+    let index = shared.channel_indices.get(channel).copied().unwrap_or(0);
+    let author = channel_creator(&shared.scenario, community.index, index);
     let pending = shared.stats.begin(Op::HttpQuery);
-    let lookup = find_roots(&shared.net, community, reader, &owner, channel, ROOT_PREFIX);
+    let lookup = find_roots(
+        &shared.net,
+        community,
+        reader,
+        &author,
+        channel,
+        ROOT_PREFIX,
+    );
     let result = match bound {
         None => lookup.await,
         Some(limit) => match bounded(shared, limit, lookup).await {
@@ -3477,5 +3500,54 @@ hold_secs = 1
         let settled = ops_json(&stats.snapshot().since(&at_stop), 1.0);
         assert_eq!(settled["hot_reply"]["count"], 8, "{settled}");
         assert_eq!(relay.posted.lock().unwrap().len(), 8, "{settled}");
+    }
+
+    #[tokio::test]
+    async fn root_lookups_search_the_channel_creators_posts() {
+        let queries: Log<Value> = Default::default();
+        let query_log = queries.clone();
+        let addr = super::super::seed::tests::fake_http(move |_, _, body| {
+            let filter: Value = serde_json::from_slice(body).unwrap();
+            query_log.lock().unwrap().push(filter[0].clone());
+            (200, "[]".to_string())
+        })
+        .await;
+        let scenario = Scenario::parse(&format!(
+            r#"
+run_id = "t"
+[target]
+ws_url = "ws://{addr}"
+http_url = "http://{addr}"
+community_host_template = "lg-{{run}}-{{i}}.example"
+connect_addr = "{addr}"
+[shape]
+communities = 2
+channels_per_community = 17
+[population]
+humans = 1
+agents = 0
+channels_per_member = 1
+[[ramp]]
+users = 1.0
+hold_secs = 1
+"#
+        ))
+        .unwrap();
+        let net = Net::new(&scenario).await.unwrap();
+        let (_stop, stop) = watch::channel(false);
+        let shared = Shared::new(scenario, net, Arc::new(Stats::default()), stop);
+        let reader = Keys::generate();
+        for (community, channel) in [(0, 0), (0, 9), (1, 16)] {
+            let id = identity::channel_id("t", community, channel);
+            let c = &shared.communities[community];
+            roots(&shared, c, &reader, &id, None).await;
+            let author = channel_creator(&shared.scenario, community, channel);
+            let lookup = queries.lock().unwrap().pop().unwrap();
+            assert_eq!(lookup["#h"], json!([id]));
+            assert_eq!(lookup["authors"], json!([author.public_key().to_hex()]));
+        }
+        let owner = identity::keys("t", Role::Owner, 1).public_key();
+        assert_eq!(channel_creator(&shared.scenario, 1, 7).public_key(), owner);
+        assert_ne!(channel_creator(&shared.scenario, 1, 16).public_key(), owner);
     }
 }

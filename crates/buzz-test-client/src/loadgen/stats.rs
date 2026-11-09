@@ -316,7 +316,7 @@ const QUOTA_EXCEEDED: &str = "rate-limited: quota exceeded";
 /// Quota rejections only: an HTTP 429 status or the relay's quota text. Other
 /// `rate-limited:` rejections, such as `shared admission unavailable` when the
 /// relay's admission store is down, are relay failures and count as errors.
-fn is_throttle(reason: &str) -> bool {
+pub(super) fn is_throttle(reason: &str) -> bool {
     reason.starts_with(HTTP_TOO_MANY_REQUESTS) || reason.contains(QUOTA_EXCEEDED)
 }
 

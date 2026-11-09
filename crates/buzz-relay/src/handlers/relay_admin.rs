@@ -341,11 +341,11 @@ async fn execute_relay_admin_command(
             // to change an existing member's role.
             let write = state
                 .db
-                .add_relay_member(
+                .add_relay_member_with_default_channels(
                     tenant.community(),
                     &target_hex,
                     &role,
-                    Some(&sender_hex),
+                    &sender_hex,
                     &state.relay_keypair,
                 )
                 .await
@@ -366,16 +366,9 @@ async fn execute_relay_admin_command(
                 if let Err(e) = publish_nip43_member_added(tenant, state, &target_hex).await {
                     warn!(error = %e, "failed to publish NIP-43 member added event");
                 }
-                // The sender adds someone else, so the target's
-                // `channel_add_policy` decides whether they are auto-joined.
-                auto_join_default_channels(
-                    tenant,
-                    state,
-                    &target_hex,
-                    Some(&event.pubkey.to_bytes()),
-                )
-                .await;
             }
+            // A no-op re-add also resumes unfinished work from the original actor.
+            auto_join_default_channels(tenant, state, &target_hex, None).await;
             fan_out_nip43_membership_list(tenant, state, write.snapshot).await;
         }
 

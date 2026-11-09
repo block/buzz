@@ -10,5 +10,8 @@ CREATE TABLE community_auth_upgrades (
     expected_issuer TEXT NOT NULL,
     operator_pubkey TEXT NOT NULL,
     policy_generation BIGINT NOT NULL CHECK (policy_generation > 0),
+    requested_requires_nip_fi BOOLEAN NOT NULL DEFAULT true,
+    expected_policy_generation BIGINT,
+    expected_requires_nip_fi BOOLEAN,
     accepted_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );

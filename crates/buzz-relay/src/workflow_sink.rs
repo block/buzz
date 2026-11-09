@@ -402,6 +402,12 @@ impl ActionSink for RelayActionSink {
                 .sign_with_keys(&state.relay_keypair)
                 .map_err(|e| ActionSinkError::EventBuild(format!("signing: {e}")))?;
 
+            crate::handlers::media_access::validate_media_references(&tenant, &state, &event)
+                .await
+                .map_err(|error| {
+                    ActionSinkError::InvalidInput(format!("media reference denied: {error:?}"))
+                })?;
+
             let event_id_hex = event.id.to_hex();
             let event_id_bytes = event.id.as_bytes().to_vec();
             let kind_u32 = KIND_STREAM_MESSAGE;

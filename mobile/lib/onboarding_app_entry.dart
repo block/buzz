@@ -5,12 +5,14 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import 'features/pairing/pairing_page.dart';
+import 'organization_app_entry.dart';
 import 'features/pairing/pairing_provider.dart';
 import 'shared/hosted/hosted_flow_provider.dart';
 import 'shared/hosted/hosted_flow.dart';
 import 'shared/hosted/hosted_communities.dart';
 import 'shared/hosted/use_known_communities.dart';
 import 'shared/hosted/hosted_environment.dart';
+import 'shared/hosted/organization_environment.dart';
 import 'shared/hosted/hosted_community_creation.dart';
 import 'shared/hosted/hosted_flow_problem_message.dart';
 import 'shared/widgets/confirmation_dialog.dart';
@@ -33,6 +35,8 @@ class OnboardingAppEntry extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    // Fixed per build, so the hooks below always run in the same order.
+    if (OrganizationEnvironment.enabled) return const OrganizationAppEntry();
     final existingUser = useState(false);
     final creating = useState(false);
     final enteringCommunityLink = useState(false);

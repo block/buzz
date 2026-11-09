@@ -4,7 +4,7 @@ void swipeReplyTests() {
   for (final thread in [false, true]) {
     for (final own in [false, true]) {
       testWidgets(
-        'right drag opens existing reply destination, thread=$thread own=$own',
+        'left drag opens existing reply destination, thread=$thread own=$own',
         (tester) async {
           final events = [
             _textMsg(
@@ -72,8 +72,8 @@ void swipeReplyTests() {
             if (bubbleRect.contains(start)) continue;
             final previousNavigationDrags = navigationDrags;
             final outside = await tester.startGesture(start);
-            await outside.moveBy(const Offset(25, 0));
-            await outside.moveBy(const Offset(100, 0));
+            await outside.moveBy(const Offset(-25, 0));
+            await outside.moveBy(const Offset(-100, 0));
             await tester.pump();
             expect(tester.getTopLeft(row), initial);
             expect(haptics, isEmpty);
@@ -82,20 +82,24 @@ void swipeReplyTests() {
             await tester.pumpAndSettle();
             expect(Navigator.of(tester.element(row)).canPop(), isFalse);
           }
-          final gesture = await tester.startGesture(
-            tester.getCenter(
-              find
-                  .descendant(
-                    of: row,
-                    matching: find.byType(LocalSendBubbleSurface),
-                  )
-                  .first,
-            ),
-          );
-          await gesture.moveBy(const Offset(25, 0));
-          await gesture.moveBy(const Offset(40, 0));
+          // A rightward drag on the bubble is left to swipe-back navigation.
+          final bubbleCenter = bubbleRect.center;
+          final previousNavigationDrags = navigationDrags;
+          final back = await tester.startGesture(bubbleCenter);
+          await back.moveBy(const Offset(25, 0));
+          await back.moveBy(const Offset(100, 0));
           await tester.pump();
-          expect(tester.getTopLeft(row).dx, greaterThan(initial.dx));
+          expect(tester.getTopLeft(row), initial);
+          expect(haptics, isEmpty);
+          expect(navigationDrags, greaterThan(previousNavigationDrags));
+          await back.up();
+          await tester.pumpAndSettle();
+          expect(Navigator.of(tester.element(row)).canPop(), isFalse);
+          final gesture = await tester.startGesture(bubbleCenter);
+          await gesture.moveBy(const Offset(-25, 0));
+          await gesture.moveBy(const Offset(-40, 0));
+          await tester.pump();
+          expect(tester.getTopLeft(row).dx, lessThan(initial.dx));
           expect(haptics, isEmpty);
           final partialCircle = tester.widget<DecoratedBox>(
             find.byKey(const ValueKey('swipe-reply-circle')),
@@ -112,23 +116,46 @@ void swipeReplyTests() {
           );
           expect(ring.strokeWidth, 2);
           expect(ring.value, inExclusiveRange(0, 1));
-          await gesture.moveBy(const Offset(45, 0));
+          await gesture.moveBy(const Offset(-45, 0));
           await tester.pump();
           expect(haptics, hasLength(1));
-          await gesture.moveBy(const Offset(10, 0));
+          await gesture.moveBy(const Offset(-10, 0));
           await tester.pump();
           expect(haptics, hasLength(1));
           final armedPosition = tester.getTopLeft(row);
-          await gesture.moveBy(const Offset(160, 0));
+          await gesture.moveBy(const Offset(-160, 0));
           await tester.pump();
           final resistedPosition = tester.getTopLeft(row);
-          expect(resistedPosition.dx, greaterThan(armedPosition.dx));
-          expect(resistedPosition.dx, lessThan(armedPosition.dx + 40));
+          expect(resistedPosition.dx, lessThan(armedPosition.dx));
+          expect(resistedPosition.dx, greaterThan(armedPosition.dx - 40));
           final circle = find.byKey(const ValueKey('swipe-reply-circle'));
+          final circleRect = tester.getRect(circle);
+          // The armed slide uncovers the feedback, which stays on screen.
           expect(
-            tester.getRect(circle).left,
-            closeTo(bubbleRect.left - Grid.lg - Grid.xxs, 0.01),
+            circleRect.left,
+            greaterThan(
+              tester
+                  .getRect(
+                    find
+                        .descendant(
+                          of: row,
+                          matching: find.byType(LocalSendBubbleSurface),
+                        )
+                        .first,
+                  )
+                  .right,
+            ),
           );
+          expect(
+            circleRect.right,
+            lessThanOrEqualTo(
+              tester.view.physicalSize.width / tester.view.devicePixelRatio,
+            ),
+          );
+          if (!own) {
+            // Incoming bubbles leave room for the usual gutter.
+            expect(circleRect.left, closeTo(bubbleRect.right + Grid.xxs, 0.01));
+          }
           final fill =
               tester.widget<DecoratedBox>(circle).decoration as BoxDecoration;
           // The armed circle uses the chosen message color, not the app accent.
@@ -159,10 +186,10 @@ void swipeReplyTests() {
             tester.element(circle).colors.onSurfaceVariant,
           );
           // Retreat below readiness without returning to rest, then cross again.
-          await gesture.moveBy(const Offset(-210, 0));
+          await gesture.moveBy(const Offset(210, 0));
           await tester.pump();
-          expect(tester.getTopLeft(row).dx, greaterThan(initial.dx));
-          await gesture.moveBy(const Offset(45, 0));
+          expect(tester.getTopLeft(row).dx, lessThan(initial.dx));
+          await gesture.moveBy(const Offset(-45, 0));
           await tester.pump();
           expect(haptics, hasLength(2));
           await tester.pump(const Duration(milliseconds: 60));
@@ -192,8 +219,8 @@ void swipeReplyTests() {
   }
 
   for (final movement in [
-    const Offset(45, 0),
-    const Offset(-100, 0),
+    const Offset(-45, 0),
+    const Offset(100, 0),
     const Offset(0, -100),
   ]) {
     testWidgets('non-reply drag $movement does not navigate', (tester) async {
@@ -246,8 +273,8 @@ void swipeReplyTests() {
               .first,
         ),
       );
-      await gesture.moveBy(const Offset(25, 0));
-      await gesture.moveBy(const Offset(90, 0));
+      await gesture.moveBy(const Offset(-25, 0));
+      await gesture.moveBy(const Offset(-90, 0));
       await tester.pump();
       final icon = find.byIcon(BuzzIcons.messageSquareReply);
       expect(
@@ -284,11 +311,49 @@ void swipeReplyTests() {
             .first,
       ),
     );
-    await gesture.moveBy(const Offset(25, 0));
-    await gesture.moveBy(const Offset(90, 0));
-    await gesture.moveBy(const Offset(-70, 0));
+    await gesture.moveBy(const Offset(-25, 0));
+    await gesture.moveBy(const Offset(-90, 0));
+    await gesture.moveBy(const Offset(70, 0));
     await gesture.up();
     await tester.pumpAndSettle();
     expect(find.byType(ThreadDetailPage), findsNothing);
   });
+}
+
+void swipeReplyLinkTests() {
+  for (final onLink in [true, false]) {
+    testWidgets(
+      'left drag starting ${onLink ? 'on a link' : 'beside a link'} replies',
+      variant: const TargetPlatformVariant({
+        TargetPlatform.iOS,
+        TargetPlatform.android,
+      }),
+      (tester) async {
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [
+              _textMsg(
+                id: 'swipe-link',
+                pubkey: 'alice',
+                content: 'Read [the doc](https://example.com/doc) carefully',
+              ),
+            ],
+          ),
+        );
+        await tester.pumpAndSettle();
+        final gesture = await tester.startGesture(
+          tester.getCenter(
+            onLink ? find.text('the doc') : find.textContaining('carefully'),
+          ),
+        );
+        await gesture.moveBy(const Offset(-25, 0));
+        await gesture.moveBy(const Offset(-100, 0));
+        await tester.pump();
+        await gesture.up();
+        await tester.pumpAndSettle();
+        expect(find.byType(ThreadDetailPage), findsOneWidget);
+        expect(find.text('Copy link'), findsNothing);
+      },
+    );
+  }
 }

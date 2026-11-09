@@ -1616,7 +1616,7 @@ async fn history_permit_follows_the_read_session_and_a_full_gate_rejects() {
     let cap = db.history_reads.available();
     assert_eq!(
         cap,
-        super::history_reads::HistoryReadGate::cap(db.read_max_connections) as usize
+        super::history_reads::cap(db.read_max_connections) as usize
     );
 
     let head = db
@@ -1638,7 +1638,12 @@ async fn history_permit_follows_the_read_session_and_a_full_gate_rejects() {
     // Fill the gate: every remaining permit is held elsewhere.
     let mut others = Vec::new();
     for _ in 1..cap {
-        others.push(db.history_reads.admit().await.expect("free permit"));
+        others.push(
+            db.history_reads
+                .admit(super::history_reads::PERMIT_WAIT)
+                .await
+                .expect("free permit"),
+        );
     }
     let recorder = DebuggingRecorder::new();
     let snapshotter = recorder.snapshotter();
@@ -1655,7 +1660,7 @@ async fn history_permit_follows_the_read_session_and_a_full_gate_rejects() {
         "the rejection must be the retryable pool timeout; got {rejected:?}"
     );
     assert!(
-        started.elapsed() >= super::history_reads::HistoryReadGate::PERMIT_WAIT,
+        started.elapsed() >= super::history_reads::PERMIT_WAIT,
         "the read must wait out the bounded permit wait before rejecting"
     );
     let decisions: Vec<(String, String)> = snapshotter
@@ -1684,12 +1689,36 @@ async fn history_permit_follows_the_read_session_and_a_full_gate_rejects() {
     drop(session);
     assert_eq!(db.history_reads.available(), 1);
     let (_window, session) = db
-        .get_channel_window_with_session(cid, channel, 10, Some(cursor), None)
+        .get_channel_window_with_session(cid, channel, 10, Some(cursor.clone()), None)
         .await
         .expect("a released permit admits the next read");
     assert!(session.is_replica());
     drop(session);
     drop(others);
+    assert_eq!(db.history_reads.available(), cap);
+
+    // An operator lowering the cap at runtime holds new reads to the new
+    // limit while one is in flight, and raising it readmits them.
+    let (_window, held) = db
+        .get_channel_window_with_session(cid, channel, 10, Some(cursor.clone()), None)
+        .await
+        .expect("routed cursor window");
+    assert_eq!(db.history_read_gate().set_limit(1), 1);
+    let rejected = db
+        .get_channel_window_with_session(cid, channel, 10, Some(cursor.clone()), None)
+        .await
+        .err()
+        .expect("a lowered cap must reject the next history read");
+    assert!(
+        matches!(rejected, DbError::Sqlx(sqlx::Error::PoolTimedOut)),
+        "a lowered cap sheds as retryable; got {rejected:?}"
+    );
+    assert_eq!(db.history_read_gate().set_limit(cap), cap);
+    let (_window, second) = db
+        .get_channel_window_with_session(cid, channel, 10, Some(cursor), None)
+        .await
+        .expect("a raised cap admits the next read");
+    drop((held, second));
     assert_eq!(db.history_reads.available(), cap);
 }
 
@@ -2088,6 +2117,65 @@ async fn is_relay_member_is_bounded_routed_and_fails_closed() {
             .expect("entry too old"),
         "an over-budget entry must fail closed to the writer"
     );
+}
+
+/// The per-AUTH pending default-channel read is bounded-routed like
+/// membership; the roster writers' read stays on the writer. A different
+/// token on each pool proves which pool answered.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn pending_default_channel_join_routed_reads_the_bounded_replica() {
+    let (writer, _writer_db) = ScratchDb::migrated(&admin_url().await, "pend_w").await;
+    let (replica, _replica_db) = ScratchDb::migrated(&admin_url().await, "pend_r").await;
+
+    let community = Uuid::new_v4();
+    let pubkey = "cc".repeat(32);
+    let (writer_token, replica_token) = (Uuid::new_v4(), Uuid::new_v4());
+    for (pool, token) in [(&writer, writer_token), (&replica, replica_token)] {
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(community)
+            .bind(format!("pending-routing-{}.example", community.simple()))
+            .execute(pool)
+            .await
+            .expect("insert community");
+        sqlx::query(
+            "INSERT INTO relay_members (community_id, pubkey, role, auto_join_pending) \
+             VALUES ($1, $2, 'member', $3)",
+        )
+        .bind(community)
+        .bind(&pubkey)
+        .bind(token)
+        .execute(pool)
+        .await
+        .expect("seed pending work");
+    }
+    let cid = CommunityId::from_uuid(community);
+    let token = |pending: Option<relay_members::PendingDefaultChannelJoin>| {
+        pending.expect("pending work").token
+    };
+
+    let mut db = Db::from_pools(writer.clone(), replica.clone());
+    db.fence().force_open_for_tests(chrono::Utc::now());
+
+    // Budget unset ⇒ writer.
+    let pending = db.pending_default_channel_join_routed(cid, &pubkey).await;
+    assert_eq!(token(pending.expect("gate off")), writer_token);
+
+    // Budget set + fresh entry ⇒ replica; the writer-only read ignores it.
+    db.set_replica_read_max_age_for_tests(Some(std::time::Duration::from_secs(5)));
+    let pending = db.pending_default_channel_join_routed(cid, &pubkey).await;
+    assert_eq!(token(pending.expect("gate on")), replica_token);
+    let pending = db.pending_default_channel_join(cid, &pubkey).await;
+    assert_eq!(token(pending.expect("writer read")), writer_token);
+
+    // Entry older than the budget ⇒ fail closed to the writer.
+    db.fence().close();
+    db.fence().force_open_for_tests_at(
+        chrono::Utc::now(),
+        std::time::Instant::now() - std::time::Duration::from_secs(10),
+    );
+    let pending = db.pending_default_channel_join_routed(cid, &pubkey).await;
+    assert_eq!(token(pending.expect("entry too old")), writer_token);
 }
 
 /// Community separation across every routed seam, verified on

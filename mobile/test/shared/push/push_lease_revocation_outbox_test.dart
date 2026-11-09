@@ -95,6 +95,9 @@ void main() {
       expect(auth.configs.single.nsec, keys.nsec);
       // A removed community's failure must not hide the active one's recovery.
       expect(auth.backgrounds.single, isTrue);
+      // A new socket rereads NIP-FI discovery, so a community that started
+      // enforcing since its last read still gets the assertion.
+      expect(auth.freshes.single, isTrue);
 
       // Removing the community publishes its tombstone the same way.
       debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
@@ -504,14 +507,17 @@ class _AssertingRelayAuth extends HostedRelayAuth {
 
   final configs = <RelayConfig>[];
   final backgrounds = <bool>[];
+  final freshes = <bool>[];
 
   @override
   Future<Map<String, String>> headers(
     RelayConfig config, {
     bool background = false,
+    bool fresh = false,
   }) async {
     configs.add(config);
     backgrounds.add(background);
+    freshes.add(fresh);
     return {'Nostr-Federated-Identity': 'Bearer hosted-token'};
   }
 }

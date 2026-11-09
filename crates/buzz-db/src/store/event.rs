@@ -3050,6 +3050,7 @@ mod e_tag_filter_shape_tests {
         let split = crate::store::recent_pass::Split {
             floor: at(10),
             ceiling: Some(at(12)),
+            older: true,
         };
         let floor = "'2026-10-01T00:00:00Z'::timestamptz";
         let ceiling = "'2026-12-01T00:00:00Z'::timestamptz";
@@ -3648,6 +3649,39 @@ mod postgres_tests {
         assert_eq!(ids(page), expected[..7]);
     }
 
+    /// The `events` partitions one pass of `q` over `range` locks, run in a
+    /// transaction of its own on `conn`, after checking that it returns
+    /// `rows` rows. Run it under `plan_cache_mode = force_generic_plan` to see
+    /// what a cached generic plan locks.
+    async fn locked_partitions(
+        conn: &mut sqlx::PgConnection,
+        q: &EventQuery,
+        range: Range,
+        rows: usize,
+    ) -> std::collections::BTreeSet<String> {
+        let mut tx = sqlx::Connection::begin(conn).await.expect("begin");
+        let mut qb = build_query_events_sql(q, range, 10);
+        let read = qb
+            .build()
+            .persistent(true)
+            .fetch_all(&mut *tx)
+            .await
+            .expect("pass");
+        assert_eq!(read.len(), rows, "the pass reads every row: {range:?}");
+        let locked: Vec<String> = sqlx::query_scalar(
+            "SELECT c.relname::text FROM pg_locks l \
+             JOIN pg_class c ON c.oid = l.relation \
+             JOIN pg_inherits i ON i.inhrelid = c.oid \
+             WHERE l.pid = pg_backend_pid() \
+               AND i.inhparent = 'events'::regclass",
+        )
+        .fetch_all(&mut *tx)
+        .await
+        .expect("locked partitions");
+        tx.rollback().await.expect("rollback");
+        locked.into_iter().collect()
+    }
+
     /// The recent pass of a regular-kind read locks only the partitions
     /// between its floor and ceiling, even as a cached generic plan. Without
     /// the ceiling (a read that may match latest-state kinds) it also locks
@@ -3712,39 +3746,126 @@ mod postgres_tests {
             channel_id: Some(channel),
             ..EventQuery::for_community(community)
         };
-        async fn locked(
-            conn: &mut sqlx::PgConnection,
-            q: &EventQuery,
-            split: crate::store::recent_pass::Split,
-        ) -> std::collections::BTreeSet<String> {
-            let mut tx = sqlx::Connection::begin(conn).await.expect("begin");
-            let mut qb = build_query_events_sql(q, Range::Recent(split), 10);
-            let rows = qb
-                .build()
-                .persistent(true)
-                .fetch_all(&mut *tx)
-                .await
-                .expect("recent pass");
-            assert_eq!(rows.len(), 3, "the recent pass reads every row");
-            let locked: Vec<String> = sqlx::query_scalar(
-                "SELECT c.relname::text FROM pg_locks l \
-                 JOIN pg_class c ON c.oid = l.relation \
-                 JOIN pg_inherits i ON i.inhrelid = c.oid \
-                 WHERE l.pid = pg_backend_pid() \
-                   AND i.inhparent = 'events'::regclass",
-            )
-            .fetch_all(&mut *tx)
-            .await
-            .expect("locked partitions");
-            tx.rollback().await.expect("rollback");
-            locked.into_iter().collect()
-        }
-        let ceiled_locks = locked(&mut conn, &q, ceiled).await;
+        let ceiled_locks = locked_partitions(&mut conn, &q, Range::Recent(ceiled), 3).await;
         assert_eq!(ceiled_locks, expected, "partitions below the ceiling");
-        let open_locks = locked(&mut conn, &q, open).await;
+        let open_locks = locked_partitions(&mut conn, &q, Range::Recent(open), 3).await;
         assert!(
             open_locks.is_superset(&ceiled_locks) && open_locks.len() > ceiled_locks.len(),
             "without the ceiling the pass also locks the later partitions: {open_locks:?}"
+        );
+    }
+
+    /// A read whose own `since` is at or above the floor, such as a `#p`
+    /// mention REQ from an agent reconnecting, is one recent pass: it returns
+    /// every matching row and runs no older pass. As a cached generic plan,
+    /// its literal floor and ceiling lock only the partitions between them,
+    /// where the `since` bind alone (the read whole) locks every partition.
+    /// Mutation: drop the `since` case from `split_for`, or run the older
+    /// pass after it → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn since_bounded_mention_read_locks_only_recent_partitions() {
+        use crate::store::recent_pass::{ceiling_at, floor_at, next};
+        let pool = setup_pool().await;
+        let db = crate::Db::from_pool(pool.clone());
+        db.maintain_partitions(
+            crate::partition::PARTITION_MANAGER_MONTHS_AHEAD,
+            crate::partition::PartitionMaintenancePolicy {
+                create_enabled: true,
+                advance_enabled: true,
+            },
+        )
+        .await
+        .expect("maintain partitions");
+        let community_uuid = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_uuid);
+        let channel = make_test_channel(&pool, community_uuid, None).await;
+
+        // Mentions of the target at the floor, now and a second below the
+        // ceiling, newest first, and one the day before the floor.
+        let now = Utc::now();
+        let floor = floor_at(now);
+        let author = Keys::generate();
+        let target = "ab".repeat(32);
+        let mut recent = Vec::new();
+        let mut expected = std::collections::BTreeSet::new();
+        let last = ceiling_at(now) - chrono::Duration::seconds(1);
+        for at in [last, now, floor, floor - chrono::Duration::days(1)] {
+            let event = EventBuilder::new(Kind::Custom(9), format!("at {at}"))
+                .tags([Tag::parse(["p", target.as_str()]).expect("p tag")])
+                .custom_created_at(nostr::Timestamp::from(at.timestamp() as u64))
+                .sign_with_keys(&author)
+                .expect("sign");
+            db.insert_event(community, &event, Some(channel))
+                .await
+                .expect("insert");
+            if at >= floor {
+                recent.push(event.id);
+                let partition: String =
+                    sqlx::query_scalar("SELECT tableoid::regclass::text FROM events WHERE id = $1")
+                        .bind(event.id.as_bytes().to_vec())
+                        .fetch_one(&pool)
+                        .await
+                        .expect("partition");
+                expected.insert(partition);
+            }
+        }
+
+        let q = EventQuery {
+            kinds: Some(vec![9]),
+            p_tag_hex: Some(target.clone()),
+            since: Some(floor),
+            limit: Some(10),
+            ..EventQuery::for_community(community)
+        };
+        let split = recent_pass_split(&q, now).expect("a since-bounded read has a recent pass");
+        assert!(!split.older, "rows below `since` cannot match");
+        assert_eq!(next(Range::Recent(split), recent.len(), 10), None);
+
+        // The production read: every matching row, from exactly the recent
+        // pass's statement, so the lock checks below bind what it prepared.
+        let mut conn = pool.acquire().await.expect("acquire");
+        sqlx::Connection::clear_cached_statements(&mut *conn)
+            .await
+            .expect("clear prepared statements");
+        let page = query_events_on(&mut conn, &q, ReadDeadline::PerRead)
+            .await
+            .expect("mention page");
+        let ids: Vec<_> = page.into_iter().map(|r| r.event.id).collect();
+        assert_eq!(ids, recent);
+        let prepared: Vec<String> = sqlx::query_scalar(
+            "SELECT statement FROM pg_prepared_statements WHERE statement LIKE $1",
+        )
+        .bind("%JOIN event_mentions%")
+        .fetch_all(&mut *conn)
+        .await
+        .expect("read prepared statements");
+        let recent_pass = build_query_events_sql(&q, Range::Recent(split), 10)
+            .sql()
+            .as_str()
+            .to_owned();
+        assert_eq!(prepared, [recent_pass], "one pass, bounded by literals");
+
+        sqlx::query("SET plan_cache_mode = force_generic_plan")
+            .execute(&mut *conn)
+            .await
+            .expect("force generic plans");
+        let bounded = locked_partitions(&mut conn, &q, Range::Recent(split), recent.len()).await;
+        assert_eq!(
+            bounded, expected,
+            "partitions between the floor and ceiling"
+        );
+        let bind_only = locked_partitions(&mut conn, &q, Range::All, recent.len()).await;
+        let every: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_inherits WHERE inhparent = 'events'::regclass",
+        )
+        .fetch_one(&mut *conn)
+        .await
+        .expect("partitions");
+        assert_eq!(
+            bind_only.len() as i64,
+            every,
+            "the `since` bind alone locks every partition: {bind_only:?}"
         );
     }
 
