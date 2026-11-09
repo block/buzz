@@ -32,6 +32,40 @@ MediaImageProvider mediaImageProviderFor(WidgetRef ref, String url) =>
       diskCache: ref.read(mediaDiskCacheProvider),
     );
 
+/// The providers to try, best first, for [url] drawn at most
+/// [MediaImage.thumbnailMaxPhysicalSize] physical pixels outside a
+/// [MediaImage], such as a native bar's avatar bitmap. This is the source
+/// [MediaImage.preferThumbnail] picks: a relay image gets only its generated
+/// thumbnails, minus those the relay already returned 404 for, so it can get
+/// none; any other URL gets itself. Try the next provider only after a 404.
+List<MediaImageProvider> smallMediaImageProviders({
+  required String url,
+  required MediaGetAuthService auth,
+  required http.Client client,
+  MediaDiskCache? diskCache,
+}) {
+  final thumbnails = relayThumbnailUrls(url, auth);
+  return [
+    if (thumbnails.isEmpty)
+      MediaImageProvider(
+        url: url,
+        auth: auth,
+        client: client,
+        diskCache: diskCache,
+      )
+    else
+      for (final thumbnail in thumbnails)
+        if (!MediaImage._missingThumbnails.contains(thumbnail))
+          MediaImageProvider(
+            url: thumbnail,
+            auth: auth,
+            client: client,
+            diskCache: diskCache,
+            isThumbnailFallback: true,
+          ),
+  ];
+}
+
 /// An [ImageProvider] for relay-hosted (and arbitrary remote) media that fixes
 /// the fetch-stampede failure modes of `Image.network` + per-build auth
 /// headers:

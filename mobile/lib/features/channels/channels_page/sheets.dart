@@ -438,7 +438,7 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
             isAgent: user.isAgent,
             background: colors.primaryContainer,
             foreground: colors.onPrimaryContainer,
-            networkImage: (url) => MediaImageProvider(
+            networkImages: (url) => smallMediaImageProviders(
               url: url,
               auth: auth,
               client: client,

@@ -212,7 +212,7 @@ class IosNavigationBar extends HookConsumerWidget {
                   ? Colors.transparent
                   : colors.primaryContainer,
               foreground: colors.onPrimaryContainer,
-              networkImage: (url) => MediaImageProvider(
+              networkImages: (url) => smallMediaImageProviders(
                 url: url,
                 auth: auth,
                 client: client,
