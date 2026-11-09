@@ -83,7 +83,7 @@ class RunnerTests: XCTestCase {
   @MainActor
   func testPaneNavigationAlignmentChangesAndRestoresPhoneLayout() throws {
     guard #available(iOS 27.0, *) else { return }
-    for leading in [false, true] {
+    for (leading, safeTop) in [(false, 0.0), (true, 0.0), (false, 59.0), (true, 59.0)] {
       let parent = UIViewController()
       let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 950, height: 669))
       window.rootViewController = parent
@@ -91,13 +91,13 @@ class RunnerTests: XCTestCase {
       defer { window.isHidden = true }
       let messenger = NavigationTestMessenger()
       let bar = IosNavigationBarFactory(messenger: messenger, parent: parent).create(
-        withFrame: CGRect(x: 0, y: 0, width: 375, height: 68),
+        withFrame: CGRect(x: 0, y: 0, width: 375, height: safeTop + 68),
         viewIdentifier: 999985, arguments: ["title": "general"])
       parent.view.addSubview(bar.view())
       let base: [String: Any] = [
         "title": "general", "largeTitle": leading, "hardEdge": true,
         "alignCollapsedTitleToLeading": leading, "centerTitleInPane": !leading,
-        "horizontalControls": true, "topSpacing": 24,
+        "horizontalControls": true, "topSpacing": 24, "safeTop": safeTop,
         "actions": [["id": "options", "label": "Options", "symbol": "ellipsis", "enabled": true],
                     ["id": "edit", "label": "Edit", "plain": true, "sharesBackground": false, "enabled": true]]]
       // Geometry is supplied explicitly; it works regardless of window width.
@@ -106,9 +106,9 @@ class RunnerTests: XCTestCase {
         var args = base
         args["centerInVisibleHeight"] = camera == nil
         args["edgeClearance"] = clearance
-        args["controlCenterY"] = camera
+        args["controlCenterY"] = camera.map { safeTop + $0 }
         messenger.configure(args)
-        bar.view().frame.size.height = height
+        bar.view().frame.size.height = safeTop + height
         messenger.scroll(to: height == 120 ? 0 : 200)
         bar.view().setNeedsLayout()
         bar.view().layoutIfNeeded()
@@ -118,11 +118,16 @@ class RunnerTests: XCTestCase {
         if leading {
           XCTAssertEqual(label.superview?.accessibilityElementsHidden, height == 120)
         }
-        let center = camera ?? (leading ? min(46, (height + clearance) / 2) : (height + clearance) / 2)
+        let center = safeTop + (camera ?? (leading ? min(46, (height + clearance) / 2) : (height + clearance) / 2))
         XCTAssertEqual(label.convert(label.bounds, to: bar.view()).midY, center, accuracy: 0.5)
         let button = try XCTUnwrap(descendants(of: bar.view()).compactMap { $0 as? UIButton }
           .first { $0.accessibilityLabel == "Options" })
-        XCTAssertEqual(button.convert(button.bounds, to: bar.view()).midY, center, accuracy: 0.5)
+        let buttonFrame = button.convert(button.bounds, to: bar.view())
+        XCTAssertEqual(buttonFrame.midY, center, accuracy: 0.5)
+        XCTAssertGreaterThanOrEqual(buttonFrame.minY, safeTop)
+        if safeTop == 59 && height == 68 && camera == nil {
+          XCTAssertEqual(buttonFrame.midY, 97, accuracy: 0.5)
+        }
         let edit = try XCTUnwrap(descendants(of: bar.view()).compactMap { $0 as? UIButton }
           .first { $0.accessibilityLabel == "Edit" })
         XCTAssertEqual(edit.convert(edit.bounds, to: bar.view()).midY, center, accuracy: 0.5)

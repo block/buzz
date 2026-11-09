@@ -24,75 +24,86 @@ void main() {
         centerInVisibleHeight: true,
         alignCollapsedBottom: true,
       );
-      const cover = NavigationHeaderLayout(
-        hardEdge: true,
-        paneControls: true,
-        topSpacing: 24,
-        controlCenterY: 45,
-        centerInVisibleHeight: true,
-        alignCollapsedBottom: true,
-        nativeEdgeClearance: 16,
-      );
-      for (final layout in [
-        const NavigationHeaderLayout(),
-        open,
-        cover,
-        open,
-        const NavigationHeaderLayout(),
-      ]) {
-        for (final collapsed in [false, true]) {
-          late double clearance;
-          await tester.pumpWidget(
-            ProviderScope(
-              child: MaterialApp(
-                theme: AppTheme.light(),
-                home: MediaQuery(
-                  data: const MediaQueryData(),
-                  child: NavigationHeaderScope(
-                    layout: layout,
-                    child: Builder(
-                      builder: (context) {
-                        clearance = frostedAppBarEdgeClearance(context);
-                        return Stack(
-                          children: [
-                            FrostedAppBar(
-                              useNativeNavigation: false,
-                              title: const SizedBox(
-                                key: titleKey,
-                                height: 44,
-                                child: Text('Messages'),
+      for (final safeTop in [0.0, 59.0]) {
+        final cover = NavigationHeaderLayout(
+          hardEdge: true,
+          paneControls: true,
+          topSpacing: 24,
+          controlCenterY: safeTop + 45,
+          centerInVisibleHeight: true,
+          alignCollapsedBottom: true,
+          nativeEdgeClearance: 16,
+        );
+        for (final layout in [
+          const NavigationHeaderLayout(),
+          open,
+          cover,
+          open,
+          const NavigationHeaderLayout(),
+        ]) {
+          for (final collapsed in [false, true]) {
+            late double clearance;
+            await tester.pumpWidget(
+              ProviderScope(
+                child: MaterialApp(
+                  theme: AppTheme.light(),
+                  home: MediaQuery(
+                    data: MediaQueryData(
+                      padding: EdgeInsets.only(top: safeTop),
+                      viewPadding: EdgeInsets.only(top: safeTop),
+                    ),
+                    child: NavigationHeaderScope(
+                      layout: layout,
+                      child: Builder(
+                        builder: (context) {
+                          clearance = frostedAppBarEdgeClearance(context);
+                          return Stack(
+                            children: [
+                              FrostedAppBar(
+                                useNativeNavigation: false,
+                                title: const SizedBox(
+                                  key: titleKey,
+                                  height: 44,
+                                  child: Text('Messages'),
+                                ),
+                                bottom: const SizedBox(
+                                  key: filtersKey,
+                                  height: 72,
+                                  child: Text('All   Solo   Team'),
+                                ),
+                                bottomHeight: collapsed ? 0 : 72,
+                                bottomOverlap: collapsed ? 72 : 0,
                               ),
-                              bottom: const SizedBox(
-                                key: filtersKey,
-                                height: 72,
-                                child: Text('All   Solo   Team'),
-                              ),
-                              bottomHeight: collapsed ? 0 : 72,
-                              bottomOverlap: collapsed ? 72 : 0,
-                            ),
-                          ],
-                        );
-                      },
+                            ],
+                          );
+                        },
+                      ),
                     ),
                   ),
                 ),
               ),
-            ),
-          );
-          await tester.pump();
-          final title = tester.getRect(find.byKey(titleKey));
-          final filters = tester.getRect(find.byKey(filtersKey));
-          expect(filters.height, 72);
-          expect(title.height, 44);
-          expect(clearance, layout.hardEdge ? layout.nativeEdgeClearance : 0);
-          if (layout.alignCollapsedBottom && collapsed) {
-            expect(filters.center.dy, closeTo(title.center.dy, 0.01));
-            expect(title.center.dy, closeTo(layout.controlCenterY ?? 38, 0.01));
-          } else if (!layout.hardEdge) {
-            expect(title.center.dy, 28);
-            expect(filters.center.dy, collapsed ? 20 : 92);
+            );
+            await tester.pump();
+            final title = tester.getRect(find.byKey(titleKey));
+            final filters = tester.getRect(find.byKey(filtersKey));
+            expect(filters.height, 72);
+            expect(title.height, 44);
+            expect(clearance, layout.hardEdge ? layout.nativeEdgeClearance : 0);
+            if (layout.alignCollapsedBottom && collapsed) {
+              expect(filters.center.dy, closeTo(title.center.dy, 0.01));
+              expect(
+                title.center.dy,
+                closeTo(layout.controlCenterY ?? safeTop + 38, 0.01),
+              );
+            } else if (!layout.hardEdge) {
+              expect(title.center.dy, safeTop + 28);
+              expect(filters.center.dy, safeTop + (collapsed ? 20 : 92));
+            }
+            if (layout.alignCollapsedBottom && collapsed) {
+              expect(title.top, greaterThanOrEqualTo(safeTop));
+            }
+            expect(tester.takeException(), isNull);
           }
-          expect(tester.takeException(), isNull);
         }
       }
       await tester.pumpWidget(const SizedBox());

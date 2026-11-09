@@ -469,11 +469,14 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     CATransaction.commit()
     let centersInHardEdge = hardEdge && usesSystemScrollEdge
       && centerInVisibleHeight
-    let visibleCenter = (container.bounds.height + edgeClearance) / 2
+    // Match Flutter: the automatic row starts below the protected top inset.
+    // Header height includes that inset; it is not part of the usable row.
+    let contentMidpoint = (flutterSafeTop + container.bounds.height) / 2
+    let visibleCenter = contentMidpoint + edgeClearance / 2
     let rowCenter = flutterSafeTop + topSpacing + 22
     let contentCenter = controlCenterY ?? (centersInHardEdge
       ? (alignCollapsedTitleToLeading ? min(rowCenter, visibleCenter) : visibleCenter)
-      : (alignCollapsedTitleToLeading ? rowCenter : container.bounds.height / 2))
+      : (alignCollapsedTitleToLeading ? rowCenter : contentMidpoint))
     if let title = paneTitle {
       let titleWidth = max(0, container.bounds.width - titleInsetLeft - titleInsetRight)
       let center = titleInsetLeft + titleWidth / 2

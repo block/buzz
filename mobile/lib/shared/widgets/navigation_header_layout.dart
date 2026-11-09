@@ -34,7 +34,10 @@ class NavigationHeaderLayout {
   final double? controlCenterY;
 
   /// Centers collapsed controls within the visible hard backdrop, including
-  /// its decorative lower extension. Expanded title positions stay unchanged.
+  /// its decorative lower extension, below the top safe-area inset. The
+  /// automatic center is safeTop + (contentHeight + clearance) / 2, where
+  /// contentHeight excludes safeTop. An explicit [controlCenterY] overrides
+  /// this center in header-local coordinates. Expanded titles stay unchanged.
   final bool centerInVisibleHeight;
 
   /// Centers a collapsing custom bottom row on the title/control row without
