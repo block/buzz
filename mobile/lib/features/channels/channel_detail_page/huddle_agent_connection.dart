@@ -26,6 +26,7 @@ Future<void> _openMobileHuddle({
     final channel = ref.read(channelByIdProvider(invite.parentChannelId));
     if (ref.read(dmVoiceCandidateProvider(invite.parentChannelId)) != null) {
       ref.invalidate(ownedAgentDirectoryProvider);
+      ref.invalidate(meArchivedAgentsProvider);
       final agents = await ref.read(ownedCodexVoiceAgentsProvider.future);
       if (!context.mounted) return;
       final agent = dmVoiceAgent(
@@ -51,6 +52,7 @@ Future<void> _openMobileHuddle({
           );
           if (!confirmed || !context.mounted) return;
           ref.invalidate(ownedAgentDirectoryProvider);
+          ref.invalidate(meArchivedAgentsProvider);
           final currentAgents = await ref.read(
             ownedCodexVoiceAgentsProvider.future,
           );
