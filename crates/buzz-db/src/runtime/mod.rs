@@ -818,6 +818,15 @@ impl Db {
             None => None,
         };
         let replica_read_max_age = read_budget_from_ms(config.replica_read_max_age_ms);
+        if let Some(budget) = replica_read_max_age.filter(|b| *b < replica_fence::MIN_READ_BUDGET) {
+            tracing::warn!(
+                budget_ms = budget.as_millis() as u64,
+                probe_interval_ms = replica_fence::PROBE_INTERVAL.as_millis() as u64,
+                recommended_min_ms = replica_fence::MIN_READ_BUDGET.as_millis() as u64,
+                "BUZZ_REPLICA_READ_MAX_AGE_MS leaves no room for one missed fence heartbeat; \
+                 bounded replica reads will spill to the writer whenever a beat is late"
+            );
+        }
         let push_enqueue = config
             .push_enabled
             .then(|| push_enqueue::PushEnqueue::new(&pool));
@@ -1442,8 +1451,10 @@ impl Db {
             return Ok(false);
         }
         self.verify_replica_fence_at_boot().await?;
+        // The probe gets its own connection so serving-pool saturation
+        // cannot delay the beat (see `replica_fence::connect_probe_pool`).
         tokio::spawn(replica_fence::run_probe(
-            self.pool.clone(),
+            replica_fence::connect_probe_pool(&self.pool),
             std::sync::Arc::clone(&self.fence),
         ));
         Ok(true)
@@ -1639,6 +1650,32 @@ impl Db {
 
     /// Record one route decision (Rev 2 observability): which path, where it
     /// went, and why.
+    /// Count one routed read the replica could have served that the writer
+    /// served instead (`buzz_db_reader_spill_total{path, reason}`).
+    ///
+    /// A subset of `buzz_db_route_decision{decision="writer"}` that leaves
+    /// out configuration (`disabled`) and splits its ambiguous `stale`
+    /// reason by cause. Reasons:
+    /// - `heartbeat_stale`: the newest heartbeat is older than the
+    ///   bounded-read budget (`BUZZ_REPLICA_READ_MAX_AGE_MS`) — the probe
+    ///   is late, not the replica;
+    /// - `heartbeat_missing`: no live heartbeat proof at all (the probe has
+    ///   not committed one, or none in [`replica_fence::FENCE_STALENESS`]);
+    /// - `fence_wall_behind`: the read's upper bound is newer than the
+    ///   newest fence wall;
+    /// - `replica_lag`: the serving session proved only an older entry than
+    ///   the read needs;
+    /// - `reader_acquire_timeout`, `reader_proof_timeout`,
+    ///   `reader_token_behind`, `reader_validation_error`: the reader
+    ///   session could not be checked out or could not prove the fence.
+    ///
+    /// History reads rejected on a saturated reader are not spills; they
+    /// stay `buzz_db_route_decision{decision="rejected"}`.
+    fn record_spill(path: &'static str, reason: &'static str) {
+        metrics::counter!("buzz_db_reader_spill_total", "path" => path, "reason" => reason)
+            .increment(1);
+    }
+
     pub(crate) fn record_route(path: &'static str, decision: &'static str, reason: &'static str) {
         metrics::counter!(
             "buzz_db_route_decision",
@@ -1890,23 +1927,27 @@ impl Db {
         // checkout; the connection-local observation still has to prove it.
         let Some(newest) = self.fence.newest() else {
             Self::record_route(path, "writer", "uninitialized");
+            Self::record_spill(path, "heartbeat_missing");
             return Ok(RouteDecision::Writer);
         };
         // Precheck helpers against the newest shared entry: if the newest
-        // cannot satisfy an arm, no proved (older-or-equal) entry can.
-        let bounded_precheck =
-            |budget: &Option<Duration>| -> std::result::Result<(), &'static str> {
-                match budget {
-                    Some(budget) if newest.committed_at.elapsed() <= *budget => Ok(()),
-                    Some(_) => Err("stale"),
-                    None => Err("disabled"),
-                }
-            };
-        let covered_precheck = |upper: &DateTime<Utc>| -> std::result::Result<(), &'static str> {
+        // cannot satisfy an arm, no proved (older-or-equal) entry can. Each
+        // failure carries its `buzz_db_route_decision` reason and, when the
+        // read is a spill rather than a configuration choice, its
+        // `buzz_db_reader_spill_total` reason.
+        type Precheck = std::result::Result<(), (&'static str, Option<&'static str>)>;
+        let bounded_precheck = |budget: &Option<Duration>| -> Precheck {
+            match budget {
+                Some(budget) if newest.committed_at.elapsed() <= *budget => Ok(()),
+                Some(_) => Err(("stale", Some("heartbeat_stale"))),
+                None => Err(("disabled", None)),
+            }
+        };
+        let covered_precheck = |upper: &DateTime<Utc>| -> Precheck {
             if *upper <= newest.fence_wall {
                 Ok(())
             } else {
-                Err("stale")
+                Err(("stale", Some("fence_wall_behind")))
             }
         };
         let precheck = match &predicate {
@@ -1914,13 +1955,20 @@ impl Db {
             RoutePredicate::Covered { upper, .. } => covered_precheck(upper),
             // No upper bound: the caller post-verifies served rows.
             RoutePredicate::CoveredPostVerified { .. } => Ok(()),
-            // Covered first (no budget dependence), else bounded.
+            // Covered first (no budget dependence), else bounded. With the
+            // bounded arm disabled the read still spilled for its wall.
             RoutePredicate::BoundedOrCovered { upper, .. } => {
-                covered_precheck(upper).or_else(|_| bounded_precheck(&self.replica_read_max_age))
+                covered_precheck(upper).or_else(|(_, covered_spill)| {
+                    bounded_precheck(&self.replica_read_max_age)
+                        .map_err(|(reason, spill)| (reason, spill.or(covered_spill)))
+                })
             }
         };
-        if let Err(reason) = precheck {
+        if let Err((reason, spill)) = precheck {
             Self::record_route(path, "writer", reason);
+            if let Some(spill) = spill {
+                Self::record_spill(path, spill);
+            }
             return Ok(RouteDecision::Writer);
         }
         let history = operation == observability::ReaderOperation::SubscriptionHistory;
@@ -1966,6 +2014,7 @@ impl Db {
                         // The session proves an older entry than the
                         // predicate needs (replication lag) — fail closed.
                         Self::record_route(path, "writer", "stale");
+                        Self::record_spill(path, "replica_lag");
                         Ok(RouteDecision::Writer)
                     }
                 }
@@ -1977,6 +2026,7 @@ impl Db {
             }
             Err(reason) => {
                 Self::record_route(path, "writer", reason);
+                Self::record_spill(path, reason);
                 Ok(RouteDecision::Writer)
             }
         }
