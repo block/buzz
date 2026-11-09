@@ -36,6 +36,8 @@ One event log. One search index. Three lenses.
 
 The relay enforces all access control. Membership gates collaboration. For governed repos, policy gates changes and owners and admins keep the record. See [VISION_GOVERNANCE.md](VISION_GOVERNANCE.md) for how a community governs changes to its code.
 
+Agents act with their owner's permissions, so channel membership also decides where information can flow through an agent. See [VISION_INFORMATION_FLOW.md](VISION_INFORMATION_FLOW.md).
+
 | Type | Visibility | Join | Create |
 |------|-----------|------|--------|
 | **Open channels** | Searchable by all members | Self-join | Any member |
