@@ -128,4 +128,119 @@ void main() {
     expect(highlights.unread, isEmpty);
     expect(highlights.attention, isEmpty);
   });
+
+  group('row hints (seen:)', () {
+    ReadStateState reads(
+      Map<String, int> contexts, {
+      Map<String, String> forced = const {},
+      int retentionFloor = 0,
+    }) => ReadStateState(
+      isReady: true,
+      pubkey: 'pk',
+      contexts: contexts,
+      version: 0,
+      forcedUnreadContexts: forced,
+      retentionFloor: retentionFloor,
+    );
+    final rows = channels.where((c) => !c.id.startsWith('forced')).toList();
+
+    test('opening saves hints that quiet the row and read nothing', () {
+      final marks = <String, int>{};
+      for (final channel in rows) {
+        marks.addAll(
+          channelRowSeenMarks(
+            channelId: channel.id,
+            events: notifier.observedUnreadEventsByChannel[channel.id]!,
+            readState: reads(const {}),
+          ),
+        );
+      }
+      expect(marks, {
+        'seen:backlog': 20,
+        'seen:msg:r1': 20,
+        'seen:msg:p1': 20,
+        'seen:both': 20,
+        'seen:msg:r2': 20,
+        'seen:msg:d1': 20,
+      });
+      final seen = reads(marks);
+      final highlights = computeChannelListHighlights(
+        channels: rows,
+        readState: seen,
+        channelsNotifier: notifier,
+      );
+      expect(highlights.unread, isEmpty);
+      expect(highlights.attention, isEmpty);
+      // Nothing was read: Solo and every other reader still see it unread.
+      expect(
+        computeUnreadChannelIds(
+          channels: rows,
+          readState: seen,
+          channelsNotifier: notifier,
+        ),
+        {for (final channel in rows) channel.id},
+      );
+      // A revisit with nothing new writes nothing.
+      for (final channel in rows) {
+        expect(
+          channelRowSeenMarks(
+            channelId: channel.id,
+            events: notifier.observedUnreadEventsByChannel[channel.id]!,
+            readState: seen,
+          ),
+          isEmpty,
+        );
+      }
+    });
+
+    test('read events need no hint', () {
+      expect(
+        channelRowSeenMarks(
+          channelId: 'both',
+          events: notifier.observedUnreadEventsByChannel['both']!,
+          readState: reads({'both': 20}),
+        ),
+        isEmpty,
+      );
+    });
+
+    test('attention lights the row again unless its own receipt saw it', () {
+      final highlights = computeChannelListHighlights(
+        channels: rows,
+        readState: reads({
+          'seen:backlog': 19,
+          'seen:reply': 99,
+          'seen:mention': 99,
+          'seen:msg:other': 99,
+        }),
+        channelsNotifier: notifier,
+      );
+      // An ordinary message newer than the hint, and attention the channel
+      // hint cannot cover, whatever its time.
+      expect(highlights.unread, {'backlog', 'both', 'dm'});
+      expect(highlights.attention, {'reply', 'mention', 'both', 'dm'});
+    });
+
+    test('the retention floor does not stand in for a receipt', () {
+      final highlights = computeChannelListHighlights(
+        channels: [_channel('reply')],
+        readState: reads(const {}, retentionFloor: 10),
+        channelsNotifier: notifier,
+      );
+      expect(highlights.attention, {'reply'});
+    });
+
+    test('a manual unread shows the whole row again', () {
+      final highlights = computeChannelListHighlights(
+        channels: channels,
+        readState: reads(
+          {'seen:forced-backlog': 20, 'seen:msg:p2': 20},
+          forced: {'forced': 'forced', 'forced-backlog': 'forced-backlog'},
+        ),
+        channelsNotifier: notifier,
+      );
+      expect(highlights.unread, containsAll(['forced', 'forced-backlog']));
+      expect(highlights.attention, contains('forced'));
+    });
+  });
 }

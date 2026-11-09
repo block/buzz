@@ -827,13 +827,18 @@ void main() {
     final manager = create();
     manager.markContextRead('msg:one', 100);
     manager.markContextRead('room', 90);
+    // Row hints: the channel's syncs, a message receipt stays here.
+    manager.markContextsRead({'seen:msg:two': 100, 'seen:room': 95});
     await manager.flush();
     manager.dispose(flushPending: false);
     final restarted = create();
     expect(restarted.getEffectiveTimestamp('msg:one'), 100);
+    expect(restarted.getEffectiveTimestamp('seen:msg:two'), 100);
+    expect(relay.contents, isNotEmpty);
     for (final content in relay.contents) {
       expect(decodeReadStateBlob(crypto.decrypt(content))!.contexts, {
         'room': 90,
+        'seen:room': 95,
       });
     }
     restarted.dispose(flushPending: false);

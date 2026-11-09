@@ -145,3 +145,20 @@ int? observedUnreadEventReadAt(
     if (event.channelCatchUp) markerOf(activityContextKey(channelId)),
   ]);
 }
+
+/// Whether [channelId]'s row has seen [event] (see [seenContextKey]): an
+/// attention message by its own receipt, whatever its timestamp, and an
+/// ordinary message by the channel's row hint. [storedOf] looks up a stored
+/// read-state context, without the retention floor: a missing receipt must
+/// stay missing.
+bool rowSawObservedUnreadEvent(
+  ObservedUnreadEvent event,
+  String channelId,
+  int? Function(String contextId) storedOf,
+) {
+  if (!event.channelCatchUp) {
+    return storedOf(seenMessageContextKey(event.id)) != null;
+  }
+  final seenAt = storedOf(seenContextKey(channelId));
+  return seenAt != null && event.createdAt <= seenAt;
+}

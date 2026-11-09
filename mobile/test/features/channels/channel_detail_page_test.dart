@@ -2922,6 +2922,79 @@ void main() {
       expect(readState.state.isForcedUnread('msg:old'), isTrue);
     });
 
+    testWidgets('an open channel quiets its row without reading it', (
+      tester,
+    ) async {
+      final readState = _SynchronousReadStateNotifier(
+        const ReadStateState(
+          isReady: true,
+          pubkey: 'self',
+          contexts: {},
+          version: 0,
+        ),
+      );
+      ObservedUnreadEvent observed(
+        String id,
+        int createdAt, {
+        bool mention = false,
+        bool reply = false,
+      }) => makeObservedUnreadEvent(
+        id: id,
+        createdAt: createdAt,
+        rootId: reply ? 'root' : null,
+        highPriority: mention,
+        channelType: 'stream',
+        isThreadedReply: reply,
+      );
+      final channelsNotifier = _FakeChannelsNotifier(
+        [_testChannel],
+        observedUnread: {
+          _channelId: [
+            observed('m1', 1100),
+            observed('p1', 1200, mention: true),
+            observed('r1', 1300, reply: true),
+          ],
+        },
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          channelsNotifier: channelsNotifier,
+          readStateNotifier: readState,
+        ),
+      );
+      await tester.pump();
+
+      // Row hints only: the channel, its mention and its reply stay unread.
+      expect(readState.markedContexts, {
+        'seen:$_channelId': 1300,
+        'seen:msg:p1': 1200,
+        'seen:msg:r1': 1300,
+      });
+
+      // An arrival while the app is in the background still lights the row.
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+      await tester.pump();
+      channelsNotifier.observe(_channelId, observed('p2', 1400, mention: true));
+      await tester.pump();
+      await tester.pump();
+      expect(readState.markedContexts, isNot(contains('seen:msg:p2')));
+
+      // Shown again, the row sees it.
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      await tester.pump();
+      await tester.pump();
+      expect(readState.markedContexts['seen:msg:p2'], 1400);
+
+      // An arrival while it is in front is seen as it lands.
+      channelsNotifier.observe(_channelId, observed('m2', 1500));
+      await tester.pump();
+      await tester.pump();
+      expect(readState.markedContexts['seen:$_channelId'], 1500);
+      expect(readState.markedContexts, isNot(contains(_channelId)));
+    });
+
     testWidgets('opening a DM reads the whole DM', (tester) async {
       final readState = _SynchronousReadStateNotifier(
         const ReadStateState(
@@ -19163,6 +19236,13 @@ class _SynchronousReadStateNotifier extends ReadStateNotifier {
     state = state.copyWithContext(contextId, unixTimestamp);
   }
 
+  @override
+  void markContextsRead(Map<String, int> contexts) {
+    for (final MapEntry(:key, :value) in contexts.entries) {
+      markContextRead(key, value);
+    }
+  }
+
   final List<String> clearedForcedContexts = [];
 
   @override
@@ -19384,6 +19464,16 @@ class _FakeChannelsNotifier extends ChannelsNotifier {
   @override
   Map<String, Map<String, ObservedUnreadEvent>>
   get observedUnreadEventsByChannel => _observedUnread;
+
+  @override
+  Map<String, ObservedUnreadEvent> observedUnreadEventsFor(String channelId) =>
+      Map.unmodifiable(_observedUnread[channelId] ?? const {});
+
+  /// Records [event] as a live arrival would, republishing the list.
+  void observe(String channelId, ObservedUnreadEvent event) {
+    (_observedUnread[channelId] ??= {})[event.id] = event;
+    state = AsyncData(List.of(_channels));
+  }
 
   @override
   Future<List<Channel>> build() => SynchronousFuture(_channels);

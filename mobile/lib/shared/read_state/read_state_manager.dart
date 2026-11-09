@@ -243,17 +243,28 @@ class ReadStateManager {
     );
   }
 
-  void markContextRead(String contextId, int unixTimestamp) {
-    if (_disposed || isOverrideContext(contextId) || unixTimestamp < 0) return;
-    if (_advanceContext(
-      contextId,
-      unixTimestamp,
-      publishable: !contextId.startsWith(msgContextPrefix),
-    )) {
-      _persistLocalState();
-      _onChanged();
-      if (!contextId.startsWith(msgContextPrefix)) _schedulePublish();
+  void markContextRead(String contextId, int unixTimestamp) =>
+      markContextsRead({contextId: unixTimestamp});
+
+  /// Advance several contexts together, saving and notifying once. Contexts
+  /// that [isLocalOnlyContext] are never published.
+  void markContextsRead(Map<String, int> contexts) {
+    if (_disposed) return;
+    var changed = false;
+    var publish = false;
+    for (final MapEntry(key: contextId, value: unixTimestamp)
+        in contexts.entries) {
+      if (isOverrideContext(contextId) || unixTimestamp < 0) continue;
+      final publishable = !isLocalOnlyContext(contextId);
+      if (_advanceContext(contextId, unixTimestamp, publishable: publishable)) {
+        changed = true;
+        publish = publish || publishable;
+      }
     }
+    if (!changed) return;
+    _persistLocalState();
+    _onChanged();
+    if (publish) _schedulePublish();
   }
 
   void seedContextRead(String contextId, int unixTimestamp) {
@@ -432,7 +443,7 @@ class ReadStateManager {
         }
         // Historical own-slot values are recoverable local writes. Peer
         // maxima never change the locally owned values or placement.
-        if (own && !entry.key.startsWith(msgContextPrefix)) {
+        if (own && !isLocalOnlyContext(entry.key)) {
           _localContexts[entry.key] = max(
             _localContexts[entry.key] ?? 0,
             entry.value,
@@ -849,7 +860,7 @@ class ReadStateManager {
           (entry) =>
               stored.publishableContextIds.contains(entry.key) &&
               !isOverrideContext(entry.key) &&
-              !entry.key.startsWith(msgContextPrefix),
+              !isLocalOnlyContext(entry.key),
         ),
       );
       _carriedOverrides.addAll(
