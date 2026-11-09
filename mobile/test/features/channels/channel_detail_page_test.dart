@@ -1,3 +1,6 @@
+import 'package:buzz/shared/relay/relay_author_provider.dart';
+import 'package:buzz/shared/community/community.dart';
+import 'package:buzz/features/channels/add_members_sheet.dart';
 import 'package:buzz/features/channels/default_agent_launcher.dart';
 import 'package:buzz/features/channels/bestie_welcome.dart';
 import 'package:buzz/features/channels/bestie_welcome_storage.dart';
@@ -39,6 +42,7 @@ import 'package:flutter/rendering.dart'
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:hooks_riverpod/misc.dart' show Override;
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart' as http_testing;
 import 'package:buzz/shared/theme/buzz_icons.dart';
@@ -287,6 +291,7 @@ Widget _buildTestable({
   _FakeTypingNotifier? typingNotifier,
   _FakeTypingNotifier? huddleTypingNotifier,
   String? canvasContent,
+  List<Override> extraOverrides = const [],
   String? initialMessageId,
   String? initialThreadRootId,
   InitialThreadRouteBehavior initialThreadRouteBehavior =
@@ -496,6 +501,7 @@ Widget _buildTestable({
       appLifecycleProvider.overrideWith(_TestAppLifecycleNotifier.new),
       // Compose bar drafts persist through SharedPreferences.
       savedPrefsProvider.overrideWithValue(_testPrefs),
+      ...extraOverrides,
     ],
     child: MaterialApp(
       debugShowCheckedModeBanner: false,
@@ -1453,6 +1459,116 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.byTooltip('View members'), findsNothing);
       expect(find.byTooltip('Start Huddle'), findsOneWidget);
+    });
+
+    testWidgets('a DM member can add people from its details', (tester) async {
+      final dmChannel = Channel(
+        id: _channelId,
+        name: 'DM',
+        channelType: 'dm',
+        visibility: 'private',
+        description: 'Direct message',
+        createdBy: 'self',
+        createdAt: DateTime(2025),
+        memberCount: 2,
+        participants: const ['Self', 'Alice'],
+        participantPubkeys: const ['self', 'alice'],
+        isMember: true,
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          relaySessionNotifier: PresenceTestRelay()..emptySnapshots = true,
+          channel: dmChannel,
+          members: [
+            for (final key in ['self', 'alice'])
+              ChannelMember(
+                pubkey: key,
+                role: 'member',
+                joinedAt: DateTime(2025),
+              ),
+          ],
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.byKey(const ValueKey('dm-header-settings-trigger')),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('channel-details-edit-action')),
+        findsNothing,
+      );
+      await tester.tap(
+        find.byKey(const ValueKey('channel-details-add-action')),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byType(AddChannelMembersSheet), findsOneWidget);
+    });
+
+    testWidgets('the moderation DM offers no Add', (tester) async {
+      final relayAuthor = 'b' * 64;
+      final moderationDm = Channel(
+        id: _channelId,
+        name: 'DM',
+        channelType: 'dm',
+        visibility: 'private',
+        description: 'Direct message',
+        createdBy: relayAuthor,
+        createdAt: DateTime(2025),
+        memberCount: 2,
+        participants: const ['Self', 'Moderation'],
+        participantPubkeys: ['self', relayAuthor],
+        isMember: true,
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          relaySessionNotifier: PresenceTestRelay()..emptySnapshots = true,
+          channel: moderationDm,
+          members: [
+            for (final key in ['self', relayAuthor])
+              ChannelMember(
+                pubkey: key,
+                role: 'member',
+                joinedAt: DateTime(2025),
+              ),
+          ],
+          extraOverrides: [
+            activeCommunityProvider.overrideWith(
+              (ref) async => Community(
+                id: 'community',
+                name: 'Community',
+                relayUrl: 'wss://relay.example',
+                addedAt: DateTime(2025),
+              ),
+            ),
+            relayAuthorProvider(
+              'wss://relay.example',
+            ).overrideWith((ref) async => relayAuthor),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.byKey(const ValueKey('dm-header-settings-trigger')),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('channel-details-star-action')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('channel-details-add-action')),
+        findsNothing,
+      );
     });
 
     testWidgets('labels unnamed DMs with the participant key', (tester) async {
