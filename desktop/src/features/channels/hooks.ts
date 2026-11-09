@@ -26,6 +26,7 @@ import {
 } from "@/shared/api/tauri";
 import type {
   AddChannelMembersInput,
+  AddChannelMembersResult,
   Channel,
   ChannelDetail,
   CreateChannelInput,
@@ -264,18 +265,26 @@ export async function invalidateChannelState(
   ]);
 }
 
-// Refresh what a membership add can change. Besides the channel state, the
-// relay agent directory is derived from channel membership, so an added agent
-// stays out of the mention picker until it is refetched; without this it
-// waits for the focused polling interval.
-export async function invalidateAfterChannelMembersAdded(
+// The relay agent directory is derived from channel membership, so an agent
+// added to a channel stays out of the mention picker until the directory is
+// refetched; otherwise that waits for the focused polling interval. The
+// rebuild is a fan-out of relay queries, so it runs in the background instead
+// of holding the add (and an invite-and-send) until it finishes.
+export function refreshRelayAgentsAfterMembersAdded(
   queryClient: ReturnType<typeof useQueryClient>,
-  channelId: string | null | undefined,
+  result: AddChannelMembersResult | undefined,
 ) {
-  await Promise.all([
-    invalidateChannelState(queryClient, channelId),
-    queryClient.invalidateQueries({ queryKey: ["relay-agents"] }),
-  ]);
+  if (!result || result.added.length === 0) {
+    return;
+  }
+  void queryClient
+    .invalidateQueries({ queryKey: ["relay-agents"] })
+    .catch((error) => {
+      console.warn(
+        "Could not refresh relay agents after adding members:",
+        error,
+      );
+    });
 }
 
 function setChannelArchivedState(
@@ -866,11 +875,12 @@ export function useAddChannelMembersMutation(channelId: string | null) {
         );
       }
     },
-    onSettled: async (_data, _err, variables) => {
+    onSettled: async (data, _err, variables) => {
+      refreshRelayAgentsAfterMembersAdded(queryClient, data);
       // Invalidate the effective channel (the one actually mutated) not the
       // live hook-closure channel, which may have changed mid-send.
       const effectiveChannelId = variables?.channelId ?? channelId;
-      await invalidateAfterChannelMembersAdded(queryClient, effectiveChannelId);
+      await invalidateChannelState(queryClient, effectiveChannelId);
     },
   });
 }

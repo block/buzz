@@ -7,9 +7,9 @@ import {
   applyLastMessages,
   canFetchChannelsForIdentity,
   channelsQueryKey,
-  invalidateAfterChannelMembersAdded,
   reconcileRefreshedCachedChannel,
   refreshChannelsQuery,
+  refreshRelayAgentsAfterMembersAdded,
   requireFullChannelList,
   upsertCachedChannel,
   upsertCachedChannelMember,
@@ -374,7 +374,30 @@ test("invalidateChannelMembersRosters dedupes and targets member keys", async ()
   ]);
 });
 
-test("invalidateAfterChannelMembersAdded refreshes the relay agent directory", async () => {
+test("refreshRelayAgentsAfterMembersAdded refreshes the directory without blocking", () => {
+  const invalidated = [];
+  let settle;
+  const queryClient = {
+    invalidateQueries: ({ queryKey }) => {
+      invalidated.push(queryKey);
+      return new Promise((resolve) => {
+        settle = resolve;
+      });
+    },
+  };
+
+  const returned = refreshRelayAgentsAfterMembersAdded(queryClient, {
+    added: ["a".repeat(64)],
+    errors: [],
+  });
+
+  // Returns before the refetch settles: an add must not wait on the rebuild.
+  assert.equal(returned, undefined);
+  assert.deepEqual(invalidated, [["relay-agents"]]);
+  settle();
+});
+
+test("refreshRelayAgentsAfterMembersAdded skips adds that changed nothing", () => {
   const invalidated = [];
   const queryClient = {
     invalidateQueries: async ({ queryKey }) => {
@@ -382,13 +405,11 @@ test("invalidateAfterChannelMembersAdded refreshes the relay agent directory", a
     },
   };
 
-  await invalidateAfterChannelMembersAdded(queryClient, "ch-a");
+  refreshRelayAgentsAfterMembersAdded(queryClient, undefined);
+  refreshRelayAgentsAfterMembersAdded(queryClient, {
+    added: [],
+    errors: [{ pubkey: "b".repeat(64), error: "rejected" }],
+  });
 
-  assert.ok(
-    invalidated.some(
-      (queryKey) => queryKey.length === 1 && queryKey[0] === "relay-agents",
-    ),
-    `relay-agents must be invalidated, got ${JSON.stringify(invalidated)}`,
-  );
-  assert.ok(invalidated.some((queryKey) => queryKey[0] === "channels"));
+  assert.deepEqual(invalidated, []);
 });
