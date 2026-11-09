@@ -416,6 +416,21 @@ void main() {
       );
     });
 
+    test('in a DM, catch-up does not mark mentions above the bottom', () {
+      final mention = _msg(
+        'mention',
+        100,
+        tags: const [
+          ['p', _self],
+        ],
+      );
+      final b = _msg('b', 200);
+      expect(_marks(isDm: true, loaded: [mention, b], bottom: b), {
+        'activity:$_channel': 200,
+        'msg:b': 200,
+      });
+    });
+
     test('in a DM, catch-up does not read messages', () {
       final a = _msg('a', 100);
       final b = _msg('b', 200);
@@ -535,6 +550,31 @@ void main() {
       expect(
         _marks(loaded: [root, r1, r2], visible: [r1], threadRootId: 'root'),
         {'msg:r1': 100},
+      );
+    });
+
+    test('the tail reply is read at its end even when it never fits', () {
+      // A reply taller than the screen shows only its end at the tail, so it
+      // is never in [visible].
+      final mention = reply(
+        'r1',
+        100,
+        tags: const [
+          ['p', _self],
+        ],
+      );
+      expect(
+        _marks(loaded: [root, mention], bottom: mention, threadRootId: 'root'),
+        {'thread-activity:root': 100, 'msg:r1': 100},
+      );
+      // Away from the live tail it waits until it fills the screen.
+      expect(
+        _marks(
+          loaded: [root, mention, reply('r2', 200)],
+          bottom: mention,
+          threadRootId: 'root',
+        ),
+        isEmpty,
       );
     });
 

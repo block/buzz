@@ -27,6 +27,8 @@ const readingDwell = Duration(milliseconds: 300);
 ///   timeline, each mention through it, replies included), at most the newest
 ///   [catchUpMessageMarkLimit], so a mention taller than the screen is still
 ///   read. Messages the reader marked unread keep that intent.
+/// - Unlike `buzz-app`, the newest message itself is read at the live bottom,
+///   in a thread too, so a reply taller than the screen is read at its end.
 /// - Each readable message (see [isReadableRow]) gets its own `msg:` mark unless its own mark,
 ///   the channel mark, or (for an ordinary top-level message) `activity:`
 ///   already reads it. A thread mark never counts here: a reply finds its
@@ -87,19 +89,22 @@ Map<String, int> readingMarks({
     }
   }
 
+  final liveBottom =
+      bottom != null &&
+          _showsNewest(
+            loaded: loaded,
+            bottom: bottom,
+            threadRootId: threadRootId,
+            flat: flat,
+          )
+      ? bottom
+      : null;
   // A nested thread view shows only one branch, so reaching its bottom does
   // not read the whole thread.
-  if (bottom != null &&
-      (threadRootId == null || isRootThread) &&
-      _showsNewest(
-        loaded: loaded,
-        bottom: bottom,
-        threadRootId: threadRootId,
-        flat: flat,
-      )) {
+  if (liveBottom != null && (threadRootId == null || isRootThread)) {
     final catchUp = _catchUpMark(
       channelId: channelId,
-      bottom: bottom,
+      bottom: liveBottom,
       threadRootId: threadRootId,
       markerOf: markerOf,
       now: now ?? DateTime.now().millisecondsSinceEpoch ~/ 1000,
@@ -108,7 +113,7 @@ Map<String, int> readingMarks({
     if (threadRootId == null && !isDm && self != null) {
       final attention = [
         for (final message in loaded)
-          if (message.createdAt <= bottom.createdAt &&
+          if (message.createdAt <= liveBottom.createdAt &&
               (flat || message.parentId == null || _isBroadcast(message)) &&
               isHighPriorityEvent(message.tags, self) &&
               needsMark(message))
@@ -117,13 +122,16 @@ Map<String, int> readingMarks({
       attention.take(catchUpMessageMarkLimit).forEach(markMessage);
     }
   }
+  // The newest row is read once its end shows at the live bottom, even when
+  // it is taller than the screen and never fills it, as at the end of a thread.
+  if (liveBottom != null) markMessage(liveBottom);
 
   visible.forEach(markMessage);
   return marks;
 }
 
 /// The most mentions and broadcasts one channel catch-up marks, as in
-/// `buzz-app`, so a backlog cannot crowd older marks out of the synced budget.
+/// `buzz-app`.
 const catchUpMessageMarkLimit = 128;
 
 /// Whether a row at [position] counts as read: it lies inside the reading

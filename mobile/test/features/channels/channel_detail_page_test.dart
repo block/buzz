@@ -3577,6 +3577,118 @@ void main() {
       expect(readState.markedContexts['msg:$threadIdReplyZero'], 1100);
     });
 
+    group('tall thread replies', () {
+      Future<_SynchronousReadStateNotifier> openThread(
+        WidgetTester tester,
+        List<NostrEvent> replies,
+      ) async {
+        final readState = _SynchronousReadStateNotifier(
+          const ReadStateState(
+            isReady: true,
+            pubkey: 'self',
+            contexts: {},
+            version: 0,
+          ),
+        );
+        final root = _textMsg(
+          id: threadIdRoot,
+          pubkey: 'self',
+          content: 'Question',
+          createdAt: 1000,
+        );
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [root, ...replies],
+            threadReplies: {threadIdRoot: replies},
+            readStateNotifier: readState,
+            home: ThreadDetailPage(
+              threadHead: formatTimeline([root]).single,
+              allMessages: formatTimeline([root, ...replies]),
+              channelId: _channelId,
+              currentPubkey: 'self',
+              isMember: true,
+              isArchived: false,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        await tester.pump(const Duration(milliseconds: 300));
+        return readState;
+      }
+
+      NostrEvent reply(String id, int createdAt, String content) => _textMsg(
+        id: id,
+        pubkey: 'alice',
+        content: content,
+        createdAt: createdAt,
+        extraTags: const [
+          ['e', threadIdRoot, '', 'reply'],
+          ['p', 'self'],
+        ],
+      );
+
+      final tallContent = List.filled(120, 'A long answer line.').join('\n\n');
+
+      Rect rowOf(WidgetTester tester, String id) =>
+          tester.getRect(find.byKey(ValueKey('thread-message-group-$id')));
+      Rect screenOf(WidgetTester tester) =>
+          tester.getRect(find.byKey(const ValueKey('thread-message-list')));
+
+      testWidgets('the last reply is read at the end of the thread', (
+        tester,
+      ) async {
+        final readState = await openThread(tester, [
+          reply(threadIdReplyZero, 1100, tallContent),
+        ]);
+        await tester.fling(
+          find.byKey(const ValueKey('thread-message-list')),
+          const Offset(0, -20000),
+          4000,
+        );
+        await tester.pumpAndSettle();
+        await tester.pump(const Duration(milliseconds: 300));
+
+        // Resting at the end, its top is off screen, so it never fits or
+        // fills the screen.
+        final row = rowOf(tester, threadIdReplyZero);
+        expect(row.top, lessThan(screenOf(tester).top));
+        expect(row.bottom, lessThan(screenOf(tester).bottom));
+        expect(readState.markedContexts['msg:$threadIdReplyZero'], 1100);
+      });
+
+      testWidgets('an earlier reply is read once it fills the screen', (
+        tester,
+      ) async {
+        final later = indexedThreadId('reply-1');
+        final readState = await openThread(tester, [
+          reply(threadIdReplyZero, 1100, tallContent),
+          reply(later, 1200, 'Short follow-up'),
+        ]);
+        final screen = screenOf(tester);
+        // The thread opens at its end: the tall reply's top is cut off, so
+        // it is not read yet.
+        var row = rowOf(tester, threadIdReplyZero);
+        expect(row.top, lessThan(screen.top));
+        expect(row.bottom, lessThan(screen.bottom));
+        expect(
+          readState.markedContexts,
+          isNot(contains('msg:$threadIdReplyZero')),
+        );
+
+        await tester.drag(
+          find.byKey(const ValueKey('thread-message-list')),
+          Offset(0, screen.bottom - row.bottom + screen.height / 2),
+        );
+        await tester.pumpAndSettle();
+        await tester.pump(const Duration(milliseconds: 300));
+
+        row = rowOf(tester, threadIdReplyZero);
+        expect(row.top, lessThan(screen.top));
+        expect(row.bottom, greaterThan(screen.bottom));
+        expect(readState.markedContexts['msg:$threadIdReplyZero'], 1100);
+      });
+    });
+
     testWidgets('rows under the Android keyboard are not read in history', (
       tester,
     ) async {
