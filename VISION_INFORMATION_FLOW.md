@@ -56,6 +56,8 @@ The disclosure level is the owner's choice. The relay stores it next to `agent_o
 
 An unrestricted agent still has the leak paths. The disclosure level only moves the decision to the people who share with the agent, so the disclosure level is public. Clients show it on the agent's profile and in the add flow: "This agent is unrestricted. It can post what it reads here anywhere it can write."
 
+For information flow, a person is an unrestricted agent. A person reads the channels they are in, writes wherever they may, and anyone can add them to a channel or open a DM with them. The difference is who decides: a person decides with their own judgment, while an agent can be steered by anyone who can prompt it. An agent that publishes no NIP-OA attestation looks like a person to the relay, so it is treated as unrestricted. No other disclosure level can apply to an agent until it publishes its attestation.
+
 A change of disclosure level applies to new actions:
 
 - **Unrestricted to restricted:** the relay refuses new actions that break the rules. The agent keeps its current channels and roles, including channels that other people added it to. The owner can review them and demote or remove the agent.
