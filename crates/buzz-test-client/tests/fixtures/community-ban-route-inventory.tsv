@@ -16,6 +16,7 @@ workflow_approvals	relay	GET	/workflows/{workflow_id}/runs/{run_id}/approvals	co
 operator_list_communities	relay	GET	/operator/communities	operator_control	not_applicable	not_applicable:relay_operator_control	classified	-
 operator_provision_community	relay	POST	/operator/communities	operator_control	not_applicable	not_applicable:relay_operator_control	classified	-
 operator_list_joined_communities	relay	GET	/operator/communities/joined	operator_control	not_applicable	not_applicable:relay_operator_control	classified	-
+operator_mint_community_invite	relay	POST	/operator/communities/invites	operator_control	conditional	enforce	pg:operator_mints_invites_only_for_relay_owners_and_admins	owner
 operator_register_listener_keys	relay	POST	/operator/listener/pubkeys	operator_control	not_applicable	not_applicable:relay_operator_control	classified	-
 operator_remove_listener_keys	relay	DELETE	/operator/listener/pubkeys	operator_control	not_applicable	not_applicable:relay_operator_control	classified	-
 operator_archive_community	relay	POST	/operator/communities/archive	operator_control	not_applicable	not_applicable:relay_operator_control	classified	-

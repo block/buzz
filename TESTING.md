@@ -90,6 +90,10 @@ verified owners and v1/v2 lifecycle behavior; see
 for the authoritative contract. Relay-operator APIs, deployment-admin APIs,
 NIP-FI commands, the localhost Git hook, and the gated mesh test endpoint use
 separate auth planes; each exemption is recorded in its route row.
+Operator-mediated invite minting is restriction-enforced: the operator attests
+the actor, and the relay checks that actor's community role and restrictions.
+Its PostgreSQL route regression mints for clear owners and admins, then rejects
+a banned admin and actors without authority.
 Secret-authenticated workflow webhooks recheck the saved workflow owner's
 community ban through the workflow engine. Their PostgreSQL regression covers
 owner bans, tenant scope and failed lookups. No sibling coverage remains pending.
