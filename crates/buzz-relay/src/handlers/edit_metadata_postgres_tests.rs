@@ -829,3 +829,235 @@ async fn concurrent_copies_of_a_restore_apply_once() {
         notices + 1
     );
 }
+
+/// The refusal NOSTR.md documents for a private-to-open edit.
+const REFUSAL: &str = "invalid: a private channel with other members cannot be made open; create a new open channel instead";
+
+/// What `edit_channel` returns for that refusal: ingest rejects the event
+/// with exactly the documented OK message.
+fn refused() -> Result<(), String> {
+    Err(format!("Rejected({REFUSAL:?})"))
+}
+
+/// Seed `agent` as a user whose NIP-OA owner is `owner`.
+async fn seed_agent(
+    state: &crate::state::AppState,
+    tenant: &buzz_core::TenantContext,
+    agent: &Keys,
+    owner: &Keys,
+) {
+    for user in [agent, owner] {
+        state
+            .db
+            .ensure_user(tenant.community(), user.public_key().to_bytes().as_slice())
+            .await
+            .expect("ensure user");
+    }
+    assert!(state
+        .db
+        .set_agent_owner(
+            tenant.community(),
+            agent.public_key().to_bytes().as_slice(),
+            owner.public_key().to_bytes().as_slice(),
+        )
+        .await
+        .expect("set agent owner"));
+}
+
+/// A private channel can be made open only when nobody but the sender and
+/// the sender's own agents is a member (Channels for IFC): opening it would
+/// change the admission rules under anyone else who joined. Someone else's
+/// agent counts as someone else, and so does the sender's owner when an
+/// agent sends. Removed members do not count. A refused change stores
+/// nothing and leaves the channel private. Mutation: drop the check in
+/// `apply_channel_metadata_event` → the refused rows open → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn private_to_open_needs_no_other_members() {
+    use buzz_db::channel::MemberRole;
+
+    let state = state().await;
+    let tenant = community(&state, "private-to-open").await;
+    let owner = Keys::generate();
+    let own_agent = Keys::generate();
+    let stranger = Keys::generate();
+    let strangers_agent = Keys::generate();
+    // A member with no users row, as `put_members_on` can leave one.
+    let unknown = Keys::generate();
+    seed_agent(&state, &tenant, &own_agent, &owner).await;
+    seed_agent(&state, &tenant, &strangers_agent, &stranger).await;
+
+    struct Row<'a> {
+        name: &'a str,
+        members: Vec<(&'a Keys, MemberRole)>,
+        removed: Vec<&'a Keys>,
+        sender: &'a Keys,
+        opens: bool,
+    }
+    let rows = [
+        Row {
+            name: "only the owner",
+            members: vec![],
+            removed: vec![],
+            sender: &owner,
+            opens: true,
+        },
+        Row {
+            name: "the owner and their agent (a Solo chat)",
+            members: vec![(&own_agent, MemberRole::Member)],
+            removed: vec![],
+            sender: &owner,
+            opens: true,
+        },
+        Row {
+            name: "a removed person still counts: their posts stay",
+            members: vec![(&stranger, MemberRole::Member)],
+            removed: vec![&stranger],
+            sender: &owner,
+            opens: false,
+        },
+        Row {
+            name: "the owner's removed agent",
+            members: vec![(&own_agent, MemberRole::Member)],
+            removed: vec![&own_agent],
+            sender: &owner,
+            opens: true,
+        },
+        Row {
+            name: "another person",
+            members: vec![
+                (&own_agent, MemberRole::Member),
+                (&stranger, MemberRole::Guest),
+            ],
+            removed: vec![],
+            sender: &owner,
+            opens: false,
+        },
+        Row {
+            name: "a member with no user row",
+            members: vec![(&unknown, MemberRole::Member)],
+            removed: vec![],
+            sender: &owner,
+            opens: false,
+        },
+        Row {
+            name: "someone else's agent",
+            members: vec![(&strangers_agent, MemberRole::Bot)],
+            removed: vec![],
+            sender: &owner,
+            opens: false,
+        },
+        Row {
+            name: "an agent sending, with its owner a member",
+            members: vec![(&own_agent, MemberRole::Admin)],
+            removed: vec![],
+            sender: &own_agent,
+            opens: false,
+        },
+    ];
+
+    for row in rows {
+        let channel_id =
+            create_channel(&state, &tenant, &owner, &[&["visibility", "private"]]).await;
+        for (member, role) in &row.members {
+            state
+                .db
+                .add_member(
+                    tenant.community(),
+                    channel_id,
+                    member.public_key().to_bytes().as_slice(),
+                    *role,
+                    Some(owner.public_key().to_bytes().as_slice()),
+                )
+                .await
+                .expect("add member");
+        }
+        for member in &row.removed {
+            state
+                .db
+                .remove_member(
+                    tenant.community(),
+                    channel_id,
+                    member.public_key().to_bytes().as_slice(),
+                    owner.public_key().to_bytes().as_slice(),
+                )
+                .await
+                .expect("remove member");
+        }
+        let events_before = count_kind(&state, &tenant, channel_id, 9002).await;
+
+        let result = edit_channel(
+            &state,
+            &tenant,
+            row.sender,
+            channel_id,
+            &[&["visibility", "open"]],
+        )
+        .await;
+        let visibility = state
+            .db
+            .get_channel(tenant.community(), channel_id)
+            .await
+            .expect("channel")
+            .visibility;
+        if row.opens {
+            assert_eq!(result, Ok(()), "{}", row.name);
+            assert_eq!(visibility, "open", "{}", row.name);
+            // Open to private stays allowed, whoever is in the channel.
+            edit_channel(
+                &state,
+                &tenant,
+                row.sender,
+                channel_id,
+                &[&["visibility", "private"]],
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{}: make private again: {e}", row.name));
+        } else {
+            assert_eq!(result, refused(), "{}", row.name);
+            assert_eq!(visibility, "private", "{}", row.name);
+            assert_eq!(
+                count_kind(&state, &tenant, channel_id, 9002).await,
+                events_before,
+                "{}: a refused edit is not stored",
+                row.name
+            );
+        }
+    }
+
+    // A channel that someone else joined while it was open, then made
+    // private again, cannot be reopened.
+    let channel_id = create_channel(&state, &tenant, &owner, &[&["visibility", "open"]]).await;
+    state
+        .db
+        .add_member(
+            tenant.community(),
+            channel_id,
+            stranger.public_key().to_bytes().as_slice(),
+            MemberRole::Member,
+            None,
+        )
+        .await
+        .expect("stranger joins");
+    edit_channel(
+        &state,
+        &tenant,
+        &owner,
+        channel_id,
+        &[&["visibility", "private"]],
+    )
+    .await
+    .expect("make private");
+    assert_eq!(
+        edit_channel(
+            &state,
+            &tenant,
+            &owner,
+            channel_id,
+            &[&["visibility", "open"]],
+        )
+        .await,
+        refused(),
+        "reopen with a stranger in it"
+    );
+}
