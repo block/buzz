@@ -1031,7 +1031,7 @@ test.describe("community rail", () => {
       )
       .toEqual({ kind: "home" });
     // Live validation succeeded, so the missing channel is now repaired to Home.
-    await expect(page).not.toHaveURL(/#\/channels\/general$/);
+    await expect(page).toHaveURL(/#\/$/);
   });
 
   test("does not restore a remembered destination on cold boot", async ({
