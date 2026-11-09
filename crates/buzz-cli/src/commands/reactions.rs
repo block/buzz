@@ -35,7 +35,8 @@ pub async fn cmd_add_reaction(
 }
 
 async fn fetch_target_author(client: &BuzzClient, event_id: &str) -> Result<PublicKey, CliError> {
-    let filter = serde_json::json!({ "ids": [event_id], "limit": 1 });
+    // Strong: a target just written may not have reached the read replica yet.
+    let filter = serde_json::json!({ "ids": [event_id], "limit": 1, "consistency": "strong" });
     let raw = client.query(&filter).await?;
     let events: serde_json::Value = serde_json::from_str(&raw)
         .map_err(|e| CliError::Other(format!("failed to parse query response: {e}")))?;
@@ -172,20 +173,26 @@ mod tests {
 
     type Submitted = Arc<Mutex<Option<serde_json::Value>>>;
 
-    async fn fake_relay(query_body: String) -> (String, Submitted) {
+    async fn fake_relay(query_body: String) -> (String, Submitted, Submitted) {
         let submitted: Submitted = Arc::new(Mutex::new(None));
-        let state = (query_body, submitted.clone());
+        let queried: Submitted = Arc::new(Mutex::new(None));
+        let state = (query_body, submitted.clone(), queried.clone());
         let app = Router::new()
             .route(
                 "/query",
-                post(|State((body, _)): State<(String, Submitted)>| async move {
-                    (StatusCode::OK, [("content-type", "application/json")], body)
-                }),
+                post(
+                    |State((body, _, queried)): State<(String, Submitted, Submitted)>,
+                     request: Bytes| async move {
+                        *queried.lock().unwrap() = serde_json::from_slice(&request).ok();
+                        (StatusCode::OK, [("content-type", "application/json")], body)
+                    },
+                ),
             )
             .route(
                 "/events",
                 post(
-                    |State((_, submitted)): State<(String, Submitted)>, body: Bytes| async move {
+                    |State((_, submitted, _)): State<(String, Submitted, Submitted)>,
+                     body: Bytes| async move {
                         *submitted.lock().unwrap() = serde_json::from_slice(&body).ok();
                         (
                             StatusCode::OK,
@@ -199,7 +206,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        (format!("http://{address}"), submitted)
+        (format!("http://{address}"), submitted, queried)
     }
 
     fn target_response() -> String {
@@ -214,7 +221,7 @@ mod tests {
 
     #[tokio::test]
     async fn add_reaction_tags_target_author() {
-        let (url, submitted) = fake_relay(target_response()).await;
+        let (url, submitted, _) = fake_relay(target_response()).await;
         let client = BuzzClient::new(url, Keys::generate(), None, None).unwrap();
 
         cmd_add_reaction(&client, TARGET_ID, "👍", None)
@@ -231,7 +238,7 @@ mod tests {
 
     #[tokio::test]
     async fn add_custom_emoji_reaction_tags_target_author() {
-        let (url, submitted) = fake_relay(target_response()).await;
+        let (url, submitted, _) = fake_relay(target_response()).await;
         let client = BuzzClient::new(url, Keys::generate(), None, None).unwrap();
 
         cmd_add_reaction(
@@ -252,12 +259,33 @@ mod tests {
 
     #[tokio::test]
     async fn add_reaction_to_unknown_event_fails_without_submitting() {
-        let (url, submitted) = fake_relay("[]".to_string()).await;
+        let (url, submitted, _) = fake_relay("[]".to_string()).await;
         let client = BuzzClient::new(url, Keys::generate(), None, None).unwrap();
 
         let result = cmd_add_reaction(&client, TARGET_ID, "👍", None).await;
 
         assert!(matches!(result, Err(CliError::NotFound(_))));
         assert!(submitted.lock().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn add_reaction_reads_target_from_the_writer() {
+        let (url, _, queried) = fake_relay(target_response()).await;
+        let client = BuzzClient::new(url, Keys::generate(), None, None).unwrap();
+
+        cmd_add_reaction(&client, TARGET_ID, "👍", None)
+            .await
+            .unwrap();
+
+        let query = queried.lock().unwrap().clone().expect("target queried");
+        let filter = query
+            .as_array()
+            .and_then(|filters| filters.first())
+            .unwrap_or(&query);
+        assert_eq!(
+            filter.get("consistency").and_then(|value| value.as_str()),
+            Some("strong"),
+            "the target lookup gates a write, so replica lag must not hide the target: {query}"
+        );
     }
 }
