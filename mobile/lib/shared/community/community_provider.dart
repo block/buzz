@@ -10,7 +10,6 @@ import 'package:nostr/nostr.dart' as nostr;
 import '../auth/auth_provider.dart';
 import '../channels/channel_list_snapshot.dart';
 import '../hosted/community_entry_requirements.dart';
-import '../hosted/known_communities_sync.dart';
 import '../push/dev_push_lease.dart';
 import '../push/push_bridge.dart';
 import '../push/push_lease_revocation_outbox.dart';
@@ -316,7 +315,11 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
     return community.id;
   }
 
-  Future<void> removeCommunity(String id) {
+  /// Forgets a community on this device. The Builderlab account learns of the
+  /// leave unless [reportToAccount] is false: an organization sign-out removes
+  /// the organization's community from this device only, not from any
+  /// account's list.
+  Future<void> removeCommunity(String id, {bool reportToAccount = true}) {
     return ref.read(communityTransitionProvider).runExclusive(() async {
       var revocationJournaled = false;
       final storage = ref.read(communityStorageProvider);
@@ -336,12 +339,12 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
         revocationJournaled = await ref.read(
           communityPushLeaseRevocationEnqueuerProvider,
         )(current[removedIndex]);
-        // The account's list must learn of the leave once the device has
-        // forgotten the community, or the next sign-in would add it back;
-        // a record that will not write keeps the community for a retry.
-        await ref
-            .read(knownCommunitiesOutboxProvider)
-            .record(current[removedIndex].relayUrl, removed: true);
+        // The account's list learns of the leave before the device forgets
+        // the community, so the next sign-in does not add it back. The leave
+        // itself never waits on or fails for that record.
+        if (reportToAccount) {
+          await recordKnownCommunityLeave(ref, current[removedIndex].relayUrl);
+        }
       }
       await storage.remove(id);
 

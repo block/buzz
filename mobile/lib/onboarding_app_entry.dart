@@ -107,17 +107,39 @@ class OnboardingAppEntry extends HookConsumerWidget {
     final connected = account != null;
     final signedInLanding = connected && !addingCommunity && !signingIn;
     final email = account?.email?.trim();
+    final uncovered = ModalRoute.of(context)?.isCurrent ?? true;
+    final idle =
+        !existingUser.value &&
+        !enteringCommunityLink.value &&
+        !creating.value &&
+        uncovered;
     final hasKnownCommunities = useKnownCommunities(
       accountKey: flow?.account.account?.subject,
-      active:
-          !existingUser.value &&
-          !enteringCommunityLink.value &&
-          !creating.value &&
-          flow?.stage == HostedFlowStage.idle &&
-          (ModalRoute.of(context)?.isCurrent ?? true),
+      active: idle && flow?.stage == HostedFlowStage.idle,
       load: () async =>
           (await loadKnownHostedCommunities(flow!.account)).isNotEmpty,
     );
+    // Report whether a background join may open its community under this
+    // surface: nothing presented over it (sheet, scanner, inline form), no
+    // pairing under way and the flow idle. Unmounting leaves it idle.
+    final pairingIdle =
+        ref.watch(pairingProvider.select((state) => state.status)) ==
+        PairingStatus.idle;
+    final entryIdle =
+        idle &&
+        pairingIdle &&
+        (flow == null || flow.stage == HostedFlowStage.idle);
+    useEffect(() {
+      final entry = ref.read(communityEntryIdleProvider.notifier);
+      scheduleMicrotask(() {
+        if (context.mounted) entry.set(entryIdle);
+      });
+      return null;
+    }, [entryIdle]);
+    useEffect(() {
+      final entry = ref.read(communityEntryIdleProvider.notifier);
+      return () => scheduleMicrotask(() => entry.set(true));
+    }, const []);
     final problem = flow != null && flow.accountOnly ? flow.problem : null;
     final status = flow == null
         ? null

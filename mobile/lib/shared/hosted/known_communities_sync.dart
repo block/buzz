@@ -26,6 +26,10 @@ String? knownCommunityAddress(String relayUrl) {
     return null;
   }
   final host = uri.host.toLowerCase().replaceFirst(RegExp(r'\.+$'), '');
+  // The same host shape `loadKnownHostedCommunities` accepts. Desktop's
+  // address is `new URL(...).host` unfiltered, so a punycode (`xn--`) or
+  // underscore host it lists reads as unsaveable here: such a community
+  // joined on desktop never reaches or leaves this device.
   if (!RegExp(r'^[a-z0-9]+(?:[.-][a-z0-9]+)*$').hasMatch(host)) return null;
   final port = uri.hasPort && uri.port != 443 ? ':${uri.port}' : '';
   return 'wss://$host$port';
@@ -403,22 +407,37 @@ class KnownCommunitiesClient {
       }
     }
     // The service names its refusals in the body of an otherwise successful
-    // answer; such a request will not be accepted as sent.
-    if (result['error'] != null) {
-      throw const KnownCommunitiesRefused(KnownCommunitiesRefusal.rejected);
+    // answer. A named `forbidden` means this account may not sync, as a 403
+    // does; any other name refuses the request as sent.
+    final error = result['error'];
+    if (error != null) {
+      throw KnownCommunitiesRefused(
+        error == 'forbidden'
+            ? KnownCommunitiesRefusal.forbidden
+            : KnownCommunitiesRefusal.rejected,
+      );
     }
     return result;
   }
 }
 
-/// The signed-in identity cannot admit a destination yet: it is not set up,
-/// not backed up, not bound, or already saved under another key here. Waits
-/// for the next trigger rather than retrying on a timer.
+/// The signed-in identity cannot admit any destination yet: it is not set
+/// up, not backed up or not bound. Every join waits for the next trigger
+/// rather than retrying on a timer.
 class KnownCommunitiesNotReady implements Exception {
   const KnownCommunitiesNotReady();
 }
 
-/// Joins [url] on this device for [subject]; see [KnownCommunitiesNotReady].
+/// This destination alone cannot be joined by the signed-in identity now: it
+/// is saved here under another key, or its relay refused the identity. The
+/// destinations after it proceed; this one counts toward
+/// [KnownCommunitiesSync.maxAdmissionAttempts] and waits for the next trigger.
+class KnownCommunityAdmissionDenied implements Exception {
+  const KnownCommunityAdmissionDenied();
+}
+
+/// Joins [url] on this device for [subject]; see [KnownCommunitiesNotReady]
+/// and [KnownCommunityAdmissionDenied].
 typedef KnownCommunityAdmission =
     Future<void> Function(
       String url,
@@ -437,8 +456,9 @@ class _Span {
   bool halted = false;
   int failures = 0;
 
-  /// Refused intents, by [KnownCommunitiesSync._key], and destinations whose
-  /// local admission kept failing; both wait for the next sign-in.
+  /// Refused intents, by [KnownCommunitiesSync._key], and destinations this
+  /// sign-in will not join: ones whose local admission kept failing and ones
+  /// the user left unchosen in the picker. All wait for the next sign-in.
   final parked = <String>{};
   final pendingAdds = <String>[];
   final admissionFailures = <String, int>{};
@@ -459,7 +479,8 @@ class _Span {
 /// read, or a service without the routes (404) stops everything until the
 /// next sign-in, while a refused address or another client error parks that
 /// one intent until it is replaced or the next sign-in. A destination whose
-/// local admission fails [maxAdmissionAttempts] times is parked the same way.
+/// local admission fails [maxAdmissionAttempts] times, or that the user saw
+/// in the picker and left unchosen ([decline]), is parked the same way.
 /// Signing out or disposal abandons in-flight work and leaves the outbox.
 class KnownCommunitiesSync {
   KnownCommunitiesSync({
@@ -513,6 +534,19 @@ class KnownCommunitiesSync {
   /// Whether listed destinations are still waiting to be joined, because
   /// the identity was busy or not ready. The owner kicks when that changes.
   bool get hasDeferredJoins => _span?.pendingAdds.isNotEmpty ?? false;
+
+  /// The user saw these listed destinations in the community picker and did
+  /// not choose them: this sign-in does not join them in the background,
+  /// whether the list named them already or names them later. The next
+  /// sign-in lists them again. Nothing is recorded while signed out.
+  void decline(Iterable<String> relayUrls) {
+    final span = _span;
+    if (span == null) return;
+    for (final url in relayUrls.map(knownCommunityAddress).nonNulls) {
+      span.parked.add(url);
+      span.pendingAdds.remove(url);
+    }
+  }
 
   static String _key(KnownCommunityIntent op) => op.toString();
 
@@ -669,6 +703,7 @@ class KnownCommunitiesSync {
     if (!_current(span)) return;
     span.listed = true;
     for (final url in add) {
+      if (span.parked.contains(url)) continue;
       if (_admittable(url)) {
         if (!span.pendingAdds.contains(url)) span.pendingAdds.add(url);
       } else {
@@ -680,9 +715,19 @@ class KnownCommunitiesSync {
   }
 
   /// Joins listed destinations one at a time while the hosted flow is not
-  /// using the identity. An identity that is not ready waits for a trigger;
-  /// a destination that keeps failing is parked for this sign-in.
+  /// using the identity. A destination joined meanwhile (by the picker, say)
+  /// is done. An identity that is not ready waits for a trigger; one this
+  /// destination alone cannot use skips to the next destination and also
+  /// waits for a trigger. A destination that keeps failing either way is
+  /// parked for this sign-in.
   Future<void> _admitPending(_Span span) async {
+    if (span.pendingAdds.isEmpty) return;
+    final saved = (await memberships())
+        .map(knownCommunityAddress)
+        .nonNulls
+        .toSet();
+    if (!_current(span)) return;
+    span.pendingAdds.removeWhere(saved.contains);
     for (final url in List.of(span.pendingAdds)) {
       if (!_current(span)) return;
       if (!_canAdmit()) return;
@@ -692,18 +737,28 @@ class KnownCommunitiesSync {
         span.pendingAdds.remove(url);
       } on KnownCommunitiesNotReady {
         return;
+      } on KnownCommunityAdmissionDenied catch (denial) {
+        if (!_current(span)) return;
+        _admissionFailed(span, url, denial);
       } catch (error) {
         if (!_current(span)) return;
-        final attempts = (span.admissionFailures[url] ?? 0) + 1;
-        span.admissionFailures[url] = attempts;
-        if (attempts < maxAdmissionAttempts) rethrow;
-        debugPrint(
-          'Joining $url failed $attempts times ($error); known-communities sync skips it until the next sign-in.',
-        );
-        span.pendingAdds.remove(url);
-        span.parked.add(url);
+        if (!_admissionFailed(span, url, error)) rethrow;
       }
     }
+  }
+
+  /// Counts a failed attempt to join [url]; parks it for this sign-in once
+  /// it has failed [maxAdmissionAttempts] times. Returns whether it parked.
+  bool _admissionFailed(_Span span, String url, Object error) {
+    final attempts = (span.admissionFailures[url] ?? 0) + 1;
+    span.admissionFailures[url] = attempts;
+    if (attempts < maxAdmissionAttempts) return false;
+    debugPrint(
+      'Joining $url failed $attempts times ($error); known-communities sync skips it until the next sign-in.',
+    );
+    span.pendingAdds.remove(url);
+    span.parked.add(url);
+    return true;
   }
 
   Future<void> _drain(_Span span) async {

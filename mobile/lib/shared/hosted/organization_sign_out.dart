@@ -36,9 +36,11 @@ Future<void> confirmOrganizationSignOut(
           .forPairing(AccountIdentityStore.publicKeyForNsec(nsec))
           .create(nsec);
     }
+    // A device-local sign-out, not a leave: no Builderlab account's list of
+    // joined communities changes.
     await ref
         .read(communityListProvider.notifier)
-        .removeCommunity(community.id);
+        .removeCommunity(community.id, reportToAccount: false);
     // Reveal the Sign in landing under the page that signed out.
     navigator.popUntil((route) => route.isFirst);
   } catch (e) {

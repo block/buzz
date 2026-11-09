@@ -5,7 +5,6 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:hooks_riverpod/misc.dart';
 import 'package:buzz/shared/channels/channel_list_snapshot.dart';
-import 'package:buzz/shared/theme/theme_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:shared_preferences_platform_interface/shared_preferences_platform_interface.dart';
 import 'package:buzz/shared/relay/relay_provider.dart' show RelayConfig;
@@ -13,7 +12,12 @@ import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/community/community_provider.dart';
 import 'package:buzz/shared/community/community_storage.dart';
 import 'package:buzz/shared/hosted/known_communities_sync.dart';
+import 'package:buzz/shared/hosted/account_identity_store.dart';
+import 'package:buzz/shared/hosted/organization_sign_out.dart';
 import 'package:buzz/shared/push/push_subscription.dart';
+import 'package:buzz/shared/theme/theme.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
 import 'community_storage_test.dart';
@@ -456,6 +460,92 @@ void main() {
         ),
       ]);
     });
+
+    test('a leave the account must not learn of, or whose record cannot be '
+        'written, still forgets the community', () async {
+      final workingOutbox = knownOutbox;
+      knownOutbox = KnownCommunitiesOutbox(storage: _BrokenKeychain());
+      container = createContainer();
+      await container.read(communityListProvider.future);
+      final notifier = container.read(communityListProvider.notifier);
+      final reported = Community.create(
+        name: 'Reported',
+        relayUrl: 'https://reported.example.com',
+      );
+      final local = Community.create(
+        name: 'Local only',
+        relayUrl: 'https://local.example.com',
+      );
+      await communityStorage.save(reported);
+      await communityStorage.save(local);
+      container.invalidate(communityListProvider);
+      await container.read(communityListProvider.future);
+      // The record is best effort: a keychain that will not take the intent
+      // does not fail the user's leave.
+      await notifier.removeCommunity(reported.id);
+      expect(
+        (await container.read(communityListProvider.future)).map((c) => c.id),
+        [local.id],
+      );
+      expect(journaledCommunityIds, [reported.id]);
+      // A device-local removal, as an organization sign-out makes, is not a
+      // leave: nothing is recorded for the account even when it could be.
+      container.dispose();
+      knownOutbox = workingOutbox;
+      container = createContainer();
+      await container.read(communityListProvider.future);
+      await container
+          .read(communityListProvider.notifier)
+          .removeCommunity(local.id, reportToAccount: false);
+      expect(await container.read(communityListProvider.future), isEmpty);
+      expect((await knownOutbox.read()).outbox, isEmpty);
+    });
+
+    testWidgets(
+      'organization sign-out keeps the identity, removes the community and '
+      'reports no leave to the account',
+      (tester) async {
+        FlutterSecureStorage.setMockInitialValues({});
+        container = createContainer();
+        final keys = nostr.Keys.generate();
+        final community = Community.create(
+          name: 'Organization',
+          relayUrl: 'wss://buzz.example.org',
+          pubkey: keys.public,
+          nsec: keys.nsec,
+        );
+        await communityStorage.save(community);
+        await communityStorage.saveActiveId(community.id);
+        await tester.pumpWidget(
+          UncontrolledProviderScope(
+            container: container,
+            child: MaterialApp(
+              theme: AppTheme.light(),
+              home: Consumer(
+                builder: (context, ref, _) => Scaffold(
+                  body: TextButton(
+                    onPressed: () => confirmOrganizationSignOut(context, ref),
+                    child: const Text('Sign out of the organization'),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.tap(find.text('Sign out of the organization'));
+        await tester.pumpAndSettle();
+        expect(find.text('Sign out?'), findsOneWidget);
+        await tester.tap(find.widgetWithText(FilledButton, 'Sign out'));
+        await tester.pumpAndSettle();
+        expect(await communityStorage.loadAll(), isEmpty);
+        expect(find.textContaining('Failed to sign out'), findsNothing);
+        expect(
+          await AccountIdentityStore().forPairing(keys.public).read(),
+          isNotNull,
+        );
+        expect((await knownOutbox.read()).outbox, isEmpty);
+      },
+    );
 
     test(
       'removal deletes the channel list snapshot and retires writers',
@@ -929,5 +1019,22 @@ class _SnapshotStore extends InMemorySharedPreferencesStore {
     final removed = super.remove(key);
     await removeGate?.future;
     return removed;
+  }
+}
+
+/// A keychain that takes nothing new.
+class _BrokenKeychain extends FakeSecureStorage {
+  @override
+  Future<void> write({
+    required String key,
+    required String? value,
+    AppleOptions? iOptions,
+    AndroidOptions? aOptions,
+    LinuxOptions? lOptions,
+    WebOptions? webOptions,
+    AppleOptions? mOptions,
+    WindowsOptions? wOptions,
+  }) async {
+    throw StateError('keychain unavailable');
   }
 }

@@ -100,6 +100,11 @@ class HostedJourneyFixture {
   bool profileUnavailable = false;
   int profileSaveFailures = 0;
   bool rejectList = false;
+
+  /// Statuses the known-communities routes answer with instead of success:
+  /// the list's, and the add's, through the real account client.
+  int? knownListStatus;
+  int? knownAddStatus;
   int saveFailures = 0;
   final knownSaved = <String>{};
   final knownRemoved = <String>{};
@@ -293,6 +298,7 @@ class HostedJourneyFixture {
       result = {'community': created};
     } else if (path.endsWith('/known-communities/list')) {
       if (rejectList) return http.Response('{}', 503);
+      if (knownListStatus != null) return http.Response('{}', knownListStatus!);
       result = {
         if (rows.isNotEmpty)
           'communities': [
@@ -303,6 +309,7 @@ class HostedJourneyFixture {
     } else if (path.endsWith('/known-communities/add')) {
       expect(request.method, 'POST');
       final url = jsonDecode(request.body)['community_url'] as String;
+      if (knownAddStatus != null) return http.Response('{}', knownAddStatus!);
       knownSaved.add(url);
       if (saveFailures-- > 0) return http.Response('{}', 503);
       result = {
@@ -447,6 +454,23 @@ class HostedJourneyFixture {
   /// Backoff retries the sync scheduled; none fires until [fireSyncRetry].
   final syncRetries = <_SyncRetry>[];
 
+  /// The mounted app's sync owner.
+  KnownCommunitiesSync get sync =>
+      container.read(knownCommunitiesSyncProvider)!;
+
+  /// Yields until [done] holds, or fails after a bounded wait.
+  Future<void> until(
+    WidgetTester tester,
+    FutureOr<bool> Function() done, {
+    required String reason,
+  }) async {
+    for (var i = 0; i < 20; i++) {
+      if (await done()) return;
+      await settle(tester);
+    }
+    if (!await done()) fail(reason);
+  }
+
   Future<void> fireSyncRetry(WidgetTester tester) async {
     final retry = syncRetries.removeAt(0);
     expect(retry.isActive, isTrue, reason: 'retry was cancelled');
@@ -454,8 +478,9 @@ class HostedJourneyFixture {
     await settle(tester);
   }
 
-  /// Yields until the signed-in sync has read the account list [lists]
-  /// times, so a journey can place rows the launch merge must not see.
+  /// Yields until the account list has been read [lists] times, by the
+  /// signed-in sync or the entry screen, so a journey can place rows that
+  /// arrive after the launch merge.
   Future<void> synced(WidgetTester tester, {int lists = 1}) async {
     for (var i = 0; i < 20; i++) {
       await settle(tester);

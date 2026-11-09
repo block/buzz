@@ -112,13 +112,29 @@ final authProvider = AsyncNotifierProvider<AuthNotifier, AuthState>(
 );
 
 /// Queues the upload of a saved membership to the Builderlab account. Joining
-/// never waits for sync, so a record that will not write is only logged.
-Future<void> recordKnownCommunityJoin(Ref ref, String relayUrl) async {
+/// never waits for sync, so a record that will not write is only logged; the
+/// next account list merge uploads the membership instead.
+Future<void> recordKnownCommunityJoin(Ref ref, String relayUrl) =>
+    _recordKnownCommunity(ref, relayUrl, removed: false);
+
+/// Queues the removal of a forgotten membership from the Builderlab account.
+/// Leaving never waits for sync either: a record that will not write is only
+/// logged, and the next sign-in may list the community again.
+Future<void> recordKnownCommunityLeave(Ref ref, String relayUrl) =>
+    _recordKnownCommunity(ref, relayUrl, removed: true);
+
+Future<void> _recordKnownCommunity(
+  Ref ref,
+  String relayUrl, {
+  required bool removed,
+}) async {
   try {
     await ref
         .read(knownCommunitiesOutboxProvider)
-        .record(relayUrl, removed: false);
+        .record(relayUrl, removed: removed);
   } catch (error) {
-    debugPrint('Known-communities join record failed: $error');
+    debugPrint(
+      'Known-communities ${removed ? 'leave' : 'join'} record failed: $error',
+    );
   }
 }

@@ -29,6 +29,24 @@ class HostedInlineEntry extends Notifier<bool> {
   }
 }
 
+/// Whether the community entry surface is idle: the hosted flow is idle and
+/// nothing is presented over the surface (no sheet, scanner, pairing or
+/// inline form), or no entry surface is mounted at all. The surface itself
+/// reports this. A background join may open its community only while it
+/// holds, so the app does not change underneath something the user is doing.
+final communityEntryIdleProvider = NotifierProvider<CommunityEntryIdle, bool>(
+  CommunityEntryIdle.new,
+);
+
+class CommunityEntryIdle extends Notifier<bool> {
+  @override
+  bool build() => true;
+
+  void set(bool idle) {
+    if (ref.mounted) state = idle;
+  }
+}
+
 /// Signals a completed local admission to the currently mounted Add route.
 final communityEntryCompletionProvider =
     NotifierProvider<CommunityEntryCompletion, int>(
