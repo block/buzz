@@ -5,6 +5,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../shared/theme/app_theme.dart';
+import '../../shared/widgets/app_scroll_behavior.dart';
 import '../../shared/widgets/ios_navigation_metrics.dart';
 import '../../shared/theme/theme_provider.dart';
 import 'profile_avatar_draft.dart';
@@ -45,6 +46,7 @@ class _ProfileAvatarTheme extends HookWidget {
     }, const []);
     return MaterialApp(
       debugShowCheckedModeBanner: false,
+      scrollBehavior: const AppScrollBehavior(),
       builder: (context, child) =>
           IosNavigationMetricsHost(child: child ?? const SizedBox.shrink()),
       theme: AppTheme.light(),
