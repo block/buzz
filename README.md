@@ -14,6 +14,10 @@
   <a href="LICENSE">Apache 2.0</a>
 </p>
 
+> [!NOTE]
+> **Buzz 1.0 is in beta at [block/buzz-app](https://github.com/block/buzz-app).**
+> This repository is Buzz 0.X, which is still available and supported.
+
 <p align="center">
   <img src="docs/assets/screenshots/channel-thread.png" alt="A Buzz project channel where people and an agent coordinate on a release plan" width="100%">
 </p>
