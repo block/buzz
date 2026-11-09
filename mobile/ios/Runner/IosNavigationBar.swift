@@ -473,9 +473,12 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     let contentMidpoint = (flutterSafeTop + container.bounds.height) / 2
     let visibleCenter = contentMidpoint + edgeClearance / 2
     let rowCenter = flutterSafeTop + topSpacing + 22
-    let contentCenter = controlCenterY ?? (centersInHardEdge
-      ? (alignCollapsedTitleToLeading ? min(rowCenter, visibleCenter) : visibleCenter)
+    let requestedCenter = controlCenterY ?? (centersInHardEdge
+      ? (alignCollapsedTitleToLeading && titleIsCollapsed != true ? min(rowCenter, visibleCenter) : visibleCenter)
       : (alignCollapsedTitleToLeading ? rowCenter : contentMidpoint))
+    // Flutter reserves the shared row; also defend direct native configurations.
+    let contentCenter = min(max(requestedCenter, flutterSafeTop + 22),
+                            max(flutterSafeTop + 22, container.bounds.height - 22))
     if let title = paneTitle {
       let titleWidth = max(0, container.bounds.width - titleInsetLeft - titleInsetRight)
       let center = titleInsetLeft + titleWidth / 2

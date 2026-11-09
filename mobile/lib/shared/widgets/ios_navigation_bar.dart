@@ -343,7 +343,10 @@ class IosNavigationBar extends HookConsumerWidget {
       'titleInsetLeft': layout.titleInsets.left,
       'titleInsetRight': layout.titleInsets.right,
       'topSpacing': layout.topSpacing,
-      'controlCenterY': layout.controlCenterY,
+      'controlCenterY': layout.resolvedControlCenter(
+        MediaQuery.paddingOf(context).top,
+        layout.paneRowHeight(IosNavigationMetrics.of(context).compactHeight),
+      ),
       'centerInVisibleHeight': layout.centerInVisibleHeight,
       'back': onBack != null,
       'leading': leading == null ? null : encodeAction(leading!, 'leading'),

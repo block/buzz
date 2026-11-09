@@ -100,10 +100,14 @@ class RunnerTests: XCTestCase {
         "actions": [["id": "options", "label": "Options", "symbol": "ellipsis", "enabled": true],
                     ["id": "edit", "label": "Edit", "plain": true, "sharesBackground": false, "enabled": true]]]
       // Geometry is supplied explicitly; it works regardless of window width.
-      for (height, camera, clearance) in [(68.0, nil as Double?, 8.0), (120.0, nil, 8.0),
-                                         (79.0, 45.0, 16.0), (94.0, 60.0, 16.0),
-                                         (154.0, 120.0, 16.0), (68.0, nil, 8.0)] {
+      for (height, camera, clearance, spacing) in [
+        (64.0, nil as Double?, 8.0, 0.0), (88.0, nil, 32.0, 0.0),
+        (56.0, -49.0, 8.0, 0.0),
+        (68.0, nil, 8.0, 24.0), (120.0, nil, 8.0, 24.0),
+        (79.0, 45.0, 16.0, 24.0), (94.0, 60.0, 16.0, 24.0),
+        (154.0, 120.0, 16.0, 24.0), (68.0, nil, 8.0, 24.0)] {
         var args = base
+        args["topSpacing"] = spacing
         args["centerInVisibleHeight"] = camera == nil
         args["edgeClearance"] = clearance
         args["controlCenterY"] = camera.map { safeTop + $0 }
@@ -118,7 +122,9 @@ class RunnerTests: XCTestCase {
         if leading {
           XCTAssertEqual(label.superview?.accessibilityElementsHidden, height == 120)
         }
-        let center = safeTop + (camera ?? (leading ? min(46, (height + clearance) / 2) : (height + clearance) / 2))
+        let requested = camera ?? (leading && height == 120
+          ? min(spacing + 22, (height + clearance) / 2) : (height + clearance) / 2)
+        let center = safeTop + min(max(requested, 22), height - 22)
         XCTAssertEqual(label.convert(label.bounds, to: bar.view()).midY, center, accuracy: 0.5)
         let button = try XCTUnwrap(descendants(of: bar.view()).compactMap { $0 as? UIButton }
           .first { $0.accessibilityLabel == "Options" })
@@ -126,7 +132,7 @@ class RunnerTests: XCTestCase {
         XCTAssertEqual(buttonFrame.midY, center, accuracy: 0.5)
         XCTAssertGreaterThanOrEqual(buttonFrame.minY, safeTop)
         XCTAssertLessThanOrEqual(buttonFrame.maxY, bar.view().bounds.maxY)
-        if camera != nil {
+        if height != 120 {
           // This lower portion was outside the old safeTop + 68 platform bounds.
           let point = CGPoint(x: buttonFrame.midX, y: buttonFrame.maxY - 1)
           let hit = bar.view().hitTest(point, with: nil)

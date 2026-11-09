@@ -1,5 +1,6 @@
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/frosted_app_bar.dart';
+import 'package:buzz/shared/widgets/filter_chip_bar.dart';
 import 'package:buzz/shared/widgets/frosted_scroll_under_scope.dart';
 import 'package:buzz/shared/widgets/ios_glass_navigation_button.dart';
 import 'package:buzz/shared/widgets/ios_navigation_bar.dart';
@@ -94,7 +95,7 @@ void main() {
               expect(filters.center.dy, closeTo(title.center.dy, 0.01));
               expect(
                 title.center.dy,
-                closeTo(layout.controlCenterY ?? safeTop + 38, 0.01),
+                closeTo(layout.controlCenterY ?? safeTop + 44, 0.01),
               );
             } else if (!layout.hardEdge) {
               expect(title.center.dy, safeTop + 28);
@@ -113,7 +114,7 @@ void main() {
   );
 
   testWidgets(
-    'explicit axes keep native controls inside shared header bounds',
+    'automatic and explicit axes contain native and Messages filter targets',
     (tester) async {
       debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
       addTearDown(() => debugDefaultTargetPlatformOverride = null);
@@ -136,8 +137,15 @@ void main() {
           messenger.setMockMethodCallHandler(channel, null);
         }
       });
-      for (final axis in [119.0, 179.0]) {
+      for (final (axis, spacing, clearance, expectedCenter, expectedBottom) in [
+        (null, 0.0, 8.0, 95.0, 123.0),
+        (null, 0.0, 32.0, 119.0, 147.0),
+        (10.0, 24.0, 16.0, 93.0, 127.0),
+        (119.0, 24.0, 16.0, 119.0, 153.0),
+        (179.0, 24.0, 16.0, 179.0, 213.0),
+      ]) {
         for (final native in [false, true]) {
+          var selected = 0;
           late double bodyTop;
           late double stickyTop;
           await tester.pumpWidget(
@@ -153,16 +161,19 @@ void main() {
                     layout: NavigationHeaderLayout(
                       hardEdge: true,
                       paneControls: true,
-                      topSpacing: 24,
+                      topSpacing: spacing,
                       centerInVisibleHeight: true,
                       controlCenterY: axis,
-                      nativeEdgeClearance: 16,
+                      nativeEdgeClearance: clearance,
+                      customEdgeClearance: clearance,
+                      alignCollapsedBottom: true,
                     ),
                     child: Builder(
                       builder: (context) {
                         bodyTop = frostedAppBarHeight(
                           context,
                           useNativeNavigation: native,
+                          bottomOverlap: native ? 0 : 56,
                         );
                         stickyTop =
                             bodyTop + frostedAppBarEdgeClearance(context);
@@ -170,6 +181,18 @@ void main() {
                           children: [
                             FrostedAppBar(
                               useNativeNavigation: native,
+                              bottomOverlap: native ? 0 : 56,
+                              bottom: native
+                                  ? null
+                                  : FilterChipBar<int>(
+                                      items: const [
+                                        FilterChipItem(id: 0, label: 'All'),
+                                        FilterChipItem(id: 1, label: 'Solo'),
+                                      ],
+                                      selected: 0,
+                                      useNativeGlass: true,
+                                      onSelected: (value) => selected = value,
+                                    ),
                               title: const SizedBox(
                                 key: ValueKey('axis-title'),
                                 height: 44,
@@ -187,15 +210,25 @@ void main() {
           );
           await tester.pump();
           await tester.pump();
-          expect(bodyTop, axis + 34);
-          expect(stickyTop, axis + 50);
+          expect(bodyTop, expectedBottom);
+          expect(stickyTop, expectedBottom + clearance);
           final bounds = native
               ? tester.getRect(find.byType(UiKitView))
               : tester.getRect(find.byType(FrostedAppBar));
           expect(bounds.bottom, bodyTop);
-          final lowerControlPoint = Offset(bounds.center.dx, axis + 21);
+          final lowerControlPoint = Offset(
+            bounds.center.dx,
+            expectedCenter + 21,
+          );
           expect(bounds.contains(lowerControlPoint), isTrue);
           if (native) {
+            final payload =
+                tester.widget<UiKitView>(find.byType(UiKitView)).creationParams
+                    as Map;
+            expect(
+              payload['controlCenterY'],
+              axis == null ? null : expectedCenter,
+            );
             final view = tester.renderObject<RenderBox>(find.byType(UiKitView));
             final hit = BoxHitTestResult();
             expect(
@@ -209,7 +242,47 @@ void main() {
             final title = tester.getRect(
               find.byKey(const ValueKey('axis-title')),
             );
-            expect(title.center.dy, axis);
+            expect(title.center.dy, expectedCenter);
+            final filter = find.byWidgetPredicate(
+              (widget) =>
+                  widget is IosGlassNavigationButton && widget.label == 'Solo',
+            );
+            final target = tester.getRect(filter);
+            expect(target.top, greaterThanOrEqualTo(59));
+            expect(target.bottom, lessThanOrEqualTo(bounds.bottom));
+            final filterView = find.descendant(
+              of: filter,
+              matching: find.byType(UiKitView),
+            );
+            final platformTarget = tester.renderObject<RenderBox>(filterView);
+            final lowerHit = tester.hitTestOnBinding(
+              Offset(target.center.dx, target.bottom - 1),
+            );
+            expect(
+              lowerHit.path.any((entry) => entry.target == platformTarget),
+              isTrue,
+            );
+            // UIKit owns the tap; exercise the real callback after proving the
+            // lower edge reaches its platform view through the Flutter header.
+            final viewWidget = tester.widget<UiKitView>(filterView);
+            final callbackChannel = MethodChannel(
+              '${viewWidget.viewType}/999991',
+            );
+            channels.add(callbackChannel);
+            messenger.setMockMethodCallHandler(
+              callbackChannel,
+              (_) async => null,
+            );
+            viewWidget.onPlatformViewCreated!(999991);
+            await tester.pump();
+            await messenger.handlePlatformMessage(
+              callbackChannel.name,
+              const StandardMethodCodec().encodeMethodCall(
+                const MethodCall('pressed'),
+              ),
+              (_) {},
+            );
+            expect(selected, 1);
             expect(title.bottom, lessThanOrEqualTo(bounds.bottom));
           }
           expect(tester.takeException(), isNull);

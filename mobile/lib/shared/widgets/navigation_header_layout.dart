@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'buzz_navigation_metrics.dart';
 
 /// Optional geometry for navigation hosted in a pane or beside an occlusion.
 ///
@@ -20,6 +21,16 @@ class NavigationHeaderLayout {
        assert(nativeEdgeClearance >= 0),
        assert(customEdgeClearance >= 0);
 
+  /// Minimum shared pane row, retaining the custom filter touch targets.
+  double paneRowHeight(double compactHeight) =>
+      (compactHeight.clamp(buzzNavigationActionSize, double.infinity) +
+              topSpacing)
+          .clamp(buzzNavigationRowHeight, double.infinity);
+
+  /// Resolves an explicit axis within the protected content area.
+  double? resolvedControlCenter(double safeTop, double rowHeight) =>
+      controlCenterY?.clamp(safeTop + rowHeight / 2, double.infinity);
+
   final bool hardEdge;
 
   /// Places native titles and actions within this header's content bounds.
@@ -32,6 +43,8 @@ class NavigationHeaderLayout {
   /// Optional control axis in header-local coordinates, for camera alignment.
   /// The host converts any window occlusion geometry into the header space.
   /// Pane headers grow to contain the row around this axis, including hit bounds.
+  /// Axes above the safe content area are clamped to half a control row below
+  /// the top inset. Decorative clearance never extends the hit-test area.
   final double? controlCenterY;
 
   /// Centers collapsed controls within the visible hard backdrop, including
