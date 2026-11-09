@@ -192,6 +192,12 @@ class ChannelsPage extends HookConsumerWidget {
           : filterContentHeight,
       useNativeNavigation: messagesFilters == null,
     );
+    // A sheet's dim barrier can't composite over Home's native soft edge, so
+    // use the Flutter backdrop while another route covers this page.
+    final route = ModalRoute.of(context);
+    final headerNativeSuppressed = useValueNotifier(false);
+    headerNativeSuppressed.value =
+        messagesFilters != null && !(route?.isCurrent ?? true);
     final communityAvatarKey = useMemoized(GlobalKey.new);
     final nativeCommunityAvatarBounds = useRef<Rect?>(null);
     final headerKey = useMemoized(GlobalKey.new);
@@ -607,6 +613,7 @@ class ChannelsPage extends HookConsumerWidget {
         onNativeReadyChanged: (ready) => nativeHeaderReady.value = ready,
         nativeTitle: '',
         useNativeNavigation: messagesFilters == null,
+        nativeViewSuppressed: headerNativeSuppressed,
         nativeLeading: messagesFilters != null
             ? null
             : IosNavigationAction(
