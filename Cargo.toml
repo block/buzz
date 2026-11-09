@@ -57,7 +57,7 @@ tower       = { version = "0.5", features = ["timeout", "util", "limit"] }
 tower-http  = { version = "0.6", features = ["trace", "cors", "compression-gzip", "limit", "timeout", "fs"] }
 
 # Database
-sqlx = { version = "0.9", features = [
+sqlx = { version = "=0.9.0", features = [
     "runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono", "json"
 ] }
 
@@ -208,6 +208,10 @@ aws-creds = { git = "https://github.com/tlongwell-block/rust-s3", rev = "c9fce36
 # - https://github.com/transact-rs/sqlx/pull/4402: MeshLLM 0.76 uses
 #   libsqlite3-sys 0.38, which 0.9.0's optional SQLite driver rejects; Cargo
 #   resolves it even though Buzz only enables PostgreSQL.
+# The exact version prevents lockfile updates from selecting a newer unpatched
+# release. Renovate updates are disabled for these crates; CI checks this pin
+# with scripts/check-sqlx-pin.py. Update that policy only after verifying all
+# three fixes in the replacement release.
 sqlx = { git = "https://github.com/launchbadge/sqlx", rev = "c3735abf034689bb1fab9d7bf9f040e492de28cf" }
 sqlx-core = { git = "https://github.com/launchbadge/sqlx", rev = "c3735abf034689bb1fab9d7bf9f040e492de28cf" }
 sqlx-macros = { git = "https://github.com/launchbadge/sqlx", rev = "c3735abf034689bb1fab9d7bf9f040e492de28cf" }
