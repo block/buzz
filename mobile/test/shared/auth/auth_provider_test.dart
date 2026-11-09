@@ -8,11 +8,17 @@ import 'package:buzz/shared/auth/auth_provider.dart';
 import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/community/community_provider.dart';
 import 'package:buzz/shared/community/community_storage.dart';
+import 'package:buzz/shared/hosted/known_communities_sync.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:buzz/shared/push/push_bridge.dart';
 
 import '../community/community_storage_test.dart';
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+  // The known-communities outbox persists through the keychain.
+  setUp(() => FlutterSecureStorage.setMockInitialValues({}));
+
   test('waits for transition teardown before replacing credentials', () async {
     final storage = CommunityStorage(secure: FakeSecureStorage());
     final active = Community.create(
@@ -51,6 +57,16 @@ void main() {
     expect(
       (await storage.loadAll()).map((community) => community.id),
       contains(replacement.id),
+    );
+    // Every join is queued for the Builderlab account's community list.
+    expect(
+      (await container.read(knownCommunitiesOutboxProvider).read()).outbox,
+      [
+        const KnownCommunityIntent(
+          url: 'wss://replacement.example',
+          removed: false,
+        ),
+      ],
     );
   });
 

@@ -12,6 +12,7 @@ import 'package:buzz/shared/relay/relay_provider.dart' show RelayConfig;
 import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/community/community_provider.dart';
 import 'package:buzz/shared/community/community_storage.dart';
+import 'package:buzz/shared/hosted/known_communities_sync.dart';
 import 'package:buzz/shared/push/push_subscription.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
@@ -20,6 +21,7 @@ import 'community_storage_test.dart';
 void main() {
   late FakeSecureStorage fakeSecure;
   late CommunityStorage communityStorage;
+  late KnownCommunitiesOutbox knownOutbox;
   late ProviderContainer container;
   late List<List<Community>> snapshots;
   late List<String> deactivatedCommunityIds;
@@ -32,6 +34,7 @@ void main() {
   setUp(() {
     fakeSecure = FakeSecureStorage();
     communityStorage = CommunityStorage(secure: fakeSecure);
+    knownOutbox = KnownCommunitiesOutbox(storage: FakeSecureStorage());
     snapshots = [];
     deactivatedCommunityIds = [];
     deactivationGenerations = [];
@@ -59,6 +62,7 @@ void main() {
     return ProviderContainer(
       overrides: [
         communityStorageProvider.overrideWithValue(communityStorage),
+        knownCommunitiesOutboxProvider.overrideWithValue(knownOutbox),
         communitySnapshotWriterProvider.overrideWithValue(writeSnapshot),
         communityPushLeaseDeactivatorProvider.overrideWithValue(deactivator),
         communityPushLeaseRevocationEnqueuerProvider.overrideWithValue(
@@ -130,6 +134,13 @@ void main() {
       final communities = await container.read(communityListProvider.future);
       expect(communities, hasLength(1));
       expect(communities.first.name, 'Test');
+      // The Builderlab account learns of the join once signed in.
+      expect((await knownOutbox.read()).outbox, [
+        const KnownCommunityIntent(
+          url: 'wss://test.example.com',
+          removed: false,
+        ),
+      ]);
     });
 
     test(
@@ -437,6 +448,13 @@ void main() {
       expect(journaledCommunityIds, [ws.id]);
       expect(deactivatedCommunityIds, isEmpty);
       expect(revocationTriggers, 1);
+      // The leave replaces the queued join as the account's latest word.
+      expect((await knownOutbox.read()).outbox, [
+        const KnownCommunityIntent(
+          url: 'wss://test.example.com',
+          removed: true,
+        ),
+      ]);
     });
 
     test(

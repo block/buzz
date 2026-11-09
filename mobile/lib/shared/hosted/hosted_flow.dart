@@ -794,13 +794,8 @@ class HostedFlow extends ChangeNotifier {
       _isCurrent(generation),
     );
     if (generation != _generation || _disposed) return;
-    // Save only after admission/persistence succeeds. A failure keeps the
-    // existing intent for retry; add is idempotent after a lost response.
-    await account.rememberCommunity(
-      destination.relayUrl ?? (throw AccountFailure.invalidResponse),
-      expectedSubject: session.subject,
-    );
-    if (generation != _generation || _disposed) return;
+    // The saved membership reaches the account through the known-communities
+    // outbox, which persistence queued; setup never waits on that upload.
     await browser.clearIntent();
     _set(HostedFlowStage.complete);
   }

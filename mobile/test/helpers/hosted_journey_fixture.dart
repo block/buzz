@@ -12,6 +12,8 @@ import 'package:buzz/features/onboarding/self_hosted_entry_sheet.dart';
 import 'package:buzz/features/profile/profile_provider.dart';
 import 'package:buzz/hosted_app_gate.dart';
 import 'package:buzz/shared/hosted/hosted_flow_provider.dart';
+import 'package:buzz/shared/hosted/known_communities_sync.dart';
+import 'package:buzz/shared/hosted/known_communities_sync_provider.dart';
 import 'package:buzz/onboarding_app_entry.dart';
 import 'package:buzz/shared/auth/auth.dart';
 import 'package:buzz/shared/deeplink/pending_deep_link_provider.dart';
@@ -100,6 +102,8 @@ class HostedJourneyFixture {
   bool rejectList = false;
   int saveFailures = 0;
   final knownSaved = <String>{};
+  final knownRemoved = <String>{};
+  int removeFailures = 0;
   bool missingList = false;
   bool loseCreateResponse = false;
   bool loseClaimResponse = false;
@@ -304,6 +308,13 @@ class HostedJourneyFixture {
       result = {
         'community': {'community_url': url},
       };
+    } else if (path.endsWith('/known-communities/remove')) {
+      expect(request.method, 'POST');
+      final url = jsonDecode(request.body)['community_url'] as String;
+      if (removeFailures-- > 0) return http.Response('{}', 503);
+      knownRemoved.add(url);
+      knownSaved.remove(url);
+      result = {};
     } else if (path.endsWith('/communities/joined')) {
       if (rejectList) return http.Response('{}', 503);
       if (missingList) return http.Response('{}', 404);
@@ -413,6 +424,46 @@ class HostedJourneyFixture {
     },
   );
 
+  /// The production sync owner over the fixture's relay probe. Retries only
+  /// follow explicit triggers (sign-in, restart, a new intent, or
+  /// [fireSyncRetry]), so a journey observes each upload attempt
+  /// deterministically.
+  KnownCommunitiesSync createSync(Ref ref) => createKnownCommunitiesSync(
+    ref,
+    probe: (community) async {
+      probes.add(community);
+      if (Uri.parse(community.relayUrl).host.startsWith('two.') &&
+          secondRelayFailures-- > 0) {
+        throw AccountFailure.unavailable;
+      }
+    },
+    timer: (delay, wake) {
+      final retry = _SyncRetry(delay, wake);
+      syncRetries.add(retry);
+      return retry;
+    },
+  );
+
+  /// Backoff retries the sync scheduled; none fires until [fireSyncRetry].
+  final syncRetries = <_SyncRetry>[];
+
+  Future<void> fireSyncRetry(WidgetTester tester) async {
+    final retry = syncRetries.removeAt(0);
+    expect(retry.isActive, isTrue, reason: 'retry was cancelled');
+    retry.wake();
+    await settle(tester);
+  }
+
+  /// Yields until the signed-in sync has read the account list [lists]
+  /// times, so a journey can place rows the launch merge must not see.
+  Future<void> synced(WidgetTester tester, {int lists = 1}) async {
+    for (var i = 0; i < 20; i++) {
+      await settle(tester);
+      if (sent('/known-communities/list').length >= lists) return;
+    }
+    fail('known-communities sync did not list the account');
+  }
+
   Future<void> mount(
     WidgetTester tester, {
     bool openEntry = true,
@@ -439,6 +490,10 @@ class HostedJourneyFixture {
         disableAnimations: true,
         overrides: [
           hostedFlowProvider.overrideWith(createFlow),
+          // Gated as in production: a build without Builderlab never syncs.
+          knownCommunitiesSyncProvider.overrideWith(
+            (ref) => HostedEnvironment.enabled ? createSync(ref) : null,
+          ),
           if (pairingValidator != null || pairingSocketFactory != null)
             pairingProvider.overrideWith(
               () => PairingNotifier(
@@ -754,4 +809,17 @@ class _RelaySocket extends RelaySocket {
       _connected();
     }
   }
+}
+
+class _SyncRetry implements Timer {
+  _SyncRetry(this.delay, this.wake);
+  final Duration delay;
+  final void Function() wake;
+  bool _cancelled = false;
+  @override
+  void cancel() => _cancelled = true;
+  @override
+  bool get isActive => !_cancelled;
+  @override
+  int get tick => 0;
 }

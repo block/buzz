@@ -10,6 +10,7 @@ import 'package:nostr/nostr.dart' as nostr;
 import '../auth/auth_provider.dart';
 import '../channels/channel_list_snapshot.dart';
 import '../hosted/community_entry_requirements.dart';
+import '../hosted/known_communities_sync.dart';
 import '../push/dev_push_lease.dart';
 import '../push/push_bridge.dart';
 import '../push/push_lease_revocation_outbox.dart';
@@ -307,6 +308,7 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
     }
 
     await storage.save(community);
+    await recordKnownCommunityJoin(ref, community.relayUrl);
     final updatedList = [...current, community];
     state = AsyncData(updatedList);
     await _removeOrphanChannelListSnapshots(updatedList);
@@ -334,6 +336,12 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
         revocationJournaled = await ref.read(
           communityPushLeaseRevocationEnqueuerProvider,
         )(current[removedIndex]);
+        // The account's list must learn of the leave once the device has
+        // forgotten the community, or the next sign-in would add it back;
+        // a record that will not write keeps the community for a retry.
+        await ref
+            .read(knownCommunitiesOutboxProvider)
+            .record(current[removedIndex].relayUrl, removed: true);
       }
       await storage.remove(id);
 
