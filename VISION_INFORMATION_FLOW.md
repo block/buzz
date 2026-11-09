@@ -76,6 +76,8 @@ One rule applies to every channel, whatever the disclosure level: no private-to-
 
 A personal agent reads with the owner's authority, so the app gives the owner's read tools only to agents at that disclosure level. Buzz cannot see what either level sends outside Buzz, through other tools or through model inference on another member's node (see [What this doesn't stop](#what-this-doesnt-stop)).
 
+**Possible: a write-only role.** A member that can post in a channel but cannot read it. R grows and W doesn't. It fits integrations and notifiers that post into many private channels: they no longer read those channels, so content can't move between them through the key. The relay refuses the key's reads of that channel on every read path. A missed read path only lets W grow, as it does today.
+
 ### Only the owner puts an agent in a channel
 
 To give the owner control of W, make the owner the only one who can change it. Only the agent's owner can add it to a channel, of any kind. Other members cannot.
