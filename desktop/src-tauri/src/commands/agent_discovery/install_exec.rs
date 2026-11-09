@@ -619,6 +619,7 @@ mod tests {
     /// would start a real login shell, which is neither hermetic nor fast.
     #[test]
     fn test_prepared_install_command_uses_default_workdir() {
+        let _nest = crate::managed_agents::pin_temp_nest_dir_for_thread();
         let expected = crate::managed_agents::default_agent_workdir()
             .expect("a default workdir must resolve on any test host");
 

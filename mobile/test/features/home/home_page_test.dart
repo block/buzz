@@ -2,6 +2,7 @@ import 'package:buzz/features/channels/default_agent_launcher.dart';
 import 'package:buzz/features/agents/agents_page.dart';
 import 'package:buzz/features/channels/me/me_section.dart';
 import 'package:buzz/features/activity/activity_page.dart';
+import 'package:buzz/features/activity/inbox_unread_provider.dart';
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/shared/me/default_agent.dart';
@@ -10,6 +11,8 @@ import 'package:buzz/features/home/home_page.dart';
 import 'package:buzz/features/home/messages_filters.dart';
 import 'package:buzz/features/home/messages_navigation_bar.dart';
 import 'package:buzz/shared/widgets/ios_message_create_button.dart';
+import 'package:buzz/shared/widgets/ios_glass_navigation_button.dart';
+import 'package:buzz/shared/widgets/ios_navigation_bar.dart';
 import 'package:buzz/features/search/search_page.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:flutter/foundation.dart';
@@ -18,10 +21,21 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+// Production iOS capsules fit the semibold label plus 16 points on each side.
+double nativeFilterWidth(String label) =>
+    (TextPainter(
+      text: TextSpan(
+        text: label,
+        style: filterChipTextStyle.copyWith(fontWeight: FontWeight.w600),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout()).width +
+    32;
+
 void main() {
   Future<Widget> buildHome({
-    int unreadInboxCount = 0,
     bool longSolo = false,
+    bool inboxUnread = false,
     bool disableAnimations = false,
     Gradient? topSectionGradient,
     ValueChanged<ValueNotifier<VoidCallback?>>? onNewChatAction,
@@ -31,6 +45,7 @@ void main() {
     return ProviderScope(
       overrides: [
         savedPrefsProvider.overrideWithValue(prefs),
+        inboxHasUnreadProvider.overrideWithValue(inboxUnread),
         defaultAgentProvider.overrideWith((ref) => Stream.value(null)),
         channelsProvider.overrideWith(_Channels.new),
       ],
@@ -62,11 +77,49 @@ void main() {
             );
           },
           settingsPageBuilder: _buildSettingsPage,
-          hasUnreadInbox: unreadInboxCount > 0,
         ),
       ),
     );
   }
+
+  testWidgets('feedback clears floating navigation and wraps large text', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    tester.view.viewPadding = const FakeViewPadding(bottom: 34);
+    addTearDown(tester.view.reset);
+    await tester.pumpWidget(await buildHome());
+    await tester.pumpAndSettle();
+    final navigation = find.byType(MessagesNavigationBar);
+    final originalTop = tester.getTopLeft(navigation).dy;
+    final context = tester.element(find.text('General'));
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.showSnackBar(const SnackBar(content: Text('Copied')));
+    await tester.pumpAndSettle();
+    expect(
+      tester.getBottomLeft(find.byType(SnackBar)).dy,
+      lessThanOrEqualTo(originalTop),
+    );
+    expect(tester.getTopLeft(navigation).dy, originalTop);
+    messenger.removeCurrentSnackBar();
+    messenger.showSnackBar(
+      const SnackBar(
+        content: Text(
+          'Could not share this image. Please try again in a moment.',
+          textScaler: TextScaler.linear(2),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(
+      tester.getBottomLeft(find.byType(SnackBar)).dy,
+      lessThanOrEqualTo(tester.getTopLeft(navigation).dy),
+    );
+    expect(tester.takeException(), isNull);
+    messenger.removeCurrentSnackBar();
+    await tester.pumpAndSettle();
+  });
 
   testWidgets(
     'Messages filters its inventory and opens Search and Settings above it',
@@ -83,6 +136,23 @@ void main() {
       expect(header.alwaysFrosted, isTrue);
       expect(header.titleStyle?.fontSize, 22);
       expect(header.centerTitle, isFalse);
+
+      for (final label in ['All', 'Solo', 'Team']) {
+        final chip = find.ancestor(
+          of: find.descendant(
+            of: find.byType(MessagesFilters),
+            matching: find.text(label),
+          ),
+          matching: find.byType(FilterChip),
+        );
+        expect(tester.getSize(chip).height, 48);
+        final paintedChip = find.descendant(
+          of: chip,
+          matching: find.byType(Material),
+        );
+        expect(tester.getSize(paintedChip).height, 48);
+        expect(tester.getSize(paintedChip).width, nativeFilterWidth(label));
+      }
 
       await tester.tap(
         find.descendant(
@@ -124,7 +194,8 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('Personal workspace').hitTestable(), findsOneWidget);
       expect(find.text('General').hitTestable(), findsOneWidget);
-      await tester.tap(find.text('Inbox'));
+      expect(find.text('Activity'), findsNothing);
+      await tester.tap(find.byTooltip('Activity'));
       await tester.pumpAndSettle();
       expect(find.byType(ActivityPage), findsOneWidget);
       Navigator.of(tester.element(find.byType(ActivityPage))).pop();
@@ -139,7 +210,7 @@ void main() {
       expect(find.byType(MessagesNavigationBar), findsOneWidget);
       await tester.tap(find.byTooltip('Community menu'));
       await tester.pumpAndSettle();
-      expect(find.text('Switch workspace'), findsOneWidget);
+      expect(find.text('Switch community'), findsOneWidget);
       expect(find.text('Agents'), findsOneWidget);
       expect(find.text('Settings'), findsOneWidget);
       await tester.tap(find.text('Settings'));
@@ -157,6 +228,56 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
+      final title = find.text('Messages');
+      final titleTop = tester.getTopLeft(title).dy;
+      final scroll = tester
+          .widget<CustomScrollView>(find.byType(CustomScrollView).first)
+          .controller!;
+      final expandedHeader = tester.widget<FrostedAppBar>(
+        find.byType(FrostedAppBar),
+      );
+      BorderSide filterOutline() => tester
+          .widget<FilterChip>(
+            find
+                .descendant(
+                  of: find.byType(MessagesFilters),
+                  matching: find.byType(FilterChip),
+                )
+                .first,
+          )
+          .side!;
+      expect(filterOutline(), BorderSide.none);
+      scroll.jumpTo(expandedHeader.bottomHeight / 4);
+      await tester.pump();
+      expect(
+        tester.getTopLeft(title).dy,
+        titleTop - expandedHeader.bottomHeight / 4,
+      );
+      expect(
+        tester
+            .widget<Opacity>(
+              find.ancestor(of: title, matching: find.byType(Opacity)).first,
+            )
+            .opacity,
+        closeTo(0.75, 0.01),
+      );
+      expect(filterOutline(), BorderSide.none);
+      scroll.jumpTo(expandedHeader.bottomHeight);
+      await tester.pump();
+      expect(
+        tester
+            .widget<Opacity>(
+              find.ancestor(of: title, matching: find.byType(Opacity)).first,
+            )
+            .opacity,
+        0,
+      );
+      expect(filterOutline().width, 1);
+      expect(filterOutline().color.a, closeTo(0.02, 0.001));
+      scroll.jumpTo(0);
+      await tester.pump();
+      expect(tester.getTopLeft(title).dy, titleTop);
+      expect(filterOutline(), BorderSide.none);
       await tester.drag(
         find.byType(CustomScrollView).first,
         const Offset(0, -2000),
@@ -186,14 +307,129 @@ void main() {
       await tester.pumpAndSettle();
       chat!.value = () => created++;
       await tester.pumpAndSettle();
+      final controlsBounds = tester.getRect(find.byType(MessagesNavigationBar));
       await tester.tap(find.byTooltip('New'));
       await tester.pumpAndSettle();
       expect(find.text('New workspace'), findsOneWidget);
+      final menuBounds = tester.getRect(
+        find
+            .ancestor(
+              of: find.text('New workspace'),
+              matching: find.byType(Material),
+            )
+            .first,
+      );
+      expect(menuBounds.left, closeTo(controlsBounds.left, .01));
+      expect(menuBounds.right, closeTo(controlsBounds.right, .01));
+      expect(menuBounds.bottom, closeTo(controlsBounds.bottom, .01));
+      expect(
+        tester.getTopLeft(find.text('Solo').last).dy,
+        lessThan(tester.getTopLeft(find.text('New chat')).dy),
+      );
+      expect(
+        tester.getTopLeft(find.text('Team').last).dy,
+        greaterThan(tester.getBottomLeft(find.text('New workspace')).dy),
+      );
+      expect(
+        tester.getTopLeft(find.text('Team').last).dy,
+        lessThan(tester.getTopLeft(find.text('New DM')).dy),
+      );
       expect(find.text('New DM'), findsOneWidget);
       expect(find.text('New channel'), findsOneWidget);
       await tester.tap(find.text('New chat'));
       await tester.pumpAndSettle();
       expect(created, 1);
+    });
+  }
+
+  for (final platform in [TargetPlatform.android, TargetPlatform.iOS]) {
+    testWidgets('$platform scrolled bell opens Activity', (tester) async {
+      debugDefaultTargetPlatformOverride = platform;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      tester.view.physicalSize = const Size(390, 844);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(await buildHome(longSolo: true));
+      await tester.pumpAndSettle();
+      final scroll = tester
+          .widget<CustomScrollView>(find.byType(CustomScrollView).first)
+          .controller!;
+      final collapseHeight = tester
+          .widget<FrostedAppBar>(find.byType(FrostedAppBar))
+          .bottomHeight;
+      for (final fraction in [0.01, 0.25, 0.5, 0.75, 1.0]) {
+        scroll.jumpTo(collapseHeight * fraction);
+        await tester.pumpAndSettle();
+        expect(
+          find.byTooltip('Activity').hitTestable(),
+          findsOneWidget,
+          reason: 'Bell must remain tappable at collapse fraction $fraction',
+        );
+      }
+      if (platform == TargetPlatform.iOS) {
+        // Widget tests hit-test the platform view but cannot run UIKit's
+        // button action. Exercise the callback that native taps dispatch.
+        tester
+            .widget<IosGlassNavigationButton>(
+              find.byWidgetPredicate(
+                (widget) =>
+                    widget is IosGlassNavigationButton &&
+                    widget.icon == IosGlassNavigationIcon.bell,
+              ),
+            )
+            .onPressed!();
+      } else {
+        await tester.tap(find.byTooltip('Activity'));
+      }
+      await tester.pumpAndSettle();
+      expect(find.byType(ActivityPage), findsOneWidget);
+      debugDefaultTargetPlatformOverride = null;
+    });
+
+    testWidgets('$platform bell follows unread inbox state', (tester) async {
+      debugDefaultTargetPlatformOverride = platform;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      for (final unread in [false, true, false]) {
+        await tester.pumpWidget(await buildHome(inboxUnread: unread));
+        await tester.pumpAndSettle();
+        expect(
+          tester.getCenter(find.byKey(const Key('home-inbox-dot'))) -
+              tester.getTopLeft(find.byKey(const Key('home-inbox-badge'))),
+          const Offset(17, 5),
+        );
+        final opacity = tester.widget<AnimatedOpacity>(
+          find.ancestor(
+            of: find.byKey(const Key('home-inbox-badge')),
+            matching: find.byType(AnimatedOpacity),
+          ),
+        );
+        expect(opacity.opacity, unread ? 1 : 0);
+        expect(opacity.duration, const Duration(milliseconds: 150));
+        expect(
+          tester.getSize(find.byKey(const Key('home-inbox-badge'))),
+          const Size.square(24),
+        );
+        expect(
+          find.byTooltip(unread ? 'Activity, unread items' : 'Activity'),
+          findsOneWidget,
+        );
+      }
+      await tester.pumpWidget(
+        await buildHome(inboxUnread: true, disableAnimations: true),
+      );
+      await tester.pump();
+      expect(
+        tester
+            .widget<AnimatedOpacity>(
+              find.ancestor(
+                of: find.byKey(const Key('home-inbox-badge')),
+                matching: find.byType(AnimatedOpacity),
+              ),
+            )
+            .duration,
+        Duration.zero,
+      );
+      debugDefaultTargetPlatformOverride = null;
     });
   }
 
@@ -222,6 +458,78 @@ void main() {
             .map((a) => a.label),
         ['New chat', 'New workspace', 'New DM', 'New channel'],
       );
+      final creationMenu = tester.widget<IosMessageCreateButton>(
+        find.byWidgetPredicate(
+          (w) => w is IosMessageCreateButton && w.label == 'New',
+        ),
+      );
+      final search = find.byTooltip('Search');
+      final initialX = tester.getCenter(search).dx;
+      final initialWidth =
+          (tester.getTopRight(search).dx - tester.getTopLeft(search).dx);
+      creationMenu.onMenuVisibilityChanged!(true);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 90));
+      final midwayX = tester.getCenter(search).dx;
+      expect(midwayX, greaterThan(initialX + 50));
+      expect(midwayX, lessThan(initialX + 100));
+      await tester.pumpAndSettle();
+      expect(tester.getCenter(search).dx, closeTo(initialX + 100, .01));
+      expect(
+        (tester.getTopRight(search).dx - tester.getTopLeft(search).dx),
+        closeTo(initialWidth * .9, .01),
+      );
+      expect(search.hitTestable(), findsNothing);
+      creationMenu.onMenuVisibilityChanged!(false);
+      await tester.pumpAndSettle();
+      expect(tester.getCenter(search).dx, closeTo(initialX, .01));
+      expect(
+        (tester.getTopRight(search).dx - tester.getTopLeft(search).dx),
+        closeTo(initialWidth, .01),
+      );
+      expect(search.hitTestable(), findsOneWidget);
+      final inbox = find.byWidgetPredicate(
+        (w) => w is IosGlassNavigationButton && w.semanticLabel == 'Activity',
+      );
+      expect(inbox, findsOneWidget);
+      expect(find.text('Activity'), findsNothing);
+      final inboxButton = tester.widget<IosGlassNavigationButton>(inbox);
+      expect(inboxButton.icon, IosGlassNavigationIcon.bell);
+
+      for (final label in ['All', 'Solo', 'Team']) {
+        final chip = tester.widget<IosGlassNavigationButton>(
+          find.descendant(
+            of: find.byType(MessagesFilters),
+            matching: find.byWidgetPredicate(
+              (w) => w is IosGlassNavigationButton && w.label == label,
+            ),
+          ),
+        );
+        expect(chip.controlSize, inboxButton.controlSize);
+        expect(chip.width, nativeFilterWidth(label));
+      }
+      expect(tester.getSize(inbox), const Size(44, 44));
+      final communityTrigger = find.byWidgetPredicate(
+        (w) =>
+            w is IosMessageCreateButton &&
+            w.accessibilityLabel == 'Community menu',
+      );
+      expect(
+        tester.getRect(inbox).right,
+        lessThan(tester.getRect(communityTrigger).left),
+      );
+      inboxButton.onPressed!();
+      await tester.pumpAndSettle();
+      expect(find.byType(ActivityPage), findsOneWidget);
+      expect(
+        find.byWidgetPredicate(
+          (w) => w is IosGlassNavigationButton && w.semanticLabel == 'Activity',
+          skipOffstage: false,
+        ),
+        findsNothing,
+      );
+      Navigator.of(tester.element(find.byType(ActivityPage))).pop();
+      await tester.pumpAndSettle();
       final communityMenu = tester.widget<IosMessageCreateButton>(
         find.byWidgetPredicate(
           (w) =>
@@ -269,6 +577,20 @@ void main() {
       await tester.pumpAndSettle();
       expect(tester.widget<Opacity>(homeOpacity).opacity, 1);
       expect(find.text('Messages'), findsOneWidget);
+      // A sheet's dim barrier can't composite over the native header edge.
+      final headerNativeView = find.descendant(
+        of: find.byType(FrostedAppBar),
+        matching: find.byType(IosNavigationBar),
+      );
+      expect(headerNativeView, findsOneWidget);
+      await tester.longPress(find.text('General'));
+      await tester.pumpAndSettle();
+      expect(find.text('Copy channel name'), findsOneWidget);
+      expect(headerNativeView, findsNothing);
+      await tester.tapAt(const Offset(20, 20));
+      await tester.pumpAndSettle();
+      expect(find.text('Copy channel name'), findsNothing);
+      expect(headerNativeView, findsOneWidget);
       await tester.pumpWidget(const SizedBox.shrink());
       debugDefaultTargetPlatformOverride = null;
     },

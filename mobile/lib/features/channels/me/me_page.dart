@@ -1,23 +1,24 @@
+import 'dart:convert';
+import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:uuid/uuid.dart';
 
 import '../../../shared/profile/user_cache_provider.dart';
-import '../../../shared/mentions/agent_identity_provider.dart';
-import '../../../shared/animated_avatar.dart';
-import '../../../shared/widgets/app_list.dart';
 import '../../../shared/widgets/concentric_sheet_surface.dart';
 import '../../../shared/widgets/bee_refresh_indicator.dart';
-import 'me_assistant_list.dart';
 import 'me_section.dart';
+import 'me_working_provider.dart';
+import 'solo_working_dots.dart';
 import 'me_unread_provider.dart';
 import '../../../shared/widgets/avatar_image.dart';
 import '../../../shared/me/me_groups.dart';
+import '../../../shared/me/default_agent.dart';
+import '../../../shared/me/me_chat_title.dart';
+import '../../../shared/crypto/event_signing.dart';
 import '../../../shared/me/me_chat_creation.dart';
-import '../../../shared/me/me_project_creation.dart';
 import '../../../shared/me/me_sync.dart';
 import '../../../shared/relay/relay.dart';
 import '../../../shared/me/me_recovery.dart';
@@ -29,15 +30,23 @@ import '../../../shared/widgets/frosted_scaffold.dart';
 import '../../../shared/widgets/buzz_loading_indicator.dart';
 import '../../../shared/widgets/modal_presentation.dart';
 import '../channel.dart';
+import '../compose_bar.dart';
+import 'me_assistant_picker_sheet.dart';
+import 'new_me_project.dart';
+import 'me_workspace_picker.dart';
+import 'me_recovery_dialog.dart';
+import '../../profile/user_profile_sheet.dart';
+import '../channel_actions_sheet.dart';
 import '../channel_detail_page.dart';
+import '../channel_identity_names_provider.dart';
+import '../channel_member_profile_actions.dart';
 import '../channel_management_provider.dart';
 import '../channels_provider.dart';
 
 part 'me_page_helpers.dart';
 part 'me_empty_state.dart';
 part 'new_me_chat.dart';
-part 'native_new_me_chat.dart';
-part 'new_me_project.dart';
+part 'me_chat_draft.dart';
 
 /// Personal chats and projects shared with the desktop Me workspace.
 class MePage extends HookConsumerWidget {
@@ -71,6 +80,7 @@ class MePage extends HookConsumerWidget {
           );
     // Warm the directory while browsing Me, before the creation form opens.
     final assistants = ref.watch(meAssistantsProvider).value;
+    ref.watch(defaultAgentProvider);
     useEffect(() {
       if (assistants != null) {
         ref.read(userCacheProvider.notifier).preload([
@@ -83,7 +93,6 @@ class MePage extends HookConsumerWidget {
     final viewer = ref.watch(myPubkeyProvider);
     final offlineSaveFailed =
         ref.watch(meOfflineSaveWarningProvider).value ?? false;
-    final syncClosed = ref.watch(meSyncWarningProvider).value ?? false;
     final channels = ref.watch(channelsProvider);
     final unreadIds = ref.watch(meUnreadChannelIdsProvider);
     final busy = useState(false);
@@ -94,13 +103,14 @@ class MePage extends HookConsumerWidget {
         await action();
       } catch (error) {
         if (error is MeRecoveryConflict && context.mounted) {
-          await _offerMeRecovery(context, ref.read(meSyncProvider));
+          await offerMeRecovery(context, ref.read(meSyncProvider));
         }
         if (context.mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
+          ScaffoldMessenger.of(context).showFeedbackSnackBar(
             SnackBar(
               content: Text(error.toString().replaceFirst('Bad state: ', '')),
             ),
+            kind: ToastKind.error,
           );
         }
       } finally {
@@ -111,23 +121,11 @@ class MePage extends HookConsumerWidget {
     final VoidCallback? newProject = busy.value || !groups.hasValue
         ? null
         : () => perform(() async {
-            await _createMeProject(context, ref);
+            await createMeProject(context, ref);
           });
     final VoidCallback? newChat = busy.value || !groups.hasValue
         ? null
-        : () => perform(() async {
-            final result = await _showNewMeChat(context, ref);
-            if (result == null || !context.mounted) return;
-            await Navigator.of(context).push(
-              MaterialPageRoute<void>(
-                builder: (_) => ChannelDetailPage(
-                  channel: result.$1,
-                  personalChat: true,
-                  initialAssistant: result.$2,
-                ),
-              ),
-            );
-          });
+        : () => perform(() => _openNewMeChat(context, ref));
 
     useEffect(() {
       var active = true;
@@ -176,6 +174,7 @@ class MePage extends HookConsumerWidget {
                   ),
                 );
           Widget row(Channel channel) => _MeChatRow(
+            channelId: channel.id,
             name: channel.name,
             isUnread: unreadIds.contains(channel.id),
             onTap: () => Navigator.of(context).push(
@@ -183,6 +182,21 @@ class MePage extends HookConsumerWidget {
                 builder: (_) =>
                     ChannelDetailPage(channel: channel, personalChat: true),
               ),
+            ),
+            onLongPress: () => showChannelDetailsSheet(
+              context: context,
+              channel: channel,
+              currentPubkey: viewer,
+              onMemberTap: (context, pubkey) => showUserProfileSheet(
+                context,
+                pubkey,
+                names: channelIdentityNamesProvider(channel.id),
+                contextualActions: (_) => ChannelMemberProfileActions(
+                  channel: channel,
+                  pubkey: pubkey,
+                ),
+              ),
+              personalChat: true,
             ),
           );
           final inventorySlivers = <Widget>[
@@ -199,21 +213,6 @@ class MePage extends HookConsumerWidget {
               ),
               sliver: SliverList.list(
                 children: [
-                  if (syncClosed)
-                    Semantics(
-                      liveRegion: true,
-                      child: Column(
-                        children: [
-                          const Text(
-                            'Live updates stopped. Your saved chats are still available.',
-                          ),
-                          TextButton(
-                            onPressed: () => ref.invalidate(meGroupsProvider),
-                            child: const Text('Retry live updates'),
-                          ),
-                        ],
-                      ),
-                    ),
                   if (offlineSaveFailed)
                     Semantics(
                       liveRegion: true,
@@ -231,15 +230,10 @@ class MePage extends HookConsumerWidget {
                     ),
                   for (final group in organization.groups) ...[
                     if (group != organization.groups.first)
-                      const SizedBox(height: Grid.twelve),
+                      const SizedBox(height: Grid.xxs),
                     MeSection(
                       key: ValueKey(group['id']),
                       label: group['name'] as String,
-                      hasUnread: visible.any(
-                        (c) =>
-                            organization.assignments[c.id] == group['id'] &&
-                            unreadIds.contains(c.id),
-                      ),
                       children: [
                         for (final channel in visible.where(
                           (c) => organization.assignments[c.id] == group['id'],
@@ -248,23 +242,18 @@ class MePage extends HookConsumerWidget {
                         if (!visible.any(
                           (c) => organization.assignments[c.id] == group['id'],
                         ))
-                          const ListTile(
-                            title: Text('No chats in this project'),
+                          const _MeSectionEmpty(
+                            'No chats in this workspace yet',
                           ),
                       ],
                     ),
                   ],
                   if (organization.groups.isNotEmpty)
-                    const SizedBox(height: Grid.twelve),
+                    const SizedBox(height: Grid.xxs),
                   if (visible.isNotEmpty || organization.groups.isNotEmpty)
                     MeSection(
                       key: const ValueKey('me-ungrouped-chats'),
                       label: 'Chats',
-                      hasUnread: visible.any(
-                        (c) =>
-                            !organization.assignments.containsKey(c.id) &&
-                            unreadIds.contains(c.id),
-                      ),
                       children: [
                         for (final channel in visible.where(
                           (c) => !organization.assignments.containsKey(c.id),
@@ -273,7 +262,7 @@ class MePage extends HookConsumerWidget {
                         if (!visible.any(
                           (c) => !organization.assignments.containsKey(c.id),
                         ))
-                          const ListTile(title: Text('No chats yet')),
+                          const _MeSectionEmpty('No chats yet'),
                       ],
                     ),
                 ],
@@ -293,8 +282,18 @@ class MePage extends HookConsumerWidget {
             if (sliver && visible.isEmpty && organization.groups.isEmpty)
               SliverToBoxAdapter(
                 child: Padding(
-                  padding: const EdgeInsets.all(Grid.gutter),
-                  child: _MeEmptyState(onNewChat: newChat),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: Grid.gutter,
+                    vertical: Grid.half,
+                  ),
+                  child: Text(
+                    'No chats yet',
+                    style: contentListBodyTextStyle.copyWith(
+                      color: context.colors.onSurfaceVariant.withValues(
+                        alpha: 0.65,
+                      ),
+                    ),
+                  ),
                 ),
               ),
           ];
@@ -326,8 +325,7 @@ class MePage extends HookConsumerWidget {
         nativeActions: [
           IosNavigationAction(
             label: 'New project',
-            symbol: 'folder.badge.plus',
-            icon: BuzzIcons.folderPlus,
+            icon: BuzzIcons.workspace,
             onPressed: newProject,
           ),
           if (newChatAction == null)
@@ -338,8 +336,7 @@ class MePage extends HookConsumerWidget {
             ),
         ],
         horizontalInset: Grid.gutter,
-        showBottomDivider: true,
-        bottomDividerOpacity: 0.07,
+
         title: Text('Solo', style: headerTitleStyle),
         titleStyle: headerTitleStyle,
         actions: [
@@ -354,7 +351,7 @@ class MePage extends HookConsumerWidget {
                   children: [
                     IconButton(
                       tooltip: 'New project',
-                      icon: const Icon(BuzzIcons.folderPlus, size: 20),
+                      icon: const Icon(BuzzIcons.workspace, size: 20),
                       onPressed: newProject,
                     ),
                     if (newChatAction == null)

@@ -1263,6 +1263,15 @@ example has verified profile publication disabled:
 }
 ```
 
+A multi-community relay MAY additionally publish a host-specific top-level
+`requires_nip_fi` boolean. This expresses mandatory admission evidence, separately
+from support for the protocol. In Buzz it is the stored community requirement OR
+global enforce; capability is advertised when global mode evaluates OR that
+requirement is true. Required hosts therefore retain both existing capability
+fields and the descriptor above. Optional shadow hosts still advertise capability.
+Root NIP-11 and `/info` MUST agree and use `Cache-Control: no-store`. An unknown or
+non-serving Host returns generic 404; unavailable host policy returns 503.
+
 A relay MUST include `federated_identity.public_profile` when, and only when,
 it implements verified profile projection, advertises the resolved community's
 stable `self` pubkey with its signing key configured, and at least one issuer

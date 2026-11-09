@@ -953,6 +953,15 @@ test("reports give per-test statuses per iteration", () => {
           type: "testStart",
           test: { id: 4, name: "later", url: "file:///m/test/b_test.dart" },
         }),
+        event({
+          type: "testStart",
+          test: {
+            id: 5,
+            name: "widget renders",
+            url: "package:flutter_test/src/widget_tester.dart",
+            root_url: "file:///m/test/b_test.dart",
+          },
+        }),
         "not json",
         event({
           type: "testDone",
@@ -975,6 +984,13 @@ test("reports give per-test statuses per iteration", () => {
           hidden: false,
           skipped: true,
         }),
+        event({
+          type: "testDone",
+          testID: 5,
+          result: "success",
+          hidden: false,
+          skipped: false,
+        }),
         event({ type: "done", success: false }),
       ].join("\n"),
       "/m/",
@@ -983,6 +999,7 @@ test("reports give per-test statuses per iteration", () => {
       ["test/a_test.dart › group renders", "passed"],
       ["test/a_test.dart › group fails", "failed"],
       ["test/b_test.dart › later", "skipped"],
+      ["test/b_test.dart › widget renders", "passed"],
     ]),
   );
   // Playwright lists a --repeat-each journey once per repetition, in order.
@@ -1079,14 +1096,20 @@ test("repeat invocations mirror the lanes they stand in for", () => {
       runner,
     );
   // The Tauri lane builds what the Desktop Tauri core lane does: the same
-  // workspace cache, system packages and sidecar stubs.
+  // workspace cache, system packages and sidecar stubs. The core lane lists
+  // its packages in TAURI_APT_PACKAGES, which its .deb cache key hashes.
   const desktop = read("../.github/workflows/_ci-desktop.yml");
-  const packages = (text) =>
-    /apt-get install -y --no-install-recommends \\\n((?: {12}\S+(?: \\)?\n)+)/.exec(
-      text,
-    )?.[1];
-  assert.ok(packages(desktop), "Desktop Tauri apt packages");
-  assert.equal(packages(flake), packages(desktop));
+  const desktopPackages = /^ {6}TAURI_APT_PACKAGES: >-\n((?: {8}\S+\n)+)/m
+    .exec(desktop)?.[1]
+    .split(/\s+/)
+    .filter(Boolean);
+  const flakePackages =
+    /apt-get install -y --no-install-recommends \\\n((?: {12}\S+(?: \\)?\n)+)/
+      .exec(flake)?.[1]
+      .split(/[\s\\]+/)
+      .filter(Boolean);
+  assert.ok(desktopPackages?.length, "Desktop Tauri apt packages");
+  assert.deepEqual(flakePackages, desktopPackages);
   assert.match(
     flake,
     /flake-tauri:\n(?: {4}.*\n)*? {6}- uses: Swatinem\/rust-cache@\w+\n {8}with:\n {10}workspaces: desktop\/src-tauri\n {10}shared-key: desktop-core\n {10}save-if: false\n/,

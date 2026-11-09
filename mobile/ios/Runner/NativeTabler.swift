@@ -16,6 +16,7 @@ enum NativeTabler {
   }()
 
   static func image(_ symbol: String, size: CGFloat = 20) -> UIImage? {
+    if symbol == "agent" { return agentImage(size: size) }
     guard let code = glyphs[symbol], let scalar = UnicodeScalar(code),
       let name = fontName, let font = UIFont(name: name, size: size) else {
       assertionFailure("Missing Tabler icon: \(symbol)")
@@ -29,10 +30,38 @@ enum NativeTabler {
     }.withRenderingMode(.alwaysTemplate)
   }
 
+  /// Matches Flutter's AgentNavigationIcon and the desktop agent mark.
+  private static func agentImage(size: CGFloat) -> UIImage {
+    UIGraphicsImageRenderer(size: CGSize(width: size, height: size)).image { renderer in
+      renderer.cgContext.scaleBy(x: size / 24, y: size / 24)
+      UIColor.black.setStroke()
+      UIColor.black.setFill()
+      let head = UIBezierPath(roundedRect: CGRect(x: 4.75, y: 7, width: 14.5, height: 13.25), cornerRadius: 4.5)
+      head.lineWidth = 2
+      head.stroke()
+      let lines = UIBezierPath()
+      lines.lineWidth = 2
+      lines.lineCapStyle = .round
+      for (start, end) in [
+        (CGPoint(x: 12, y: 7), CGPoint(x: 12, y: 2.5)),
+        (CGPoint(x: 3.25, y: 11.5), CGPoint(x: 3.25, y: 15.75)),
+        (CGPoint(x: 20.75, y: 11.5), CGPoint(x: 20.75, y: 15.75))
+      ] {
+        lines.move(to: start)
+        lines.addLine(to: end)
+      }
+      lines.stroke()
+      for x in [9.0, 15.0] {
+        UIBezierPath(ovalIn: CGRect(x: x - 1.4, y: 11.85, width: 2.8, height: 2.8)).fill()
+      }
+    }.withRenderingMode(.alwaysTemplate)
+  }
+
   private static let glyphs: [String: UInt32] = [
     "arrow.down": 0xea16, // arrow-down
     "xmark": 0xeb55, // x
     "xmark.circle.fill": 0xea6a, // circle-x
+    "chevron.down": 0xea5f, // chevron-down
     "chevron.backward": 0xea60, // chevron-left
     "chevron.left": 0xea60, // chevron-left
     "chevron.right": 0xea61, // chevron-right
@@ -75,6 +104,7 @@ enum NativeTabler {
     "doc": 0xeaa4, // file
     "plus": 0xeb0b, // plus
     "building.2.crop.circle": 0xebf6, // building-community
+    "workspace": 0xecd7, // cube-3d-sphere
     "folder.badge.plus": 0xeaab, // folder-plus
     "headphones": 0xeabd, // headphones
     "line.3.horizontal.decrease": 0xeaa5, // filter
@@ -88,6 +118,7 @@ enum NativeTabler {
     "link": 0xeade, // link
     "checkmark": 0xea5e, // check
     "checkmark.circle": 0xea67, // circle-check
+    "bell": 0xea35, // bell
     "bell.slash": 0xece9, // bell-off
     "number": 0xeabc, // hash — matches BuzzIcons.hash
     "bubble.left": 0xeaef, // message

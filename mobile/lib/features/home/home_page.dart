@@ -5,19 +5,24 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../../shared/hosted/organization_environment.dart';
 import '../../shared/theme/theme.dart';
+import '../../shared/theme/buzz_icons.dart';
 import '../../shared/community/community_membership_provider.dart';
 import '../../shared/community/community_provider.dart';
 import '../../shared/community/community_icon_provider.dart';
 import '../../shared/community/community_avatar.dart';
 import '../../shared/widgets/ios_message_create_button.dart';
+import '../../shared/widgets/ios_glass_navigation_button.dart';
 import '../../shared/widgets/bottom_up_page_route.dart';
 import '../../shared/widgets/mobile_tab_footer_backdrop.dart';
 import '../activity/activity_page.dart';
+import '../activity/inbox_unread_provider.dart';
 import '../channels/channels_page.dart';
 import '../search/search_page.dart';
 import 'messages_filters.dart';
 import 'messages_navigation_bar.dart';
+import '../../shared/widgets/covered_route_keyboard_insets.dart';
 
 class HomePage extends HookConsumerWidget {
   const HomePage({
@@ -26,17 +31,13 @@ class HomePage extends HookConsumerWidget {
     required this.defaultAgentBuilder,
     this.communityInvitePageBuilder,
     this.mePageBuilder,
-    this.profilePageBuilder,
     this.communityAppearancePageBuilder,
-    required this.hasUnreadInbox,
-    this.hasUnreadSolo = false,
     super.key,
   });
 
   final WidgetBuilder settingsPageBuilder;
   final ValueChanged<BuildContext> onAgents;
   final WidgetBuilder defaultAgentBuilder;
-  final WidgetBuilder? profilePageBuilder;
 
   /// Builds a sliver inventory and publishes its two creation actions.
   final Widget Function(
@@ -47,8 +48,6 @@ class HomePage extends HookConsumerWidget {
   mePageBuilder;
   final WidgetBuilder? communityInvitePageBuilder;
   final WidgetBuilder? communityAppearancePageBuilder;
-  final bool hasUnreadInbox;
-  final bool hasUnreadSolo;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -61,6 +60,8 @@ class HomePage extends HookConsumerWidget {
 
     final communitySurfaceProgress = useState(0.0);
     final filter = useState('All');
+    final hasUnreadInbox = ref.watch(inboxHasUnreadProvider);
+    final inboxLabel = hasUnreadInbox ? 'Activity, unread items' : 'Activity';
     final reselect = useValueNotifier(0);
     final newChat = useValueNotifier<VoidCallback?>(null);
     final newWorkspace = useValueNotifier<VoidCallback?>(null);
@@ -73,7 +74,7 @@ class HomePage extends HookConsumerWidget {
     final reducedMotion = MediaQuery.disableAnimationsOf(context);
     void openSearch() => Navigator.of(context).push(
       BottomUpPageRoute<void>(
-        builder: (_) => const SearchPage(),
+        builder: (_) => const CoveredRouteKeyboardInsets(child: SearchPage()),
         reducedMotion: reducedMotion,
       ),
     );
@@ -90,73 +91,161 @@ class HomePage extends HookConsumerWidget {
     void openPage(WidgetBuilder builder) =>
         Navigator.of(context).push(MaterialPageRoute<void>(builder: builder));
     final solo = mePageBuilder?.call(context, newChat, newWorkspace);
+    void openInbox() => Navigator.of(context).push(
+      BottomUpPageRoute<void>(
+        builder: (_) => const ActivityPage(),
+        reducedMotion: reducedMotion,
+      ),
+    );
     final messages = ChannelsPage(
       settingsPageBuilder: settingsPageBuilder,
-      hasUnreadInbox: hasUnreadInbox,
-      onInbox: () => Navigator.of(context).push(
-        BottomUpPageRoute<void>(
-          builder: (_) => const ActivityPage(),
-          reducedMotion: reducedMotion,
-        ),
-      ),
-      messagesActionsBuilder: (openSwitcher) {
+      messagesActionsWidth:
+          2 * (defaultTargetPlatform == TargetPlatform.iOS ? 44 : 48) + Grid.xs,
+      messagesActionsBuilder: (openSwitcher, avatarKey) {
         final moreActions = [
-          (
-            label: 'Switch workspace',
-            symbol: 'arrow.left.arrow.right',
-            onPressed: openSwitcher,
-          ),
+          // An internal build reaches only its organization's community.
+          if (!OrganizationEnvironment.enabled)
+            (
+              label: 'Switch community',
+              symbol: 'arrow.left.arrow.right',
+              onPressed: openSwitcher,
+            ),
           if (canInvite && communityInvitePageBuilder != null)
             (
               label: 'Invite',
               symbol: 'person.badge.plus',
               onPressed: () => openPage(communityInvitePageBuilder!),
             ),
+          (
+            label: 'Agents',
+            symbol: 'agent',
+            onPressed: () => onAgents(context),
+          ),
           if (communityAppearancePageBuilder != null)
             (
               label: 'Appearance',
               symbol: 'circle.lefthalf.filled',
               onPressed: () => openPage(communityAppearancePageBuilder!),
             ),
-          (
-            label: 'Agents',
-            symbol: 'person.2',
-            onPressed: () => onAgents(context),
-          ),
           (label: 'Settings', symbol: 'gearshape', onPressed: openSettings),
         ];
         return [
-          if (defaultTargetPlatform == TargetPlatform.iOS)
-            IosMessageCreateButton(
-              actions: moreActions,
-              dividerBefore: const {1},
-              icon: 'more',
-              avatarUrl: communityIcon,
-              avatarInitial: communityName.isEmpty
-                  ? '?'
-                  : communityName.characters.first.toUpperCase(),
-              accessibilityLabel: 'Community menu',
-              width: 44,
-              height: 44,
-              plain: false,
-            )
+          if (defaultTargetPlatform == TargetPlatform.iOS &&
+              !nativeControlsVisible)
+            const SizedBox(width: 44, height: 44)
           else
-            AndroidExpandingMenuButton(
-              label: 'Community menu',
-              actions: moreActions,
-              dividerBefore: const {1},
-              width: 48,
-              height: 48,
-              trigger: CommunityAvatar(
-                name: communityName,
-                relayUrl: community?.relayUrl,
-                size: 36,
-              ),
+            Stack(
+              alignment: Alignment.center,
+              children: [
+                defaultTargetPlatform == TargetPlatform.iOS
+                    ? IosGlassNavigationButton(
+                        icon: IosGlassNavigationIcon.bell,
+                        semanticLabel: inboxLabel,
+                        width: 44,
+                        height: 44,
+                        controlSize: 44,
+                        foregroundColor: context.colors.onSurface,
+                        onPressed: openInbox,
+                      )
+                    : IconButton.filledTonal(
+                        tooltip: inboxLabel,
+                        style: IconButton.styleFrom(
+                          backgroundColor:
+                              context.colors.surfaceContainerHighest,
+                          foregroundColor: context.colors.onSurface,
+                          minimumSize: const Size.square(48),
+                        ),
+                        icon: const Icon(BuzzIcons.bell),
+                        onPressed: openInbox,
+                      ),
+                Positioned.fill(
+                  child: IgnorePointer(
+                    child: ExcludeSemantics(
+                      child: Center(
+                        child: AnimatedOpacity(
+                          opacity: hasUnreadInbox ? 1 : 0,
+                          duration: reducedMotion
+                              ? Duration.zero
+                              : const Duration(milliseconds: 150),
+                          curve: Curves.easeOut,
+                          child: SizedBox.square(
+                            key: const Key('home-inbox-badge'),
+                            dimension: 24,
+                            child: Stack(
+                              clipBehavior: Clip.none,
+                              children: [
+                                Positioned(
+                                  top: 0,
+                                  right: 2,
+                                  child: Container(
+                                    key: const Key('home-inbox-dot'),
+                                    width: 10,
+                                    height: 10,
+                                    decoration: BoxDecoration(
+                                      shape: BoxShape.circle,
+                                      color: context.colors.primary,
+                                      border: Border.all(
+                                        color:
+                                            defaultTargetPlatform ==
+                                                TargetPlatform.android
+                                            ? context
+                                                  .colors
+                                                  .surfaceContainerHighest
+                                            : context.controlSurface,
+                                        width: 2,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
             ),
+          const SizedBox(width: Grid.xs),
+          SizedBox(
+            key: avatarKey,
+            child: defaultTargetPlatform == TargetPlatform.iOS
+                ? IosMessageCreateButton(
+                    actions: moreActions,
+                    dividerBefore: OrganizationEnvironment.enabled
+                        ? const {}
+                        : const {1},
+                    icon: 'more',
+                    avatarUrl: communityIcon,
+                    avatarInitial: communityName.isEmpty
+                        ? '?'
+                        : communityName.characters.first.toUpperCase(),
+                    accessibilityLabel: 'Community menu',
+                    width: 44,
+                    height: 44,
+                    plain: false,
+                  )
+                : AndroidExpandingMenuButton(
+                    label: 'Community menu',
+                    backgroundColor: context.colors.surfaceContainerHighest,
+                    actions: moreActions,
+                    dividerBefore: OrganizationEnvironment.enabled
+                        ? const {}
+                        : const {1},
+                    width: 48,
+                    height: 48,
+                    trigger: CommunityAvatar(
+                      name: communityName,
+                      relayUrl: community?.relayUrl,
+                      size: 36,
+                    ),
+                  ),
+          ),
         ];
       },
-      messagesFilters: MessagesFilters(
-        hasUnreadSolo: hasUnreadSolo,
+      messagesFilters: (isCollapsed) => MessagesFilters(
+        isCollapsed: isCollapsed,
         selected: filter.value,
         onSelected: (value) {
           filter.value = value;
@@ -181,12 +270,49 @@ class HomePage extends HookConsumerWidget {
         communitySurfaceProgress.value = progress;
       },
     );
-    final bottom =
-        MediaQuery.viewPaddingOf(context).bottom > mobileTabBarBottomGap
-        ? MediaQuery.viewPaddingOf(context).bottom
-        : mobileTabBarBottomGap;
+    final bottom = mobileTabBarBottom(context);
     return Scaffold(
       resizeToAvoidBottomInset: false,
+      // Register the floating controls with Scaffold so snackbars clear them.
+      extendBody: true,
+      bottomNavigationBar: Padding(
+        padding: EdgeInsets.only(bottom: bottom),
+        child: SizedBox(
+          height: mobileTabBarHeight,
+          child:
+              defaultTargetPlatform != TargetPlatform.iOS ||
+                  nativeControlsVisible
+              ? Center(
+                  child: MessagesNavigationBar(
+                    onSearch: openSearch,
+                    agent: defaultAgentBuilder(context),
+                    creationActions: [
+                      (
+                        label: 'New chat',
+                        symbol: 'square.and.pencil',
+                        onPressed: newChat.value,
+                      ),
+                      (
+                        label: 'New workspace',
+                        symbol: 'workspace',
+                        onPressed: newWorkspace.value,
+                      ),
+                      (
+                        label: 'New DM',
+                        symbol: 'bubble.left',
+                        onPressed: newDm.value,
+                      ),
+                      (
+                        label: 'New channel',
+                        symbol: 'number',
+                        onPressed: newChannel.value,
+                      ),
+                    ],
+                  ),
+                )
+              : null,
+        ),
+      ),
       body: Stack(
         children: [
           MediaQuery(
@@ -223,41 +349,6 @@ class HomePage extends HookConsumerWidget {
               ),
             ),
           ),
-          if (defaultTargetPlatform != TargetPlatform.iOS ||
-              nativeControlsVisible)
-            Positioned(
-              left: 0,
-              right: 0,
-              bottom: bottom,
-              child: Center(
-                child: MessagesNavigationBar(
-                  onSearch: openSearch,
-                  agent: defaultAgentBuilder(context),
-                  creationActions: [
-                    (
-                      label: 'New chat',
-                      symbol: 'square.and.pencil',
-                      onPressed: newChat.value,
-                    ),
-                    (
-                      label: 'New workspace',
-                      symbol: 'folder.badge.plus',
-                      onPressed: newWorkspace.value,
-                    ),
-                    (
-                      label: 'New DM',
-                      symbol: 'bubble.left',
-                      onPressed: newDm.value,
-                    ),
-                    (
-                      label: 'New channel',
-                      symbol: 'number',
-                      onPressed: newChannel.value,
-                    ),
-                  ],
-                ),
-              ),
-            ),
         ],
       ),
     );

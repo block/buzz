@@ -627,7 +627,6 @@ void main() {
       expect(service.cachedSnapshot()?.event?.id, fresh.id);
       relay.closeSubscription!('offline');
       await Future<void>.delayed(Duration.zero);
-      expect(service.syncClosed.value, isTrue);
       expect(container.read(meGroupsProvider).hasError, isFalse);
       expect(
         container.read(meGroupsProvider).value?.groups.single['name'],

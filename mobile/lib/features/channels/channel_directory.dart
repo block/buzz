@@ -26,13 +26,21 @@ class ChannelDirectoryLoadState {
   /// Current loading status for [scope].
   final ChannelDirectoryLoadStatus status;
 
+  /// When the directory for [scope] last finished loading.
+  final DateTime? loadedAt;
+
   /// Creates directory loading state.
-  const ChannelDirectoryLoadState({required this.scope, required this.status});
+  const ChannelDirectoryLoadState({
+    required this.scope,
+    required this.status,
+    this.loadedAt,
+  });
 
   /// Initial state before any directory request has started.
   const ChannelDirectoryLoadState.idle()
     : scope = null,
-      status = ChannelDirectoryLoadStatus.idle;
+      status = ChannelDirectoryLoadStatus.idle,
+      loadedAt = null;
 }
 
 /// Returns the stable directory scope for a relay and signing identity.
@@ -48,6 +56,10 @@ class ChannelDirectoryLoadNotifier extends Notifier<ChannelDirectoryLoadState> {
   bool isLoading(String scope) =>
       state.scope == scope &&
       state.status == ChannelDirectoryLoadStatus.loading;
+
+  /// Whether the last directory request for [scope] failed.
+  bool hasFailed(String scope) =>
+      state.scope == scope && state.status == ChannelDirectoryLoadStatus.error;
 
   /// Marks the directory as loading.
   void markLoading(String scope) => state = ChannelDirectoryLoadState(
@@ -65,6 +77,7 @@ class ChannelDirectoryLoadNotifier extends Notifier<ChannelDirectoryLoadState> {
   void markLoaded(String scope) => state = ChannelDirectoryLoadState(
     scope: scope,
     status: ChannelDirectoryLoadStatus.loaded,
+    loadedAt: DateTime.now(),
   );
 
   /// Marks the directory request as unsuccessful.
@@ -250,7 +263,8 @@ List<NostrEvent> _latestChannelEvents(
   return latestById.values.toList();
 }
 
-Future<Set<String>> _fetchHiddenDmIds(
+/// The hidden DM ids, or null when the relay doesn't answer.
+Future<Set<String>?> _fetchHiddenDmIds(
   RelaySessionNotifier session,
   String myPk,
 ) async {
@@ -259,7 +273,7 @@ Future<Set<String>> _fetchHiddenDmIds(
       await session.fetchHistory(NostrFilters.hiddenDms(myPk)),
     );
   } catch (_) {
-    return const {};
+    return null;
   }
 }
 
@@ -419,13 +433,19 @@ class _ChannelRefreshCoordinator {
       final status = loadStatus();
       if (status.isLoading(scope)) {
         // This refresh takes ownership of the shared generation, so the
-        // in-flight directory response will be discarded. The mounted Browse
-        // sheet cannot restart an idle request on its own: it only starts a
-        // load when it mounts and deliberately renders idle as its initial
-        // spinner. Settle the displaced load to a retryable terminal state so
-        // the sheet never waits forever for a response that may no longer
-        // write results.
-        status.markError(scope);
+        // in-flight directory response will be discarded. Mark it idle, not
+        // error: nothing failed, so a caller may load it again, and search
+        // retries a displaced load once instead of reporting a failure.
+        status.markIdle(scope);
+      }
+    } else {
+      final status = loadStatus();
+      if (status.hasFailed(scope)) {
+        // A new attempt replaces the last failure. The status turns loading
+        // only after the membership reads, so a refresh that retires this
+        // attempt earlier must not leave the old error to be read as its
+        // result: idle lets search retry the displaced attempt.
+        status.markIdle(scope);
       }
     }
     return fence;
@@ -536,21 +556,36 @@ String _encodeRootIdSet(Set<String> values) => jsonEncode(values.toList());
 /// ceiling enforced by `just file-size-check`. Private members stay reachable:
 /// a part shares its parent's library.
 extension _ObservedUnreadRecording on ChannelsNotifier {
-  void _recordUnreadEvent(Channel channel, NostrEvent event, String myPk) {
+  bool _recordUnreadEvent(
+    Channel channel,
+    NostrEvent event,
+    String myPk, {
+    bool countQuiet = false,
+  }) {
+    if (_unscopedUnreadDeletedIds.contains(event.id) ||
+        _unreadDeletedIdsByChannel[channel.id]?.contains(event.id) == true) {
+      return false;
+    }
+    if (!countQuiet && isQuietAgentMessage(event.tags)) return false;
+    // A counted quiet event is only a backlog marker: it never earns attention
+    // through its mentions or thread.
     final isThreadedReply =
-        event.threadReference.parentId != null && !_isBroadcastReply(event);
+        !countQuiet &&
+        event.threadReference.parentId != null &&
+        !_isBroadcastReply(event);
     final isHighPriority =
-        channel.isDm || isHighPriorityEvent(event.tags, myPk);
+        channel.isDm || (!countQuiet && isHighPriorityEvent(event.tags, myPk));
     recordObservedUnreadEvent(
       _observedUnreadEventsByChannel,
       channel.id,
       makeObservedUnreadEvent(
         id: event.id,
         createdAt: event.createdAt,
-        rootId: _observedUnreadRootId(event),
+        rootId: countQuiet ? null : _observedUnreadRootId(event),
         highPriority: isHighPriority,
         channelType: channel.channelType,
         isThreadedReply: isThreadedReply,
+        threadReply: isThreadedReply && !channel.isDm ? event : null,
       ),
       _unreadCatchUpLimit,
     );
@@ -558,6 +593,23 @@ extension _ObservedUnreadRecording on ChannelsNotifier {
     final current = _latestObservedByChannel[channel.id] ?? 0;
     if (event.createdAt > current) {
       _latestObservedByChannel[channel.id] = event.createdAt;
+    }
+    return true;
+  }
+}
+
+/// Activity projection of the channel unread registry.
+extension ObservedThreadActivity on ChannelsNotifier {
+  /// The same eligible replies that supply channel attention dots. Consumers
+  /// watch [channelsProvider] for changes; this does not fetch extra history.
+  Iterable<NostrEvent> observedThreadReplies(Iterable<Channel> channels) sync* {
+    for (final channel in channels) {
+      if (!channel.isMember || channel.isArchived || channel.isDm) continue;
+      for (final observed
+          in _observedUnreadEventsByChannel[channel.id]?.values ??
+              const <ObservedUnreadEvent>[]) {
+        if (observed.threadReply case final reply?) yield reply;
+      }
     }
   }
 }

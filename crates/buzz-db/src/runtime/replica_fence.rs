@@ -48,10 +48,14 @@
 //! `RETURNING token` or an epoch change (restore/re-seed) clears the retained
 //! ring, so no stale entry can masquerade as fresh coverage.
 //!
-//! Everything fails **closed**: probe errors, masked `pg_stat_activity`
-//! visibility, an unreadable heartbeat row on the reader session, an epoch
-//! mismatch, or an observed token below every retained entry all route the
-//! request back to the writer — degraded capacity, never holes.
+//! Everything fails **closed**: an unreadable heartbeat row on the reader
+//! session, an epoch mismatch, or an observed token below every retained
+//! entry all route the request back to the writer — degraded capacity, never
+//! holes. A failed probe (a writer error or masked `pg_stat_activity`
+//! visibility) proves nothing new, so it records no entry; the entries
+//! already retained stay valid, because a proof never decays. If the probe
+//! keeps failing, the newest entry ages past [`FENCE_STALENESS`] and the
+//! fence closes.
 //!
 //! Operational bypasses (sessions without the GUC, `session_replication_role
 //! = replica` restores) are outside the proof by design and require holding
@@ -204,8 +208,9 @@ impl ReplicaFence {
         Self::default()
     }
 
-    /// Close the fence: drop all retained proofs; reads route to the writer.
-    pub fn close(&self) {
+    /// Test hook: drop all retained proofs, so reads route to the writer.
+    #[cfg(test)]
+    pub(crate) fn close(&self) {
         let mut inner = self.inner.lock().expect("fence lock poisoned");
         inner.ring.clear();
     }
@@ -538,8 +543,8 @@ struct WriterSample {
     committed_at: Instant,
 }
 
-/// Errors that close the fence. All variants are logged and treated
-/// identically: fail closed.
+/// Errors that fail one probe. All variants are logged and treated
+/// identically: the probe records no entry, and the retained entries stand.
 #[derive(Debug, thiserror::Error)]
 pub enum ProbeError {
     /// A probe query against the writer failed.
@@ -803,57 +808,38 @@ pub struct HeartbeatObservation {
     pub backend: String,
 }
 
-/// Background probe loop: commit a heartbeat token every `PROBE_INTERVAL`;
-/// close the fence on any error. Runs for the life of the process.
+/// Background probe loop: commit a heartbeat token every `PROBE_INTERVAL`.
+/// Runs for the life of the process.
 pub async fn run_probe(writer: PgPool, fence: Arc<ReplicaFence>) {
     let mut interval = tokio::time::interval(PROBE_INTERVAL);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         interval.tick().await;
-        match probe_once(&writer, &fence).await {
-            Ok(_) => {}
-            Err(e) => {
-                fence.close();
-                tracing::warn!(error = %e, "replica fence probe failed; fence closed");
-            }
-        }
+        probe_tick(&writer, &fence).await;
+    }
+}
+
+/// One probe-loop tick. A failure is logged and keeps the retained entries:
+/// they were proved by earlier handshakes and stay valid, so one failed
+/// probe must not route every read to the writer. Only staleness
+/// ([`FENCE_STALENESS`]) closes a fence whose probe keeps failing.
+async fn probe_tick(writer: &PgPool, fence: &ReplicaFence) {
+    if let Err(e) = probe_once(writer, fence).await {
+        tracing::warn!(error = %e, "replica fence probe failed; retained proofs stand");
     }
 }
 
 #[cfg(test)]
 mod postgres_tests {
     use super::*;
+    use crate::test_support::{ScratchDb, ScratchRole};
 
     /// A private scratch database with migrations applied: the probe tests
     /// mutate the singleton heartbeat row (rewind/rotate), which must never
-    /// race the shared dev database or each other.
-    async fn scratch_db() -> (PgPool, PgPool, String) {
-        let admin = PgPool::connect(&crate::test_support::database_url())
-            .await
-            .expect("connect admin");
-        let name = format!("fence_probe_{}", uuid::Uuid::new_v4().simple());
-        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {name}")))
-            .execute(&admin)
-            .await
-            .expect("create scratch db");
-        let base = crate::test_support::database_url();
-        let idx = base.rfind('/').expect("db url has a path segment");
-        let pool = PgPool::connect(&format!("{}/{}", &base[..idx], name))
-            .await
-            .expect("connect scratch db");
-        crate::migration::run_migrations(&pool)
-            .await
-            .expect("migrate scratch db");
-        (admin, pool, name)
-    }
-
-    async fn drop_scratch_db(admin: &PgPool, pool: PgPool, name: &str) {
-        pool.close().await;
-        let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
-            "DROP DATABASE IF EXISTS {name} WITH (FORCE)"
-        )))
-        .execute(admin)
-        .await;
+    /// race the shared dev database or each other. Dropping the guard drops
+    /// the database.
+    async fn scratch_db() -> (PgPool, ScratchDb) {
+        ScratchDb::migrated(&crate::test_support::database_url(), "fence_probe").await
     }
 
     #[test]
@@ -891,6 +877,44 @@ mod postgres_tests {
         );
         // heartbeat_age is deliberately ungated (observability).
         assert!(fence.heartbeat_age().expect("entry retained") > FENCE_STALENESS);
+    }
+
+    /// A failed probe proves nothing new but must keep what earlier probes
+    /// proved: the retained entry still answers `newest()` and `resolve()`.
+    /// Closing here routed every read to the writer until the next success.
+    #[tokio::test]
+    async fn failed_probe_keeps_retained_proofs() {
+        let fence = ReplicaFence::new();
+        let epoch = Uuid::new_v4();
+        let wall = Utc::now();
+        fence.record(7, epoch, Instant::now(), wall);
+
+        let writer = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy(&crate::test_support::database_url())
+            .expect("construct lazy writer pool");
+        writer.close().await;
+        probe_once(&writer, &fence)
+            .await
+            .expect_err("a closed writer pool fails the probe");
+
+        probe_tick(&writer, &fence).await;
+
+        let newest = fence
+            .newest()
+            .expect("retained proof survives a failed probe");
+        assert_eq!((newest.token, newest.fence_wall), (7, wall));
+        assert!(matches!(
+            fence.resolve(7, epoch),
+            ResolveOutcome::Proved(entry) if entry.token == 7
+        ));
+
+        // The retained entry is also what catches an epoch-keeping restore
+        // across the outage: a rewound token is a regression, not a fresh
+        // start. An emptied ring here would accept it under the old epoch.
+        assert_eq!(
+            fence.record(5, epoch, Instant::now(), wall),
+            RecordOutcome::TokenRegression
+        );
     }
 
     /// Resolve picks the greatest retained entry <= the observed token —
@@ -1050,8 +1074,8 @@ mod postgres_tests {
     /// still held. It must block until release, then sample.
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn sample_writer_waits_for_shared_floor_lock_before_sampling_time() {
-        let (admin, pool, name) = scratch_db().await;
+    async fn cluster_global_sample_writer_waits_for_shared_floor_lock_before_sampling_time() {
+        let (pool, _scratch) = scratch_db().await;
 
         let mut blocker = pool.begin().await.expect("begin shared-lock blocker");
         sqlx::query("SELECT pg_advisory_xact_lock_shared($1)")
@@ -1090,8 +1114,6 @@ mod postgres_tests {
             sample.sampled_at,
             marker_before_release
         );
-
-        drop_scratch_db(&admin, pool, &name).await;
     }
 
     /// An unprivileged probe role sees NULL `state`/`xact_start` for other
@@ -1101,10 +1123,6 @@ mod postgres_tests {
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn cluster_global_sample_writer_fails_closed_when_activity_is_masked() {
-        let admin = PgPool::connect(&crate::test_support::database_url())
-            .await
-            .expect("connect");
-
         // Hold a transaction open as the privileged user: this is the row
         // the unprivileged probe must notice it cannot classify.
         let tx_pool = PgPool::connect(&crate::test_support::database_url())
@@ -1118,19 +1136,22 @@ mod postgres_tests {
 
         // An unprivileged login role (no pg_monitor): pg_stat_activity masks
         // other sessions' state columns for it.
-        let role = format!("fence_probe_{}", uuid::Uuid::new_v4().simple());
-        sqlx::query(sqlx::AssertSqlSafe(format!(
-            "CREATE ROLE {role} LOGIN PASSWORD 'fence_probe_test'" // sadscan:disable np.postgres.1
-        )))
-        .execute(&admin)
-        .await
-        .expect("create unprivileged role");
+        let role = ScratchRole::create(
+            &crate::test_support::database_url(),
+            "fence_probe",
+            "LOGIN PASSWORD 'fence_probe_test'", // sadscan:disable np.postgres.1
+        )
+        .await;
 
         let base = crate::test_support::database_url();
         let unpriv_url = {
             let rest = base.strip_prefix("postgres://").expect("pg url");
             let at = rest.rfind('@').expect("credentials in url");
-            format!("postgres://{role}:fence_probe_test@{}", &rest[at + 1..])
+            format!(
+                "postgres://{}:fence_probe_test@{}",
+                role.name(),
+                &rest[at + 1..]
+            )
         };
         let unpriv = PgPool::connect(&unpriv_url).await.expect("connect unpriv");
 
@@ -1144,10 +1165,6 @@ mod postgres_tests {
 
         tx.rollback().await.expect("rollback");
         unpriv.close().await;
-        sqlx::query(sqlx::AssertSqlSafe(format!("DROP ROLE {role}")))
-            .execute(&admin)
-            .await
-            .expect("drop role");
     }
 
     /// The Aurora PostgreSQL identity function name is exact — the
@@ -1191,7 +1208,7 @@ mod postgres_tests {
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn cluster_global_probe_commits_tokens_and_sessions_prove_coverage() {
-        let (admin, pool, name) = scratch_db().await;
+        let (pool, _scratch) = scratch_db().await;
         let fence = ReplicaFence::new();
 
         let first = probe_once(&pool, &fence).await.expect("first probe");
@@ -1236,7 +1253,6 @@ mod postgres_tests {
         );
 
         drop(conn);
-        drop_scratch_db(&admin, pool, &name).await;
     }
 
     /// A same-epoch token rewind on the writer (restore adversary) must not
@@ -1246,7 +1262,7 @@ mod postgres_tests {
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn cluster_global_probe_rotates_epoch_on_same_epoch_token_regression() {
-        let (admin, pool, name) = scratch_db().await;
+        let (pool, _scratch) = scratch_db().await;
         let fence = ReplicaFence::new();
 
         let before = probe_once(&pool, &fence).await.expect("probe");
@@ -1286,6 +1302,5 @@ mod postgres_tests {
         );
 
         drop(conn);
-        drop_scratch_db(&admin, pool, &name).await;
     }
 }

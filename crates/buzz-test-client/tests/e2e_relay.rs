@@ -302,6 +302,117 @@ async fn test_invite_mint_and_claim_admits_new_pubkey() {
     );
 }
 
+/// Claiming an invite joins the new member to the community's default
+/// channels: the relay owner flags one, the claim puts the claimer on its
+/// kind:39002 roster and stores one relay-signed kind:44100 for them, and a
+/// repeat claim is a no-op.
+///
+/// The claimer opens no WebSocket until the claim has answered. The e2e
+/// relay runs without `BUZZ_REQUIRE_RELAY_MEMBERSHIP`, so a NIP-42 admission
+/// would join them to the default channels itself and leave the claim
+/// nothing to join.
+#[tokio::test]
+#[ignore]
+async fn test_invite_claim_auto_joins_default_channel() {
+    let url = relay_url();
+    let relay_owner = Keys::generate();
+    let joiner = Keys::generate();
+    let joiner_hex = joiner.public_key().to_hex();
+    seed_relay_owner(&relay_owner).await;
+    let channel_id = create_test_channel(&relay_owner).await;
+    assert_eq!(
+        set_metadata_ws(&url, &channel_id, &relay_owner, "auto_join", "true").await,
+        (true, String::new())
+    );
+
+    let mint_response = invite_post(&relay_owner, "/api/invites", "{}").await;
+    assert_eq!(mint_response.status(), reqwest::StatusCode::OK);
+    let mint_json: serde_json::Value = mint_response.json().await.expect("mint JSON");
+    let code = mint_json
+        .get("code")
+        .and_then(serde_json::Value::as_str)
+        .expect("mint response includes code");
+    let claim_body = serde_json::json!({ "code": code }).to_string();
+    let claimed_since = nostr::Timestamp::now() - 5u64;
+    let claim_response = invite_post(&joiner, "/api/invites/claim", &claim_body).await;
+    assert_eq!(claim_response.status(), reqwest::StatusCode::OK);
+    let claim_json: serde_json::Value = claim_response.json().await.expect("claim JSON");
+    assert_eq!(
+        claim_json.get("status").and_then(serde_json::Value::as_str),
+        Some("joined")
+    );
+    assert_eq!(
+        member_role(&url, &relay_owner, &channel_id, &joiner_hex)
+            .await
+            .as_deref(),
+        Some("member"),
+        "the relay-signed kind:39002 roster lists the claimer"
+    );
+
+    // The claim stores its notice before it answers, so the notice comes
+    // back as history, before EOSE.
+    let mut joiner_client = BuzzTestClient::connect(&url, &joiner)
+        .await
+        .expect("connect joiner");
+    let sid = sub_id("auto-join-notif");
+    let filter = Filter::new()
+        .kind(Kind::Custom(44100))
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::P), joiner_hex.as_str())
+        .since(claimed_since);
+    joiner_client
+        .subscribe(&sid, vec![filter])
+        .await
+        .expect("subscribe to membership notifications");
+    let notices = joiner_client
+        .collect_until_eose(&sid, Duration::from_secs(5))
+        .await
+        .expect("EOSE for membership sub");
+    joiner_client.disconnect().await.ok();
+    // Other tests may leave their own default channels flagged on this
+    // shared relay; count only the notices about ours.
+    let ours: Vec<_> = notices
+        .iter()
+        .filter(|event| {
+            event.tags.iter().any(|tag| {
+                let tag = tag.as_slice();
+                tag.len() >= 2 && tag[0] == "h" && tag[1] == channel_id
+            })
+        })
+        .collect();
+    assert_eq!(
+        ours.len(),
+        1,
+        "one notice for the default channel: {notices:?}"
+    );
+    let info: serde_json::Value = reqwest::get(format!("{}/info", relay_http_url()))
+        .await
+        .expect("GET /info")
+        .json()
+        .await
+        .expect("NIP-11 JSON");
+    assert_eq!(
+        info.get("self").and_then(serde_json::Value::as_str),
+        Some(ours[0].pubkey.to_hex().as_str()),
+        "the relay signs the notice"
+    );
+
+    let repeat_response = invite_post(&joiner, "/api/invites/claim", &claim_body).await;
+    assert_eq!(repeat_response.status(), reqwest::StatusCode::OK);
+    let repeat_json: serde_json::Value = repeat_response.json().await.expect("repeat claim JSON");
+    assert_eq!(
+        repeat_json
+            .get("status")
+            .and_then(serde_json::Value::as_str),
+        Some("already_member")
+    );
+
+    // Leave the shared relay as found.
+    assert_eq!(
+        set_metadata_ws(&url, &channel_id, &relay_owner, "auto_join", "false").await,
+        (true, String::new())
+    );
+}
+
 #[tokio::test]
 #[ignore]
 async fn test_invite_claim_rejects_invalid_code() {
@@ -3133,19 +3244,30 @@ async fn set_join_role_ws(
     signer: &Keys,
     join_role: &str,
 ) -> (bool, String) {
+    set_metadata_ws(url, channel_id, signer, "join_role", join_role).await
+}
+
+/// Submit a kind:9002 with one `[tag, value]` setting and return the OK frame.
+async fn set_metadata_ws(
+    url: &str,
+    channel_id: &str,
+    signer: &Keys,
+    tag: &str,
+    value: &str,
+) -> (bool, String) {
     // The nonce keeps a repeated setting within one second from signing the
     // same event id as the earlier one, which the relay drops as a duplicate.
     let event = EventBuilder::new(Kind::Custom(9002), "")
         .tags([
             Tag::parse(["h", channel_id]).unwrap(),
-            Tag::parse(["join_role", join_role]).unwrap(),
+            Tag::parse([tag, value]).unwrap(),
             Tag::parse(["nonce", &uuid::Uuid::new_v4().to_string()]).unwrap(),
         ])
         .sign_with_keys(signer)
         .unwrap();
     let mut client = BuzzTestClient::connect(url, signer)
         .await
-        .expect("connect join_role actor");
+        .expect("connect kind:9002 actor");
     let ok = client.send_event(event).await.expect("send kind:9002");
     client.disconnect().await.ok();
     (ok.accepted, ok.message)
@@ -3713,6 +3835,31 @@ async fn test_nip29_announce_channel_wire() {
         !tags.contains(&vec!["closed".to_string()]),
         "open channels accept kind:9021 joins: {tags:?}"
     );
+    assert!(
+        !tags.contains(&vec!["auto_join".to_string()]),
+        "no channel is a default channel until a relay admin asks: {tags:?}"
+    );
+
+    // `auto_join` is a community setting: the channel owner, who is not on
+    // the relay roster, cannot set it; a relay owner can, and kind:39000
+    // then advertises the bare tag.
+    let (accepted, msg) = set_metadata_ws(&url, &channel_id, &owner, "auto_join", "true").await;
+    assert!(!accepted, "channel owner must not set auto_join");
+    assert!(msg.contains("relay owner or admin"), "{msg}");
+    let relay_owner = Keys::generate();
+    seed_relay_owner(&relay_owner).await;
+    assert_eq!(
+        set_metadata_ws(&url, &channel_id, &relay_owner, "auto_join", "true").await,
+        (true, String::new())
+    );
+    let tags = group_metadata_tags(&url, &owner, &channel_id).await;
+    assert!(tags.contains(&vec!["auto_join".to_string()]), "{tags:?}");
+    assert_eq!(
+        set_metadata_ws(&url, &channel_id, &relay_owner, "auto_join", "false").await,
+        (true, String::new())
+    );
+    let tags = group_metadata_tags(&url, &owner, &channel_id).await;
+    assert!(!tags.contains(&vec!["auto_join".to_string()]), "{tags:?}");
 
     // A non-member of an open announce channel cannot write, and cannot
     // self-add as a member.

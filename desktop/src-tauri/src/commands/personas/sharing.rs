@@ -78,13 +78,19 @@ pub async fn update_persona_and_publish(
     app: AppHandle,
 ) -> Result<SetPersonaSharedResult, String> {
     let (_, prepared) =
-        super::update::update_persona_with(input, app.clone(), |app, state, persona| {
+        super::update::update_persona_with(input, app.clone(), |app, _state, persona, scope| {
             // Strict path: this command's contract is to report the publication
             // outcome, so an enqueue failure must reach the UI rather than being
             // logged and swallowed.
-            let result = prepare_persona_publication(app, state, persona, None)?;
+            let scope = scope.ok_or("Signing keys unavailable for persona publication")?;
+            let result =
+                super::pending::prepare_persona_publication_in_scope(scope.clone(), persona, None)?;
             // F2: refresh any shared 30178 heads that include this persona.
-            crate::commands::refresh_team_catalog_heads_for_persona(app, state, &persona.id);
+            crate::commands::refresh_team_catalog_heads_for_persona_in_scope(
+                app,
+                scope,
+                &persona.id,
+            );
             Ok(result)
         })
         .await?;

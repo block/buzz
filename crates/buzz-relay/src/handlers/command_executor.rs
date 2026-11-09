@@ -153,7 +153,7 @@ async fn persist_command_event(
             )
             .await
             .map_err(|e| {
-                IngestError::Internal(format!("error: replace parameterized event: {e}"))
+                IngestError::Internal(format!("error: replace parameterized event: {}", e.kind()))
             })?;
 
         return match result.status {
@@ -184,7 +184,7 @@ async fn persist_command_event(
 
     let (_, was_inserted) = buzz_db::event::insert_event_in_transaction(&mut tx, event, channel_id)
         .await
-        .map_err(|e| IngestError::Internal(format!("error: insert event: {e}")))?;
+        .map_err(|e| IngestError::Internal(format!("error: insert event: {}", e.kind())))?;
     if was_inserted {
         Ok(PersistResult::Inserted(tx))
     } else {
@@ -697,7 +697,7 @@ async fn handle_workflow_def(
             .map_err(|e| IngestError::Internal(format!("error: role check: {e}")))?;
         if !matches!(role.as_deref(), Some("owner") | Some("admin")) {
             return Err(IngestError::Rejected(
-                "forbidden: workflows with call_webhook actions require the owner or admin role"
+                "forbidden: workflows with call_webhook actions require the channel owner or admin role"
                     .into(),
             ));
         }

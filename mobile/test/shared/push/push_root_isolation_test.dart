@@ -20,6 +20,7 @@ import 'package:buzz/shared/push/push_bootstrap.dart';
 import 'package:buzz/shared/push/push_bridge.dart';
 import 'package:buzz/shared/push/push_subscription.dart';
 import 'package:nostr/nostr.dart' as nostr;
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:buzz/shared/push/push_lease_revocation_outbox.dart';
 import 'package:buzz/shared/push/push_relay_capability_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
@@ -339,6 +340,13 @@ void main() {
   ) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
     SharedPreferences.setMockInitialValues({});
+    PackageInfo.setMockInitialValues(
+      appName: 'Buzz',
+      packageName: 'example.buzz',
+      version: '1.0.0',
+      buildNumber: '1',
+      buildSignature: '',
+    );
     const channel = MethodChannel('buzz/push');
     final messenger =
         TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
@@ -423,9 +431,8 @@ const _descriptor = BuzzPushLeaseDescriptor(
   executorPubkey: 'pubkey',
   transport: 'apns',
   maxLeaseTtlSeconds: 3600,
-  // The relay's NIP-11 limits, which fit a DM lease at the endpoint limit.
-  maxContentLength: 65536,
-  maxPlaintextLength: 32768,
+  maxContentLength: 4096,
+  maxPlaintextLength: 4096,
   maxEndpointLength: 2048,
   maxStringLength: 512,
 );

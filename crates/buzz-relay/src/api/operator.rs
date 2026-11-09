@@ -4,6 +4,10 @@
 //! request signing and replay protection, but they do not run through event
 //! ingest, relay membership, channel scoping, storage, or fan-out.
 
+mod community_policy;
+pub use community_policy::{community_nip_fi_policy_status, set_community_nip_fi_policy};
+
+use crate::access::{AccessSlot, AuthMethod, AuthResult};
 use std::sync::Arc;
 
 use axum::{
@@ -194,6 +198,7 @@ fn verify_registration_proof(
 /// or an inbound proxy `Host` header.
 async fn authorize_operator_request(
     state: &Arc<AppState>,
+    slot: &AccessSlot,
     headers: &HeaderMap,
     method: &str,
     path: &str,
@@ -214,8 +219,9 @@ async fn authorize_operator_request(
         pubkey,
         event_id_bytes,
         ..
-    } = bridge::verify_nip98_exempt_operator(headers, method, &url, body)?;
-    check_operator_replay(state, event_id_bytes).await?;
+    } = bridge::verify_nip98_exempt_operator(slot, headers, method, &url, body)?;
+    slot.attempt(AuthMethod::Nip98, Some(pubkey), true);
+    check_operator_replay(state, event_id_bytes, slot).await?;
 
     let pubkey_hex = pubkey.to_hex();
     if !state
@@ -224,12 +230,13 @@ async fn authorize_operator_request(
         .iter()
         .any(|pk| pk == &pubkey_hex)
     {
+        slot.finish(AuthResult::Denied(crate::access::AuthReason::NotOperator));
         return Err(api_error(
             StatusCode::FORBIDDEN,
             "actor not authorized: not a relay operator",
         ));
     }
-
+    slot.finish(AuthResult::Success);
     Ok(pubkey)
 }
 
@@ -237,6 +244,7 @@ async fn authorize_operator_request(
 /// identity and a NIP-98 request signature.
 async fn authorize_operator_listener_request(
     state: &Arc<AppState>,
+    slot: &AccessSlot,
     headers: &HeaderMap,
     method: &str,
     path: &str,
@@ -252,30 +260,42 @@ async fn authorize_operator_listener_request(
         pubkey,
         event_id_bytes,
         ..
-    } = bridge::verify_nip98_exempt_operator(headers, method, &url, Some(body))?;
-    check_operator_replay(state, event_id_bytes).await?;
+    } = bridge::verify_nip98_exempt_operator(slot, headers, method, &url, Some(body))?;
+    slot.attempt(AuthMethod::Nip98, Some(pubkey), true);
+    check_operator_replay(state, event_id_bytes, slot).await?;
     if !state
         .config
         .operator_listener_delivery_urls
         .contains_key(&pubkey.to_hex())
     {
+        slot.finish(AuthResult::Denied(
+            crate::access::AuthReason::NotOperatorListener,
+        ));
         return Err(api_error(
             StatusCode::FORBIDDEN,
             "actor not authorized: not a configured operator listener",
         ));
     }
+    slot.finish(AuthResult::Success);
     Ok(pubkey)
 }
 
 /// Register target pubkeys for the authenticated operator listener.
 pub async fn register_listener_pubkeys(
     State(state): State<Arc<AppState>>,
+    slot: AccessSlot,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let listener =
-        authorize_operator_listener_request(&state, &headers, "POST", LISTENER_PUBKEYS_PATH, &body)
-            .await?;
+    let listener = authorize_operator_listener_request(
+        &state,
+        &slot,
+        &headers,
+        "POST",
+        LISTENER_PUBKEYS_PATH,
+        &body,
+    )
+    .await?;
     let origin = state
         .config
         .relay_operator_api_origin
@@ -298,11 +318,13 @@ pub async fn register_listener_pubkeys(
 /// Remove target pubkeys for the authenticated operator listener.
 pub async fn remove_listener_pubkeys(
     State(state): State<Arc<AppState>>,
+    slot: AccessSlot,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let listener = authorize_operator_listener_request(
         &state,
+        &slot,
         &headers,
         "DELETE",
         LISTENER_PUBKEYS_PATH,
@@ -321,6 +343,7 @@ pub async fn remove_listener_pubkeys(
 async fn check_operator_replay(
     state: &AppState,
     event_id_bytes: [u8; 32],
+    slot: &AccessSlot,
 ) -> Result<(), (StatusCode, Json<Value>)> {
     let event_id = nostr::EventId::from_byte_array(event_id_bytes);
     match state
@@ -333,11 +356,17 @@ async fn check_operator_replay(
         .await
     {
         Ok(true) => Ok(()),
-        Ok(false) => Err(api_error(
-            StatusCode::UNAUTHORIZED,
-            "NIP-98: replay detected",
-        )),
+        Ok(false) => {
+            slot.finish(AuthResult::Failed("nip98_replay"));
+            Err(api_error(
+                StatusCode::UNAUTHORIZED,
+                "NIP-98: replay detected",
+            ))
+        }
         Err(error) => {
+            slot.finish(AuthResult::Denied(
+                crate::access::AuthReason::ReplayCheckUnavailable,
+            ));
             tracing::warn!(
                 scope = OPERATOR_REPLAY_SCOPE,
                 error = %error,
@@ -365,11 +394,13 @@ async fn check_operator_replay(
 /// authority for this deployment-root control-plane surface.
 pub async fn provision_community(
     State(state): State<Arc<AppState>>,
+    slot: AccessSlot,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let pubkey = authorize_operator_request(
         &state,
+        &slot,
         &headers,
         "POST",
         "/operator/communities",
@@ -394,6 +425,18 @@ pub async fn provision_community(
         })?)),
         Err(msg) if msg.starts_with("actor not authorized") => {
             Err(api_error(StatusCode::FORBIDDEN, &msg))
+        }
+        Err(msg) if msg.starts_with("nip_fi_binding_required:") => Err(coded_api_error(
+            StatusCode::BAD_REQUEST,
+            "nip_fi_binding_required",
+            &msg,
+        )),
+        Err(msg) if msg.starts_with("initial_policy_requires_create_only:") => {
+            Err(coded_api_error(
+                StatusCode::BAD_REQUEST,
+                "initial_policy_requires_create_only",
+                &msg,
+            ))
         }
         Err(msg) if msg.starts_with("limit_reached:") => {
             Err(coded_api_error(StatusCode::CONFLICT, "limit_reached", &msg))
@@ -435,11 +478,12 @@ pub struct DeleteCommunityRequest {
 /// Idempotently archive a community owned by the asserted end-user identity.
 pub async fn archive_community(
     State(state): State<Arc<AppState>>,
+    slot: AccessSlot,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     const PATH: &str = "/operator/communities/archive";
-    authorize_operator_request(&state, &headers, "POST", PATH, None, Some(&body)).await?;
+    authorize_operator_request(&state, &slot, &headers, "POST", PATH, None, Some(&body)).await?;
     let request: ArchiveCommunityRequest = serde_json::from_slice(&body).map_err(|e| {
         api_error(
             StatusCode::BAD_REQUEST,
@@ -468,6 +512,7 @@ pub async fn archive_community(
         .map_err(|e| internal_error(&format!("archive community: {e}")))?
         .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "community not found"))?;
     let tenant = TenantContext::resolved(record.id, &record.host);
+    state.invalidate_community_host(&tenant);
     let closed = match state
         .disconnect_community_clusterwide(&tenant, record.archived_at)
         .await
@@ -500,11 +545,12 @@ pub async fn archive_community(
 /// Idempotently restore an archived community owned by the asserted end-user identity.
 pub async fn unarchive_community(
     State(state): State<Arc<AppState>>,
+    slot: AccessSlot,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     const PATH: &str = "/operator/communities/unarchive";
-    authorize_operator_request(&state, &headers, "POST", PATH, None, Some(&body)).await?;
+    authorize_operator_request(&state, &slot, &headers, "POST", PATH, None, Some(&body)).await?;
     let request: ArchiveCommunityRequest = serde_json::from_slice(&body).map_err(|e| {
         api_error(
             StatusCode::BAD_REQUEST,
@@ -538,6 +584,7 @@ pub async fn unarchive_community(
         }
     };
     tracing::info!(community = %record.id, host = %record.host, "community unarchived");
+    state.invalidate_community_host(&TenantContext::resolved(record.id, &record.host));
     Ok(Json(serde_json::json!({
         "community_id": record.id.to_string(),
         "host": record.host,
@@ -586,12 +633,14 @@ pub async fn unarchive_community(
 /// that upstream ceremony, not verified as cryptographic owner consent.
 pub async fn delete_community(
     State(state): State<Arc<AppState>>,
+    slot: AccessSlot,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
     const PATH: &str = "/operator/communities/delete";
     let operator =
-        authorize_operator_request(&state, &headers, "POST", PATH, None, Some(&body)).await?;
+        authorize_operator_request(&state, &slot, &headers, "POST", PATH, None, Some(&body))
+            .await?;
     let request: DeleteCommunityRequest = serde_json::from_slice(&body).map_err(|e| {
         coded_api_error(
             StatusCode::BAD_REQUEST,
@@ -698,12 +747,14 @@ pub async fn delete_community(
 /// The operator is trusted to select the identity; this route does not bind it to a user session.
 pub async fn list_joined_communities(
     State(state): State<Arc<AppState>>,
+    slot: AccessSlot,
     headers: HeaderMap,
     RawQuery(raw_query): RawQuery,
     Query(query): Query<JoinedCommunitiesQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     authorize_operator_request(
         &state,
+        &slot,
         &headers,
         "GET",
         "/operator/communities/joined",
@@ -733,12 +784,14 @@ pub async fn list_joined_communities(
 /// List communities where a pubkey currently holds the `owner` role.
 pub async fn list_owned_communities(
     State(state): State<Arc<AppState>>,
+    slot: AccessSlot,
     headers: HeaderMap,
     RawQuery(raw_query): RawQuery,
     Query(query): Query<ListCommunitiesQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     authorize_operator_request(
         &state,
+        &slot,
         &headers,
         "GET",
         "/operator/communities",
@@ -788,11 +841,13 @@ pub async fn list_owned_communities(
 /// NIP-43 membership list is best-effort, matching the provision path.
 pub async fn transfer_community(
     State(state): State<Arc<AppState>>,
+    slot: AccessSlot,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _pubkey = authorize_operator_request(
         &state,
+        &slot,
         &headers,
         "POST",
         "/operator/communities/transfer",
@@ -921,12 +976,14 @@ pub async fn transfer_community(
 /// normalized authority used by create.
 pub async fn community_availability(
     State(state): State<Arc<AppState>>,
+    slot: AccessSlot,
     headers: HeaderMap,
     RawQuery(raw_query): RawQuery,
     Query(query): Query<CommunityAvailabilityQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     authorize_operator_request(
         &state,
+        &slot,
         &headers,
         "GET",
         "/operator/communities/availability",
@@ -980,12 +1037,14 @@ pub struct CommunityNipFiBindingQuery {
 /// - 404 means no community row has this host.
 pub async fn community_nip_fi_binding(
     State(state): State<Arc<AppState>>,
+    slot: AccessSlot,
     headers: HeaderMap,
     RawQuery(raw_query): RawQuery,
     Query(query): Query<CommunityNipFiBindingQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     authorize_operator_request(
         &state,
+        &slot,
         &headers,
         "GET",
         "/operator/communities/nip-fi-binding",
@@ -1141,8 +1200,53 @@ mod tests {
     }
 }
 
+fn upgrade_configured_trust(
+    state: &AppState,
+    host: &str,
+    issuer: &str,
+) -> Result<(), &'static str> {
+    let policy = state
+        .config
+        .nip_fi_provision_binding
+        .as_ref()
+        .ok_or("authorization_unavailable")?;
+    let [configured_issuer] = policy.authorized_issuers() else {
+        return Err("authorization_unavailable");
+    };
+    if !policy.is_bindable(host) || configured_issuer != issuer {
+        return Err("issuer_conflict");
+    }
+    if state
+        .config
+        .nip_fi
+        .registry
+        .policy_for_issuer(issuer)
+        .is_none()
+    {
+        return Err("authorization_unavailable");
+    }
+    Ok(())
+}
+
+/// Keep all policy responses, including auth and dependency errors, out of caches.
+pub async fn no_store_policy_response(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let policy = request.uri().path() == "/operator/communities/nip-fi-policy";
+    let mut response = next.run(request).await;
+    if policy {
+        response.headers_mut().insert(
+            axum::http::header::CACHE_CONTROL,
+            axum::http::HeaderValue::from_static("no-store"),
+        );
+    }
+    response
+}
+
 #[cfg(test)]
 mod postgres_tests {
+    mod initial_policy_postgres_tests;
     use std::{
         collections::HashSet,
         sync::{Arc, Mutex},
@@ -1259,9 +1363,7 @@ mod postgres_tests {
             .ok()?;
         let db = buzz_db::Db::from_pool(pool.clone());
 
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .ok()?;
+        let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).ok()?;
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await
@@ -1442,6 +1544,35 @@ mod postgres_tests {
                 "missing {role} snapshot tag for {pubkey}"
             );
         }
+    }
+
+    /// An operator request dropped while its replay check is in flight
+    /// still writes one `aborted` line.
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires Postgres"]
+    async fn operator_request_dropped_during_replay_logs_one_aborted_line() {
+        let operator = Keys::generate();
+        let state = operator_test_state(std::slice::from_ref(&operator))
+            .await
+            .expect("local Postgres");
+        let mut state = (*state).clone();
+        let replay = Arc::new(crate::access::tests::StallingReplayGuard::default());
+        state.nip98_replay = replay.clone();
+        // The query string is required, or extraction refuses before auth.
+        let path = format!(
+            "/operator/communities?owner_pubkey={}",
+            operator.public_key().to_hex()
+        );
+        let (guard, out) = crate::access::tests::capture_scoped();
+        tokio::select! {
+            _ = signed_operator_request(Arc::new(state), &operator, "GET", &path, None) => {
+                panic!("the replay check must stall");
+            }
+            () = replay.arrived.notified() => {}
+        }
+        drop(guard);
+        let line = crate::access::tests::assert_one_aborted_line(&out, &operator.public_key());
+        assert_eq!(line["route"], "/operator/communities");
     }
 
     #[tokio::test]
@@ -2818,17 +2949,39 @@ mod postgres_tests {
         (policy, reserved, format!("acme.{suffix}"))
     }
 
-    async fn nip_fi_lookup(state: Arc<AppState>, operator: &Keys, host: &str) -> Value {
-        let response = signed_operator_request(
-            state,
-            operator,
-            "GET",
-            &format!("/operator/communities/nip-fi-binding?host={host}"),
-            None,
+    fn fresh_upgrade_auth(keys: &Keys, url: &str, method: &str, body: Option<&[u8]>) -> String {
+        let mut tags = vec![
+            Tag::parse(["u", url]).unwrap(),
+            Tag::parse(["method", method]).unwrap(),
+            Tag::parse(["nonce", &Uuid::new_v4().to_string()]).unwrap(),
+        ];
+        if let Some(body) = body {
+            tags.push(Tag::parse(["payload", &hex::encode(Sha256::digest(body))]).unwrap());
+        }
+        let event = EventBuilder::new(Kind::HttpAuth, "")
+            .tags(tags)
+            .sign_with_keys(keys)
+            .unwrap();
+        format!(
+            "Nostr {}",
+            base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&event).unwrap())
         )
-        .await;
-        assert_eq!(response.status(), StatusCode::OK, "{host}");
-        read_json(response).await
+    }
+
+    async fn fresh_upgrade_request(
+        state: Arc<AppState>,
+        keys: &Keys,
+        method: &str,
+        path: &str,
+        body: Option<String>,
+    ) -> axum::response::Response {
+        let auth = fresh_upgrade_auth(
+            keys,
+            &format!("http://{INGRESS_HOST}{path}"),
+            method,
+            body.as_deref().map(str::as_bytes),
+        );
+        operator_request_with_auth(state, method, path, body, auth).await
     }
 
     #[tokio::test]
@@ -4233,9 +4386,7 @@ mod postgres_tests {
 
         let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
         let db = buzz_db::Db::from_pool(pool.clone());
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("redis pool");
+        let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await
@@ -4274,4 +4425,18 @@ mod postgres_tests {
         let body = read_json(response).await;
         assert_eq!(body["error"], "internal server error");
     }
+    async fn nip_fi_lookup(state: Arc<AppState>, operator: &Keys, host: &str) -> Value {
+        let response = signed_operator_request(
+            state,
+            operator,
+            "GET",
+            &format!("/operator/communities/nip-fi-binding?host={host}"),
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK, "{host}");
+        read_json(response).await
+    }
+
+    mod policy_tests;
 }

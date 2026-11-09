@@ -209,3 +209,24 @@ fn test_rename_renames_all_matching_instances_in_one_pass() {
     assert_eq!(records[1].name, "Duncan Idaho");
     assert_eq!(records[2].name, "Birch", "pool-named instance untouched");
 }
+
+#[test]
+fn missing_signer_refuses_the_whole_avatar_plan_and_key_recovery_can_retry() {
+    let mut record = agent("persona-1", "Keyless", None);
+    record.slug = Some("persona-1".into());
+    record.avatar_url = Some("https://example.org/old.png".into());
+    let mut persona = record.clone().to_definition_view().unwrap();
+    persona.id = "persona-1".into();
+    let previous = serde_json::to_value(&record).unwrap();
+    persona.avatar_url = Some("https://example.org/new.png".into());
+    let error = plan_persona_avatar_transfers(&persona, &[record.clone()], "wss://example.org")
+        .err()
+        .unwrap();
+    assert!(error.contains("Keyless") && error.contains("Restore") && error.contains("unlink"));
+    assert_eq!(serde_json::to_value(&record).unwrap(), previous);
+    let keys = nostr::Keys::generate();
+    record.private_key_nsec = keys.secret_key().to_secret_hex();
+    let plan = plan_persona_avatar_transfers(&persona, &[record], "wss://example.org").unwrap();
+    assert_eq!(plan.len(), 1);
+    assert_eq!(plan[0].2, persona.avatar_url);
+}

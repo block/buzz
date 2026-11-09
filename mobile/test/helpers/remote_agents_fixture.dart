@@ -54,7 +54,9 @@ class FakeRegistry extends BuilderlabAccountClient {
       'supported_reasoning_efforts': ['max'],
     },
   ];
+  Map<String, dynamic>? recommendedSelection;
   Completer<void>? catalogGate;
+  bool failCatalog = false;
   bool failListing = false;
   bool rejectRegistration = false;
   bool loseRegistration = false;
@@ -68,8 +70,16 @@ class FakeRegistry extends BuilderlabAccountClient {
   BuilderlabAccount? get account => signedIn
       ? BuilderlabAccount(subject: subject, expiresAt: DateTime.utc(2030))
       : null;
+
+  /// Holds [restore] open so a test can observe a cold-start restoration.
+  Completer<void>? restoreGate;
+
   @override
-  Future<BuilderlabAccount?> restore() async => account;
+  Future<BuilderlabAccount?> restore() async {
+    await restoreGate?.future;
+    return account;
+  }
+
   @override
   Future<Map<String, dynamic>> currentIdentity() async => {
     'identity': {'pubkey_hex': bound},
@@ -88,7 +98,11 @@ class FakeRegistry extends BuilderlabAccountClient {
     switch (path) {
       case '/v3/beekeeper/get-model-catalog':
         await catalogGate?.future;
-        return {'models': models};
+        if (failCatalog) throw StateError('Catalog unavailable.');
+        return {
+          'models': models,
+          'recommended_selection': ?recommendedSelection,
+        };
       case '/v3/beekeeper/list-agents':
         if (failListing) throw StateError('Registry unavailable.');
         return {'status': 1, 'agents': listed};
@@ -136,7 +150,7 @@ class FakeRegistry extends BuilderlabAccountClient {
 
 /// Fakes only relay publication; registry logic stays real.
 class RelayFakeController extends RemoteAgentController {
-  RelayFakeController(FakeRegistry account)
+  RelayFakeController(FakeRegistry account, {super.onCreated})
     : super(
         account: account,
         keys: AccountIdentityStore(),

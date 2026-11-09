@@ -91,11 +91,6 @@ void main() {
                     relayUrl: 'wss://relay.example',
                   ).copyWith(pushNotificationsEnabled: enabled),
                 ),
-                buzzPushAuthorizationStatusReaderProvider.overrideWithValue(
-                  () async => throw StateError(
-                    'must not query notification permission',
-                  ),
-                ),
               ],
               child: MaterialApp(
                 theme: AppTheme.light(),

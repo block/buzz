@@ -55,20 +55,23 @@ nostr.Event signNostrEvent({
   return unsigned.copyWith(sig: _encodeHex(signature));
 }
 
-final _hex128 = RegExp(r'^[0-9a-fA-F]{128}$');
+// Verify inputs are lowercase only, as NIP-01 and bip340's decoder require.
+final _lowerHex64 = RegExp(r'^[0-9a-f]{64}$');
+final _lowerHex128 = RegExp(r'^[0-9a-f]{128}$');
 
 /// Verifies a BIP-340 Schnorr [signature] (128 hex) over the 32-byte
 /// [messageHex] digest for the x-only [publicKey] with libsecp256k1.
 ///
-/// Returns false for malformed hex as well as for invalid signatures.
+/// Returns false for malformed or uppercase hex as well as for invalid
+/// signatures.
 bool verifySchnorrHex({
   required String publicKey,
   required String messageHex,
   required String signature,
 }) {
-  if (!_hex64.hasMatch(publicKey) ||
-      !_hex64.hasMatch(messageHex) ||
-      !_hex128.hasMatch(signature)) {
+  if (!_lowerHex64.hasMatch(publicKey) ||
+      !_lowerHex64.hasMatch(messageHex) ||
+      !_lowerHex128.hasMatch(signature)) {
     return false;
   }
   return secp256k1.schnorrVerify(
@@ -111,7 +114,8 @@ nostr.Event verifiedNostrEventFromJson(String payload) {
       nostr.EventValidationReason.idMismatch,
     );
   }
-  if (!_hex64.hasMatch(event.pubkey) || !_hex128.hasMatch(event.sig)) {
+  if (!_lowerHex64.hasMatch(event.pubkey) ||
+      !_lowerHex128.hasMatch(event.sig)) {
     throw const nostr.EventValidationException(
       'malformed pubkey or signature',
       nostr.EventValidationReason.malformedSignature,

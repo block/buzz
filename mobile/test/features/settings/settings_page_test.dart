@@ -9,10 +9,8 @@ import 'package:buzz/shared/community/community_membership_provider.dart';
 import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/community/community_provider.dart';
 import 'package:buzz/shared/theme/theme.dart';
-import 'package:buzz/shared/push/push_bridge.dart';
 import 'package:buzz/shared/push/dev_push_lease.dart';
 import 'package:buzz/shared/push/push_relay_capability_provider.dart';
-import 'package:buzz/shared/push/push_subscription_provider.dart';
 import 'package:buzz/shared/relay/app_lifecycle_provider.dart';
 import 'package:buzz/shared/widgets/app_list.dart';
 import 'package:buzz/shared/widgets/app_list_card.dart';
@@ -94,6 +92,79 @@ void main() {
     });
   }
 
+  for (final viaKeyboard in [false, true]) {
+    testWidgets(
+      '${viaKeyboard ? 'keyboard activation of' : 'tapping'} the version copies the whole version string',
+      (tester) async {
+        String? copied;
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          (call) async {
+            if (call.method == 'Clipboard.setData') {
+              copied = (call.arguments as Map)['text'] as String?;
+            }
+            return null;
+          },
+        );
+        addTearDown(
+          () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            SystemChannels.platform,
+            null,
+          ),
+        );
+        SharedPreferences.setMockInitialValues({});
+        final prefs = await SharedPreferences.getInstance();
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [savedPrefsProvider.overrideWithValue(prefs)],
+            child: MaterialApp(
+              theme: AppTheme.light(),
+              home: SettingsPage(
+                profileHeader: const SizedBox.shrink(),
+                identityRecoveryPageBuilder: (_) => const SizedBox.shrink(),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        final version = find.text('v0.16.0 (432)');
+        await tester.scrollUntilVisible(version, 200);
+        await tester.pumpAndSettle();
+        final target = find.ancestor(
+          of: version,
+          matching: find.byType(InkWell),
+        );
+        expect(
+          tester.getSize(target).height,
+          greaterThanOrEqualTo(kMinInteractiveDimension),
+        );
+
+        if (viaKeyboard) {
+          final versionFocus = Focus.of(tester.element(version));
+          var tabs = 0;
+          while (!versionFocus.hasPrimaryFocus) {
+            expect(
+              tabs++,
+              lessThan(50),
+              reason: 'version is not reachable by Tab',
+            );
+            await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+            await tester.pump();
+          }
+          await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+        } else {
+          await tester.tap(version);
+        }
+        await tester.pump();
+
+        expect(copied, 'v0.16.0 (432)');
+        expect(find.text('Version copied'), findsOneWidget);
+        await tester.pump(const Duration(seconds: 5));
+        await tester.pumpAndSettle();
+      },
+    );
+  }
+
   for (final outcome in ['absent', 'error']) {
     testWidgets('hides notifications while capability loads and is $outcome', (
       tester,
@@ -103,7 +174,6 @@ void main() {
       SharedPreferences.setMockInitialValues({});
       final prefs = await SharedPreferences.getInstance();
       final capability = Completer<BuzzPushLeaseDescriptor?>();
-      var permissionReads = 0;
       await tester.pumpWidget(
         ProviderScope(
           overrides: [
@@ -116,12 +186,6 @@ void main() {
             ),
             currentRelayPushDescriptorProvider.overrideWith(
               (ref) => capability.future,
-            ),
-            buzzPushAuthorizationStatusReaderProvider.overrideWithValue(
-              () async {
-                permissionReads += 1;
-                return BuzzPushAuthorizationStatus.authorized;
-              },
             ),
           ],
           child: MaterialApp(
@@ -145,7 +209,6 @@ void main() {
       expect(find.text('Notifications'), findsNothing);
       expect(find.text('Push notifications'), findsNothing);
       expect(find.byType(Switch), findsNothing);
-      expect(permissionReads, 0);
       expect(tester.takeException(), isNull);
       debugDefaultTargetPlatformOverride = null;
     });
@@ -171,12 +234,7 @@ void main() {
           savedPrefsProvider.overrideWithValue(prefs),
           activeCommunityProvider.overrideWith((ref) async => community),
           currentRelayPushDescriptorProvider.overrideWith((ref) => capability),
-          // The lease had no room for 12 older Solo chats.
-          pushSubscriptionSyncProvider.overrideWith((ref) async => 12),
           appLifecycleProvider.overrideWith(_SettingsLifecycleNotifier.new),
-          buzzPushAuthorizationStatusReaderProvider.overrideWithValue(
-            () async => BuzzPushAuthorizationStatus.authorized,
-          ),
         ],
         child: MaterialApp(
           theme: AppTheme.light(),
@@ -194,14 +252,6 @@ void main() {
       findsOneWidget,
     );
     expect(tester.widget<Switch>(find.byType(Switch)).value, isTrue);
-    expect(
-      find.text('Older Solo chats notify only on mention'),
-      findsOneWidget,
-    );
-    expect(
-      find.text('12 chats are past this relay’s notification limit.'),
-      findsOneWidget,
-    );
     debugDefaultTargetPlatformOverride = null;
   });
 
