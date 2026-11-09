@@ -63,7 +63,7 @@ A change of disclosure level applies to new actions:
 - **Unrestricted to restricted:** the relay refuses new actions that break the rules. The agent keeps its current channels and roles, including channels that other people added it to. The owner can review them and demote or remove the agent.
 - **Restricted to unrestricted:** R can grow at once, for example when someone adds the agent to their channel.
 
-One rule applies to every channel, whatever the disclosure level: no private-to-open changes (see [Membership is a decision about the channel](#membership-is-a-decision-about-the-channel)). It protects people as well as agents.
+One rule applies to every channel, whatever the disclosure level: no private-to-open changes, except in a channel that holds only its opener and the opener's agents (see [Membership is a decision about the channel](#membership-is-a-decision-about-the-channel)). It protects people as well as agents.
 
 **Open question:** which disclosure level a new agent gets. Rollout starts with unrestricted, so that nothing changes until owners choose.
 
@@ -77,6 +77,8 @@ One rule applies to every channel, whatever the disclosure level: no private-to-
 | Personal | Everything the owner can read | Only the owner, in its DM with the owner | The owner can already read everything it reads. To reach anyone else, it drafts and the owner sends, or the owner approves each send. |
 
 A personal agent reads with the owner's authority, so the app gives the owner's read tools only to agents at that disclosure level. Buzz cannot see what either level sends outside Buzz, through other tools or through model inference on another member's node (see [What this doesn't stop](#what-this-doesnt-stop)).
+
+A public agent can't stay in a channel that becomes private. Its W would gain a private channel. So an open-to-private change is refused while a public agent is in the channel: remove the public agents first.
 
 **Possible: a write-only role.** A member that can post in a channel but cannot read it. R grows and W doesn't. It fits integrations and notifiers that post into many private channels: they no longer read those channels, so content can't move between them through the key. The relay refuses the key's reads of that channel on every read path. A missed read path only lets W grow, as it does today.
 
@@ -104,7 +106,7 @@ This is the largest cost of the restricted disclosure level. A restricted agent 
 
 ### Agents are guests unless the owner says otherwise
 
-R depends on where the agent can write, so the owner controls that separately from where it can read. When the owner adds the agent to a channel, it joins as a guest unless the owner picks member. (The channel's `join_role` still applies to people.) Only the owner can raise the agent's role later. Anyone who can change roles in the channel can lower it, because a lower role only makes R smaller.
+R depends on where the agent can write, so the owner controls that separately from where it can read. When the owner adds the agent to a channel, it joins as a guest unless the owner picks member. (The channel's `join_role` still applies to people.) Only the owner can raise the agent's role later. Raising the agent to member in an open channel sets R to the whole community, so everything in W, including other people's content, can reach everyone. Clients say so when the owner raises it. Anyone who can change roles in the channel can lower it, because a lower role only makes R smaller.
 
 In an open channel with `join_role = member`, a person can write without joining. If an agent could do the same, it could post in a community-wide channel without anyone adding it. So an agent cannot.
 
@@ -139,7 +141,8 @@ The owner cannot control who joins someone else's channel. So when the owner mak
 
 Accepting the rules only means something if the rules stay put. One relay change makes sure they do:
 
-- **Refuse private-to-open visibility changes, for every channel.** Making a private channel open changes the admission rules out from under everyone who joined under the old ones, people included. That is a good rule with or without agents. An admin who wants an open channel can create one.
+- **Refuse private-to-open visibility changes, with one exception.** Making a private channel open changes the admission rules out from under everyone who joined under the old ones, people included. That is a good rule with or without agents. An admin who wants an open channel can create one.
+  The exception is a channel where nobody but the person opening it joined under the old rules. Every member must be that person or one of that person's agents that is not a restricted writer. Opening such a channel, for example a Solo chat, is a one-time disclosure by a person of what that person can already read. After it opens, it is an ordinary open channel: the owner's restricted agents stay guests until the owner raises them.
 
 **Later improvement: limit adds to admins.** Every private channel has the same admission rule: any member can add anyone. So making the agent a member of a private channel means trusting every current member's judgment. A later channel setting can limit adds to owners and admins. With it, an owner can choose a private channel where only the admins can grow R, and what the owner accepts becomes trust in the channel's admins. This is not needed for safety, because the owner accepts whatever the admission rules are. It gives the owner a tighter R to choose. The same setting helps announce channels, where it keeps the set of writers under the admins' control.
 
@@ -182,14 +185,15 @@ The owner is whichever key signed the agent's NIP-OA attestation. It need not be
 - **A wrong exception.** The exception list is the only way an agent can publish outside a channel, so every kind on it, except the profile, has to really limit its readers to the agent and its owner.
 - **The agent's profile is a leak path** for an unrestricted agent. Its fields are public and the agent can change them at any time.
 - **Owners choose unrestricted for convenience.** The disclosure level then protects nobody. The public label lets other people decide what to share with the agent, but only if they read it.
-- **Refusing private-to-open breaks a workflow.** Some admins start a channel private and open it later. They have to create a new open channel instead.
+- **Refusing private-to-open breaks a workflow.** Some admins start a channel private and open it later. Unless the channel holds only them and their agents, they have to create a new open channel instead.
+- **Opening a Solo chat publishes what the owner's agents wrote there**, including what they drew from their other channels. Accepted: a person discloses what they can read.
 
 ## Rollout
 
 1. ✅ Announce channels: guests are read-only everywhere ([#8143](https://github.com/block/buzz/pull/8143)).
 2. Add the disclosure level, with every agent unrestricted. Nothing changes until an owner chooses restricted.
 3. For restricted agents: only the owner can add the agent to a channel or open a DM that includes it. The agent can join open channels by itself, as a guest only. The agent is a guest by default. Only the owner raises its role. Anyone with role authority can lower it. The agent creates only private channels, and adds only its owner to them.
-4. Refuse private-to-open visibility changes for every channel.
+4. Refuse private-to-open visibility changes, except in a channel where every member is the person opening it or one of that person's agents that is not a restricted writer.
 5. For restricted agents: refuse events without an `h` tag, after checking what agents publish now, and require profile approval.
 6. Decide the default disclosure level for new agents.
 
