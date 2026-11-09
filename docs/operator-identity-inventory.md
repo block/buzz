@@ -18,7 +18,11 @@ The response contains:
 - `identities`: the root key first, followed by directly owned agents from the
   relay's verified, community-local ownership mapping. Each row has `pubkey`,
   optional `displayName` and `ownerPubkey`, current NIP-IA `archived` state,
-  and `executionHeld` (the key has its own identity-retirement execution hold);
+  `executionHeld` (the key has its own identity-retirement execution hold), and
+  `ownerExecutionHeld` (the key's recorded owner is held, which also blocks the
+  key's new work; `false` for a key with no recorded owner). A key is blocked
+  when either is `true`. Both are always present: a client that cannot read
+  them must treat the key's state as unknown, not as not held;
 - `workflows`: metadata for workflows owned by those exact keys, including
   `id`, `name`, `ownerPubkey`, optional `channelId`, saved `status` and `enabled`,
   and `pendingRuns`, `runningRuns`, `waitingApprovalRuns` and `drainingRuns`

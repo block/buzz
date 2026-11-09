@@ -134,6 +134,17 @@ impl Fixture {
             .to_string()
     }
 
+    async fn owner_of(&self, key: &[u8]) -> Option<Vec<u8>> {
+        sqlx::query_scalar(
+            "SELECT agent_owner_pubkey FROM users WHERE community_id = $1 AND pubkey = $2",
+        )
+        .bind(self.c.as_uuid())
+        .bind(key)
+        .fetch_one(&self.pool)
+        .await
+        .unwrap()
+    }
+
     async fn held(&self, key: &[u8]) -> bool {
         sqlx::query_scalar(
             "SELECT EXISTS (SELECT 1 FROM identity_retirement_holds WHERE community_id = $1 AND pubkey = $2)",
@@ -465,8 +476,15 @@ async fn release_restores_only_unmodified_workflows_of_the_exact_key() {
     assert_eq!(f.workflow_status(kept).await, "active");
     assert_eq!(f.workflow_status(edited).await, "archived");
     assert_eq!(f.workflow_status(root_wf).await, "archived");
-    // The agent is still held through its owner.
+    // The agent is still held through its owner, and the preview says so
+    // even when the agent is inspected as the root.
     assert!(!f.held(&AGENT).await);
+    let preview = f.db.admin_identity_inventory(f.c, &AGENT).await.unwrap();
+    assert!(!preview.identities[0].execution_held);
+    assert!(preview.identities[0].owner_execution_held);
+    let preview = f.db.admin_identity_inventory(f.c, &ROOT).await.unwrap();
+    assert!(preview.identities[0].execution_held && !preview.identities[0].owner_execution_held);
+    assert!(preview.identities[1].owner_execution_held);
     assert!(matches!(
         f.db.create_workflow_run(f.c, kept, None, None).await,
         Err(DbError::ExecutionHeld)
@@ -480,6 +498,8 @@ async fn release_restores_only_unmodified_workflows_of_the_exact_key() {
     assert_eq!(record.result.stages.new_work_admission, "released");
     assert_eq!(record.result.stages.workflows, "confirmed");
     assert_eq!(f.workflow_status(root_wf).await, "active");
+    let preview = f.db.admin_identity_inventory(f.c, &AGENT).await.unwrap();
+    assert!(!preview.identities[0].owner_execution_held);
     f.db.create_workflow_run(f.c, kept, None, None)
         .await
         .unwrap();
@@ -595,8 +615,8 @@ async fn workflow_and_run_writers_wait_for_an_in_flight_retirement() {
     assert!(matches!(upsert.await.unwrap(), Err(DbError::ExecutionHeld)));
     assert!(matches!(run.await.unwrap(), Err(DbError::ExecutionHeld)));
 
-    // Agent-owner links wait too (alone, so no other waiter holds a writer
-    // slot), and a link that lands after retirement inherits the owner's hold.
+    // A competing agent-owner link waits (alone, so no other waiter holds a
+    // writer slot) and, once the hold commits, is refused.
     let mut retirement = f.pool.begin().await.unwrap();
     crate::relay_invite::lock_admission(&mut retirement, f.c)
         .await
@@ -605,10 +625,61 @@ async fn workflow_and_run_writers_wait_for_an_in_flight_retirement() {
     let link = tokio::spawn(async move { db.set_agent_owner(c, &OTHER, &ROOT).await });
     assert_waits(&link).await;
     retirement.commit().await.unwrap();
-    assert!(link.await.unwrap().unwrap());
+    assert!(matches!(link.await.unwrap(), Err(DbError::ExecutionHeld)));
+    assert_eq!(f.owner_of(&OTHER).await, None);
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn held_owner_refuses_new_agent_links_and_keeps_existing_ones() {
+    let f = Fixture::new().await;
+    let req = f.archive_request().await;
+    f.db.apply_identity_retirement(&req).await.unwrap();
+    let (root, other) = (hex::encode(ROOT), hex::encode(OTHER));
+    let relay = nostr::Keys::generate();
+
+    // Direct NIP-OA link writers.
     assert!(matches!(
-        f.db.create_workflow(f.c, None, &OTHER, "n", "{}", &[0; 32])
+        f.db.set_agent_owner(f.c, &OTHER, &ROOT).await,
+        Err(DbError::ExecutionHeld)
+    ));
+    assert!(matches!(
+        f.db.set_agent_owner_for_authorization(f.c, &OTHER, &ROOT)
             .await,
         Err(DbError::ExecutionHeld)
     ));
+    // Invitation claims that would record the link.
+    assert!(matches!(
+        f.db.claim_relay_membership_with_owner(f.c, &other, "member", None, Some(&root), &relay)
+            .await,
+        Err(DbError::InviteRestricted)
+    ));
+    let fresh = hex::encode([0x55; 32]);
+    assert!(matches!(
+        f.db.claim_relay_membership_with_owner(f.c, &fresh, "member", None, Some(&root), &relay)
+            .await,
+        Err(DbError::InviteRestricted)
+    ));
+    assert_eq!(f.owner_of(&OTHER).await, None);
+
+    // An existing link to the held owner replays unchanged.
+    assert!(!f.db.set_agent_owner(f.c, &AGENT, &ROOT).await.unwrap());
+    let replay =
+        f.db.claim_relay_membership_with_owner(
+            f.c,
+            &hex::encode(AGENT),
+            "member",
+            None,
+            Some(&root),
+            &relay,
+        )
+        .await
+        .unwrap();
+    assert!(!replay.outcome.owner_link_created);
+
+    // After release, linking works again.
+    f.db.apply_identity_retirement(&f.request(RetirementOperation::Release, ROOT))
+        .await
+        .unwrap();
+    assert!(f.db.set_agent_owner(f.c, &OTHER, &ROOT).await.unwrap());
 }

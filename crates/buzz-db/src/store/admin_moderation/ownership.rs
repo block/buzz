@@ -193,6 +193,9 @@ pub struct InventoryIdentity {
     pub archived: bool,
     /// This key has its own identity-retirement execution hold.
     pub execution_held: bool,
+    /// This key's recorded owner has a hold, which also blocks this key's new
+    /// work. Always `false` for a key without a recorded owner.
+    pub owner_execution_held: bool,
 }
 
 /// Workflow metadata and run counts, excluding definitions and private approval data.
@@ -258,7 +261,10 @@ impl Db {
              SELECT k.pubkey, u.display_name, u.agent_owner_pubkey, \
                     (a.pubkey IS NOT NULL) AS archived, \
                     EXISTS (SELECT 1 FROM identity_retirement_holds h \
-                      WHERE h.community_id = $1 AND h.pubkey = k.pubkey) AS execution_held \
+                      WHERE h.community_id = $1 AND h.pubkey = k.pubkey) AS execution_held, \
+                    EXISTS (SELECT 1 FROM identity_retirement_holds h \
+                      WHERE h.community_id = $1 AND h.pubkey = u.agent_owner_pubkey) \
+                      AS owner_execution_held \
              FROM keys k \
              LEFT JOIN users u ON u.community_id = $1 AND u.pubkey = k.pubkey \
              LEFT JOIN archived_identities a \
@@ -283,6 +289,7 @@ impl Db {
                 owner_pubkey: owner.map(hex::encode),
                 archived: row.try_get("archived")?,
                 execution_held: row.try_get("execution_held")?,
+                owner_execution_held: row.try_get("owner_execution_held")?,
             });
             owners.push(pubkey);
         }

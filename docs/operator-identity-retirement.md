@@ -73,6 +73,11 @@ reported with `"skipped": "modified_since_retirement"` (or `status: "deleted"`).
 Release is per key: releasing a root does not release its agents, and an agent
 stays blocked while its owner is held (`newWorkAdmission: "blocked"`).
 
+Release never changes NIP-IA visibility and publishes nothing, so it always
+answers `200` with `stages.visibility: "unchanged"`. Only release uses that
+value; archive and unarchive answer `confirmed` or `pending`. The response lists
+exactly one identity, the target, with `role: "root"`.
+
 ## Holds
 
 While a key or its recorded owner is held, the relay refuses to create or update
@@ -85,6 +90,13 @@ before each step, so a step that started before (or races with) the
 cancellation can still finish. If the executing relay process stops, nothing
 records `completed_at` and the run stays draining; treat a long-draining run as
 unconfirmed and check the process it ran on.
+
+A held key also cannot gain agents. Recording a new agent-owner link to a held
+owner is refused: NIP-OA authentication fails with the owner-link error, and
+an invitation claim that presents the held owner is refused as restricted. A
+link recorded before retirement is unchanged and keeps working. The hold is
+checked under the same admission lock retirement takes, so a link racing a
+retirement is either recorded first (and retired with it) or refused.
 
 The relay cannot stop agent processes or external hosts; `agentRuntime` is
 always `unsupported`.
@@ -132,6 +144,23 @@ unknown_community_host`, `403`, `409 target_is_staff | request_id_conflict |
 inventory_changed`, `422 inventory_too_large`, `503 identity_retirement_disabled |
 retry_later`. `retry_later` means the transaction timed out waiting for a lock
 and nothing was applied; repeat the same request.
+
+## Routing
+
+The relay sees only the caller's NIP-98 request. An admin portal in front of it
+has two separate hops, and each needs its own routing check:
+
+1. browser → portal: the portal's own pages and form posts;
+2. portal → relay: `GET` ownership, `POST` archive, and `DELETE` archive and
+   execution-hold, each with a JSON body.
+
+On the portal → relay hop, every proxy and ingress must forward the method,
+the exact body bytes (including on `DELETE`) and the path and query unchanged.
+The relay checks the signed URL against its configured `BUZZ_ADMIN_HOST`, not
+the inbound `Host` header, so the portal must sign that origin. A dropped `DELETE` body answers `400 invalid_body`;
+a changed body or URL fails NIP-98 (`401`). Both fail closed, but leave keys
+held that cannot be released. Before enabling mutations, run unarchive and
+release through the real ingress, not only against the relay directly.
 
 ## Rollout
 

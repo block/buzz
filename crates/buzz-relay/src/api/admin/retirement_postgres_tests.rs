@@ -291,6 +291,20 @@ async fn retirement_routes_are_operator_only_gated_bound_and_idempotent() {
     assert_eq!(released["stages"]["visibility"], "unchanged");
     assert_eq!(released["stages"]["newWorkAdmission"], "blocked");
     assert_eq!(released["workflows"][0]["status"], "active");
+    // Inspected directly, the released agent still shows its owner's hold.
+    let agent_view = format!("/members/{agent}/ownership?communityHost={host}");
+    let request = Request::builder()
+        .uri(&agent_view)
+        .header(header::HOST, "admin.example")
+        .header(
+            header::AUTHORIZATION,
+            make_nostr_auth(&operator, &agent_view),
+        )
+        .body(Body::empty())
+        .unwrap();
+    let (_, view) = send(&on, request).await;
+    assert_eq!(view["identities"][0]["executionHeld"], false, "{view}");
+    assert_eq!(view["identities"][0]["ownerExecutionHeld"], true, "{view}");
     let (_, released) = call(
         &on,
         &operator,
