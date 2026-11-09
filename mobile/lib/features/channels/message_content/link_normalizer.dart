@@ -8,7 +8,8 @@ final _codeRunPattern = RegExp(r'`+|~{3,}');
 
 /// Rewrites authored Markdown link and image destinations into the plain form
 /// the gallery and attachment lookups match, leaving inline and fenced code
-/// untouched. Bare URLs are left to gpt_markdown's autolinking.
+/// untouched. Bare URLs are left to gpt_markdown's autolinking, except those
+/// it would not link (see [_angleUnlinkedUrls]).
 String normalizeMarkdownLinks(String content) =>
     mapMarkdownProse(content, _normalizeLinkSegment);
 
@@ -266,7 +267,7 @@ String _normalizeLinkSegment(String segment) {
       cursor = suffix.end;
       valid = suffix.valid;
     }
-    result.write(segment.substring(offset, match.start));
+    result.write(_angleUnlinkedUrls(segment.substring(offset, match.start)));
     if (valid) {
       final destination = segment.substring(start, destinationEnd);
       final image = segment[match.start] == '!';
@@ -285,7 +286,7 @@ String _normalizeLinkSegment(String segment) {
     }
     offset = cursor;
   }
-  result.write(segment.substring(offset));
+  result.write(_angleUnlinkedUrls(segment.substring(offset)));
   return result.toString();
 }
 
@@ -323,4 +324,49 @@ String _normalizeLinkSegment(String segment) {
     }
   }
   return (end: cursor, valid: false);
+}
+
+// Not in a destination (`](url`), a label (`[url`) or an existing autolink.
+final _bareHttpUrl = RegExp(r'(?<![\w<\[=/])(?<!\]\()https?://[^\s<>]+');
+final _urlEscape = RegExp(r'\\([!-/:-@\[-`{-~])');
+const _urlTrailingPunctuation = '.,!?:;*_~\'"\\';
+
+/// Wraps each bare HTTP(S) URL that gpt_markdown's autolink rejects in
+/// `<...>`, which it links whatever the host. It rejects a port, a host
+/// without a dot and any `@`, so `http://localhost:3000`,
+/// `https://example.com:8443` and `https://mastodon.social/@alice` would
+/// otherwise stay plain text, though GFM and desktop link them. Trailing
+/// punctuation and an unbalanced `)` stay outside, as in GFM, and escapes
+/// are resolved, since an angle autolink keeps backslashes literally.
+String _angleUnlinkedUrls(String prose) {
+  if (!prose.contains('://')) return prose;
+  return prose.replaceAllMapped(_bareHttpUrl, (match) {
+    var url = match[0]!;
+    var end = url.length;
+    while (end > 0) {
+      final last = url[end - 1];
+      final unbalanced =
+          last == ')' &&
+          ')'.allMatches(url.substring(0, end)).length >
+              '('.allMatches(url.substring(0, end)).length;
+      if (!_urlTrailingPunctuation.contains(last) && !unbalanced) break;
+      end--;
+    }
+    final trailing = url.substring(end);
+    url = url.substring(0, end);
+    if (!_autolinkRejects(url)) return match[0]!;
+    final resolved = url.replaceAllMapped(
+      _urlEscape,
+      (escape) => escape[1] == r'\' ? '%5C' : escape[1]!,
+    );
+    return '<$resolved>$trailing';
+  });
+}
+
+bool _autolinkRejects(String url) {
+  final rest = url.substring(url.indexOf('://') + 3);
+  final hostEnd = rest.indexOf(RegExp(r'[/?#]'));
+  final host = hostEnd < 0 ? rest : rest.substring(0, hostEnd);
+  return host.isNotEmpty &&
+      (host.contains(':') || !host.contains('.') || url.contains('@'));
 }

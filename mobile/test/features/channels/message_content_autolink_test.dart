@@ -140,5 +140,86 @@ void main() {
     expect(_links(tester), ['mailto:a@b.com']);
     await tester.tapOnText(find.textRange.ofSubstring('a@b.com'));
     expect(launcher.launched, ['mailto:a@b.com']);
+
+    // A hold offers the same Open as the tap.
+    await tester.longPress(find.text('a@b.com'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Open link'));
+    await tester.pumpAndSettle();
+    expect(launcher.launched, ['mailto:a@b.com', 'mailto:a@b.com']);
+  });
+
+  testWidgets('links URLs with a port, a single-label host or an @', (
+    tester,
+  ) async {
+    // gpt_markdown's bare autolink rejects these; GFM and desktop link them.
+    await _pump(
+      tester,
+      'See http://localhost:3000/x. Or (https://example.com:8443/a), '
+      'https://mastodon.social/@alice! and http://localhost:3000/a\\_b',
+    );
+    expect(
+      _links(tester),
+      unorderedEquals([
+        'http://localhost:3000/x',
+        'https://example.com:8443/a',
+        'https://mastodon.social/@alice',
+        'http://localhost:3000/a_b',
+      ]),
+    );
+  });
+
+  testWidgets('resolves escapes inside link URLs', (tester) async {
+    // Stand-ins would become gpt_markdown placeholders inside a URL.
+    await _pump(
+      tester,
+      '[wiki](https://en.wikipedia.org/wiki/Foo_\\(bar\\)) '
+      '[x](https://e.com/a\\_b) and https://e.com/c\\_d end',
+    );
+    expect(
+      _links(tester),
+      unorderedEquals([
+        'https://en.wikipedia.org/wiki/Foo_%28bar%29',
+        'https://e.com/a_b',
+        'https://e.com/c_d',
+      ]),
+    );
+    expect(find.textContaining('\u2060', findRichText: true), findsNothing);
+  });
+
+  testWidgets('bare and authored links share the link colour', (tester) async {
+    await _pump(tester, '[authored](https://e.com/a) https://e.com/bare');
+    Color? colorOf(String label) {
+      final rich = tester.widget<RichText>(
+        find.text(label, findRichText: true),
+      );
+      Color? found;
+      void walk(InlineSpan span, TextStyle? inherited) {
+        final effective = inherited?.merge(span.style) ?? span.style;
+        if (span is! TextSpan) return;
+        if (span.text == label) found = effective?.color;
+        for (final child in span.children ?? const <InlineSpan>[]) {
+          walk(child, effective);
+        }
+      }
+
+      walk(rich.text, null);
+      return found;
+    }
+
+    expect(colorOf('https://e.com/bare'), isNotNull);
+    expect(colorOf('https://e.com/bare'), colorOf('authored'));
+  });
+
+  testWidgets('a Buzz URL of an unknown shape is plain text', (tester) async {
+    await _pump(tester, '[label](buzz://unknown?x=1) and buzz://unknown?y=2');
+    expect(_links(tester), isEmpty);
+    final paragraph = tester.widget<RichText>(
+      find.textContaining('label and buzz://unknown?y=2', findRichText: true),
+    );
+    bool styled(InlineSpan span) =>
+        span.style?.decoration == TextDecoration.underline ||
+        (span is TextSpan && (span.children?.any(styled) ?? false));
+    expect(styled(paragraph.text), isFalse);
   });
 }

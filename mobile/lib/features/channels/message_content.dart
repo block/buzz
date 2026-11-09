@@ -606,9 +606,15 @@ class MessageContent extends HookConsumerWidget {
     final url = unshieldMarkdownEscapes(link.url);
     // An autolink's label is one plain run that inline patterns never see, so
     // restore its escape stand-ins here; other labels already went through
-    // _markdownEscapePattern.
+    // _markdownEscapePattern. link.style keeps the themed link colour, as an
+    // authored label's spans do.
     final labelSpans = link.isAutolink
-        ? [TextSpan(text: unshieldMarkdownEscapes(link.label))]
+        ? [
+            TextSpan(
+              text: unshieldMarkdownEscapes(link.label),
+              style: link.style,
+            ),
+          ]
         : link.labelSpans;
     // Not `link.label`: it still carries gpt_markdown's placeholders for
     // inline-pattern matches, such as an @mention in the label.
@@ -625,7 +631,7 @@ class MessageContent extends HookConsumerWidget {
     // A Buzz URL of an unknown shape has nowhere to go, so it stays text
     // rather than a link whose tap and Open action do nothing.
     if (uri?.scheme == 'buzz' && buzzLink == null) {
-      return TextSpan(style: baseStyle, children: labelSpans);
+      return TextSpan(text: text, style: fallbackStyle);
     }
     final isBuzzLink =
         buzzLink is ChannelDeepLink ||
@@ -674,7 +680,11 @@ class MessageContent extends HookConsumerWidget {
         unawaited(_openLink(context, ref, url, text, resolvedChannelTap));
     // _openLink handles only these schemes; the sheet hides Open for others.
     final scheme = uri?.scheme;
-    final canOpen = scheme == 'buzz' || scheme == 'http' || scheme == 'https';
+    final canOpen =
+        scheme == 'buzz' ||
+        scheme == 'http' ||
+        scheme == 'https' ||
+        scheme == 'mailto';
 
     final authoredLinkStyle = baseStyle.copyWith(
       color: context.colors.primary,

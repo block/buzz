@@ -712,13 +712,13 @@ void main() {
       await tester.pumpWidget(
         _testable(
           const MessageContent(
-            content: 'Write to [support](mailto:support@example.com)',
+            content: 'Fetch [report](ftp://files.example.com/report.pdf)',
           ),
         ),
       );
-      await tester.longPress(find.text('support'));
+      await tester.longPress(find.text('report'));
       await tester.pumpAndSettle();
-      expect(find.text('mailto:support@example.com'), findsOneWidget);
+      expect(find.text('ftp://files.example.com/report.pdf'), findsOneWidget);
       expect(find.text('Copy link'), findsOneWidget);
       expect(find.text('Share link'), findsOneWidget);
       expect(find.text('Open link'), findsNothing);
