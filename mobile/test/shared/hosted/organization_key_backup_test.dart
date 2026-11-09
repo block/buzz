@@ -5,7 +5,7 @@ import 'package:buzz/shared/hosted/builderlab_account.dart';
 import 'package:buzz/shared/hosted/hosted_backup_service.dart';
 import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
 import 'package:buzz/shared/hosted/hpke_backup.dart';
-import 'package:buzz/shared/hosted/organization_environment.dart';
+import 'package:buzz/shared/hosted/builderlab_build.dart';
 import 'package:buzz/shared/hosted/organization_key_backup.dart';
 import 'package:buzz/shared/relay/relay_provider.dart';
 import 'package:flutter/services.dart';
@@ -128,7 +128,7 @@ void main() {
       organization: backup.account,
       organizationBackup: backup,
       organizationRelay: (relay) =>
-          OrganizationEnvironment.matches(relay, [relayHost]),
+          BuilderlabBuild.matchesRelay(relay, [relayHost]),
       enabled: true,
     );
     expect(await auth.headers(relay), {

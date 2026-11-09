@@ -5,29 +5,49 @@ Flutter mobile client for Buzz.
 See [VISION_MOBILE.md](../VISION_MOBILE.md) for intended behavior and
 architecture.
 
-## Optional Builderlab login
+## Builderlab builds
 
-`BUZZ_AUTH_DOMAINS` is a comma-separated build-time environment setting, passed
-with Flutter's `--dart-define` (shell environment variables alone are not read):
+Three build-time settings, passed with Flutter's `--dart-define` (shell
+environment variables alone are not read), choose the build's single
+Builderlab. Set all three or none:
 
 ```bash
-flutter run --dart-define=BUZZ_AUTH_DOMAINS=communities.buzz.xyz,communities.public.builderlabstaging.xyz
+flutter run \
+  --dart-define=BUZZ_DISTRIBUTION=public \
+  --dart-define=BUZZ_BUILDERLAB_URL=https://app.builderlab.xyz \
+  --dart-define=BUZZ_BUILDERLAB_RELAYS=communities.buzz.xyz
 ```
 
-Unset or empty means **Builderlab features are disabled**: no account login,
+- `BUZZ_DISTRIBUTION`: `public` or `internal`. See the
+  [public build](../CONTEXT.md#public-build) and
+  [internal build](../CONTEXT.md#internal-build), and
+  [ADR 0001](../docs/adr/0001-internal-and-public-mobile-builds.md).
+- `BUZZ_BUILDERLAB_URL`: the build's Builderlab HTTPS origin. On iOS, sign-in
+  currently opens only Builderlab's own hosts (`app.builderlab.xyz`, or a
+  `<tenant>.builderlab.xyz` organization) and their staging equivalents; the
+  native browser bridge refuses any other origin.
+- `BUZZ_BUILDERLAB_RELAYS`: comma-separated DNS domains whose relays use that
+  Builderlab's session. Entries match the domain itself and its subdomains,
+  case-insensitively. Use DNS names, not URLs or wildcards.
+
+With none set, **Builderlab features are disabled**: no account login,
 community creation, backup/recovery UI, reconnect prompts, or background account
 restoration. QR/code pairing, community links and invites use Nostr-only entry.
 Saved account keys and sessions are retained for a later enabled build.
 
-A nonempty list enables Builderlab features and requires account setup only for
-matching domains. Those features need their backend endpoints. Normal relay key
-authentication remains in place. `BUZZ_BUILDERLAB_URL` selects the backend; setting
-it alone does not enable Builderlab features.
+A public build signs in with Builderlab's web account setup, and requires it for
+communities under `BUZZ_BUILDERLAB_RELAYS`, which also places new communities
+under the first domain. QR pairing and other communities stay available.
 
-Entries match the domain itself and its subdomains, case-insensitively. Use DNS
-names, not URLs or wildcards. The list does not add trusted account servers:
-configured domains outside the supported Builderlab realm cannot use hosted
-setup. `BUZZ_BUILDERLAB_URL` still selects the trusted account environment.
+An internal build offers one **Sign in** action that goes to the organization's
+single sign-on and then joins the community at its
+`BUZZ_BUILDERLAB_RELAYS` host. It has no QR pairing, community switching or
+community creation, refuses links to other relays, and hides communities on
+other relays that an earlier build saved, keeping their keys.
+
+An internal build takes exactly one `BUZZ_BUILDERLAB_RELAYS` entry, its
+organization's relay host. It matches that exact host, not a domain, and the
+relay always receives its Builderlab session's relay assertions.
 
 ## Agent creation links
 
@@ -80,8 +100,9 @@ is `lib/features/agents/agent_creation_draft.dart`.
 ## Hosted relay authentication
 
 `--dart-define=BUZZ_HOSTED_RELAY_AUTH=true` enables Builderlab relay assertions
-and reconnect sign-in **only for `BUZZ_AUTH_DOMAINS` matches**. It defaults off: configure backend assertion issuance
-before enabling mobile authentication, and enable relay enforcement last.
+and reconnect sign-in for a public build's `BUZZ_BUILDERLAB_RELAYS`. It
+defaults off: configure backend assertion issuance before enabling mobile
+authentication, and enable relay enforcement last.
 
 ## Setup
 

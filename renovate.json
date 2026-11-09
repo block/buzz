@@ -50,6 +50,12 @@
       "description": "tiptap 3.23.x breaks editor lifecycle under real relay latency — pin until upstream stabilizes.",
       "matchPackageNames": ["@tiptap/{/,}**"],
       "allowedVersions": "<3.23.0"
+    },
+    {
+      "description": "Keep SQLx on the verified pool-return timeout patch until an official release retains it, cancelled-BEGIN rollback, and SQLite compatibility. Keep this rule last so later rules cannot re-enable updates.",
+      "matchManagers": ["cargo"],
+      "matchDepNames": ["sqlx", "sqlx-core", "sqlx-macros", "sqlx-macros-core", "sqlx-mysql", "sqlx-postgres", "sqlx-sqlite"],
+      "enabled": false
     }
   ]
 }

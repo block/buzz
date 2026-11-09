@@ -12,6 +12,7 @@ import 'package:buzz/features/home/messages_filters.dart';
 import 'package:buzz/features/home/messages_navigation_bar.dart';
 import 'package:buzz/shared/widgets/ios_message_create_button.dart';
 import 'package:buzz/shared/widgets/ios_glass_navigation_button.dart';
+import 'package:buzz/shared/widgets/ios_navigation_bar.dart';
 import 'package:buzz/features/search/search_page.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:flutter/foundation.dart';
@@ -342,6 +343,49 @@ void main() {
   }
 
   for (final platform in [TargetPlatform.android, TargetPlatform.iOS]) {
+    testWidgets('$platform scrolled bell opens Activity', (tester) async {
+      debugDefaultTargetPlatformOverride = platform;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      tester.view.physicalSize = const Size(390, 844);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(await buildHome(longSolo: true));
+      await tester.pumpAndSettle();
+      final scroll = tester
+          .widget<CustomScrollView>(find.byType(CustomScrollView).first)
+          .controller!;
+      final collapseHeight = tester
+          .widget<FrostedAppBar>(find.byType(FrostedAppBar))
+          .bottomHeight;
+      for (final fraction in [0.01, 0.25, 0.5, 0.75, 1.0]) {
+        scroll.jumpTo(collapseHeight * fraction);
+        await tester.pumpAndSettle();
+        expect(
+          find.byTooltip('Activity').hitTestable(),
+          findsOneWidget,
+          reason: 'Bell must remain tappable at collapse fraction $fraction',
+        );
+      }
+      if (platform == TargetPlatform.iOS) {
+        // Widget tests hit-test the platform view but cannot run UIKit's
+        // button action. Exercise the callback that native taps dispatch.
+        tester
+            .widget<IosGlassNavigationButton>(
+              find.byWidgetPredicate(
+                (widget) =>
+                    widget is IosGlassNavigationButton &&
+                    widget.icon == IosGlassNavigationIcon.bell,
+              ),
+            )
+            .onPressed!();
+      } else {
+        await tester.tap(find.byTooltip('Activity'));
+      }
+      await tester.pumpAndSettle();
+      expect(find.byType(ActivityPage), findsOneWidget);
+      debugDefaultTargetPlatformOverride = null;
+    });
+
     testWidgets('$platform bell follows unread inbox state', (tester) async {
       debugDefaultTargetPlatformOverride = platform;
       addTearDown(() => debugDefaultTargetPlatformOverride = null);
@@ -533,6 +577,20 @@ void main() {
       await tester.pumpAndSettle();
       expect(tester.widget<Opacity>(homeOpacity).opacity, 1);
       expect(find.text('Messages'), findsOneWidget);
+      // A sheet's dim barrier can't composite over the native header edge.
+      final headerNativeView = find.descendant(
+        of: find.byType(FrostedAppBar),
+        matching: find.byType(IosNavigationBar),
+      );
+      expect(headerNativeView, findsOneWidget);
+      await tester.longPress(find.text('General'));
+      await tester.pumpAndSettle();
+      expect(find.text('Copy channel name'), findsOneWidget);
+      expect(headerNativeView, findsNothing);
+      await tester.tapAt(const Offset(20, 20));
+      await tester.pumpAndSettle();
+      expect(find.text('Copy channel name'), findsNothing);
+      expect(headerNativeView, findsOneWidget);
       await tester.pumpWidget(const SizedBox.shrink());
       debugDefaultTargetPlatformOverride = null;
     },

@@ -173,6 +173,7 @@ async fn post(
     .await
 }
 
+mod cli_edit_postgres_tests;
 mod emoji_reference_postgres_tests;
 mod reference_budget_postgres_tests;
 mod reference_formats_postgres_tests;

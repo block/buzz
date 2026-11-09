@@ -57,7 +57,7 @@ tower       = { version = "0.5", features = ["timeout", "util", "limit"] }
 tower-http  = { version = "0.6", features = ["trace", "cors", "compression-gzip", "limit", "timeout", "fs"] }
 
 # Database
-sqlx = { version = "0.9", features = [
+sqlx = { version = "=0.9.0", features = [
     "runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono", "json"
 ] }
 
@@ -193,8 +193,13 @@ strip = true
 # allowlist for the auth token). Revert to crates.io once #449 lands upstream.
 [patch.crates-io]
 aws-creds = { git = "https://github.com/tlongwell-block/rust-s3", rev = "c9fce3620dd434c1f810101d672cf384268dbb0f" }
-# SQLx: pin every crate to one unreleased upstream commit until 0.9.1 ships.
-# The crates share types, so they must move together. It carries two fixes:
+# SQLx: pin every crate together; these crates share types. This unreleased
+# revision includes the whole-return deadline from the open upstream PR #4407
+# and retains the fixes below. Return to a released version once it includes
+# all three fixes:
+# - https://github.com/transact-rs/sqlx/pull/4407: bound the entire return to
+#   the pool, including the release hook and SQLx ping, to five seconds. Silent
+#   sockets must release their pool permits so new connections can replace them.
 # - https://github.com/transact-rs/sqlx/pull/4394: a `BEGIN` whose future is
 #   dropped before Postgres answers no longer returns its pooled connection
 #   still inside the transaction. 0.9.0 queues no `ROLLBACK` for it, so the
@@ -203,10 +208,14 @@ aws-creds = { git = "https://github.com/tlongwell-block/rust-s3", rev = "c9fce36
 # - https://github.com/transact-rs/sqlx/pull/4402: MeshLLM 0.76 uses
 #   libsqlite3-sys 0.38, which 0.9.0's optional SQLite driver rejects; Cargo
 #   resolves it even though Buzz only enables PostgreSQL.
-sqlx = { git = "https://github.com/launchbadge/sqlx", rev = "f1e94ec34dd5f11ad6488a3a8ac7988439a3f757" }
-sqlx-core = { git = "https://github.com/launchbadge/sqlx", rev = "f1e94ec34dd5f11ad6488a3a8ac7988439a3f757" }
-sqlx-macros = { git = "https://github.com/launchbadge/sqlx", rev = "f1e94ec34dd5f11ad6488a3a8ac7988439a3f757" }
-sqlx-macros-core = { git = "https://github.com/launchbadge/sqlx", rev = "f1e94ec34dd5f11ad6488a3a8ac7988439a3f757" }
-sqlx-mysql = { git = "https://github.com/launchbadge/sqlx", rev = "f1e94ec34dd5f11ad6488a3a8ac7988439a3f757" }
-sqlx-postgres = { git = "https://github.com/launchbadge/sqlx", rev = "f1e94ec34dd5f11ad6488a3a8ac7988439a3f757" }
-sqlx-sqlite = { git = "https://github.com/launchbadge/sqlx", rev = "f1e94ec34dd5f11ad6488a3a8ac7988439a3f757" }
+# The exact version prevents lockfile updates from selecting a newer unpatched
+# release. Renovate updates are disabled for these crates; CI checks this pin
+# with scripts/check-sqlx-pin.py. Update that policy only after verifying all
+# three fixes in the replacement release.
+sqlx = { git = "https://github.com/launchbadge/sqlx", rev = "c3735abf034689bb1fab9d7bf9f040e492de28cf" }
+sqlx-core = { git = "https://github.com/launchbadge/sqlx", rev = "c3735abf034689bb1fab9d7bf9f040e492de28cf" }
+sqlx-macros = { git = "https://github.com/launchbadge/sqlx", rev = "c3735abf034689bb1fab9d7bf9f040e492de28cf" }
+sqlx-macros-core = { git = "https://github.com/launchbadge/sqlx", rev = "c3735abf034689bb1fab9d7bf9f040e492de28cf" }
+sqlx-mysql = { git = "https://github.com/launchbadge/sqlx", rev = "c3735abf034689bb1fab9d7bf9f040e492de28cf" }
+sqlx-postgres = { git = "https://github.com/launchbadge/sqlx", rev = "c3735abf034689bb1fab9d7bf9f040e492de28cf" }
+sqlx-sqlite = { git = "https://github.com/launchbadge/sqlx", rev = "c3735abf034689bb1fab9d7bf9f040e492de28cf" }

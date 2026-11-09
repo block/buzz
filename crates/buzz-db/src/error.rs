@@ -54,6 +54,10 @@ pub enum DbError {
     #[error("invitation principal is restricted")]
     InviteRestricted,
 
+    /// The invitation issuer is not an owner or admin at mint time.
+    #[error("invitation issuer is not an owner or admin")]
+    InviteIssuerNotAdmin,
+
     /// A verified invitation owner conflicts with the recorded owner.
     #[error("invitation owner does not match the recorded owner")]
     InviteOwnerMismatch,

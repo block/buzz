@@ -790,7 +790,7 @@ class RemoteAgentController extends ChangeNotifier {
       final config = RelayConfig(baseUrl: relay, nsec: key.nsec);
       await submitSignedEventOnce(
         wsUrl: config.wsUrl,
-        headers: await relayAuth.headers(config),
+        headers: await relayAuth.headers(config, fresh: true),
         nsec: key.nsec,
         kind: 30177,
         content: jsonEncode({
@@ -813,7 +813,7 @@ class RemoteAgentController extends ChangeNotifier {
         final config = RelayConfig(baseUrl: relay, nsec: key.nsec);
         await submitSignedEventOnce(
           wsUrl: config.wsUrl,
-          headers: await relayAuth.headers(config),
+          headers: await relayAuth.headers(config, fresh: true),
           nsec: key.nsec,
           kind: 5,
           content: '',

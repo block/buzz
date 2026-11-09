@@ -488,6 +488,31 @@ void main() {
     },
   );
 
+  test('reactions tag the reacted-to message author', () async {
+    final keys = nostr.Keys.generate();
+    final session = _RecordingPublishRelaySession();
+    final actionsProvider = Provider<ChannelActions>((ref) {
+      return ChannelActions(
+        ref: ref,
+        session: session,
+        signedEventRelay: SignedEventRelay(session: session, nsec: keys.nsec),
+        currentPubkey: keys.public,
+      );
+    });
+    final container = ProviderContainer(retry: (_, _) => null);
+    addTearDown(container.dispose);
+    final author = nostr.Keys.generate().public;
+
+    await container
+        .read(actionsProvider)
+        .addReaction('target-event', '👍', targetAuthor: author);
+
+    expect(session.publishedEvents.single.tags, [
+      ['e', 'target-event'],
+      ['p', author],
+    ]);
+  });
+
   group('Huddle channel lifecycle', () {
     test(
       'starts from accepted signed events without refreshing all channels',
@@ -515,7 +540,9 @@ void main() {
         addTearDown(container.dispose);
 
         final actions = container.read(actionsProvider);
-        final backingChannelId = await actions.createHuddleBackingChannel();
+        final backingChannelId = await actions.createHuddleBackingChannel(
+          parentChannelId: _channelId,
+        );
         final started = await actions.announceHuddleStarted(
           parentChannelId: _channelId,
           ephemeralChannelId: backingChannelId,
@@ -529,6 +556,15 @@ void main() {
         expect(create.tags, contains(equals(['visibility', 'private'])));
         expect(create.tags, contains(equals(['channel_type', 'stream'])));
         expect(create.tags, contains(equals(['ttl', '3600'])));
+        expect(
+          create.tags,
+          contains(
+            equals([
+              'about',
+              'Buzz Huddle (buzz.huddles/v1)\nparent:$_channelId',
+            ]),
+          ),
+        );
 
         final start = session.publishedEvents.last;
         expect(start.kind, EventKind.huddleStarted);

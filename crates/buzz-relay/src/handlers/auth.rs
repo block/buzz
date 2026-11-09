@@ -1133,6 +1133,11 @@ mod tests {
             "a login waits for a permit before it is shed"
         );
         assert!(matches!(shed.conn.auth_state_snapshot(), AuthState::Failed));
+        assert_eq!(
+            crate::connection::server_close_reason(&state, &shed.conn),
+            Some("auth_failed"),
+            "a shed login closes as auth_failed"
+        );
         assert!(
             shed.send_rx.try_recv().is_err(),
             "no OK on the data channel"

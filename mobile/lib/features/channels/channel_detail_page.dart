@@ -25,12 +25,16 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 
+import '../../shared/agents/owned_agent_directory.dart';
 import '../../shared/emoji/emoji_burst.dart';
+import '../../shared/me/me_archived_agents.dart';
 import '../../shared/me/me_assistants.dart';
 import '../../shared/me/me_sync.dart';
 import '../../shared/me/me_search_placement.dart';
 import 'me/me_assistant_picker.dart';
 import 'me/me_chat_assistant.dart';
+import 'me/me_chat_settings.dart';
+import 'me/me_settings_sheet.dart';
 import 'me/me_workspace_picker.dart';
 import 'me/me_messages_provider.dart';
 import '../../shared/huddle/huddle.dart';
@@ -85,6 +89,7 @@ import 'jump_to_latest_switcher.dart';
 import 'local_message_send_animation_provider.dart';
 import 'local_message_send_transition.dart';
 import 'mobile_huddle_controller.dart';
+import 'dm_voice_agent_provider.dart';
 import 'message_actions.dart';
 import 'message_action_backdrop_state.dart';
 import 'message_long_press_region.dart';
@@ -118,6 +123,7 @@ part 'channel_detail_page/system_rows.dart';
 part 'channel_detail_page/thread_working.dart';
 part 'channel_detail_page/activity_members_sheet.dart';
 part 'channel_detail_page/huddle_sheet.dart';
+part 'channel_detail_page/huddle_agent_connection.dart';
 part 'channel_detail_page/huddle_call_avatar.dart';
 part 'channel_detail_page/huddle_participant_cluster.dart';
 part 'channel_detail_page/huddle_call_participants.dart';
@@ -562,10 +568,18 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
             memberProfilesPreloadState.connectionState !=
                 ConnectionState.done ||
             memberProfilesPreloadState.data != true);
+    final isAgentDm = _isOneToOneAgentDm(resolvedChannel, agentPubkeys);
+    final voiceAgent = isAgentDm
+        ? dmVoiceAgent(
+            resolvedChannel,
+            ref.watch(myPubkeyProvider),
+            ref.watch(ownedCodexVoiceAgentsProvider).value ?? const {},
+          )
+        : null;
     final showsHuddleAction =
         showsComposer &&
         !isAgentIdentityUnresolved &&
-        !_isOneToOneAgentDm(resolvedChannel, agentPubkeys);
+        (!isAgentDm || voiceAgent != null);
     final messagesNotifier = ref.read(messagesProvider.notifier);
     final isConnectionInProgress =
         sessionStatus == SessionStatus.connecting ||
@@ -676,10 +690,57 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
             .read(channelSectionsProvider)
             .store
             .assignments[resolvedChannel.id],
+        personalChat: personalChat,
       );
       if (shouldClose == true && context.mounted) {
         Navigator.of(context).pop();
       }
+    }
+
+    // Picker changes rebuild the conversation while its modal route is open.
+    // Read the latest controls whenever returning to settings.
+    final chatSettingsControls = useRef((
+      assistant: assistant,
+      workspace: workspace,
+    ));
+    chatSettingsControls.value = (assistant: assistant, workspace: workspace);
+    Future<void> openChatSettings() async {
+      await showBuzzModalBottomSheet<void>(
+        context: context,
+        showCloseButton: false,
+        isScrollControlled: true,
+        builder: (_) => MeSettingsSheet(
+          builder: (present, refresh) {
+            final controls = chatSettingsControls.value;
+            Future<void> open(bool agent) async {
+              if (agent) {
+                await controls.assistant.openPicker?.call(present: present);
+              } else {
+                await controls.workspace.openPicker?.call(present: present);
+              }
+              await WidgetsBinding.instance.endOfFrame;
+              refresh();
+            }
+
+            return SafeArea(
+              child: MeChatSettings(
+                agentName: controls.assistant.name,
+                agentAvatarUrl: controls.assistant.nativeAction.imageUrl,
+                agentInitial:
+                    controls.assistant.nativeAction.avatarInitial ?? '?',
+                hasAgent: controls.assistant.selected != null,
+                workspaceName: controls.workspace.name,
+                onAgentTap: controls.assistant.openPicker == null
+                    ? null
+                    : () => open(true),
+                onWorkspaceTap: controls.workspace.openPicker == null
+                    ? null
+                    : () => open(false),
+              ),
+            );
+          },
+        ),
+      );
     }
 
     final retention = ephemeralChannelDisplay(resolvedChannel);
@@ -774,14 +835,17 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                   messagesNotifier.isCatchingUp,
         onNativeTitlePressed: openChannelDetails,
         nativeActions: [
-          if (personalChat) workspace.nativeAction,
           if (personalChat)
-            assistant.nativeAction
+            IosNavigationAction(
+              label: 'Chat settings',
+              icon: BuzzIcons.ellipsis,
+              onPressed: openChatSettings,
+            )
           else if (resolvedChannel.isDm ? showsHuddleAction : showsComposer)
             _huddleNavigationAction(context, ref, resolvedChannel, [
               ...messagesState.value ?? const [],
               ...huddleLifecycle,
-            ]),
+            ], voiceAgent: voiceAgent),
         ],
         iconColor: context.colors.primary,
         titleContentHeight: appBarTitleContentHeight,
@@ -795,11 +859,16 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
           onTap: openChannelDetails,
         ),
         actions: [
-          if (personalChat) workspace.action,
           if (personalChat)
-            assistant.action
+            IconButton(
+              key: const ValueKey('me-chat-settings-button'),
+              tooltip: 'Chat settings',
+              icon: const Icon(BuzzIcons.ellipsis),
+              onPressed: openChatSettings,
+            )
           else if (resolvedChannel.isDm ? showsHuddleAction : showsComposer)
             _HuddleButton(
+              voiceAgent: voiceAgent,
               channel: resolvedChannel,
               events: [...messagesState.value ?? const [], ...huddleLifecycle],
             ),
@@ -918,6 +987,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                                           null),
                               channelId: channel.id,
                               isDm: resolvedChannel.isDm,
+                              flat: personalChat,
                               currentPubkey: currentPubkey,
                               isMember: resolvedChannel.isMember,
                               isArchived: resolvedChannel.isArchived,

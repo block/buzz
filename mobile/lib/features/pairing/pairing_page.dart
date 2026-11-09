@@ -83,6 +83,11 @@ class PairingPage extends HookConsumerWidget {
   final bool builderlabBusy;
   final bool signInPending;
 
+  /// An internal build's only way in: its organization's single sign-on.
+  /// When set, the landing offers this one action and no pairing.
+  final VoidCallback? onSignIn;
+  final bool signInBusy;
+
   const PairingPage({
     super.key,
     this.addingCommunity = false,
@@ -106,6 +111,8 @@ class PairingPage extends HookConsumerWidget {
     this.builderlabLabel = 'Connect to Builderlab',
     this.builderlabBusy = false,
     this.signInPending = false,
+    this.onSignIn,
+    this.signInBusy = false,
   });
 
   @override
@@ -409,6 +416,8 @@ class PairingPage extends HookConsumerWidget {
                       builderlabLabel: builderlabLabel,
                       builderlabBusy: builderlabBusy,
                       signInPending: signInPending,
+                      onSignIn: onSignIn,
+                      signInBusy: signInBusy,
                       codeController: codeController,
                       isBusy: isBusy,
                       pairingCodeExpanded: pairingCodeExpanded.value,

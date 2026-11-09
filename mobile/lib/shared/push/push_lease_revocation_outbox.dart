@@ -553,6 +553,7 @@ Future<void> publishBuzzPushLeaseRevocation(
               headers: await relayAuth.headers(
                 RelayConfig(baseUrl: record.relayUrl, nsec: record.nsec),
                 background: true,
+                fresh: true,
               ),
               nsec: record.nsec,
               kind: kind,
