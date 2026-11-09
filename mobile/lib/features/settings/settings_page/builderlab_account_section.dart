@@ -21,7 +21,6 @@ class _BuilderlabAccountSection extends ConsumerWidget {
         AppListRow(
           key: const Key('settings-builderlab-account'),
           title: 'Builderlab account',
-          subtitle: 'GitHub, billing and communities',
           trailing: Icon(
             BuzzIcons.externalLink,
             size: 18,
