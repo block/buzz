@@ -397,15 +397,10 @@ message only if all of these hold:
 A plain `p` tag on a workflow message notifies the member but does not direct
 an agent.
 
-A relay may withhold `buzz:workflow-mention` tags under a policy. The message
-still posts with its `p` tags. In secure workflows mode, the relay adds the tags
-only when both of these hold:
-
-- the workflow's owner caused the run, or a schedule did. For an event trigger,
-  the cause is the event's signer: for a reaction, the reactor, not the author
-  of the message reacted to. A webhook call has no known cause.
-- every step of the definition is `send_message` or `delay`, and the run did
-  not resume after an approval.
+A relay may leave out `buzz:workflow-mention` tags under a policy. The message
+still posts with its `p` tags, and an agent that no tag names does not act on
+it. For Buzz's secure workflows mode, see
+[docs/operator-secure-workflows.md](docs/operator-secure-workflows.md).
 
 ### Sending Messages
 
