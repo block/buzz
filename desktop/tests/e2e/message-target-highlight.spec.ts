@@ -112,7 +112,10 @@ for (const targetCase of CASES) {
     const flashedOnScreen = await page.evaluate(
       ([targetId, generalPath, highlightClass]) =>
         new Promise<boolean>((resolve) => {
-          const deadline = performance.now() + 3_000;
+          // The flash is timed from when the row is on screen, so this only
+          // bounds how long a slow runner may take to mount the channel and
+          // reach the row (a starved page needs seconds between renders).
+          const deadline = performance.now() + 10_000;
           const tick = () => {
             const timelineEl = document.querySelector(
               '[data-testid="message-timeline"]',

@@ -120,6 +120,15 @@ function isAtBottomNow(
   );
 }
 
+/** Longest the highlight waits for its row to reach the viewport. */
+const HIGHLIGHT_VISIBLE_WAIT_MS = 5_000;
+
+function intersectsViewport(el: HTMLElement, container: HTMLElement): boolean {
+  const rect = el.getBoundingClientRect();
+  const containerRect = container.getBoundingClientRect();
+  return rect.bottom > containerRect.top && rect.top < containerRect.bottom;
+}
+
 function isInViewport(el: HTMLElement, container: HTMLElement): boolean {
   const rect = el.getBoundingClientRect();
   const containerRect = container.getBoundingClientRect();
@@ -252,6 +261,7 @@ export function useAnchoredScroll({
   const prevMessagesRef = React.useRef<AnchoredMessage[]>([]);
   const handledTargetIdRef = React.useRef<string | null>(null);
   const highlightTimeoutRef = React.useRef<number | null>(null);
+  const highlightWaitRafRef = React.useRef<number | null>(null);
   // Tracks a pending rAF queued by pinToBottomOnMount so it can be cancelled
   // on channel switch (the channelId reset effect clears it).
   const mountPinRafIdRef = React.useRef<number | null>(null);
@@ -287,6 +297,17 @@ export function useAnchoredScroll({
     mountPinRafIdRef.current = null;
   }, []);
 
+  const clearHighlightTimers = React.useCallback(() => {
+    if (highlightTimeoutRef.current !== null) {
+      window.clearTimeout(highlightTimeoutRef.current);
+      highlightTimeoutRef.current = null;
+    }
+    if (highlightWaitRafRef.current !== null) {
+      cancelAnimationFrame(highlightWaitRafRef.current);
+      highlightWaitRafRef.current = null;
+    }
+  }, []);
+
   // Reset everything when the channel changes — the layout effect that runs
   // immediately after this reset is responsible for either jumping to bottom
   // or to the target message for the new channel.
@@ -317,15 +338,12 @@ export function useAnchoredScroll({
       cancelAnimationFrame(targetSettleRafRef.current);
       targetSettleRafRef.current = null;
     }
-    if (highlightTimeoutRef.current !== null) {
-      window.clearTimeout(highlightTimeoutRef.current);
-      highlightTimeoutRef.current = null;
-    }
+    clearHighlightTimers();
     if (mountPinRafIdRef.current !== null) {
       cancelAnimationFrame(mountPinRafIdRef.current);
       mountPinRafIdRef.current = null;
     }
-  }, [channelId]);
+  }, [channelId, clearHighlightTimers]);
 
   const noteProgrammaticScroll = React.useCallback(
     (container: HTMLDivElement, scrollTopBefore: number) => {
@@ -515,18 +533,42 @@ export function useAnchoredScroll({
     virtualizerOwnsPrependAnchoring,
   ]);
 
-  const highlightMessage = React.useCallback((messageId: string) => {
-    if (highlightTimeoutRef.current !== null) {
-      window.clearTimeout(highlightTimeoutRef.current);
-    }
-    setHighlightedMessageId(messageId);
-    highlightTimeoutRef.current = window.setTimeout(() => {
-      setHighlightedMessageId((current) =>
-        current === messageId ? null : current,
-      );
-      highlightTimeoutRef.current = null;
-    }, 2_000);
-  }, []);
+  const highlightMessage = React.useCallback(
+    (messageId: string) => {
+      clearHighlightTimers();
+      setHighlightedMessageId(messageId);
+      const startFade = () => {
+        highlightTimeoutRef.current = window.setTimeout(() => {
+          setHighlightedMessageId((current) =>
+            current === messageId ? null : current,
+          );
+          highlightTimeoutRef.current = null;
+        }, 2_000);
+      };
+      // Time the flash from when the row is actually on screen, not from when
+      // the scroll was accepted: reaching an unmeasured row can take several
+      // measure passes, and a flash that elapses off screen is never seen.
+      // Bounded so a row that never becomes visible still clears.
+      const deadline = performance.now() + HIGHLIGHT_VISIBLE_WAIT_MS;
+      const waitForVisible = () => {
+        highlightWaitRafRef.current = null;
+        const container = scrollContainerRef.current;
+        const el = container?.querySelector<HTMLElement>(
+          `[data-message-id="${CSS.escape(messageId)}"]`,
+        );
+        if (
+          (container && el && intersectsViewport(el, container)) ||
+          performance.now() > deadline
+        ) {
+          startFade();
+          return;
+        }
+        highlightWaitRafRef.current = requestAnimationFrame(waitForVisible);
+      };
+      highlightWaitRafRef.current = requestAnimationFrame(waitForVisible);
+    },
+    [clearHighlightTimers, scrollContainerRef],
+  );
 
   const scrollToMessageImperative = React.useCallback(
     (
@@ -1067,9 +1109,7 @@ export function useAnchoredScroll({
 
   React.useEffect(() => {
     return () => {
-      if (highlightTimeoutRef.current !== null) {
-        window.clearTimeout(highlightTimeoutRef.current);
-      }
+      clearHighlightTimers();
       if (programmaticScrollRafRef.current !== null) {
         cancelAnimationFrame(programmaticScrollRafRef.current);
       }
@@ -1077,7 +1117,7 @@ export function useAnchoredScroll({
         cancelAnimationFrame(targetSettleRafRef.current);
       }
     };
-  }, []);
+  }, [clearHighlightTimers]);
 
   const onVirtualizerAtBottomStateChange = React.useCallback(
     (atBottom: boolean) => {
