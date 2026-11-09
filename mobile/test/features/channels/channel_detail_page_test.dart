@@ -17999,6 +17999,160 @@ void main() {
       },
     );
 
+    // A targeted entry can also hydrate in two steps: the route's snapshot
+    // of the target, then the relay's full thread, which may include the
+    // reader's own earlier replies.
+    for (final (initialMessageId, delayedHydration) in [
+      (null, false),
+      ('reply-5', false),
+      ('reply-5', true),
+    ]) {
+      testWidgets('a sent reply stays above the composer as it grows in '
+          '(target: $initialMessageId, delayed: $delayedHydration)', (
+        tester,
+      ) async {
+        final previousPlatform = debugDefaultTargetPlatformOverride;
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+        addTearDown(
+          () => debugDefaultTargetPlatformOverride = previousPlatform,
+        );
+        tester.view.physicalSize = const Size(400, 800);
+        tester.view.devicePixelRatio = 1;
+        tester.view.viewPadding = const FakeViewPadding(bottom: 20);
+        addTearDown(tester.view.reset);
+
+        final rootEvent = _textMsg(
+          id: threadIdThreadDashRoot,
+          pubkey: 'alice',
+          content: 'Thread root',
+          createdAt: 1000,
+        );
+        final replies = [
+          for (var i = 0; i < 30; i++)
+            _textMsg(
+              id: 'reply-$i',
+              pubkey: delayedHydration && i.isEven ? 'self' : 'bob',
+              content: 'Reply $i',
+              createdAt: 1100 + i,
+              extraTags: const [
+                ['e', threadIdThreadDashRoot, '', 'reply'],
+              ],
+            ),
+        ];
+
+        final hydration = Completer<List<NostrEvent>>();
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [rootEvent],
+            threadReplies: delayedHydration
+                ? const {}
+                : {threadIdThreadDashRoot: replies},
+            threadReplyLoaders: delayedHydration
+                ? {threadIdThreadDashRoot: () => hydration.future}
+                : const {},
+            users: const {
+              'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+              'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+            },
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final threadHead = formatTimeline([rootEvent]).single;
+        final target = formatTimeline([
+          rootEvent,
+          replies[5],
+        ]).where((message) => message.id == 'reply-5');
+        Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+          MaterialPageRoute<void>(
+            builder: (_) => ThreadDetailPage(
+              threadHead: threadHead,
+              allMessages: [threadHead, if (delayedHydration) ...target],
+              channelId: _channelId,
+              currentPubkey: 'self',
+              isMember: true,
+              isArchived: false,
+              // Inbox, push and link entries open at an older target and must
+              // still bring the reader's own reply into view.
+              initialMessageId: initialMessageId,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        if (delayedHydration) {
+          hydration.complete(replies);
+          await tester.pumpAndSettle();
+        }
+        if (initialMessageId != null) {
+          expect(
+            find.text('Reply 5').hitTestable(),
+            findsOneWidget,
+            reason: 'The target jump must reveal the hydrated list.',
+          );
+        }
+        // Readers scroll a little before replying, which detaches tail follow
+        // so focusing the composer no longer snaps to the tail by itself.
+        await tester.drag(
+          find.byType(ScrollablePositionedList),
+          const Offset(0, 80),
+        );
+        await tester.pumpAndSettle();
+        if (initialMessageId != null) {
+          expect(find.text('Reply 5'), findsOneWidget);
+        }
+        await tester.tap(find.text('Reply in thread…').hitTestable());
+        await tester.pumpAndSettle();
+        tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+        await tester.pumpAndSettle();
+
+        // Production adds a signed reply this way before the relay answers, and
+        // its row then grows to full height over the entrance transition.
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(ThreadDetailPage)),
+        );
+        final sent = _textMsg(
+          id: 'sent-reply',
+          pubkey: 'self',
+          content: 'A sent reply\nwith a second line\nand a third line',
+          createdAt: 1200,
+          extraTags: const [
+            ['e', threadIdThreadDashRoot, '', 'reply'],
+          ],
+        );
+        container
+            .read(localMessageSendAnimationProvider(_channelId).notifier)
+            .mark(sent.id);
+        container
+            .read(
+              threadLocalRepliesProvider(
+                const ThreadRepliesArgs(
+                  channelId: _channelId,
+                  rootId: threadIdThreadDashRoot,
+                ),
+              ).notifier,
+            )
+            .add(sent);
+        await tester.pumpAndSettle();
+        debugDefaultTargetPlatformOverride = previousPlatform;
+
+        final sentReply = find.byKey(
+          const ValueKey('thread-message-group-sent-reply'),
+        );
+        final composerTop = tester
+            .getTopLeft(find.byKey(const ValueKey('composer-surface')))
+            .dy;
+        expect(
+          tester.getBottomLeft(sentReply).dy,
+          lessThanOrEqualTo(composerTop),
+          reason: 'The fully grown reply must not end under the composer.',
+        );
+        expect(
+          find.byKey(const ValueKey('thread-jump-to-latest')),
+          findsNothing,
+        );
+      });
+    }
+
     testWidgets('thread hides initial tail placement until it is settled', (
       tester,
     ) async {

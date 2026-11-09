@@ -139,8 +139,11 @@ class _RecordingReactionActions implements ChannelActions {
   Future<void> removeReaction(String eventId, String emoji) async =>
       removed.add(eventId);
   @override
-  Future<void> addReaction(String eventId, String emoji) async =>
-      added.add(eventId);
+  Future<void> addReaction(
+    String eventId,
+    String emoji, {
+    required String targetAuthor,
+  }) async => added.add(eventId);
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
@@ -805,6 +808,91 @@ void main() {
         find.byKey(const ValueKey('reaction-details-sheet')),
         findsNothing,
       );
+      debugDefaultTargetPlatformOverride = null;
+    },
+  );
+
+  testWidgets(
+    'native sheet reuses custom emoji bytes the pill already downloaded',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      const shortcode = ':partyparrot:';
+      final png = base64Decode(
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==',
+      );
+      var fetches = 0;
+      Map<Object?, Object?>? payload;
+      final completion = Completer<Map<String, Object?>>();
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        NativeMessagePresentation.channel,
+        (call) async {
+          if (call.method == 'reactions') {
+            payload = call.arguments as Map<Object?, Object?>;
+            return completion.future;
+          }
+          return <String, Object?>{};
+        },
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          NativeMessagePresentation.channel,
+          null,
+        ),
+      );
+      await tester.pumpWidget(
+        WidgetHelpers.testable(
+          overrides: [
+            emojiDatasetOrEmptyProvider.overrideWithValue(_dataset),
+            mediaHttpClientProvider.overrideWithValue(
+              MockClient((request) async {
+                fetches++;
+                return http.Response.bytes(png, 200);
+              }),
+            ),
+          ],
+          child: ReactionRow(
+            messageId: _messageId,
+            channelId: 'channel',
+            reactions: const [
+              TimelineReaction(
+                emoji: shortcode,
+                count: 1,
+                reactedByCurrentUser: false,
+                userPubkeys: [_alice],
+                emojiUrl: 'https://relay.example/media/party.png',
+              ),
+            ],
+            onToggle: (_) {},
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final source = tester.widget<Image>(
+        find.descendant(
+          of: find.byType(CustomEmojiImage),
+          matching: find.byType(Image),
+        ),
+      );
+      await tester.runAsync(
+        () => precacheImage(
+          source.image,
+          tester.element(find.byType(CustomEmojiImage)),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(fetches, 1);
+
+      await tester.longPress(
+        find.byKey(const ValueKey('reaction-pill-$shortcode')),
+      );
+      await tester.pumpAndSettle();
+
+      final reaction = (payload!['reactions'] as List).single as Map;
+      expect(reaction['url'], 'https://relay.example/media/party.png');
+      expect(reaction['bytes'], png);
+      completion.complete(<String, Object?>{});
+      await tester.pumpAndSettle();
       debugDefaultTargetPlatformOverride = null;
     },
   );

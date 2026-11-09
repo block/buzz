@@ -521,6 +521,7 @@ pub(crate) struct PausingProxy {
     pub(crate) port: u16,
     hold: tokio::sync::watch::Sender<ProxyHold>,
     next_session: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    held_sessions: tokio::sync::watch::Sender<std::collections::BTreeSet<u64>>,
 }
 
 /// Which proxy sessions hold their bytes.
@@ -549,6 +550,7 @@ impl PausingProxy {
             mut to: tokio::net::tcp::OwnedWriteHalf,
             mut hold: tokio::sync::watch::Receiver<ProxyHold>,
             session: u64,
+            held_sessions: tokio::sync::watch::Sender<std::collections::BTreeSet<u64>>,
         ) {
             let mut buf = [0u8; 8192];
             loop {
@@ -557,6 +559,9 @@ impl PausingProxy {
                 };
                 if n == 0 {
                     return;
+                }
+                if hold.borrow().holds(session) {
+                    held_sessions.send_if_modified(|sessions| sessions.insert(session));
                 }
                 if hold.wait_for(|hold| !hold.holds(session)).await.is_err() {
                     return;
@@ -575,6 +580,8 @@ impl PausingProxy {
         let accept_hold = hold.subscribe();
         let next_session = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
         let accept_next = next_session.clone();
+        let (held_sessions, _) = tokio::sync::watch::channel(Default::default());
+        let accept_held_sessions = held_sessions.clone();
         tokio::spawn(async move {
             while let Ok((client, _)) = listener.accept().await {
                 let session = accept_next.fetch_add(1, Ordering::SeqCst);
@@ -590,12 +597,14 @@ impl PausingProxy {
                     server_write,
                     accept_hold.clone(),
                     session,
+                    accept_held_sessions.clone(),
                 ));
                 tokio::spawn(pump(
                     server_read,
                     client_write,
                     accept_hold.clone(),
                     session,
+                    accept_held_sessions.clone(),
                 ));
             }
         });
@@ -603,7 +612,26 @@ impl PausingProxy {
             port,
             hold,
             next_session,
+            held_sessions,
         }
+    }
+
+    /// Resume all previously stalled test-proxy sessions.
+    pub(crate) fn resume_all(&self) {
+        self.hold.send_replace(ProxyHold::default());
+    }
+
+    /// Wait until traffic from at least `count` distinct sessions has hit a hold.
+    pub(crate) async fn wait_for_held_sessions(&self, count: usize) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            self.held_sessions
+                .subscribe()
+                .wait_for(|sessions| sessions.len() >= count)
+                .await
+                .expect("proxy observations remain open");
+        })
+        .await
+        .expect("database traffic reached the proxy hold");
     }
 
     pub(crate) fn set_paused(&self, paused: bool) {

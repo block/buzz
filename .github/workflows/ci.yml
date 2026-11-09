@@ -144,6 +144,10 @@ jobs:
         run: |
           scripts/test-rust-cache-contract.sh
           scripts/test-rust-cache-contract-regressions.sh
+      - name: SQLx dependency pin
+        run: |
+          python3 scripts/check-sqlx-pin.py
+          python3 scripts/test-sqlx-pin.py
       - name: CI required-context isolation contract
         run: scripts/test-ci-required-context-isolation.sh
       - name: CI path selection regression tests

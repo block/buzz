@@ -6,9 +6,9 @@ fn community(n: u128) -> CommunityId {
     CommunityId::from_uuid(Uuid::from_u128(n))
 }
 
-fn snapshot(ids: Vec<Uuid>) -> ReadAt<Vec<Uuid>> {
+fn snapshot<T>(value: T) -> ReadAt<T> {
     ReadAt {
-        value: ids,
+        value,
         read_at: Instant::now(),
     }
 }
@@ -534,4 +534,140 @@ async fn ttl_reclaims_idle_snapshots_and_invalidation_preserves_only_active_read
         weak.upgrade().is_none(),
         "TTL maintenance must release the idle payload"
     );
+}
+
+/// One fan-out's recipients: fresh sets answer without a read, the rest share
+/// one bulk read per `BULK_USERS` users and are published for later checks,
+/// oversized users share one point read, and a failed read leaves its users
+/// unverified rather than denied.
+#[tokio::test]
+async fn fan_out_recipients_share_one_bulk_read_and_publish_it() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let cache = MembershipCache::new(Duration::from_secs(5));
+    let channel = Uuid::from_u128(1);
+    let user = |n: u8| vec![n; 32];
+    cache.seed_member((community(1), channel, user(0)), true);
+    let users: Vec<_> = (0..=BULK_USERS as u8 + 1).map(user).collect();
+    let oversized = user(1);
+    let reads = AtomicUsize::new(0);
+
+    let members = cache
+        .members(
+            community(1),
+            channel,
+            users.iter().cloned().chain([user(2)]),
+            |pubkeys| {
+                reads.fetch_add(1, Ordering::SeqCst);
+                assert!(!pubkeys.contains(&user(0)), "a fresh set is not re-read");
+                assert!(pubkeys.len() <= BULK_USERS);
+                let rows = pubkeys
+                    .iter()
+                    .flat_map(|pubkey| {
+                        let ids: Vec<Uuid> = if *pubkey == oversized {
+                            (0..=MAX_MEMBERSHIPS as u128).map(Uuid::from_u128).collect()
+                        } else if pubkey[0] % 2 == 0 {
+                            vec![channel]
+                        } else {
+                            vec![Uuid::from_u128(2)]
+                        };
+                        ids.into_iter().map(|id| (pubkey.clone(), id))
+                    })
+                    .collect();
+                async move { Ok(snapshot(rows)) }
+            },
+            |pubkeys| {
+                assert_eq!(pubkeys, std::slice::from_ref(&oversized));
+                async move { Ok(pubkeys) }
+            },
+        )
+        .await;
+    assert_eq!(reads.load(Ordering::SeqCst), 2, "one read per chunk");
+    let expected: HashSet<_> = users
+        .iter()
+        .filter(|pubkey| pubkey[0] % 2 == 0 || **pubkey == oversized)
+        .cloned()
+        .collect();
+    assert_eq!(members.members, expected);
+    assert!(members.unverified.is_empty());
+    assert_eq!(
+        cache.cached_member(&(community(1), channel, user(3))),
+        Some(false),
+        "the bulk read is published"
+    );
+    assert_eq!(
+        cache.cached_member(&(community(1), channel, user(4))),
+        Some(true)
+    );
+
+    let failed = cache
+        .members(
+            community(2),
+            channel,
+            [user(0), user(1)],
+            |_| async { Err(DbError::InvalidData("unavailable".into())) },
+            |_| async { panic!("unexpected point check") },
+        )
+        .await;
+    assert!(failed.members.is_empty());
+    assert_eq!(failed.unverified, HashSet::from([user(0), user(1)]));
+    assert_eq!(
+        cache.cached_member(&(community(2), channel, user(0))),
+        None,
+        "a failed read is not cached"
+    );
+}
+
+/// A user whose set another request is loading is read again by the batch,
+/// never waited for, and only the gate holder publishes.
+#[tokio::test]
+async fn fan_out_batch_does_not_wait_for_a_single_load() {
+    let cache = Arc::new(MembershipCache::new(Duration::from_secs(5)));
+    let key = (community(1), vec![1; 32]);
+    let channel = Uuid::from_u128(1);
+    let (entered, started) = oneshot::channel();
+    let (release, released) = oneshot::channel();
+    let single = {
+        let cache = cache.clone();
+        let key = key.clone();
+        tokio::spawn(async move {
+            cache
+                .contains(
+                    key,
+                    channel,
+                    async {
+                        entered.send(()).unwrap();
+                        released.await.unwrap();
+                        Ok(snapshot(vec![]))
+                    },
+                    async { panic!("unexpected point check") },
+                )
+                .await
+        })
+    };
+    started.await.unwrap();
+    let members = cache
+        .members(
+            key.0,
+            channel,
+            [key.1.clone()],
+            |pubkeys| async move {
+                Ok(snapshot(
+                    pubkeys
+                        .into_iter()
+                        .map(|pubkey| (pubkey, channel))
+                        .collect(),
+                ))
+            },
+            |_| async { panic!("unexpected point check") },
+        )
+        .await;
+    assert_eq!(members.members, HashSet::from([key.1.clone()]));
+    assert_eq!(
+        cache.cached_member(&(key.0, channel, key.1.clone())),
+        None,
+        "the batch did not hold the gate, so it does not publish"
+    );
+    release.send(()).unwrap();
+    assert!(!single.await.unwrap().unwrap());
+    assert_eq!(cache.cached_member(&(key.0, channel, key.1)), Some(false));
 }

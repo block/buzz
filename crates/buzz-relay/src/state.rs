@@ -56,6 +56,18 @@ pub(crate) enum CommunityDisconnectReason {
 }
 
 impl CommunityDisconnectReason {
+    /// The access log `close_reason` of a connection this reason closed.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::CommunityArchived => "community_archived",
+            Self::CommunityDeleted => "community_deleted",
+            Self::AuthPolicyUpgraded => "auth_policy_upgraded",
+            Self::AuthorizationDenied => "authorization_denied",
+            Self::AccessRevoked => "access_revoked",
+            Self::Removed => "removed",
+        }
+    }
+
     pub(crate) fn close_message(self) -> WsMessage {
         match self {
             Self::CommunityArchived => WsMessage::Close(Some(axum::extract::ws::CloseFrame {
@@ -2056,6 +2068,41 @@ impl AppState {
                     // Keep the fallback query out of every caller's future
                     // layout, and allocate it only when a point check is needed.
                     Box::pin(self.db.is_member(community_id, channel_id, pubkey)).await
+                },
+            )
+            .await
+    }
+
+    /// Which of `pubkeys` are active members of the channel, through the
+    /// membership cache: one bulk read for the users it lacks, instead of one
+    /// read each. For a fan-out's recipients.
+    pub(crate) async fn members_cached(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+        pubkeys: impl IntoIterator<Item = Vec<u8>>,
+    ) -> crate::membership_cache::Members {
+        self.membership_cache
+            .members(
+                community_id,
+                channel_id,
+                pubkeys,
+                |pubkeys| async move {
+                    Box::pin(self.db.get_active_membership_ids_bulk_read_at(
+                        community_id,
+                        &pubkeys,
+                        (crate::membership_cache::MAX_MEMBERSHIPS + 1) as u32,
+                    ))
+                    .await
+                },
+                |pubkeys| async move {
+                    let pairs = Box::pin(self.db.membership_pairs(
+                        community_id,
+                        &[channel_id],
+                        &pubkeys,
+                    ))
+                    .await?;
+                    Ok(pairs.into_iter().map(|(_, pubkey)| pubkey).collect())
                 },
             )
             .await

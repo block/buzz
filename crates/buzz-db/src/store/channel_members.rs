@@ -15,6 +15,9 @@ use buzz_datastore_tracing::datastore_span;
 
 pub use buzz_core::channel::MemberRole;
 
+/// `(pubkey, channel_id)` membership rows.
+pub type PubkeyChannels = Vec<(Vec<u8>, Uuid)>;
+
 /// A channel membership row as returned from the database.
 #[derive(Debug, Clone)]
 pub struct MemberRecord {
@@ -1252,6 +1255,50 @@ pub async fn get_active_membership_ids_read_at(
     .bind(i64::from(limit))
     .fetch_all(&mut *connection)
     .await?;
+    Ok(ReadAt { value, read_at })
+}
+
+/// [`get_active_membership_ids_read_at`] for many pubkeys in one statement:
+/// `(pubkey, channel_id)` rows, up to `limit` per pubkey. A pubkey with
+/// `limit` rows may be incomplete; callers must not cache it as a full set.
+pub async fn get_active_membership_ids_bulk_read_at(
+    pool: &PgPool,
+    community_id: CommunityId,
+    pubkeys: &[Vec<u8>],
+    limit: u32,
+) -> Result<ReadAt<PubkeyChannels>> {
+    if pubkeys.is_empty() {
+        return Ok(ReadAt {
+            value: Vec::new(),
+            read_at: std::time::Instant::now(),
+        });
+    }
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
+    let read_at = std::time::Instant::now();
+    // One bounded read per pubkey, as in the single-user query: each user's
+    // scan stops at `limit` rows.
+    let rows = sqlx::query(
+        "SELECT u.pubkey, m.channel_id FROM unnest($2::bytea[]) AS u(pubkey) \
+         CROSS JOIN LATERAL ( \
+           SELECT cm.channel_id FROM channel_members cm \
+           JOIN channels c ON cm.community_id = c.community_id AND cm.channel_id = c.id AND c.deleted_at IS NULL \
+           WHERE cm.community_id = $1 AND cm.pubkey = u.pubkey AND cm.removed_at IS NULL \
+           LIMIT $3 \
+         ) m",
+    )
+    .bind(community_id.as_uuid())
+    .bind(pubkeys)
+    .bind(i64::from(limit))
+    .fetch_all(&mut *connection)
+    .await?;
+    let value = rows
+        .into_iter()
+        .map(|row| Ok((row.try_get("pubkey")?, row.try_get("channel_id")?)))
+        .collect::<Result<_>>()?;
     Ok(ReadAt { value, read_at })
 }
 
@@ -2507,6 +2554,18 @@ impl Db {
         limit: u32,
     ) -> Result<ReadAt<Vec<Uuid>>> {
         get_active_membership_ids_read_at(&self.pool, community_id, pubkey, limit).await
+    }
+
+    /// [`Self::get_active_membership_ids_read_at`] for many pubkeys in one
+    /// statement, as `(pubkey, channel_id)` rows, up to `limit` per pubkey.
+    #[datastore_span(name = "get_active_membership_ids_bulk", system = "postgresql")]
+    pub async fn get_active_membership_ids_bulk_read_at(
+        &self,
+        community_id: CommunityId,
+        pubkeys: &[Vec<u8>],
+        limit: u32,
+    ) -> Result<ReadAt<PubkeyChannels>> {
+        get_active_membership_ids_bulk_read_at(&self.pool, community_id, pubkeys, limit).await
     }
 
     /// Channel IDs where a pubkey is an active member. See [`get_member_channel_ids`].

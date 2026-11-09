@@ -208,6 +208,7 @@ class IosNavigationBar extends HookConsumerWidget {
     };
     final auth = ref.watch(mediaGetAuthServiceProvider);
     final client = ref.watch(mediaHttpClientProvider);
+    final diskCache = ref.watch(mediaDiskCacheProvider);
     final colors = Theme.of(context).colorScheme;
     String imageKey(IosNavigationAction action) => jsonEncode([
       action.avatarIdentity,
@@ -236,8 +237,12 @@ class IosNavigationBar extends HookConsumerWidget {
                   ? Colors.transparent
                   : colors.primaryContainer,
               foreground: colors.onPrimaryContainer,
-              networkImage: (url) =>
-                  MediaImageProvider(url: url, auth: auth, client: client),
+              networkImages: (url) => smallMediaImageProviders(
+                url: url,
+                auth: auth,
+                client: client,
+                diskCache: diskCache,
+              ),
             ).then(
               (bytes) {
                 if (!active || !context.mounted || bytes == null) return;
@@ -261,6 +266,7 @@ class IosNavigationBar extends HookConsumerWidget {
         avatarKey,
         auth,
         client,
+        diskCache,
         colors.primaryContainer,
         colors.onPrimaryContainer,
       ],

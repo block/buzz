@@ -488,6 +488,31 @@ void main() {
     },
   );
 
+  test('reactions tag the reacted-to message author', () async {
+    final keys = nostr.Keys.generate();
+    final session = _RecordingPublishRelaySession();
+    final actionsProvider = Provider<ChannelActions>((ref) {
+      return ChannelActions(
+        ref: ref,
+        session: session,
+        signedEventRelay: SignedEventRelay(session: session, nsec: keys.nsec),
+        currentPubkey: keys.public,
+      );
+    });
+    final container = ProviderContainer(retry: (_, _) => null);
+    addTearDown(container.dispose);
+    final author = nostr.Keys.generate().public;
+
+    await container
+        .read(actionsProvider)
+        .addReaction('target-event', '👍', targetAuthor: author);
+
+    expect(session.publishedEvents.single.tags, [
+      ['e', 'target-event'],
+      ['p', author],
+    ]);
+  });
+
   group('Huddle channel lifecycle', () {
     test(
       'starts from accepted signed events without refreshing all channels',

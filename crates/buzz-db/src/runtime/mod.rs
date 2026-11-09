@@ -1061,21 +1061,19 @@ impl Db {
         options.options([("default_transaction_isolation", "read committed")])
     }
 
-    /// Upper bound on a reader connection's release check (see
-    /// [`Db::read_pool_options`]); matches sqlx's own close-on-drop bound.
-    const READER_RELEASE_TIMEOUT: Duration = Duration::from_secs(5);
+    /// Leave headroom inside SQLx's five-second whole-return deadline so this
+    /// check records the reason before SQLx cancels the release future.
+    const READER_RELEASE_TIMEOUT: Duration = Duration::from_secs(4);
 
     /// Reader pool options apart from connection lifetimes (see
     /// [`Db::connect_read_pool`]).
     ///
     /// Every checkout that goes back to the pool first passes a release
-    /// check bounded by [`Db::READER_RELEASE_TIMEOUT`]. sqlx's own release
-    /// ping has no timeout, so a socket whose reader stopped answering
-    /// without closing it (a failover, a partition) would otherwise hold its
-    /// slot until the kernel gives up on it; with every slot held that way,
-    /// the pool cannot dial the reader that replaced it. A check that times
-    /// out or errors closes the socket and frees the slot, and sqlx's floor
-    /// maintenance dials a replacement.
+    /// check bounded by [`Db::READER_RELEASE_TIMEOUT`]. A check that times
+    /// out or errors records the reason, closes the socket, and frees the
+    /// slot. SQLx bounds the whole return, including its subsequent ping,
+    /// so a reader that stops answering without closing cannot strand pool
+    /// capacity. Its floor maintenance dials a replacement.
     ///
     /// The check also closes, rather than returns, a connection still inside
     /// a transaction. sqlx rolls back a checkout dropped while its `BEGIN`
@@ -1087,12 +1085,6 @@ impl Db {
     /// (see [`Db::proved_reader`]) and reader sessions default to `READ
     /// COMMITTED` (see [`Db::reader_connect_options`]), so an isolation level
     /// other than the session default means a transaction is still open.
-    ///
-    /// Residual window: after the check passes, sqlx sends its own release
-    /// ping, which has no timeout. A reader that goes silent in that one
-    /// round trip strands that one slot until the socket fails. That is
-    /// bounded by the releases in flight at that instant, and later checkouts
-    /// of silent connections go through the proof timeout and this check.
     pub(crate) fn read_pool_options(max_connections: u32) -> PgPoolOptions {
         PgPoolOptions::new()
             .max_connections(max_connections)
