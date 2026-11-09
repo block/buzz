@@ -14,8 +14,10 @@
 //! An event is dropped on this node when its worker's queue is full, or when
 //! the dispatcher lags the broadcast and skips it. Both are counted, and the
 //! syncs the dropped events would have reached get `CLOSED "resync: ..."`
-//! (NIP-AR Sync rule 5). A plain subscription is not told; its client catches
-//! up from its cursor when it next reconnects.
+//! (NIP-AR Sync rule 5). A plain subscription is not told. Its client may
+//! replay the event when it next reconnects, but only if later deliveries did
+//! not move its resume cursor past the event by more than the client's replay
+//! slack.
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
 
