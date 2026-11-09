@@ -24,19 +24,28 @@ final _huddleLogicalParticipantPubkeysProvider = Provider.autoDispose
             currentPubkey: state.currentPubkey,
             participantPubkeys: state.participantPubkeys,
             wasAdmitted: state.wasAdmitted,
+            parentChannelId: state.parentChannelId,
           ),
         ),
       );
       final backingMembers =
           ref.watch(channelMembersProvider(channelId)).value ??
           const <ChannelMember>[];
+      final parent = session.parentChannelId == null
+          ? null
+          : ref.watch(channelByIdProvider(session.parentChannelId!));
+      final isDm =
+          parent?.isDm == true &&
+          parent!.participantPubkeys.toSet().length == 2;
       return _huddleParticipantPubkeys(
         sessionParticipantPubkeys: session.ephemeralChannelId == channelId
             ? session.participantPubkeys
             : const [],
         currentPubkey: session.currentPubkey,
         members: session.wasAdmitted
-            ? backingMembers.where((member) => member.isBot)
+            ? (isDm
+                  ? const <ChannelMember>[]
+                  : backingMembers.where((member) => member.isBot))
             : backingMembers,
       );
     });
@@ -261,19 +270,11 @@ IosNavigationAction _huddleNavigationAction(
               title: 'Start a Huddle?',
               message: voiceAgent == null
                   ? 'Your microphone will turn on, and others in this conversation can join.'
-                  : 'Your microphone will turn on and your Codex agent will join. Keep Buzz open on the desktop running this agent.',
+                  : 'Your microphone will turn on and your Codex agent will be invited. Keep Buzz open on the desktop running this agent.',
               confirmLabel: 'Start Huddle',
             );
             if (!confirmed || !context.mounted) return;
             try {
-              if (voiceAgent != null &&
-                  !(await ref.read(
-                    ownedCodexVoiceAgentsProvider.future,
-                  )).contains(voiceAgent)) {
-                throw StateError(
-                  'This agent is no longer available for voice.',
-                );
-              }
               if (!context.mounted) return;
               await ref
                   .read(mobileHuddleControllerProvider.notifier)
@@ -481,39 +482,6 @@ Future<void> _startMobileHuddleFromChannel({
   }
 }
 
-void _openMobileHuddle({
-  required BuildContext context,
-  required WidgetRef ref,
-  required _HuddleInvite invite,
-}) {
-  final config = ref.read(relayConfigProvider);
-  final nsec = config.nsec;
-  if (nsec == null || nsec.isEmpty) {
-    ScaffoldMessenger.of(context).showFeedbackSnackBar(
-      const SnackBar(content: Text('A paired identity is required.')),
-      kind: ToastKind.generic,
-    );
-    return;
-  }
-
-  final session = ref.read(huddleSessionProvider);
-  _showMobileHuddleCall(context: context, ref: ref, invite: invite);
-  if (session.ephemeralChannelId != invite.ephemeralChannelId ||
-      session.phase == HuddleSessionPhase.idle ||
-      session.phase == HuddleSessionPhase.failed) {
-    unawaited(
-      ref
-          .read(mobileHuddleControllerProvider.notifier)
-          .join(
-            parentChannelId: invite.parentChannelId,
-            ephemeralChannelId: invite.ephemeralChannelId,
-            startedBy: invite.startedBy,
-            startedEventId: invite.startedEventId,
-          ),
-    );
-  }
-}
-
 void _showMobileHuddleCall({
   required BuildContext context,
   required WidgetRef ref,
@@ -623,9 +591,7 @@ class _MobileHuddleCallPage extends ConsumerWidget {
         !unavailable &&
         session.microphonePermissionRequired;
     final localPubkey = session.currentPubkey?.toLowerCase();
-    // Audio peers remain authoritative for humans after admission. Agents are
-    // logical Huddle participants as soon as their bot membership is published,
-    // before their send-only audio connection starts speaking.
+    // In DMs, only admitted audio peers appear as connected participants.
     final participantPubkeys = ref.watch(
       _huddleLogicalParticipantPubkeysProvider(invite.ephemeralChannelId),
     );
@@ -740,6 +706,7 @@ class _MobileHuddleCallPage extends ConsumerWidget {
                     );
                   },
                 ),
+                _HuddleAgentConnectionNotice(invite: invite),
                 Expanded(
                   child: _HuddleCallParticipants(
                     connected: connected,

@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'package:buzz/features/channels/dm_voice_agent_provider.dart';
 import 'dart:typed_data';
 import 'package:buzz/shared/me/me_assistants.dart';
 import 'package:buzz/shared/me/me_archived_agents.dart';
@@ -11,6 +12,19 @@ import 'package:nostr/nostr.dart' as nostr;
 import 'package:pointycastle/digests/sha256.dart';
 
 class _Relay extends RelaySessionNotifier {
+  void Function(NostrEvent)? onInventory;
+  @override
+  Future<void Function()> subscribe(
+    NostrFilter filter,
+    void Function(NostrEvent) onEvent, {
+    void Function(String)? onClosed,
+  }) async {
+    onInventory = onEvent;
+    return () {
+      onInventory = null;
+    };
+  }
+
   final List<List<NostrEvent>> pages;
   List<NostrEvent>? inventory;
   List<List<NostrEvent>>? inventoryPages;
@@ -126,6 +140,37 @@ void main() {
     addTearDown(container.dispose);
     return container;
   }
+
+  test(
+    'voice discovery follows desktop add, runtime change and removal without reconnect',
+    () async {
+      final relay = _Relay([
+        [profile(agent, ownedBy: owner)],
+      ], inventory: []);
+      final container = setup(relay);
+      final sub = container.listen(ownedCodexVoiceAgentsProvider, (_, _) {});
+      addTearDown(sub.close);
+      expect(
+        await container.read(ownedCodexVoiceAgentsProvider.future),
+        isEmpty,
+      );
+      for (final record in [
+        listing(agent.public, runtime: 'buzz.codex/codex', time: 2),
+        listing(agent.public, runtime: 'other/runtime', time: 3),
+        listing(agent.public, runtime: 'buzz.codex/codex', time: 4),
+        listing(agent.public, content: '', time: 5),
+      ]) {
+        relay.inventory = [record];
+        relay.onInventory!(record);
+        await container.pump();
+        final keys = await container.read(ownedCodexVoiceAgentsProvider.future);
+        expect(
+          keys.contains(agent.public),
+          record.createdAt == 2 || record.createdAt == 4,
+        );
+      }
+    },
+  );
 
   test('runtime eligibility uses the newest signed inventory head', () async {
     final relay = _Relay(
