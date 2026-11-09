@@ -161,7 +161,11 @@ class AddChannelMembersSheet extends HookConsumerWidget {
     void toggleUser(MentionCandidate user) {
       if (isSubmitting.value) return;
       final normalized = user.pubkey.toLowerCase();
-      if (selectedPubkeys.contains(normalized)) {
+      // The current selection, not this build's: a second tap can land
+      // before the rebuild that reflects the first.
+      if (selectedUsers.value.any(
+        (selected) => selected.pubkey.toLowerCase() == normalized,
+      )) {
         selectedUsers.value = [
           for (final selected in selectedUsers.value)
             if (selected.pubkey.toLowerCase() != normalized) selected,
