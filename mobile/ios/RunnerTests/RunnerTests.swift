@@ -2138,14 +2138,25 @@ extension XCTestCase {
   /// to the new window, so acting right after it raced UIKit.
   @MainActor
   func keyWindow(showing root: UIViewController) async throws -> UIWindow {
-    let scene = try XCTUnwrap(UIApplication.shared.connectedScenes
-      .compactMap { $0 as? UIWindowScene }
-      .first { $0.activationState == .foregroundActive })
+    // The scene can still be activating when the first test runs.
+    let activeScene = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+      self.foregroundActiveScene() != nil
+    }, object: nil)
+    await fulfillment(of: [activeScene], timeout: 5)
+    let scene = try XCTUnwrap(foregroundActiveScene())
     let window = UIWindow(windowScene: scene)
     window.rootViewController = root
     window.makeKeyAndVisible()
     await fulfillment(of: [keyWindowReady(window, showing: root)], timeout: 5)
     return window
+  }
+
+  /// The scene production code presents in: the foreground-active one.
+  @MainActor
+  func foregroundActiveScene() -> UIWindowScene? {
+    UIApplication.shared.connectedScenes
+      .compactMap { $0 as? UIWindowScene }
+      .first { $0.activationState == .foregroundActive }
   }
 
   /// Fulfilled once `window` is the key window and shows `root`'s view.
