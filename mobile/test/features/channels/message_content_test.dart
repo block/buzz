@@ -374,6 +374,42 @@ Finder _anyRichText() {
   );
 }
 
+/// The URLs of the ordinary links whose label is exactly [label].
+///
+/// Each ordinary link is its own widget, keyed `message-link:<url>`, so a
+/// hold can open the link sheet. Buzz chips are keyed `buzz-link-chip:<url>`.
+List<String> _linkUrls(WidgetTester tester, String label) => [
+  for (final element
+      in find
+          .byWidgetPredicate(
+            (widget) =>
+                widget.key is ValueKey<String> &&
+                (widget.key! as ValueKey<String>).value.startsWith(
+                  'message-link:',
+                ),
+          )
+          .evaluate())
+    if (find
+        .descendant(
+          of: find.byElementPredicate((candidate) => candidate == element),
+          matching: find.text(label, findRichText: true),
+        )
+        .evaluate()
+        .isNotEmpty)
+      (element.widget.key! as ValueKey<String>).value.substring(
+        'message-link:'.length,
+      ),
+];
+
+/// Whether [span] or any descendant is underlined.
+bool _isUnderlined(InlineSpan span) =>
+    span.style?.decoration == TextDecoration.underline ||
+    (span is TextSpan && (span.children?.any(_isUnderlined) ?? false));
+
+/// Taps the link labelled [label] where it is drawn.
+Future<void> _tapLink(WidgetTester tester, String label) =>
+    tester.tapOnText(find.textRange.ofSubstring(label));
+
 /// Extracts all plain text from all RichText widgets in the tree.
 String _allRichText(WidgetTester tester) {
   final richTexts = tester.widgetList<RichText>(_anyRichText());
@@ -562,17 +598,17 @@ void main() {
         ('> ```sh\n> x\n\n```\necho \\#g\n```', r'echo \#g'),
         // A quoted fence ends with its quote, so later prose is parsed.
         ('> ```sh\n> echo x\n\nplain \\#text', 'plain #text'),
-        // Known limitation: gpt_markdown's raw-text fallback for this
-        // unclaimed strike skips inline components, so the stand-in shows.
-        // Its fullwidth form still reads as #.
-        ('~~a\nb \\#c~~', '\uFF03c'),
+        // A strike spanning lines still restores its escapes.
+        ('~~a\nb \\#c~~', 'b #c'),
         // A bare link's trailing backslash stays outside the link.
         (r'see https://example.com/a\', 'see '),
         (r'in buzz://channel/9f18f3c6-b5e5-453d-b36d-65487913be0b.\', r'.\'),
         (r'*https://example.com/a\**', '*'),
         (r'see \<https://example.com/b>', 'see <'),
         (r'see \https://example.com/c', r'see \'),
-        (r'see <https://example.com/a\>', r'https://example.com/a\'),
+        // Stays one autolink. gpt_markdown 1.3.4 drops the backslash before
+        // `>` (CommonMark keeps it), so the link ends at `a`.
+        (r'see <https://example.com/a\>', 'https://example.com/a'),
         (
           '![shot \\#1](https://example.com/a.png)\n'
               '![shot \\#2](https://example.com/b.png)',
@@ -592,7 +628,7 @@ void main() {
             );
           }
           // No stand-in or leaked link syntax reaches text or semantics.
-          if (content.contains('\u2060') || shown == '\uFF03c') continue;
+          if (content.contains('\u2060')) continue;
           expect(
             find.textContaining(
               RegExp('\u2060|\\]\\(http'),
@@ -661,7 +697,8 @@ void main() {
         ),
       );
 
-      await tester.tap(find.text('report.pdf'));
+      expect(_linkUrls(tester, 'report.pdf'), hasLength(1));
+      await _tapLink(tester, 'report.pdf');
       await tester.pump();
 
       expect(openedUrl, url);
@@ -675,13 +712,13 @@ void main() {
       await tester.pumpWidget(
         _testable(
           const MessageContent(
-            content: 'Write to [support](mailto:support@example.com)',
+            content: 'Fetch [report](ftp://files.example.com/report.pdf)',
           ),
         ),
       );
-      await tester.longPress(find.text('support'));
+      await tester.longPress(find.text('report'));
       await tester.pumpAndSettle();
-      expect(find.text('mailto:support@example.com'), findsOneWidget);
+      expect(find.text('ftp://files.example.com/report.pdf'), findsOneWidget);
       expect(find.text('Copy link'), findsOneWidget);
       expect(find.text('Share link'), findsOneWidget);
       expect(find.text('Open link'), findsNothing);
@@ -1032,8 +1069,8 @@ void main() {
           _testable(const MessageContent(content: '[Open message]($url)')),
         );
 
-        expect(find.text('Open message'), findsOneWidget);
-        await tester.tap(find.text('Open message'));
+        expect(_linkUrls(tester, 'Open message'), hasLength(1));
+        await _tapLink(tester, 'Open message');
         await tester.pump();
 
         final container = ProviderScope.containerOf(
@@ -1157,7 +1194,7 @@ void main() {
           find.byKey(ValueKey('buzz-link-chip:$messageUrl')),
           findsOneWidget,
         );
-        expect(find.text(joinUrl), findsOneWidget);
+        expect(_linkUrls(tester, joinUrl), hasLength(1));
         expect(_allRichText(tester), contains('See \u{FFFC}. Then \u{FFFC}!'));
 
         await tester.tap(find.byKey(ValueKey('buzz-link-chip:$messageUrl')));
@@ -1175,7 +1212,7 @@ void main() {
         );
 
         container.read(pendingDeepLinkProvider.notifier).consume();
-        await tester.tap(find.text(joinUrl));
+        await _tapLink(tester, joinUrl);
         await tester.pump();
         expect(
           container.read(pendingDeepLinkProvider),
@@ -1223,8 +1260,8 @@ void main() {
           _testable(const MessageContent(content: 'Join with $url')),
         );
 
-        expect(find.text(url), findsOneWidget);
-        await tester.tap(find.text(url));
+        expect(_linkUrls(tester, url), hasLength(1));
+        await _tapLink(tester, url);
         await tester.pump();
 
         final container = ProviderScope.containerOf(
@@ -1270,7 +1307,7 @@ void main() {
           _testable(const MessageContent(content: '[Open channel]($url)')),
         );
 
-        await tester.tap(find.text('Open channel'));
+        await _tapLink(tester, 'Open channel');
         await tester.pump();
 
         final container = ProviderScope.containerOf(
@@ -1300,7 +1337,7 @@ void main() {
           ),
         );
 
-        await tester.tap(find.text('Open channel'));
+        await _tapLink(tester, 'Open channel');
         await tester.pump();
 
         expect(tappedChannelId, channelId);
@@ -1359,11 +1396,22 @@ void main() {
         );
 
         // The URL text should be rendered and tappable.
-        expect(find.text('https://example.com'), findsOneWidget);
-        final linkText = tester.widget<Text>(find.text('https://example.com'));
+        expect(_linkUrls(tester, 'https://example.com'), [
+          'https://example.com',
+        ]);
+        final label = tester.widget<RichText>(
+          find.descendant(
+            of: find.byKey(const ValueKey('message-link:https://example.com')),
+            matching: find.byType(RichText),
+          ),
+        );
+        expect(_isUnderlined(label.text), isTrue);
         expect(
-          linkText.style?.decoration ?? linkText.textSpan?.style?.decoration,
-          TextDecoration.underline,
+          find.descendant(
+            of: find.byKey(const ValueKey('message-link:https://example.com')),
+            matching: find.byType(GestureDetector),
+          ),
+          findsOneWidget,
         );
       });
     });
@@ -1804,7 +1852,7 @@ void main() {
           find.byKey(const ValueKey('voice-note-attachment:$url')),
           findsNothing,
         );
-        expect(find.text('recording.mp4'), findsOneWidget);
+        expect(_linkUrls(tester, 'recording.mp4'), hasLength(1));
       });
 
       testWidgets('renders an audio imeta attachment as a voice note card', (
@@ -2945,8 +2993,22 @@ Photos
             find.byKey(ValueKey('buzz-link-chip:${entry.value}')),
             findsNothing,
           );
-          expect(find.text(entry.key), findsOneWidget);
+          expect(_allRichText(tester), contains(entry.key));
         }
+        expect(_linkUrls(tester, 'Open message'), hasLength(1));
+        expect(_linkUrls(tester, 'Open channel'), hasLength(1));
+        // Mobile has no repo/PR destination, so that link has no tap, though
+        // a hold still copies or shares it.
+        expect(_linkUrls(tester, 'Release candidate'), hasLength(1));
+        expect(
+          find.descendant(
+            of: find.byKey(
+              ValueKey('message-link:${links['Release candidate']}'),
+            ),
+            matching: find.byType(GestureDetector),
+          ),
+          findsNothing,
+        );
       });
 
       testWidgets('preserves formatting in authored Buzz labels', (
@@ -3055,6 +3117,44 @@ Photos
         expect(find.text('580ca78b · cdcdcdcd'), findsOneWidget);
         expect(find.text('580ca78b'), findsOneWidget);
       });
+    });
+
+    // A Buzz link chip's placeholder used to merge its whole paragraph into
+    // one semantics node, so every pill shared one label and one tap action.
+    testWidgets('gives each inline pill its own screen-reader stop', (
+      tester,
+    ) async {
+      final semantics = tester.ensureSemantics();
+      final prUrl = 'buzz://pr?id=${'cd' * 32}&owner=${'ab' * 32}&d=buzz';
+      String? tappedPubkey;
+      String? tappedChannel;
+      await tester.pumpWidget(
+        _testable(
+          MessageContent(
+            content: 'Ask @Alice in #general about $prUrl',
+            mentionNames: const {'pk1': 'Alice'},
+            channelNames: const {'general': 'channel-1'},
+            onMentionTap: (pubkey) => tappedPubkey = pubkey,
+            onChannelTap: (id) => tappedChannel = id,
+          ),
+        ),
+      );
+
+      final channel = find.semantics.byLabel('Open channel general');
+      expect(channel, findsOne);
+      tester.semantics.tap(channel);
+      expect(tappedChannel, 'channel-1');
+
+      final mention = find.semantics.byLabel('@\nAlice');
+      expect(mention, findsOne);
+      tester.semantics.tap(mention);
+      expect(tappedPubkey, 'pk1');
+
+      expect(
+        find.semantics.byLabel('Pull request cdcdcdcd in repository buzz'),
+        findsOne,
+      );
+      semantics.dispose();
     });
 
     group('@mentions', () {
@@ -3403,6 +3503,29 @@ Photos
 
         expect(_findRich('ticket 2959'), findsOneWidget);
         expect(_hasNestedPlaceholder(tester), isFalse);
+      });
+
+      testWidgets('tokens inside a link URL stay part of the URL', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content:
+                  'See [x](https://e.com/?u=@Alice) and https://e.com/?q=#general',
+              channelNames: {'general': 'ch-id-1'},
+              mentionNames: {'pk1': 'Alice'},
+            ),
+          ),
+        );
+
+        expect(_linkUrls(tester, 'x').single, 'https://e.com/?u=@Alice');
+        expect(
+          _linkUrls(tester, 'https://e.com/?q=#general').single,
+          'https://e.com/?q=#general',
+        );
+        expect(find.byIcon(BuzzIcons.hash), findsNothing);
+        expect(find.text('@'), findsNothing);
       });
 
       testWidgets('tokens outside a link label still render as pills', (

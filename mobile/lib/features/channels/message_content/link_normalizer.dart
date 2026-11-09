@@ -3,23 +3,14 @@
 String normalizeMarkdownDestination(String url) =>
     url.replaceAll(' ', '%20').replaceAll('(', '%28').replaceAll(')', '%29');
 
-const _backslashUnit = 0x5C;
-const _markdownDelimiters = ['***', '___', '**', '__', '~~', '*', '_'];
-
-final _autolinkPattern = RegExp(
-  r'<((?:https?://|buzz://(?:message\?|join\?|channel/|(?:pr|issue|repo)\?))[^>]+)>',
-);
-final _bareLinkPattern = RegExp(
-  r'(?<![(\]=])(?:https?://|buzz://(?:message\?|join\?|channel/|(?:pr|issue|repo)\?))[^\s)>\]]+',
-);
-final _trailingPunctuationPattern = RegExp(r'[.,!?:;]+$');
 final _backtickRunPattern = RegExp(r'`+');
 final _codeRunPattern = RegExp(r'`+|~{3,}');
 
-/// Converts supported Buzz and HTTP(S) autolinks and bare links into Markdown
-/// links while leaving inline and fenced code untouched. Punctuation peeling
-/// is limited to Buzz URLs so existing HTTP(S) destinations stay unchanged.
-String normalizeBareLinks(String content) =>
+/// Rewrites authored Markdown link and image destinations into the plain form
+/// the gallery and attachment lookups match, leaving inline and fenced code
+/// untouched. Bare URLs are left to gpt_markdown's autolinking, except those
+/// it would not link (see [_angleUnlinkedUrls]).
+String normalizeMarkdownLinks(String content) =>
     mapMarkdownProse(content, _normalizeLinkSegment);
 
 /// Applies [transform] to each run of [content] outside inline and fenced
@@ -276,7 +267,7 @@ String _normalizeLinkSegment(String segment) {
       cursor = suffix.end;
       valid = suffix.valid;
     }
-    result.write(_normalizeProseLinks(segment.substring(offset, match.start)));
+    result.write(_angleUnlinkedUrls(segment.substring(offset, match.start)));
     if (valid) {
       final destination = segment.substring(start, destinationEnd);
       final image = segment[match.start] == '!';
@@ -295,7 +286,7 @@ String _normalizeLinkSegment(String segment) {
     }
     offset = cursor;
   }
-  result.write(_normalizeProseLinks(segment.substring(offset)));
+  result.write(_angleUnlinkedUrls(segment.substring(offset)));
   return result.toString();
 }
 
@@ -335,105 +326,47 @@ String _normalizeLinkSegment(String segment) {
   return (end: cursor, valid: false);
 }
 
-String _normalizeProseLinks(String segment) {
-  // An escaped `\<` is literal, not an autolink; its URL stays a bare link.
-  var normalized = segment.replaceAllMapped(
-    _autolinkPattern,
-    (match) =>
-        _isEscaped(segment, match.start) ? match[0]! : _autolink(match[1]!),
-  );
-  normalized = normalized.replaceAllMapped(
-    _bareLinkPattern,
-    (match) => _normalizeBareLink(normalized, match),
-  );
-  return normalized;
+// Not in a destination (`](url`), a label (`[url`) or an existing autolink.
+final _bareHttpUrl = RegExp(r'(?<![\w<\[=/])(?<!\]\()https?://[^\s<>]+');
+final _urlEscape = RegExp(r'\\([!-/:-@\[-`{-~])');
+const _urlTrailingPunctuation = '.,!?:;*_~\'"\\';
+
+/// Wraps each bare HTTP(S) URL that gpt_markdown's autolink rejects in
+/// `<...>`, which it links whatever the host. It rejects a port, a host
+/// without a dot and any `@`, so `http://localhost:3000`,
+/// `https://example.com:8443` and `https://mastodon.social/@alice` would
+/// otherwise stay plain text, though GFM and desktop link them. Trailing
+/// punctuation and an unbalanced `)` stay outside, as in GFM, and escapes
+/// are resolved, since an angle autolink keeps backslashes literally.
+String _angleUnlinkedUrls(String prose) {
+  if (!prose.contains('://')) return prose;
+  return prose.replaceAllMapped(_bareHttpUrl, (match) {
+    var url = match[0]!;
+    var end = url.length;
+    while (end > 0) {
+      final last = url[end - 1];
+      final unbalanced =
+          last == ')' &&
+          ')'.allMatches(url.substring(0, end)).length >
+              '('.allMatches(url.substring(0, end)).length;
+      if (!_urlTrailingPunctuation.contains(last) && !unbalanced) break;
+      end--;
+    }
+    final trailing = url.substring(end);
+    url = url.substring(0, end);
+    if (!_autolinkRejects(url)) return match[0]!;
+    final resolved = url.replaceAllMapped(
+      _urlEscape,
+      (escape) => escape[1] == r'\' ? '%5C' : escape[1]!,
+    );
+    return '<$resolved>$trailing';
+  });
 }
 
-// An autolink keeps its backslashes literally. Encode them so none is read
-// as an escape of the synthesized `]` or `)`.
-String _autolink(String url) =>
-    '[${url.replaceAll(r'\', '&#92;')}](${url.replaceAll(r'\', '%5C')})';
-
-String _normalizeBareLink(String segment, Match match) {
-  final matched = match[0]!;
-  var url = matched;
-  var trailing = '';
-  final isBuzzUrl = matched.startsWith('buzz://');
-  final start = match.start;
-
-  // A trailing backslash escapes what follows or breaks the line; it is never
-  // part of the destination, and the renderer would read it as an escape.
-  // Peel it again whenever stripping punctuation or a delimiter exposes one.
-  // Scan back rather than match `\\+$`, which retries from every offset.
-  void peelBackslashes() {
-    var urlEnd = url.length;
-    while (urlEnd > 0 && url.codeUnitAt(urlEnd - 1) == _backslashUnit) {
-      urlEnd--;
-    }
-    trailing = '${url.substring(urlEnd)}$trailing';
-    url = url.substring(0, urlEnd);
-  }
-
-  peelBackslashes();
-  if (isBuzzUrl) {
-    final outsidePunctuation = _trailingPunctuationPattern.firstMatch(url);
-    if (outsidePunctuation != null) {
-      url = url.substring(0, outsidePunctuation.start);
-      trailing = '${outsidePunctuation[0]}$trailing';
-    }
-  }
-
-  var strippedDelimiter = true;
-  while (strippedDelimiter) {
-    strippedDelimiter = false;
-    peelBackslashes();
-    for (final delimiter in _markdownDelimiters) {
-      if (url.endsWith(delimiter) &&
-          _hasUnclosedMarkdownDelimiter(
-            segment.substring(0, start),
-            delimiter,
-          )) {
-        url = url.substring(0, url.length - delimiter.length);
-        trailing = '$delimiter$trailing';
-        strippedDelimiter = true;
-        break;
-      }
-    }
-  }
-
-  if (isBuzzUrl) {
-    final punctuation = _trailingPunctuationPattern.firstMatch(url);
-    if (punctuation != null) {
-      url = url.substring(0, punctuation.start);
-      trailing = '${punctuation[0]}$trailing';
-      peelBackslashes();
-    }
-  }
-
-  // Preserve a URL already used as its own Markdown label. This covers both
-  // converted autolinks and authored `[url](url)` links.
-  if (start >= 1 && segment[start - 1] == '[') return matched;
-  // A backslash before the URL is literal, since a letter follows it. Double
-  // it so it can't escape the synthesized `[`.
-  final literalBackslash = _isEscaped(segment, start) ? r'\' : '';
-  return '$literalBackslash[$url]($url)$trailing';
-}
-
-bool _hasUnclosedMarkdownDelimiter(String prefix, String delimiter) {
-  var open = false;
-  var offset = 0;
-  while (true) {
-    final index = prefix.indexOf(delimiter, offset);
-    if (index < 0) return open;
-    final before = index == 0 ? null : prefix[index - 1];
-    final afterIndex = index + delimiter.length;
-    final after = afterIndex == prefix.length ? null : prefix[afterIndex];
-    final canOpen =
-        (after == null || after.trim().isNotEmpty) &&
-        (before == null ||
-            before.trim().isEmpty ||
-            RegExp(r'[^\w]').hasMatch(before));
-    if (open || canOpen) open = !open;
-    offset = afterIndex;
-  }
+bool _autolinkRejects(String url) {
+  final rest = url.substring(url.indexOf('://') + 3);
+  final hostEnd = rest.indexOf(RegExp(r'[/?#]'));
+  final host = hostEnd < 0 ? rest : rest.substring(0, hostEnd);
+  return host.isNotEmpty &&
+      (host.contains(':') || !host.contains('.') || url.contains('@'));
 }

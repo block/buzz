@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:gpt_markdown/custom_widgets/link_button.dart';
 import 'package:buzz/features/channels/agent_activity/observer_models.dart';
 import 'package:buzz/features/channels/agent_activity/transcript_item_widget.dart';
 import 'package:buzz/shared/theme/theme.dart';
@@ -11,6 +10,16 @@ Widget _testable(Widget child) {
     home: Scaffold(body: SingleChildScrollView(child: child)),
   );
 }
+
+/// Whether the tree draws a link widget.
+bool _rendersLink(WidgetTester tester) => find
+    .byWidgetPredicate(
+      (widget) =>
+          widget.key is ValueKey<String> &&
+          (widget.key! as ValueKey<String>).value.startsWith('message-link:'),
+    )
+    .evaluate()
+    .isNotEmpty;
 
 void main() {
   // Neither transcript surface passes a link handler, so an autolinked bare
@@ -30,7 +39,7 @@ void main() {
       ),
     );
 
-    expect(find.byType(LinkButton), findsNothing);
+    expect(_rendersLink(tester), isFalse);
   });
 
   testWidgets('leaves a bare URL in a thought as plain text', (tester) async {
@@ -47,6 +56,6 @@ void main() {
       ),
     );
 
-    expect(find.byType(LinkButton), findsNothing);
+    expect(_rendersLink(tester), isFalse);
   });
 }

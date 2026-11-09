@@ -1,6 +1,6 @@
 part of '../message_content.dart';
 
-List<MarkdownComponent> _useMessageInlineComponents({
+List<InlinePattern> _useMessageInlinePatterns({
   required String content,
   required String finalContent,
   required Map<String, String> mentionNames,
@@ -30,7 +30,7 @@ List<MarkdownComponent> _useMessageInlineComponents({
         (String channelId) => channelHandler.value(channelId),
     const [],
   );
-  final inputs = _InlineComponentInputs(
+  final inputs = _InlinePatternInputs(
     content: content,
     finalContent: finalContent,
     mentionNames: mentionNames,
@@ -46,11 +46,11 @@ List<MarkdownComponent> _useMessageInlineComponents({
     hasMentionHandler: onMentionTap != null,
   );
 
-  // gpt_markdown compares components by identity. Recreating them on every
+  // gpt_markdown compares patterns by identity. Recreating them on every
   // parent rebuild reparses unchanged message bodies on the UI isolate.
   return useMemoized(
     () => [
-      _MentionMd(
+      _mentionPattern(
         mentionNames: inputs.mentionNames,
         mentionLabels: inputs.mentionLabels,
         bindings: inputs.bindings,
@@ -61,21 +61,22 @@ List<MarkdownComponent> _useMessageInlineComponents({
         agentMentionPubkeys: inputs.agentPubkeys,
         onMentionTap: inputs.hasMentionHandler ? mentionTap : null,
       ),
-      CustomEmojiMd(inputs.customEmoji, content: finalContent, size: emojiSize),
-      _ChannelLinkMd(
+      CustomEmojiPattern(
+        inputs.customEmoji,
+        content: finalContent,
+        size: emojiSize,
+      ),
+      _channelLinkPattern(
         channelNames: inputs.channelNames,
         onChannelTap: channelTap,
       ),
-      _MarkdownLabelEntityMd(),
-      _MarkdownEscapeMd(),
-      for (final component in MarkdownComponent.inlineComponents)
-        component is ATagMd ? _MessageLinkMd() : component,
+      _markdownEscapePattern,
     ],
     [inputs],
   );
 }
 
-class _InlineComponentInputs {
+class _InlinePatternInputs {
   final String content;
   final String finalContent;
   final Map<String, String> mentionNames;
@@ -90,7 +91,7 @@ class _InlineComponentInputs {
   final bool hasMediaReply;
   final bool hasMediaMore;
 
-  _InlineComponentInputs({
+  _InlinePatternInputs({
     required this.content,
     required this.finalContent,
     required Map<String, String> mentionNames,
@@ -119,7 +120,7 @@ class _InlineComponentInputs {
 
   @override
   bool operator ==(Object other) =>
-      other is _InlineComponentInputs &&
+      other is _InlinePatternInputs &&
       content == other.content &&
       finalContent == other.finalContent &&
       emojiSize == other.emojiSize &&
@@ -145,40 +146,11 @@ class _InlineComponentInputs {
       Object.hash(content, finalContent, emojiSize, hasMentionHandler);
 }
 
-// Encoded label punctuation must remain literal even inside nested formatting.
-class _MarkdownLabelEntityMd extends InlineMd {
-  @override
-  RegExp get exp => RegExp(r'&#(?:91|92|93);');
-
-  @override
-  Set<MarkdownScope> get scopes => const {MarkdownScope.linkLabel};
-
-  @override
-  InlineSpan span(
-    BuildContext context,
-    String text,
-    GptMarkdownConfig config,
-  ) => TextSpan(text: decodeMarkdownLabelSyntax(text), style: config.style);
-}
-
 // Backslash-escaped characters, held by shieldMarkdownEscapes so no other
-// syntax matches them, shown as themselves.
-class _MarkdownEscapeMd extends InlineMd {
-  @override
-  RegExp get exp => RegExp('(?:${shieldedMarkdownEscape.pattern})+');
-
-  @override
-  InlineSpan span(
-    BuildContext context,
-    String text,
-    GptMarkdownConfig config,
-  ) => TextSpan(text: unshieldMarkdownEscapes(text), style: config.style);
-}
-
-// Labels are already normalized, including literal/nested brackets. The
-// package's permissive .*? label matcher can otherwise start at a prose '['
-// and swallow a later image or link before its own component gets to render.
-class _MessageLinkMd extends ATagMd {
-  @override
-  RegExp get exp => RegExp(r'(?<!!)\[[^\[\]\n]*\]\([^\s]*\)');
-}
+// syntax matches them, shown as themselves. A TextSpan, so link labels too.
+final _markdownEscapePattern = InlinePattern(
+  pattern: RegExp('(?:${shieldedMarkdownEscape.pattern})+'),
+  scopes: MarkdownComponent.allScopes,
+  builder: (context, match, style) =>
+      TextSpan(text: unshieldMarkdownEscapes(match[0]!), style: style),
+);
