@@ -7,6 +7,7 @@ import {
   applyLastMessages,
   canFetchChannelsForIdentity,
   channelsQueryKey,
+  invalidateAfterChannelMembersAdded,
   reconcileRefreshedCachedChannel,
   refreshChannelsQuery,
   requireFullChannelList,
@@ -371,4 +372,23 @@ test("invalidateChannelMembersRosters dedupes and targets member keys", async ()
     ["channels", "ch-a", "members"],
     ["channels", "ch-b", "members"],
   ]);
+});
+
+test("invalidateAfterChannelMembersAdded refreshes the relay agent directory", async () => {
+  const invalidated = [];
+  const queryClient = {
+    invalidateQueries: async ({ queryKey }) => {
+      invalidated.push(queryKey);
+    },
+  };
+
+  await invalidateAfterChannelMembersAdded(queryClient, "ch-a");
+
+  assert.ok(
+    invalidated.some(
+      (queryKey) => queryKey.length === 1 && queryKey[0] === "relay-agents",
+    ),
+    `relay-agents must be invalidated, got ${JSON.stringify(invalidated)}`,
+  );
+  assert.ok(invalidated.some((queryKey) => queryKey[0] === "channels"));
 });

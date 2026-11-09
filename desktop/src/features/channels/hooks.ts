@@ -264,6 +264,20 @@ export async function invalidateChannelState(
   ]);
 }
 
+// Refresh what a membership add can change. Besides the channel state, the
+// relay agent directory is derived from channel membership, so an added agent
+// stays out of the mention picker until it is refetched; without this it
+// waits for the focused polling interval.
+export async function invalidateAfterChannelMembersAdded(
+  queryClient: ReturnType<typeof useQueryClient>,
+  channelId: string | null | undefined,
+) {
+  await Promise.all([
+    invalidateChannelState(queryClient, channelId),
+    queryClient.invalidateQueries({ queryKey: ["relay-agents"] }),
+  ]);
+}
+
 function setChannelArchivedState(
   queryClient: ReturnType<typeof useQueryClient>,
   channelId: string,
@@ -856,7 +870,7 @@ export function useAddChannelMembersMutation(channelId: string | null) {
       // Invalidate the effective channel (the one actually mutated) not the
       // live hook-closure channel, which may have changed mid-send.
       const effectiveChannelId = variables?.channelId ?? channelId;
-      await invalidateChannelState(queryClient, effectiveChannelId);
+      await invalidateAfterChannelMembersAdded(queryClient, effectiveChannelId);
     },
   });
 }
