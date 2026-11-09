@@ -280,6 +280,13 @@ jobs:
             exit 1
           fi
 
+      - name: Install runner ACL support
+        run: |
+          if [ ! -x /usr/bin/setfacl ]; then
+            sudo apt-get update
+            sudo apt-get install --yes acl
+          fi
+
       # Codex is deliberately the last step in this job. It can inspect the full
       # checkout and history, but it has no persisted GitHub credential, write
       # permission, or arbitrary network access. The API key stays behind the
@@ -292,7 +299,7 @@ jobs:
         # minutes instead of the full 40, and the salvage step recovers the result.
         timeout-minutes: 30
         continue-on-error: true
-        uses: openai/codex-action@86365089eb2b84e0a8fb0717b304f8bdcb13b20e # v1.12
+        uses: openai/codex-action@bdf19a4a223ec2549a3e2274a0cf61556bc07675 # v1.13
         env:
           # Checkout and fetch are complete. Remove runner credentials from the
           # environment inherited by the Codex subprocess.
