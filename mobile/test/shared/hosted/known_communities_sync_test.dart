@@ -513,10 +513,13 @@ void main() {
       await f.settle();
       expect(f.admissions, [one]);
       expect(f.timers, isEmpty);
+      // Something other than the relay being unreachable keeps the join
+      // from completing (a storage write, say): each failure is retried on
+      // the run's backoff and counts toward parking the destination.
       f.admissionFailures[two] = [
-        AccountFailure.unavailable,
-        AccountFailure.unavailable,
-        AccountFailure.unavailable,
+        StateError('write failed'),
+        StateError('write failed'),
+        StateError('write failed'),
       ];
       f.sync.kick();
       await f.settle();
@@ -532,23 +535,42 @@ void main() {
       expect((await f.state()).known, containsAll([one, two]));
     });
 
-    test('a relay that cannot be reached is retried with backoff and joined '
-        'once it answers, within the same sign-in', () async {
+    test('a relay that cannot be reached is retried at doubling delays for '
+        'longer than the parking limit and joined once it answers, within the '
+        'same sign-in', () async {
       final f = _Fixture();
       addTearDown(f.dispose);
       f.account.rows.add(one);
       f.account.subject.value = 'me';
       // The probe socket never reached `connected`: transport, not refusal.
-      f.admissionFailures[one] = [AccountFailure.unavailable];
+      // More misses than maxAdmissionAttempts, so a counted attempt would
+      // park the destination before it ever answers.
+      f.admissionFailures[one] = [
+        AccountFailure.unavailable,
+        AccountFailure.unavailable,
+        AccountFailure.unavailable,
+        AccountFailure.unavailable,
+      ];
       f.sync.start();
       await f.settle();
       expect(f.admissions, [one]);
       expect(f.memberships, isEmpty);
-      expect(f.timers.map((t) => t.$1), [const Duration(seconds: 1)]);
-      expect(f.sync.parked, isEmpty);
-      await f.fireRetry();
-      expect(f.admissions, [one, one]);
+      final delays = <Duration>[];
+      for (var attempt = 1; attempt <= 4; attempt++) {
+        expect(f.admissions, hasLength(attempt));
+        expect(f.sync.parked, isEmpty);
+        delays.add(f.timers.single.$1);
+        await f.fireRetry();
+      }
+      expect(delays, [
+        const Duration(seconds: 1),
+        const Duration(seconds: 2),
+        const Duration(seconds: 4),
+        const Duration(seconds: 8),
+      ]);
+      expect(f.admissions, List.filled(5, one));
       expect(f.memberships, [one]);
+      expect(f.sync.parked, isEmpty);
       expect(f.timers, isEmpty);
       expect(f.sync.hasDeferredJoins, isFalse);
       // One sign-in throughout: the list was read once.

@@ -719,7 +719,8 @@ class KnownCommunitiesSync {
   /// is done. An identity that is not ready waits for a trigger; one this
   /// destination alone cannot use skips to the next destination and also
   /// waits for a trigger. A destination that keeps failing either way is
-  /// parked for this sign-in.
+  /// parked for this sign-in. A relay that cannot be reached is retried
+  /// with the run's backoff for as long as the sign-in lasts.
   Future<void> _admitPending(_Span span) async {
     if (span.pendingAdds.isEmpty) return;
     final saved = (await memberships())
@@ -742,6 +743,10 @@ class KnownCommunitiesSync {
         _admissionFailed(span, url, denial);
       } catch (error) {
         if (!_current(span)) return;
+        // A relay that could not be reached is retried on the run's backoff
+        // like a failed upload; it is no verdict on the destination, so it
+        // does not count toward parking it.
+        if (error == AccountFailure.unavailable) rethrow;
         if (!_admissionFailed(span, url, error)) rethrow;
       }
     }
@@ -749,6 +754,7 @@ class KnownCommunitiesSync {
 
   /// Counts a failed attempt to join [url]; parks it for this sign-in once
   /// it has failed [maxAdmissionAttempts] times. Returns whether it parked.
+  /// Transient unavailability never reaches here.
   bool _admissionFailed(_Span span, String url, Object error) {
     final attempts = (span.admissionFailures[url] ?? 0) + 1;
     span.admissionFailures[url] = attempts;

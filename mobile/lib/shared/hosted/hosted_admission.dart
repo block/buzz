@@ -172,11 +172,10 @@ class HostedAdmission {
         RelayConfig(baseUrl: community.relayUrl, nsec: community.nsec),
         fresh: true,
       );
-      try {
-        await socket.connect().timeout(const Duration(seconds: 30));
-      } on TimeoutException {
-        throw AccountFailure.unavailable;
-      }
+      // The socket bounds itself: the upgrade by its connect timeout and
+      // NIP-42 auth by its own timer, each reported through onDisconnected,
+      // so connect() returns without an outer deadline.
+      await socket.connect();
       if (socket.state == SocketState.connected) return;
       if (relayUpgradeRefused(closed) || closed is RelayAuthRejectedException) {
         throw AccountFailure.denied;
