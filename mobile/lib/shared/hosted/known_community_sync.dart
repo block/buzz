@@ -19,6 +19,7 @@ class KnownCommunitySync extends ChangeNotifier {
   KnownCommunitySync({
     required this.account,
     required this.localCommunities,
+    this.acknowledgeRemoval,
     FlutterSecureStorage? storage,
     this.retryDelay = const Duration(seconds: 2),
   }) : _storage = storage ?? accountSecureStorage {
@@ -31,6 +32,9 @@ class KnownCommunitySync extends ChangeNotifier {
 
   /// Durable device records, including their explicit account ownership.
   final Future<List<Community>> Function() localCommunities;
+
+  /// Removes a credential-free local tombstone only after server acknowledgment.
+  final Future<void> Function(String revision)? acknowledgeRemoval;
   final FlutterSecureStorage _storage;
 
   /// Initial transient retry delay; subsequent failures back off up to 32x.
@@ -81,8 +85,11 @@ class KnownCommunitySync extends ChangeNotifier {
   /// Persist removal before deleting the local record. The drain sends it only
   /// once the local record is absent, so failed local deletion cannot forget it
   /// remotely. Signed-out edits never borrow another account's credentials.
-  Future<void> remove(String relay) async {
-    final subject = account.account?.subject;
+  Future<void> remove(String relay, {String? expectedSubject}) async {
+    final subject = expectedSubject ?? await account.retainedSubject();
+    if (await account.retainedSubject() != subject) {
+      throw AccountFailure.differentAccount;
+    }
     final url = knownCommunityAddress(relay);
     if (subject == null || url == null) return;
     await _queue.run(() async {
@@ -109,14 +116,15 @@ class KnownCommunitySync extends ChangeNotifier {
   /// credentials is the durable add intent; a later journal failure cannot turn
   /// a completed join into an authentication failure. Unclaimed legacy records
   /// and another account's retained records are never automatically uploaded.
-  Community prepareAddition(Community community) {
-    final subject = account.account?.subject;
+  Future<Community> prepareAddition(Community community) async {
+    final subject = await account.retainedSubject();
     if (subject == null &&
         community.accountSyncOwner == null &&
         community.accountSyncRevision == null) {
       return community;
     }
     return community.copyWith(
+      accountSyncRemoved: false,
       accountSyncOwner: subject == null ? null : _owner(subject),
       accountSyncRevision: subject == null ? null : const Uuid().v4(),
     );
@@ -133,11 +141,23 @@ class KnownCommunitySync extends ChangeNotifier {
 
   /// Pending removals for visible status, including across app restarts.
   Future<Set<String>> pendingRemovals(String subject) => _queue.run(() async {
-    final state = await _read(subject);
-    return state.pending.entries
-        .where((entry) => entry.value)
-        .map((entry) => entry.key)
+    final records = await localCommunities();
+    final removed = records
+        .where(
+          (c) => c.accountSyncRemoved && c.accountSyncOwner == _owner(subject),
+        )
+        .map((c) => c.relayUrl)
         .toSet();
+    try {
+      final state = await _read(subject);
+      removed.addAll(
+        state.pending.entries.where((e) => e.value).map((e) => e.key),
+      );
+    } catch (_) {
+      // A separate journal failure must not conceal a committed local removal.
+      if (removed.isEmpty) rethrow;
+    }
+    return removed;
   });
 
   /// Run after startup, a saved-community change, sign-in, or app resume.
@@ -170,9 +190,27 @@ class KnownCommunitySync extends ChangeNotifier {
       final subject = session.subject;
       attemptSubject = subject;
       if (_blockedSubject == subject) return;
+      // Local deletion and this intent share a single storage commit. Drain it
+      // independently of the older account-only journal, even if that is broken.
+      final committed = await localCommunities();
+      for (final item in committed.where(
+        (c) => c.accountSyncRemoved && c.accountSyncOwner == _owner(subject),
+      )) {
+        if (!_current(subject)) return;
+        await account.updateKnownCommunity(
+          item.relayUrl,
+          removed: true,
+          expectedSubject: subject,
+        );
+        if (!_current(subject)) return;
+        await acknowledgeRemoval?.call(item.accountSyncRevision!);
+        if (!_disposed) notifyListeners();
+      }
       var local = <String>{};
       await _queue.run(() async {
-        final records = await localCommunities();
+        final records = (await localCommunities())
+            .where((c) => !c.accountSyncRemoved)
+            .toList();
         local = records
             .map((c) => knownCommunityAddress(c.relayUrl))
             .whereType<String>()
@@ -192,6 +230,7 @@ class KnownCommunitySync extends ChangeNotifier {
         state.pending.removeWhere(
           (url, removed) => !removed && !owned.contains(url),
         );
+        final revisions = <String, List<String>>{};
         for (final item in records) {
           final url = knownCommunityAddress(item.relayUrl);
           final revision = item.accountSyncRevision;
@@ -200,6 +239,11 @@ class KnownCommunitySync extends ChangeNotifier {
               item.accountSyncOwner != _owner(subject)) {
             continue;
           }
+          (revisions[url] ??= []).add(revision);
+        }
+        for (final entry in revisions.entries) {
+          final url = entry.key;
+          final revision = (entry.value..sort()).join(',');
           if (state.observed[url] != revision) {
             // A committed re-add wins over an older removal, even if the app
             // stopped before it could update this separate retry journal.

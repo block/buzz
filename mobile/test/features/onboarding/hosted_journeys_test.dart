@@ -311,6 +311,9 @@ void main() {
             findsNothing,
           );
           await f.tap(tester, 'Find my communities');
+          // Discovery no longer repairs hosted identity state until selection.
+          expect((await f.store.read())!.backup, isNull);
+          await f.tap(tester, 'one');
         }
       } else {
         await f.tap(tester, 'Try again');

@@ -41,6 +41,18 @@ class Community {
   /// A new revision supersedes an earlier queued account removal on recovery.
   final String? accountSyncRevision;
 
+  /// Credential-free removal intent, hidden from the device community list.
+  final bool accountSyncRemoved;
+
+  /// Distinguishes local destinations with nondefault ports in picker actions.
+  String get pickerName {
+    final uri = Uri.parse(relayUrl);
+    if (!uri.hasPort || uri.port == 443 || name.contains(uri.authority)) {
+      return name;
+    }
+    return '$name (${uri.authority})';
+  }
+
   final String relayUrl;
   final String? pubkey;
   final String? nsec;
@@ -64,6 +76,7 @@ class Community {
     required this.relayUrl,
     this.accountSyncOwner,
     this.accountSyncRevision,
+    this.accountSyncRemoved = false,
     this.pubkey,
     this.nsec,
     this.sensitiveActionPolicy = SensitiveActionPolicy.disabledByUser,
@@ -101,6 +114,7 @@ class Community {
     String? relayUrl,
     Object? accountSyncOwner = _sentinel,
     Object? accountSyncRevision = _sentinel,
+    bool? accountSyncRemoved,
     Object? pubkey = _sentinel,
     Object? nsec = _sentinel,
     SensitiveActionPolicy? sensitiveActionPolicy,
@@ -119,6 +133,7 @@ class Community {
       accountSyncRevision: accountSyncRevision == _sentinel
           ? this.accountSyncRevision
           : accountSyncRevision as String?,
+      accountSyncRemoved: accountSyncRemoved ?? this.accountSyncRemoved,
       pubkey: pubkey == _sentinel ? this.pubkey : pubkey as String?,
       nsec: nsec == _sentinel ? this.nsec : nsec as String?,
       sensitiveActionPolicy:
@@ -140,6 +155,7 @@ class Community {
     'id': id,
     'name': _name,
     'relayUrl': relayUrl,
+    if (accountSyncRemoved) 'accountSyncRemoved': true,
     if (accountSyncOwner != null) 'accountSyncOwner': accountSyncOwner,
     if (accountSyncRevision != null) 'accountSyncRevision': accountSyncRevision,
     if (pubkey != null) 'pubkey': pubkey,
@@ -178,6 +194,7 @@ class Community {
       id: json['id'] as String,
       name: json['name'] as String,
       relayUrl: json['relayUrl'] as String,
+      accountSyncRemoved: json['accountSyncRemoved'] == true,
       accountSyncOwner: json['accountSyncOwner'] as String?,
       accountSyncRevision: json['accountSyncRevision'] as String?,
       pubkey: json['pubkey'] as String?,

@@ -250,6 +250,9 @@ class OnboardingAppEntry extends HookConsumerWidget {
               onCreateCommunity: flow == null || busy
                   ? null
                   : () => creating.value = true,
+              onFindCommunities: flow == null || busy
+                  ? null
+                  : () => unawaited(flow.signInAccount(discoverOnly: true)),
               onBuilderlab: flow == null
                   ? null
                   : signingIn

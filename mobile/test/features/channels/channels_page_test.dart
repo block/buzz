@@ -3956,7 +3956,11 @@ class _FakeCommunityListNotifier extends CommunityListNotifier {
   Future<List<Community>> build() async => _communities;
 
   @override
-  Future<void> removeCommunity(String id) async {
+  Future<void> removeCommunity(
+    String id, {
+    String? confirmedSubject,
+    bool accountConfirmed = false,
+  }) async {
     removedIds.add(id);
     _communities = _communities
         .where((community) => community.id != id)

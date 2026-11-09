@@ -76,6 +76,9 @@ class PairingPage extends HookConsumerWidget {
   final VoidCallback? onCommunityLink;
   final VoidCallback? onCreateCommunity;
   final VoidCallback? onBuilderlab;
+
+  /// Opens account destinations before hosted identity setup.
+  final VoidCallback? onFindCommunities;
   final VoidCallback? onImportIdentity;
   final String? accountStatus;
   final Widget? setupContent;
@@ -105,6 +108,7 @@ class PairingPage extends HookConsumerWidget {
     this.onCommunityLink,
     this.onCreateCommunity,
     this.onBuilderlab,
+    this.onFindCommunities,
     this.onImportIdentity,
     this.accountStatus,
     this.setupContent,
@@ -315,7 +319,9 @@ class PairingPage extends HookConsumerWidget {
             builder: (context, progress, _) => AddCommunityPage(
               scannerProgress: progress,
               onboarding: signedInOnboarding,
-              onFindCommunities: hasKnownCommunities ? onBuilderlab : null,
+              onFindCommunities: hasKnownCommunities
+                  ? (onFindCommunities ?? onBuilderlab)
+                  : null,
               onImportIdentity: signedInOnboarding ? onImportIdentity : null,
               onCreateCommunity: signedInOnboarding ? onCreateCommunity : null,
               enteringCommunityLink: enteringCommunityLink,

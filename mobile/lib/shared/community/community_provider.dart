@@ -1,4 +1,5 @@
 import '../hosted/known_community_sync_provider.dart';
+import '../hosted/builderlab_account.dart';
 import '../hosted/hosted_relay_auth.dart';
 import 'dart:async';
 import 'dart:developer' as developer;
@@ -277,7 +278,7 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
   /// its credentials instead. Returns the effective community ID.
   Future<String> addCommunity(Community community) async {
     final sync = ref.read(knownCommunitySyncProvider);
-    community = sync?.prepareAddition(community) ?? community;
+    community = await sync?.prepareAddition(community) ?? community;
     await CommunityEntryRequirements.verify(
       community,
       ref.read(builderlabAccountProvider),
@@ -321,7 +322,20 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
     return community.id;
   }
 
-  Future<void> removeCommunity(String id) {
+  /// Removes a saved identity without letting awaited cleanup change the account
+  /// that confirmed its remote edit. An explicit null confirmation is local-only.
+  Future<void> removeCommunity(
+    String id, {
+    String? confirmedSubject,
+    bool accountConfirmed = false,
+  }) async {
+    final account = ref.read(builderlabAccountProvider);
+    final sync = ref.read(knownCommunitySyncProvider);
+    final subject = sync == null
+        ? null
+        : accountConfirmed
+        ? confirmedSubject
+        : await account.retainedSubject();
     return ref.read(communityTransitionProvider).runExclusive(() async {
       var revocationJournaled = false;
       final storage = ref.read(communityStorageProvider);
@@ -342,12 +356,15 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
           communityPushLeaseRevocationEnqueuerProvider,
         )(current[removedIndex]);
       }
-      if (removedIndex >= 0) {
-        await ref
-            .read(knownCommunitySyncProvider)
-            ?.remove(current[removedIndex].relayUrl);
+      if (sync != null && await account.retainedSubject() != subject) {
+        throw AccountFailure.differentAccount;
       }
-      await storage.remove(id);
+      await storage.remove(
+        id,
+        accountSyncOwner: subject == null
+            ? null
+            : '${account.accountOrigin.origin}\n$subject',
+      );
       ref.read(knownCommunitySyncProvider)?.trigger();
 
       final updatedList = current.where((w) => w.id != id).toList();

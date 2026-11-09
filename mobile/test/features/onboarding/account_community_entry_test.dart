@@ -14,9 +14,10 @@ import '../../helpers/hosted_communities_fixture.dart';
 import '../../helpers/widget_helpers.dart';
 
 void main() {
-  for (final mixed in [false, true]) {
+  for (final scenario in ['external-only', 'mixed', 'hosted-selection']) {
+    final mixed = scenario != 'external-only';
     testWidgets(
-      'fresh ${mixed ? 'mixed' : 'external-only'} account discovers and enters external destinations',
+      'fresh $scenario account discovers destinations before admission',
       (tester) async {
         if (!HostedEnvironment.enabled) return;
         FlutterSecureStorage.setMockInitialValues({});
@@ -26,7 +27,7 @@ void main() {
           () => PendingDeepLinkNotifier.debugUriStreamOverride = null,
         );
         final fixture = HostedCommunitiesFixture();
-        await fixture.initialize(widget: true);
+        await fixture.initialize(widget: true, withIdentity: mixed);
         addTearDown(fixture.dispose);
         fixture.rows = [
           {'community_url': 'wss://team.example:8443'},
@@ -60,6 +61,23 @@ void main() {
           findsNothing,
         );
         expect(find.text('hosted'), mixed ? findsOneWidget : findsNothing);
+        expect(
+          fixture.requests.where((p) => p.contains('nostr-identities')),
+          isEmpty,
+        );
+        if (scenario == 'hosted-selection') {
+          await tester.tap(find.text('hosted'));
+          await tester.pumpAndSettle();
+          expect(fixture.admitted, ['hosted.communities.buzz.xyz']);
+          expect(
+            fixture.requests.where((p) => p.endsWith('/current')),
+            isNotEmpty,
+          );
+          expect(find.byType(SelfHostedEntrySheet), findsNothing);
+          await tester.pumpWidget(const SizedBox.shrink());
+          await tester.pumpAndSettle();
+          return;
+        }
         final port = mixed ? 9443 : 8443;
         final row = find.byKey(
           Key('community-switcher-row-wss://team.example:$port'),
@@ -77,6 +95,15 @@ void main() {
           'wss://team.example:$port',
         );
         expect(fixture.admitted, isEmpty);
+        if (!mixed) {
+          expect(
+            fixture.requests.where((p) => p.contains('nostr-identities')),
+            isEmpty,
+            reason:
+                'external discovery must not resolve, bind, or back up a hosted key',
+          );
+          expect(await fixture.store.read(), isNull);
+        }
         expect(tester.takeException(), isNull);
         await tester.pumpWidget(const SizedBox.shrink());
         await tester.pumpAndSettle();

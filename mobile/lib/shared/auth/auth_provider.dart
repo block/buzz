@@ -63,9 +63,9 @@ class AuthNotifier extends AsyncNotifier<AuthState> {
     Community community, {
     bool Function()? shouldContinue,
     bool activate = true,
-  }) {
+  }) async {
     final sync = ref.read(knownCommunitySyncProvider);
-    community = sync?.prepareAddition(community) ?? community;
+    community = await sync?.prepareAddition(community) ?? community;
     return ref.read(communityTransitionProvider).runExclusive(() async {
       if (shouldContinue != null && !shouldContinue()) return;
       await CommunityEntryRequirements.verify(

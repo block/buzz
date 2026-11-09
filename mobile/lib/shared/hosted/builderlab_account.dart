@@ -141,6 +141,20 @@ class BuilderlabAccountClient {
     return result;
   }
 
+  /// Locally retained account for recording offline edits only. This does not
+  /// authorize network requests; those still require a verified session.
+  Future<String?> retainedSubject() async {
+    if (_disposed) throw AccountFailure.unavailable;
+    final current = account;
+    if (current != null) return current.subject;
+    // Local edits must not queue behind a network restore that may be offline.
+    final generation = _sessionGeneration.value;
+    final record = await _readRecord();
+    if (_disposed) throw AccountFailure.unavailable;
+    if (generation != _sessionGeneration.value) return retainedSubject();
+    return record?.subject;
+  }
+
   /// Concurrent callers share one restore, so a second one cannot replace the
   /// account the first adopted while its callers still hold that session.
   Future<BuilderlabAccount?> restore() =>
@@ -476,7 +490,10 @@ class BuilderlabAccountClient {
     _credential = null;
     _unshared = null;
     _account = null;
-    if (!_disposed) _subject.value = null;
+    if (!_disposed) {
+      _subject.value = null;
+      _sessionGeneration.value++;
+    }
   }
 
   Future<void> _unshare() async {

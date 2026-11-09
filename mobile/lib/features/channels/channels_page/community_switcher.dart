@@ -433,7 +433,7 @@ class CommunitySwitcherPage extends HookConsumerWidget {
                     for (final community in communities)
                       CommunityGridOption(
                         id: community.id,
-                        name: community.name,
+                        name: community.pickerName,
                         relayUrl: community.relayUrl,
                         // Keep the current-community marker stable
                         // while the selected avatar leaves the grid.
@@ -448,7 +448,7 @@ class CommunitySwitcherPage extends HookConsumerWidget {
                             selectCommunity(community, origin),
                         badge: _CommunityGridAction(
                           id: community.id,
-                          name: community.name,
+                          name: community.pickerName,
                           isActive:
                               community.id ==
                               (flight.value == null

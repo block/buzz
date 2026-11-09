@@ -85,22 +85,39 @@ Future<void> _confirmRemoveCommunity(
 }) async {
   final messenger = ScaffoldMessenger.of(context);
   final account = ref.read(builderlabAccountProvider);
-  final subject = account.account?.subject;
+  final sync = ref.read(knownCommunitySyncProvider);
   try {
+    final subject = sync == null ? null : await account.retainedSubject();
+    if (!context.mounted) return;
+    final retainsDestination = (ref.read(communityListProvider).value ?? [])
+        .any(
+          (item) =>
+              item.id != community.id &&
+              knownCommunityAddress(item.relayUrl) ==
+                  knownCommunityAddress(community.relayUrl),
+        );
     final confirmed = await showDestructiveConfirmation(
       context: context,
       title: 'Remove community?',
       message: subject == null
-          ? 'Are you sure you want to remove “${community.name}”? You can pair with it again later.'
-          : 'Remove “${community.name}” from this device and request removal from your Builder Lab community list? Account removal syncs when connected.',
+          ? 'Are you sure you want to remove “${community.pickerName}”? You can pair with it again later.'
+          : retainsDestination
+          ? 'Remove this identity for “${community.pickerName}” from this device? Another saved identity still uses this community, so it stays in your account list.'
+          : 'Remove “${community.pickerName}” from this device and request removal from your Builder Lab community list? Account removal syncs when connected.',
       confirmLabel: 'Remove',
     );
-    if (!confirmed || !context.mounted || account.account?.subject != subject) {
+    if (!confirmed ||
+        !context.mounted ||
+        (sync != null && await account.retainedSubject() != subject)) {
       return;
     }
     await ref
         .read(communityListProvider.notifier)
-        .removeCommunity(community.id);
+        .removeCommunity(
+          community.id,
+          confirmedSubject: subject,
+          accountConfirmed: true,
+        );
     if (closeSheetAfterRemoval && context.mounted) {
       Navigator.of(context).pop();
     }
@@ -118,10 +135,11 @@ Future<void> _confirmRemoveAccountCommunity(
   AddCommunityDeepLink community,
 ) async {
   final account = ref.read(builderlabAccountProvider);
-  final subject = account.account?.subject;
   final sync = ref.read(knownCommunitySyncProvider);
-  if (subject == null || sync == null) return;
+  if (sync == null) return;
   try {
+    final subject = await account.retainedSubject();
+    if (!context.mounted || subject == null) return;
     final confirmed = await showDestructiveConfirmation(
       context: context,
       title: 'Remove community?',
@@ -129,10 +147,12 @@ Future<void> _confirmRemoveAccountCommunity(
           'Remove “${community.name}” from your Builder Lab community list? Removal syncs when connected.',
       confirmLabel: 'Remove',
     );
-    if (!confirmed || !context.mounted || account.account?.subject != subject) {
+    if (!confirmed ||
+        !context.mounted ||
+        await account.retainedSubject() != subject) {
       return;
     }
-    await sync.remove(community.relayUrl);
+    await sync.remove(community.relayUrl, expectedSubject: subject);
     sync.trigger();
   } catch (_) {
     if (context.mounted) {

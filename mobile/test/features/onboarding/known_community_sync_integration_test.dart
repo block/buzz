@@ -79,84 +79,121 @@ class _JournalStorage extends FakeSecureStorage {
 }
 
 void main() {
-  testWidgets('removing an account-only destination shows its pending removal', (
-    tester,
-  ) async {
-    if (!HostedEnvironment.enabled) return;
-    final account = _Account()
-      ..urls = ['wss://team.example:8443', 'wss://team.example:9443'];
-    final storage = CommunityStorage(secure: FakeSecureStorage());
-    final sync = KnownCommunitySync(
-      account: account,
-      storage: FakeSecureStorage(),
-      localCommunities: () async => [],
+  for (final localEntries in [false, true]) {
+    testWidgets(
+      'removing ${localEntries ? 'local' : 'account-only'} ports shows precise pending removal',
+      (tester) async {
+        if (!HostedEnvironment.enabled) return;
+        final account = _Account()
+          ..urls = ['wss://team.example:8443', 'wss://team.example:9443'];
+        final storage = CommunityStorage(secure: FakeSecureStorage());
+        if (localEntries) {
+          for (final port in [8443, 9443]) {
+            await storage.save(
+              Community(
+                id: '$port',
+                name: 'team.example',
+                relayUrl: 'wss://team.example:$port',
+                addedAt: DateTime(2025),
+              ),
+            );
+          }
+        }
+        final label = localEntries
+            ? 'team.example (team.example:9443)'
+            : 'team.example:9443';
+        final sync = KnownCommunitySync(
+          account: account,
+          storage: FakeSecureStorage(),
+          localCommunities: storage.loadForAccountSync,
+          acknowledgeRemoval: storage.acknowledgeRemoval,
+        );
+        // Keep the server response stale so the durable removal filter is exercised.
+        sync.setActive(false);
+        addTearDown(sync.dispose);
+        await tester.pumpWidget(
+          WidgetHelpers.testable(
+            enableAccountCommunitySync: true,
+            overrides: [
+              builderlabAccountProvider.overrideWithValue(account),
+              communityStorageProvider.overrideWithValue(storage),
+              communitySnapshotWriterProvider.overrideWithValue((_) async {}),
+              communityPushLeaseRevocationEnqueuerProvider.overrideWithValue(
+                (_) async => false,
+              ),
+              knownCommunitySyncProvider.overrideWithValue(sync),
+              communityIconPresentationProvider.overrideWith(
+                (ref, relay) => null,
+              ),
+            ],
+            child: CommunitySwitcherPage(
+              destination: null,
+              prepareLanding: () async => null,
+              onFlightChanged: (_) {},
+              onTransitionProgress: (_) {},
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(find.text(label), findsOneWidget);
+        await tester.tap(find.text('Edit'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byTooltip('Remove $label'));
+        await tester.pumpAndSettle();
+        expect(find.textContaining('Remove “$label”'), findsOneWidget);
+        expect(
+          find.text(
+            localEntries
+                ? 'team.example (team.example:8443)'
+                : 'team.example:8443',
+          ),
+          findsOneWidget,
+        );
+        await tester.tap(find.text('Remove').last);
+        await tester.pumpAndSettle();
+        expect(find.text('team.example:9443'), findsOneWidget);
+        expect(find.textContaining('is pending account sync'), findsOneWidget);
+        expect(await sync.pendingRemovals('owner'), {
+          'wss://team.example:9443',
+        });
+        expect(account.calls, isEmpty);
+        account.failure = AccountFailure.unavailable;
+        sync.setActive(true);
+        await tester.pumpAndSettle();
+        expect(find.textContaining('hasn’t synced'), findsOneWidget);
+        // A refused endpoint remains visible and offers explicit retry.
+        account.failure = AccountFailure.rejected;
+        await tester.tap(find.text('Retry account sync'));
+        await tester.pumpAndSettle();
+        expect(find.textContaining('hasn’t synced'), findsOneWidget);
+        await tester.pumpWidget(const SizedBox.shrink());
+        // The service remains scoped to this signed-in account across picker opens.
+        await tester.pumpWidget(
+          WidgetHelpers.testable(
+            enableAccountCommunitySync: true,
+            overrides: [
+              builderlabAccountProvider.overrideWithValue(account),
+              knownCommunitySyncProvider.overrideWithValue(sync),
+            ],
+            child: const AccountCommunitySyncStatus(),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(find.textContaining('hasn’t synced'), findsOneWidget);
+        account.failure = null;
+        await tester.tap(find.text('Retry account sync'));
+        await tester.pumpAndSettle();
+        expect(find.textContaining('hasn’t synced'), findsNothing);
+        expect(account.calls, ['remove', 'remove', 'remove']);
+        expect(account.targets, everyElement('wss://team.example:9443'));
+        expect(
+          (await storage.loadAll()).map((c) => c.id),
+          localEntries ? ['8443'] : <String>[],
+        );
+        expect(tester.takeException(), isNull);
+      },
     );
-    // Keep the server response stale so the durable removal filter is exercised.
-    sync.setActive(false);
-    addTearDown(sync.dispose);
-    await tester.pumpWidget(
-      WidgetHelpers.testable(
-        enableAccountCommunitySync: true,
-        overrides: [
-          builderlabAccountProvider.overrideWithValue(account),
-          communityStorageProvider.overrideWithValue(storage),
-          knownCommunitySyncProvider.overrideWithValue(sync),
-          communityIconPresentationProvider.overrideWith((ref, relay) => null),
-        ],
-        child: CommunitySwitcherPage(
-          destination: null,
-          prepareLanding: () async => null,
-          onFlightChanged: (_) {},
-          onTransitionProgress: (_) {},
-        ),
-      ),
-    );
-    await tester.pumpAndSettle();
-    expect(find.text('team.example:9443'), findsOneWidget);
-    await tester.tap(find.text('Edit'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.byTooltip('Remove team.example:9443'));
-    await tester.pumpAndSettle();
-    expect(find.textContaining('Remove “team.example:9443”'), findsOneWidget);
-    expect(find.text('team.example:8443'), findsOneWidget);
-    await tester.tap(find.text('Remove').last);
-    await tester.pumpAndSettle();
-    expect(find.text('team.example:9443'), findsOneWidget);
-    expect(find.textContaining('is pending account sync'), findsOneWidget);
-    expect(await sync.pendingRemovals('owner'), {'wss://team.example:9443'});
-    expect(account.calls, isEmpty);
-    account.failure = AccountFailure.unavailable;
-    sync.setActive(true);
-    await tester.pumpAndSettle();
-    expect(find.textContaining('hasn’t synced'), findsOneWidget);
-    // A refused endpoint remains visible and offers explicit retry.
-    account.failure = AccountFailure.rejected;
-    await tester.tap(find.text('Retry account sync'));
-    await tester.pumpAndSettle();
-    expect(find.textContaining('hasn’t synced'), findsOneWidget);
-    await tester.pumpWidget(const SizedBox.shrink());
-    // The service remains scoped to this signed-in account across picker opens.
-    await tester.pumpWidget(
-      WidgetHelpers.testable(
-        enableAccountCommunitySync: true,
-        overrides: [
-          builderlabAccountProvider.overrideWithValue(account),
-          knownCommunitySyncProvider.overrideWithValue(sync),
-        ],
-        child: const AccountCommunitySyncStatus(),
-      ),
-    );
-    await tester.pumpAndSettle();
-    expect(find.textContaining('hasn’t synced'), findsOneWidget);
-    account.failure = null;
-    await tester.tap(find.text('Retry account sync'));
-    await tester.pumpAndSettle();
-    expect(find.textContaining('hasn’t synced'), findsNothing);
-    expect(account.calls, ['remove', 'remove', 'remove']);
-    expect(account.targets, everyElement('wss://team.example:9443'));
-    expect(await storage.loadAll(), isEmpty);
-    expect(tester.takeException(), isNull);
-  });
+  }
 
   test(
     'pairing acknowledges committed re-add despite journal failure and restart',
@@ -171,7 +208,8 @@ void main() {
       var sync = KnownCommunitySync(
         account: account,
         storage: journal,
-        localCommunities: storage.loadAll,
+        localCommunities: storage.loadForAccountSync,
+        acknowledgeRemoval: storage.acknowledgeRemoval,
       );
       await sync.remove('wss://paired.example');
       journal.failWrites = true;
@@ -260,7 +298,8 @@ void main() {
       sync = KnownCommunitySync(
         account: account,
         storage: journal,
-        localCommunities: storage.loadAll,
+        localCommunities: storage.loadForAccountSync,
+        acknowledgeRemoval: storage.acknowledgeRemoval,
       );
       addTearDown(sync.dispose);
       await sync.synchronize();
@@ -278,7 +317,8 @@ void main() {
       final sync = KnownCommunitySync(
         account: account,
         storage: FakeSecureStorage(),
-        localCommunities: storage.loadAll,
+        localCommunities: storage.loadForAccountSync,
+        acknowledgeRemoval: storage.acknowledgeRemoval,
       );
       final container = ProviderContainer(
         overrides: [

@@ -1,4 +1,6 @@
 import 'dart:async';
+
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -18,6 +20,8 @@ import 'package:nostr/nostr.dart' as nostr;
 import 'community_storage_test.dart';
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+  setUp(() => FlutterSecureStorage.setMockInitialValues({}));
   late FakeSecureStorage fakeSecure;
   late CommunityStorage communityStorage;
   late ProviderContainer container;

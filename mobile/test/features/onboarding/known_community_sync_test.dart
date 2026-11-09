@@ -89,7 +89,9 @@ void main() {
       expect(account.calls.map((c) => (c.subject, c.relay)), [
         ('owner', 'wss://private-a.example'),
       ]);
-      local.add(sync.prepareAddition(_claimed('wss://explicit-b.example')));
+      local.add(
+        await sync.prepareAddition(_claimed('wss://explicit-b.example')),
+      );
       await sync.synchronize();
       expect(account.calls.last.subject, 'another');
       expect(account.calls.last.relay, 'wss://explicit-b.example');
