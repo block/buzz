@@ -236,12 +236,12 @@ async fn persistent_post_ban_gate_uses_cached_restriction_row() {
 }
 
 /// HTTP typing reads the cached serving state, like the WebSocket path.
-/// Mutation: call the uncached `is_serving_active` → RED.
+/// Mutation: call the uncached `is_community_active` → RED.
 #[tokio::test]
 #[ignore = "requires Postgres and Redis"]
 async fn typing_uses_cached_serving_state() {
     let f = Fixture::new().await;
-    f.state.serving_active_cache.insert(f.community, false);
+    f.state.community_active.seed(f.community, false);
     let (status, body) = f
         .post(&f.member, &f.typing(&f.member, Some(f.channel)))
         .await;

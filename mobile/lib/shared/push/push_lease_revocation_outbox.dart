@@ -12,6 +12,8 @@ import 'package:nostr/nostr.dart' as nostr;
 import '../storage/secure_storage.dart';
 
 import '../community/community.dart';
+import '../hosted/hosted_relay_auth.dart';
+import '../relay/relay_provider.dart';
 import '../relay/signed_event_relay.dart';
 import 'dev_push_lease.dart';
 import 'push_bridge.dart';
@@ -526,8 +528,9 @@ Uri _buzzPushRelayUri(String relayUrl) {
 }
 
 Future<void> publishBuzzPushLeaseRevocation(
-  BuzzPushLeaseRevocationRecord record,
-) async {
+  BuzzPushLeaseRevocationRecord record, {
+  required HostedRelayAuth relayAuth,
+}) async {
   final descriptor = await fetchBuzzPushLeaseDescriptor(record.relayUrl);
   if (descriptor.origin != record.relayOrigin) {
     throw StateError('Relay push origin changed while revocation was pending.');
@@ -542,15 +545,22 @@ Future<void> publishBuzzPushLeaseRevocation(
     generation: record.generation,
     nsec: record.nsec,
     memberPubkey: record.memberPubkey,
-    submit: ({required kind, required content, required tags, createdAt}) =>
-        submitSignedEventOnce(
-          wsUrl: wsUrl,
-          nsec: record.nsec,
-          kind: kind,
-          content: content,
-          tags: tags,
-          createdAt: createdAt,
-        ),
+    submit:
+        ({required kind, required content, required tags, createdAt}) async =>
+            submitSignedEventOnce(
+              wsUrl: wsUrl,
+              // A hosted relay refuses the socket upgrade without an assertion.
+              headers: await relayAuth.headers(
+                RelayConfig(baseUrl: record.relayUrl, nsec: record.nsec),
+                background: true,
+                fresh: true,
+              ),
+              nsec: record.nsec,
+              kind: kind,
+              content: content,
+              tags: tags,
+              createdAt: createdAt,
+            ),
   );
 }
 
@@ -563,7 +573,10 @@ final buzzPushLeaseRevocationOutboxProvider =
     Provider<BuzzPushLeaseRevocationOutbox>((ref) {
       final outbox = BuzzPushLeaseRevocationOutbox(
         storage: ref.read(buzzPushLeaseRevocationStorageProvider),
-        publisher: publishBuzzPushLeaseRevocation,
+        publisher: (record) => publishBuzzPushLeaseRevocation(
+          record,
+          relayAuth: ref.read(hostedRelayAuthProvider),
+        ),
       );
       ref.onDispose(outbox.dispose);
       return outbox;

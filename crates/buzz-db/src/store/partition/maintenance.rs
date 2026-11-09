@@ -23,7 +23,7 @@ use std::time::Duration;
 use chrono::{DateTime, Datelike, Utc};
 use serde::Serialize;
 use sqlx::{Connection, PgConnection, PgPool, Row};
-use tracing::info;
+use tracing::{info, warn};
 
 use super::{
     add_months, audit_partition_catalog_at, audit_table_on, month_start, partition_name,
@@ -555,7 +555,42 @@ async fn apply_change(
     now: DateTime<Utc>,
 ) -> Result<LockedAttempt> {
     let mut transaction = connection.begin().await?;
-    configure_maintenance_transaction(&mut transaction).await?;
+    let attempt = attempt_change(&mut transaction, table, months_ahead, policy, now).await;
+    // End the transaction before the next table starts, on failure too.
+    // PostgreSQL sends a failed statement's error before its backend aborts
+    // and releases the advisory lock, and a dropped transaction only queues
+    // its ROLLBACK. Either way the next table's probe could find the lock
+    // still held and report `skipped_locked`. A completed ROLLBACK proves the
+    // lock is free.
+    match attempt {
+        Ok(LockedAttempt::Committed(change)) => {
+            transaction.commit().await?;
+            Ok(LockedAttempt::Committed(change))
+        }
+        Ok(attempt) => {
+            transaction.rollback().await?;
+            Ok(attempt)
+        }
+        Err(error) => {
+            if let Err(rollback) = transaction.rollback().await {
+                warn!(table, %rollback, "partition maintenance rollback failed");
+            }
+            Err(error)
+        }
+    }
+}
+
+/// Plan and apply `table`'s change inside the caller's transaction. A
+/// `Committed` result is ready to commit; [`apply_change`] ends the
+/// transaction on every path.
+async fn attempt_change(
+    transaction: &mut PgConnection,
+    table: &'static str,
+    months_ahead: i32,
+    policy: PartitionMaintenancePolicy,
+    now: DateTime<Utc>,
+) -> Result<LockedAttempt> {
+    configure_maintenance_transaction(transaction).await?;
 
     let acquired: bool = crate::observability::observe_advisory_lock(
         crate::observability::LockType::PartitionMaintenance,
@@ -568,28 +603,18 @@ async fn apply_change(
     )
     .await?;
     if !acquired {
-        transaction.rollback().await?;
         return Ok(LockedAttempt::SkippedLocked);
     }
 
     // Re-plan while serialized against other managers but before any table
     // lock. A runner that lost a race sees the winner's committed layout here
     // and stops, instead of mistaking the winner's monthlies for collisions.
-    let serialized = audit_table_on(&mut transaction, table, months_ahead, now).await?;
+    let serialized = audit_table_on(transaction, table, months_ahead, now).await?;
     let expected = match plan_maintenance(&serialized, policy) {
         MaintenancePlan::Apply(change) => change,
-        MaintenancePlan::Noop => {
-            transaction.rollback().await?;
-            return Ok(LockedAttempt::Unchanged);
-        }
-        MaintenancePlan::Disabled => {
-            transaction.rollback().await?;
-            return Ok(LockedAttempt::Disabled);
-        }
-        MaintenancePlan::Refuse(reason) => {
-            transaction.rollback().await?;
-            return Ok(LockedAttempt::Refused(reason));
-        }
+        MaintenancePlan::Noop => return Ok(LockedAttempt::Unchanged),
+        MaintenancePlan::Disabled => return Ok(LockedAttempt::Disabled),
+        MaintenancePlan::Refuse(reason) => return Ok(LockedAttempt::Refused(reason)),
     };
     // Reject misnamed relations before any lock can cost a parent outage.
     if let Some(name) = colliding_relation(
@@ -599,19 +624,16 @@ async fn apply_change(
     )
     .await?
     {
-        transaction.rollback().await?;
         return Ok(LockedAttempt::Refused(collision_message(&name)));
     }
 
     // Refuse an unproven lock set before taking any lock.
-    let parent = maintenance_parent(&mut transaction, table).await?;
+    let parent = maintenance_parent(transaction, table).await?;
     if let Some(reason) = parent.refusal {
-        transaction.rollback().await?;
         return Ok(LockedAttempt::Refused(reason));
     }
     if let Some(catch_all) = &expected.catch_all {
-        if let Some(reason) = catch_all_foreign_key_refusal(&mut transaction, catch_all).await? {
-            transaction.rollback().await?;
+        if let Some(reason) = catch_all_foreign_key_refusal(transaction, catch_all).await? {
             return Ok(LockedAttempt::Refused(reason));
         }
     }
@@ -620,7 +642,7 @@ async fn apply_change(
     // a counterpart while holding the parent could deadlock with such a writer.
     // ONLY: without it PostgreSQL locks every historical child in turn.
     lock(
-        &mut transaction,
+        transaction,
         &format!(
             "LOCK TABLE ONLY {} IN ACCESS EXCLUSIVE MODE",
             qualified_relation_name(&parent.schema, table)
@@ -632,9 +654,8 @@ async fn apply_change(
     // attaching would then wait on its table while holding the parent. Adding
     // or dropping a foreign key on or to the parent needs a lock that
     // conflicts with this one, so the set cannot change from here on.
-    let parent = maintenance_parent(&mut transaction, table).await?;
+    let parent = maintenance_parent(transaction, table).await?;
     if let Some(reason) = parent.refusal {
-        transaction.rollback().await?;
         return Ok(LockedAttempt::Refused(reason));
     }
     // Attaching a partition adds its foreign key under SHARE ROW EXCLUSIVE on
@@ -647,7 +668,7 @@ async fn apply_change(
     // catch-all with any other foreign key is refused before and after its lock.
     for counterpart in &parent.counterparts {
         lock(
-            &mut transaction,
+            transaction,
             &format!("LOCK TABLE ONLY {counterpart} IN SHARE ROW EXCLUSIVE MODE NOWAIT"),
         )
         .await?;
@@ -656,7 +677,7 @@ async fn apply_change(
     // child while holding the parent.
     if let Some(catch_all) = &expected.catch_all {
         lock(
-            &mut transaction,
+            transaction,
             &format!(
                 "LOCK TABLE ONLY {} IN ACCESS EXCLUSIVE MODE NOWAIT",
                 qualified_relation_name(&catch_all.schema, &catch_all.name)
@@ -665,30 +686,19 @@ async fn apply_change(
         .await?;
         // Foreign-key DDL on or to the catch-all conflicts with this lock but
         // not with the parent's, so only this check is authoritative.
-        if let Some(reason) = catch_all_foreign_key_refusal(&mut transaction, catch_all).await? {
-            transaction.rollback().await?;
+        if let Some(reason) = catch_all_foreign_key_refusal(transaction, catch_all).await? {
             return Ok(LockedAttempt::Refused(reason));
         }
     }
 
     // Close the window between the serialized audit and the table locks.
-    let locked = audit_table_on(&mut transaction, table, months_ahead, now).await?;
+    let locked = audit_table_on(transaction, table, months_ahead, now).await?;
     match plan_maintenance(&locked, policy) {
         MaintenancePlan::Apply(change) if change == expected => {}
-        MaintenancePlan::Noop => {
-            transaction.rollback().await?;
-            return Ok(LockedAttempt::Unchanged);
-        }
-        MaintenancePlan::Disabled => {
-            transaction.rollback().await?;
-            return Ok(LockedAttempt::Disabled);
-        }
-        MaintenancePlan::Refuse(reason) => {
-            transaction.rollback().await?;
-            return Ok(LockedAttempt::Refused(reason));
-        }
+        MaintenancePlan::Noop => return Ok(LockedAttempt::Unchanged),
+        MaintenancePlan::Disabled => return Ok(LockedAttempt::Disabled),
+        MaintenancePlan::Refuse(reason) => return Ok(LockedAttempt::Refused(reason)),
         MaintenancePlan::Apply(_) => {
-            transaction.rollback().await?;
             return Err(DbError::InvalidData(
                 "partition catalog changed between the audit and the maintenance locks".to_string(),
             ));
@@ -698,7 +708,7 @@ async fn apply_change(
     let parent_relation = qualified_relation_name(&parent.schema, table);
     if let Some(catch_all) = &expected.catch_all {
         execute_ddl(
-            &mut transaction,
+            transaction,
             format!(
                 "DROP TABLE {}",
                 qualified_relation_name(&catch_all.schema, &catch_all.name)
@@ -709,7 +719,7 @@ async fn apply_change(
     for month in &expected.create {
         let end = next_month(*month)?;
         execute_ddl(
-            &mut transaction,
+            transaction,
             format!(
                 "CREATE TABLE {} PARTITION OF {parent_relation} \
                  FOR VALUES FROM ('{}') TO ('{}')",
@@ -722,7 +732,7 @@ async fn apply_change(
     }
     if let Some(catch_all) = &expected.catch_all {
         execute_ddl(
-            &mut transaction,
+            transaction,
             format!(
                 "CREATE TABLE {} PARTITION OF {parent_relation} \
                  FOR VALUES FROM ('{}') TO (MAXVALUE)",
@@ -734,18 +744,16 @@ async fn apply_change(
     }
 
     let new_children = expected.target_names(table);
-    grant_parent_readers(&mut transaction, parent.oid, &parent.schema, &new_children).await?;
+    grant_parent_readers(transaction, parent.oid, &parent.schema, &new_children).await?;
 
-    let after = audit_table_on(&mut transaction, table, months_ahead, now).await?;
+    let after = audit_table_on(transaction, table, months_ahead, now).await?;
     let verified = verify_applied(&locked, &after, &expected)
-        .and(verify_inheritance(&mut transaction, parent.oid, &new_children).await?);
+        .and(verify_inheritance(transaction, parent.oid, &new_children).await?);
     if let Err(reason) = verified {
-        transaction.rollback().await?;
         return Err(DbError::InvalidData(format!(
             "partition maintenance failed its postcondition and rolled back: {reason}"
         )));
     }
-    transaction.commit().await?;
     Ok(LockedAttempt::Committed(expected))
 }
 

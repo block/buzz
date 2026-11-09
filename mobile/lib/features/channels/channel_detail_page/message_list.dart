@@ -1,6 +1,7 @@
 part of '../channel_detail_page.dart';
 
 class _MessageList extends HookConsumerWidget {
+  final DateHeaderScrollActivity dateScrollActivity;
   final ValueNotifier<StickyDateHeaderState> stickyDateHeaderState;
   final List<MainTimelineEntry> entries;
   final List<TypingEntry> inlineTyping;
@@ -28,6 +29,7 @@ class _MessageList extends HookConsumerWidget {
   final VoidCallback? restoreComposerFocus;
 
   const _MessageList({
+    required this.dateScrollActivity,
     required this.entries,
     this.inlineTyping = const [],
     this.threadWorking = const {},
@@ -895,6 +897,7 @@ class _MessageList extends HookConsumerWidget {
     }
 
     final channelNamesMap = ref.watch(channelIdsByNameProvider);
+    final rowCache = _useRowCache(this, [channelNamesMap, localSendAnimations]);
 
     return Stack(
       children: [
@@ -913,6 +916,7 @@ class _MessageList extends HookConsumerWidget {
               return false;
             }
             if (notification is! ScrollNotification) return false;
+            dateScrollActivity.onNotification(notification);
             timelineViewportHeight.value =
                 notification.metrics.viewportDimension;
             distanceFromLatest.value = max(
@@ -1032,15 +1036,31 @@ class _MessageList extends HookConsumerWidget {
                     nextMessage.pubkey.toLowerCase() !=
                         message.pubkey.toLowerCase() ||
                     nextMessage.createdAt - message.createdAt > 300;
-
-                return LocalMessageSendTransition(
+                final animate = isRecentLocalMessageSendAnimation(
+                  localSendAnimations,
+                  message.id,
+                );
+                final isHandoff = isRecentAgentReplyHandoff(
+                  handoff.messageIds,
+                  message.id,
+                );
+                final endsDay =
+                    nextMessage != null &&
+                    !isSameDay(message.createdAt, nextMessage.createdAt);
+                final inputs = _rowInputs(entryGroup, [
+                  prevMessage,
+                  nextMessage,
+                  animate,
+                  isHandoff,
+                  threadWorking[message.id.toLowerCase()],
+                  if (index == 0) ...[displayedTyping, workingAgents],
+                ]);
+                if (rowCache.reuse(message, inputs) case final row?) return row;
+                final row = LocalMessageSendTransition(
                   messageId: message.id,
                   channelId: channelId,
                   key: ValueKey('channel-message-send-${message.id}'),
-                  animate: isRecentLocalMessageSendAnimation(
-                    localSendAnimations,
-                    message.id,
-                  ),
+                  animate: animate,
                   startOffsetFactor: showAuthor
                       ? localMessageSendTransitionAvatarStartOffset
                       : localMessageSendTransitionStartOffset,
@@ -1065,17 +1085,13 @@ class _MessageList extends HookConsumerWidget {
                             label: formatDayHeading(message.createdAt),
                             dayTimestamp: message.createdAt,
                             stickyDayTimestamp: stickyDayTimestamp,
+                            scrollVisible: dateScrollActivity,
                           ),
                         if (message.isSystem)
                           _SystemMessageRow(
                             message: message,
                             startsDay: showDayDivider,
-                            endsDay:
-                                nextMessage != null &&
-                                !isSameDay(
-                                  message.createdAt,
-                                  nextMessage.createdAt,
-                                ),
+                            endsDay: endsDay,
                             groupedMessages: entryGroup.length > 1
                                 ? entryGroup
                                       .map((entry) => entry.message)
@@ -1091,22 +1107,9 @@ class _MessageList extends HookConsumerWidget {
                           _MessageBubble(
                             message: message,
                             startsDay: showDayDivider,
-                            endsDay:
-                                nextMessage != null &&
-                                !isSameDay(
-                                  message.createdAt,
-                                  nextMessage.createdAt,
-                                ),
-                            showAuthor:
-                                showAuthor ||
-                                isRecentAgentReplyHandoff(
-                                  handoff.messageIds,
-                                  message.id,
-                                ),
-                            typingHandoff: isRecentAgentReplyHandoff(
-                              handoff.messageIds,
-                              message.id,
-                            ),
+                            endsDay: endsDay,
+                            showAuthor: showAuthor || isHandoff,
+                            typingHandoff: isHandoff,
                             showAvatar: showAvatar,
                             hasReplies: entry.summary != null,
                             replyFooter:
@@ -1153,6 +1156,7 @@ class _MessageList extends HookConsumerWidget {
                     ),
                   ),
                 );
+                return rowCache.keep(message, inputs, row);
               },
             ),
           ),
@@ -1168,16 +1172,7 @@ class _MessageList extends HookConsumerWidget {
                 ) +
                 Grid.xs,
             child: Center(
-              child: IconButton.filled(
-                key: const ValueKey('channel-jump-to-oldest-unread'),
-                onPressed: scrollToOldestUnread,
-                tooltip: 'Jump to oldest unread message',
-                style: IconButton.styleFrom(
-                  backgroundColor: context.controlSurface,
-                  foregroundColor: context.colors.onPrimaryContainer,
-                ),
-                icon: const Icon(BuzzIcons.chevronUp, size: 20),
-              ),
+              child: _JumpToOldestUnreadButton(onPressed: scrollToOldestUnread),
             ),
           )
         else

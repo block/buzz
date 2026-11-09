@@ -93,6 +93,8 @@ pub const EXPECTED_SCOPED_TABLES: &[&str] = &[
     "events",
     "git_repo_names",
     "join_policy_acceptances",
+    "media_uploaders",
+    "media_publications",
     "moderation_actions",
     "moderation_reports",
     "parameterized_event_watermarks",
@@ -138,6 +140,8 @@ pub const PURGE_SCOPED_TABLES: &[&str] = &[
     "workflow_runs",
     "push_wake_outbox",
     "join_policy_acceptances",
+    "media_uploaders",
+    "media_publications",
     "moderation_reports",
     "subscriptions",
     "api_tokens",
@@ -8089,6 +8093,13 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
         .execute(&db.pool)
         .await
         .expect("insert guarded NIP-RS row");
+        let media_hash = "a".repeat(64);
+        db.record_media_upload(request.community_id, &media_hash, &[7; 32])
+            .await
+            .expect("upload proof");
+        db.record_media_publications(request.community_id, vec![media_hash.clone()])
+            .await
+            .expect("publication boundary");
         store
             .approve(request.id, "approver", None)
             .await
@@ -8099,6 +8110,14 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
             .expect("claim")
             .expect("won claim");
         store.begin_quiescing(&claim.lease).await.expect("quiesce");
+        assert!(db
+            .record_media_upload(request.community_id, &media_hash, &[8; 32])
+            .await
+            .is_err());
+        assert!(db
+            .record_media_publications(request.community_id, vec!["b".repeat(64)])
+            .await
+            .is_err());
         let generation = store.fence(&claim.lease).await.expect("fence");
         let token = LeaseToken {
             fence_generation: Some(generation),
@@ -8154,6 +8173,8 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
             .await
             .expect("bindings");
         let first = store.purge_postgres(&token).await.expect("purge postgres");
+        assert_eq!(first["media_uploaders"], 1);
+        assert_eq!(first["media_publications"], 1);
         let expected_tables: BTreeSet<&str> = EXPECTED_SCOPED_TABLES
             .iter()
             .chain(RELAY_ADMIN_TABLES.iter().map(|(table, _)| table))
@@ -8716,12 +8737,12 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
         let deleted = store.purge_postgres(&token).await.expect("purge postgres");
 
         let upgrade = db
-            .community_auth_upgrade_status(upgrade_id, "operator")
+            .community_auth_policy_status(upgrade_id, "operator")
             .await
             .unwrap()
             .expect("receipt survives purge");
-        assert_eq!(upgrade.community_id, community);
-        assert_eq!(upgrade.state, "unavailable");
+        assert_eq!(upgrade.acceptance.community_id, community);
+        assert_eq!(upgrade.acceptance.state, "unavailable");
         let retained: Uuid = sqlx::query_scalar(
             "SELECT target_community_id FROM entity_deletion_stage_history WHERE id = $1",
         )

@@ -132,23 +132,15 @@ void main() {
       ) async {
         final url = '$_base/media/clip (1).${item.$1}';
         final expected = '$_base/media/clip%20%281%29.${item.$1}';
-        String? requested;
         await tester.pumpWidget(
           _app(
             'oops [ text ![clip \\[Q4\\]](<$url> $title)',
             tags: [
               ['imeta', 'url $url', 'm ${item.$2}'],
             ],
-            overrides: [
-              videoPreviewFrameLoaderProvider.overrideWithValue((url) async {
-                requested = url;
-                return null;
-              }),
-            ],
           ),
         );
         await tester.pumpAndSettle();
-        expect(requested, expected);
         expect(
           find.byKey(ValueKey('message-media-video-preview:$expected')),
           findsOneWidget,

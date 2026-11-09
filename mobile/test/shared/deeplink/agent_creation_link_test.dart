@@ -180,7 +180,7 @@ void main() {
               'v': 1,
               'id': 'av_1',
               'name': 'Scout',
-              'avatarUrl': HostedEnvironment.avatarsCdnOrigin
+              'avatarUrl': HostedEnvironment.avatarsCdnOrigin!
                   .replace(path: '/av_1/r/avatar.png')
                   .toString(),
             }),
@@ -190,7 +190,7 @@ void main() {
       expect(result, isA<AgentCreationDraft>());
       expect(
         seen.url,
-        HostedEnvironment.avatarsCdnOrigin.replace(path: '/av_1/agent.json'),
+        HostedEnvironment.avatarsCdnOrigin!.replace(path: '/av_1/agent.json'),
       );
       expect(seen.followRedirects, isFalse);
     });

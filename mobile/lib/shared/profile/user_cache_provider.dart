@@ -1,13 +1,19 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../relay/relay.dart';
 import '../verified_profiles/verified_profile_directory.dart';
 import 'user_profile.dart';
 import 'profile_event_parser.dart';
+import 'profile_snapshot.dart';
 
-/// In-memory cache of user profiles, fetched in batches from the relay.
+/// Cache of user profiles, fetched in batches from the relay.
+///
+/// Verified profiles persist per identity and relay ([ProfileSnapshotStorage])
+/// so names and avatars render on launch, even on a slow link. Restored
+/// profiles are served immediately and revalidated on their first lookup.
 ///
 /// Lookups requested via [get] or [preload] are coalesced into a single
 /// kind:0 batch query (NIP-01 `authors` filter) every 50ms. Larger requests
@@ -15,6 +21,7 @@ import 'profile_event_parser.dart';
 class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
   // The relay clamps each history response to DEFAULT_MAX_PAGE_LIMIT (1000).
   static const _maximumProfilesPerQuery = 1000;
+  static const _snapshotWriteDelay = Duration(seconds: 2);
 
   final Set<String> _pending = {};
   final Map<String, ({int createdAt, String eventId})> _profileEventOrders = {};
@@ -24,11 +31,22 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
   Timer? _batchTimer;
   Completer<bool>? _batchCompleter;
 
+  /// Restored from the snapshot and not yet checked with the relay this scope.
+  final Set<String> _unrevalidated = {};
+
+  /// Lookups whose batch query is on the wire.
+  final Set<String> _inFlight = {};
+  void Function()? _snapshotWriter;
+  Timer? _snapshotTimer;
+  Map<String, UserProfile> _latest = const {};
+
   @override
   Map<String, UserProfile> build() {
-    ref.watch(relayConfigProvider);
+    final config = ref.watch(relayConfigProvider);
     _generation++;
     _profileEventOrders.clear();
+    _unrevalidated.clear();
+    _inFlight.clear();
     ref.onDispose(() {
       _generation++;
       _pending.clear();
@@ -36,18 +54,77 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
       _batchTimer = null;
       _batchCompleter?.complete(false);
       _batchCompleter = null;
+      // Flush rather than drop: switching community must not lose the
+      // profiles learned since the last write.
+      if (_snapshotTimer?.isActive ?? false) _snapshotWriter?.call();
+      _snapshotTimer?.cancel();
+      _snapshotTimer = null;
+      _snapshotWriter = null;
     });
-    return {};
+    return _restoreSnapshot(config);
   }
+
+  Map<String, UserProfile> _restoreSnapshot(RelayConfig config) {
+    final storage = ref.read(profileSnapshotStorageProvider);
+    final pubkey = pubkeyFromNsec(config.nsec);
+    if (storage == null || pubkey == null) return {};
+    final relay = config.baseUrl;
+    final token = storage.capture(pubkey, relay);
+    _snapshotWriter = () {
+      final profiles = [
+        for (final MapEntry(:key, value: order) in _profileEventOrders.entries)
+          if (_latest[key] case final profile?)
+            (
+              profile: profile,
+              createdAt: order.createdAt,
+              eventId: order.eventId,
+            ),
+      ];
+      storage
+          .write(token, profiles)
+          .then(
+            (saved) {
+              if (!saved) debugPrint('[UserCache] snapshot was not saved');
+            },
+            onError: (Object error, StackTrace stack) {
+              debugPrint('[UserCache] snapshot write failed: $error');
+            },
+          );
+    };
+    final restored = <String, UserProfile>{};
+    for (final parsed in storage.read(pubkey, relay)) {
+      final key = parsed.profile.pubkey;
+      restored[key] = parsed.profile;
+      _profileEventOrders[key] = (
+        createdAt: parsed.createdAt,
+        eventId: parsed.eventId,
+      );
+      _unrevalidated.add(key);
+    }
+    return _latest = restored;
+  }
+
+  @override
+  set state(Map<String, UserProfile> value) {
+    super.state = _latest = value;
+    if (_snapshotWriter == null) return;
+    _snapshotTimer ??= Timer(_snapshotWriteDelay, () {
+      _snapshotTimer = null;
+      _snapshotWriter?.call();
+    });
+  }
+
+  /// Whether [pubkey] has a profile that is current for this scope.
+  bool _isCached(String pubkey) =>
+      state.containsKey(pubkey) && !_unrevalidated.contains(pubkey);
 
   /// Request a profile for [pubkey]. Returns immediately from cache if
   /// available, otherwise schedules a batch fetch.
   UserProfile? get(String pubkey) {
     _trackVerified([pubkey]);
-    final cached = state[pubkey.toLowerCase()];
-    if (cached != null) return cached;
-    _scheduleFetch(pubkey.toLowerCase());
-    return null;
+    final key = pubkey.toLowerCase();
+    _scheduleFetch(key);
+    return state[key];
   }
 
   /// Stores a profile that was fetched or updated outside the batch loader.
@@ -67,7 +144,7 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
     final requested = pubkeys.map((pubkey) => pubkey.toLowerCase()).toSet();
     _trackVerified(requested);
     final toFetch = requested
-        .where((pubkey) => refreshCached || !state.containsKey(pubkey))
+        .where((pubkey) => refreshCached || !_isCached(pubkey))
         .toList();
     final generation = _generation;
     final session = ref.read(relaySessionProvider.notifier);
@@ -85,6 +162,7 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
     if (!_isCurrent(generation)) {
       throw StateError('Profile request belongs to a retired cache');
     }
+    _unrevalidated.removeAll(toFetch);
     return {for (final pubkey in requested) pubkey: ?state[pubkey]};
   }
 
@@ -93,11 +171,16 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
   Future<bool> preload(List<String> pubkeys) {
     _trackVerified(pubkeys);
     final normalized = pubkeys.map((pk) => pk.toLowerCase()).toSet();
-    final alreadyPending = normalized.any(_pending.contains);
+    // Restored profiles being revalidated already render; don't wait on them.
+    final alreadyPending = normalized.any(
+      (pk) => _pending.contains(pk) && !state.containsKey(pk),
+    );
     final uncached = normalized
-        .map((pk) => pk.toLowerCase())
         .where((pk) => !state.containsKey(pk) && !_pending.contains(pk))
         .toList();
+    // Restored profiles already render; revalidate them without making the
+    // caller wait on the network.
+    normalized.where(_unrevalidated.contains).forEach(_scheduleFetch);
     if (uncached.isEmpty && !alreadyPending) return Future.value(true);
     _pending.addAll(uncached);
     final completer = _batchCompleter ??= Completer<bool>();
@@ -128,6 +211,7 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
         if (!_isCurrent(generation)) return false;
         if (!await _verifyAndMerge(events, generation)) return false;
       }
+      _unrevalidated.removeAll(normalized);
       return true;
     } catch (_) {
       return false;
@@ -149,7 +233,11 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
       ref.read(verifiedProfilesProvider.notifier).track(pubkeys);
 
   void _scheduleFetch(String pubkey) {
-    if (state.containsKey(pubkey) || _pending.contains(pubkey)) return;
+    if (_isCached(pubkey) ||
+        _pending.contains(pubkey) ||
+        _inFlight.contains(pubkey)) {
+      return;
+    }
     _pending.add(pubkey);
     _batchCompleter ??= Completer<bool>();
     _scheduleBatch();
@@ -165,6 +253,7 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
     _batchCompleter = null;
 
     _flushInFlight = true;
+    _inFlight.addAll(pubkeys);
     final generation = _generation;
     var succeeded = false;
     try {
@@ -177,6 +266,8 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
         );
         if (!_isCurrent(generation)) return;
         if (!await _verifyAndMerge(events, generation)) return;
+        // Confirmed by the relay, whether or not it still has a profile.
+        _unrevalidated.removeAll(batch);
         remaining -= batch.length;
         if (remaining == 0) {
           // All requested pages are ready.
@@ -185,8 +276,10 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
         }
       }
     } catch (_) {
-      // Silently fail — non-gating callers will just show pubkeys.
+      // Silently fail — non-gating callers will just show pubkeys, or the
+      // restored profile, which the next lookup revalidates again.
     } finally {
+      if (_isCurrent(generation)) _inFlight.removeAll(pubkeys);
       if (completer != null && !completer.isCompleted) {
         completer.complete(succeeded);
       }

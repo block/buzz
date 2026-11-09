@@ -21,6 +21,8 @@ import 'hosted_community_connection.dart';
 import 'web_connect_binding.dart';
 import 'hosted_join_policy.dart';
 
+part 'hosted_flow_identity_recovery.dart';
+
 enum HostedFlowStage {
   idle,
   working,
@@ -133,6 +135,8 @@ class HostedFlow extends ChangeNotifier {
   bool accountOnly = false;
   bool _importRequested = false;
   bool canCreateIdentity = false;
+  _RejectedBinding? _rejectedBinding;
+
   String? requiredIdentityPubkey;
   String? _pairedPubkey;
   SensitiveActionPolicy? pairedSensitiveActionPolicy;
@@ -540,14 +544,20 @@ class HostedFlow extends ChangeNotifier {
     return _enqueue(() => _continue(generation, selectedPubkey: pubkey));
   }
 
-  /// Web-binding links retain an explicit choice before creating an identity.
+  /// Create explicitly from setup, or beside the saved identities offered.
   Future<void> createIdentity() {
-    if (stage != HostedFlowStage.setupIdentity || !canCreateIdentity) {
+    if ((_target == null && !accountOnly) ||
+        !canCreateIdentity ||
+        (stage != HostedFlowStage.setupIdentity &&
+            stage != HostedFlowStage.chooseIdentity)) {
       return Future.value();
     }
+    final offered = {for (final item in identityChoices) item.pubkey};
     final generation = _nextGeneration();
     _set(HostedFlowStage.working);
-    return _enqueue(() => _continue(generation, createNew: true));
+    return _enqueue(
+      () => _continue(generation, createNew: true, offered: offered),
+    );
   }
 
   /// Import through the secure store, rechecking the account binding.
@@ -572,6 +582,7 @@ class HostedFlow extends ChangeNotifier {
     int generation, {
     String? selectedPubkey,
     bool createNew = false,
+    Set<String> offered = const {},
   }) async {
     final target = _target;
     final session = account.account;
@@ -612,15 +623,17 @@ class HostedFlow extends ChangeNotifier {
       );
       if (_disposed || generation != _generation) return;
     }
-    if (resolved.state == HostedIdentityState.needsSetup &&
+    // Selection offers creation beside saved identities only on request.
+    final creatable =
         resolved.canCreate &&
-        createNew &&
-        !canSealBackup) {
+        (resolved.state == HostedIdentityState.needsSetup ||
+            (createNew &&
+                resolved.state == HostedIdentityState.needsSelection));
+    if (creatable && createNew && !canSealBackup) {
       _set(HostedFlowStage.blocked, HostedFlowProblem.unsupportedPlatform);
       return;
     }
-    if (resolved.state == HostedIdentityState.needsSetup &&
-        resolved.canCreate &&
+    if (creatable &&
         canSealBackup &&
         (target is! NostrBindDeepLink || createNew) &&
         !_importRequested) {
@@ -629,6 +642,7 @@ class HostedFlow extends ChangeNotifier {
       resolved = await identity.resolve(
         isCurrent: _isCurrent(generation),
         createNew: true,
+        offered: offered,
       );
     }
     if (_pairedPubkey != null && resolved.pubkey != _pairedPubkey) {
@@ -692,13 +706,19 @@ class HostedFlow extends ChangeNotifier {
           if (response['error'] != null || request == null) {
             throw AccountFailure.invalidResponse;
           }
-          await WebConnectBindingService().complete(
-            request: request,
-            subject: session.subject,
-            expectedPubkey: resolved.pubkey!,
-            withKeys: store.withKeys,
-            verify: _verifyBinding,
-            isCurrent: _isCurrent(generation),
+          final pubkey = resolved.pubkey!;
+          await _observeBinding(
+            session.subject,
+            pubkey,
+            generation,
+            () => WebConnectBindingService().complete(
+              request: request,
+              subject: session.subject,
+              expectedPubkey: pubkey,
+              withKeys: store.withKeys,
+              verify: _verifyBinding,
+              isCurrent: _isCurrent(generation),
+            ),
           );
         } else if (resolved.state == HostedIdentityState.needsBackup) {
           await HostedBackupService(
@@ -721,6 +741,8 @@ class HostedFlow extends ChangeNotifier {
       return;
     }
     if (resolved.state == HostedIdentityState.needsSelection) {
+      canCreateIdentity =
+          resolved.canCreate && _pairedPubkey == null && !_importRequested;
       identityChoices = List.unmodifiable(resolved.choices);
       _set(HostedFlowStage.chooseIdentity);
       return;
@@ -988,7 +1010,7 @@ class HostedFlow extends ChangeNotifier {
     if (account.account?.subject != subject) {
       throw AccountFailure.differentAccount;
     }
-    final response = await account.post('/v1/buzz/nostr-identities/verify', {
+    final response = await account.post(_verifyPath, {
       'challenge_id': challengeId,
       'nonce': nonce,
       'signed_payload': signedPayload,

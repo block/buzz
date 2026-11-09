@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:crypto/crypto.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
+import '../hosted/organization_environment.dart';
 import '../storage/secure_storage.dart';
 import '../storage/serial_queue.dart';
 
@@ -22,12 +23,27 @@ class CommunityStorage {
 
   final FlutterSecureStorage _secure;
 
-  CommunityStorage({FlutterSecureStorage? secure})
-    : _secure = secure ?? communitySecureStorage;
+  /// Whether this build shows a saved community. Others stay stored, with
+  /// their keys, for a build that can reach them.
+  final bool Function(Community community) _visible;
 
-  /// Load all communities. On first call, migrates legacy single-community
-  /// credentials if present.
-  Future<List<Community>> loadAll() async {
+  CommunityStorage({
+    FlutterSecureStorage? secure,
+    bool Function(Community community)? visible,
+  }) : _secure = secure ?? communitySecureStorage,
+       _visible = visible ?? reachableInBuild;
+
+  /// An internal build reaches only its organization's community.
+  static bool reachableInBuild(Community community) =>
+      !OrganizationEnvironment.enabled ||
+      OrganizationEnvironment.protects(Uri.parse(community.relayUrl));
+
+  /// Load all communities this build shows. On first call, migrates legacy
+  /// single-community credentials if present.
+  Future<List<Community>> loadAll() async =>
+      (await _loadStored()).where(_visible).toList();
+
+  Future<List<Community>> _loadStored() async {
     final raw = await _secure.read(key: _keyCommunities);
     if (raw != null) return _decodeList(raw);
 
@@ -180,8 +196,15 @@ class CommunityStorage {
         .toList();
   }
 
+  /// Replaces the communities this build shows, keeping the others.
   Future<void> _saveList(List<Community> communities) async {
-    final json = jsonEncode(communities.map((item) => item.toJson()).toList());
+    final raw = await _secure.read(key: _keyCommunities);
+    final hidden = raw == null
+        ? const <Community>[]
+        : _decodeList(raw).where((item) => !_visible(item));
+    final json = jsonEncode(
+      [...hidden, ...communities].map((item) => item.toJson()).toList(),
+    );
     await _secure.write(key: _keyCommunities, value: json);
   }
 }

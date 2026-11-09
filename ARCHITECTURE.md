@@ -550,7 +550,7 @@ Subscriber → dedicated PubSub  → PSUBSCRIBE buzz:channel:*
 
 The subscriber uses a **dedicated** `redis::aio::PubSub` connection — not from the pool. This is intentional: pool connections cannot hold `PSUBSCRIBE` state.
 
-**Current state:** The subscriber loop is spawned in `buzz-relay/src/main.rs` and populates the broadcast channel. A consumer task subscribes via `pubsub.subscribe_local()`, calls `sub_registry.fan_out()` on each received event, and delivers matches to local WebSocket connections via `conn_manager.send_to()`. Multi-node fan-out is now wired end-to-end. Local-echo deduplication is implemented via `AppState.local_event_ids` — events published by the local relay instance are tracked and skipped when received via the Redis round-trip.
+**Current state:** The subscriber loop is spawned in `buzz-relay/src/main.rs` and populates the broadcast channel. A dispatcher task subscribes via `pubsub.subscribe_local()` and routes each event to one of 16 delivery workers by `(community, topic)`, so one channel's events keep their order while channels deliver concurrently (`handlers/multinode_fanout.rs`). Each worker calls `sub_registry.fan_out()`, applies the access gate (one bulk membership read for the recipients the membership cache lacks), and delivers matches to local WebSocket connections via `conn_manager.send_to()`. Live delivery never drops an event silently: when a worker's bounded queue is full, an event is not delivered within 30 s of this node reading it from Redis, or the access gate still cannot check a recipient by that deadline (it re-checks with backoff until then), that event's local recipients get `CLOSED "resync: ..."` for syncs, are fenced from every further live EVENT frame as soon as the loss is detected (so a client's resume cursor stops moving), and are closed so clients catch up from their cursor; when the dispatcher itself lags the broadcast, every subscribed connection is treated the same way. Only the fence is immediate: each node closes at most 1% of its connections per second (at least one per jittered 100 ms tick), so a loss cannot become a reconnect storm. A slow delivery is delivered late rather than lost, so a database stall of a few seconds delays events instead of closing their recipients on every node at once. Clients resume from the newest `created_at` they received minus 5 s; an event delivered more than 5 s late, then lost at the deadline or by a disconnect while it waits, is replayed only if the client's cursor did not move past it by more than that slack. A dispatcher that falls behind without overflowing the broadcast detects a loss late, and dispatcher lag loses events it never sees; neither is bounded by the deadline. Multi-node fan-out is now wired end-to-end. Local-echo deduplication is implemented via `AppState.local_event_ids` — events published by the local relay instance are tracked and skipped when received via the Redis round-trip.
 
 **Reconnection:** exponential backoff 1s → 30s (`backoff_secs * 2`). Backoff resets to 1s only after a clean stream end, not on each reconnect attempt.
 
@@ -578,6 +578,12 @@ Privacy-sensitive kinds are excluded at the storage level (the `search_tsv`
 multi-community mode every query filter includes `community_id`, so the shared
 `events` table is infrastructure, not a cross-community result space; the relay
 re-authorizes every candidate hit before returning it.
+
+A database built from `migrations/0008_fresh_install_search_allowlist.sql` indexes
+only an allowlist of kinds, and so does one converted by
+`scripts/maintenance/nip_rs_search_allowlist.sql`. Such a database does not index
+kind 30180 (custom emoji entries) until an operator runs the updated maintenance
+script, which must happen before the emoji migration rollout.
 
 **Key behaviors:**
 - `SearchService::new(pool)` wraps a `PgPool`; `search(&SearchQuery)` runs a

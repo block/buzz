@@ -24,6 +24,7 @@ import 'relay_query_response.dart';
 import 'relay_rate_limit_gate.dart';
 import 'relay_reconnect_policy.dart';
 import 'read_state_snapshot.dart';
+import '../verified_profiles/verified_profile.dart';
 import 'relay_session_types.dart';
 import 'relay_socket.dart';
 import 'package:buzz/shared/crypto/event_signing.dart';
@@ -168,7 +169,9 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   /// A relay without that endpoint answers 404 or 405. The search then uses
   /// NIP-50 ([NostrFilters.searchUsers]), and so do later searches on that
   /// relay for [profileSearchRetry]; after that the endpoint is tried again.
-  /// A query or limit the endpoint does not accept also uses NIP-50.
+  /// A query or limit the endpoint does not accept also uses NIP-50. The
+  /// endpoint's verified heads (kind:30382) are kept: [searchedPeople] finds
+  /// people with no kind:0 by them.
   Future<List<NostrEvent>> searchProfiles(
     String query, {
     int limit = 50,
@@ -191,7 +194,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
         }, timeout: timeout);
         return [
           for (final event in events)
-            if (event.kind == 0) event,
+            if (event.kind == 0 || event.kind == verifiedProfileKind) event,
         ];
       } on RelayException catch (error) {
         if (error.statusCode != 404 && error.statusCode != 405) rethrow;
@@ -624,7 +627,9 @@ class RelaySessionNotifier extends Notifier<SessionState> {
 
     try {
       final auth = ref.read(hostedRelayAuthProvider);
-      if (auth.protects(config)) socket.headers = await auth.headers(config);
+      if (auth.protects(config)) {
+        socket.headers = await auth.headers(config, fresh: true);
+      }
       if (_disposed || generation != _connectionGeneration) return;
       await socket.connect();
     } on AccountFailure catch (error) {

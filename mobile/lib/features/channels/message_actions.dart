@@ -599,9 +599,10 @@ class _MessageQuickActionsRow extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final messages = allMessages;
     final canRemind = ref.watch(reminderServiceProvider) != null;
+    final startsThreads = ref.watch(channelStartsThreadsProvider(channelId));
 
     final tiles = <Widget>[
-      if (messages != null)
+      if (messages != null && startsThreads)
         _MessageQuickActionTile(
           icon: BuzzIcons.messageSquareReply,
           label: 'Reply',

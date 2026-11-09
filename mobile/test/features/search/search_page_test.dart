@@ -252,7 +252,7 @@ void main() {
     debugDefaultTargetPlatformOverride = null;
   });
 
-  testWidgets('X dismisses search while the keyboard is focused', (
+  testWidgets('opening search focuses the field; X dismisses it', (
     tester,
   ) async {
     await tester.pumpWidget(
@@ -278,8 +278,9 @@ void main() {
     );
     await tester.tap(find.text('Open search'));
     await tester.pumpAndSettle();
-    await tester.tap(find.byType(TextField));
-    await tester.pumpAndSettle();
+    final field = tester.widget<TextField>(find.byType(TextField));
+    expect(field.focusNode!.hasFocus, isTrue);
+    expect(tester.testTextInput.isVisible, isTrue);
     await tester.enterText(find.byType(TextField), 'draft');
     await tester.tap(find.byTooltip('Close search'));
     await tester.pumpAndSettle();

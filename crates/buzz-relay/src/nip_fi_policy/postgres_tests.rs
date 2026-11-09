@@ -60,7 +60,7 @@ async fn wait_for_blocker(db: &buzz_db::Db, waiter: i32, blocker: i32) {
 #[ignore = "requires Postgres"]
 #[allow(clippy::result_large_err)] // Exercise the real Axum admission response.
 async fn optional_leases_on_another_pod_expire_before_acceptance_with_or_without_invalidation() {
-    use buzz_db::community_auth::{UpgradeOutcome, UpgradeRequest};
+    use buzz_db::community_auth::{PolicyOutcome, PolicyRequest, UpgradeRequest};
     let base = crate::api::bridge::postgres_tests::bridge_handler_test_state()
         .await
         .unwrap();
@@ -125,10 +125,18 @@ async fn optional_leases_on_another_pod_expire_before_acceptance_with_or_without
         assert_eq!(
             pod_a
                 .db
-                .enable_community_nip_fi(&wrong_host, Ok(()))
+                .set_community_nip_fi_policy(
+                    &PolicyRequest {
+                        tuple: wrong_host.clone(),
+                        requires_nip_fi: true,
+                        expected_policy_generation: 0,
+                        expected_requires_nip_fi: false
+                    },
+                    Ok(())
+                )
                 .await
                 .unwrap(),
-            UpgradeOutcome::Refused("host_conflict")
+            PolicyOutcome::Refused("host_conflict")
         );
 
         // Keep acceptance paused AFTER it locks the community row, without
@@ -169,7 +177,18 @@ async fn optional_leases_on_another_pod_expire_before_acceptance_with_or_without
         let acceptance = {
             let db = pod_a.db.clone();
             let request = request.clone();
-            tokio::spawn(async move { db.enable_community_nip_fi(&request, Ok(())).await })
+            tokio::spawn(async move {
+                db.set_community_nip_fi_policy(
+                    &PolicyRequest {
+                        tuple: request.clone(),
+                        requires_nip_fi: true,
+                        expected_policy_generation: 0,
+                        expected_requires_nip_fi: false,
+                    },
+                    Ok(()),
+                )
+                .await
+            })
         };
         let acceptance_pid = host_lock_pid(&base.db, &host, false).await;
         let mut remap_connection = base.db.pool().acquire().await.unwrap();
@@ -218,7 +237,7 @@ async fn optional_leases_on_another_pod_expire_before_acceptance_with_or_without
             "single/double remap must remain blocked until acceptance commits"
         );
         issuer_gate.commit().await.unwrap();
-        let UpgradeOutcome::Accepted(_) = acceptance.await.unwrap().unwrap() else {
+        let PolicyOutcome::Accepted(_) = acceptance.await.unwrap().unwrap() else {
             panic!("acceptance");
         };
         let prime_to_commit = primed_at.elapsed();
