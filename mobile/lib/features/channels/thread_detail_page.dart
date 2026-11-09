@@ -116,6 +116,11 @@ class ThreadDetailPage extends HookConsumerWidget {
     // signing identity instead of freezing that incomplete route snapshot.
     final currentPubkey =
         ref.watch(currentPubkeyProvider) ?? this.currentPubkey;
+    // A Solo chat's threads are read-only: its agents answer at top level.
+    final canReply =
+        isMember &&
+        !isArchived &&
+        ref.watch(channelStartsThreadsProvider(channelId));
     final appView = View.of(context);
     final composerDockHeight = useState(0.0);
     final composerFocusNode = useFocusNode();
@@ -348,8 +353,7 @@ class ThreadDetailPage extends HookConsumerWidget {
     );
 
     bool threadTailIsVisible() {
-      if (isMember &&
-          !isArchived &&
+      if (canReply &&
           (!viewportHeight.isFinite ||
               viewportHeight <= 0 ||
               composerDockHeight.value <= 0)) {
@@ -656,7 +660,7 @@ class ThreadDetailPage extends HookConsumerWidget {
         previousReplyCount.value = replies.length;
         return null;
       }
-      if (isMember && !isArchived && composerDockHeight.value <= 0) {
+      if (canReply && composerDockHeight.value <= 0) {
         return null;
       }
       if (!initialTailSettle.isComplete) {
@@ -1059,7 +1063,7 @@ class ThreadDetailPage extends HookConsumerWidget {
               ),
             ],
           ),
-          if (isMember && !isArchived)
+          if (canReply)
             AndroidImeLift(
               child: Align(
                 alignment: Alignment.bottomCenter,
