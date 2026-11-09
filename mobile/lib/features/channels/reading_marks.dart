@@ -22,16 +22,13 @@ const readingDwell = Duration(milliseconds: 300);
 ///   `activity:<channel>` and a thread writes `thread-activity:<root>`. These
 ///   catch-up marks read ordinary messages and that thread's replies. They do
 ///   not read mentions, broadcasts or DMs.
-/// - The same channel catch-up also gives each loaded top-level mention and
-///   broadcast through the bottom row its own `msg:` mark (in a [flat]
-///   timeline, each mention through it, replies included), at most the newest
-///   [catchUpMessageMarkLimit], so a mention taller than the screen is still
-///   read. Messages the reader marked unread keep that intent.
 /// - Unlike `buzz-app`, the newest message itself is read at the live bottom,
-///   in a thread too, so a reply taller than the screen is read at its end.
-/// - Each readable message (see [isReadableRow]) gets its own `msg:` mark unless its own mark,
-///   the channel mark, or (for an ordinary top-level message) `activity:`
-///   already reads it. A thread mark never counts here: a reply finds its
+///   in a thread too, so one taller than the screen is read at its end.
+///   Mentions above it are read only on their own, never by reaching the
+///   bottom.
+/// - Each readable message (see [isReadableRow]) gets its own `msg:` mark
+///   unless its own mark, the channel mark, or (for an ordinary top-level
+///   message) `activity:` already reads it. A thread mark never counts here: a reply finds its
 ///   thread only while the root is loaded, so `buzz-app` keeps reply marks.
 ///   Unlike `buzz-app`, the message a link opened is readable once any part
 ///   of it shows, since a phone often cannot fit a long one.
@@ -45,7 +42,7 @@ const readingDwell = Duration(milliseconds: 300);
 /// bottom of the list; otherwise null. Set [threadRootId] when reading a
 /// thread, and [isRootThread] when its head is the thread root rather than a
 /// nested reply. Set [flat] for a channel timeline that shows replies inline,
-/// as a Solo chat does. [now] is the current Unix time in seconds; it defaults to
+/// as a Solo chat does, so its newest reply is the bottom. [now] is the current Unix time in seconds; it defaults to
 /// the clock. The result maps each read-state context to its new time.
 Map<String, int> readingMarks({
   required ReadStateState readState,
@@ -110,17 +107,6 @@ Map<String, int> readingMarks({
       now: now ?? DateTime.now().millisecondsSinceEpoch ~/ 1000,
     );
     if (catchUp != null) marks[catchUp.key] = catchUp.value;
-    if (threadRootId == null && !isDm && self != null) {
-      final attention = [
-        for (final message in loaded)
-          if (message.createdAt <= liveBottom.createdAt &&
-              (flat || message.parentId == null || _isBroadcast(message)) &&
-              isHighPriorityEvent(message.tags, self) &&
-              needsMark(message))
-            message,
-      ]..sort((a, b) => b.createdAt.compareTo(a.createdAt));
-      attention.take(catchUpMessageMarkLimit).forEach(markMessage);
-    }
   }
   // The newest row is read once its end shows at the live bottom, even when
   // it is taller than the screen and never fills it, as at the end of a thread.
@@ -129,10 +115,6 @@ Map<String, int> readingMarks({
   visible.forEach(markMessage);
   return marks;
 }
-
-/// The most mentions and broadcasts one channel catch-up marks, as in
-/// `buzz-app`.
-const catchUpMessageMarkLimit = 128;
 
 /// Whether a row at [position] counts as read: it lies inside the reading
 /// area from [start] to [end], or it is taller than that area and covers all

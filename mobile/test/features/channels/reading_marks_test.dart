@@ -210,9 +210,9 @@ void main() {
       });
     });
 
-    test('catch-up marks unseen top-level mentions and broadcasts', () {
-      // A mention taller than the screen is never fully visible, so the
-      // bottom catch-up reads it, as `buzz-app` does.
+    test('the bottom does not read mentions above it', () {
+      // Only a mention that showed is read. Reaching the bottom past one that
+      // never filled the screen leaves it unread.
       final mention = _msg(
         'm',
         100,
@@ -230,86 +230,44 @@ void main() {
           ['p', _self],
         ],
       );
-      final reply = _msg(
-        'r',
-        120,
-        parentId: 'root',
-        rootId: 'root',
-        tags: const [
-          ['p', _self],
-        ],
-      );
-      final marked = _msg(
-        'marked',
-        130,
-        tags: const [
-          ['p', _self],
-        ],
-      );
-      final read = _msg(
-        'read',
-        140,
-        tags: const [
-          ['p', _self],
-        ],
-      );
       final b = _msg('b', 200);
-      expect(
-        _marks(
-          readState: _state({'msg:read': 140}, {'msg:marked': _channel}),
-          loaded: [mention, broadcast, reply, marked, read, b],
-          visible: [b],
-          bottom: b,
-        ),
-        {'activity:$_channel': 200, 'msg:m': 100, 'msg:bc': 110},
-      );
+      expect(_marks(loaded: [mention, broadcast, b], visible: [b], bottom: b), {
+        'activity:$_channel': 200,
+      });
     });
 
-    test('catch-up marks mentions even when activity already covers it', () {
+    test('the newest message is read at the bottom even when not visible', () {
+      // A mention taller than the screen shows only its end at the bottom.
       final mention = _msg(
         'm',
-        100,
+        200,
         tags: const [
           ['p', _self],
         ],
       );
-      final b = _msg('b', 200);
       expect(
         _marks(
-          readState: _state({'activity:$_channel': 200}),
-          loaded: [mention, b],
-          visible: [b],
-          bottom: b,
+          readState: _state(const {}, {'msg:forced': _channel}),
+          loaded: [_msg('a', 100), mention],
+          bottom: mention,
         ),
-        {'msg:m': 100},
+        {'activity:$_channel': 200, 'msg:m': 200},
       );
-    });
-
-    test('catch-up marks at most the newest $catchUpMessageMarkLimit '
-        'unread mentions', () {
-      final mentions = [
-        for (var i = 0; i < catchUpMessageMarkLimit + 2; i++)
-          _msg(
-            'm$i',
-            100 + i,
-            tags: const [
-              ['p', _self],
-            ],
-          ),
-      ];
-      final b = _msg('b', 1000);
-      final first = _marks(loaded: [...mentions, b], visible: [b], bottom: b);
-      expect(first.keys.where((key) => key.startsWith('msg:')), hasLength(128));
-      expect(first.containsKey('msg:m0'), isFalse);
-      expect(first.containsKey('msg:m1'), isFalse);
-
-      final second = _marks(
-        readState: _state(first),
-        loaded: [...mentions, b],
-        visible: [b],
-        bottom: b,
+      final forced = _msg(
+        'forced',
+        200,
+        tags: const [
+          ['p', _self],
+        ],
       );
-      expect(second, {'msg:m0': 100, 'msg:m1': 101});
+      expect(
+        _marks(
+          readState: _state(const {}, {'msg:forced': _channel}),
+          loaded: [forced],
+          bottom: forced,
+        ),
+        {'activity:$_channel': 200},
+      );
     });
 
     test('catch-up does not mark a mention away from the live bottom', () {
@@ -327,7 +285,7 @@ void main() {
       });
     });
 
-    test('a flat timeline catches up inline reply mentions', () {
+    test('a flat timeline reads only its newest inline reply', () {
       final reply = _msg(
         'r',
         120,
@@ -338,20 +296,20 @@ void main() {
         ],
       );
       final b = _msg('b', 200, parentId: 'root', rootId: 'root');
-      expect(
-        readingMarks(
-          readState: _state(),
-          channelId: _channel,
-          isDm: false,
-          currentPubkey: _self,
-          loaded: [reply, b],
-          visible: [b],
-          bottom: b,
-          flat: true,
-          now: 10000,
-        ),
-        {'activity:$_channel': 200, 'msg:r': 120, 'msg:b': 200},
+      Map<String, int> marks(TimelineMessage bottom) => readingMarks(
+        readState: _state(),
+        channelId: _channel,
+        isDm: false,
+        currentPubkey: _self,
+        loaded: [reply, b],
+        visible: const [],
+        bottom: bottom,
+        flat: true,
+        now: 10000,
       );
+      expect(marks(b), {'activity:$_channel': 200, 'msg:b': 200});
+      // A newer inline reply means the bottom is not live.
+      expect(marks(reply), isEmpty);
     });
 
     test('away from the bottom, visible unread rows get message marks', () {

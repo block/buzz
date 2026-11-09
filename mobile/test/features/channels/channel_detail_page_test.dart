@@ -2831,7 +2831,7 @@ void main() {
     });
 
     testWidgets('reading the bottom of an archived Solo chat reads a tall '
-        'mention', (tester) async {
+        'newest mention', (tester) async {
       final readState = _SynchronousReadStateNotifier(
         const ReadStateState(
           isReady: true,
@@ -2863,12 +2863,6 @@ void main() {
             ['p', 'self'],
           ],
         ),
-        _textMsg(
-          id: 'latest',
-          pubkey: 'alice',
-          content: 'Latest',
-          createdAt: 1200,
-        ),
       ];
 
       await tester.pumpWidget(
@@ -2888,8 +2882,10 @@ void main() {
         find.text('This channel is archived and read-only on mobile.'),
         findsOneWidget,
       );
+      // Only its end shows at the bottom, so it neither fits nor fills the
+      // screen; being the newest message reads it.
       expect(readState.markedContexts, {
-        'activity:$_channelId': 1200,
+        'activity:$_channelId': 1100,
         'msg:tall': 1100,
       });
       expect(tester.takeException(), isNull);
@@ -2929,7 +2925,7 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      readState.forgetMarks();
+      readState.markedContexts.clear();
 
       final messageList = find.byKey(const ValueKey('channel-message-list'));
       tester
@@ -2998,8 +2994,8 @@ void main() {
       expect(readState.markedContexts, {'msg:tall': 1100});
     });
 
-    testWidgets('reading the bottom of a Solo chat reads an inline reply '
-        'mention', (tester) async {
+    testWidgets('reading the bottom of a Solo chat reads a tall newest '
+        'inline reply mention', (tester) async {
       final readState = _SynchronousReadStateNotifier(
         const ReadStateState(
           isReady: true,
@@ -3036,15 +3032,6 @@ void main() {
           extraTags: [
             ['e', rootId, '', 'reply'],
             ['p', 'self'],
-          ],
-        ),
-        _textMsg(
-          id: 'latest',
-          pubkey: 'bob',
-          content: 'Latest',
-          createdAt: 1200,
-          extraTags: [
-            ['e', rootId, '', 'reply'],
           ],
         ),
       ];
@@ -3754,9 +3741,8 @@ void main() {
           context: messageListElement,
           direction: ScrollDirection.reverse,
         ).dispatch(messageListElement);
-        // Settling at the bottom catches up every mention; forget those
-        // marks so only the jump's reads count.
-        readState.forgetMarks();
+        // Settling can already complete the read dwell; record the whole jump.
+        readState.markedContexts.clear();
         tester
             .widget<ScrollablePositionedList>(messageList)
             .itemScrollController!
@@ -19571,11 +19557,6 @@ class _SynchronousReadStateNotifier extends ReadStateNotifier {
   }) {
     markedContexts[contextId] = unixTimestamp;
     state = state.copyWithContext(contextId, unixTimestamp);
-  }
-
-  void forgetMarks() {
-    markedContexts.clear();
-    state = _initialState;
   }
 
   final List<String> clearedForcedContexts = [];
