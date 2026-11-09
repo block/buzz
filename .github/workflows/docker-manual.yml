@@ -180,13 +180,15 @@ jobs:
           jq -n --arg image "$pinned" --arg tag "$image" --arg digest "$merged_digest" \
             --arg sha "$SOURCE_SHA" --arg source "$source_url" --argjson platforms "$runtime_digests" \
             '{image:$image, tag:$tag, digest:$digest, source_sha:$sha, source_url:$source,
-              platforms:$platforms, ci_qualification:"skipped", status:"registry-verified"}' \
+              platforms:$platforms, deployment_tag:("sha-" + $sha[0:7]),
+              ci_qualification:"skipped", status:"registry-verified"}' \
             > "$RUNNER_TEMP/manual-image.json"
           {
             echo '## Manual relay image published to GHCR'
             echo
             echo "Source commit: $SOURCE_SHA"
-            echo "Tag: $image"
+            echo "Registry tag: $image"
+            echo "Deployment metadata tag: $(jq -r .deployment_tag "$RUNNER_TEMP/manual-image.json")"
             echo "Digest: $(jq -r .digest "$RUNNER_TEMP/manual-image.json")"
             echo 'Platforms: linux/amd64, linux/arm64'
             echo 'CI qualification was skipped. No deployment was started.'
