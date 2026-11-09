@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:buzz/shared/hosted/builderlab_account.dart';
 import 'package:buzz/shared/hosted/known_communities_sync.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -170,6 +171,9 @@ class _Fixture {
 }
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+  setUp(() => FlutterSecureStorage.setMockInitialValues({}));
+
   group('KnownCommunitiesSyncState', () {
     const a = 'wss://a.communities.example';
     const b = 'wss://b.communities.example';
@@ -527,6 +531,154 @@ void main() {
       expect(f.account.sent('add'), isEmpty);
       expect((await f.state()).known, containsAll([one, two]));
     });
+
+    test('a destination this identity alone cannot join does not hold up the '
+        'ones after it and parks once it keeps being refused; one joined '
+        'meanwhile is done without admission', () async {
+      final f = _Fixture(canAdmit: false);
+      addTearDown(f.dispose);
+      f.account.rows.addAll([one, two, three]);
+      f.account.subject.value = 'me';
+      f.sync.start();
+      await f.settle();
+      expect(f.admissions, isEmpty);
+      expect(f.sync.hasDeferredJoins, isTrue);
+      // The picker joined the third while the flow owned the identity; the
+      // first is saved here under another key (or its relay refuses this
+      // identity), which is no reason to leave the second waiting.
+      f.memberships.add(three);
+      f.admissionFailures[one] = [
+        const KnownCommunityAdmissionDenied(),
+        const KnownCommunityAdmissionDenied(),
+        const KnownCommunityAdmissionDenied(),
+      ];
+      f.canAdmit = true;
+      f.sync.kick();
+      await f.settle();
+      expect(f.admissions, [one, two]);
+      expect(f.memberships, [three, two]);
+      // The refused one waits for a trigger, not a timer, and each trigger
+      // counts toward parking it for this sign-in.
+      expect(f.sync.hasDeferredJoins, isTrue);
+      expect(f.timers, isEmpty);
+      f.sync.kick();
+      await f.settle();
+      f.sync.kick();
+      await f.settle();
+      expect(f.admissions, [one, two, one, one]);
+      expect(f.sync.parked, {one});
+      expect(f.sync.hasDeferredJoins, isFalse);
+      f.sync.kick();
+      await f.settle();
+      expect(f.admissions, hasLength(4));
+    });
+
+    test('destinations the user left unchosen in the picker are not joined '
+        'this sign-in, whether listed already or later', () async {
+      final f = _Fixture(canAdmit: false);
+      addTearDown(f.dispose);
+      f.account.rows.addAll([one, two, three]);
+      f.sync.start();
+      // Signed out, a decline records nothing.
+      f.sync.decline([two]);
+      f.account.subject.value = 'me';
+      // Declined before the list answers: the list does not queue it.
+      f.sync.decline(['wss://Three.communities.example/']);
+      await f.settle();
+      expect(f.sync.hasDeferredJoins, isTrue);
+      // Declined after it was queued: withdrawn.
+      f.sync.decline([two, 'not a relay']);
+      f.canAdmit = true;
+      f.sync.kick();
+      await f.settle();
+      expect(f.admissions, [one]);
+      expect(f.sync.parked, {two, three});
+      expect(f.sync.hasDeferredJoins, isFalse);
+      // The next sign-in lists them again.
+      f.account.subject.value = null;
+      f.account.subject.value = 'me';
+      await f.settle();
+      expect(f.admissions, [one, two, three]);
+    });
+
+    test(
+      'through the real client, a client error the service did not name '
+      'parks the intent instead of retrying, and a named forbidden halts',
+      () async {
+        http.Response Function() answerAdd = () => http.Response('{}', 410);
+        final expiry = DateTime.now()
+            .toUtc()
+            .add(const Duration(days: 1))
+            .toIso8601String();
+        final adds = <http.Request>[];
+        final account = BuilderlabAccountClient(
+          storage: FakeSecureStorage(),
+          httpClient: MockClient((request) async {
+            final path = request.url.path;
+            if (path.endsWith('/exchange')) {
+              return http.Response(
+                jsonEncode({'session_credential': 's', 'expires_at': expiry}),
+                200,
+              );
+            }
+            if (path.endsWith('/me')) {
+              return http.Response(
+                jsonEncode({'subject': 'me', 'expires_at': expiry}),
+                200,
+              );
+            }
+            if (path.endsWith('/known-communities/list')) {
+              return http.Response('{}', 200);
+            }
+            if (path.endsWith('/known-communities/add')) {
+              adds.add(request);
+              return answerAdd();
+            }
+            fail('unexpected request $path');
+          }),
+        );
+        addTearDown(account.dispose);
+        final outbox = KnownCommunitiesOutbox(storage: FakeSecureStorage());
+        addTearDown(outbox.dispose);
+        final timers = <Timer>[];
+        final sync = KnownCommunitiesSync(
+          account: account,
+          outbox: outbox,
+          client: KnownCommunitiesClient(account),
+          memberships: () async => [one],
+          admit: (_, _, _) async {},
+          timer: (_, wake) {
+            final timer = _Timer(wake);
+            timers.add(timer);
+            return timer;
+          },
+        );
+        addTearDown(sync.dispose);
+        Future<void> settle() async {
+          for (var i = 0; i < 40; i++) {
+            await Future<void>.delayed(Duration.zero);
+          }
+        }
+
+        await account.exchange(code: 'code', verifier: 'v' * 43);
+        sync.start();
+        await settle();
+        expect(adds, hasLength(1));
+        expect(sync.parked, {'+$one'});
+        expect(sync.halted, isFalse);
+        expect(timers, isEmpty);
+        expect((await outbox.read()).outbox, hasLength(1));
+        // A success whose body names forbidden stops the sync like a 403.
+        answerAdd = () =>
+            http.Response(jsonEncode({'error': 'forbidden'}), 200);
+        await account.clearLocalSession();
+        await account.exchange(code: 'code', verifier: 'v' * 43);
+        await settle();
+        expect(adds, hasLength(2));
+        expect(sync.halted, isTrue);
+        expect(timers, isEmpty);
+      },
+    );
   });
 }
 

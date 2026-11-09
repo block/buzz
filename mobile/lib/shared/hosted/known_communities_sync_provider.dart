@@ -24,9 +24,13 @@ final knownCommunitiesSyncProvider = Provider<KnownCommunitiesSync?>(
 );
 
 /// Wires the sync to the account, the saved communities, the hosted flow's
-/// admission (sharing its relay [probe] seam) and the app lifecycle, then
-/// starts it. The flow's own identity work must not interleave with a
-/// background join, so joins wait until the flow is idle or complete.
+/// admission (sharing its relay [probe] seam), the community entry surface
+/// and the app lifecycle, then starts it. The flow's own identity work must
+/// not interleave with a background join, so joins wait until the flow is
+/// idle or complete; what the user leaves unchosen in the flow's picker is
+/// declined for this sign-in. A join that would open the first community
+/// does so only while the entry surface is idle; otherwise the community
+/// opens once the surface is idle again.
 KnownCommunitiesSync createKnownCommunitiesSync(
   Ref ref, {
   Future<void> Function(Community)? probe,
@@ -45,6 +49,8 @@ KnownCommunitiesSync createKnownCommunitiesSync(
   bool settled() =>
       flow.stage == HostedFlowStage.idle ||
       flow.stage == HostedFlowStage.complete;
+  // A join made while the entry surface was busy left no community open.
+  var openingDeferred = false;
   final sync = KnownCommunitiesSync(
     account: account,
     outbox: ref.read(knownCommunitiesOutboxProvider),
@@ -62,6 +68,8 @@ KnownCommunitiesSync createKnownCommunitiesSync(
       store: store,
       admission: admission,
       isCurrent: isCurrent,
+      canOpen: () => ref.read(communityEntryIdleProvider),
+      onOpeningDeferred: () => openingDeferred = true,
     ),
     timer: timer,
     maxBackoff: maxBackoff,
@@ -75,10 +83,23 @@ KnownCommunitiesSync createKnownCommunitiesSync(
   }
 
   flow.addListener(onFlow);
+  flow.onCommunitiesDeclined = sync.decline;
+  ref.listen(communityEntryIdleProvider, (_, idle) {
+    if (!idle || !openingDeferred) return;
+    openingDeferred = false;
+    unawaited(
+      openFirstSavedCommunity(ref).catchError((Object error) {
+        debugPrint('Known-communities sync could not open a community: $error');
+      }),
+    );
+  });
   final lifecycle = AppLifecycleListener(onResume: sync.kick);
   sync.start();
   ref.onDispose(() {
     flow.removeListener(onFlow);
+    if (identical(flow.onCommunitiesDeclined, sync.decline)) {
+      flow.onCommunitiesDeclined = null;
+    }
     lifecycle.dispose();
     sync.dispose();
     admission.dispose();
@@ -86,11 +107,27 @@ KnownCommunitiesSync createKnownCommunitiesSync(
   return sync;
 }
 
+/// Opens the first saved community when none is open, as a join made while
+/// the entry surface was busy left it. Nothing happens once one is open.
+Future<void> openFirstSavedCommunity(Ref ref) async {
+  final storage = ref.read(communityStorageProvider);
+  if (await storage.loadActiveId() != null) return;
+  final saved = await storage.loadAll();
+  if (saved.isEmpty) return;
+  await ref
+      .read(communityListProvider.notifier)
+      .switchCommunity(saved.first.id);
+}
+
 /// Joins a listed destination with the account's set-up identity, through the
 /// same admission and persistence as an explicit Add, without the profile
-/// prompt. It becomes the active community only when none is. An identity
-/// that is not ready, or a saved community under another key, waits for the
-/// next trigger ([KnownCommunitiesNotReady]); relay failures propagate.
+/// prompt. It becomes the open community only when none is and [canOpen]
+/// holds (the entry surface is idle); otherwise it is saved unopened and
+/// [onOpeningDeferred] is told. An identity that is not ready, or a session
+/// that ended or changed, waits for the next trigger
+/// ([KnownCommunitiesNotReady]); a community saved here under another key,
+/// or a relay that refuses this identity, fails this destination alone
+/// ([KnownCommunityAdmissionDenied]); other relay failures propagate.
 Future<void> admitKnownCommunity(
   Ref ref, {
   required String url,
@@ -98,6 +135,8 @@ Future<void> admitKnownCommunity(
   required AccountIdentityStore store,
   required HostedAdmission admission,
   required bool Function() isCurrent,
+  required bool Function() canOpen,
+  required void Function() onOpeningDeferred,
 }) async {
   final snapshot = await store.forSubject(subject).read();
   if (snapshot == null ||
@@ -119,25 +158,29 @@ Future<void> admitKnownCommunity(
       persist: (community, current) async {
         final activeId = await storage.loadActiveId();
         if (!current()) return;
+        final open = activeId == null && canOpen();
         await ref
             .read(authProvider.notifier)
             .authenticateWithCommunity(
               community,
               shouldContinue: current,
-              activate: activeId == null,
+              activate: open,
             );
+        if (activeId == null && !open && current()) onOpeningDeferred();
       },
       // A listed destination is an Add, never an invite, so there are no
       // starter channels to recover.
       recoverStarterChannels: (_, _) async {},
     );
   } on SavedCommunityIdentityConflict {
-    throw const KnownCommunitiesNotReady();
+    throw const KnownCommunityAdmissionDenied();
   } on AccountIdentityFailure {
     throw const KnownCommunitiesNotReady();
   } on AccountFailure catch (failure) {
+    if (failure == AccountFailure.denied) {
+      throw const KnownCommunityAdmissionDenied();
+    }
     if (const {
-      AccountFailure.denied,
       AccountFailure.differentAccount,
       AccountFailure.signedOut,
       AccountFailure.accountSetupRequired,

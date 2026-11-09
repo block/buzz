@@ -16,6 +16,7 @@ import '../community/community_storage_test.dart' show FakeSecureStorage;
 import 'package:buzz/features/age_gate/age_signal_provider.dart';
 import 'package:buzz/features/home/home_page.dart';
 import 'package:buzz/shared/auth/auth.dart';
+import 'package:buzz/shared/hosted/known_communities_sync.dart';
 import 'package:buzz/shared/push/dev_push_lease.dart';
 import 'package:buzz/shared/push/push_bootstrap.dart';
 import 'package:buzz/shared/push/push_bridge.dart';
@@ -223,6 +224,9 @@ void main() {
           overrides: [
             savedPrefsProvider.overrideWithValue(prefs),
             communityStorageProvider.overrideWithValue(storage),
+            knownCommunitiesOutboxProvider.overrideWithValue(
+              KnownCommunitiesOutbox(storage: FakeSecureStorage()),
+            ),
             communitySnapshotWriterProvider.overrideWithValue((_) async {}),
             authProvider.overrideWith(_Auth.new),
             relaySessionProvider.overrideWith(_Session.new),
