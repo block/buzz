@@ -85,7 +85,7 @@ let t = 0,
   poster = false,
   last = performance.now();
 function fly(time, start, direction, y, pair = false, endY = y) {
-  let phase = (time - start + 16) % 16;
+  const phase = (time - start + 16) % 16;
   if (phase > 2.6) return;
   const u = phase / 2.6,
     x = direction > 0 ? -90 + 1140 * u : 1050 - 1140 * u;
@@ -133,7 +133,7 @@ function loopingBee(time) {
   ctx.fill(bee, "evenodd");
   ctx.restore();
 }
-window.renderAt = function (time) {
+window.renderAt = (time) => {
   const q = ((time % 16) + 16) % 16;
   ctx.fillStyle = "#d7d72e";
   ctx.fillRect(0, 0, 960, 540);
@@ -185,7 +185,7 @@ function savePoster(time) {
   document.querySelector("#poster-image").src = data;
   document.querySelector("#download-poster").href = data;
   document.querySelector("#poster-status").textContent =
-    "Saved poster: " + posterTime.toFixed(2) + "s · 960 × 540";
+    `Saved poster: ${posterTime.toFixed(2)}s · 960 × 540`;
   localStorage.setItem("buzz-invite-poster-time", String(posterTime));
 }
 document.querySelector("#save-poster").onclick = () => {
@@ -233,7 +233,7 @@ setupLogo()
       last = now;
       if (!window.captureMode) renderAt(t);
       document.querySelector("#seek").value = t;
-      document.querySelector("#time").textContent = t.toFixed(1) + " / 16s";
+      document.querySelector("#time").textContent = `${t.toFixed(1)} / 16s`;
       requestAnimationFrame(frame);
     });
   })

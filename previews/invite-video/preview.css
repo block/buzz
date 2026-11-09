@@ -53,7 +53,7 @@ p {
 canvas {
   display: block;
   width: 100%;
-  aspect-ratio: 16/9;
+  aspect-ratio: 16 / 9;
   border-radius: 18px;
   background: #d7d72e;
 }

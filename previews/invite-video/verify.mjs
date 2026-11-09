@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 
@@ -90,6 +90,8 @@ try {
     });
     const png = (data) => Buffer.from(data.split(",")[1], "base64");
     await writeFile(`${root}buzz-invite-poster.png`, png(await frame(0)));
+    // Clear frames from earlier renders so ffmpeg encodes exactly 480.
+    await rm(`${root}.output/frames`, { recursive: true, force: true });
     await mkdir(`${root}.output/frames`, { recursive: true });
     for (let i = 0; i < 480; i++) {
       await writeFile(
