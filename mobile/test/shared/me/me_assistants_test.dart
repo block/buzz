@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'package:buzz/features/channels/dm_voice_agent_provider.dart';
 import 'dart:typed_data';
+import 'package:buzz/shared/agents/owned_agent_directory.dart';
 import 'package:buzz/shared/me/me_assistants.dart';
 import 'package:buzz/shared/me/me_archived_agents.dart';
 import 'package:buzz/shared/me/me_agent_inventory.dart';
@@ -118,7 +119,11 @@ void main() {
     ).toMap(),
   );
 
-  ProviderContainer setup(_Relay relay, {Set<String> archived = const {}}) {
+  ProviderContainer setup(
+    _Relay relay, {
+    Set<String> archived = const {},
+    String? viewer,
+  }) {
     relay.inventory ??= [listing(agent.public)];
     final sync = MeSync(
       relay,
@@ -135,6 +140,7 @@ void main() {
         relaySessionProvider.overrideWith(() => relay),
         meSyncProvider.overrideWithValue(sync),
         meArchivedAgentsProvider.overrideWith((ref) async => archived),
+        if (viewer != null) myPubkeyProvider.overrideWithValue(viewer),
       ],
     );
     addTearDown(container.dispose);
@@ -147,13 +153,19 @@ void main() {
       final relay = _Relay([
         [profile(agent, ownedBy: owner)],
       ], inventory: []);
-      final container = setup(relay);
+      final container = setup(relay, viewer: owner.public);
+      int inventoryReads() => relay.requestedTags
+          .where((filter) => (filter['kinds'] as List).contains(30177))
+          .length;
       final sub = container.listen(ownedCodexVoiceAgentsProvider, (_, _) {});
       addTearDown(sub.close);
       expect(
         await container.read(ownedCodexVoiceAgentsProvider.future),
         isEmpty,
       );
+      // Voice shares the directory mentions already load for the DM.
+      await container.read(ownedAgentDirectoryProvider.future);
+      expect(inventoryReads(), 1);
       for (final record in [
         listing(agent.public, runtime: 'buzz.codex/codex', time: 2),
         listing(agent.public, runtime: 'other/runtime', time: 3),
@@ -171,26 +183,6 @@ void main() {
       }
     },
   );
-
-  test('runtime eligibility uses the newest signed inventory head', () async {
-    final relay = _Relay(
-      [],
-      inventory: [listing(agent.public, runtime: 'buzz.codex/codex')],
-    );
-    final container = setup(relay);
-    final sync = container.read(meSyncProvider);
-    expect(
-      await loadMeAgentInventory(sync, runtime: 'buzz.codex/codex'),
-      contains(agent.public),
-    );
-    relay.inventory!.add(
-      listing(agent.public, runtime: 'buzz.claude/claude', time: 2),
-    );
-    expect(
-      await loadMeAgentInventory(sync, runtime: 'buzz.codex/codex'),
-      isEmpty,
-    );
-  });
 
   test(
     'lists current inventory with verified ownership, name and artwork',
