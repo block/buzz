@@ -1,0 +1,13 @@
+{
+  "name": "buzz-invite-preview",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node verify.mjs",
+    "render": "node verify.mjs --render"
+  },
+  "devDependencies": {
+    "playwright": "1.65.0",
+    "prettier": "3.6.2"
+  }
+}
