@@ -975,8 +975,6 @@ async fn probe_traced(
             span.record("token", entry.token);
             if let Some(gap) = trace.beat_gap {
                 span.record("beat_gap_ms", millis(gap));
-                metrics::histogram!("buzz_db_replica_fence_beat_gap_seconds")
-                    .record(gap.as_secs_f64());
             }
         }
         Err(error) => {
@@ -1123,7 +1121,7 @@ pub async fn run_probe(writer: PgPool, fence: Arc<ReplicaFence>) {
 }
 
 /// How often a run of failed, slow or late beats is logged. Every beat is
-/// still on its span and in the beat-gap histogram; the log only marks the
+/// still on its span; the log only marks the
 /// episode, so a degraded writer cannot turn the probe cadence into a log
 /// flood.
 const PROBE_LOG_INTERVAL: Duration = Duration::from_secs(10);
