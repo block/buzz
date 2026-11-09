@@ -32,8 +32,29 @@ npm run render
 
 Verification starts an isolated localhost server and checks poster selection, PNG export, persistence, loop continuity, mobile overflow and reduced-motion startup. Rendering also rebuilds both committed media files. Temporary captures stay in `.output/`. `PREVIEW_BROWSER` may select another installed Playwright Chromium channel.
 
-## Integration boundary
+## Production invite previews
 
-This PR prepares media and preview tooling. It does not change live invite HTML or deploy the relay. To enable real link previews, serve the media at public absolute HTTPS URLs and add `og:video` (direct MP4), `og:video:type` (`video/mp4`), dimensions, `og:image` (poster), title and description to the initial invite HTML. Keep generic branding on the public preview and never redeem an invite during a crawler fetch. Ship the relay image and verify an actual shared invite in the target clients.
+The production web build includes the approved MP4 and wordmark-only poster at
+`/assets/invite-preview/buzz-invite-loop-v1.mp4` and
+`/assets/invite-preview/buzz-invite-poster-v1.png`. The relay adds Open Graph
+metadata to the initial HTML for `/invite/<code>` only. Previews are generic and
+do not validate or redeem the invite.
+
+Deploy both the updated relay and its web bundle (the relay Docker image includes
+both). The media host comes from the request's resolved community, matching the
+invite link's host. `RELAY_URL` supplies only the `wss`/`ws` TLS posture, mapped to
+`https`/`http`. Unmapped hosts or lookup failures receive no preview metadata.
+Each community host must serve the web bundle without authentication. Use HTTPS
+in production.
+
+After deployment, inspect an invite response with `curl` for `og:video` and
+`og:image`, then fetch both referenced URLs and check that they return MP4/PNG
+content rather than a login page. The video endpoint supports HTTP range
+requests. Share a fresh invite link in Messages to test actual playback; receiving
+apps decide whether to play video or use the poster, and may cache previews.
+
+When replacing approved media, bump the versioned filenames in both
+`web/vite.config.ts` and `crates/buzz-relay/src/invite_preview.rs` to avoid stale
+cached media.
 
 The receiving app chooses playback behavior. The 16-second duration is an animation choice, not an asserted platform limit.
