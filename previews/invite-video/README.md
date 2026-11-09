@@ -41,9 +41,11 @@ metadata to the initial HTML for `/invite/<code>` only. Previews are generic and
 do not validate or redeem the invite.
 
 Deploy both the updated relay and its web bundle (the relay Docker image includes
-both). Set `RELAY_URL` to the publicly reachable canonical relay URL; its
-`wss`/`ws` scheme maps to `https`/`http` for the media URLs. The configured origin
-must serve the web bundle without authentication. Use HTTPS in production.
+both). The media host comes from the request's resolved community, matching the
+invite link's host. `RELAY_URL` supplies only the `wss`/`ws` TLS posture, mapped to
+`https`/`http`. Unmapped hosts or lookup failures receive no preview metadata.
+Each community host must serve the web bundle without authentication. Use HTTPS
+in production.
 
 After deployment, inspect an invite response with `curl` for `og:video` and
 `og:image`, then fetch both referenced URLs and check that they return MP4/PNG

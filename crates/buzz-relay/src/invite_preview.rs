@@ -7,27 +7,40 @@ use axum::{
 use std::path::Path;
 use url::Url;
 
-pub(crate) async fn response(index: &Path, relay_url: &str) -> Response {
+pub(crate) async fn response<R: crate::tenant::HostResolver>(
+    index: &Path,
+    relay_url: &str,
+    resolver: &R,
+    raw_host: &str,
+) -> Response {
     match tokio::fs::read_to_string(index).await {
-        Ok(html) => Html(with_metadata(html, relay_url)).into_response(),
+        Ok(html) => {
+            let tenant = crate::tenant::bind_community(resolver, raw_host).await.ok();
+            Html(with_metadata(html, relay_url, tenant.as_ref())).into_response()
+        }
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
 
-fn with_metadata(html: String, relay_url: &str) -> String {
-    let Ok(mut origin) = Url::parse(relay_url) else {
+fn with_metadata(
+    html: String,
+    relay_url: &str,
+    tenant: Option<&buzz_core::tenant::TenantContext>,
+) -> String {
+    let Some(tenant) = tenant else {
         return html;
     };
-    let scheme = match origin.scheme() {
+    let Ok(relay) = Url::parse(relay_url) else {
+        return html;
+    };
+    let scheme = match relay.scheme() {
         "wss" | "https" => "https",
         "ws" | "http" => "http",
         _ => return html,
     };
-    if origin.set_scheme(scheme).is_err() || origin.host_str().is_none() {
-        return html;
-    }
-    // Use the operator's canonical public origin, never the request Host or token.
-    let origin = origin.origin().ascii_serialization();
+    // The deployment URL supplies TLS posture only. The resolved request host
+    // is authoritative; never advertise a neighboring community's seed host.
+    let origin = format!("{scheme}://{}", tenant.host());
     let origin = origin
         .replace('&', "&amp;")
         .replace('"', "&quot;")
@@ -63,30 +76,68 @@ fn with_metadata(html: String, relay_url: &str) -> String {
 mod tests {
     use super::*;
 
-    #[test]
-    fn canonical_public_media_without_credentials_or_paths() {
-        let document = "<html><head><title>Buzz</title></head><body>app</body></html>";
-        for (relay, expected, secure) in [
-            ("wss://example.org/relay", "https://example.org", true),
-            (
-                "https://user:password@example.org:8443/path?secret=x#fragment",
-                "https://example.org:8443",
-                true,
-            ),
-            ("ws://localhost:8080", "http://localhost:8080", false),
-        ] {
-            let html = with_metadata(document.into(), relay);
-            assert!(html.contains(&format!(
-                "content=\"{expected}/assets/invite-preview/buzz-invite-loop-v1.mp4\""
-            )));
-            assert!(html.contains("buzz-invite-poster-v1.png"));
-            assert_eq!(html.contains("og:video:secure_url"), secure);
-            assert!(!html.contains("password"));
-            assert!(!html.contains("secret"));
-            assert!(html.ends_with("</head><body>app</body></html>"));
+    struct Resolver;
+    impl crate::tenant::HostResolver for Resolver {
+        type Error = ();
+        async fn resolve_host(
+            &self,
+            host: &str,
+        ) -> Result<Option<buzz_core::tenant::CommunityId>, ()> {
+            match host {
+                "alpha.example" | "beta.example:8443" => {
+                    Ok(Some(buzz_core::tenant::CommunityId::from_uuid(
+                        uuid::Uuid::from_u128(if host.starts_with("alpha") { 1 } else { 2 }),
+                    )))
+                }
+                "error.example" => Err(()),
+                _ => Ok(None),
+            }
         }
-        for invalid in ["invalid", "file:///tmp/test", "javascript:alert(1)"] {
-            assert_eq!(with_metadata(document.into(), invalid), document);
+    }
+
+    #[tokio::test]
+    async fn media_uses_only_resolved_request_host_and_fails_closed() {
+        let document = "<html><head><title>Buzz</title></head><body>app</body></html>";
+        let dir = tempfile::tempdir().unwrap();
+        let index = dir.path().join("index.html");
+        std::fs::write(&index, document).unwrap();
+        for relay in [
+            "wss://seed.example/relay",
+            "https://user:password@seed.example/path?secret=x",
+            "ws://localhost:3000",
+        ] {
+            for host in [
+                "ALPHA.example",
+                "beta.example:8443",
+                "unknown.example",
+                "error.example",
+                "",
+            ] {
+                let response = response(&index, relay, &Resolver, host).await;
+                let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                let html = std::str::from_utf8(&bytes).unwrap();
+                if host == "ALPHA.example" || host == "beta.example:8443" {
+                    let scheme = if relay.starts_with("ws://") {
+                        "http"
+                    } else {
+                        "https"
+                    };
+                    let origin = format!("{scheme}://{}", host.to_lowercase());
+                    for file in ["buzz-invite-loop-v1.mp4", "buzz-invite-poster-v1.png"] {
+                        assert!(html.contains(&format!(
+                            "content=\"{origin}/assets/invite-preview/{file}\""
+                        )));
+                    }
+                    assert_eq!(html.contains("og:video:secure_url"), scheme == "https");
+                    assert!(!html.contains("seed.example"));
+                    assert!(!html.contains("password"));
+                    assert!(!html.contains("secret"));
+                } else {
+                    assert_eq!(html, document);
+                }
+            }
         }
     }
 }

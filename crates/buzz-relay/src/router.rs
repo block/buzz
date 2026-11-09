@@ -620,6 +620,11 @@ pub fn build_router(state: Arc<AppState>) -> Router {
                         return Ok(crate::invite_preview::response(
                             &index,
                             &state.config.relay_url,
+                            state.as_ref(),
+                            req.headers()
+                                .get(axum::http::header::HOST)
+                                .and_then(|host| host.to_str().ok())
+                                .unwrap_or(""),
                         )
                         .await);
                     }
@@ -2163,6 +2168,15 @@ mod tests {
             std::fs::write(media_dir.join(name), bytes).unwrap();
         }
         let state = spa_state(admin_dir.path(), web_dir.path()).await;
+        for (host, id) in [("alpha.example", 1), ("beta.example", 2)] {
+            state.tenant_host_cache.insert(
+                host.into(),
+                (
+                    buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::from_u128(id)),
+                    std::time::Instant::now(),
+                ),
+            );
+        }
         // Also exercise the production router over a real HTTP connection.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -2178,6 +2192,7 @@ mod tests {
         let client = reqwest::Client::builder().no_proxy().build().unwrap();
         let fetched = client
             .get(format!("http://{address}/invite/unused-token"))
+            .header("host", "alpha.example")
             .send()
             .await
             .unwrap();
@@ -2194,17 +2209,29 @@ mod tests {
         assert_eq!(fetched.status(), StatusCode::PARTIAL_CONTENT);
         assert_eq!(fetched.bytes().await.unwrap().len(), 32);
         server.abort();
-        let response =
-            spa_response(state.clone(), "untrusted.example", "/invite/unused-token").await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let html = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let html = std::str::from_utf8(&html).unwrap();
-        assert!(html.contains("og:video"));
-        assert!(html.contains("og:image"));
-        assert!(!html.contains("untrusted.example"));
-        assert!(!html.contains("unused-token"));
+        for host in ["alpha.example", "beta.example", ""] {
+            let response = spa_response(state.clone(), host, "/invite/unused-token").await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let html = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let html = std::str::from_utf8(&html).unwrap();
+            if host.is_empty() {
+                assert!(!html.contains("og:video"));
+                assert!(!html.contains("og:image"));
+                continue;
+            }
+            assert!(html.contains(&format!("http://{host}/assets/invite-preview/")));
+            assert!(!html.contains(if host == "alpha.example" {
+                "beta.example"
+            } else {
+                "alpha.example"
+            }));
+            assert!(html.contains("og:video"));
+            assert!(html.contains("og:image"));
+            assert!(!html.contains("untrusted.example"));
+            assert!(!html.contains("unused-token"));
+        }
         for path in ["/repos", "/invite/"] {
             let response = spa_response(state.clone(), "public.example", path).await;
             let body = axum::body::to_bytes(response.into_body(), usize::MAX)
