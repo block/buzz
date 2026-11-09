@@ -585,6 +585,7 @@ extension _ObservedUnreadRecording on ChannelsNotifier {
         highPriority: isHighPriority,
         channelType: channel.channelType,
         isThreadedReply: isThreadedReply,
+        threadReply: isThreadedReply && !channel.isDm ? event : null,
       ),
       _unreadCatchUpLimit,
     );
@@ -594,5 +595,21 @@ extension _ObservedUnreadRecording on ChannelsNotifier {
       _latestObservedByChannel[channel.id] = event.createdAt;
     }
     return true;
+  }
+}
+
+/// Activity projection of the channel unread registry.
+extension ObservedThreadActivity on ChannelsNotifier {
+  /// The same eligible replies that supply channel attention dots. Consumers
+  /// watch [channelsProvider] for changes; this does not fetch extra history.
+  Iterable<NostrEvent> observedThreadReplies(Iterable<Channel> channels) sync* {
+    for (final channel in channels) {
+      if (!channel.isMember || channel.isArchived || channel.isDm) continue;
+      for (final observed
+          in _observedUnreadEventsByChannel[channel.id]?.values ??
+              const <ObservedUnreadEvent>[]) {
+        if (observed.threadReply case final reply?) yield reply;
+      }
+    }
   }
 }
