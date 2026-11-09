@@ -2592,6 +2592,66 @@ async fn lazy_reader_pool_still_spawns_fence_probe() {
     assert!(spawned, "a configured (lazy) reader must spawn the probe");
 }
 
+/// The fence probe must keep beating while every serving writer connection
+/// is checked out. On the serving pool its beat queued behind request
+/// traffic, so under load every pod's newest token aged past the
+/// bounded-read budget and reads spilled onto the saturated writer.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn fence_probe_beats_while_serving_writer_pool_is_exhausted() {
+    let (seed, scratch) = ScratchDb::migrated(&admin_url().await, "fence_own_pool").await;
+    seed.close().await;
+
+    let url = scratch.url().to_owned();
+    let db = Db::new(&DbConfig {
+        database_url: url.clone(),
+        read_database_url: Some(url),
+        max_connections: 1,
+        min_connections: 0,
+        acquire_timeout_secs: 1,
+        ..DbConfig::default()
+    })
+    .await
+    .expect("connect armed Db with one serving writer connection");
+    assert!(
+        db.spawn_fence_probe().await.expect("verification passes"),
+        "a configured reader must spawn the probe"
+    );
+
+    // Hold the serving writer pool's only connection for the whole test.
+    let mut held = db.pool.acquire().await.expect("hold serving connection");
+    let baseline = db.fence().newest().map(|entry| entry.token);
+
+    // Two beats strictly after the hold: one in flight when the hold began
+    // cannot satisfy this on its own.
+    let mut beats = 0;
+    let mut last = baseline;
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while beats < 2 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "probe stopped beating while the serving writer pool was exhausted"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let newest = db.fence().newest().map(|entry| entry.token);
+        if newest > last {
+            beats += 1;
+            last = newest;
+        }
+    }
+
+    // The beats come from the probe's own, identifiable session.
+    let probe_sessions: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pg_stat_activity \
+         WHERE datname = current_database() AND application_name = $1",
+    )
+    .bind(replica_fence::PROBE_APPLICATION_NAME)
+    .fetch_one(&mut *held)
+    .await
+    .expect("count probe sessions");
+    assert_eq!(probe_sessions, 1, "the probe holds exactly one connection");
+}
+
 /// Thread replies: head fetch reads the writer; a FULL cursor page is
 /// served by the replica; an UNDER-limit cursor page (candidate terminal
 /// page) is re-run on the writer so a lagged replica can never truncate
