@@ -231,32 +231,33 @@ kind:9030 add is made by someone else, so the new member's
 `channel_add_policy` applies first, as it would to that actor's kind:9000:
 if it refuses them, no default channel is joined at the add. The claim
 response waits for the joins, and a claimer who disconnects before it
-arrives does not cut them short. A channel that fails to join, or an add the
-member's policy refuses, is logged and counted
-(`buzz_auto_join_failures_total`) and not retried at the roster write: the
-kind:39000 tag is the record a client reconciles against. That includes a
-channel archived or made private while the join runs: the membership write
-decides both again under the channel's locks, so the member is not added and
-nothing is announced.
+arrives does not cut them short. The roster write records this work with
+the roster row, so a channel that fails to join is logged and counted
+(`buzz_auto_join_failures_total`) and the work stays pending: the next claim,
+add or WebSocket AUTH of that member finishes it, each channel once, with the
+persisted actor's `channel_add_policy` asked again as at the add. An add the
+policy refuses completes the work with no joins. A channel archived or made
+private while the join runs is complete for that member: the membership
+write decides both again under the channel's locks, so the member is not
+added and nothing is announced. The kind:39000 tag is the record a client
+reconciles against.
 
 On a community that requires relay membership, a person's WebSocket AUTH
-also enrolls them, after the OK, when they have **no entry evidence since
-their roster row was created**: no membership, active or ended since then,
-in any shared (stream or forum) channel other than a private channel they
-created themselves (see [Landing channel](#landing-channel)). Such a person
-is joined to the landing channel and then to every effective default channel
-they have not been a member of since the roster row was created. This is
-the recovery for a roster write whose joins did not finish, and it is how a
-member added with `buzz-admin add-member` is enrolled: that command writes
-the roster row only, and the person's first AUTH does the joins. A person
-with any such evidence is never joined at AUTH, so a kind:9022 leave stands
-and a reconnect or new device changes nothing; a member whose kind:9030 add
-their `channel_add_policy` refused is enrolled at their first AUTH all the
-same, because an admission join is their own act (as a kind:9021 is) and the
-policy restricts who else may add them. Each channel's write checks its
-membership history again under the channel's lock and is announced only when
-it wrote a row, so two admissions racing each other join and announce once.
-Agents are never enrolled at AUTH.
+also joins them, after the OK, in two ways. They are joined to the landing
+channel when they have **no entry evidence since their roster row was
+created**: no membership, active or ended since then, in any shared (stream
+or forum) channel other than a private channel they created themselves (see
+[Landing channel](#landing-channel)). Then the pending default-channel work
+of their roster write, if any, is finished: each channel's write checks its
+membership history since the roster row was created again under the
+channel's lock and is announced only when it wrote a row, so a kind:9022
+leave since admission stands and two admissions racing each other join and
+announce once. Once that work has finished, no later AUTH joins them to a
+default channel, so a reconnect or new device changes nothing. `buzz-admin
+add-member` writes the roster row only: the person's first AUTH joins them
+to the landing channel and to no default channel. Agents are never joined to
+the landing channel; their pending default-channel work is finished at AUTH
+as a person's is.
 
 A community that does not require relay membership has no roster insert to
 join people at, so there the relay joins a person when it admits their
@@ -432,9 +433,10 @@ joined to it.
   claim or kind:9030 add. A person's AUTH joins them only if they have no
   entry evidence since their roster row was created: no membership, active
   or ended since then, in a shared (stream or forum) channel, other than
-  private channels they created themselves. That recovers an admission whose
-  joins did not finish and enrolls a `buzz-admin add-member` row, and it
-  joins the default channels they have not been in since then too (see
+  private channels they created themselves. That recovers a roster write
+  whose landing join did not finish and enrolls a `buzz-admin add-member`
+  row; the default channels are recovered from the roster write's own
+  pending record, not from this evidence (see
   [Default channels](#default-channels)). After a kind:9031 removal and a
   new roster row, the next admission is a first entry again unless a
   shared-channel membership from before is still active: kind:9031 removes

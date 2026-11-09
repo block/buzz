@@ -3337,6 +3337,27 @@ mod tests {
                 .count()
         }
 
+        /// A roster admission whose default-channel work was recorded but
+        /// never run, as an invite claim leaves it when the relay stops
+        /// before the joins.
+        async fn seed_pending_relay_member(
+            state: &crate::state::AppState,
+            community: buzz_core::tenant::CommunityId,
+            keys: &Keys,
+        ) {
+            let _ = state
+                .db
+                .add_relay_member_with_default_channels(
+                    community,
+                    &keys.public_key().to_hex(),
+                    "member",
+                    "invite",
+                    &state.relay_keypair,
+                )
+                .await
+                .expect("seed pending relay member");
+        }
+
         async fn seed_relay_member(
             state: &crate::state::AppState,
             community: buzz_core::tenant::CommunityId,
@@ -3454,23 +3475,26 @@ mod tests {
         }
 
         /// With a roster, a roster write that did not join the person (here,
-        /// a bare roster insert, as `buzz-admin add-member` makes) is
-        /// recovered at AUTH: the landing channel, then the default channels
-        /// they have not been in since admission. Once they have left both,
-        /// an admission joins nothing; after a kind:9031 removal,
-        /// re-admission is a first entry again and restores both, through
-        /// `put_first_member_since` with the new roster row's `created_at`.
+        /// an admission whose default-channel work was recorded but never
+        /// run) is recovered at AUTH: the landing channel, from the missing
+        /// entry evidence, then the default channels, from the pending
+        /// record. Once they have left both, an admission joins nothing;
+        /// after a kind:9031 removal, re-admission is a first entry again
+        /// and restores both, through the new roster row's `created_at`.
         /// A recovery paused before the default channel's write, while a
         /// racing join (an invite claim) and a leave land, writes nothing:
-        /// the leave stands and the admission adds no second notice.
+        /// the leave stands and the admission adds no second notice. A bare
+        /// roster row, as `buzz-admin add-member` writes, is joined to the
+        /// landing channel only.
         ///
         /// Mutations: use `None` for `admitted_at` in roster mode → the
         /// re-admission joins nothing (RED); drop the roster-mode defaults
         /// recovery → the default channel is not joined (RED); gate the spawn
         /// on `!require_relay_membership` again → nothing is joined (RED);
-        /// recover the defaults with `join_channel_as_self` instead of
-        /// `put_first_member_since` → the leave is undone and a second
-        /// `member_joined` notice appears (RED).
+        /// recover the defaults with `join_channel_as_self` instead of the
+        /// fenced pending write → the leave is undone and a second
+        /// `member_joined` notice appears (RED); drop the pending-record
+        /// check → the bare row is joined to the default channel (RED).
         #[tokio::test]
         #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
         async fn roster_auth_recovers_landing_and_defaults_for_a_first_entry() {
@@ -3483,7 +3507,7 @@ mod tests {
             seed_relay_member(&state, community, &owner, "owner").await;
             let announcements =
                 default_channels(&state, community, &owner, &["announcements"]).await[0];
-            seed_relay_member(&state, community, &person, "member").await;
+            seed_pending_relay_member(&state, community, &person).await;
 
             admit_and_settle(&state, community, &person, "roster-recover", None).await;
             let landing = landing_channel(&state, community).await;
@@ -3521,7 +3545,7 @@ mod tests {
                 .await
                 .map(|write| write.outcome)
                 .expect("kind:9031 removal");
-            seed_relay_member(&state, community, &person, "member").await;
+            seed_pending_relay_member(&state, community, &person).await;
             admit_and_settle(&state, community, &person, "roster-readmitted", None).await;
             assert_eq!(
                 roles("readmitted").await,
@@ -3544,7 +3568,7 @@ mod tests {
                 .await
                 .map(|write| write.outcome)
                 .expect("kind:9031 removal");
-            seed_relay_member(&state, community, &person, "member").await;
+            seed_pending_relay_member(&state, community, &person).await;
             let (done, done_release) = auto_join_done_hook::arm(community);
             let (reached, release) = auto_join_channel_hook::arm(community);
             let (conn, _ctrl) = registered_pending_conn(&state, community, "roster-raced");
@@ -3599,6 +3623,24 @@ mod tests {
                 member_joined_notice_count(&state, community, announcements, &person).await,
                 notices_after_race,
                 "the racing join's notice is the admission's only one"
+            );
+
+            // A bare roster row records no default-channel work, so its first
+            // AUTH joins the landing channel only.
+            let roster_only = Keys::generate();
+            seed_relay_member(&state, community, &roster_only, "member").await;
+            admit_and_settle(&state, community, &roster_only, "roster-only", None).await;
+            assert_eq!(
+                channel_role(&state, community, landing, &roster_only)
+                    .await
+                    .as_deref(),
+                Some("member"),
+                "a bare roster row enters through the landing channel"
+            );
+            assert_eq!(
+                channel_role(&state, community, announcements, &roster_only).await,
+                None,
+                "a bare roster row is not enrolled in default channels"
             );
         }
 
