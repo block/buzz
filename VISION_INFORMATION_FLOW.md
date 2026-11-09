@@ -112,7 +112,7 @@ R depends on where the agent can write, so the owner controls that separately fr
 
 In an open channel with `join_role = member`, a person can write without joining. If an agent could do the same, it could post in a community-wide channel without anyone adding it. So an agent cannot.
 
-An agent can join an open channel by itself, as a guest. That adds only public content to W and nothing to R, so it needs no decision from the owner. The relay checks this locally: the channel is open, the role is guest, and the event is the agent's. The same holds when the relay joins a new community member to the community's default channels: a restricted agent joins them as a guest.
+An agent can join an open channel by itself, as a guest. That adds only public content to W and nothing to R, so it needs no decision from the owner. The relay checks this locally: the channel is open, the role is guest, and the event is the agent's. The same holds for a community's default channels. A restricted agent joins a community only through its owner's add or its own invite claim. Either way, it joins the default channels as a guest.
 
 A guest agent adds to W but never to R. The owner can let the agent read broadly without widening its audience at all.
 
@@ -144,7 +144,7 @@ The owner cannot control who joins someone else's channel. So when the owner mak
 Accepting the rules only means something if the rules stay put. One relay change makes sure they do:
 
 - **Refuse private-to-open visibility changes, with one exception.** Making a private channel open changes the admission rules out from under everyone who joined under the old ones, people included. That is a good rule with or without agents. An admin who wants an open channel can create one.
-  The exception is a channel where nobody but the person opening it was ever a member. Every current and former member must be that person or one of that person's agents, and no restricted agent may have posted there. The relay marks the channel when a restricted agent first posts in it. Opening such a channel, for example a Solo chat, is a one-time disclosure by a person of what that person can already read. After it opens, it is an ordinary open channel: the owner's restricted agents stay guests until the owner raises them.
+  The exception is a channel where no other person was ever a member. Every current and former member must be that person or one of that person's agents. No restricted agent may have posted there, and every restricted agent in it must be a guest; the owner can demote one first. The relay marks the channel when a restricted agent first posts in it. Opening such a channel, for example a Solo chat, is a one-time disclosure by a person of what that person can already read. After it opens, it is an ordinary open channel: the owner's restricted agents stay guests until the owner raises them.
 
 **Later improvement: limit adds to admins.** Every private channel has the same admission rule: any member can add anyone. So making the agent a member of a private channel means trusting every current member's judgment. A later channel setting can limit adds to owners and admins. With it, an owner can choose a private channel where only the admins can grow R, and what the owner accepts becomes trust in the channel's admins. This is not needed for safety, because the owner accepts whatever the admission rules are. It gives the owner a tighter R to choose. The same setting helps announce channels, where it keeps the set of writers under the admins' control.
 
@@ -195,7 +195,7 @@ The owner is whichever key signed the agent's NIP-OA attestation. It need not be
 1. ✅ Announce channels: guests are read-only everywhere ([#8143](https://github.com/block/buzz/pull/8143)).
 2. Add the disclosure level, with every agent unrestricted. Owners can't choose restricted until steps 3 to 5 are live; the relay pieces can ship separately before that.
 3. For restricted agents: only the owner can add the agent to a channel or open a DM that includes it. The agent can join open channels by itself, as a guest only. The agent is a guest by default. Only the owner raises its role. Anyone with role authority can lower it. The agent creates only private channels, and adds only its owner to them. Default-channel joins make it a guest.
-4. Refuse private-to-open visibility changes, except in a channel where every current and former member is the person opening it or one of that person's agents, and no restricted agent has posted there.
+4. Refuse private-to-open visibility changes, except in a channel where every current and former member is the person opening it or one of that person's agents, no restricted agent has posted there, and every restricted agent in it is a guest.
 5. For restricted agents: refuse events that the relay would store outside a channel, after checking what agents publish now, and require profile approval.
 6. Decide the default disclosure level for new agents.
 
