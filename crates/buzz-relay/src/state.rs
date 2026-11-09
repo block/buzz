@@ -56,6 +56,18 @@ pub(crate) enum CommunityDisconnectReason {
 }
 
 impl CommunityDisconnectReason {
+    /// The access log `close_reason` of a connection this reason closed.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::CommunityArchived => "community_archived",
+            Self::CommunityDeleted => "community_deleted",
+            Self::AuthPolicyUpgraded => "auth_policy_upgraded",
+            Self::AuthorizationDenied => "authorization_denied",
+            Self::AccessRevoked => "access_revoked",
+            Self::Removed => "removed",
+        }
+    }
+
     pub(crate) fn close_message(self) -> WsMessage {
         match self {
             Self::CommunityArchived => WsMessage::Close(Some(axum::extract::ws::CloseFrame {

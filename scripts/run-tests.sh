@@ -326,6 +326,11 @@ run_unit_tests() {
       api::bridge::postgres_tests::moderation_read_audit_query_bearing_nip98_event_verifies \
       api::bridge::postgres_tests::moderation_read_restricted_no_query_still_verifies \
       connection::tests::aborting_lifecycle_owner_is_drop_safe \
+      connection::tests::missed_pongs_close_with_their_reason_and_count \
+      connection::tests::client_reply_to_a_jittered_restart_closes_as_shutdown \
+      connection::tests::client_close_racing_a_policy_disconnect_keeps_the_policy_reason \
+      connection::tests::server_close_reason_ranks_shutdown_policy_then_cancellation \
+      connection::tests::auth_timeout_after_a_rejected_auth_closes_as_auth_failed \
       connection::tests::shutdown_terminalizes_auth_stalled_on_database_before_late_success \
       connection::terminal_close_delivery_tests::upgrade_would_deny_line_without_auth_logs_absent_at_close \
       handlers::event::tests::observer_owner_cache_is_scoped_to_community \

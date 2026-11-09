@@ -1057,6 +1057,8 @@ where
 /// after a normal close, a refusal during startup, or the handler being
 /// dropped. `pubkey` is the identity it logged in as, if any, with its
 /// `method` and `pubkey_verified`; the login also wrote its own `auth` line.
+/// `close_reason` is why the connection ended: the first reason recorded wins,
+/// else `refused` for a refusal, else `handler_dropped`.
 pub(crate) struct CloseLine {
     conn_id: Uuid,
     community: CommunityId,
@@ -1065,6 +1067,7 @@ pub(crate) struct CloseLine {
     opened: std::time::Instant,
     pubkey: std::sync::Mutex<Option<PublicKey>>,
     refused: std::sync::OnceLock<&'static str>,
+    close_reason: std::sync::OnceLock<&'static str>,
     pub(crate) queued: std::sync::Arc<QueuedTotals>,
     pub(crate) refusals: std::sync::Arc<RefusalBudget>,
 }
@@ -1085,6 +1088,7 @@ impl CloseLine {
             opened: std::time::Instant::now(),
             pubkey: std::sync::Mutex::new(None),
             refused: std::sync::OnceLock::new(),
+            close_reason: std::sync::OnceLock::new(),
             queued: Default::default(),
             refusals: Default::default(),
         })
@@ -1102,6 +1106,12 @@ impl CloseLine {
     /// Record why the relay refused the connection before serving it.
     pub(crate) fn refused(&self, reason: &'static str) {
         let _ = self.refused.set(reason);
+    }
+
+    /// Record why the connection ended. Only the first reason is kept, so the
+    /// cause recorded before cancelling outranks the generic one cleanup adds.
+    pub(crate) fn closed(&self, reason: &'static str) {
+        let _ = self.close_reason.set(reason);
     }
 }
 
@@ -1121,6 +1131,12 @@ impl Drop for CloseLine {
             peer_addr = %self.peer_addr,
             client_ip = self.client_ip.map(tracing::field::display),
             refused = self.refused.get().copied(),
+            close_reason = self
+                .close_reason
+                .get()
+                .copied()
+                .or(self.refused.get().map(|_| "refused"))
+                .unwrap_or("handler_dropped"),
             pubkey = pubkey.as_deref(),
             method = pubkey.is_some().then_some(AuthMethod::Nip42.as_str()),
             pubkey_verified = pubkey.is_some().then_some(true),
@@ -1807,6 +1823,36 @@ pub(crate) mod tests {
         assert_eq!(logged, 16);
         assert_eq!(RefusalBudget::close(&budget.reads), 4);
         assert_eq!(RefusalBudget::close(&budget.auths), 0);
+    }
+
+    /// The first recorded close reason wins; a refusal with none closes as
+    /// `refused`, and a line dropped with neither as `handler_dropped`.
+    #[test]
+    fn close_line_keeps_the_first_reason_and_defaults_refusals() {
+        let open = || {
+            CloseLine::open(
+                Uuid::nil(),
+                CommunityId::from_uuid(Uuid::nil()),
+                "127.0.0.1:1".parse().unwrap(),
+                None,
+            )
+        };
+        let ((), out) = capture(|| {
+            let close = open();
+            close.closed("auth_timeout");
+            close.closed("server_closed");
+            drop(close);
+            let refused = open();
+            refused.refused("connection_limit");
+            drop(refused);
+            drop(open());
+        });
+        let reasons: Vec<_> = out
+            .lines()
+            .iter()
+            .map(|l| l["close_reason"].clone())
+            .collect();
+        assert_eq!(reasons, ["auth_timeout", "refused", "handler_dropped"]);
     }
 
     /// Refusals charged after `close` was written each log their own line,
