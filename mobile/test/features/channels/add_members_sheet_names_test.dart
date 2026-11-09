@@ -54,6 +54,7 @@ class _Actions extends Fake implements ChannelActions {
     required String channelId,
     required List<String> pubkeys,
     String role = 'member',
+    Set<String> agentPubkeys = const {},
   }) async => calls.add(pubkeys);
 }
 

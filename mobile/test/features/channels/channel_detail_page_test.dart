@@ -19434,6 +19434,7 @@ class _FakeChannelActions extends ChannelActions {
     required String channelId,
     required List<String> pubkeys,
     String role = 'member',
+    Set<String> agentPubkeys = const {},
   }) async {
     await onAddMembers?.call(channelId, pubkeys);
   }

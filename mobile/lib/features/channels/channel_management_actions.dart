@@ -166,10 +166,15 @@ class ChannelActions {
     return channel;
   }
 
+  /// Adds [pubkeys] to the channel with [role]. Pubkeys in [agentPubkeys] are
+  /// added with the `bot` role instead: clients read that role as the signal
+  /// that a member is an agent, as the Desktop add flow and the compose bar's
+  /// mention-add already record it.
   Future<void> addMembers({
     required String channelId,
     required List<String> pubkeys,
     String role = 'member',
+    Set<String> agentPubkeys = const {},
   }) async {
     final normalizedRole = role.trim();
     if (normalizedRole.isEmpty) {
@@ -178,6 +183,9 @@ class ChannelActions {
     final normalizedPubkeys = {
       for (final pubkey in pubkeys)
         if (pubkey.trim().isNotEmpty) pubkey.trim().toLowerCase(),
+    };
+    final normalizedAgents = {
+      for (final pubkey in agentPubkeys) pubkey.trim().toLowerCase(),
     };
     _ensureCommunityValid();
     // Per-pubkey failures are collected rather than thrown on the spot: one
@@ -195,7 +203,10 @@ class ChannelActions {
           tags: [
             ['h', channelId],
             ['p', pubkey],
-            ['role', normalizedRole],
+            [
+              'role',
+              normalizedAgents.contains(pubkey) ? 'bot' : normalizedRole,
+            ],
           ],
         );
       } catch (error) {

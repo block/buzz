@@ -186,6 +186,10 @@ class AddChannelMembersSheet extends HookConsumerWidget {
         await actions.addMembers(
           channelId: channelId,
           pubkeys: submittedUsers.map((user) => user.pubkey).toList(),
+          agentPubkeys: {
+            for (final user in submittedUsers)
+              if (user.isAgent) user.pubkey,
+          },
         );
         if (context.mounted) Navigator.of(context).pop(true);
       } on AddMembersException catch (error) {
