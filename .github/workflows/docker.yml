@@ -27,15 +27,14 @@ jobs:
       sha: ${{ steps.source.outputs.sha }}
       tag: ${{ steps.source.outputs.tag }}
     steps:
-      - name: Require workflow from main in block/buzz
+      - name: Require block/buzz repository
         env:
-          DISPATCH_REF: ${{ github.ref }}
           REPOSITORY: ${{ github.repository }}
         shell: bash
         run: |
           set -euo pipefail
-          [[ "$REPOSITORY" == block/buzz && "$DISPATCH_REF" == refs/heads/main ]] || {
-            echo '::error::Run the workflow from main in block/buzz; use source_ref to select code.'
+          [[ "$REPOSITORY" == block/buzz ]] || {
+            echo '::error::Run this workflow in block/buzz; use source_ref to select repository code.'
             exit 1
           }
       - name: Resolve a source reachable from a repository branch
