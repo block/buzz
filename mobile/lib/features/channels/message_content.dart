@@ -622,6 +622,11 @@ class MessageContent extends HookConsumerWidget {
     final buzzLink = uri?.scheme == 'buzz'
         ? parseBuzzDeepLink(uri!) ?? parseEntityDeepLink(uri)
         : null;
+    // A Buzz URL of an unknown shape has nowhere to go, so it stays text
+    // rather than a link whose tap and Open action do nothing.
+    if (uri?.scheme == 'buzz' && buzzLink == null) {
+      return TextSpan(style: baseStyle, children: labelSpans);
+    }
     final isBuzzLink =
         buzzLink is ChannelDeepLink ||
         buzzLink is MessageDeepLink ||
@@ -694,6 +699,7 @@ class MessageContent extends HookConsumerWidget {
     // label and tap action.
     return link.asWidgetSpan(
       Semantics(
+        key: rendered is _TokenPill ? null : ValueKey('message-link:$url'),
         container: true,
         link: opensLink && rendered is! _TokenPill,
         child: _LinkLongPress(

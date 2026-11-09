@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:gpt_markdown/gpt_markdown.dart';
 import 'package:buzz/features/channels/agent_activity/observer_models.dart';
 import 'package:buzz/features/channels/agent_activity/transcript_item_widget.dart';
 import 'package:buzz/shared/theme/theme.dart';
@@ -12,20 +11,15 @@ Widget _testable(Widget child) {
   );
 }
 
-/// Whether any paragraph in the tree draws a link.
-bool _rendersLink(WidgetTester tester) {
-  // Not `visitChildren`: it only visits spans that carry their own text, and
-  // a link wrapping its parsed label carries none.
-  bool walk(InlineSpan span) =>
-      span is LinkTextSpan ||
-      (span is TextSpan && (span.children?.any(walk) ?? false));
-
-  return tester
-      .widgetList<RichText>(
-        find.byWidgetPredicate((widget) => widget is RichText),
-      )
-      .any((rich) => walk(rich.text));
-}
+/// Whether the tree draws a link widget.
+bool _rendersLink(WidgetTester tester) => find
+    .byWidgetPredicate(
+      (widget) =>
+          widget.key is ValueKey<String> &&
+          (widget.key! as ValueKey<String>).value.startsWith('message-link:'),
+    )
+    .evaluate()
+    .isNotEmpty;
 
 void main() {
   // Neither transcript surface passes a link handler, so an autolinked bare

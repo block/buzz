@@ -2,7 +2,6 @@ import 'package:buzz/features/channels/message_content.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:gpt_markdown/gpt_markdown.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:plugin_platform_interface/plugin_platform_interface.dart';
 import 'package:url_launcher_platform_interface/url_launcher_platform_interface.dart';
@@ -37,33 +36,19 @@ Future<void> _pump(WidgetTester tester, String content) {
 }
 
 /// Every link MessageContent drew: Buzz permalinks with a canonical label
-/// render as chips, everything else as a [LinkTextSpan].
+/// render as chips keyed `buzz-link-chip:<url>`, everything else as a link
+/// widget keyed `message-link:<url>`.
 List<String> _links(WidgetTester tester) {
+  const prefixes = ['message-link:', 'buzz-link-chip:'];
   final links = <String>[];
-  // Not `visitChildren`: it only visits spans that carry their own text, and
-  // a link wrapping its parsed label carries none.
-  void walk(InlineSpan span) {
-    if (span is LinkTextSpan) links.add(span.url);
-    if (span is TextSpan) span.children?.forEach(walk);
-  }
-
-  for (final rich in tester.widgetList<RichText>(
-    find.byWidgetPredicate((widget) => widget is RichText),
-  )) {
-    walk(rich.text);
-  }
   for (final element
       in find
-          .byWidgetPredicate(
-            (widget) =>
-                widget.key is ValueKey<String> &&
-                (widget.key! as ValueKey<String>).value.startsWith(
-                  'buzz-link-chip:',
-                ),
-          )
+          .byWidgetPredicate((widget) => widget.key is ValueKey<String>)
           .evaluate()) {
-    final key = element.widget.key! as ValueKey<String>;
-    links.add(key.value.substring('buzz-link-chip:'.length));
+    final key = (element.widget.key! as ValueKey<String>).value;
+    for (final prefix in prefixes) {
+      if (key.startsWith(prefix)) links.add(key.substring(prefix.length));
+    }
   }
   return links;
 }

@@ -374,24 +374,37 @@ Finder _anyRichText() {
   );
 }
 
-/// The link spans whose label is exactly [label].
+/// The URLs of the ordinary links whose label is exactly [label].
 ///
-/// Links render as [LinkTextSpan]s inside the paragraph rather than as
-/// widgets of their own, so `find.text` cannot see them. Not `visitChildren`:
-/// it only visits spans that carry their own text, and a link wrapping its
-/// parsed label carries none.
-List<LinkTextSpan> _linkSpans(WidgetTester tester, String label) {
-  final links = <LinkTextSpan>[];
-  void walk(InlineSpan span) {
-    if (span is LinkTextSpan && span.toPlainText() == label) links.add(span);
-    if (span is TextSpan) span.children?.forEach(walk);
-  }
+/// Each ordinary link is its own widget, keyed `message-link:<url>`, so a
+/// hold can open the link sheet. Buzz chips are keyed `buzz-link-chip:<url>`.
+List<String> _linkUrls(WidgetTester tester, String label) => [
+  for (final element
+      in find
+          .byWidgetPredicate(
+            (widget) =>
+                widget.key is ValueKey<String> &&
+                (widget.key! as ValueKey<String>).value.startsWith(
+                  'message-link:',
+                ),
+          )
+          .evaluate())
+    if (find
+        .descendant(
+          of: find.byElementPredicate((candidate) => candidate == element),
+          matching: find.text(label, findRichText: true),
+        )
+        .evaluate()
+        .isNotEmpty)
+      (element.widget.key! as ValueKey<String>).value.substring(
+        'message-link:'.length,
+      ),
+];
 
-  for (final rich in tester.widgetList<RichText>(_anyRichText())) {
-    walk(rich.text);
-  }
-  return links;
-}
+/// Whether [span] or any descendant is underlined.
+bool _isUnderlined(InlineSpan span) =>
+    span.style?.decoration == TextDecoration.underline ||
+    (span is TextSpan && (span.children?.any(_isUnderlined) ?? false));
 
 /// Taps the link labelled [label] where it is drawn.
 Future<void> _tapLink(WidgetTester tester, String label) =>
@@ -595,7 +608,7 @@ void main() {
         (r'see \https://example.com/c', r'see \'),
         // Stays one autolink. gpt_markdown 1.3.4 drops the backslash before
         // `>` (CommonMark keeps it), so the link ends at `a`.
-        (r'see <https://example.com/a\>', 'see https://example.com/a'),
+        (r'see <https://example.com/a\>', 'https://example.com/a'),
         (
           '![shot \\#1](https://example.com/a.png)\n'
               '![shot \\#2](https://example.com/b.png)',
@@ -684,7 +697,7 @@ void main() {
         ),
       );
 
-      expect(_linkSpans(tester, 'report.pdf'), hasLength(1));
+      expect(_linkUrls(tester, 'report.pdf'), hasLength(1));
       await _tapLink(tester, 'report.pdf');
       await tester.pump();
 
@@ -1056,7 +1069,7 @@ void main() {
           _testable(const MessageContent(content: '[Open message]($url)')),
         );
 
-        expect(_linkSpans(tester, 'Open message'), hasLength(1));
+        expect(_linkUrls(tester, 'Open message'), hasLength(1));
         await _tapLink(tester, 'Open message');
         await tester.pump();
 
@@ -1181,8 +1194,8 @@ void main() {
           find.byKey(ValueKey('buzz-link-chip:$messageUrl')),
           findsOneWidget,
         );
-        expect(_linkSpans(tester, joinUrl), hasLength(1));
-        expect(_allRichText(tester), contains('See \u{FFFC}. Then $joinUrl!'));
+        expect(_linkUrls(tester, joinUrl), hasLength(1));
+        expect(_allRichText(tester), contains('See \u{FFFC}. Then \u{FFFC}!'));
 
         await tester.tap(find.byKey(ValueKey('buzz-link-chip:$messageUrl')));
         await tester.pump();
@@ -1247,7 +1260,7 @@ void main() {
           _testable(const MessageContent(content: 'Join with $url')),
         );
 
-        expect(_linkSpans(tester, url), hasLength(1));
+        expect(_linkUrls(tester, url), hasLength(1));
         await _tapLink(tester, url);
         await tester.pump();
 
@@ -1383,10 +1396,23 @@ void main() {
         );
 
         // The URL text should be rendered and tappable.
-        final links = _linkSpans(tester, 'https://example.com');
-        expect(links, hasLength(1));
-        expect(links.single.onTap, isNotNull);
-        expect(links.single.style?.decoration, TextDecoration.underline);
+        expect(_linkUrls(tester, 'https://example.com'), [
+          'https://example.com',
+        ]);
+        final label = tester.widget<RichText>(
+          find.descendant(
+            of: find.byKey(const ValueKey('message-link:https://example.com')),
+            matching: find.byType(RichText),
+          ),
+        );
+        expect(_isUnderlined(label.text), isTrue);
+        expect(
+          find.descendant(
+            of: find.byKey(const ValueKey('message-link:https://example.com')),
+            matching: find.byType(GestureDetector),
+          ),
+          findsOneWidget,
+        );
       });
     });
 
@@ -1826,7 +1852,7 @@ void main() {
           find.byKey(const ValueKey('voice-note-attachment:$url')),
           findsNothing,
         );
-        expect(_linkSpans(tester, 'recording.mp4'), hasLength(1));
+        expect(_linkUrls(tester, 'recording.mp4'), hasLength(1));
       });
 
       testWidgets('renders an audio imeta attachment as a voice note card', (
@@ -2969,10 +2995,20 @@ Photos
           );
           expect(_allRichText(tester), contains(entry.key));
         }
-        // Mobile has no repo/PR destination, so that label stays inert text.
-        expect(_linkSpans(tester, 'Open message'), hasLength(1));
-        expect(_linkSpans(tester, 'Open channel'), hasLength(1));
-        expect(_linkSpans(tester, 'Release candidate'), isEmpty);
+        expect(_linkUrls(tester, 'Open message'), hasLength(1));
+        expect(_linkUrls(tester, 'Open channel'), hasLength(1));
+        // Mobile has no repo/PR destination, so that link has no tap, though
+        // a hold still copies or shares it.
+        expect(_linkUrls(tester, 'Release candidate'), hasLength(1));
+        expect(
+          find.descendant(
+            of: find.byKey(
+              ValueKey('message-link:${links['Release candidate']}'),
+            ),
+            matching: find.byType(GestureDetector),
+          ),
+          findsNothing,
+        );
       });
 
       testWidgets('preserves formatting in authored Buzz labels', (
@@ -3483,9 +3519,9 @@ Photos
           ),
         );
 
-        expect(_linkSpans(tester, 'x').single.url, 'https://e.com/?u=@Alice');
+        expect(_linkUrls(tester, 'x').single, 'https://e.com/?u=@Alice');
         expect(
-          _linkSpans(tester, 'https://e.com/?q=#general').single.url,
+          _linkUrls(tester, 'https://e.com/?q=#general').single,
           'https://e.com/?q=#general',
         );
         expect(find.byIcon(BuzzIcons.hash), findsNothing);
