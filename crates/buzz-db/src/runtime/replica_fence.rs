@@ -100,14 +100,11 @@ pub const FENCE_CLOCK_MARGIN_SECS: i64 = 5;
 /// Default interval at which the probe samples the writer and commits a
 /// heartbeat token (env `BUZZ_REPLICA_FENCE_PROBE_INTERVAL_MS`).
 ///
-/// The bounded-read budget (`BUZZ_REPLICA_READ_MAX_AGE_MS`) must survive
-/// one missed or failed beat plus probe latency, or a single slow beat
-/// routes every bounded read to the writer: just before the next commit
-/// the newest entry is already one interval old, and a missed beat adds
-/// another. At 500ms a 1000ms budget had no room for either; 400ms leaves
-/// 200ms (see [`min_read_budget`]). Cost is one single-row UPDATE tuple of
-/// WAL per beat per pod — ~25 beats/s across ten pods, <0.1% of the writer.
-pub const DEFAULT_PROBE_INTERVAL: Duration = Duration::from_millis(400);
+/// Every beat takes the deployment-wide exclusive floor lock, and channel
+/// writes queue behind it while it is held, so beating faster costs more
+/// lock drains per pod, not just WAL. Tolerating a slow beat is the read
+/// budget's job (see [`min_read_budget`]), not the interval's.
+pub const DEFAULT_PROBE_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Shortest accepted probe interval. Bounded by the retained ring, which
 /// must hold more history than [`FENCE_STALENESS`] (see the assertion at
@@ -129,17 +126,21 @@ pub fn probe_interval_from_ms(ms: u64) -> Duration {
     Duration::from_millis(ms).clamp(MIN_PROBE_INTERVAL, MAX_PROBE_INTERVAL)
 }
 
-/// Probe latency a bounded-read budget should absorb on top of one missed
-/// beat.
+/// Commit and scheduling latency a bounded-read budget should absorb on
+/// top of one lock-timed-out beat.
 const READ_BUDGET_LATENCY_MARGIN: Duration = Duration::from_millis(200);
 
-/// Smallest bounded-read budget that tolerates one missed beat at
-/// `probe_interval`: two intervals plus [`READ_BUDGET_LATENCY_MARGIN`]. A
+/// Smallest bounded-read budget (`BUZZ_REPLICA_READ_MAX_AGE_MS`) that
+/// survives one beat failing on [`PROBE_LOCK_TIMEOUT`] at `probe_interval`:
+/// the newest entry is one interval old when that beat starts, ages by the
+/// lock wait, and the next beat (fired at once, since missed ticks are
+/// delayed rather than skipped) commits after
+/// [`READ_BUDGET_LATENCY_MARGIN`]. 1700ms at the default interval. A
 /// smaller budget still works, but bounded reads spill to the writer
-/// whenever a single beat is late; the relay warns at startup.
+/// whenever a beat waits out the floor lock; the relay warns at startup.
 pub const fn min_read_budget(probe_interval: Duration) -> Duration {
     probe_interval
-        .saturating_mul(2)
+        .saturating_add(PROBE_LOCK_TIMEOUT)
         .saturating_add(READ_BUDGET_LATENCY_MARGIN)
 }
 
@@ -187,26 +188,8 @@ const PROBE_STATEMENT_TIMEOUT: Duration = Duration::from_secs(2);
 /// acquire timeout plus one lock wait plus the remaining statements.
 const PROBE_DEADLINE: Duration = Duration::from_secs(5);
 
-/// A probe phase slower than this is logged. On a healthy writer each
-/// phase completes in low single-digit milliseconds.
-const SLOW_PROBE_PHASE: Duration = Duration::from_millis(100);
-
-/// The acquire phase's slow threshold. With the probe as the pool's only
-/// user, acquire only waits on a dial (TLS plus session setup), which
-/// legitimately takes tens of milliseconds at start-up and on every
-/// `max_lifetime` recycle; only a dial far slower than that is news.
-const SLOW_PROBE_ACQUIRE: Duration = Duration::from_millis(500);
-
-/// A gap between consecutive committed beats longer than this — two
-/// probe intervals — is logged as a late beat. It is the gap, not the
-/// probe's own latency, that ages the newest entry past the bounded-read
-/// budget and routes reads to the writer.
-const fn late_beat_gap(probe_interval: Duration) -> Duration {
-    probe_interval.saturating_mul(2)
-}
-
 /// How many `(token, fence_wall)` entries the fence retains. At one probe
-/// per [`DEFAULT_PROBE_INTERVAL`] (400ms) this is ~48 seconds of history,
+/// per [`DEFAULT_PROBE_INTERVAL`] (500ms) this is ~60 seconds of history,
 /// and at least 36 seconds at [`MIN_PROBE_INTERVAL`] — a reader
 /// session lagging further than that behind the newest token fails closed
 /// (routes to the writer) rather than proving from thin air. Aurora reader
@@ -732,8 +715,8 @@ pub fn connect_probe_pool(writer: &PgPool) -> PgPool {
         )
 }
 
-/// Wall time of each probe phase, recorded on the probe span and in
-/// slow-probe logs. Phases a failed probe never reached stay zero.
+/// Wall time of each probe phase, recorded on the probe span and in the
+/// failure log. Phases a failed probe never reached stay zero.
 #[derive(Debug, Default, Clone, Copy)]
 struct ProbeTimings {
     /// Waiting for the probe connection (a dial, at most).
@@ -746,23 +729,6 @@ struct ProbeTimings {
     heartbeat: Duration,
     /// `COMMIT`.
     commit: Duration,
-}
-
-impl ProbeTimings {
-    /// The slowest phase past its slow threshold, if any.
-    fn slow_phase(&self) -> Option<(&'static str, Duration)> {
-        [
-            ("acquire", self.acquire, SLOW_PROBE_ACQUIRE),
-            ("lock", self.lock, SLOW_PROBE_PHASE),
-            ("scan", self.scan, SLOW_PROBE_PHASE),
-            ("heartbeat", self.heartbeat, SLOW_PROBE_PHASE),
-            ("commit", self.commit, SLOW_PROBE_PHASE),
-        ]
-        .into_iter()
-        .filter(|(_, elapsed, threshold)| elapsed >= threshold)
-        .map(|(phase, elapsed, _)| (phase, elapsed))
-        .max_by_key(|(_, elapsed)| *elapsed)
-    }
 }
 
 /// What one probe observed about itself, beyond its result.
@@ -1140,7 +1106,7 @@ pub struct HeartbeatObservation {
 pub async fn run_probe(writer: PgPool, fence: Arc<ReplicaFence>, probe_interval: Duration) {
     let mut interval = tokio::time::interval(probe_interval);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let mut state = ProbeLoopState::new(probe_interval);
+    let mut state = ProbeLoopState::default();
     loop {
         interval.tick().await;
         probe_tick(&writer, &fence, &mut state).await;
@@ -1178,28 +1144,13 @@ impl LogThrottle {
 }
 
 /// Log state carried across probe ticks.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct ProbeLoopState {
-    /// A gap between committed beats above this is logged as late.
-    late_beat_gap: Duration,
     /// Failed probes since the last success.
     consecutive_failures: u64,
     /// Failure lines; reset on recovery so a new run's first failure
     /// always logs.
     failure_log: LogThrottle,
-    /// Slow or late beat lines.
-    slow_log: LogThrottle,
-}
-
-impl ProbeLoopState {
-    fn new(probe_interval: Duration) -> Self {
-        Self {
-            late_beat_gap: late_beat_gap(probe_interval),
-            consecutive_failures: 0,
-            failure_log: LogThrottle::default(),
-            slow_log: LogThrottle::default(),
-        }
-    }
 }
 
 /// One probe-loop tick. A failure is logged and keeps the retained entries:
@@ -1240,28 +1191,7 @@ async fn probe_tick(writer: &PgPool, fence: &ReplicaFence, state: &mut ProbeLoop
             state.consecutive_failures = 0;
             state.failure_log = LogThrottle::default();
         }
-        Ok(entry) => {
-            let slow = timings.slow_phase();
-            let late = trace.beat_gap.is_some_and(|gap| gap > state.late_beat_gap);
-            if slow.is_none() && !late {
-                return;
-            }
-            let Some(suppressed) = state.slow_log.admit(Instant::now()) else {
-                return;
-            };
-            tracing::warn!(
-                token = entry.token,
-                beat_gap_ms = trace.beat_gap.map(millis),
-                slowest_phase = slow.map(|(phase, _)| phase),
-                acquire_ms = millis(timings.acquire),
-                lock_ms = millis(timings.lock),
-                scan_ms = millis(timings.scan),
-                heartbeat_ms = millis(timings.heartbeat),
-                commit_ms = millis(timings.commit),
-                suppressed,
-                "replica fence beat slow or late; bounded replica reads may route to the writer"
-            );
-        }
+        Ok(_) => {}
     }
 }
 
@@ -1333,12 +1263,7 @@ mod postgres_tests {
             .await
             .expect_err("a closed writer pool fails the probe");
 
-        probe_tick(
-            &writer,
-            &fence,
-            &mut ProbeLoopState::new(DEFAULT_PROBE_INTERVAL),
-        )
-        .await;
+        probe_tick(&writer, &fence, &mut ProbeLoopState::default()).await;
 
         let newest = fence
             .newest()
@@ -1358,24 +1283,26 @@ mod postgres_tests {
         );
     }
 
-    /// The probe's log throttle admits one line per interval and reports
-    /// how many it held back.
+    /// An unset interval selects the default, a set one is clamped to the
+    /// accepted range, and the budget floor covers one lock-timed-out beat.
     #[test]
     fn probe_interval_defaults_and_clamps() {
         assert_eq!(probe_interval_from_ms(0), DEFAULT_PROBE_INTERVAL);
-        assert_eq!(probe_interval_from_ms(500), Duration::from_millis(500));
+        assert_eq!(probe_interval_from_ms(400), Duration::from_millis(400));
         assert_eq!(probe_interval_from_ms(1), MIN_PROBE_INTERVAL);
         assert_eq!(probe_interval_from_ms(u64::MAX), MAX_PROBE_INTERVAL);
         assert_eq!(
             min_read_budget(DEFAULT_PROBE_INTERVAL),
-            Duration::from_millis(1000)
+            Duration::from_millis(1700)
         );
         assert_eq!(
-            min_read_budget(Duration::from_millis(500)),
-            Duration::from_millis(1200)
+            min_read_budget(Duration::from_millis(400)),
+            Duration::from_millis(1600)
         );
     }
 
+    /// The probe's log throttle admits one line per interval and reports
+    /// how many it held back.
     #[test]
     fn probe_log_throttle_admits_one_line_per_interval() {
         let mut throttle = LogThrottle::default();
@@ -1389,22 +1316,6 @@ mod postgres_tests {
             "next line reports what was suppressed"
         );
         assert_eq!(throttle.admit(start + PROBE_LOG_INTERVAL), None);
-    }
-
-    /// Slow-beat detection ignores ordinary dial time in the acquire phase
-    /// but not in the database phases.
-    #[test]
-    fn probe_slow_phase_thresholds() {
-        let ms = Duration::from_millis;
-        let mut timings = ProbeTimings {
-            acquire: ms(150),
-            ..ProbeTimings::default()
-        };
-        assert_eq!(timings.slow_phase(), None, "a TLS dial is not slow");
-        timings.lock = ms(150);
-        assert_eq!(timings.slow_phase(), Some(("lock", ms(150))));
-        timings.acquire = SLOW_PROBE_ACQUIRE;
-        assert_eq!(timings.slow_phase(), Some(("acquire", SLOW_PROBE_ACQUIRE)));
     }
 
     /// Resolve picks the greatest retained entry <= the observed token —

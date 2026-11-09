@@ -838,8 +838,9 @@ impl Db {
                 budget_ms = budget.as_millis() as u64,
                 probe_interval_ms = fence_probe_interval.as_millis() as u64,
                 recommended_min_ms = min_read_budget.as_millis() as u64,
-                "BUZZ_REPLICA_READ_MAX_AGE_MS leaves no room for one missed fence heartbeat; \
-                 bounded replica reads will spill to the writer whenever a beat is late"
+                "BUZZ_REPLICA_READ_MAX_AGE_MS cannot absorb one fence heartbeat that waits out \
+                 its lock timeout; bounded replica reads will spill to the writer whenever \
+                 a beat is late"
             );
         }
         let push_enqueue = config
@@ -868,6 +869,19 @@ impl Db {
     /// Additional writer pools, including the relay audit pool, must use this
     /// constructor so they inherit the timeout, floor-guard, and isolation
     /// policy installed by [`Db::new`].
+    ///
+    /// Two single-connection side pools deliberately do not, so serving-pool
+    /// saturation cannot delay their work. Neither inserts into `events`, so
+    /// neither needs the `buzz.created_at_floor` guard, and each installs
+    /// its own shorter timeouts so it fails fast instead of queueing:
+    /// - [`replica_fence::connect_probe_pool`]: the fence probe takes the
+    ///   floor lock itself (exclusive) and writes only `replica_heartbeat`.
+    /// - the push-enqueue pool (`push_enqueue::PushEnqueue::new`): it writes
+    ///   only `push_match_queue`, and is lazy so relay startup never depends
+    ///   on push.
+    ///
+    /// New pools follow the rule above unless they have a reason as specific
+    /// as these.
     pub async fn connect_writer_pool(config: &DbConfig) -> Result<PgPool> {
         use connection_observability::{
             classify_pool_outcome, record_milestone, DbConnectionStep, DbConnectionStepAttempt,
@@ -1667,8 +1681,6 @@ impl Db {
         }
     }
 
-    /// Record one route decision (Rev 2 observability): which path, where it
-    /// went, and why.
     /// Count one routed read the replica could have served that the writer
     /// served instead (`buzz_db_reader_spill_total{path, reason}`).
     ///
@@ -1695,6 +1707,8 @@ impl Db {
             .increment(1);
     }
 
+    /// Record one route decision (Rev 2 observability): which path, where it
+    /// went, and why.
     pub(crate) fn record_route(path: &'static str, decision: &'static str, reason: &'static str) {
         metrics::counter!(
             "buzz_db_route_decision",
