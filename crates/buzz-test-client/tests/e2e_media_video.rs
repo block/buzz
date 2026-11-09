@@ -79,10 +79,18 @@ fn blossom_auth_header(event: &nostr::Event) -> String {
     )
 }
 
-/// Build a minimal but structurally valid fast-start MP4 (H.264, 1s, 320×240).
+/// Build a minimal but structurally valid fast-start MP4 (H.264, 1s, 320×240)
+/// that is unique to this call.
 ///
-/// Layout: ftyp | moov(mvhd + trak(tkhd + mdia(mdhd + hdlr + minf(vmhd + dinf + stbl)))) | mdat
+/// Layout: ftyp | moov(mvhd + trak(tkhd + mdia(mdhd + hdlr + minf(vmhd + dinf + stbl)))) | mdat | free
 /// This is enough for `infer` to detect video/mp4 and for the `mp4` crate to parse.
+///
+/// The trailing `free` box carries a random nonce so every test uploads its own
+/// blob. Tests run in parallel against one relay, and under
+/// `BUZZ_MEDIA_READ_MODE=enforce` any event that publishes a hash records a
+/// sticky publication marker, even if the event is later rejected. That marker
+/// ends uploader-preview reads of the hash, so a shared blob let one test's
+/// publish turn another test's GET into a 404.
 fn build_test_mp4() -> Vec<u8> {
     fn box_wrap(fourcc: &[u8; 4], payload: &[u8]) -> Vec<u8> {
         let size = (8 + payload.len()) as u32;
@@ -263,8 +271,9 @@ fn build_test_mp4() -> Vec<u8> {
     let moov_payload = [&mvhd[..], &trak].concat();
     let moov = box_wrap(b"moov", &moov_payload);
     let mdat = box_wrap(b"mdat", &[]);
+    let nonce = box_wrap(b"free", uuid::Uuid::new_v4().as_bytes());
 
-    [ftyp, moov, mdat].concat()
+    [ftyp, moov, mdat, nonce].concat()
 }
 
 /// Upload a valid MP4 video via Blossom, verify the BlobDescriptor includes
