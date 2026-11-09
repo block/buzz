@@ -107,6 +107,10 @@ prior release's recorded squash commit; tag ancestry is deliberately irrelevant.
 Every push to `main` continues to publish the rolling relay `:main` and
 `:sha-<7>` tags, plus matching `:debug-main` and `:debug-sha-<7>` variants.
 
+For an operator-selected branch or commit without CI qualification, see
+[manual relay image publishing](docs/manual-relay-images.md). This separate
+laptop/manual-Actions path publishes `manual-*` tags without moving release tags.
+
 ### Mobile
 
 1. **Publish a candidate.** From a clean checkout whose `origin` is the
