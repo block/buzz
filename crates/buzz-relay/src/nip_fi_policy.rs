@@ -195,7 +195,9 @@ pub(crate) async fn bind_for_upgrade(
         return crate::tenant::bind_community(state, raw_host)
             .await
             .map(|tenant| (tenant, state.config.nip_fi.mode))
-            .map_err(|_| not_found());
+            .map_err(|error| {
+                crate::nip_fi_shadow::TenantBindError::from_bind(error).into_response()
+            });
     }
     let host = buzz_core::tenant::normalize_host(raw_host);
     if host.is_empty() || host.chars().count() > buzz_core::tenant::MAX_HOST_LEN {
@@ -208,9 +210,15 @@ pub(crate) async fn bind_for_upgrade(
     .await;
     let (row, policy) = match binding {
         Ok(Ok(Some(binding))) => binding,
-        // Row-zero binding preserves its generic refusal on a missing row or
-        // failed lookup. Neither outcome can yield a tenant or an upgrade.
-        _ => return Err(not_found()),
+        Ok(Ok(None)) => return Err(not_found()),
+        Ok(Err(error)) => {
+            tracing::error!(%error, "tenant lookup unavailable");
+            return Err(crate::nip_fi_shadow::TenantBindError::Unavailable.into_response());
+        }
+        Err(_) => {
+            tracing::error!("tenant lookup exceeded its budget");
+            return Err(crate::nip_fi_shadow::TenantBindError::Unavailable.into_response());
+        }
     };
     let policy = Policy {
         community_id: policy.community_id,

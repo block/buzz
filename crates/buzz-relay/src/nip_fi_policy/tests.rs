@@ -632,7 +632,7 @@ async fn unmapped_legacy_rejection_scope_never_yields_an_admission_proof() {
         assert!(
             crate::nip_fi_shadow::bind_tenant(&state, &headers("unknown.example", false))
                 .await
-                .is_none(),
+                .is_err_and(|error| error == crate::nip_fi_shadow::TenantBindError::Unmapped),
             "an authoritative miss cannot reuse a cached tenant"
         );
 

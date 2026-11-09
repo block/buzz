@@ -49,9 +49,9 @@ pub trait HostResolver: Send + Sync {
 #[derive(Debug)]
 pub enum BindError<E> {
     /// The host did not map to any community on this deployment. Callers MUST
-    /// reject the request with a *generic* error — never echo the host back or
-    /// distinguish "unmapped" from other failures, so an unauthenticated
-    /// caller cannot probe which hosts exist.
+    /// reject the request with a generic not-found error, never echoing the
+    /// host. A lookup failure is instead unavailable: it supplies no evidence
+    /// about whether this host exists.
     UnmappedHost,
     /// The resolution lookup itself failed (e.g. database error). Treated as
     /// fail-closed: the request is rejected, never admitted to a default tenant.
@@ -441,3 +441,7 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+#[path = "tenant/postgres_tests.rs"]
+mod postgres_tests;

@@ -313,7 +313,7 @@ fn rejected() -> (StatusCode, Vec<u8>) {
 /// route's path extractor (`wf` is not a UUID).
 fn cleared_nip_fi(outcomes: &[(StatusCode, Vec<u8>)]) -> bool {
     outcomes.iter().all(|(status, body)| match *status {
-        StatusCode::NOT_FOUND => body == b"relay: no community is configured for this host",
+        StatusCode::SERVICE_UNAVAILABLE => body == b"relay: service temporarily unavailable",
         StatusCode::BAD_REQUEST => body.starts_with(b"Invalid URL: Cannot parse `workflow_id`"),
         _ => false,
     })

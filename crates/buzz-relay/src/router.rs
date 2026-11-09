@@ -2575,29 +2575,30 @@ mod tests {
     }
 
     /// Off mode reads no identity header: an upgrade with no header and one
-    /// with a malformed header get the same status, outside {401, 403, 503}.
-    /// This proves the NIP-FI gate is bypassed, not that the upgrade succeeds:
-    /// without a database the request can stop later (e.g. tenant lookup 404).
+    /// with a malformed header get the same outcome. A tenant-lookup 503 is
+    /// distinct from a NIP-FI denial and does not claim the upgrade succeeds.
     async fn assert_off_mode_ignores_header(path: &str, malformed: bool) {
-        let absent = nip_fi_gate_status(nip_fi_off_state().await, path, None, None).await;
-        let status = if malformed {
-            nip_fi_gate_status(
-                nip_fi_off_state().await,
-                path,
-                Some("Nostr-Federated-Identity"),
-                Some("Basic not-a-bearer-token"),
+        let absent =
+            status_and_body(nip_fi_gate_response(nip_fi_off_state().await, path, None, None).await)
+                .await;
+        let outcome = if malformed {
+            status_and_body(
+                nip_fi_gate_response(
+                    nip_fi_off_state().await,
+                    path,
+                    Some("Nostr-Federated-Identity"),
+                    Some("Basic not-a-bearer-token"),
+                )
+                .await,
             )
             .await
         } else {
-            absent
+            absent.clone()
         };
-        for s in [absent, status] {
-            assert!(
-                !matches!(s.as_u16(), 401 | 403 | 503),
-                "Off mode must not gate {path} (malformed={malformed}); got {s}"
-            );
+        for outcome in [&absent, &outcome] {
+            assert_gate_bypassed(outcome);
         }
-        assert_eq!(status, absent, "Off mode must ignore the header on {path}");
+        assert_eq!(outcome, absent, "Off mode must ignore the header on {path}");
     }
 
     #[tokio::test]
@@ -2693,26 +2694,26 @@ mod tests {
     // Because the gate runs before bind_community, the WS-upgrade 401/503 tests
     // above are DB-free. Plain-GET requests, however, do reach bind_community
     // (the gate's non-upgrade else-branch skips the gate and falls through).
-    // With an unseeded lazy pool, bind_community returns 404 — but that is NOT
-    // a gate denial. These tests assert that the response is neither 401 nor 503
-    // (gate denial codes), which holds regardless of host resolution state.
+    // With an unreachable database, binding returns its generic outage503.
+    // Its exact body is distinct from a gate denial, so these probes can
+    // prove the gate was bypassed without inventing a missing-host result.
     //
     // Fix 6: corrected the DB-free comment (bind_community is reached by plain
     // GETs; only WS-upgrade requests skip the tenant lookup via the pre-gate path).
     //
     // Mutation evidence:
     //   A) Move the NIP-FI gate to fire on plain GETs too → response becomes
-    //      401/503 → assertion `status != 401 && status != 503` panics.
+    //      identity denial bytes → the gate-bypass assertion panics.
     //   B) Key the gate on the Accept header → a WS request with Accept:
     //      text/html bypasses it → the 401/503 test below returns 101 → panics.
 
     /// Drive a plain (non-WS) GET request through the built router. Returns
     /// the HTTP status and, for NIP-11 responses, validates the JSON content.
-    async fn nip_fi_non_upgrade_status(
+    async fn nip_fi_non_upgrade_outcome(
         state: Arc<AppState>,
         path: &str,
         accept: Option<&str>,
-    ) -> axum::http::StatusCode {
+    ) -> (axum::http::StatusCode, Vec<u8>) {
         use axum::body::Body;
         use axum::http::Request;
         use tower::ServiceExt;
@@ -2722,32 +2723,19 @@ mod tests {
             builder = builder.header("Accept", accept_value);
         }
         let req = builder.body(Body::empty()).expect("request");
-        build_router(state)
-            .oneshot(req)
-            .await
-            .expect("router response")
-            .status()
+        status_and_body(
+            build_router(state)
+                .oneshot(req)
+                .await
+                .expect("router response"),
+        )
+        .await
     }
 
     #[tokio::test]
-    async fn nip_fi_enforce_plain_get_not_gated_401_or_503() {
-        let state = nip_fi_enforce_state().await;
-        // A plain GET / without WS upgrade headers is not a WebSocket upgrade.
-        // In enforce mode the NIP-FI gate must NOT intercept it — the response
-        // must not be a gate denial (401/503). It may be a 404 from bind_community
-        // (unseeded host) or 200 (NIP-11) with a seeded host; the gate invariant
-        // holds either way.
-        let status = nip_fi_non_upgrade_status(state, "/", None).await;
-        assert_ne!(
-            status,
-            axum::http::StatusCode::UNAUTHORIZED,
-            "plain GET / in enforce mode must not be gated 401"
-        );
-        assert_ne!(
-            status,
-            axum::http::StatusCode::SERVICE_UNAVAILABLE,
-            "plain GET / in enforce mode must not be gated 503"
-        );
+    async fn nip_fi_enforce_plain_get_bypasses_identity_gate() {
+        let outcome = nip_fi_non_upgrade_outcome(nip_fi_enforce_state().await, "/", None).await;
+        assert_gate_bypassed(&outcome);
     }
 
     #[tokio::test]
@@ -2755,7 +2743,8 @@ mod tests {
         let state = nip_fi_enforce_state().await;
         // application/nostr+json short-circuits before the WS check; the
         // NIP-FI gate must never intercept it regardless of mode.
-        let status = nip_fi_non_upgrade_status(state, "/", Some("application/nostr+json")).await;
+        let (status, _) =
+            nip_fi_non_upgrade_outcome(state, "/", Some("application/nostr+json")).await;
         assert_eq!(
             status,
             axum::http::StatusCode::OK,
@@ -2794,10 +2783,10 @@ mod tests {
     /// Drive a request that carries exactly `Upgrade: websocket` but no
     /// `Connection` header. Must not be gated — returns whatever the NIP-11
     /// or HTTP handler produces (not 401/503 from the NIP-FI gate).
-    async fn nip_fi_upgrade_only_status(
+    async fn nip_fi_upgrade_only_outcome(
         state: Arc<AppState>,
         path: &str,
-    ) -> axum::http::StatusCode {
+    ) -> (axum::http::StatusCode, Vec<u8>) {
         use axum::body::Body;
         use axum::http::Request;
         use tower::ServiceExt;
@@ -2808,19 +2797,21 @@ mod tests {
             // Deliberately omit Connection header.
             .body(Body::empty())
             .expect("request");
-        build_router(state)
-            .oneshot(req)
-            .await
-            .expect("router response")
-            .status()
+        status_and_body(
+            build_router(state)
+                .oneshot(req)
+                .await
+                .expect("router response"),
+        )
+        .await
     }
 
     /// Drive a request that carries `Connection: Upgrade` but no `Upgrade`
     /// header. Must not be gated by the NIP-FI enforcement logic.
-    async fn nip_fi_connection_only_status(
+    async fn nip_fi_connection_only_outcome(
         state: Arc<AppState>,
         path: &str,
-    ) -> axum::http::StatusCode {
+    ) -> (axum::http::StatusCode, Vec<u8>) {
         use axum::body::Body;
         use axum::http::Request;
         use tower::ServiceExt;
@@ -2831,49 +2822,25 @@ mod tests {
             // Deliberately omit Upgrade header.
             .body(Body::empty())
             .expect("request");
-        build_router(state)
-            .oneshot(req)
-            .await
-            .expect("router response")
-            .status()
+        status_and_body(
+            build_router(state)
+                .oneshot(req)
+                .await
+                .expect("router response"),
+        )
+        .await
     }
 
     #[tokio::test]
     async fn b4_upgrade_only_no_connection_header_not_gated() {
-        let state = nip_fi_enforce_state().await;
-        // Upgrade: websocket present, Connection absent → not a valid WS
-        // upgrade handshake → must NOT be denied by the NIP-FI gate.
-        // The request falls through to the NIP-11 / HTTP handler, which
-        // returns 200 (NIP-11 JSON) or 426 (Upgrade Required) — not 401/503.
-        let status = nip_fi_upgrade_only_status(state, "/").await;
-        assert_ne!(
-            status,
-            axum::http::StatusCode::UNAUTHORIZED,
-            "B4: Upgrade-only request (no Connection header) must not be denied 401 by NIP-FI gate"
-        );
-        assert_ne!(
-            status,
-            axum::http::StatusCode::SERVICE_UNAVAILABLE,
-            "B4: Upgrade-only request (no Connection header) must not be denied 503 by NIP-FI gate"
-        );
+        let outcome = nip_fi_upgrade_only_outcome(nip_fi_enforce_state().await, "/").await;
+        assert_gate_bypassed(&outcome);
     }
 
     #[tokio::test]
     async fn b4_connection_upgrade_only_no_upgrade_header_not_gated() {
-        let state = nip_fi_enforce_state().await;
-        // Connection: Upgrade present, Upgrade absent → not a valid WS
-        // upgrade handshake → must NOT be denied by the NIP-FI gate.
-        let status = nip_fi_connection_only_status(state, "/").await;
-        assert_ne!(
-            status,
-            axum::http::StatusCode::UNAUTHORIZED,
-            "B4: Connection-only request (no Upgrade header) must not be denied 401 by NIP-FI gate"
-        );
-        assert_ne!(
-            status,
-            axum::http::StatusCode::SERVICE_UNAVAILABLE,
-            "B4: Connection-only request (no Upgrade header) must not be denied 503 by NIP-FI gate"
-        );
+        let outcome = nip_fi_connection_only_outcome(nip_fi_enforce_state().await, "/").await;
+        assert_gate_bypassed(&outcome);
     }
 
     #[path = "policy_sweep_postgres_tests.rs"]
@@ -4495,28 +4462,29 @@ mod tests {
         let token = mint_deny_test_token(&clean_key.to_hex());
         let bearer = format!("Bearer {token}");
 
-        let status =
-            nip_fi_gate_status(state, "/", Some("Nostr-Federated-Identity"), Some(&bearer)).await;
-        let expected = nip_fi_gate_status(
-            Arc::new(baseline),
-            "/",
-            Some("Nostr-Federated-Identity"),
-            Some(&bearer),
+        let outcome = status_and_body(
+            nip_fi_gate_response(state, "/", Some("Nostr-Federated-Identity"), Some(&bearer)).await,
+        )
+        .await;
+        let expected = status_and_body(
+            nip_fi_gate_response(
+                Arc::new(baseline),
+                "/",
+                Some("Nostr-Federated-Identity"),
+                Some(&bearer),
+            )
+            .await,
         )
         .await;
 
-        // Unbound host → 404; bound host → NIP-11 fallback → 200. Anything
-        // else means an upstream failure that could mask the comparison.
-        assert!(
-            matches!(
-                expected,
-                axum::http::StatusCode::OK | axum::http::StatusCode::NOT_FOUND
-            ),
-            "no-map baseline must be 200 or 404, got {expected}"
-        );
+        assert_gate_bypassed(&expected);
+        assert!(matches!(
+            expected.0,
+            StatusCode::OK | StatusCode::NOT_FOUND | StatusCode::SERVICE_UNAVAILABLE
+        ));
         assert_eq!(
-            status, expected,
-            "WS admission for a key NOT in the deny map must reach the no-map downstream outcome"
+            outcome, expected,
+            "a key outside the deny map must reach the same downstream outcome"
         );
     }
 
@@ -4699,6 +4667,21 @@ mod tests {
         (Arc::new(state), verifier)
     }
 
+    /// A specific tenant-lookup outage is past the identity gate; an identity
+    /// denial's503 has different bytes and must still fail these probes.
+    fn assert_gate_bypassed((status, body): &(StatusCode, Vec<u8>)) {
+        assert!(
+            !matches!(status.as_u16(), 401 | 403),
+            "identity gate denied: {status} {body:?}"
+        );
+        if *status == StatusCode::SERVICE_UNAVAILABLE {
+            assert_eq!(
+                body, b"relay: service temporarily unavailable",
+                "only a tenant lookup outage is allowed"
+            );
+        }
+    }
+
     async fn status_and_body(resp: axum::response::Response) -> (axum::http::StatusCode, Vec<u8>) {
         let status = resp.status();
         let body = axum::body::to_bytes(resp.into_body(), 4096)
@@ -4868,12 +4851,11 @@ mod tests {
     }
 
     // Pins: Off mode never consults the community map. With the production
-    // Off default (no communities) every NIP-FI site answers exactly as
-    // before: the upgrades reach the tenant lookup's exact 404, header or not.
-    // Mutation: resolving the Host before the Off early-return turns these
-    // into 503.
+    // Off default (no communities), header presence does not change routing.
+    // The unreachable database is an outage, not an authoritative host miss.
+    // The exact body distinguishes this from a NIP-FI authorization denial.
     #[tokio::test]
-    async fn nip_fi_off_unmapped_host_is_byte_identical_404() {
+    async fn nip_fi_off_tenant_lookup_failure_is_retryable_503() {
         let audio = format!("/huddle/{}/audio", uuid::Uuid::new_v4());
         for path in ["/", audio.as_str()] {
             for token in [None, Some("Bearer a.b.c")] {
@@ -4889,8 +4871,8 @@ mod tests {
                 assert_eq!(
                     status_and_body(resp).await,
                     (
-                        axum::http::StatusCode::NOT_FOUND,
-                        b"relay: no community is configured for this host".to_vec()
+                        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                        b"relay: service temporarily unavailable".to_vec()
                     ),
                     "{path} token={token:?}"
                 );
@@ -4958,5 +4940,57 @@ mod tests {
         .await;
         assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
         assert_eq!(verifier.calls(), 1);
+    }
+
+    /// No infrastructure: a closed pool is unavailable, while a missing Host has
+    /// no routing evidence and remains not found before any database read.
+    #[tokio::test]
+    async fn closed_pool_is_not_an_authoritative_missing_host() {
+        use axum::{
+            body::{to_bytes, Body},
+            http::{header, Request, StatusCode},
+        };
+        use std::sync::Arc;
+        use tower::ServiceExt;
+        let mut state = (*crate::state::tests::test_state_with_unreachable_database_url(
+            "postgres://127.0.0.1:1/unused",
+        )
+        .await)
+            .clone();
+        Arc::make_mut(&mut state.config).nip_fi.mode = buzz_auth::NipFiMode::Off;
+        state.db.pool().close().await;
+        let state = Arc::new(state);
+        for path in ["/query", "/count", "/events", "/api/invites"] {
+            for host in [Some("relay.example"), Some("unknown.example"), None] {
+                let mut request =
+                    Request::post(path).header(header::CONTENT_TYPE, "application/json");
+                if let Some(host) = host {
+                    request = request.header(header::HOST, host);
+                }
+                let response = crate::router::build_router(state.clone())
+                    .oneshot(request.body(Body::from("{}")).unwrap())
+                    .await
+                    .unwrap();
+                let status = response.status();
+                let body = to_bytes(response.into_body(), 4096).await.unwrap();
+                assert_eq!(
+                    status,
+                    if host.is_some() {
+                        StatusCode::SERVICE_UNAVAILABLE
+                    } else {
+                        StatusCode::NOT_FOUND
+                    },
+                    "{path} {host:?}: {body:?}"
+                );
+                assert_eq!(
+                    &body[..],
+                    if host.is_some() {
+                        br#"{"error":"relay: service temporarily unavailable"}"#.as_slice()
+                    } else {
+                        br#"{"error":"relay: no community is configured for this host"}"#.as_slice()
+                    }
+                );
+            }
+        }
     }
 }

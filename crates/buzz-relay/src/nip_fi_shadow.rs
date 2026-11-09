@@ -566,22 +566,60 @@ impl EnforcedProof {
     }
 }
 
-/// Bind the request's tenant from its Host header, as every HTTP handler's
-/// row zero does. `None` means the Host bound no community; the caller keeps
-/// its own legacy rejection, and shadow records enforce's verdict first.
+/// Why a request could not bind to its host's community. A failed lookup
+/// says nothing about whether a host exists and must remain retryable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TenantBindError {
+    Unmapped,
+    Unavailable,
+}
+
+impl TenantBindError {
+    pub(crate) fn from_bind(error: crate::tenant::BindError<buzz_db::DbError>) -> Self {
+        match error {
+            crate::tenant::BindError::UnmappedHost => Self::Unmapped,
+            crate::tenant::BindError::Lookup(error) => {
+                tracing::error!(%error, "tenant lookup unavailable");
+                Self::Unavailable
+            }
+        }
+    }
+
+    /// Generic upgrade rejection; never expose the host or backend error.
+    pub(crate) fn into_response(self) -> axum::response::Response {
+        use axum::response::IntoResponse;
+        match self {
+            Self::Unmapped => (
+                axum::http::StatusCode::NOT_FOUND,
+                "relay: no community is configured for this host",
+            )
+                .into_response(),
+            Self::Unavailable => (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "relay: service temporarily unavailable",
+            )
+                .into_response(),
+        }
+    }
+}
+
+/// Bind row zero without collapsing an unavailable lookup into a missing host.
+/// An authoritative policy miss never falls back to the host cache.
 pub(crate) async fn bind_tenant(
     state: &crate::state::AppState,
     headers: &HeaderMap,
-) -> Option<buzz_core::TenantContext> {
+) -> Result<buzz_core::TenantContext, TenantBindError> {
     let raw_host = headers
         .get(axum::http::header::HOST)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     let tenant = match crate::nip_fi_policy::request_tenant(raw_host) {
-        Some(tenant) => tenant,
-        None => crate::tenant::bind_community(state, raw_host).await.ok(),
+        Some(tenant) => tenant.ok_or(TenantBindError::Unmapped),
+        None => crate::tenant::bind_community(state, raw_host)
+            .await
+            .map_err(TenantBindError::from_bind),
     };
-    if tenant.is_none() {
+    if tenant.is_err() {
         observe_unbound(state, headers).await;
     }
     tenant
