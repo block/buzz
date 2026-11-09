@@ -1541,6 +1541,12 @@ async fn steer_rejected_on_empty_prompt() {
         steer_reply["error"]["code"], -32602,
         "empty prompt must be rejected"
     );
+    // "no active run" and a run-id mismatch also answer -32602, and either can
+    // win if the turn ends first; the empty-prompt guard runs before both.
+    assert_eq!(
+        steer_reply["error"]["message"], "steer: prompt must not be empty",
+        "the empty-prompt guard must be what rejects the steer"
+    );
     assert!(prompt_done, "session/prompt did not finish");
     h.shutdown().await;
 }
