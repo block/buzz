@@ -423,6 +423,8 @@ test-unit:
         # never dialed). Keep the Cargo fallback in step.
         cargo nextest run -p buzz-relay-mesh
         cargo nextest run -p buzz-cli
+        cargo nextest run -p buzz-ws-client
+        cargo nextest run -p buzz-pairing-cli
         # buzz-sdk builder/validation unit tests: pure event-builder and input
         # validation (e.g. the canvas writer-discipline/skew guard and the
         # canvas_write_survived predicate), no infra. `--lib` runs all unit

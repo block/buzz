@@ -12,6 +12,8 @@ use crate::error::CliError;
 
 /// NIP-FI assertion header (`docs/nips/NIP-FI.md` §Client-attached transport).
 const FEDERATED_IDENTITY_HEADER: &str = "Nostr-Federated-Identity";
+/// `User-Agent` sent on every WebSocket upgrade.
+const USER_AGENT: &str = concat!("buzz-cli/", env!("CARGO_PKG_VERSION"));
 
 /// Descriptor returned by the relay after a successful upload.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -704,10 +706,14 @@ impl BuzzClient {
         })
     }
 
-    /// The NIP-FI assertion as WebSocket upgrade headers (empty without an
-    /// evidence source).
+    /// The WebSocket upgrade headers: the CLI's `User-Agent`, and the NIP-FI
+    /// assertion when there is an evidence source.
     async fn upgrade_headers(&self) -> Result<buzz_ws_client::HeaderMap, CliError> {
         let mut headers = buzz_ws_client::HeaderMap::new();
+        headers.insert(
+            "user-agent",
+            buzz_ws_client::HeaderValue::from_static(USER_AGENT),
+        );
         if let Some(assertion) = self.evidence().await? {
             let mut value =
                 buzz_ws_client::HeaderValue::from_str(&format!("Bearer {assertion}"))
@@ -4094,6 +4100,20 @@ mod ws_deadline_tests {
     }
 
     pub(super) type Log = Arc<std::sync::Mutex<Vec<String>>>;
+
+    /// Every upgrade names the CLI and its version.
+    #[tokio::test]
+    async fn upgrade_headers_carry_the_cli_user_agent() {
+        let keys = Keys::generate();
+        let c = BuzzClient::new(
+            "http://127.0.0.1:1".into(),
+            Credentials::from_signer(Arc::new(keys.clone()), keys.public_key()),
+        )
+        .unwrap();
+        let headers = c.upgrade_headers().await.unwrap();
+        assert_eq!(headers.get("user-agent").unwrap(), super::USER_AGENT);
+        assert!(super::USER_AGENT.starts_with("buzz-cli/"));
+    }
 
     /// A sign-in signature that comes back after the relay's 5 s deadline
     /// reconnects and signs the new challenge, never the old one.

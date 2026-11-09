@@ -20,6 +20,7 @@ import 'package:buzz/shared/push/push_bootstrap.dart';
 import 'package:buzz/shared/push/push_bridge.dart';
 import 'package:buzz/shared/push/push_subscription.dart';
 import 'package:nostr/nostr.dart' as nostr;
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:buzz/shared/push/push_lease_revocation_outbox.dart';
 import 'package:buzz/shared/push/push_relay_capability_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
@@ -339,6 +340,13 @@ void main() {
   ) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
     SharedPreferences.setMockInitialValues({});
+    PackageInfo.setMockInitialValues(
+      appName: 'Buzz',
+      packageName: 'example.buzz',
+      version: '1.0.0',
+      buildNumber: '1',
+      buildSignature: '',
+    );
     const channel = MethodChannel('buzz/push');
     final messenger =
         TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
