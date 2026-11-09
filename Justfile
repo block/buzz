@@ -644,6 +644,8 @@ test-unit:
                 + test(=state::tests::disconnect_community_wins_reason_losing_nip_fi_does_not_enqueue_frame)
                 + test(=state::tests::manager_disconnect_sets_reason_enqueues_frame_then_cancels)
                 + test(/^api::nip_fi::/)'
+        # Public invite metadata and HTTP media delivery are infra-free.
+        cargo nextest run -p buzz-relay --lib -E 'test(/invite_preview/)'
         # Invitation drain/cutoff boundary contracts are infra-free.
         cargo nextest run -p buzz-relay --lib -E 'test(/^invite_token::/) + test(/^config::invite_cutoff_tests::/)'
         # Runtime concurrency caps: the flag controller, provider selection and
