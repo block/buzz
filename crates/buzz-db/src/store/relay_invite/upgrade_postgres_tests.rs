@@ -390,56 +390,28 @@ async fn assert_join_role_preserved(pool: &PgPool, community: Uuid) {
     );
 }
 
-async fn start_invite_repair_script(
-    pool: &PgPool,
-    application_name: Option<&str>,
-) -> std::process::Child {
-    let database_url = crate::test_support::database_url();
-    let options: sqlx::postgres::PgConnectOptions = database_url.parse().unwrap();
-    let host = options.get_host().to_owned();
-    let port = options.get_port().to_string();
-    let user = options.get_username().to_owned();
-    let password = database_url
-        .split_once("://")
-        .and_then(|(_, rest)| rest.split_once('@'))
-        .and_then(|(authority, _)| authority.split_once(':'))
-        .map(|(_, password)| password.to_owned())
-        .or_else(|| std::env::var("PGPASSWORD").ok())
-        .unwrap_or_default();
-    let database: String = sqlx::query_scalar("SELECT current_database()")
-        .fetch_one(pool)
-        .await
-        .unwrap();
+async fn start_invite_repair_script(application_name: Option<&str>) -> tokio::process::Child {
     let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../scripts/maintenance/backfill_invite_revocations.sql");
-    let mut command = std::process::Command::new("psql");
+    let mut command = tokio::process::Command::new("psql");
     command
         .args(["-X", "-v", "ON_ERROR_STOP=1"])
-        .arg("--host")
-        .arg(host)
-        .arg("--port")
-        .arg(port)
-        .arg("--username")
-        .arg(user)
         .arg("--dbname")
-        .arg(database)
+        .arg(crate::test_support::database_url())
         .arg("--file")
         .arg(script)
-        .env("PGPASSWORD", password)
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
     if let Some(application_name) = application_name {
         command.env("PGAPPNAME", application_name);
     }
     command.spawn().expect("start invite repair script")
 }
 
-pub(super) async fn run_invite_repair_script(pool: &PgPool) -> String {
-    let child = start_invite_repair_script(pool, None).await;
-    let output = tokio::task::spawn_blocking(move || child.wait_with_output())
-        .await
-        .unwrap()
-        .unwrap();
+pub(super) async fn run_invite_repair_script(_pool: &PgPool) -> String {
+    let child = start_invite_repair_script(None).await;
+    let output = child.wait_with_output().await.unwrap();
     assert!(
         output.status.success(),
         "invite repair script failed:\n{}\n{}",
@@ -1025,8 +997,8 @@ async fn invite_repair_serializes_with_ban_before_clearing_legacy_marker() {
     super::revocation_postgres_tests::wait_for_lock(&pool, &ban_name, "transactionid", &ban).await;
 
     let repair_name = format!("invite-repair-{}", Uuid::new_v4());
-    let child = start_invite_repair_script(&pool, Some(&repair_name)).await;
-    let repair = tokio::task::spawn_blocking(move || child.wait_with_output());
+    let child = start_invite_repair_script(Some(&repair_name)).await;
+    let repair = tokio::spawn(async move { child.wait_with_output().await });
     super::revocation_postgres_tests::wait_for_lock(&pool, &repair_name, "advisory", &repair).await;
     assert_repair_waits_for_admission(&pool, &repair_name).await;
 
@@ -1089,8 +1061,8 @@ async fn invite_repair_serializes_with_owner_change_before_clearing_legacy_marke
     .await;
 
     let repair_name = format!("invite-repair-{}", Uuid::new_v4());
-    let child = start_invite_repair_script(&pool, Some(&repair_name)).await;
-    let repair = tokio::task::spawn_blocking(move || child.wait_with_output());
+    let child = start_invite_repair_script(Some(&repair_name)).await;
+    let repair = tokio::spawn(async move { child.wait_with_output().await });
     super::revocation_postgres_tests::wait_for_lock(&pool, &repair_name, "advisory", &repair).await;
     assert_repair_waits_for_admission(&pool, &repair_name).await;
 
@@ -1150,8 +1122,8 @@ async fn invite_repair_waits_for_deletion_transition_before_clearing_legacy_mark
     .unwrap();
 
     let repair_name = format!("invite-repair-{}", Uuid::new_v4());
-    let child = start_invite_repair_script(&pool, Some(&repair_name)).await;
-    let repair = tokio::task::spawn_blocking(move || child.wait_with_output());
+    let child = start_invite_repair_script(Some(&repair_name)).await;
+    let repair = tokio::spawn(async move { child.wait_with_output().await });
     super::revocation_postgres_tests::wait_for_lock(&pool, &repair_name, "advisory", &repair).await;
     let waiting_for_deletion_before_admission: bool = sqlx::query_scalar(
         "SELECT EXISTS (\
