@@ -70,6 +70,49 @@ bool _queueComposerImages(
   return true;
 }
 
+/// Attaches files parked for this channel by a share-sheet hand-off.
+///
+/// Thread composers never take a seed: shares always target the channel
+/// timeline. The seed is taken once per mount and ownership of the files moves
+/// to the composer, which deletes them after upload or discard.
+void _useComposerSeed({
+  required WidgetRef ref,
+  required String channelId,
+  required String? threadHeadId,
+  required ObjectRef<_ComposerVoiceNote> voiceNote,
+  required ValueNotifier<List<_PendingAttachment>> attachments,
+  required ValueNotifier<String?> uploadError,
+  required ObjectRef<int> draftRevision,
+}) {
+  useEffect(() {
+    if (threadHeadId != null) return null;
+    // Take the seed after this frame: taking mutates the provider, which is
+    // not allowed while the tree is building, and the first build must settle
+    // before attachments are queued.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final seed = ref.read(composerSeedProvider.notifier).take(channelId);
+      for (final file in seed) {
+        final kind = file.isImage
+            ? _PendingAttachmentKind.image
+            : file.isVideo
+            ? _PendingAttachmentKind.video
+            : _PendingAttachmentKind.file;
+        final queued = _queueComposerAttachment(
+          XFile(file.path, name: file.name, mimeType: file.mimeType),
+          kind,
+          voiceNote,
+          attachments,
+          uploadError,
+          draftRevision,
+          deleteAfterUse: true,
+        );
+        if (!queued) unawaited(_deleteXFile(XFile(file.path)));
+      }
+    });
+    return null;
+  }, [channelId, threadHeadId]);
+}
+
 enum _AttachmentSurface { closed, menu, camera, photos }
 
 const _attachmentMenuWidth = 216.0;
