@@ -8,12 +8,15 @@
 //!
 //! Live delivery never loses an event silently. An event is lost when its
 //! worker's queue is full, or when it is not delivered within
-//! [`MAX_QUEUE_DELAY`] of this node reading it from Redis. Either way the syncs
-//! it would have reached get `CLOSED "resync: ..."` (NIP-AR Sync rule 5), and
-//! the connections it would have reached are fenced and closed so their
-//! clients catch up from their cursor. When the dispatcher itself lags the
-//! broadcast, it cannot tell which events it skipped, so it does the same for
-//! every subscribed connection.
+//! [`MAX_DELIVERY_DELAY`] of this node reading it from Redis. Either way the
+//! syncs it would have reached get `CLOSED "resync: ..."` (NIP-AR Sync rule 5),
+//! and the connections it would have reached are fenced and closed so their
+//! clients catch up from their cursor. A recipient the access gate could not
+//! check (a visibility or membership read failed) is checked again, with
+//! backoff, until the deadline, and is lost the same way only if the gate
+//! still cannot check it. When the dispatcher itself lags the broadcast,
+//! it cannot tell which events it skipped, so it does the same for every
+//! subscribed connection.
 //!
 //! An ephemeral event (presence, typing, observer frames) is never stored, so
 //! no reconnect can replay it. Losing one is only counted: closing its
@@ -22,18 +25,20 @@
 //!
 //! A client resumes from the newest `created_at` it received, minus a few
 //! seconds of slack. Recovery depends on that cursor never getting further
-//! ahead of a lost event than the slack:
-//! - A fence is immediate and atomic with the live send path, so after it no
-//!   newer frame is queued to the connection. Frames queued before it were
-//!   produced no later than the fence.
-//! - [`MAX_QUEUE_DELAY`] is the cutoff for attempting delivery: no event is
-//!   delivered, and so none moves a cursor, later than that after this node
-//!   read it from Redis. A worker that has not delivered an event by then
-//!   fences its recipients at once.
+//! ahead of a lost event than the slack. A fence is immediate and atomic with
+//! the live send path, so after it no newer frame is queued to the connection;
+//! frames queued before it were produced no later than the fence.
 //!
-//! So a missed event is replayed as long as `MAX_QUEUE_DELAY`, plus its
-//! writer's clock skew and its publish-to-Redis delay, stays under the
-//! client's slack. Three cases fall outside that bound:
+//! A slow delivery is delivered late rather than lost. A database stall of a
+//! few seconds slows every node's deliveries at once; closing their
+//! recipients then would send the whole fleet back to that database at the
+//! same moment. The cost: while an event waits, newer events on other
+//! channels can move a recipient's cursor past it. If the event then arrives,
+//! nothing is lost. If it is lost at [`MAX_DELIVERY_DELAY`], or the client
+//! disconnects while it waits, a reconnect replays it only when the cursor
+//! moved less than the slack past it.
+//!
+//! Other cases outside the slack:
 //! - The relay accepts `created_at` far outside the slack, and an ordinary
 //!   reconnect has the same limit. Only a client-side rewind can recover an
 //!   event whose writer's clock is further behind.
@@ -42,8 +47,9 @@
 //!   only when the dispatcher reaches it.
 //! - Dispatcher lag, where the skipped events are never seen.
 //!
-//! The socket close itself goes through one paced closer so a hot channel
-//! cannot turn into a reconnect storm (Review-Proven Rule 9).
+//! The socket closes go through one closer per node, paced as a share of the
+//! node's connections, so no loss turns into a reconnect storm
+//! (Review-Proven Rule 9).
 use std::collections::HashSet;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -67,14 +73,18 @@ pub const WORKERS: usize = 16;
 /// Events each worker may hold before the dispatcher drops new ones.
 pub const WORKER_QUEUE: usize = 1024;
 /// The cutoff for delivering an event, from when this node read it from Redis.
-/// An event not delivered by then counts as lost.
-/// It must stay well under the clients' replay slack (5 s), so a client whose
-/// cursor moved on through faster paths still replays what it missed.
-pub const MAX_QUEUE_DELAY: Duration = Duration::from_secs(2);
-/// Connections the closer closes per tick.
-const CLOSE_BATCH: usize = 50;
-/// The closer's tick: with [`CLOSE_BATCH`], at most 5,000 closes per second.
-const CLOSE_TICK: Duration = Duration::from_millis(10);
+/// An event not delivered by then counts as lost. It outlasts a database stall
+/// of a few seconds, so such a stall delays deliveries instead of closing
+/// their recipients.
+pub const MAX_DELIVERY_DELAY: Duration = Duration::from_secs(30);
+/// The share of this node's subscribed connections the closer may close per
+/// second, 1%, above a floor of one per [`CLOSE_TICK`]: `max(1% of
+/// connections, 10)` closes per second. From 1,000 connections up, closing
+/// every connection takes at least 100 s; a smaller node is bounded by the
+/// floor (150 connections close in about 15 s).
+const CLOSE_SHARE_PER_SECOND: f64 = 0.01;
+/// The closer's mean tick. Each tick is jittered by ±50%.
+const CLOSE_TICK: Duration = Duration::from_millis(100);
 /// The resync reason for a sync whose live entry was lost here.
 const LAG_RESYNC: &str = "resync: live delivery lagged";
 
@@ -90,7 +100,7 @@ impl Queued {
     fn new(channel_event: ChannelEvent) -> Self {
         Self {
             community_id: channel_event.community_id,
-            deadline: channel_event.received_at + MAX_QUEUE_DELAY,
+            deadline: channel_event.received_at + MAX_DELIVERY_DELAY,
             stored: pubsub_stored_event(channel_event),
         }
     }
@@ -127,19 +137,36 @@ async fn run_worker(
 
 /// Deliver a queued event by its deadline, or handle it as lost. A delivery
 /// cut off at the deadline may have reached some recipients; they close too.
+/// Recipients the access gate could not check are checked again until the
+/// deadline, and are lost only if the gate still cannot check them. An
+/// ephemeral event is not worth holding its worker for, so it is not retried.
 async fn deliver_or_lose(state: &Arc<AppState>, closer: &LagCloser, queued: Queued) {
     let Queued {
         community_id,
         stored,
         deadline,
     } = queued;
-    let delivered = Instant::now() < deadline
-        && tokio::time::timeout_at(deadline, deliver_pubsub_event(state, community_id, &stored))
-            .await
-            .is_ok();
-    if !delivered {
+    let ephemeral = is_ephemeral(event_kind_u32(&stored.event));
+    let retry_until = if ephemeral { Instant::now() } else { deadline };
+    let unverified = if Instant::now() < deadline {
+        tokio::time::timeout_at(
+            deadline,
+            deliver_pubsub_event(state, community_id, &stored, retry_until),
+        )
+        .await
+        .ok()
+    } else {
+        None
+    };
+    let Some(unverified) = unverified else {
         lose(state, closer, community_id, &stored, "stale");
+        return;
+    };
+    if unverified.is_empty() || ephemeral {
+        return;
     }
+    metrics::counter!("buzz_multinode_fanout_dropped_total", "reason" => "unverified").increment(1);
+    closer.queue(state, unverified);
 }
 
 /// One known event will not be delivered: resync the syncs and fence and
@@ -237,9 +264,19 @@ impl Dispatcher {
     }
 }
 
-/// Fences connections that lost a live event at once, then closes them at most
-/// [`CLOSE_BATCH`] per [`CLOSE_TICK`]. The pending set holds each connection
-/// once and never more than this node's connections.
+/// Closes per second for a node with `connections` connections: its share,
+/// and at least one per tick.
+fn close_rate(connections: usize) -> f64 {
+    (connections as f64 * CLOSE_SHARE_PER_SECOND).max(1.0 / CLOSE_TICK.as_secs_f64())
+}
+
+/// Fences connections that lost a live event at once, then closes them at
+/// [`close_rate`]: [`CLOSE_SHARE_PER_SECOND`] of this node's connections, at
+/// least one per tick. Every node paces its own closes, so a loss that reaches
+/// every node sends at most that share of the fleet (or the floor, on nodes
+/// under 1,000 connections) to reconnect each second. The
+/// pending set holds each connection once and never more than this node's
+/// connections.
 #[derive(Default)]
 struct LagCloser {
     pending: Mutex<HashSet<ConnId>>,
@@ -261,12 +298,12 @@ impl LagCloser {
         }
     }
 
-    /// Close up to [`CLOSE_BATCH`] pending connections, and count them.
-    /// Returns how many it closed.
-    fn close_batch(&self, state: &AppState) -> usize {
+    /// Close up to `limit` pending connections, and count them. Returns how
+    /// many it closed.
+    fn close_batch(&self, state: &AppState, limit: usize) -> usize {
         let batch: Vec<ConnId> = {
             let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
-            let batch: Vec<ConnId> = pending.iter().take(CLOSE_BATCH).copied().collect();
+            let batch: Vec<ConnId> = pending.iter().take(limit).copied().collect();
             for conn_id in &batch {
                 pending.remove(conn_id);
             }
@@ -279,17 +316,35 @@ impl LagCloser {
         batch.len()
     }
 
+    fn is_empty(&self) -> bool {
+        self.pending
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_empty()
+    }
+
     async fn run(self: Arc<Self>, state: Arc<AppState>) {
         loop {
             self.wake.notified().await;
             let mut closed = 0usize;
+            // Closes owed since the last tick; a fraction carries over.
+            let mut owed: f64 = 1.0;
             loop {
-                let batch = self.close_batch(&state);
-                if batch == 0 {
+                let batch = self.close_batch(&state, owed as usize);
+                if batch == 0 && self.is_empty() {
                     break;
                 }
                 closed += batch;
-                tokio::time::sleep(CLOSE_TICK).await;
+                // Owed closes with no pending connection to close lapse, so
+                // a quiet spell cannot bank a burst.
+                owed = if batch < owed as usize {
+                    owed.fract()
+                } else {
+                    owed - batch as f64
+                };
+                let tick = CLOSE_TICK.mul_f64(rand::random_range(0.5..1.5));
+                tokio::time::sleep(tick).await;
+                owed += close_rate(state.sub_registry.total_connections()) * tick.as_secs_f64();
             }
             warn!(
                 closed,
@@ -449,13 +504,21 @@ mod tests {
         assert_eq!(pending(&dispatcher), HashSet::from([first, second]));
     }
 
-    /// The closer cancels queued connections, at most one batch per tick.
+    /// The closer closes queued connections at its share of this node's
+    /// connections per second, with at least one per tick: never the whole
+    /// backlog at once.
     #[tokio::test(start_paused = true)]
-    async fn closer_cancels_queued_connections_in_paced_batches() {
+    async fn closer_closes_a_share_of_the_nodes_connections_per_second() {
+        assert_eq!(close_rate(100), 10.0, "the floor: one per mean tick");
+        assert_eq!(
+            close_rate(150),
+            10.0,
+            "a small node is bounded by the floor"
+        );
+        assert_eq!(close_rate(10_000), 100.0, "1% of the node per second");
+
         let state = crate::state::tests::test_state().await;
-        let subscribers: Vec<_> = (0..CLOSE_BATCH + 1)
-            .map(|_| subscriber(&state, STORED))
-            .collect();
+        let subscribers: Vec<_> = (0..2_000).map(|_| subscriber(&state, STORED)).collect();
         let closer = Arc::new(LagCloser::default());
         tokio::spawn(Arc::clone(&closer).run(Arc::clone(&state)));
 
@@ -466,10 +529,15 @@ mod tests {
                 .filter(|(_, _, cancel)| cancel.is_cancelled())
                 .count()
         };
-        tokio::time::sleep(CLOSE_TICK / 2).await;
-        assert_eq!(cancelled(), CLOSE_BATCH, "one batch before the first tick");
-        tokio::time::sleep(CLOSE_TICK).await;
-        assert_eq!(cancelled(), CLOSE_BATCH + 1, "the rest after one tick");
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        assert_eq!(cancelled(), 1, "one close at once, not a batch");
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        // 20 per second for 10 s, give or take one jittered tick.
+        let closed = cancelled();
+        assert!(
+            (195..=205).contains(&closed),
+            "paced at 1% of 2,000 connections per second: {closed}"
+        );
     }
 
     /// Deliver `event` the way a worker does, and report whether the
@@ -532,13 +600,13 @@ mod tests {
         let queue = &mut queues[0];
 
         dispatcher.dispatch(&state, event(STORED, 0));
-        tokio::time::advance(MAX_QUEUE_DELAY - Duration::from_millis(1)).await;
+        tokio::time::advance(MAX_DELIVERY_DELAY - Duration::from_millis(1)).await;
         let in_time = queue.try_recv().expect("queued");
         deliver_or_lose(&state, &dispatcher.closer, in_time).await;
         assert!(frames.try_recv().is_ok(), "delivered inside its deadline");
 
         dispatcher.dispatch(&state, event(STORED, 1)); // R
-        tokio::time::advance(MAX_QUEUE_DELAY).await;
+        tokio::time::advance(MAX_DELIVERY_DELAY).await;
         let late = queue.try_recv().expect("queued");
         deliver_or_lose(&state, &dispatcher.closer, late).await;
         assert!(frames.try_recv().is_err(), "R is not delivered late");
@@ -550,6 +618,163 @@ mod tests {
         assert!(!cancel.is_cancelled(), "the close waits for the closer");
     }
 
+    /// A delivery slowed well past the clients' replay slack is still
+    /// delivered, and closes nothing: a database stall of a few seconds must
+    /// not close every recipient on every node at once.
+    #[tokio::test(start_paused = true)]
+    async fn event_delayed_past_the_replay_slack_is_delivered_late() {
+        let state = crate::state::tests::test_state().await;
+        let (_conn, mut frames, cancel) = subscriber(&state, STORED);
+        let (dispatcher, mut queues) = Dispatcher::new(1, 4);
+
+        dispatcher.dispatch(&state, event(STORED, 0));
+        tokio::time::advance(Duration::from_secs(10)).await;
+        let queued = queues[0].try_recv().expect("queued");
+        deliver_or_lose(&state, &dispatcher.closer, queued).await;
+        assert!(frames.try_recv().is_ok(), "delivered late");
+        assert!(pending(&dispatcher).is_empty(), "nothing to close");
+        assert!(!cancel.is_cancelled());
+    }
+
+    /// A recipient the access gate still cannot check at the deadline did not
+    /// get the event, so it is lost like a late one: fenced and queued to
+    /// close. A lost ephemeral event is not retried and closes nothing, as on
+    /// every other loss path.
+    #[tokio::test(start_paused = true)]
+    async fn recipient_the_access_gate_could_not_check_is_lost() {
+        let state = crate::state::tests::test_state().await;
+        state.db.pool().close().await;
+        let channel_id = Uuid::new_v4();
+        state
+            .channel_visibility_cache
+            .insert((community(), channel_id), "private".to_string());
+        let (conn, mut frames, _cancel) = subscriber(&state, STORED);
+        state
+            .conn_manager
+            .set_authenticated_pubkey(conn, vec![7; 32]);
+        state.sub_registry.register(
+            conn,
+            "channel".to_string(),
+            vec![Filter::new().kinds([Kind::Custom(STORED), Kind::Custom(PRESENCE)])],
+            Some(channel_id),
+        );
+        let in_channel = |kind| ChannelEvent {
+            topic: EventTopic::Channel(channel_id),
+            ..event(kind, 0)
+        };
+        let closer = LagCloser::default();
+
+        let started = Instant::now();
+        deliver_or_lose(&state, &closer, Queued::new(in_channel(PRESENCE))).await;
+        assert_eq!(
+            started.elapsed(),
+            Duration::ZERO,
+            "an ephemeral is not retried"
+        );
+        assert!(closer.pending.lock().expect("pending").is_empty());
+
+        let started = Instant::now();
+        deliver_or_lose(&state, &closer, Queued::new(in_channel(STORED))).await;
+        assert!(
+            started.elapsed() > MAX_DELIVERY_DELAY - Duration::from_secs(3),
+            "retried until its deadline: {:?}",
+            started.elapsed()
+        );
+        assert!(frames.try_recv().is_err(), "the gate let nothing through");
+        assert_eq!(
+            closer.pending.lock().expect("pending").clone(),
+            HashSet::from([conn])
+        );
+    }
+
+    /// A database stall shorter than the deadline delays a recipient the
+    /// access gate could not check; it does not close it. The gate is checked
+    /// again until it can answer, and the event is then delivered.
+    #[tokio::test(start_paused = true)]
+    async fn recipient_the_gate_checks_on_a_retry_gets_the_event_late() {
+        let state = crate::state::tests::test_state().await;
+        state.db.pool().close().await;
+        let channel_id = Uuid::new_v4();
+        let (conn, mut frames, cancel) = subscriber(&state, STORED);
+        state.sub_registry.register(
+            conn,
+            "channel".to_string(),
+            vec![Filter::new().kind(Kind::Custom(STORED))],
+            Some(channel_id),
+        );
+        let queued = Queued::new(ChannelEvent {
+            topic: EventTopic::Channel(channel_id),
+            ..event(STORED, 0)
+        });
+        let closer = Arc::new(LagCloser::default());
+        let delivery = tokio::spawn({
+            let (state, closer) = (Arc::clone(&state), Arc::clone(&closer));
+            async move { deliver_or_lose(&state, &closer, queued).await }
+        });
+
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        assert!(
+            frames.try_recv().is_err(),
+            "nothing while the visibility read fails"
+        );
+        // The stall ends: the channel's visibility can be read again.
+        state
+            .channel_visibility_cache
+            .insert((community(), channel_id), "open".to_string());
+        delivery.await.expect("delivery task");
+
+        assert!(frames.try_recv().is_ok(), "delivered late");
+        assert!(
+            closer.pending.lock().expect("pending").is_empty(),
+            "nothing to close"
+        );
+        assert!(!cancel.is_cancelled());
+    }
+
+    mod postgres_tests {
+        use super::*;
+
+        /// An event for a channel the database does not have (deleted, or
+        /// never created here) reaches no one, and is not retried: a missing
+        /// channel is an answer, not a failed check. Retrying it would hold
+        /// its worker until the deadline and then close its recipients.
+        /// Mutation: drop the `ChannelNotFound` arm in `check_fanout_access`
+        /// -> retried for 30 s and queued to close -> RED.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn event_for_a_missing_channel_is_denied_not_retried() {
+            let state = crate::state::tests::test_state().await;
+            let channel_id = Uuid::new_v4();
+            let (conn, mut frames, cancel) = subscriber(&state, STORED);
+            state.sub_registry.register(
+                conn,
+                "channel".to_string(),
+                vec![Filter::new().kind(Kind::Custom(STORED))],
+                Some(channel_id),
+            );
+            let closer = LagCloser::default();
+
+            let started = std::time::Instant::now();
+            deliver_or_lose(
+                &state,
+                &closer,
+                Queued::new(ChannelEvent {
+                    topic: EventTopic::Channel(channel_id),
+                    ..event(STORED, 0)
+                }),
+            )
+            .await;
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "not retried: {:?}",
+                started.elapsed()
+            );
+            assert!(frames.try_recv().is_err(), "no one has access");
+            assert!(closer.pending.lock().expect("pending").is_empty());
+            assert!(!cancel.is_cancelled());
+        }
+    }
+
     /// The deadline runs from Redis receipt: an event that already waited out
     /// its deadline in the broadcast before dispatch is lost, not delivered.
     #[tokio::test(start_paused = true)]
@@ -559,7 +784,7 @@ mod tests {
         let (dispatcher, mut queues) = Dispatcher::new(1, 4);
 
         let received = event(STORED, 0);
-        tokio::time::advance(MAX_QUEUE_DELAY).await;
+        tokio::time::advance(MAX_DELIVERY_DELAY).await;
         dispatcher.dispatch(&state, received);
         let queued = queues[0].try_recv().expect("queued");
         deliver_or_lose(&state, &dispatcher.closer, queued).await;
@@ -603,7 +828,7 @@ mod tests {
         deliver_or_lose(&state, &closer, Queued::new(event)).await;
         assert_eq!(
             started.elapsed(),
-            MAX_QUEUE_DELAY,
+            MAX_DELIVERY_DELAY,
             "cut off at the deadline"
         );
         assert!(frames.try_recv().is_err());
@@ -616,17 +841,16 @@ mod tests {
     /// Each batch is counted when it closes, not when the backlog drains.
     #[tokio::test]
     async fn each_close_batch_is_counted_as_it_closes() {
+        const BATCH: usize = 50;
         let state = crate::state::tests::test_state().await;
-        let subscribers: Vec<_> = (0..CLOSE_BATCH + 1)
-            .map(|_| subscriber(&state, STORED))
-            .collect();
+        let subscribers: Vec<_> = (0..BATCH + 1).map(|_| subscriber(&state, STORED)).collect();
         let closer = LagCloser::default();
         closer.queue(&state, subscribers.iter().map(|(conn_id, _, _)| *conn_id));
 
         let recorder = metrics_util::debugging::DebuggingRecorder::new();
         let snapshotter = recorder.snapshotter();
-        let closed = metrics::with_local_recorder(&recorder, || closer.close_batch(&state));
-        assert_eq!(closed, CLOSE_BATCH);
+        let closed = metrics::with_local_recorder(&recorder, || closer.close_batch(&state, BATCH));
+        assert_eq!(closed, BATCH);
         assert_eq!(closer.pending.lock().expect("pending").len(), 1);
         let counted: u64 = snapshotter
             .snapshot()
@@ -638,7 +862,7 @@ mod tests {
                 other => panic!("expected a counter, got {other:?}"),
             })
             .sum();
-        assert_eq!(counted, CLOSE_BATCH as u64);
+        assert_eq!(counted, BATCH as u64);
     }
 
     /// A lost ephemeral event cannot be replayed, so it is only counted: its
@@ -681,7 +905,7 @@ mod tests {
         );
 
         let stale = event(PRESENCE, 2);
-        tokio::time::advance(MAX_QUEUE_DELAY).await;
+        tokio::time::advance(MAX_DELIVERY_DELAY).await;
         deliver_or_lose(&state, &dispatcher.closer, Queued::new(stale)).await;
         assert!(frames.try_recv().is_err(), "still never delivered late");
         assert!(

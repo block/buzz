@@ -2073,6 +2073,41 @@ impl AppState {
             .await
     }
 
+    /// Which of `pubkeys` are active members of the channel, through the
+    /// membership cache: one bulk read for the users it lacks, instead of one
+    /// read each. For a fan-out's recipients.
+    pub(crate) async fn members_cached(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+        pubkeys: impl IntoIterator<Item = Vec<u8>>,
+    ) -> crate::membership_cache::Members {
+        self.membership_cache
+            .members(
+                community_id,
+                channel_id,
+                pubkeys,
+                |pubkeys| async move {
+                    Box::pin(self.db.get_active_membership_ids_bulk_read_at(
+                        community_id,
+                        &pubkeys,
+                        (crate::membership_cache::MAX_MEMBERSHIPS + 1) as u32,
+                    ))
+                    .await
+                },
+                |pubkeys| async move {
+                    let pairs = Box::pin(self.db.membership_pairs(
+                        community_id,
+                        &[channel_id],
+                        &pubkeys,
+                    ))
+                    .await?;
+                    Ok(pairs.into_iter().map(|(_, pubkey)| pubkey).collect())
+                },
+            )
+            .await
+    }
+
     /// `is_community_active` served from [`Self::community_active`], for
     /// socket admission and the ephemeral write fence. Errors are not cached.
     pub async fn is_community_active_cached(

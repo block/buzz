@@ -47,6 +47,10 @@ final ownedAgentDirectoryProvider =
       );
     });
 
+/// Registration pages read before failing, as `loadMeAgentInventory` bounds
+/// the same inventory.
+const ownedAgentDirectoryPageBudget = 50;
+
 /// Uses the active community's authenticated query boundary and paginates it.
 Future<List<OwnedAgentDirectoryEntry>> loadOwnedAgentDirectory(
   String owner,
@@ -55,6 +59,9 @@ Future<List<OwnedAgentDirectoryEntry>> loadOwnedAgentDirectory(
   final registrations = <String, NostrEvent>{};
   final seen = <String>{};
   for (var page = 1; ; page++) {
+    if (page > ownedAgentDirectoryPageBudget) {
+      throw StateError('Agent inventory exceeds the read budget.');
+    }
     final events = await query(
       NostrFilter(
         kinds: const [30177],

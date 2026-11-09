@@ -7,6 +7,8 @@ import '../../shared/community/community_provider.dart';
 import '../../shared/huddle/huddle.dart';
 import '../../shared/relay/relay.dart';
 import 'channel_management_provider.dart';
+import 'dm_voice_agent_provider.dart';
+import 'channels_provider.dart';
 
 typedef HuddleHumanCountLoader = Future<int> Function(String channelId);
 
@@ -90,7 +92,16 @@ final class _HuddleAdmissionToken {
   final int epoch;
   final String backingChannelId;
 
-  const _HuddleAdmissionToken(this.epoch, this.backingChannelId);
+  /// Membership is shared by all of an owner's devices. A snapshot cannot
+  /// prove that another admission did not arrive during teardown. In DMs,
+  /// leave audio only; the relay ends the room after its last peer leaves.
+  final bool relayOwnsCleanup;
+
+  const _HuddleAdmissionToken(
+    this.epoch,
+    this.backingChannelId, {
+    this.relayOwnsCleanup = false,
+  });
 }
 
 /// Coordinates the Nostr lifecycle around the foreground audio session.
@@ -128,19 +139,26 @@ final class MobileHuddleController extends Notifier<bool> {
 
   Future<void>? _startFuture;
 
-  Future<void> start({required String parentChannelId}) {
+  Future<void> start({required String parentChannelId, String? agentPubkey}) {
     final inFlight = _startFuture;
     if (inFlight != null) return inFlight;
 
     late final Future<void> startFuture;
-    startFuture = _start(parentChannelId: parentChannelId).whenComplete(() {
-      if (identical(_startFuture, startFuture)) _startFuture = null;
-    });
+    startFuture =
+        _start(
+          parentChannelId: parentChannelId,
+          agentPubkey: agentPubkey,
+        ).whenComplete(() {
+          if (identical(_startFuture, startFuture)) _startFuture = null;
+        });
     _startFuture = startFuture;
     return startFuture;
   }
 
-  Future<void> _start({required String parentChannelId}) async {
+  Future<void> _start({
+    required String parentChannelId,
+    String? agentPubkey,
+  }) async {
     if (state) return;
     final generation = ++_generation;
     final admissionEpoch = ++_admissionEpoch;
@@ -149,9 +167,25 @@ final class MobileHuddleController extends Notifier<bool> {
     String? backingChannelId;
     var announced = false;
     try {
-      backingChannelId = await actions.createHuddleBackingChannel();
+      final resolvedAgent = await resolveDmVoiceAgent(ref, parentChannelId);
+      _ensureCurrent(generation);
+      if (agentPubkey != null && resolvedAgent != agentPubkey) {
+        throw StateError('This agent is no longer available for voice.');
+      }
+      agentPubkey = resolvedAgent;
+      backingChannelId = await actions.createHuddleBackingChannel(
+        parentChannelId: parentChannelId,
+      );
       _latestAdmissionTargetBackingChannelId = backingChannelId;
       _ensureCurrent(generation);
+      if (agentPubkey != null) {
+        await actions.addMembers(
+          channelId: backingChannelId,
+          pubkeys: [agentPubkey],
+          role: 'bot',
+        );
+        _ensureCurrent(generation);
+      }
       final start = await actions.announceHuddleStarted(
         parentChannelId: parentChannelId,
         ephemeralChannelId: backingChannelId,
@@ -175,7 +209,11 @@ final class MobileHuddleController extends Notifier<bool> {
       if (session.phase == HuddleSessionPhase.failed) {
         throw StateError(session.error ?? 'Unable to join the new Huddle.');
       }
-      _admissionToken = _HuddleAdmissionToken(admissionEpoch, backingChannelId);
+      _admissionToken = _HuddleAdmissionToken(
+        admissionEpoch,
+        backingChannelId,
+        relayOwnsCleanup: _isDirectCall(parentChannelId),
+      );
     } catch (_) {
       if (admissionEpoch == _admissionEpoch) {
         _latestAdmissionTargetBackingChannelId = null;
@@ -213,6 +251,7 @@ final class MobileHuddleController extends Notifier<bool> {
     final admissionEpoch = ++_admissionEpoch;
     _latestAdmissionTargetBackingChannelId = ephemeralChannelId;
     final currentPubkey = ref.read(currentPubkeyProvider);
+    final relayOwnsCleanup = _isDirectCall(parentChannelId);
     try {
       await ref
           .read(huddleSessionProvider.notifier)
@@ -238,6 +277,7 @@ final class MobileHuddleController extends Notifier<bool> {
       _admissionToken = _HuddleAdmissionToken(
         admissionEpoch,
         ephemeralChannelId,
+        relayOwnsCleanup: relayOwnsCleanup,
       );
     }
   }
@@ -322,7 +362,11 @@ final class MobileHuddleController extends Notifier<bool> {
     if (identical(_admissionToken, admissionToken)) _admissionToken = null;
     final parentChannelId = session.parentChannelId;
     final backingChannelId = session.ephemeralChannelId;
-    final humanCount = !session.wasAdmitted || backingChannelId == null
+    final humanCount =
+        !session.wasAdmitted ||
+            backingChannelId == null ||
+            admissionToken?.relayOwnsCleanup == true ||
+            _hasOtherOwnerAdmission(session)
         ? null
         : ref
               .read(huddleHumanCountProvider)(backingChannelId)
@@ -362,6 +406,10 @@ final class MobileHuddleController extends Notifier<bool> {
     final backingChannelId = session.ephemeralChannelId;
     final admissionToken = session.wasAdmitted ? _admissionToken : null;
     if (admissionToken == null || backingChannelId == null) return;
+    if (admissionToken.relayOwnsCleanup || _hasOtherOwnerAdmission(session)) {
+      _admissionToken = null;
+      return;
+    }
     if (identical(_admissionToken, admissionToken)) _admissionToken = null;
     final humanCount = ref
         .read(huddleHumanCountProvider)(backingChannelId)
@@ -427,6 +475,22 @@ final class MobileHuddleController extends Notifier<bool> {
       // The audio relay may already have auto-ended and archived the room.
     }
   }
+
+  bool _isDirectCall(String parentChannelId) {
+    final channel = ref.read(channelByIdProvider(parentChannelId));
+    return channel?.isDm == true &&
+        channel!.participantPubkeys.toSet().length == 2;
+  }
+
+  bool _hasOtherOwnerAdmission(HuddleSessionState session) =>
+      session.currentPubkey != null &&
+      session.participantPubkeys
+              .where(
+                (key) =>
+                    key.toLowerCase() == session.currentPubkey!.toLowerCase(),
+              )
+              .length >
+          1;
 
   Future<void> end() async {
     ++_generation;

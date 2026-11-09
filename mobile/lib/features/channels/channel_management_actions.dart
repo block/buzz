@@ -408,7 +408,12 @@ class ChannelActions {
     _ref.invalidate(channelBotPubkeysProvider(channelId));
   }
 
-  Future<void> addReaction(String eventId, String emoji) async {
+  /// [targetAuthor] fills the NIP-25 `p` tag, which Activity reads by `#p`.
+  Future<void> addReaction(
+    String eventId,
+    String emoji, {
+    required String targetAuthor,
+  }) async {
     final shortcode = normalizeShortcode(emoji);
     final emojiUrl = reactionEmojiUrl(
       emoji,
@@ -419,6 +424,7 @@ class ChannelActions {
       content: emoji,
       tags: [
         ['e', eventId],
+        ['p', targetAuthor],
         if (shortcode != null && emojiUrl != null)
           ['emoji', shortcode, emojiUrl],
       ],

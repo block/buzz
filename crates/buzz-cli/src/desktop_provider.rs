@@ -19,6 +19,9 @@ use tokio::net::TcpStream;
 
 use crate::error::CliError;
 
+mod ownership;
+use ownership::{connect, current_uid};
+
 pub const PROVIDER_ENV: &str = "BUZZ_CREDENTIAL_PROVIDER";
 
 /// The protocol version this caller speaks.
@@ -28,8 +31,6 @@ const VERSION_HEADER: &str = "Buzz-Credential-Provider";
 /// Methods the provider may hold open for a person's decision (up to 120s).
 pub(crate) const HELD_TIMEOUT: Duration = Duration::from_secs(150);
 const QUICK_TIMEOUT: Duration = Duration::from_secs(10);
-/// `lsof` can take seconds on a busy Mac.
-const SAME_USER_TIMEOUT: Duration = Duration::from_secs(5);
 /// Every result is built from a request's params, and the desktop reads at
 /// most 2 MiB of request body, so no result is larger than that in bytes.
 /// Escaping a result as a JSON string grows it at most sixfold: a decrypted
@@ -281,100 +282,6 @@ fn parse_response(raw: &[u8]) -> Option<(u16, Vec<u8>)> {
         Some(n) => Some((status, rest.get(..n)?.to_vec())),
         None => Some((status, rest.to_vec())),
     }
-}
-
-// ---------------------------------------------------------------------------
-// Same-user check
-// ---------------------------------------------------------------------------
-
-/// Connect to the provider port. With `check`, confirm by numeric user ID that
-/// a process of this user holds the server side of this very connection, and
-/// refuse to use the connection otherwise.
-async fn connect(port: u16, check: bool) -> Result<TcpStream, ProviderError> {
-    let stream = tokio::time::timeout(QUICK_TIMEOUT, TcpStream::connect(("127.0.0.1", port)))
-        .await
-        .map_err(|_| ProviderError::Transport("connection timed out".into()))?
-        .map_err(|e| ProviderError::Transport(format!("not reachable: {}", e.kind())))?;
-    if check {
-        let local = stream
-            .local_addr()
-            .map_err(|_| ProviderError::Transport("no local address".into()))?
-            .port();
-        #[cfg(test)]
-        if tests::SAME_USER_HANGS.try_with(|_| ()).is_ok() {
-            return Err(ProviderError::Unconfirmed);
-        }
-        confirm_same_user(server_side_uid(port, local)).await?;
-    }
-    Ok(stream)
-}
-
-/// Refuse unless `owner` finds this user's UID. A lookup that runs out of
-/// time decided nothing, so it is retryable; any other answer is final.
-async fn confirm_same_user(
-    owner: impl std::future::Future<Output = Option<u32>>,
-) -> Result<(), ProviderError> {
-    match tokio::time::timeout(SAME_USER_TIMEOUT, owner).await {
-        Ok(Some(uid)) if uid == current_uid() => Ok(()),
-        Ok(_) => Err(ProviderError::OtherUser),
-        Err(_) => Err(ProviderError::Unconfirmed),
-    }
-}
-
-fn current_uid() -> u32 {
-    #[cfg(test)]
-    if let Ok(uid) = tests::CALLER_UID.try_with(|uid| *uid) {
-        return uid;
-    }
-    // SAFETY: getuid has no preconditions and cannot fail.
-    unsafe { libc::getuid() }
-}
-
-/// The owner UID of the socket `127.0.0.1:server -> 127.0.0.1:client`.
-#[cfg(target_os = "linux")]
-async fn server_side_uid(server: u16, client: u16) -> Option<u32> {
-    let table = tokio::fs::read_to_string("/proc/net/tcp").await.ok()?;
-    proc_net_tcp_uid(&table, server, client)
-}
-
-#[cfg(any(target_os = "linux", test))]
-fn proc_net_tcp_uid(table: &str, server: u16, client: u16) -> Option<u32> {
-    let local = format!("0100007F:{server:04X}");
-    let remote = format!("0100007F:{client:04X}");
-    table.lines().skip(1).find_map(|line| {
-        let cols: Vec<&str> = line.split_whitespace().collect();
-        (cols.get(1) == Some(&local.as_str()) && cols.get(2) == Some(&remote.as_str()))
-            .then(|| cols.get(7)?.parse().ok())
-            .flatten()
-    })
-}
-
-/// macOS: `lsof` lists the socket's owning process with its UID.
-#[cfg(not(target_os = "linux"))]
-async fn server_side_uid(server: u16, client: u16) -> Option<u32> {
-    let output = tokio::process::Command::new("/usr/sbin/lsof")
-        .args(["-nP", "-F", "un", &format!("-iTCP@127.0.0.1:{server}")])
-        .kill_on_drop(true)
-        .output()
-        .await
-        .ok()?;
-    lsof_uid(&String::from_utf8_lossy(&output.stdout), server, client)
-}
-
-#[cfg(any(not(target_os = "linux"), test))]
-fn lsof_uid(output: &str, server: u16, client: u16) -> Option<u32> {
-    let want = format!("n127.0.0.1:{server}->127.0.0.1:{client}");
-    let mut uid = None;
-    for line in output.lines() {
-        if let Some(value) = line.strip_prefix('u') {
-            uid = value.parse().ok();
-        } else if line.strip_prefix('p').is_some() {
-            uid = None;
-        } else if line == want {
-            return uid;
-        }
-    }
-    None
 }
 
 // ---------------------------------------------------------------------------
@@ -1516,6 +1423,7 @@ fn unpair_with(
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use super::ownership::{lsof_uid, proc_net_tcp_uid};
     use super::*;
     use crate::cached_assertion::unix_now;
 
@@ -1867,28 +1775,6 @@ pub(crate) mod tests {
         assert_eq!(signed.created_at, content.created_at);
         assert_eq!(signed.id, id);
         assert!(seen.lock().unwrap().len() >= 5);
-    }
-
-    /// A same-user lookup that runs out of time is retryable; a wrong or
-    /// missing owner stays a refusal.
-    #[tokio::test(start_paused = true)]
-    async fn a_slow_same_user_check_is_retryable_and_a_mismatch_is_not() {
-        let slow = async {
-            tokio::time::sleep(Duration::from_secs(4)).await;
-            Some(current_uid())
-        };
-        assert!(
-            confirm_same_user(slow).await.is_ok(),
-            "4 s is within the budget"
-        );
-
-        let err = confirm_same_user(std::future::pending()).await.unwrap_err();
-        assert!(crate::error::is_retryable_error(&err.into_cli("describe")));
-
-        for owner in [Some(current_uid() + 1), None] {
-            let err = confirm_same_user(async { owner }).await.unwrap_err();
-            assert!(!crate::error::is_retryable_error(&err.into_cli("describe")));
-        }
     }
 
     #[tokio::test]
