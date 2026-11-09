@@ -1,9 +1,10 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
-import '../../shared/me/me_agent_inventory.dart';
-import '../../shared/me/me_assistants.dart';
+import '../../shared/agents/owned_agent_directory.dart';
+import '../../shared/me/me_archived_agents.dart';
 import '../../shared/me/me_sync.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
@@ -14,19 +15,17 @@ import 'channels_provider.dart';
 
 /// Runtime is owner-signed discovery evidence, not permission to run an agent.
 /// The hosting desktop rechecks its live runtime, protection and room access.
+/// Derived from the owned-agent directory an agent DM already loads, so voice
+/// adds no inventory read.
 final ownedCodexVoiceAgentsProvider = FutureProvider<Set<String>>((ref) async {
-  final sync = ref.watch(meSyncProvider);
   ref.watch(_voiceInventoryChangesProvider);
-  ref.watch(relaySessionProvider.select((state) => state.status));
-  final inventory = await loadMeAgentInventory(
-    sync,
-    runtime: 'buzz.codex/codex',
-  );
-  final owned = await ref.refresh(meAssistantsProvider.future);
-  sync.check();
+  final archived = ref.watch(meArchivedAgentsProvider.future);
+  final owned = await ref.watch(ownedAgentDirectoryProvider.future);
+  final hidden = await archived;
   return {
     for (final agent in owned)
-      if (inventory.containsKey(agent.pubkey)) agent.pubkey,
+      if (agent.runtime == 'buzz.codex/codex' && !hidden.contains(agent.pubkey))
+        agent.pubkey,
   };
 });
 
@@ -45,12 +44,11 @@ String? dmVoiceAgent(Channel channel, String? viewer, Set<String> ownedCodex) {
 }
 
 // Subscribe separately from the snapshot so refreshing it does not replay the
-// subscription and cause an invalidation loop. Reconnects resubscribe.
-final _voiceInventoryChangesProvider = StreamProvider.autoDispose<int>((ref) {
+// subscription and cause an invalidation loop. Reconnects resubscribe. A
+// desktop inventory change rereads the directory, which mentions share.
+final _voiceInventoryChangesProvider = Provider.autoDispose<void>((ref) {
   final sync = ref.watch(meSyncProvider);
   ref.watch(relaySessionProvider.select((state) => state.status));
-  final updates = StreamController<int>();
-  var revision = 0;
   var disposed = false;
   void Function()? unsubscribe;
   unawaited(() async {
@@ -58,20 +56,23 @@ final _voiceInventoryChangesProvider = StreamProvider.autoDispose<int>((ref) {
       unsubscribe = await sync.session.subscribe(
         NostrFilter(kinds: const [30177], authors: [sync.pubkey], limit: 0),
         (_) {
-          if (!disposed) updates.add(++revision);
+          if (!disposed) ref.invalidate(ownedAgentDirectoryProvider);
+          ref.invalidate(meArchivedAgentsProvider);
         },
       );
       if (disposed) unsubscribe?.call();
     } catch (error, stack) {
-      if (!disposed) updates.addError(error, stack);
+      if (!disposed) {
+        FlutterError.reportError(
+          FlutterErrorDetails(exception: error, stack: stack),
+        );
+      }
     }
   }());
   ref.onDispose(() {
     disposed = true;
     unsubscribe?.call();
-    unawaited(updates.close());
   });
-  return updates.stream;
 });
 
 /// Classification only: ordinary human/group DMs never depend on inventory
@@ -101,7 +102,9 @@ Future<String?> resolveDmVoiceAgent(Ref ref, String parentChannelId) async {
       ref.read(dmVoiceCandidateProvider(parentChannelId)) == null) {
     return null;
   }
-  final agents = await ref.refresh(ownedCodexVoiceAgentsProvider.future);
+  ref.invalidate(ownedAgentDirectoryProvider);
+  ref.invalidate(meArchivedAgentsProvider);
+  final agents = await ref.read(ownedCodexVoiceAgentsProvider.future);
   final agent = dmVoiceAgent(channel, ref.read(currentPubkeyProvider), agents);
   if (agent == null) {
     throw StateError('This agent is no longer available for voice.');
