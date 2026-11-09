@@ -761,6 +761,18 @@ class ThreadDetailPage extends HookConsumerWidget {
           visible.add(message);
         }
       }
+      // The tail can sit at the scroll end while the keyboard still covers
+      // it, so it counts as the bottom only when its end is above the
+      // keyboard and composer.
+      final tailIndex = _threadTailIndex(replies.length);
+      final atBottom =
+          replies.isNotEmpty &&
+          threadTailIsVisible() &&
+          itemPositionsListener.itemPositions.value.any(
+            (position) =>
+                position.index == tailIndex &&
+                position.itemTrailingEdge <= bottomEdge,
+          );
       final isDm =
           ref.read(channelsProvider.notifier).channelById(channelId)?.isDm ??
           false;
@@ -771,9 +783,7 @@ class ThreadDetailPage extends HookConsumerWidget {
         currentPubkey: currentPubkey,
         loaded: allMsgs,
         visible: visible,
-        bottom: replies.isNotEmpty && threadTailIsVisible()
-            ? replies.last
-            : null,
+        bottom: atBottom ? replies.last : null,
         threadRootId: queryRootId,
         isRootThread: threadHead.parentId == null,
       );
