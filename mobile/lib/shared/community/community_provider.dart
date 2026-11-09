@@ -276,6 +276,8 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
   /// Add a community. If one with the same relay URL already exists, update
   /// its credentials instead. Returns the effective community ID.
   Future<String> addCommunity(Community community) async {
+    final sync = ref.read(knownCommunitySyncProvider);
+    community = sync?.prepareAddition(community) ?? community;
     await CommunityEntryRequirements.verify(
       community,
       ref.read(builderlabAccountProvider),
@@ -293,6 +295,8 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
       final updated = existing.copyWith(
         pubkey: community.pubkey,
         nsec: community.nsec,
+        accountSyncOwner: community.accountSyncOwner,
+        accountSyncRevision: community.accountSyncRevision,
       );
       if (_channelSnapshotPubkey(existing)?.toLowerCase() !=
           _channelSnapshotPubkey(updated)?.toLowerCase()) {
@@ -304,7 +308,7 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
       state = AsyncData(updatedList);
       await _removeOrphanChannelListSnapshots(updatedList);
       await syncCommunitySnapshot(ref, updatedList);
-      await ref.read(knownCommunitySyncProvider)?.added(community.relayUrl);
+      sync?.trigger();
       return existing.id;
     }
 
@@ -313,7 +317,7 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
     state = AsyncData(updatedList);
     await _removeOrphanChannelListSnapshots(updatedList);
     await syncCommunitySnapshot(ref, updatedList);
-    await ref.read(knownCommunitySyncProvider)?.added(community.relayUrl);
+    sync?.trigger();
     return community.id;
   }
 

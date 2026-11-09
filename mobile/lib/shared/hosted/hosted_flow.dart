@@ -912,10 +912,14 @@ class HostedFlow extends ChangeNotifier {
         generation == _generation &&
         account.account?.subject == subject;
     if (!_addingCommunities) {
-      final listed = await loadKnownHostedCommunities(account);
+      final listed = await loadKnownAccountCommunities(account);
       if (!current()) return;
       communities = listed;
-      selectedRelays = Set.unmodifiable(listed.map((item) => item.relayUrl));
+      selectedRelays = Set.unmodifiable({
+        for (final item in listed)
+          if (HostedEnvironment.supportsRelay(Uri.parse(item.relayUrl)))
+            item.relayUrl,
+      });
       if (listed.isEmpty) {
         await leave(noCommunities: true);
         return;

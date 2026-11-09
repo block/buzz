@@ -24,12 +24,5 @@ final knownCommunitiesProvider =
       if (!ref.mounted || account.account?.subject != session.subject) {
         return const [];
       }
-      final removed =
-          await sync?.pendingRemovals(session.subject) ?? <String>{};
-      if (!ref.mounted || account.account?.subject != session.subject) {
-        return const [];
-      }
-      return communities
-          .where((community) => !removed.contains(community.relayUrl))
-          .toList(growable: false);
+      return communities;
     });

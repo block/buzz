@@ -1,5 +1,7 @@
 import 'dart:async';
 
+import 'package:buzz/shared/community/community.dart';
+import 'package:buzz/shared/hosted/hosted_environment.dart';
 import 'package:buzz/shared/hosted/builderlab_account.dart';
 import 'package:buzz/shared/hosted/hosted_communities.dart';
 import 'package:buzz/shared/hosted/known_community_address.dart';
@@ -49,41 +51,83 @@ class _Account extends BuilderlabAccountClient {
   }
 }
 
+Community _claimed(
+  String url, {
+  String owner = 'owner',
+  String revision = 'first',
+}) => Community(
+  id: url,
+  name: url,
+  relayUrl: url,
+  addedAt: DateTime(2026),
+  accountSyncOwner: '${HostedEnvironment.origin.origin}\n$owner',
+  accountSyncRevision: revision,
+);
+
 void main() {
   test(
-    'backfills secure local addresses, then records additions and removals',
+    'retained and legacy destinations are not claimed by the next account',
     () async {
       final account = _Account();
-      var local = [
-        'https://team.example:8443/',
-        'wss://one.communities.buzz.xyz',
-        'ws://insecure.example',
+      final local = [
+        _claimed('wss://private-a.example'),
+        _claimed(
+          'wss://legacy.example',
+        ).copyWith(accountSyncOwner: null, accountSyncRevision: null),
       ];
       final sync = KnownCommunitySync(
         account: account,
         storage: FakeSecureStorage(),
-        localRelays: () async => local,
+        localCommunities: () async => local,
       );
       addTearDown(sync.dispose);
       await sync.synchronize();
-      expect(account.calls.map((c) => c.relay), [
-        'wss://team.example:8443',
-        'wss://one.communities.buzz.xyz',
+      account.subject.value = null;
+      await sync.synchronize();
+      account.subject.value = 'another';
+      await sync.synchronize();
+      expect(account.calls.map((c) => (c.subject, c.relay)), [
+        ('owner', 'wss://private-a.example'),
       ]);
-      expect(account.calls.every((c) => c.path.endsWith('/add')), isTrue);
+      local.add(sync.prepareAddition(_claimed('wss://explicit-b.example')));
       await sync.synchronize();
+      expect(account.calls.last.subject, 'another');
+      expect(account.calls.last.relay, 'wss://explicit-b.example');
       expect(account.calls, hasLength(2));
-      await sync.remove('wss://team.example:8443');
-      // Failed/cancelled local removal cannot delete the account entry.
-      await sync.synchronize();
-      expect(account.calls, hasLength(2));
-      local = ['wss://one.communities.buzz.xyz'];
-      await sync.synchronize();
-      expect(account.calls.last.path, endsWith('/remove'));
-      expect(account.calls.last.relay, 'wss://team.example:8443');
-      expect(await sync.pendingRemovals('owner'), isEmpty);
     },
   );
+
+  test('reconciles owned secure additions, then records removals', () async {
+    final account = _Account();
+    var local = [
+      'https://team.example:8443/',
+      'wss://one.communities.buzz.xyz',
+      'ws://insecure.example',
+    ];
+    final sync = KnownCommunitySync(
+      account: account,
+      storage: FakeSecureStorage(),
+      localCommunities: () async => local.map(_claimed).toList(),
+    );
+    addTearDown(sync.dispose);
+    await sync.synchronize();
+    expect(account.calls.map((c) => c.relay), [
+      'wss://team.example:8443',
+      'wss://one.communities.buzz.xyz',
+    ]);
+    expect(account.calls.every((c) => c.path.endsWith('/add')), isTrue);
+    await sync.synchronize();
+    expect(account.calls, hasLength(2));
+    await sync.remove('wss://team.example:8443');
+    // Failed/cancelled local removal cannot delete the account entry.
+    await sync.synchronize();
+    expect(account.calls, hasLength(2));
+    local = ['wss://one.communities.buzz.xyz'];
+    await sync.synchronize();
+    expect(account.calls.last.path, endsWith('/remove'));
+    expect(account.calls.last.relay, 'wss://team.example:8443');
+    expect(await sync.pendingRemovals('owner'), isEmpty);
+  });
 
   test(
     'offline removal survives restart and retries without another user action',
@@ -94,7 +138,7 @@ void main() {
       var sync = KnownCommunitySync(
         account: account,
         storage: storage,
-        localRelays: () async => local,
+        localCommunities: () async => local.map(_claimed).toList(),
       );
       await sync.synchronize();
       account.failure = AccountFailure.unavailable;
@@ -107,7 +151,7 @@ void main() {
       sync = KnownCommunitySync(
         account: account,
         storage: storage,
-        localRelays: () async => local,
+        localCommunities: () async => local.map(_claimed).toList(),
       );
       addTearDown(sync.dispose);
       await sync.synchronize();
@@ -130,7 +174,7 @@ void main() {
       final sync = KnownCommunitySync(
         account: account,
         storage: FakeSecureStorage(),
-        localRelays: () async => local,
+        localCommunities: () async => local.map(_claimed).toList(),
       );
       addTearDown(sync.dispose);
       final running = sync.synchronize();
@@ -156,7 +200,7 @@ void main() {
     final sync = KnownCommunitySync(
       account: account,
       storage: storage,
-      localRelays: () async => [],
+      localCommunities: () async => [],
     );
     addTearDown(sync.dispose);
     await sync.remove('wss://old.example');
@@ -184,7 +228,7 @@ void main() {
       final sync = KnownCommunitySync(
         account: account,
         storage: FakeSecureStorage(),
-        localRelays: () async => ['wss://team.example'],
+        localCommunities: () async => [_claimed('wss://team.example')],
       );
       addTearDown(sync.dispose);
       await sync.synchronize();
@@ -207,7 +251,7 @@ void main() {
         final sync = KnownCommunitySync(
           account: account,
           storage: FakeSecureStorage(),
-          localRelays: () async => ['wss://team.example'],
+          localCommunities: () async => [_claimed('wss://team.example')],
         );
         sync.trigger();
         clock.flushMicrotasks();
@@ -234,6 +278,8 @@ void main() {
       final account = _Account()
         ..rows = [
           {'community_url': 'wss://team.example:8443/'},
+          {'community_url': 'wss://team.example:9443'},
+          {'community_url': 'wss://one.communities.buzz.xyz:8443'},
           {'community_url': 'wss://one.communities.buzz.xyz:443'},
           {'community_url': 'wss://one.communities.buzz.xyz/'},
           {'community_url': 'ws://insecure.example'},
@@ -243,10 +289,15 @@ void main() {
       final all = await loadKnownAccountCommunities(account);
       expect(all.map((c) => c.relayUrl), [
         'wss://team.example:8443',
+        'wss://team.example:9443',
+        if (!HostedEnvironment.requiresAuth('one.communities.buzz.xyz'))
+          'wss://one.communities.buzz.xyz:8443',
         'wss://one.communities.buzz.xyz',
       ]);
-      final hosted = await loadKnownHostedCommunities(account);
-      expect(hosted.map((c) => c.relayUrl), ['wss://one.communities.buzz.xyz']);
+      expect(all.take(2).map((c) => c.name), [
+        'team.example:8443',
+        'team.example:9443',
+      ]);
       expect(knownCommunityAddress('wss://team.example:65536'), isNull);
       expect(knownCommunityAddress('wss://team.example:0'), isNull);
     },

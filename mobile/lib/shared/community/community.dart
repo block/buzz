@@ -33,6 +33,14 @@ class Community {
   /// fallbacks always appear in the short form onboarding shows.
   String get name => HostedEnvironment.communityDisplayName(_name, relayUrl);
 
+  /// Account origin and subject that explicitly saved this destination.
+  /// Legacy/unclaimed records remain local; they are never uploaded on sign-in.
+  final String? accountSyncOwner;
+
+  /// Unique revision persisted atomically with an explicit local join.
+  /// A new revision supersedes an earlier queued account removal on recovery.
+  final String? accountSyncRevision;
+
   final String relayUrl;
   final String? pubkey;
   final String? nsec;
@@ -54,6 +62,8 @@ class Community {
     required this.id,
     required String name,
     required this.relayUrl,
+    this.accountSyncOwner,
+    this.accountSyncRevision,
     this.pubkey,
     this.nsec,
     this.sensitiveActionPolicy = SensitiveActionPolicy.disabledByUser,
@@ -89,6 +99,8 @@ class Community {
   Community copyWith({
     String? name,
     String? relayUrl,
+    Object? accountSyncOwner = _sentinel,
+    Object? accountSyncRevision = _sentinel,
     Object? pubkey = _sentinel,
     Object? nsec = _sentinel,
     SensitiveActionPolicy? sensitiveActionPolicy,
@@ -101,6 +113,12 @@ class Community {
       id: id,
       name: name ?? _name,
       relayUrl: relayUrl ?? this.relayUrl,
+      accountSyncOwner: accountSyncOwner == _sentinel
+          ? this.accountSyncOwner
+          : accountSyncOwner as String?,
+      accountSyncRevision: accountSyncRevision == _sentinel
+          ? this.accountSyncRevision
+          : accountSyncRevision as String?,
       pubkey: pubkey == _sentinel ? this.pubkey : pubkey as String?,
       nsec: nsec == _sentinel ? this.nsec : nsec as String?,
       sensitiveActionPolicy:
@@ -122,6 +140,8 @@ class Community {
     'id': id,
     'name': _name,
     'relayUrl': relayUrl,
+    if (accountSyncOwner != null) 'accountSyncOwner': accountSyncOwner,
+    if (accountSyncRevision != null) 'accountSyncRevision': accountSyncRevision,
     if (pubkey != null) 'pubkey': pubkey,
     if (nsec != null) 'nsec': nsec,
     'sensitiveActionPolicy': sensitiveActionPolicy.name,
@@ -158,6 +178,8 @@ class Community {
       id: json['id'] as String,
       name: json['name'] as String,
       relayUrl: json['relayUrl'] as String,
+      accountSyncOwner: json['accountSyncOwner'] as String?,
+      accountSyncRevision: json['accountSyncRevision'] as String?,
       pubkey: json['pubkey'] as String?,
       nsec: json['nsec'] as String?,
       sensitiveActionPolicy: SensitiveActionPolicy.values.firstWhere(

@@ -401,6 +401,7 @@ class CommunitySwitcherPage extends HookConsumerWidget {
                     ),
                   ),
                 ),
+              const AccountCommunitySyncStatus(),
               if (knownAsync.isLoading)
                 const Padding(
                   padding: EdgeInsets.only(bottom: Grid.sm),

@@ -10,10 +10,7 @@ final knownCommunitySyncProvider = Provider<KnownCommunitySync?>((ref) {
   if (!HostedEnvironment.enabled) return null;
   final sync = KnownCommunitySync(
     account: ref.watch(builderlabAccountProvider),
-    localRelays: () async =>
-        (await ref.read(communityStorageProvider).loadAll())
-            .map((community) => community.relayUrl)
-            .toList(),
+    localCommunities: () => ref.read(communityStorageProvider).loadAll(),
   );
   ref.onDispose(sync.dispose);
   return sync;

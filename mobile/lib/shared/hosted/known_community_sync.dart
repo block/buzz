@@ -3,6 +3,9 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:uuid/uuid.dart';
+
+import '../community/community.dart';
 
 import '../storage/secure_storage.dart';
 import '../storage/serial_queue.dart';
@@ -12,19 +15,30 @@ import 'known_community_address.dart';
 /// Durable account-list edits. Community credentials and relay membership never
 /// enter this queue. Each account keeps its own snapshot and latest URL intents.
 class KnownCommunitySync extends ChangeNotifier {
+  /// Reconciles committed, explicitly owned additions and queued removals.
   KnownCommunitySync({
     required this.account,
-    required this.localRelays,
+    required this.localCommunities,
     FlutterSecureStorage? storage,
     this.retryDelay = const Duration(seconds: 2),
   }) : _storage = storage ?? accountSecureStorage {
     account.subjectChanges.addListener(_sessionChanged);
+    account.sessionChanges.addListener(_sessionChanged);
   }
 
+  /// Account API whose verified session authorizes each destination edit.
   final BuilderlabAccountClient account;
-  final Future<List<String>> Function() localRelays;
+
+  /// Durable device records, including their explicit account ownership.
+  final Future<List<Community>> Function() localCommunities;
   final FlutterSecureStorage _storage;
+
+  /// Initial transient retry delay; subsequent failures back off up to 32x.
   final Duration retryDelay;
+
+  /// Latest failure for the current account; pending work remains durable.
+  Object? get failure => _failure;
+  Object? _failure;
   final _queue = SerialQueue();
   Timer? _retry;
   bool _disposed = false;
@@ -49,6 +63,7 @@ class KnownCommunitySync extends ChangeNotifier {
       !_disposed && account.account?.subject == subject;
 
   void _sessionChanged() {
+    _failure = null;
     _blockedSubject = null;
     _failures = 0;
     _retry?.cancel();
@@ -73,29 +88,50 @@ class KnownCommunitySync extends ChangeNotifier {
     await _queue.run(() async {
       final state = await _read(subject);
       if (!_current(subject)) throw AccountFailure.differentAccount;
+      final local = await localCommunities();
+      if (!_current(subject)) throw AccountFailure.differentAccount;
+      for (final item in local) {
+        if (knownCommunityAddress(item.relayUrl) == url &&
+            item.accountSyncOwner == _owner(subject) &&
+            item.accountSyncRevision != null) {
+          state.observed[url] = item.accountSyncRevision!;
+        }
+      }
       state.pending[url] = true;
       await _write(subject, state);
     });
     if (!_disposed) notifyListeners();
   }
 
-  /// A successful explicit join supersedes an older queued removal.
-  Future<void> added(String relay) async {
+  String _owner(String subject) => '${account.accountOrigin.origin}\n$subject';
+
+  /// Stamp only explicit additions. Saving this returned record atomically with
+  /// credentials is the durable add intent; a later journal failure cannot turn
+  /// a completed join into an authentication failure. Unclaimed legacy records
+  /// and another account's retained records are never automatically uploaded.
+  Community prepareAddition(Community community) {
     final subject = account.account?.subject;
-    final url = knownCommunityAddress(relay);
-    if (subject == null || url == null) return;
-    await _queue.run(() async {
-      final state = await _read(subject);
-      if (!_current(subject)) return;
-      state.local.add(url);
-      state.pending[url] = false;
-      await _write(subject, state);
-    });
-    if (!_disposed) notifyListeners();
+    if (subject == null &&
+        community.accountSyncOwner == null &&
+        community.accountSyncRevision == null) {
+      return community;
+    }
+    return community.copyWith(
+      accountSyncOwner: subject == null ? null : _owner(subject),
+      accountSyncRevision: subject == null ? null : const Uuid().v4(),
+    );
+  }
+
+  /// An explicit retry clears a refused request without dropping its intent.
+  void retry() {
+    _blockedSubject = null;
+    _failure = null;
+    _failures = 0;
+    notifyListeners();
     trigger();
   }
 
-  /// Hide pending removals even if the account service is temporarily offline.
+  /// Pending removals for visible status, including across app restarts.
   Future<Set<String>> pendingRemovals(String subject) => _queue.run(() async {
     final state = await _read(subject);
     return state.pending.entries
@@ -134,20 +170,43 @@ class KnownCommunitySync extends ChangeNotifier {
       final subject = session.subject;
       attemptSubject = subject;
       if (_blockedSubject == subject) return;
-      final local = (await localRelays())
-          .map(knownCommunityAddress)
-          .whereType<String>()
-          .toSet();
-      if (!_current(subject)) return;
+      var local = <String>{};
       await _queue.run(() async {
+        final records = await localCommunities();
+        local = records
+            .map((c) => knownCommunityAddress(c.relayUrl))
+            .whereType<String>()
+            .toSet();
         final state = await _read(subject);
         if (!_current(subject)) return;
-        // Backfill saved QR/address destinations on the first account sign-in,
-        // then upload only additions. A server-list omission never erases keys.
-        for (final url in local.difference(state.local)) {
-          if (state.pending[url] != true) state.pending[url] = false;
+        final owned = records
+            .where(
+              (item) =>
+                  item.accountSyncOwner == _owner(subject) &&
+                  item.accountSyncRevision != null,
+            )
+            .map((item) => knownCommunityAddress(item.relayUrl))
+            .whereType<String>()
+            .toSet();
+        // Older preview journals had no ownership evidence for inferred adds.
+        state.pending.removeWhere(
+          (url, removed) => !removed && !owned.contains(url),
+        );
+        for (final item in records) {
+          final url = knownCommunityAddress(item.relayUrl);
+          final revision = item.accountSyncRevision;
+          if (url == null ||
+              revision == null ||
+              item.accountSyncOwner != _owner(subject)) {
+            continue;
+          }
+          if (state.observed[url] != revision) {
+            // A committed re-add wins over an older removal, even if the app
+            // stopped before it could update this separate retry journal.
+            state.pending[url] = false;
+            state.observed[url] = revision;
+          }
         }
-        state.local = local;
         await _write(subject, state);
       });
       while (_current(subject) && _active) {
@@ -175,10 +234,16 @@ class KnownCommunitySync extends ChangeNotifier {
         if (!_disposed) notifyListeners();
       }
       _failures = 0;
+      if (_failure != null) {
+        _failure = null;
+        notifyListeners();
+      }
     } catch (error) {
       if (_disposed || (attemptSubject != null && !_current(attemptSubject))) {
         return;
       }
+      _failure = error;
+      notifyListeners();
       if (error == AccountFailure.denied ||
           error == AccountFailure.rejected ||
           error == AccountFailure.invalidResponse ||
@@ -198,24 +263,25 @@ class KnownCommunitySync extends ChangeNotifier {
     _disposed = true;
     _retry?.cancel();
     account.subjectChanges.removeListener(_sessionChanged);
+    account.sessionChanges.removeListener(_sessionChanged);
     super.dispose();
   }
 }
 
 class _SyncState {
-  _SyncState({Set<String>? local, Map<String, bool>? pending})
-    : local = local ?? {},
+  _SyncState({Map<String, String>? observed, Map<String, bool>? pending})
+    : observed = observed ?? {},
       pending = pending ?? {};
-  Set<String> local;
+  final Map<String, String> observed;
   final Map<String, bool> pending;
 
   factory _SyncState.decode(String raw) {
     final value = jsonDecode(raw) as Map<String, dynamic>;
     return _SyncState(
-      local: (value['local'] as List).cast<String>().toSet(),
+      observed: (value['observed'] as Map?)?.cast<String, String>() ?? {},
       pending: (value['pending'] as Map).cast<String, bool>(),
     );
   }
 
-  String encode() => jsonEncode({'local': local.toList(), 'pending': pending});
+  String encode() => jsonEncode({'observed': observed, 'pending': pending});
 }

@@ -3,19 +3,8 @@ import 'builderlab_account.dart';
 import 'hosted_environment.dart';
 import 'known_community_address.dart';
 
-/// Account-saved destinations, not evidence that this identity is a member.
-/// Keep the existing hosted environment boundary and normal relay admission.
-Future<List<AddCommunityDeepLink>> loadKnownHostedCommunities(
-  BuilderlabAccountClient account,
-) async => (await loadKnownAccountCommunities(account))
-    .where(
-      (community) =>
-          HostedEnvironment.supportsRelay(Uri.parse(community.relayUrl)),
-    )
-    .toList(growable: false);
-
-/// All account-saved destinations this mobile client can enter. Unlike hosted
-/// onboarding discovery, this also includes ordinary self-hosted addresses.
+/// Account-saved destinations this client can enter. These are saved addresses,
+/// not evidence of membership; hosted and external entry retain admission checks.
 Future<List<AddCommunityDeepLink>> loadKnownAccountCommunities(
   BuilderlabAccountClient account,
 ) async {
@@ -38,9 +27,19 @@ Future<List<AddCommunityDeepLink>> loadKnownAccountCommunities(
     if (Uri.tryParse(raw)?.scheme != 'wss') continue;
     final relay = knownCommunityAddress(raw);
     if (relay == null) continue;
+    final uri = Uri.parse(relay);
+    // Hosted domains require their configured HTTPS origin. They cannot use
+    // self-hosted entry to bypass the build's account/admission boundary.
+    if (HostedEnvironment.requiresAuth(uri.host) &&
+        !HostedEnvironment.supportsRelay(uri)) {
+      continue;
+    }
     communities.putIfAbsent(
       relay,
-      () => AddCommunityDeepLink(relayUrl: relay, name: Uri.parse(relay).host),
+      () => AddCommunityDeepLink(
+        relayUrl: relay,
+        name: uri.hasPort ? uri.authority : uri.host,
+      ),
     );
   }
   return List.unmodifiable(communities.values);

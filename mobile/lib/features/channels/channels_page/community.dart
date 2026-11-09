@@ -92,7 +92,7 @@ Future<void> _confirmRemoveCommunity(
       title: 'Remove community?',
       message: subject == null
           ? 'Are you sure you want to remove “${community.name}”? You can pair with it again later.'
-          : 'Remove “${community.name}” from this device and your Builder Lab community list? You can add it again later.',
+          : 'Remove “${community.name}” from this device and request removal from your Builder Lab community list? Account removal syncs when connected.',
       confirmLabel: 'Remove',
     );
     if (!confirmed || !context.mounted || account.account?.subject != subject) {
@@ -126,7 +126,7 @@ Future<void> _confirmRemoveAccountCommunity(
       context: context,
       title: 'Remove community?',
       message:
-          'Remove “${community.name}” from your Builder Lab community list? You can add it again later.',
+          'Remove “${community.name}” from your Builder Lab community list? Removal syncs when connected.',
       confirmLabel: 'Remove',
     );
     if (!confirmed || !context.mounted || account.account?.subject != subject) {

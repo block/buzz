@@ -64,6 +64,8 @@ class AuthNotifier extends AsyncNotifier<AuthState> {
     bool Function()? shouldContinue,
     bool activate = true,
   }) {
+    final sync = ref.read(knownCommunitySyncProvider);
+    community = sync?.prepareAddition(community) ?? community;
     return ref.read(communityTransitionProvider).runExclusive(() async {
       if (shouldContinue != null && !shouldContinue()) return;
       await CommunityEntryRequirements.verify(
@@ -76,7 +78,7 @@ class AuthNotifier extends AsyncNotifier<AuthState> {
       final storage = ref.read(communityStorageProvider);
       await storage.save(community);
       if (activate) await storage.saveActiveId(community.id);
-      await ref.read(knownCommunitySyncProvider)?.added(community.relayUrl);
+      sync?.trigger();
       await syncStoredCommunitySnapshot(ref);
 
       // Invalidate community providers so other consumers pick up the new data.
