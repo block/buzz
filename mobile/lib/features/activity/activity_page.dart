@@ -190,8 +190,6 @@ class ActivityPage extends HookConsumerWidget {
           (channelById[id]?.isDm ?? false) ||
           ref.read(channelsProvider.notifier).hiddenDmIds.contains(id),
     );
-    // A filtered DM row holds only part of its conversation, so the DM
-    // channel marker would also read events this view hides.
     final rowsArePartial =
         filter.value == InboxFilter.thread ||
         filter.value == InboxFilter.mention ||
@@ -219,16 +217,63 @@ class ActivityPage extends HookConsumerWidget {
       return null;
     }, [preloadPubkeysKey]);
 
+    // A filtered row holds only part of its conversation. Its synced thread
+    // or channel marker is one watermark, so advance it through every event
+    // that is now read (shown here, or already read) and stop just before the
+    // first unread event the filter hides. Shown events past that point get
+    // local per-message marks until the hidden one is read too.
+    void markPartialRowRead(
+      InboxItem item,
+      String channelId, {
+      required bool isDmRow,
+    }) {
+      final notifier = ref.read(readStateProvider.notifier);
+      final shown = {
+        for (final e in [item.item, ...item.groupItems]) e.id: e,
+      };
+      final rootId = isDmRow ? null : item.threadRootId;
+      bool inContext(FeedItem e) =>
+          e.channelId == channelId &&
+          (rootId == null ||
+              (isThreadReply(e.tags) &&
+                  threadReferenceOf(e.tags).rootId == rootId));
+      final events = {
+        for (final e in [
+          ...allItems.expand((i) => i.groupItems),
+          ...shown.values,
+        ])
+          if (inContext(e)) e.id: e,
+      }.values.toList()..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+      int? cap;
+      for (final e in events) {
+        if (!shown.containsKey(e.id) &&
+            !isInboxEventRead(e, markerOf: markerOf)) {
+          cap = e.createdAt - 1;
+          break;
+        }
+        cap = e.createdAt;
+      }
+      if (cap != null) {
+        notifier.markContextRead(
+          rootId == null ? channelId : threadContextKey(rootId),
+          cap,
+        );
+      }
+      for (final e in shown.values) {
+        if (inContext(e) && cap != null && e.createdAt <= cap) continue;
+        notifier.markContextRead(msgContextKey(e.id), e.createdAt);
+      }
+    }
+
     void markItemRead(InboxItem item) {
       final notifier = ref.read(readStateProvider.notifier);
       ref
           .read(inboxLocalStateProvider.notifier)
           .clearUnread(groupedInboxItemIds(item));
       final isDmRow = item.conversationId.startsWith('dm:');
-      if (isDmRow && rowsArePartial) {
-        for (final e in {item.item, ...item.groupItems}) {
-          notifier.markContextRead(msgContextKey(e.id), e.createdAt);
-        }
+      final partialChannelId = rowsArePartial ? item.item.channelId : null;
+      if (partialChannelId != null) {
+        markPartialRowRead(item, partialChannelId, isDmRow: isDmRow);
         return;
       }
       // A DM row can group replies under several thread roots; its channel
