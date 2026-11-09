@@ -167,7 +167,8 @@ jobs:
   postgres-tests:
     name: PostgreSQL Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Allow bounded tool setup as well as the database test suite.
+    timeout-minutes: 15
     if: inputs.lane == 'postgres' && (github.event_name == 'push' || inputs.rust)
     permissions:
       contents: read
@@ -206,10 +207,8 @@ jobs:
       PGSCHEMA_PLAN_PASSWORD: buzz_dev
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
-      # pgschema has no --version; --help exits 0 once Hermit has fetched it.
-      - name: Fetch Hermit tools
-        run: scripts/ci-hermit-retry.sh ./bin/pgschema --help
+      - name: Activate Hermit and fetch relay tools
+        run: scripts/ci-hermit-retry.sh scripts/ci-relay-tools.sh
       - name: Tune disposable PostgreSQL
         env:
           PGPASSWORD: ${{ env.BUZZ_TEST_POSTGRES_PASSWORD }}
@@ -261,10 +260,8 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
-      # pgschema has no --version; --help exits 0 once Hermit has fetched it.
-      - name: Fetch Hermit tools
-        run: scripts/ci-hermit-retry.sh ./bin/pgschema --help
+      - name: Activate Hermit and fetch relay tools
+        run: scripts/ci-hermit-retry.sh scripts/ci-relay-tools.sh
       - name: Start integration services
         run: |
           for attempt in 1 2 3; do
@@ -361,7 +358,7 @@ jobs:
           PGSCHEMA_PLAN_USER: buzz
           PGSCHEMA_PLAN_PASSWORD: buzz_dev
         run: |
-          ./bin/pgschema apply --file schema/schema.sql --auto-approve
+          "$PGSCHEMA_BIN" apply --file schema/schema.sql --auto-approve
           docker exec -i -e PGPASSWORD=buzz_dev buzz-postgres \
             psql -U buzz -d buzz -v ON_ERROR_STOP=1 < scripts/reconcile-schema-after-pgschema.sql
           docker exec -e PGPASSWORD=buzz_dev buzz-postgres \
@@ -454,10 +451,8 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
-      # pgschema has no --version; --help exits 0 once Hermit has fetched it.
-      - name: Fetch Hermit tools
-        run: scripts/ci-hermit-retry.sh ./bin/pgschema --help
+      - name: Activate Hermit and fetch relay tools
+        run: scripts/ci-hermit-retry.sh scripts/ci-relay-tools.sh
       - name: Install cargo-nextest
         uses: taiki-e/install-action@0fd46367812ee04360509b4169d9f659d6892bb2 # v2.79.15
         with:
@@ -525,7 +520,7 @@ jobs:
           PGSCHEMA_PLAN_USER: buzz
           PGSCHEMA_PLAN_PASSWORD: buzz_dev
         run: |
-          ./bin/pgschema apply --file schema/schema.sql --auto-approve
+          "$PGSCHEMA_BIN" apply --file schema/schema.sql --auto-approve
           docker exec -i -e PGPASSWORD=buzz_dev buzz-postgres \
             psql -U buzz -d buzz -v ON_ERROR_STOP=1 < scripts/reconcile-schema-after-pgschema.sql
           docker exec -e PGPASSWORD=buzz_dev buzz-postgres \
@@ -650,7 +645,8 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
+      - name: Activate Hermit and fetch relay tools
+        run: scripts/ci-hermit-retry.sh scripts/ci-relay-tools.sh
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
         with:
           save-if: ${{ github.event_name != 'pull_request' }}

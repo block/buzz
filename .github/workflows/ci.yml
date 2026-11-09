@@ -76,6 +76,7 @@ jobs:
               - 'scripts/normative-corpus.json'
               - 'scripts/ci-apt-retry.sh'
               - 'scripts/ci-hermit-retry.sh'
+              - 'scripts/ci-relay-tools.sh'
               - 'Justfile'
             desktop:
               - '.github/workflows/ci.yml'

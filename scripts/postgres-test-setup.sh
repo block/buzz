@@ -56,7 +56,7 @@ export PGSCHEMA_PLAN_USER="${PGSCHEMA_PLAN_USER:-$PGUSER}"
 export PGSCHEMA_PLAN_PASSWORD="${PGSCHEMA_PLAN_PASSWORD:-$PGPASSWORD}"
 
 schema_log="${TMPDIR:-/tmp}/buzz-pgschema-${run_hash}.log"
-if ! "$workspace_root/bin/pgschema" apply \
+if ! "${PGSCHEMA_BIN:-$workspace_root/bin/pgschema}" apply \
   --file "$workspace_root/schema/schema.sql" \
   --auto-approve >"$schema_log" 2>&1; then
   cat "$schema_log" >&2

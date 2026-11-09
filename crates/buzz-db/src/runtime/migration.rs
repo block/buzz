@@ -1707,6 +1707,12 @@ mod postgres_tests {
             .contains("CREATE TABLE artifact_heads"));
     }
 
+    const PGSCHEMA_APPLY_CALLS: [&str; 3] = [
+        "./bin/pgschema apply",
+        r#""$PGSCHEMA_BIN" apply"#,
+        r#""${PGSCHEMA_BIN:-./bin/pgschema}" apply"#,
+    ];
+
     #[test]
     fn every_pgschema_apply_runs_post_apply_reconciliation() {
         fn files_under(root: &Path) -> Vec<PathBuf> {
@@ -1743,7 +1749,7 @@ mod postgres_tests {
             let lines: Vec<_> = contents.lines().collect();
 
             for (index, line) in lines.iter().enumerate() {
-                if !line.contains("./bin/pgschema apply") {
+                if !PGSCHEMA_APPLY_CALLS.iter().any(|call| line.contains(call)) {
                     continue;
                 }
 
@@ -1782,8 +1788,10 @@ mod postgres_tests {
         let repair_at = launcher
             .find("scripts/repair-events-pkey.sql")
             .expect("start-relay-for-tests.sh runs scripts/repair-events-pkey.sql");
-        let apply_at = launcher
-            .find("./bin/pgschema apply")
+        let apply_at = PGSCHEMA_APPLY_CALLS
+            .iter()
+            .filter_map(|call| launcher.find(call))
+            .min()
             .expect("start-relay-for-tests.sh runs pgschema apply");
         assert!(
             repair_at < apply_at,
