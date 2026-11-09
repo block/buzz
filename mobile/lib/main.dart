@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'app.dart';
@@ -13,6 +14,7 @@ import 'shared/agents/agents_surface.dart';
 import 'shared/push/push_bridge.dart';
 import 'shared/relay/media_disk_cache.dart';
 import 'shared/relay/relay_closed_policy.dart';
+import 'shared/relay/relay_websocket.dart';
 import 'shared/theme/theme_provider.dart';
 
 void main() => runBuzzApp(const App());
@@ -20,9 +22,14 @@ void main() => runBuzzApp(const App());
 Future<void> runBuzzApp(Widget app) async {
   WidgetsFlutterBinding.ensureInitialized();
   installBuzzPushMethodHandler();
+  // Relay upgrades name the app version, so learn it before any socket opens.
+  final userAgent = loadRelayUserAgent(
+    () async => (await PackageInfo.fromPlatform()).version,
+  );
 
   // Pre-load preferences so the first frame uses the saved theme/accent.
   final prefs = await SharedPreferences.getInstance();
+  await userAgent;
 
   runApp(
     buildRootProviderScope(

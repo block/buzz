@@ -133,6 +133,8 @@ use nostr::{Event, EventBuilder, Keys, Kind, RelayUrl, Tag};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use tokio::time::timeout;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::http::{header::USER_AGENT, HeaderValue};
 use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
@@ -4204,6 +4206,9 @@ where
     Err(last_err.unwrap_or(RelayError::ConnectionClosed))
 }
 
+/// `User-Agent` sent on every relay WebSocket upgrade.
+const RELAY_USER_AGENT: &str = concat!("buzz-acp/", env!("CARGO_PKG_VERSION"));
+
 /// Perform a single WebSocket connect + NIP-42 auth handshake.
 ///
 /// Returns `(ws, buffer)` on success.
@@ -4216,7 +4221,14 @@ async fn do_connect(
         .parse::<url::Url>()
         .map_err(|e| RelayError::Http(format!("invalid relay URL: {e}")))?;
 
-    let (ws, _response) = tokio::time::timeout(CONNECT_TIMEOUT, connect_async(parsed.as_str()))
+    let mut request = parsed
+        .as_str()
+        .into_client_request()
+        .map_err(|e| RelayError::WebSocket(Box::new(e)))?;
+    request
+        .headers_mut()
+        .insert(USER_AGENT, HeaderValue::from_static(RELAY_USER_AGENT));
+    let (ws, _response) = tokio::time::timeout(CONNECT_TIMEOUT, connect_async(request))
         .await
         .map_err(|_| RelayError::ConnectionClosed)? // timeout → treat as connection failure
         .map_err(|e| RelayError::WebSocket(Box::new(e)))?;
@@ -6375,6 +6387,34 @@ mod tests {
     /// WebSocket endpoint, and tungstenite returns `Error::Http` (non-101
     /// response) or `Error::Url(UnsupportedUrlScheme)` depending on how far
     /// the handshake gets. Either way it must not be retried.
+    /// The upgrade `do_connect()` sends names buzz-acp and its version.
+    #[allow(clippy::result_large_err)] // tungstenite's handshake callback type
+    #[tokio::test]
+    async fn do_connect_sends_user_agent() {
+        use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut received = None;
+            let _ws = tokio_tungstenite::accept_hdr_async(
+                stream,
+                |request: &Request, response: Response| {
+                    received = request.headers().get(USER_AGENT).cloned();
+                    Ok(response)
+                },
+            )
+            .await
+            .unwrap();
+            received
+        });
+        // The server hangs up after the upgrade, so the AUTH handshake fails.
+        let _ = do_connect(&url, &nostr::Keys::generate(), None).await;
+        assert_eq!(server.await.unwrap().unwrap(), RELAY_USER_AGENT);
+        assert!(RELAY_USER_AGENT.starts_with("buzz-acp/"));
+    }
+
     #[tokio::test]
     async fn do_connect_wrong_scheme_is_terminal() {
         let keys = nostr::Keys::generate();
