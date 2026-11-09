@@ -380,18 +380,6 @@ class BuilderlabAccountClient {
   Future<Map<String, dynamic>> currentIdentity() =>
       post('/v1/buzz/nostr-identities/current', {});
 
-  /// Saves a successfully admitted destination to the same account, even if
-  /// another session operation was queued before this request runs.
-  Future<void> rememberCommunity(
-    String relay, {
-    required String expectedSubject,
-  }) async {
-    final result = await _post('/v1/buzz/known-communities/add', {
-      'community_url': relay,
-    }, expectedSubject: expectedSubject);
-    if (result['error'] != null) throw AccountFailure.rejected;
-  }
-
   /// Edits only the account's saved destination list; relay membership and
   /// credentials are unchanged. Both operations are idempotent.
   Future<void> updateKnownCommunity(

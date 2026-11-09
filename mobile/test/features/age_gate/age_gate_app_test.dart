@@ -20,6 +20,7 @@ import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme_provider.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -40,6 +41,8 @@ void main() {
     'an in-flight credential commit cannot reopen restricted access',
     (tester) async {
       SharedPreferences.setMockInitialValues({});
+      // The join also records to the known-communities outbox's keychain.
+      FlutterSecureStorage.setMockInitialValues({});
       final prefs = await SharedPreferences.getInstance();
       final storage = _PausedCommunityStorage();
       final age = _MutableAgeSignalNotifier();
