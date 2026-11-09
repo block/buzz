@@ -1616,7 +1616,7 @@ async fn history_permit_follows_the_read_session_and_a_full_gate_rejects() {
     let cap = db.history_reads.available();
     assert_eq!(
         cap,
-        super::history_reads::HistoryReadGate::cap(db.read_max_connections) as usize
+        super::history_reads::cap(db.read_max_connections) as usize
     );
 
     let head = db
@@ -1638,7 +1638,12 @@ async fn history_permit_follows_the_read_session_and_a_full_gate_rejects() {
     // Fill the gate: every remaining permit is held elsewhere.
     let mut others = Vec::new();
     for _ in 1..cap {
-        others.push(db.history_reads.admit().await.expect("free permit"));
+        others.push(
+            db.history_reads
+                .admit(super::history_reads::PERMIT_WAIT)
+                .await
+                .expect("free permit"),
+        );
     }
     let recorder = DebuggingRecorder::new();
     let snapshotter = recorder.snapshotter();
@@ -1655,7 +1660,7 @@ async fn history_permit_follows_the_read_session_and_a_full_gate_rejects() {
         "the rejection must be the retryable pool timeout; got {rejected:?}"
     );
     assert!(
-        started.elapsed() >= super::history_reads::HistoryReadGate::PERMIT_WAIT,
+        started.elapsed() >= super::history_reads::PERMIT_WAIT,
         "the read must wait out the bounded permit wait before rejecting"
     );
     let decisions: Vec<(String, String)> = snapshotter
@@ -1684,12 +1689,36 @@ async fn history_permit_follows_the_read_session_and_a_full_gate_rejects() {
     drop(session);
     assert_eq!(db.history_reads.available(), 1);
     let (_window, session) = db
-        .get_channel_window_with_session(cid, channel, 10, Some(cursor), None)
+        .get_channel_window_with_session(cid, channel, 10, Some(cursor.clone()), None)
         .await
         .expect("a released permit admits the next read");
     assert!(session.is_replica());
     drop(session);
     drop(others);
+    assert_eq!(db.history_reads.available(), cap);
+
+    // An operator lowering the cap at runtime holds new reads to the new
+    // limit while one is in flight, and raising it readmits them.
+    let (_window, held) = db
+        .get_channel_window_with_session(cid, channel, 10, Some(cursor.clone()), None)
+        .await
+        .expect("routed cursor window");
+    assert_eq!(db.history_read_gate().set_limit(1), 1);
+    let rejected = db
+        .get_channel_window_with_session(cid, channel, 10, Some(cursor.clone()), None)
+        .await
+        .err()
+        .expect("a lowered cap must reject the next history read");
+    assert!(
+        matches!(rejected, DbError::Sqlx(sqlx::Error::PoolTimedOut)),
+        "a lowered cap sheds as retryable; got {rejected:?}"
+    );
+    assert_eq!(db.history_read_gate().set_limit(cap), cap);
+    let (_window, second) = db
+        .get_channel_window_with_session(cid, channel, 10, Some(cursor), None)
+        .await
+        .expect("a raised cap admits the next read");
+    drop((held, second));
     assert_eq!(db.history_reads.available(), cap);
 }
 
@@ -2090,6 +2119,65 @@ async fn is_relay_member_is_bounded_routed_and_fails_closed() {
     );
 }
 
+/// The per-AUTH pending default-channel read is bounded-routed like
+/// membership; the roster writers' read stays on the writer. A different
+/// token on each pool proves which pool answered.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn pending_default_channel_join_routed_reads_the_bounded_replica() {
+    let (writer, _writer_db) = ScratchDb::migrated(&admin_url().await, "pend_w").await;
+    let (replica, _replica_db) = ScratchDb::migrated(&admin_url().await, "pend_r").await;
+
+    let community = Uuid::new_v4();
+    let pubkey = "cc".repeat(32);
+    let (writer_token, replica_token) = (Uuid::new_v4(), Uuid::new_v4());
+    for (pool, token) in [(&writer, writer_token), (&replica, replica_token)] {
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(community)
+            .bind(format!("pending-routing-{}.example", community.simple()))
+            .execute(pool)
+            .await
+            .expect("insert community");
+        sqlx::query(
+            "INSERT INTO relay_members (community_id, pubkey, role, auto_join_pending) \
+             VALUES ($1, $2, 'member', $3)",
+        )
+        .bind(community)
+        .bind(&pubkey)
+        .bind(token)
+        .execute(pool)
+        .await
+        .expect("seed pending work");
+    }
+    let cid = CommunityId::from_uuid(community);
+    let token = |pending: Option<relay_members::PendingDefaultChannelJoin>| {
+        pending.expect("pending work").token
+    };
+
+    let mut db = Db::from_pools(writer.clone(), replica.clone());
+    db.fence().force_open_for_tests(chrono::Utc::now());
+
+    // Budget unset ⇒ writer.
+    let pending = db.pending_default_channel_join_routed(cid, &pubkey).await;
+    assert_eq!(token(pending.expect("gate off")), writer_token);
+
+    // Budget set + fresh entry ⇒ replica; the writer-only read ignores it.
+    db.set_replica_read_max_age_for_tests(Some(std::time::Duration::from_secs(5)));
+    let pending = db.pending_default_channel_join_routed(cid, &pubkey).await;
+    assert_eq!(token(pending.expect("gate on")), replica_token);
+    let pending = db.pending_default_channel_join(cid, &pubkey).await;
+    assert_eq!(token(pending.expect("writer read")), writer_token);
+
+    // Entry older than the budget ⇒ fail closed to the writer.
+    db.fence().close();
+    db.fence().force_open_for_tests_at(
+        chrono::Utc::now(),
+        std::time::Instant::now() - std::time::Duration::from_secs(10),
+    );
+    let pending = db.pending_default_channel_join_routed(cid, &pubkey).await;
+    assert_eq!(token(pending.expect("entry too old")), writer_token);
+}
+
 /// Community separation across every routed seam, verified on
 /// REPLICA-SERVED reads.
 ///
@@ -2436,17 +2524,15 @@ async fn routed_reads_are_confined_to_the_requested_community() {
 
     // 4. By-ID hydration — ids carry no channel pin, and B's ids are
     //    requested alongside A's. Only A's may hydrate.
-    let ids: Vec<&[u8]> = vec![
-        a_shared.id.as_bytes(),
-        a_replica_only.id.as_bytes(),
-        b_shared.id.as_bytes(),
-        b_replica_only.id.as_bytes(),
-    ];
+    let hits: Vec<([u8; 32], i64)> = [&a_shared, &a_replica_only, &b_shared, &b_replica_only]
+        .iter()
+        .map(|e| (e.id.to_bytes(), e.created_at.as_secs() as i64))
+        .collect();
     let rows = db
-        .get_events_by_ids_routed("sep_by_ids", cid_a, &ids)
+        .get_events_by_ids_at_routed("sep_by_ids", cid_a, &hits)
         .await
         .expect("routed by-ids");
-    assert_a_only(&rows, "a-replica-only", "get_events_by_ids_routed");
+    assert_a_only(&rows, "a-replica-only", "get_events_by_ids_at_routed");
 
     // 5-7. All three feed builders, each given BOTH channels as
     //      accessible — so only the community predicate can exclude B.
@@ -3781,6 +3867,7 @@ struct EtagFixture {
     cid: CommunityId,
     channel: Uuid,
     root_hex: String,
+    root_seconds: i64,
     mentioned_hex: String,
 }
 
@@ -3827,6 +3914,7 @@ async fn e_tag_fixture(prefix: &str) -> EtagFixture {
         cid: CommunityId::from_uuid(community),
         channel,
         root_hex: root.id.to_hex(),
+        root_seconds: base as i64,
         mentioned_hex: mentioned.public_key().to_hex(),
     }
 }
@@ -3902,12 +3990,15 @@ async fn replica_statement_cancel_propagates_without_writer_rerun() {
         db.count_events_routed("t_cxl", &q).await.map(drop),
         "count_events_routed",
     );
-    let root_id = hex::decode(&fx.root_hex).expect("hex");
+    let root_id: [u8; 32] = hex::decode(&fx.root_hex)
+        .expect("hex")
+        .try_into()
+        .expect("32-byte id");
     cancelled(
-        db.get_events_by_ids_routed("t_cxl", fx.cid, &[root_id.as_slice()])
+        db.get_events_by_ids_at_routed("t_cxl", fx.cid, &[(root_id, fx.root_seconds)])
             .await
             .map(drop),
-        "get_events_by_ids_routed",
+        "get_events_by_ids_at_routed",
     );
     // The routed reads with their own SQL (feed, thread, channel window,
     // relay membership) fall back to the writer on replica failure, but not
@@ -4215,6 +4306,12 @@ mod listed_channel_name_postgres_tests;
 #[path = "tests/reader_pool_postgres_tests.rs"]
 mod reader_pool_postgres_tests;
 
+#[path = "tests/writer_pool_postgres_tests.rs"]
+mod writer_pool_postgres_tests;
+
+#[path = "tests/event_hydration_postgres_tests.rs"]
+mod event_hydration_postgres_tests;
+
 /// `insert_event_with_serving_write_guard` indexes mentions in the event's own
 /// transaction, and an indexing failure stays best-effort: the savepoint rolls
 /// back only the mention rows, never the event.
@@ -4370,3 +4467,6 @@ async fn serving_write_guard_insert_indexes_mentions_in_event_transaction() {
         .await
         .expect("release serving-write lease"));
 }
+
+#[path = "tests/pool_release_postgres_tests.rs"]
+mod pool_release_postgres_tests;

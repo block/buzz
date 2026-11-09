@@ -81,7 +81,7 @@ feed the same durable intake path. Do not widen webhook freshness as recovery.
 
 ## Rollout and validation
 
-Migration 0084 is an **expand**: one tenant-owned table/index set and one nullable
+Migration 0087 is an **expand**: one tenant-owned table/index set and one nullable
 outbox metadata column; no trigger, function, foreign key or data backfill. Apply
 schema through the deployment's reviewed workflow before new code. The older
 relay ignores the new table/column, but its exact-set community-deletion catalog

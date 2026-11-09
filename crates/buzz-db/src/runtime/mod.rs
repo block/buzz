@@ -264,6 +264,9 @@ where
 #[derive(Clone, Debug)]
 pub struct Db {
     pub(crate) pool: PgPool,
+    /// Shared across clones; media authorization may use at most a quarter of
+    /// the writer pool (capped at eight), leaving capacity for ordinary writes.
+    pub(crate) media_authorization_slots: std::sync::Arc<tokio::sync::Semaphore>,
     /// Optional bounded post-commit producer, shared across handle clones.
     pub(crate) push_enqueue: Option<push_enqueue::PushEnqueue>,
     /// Maximum connections configured for this pool (from [`DbConfig::max_connections`]).
@@ -306,7 +309,7 @@ pub struct Db {
     /// Concurrency cap on replica-served subscription-history reads, sized
     /// from [`Db::read_max_connections`] (see [`history_reads`]). Shared
     /// across `Db` clones.
-    pub(crate) history_reads: history_reads::HistoryReadGate,
+    pub(crate) history_reads: crate::concurrency_gate::ConcurrencyGate,
 }
 
 /// The session that served (or will serve) a routed read, so follow-up
@@ -819,6 +822,7 @@ impl Db {
             .push_enabled
             .then(|| push_enqueue::PushEnqueue::new(&pool));
         Ok(Self {
+            media_authorization_slots: media_authorization_slots(&pool),
             push_enqueue,
             pool,
             max_connections: config.max_connections,
@@ -827,7 +831,7 @@ impl Db {
             fence: std::sync::Arc::new(replica_fence::ReplicaFence::new()),
             replica_read_max_age,
             reader_aurora_identity: std::sync::Arc::new(std::sync::OnceLock::new()),
-            history_reads: history_reads::HistoryReadGate::for_read_pool(read_max_connections),
+            history_reads: history_reads::gate_for_read_pool(read_max_connections),
         })
     }
 
@@ -1057,38 +1061,30 @@ impl Db {
         options.options([("default_transaction_isolation", "read committed")])
     }
 
-    /// Upper bound on a reader connection's release check (see
-    /// [`Db::read_pool_options`]); matches sqlx's own close-on-drop bound.
-    const READER_RELEASE_TIMEOUT: Duration = Duration::from_secs(5);
+    /// Leave headroom inside SQLx's five-second whole-return deadline so this
+    /// check records the reason before SQLx cancels the release future.
+    const READER_RELEASE_TIMEOUT: Duration = Duration::from_secs(4);
 
     /// Reader pool options apart from connection lifetimes (see
     /// [`Db::connect_read_pool`]).
     ///
     /// Every checkout that goes back to the pool first passes a release
-    /// check bounded by [`Db::READER_RELEASE_TIMEOUT`]. sqlx's own release
-    /// ping has no timeout, so a socket whose reader stopped answering
-    /// without closing it (a failover, a partition) would otherwise hold its
-    /// slot until the kernel gives up on it; with every slot held that way,
-    /// the pool cannot dial the reader that replaced it. A check that times
-    /// out or errors closes the socket and frees the slot, and sqlx's floor
-    /// maintenance dials a replacement.
+    /// check bounded by [`Db::READER_RELEASE_TIMEOUT`]. A check that times
+    /// out or errors records the reason, closes the socket, and frees the
+    /// slot. SQLx bounds the whole return, including its subsequent ping,
+    /// so a reader that stops answering without closing cannot strand pool
+    /// capacity. Its floor maintenance dials a replacement.
     ///
     /// The check also closes, rather than returns, a connection still inside
-    /// a transaction. A checkout dropped while its `BEGIN` was in flight (a
-    /// timed-out proof, a cancelled caller) has no `ROLLBACK` queued: sqlx
-    /// counts the transaction only once `BEGIN` is acknowledged. Once the
-    /// reader answers, that connection would otherwise go back to the pool
+    /// a transaction. sqlx rolls back a checkout dropped while its `BEGIN`
+    /// was in flight (a timed-out proof, a cancelled caller) since
+    /// transact-rs/sqlx#4394, so this is a backstop: a connection that still
+    /// came back inside a transaction would otherwise go back to the pool
     /// `idle in transaction`. Closing it ends the session, and the server
     /// rolls the transaction back. Routed reads only begin `REPEATABLE READ`
     /// (see [`Db::proved_reader`]) and reader sessions default to `READ
     /// COMMITTED` (see [`Db::reader_connect_options`]), so an isolation level
     /// other than the session default means a transaction is still open.
-    ///
-    /// Residual window: after the check passes, sqlx sends its own release
-    /// ping, which has no timeout. A reader that goes silent in that one
-    /// round trip strands that one slot until the socket fails. That is
-    /// bounded by the releases in flight at that instant, and later checkouts
-    /// of silent connections go through the proof timeout and this check.
     pub(crate) fn read_pool_options(max_connections: u32) -> PgPoolOptions {
         PgPoolOptions::new()
             .max_connections(max_connections)
@@ -1377,12 +1373,11 @@ impl Db {
     /// that need push must use [`Db::new`] with `push_enabled` instead.
     pub fn from_pool(pool: PgPool) -> Self {
         Self {
+            media_authorization_slots: media_authorization_slots(&pool),
             push_enqueue: None,
             max_connections: pool.options().get_max_connections(),
             read_max_connections: pool.options().get_max_connections(),
-            history_reads: history_reads::HistoryReadGate::for_read_pool(
-                pool.options().get_max_connections(),
-            ),
+            history_reads: history_reads::gate_for_read_pool(pool.options().get_max_connections()),
             pool,
             read_pool: None,
             fence: std::sync::Arc::new(replica_fence::ReplicaFence::new()),
@@ -1400,11 +1395,12 @@ impl Db {
     /// [`Db::fence`]).
     pub fn from_pools(pool: PgPool, read_pool: PgPool) -> Self {
         Self {
+            media_authorization_slots: media_authorization_slots(&pool),
             push_enqueue: None,
             max_connections: pool.options().get_max_connections(),
             read_max_connections: read_pool.options().get_max_connections(),
             pool,
-            history_reads: history_reads::HistoryReadGate::for_read_pool(
+            history_reads: history_reads::gate_for_read_pool(
                 read_pool.options().get_max_connections(),
             ),
             read_pool: Some(read_pool),
@@ -1480,6 +1476,13 @@ impl Db {
     /// Whether a distinct read-replica pool is configured.
     pub fn has_read_pool(&self) -> bool {
         self.read_pool.is_some()
+    }
+
+    /// The cap on concurrent subscription-history reads (see
+    /// [`history_reads`]). Its ceiling is the share of the reader pool that
+    /// leaves room for authorization reads; operators may lower it at runtime.
+    pub fn history_read_gate(&self) -> &crate::concurrency_gate::ConcurrencyGate {
+        &self.history_reads
     }
 
     /// Open a reader request transaction and complete the connection-local
@@ -1862,7 +1865,7 @@ impl Db {
     /// [`history_reads`] permit for as long as their reader transaction, so
     /// they never fill the reader pool, and they are never moved to the
     /// writer merely because the reader is busy: a history read that waits
-    /// out its permit ([`history_reads::HistoryReadGate::PERMIT_WAIT`]) or
+    /// out its permit ([`history_reads::PERMIT_WAIT`]) or
     /// its reader acquire ([`Db::READER_ACQUIRE_TIMEOUT`]) on a saturated
     /// reader pool ([`Db::reader_saturated`]) is rejected with
     /// [`sqlx::Error::PoolTimedOut`], which the relay answers with its
@@ -1922,7 +1925,7 @@ impl Db {
         }
         let history = operation == observability::ReaderOperation::SubscriptionHistory;
         let permit = if history {
-            let Some(permit) = self.history_reads.admit().await else {
+            let Some(permit) = self.history_reads.admit(history_reads::PERMIT_WAIT).await else {
                 return Err(Self::reject_history_read(path, "history_read_cap"));
             };
             Some(permit)
@@ -2167,3 +2170,9 @@ mod pool_role_tests {
 #[cfg(test)]
 #[path = "tests.rs"]
 mod postgres_tests;
+
+fn media_authorization_slots(pool: &PgPool) -> std::sync::Arc<tokio::sync::Semaphore> {
+    std::sync::Arc::new(tokio::sync::Semaphore::new(
+        (pool.options().get_max_connections() as usize / 4).clamp(1, 8),
+    ))
+}

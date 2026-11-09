@@ -519,9 +519,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             get(api::operator::community_nip_fi_binding),
         )
         .route(
-            "/operator/communities/nip-fi-upgrade",
-            get(api::operator::community_nip_fi_upgrade_status)
-                .post(api::operator::enable_community_nip_fi),
+            "/operator/communities/nip-fi-policy",
+            get(api::operator::community_nip_fi_policy_status)
+                .post(api::operator::set_community_nip_fi_policy),
         )
         .route(
             "/operator/communities/transfer",
@@ -640,9 +640,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .layer(http_trace_layer())
         .layer(build_cors_layer(&state.config.cors_origins))
         // Outside all rejection-producing layers, including the API body limit.
-        .layer(middleware::from_fn(
-            api::operator::no_store_upgrade_response,
-        ))
+        .layer(middleware::from_fn(api::operator::no_store_policy_response))
 }
 
 type MakeHttpSpan = fn(&Request<Body>) -> tracing::Span;
@@ -1327,7 +1325,7 @@ mod tests {
         async fn evaluate(
             &self,
             _db: &buzz_db::Db,
-            _redis_pool: &deadpool_redis::Pool,
+            _redis_pool: &buzz_pubsub::RedisConnection,
         ) -> DependencyReport {
             self.evaluations_started.fetch_add(1, Ordering::SeqCst);
             self.evaluations
@@ -1403,9 +1401,7 @@ mod tests {
         });
         let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
         let db = buzz_db::Db::from_pool(pool.clone());
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("redis pool");
+        let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await
@@ -1451,9 +1447,7 @@ mod tests {
         config.redis_url = "redis://127.0.0.1:1".to_string();
         let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
         let db = buzz_db::Db::from_pool(pool.clone());
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("redis pool");
+        let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await
@@ -1713,7 +1707,7 @@ mod tests {
         async fn evaluate(
             &self,
             _db: &buzz_db::Db,
-            _redis_pool: &deadpool_redis::Pool,
+            _redis_pool: &buzz_pubsub::RedisConnection,
         ) -> DependencyReport {
             self.started.fetch_add(1, Ordering::SeqCst);
             let in_flight = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
@@ -2404,6 +2398,92 @@ mod tests {
         nip_fi_state(buzz_auth::NipFiMode::Off).await
     }
 
+    #[tokio::test]
+    async fn git_policy_guards_preserve_unmatched_routes() {
+        use axum::{body::to_bytes, extract::ConnectInfo, http::Request};
+        use std::net::SocketAddr;
+        use tower::ServiceExt;
+
+        let app = build_router(nip_fi_off_state().await);
+        let localhost: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        let remote: SocketAddr = "192.0.2.1:12345".parse().unwrap();
+        // Exercise the merged production router, including its default fallback.
+        for peer in [None, Some(remote), Some(localhost)] {
+            for method in ["GET", "POST"] {
+                for path in ["/operator/communities/nip-fi-upgrade", "/unknown-route"] {
+                    let mut req = Request::builder()
+                        .method(method)
+                        .uri(path)
+                        .header("content-type", "application/json")
+                        .header("content-length", 1024 * 1024 + 1)
+                        .body(Body::from(vec![b' '; 1024 * 1024 + 1]))
+                        .unwrap();
+                    if let Some(peer) = peer {
+                        req.extensions_mut().insert(ConnectInfo(peer));
+                    }
+                    let res = app.clone().oneshot(req).await.unwrap();
+                    let status = res.status();
+                    let body = to_bytes(res.into_body(), usize::MAX).await.unwrap();
+                    assert_eq!(
+                        status,
+                        StatusCode::NOT_FOUND,
+                        "{method} {path}, peer={peer:?}, body={body:?}"
+                    );
+                }
+            }
+        }
+        for (peer, size, expected) in [
+            (None, 2, StatusCode::FORBIDDEN),
+            (Some(remote), 1024 * 1024 + 1, StatusCode::FORBIDDEN),
+            (
+                Some(localhost),
+                1024 * 1024 + 1,
+                StatusCode::PAYLOAD_TOO_LARGE,
+            ),
+            // A small JSON object reaches the real handler's JSON extractor.
+            (Some(localhost), 2, StatusCode::UNPROCESSABLE_ENTITY),
+        ] {
+            let mut payload = b"{}".to_vec();
+            payload.resize(size, b' ');
+            let mut req = Request::builder()
+                .method("POST")
+                .uri("/internal/git/policy")
+                .header("content-type", "application/json")
+                .header("content-length", size)
+                .body(Body::from(payload))
+                .unwrap();
+            if let Some(peer) = peer {
+                req.extensions_mut().insert(ConnectInfo(peer));
+            }
+            let res = app.clone().oneshot(req).await.unwrap();
+            let status = res.status();
+            let body = to_bytes(res.into_body(), usize::MAX).await.unwrap();
+            assert_eq!(
+                status, expected,
+                "peer={peer:?}, size={size}, body={body:?}"
+            );
+            if expected == StatusCode::FORBIDDEN {
+                assert_eq!(&body[..], b"internal endpoint: localhost only");
+            }
+        }
+        // The path's method fallback remains protected, too.
+        for (peer, expected) in [
+            (None, StatusCode::FORBIDDEN),
+            (Some(remote), StatusCode::FORBIDDEN),
+            (Some(localhost), StatusCode::METHOD_NOT_ALLOWED),
+        ] {
+            let mut req = Request::builder()
+                .uri("/internal/git/policy")
+                .body(Body::empty())
+                .unwrap();
+            if let Some(peer) = peer {
+                req.extensions_mut().insert(ConnectInfo(peer));
+            }
+            let res = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(res.status(), expected, "GET policy, peer={peer:?}");
+        }
+    }
+
     async fn nip_fi_state(mode: buzz_auth::NipFiMode) -> Arc<AppState> {
         use crate::nip_fi_config::NipFiRelayConfig;
         use buzz_auth::IssuerRegistry;
@@ -2437,9 +2517,7 @@ mod tests {
             .connect_lazy(&config.database_url)
             .expect("lazy pg pool");
         let db = buzz_db::Db::from_pool(pool.clone());
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("redis pool");
+        let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await
@@ -2803,6 +2881,9 @@ mod tests {
         );
     }
 
+    #[path = "policy_sweep_postgres_tests.rs"]
+    mod policy_sweep;
+
     // ── F6: document fallback (postgres-only) ───────────────────────────────────
     //
     // A no-`Accept` plain GET / to a successfully mapped host must bypass the
@@ -3038,10 +3119,9 @@ mod tests {
                 );
                 // Real Redis so admission reaches the handler, not the
                 // fail-closed rate limiter.
-                let redis = deadpool_redis::Config::from_url(
-                    std::env::var("REDIS_URL").unwrap_or("redis://127.0.0.1:6379".into()),
+                let redis = buzz_pubsub::redis_connection(
+                    &std::env::var("REDIS_URL").unwrap_or("redis://127.0.0.1:6379".into()),
                 )
-                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
                 .unwrap();
                 state.admission_rate_limiter = Arc::new(
                     buzz_pubsub::rate_limiter::RedisRateLimiter::new(redis.clone()),
@@ -3205,7 +3285,7 @@ mod tests {
             }
         }
 
-        async fn real_db_state() -> Option<Arc<AppState>> {
+        pub(super) async fn real_db_state() -> Option<Arc<AppState>> {
             let db_url = crate::test_support::database_url();
             let pool = sqlx::PgPool::connect(&db_url).await.ok()?;
 
@@ -3214,9 +3294,7 @@ mod tests {
             config.redis_url = "redis://127.0.0.1:1".to_string();
             config.database_url = db_url;
             let db = buzz_db::Db::from_pool(pool.clone());
-            let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-                .expect("redis pool");
+            let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
             let pubsub = Arc::new(
                 buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                     .await
@@ -3799,9 +3877,7 @@ mod tests {
 
         let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
         let db = buzz_db::Db::from_pool(pool.clone());
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("redis pool");
+        let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await
@@ -3900,9 +3976,7 @@ mod tests {
 
             let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
             let db = buzz_db::Db::from_pool(pool.clone());
-            let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-                .expect("redis pool");
+            let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
             let pubsub = Arc::new(
                 buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                     .await
@@ -4304,9 +4378,7 @@ mod tests {
             .connect_lazy(&config.database_url)
             .expect("lazy pg pool");
         let db = buzz_db::Db::from_pool(pool.clone());
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("redis pool");
+        let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await
