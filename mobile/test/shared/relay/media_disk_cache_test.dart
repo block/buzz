@@ -310,14 +310,50 @@ void main() {
             reason: '$bytes bytes, $files files: $name',
           );
         }
-        // Evicted files are gone from disk too; the index remains.
+        // Evicted files are gone from disk too; the index (and a save of it
+        // in progress) remains.
         final names = directory
             .listSync()
             .map((entry) => p.basename(entry.path))
-            .where((name) => name != 'index.json');
+            .where((name) => !name.startsWith('index.json'));
         expect(names, hasLength(3 - evicted.length), reason: '$bytes $files');
         await cache.dispose();
       }
+
+      Future<MediaDiskCache> open(String name) async => MediaDiskCache.open(
+        MediaDiskCache.directoryFor(root, name, 's'),
+        byteBudget: 10,
+        evictionDelay: const Duration(milliseconds: 200),
+      );
+      const evictionRan = Duration(milliseconds: 400);
+
+      // Reading a file from disk marks it used, even when the cache already
+      // holds it in memory.
+      final reads = await open('reads');
+      await reads.write('old', Uint8List(4), immutable: true);
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+      await reads.write('middle', Uint8List(4), immutable: true);
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+      expect(await reads.read('old'), isNotNull);
+      await reads.write('newest', Uint8List(4), immutable: true);
+      await Future<void>.delayed(evictionRan);
+      expect(await reads.read('middle'), isNull);
+      expect(await reads.read('old'), isNotNull);
+      await reads.dispose();
+
+      // Replacing a file's bytes after eviction last ran, as a background
+      // refresh does, evicts again once the cache is over budget.
+      final refresh = await open('refresh');
+      await refresh.write('other', Uint8List(4), immutable: true);
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+      await refresh.write('refreshed', Uint8List(4), immutable: false);
+      // Eviction ran with the cache in budget. A read would schedule it again.
+      await Future<void>.delayed(evictionRan);
+      await refresh.write('refreshed', Uint8List(8), immutable: false);
+      await Future<void>.delayed(evictionRan);
+      expect(await refresh.read('other'), isNull);
+      expect((await refresh.read('refreshed'))?.bytes, hasLength(8));
+      await refresh.dispose();
     },
   );
 }

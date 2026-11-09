@@ -193,7 +193,10 @@ class MediaDiskCache {
     final manager = await _manager;
     if (manager == null) return null;
     try {
-      info = await manager.getFileFromCache(url);
+      // Past the first lookup, the package serves a URL from memory without
+      // marking it used, so a file read often would be evicted first. Going
+      // to the index marks it used, and schedules eviction.
+      info = await manager.getFileFromCache(url, ignoreMemCache: true);
       if (info == null) return null;
       bytes = await info.file.readAsBytes();
     } on FileSystemException {
@@ -231,6 +234,10 @@ class MediaDiskCache {
         bytes,
         maxAge: immutable ? _neverStale : externalRefreshAge,
       );
+      // Replacing a URL the package already holds in memory schedules no
+      // eviction, so a refresh that grows the cache would leave it over
+      // budget. An index lookup schedules it.
+      await manager.getFileFromCache(url, ignoreMemCache: true);
     } on Object catch (error) {
       _logFailure(error);
     }
