@@ -894,22 +894,22 @@ fn extract_global_selector_index_keys<'a>(
     Some(keys)
 }
 
-/// The selectors a global event can be routed by: each distinct `#p` value
-/// and its author.
+/// The selectors a global event can be routed by: each distinct `#p` value,
+/// literal or relay-derived, and its author.
 fn event_global_selectors(event: &StoredEvent) -> Vec<GlobalSelector> {
     let mut seen = HashSet::new();
     let mut selectors = Vec::new();
-    // Must read `p` tags exactly as `buzz_core::filter::filters_match` does, or
-    // fan-out silently skips subscriptions that match.
-    for tag in event.event.tags.iter() {
-        if tag.kind().to_string() != "p" {
-            continue;
-        }
-        if let Some(value) = tag.content() {
-            let value = value.to_string();
-            if seen.insert(value.clone()) {
-                selectors.push(GlobalSelector::P(value));
-            }
+    // Must read `p` values exactly as `buzz_core::filter::filters_match` does,
+    // or fan-out silently skips subscriptions that match.
+    let literal = event
+        .event
+        .tags
+        .iter()
+        .filter(|tag| tag.kind().to_string() == "p")
+        .filter_map(|tag| tag.content().map(str::to_string));
+    for value in literal.chain(event.derived_recipients.iter().cloned()) {
+        if seen.insert(value.clone()) {
+            selectors.push(GlobalSelector::P(value));
         }
     }
     selectors.push(GlobalSelector::Author(event.event.pubkey));
@@ -1778,6 +1778,38 @@ mod tests {
         let event = make_stored_event_with_p(kind, p_a, None);
         let matches = registry.fan_out(&event);
         assert_eq!(matches, vec![(conn_a, "observer_a".to_string())]);
+    }
+
+    #[test]
+    fn test_global_selector_index_routes_by_derived_recipient() {
+        let registry = SubscriptionRegistry::new();
+        let recipient_conn = Uuid::new_v4();
+        let other_conn = Uuid::new_v4();
+        let recipient = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let other = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        registry.register(
+            recipient_conn,
+            "recipient".to_string(),
+            vec![Filter::new()
+                .kind(Kind::Reaction)
+                .custom_tags(p_tag(), [recipient])],
+            None,
+        );
+        registry.register(
+            other_conn,
+            "other".to_string(),
+            vec![Filter::new()
+                .kind(Kind::Reaction)
+                .custom_tags(p_tag(), [other])],
+            None,
+        );
+
+        let reaction = make_stored_event(Kind::Reaction, None)
+            .with_derived_recipients(vec![recipient.to_string()]);
+        assert_eq!(
+            registry.fan_out(&reaction),
+            vec![(recipient_conn, "recipient".to_string())]
+        );
     }
 
     #[test]
