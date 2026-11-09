@@ -75,9 +75,6 @@ pub struct ChannelEvent {
     pub topic: EventTopic,
     /// The Nostr event payload.
     pub event: nostr::Event,
-    /// When this node read the event from Redis. Delivery deadlines start
-    /// here, so time spent waiting in the local broadcast counts.
-    pub received_at: tokio::time::Instant,
 }
 
 /// Health of this node's Redis event subscription link.
