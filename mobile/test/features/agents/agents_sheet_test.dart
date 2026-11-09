@@ -68,7 +68,7 @@ void main() {
     expect(find.text('Set as default'), findsNothing);
     expect(find.text('Model not shared'), findsNothing);
     expect(find.byIcon(Icons.star), findsNothing);
-    expect(find.text('Manage on desktop'), findsOneWidget);
+    expect(find.text('On another device'), findsOneWidget);
     expect(find.byIcon(Icons.keyboard_arrow_down), findsNothing);
 
     await tester.tap(find.byKey(ValueKey(existing)));
@@ -83,7 +83,7 @@ void main() {
     expect(
       find.descendant(
         of: find.byType(UserProfileSheet),
-        matching: find.text('Manage on desktop'),
+        matching: find.text('On another device'),
       ),
       findsNothing,
     );
@@ -97,7 +97,9 @@ void main() {
     expect(find.text('Instructions'), findsOneWidget);
     expect(find.text('Management'), findsOneWidget);
     expect(
-      find.textContaining('Keep Buzz open and your desktop online'),
+      find.textContaining(
+        'you can chat with it from here while Buzz is open there.',
+      ),
       findsOneWidget,
     );
     expect(
@@ -218,7 +220,9 @@ void main() {
       await tester.tap(find.byKey(ValueKey(fakeAgent)));
       await tester.pumpAndSettle();
       expect(
-        find.textContaining('This agent runs on Builderbot.'),
+        find.text(
+          'Runs on a Builderlab machine, so you can chat with it from here anytime.',
+        ),
         findsOneWidget,
       );
       // Remote instructions come from the registry row, not published config.

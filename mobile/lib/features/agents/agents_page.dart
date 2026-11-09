@@ -20,7 +20,6 @@ import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/modal_presentation.dart';
-import '../../shared/widgets/agent_navigation_icon.dart';
 import '../../shared/me/me_sync.dart';
 import '../channels/bestie_welcome_storage.dart';
 import '../channels/channel.dart';
@@ -208,23 +207,6 @@ class _AgentsNavigation extends HookConsumerWidget {
                   builder: (_) => UserProfileSheet(
                     pubkey: pubkey,
                     agentPresentation: true,
-                    agentSubtitleIcon:
-                        controller.agents.any(
-                          (agent) => agent['agent_pubkey'] == pubkey,
-                        )
-                        ? const AgentNavigationIcon(size: 16)
-                        : null,
-                    agentSubtitle:
-                        controller.agents.any(
-                          (agent) => agent['agent_pubkey'] == pubkey,
-                        )
-                        ? 'Builderbot agent'
-                        : agentLocationUnknown(
-                            ref.read(activeCommunityProvider).asData?.value,
-                            controller,
-                          )
-                        ? null
-                        : 'Manage on desktop',
                     primaryActionsSpacing: Grid.md,
                     contextualActions: (_) =>
                         BestieAgentAction(pubkey: pubkey, compact: true),
@@ -346,6 +328,7 @@ class AgentsPage extends HookConsumerWidget {
     final profiles = ref.watch(userCacheProvider);
     final creating = useState(false);
     final needsSignIn = agentLocationUnknown(community, controller);
+    final unconfirmed = agentLocationUnconfirmed(community, controller);
     final signInNeeded = builderlabSignInNeeded(community, controller);
     final failed =
         registered.hasError ||
@@ -715,10 +698,13 @@ class AgentsPage extends HookConsumerWidget {
                       subtitle: editable
                           ? null
                           : remote != null
-                          ? 'Builderbot agent'
-                          : needsSignIn
+                          ? 'Remote agent'
+                          : unconfirmed
                           ? null
-                          : 'Manage on desktop',
+                          : 'On another device',
+                      subtitleIcon: !editable && remote != null
+                          ? const Icon(BuzzIcons.cloud, size: 14)
+                          : null,
                     );
                   },
                 ),

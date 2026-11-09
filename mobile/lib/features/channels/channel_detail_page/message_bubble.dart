@@ -65,6 +65,14 @@ class _MessageBubble extends HookConsumerWidget {
         ref.watch(userCacheProvider.select((cache) => cache[pk])) ??
         ref.read(userCacheProvider.notifier).get(pk);
     final displayName = watchChannelIdentityLabel(ref, currentChannelId, pk);
+    // A remote cue only for agents the owner's registry confirms.
+    final remote =
+        !ownMessage &&
+        ref.watch(
+          availableRemoteAgentsProvider.select(
+            (agents) => agents.value?.contains(pk) ?? false,
+          ),
+        );
     final isAgent =
         ref.watch(agentMentionPubkeysProvider(currentChannelId)).contains(pk) ||
         profile?.ownerPubkey != null;
@@ -311,6 +319,9 @@ class _MessageBubble extends HookConsumerWidget {
                                                   : messageUsernameLabel(
                                                       profile,
                                                     ),
+                                              detail: remote ? 'Remote' : null,
+                                              detailTooltip:
+                                                  'Runs remotely on Builderlab',
                                               timestamp: formatMessageTime(
                                                 message.createdAt,
                                               ),

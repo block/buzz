@@ -5,6 +5,7 @@ import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/members_sheet.dart';
 import 'package:buzz/features/profile/user_status.dart';
 import 'package:buzz/features/profile/user_status_cache_provider.dart';
+import 'package:buzz/shared/agents/remote_agents.dart';
 import 'package:buzz/shared/identity_names/identity_names.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
@@ -34,6 +35,8 @@ Future<void> _pump(
   WidgetTester tester,
   List<ChannelMember> members, {
   ValueChanged<String>? onTap,
+  Set<String> working = const {},
+  Set<String> remote = const {},
 }) async {
   final names = IdentityNameSources.empty.scope(
     members.map((m) => m.pubkey),
@@ -46,7 +49,8 @@ Future<void> _pump(
         channelIdentityNamesProvider('channel').overrideWith((ref) => names),
         userCacheProvider.overrideWith(_Cache.new),
         userStatusCacheProvider.overrideWith(_Statuses.new),
-        workingBotPubkeysProvider('channel').overrideWith((ref) => {}),
+        workingBotPubkeysProvider('channel').overrideWith((ref) => working),
+        availableRemoteAgentsProvider.overrideWith((ref) async => remote),
       ],
       child: MaterialApp(
         theme: AppTheme.light(),
@@ -72,7 +76,13 @@ Future<void> _pump(
       ),
     ),
   );
-  await tester.pumpAndSettle();
+  // A working agent's spinner never settles.
+  if (working.isEmpty) {
+    await tester.pumpAndSettle();
+  } else {
+    await tester.pump();
+    await tester.pump();
+  }
 }
 
 List<ChannelMember> _roster(int people, int bots) => [
@@ -156,6 +166,36 @@ void main() {
     expect(
       tester.getSize(find.byKey(const ValueKey('members-sheet-list'))).height,
       lessThan(400),
+    );
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('a working remote agent says where it runs', (tester) async {
+    // Agents 1 and 2 are both working; only agent 2 is confirmed remote.
+    await _pump(
+      tester,
+      _roster(1, 2),
+      working: {_key(1), _key(2)},
+      remote: {_key(2)},
+    );
+    final local = find.ancestor(
+      of: find.text('Agent 1'),
+      matching: find.byType(ListTile),
+    );
+    final cloud = find.ancestor(
+      of: find.text('Agent 2'),
+      matching: find.byType(ListTile),
+    );
+    expect(
+      find.descendant(of: local, matching: find.text('Working\u2026')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: cloud,
+        matching: find.text('Running remotely on Builderlab\u2026'),
+      ),
+      findsOneWidget,
     );
     expect(tester.takeException(), isNull);
   });

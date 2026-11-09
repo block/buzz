@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../../shared/agents/remote_agents.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/theme/theme.dart';
@@ -34,6 +35,13 @@ class InlineAgentTyping extends ConsumerWidget {
     final visibleKeys = keys.take(keys.length > 4 ? 3 : 4).toList();
     final profiles = ref.watch(userCacheProvider);
     final bots = ref.watch(agentMentionPubkeysProvider(channelId));
+    // Only the owner's registry confirms where an agent runs. Like desktop's
+    // typing byline, the cues are for a lone confirmed remote agent, so a
+    // mixed group never reads as all remote.
+    final remoteAgents = ref.watch(availableRemoteAgentsProvider).value;
+    final remote =
+        keys.length == 1 &&
+        (remoteAgents?.contains(visibleKeys.first) ?? false);
     final labels = watchChannelIdentityLabels(
       ref,
       channelId,
@@ -47,7 +55,9 @@ class InlineAgentTyping extends ConsumerWidget {
         : '$name and ${keys.length - 1} ${keys.length == 2 ? 'other' : 'others'}';
     return Semantics(
       liveRegion: true,
-      label: '$title ${keys.length == 1 ? 'is' : 'are'} typing',
+      label: remote
+          ? '$title, remote, is typing'
+          : '$title ${keys.length == 1 ? 'is' : 'are'} typing',
       child: ExcludeSemantics(
         child: Padding(
           padding: const EdgeInsets.only(top: Grid.xs, bottom: Grid.xxs),
@@ -88,19 +98,36 @@ class InlineAgentTyping extends ConsumerWidget {
                   children: [
                     Padding(
                       padding: const EdgeInsets.only(left: Grid.xs),
-                      child: Text(
-                        title,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: messageUsernameTextStyle.copyWith(
-                          color: context.colors.onSurface,
-                          fontSize: 13.1,
-                          height: 17 / 13.1,
-                        ),
+                      child: Row(
+                        children: [
+                          Flexible(
+                            child: Text(
+                              title,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: messageUsernameTextStyle.copyWith(
+                                color: context.colors.onSurface,
+                                fontSize: 13.1,
+                                height: 17 / 13.1,
+                              ),
+                            ),
+                          ),
+                          // A long name truncates before the location does.
+                          if (remote)
+                            Text(
+                              ' \u00b7 Remote',
+                              maxLines: 1,
+                              style: messageMetadataTextStyle.copyWith(
+                                color: context.colors.onSurfaceVariant,
+                                fontSize: 11,
+                                height: 17 / 11,
+                              ),
+                            ),
+                        ],
                       ),
                     ),
                     const SizedBox(height: Grid.xxs),
-                    const AgentTypingBubble(),
+                    AgentTypingBubble(remote: remote),
                   ],
                 ),
               ),

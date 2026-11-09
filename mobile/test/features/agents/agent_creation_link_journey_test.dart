@@ -11,6 +11,7 @@ import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/deep_link_dispatcher.dart';
 import 'package:buzz/shared/agents/remote_agents.dart';
 import 'package:buzz/shared/deeplink/pending_deep_link_provider.dart';
+import 'package:buzz/shared/widgets/builderlab_logo_icon.dart';
 import 'package:buzz/shared/widgets/preset_agent_avatar.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -128,6 +129,23 @@ void main() {
       expect(_cdnRequests.single.toString(), '$_cdn/av_full/agent.json');
       expect(find.byType(CreateAgentPage), findsOneWidget);
       expect(find.text('Scout'), findsOneWidget);
+      // Every agent mobile creates is a Builderlab agent: the row above Model
+      // says so, and explains Builderlab on tap.
+      final harness = find.bySemanticsLabel('Harness: Builderlab');
+      expect(harness, findsOneWidget);
+      // Like Model's, the value is plain text; the mark lives in the sheet.
+      expect(find.byType(BuilderlabLogoIcon), findsNothing);
+      expect(
+        tester.getTopLeft(find.text('Harness')).dy,
+        lessThan(tester.getTopLeft(find.text('Model')).dy),
+      );
+      await tester.tap(harness);
+      await tester.pumpAndSettle();
+      expect(find.textContaining('run remotely on Builderlab'), findsOneWidget);
+      expect(find.byType(BuilderlabLogoIcon), findsOneWidget);
+      await tester.tapAt(const Offset(10, 10));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('run remotely on Builderlab'), findsNothing);
       expect(find.text('Reply concisely.'), findsOneWidget);
       expect(find.text('Test model'), findsOneWidget);
       expect(find.text('high'), findsOneWidget);

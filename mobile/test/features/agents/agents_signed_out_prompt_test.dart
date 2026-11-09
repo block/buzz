@@ -78,7 +78,7 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text(prompt), findsOneWidget);
       expect(find.byKey(ValueKey(existingDesktopKeys.public)), findsOneWidget);
-      expect(find.text('Manage on desktop'), findsNothing);
+      expect(find.text('On another device'), findsNothing);
 
       // The capsule scrolls with the cards rather than pinning over them.
       tester.view.physicalSize = const Size(390, 400);
@@ -102,7 +102,7 @@ void main() {
       await tester.tap(find.byKey(ValueKey(existingDesktopKeys.public)));
       await tester.pumpAndSettle();
       expect(find.byType(UserProfileSheet), findsOneWidget);
-      expect(find.textContaining('Keep Buzz open'), findsNothing);
+      expect(find.textContaining('It works while Buzz is open'), findsNothing);
       expect(find.textContaining('Sign in to Builderlab to see'), findsOne);
       await tester.tapAt(const Offset(5, 5));
       await tester.pumpAndSettle();
@@ -118,11 +118,15 @@ void main() {
       await tester.pumpAndSettle();
       expect(flow.reconnects, 2);
 
-      // Signing in restores the desktop labelling for unregistered agents.
+      // Signing in alone confirms nothing; the completed flow's registry
+      // listing restores the labelling for unregistered agents.
       h.registry.signedIn = true;
       await tester.pumpAndSettle();
       expect(find.text(prompt), findsNothing);
-      expect(find.text('Manage on desktop'), findsOneWidget);
+      expect(find.text('On another device'), findsNothing);
+      await h.controller.run(h.controller.refresh);
+      await tester.pumpAndSettle();
+      expect(find.text('On another device'), findsOneWidget);
     },
     skip: !HostedEnvironment.enabled,
   );
