@@ -16,9 +16,13 @@ import 'package:buzz/features/channels/channel_detail_page.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/message_content.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
+import 'package:buzz/features/channels/thread_follows/thread_follows_provider.dart';
 import 'package:buzz/shared/identity_names/identity_names.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
+import 'package:buzz/shared/read_state/read_state_format.dart';
 import 'package:buzz/shared/read_state/read_state_provider.dart';
+import 'package:buzz/shared/relay/relay.dart';
+import 'package:buzz/shared/reminders/reminder_service.dart' as reminder;
 import 'package:buzz/shared/profile/user_cache_provider.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/shared/theme/theme.dart';
@@ -31,6 +35,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:hooks_riverpod/misc.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
+import 'package:nostr/nostr.dart' as nostr;
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../helpers/thread_ids.dart';
@@ -134,6 +139,7 @@ void main() {
     ValueListenable<int>? tabReselection,
     List<ComposeDraft> drafts = const [],
     List<Reminder> reminders = const [],
+    RemindersNotifier Function()? remindersNotifier,
     Set<String> knownAgentPubkeys = const {},
     List<Override> overrides = const [],
     UserCacheNotifier Function()? userCache,
@@ -159,7 +165,9 @@ void main() {
         composeDraftsProvider.overrideWith(
           () => _FakeComposeDraftsNotifier(drafts),
         ),
-        remindersProvider.overrideWith(() => _FakeRemindersNotifier(reminders)),
+        remindersProvider.overrideWith(
+          remindersNotifier ?? () => _FakeRemindersNotifier(reminders),
+        ),
         ...overrides,
       ],
       child: MaterialApp(
@@ -879,6 +887,76 @@ void main() {
     },
   );
 
+  testWidgets(
+    'reading a thread row under People leaves hidden agent replies unread',
+    (tester) async {
+      FeedItem threadEvent(String id, String pubkey, int age) => FeedItem(
+        id: id,
+        kind: 9,
+        pubkey: pubkey,
+        content: 'body $id',
+        createdAt: now - age,
+        channelId: 'ch1',
+        channelName: 'general',
+        tags: const [
+          ['e', threadIdRoot1, '', 'root'],
+          ['e', threadIdRoot1, '', 'reply'],
+        ],
+        category: 'mention',
+      );
+
+      await tester.pumpWidget(
+        await buildTestable(
+          knownAgentPubkeys: const {'agent_pk'},
+          feed: HomeFeedResponse(
+            mentions: [
+              threadEvent('g1', 'agent_pk', 300),
+              threadEvent('p1', 'bob_pk', 200),
+            ],
+            needsAction: const [],
+            activity: const [],
+            agentActivity: const [],
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      Future<void> chooseSender(String label) async {
+        await tester.tap(find.byKey(const ValueKey('activity-sender-menu')));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text(label).last);
+        await tester.pumpAndSettle();
+      }
+
+      await chooseSender('People');
+      await tester.drag(
+        find.byKey(const ValueKey('inbox-row-p1')),
+        const Offset(-500, 0),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('inbox-unread-dot-p1')), findsNothing);
+
+      await chooseSender('Anyone');
+      expect(find.byKey(const ValueKey('inbox-unread-dot-p1')), findsOneWidget);
+      int? threadMarker() => ProviderScope.containerOf(
+        tester.element(find.byType(ActivityPage)),
+      ).read(readStateProvider).contexts[threadContextKey(threadIdRoot1)];
+      // The synced marker stops short of the hidden agent reply.
+      expect(threadMarker(), now - 301);
+
+      await chooseSender('Agents');
+      await tester.drag(
+        find.byKey(const ValueKey('inbox-row-g1')),
+        const Offset(-500, 0),
+      );
+      await tester.pumpAndSettle();
+      // With the agent reply read too, the synced marker covers both.
+      expect(threadMarker(), now - 200);
+      await chooseSender('Anyone');
+      expect(find.byKey(const ValueKey('inbox-unread-dot-p1')), findsNothing);
+    },
+  );
+
   testWidgets('sender filter preloads authors hidden under newer rows', (
     tester,
   ) async {
@@ -1098,6 +1176,156 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.byKey(const ValueKey('inbox-unread-dot-m1')), findsOneWidget);
+  });
+
+  testWidgets('long-press follows a thread and sets a reminder', (
+    tester,
+  ) async {
+    final reminders = _CapturingReminderService();
+    final remindersNotifier = _FakeRemindersNotifier(const []);
+    await tester.pumpWidget(
+      await buildTestable(
+        remindersNotifier: () => remindersNotifier,
+        overrides: [
+          reminder.reminderServiceProvider.overrideWithValue(reminders),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(ActivityPage)),
+    );
+    Finder sheetText(String text) => find.descendant(
+      of: find.byType(BottomSheet),
+      matching: find.text(text),
+    );
+
+    // A thread row follows its root, and the menu then offers unfollow.
+    await tester.longPress(find.byKey(const ValueKey('inbox-row-a1')));
+    await tester.pumpAndSettle();
+    await tester.tap(sheetText('Follow thread'));
+    await tester.pumpAndSettle();
+    expect(
+      container.read(threadFollowsProvider).isFollowing(threadIdRoot1),
+      isTrue,
+    );
+
+    await tester.longPress(find.byKey(const ValueKey('inbox-row-a1')));
+    await tester.pumpAndSettle();
+    expect(sheetText('Follow thread'), findsNothing);
+    await tester.tap(sheetText('Unfollow thread'));
+    await tester.pumpAndSettle();
+    expect(
+      container.read(threadFollowsProvider).isFollowing(threadIdRoot1),
+      isFalse,
+    );
+
+    // A top-level row follows the message itself as a potential thread head.
+    await tester.longPress(find.byKey(const ValueKey('inbox-row-m1')));
+    await tester.pumpAndSettle();
+    await tester.tap(sheetText('Follow thread'));
+    await tester.pumpAndSettle();
+    expect(container.read(threadFollowsProvider).isFollowing('m1'), isTrue);
+
+    // Remind me opens the shared reminder sheet for the row's message.
+    await tester.longPress(find.byKey(const ValueKey('inbox-row-m1')));
+    await tester.pumpAndSettle();
+    await tester.tap(sheetText('Remind me'));
+    await tester.pumpAndSettle();
+    expect(find.text('Remind me about this message'), findsOneWidget);
+    await tester.tap(find.text('In 1 hour'));
+    await tester.pumpAndSettle();
+
+    final first = reminders.saved.single;
+    expect(first.target.eventId, 'm1');
+    expect(first.target.channelId, 'ch1');
+    expect(first.target.preview, 'Hey check this out');
+    expect(first.dTag, isNull);
+    expect(find.text('Reminder set'), findsOneWidget);
+    expect(remindersNotifier.refreshes, 1);
+  });
+
+  testWidgets('long-press reschedules an existing reminder instead of adding '
+      'one', (tester) async {
+    final reminders = _CapturingReminderService();
+    final existing = Reminder(
+      id: 'reminder-d1',
+      notBefore: now + 600,
+      status: 'pending',
+      target: const ReminderTarget(
+        eventId: 'm1',
+        channelId: 'ch1',
+        preview: 'Hey check this out',
+        authorPubkey:
+            'a11ce00000000000000000000000000000000000000000000000000000000000',
+      ),
+      note: 'Reply after standup',
+      createdAt: now - 60,
+      eventId: 'reminder-event-1',
+    );
+    await tester.pumpWidget(
+      await buildTestable(
+        reminders: [existing],
+        overrides: [
+          reminder.reminderServiceProvider.overrideWithValue(reminders),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.longPress(find.byKey(const ValueKey('inbox-row-m1')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Remind me'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('In 1 hour'));
+    await tester.pumpAndSettle();
+
+    final saved = reminders.saved.single;
+    expect(saved.dTag, 'reminder-d1');
+    expect(saved.note, 'Reply after standup');
+    expect(find.text('Reminder updated'), findsOneWidget);
+  });
+
+  testWidgets('long-press omits Follow in a Solo chat', (tester) async {
+    await tester.pumpWidget(
+      await buildTestable(
+        channels: [
+          Channel(
+            id: 'ch1',
+            name: 'Notes',
+            channelType: 'stream',
+            visibility: 'private',
+            description: '',
+            createdBy: 'x',
+            createdAt: DateTime(2025),
+            memberCount: 1,
+            isMember: true,
+            labels: const ['buzz.solo'],
+          ),
+          testChannels[1],
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.longPress(find.byKey(const ValueKey('inbox-row-m1')));
+    await tester.pumpAndSettle();
+    expect(find.text('Open conversation'), findsOneWidget);
+    expect(find.text('Follow thread'), findsNothing);
+  });
+
+  testWidgets('long-press hides reminders when signed out', (tester) async {
+    await tester.pumpWidget(
+      await buildTestable(
+        overrides: [reminder.reminderServiceProvider.overrideWithValue(null)],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.longPress(find.byKey(const ValueKey('inbox-row-m1')));
+    await tester.pumpAndSettle();
+    expect(find.text('Follow thread'), findsOneWidget);
+    expect(find.text('Remind me'), findsNothing);
   });
 
   testWidgets('swiping an inbox row reveals and runs its row actions', (
@@ -1329,8 +1557,13 @@ class _FakeRemindersNotifier extends RemindersNotifier {
   final List<Reminder> _reminders;
   _FakeRemindersNotifier(this._reminders);
 
+  int refreshes = 0;
+
   @override
   Future<List<Reminder>> build() async => _reminders;
+
+  @override
+  Future<void> refresh() async => refreshes++;
 }
 
 class _FakeComposeDraftsNotifier extends ComposeDraftsNotifier {
@@ -1339,4 +1572,31 @@ class _FakeComposeDraftsNotifier extends ComposeDraftsNotifier {
 
   @override
   List<ComposeDraft> build() => _drafts;
+}
+
+class _CapturingReminderService extends reminder.ReminderService {
+  _CapturingReminderService._(nostr.Keys keys)
+    : super(
+        signedEventRelay: SignedEventRelay(
+          session: RelaySessionNotifier(),
+          nsec: keys.nsec,
+        ),
+        crypto: reminder.ReminderCrypto(keys.nsec, keys.public),
+      );
+
+  factory _CapturingReminderService() =>
+      _CapturingReminderService._(nostr.Keys.generate());
+
+  final saved =
+      <({reminder.ReminderTarget target, String? note, String? dTag})>[];
+
+  @override
+  Future<void> createReminder({
+    required reminder.ReminderTarget target,
+    required int notBefore,
+    String? note,
+    String? replacingDTag,
+  }) async {
+    saved.add((target: target, note: note, dTag: replacingDTag));
+  }
 }
