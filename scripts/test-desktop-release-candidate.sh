@@ -2,6 +2,7 @@
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+python3 "$repo_root/scripts/test-desktop-release-dispatch.py"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 cp "$repo_root/scripts/desktop_release.py" "$tmp/desktop_release.py"
