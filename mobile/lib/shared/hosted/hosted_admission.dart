@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:http/http.dart' as http;
@@ -150,18 +151,25 @@ class HostedAdmission {
       );
     });
     checkCurrent();
-    await (_probe ?? _authenticateRelay)(community);
+    await (_probe ?? authenticateRelay)(community);
     checkCurrent();
     return community;
   }
 
-  Future<void> _authenticateRelay(Community community) async {
+  /// The default probe: proves the relay admits this identity. A refused
+  /// upgrade (401/403) or a refused NIP-42 auth is [AccountFailure.denied]:
+  /// sending the same identity again cannot succeed. A socket that never
+  /// reaches `connected` for any other reason (unreachable relay, dropped
+  /// connection, timeout) is [AccountFailure.unavailable], so callers retry
+  /// instead of giving up on the destination.
+  Future<void> authenticateRelay(Community community) async {
+    Object? closed;
     final socket = RelaySocket(
       wsUrl: community.relayUrl,
       nsec: community.nsec,
       onMessage: (_) {},
       onConnected: () {},
-      onDisconnected: (_) {},
+      onDisconnected: (error) => closed = error ?? closed,
     );
     try {
       socket.headers = await relayAuth.headers(
@@ -173,8 +181,16 @@ class HostedAdmission {
         diagnostics,
         signer: pubkeyFromNsec(community.nsec),
       );
-      await socket.connect().timeout(const Duration(seconds: 30));
-      if (socket.state != SocketState.connected) throw AccountFailure.denied;
+      try {
+        await socket.connect().timeout(const Duration(seconds: 30));
+      } on TimeoutException {
+        throw AccountFailure.unavailable;
+      }
+      if (socket.state == SocketState.connected) return;
+      if (relayUpgradeRefused(closed) || closed is RelayAuthRejectedException) {
+        throw AccountFailure.denied;
+      }
+      throw AccountFailure.unavailable;
     } finally {
       socket.dispose();
     }

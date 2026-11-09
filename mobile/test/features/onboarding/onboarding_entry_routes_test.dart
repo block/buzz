@@ -9,6 +9,7 @@ import 'package:buzz/features/invites/invite_join_provider.dart';
 import 'package:buzz/features/invites/invite_join_sheet.dart';
 import 'package:buzz/features/onboarding/hosted_connect_page.dart';
 import 'package:buzz/features/onboarding/self_hosted_entry_sheet.dart';
+import 'package:buzz/features/pairing/pairing_provider.dart';
 import 'package:buzz/hosted_app_gate.dart';
 import 'package:buzz/shared/hosted/hosted_flow_provider.dart';
 import 'package:buzz/onboarding_app_entry.dart';
@@ -462,6 +463,90 @@ void main() {
     await tester.pump();
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets('a pushed Add route leaving does not report the home entry '
+      'surface idle while it is still mid-flow', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(440, 956));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    FlutterSecureStorage.setMockInitialValues({});
+    PendingDeepLinkNotifier.debugUriStreamOverride = const Stream<Uri>.empty();
+    final f = HostedCommunitiesFixture();
+    await f.initialize(widget: true);
+    addTearDown(() async {
+      PendingDeepLinkNotifier.debugUriStreamOverride = null;
+      await f.dispose();
+    });
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        disableAnimations: true,
+        overrides: [
+          hostedFlowProvider.overrideWithValue(f.flow),
+          channelsProvider.overrideWith(_NoChannels.new),
+          pairingProvider.overrideWith(_PairingInProgress.new),
+        ],
+        child: const HostedAppGate(
+          authenticated: false,
+          child: OnboardingAppEntry(),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(HostedAppGate)),
+    );
+    final reported = <bool>[];
+    container.listen<bool>(
+      communityEntryIdleProvider,
+      (_, idle) => reported.add(idle),
+    );
+    // The home has a pairing under way: it is busy.
+    expect(container.read(communityEntryIdleProvider), isFalse);
+
+    // A second entry surface is pushed over it, as the community picker
+    // does, and then leaves.
+    final navigator = tester.state<NavigatorState>(find.byType(Navigator));
+    final route = MaterialPageRoute<void>(
+      builder: (_) => const OnboardingAppEntry(
+        addingCommunity: true,
+        restoreAccount: false,
+      ),
+    );
+    navigator.push(route);
+    // The pairing progress animates for as long as it runs: pump frames.
+    Future<void> settle() async {
+      for (var i = 0; i < 5; i++) {
+        await tester.pump(const Duration(milliseconds: 100));
+      }
+    }
+
+    await settle();
+    expect(
+      find.byType(OnboardingAppEntry, skipOffstage: false),
+      findsNWidgets(2),
+    );
+    expect(container.read(communityEntryIdleProvider), isFalse);
+    // The picker retires its route the same way.
+    navigator.removeRoute(route);
+    await settle();
+    expect(find.byType(OnboardingAppEntry), findsOneWidget);
+    // The home is still mid-flow, so nothing may open a community under it.
+    expect(container.read(communityEntryIdleProvider), isFalse);
+    expect(reported, isNot(contains(true)));
+
+    // Only the home's own pairing ending makes the surface idle again.
+    container.read(pairingProvider.notifier).reset();
+    await settle();
+    expect(container.read(communityEntryIdleProvider), isTrue);
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
+    expect(tester.takeException(), isNull);
+  });
+}
+
+/// A pairing that is connecting until [reset].
+class _PairingInProgress extends PairingNotifier {
+  @override
+  PairingState build() => const PairingState(status: PairingStatus.connecting);
 }
 
 class _EnumerationStorage extends FlutterSecureStorage {
