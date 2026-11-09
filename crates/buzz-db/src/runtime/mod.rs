@@ -299,6 +299,9 @@ pub struct Db {
     /// bounded-stale read semantics are a product decision, not an
     /// invariant, so the gate ships off.
     pub(crate) replica_read_max_age: Option<Duration>,
+    /// Interval at which [`Db::spawn_fence_probe`]'s probe commits
+    /// heartbeat tokens ([`DbConfig::replica_fence_probe_interval_ms`]).
+    pub(crate) fence_probe_interval: Duration,
     /// Whether the reader endpoint supports the Aurora PostgreSQL identity
     /// function ([`replica_fence::AURORA_IDENTITY_FN`]) — probed
     /// once per process on the first routed read (on a plain autocommit
@@ -700,6 +703,14 @@ pub struct DbConfig {
     /// than the staleness gate never routes anyway, so a larger budget
     /// would only misrepresent the config.
     pub replica_read_max_age_ms: u64,
+    /// Replica fence heartbeat interval in milliseconds (env
+    /// `BUZZ_REPLICA_FENCE_PROBE_INTERVAL_MS`). `0` selects
+    /// [`replica_fence::DEFAULT_PROBE_INTERVAL`]; other values are clamped
+    /// to [`replica_fence::MIN_PROBE_INTERVAL`]..=
+    /// [`replica_fence::MAX_PROBE_INTERVAL`]. Only used when a read pool is
+    /// configured. The bounded-read budget should be at least
+    /// [`replica_fence::min_read_budget`] of this interval.
+    pub replica_fence_probe_interval_ms: u64,
     /// Session `lock_timeout` in milliseconds for writer connections (env
     /// `BUZZ_DB_LOCK_TIMEOUT_MS`). `0` disables the timeout.
     pub lock_timeout_ms: u64,
@@ -735,6 +746,7 @@ impl Default for DbConfig {
             max_lifetime_secs: 300,
             idle_timeout_secs: 600,
             replica_read_max_age_ms: 0,
+            replica_fence_probe_interval_ms: 0,
             lock_timeout_ms: DEFAULT_LOCK_TIMEOUT_MS,
             idle_txn_timeout_ms: DEFAULT_IDLE_TXN_TIMEOUT_MS,
             statement_timeout_ms: DEFAULT_STATEMENT_TIMEOUT_MS,
@@ -818,11 +830,14 @@ impl Db {
             None => None,
         };
         let replica_read_max_age = read_budget_from_ms(config.replica_read_max_age_ms);
-        if let Some(budget) = replica_read_max_age.filter(|b| *b < replica_fence::MIN_READ_BUDGET) {
+        let fence_probe_interval =
+            replica_fence::probe_interval_from_ms(config.replica_fence_probe_interval_ms);
+        let min_read_budget = replica_fence::min_read_budget(fence_probe_interval);
+        if let Some(budget) = replica_read_max_age.filter(|b| *b < min_read_budget) {
             tracing::warn!(
                 budget_ms = budget.as_millis() as u64,
-                probe_interval_ms = replica_fence::PROBE_INTERVAL.as_millis() as u64,
-                recommended_min_ms = replica_fence::MIN_READ_BUDGET.as_millis() as u64,
+                probe_interval_ms = fence_probe_interval.as_millis() as u64,
+                recommended_min_ms = min_read_budget.as_millis() as u64,
                 "BUZZ_REPLICA_READ_MAX_AGE_MS leaves no room for one missed fence heartbeat; \
                  bounded replica reads will spill to the writer whenever a beat is late"
             );
@@ -839,6 +854,7 @@ impl Db {
             read_max_connections,
             fence: std::sync::Arc::new(replica_fence::ReplicaFence::new()),
             replica_read_max_age,
+            fence_probe_interval,
             reader_aurora_identity: std::sync::Arc::new(std::sync::OnceLock::new()),
             history_reads: history_reads::gate_for_read_pool(read_max_connections),
         })
@@ -1391,6 +1407,7 @@ impl Db {
             read_pool: None,
             fence: std::sync::Arc::new(replica_fence::ReplicaFence::new()),
             replica_read_max_age: None,
+            fence_probe_interval: replica_fence::DEFAULT_PROBE_INTERVAL,
             reader_aurora_identity: std::sync::Arc::new(std::sync::OnceLock::new()),
         }
     }
@@ -1415,6 +1432,7 @@ impl Db {
             read_pool: Some(read_pool),
             fence: std::sync::Arc::new(replica_fence::ReplicaFence::new()),
             replica_read_max_age: None,
+            fence_probe_interval: replica_fence::DEFAULT_PROBE_INTERVAL,
             reader_aurora_identity: std::sync::Arc::new(std::sync::OnceLock::new()),
         }
     }
@@ -1456,6 +1474,7 @@ impl Db {
         tokio::spawn(replica_fence::run_probe(
             replica_fence::connect_probe_pool(&self.pool),
             std::sync::Arc::clone(&self.fence),
+            self.fence_probe_interval,
         ));
         Ok(true)
     }
