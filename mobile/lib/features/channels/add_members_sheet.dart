@@ -215,6 +215,7 @@ class AddChannelMembersSheet extends HookConsumerWidget {
     if (nativePresentation) {
       final auth = ref.watch(mediaGetAuthServiceProvider);
       final client = ref.watch(mediaHttpClientProvider);
+      final diskCache = ref.watch(mediaDiskCacheProvider);
       final colors = Theme.of(context).colorScheme;
       String avatarKey(MentionCandidate user) => jsonEncode([
         user.pubkey,
@@ -248,8 +249,12 @@ class AddChannelMembersSheet extends HookConsumerWidget {
             isAgent: user.isAgent,
             background: colors.primaryContainer,
             foreground: colors.onPrimaryContainer,
-            networkImage: (url) =>
-                MediaImageProvider(url: url, auth: auth, client: client),
+            networkImages: (url) => smallMediaImageProviders(
+              url: url,
+              auth: auth,
+              client: client,
+              diskCache: diskCache,
+            ),
           );
         },
         state: {
