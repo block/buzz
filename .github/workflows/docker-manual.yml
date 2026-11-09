@@ -7,15 +7,11 @@ on:
   workflow_dispatch:
     inputs:
       source_ref:
-        description: Branch, tag, full commit SHA, or refs/pull/NUMBER/head to build
+        description: block/buzz branch, tag, or full SHA reachable from a repository branch
         required: true
         type: string
 
 permissions: {}
-
-concurrency:
-  group: manual-relay-image-${{ github.run_id }}
-  cancel-in-progress: false
 
 env:
   IMAGE_NAME: ${{ vars.GHCR_IMAGE != '' && vars.GHCR_IMAGE || 'ghcr.io/block/buzz' }}
@@ -31,17 +27,69 @@ jobs:
       sha: ${{ steps.source.outputs.sha }}
       tag: ${{ steps.source.outputs.tag }}
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-        with:
-          ref: ${{ inputs.source_ref }}
-          persist-credentials: false
-      - name: Pin the selected commit for all builds
-        id: source
+      - name: Require workflow from main in block/buzz
+        env:
+          DISPATCH_REF: ${{ github.ref }}
+          REPOSITORY: ${{ github.repository }}
         shell: bash
         run: |
           set -euo pipefail
-          sha=$(git rev-parse 'HEAD^{commit}')
+          [[ "$REPOSITORY" == block/buzz && "$DISPATCH_REF" == refs/heads/main ]] || {
+            echo '::error::Run the workflow from main in block/buzz; use source_ref to select code.'
+            exit 1
+          }
+      - name: Resolve a source reachable from a repository branch
+        id: source
+        env:
+          SOURCE_REF: ${{ inputs.source_ref }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "$SOURCE_REF" || ${#SOURCE_REF} -gt 255 || ! "$SOURCE_REF" =~ ^[A-Za-z0-9._/@-]+$ ]]; then
+            echo '::error::Supply a repository branch, tag, or full commit SHA.'
+            exit 1
+          fi
+          case "$SOURCE_REF" in
+            -*|*..*|*.lock|refs/pull/*|pull/*|*/pull/*)
+              echo '::error::PR refs and malformed refs are not allowed.'
+              exit 1
+              ;;
+          esac
+          workdir=$(mktemp -d)
+          trap 'rm -rf "$workdir"' EXIT
+          git -C "$workdir" init --quiet
+          git -C "$workdir" remote add origin https://github.com/block/buzz.git
+          # Fetch only canonical branch histories, never refs/pull or arbitrary SHAs.
+          # Full history is needed to prove ancestry; blobs are fetched only by build jobs.
+          git -C "$workdir" fetch --filter=blob:none --no-tags origin \
+            '+refs/heads/*:refs/remotes/origin/*'
+          if [[ "$SOURCE_REF" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            sha=$(git -C "$workdir" rev-parse --verify "${SOURCE_REF}^{commit}")
+          elif [[ "$SOURCE_REF" == refs/heads/* ]]; then
+            sha=$(git -C "$workdir" rev-parse --verify "refs/remotes/origin/${SOURCE_REF#refs/heads/}^{commit}")
+          else
+            tag_ref="$SOURCE_REF"
+            if [[ "$SOURCE_REF" != refs/* ]] && \
+              sha=$(git -C "$workdir" rev-parse --verify "refs/remotes/origin/${SOURCE_REF}^{commit}" 2>/dev/null); then
+              :
+            else
+              if [[ "$SOURCE_REF" != refs/* ]]; then
+                tag_ref="refs/tags/$SOURCE_REF"
+              fi
+              [[ "$tag_ref" == refs/tags/* ]] || {
+                echo '::error::Only repository branches and tags are allowed.'
+                exit 1
+              }
+              git -C "$workdir" fetch --no-tags origin "$tag_ref:refs/tags/manual-source"
+              sha=$(git -C "$workdir" rev-parse --verify 'refs/tags/manual-source^{commit}')
+            fi
+          fi
           [[ "$sha" =~ ^[0-9a-f]{40}$ ]]
+          branches=$(git -C "$workdir" for-each-ref --format='%(refname)' --contains="$sha" refs/remotes/origin/)
+          [[ -n "$branches" ]] || {
+            echo '::error::Selected commit must be reachable from a block/buzz branch; PR-only commits are not allowed.'
+            exit 1
+          }
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "tag=manual-${sha:0:12}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
           echo "Selected source: $sha. CI qualification is skipped."
@@ -126,11 +174,6 @@ jobs:
       contents: read
       packages: write
     steps:
-      # Use the verifier shipped with this workflow, not the selected source ref.
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-        with:
-          ref: ${{ github.workflow_sha }}
-          persist-credentials: false
       - uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
       - uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
         with:
@@ -141,7 +184,7 @@ jobs:
         with:
           pattern: manual-digest-*
           path: ${{ runner.temp }}/manual-digests
-      - name: Assemble, verify and write the receipt
+      - name: Assemble and verify the published image
         env:
           SOURCE_SHA: ${{ needs.resolve.outputs.sha }}
           MANUAL_TAG: ${{ needs.resolve.outputs.tag }}
@@ -159,14 +202,40 @@ jobs:
             --annotation "index:org.opencontainers.image.revision=$SOURCE_SHA" \
             --annotation "index:org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
             --annotation "index:xyz.buzz.manual-build=true" "${digests[@]}"
-          python3 scripts/manual_relay_image.py verify --image "$image" \
-            --sha "$SOURCE_SHA" --source-url "https://github.com/$GITHUB_REPOSITORY" \
-            --receipt "$RUNNER_TEMP/manual-image.json"
+          # Verify the published bytes using this workflow, not scripts from the selected source.
+          merged_digest=$(docker buildx imagetools inspect "$image" --format '{{json .Manifest}}' |
+            jq -er '.digest | select(test("^sha256:[0-9a-f]{64}$"))')
+          pinned="$IMAGE_NAME@$merged_digest"
+          source_url="https://github.com/$GITHUB_REPOSITORY"
+          docker buildx imagetools inspect "$pinned" --raw > "$RUNNER_TEMP/index.json"
+          jq -e '.manifests |
+            map(select((.platform.os == "unknown" and .platform.architecture == "unknown") | not)) |
+            map(.platform.os + "/" + .platform.architecture) | sort == ["linux/amd64", "linux/arm64"]' \
+            "$RUNNER_TEMP/index.json" >/dev/null
+          runtime_digests='{}'
+          for arch in amd64 arm64; do
+            child=$(jq -er --arg arch "$arch" '.manifests[] |
+              select(.platform.os == "linux" and .platform.architecture == $arch) |
+              .digest | select(test("^sha256:[0-9a-f]{64}$"))' "$RUNNER_TEMP/index.json")
+            docker buildx imagetools inspect "$IMAGE_NAME@$child" --format '{{json .Image}}' |
+              jq -e --arg arch "$arch" --arg sha "$SOURCE_SHA" --arg source "$source_url" '
+                .os == "linux" and .architecture == $arch and
+                .config.Labels["org.opencontainers.image.revision"] == $sha and
+                .config.Labels["org.opencontainers.image.source"] == $source' >/dev/null
+            runtime_digests=$(jq -cn --argjson current "$runtime_digests" \
+              --arg platform "linux/$arch" --arg digest "$child" '$current + {($platform): $digest}')
+          done
+          jq -n --arg image "$pinned" --arg tag "$image" --arg digest "$merged_digest" \
+            --arg sha "$SOURCE_SHA" --arg source "$source_url" --argjson platforms "$runtime_digests" \
+            '{image:$image, tag:$tag, digest:$digest, source_sha:$sha, source_url:$source,
+              platforms:$platforms,
+              ci_qualification:"skipped", status:"registry-verified"}' \
+            > "$RUNNER_TEMP/manual-image.json"
           {
             echo '## Manual relay image published to GHCR'
             echo
             echo "Source commit: $SOURCE_SHA"
-            echo "Tag: $image"
+            echo "Registry tag: $image"
             echo "Digest: $(jq -r .digest "$RUNNER_TEMP/manual-image.json")"
             echo 'Platforms: linux/amd64, linux/arm64'
             echo 'CI qualification was skipped. No deployment was started.'
