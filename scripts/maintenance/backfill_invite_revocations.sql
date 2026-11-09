@@ -34,11 +34,18 @@ DECLARE
     affected BIGINT;
 BEGIN
     LOOP
-        SELECT id INTO target_community
-        FROM communities
-        WHERE last_community IS NULL OR id > last_community
-        ORDER BY id
-        LIMIT 1;
+        IF last_community IS NULL THEN
+            SELECT id INTO target_community
+            FROM communities
+            ORDER BY id
+            LIMIT 1;
+        ELSE
+            SELECT id INTO target_community
+            FROM communities
+            WHERE id > last_community
+            ORDER BY id
+            LIMIT 1;
+        END IF;
         EXIT WHEN NOT FOUND;
         last_community := target_community;
 
