@@ -638,14 +638,25 @@ fn ensure_git_repo_path(
     ensure_git_path("BUZZ_GIT_REPO_PATH", raw)
 }
 
-/// Longest interpreter path Linux runs from a `#!` line: the kernel reads the
-/// first 256 bytes and needs `#!`, the path and the newline inside them.
+/// Longest interpreter path Linux 5.1+ runs from a `#!` line: the kernel reads
+/// the first 256 bytes and needs `#!`, the path and the newline inside them.
+/// Older kernels read 128 bytes; the startup probe catches a path they can't run.
 pub(crate) const MAX_GIT_HOOK_INTERPRETER_BYTES: usize = 253;
 
-/// Read `BUZZ_BASH_PATH` and check that the hook can run it, so a bad value
-/// fails at startup instead of rejecting every push.
-fn git_hook_interpreter_from_env() -> Result<Option<String>, ConfigError> {
-    let raw = match std::env::var("BUZZ_BASH_PATH") {
+/// Read `BUZZ_BASH_PATH`; `hooks_dir` is where the hooks will run.
+fn git_hook_interpreter_from_env(
+    hooks_dir: &std::path::Path,
+) -> Result<Option<String>, ConfigError> {
+    git_hook_interpreter(std::env::var("BUZZ_BASH_PATH"), hooks_dir)
+}
+
+/// Validate `BUZZ_BASH_PATH` and run it once the way git runs the hook, so a
+/// bad value fails at startup instead of rejecting every push.
+fn git_hook_interpreter(
+    raw: Result<String, std::env::VarError>,
+    hooks_dir: &std::path::Path,
+) -> Result<Option<String>, ConfigError> {
+    let raw = match raw {
         Ok(raw) => Some(raw),
         Err(std::env::VarError::NotPresent) => None,
         Err(std::env::VarError::NotUnicode(_)) => {
@@ -654,11 +665,15 @@ fn git_hook_interpreter_from_env() -> Result<Option<String>, ConfigError> {
             ))
         }
     };
-    let interpreter = parse_git_hook_interpreter(raw)?;
-    if let Some(path) = &interpreter {
-        ensure_git_hook_interpreter_executable(path)?;
-    }
-    Ok(interpreter)
+    let Some(interpreter) = parse_git_hook_interpreter(raw)? else {
+        return Ok(None);
+    };
+    crate::api::git::hook::probe_interpreter(&interpreter, hooks_dir).map_err(|e| {
+        ConfigError::InvalidValue(format!(
+            "BUZZ_BASH_PATH {interpreter:?} can't run the git hook: {e}"
+        ))
+    })?;
+    Ok(Some(interpreter))
 }
 
 /// Parse `BUZZ_BASH_PATH`. Unset or blank means "use `/usr/bin/env bash`".
@@ -688,26 +703,6 @@ fn parse_git_hook_interpreter(raw: Option<String>) -> Result<Option<String>, Con
         )));
     }
     Ok(Some(interpreter.to_string()))
-}
-
-/// The interpreter must be an executable file (symlinks are followed).
-fn ensure_git_hook_interpreter_executable(path: &str) -> Result<(), ConfigError> {
-    let metadata = std::fs::metadata(path).map_err(|e| {
-        ConfigError::InvalidValue(format!("BUZZ_BASH_PATH {path:?} is not usable: {e}"))
-    })?;
-    #[cfg(unix)]
-    let executable = {
-        use std::os::unix::fs::PermissionsExt;
-        metadata.permissions().mode() & 0o111 != 0
-    };
-    #[cfg(not(unix))]
-    let executable = true;
-    if !metadata.is_file() || !executable {
-        return Err(ConfigError::InvalidValue(format!(
-            "BUZZ_BASH_PATH {path:?} must be an executable file"
-        )));
-    }
-    Ok(())
 }
 
 fn ensure_git_path(
@@ -1185,7 +1180,7 @@ impl Config {
         let git_repo_path = ensure_git_repo_path(
             std::env::var("BUZZ_GIT_REPO_PATH").unwrap_or_else(|_| "./repos".to_string()),
         )?;
-        let git_hook_interpreter = git_hook_interpreter_from_env()?;
+        let git_hook_interpreter = git_hook_interpreter_from_env(&git_repo_path)?;
         let git_pack_cache_path = ensure_git_path(
             "BUZZ_GIT_PACK_CACHE_PATH",
             std::env::var("BUZZ_GIT_PACK_CACHE_PATH")
@@ -1685,22 +1680,56 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn git_hook_interpreter_must_be_an_executable_file() {
-        use std::os::unix::fs::PermissionsExt;
+    fn git_hook_interpreter_is_checked_by_running_it() {
+        use std::env::VarError;
+        use std::os::unix::{ffi::OsStringExt, fs::PermissionsExt};
 
-        let dir = tempfile::tempdir().unwrap();
-        let script = dir.path().join("bash");
-        std::fs::write(&script, "").unwrap();
-        let path = script.to_str().unwrap();
+        use crate::api::git::hook::tests::executable_on_path;
 
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o644)).unwrap();
-        assert!(ensure_git_hook_interpreter_executable(path).is_err());
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        assert!(ensure_git_hook_interpreter_executable(path).is_ok());
+        let hooks = tempfile::tempdir().unwrap();
+        let files = tempfile::tempdir().unwrap();
+        let bash = executable_on_path("bash").to_str().unwrap().to_string();
+        assert_eq!(
+            git_hook_interpreter(Err(VarError::NotPresent), hooks.path()).unwrap(),
+            None
+        );
+        assert_eq!(
+            git_hook_interpreter(Ok("  ".into()), hooks.path()).unwrap(),
+            None
+        );
+        assert_eq!(
+            git_hook_interpreter(Ok(bash.clone()), hooks.path()).unwrap(),
+            Some(bash)
+        );
 
-        let missing = dir.path().join("missing");
-        assert!(ensure_git_hook_interpreter_executable(missing.to_str().unwrap()).is_err());
-        assert!(ensure_git_hook_interpreter_executable(dir.path().to_str().unwrap()).is_err());
+        let not_executable = files.path().join("not-executable");
+        std::fs::write(&not_executable, "").unwrap();
+        std::fs::set_permissions(&not_executable, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let path = |p: &std::path::Path| p.to_str().unwrap().to_string();
+        let rejected = [
+            Err(VarError::NotUnicode(std::ffi::OsString::from_vec(
+                b"/bin/\xff".to_vec(),
+            ))),
+            Ok("bash".to_string()),
+            Ok(path(&not_executable)),
+            Ok(path(files.path())),
+            Ok(path(&files.path().join("missing"))),
+            // Runs, but the hook would fail: the probe needs a zero exit.
+            Ok(path(&executable_on_path("false"))),
+        ];
+        for raw in rejected {
+            assert!(
+                matches!(
+                    git_hook_interpreter(raw.clone(), hooks.path()),
+                    Err(ConfigError::InvalidValue(_))
+                ),
+                "{raw:?} must be rejected"
+            );
+        }
+        assert!(
+            std::fs::read_dir(hooks.path()).unwrap().next().is_none(),
+            "the probe leaves no file behind"
+        );
     }
 
     #[test]

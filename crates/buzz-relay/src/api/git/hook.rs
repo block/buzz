@@ -154,8 +154,67 @@ const DEFAULT_INTERPRETER: &str = "/usr/bin/env bash";
 /// path to bash for hosts without `/usr/bin/env`, such as minimal containers.
 /// `None` keeps the portable `#!/usr/bin/env bash`.
 fn render_pre_receive_hook(interpreter: Option<&str>) -> String {
-    let interpreter = interpreter.unwrap_or(DEFAULT_INTERPRETER);
-    format!("#!{interpreter}\n{PRE_RECEIVE_HOOK_BODY}")
+    format!("{}{PRE_RECEIVE_HOOK_BODY}", shebang(interpreter))
+}
+
+/// The hook's first line.
+fn shebang(interpreter: Option<&str>) -> String {
+    format!("#!{}\n", interpreter.unwrap_or(DEFAULT_INTERPRETER))
+}
+
+/// Run a one-line script with the hook's `#!` line in `dir`, the way git runs
+/// the hook, so whatever the kernel or file system refuses there (permissions,
+/// a `noexec` mount, an older kernel's shorter `#!` limit) shows up at startup.
+#[cfg(unix)]
+pub(crate) fn probe_interpreter(interpreter: &str, dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::{Command, Stdio};
+
+    // A `TempPath` holds no open handle, which exec would refuse (ETXTBSY).
+    let script = tempfile::Builder::new()
+        .prefix(".interpreter-probe")
+        .tempfile_in(dir)?
+        .into_temp_path();
+    std::fs::write(&script, format!("{}exit 0\n", shebang(Some(interpreter))))?;
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700))?;
+    let status = retry_while_busy(|| {
+        Command::new(&script)
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+    })?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!(
+            "a script run with it exited with {status}"
+        )))
+    }
+}
+
+/// Hooks with a `#!` line are a Unix mechanism; there is nothing to probe.
+#[cfg(not(unix))]
+pub(crate) fn probe_interpreter(_interpreter: &str, _dir: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+/// Exec of a just-written script fails with ETXTBSY while a fork elsewhere in
+/// the process still holds a copy of its write handle; that clears quickly.
+#[cfg(unix)]
+pub(crate) fn retry_while_busy<T>(
+    mut run: impl FnMut() -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    for _ in 0..10 {
+        match run() {
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            result => return result,
+        }
+    }
+    run()
 }
 
 /// Install the pre-receive hook into a bare repository.
@@ -193,7 +252,7 @@ pub async fn install_hook(repo_path: &Path, interpreter: Option<&str>) -> anyhow
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::{render_pre_receive_hook, PRE_RECEIVE_HOOK_BODY};
 
     #[test]
@@ -229,20 +288,20 @@ mod tests {
         );
     }
 
-    /// The bash the test process finds on `PATH`, as an absolute path.
+    /// The executable `name` the test process finds on `PATH`, as an absolute path.
     #[cfg(unix)]
-    fn bash_on_path() -> std::path::PathBuf {
+    pub(crate) fn executable_on_path(name: &str) -> std::path::PathBuf {
         use std::os::unix::fs::PermissionsExt;
-        let path = std::env::var_os("PATH").expect("the tests find bash on PATH");
+        let path = std::env::var_os("PATH").expect("the tests find tools on PATH");
         let found = std::env::split_paths(&path)
-            .map(|directory| directory.join("bash"))
+            .map(|directory| directory.join(name))
             .find(|candidate| {
                 candidate
                     .metadata()
                     .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
             })
-            .expect("an executable bash is on PATH");
-        std::path::absolute(found).expect("bash has an absolute path")
+            .unwrap_or_else(|| panic!("an executable {name} is on PATH"));
+        std::path::absolute(found).expect("an absolute path")
     }
 
     /// Install the hook with `interpreter` (a symlink to bash) and run it the
@@ -253,14 +312,16 @@ mod tests {
         interpreter: &std::path::Path,
     ) -> std::io::Result<std::process::Output> {
         std::fs::create_dir_all(interpreter.parent().unwrap()).unwrap();
-        std::os::unix::fs::symlink(bash_on_path(), interpreter).unwrap();
+        std::os::unix::fs::symlink(executable_on_path("bash"), interpreter).unwrap();
         super::install_hook(repo, Some(interpreter.to_str().unwrap()))
             .await
             .unwrap();
-        std::process::Command::new(repo.join("hooks/pre-receive"))
-            .env_clear()
-            .stdin(std::process::Stdio::null())
-            .output()
+        super::retry_while_busy(|| {
+            std::process::Command::new(repo.join("hooks/pre-receive"))
+                .env_clear()
+                .stdin(std::process::Stdio::null())
+                .output()
+        })
     }
 
     #[cfg(unix)]
@@ -294,10 +355,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let interpreter = dir.path().join("team tools/bash");
         let started = run_hook_with_interpreter(dir.path(), &interpreter).await;
-        assert!(
-            started.is_err(),
-            "the kernel ran a #! line with a space in the path: {started:?}"
-        );
+        // The kernel looks for an interpreter named `.../team`.
+        let error = started.expect_err("the kernel ran a #! line with a space in the path");
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound, "{error}");
     }
 
     #[test]
