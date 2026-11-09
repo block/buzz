@@ -536,19 +536,13 @@ export function useAnchoredScroll({
   const highlightMessage = React.useCallback(
     (messageId: string) => {
       clearHighlightTimers();
-      setHighlightedMessageId(messageId);
-      const startFade = () => {
-        highlightTimeoutRef.current = window.setTimeout(() => {
-          setHighlightedMessageId((current) =>
-            current === messageId ? null : current,
-          );
-          highlightTimeoutRef.current = null;
-        }, 2_000);
-      };
-      // Time the flash from when the row is actually on screen, not from when
-      // the scroll was accepted: reaching an unmeasured row can take several
-      // measure passes, and a flash that elapses off screen is never seen.
-      // Bounded so a row that never becomes visible still clears.
+      setHighlightedMessageId(null);
+      // The flash is a one-shot 2s CSS keyframe whose clock starts when the
+      // highlight class first lands on a mounted row. Reaching an unmeasured
+      // row can take several measure passes, and the virtualizer can mount it
+      // off screen first, so apply the class only once the row is on screen:
+      // a flash that runs off screen holds at opacity 0 and is never seen.
+      // A row that never becomes visible is not highlighted.
       const deadline = performance.now() + HIGHLIGHT_VISIBLE_WAIT_MS;
       const waitForVisible = () => {
         highlightWaitRafRef.current = null;
@@ -556,13 +550,17 @@ export function useAnchoredScroll({
         const el = container?.querySelector<HTMLElement>(
           `[data-message-id="${CSS.escape(messageId)}"]`,
         );
-        if (
-          (container && el && intersectsViewport(el, container)) ||
-          performance.now() > deadline
-        ) {
-          startFade();
+        if (container && el && intersectsViewport(el, container)) {
+          setHighlightedMessageId(messageId);
+          highlightTimeoutRef.current = window.setTimeout(() => {
+            setHighlightedMessageId((current) =>
+              current === messageId ? null : current,
+            );
+            highlightTimeoutRef.current = null;
+          }, 2_000);
           return;
         }
+        if (performance.now() > deadline) return;
         highlightWaitRafRef.current = requestAnimationFrame(waitForVisible);
       };
       highlightWaitRafRef.current = requestAnimationFrame(waitForVisible);

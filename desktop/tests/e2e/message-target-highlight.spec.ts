@@ -126,7 +126,13 @@ for (const targetCase of CASES) {
             const flashing =
               row?.closest(`[class*="${highlightClass}"]`) ??
               row?.querySelector(`[class*="${highlightClass}"]`);
-            if (timelineEl && row && flashing) {
+            // The flash is the row's ::before keyframe: full opacity for its
+            // first 60%, then a fade held at 0. The class alone is not enough;
+            // a flash that ran off screen keeps the class but shows nothing.
+            const flashVisible =
+              flashing &&
+              Number(getComputedStyle(flashing, "::before").opacity) > 0.9;
+            if (timelineEl && row && flashVisible) {
               const viewport = timelineEl.getBoundingClientRect();
               const rect = row.getBoundingClientRect();
               if (rect.bottom > viewport.top && rect.top < viewport.bottom) {
