@@ -15,6 +15,8 @@
 -- statement_timeout bounds the entire DO invocation, including all batches;
 -- COMMIT does not restart it. On timeout, committed batches remain repaired,
 -- the current batch rolls back, and ON_ERROR_STOP skips the final zero check.
+-- A lock_timeout stop likewise keeps committed batches; keep admission closed
+-- and rerun after resolving lock contention.
 -- Keep admission closed and rerun. If scanning the repaired prefix consumes
 -- the budget, choose a larger finite invocation budget with psql's
 -- -v invite_repair_timeout=10min (the default is 2min).

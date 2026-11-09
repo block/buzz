@@ -234,7 +234,9 @@ second run must keep zero and leave revocation timestamps and markers unchanged.
 The default two-minute statement timeout covers the entire repair invocation,
 not each batch. A timeout preserves committed batches, rolls back the current
 batch and skips the final query; it is not a successful zero check. Keep the
-same writer controls in place and rerun. If scanning already repaired rows
+same writer controls in place and rerun. A `lock_timeout` stop likewise keeps
+committed batches; resolve lock contention and rerun under the same controls.
+If scanning already repaired rows
 exhausts that budget, pass a larger finite budget, for example
 `psql -X -v ON_ERROR_STOP=1 -v invite_repair_timeout=10min -f scripts/maintenance/backfill_invite_revocations.sql`.
 Review fenced communities separately and keep their admission closed until they
