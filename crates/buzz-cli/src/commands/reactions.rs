@@ -157,6 +157,7 @@ pub async fn dispatch(cmd: crate::ReactionsCmd, client: &BuzzClient) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::{cmd_add_reaction, BuzzClient, CliError};
+    use crate::credentials::Credentials;
     use axum::body::Bytes;
     use axum::extract::State;
     use axum::http::StatusCode;
@@ -220,7 +221,7 @@ mod tests {
     #[tokio::test]
     async fn add_reaction_tags_target_author() {
         let (url, submitted, _) = fake_relay(target_response()).await;
-        let client = BuzzClient::new(url, Keys::generate(), None, None).unwrap();
+        let client = BuzzClient::new(url, Credentials::from_keys(Keys::generate())).unwrap();
 
         cmd_add_reaction(&client, TARGET_ID, "👍", None)
             .await
@@ -237,7 +238,7 @@ mod tests {
     #[tokio::test]
     async fn add_custom_emoji_reaction_tags_target_author() {
         let (url, submitted, _) = fake_relay(target_response()).await;
-        let client = BuzzClient::new(url, Keys::generate(), None, None).unwrap();
+        let client = BuzzClient::new(url, Credentials::from_keys(Keys::generate())).unwrap();
 
         cmd_add_reaction(
             &client,
@@ -258,7 +259,7 @@ mod tests {
     #[tokio::test]
     async fn add_reaction_to_unknown_event_fails_without_submitting() {
         let (url, submitted, _) = fake_relay("[]".to_string()).await;
-        let client = BuzzClient::new(url, Keys::generate(), None, None).unwrap();
+        let client = BuzzClient::new(url, Credentials::from_keys(Keys::generate())).unwrap();
 
         let result = cmd_add_reaction(&client, TARGET_ID, "👍", None).await;
 
@@ -269,7 +270,7 @@ mod tests {
     #[tokio::test]
     async fn add_reaction_reads_target_from_the_writer() {
         let (url, _, queried) = fake_relay(target_response()).await;
-        let client = BuzzClient::new(url, Keys::generate(), None, None).unwrap();
+        let client = BuzzClient::new(url, Credentials::from_keys(Keys::generate())).unwrap();
 
         cmd_add_reaction(&client, TARGET_ID, "👍", None)
             .await
