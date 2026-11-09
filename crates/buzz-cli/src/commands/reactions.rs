@@ -24,8 +24,12 @@ pub async fn cmd_add_reaction(
             .map_err(|e| CliError::Other(format!("build_reaction failed: {e}")))?
     };
     // NIP-25: lets the target's author find reactions with a `#p` filter.
-    let target_author = fetch_target_author(client, event_id).await?;
-    let builder = builder.tag(Tag::public_key(target_author));
+    // An unscoped read can miss a target the sender may react to (system
+    // channels), so the relay, not this lookup, decides whether it exists.
+    let builder = match fetch_target_author(client, event_id).await? {
+        Some(target_author) => builder.tag(Tag::public_key(target_author)),
+        None => builder,
+    };
 
     let event = client.sign_event(builder).await?;
 
@@ -34,19 +38,25 @@ pub async fn cmd_add_reaction(
     Ok(())
 }
 
-async fn fetch_target_author(client: &BuzzClient, event_id: &str) -> Result<PublicKey, CliError> {
+async fn fetch_target_author(
+    client: &BuzzClient,
+    event_id: &str,
+) -> Result<Option<PublicKey>, CliError> {
     // Strong: a target just written may not have reached the read replica yet.
     let filter = serde_json::json!({ "ids": [event_id], "limit": 1, "consistency": "strong" });
     let raw = client.query(&filter).await?;
     let events: serde_json::Value = serde_json::from_str(&raw)
         .map_err(|e| CliError::Other(format!("failed to parse query response: {e}")))?;
-    let author = events
+    let Some(author) = events
         .as_array()
         .and_then(|events| events.first())
         .and_then(|event| event.get("pubkey"))
         .and_then(|pubkey| pubkey.as_str())
-        .ok_or_else(|| CliError::NotFound(format!("event {event_id} not found")))?;
+    else {
+        return Ok(None);
+    };
     PublicKey::from_hex(author)
+        .map(Some)
         .map_err(|e| CliError::Other(format!("event {event_id} has an invalid pubkey: {e}")))
 }
 
@@ -171,37 +181,54 @@ mod tests {
     const TARGET_AUTHOR: &str = "35c18ae273fccfaf80d629e20e7f8721b90499379addff533054acc2504c12b4";
 
     type Submitted = Arc<Mutex<Option<serde_json::Value>>>;
+    type Reply = (StatusCode, String);
+
+    const ACCEPTED: &str = r#"{"event_id":"fake","accepted":true}"#;
+
+    #[derive(Clone)]
+    struct FakeRelay {
+        query: Reply,
+        events: Reply,
+        submitted: Submitted,
+        queried: Submitted,
+    }
 
     async fn fake_relay(query_body: String) -> (String, Submitted, Submitted) {
-        let submitted: Submitted = Arc::new(Mutex::new(None));
-        let queried: Submitted = Arc::new(Mutex::new(None));
-        let state = (query_body, submitted.clone(), queried.clone());
+        fake_relay_replying(
+            (StatusCode::OK, query_body),
+            (StatusCode::OK, ACCEPTED.into()),
+        )
+        .await
+    }
+
+    async fn fake_relay_replying(query: Reply, events: Reply) -> (String, Submitted, Submitted) {
+        let relay = FakeRelay {
+            query,
+            events,
+            submitted: Arc::new(Mutex::new(None)),
+            queried: Arc::new(Mutex::new(None)),
+        };
+        let (submitted, queried) = (relay.submitted.clone(), relay.queried.clone());
         let app = Router::new()
             .route(
                 "/query",
                 post(
-                    |State((body, _, queried)): State<(String, Submitted, Submitted)>,
-                     request: Bytes| async move {
-                        *queried.lock().unwrap() = serde_json::from_slice(&request).ok();
-                        (StatusCode::OK, [("content-type", "application/json")], body)
+                    |State(relay): State<FakeRelay>, request: Bytes| async move {
+                        *relay.queried.lock().unwrap() = serde_json::from_slice(&request).ok();
+                        let (status, body) = relay.query;
+                        (status, [("content-type", "application/json")], body)
                     },
                 ),
             )
             .route(
                 "/events",
-                post(
-                    |State((_, submitted, _)): State<(String, Submitted, Submitted)>,
-                     body: Bytes| async move {
-                        *submitted.lock().unwrap() = serde_json::from_slice(&body).ok();
-                        (
-                            StatusCode::OK,
-                            [("content-type", "application/json")],
-                            r#"{"event_id":"fake","accepted":true}"#,
-                        )
-                    },
-                ),
+                post(|State(relay): State<FakeRelay>, body: Bytes| async move {
+                    *relay.submitted.lock().unwrap() = serde_json::from_slice(&body).ok();
+                    let (status, body) = relay.events;
+                    (status, [("content-type", "application/json")], body)
+                }),
             )
-            .with_state(state);
+            .with_state(relay);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -257,13 +284,61 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn add_reaction_to_unknown_event_fails_without_submitting() {
+    async fn add_reaction_to_unreadable_target_submits_without_p_tag() {
         let (url, submitted, _) = fake_relay("[]".to_string()).await;
+        let client = BuzzClient::new(url, Credentials::from_keys(Keys::generate())).unwrap();
+
+        cmd_add_reaction(&client, TARGET_ID, "👍", None)
+            .await
+            .unwrap();
+
+        let tags = submitted_tags(&submitted);
+        assert!(tags.contains(&vec!["e".to_string(), TARGET_ID.to_string()]));
+        assert!(
+            !tags
+                .iter()
+                .any(|tag| tag.first().map(String::as_str) == Some("p")),
+            "an unreadable target has no known author to tag, got {tags:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn add_reaction_shows_the_relay_rejection_verbatim() {
+        let rejection = r#"{"error":"invalid: reaction target event not found"}"#;
+        let (url, _, _) = fake_relay_replying(
+            (StatusCode::OK, "[]".into()),
+            (StatusCode::BAD_REQUEST, rejection.into()),
+        )
+        .await;
+        let client = BuzzClient::new(url, Credentials::from_keys(Keys::generate())).unwrap();
+
+        let error = cmd_add_reaction(&client, TARGET_ID, "👍", None)
+            .await
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("invalid: reaction target event not found"),
+            "the relay's rejection must reach the user as written, got {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn add_reaction_fails_without_submitting_when_target_lookup_errors() {
+        let (url, submitted, _) = fake_relay_replying(
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                r#"{"error":"boom"}"#.into(),
+            ),
+            (StatusCode::OK, ACCEPTED.into()),
+        )
+        .await;
         let client = BuzzClient::new(url, Credentials::from_keys(Keys::generate())).unwrap();
 
         let result = cmd_add_reaction(&client, TARGET_ID, "👍", None).await;
 
-        assert!(matches!(result, Err(CliError::NotFound(_))));
+        assert!(matches!(result, Err(CliError::Relay { status: 500, .. })));
         assert!(submitted.lock().unwrap().is_none());
     }
 
