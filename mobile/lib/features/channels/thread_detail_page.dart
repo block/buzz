@@ -291,6 +291,7 @@ class ThreadDetailPage extends HookConsumerWidget {
     final tailCorrectionInProgress = useRef(false);
     final tailCorrectionGeneration = useRef(0);
     final activeThreadScrollPosition = useRef<ScrollPosition?>(null);
+    final threadMaxScrollExtents = useMemoized(Expando<double>.new);
     final composerHasFocus = useListenable(composerFocusNode).hasFocus;
     final viewportHeight = useListenable(listViewport.height).value;
     final previousViewportHeight = useRef(viewportHeight);
@@ -645,7 +646,12 @@ class ThreadDetailPage extends HookConsumerWidget {
           headHeight.value == null) {
         return null;
       }
-      if (initialMessageId != null) {
+      // A targeted entry starts at its target, not the tail. Absorb the
+      // replies it hydrates with (a provisional list, then the relay's) until
+      // the target jump reveals the list; a tail correction scheduled earlier
+      // would cancel that one-shot jump and leave the list hidden. Later
+      // arrivals use the ordinary rules below, so a sent reply comes into view.
+      if (initialMessageId != null && !initialViewportReady.value) {
         initialTailSettle.abandon();
         previousReplyCount.value = replies.length;
         return null;
@@ -953,76 +959,102 @@ class ThreadDetailPage extends HookConsumerWidget {
           Column(
             children: [
               Expanded(
-                child: _ThreadMessageList(
-                  dateScrollActivity: dateScrollActivity,
-                  headHeight: headHeight.value ?? 0,
-                  onHeadHeightChanged: (height) {
-                    if (context.mounted) headHeight.value = height;
+                child: NotificationListener<ScrollMetricsNotification>(
+                  onNotification: (notification) {
+                    if (notification.depth == 0) {
+                      _followThreadTailOnMetricsChange(
+                        notification,
+                        activePosition: activeThreadScrollPosition.value,
+                        previousMaxExtents: threadMaxScrollExtents,
+                        followsTail: () =>
+                            followsThreadTail.value &&
+                            initialTailSettle.isComplete &&
+                            !tailIntent.isDragging &&
+                            !userOptedOutOfTailFollow.value &&
+                            !isNavigatingToThreadTail.value &&
+                            // A jump away from the tail can briefly leave the
+                            // position at an estimated end; only content
+                            // growing at the real tail should be followed.
+                            itemPositionsListener.itemPositions.value.any(
+                              (item) =>
+                                  item.index ==
+                                  _threadTailIndex(replies.length),
+                            ),
+                      );
+                    }
+                    return false;
                   },
-                  viewport: listViewport,
-                  onUserScrollStart: () {
-                    hidesLatestForInitialTailSettle.value = false;
-                    hidesLatestForComposerTailCorrection.value = false;
-                    initialTailSettle.abandon();
-                    initialViewportReady.value = true;
-                    tailCorrectionInProgress.value = false;
-                    isNavigatingToThreadTail.value = false;
-                    tailIntent.beginDrag();
-                    userOptedOutOfTailFollow.value = true;
-                    userDragDetachedTailFollow.value = true;
-                    followsThreadTail.value = false;
-                  },
-                  onUserScrollEnd: () {
-                    tailIntent.endDrag();
-                    tailIntent.schedule(
-                      allowed: userOptedOutOfTailFollow.value,
-                      revalidate: () =>
-                          context.mounted &&
-                          itemScrollController.isAttached &&
-                          !tailIntent.isDragging &&
-                          userOptedOutOfTailFollow.value,
-                      action: () {
-                        _resumeThreadTailFollow(
-                          isVisible: threadTailIsVisible,
-                          userOptedOut: userOptedOutOfTailFollow,
-                          followsTail: followsThreadTail,
-                        );
-                        if (!userOptedOutOfTailFollow.value) {
-                          userDragDetachedTailFollow.value = false;
-                        }
-                      },
-                    );
-                  },
-                  visible: threadViewportVisible,
-                  itemScrollController: itemScrollController,
-                  itemPositionsListener: itemPositionsListener,
-                  bottomInset: timelineBottomInset,
-                  replies: replies,
-                  knownAgents: threadTyping.isEmpty
-                      ? const {}
-                      : ref.watch(meAgentInventoryProvider).value ?? const {},
-                  inlineTyping: isMember && !isArchived
-                      ? threadTyping
-                      : const [],
-                  relayReplyState: relayReplyState,
-                  onRetryReplies: () =>
-                      ref.invalidate(threadRepliesProvider(repliesArgs)),
-                  localSendAnimations: localSendAnimations,
-                  trackActiveScrollPosition: trackActiveScrollPosition,
-                  headIsDeleted: liveDeletionHidesHead,
-                  head: liveHead,
-                  stickyDayTimestamp: stickyDayTimestamp,
-                  channelNames: channelNamesMap,
-                  channelId: channelId,
-                  currentPubkey: currentPubkey,
-                  highlightedMessageId: highlightedMessageId.value,
-                  allMessages: allMsgs,
-                  isMember: isMember,
-                  isArchived: isArchived,
-                  composerFocusNode: composerFocusNode,
-                  restoreComposerFocus: () =>
-                      restoreComposerFocus.value?.call(),
-                  childrenByParent: childrenByParent,
+                  child: _ThreadMessageList(
+                    dateScrollActivity: dateScrollActivity,
+                    headHeight: headHeight.value ?? 0,
+                    onHeadHeightChanged: (height) {
+                      if (context.mounted) headHeight.value = height;
+                    },
+                    viewport: listViewport,
+                    onUserScrollStart: () {
+                      hidesLatestForInitialTailSettle.value = false;
+                      hidesLatestForComposerTailCorrection.value = false;
+                      initialTailSettle.abandon();
+                      initialViewportReady.value = true;
+                      tailCorrectionInProgress.value = false;
+                      isNavigatingToThreadTail.value = false;
+                      tailIntent.beginDrag();
+                      userOptedOutOfTailFollow.value = true;
+                      userDragDetachedTailFollow.value = true;
+                      followsThreadTail.value = false;
+                    },
+                    onUserScrollEnd: () {
+                      tailIntent.endDrag();
+                      tailIntent.schedule(
+                        allowed: userOptedOutOfTailFollow.value,
+                        revalidate: () =>
+                            context.mounted &&
+                            itemScrollController.isAttached &&
+                            !tailIntent.isDragging &&
+                            userOptedOutOfTailFollow.value,
+                        action: () {
+                          _resumeThreadTailFollow(
+                            isVisible: threadTailIsVisible,
+                            userOptedOut: userOptedOutOfTailFollow,
+                            followsTail: followsThreadTail,
+                          );
+                          if (!userOptedOutOfTailFollow.value) {
+                            userDragDetachedTailFollow.value = false;
+                          }
+                        },
+                      );
+                    },
+                    visible: threadViewportVisible,
+                    itemScrollController: itemScrollController,
+                    itemPositionsListener: itemPositionsListener,
+                    bottomInset: timelineBottomInset,
+                    replies: replies,
+                    knownAgents: threadTyping.isEmpty
+                        ? const {}
+                        : ref.watch(meAgentInventoryProvider).value ?? const {},
+                    inlineTyping: isMember && !isArchived
+                        ? threadTyping
+                        : const [],
+                    relayReplyState: relayReplyState,
+                    onRetryReplies: () =>
+                        ref.invalidate(threadRepliesProvider(repliesArgs)),
+                    localSendAnimations: localSendAnimations,
+                    trackActiveScrollPosition: trackActiveScrollPosition,
+                    headIsDeleted: liveDeletionHidesHead,
+                    head: liveHead,
+                    stickyDayTimestamp: stickyDayTimestamp,
+                    channelNames: channelNamesMap,
+                    channelId: channelId,
+                    currentPubkey: currentPubkey,
+                    highlightedMessageId: highlightedMessageId.value,
+                    allMessages: allMsgs,
+                    isMember: isMember,
+                    isArchived: isArchived,
+                    composerFocusNode: composerFocusNode,
+                    restoreComposerFocus: () =>
+                        restoreComposerFocus.value?.call(),
+                    childrenByParent: childrenByParent,
+                  ),
                 ),
               ),
             ],
