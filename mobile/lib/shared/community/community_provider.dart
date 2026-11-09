@@ -16,6 +16,7 @@ import '../channels/channel_list_snapshot.dart';
 import '../channels/saved_message_store.dart';
 import '../diagnostics/diagnostic_reporter.dart';
 import '../hosted/community_entry_requirements.dart';
+import '../hosted/known_communities_sync.dart';
 import '../profile/profile_snapshot.dart';
 import '../push/dev_push_lease.dart';
 import '../push/push_bridge.dart';
@@ -328,6 +329,7 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
     }
 
     await storage.save(community);
+    await recordKnownCommunityJoin(ref, community.relayUrl);
     final updatedList = [...current, community];
     state = AsyncData(updatedList);
     await _removeOrphanChannelListSnapshots(updatedList);
@@ -372,6 +374,12 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
         revocationJournaled = await ref.read(
           communityPushLeaseRevocationEnqueuerProvider,
         )(current[removedIndex]);
+        // The account's list must learn of the leave once the device has
+        // forgotten the community, or the next sign-in would add it back;
+        // a record that will not write keeps the community for a retry.
+        await ref
+            .read(knownCommunitiesOutboxProvider)
+            .record(current[removedIndex].relayUrl, removed: true);
       }
       // A durable revocation commits this removal to its confirmed account.
       // Finish local deletion even if the account changed during journaling;

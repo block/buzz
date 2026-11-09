@@ -86,8 +86,11 @@ void main() {
       (tester, f) async {
         await f.initialize();
         f.offerProfile = false;
-        f.rows.addAll([f.row('one'), f.row('two')]);
         await f.mount(tester, openEntry: false);
+        // The signed-in launch merges the account's (empty) list; the picker
+        // reads the rows that arrive afterwards.
+        await f.synced(tester);
+        f.rows.addAll([f.row('one'), f.row('two')]);
         await f.flow.signInAccount();
         await f.settle(tester);
         expect(find.text('Select a community'), findsOneWidget);
@@ -414,8 +417,9 @@ void main() {
     f,
   ) async {
     await f.initialize();
-    f.rows.add(f.row('one'));
     await f.mount(tester);
+    await f.synced(tester);
+    f.rows.add(f.row('one'));
     // Account restoration may resume independently of the Add choices.
     await f.flow.signInAccount();
     await f.settle(tester);
@@ -448,8 +452,9 @@ void main() {
       'fallback profile preserves drafts and recovers save failures (skip: $skipAvatar)',
       (tester, f) async {
         await f.initialize();
-        f.rows.add(f.row('one'));
         await f.mount(tester);
+        await f.synced(tester);
+        f.rows.add(f.row('one'));
         // Account restoration may resume independently of the Add choices.
         await f.flow.signInAccount();
         await f.settle(tester);
@@ -983,17 +988,18 @@ void main() {
       );
       f.denyAssertion = false;
       f.denialDate = null;
-      for (final path in [
-        '/status',
-        '/enrollment',
-        '/known-communities/list',
-      ]) {
+      for (final path in ['/status', '/enrollment']) {
         expect(
           f.sent(path),
           isEmpty,
           reason: 'Reconnect must not run onboarding',
         );
       }
+      // Each sign-in merges the account's community list without onboarding:
+      // the saved community is uploaded, and nothing is added or removed.
+      expect(f.sent('/known-communities/list'), isNotEmpty);
+      expect(f.knownSaved, {community.relayUrl});
+      expect((await f.storage.loadAll()).single.id, community.id);
       // The issuer can succeed while the relay refuses the upgrade. One
       // renewal is allowed, then stop; a user retry can recover later.
       f.refuseUpgrade = true;
@@ -1513,6 +1519,10 @@ void main() {
       expect(find.text('Signed in as owner@example.com'), findsOneWidget);
       expect(find.text('Scan a QR code'), findsOneWidget);
       expect(find.text('Use pairing code'), findsNothing);
+      // The sync's own list read failed with the first one; its retry now
+      // merges the still-empty list, so the rows below belong to the picker.
+      await f.fireSyncRetry(tester);
+      await f.synced(tester, lists: 2);
       f.rows.addAll([f.row('one'), f.row('two')]);
       // Account restoration may resume independently of the Add choices.
       await f.flow.signInAccount();
@@ -1581,10 +1591,11 @@ void main() {
         } else {
           f.cloudKeys.addAll([f.secondKeys, f.keys]);
         }
-        f.rows.addAll([f.row('one'), f.row('two')]);
         f.offerProfile = false;
         f.profileUnavailable = unreadableProfile;
         await f.mount(tester);
+        await f.synced(tester);
+        f.rows.addAll([f.row('one'), f.row('two')]);
         // Account restoration may resume independently of the Add choices.
         tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
           const MethodChannel('buzz/hosted_hpke'),
@@ -1885,10 +1896,11 @@ void main() {
       await f.initialize();
       f.offerProfile = false;
       f.claimError = sentinel;
+      await f.mount(tester);
+      await f.synced(tester);
       // Even recorded membership must not turn a current explicit denial
       // into successful admission through lost-response reconciliation.
       f.rows.add(f.row('one'));
-      await f.mount(tester);
       await f.link(tester, 'one');
       await tester.tap(find.byType(CheckboxListTile));
       await f.settle(tester);
@@ -1966,18 +1978,64 @@ void main() {
         f.sent('/accept-policy').single.url.host,
         'two.communities.buzz.xyz',
       );
-      // The remote add was accepted but its acknowledgement was lost. The
-      // saved community and pending intent survive; retry never reclaims it.
-      expect(find.text('Try again').hitTestable(), findsOneWidget);
+      // The remote add was accepted but its acknowledgement was lost. Setup
+      // finished anyway: the intent waits in the outbox with a retry
+      // scheduled, and a restart resends it to the same account without
+      // reclaiming the invite.
+      expect(find.text('Try again'), findsNothing);
+      expect(find.text('Community home').hitTestable(), findsOneWidget);
       expect(f.knownSaved, {'wss://two.communities.buzz.xyz'});
+      expect(f.sent('/known-communities/add'), hasLength(1));
+      expect(f.syncRetries, hasLength(1));
       await f.restart(tester);
-      await f.tap(tester, 'Start login again');
+      await f.synced(tester, lists: 2);
       expect((await f.storage.loadAll()).single.id, saved.id);
       expect(f.sent('/claim'), hasLength(1));
       expect(f.sent('/known-communities/add'), hasLength(2));
+      expect(f.knownSaved, {'wss://two.communities.buzz.xyz'});
       expect(find.byType(OnboardingAppEntry), findsNothing);
     },
     requiresAuthDomain: true,
+  );
+
+  journey(
+    'a signed-in launch joins the account\'s communities in the background '
+    'and a leave on the phone reaches the account',
+    (tester, f) async {
+      await f.initialize();
+      f.offerProfile = false;
+      // Joined elsewhere, for example on desktop, while this phone was away.
+      f.rows.addAll([f.row('one'), f.row('two')]);
+      await f.mount(tester, openEntry: false);
+      await f.synced(tester);
+      for (var i = 0; i < 20 && (await f.storage.loadAll()).length < 2; i++) {
+        await f.settle(tester);
+      }
+      final saved = await f.storage.loadAll();
+      expect(saved.map((c) => c.relayUrl), [
+        'wss://one.communities.buzz.xyz',
+        'wss://two.communities.buzz.xyz',
+      ]);
+      expect(saved.every((c) => c.pubkey == f.keys.public), isTrue);
+      // The first one opens, since nothing was open; no profile prompt.
+      expect(await f.storage.loadActiveId(), saved.first.id);
+      expect(f.profileWrites, isEmpty);
+      expect(find.byType(OnboardingAppEntry), findsNothing);
+      expect(find.text('Community home').hitTestable(), findsOneWidget);
+      // Memberships the account listed are not uploaded again.
+      expect(f.sent('/known-communities/add'), isEmpty);
+
+      await f.container
+          .read(communityListProvider.notifier)
+          .removeCommunity(saved.last.id);
+      for (var i = 0; i < 20 && f.knownRemoved.isEmpty; i++) {
+        await f.settle(tester);
+      }
+      expect(f.knownRemoved, {'wss://two.communities.buzz.xyz'});
+      expect((await f.storage.loadAll()).map((c) => c.relayUrl), [
+        'wss://one.communities.buzz.xyz',
+      ]);
+    },
   );
 }
 

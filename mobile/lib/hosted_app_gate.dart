@@ -23,6 +23,7 @@ import 'features/onboarding/hosted_reconnect_banner.dart';
 import 'features/onboarding/organization_sign_in_banner.dart';
 
 import 'shared/hosted/hosted_flow_provider.dart';
+import 'shared/hosted/known_communities_sync_provider.dart';
 import 'shared/hosted/known_community_sync_provider.dart';
 import 'shared/hosted/organization_sign_in.dart';
 
@@ -42,6 +43,8 @@ class HostedAppGate extends HookConsumerWidget {
         ? ref.watch(hostedFlowProvider)
         : null;
     useListenable(flow);
+    // The account's community list follows this device while signed in.
+    ref.watch(knownCommunitiesSyncProvider);
     useEffect(() {
       if (flow == null) return null;
       void onFlowChanged() {
