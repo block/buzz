@@ -67,6 +67,7 @@ impl CommunityDisconnectReason {
             Self::CommunityDeleted => "community_deleted",
             Self::AuthPolicyUpgraded => "auth_policy_upgraded",
             Self::AuthorizationDenied => "authorization_denied",
+            Self::AuthorizationUnavailable => "authorization_unavailable",
             Self::AccessRevoked => "access_revoked",
             Self::Removed => "removed",
         }
@@ -6681,6 +6682,7 @@ mod live_authorization_tests {
     const TEST_ISSUER: &str = "https://issuer.example";
 
     struct LiveConnectionFixture {
+        control: CommunityConnectionControl,
         cancel: CancellationToken,
         terminal_rx: mpsc::Receiver<WsMessage>,
         reason_rx: watch::Receiver<Option<CommunityDisconnectReason>>,
@@ -6789,7 +6791,7 @@ mod live_authorization_tests {
                 Arc::new(AtomicU8::new(0)),
                 Arc::new(Mutex::new(HashMap::new())),
                 3,
-                control,
+                control.clone(),
             );
             conn_manager.set_authenticated_identity(
                 connection_id,
@@ -6805,6 +6807,7 @@ mod live_authorization_tests {
         }
 
         LiveConnectionFixture {
+            control,
             cancel,
             terminal_rx,
             reason_rx,
@@ -7674,6 +7677,20 @@ mod live_authorization_tests {
         .await;
         assert_eq!(expired_grace.closed_for_db_failure, 4);
         assert!(sessions.iter().all(|session| session.cancel.is_cancelled()));
+
+        // The same terminal chosen by revalidation must reach access logging,
+        // rather than falling back to the generic cancellation reason.
+        let state = crate::state::tests::test_state().await;
+        let (mut conn, _rx) = crate::connection::tests::test_conn_with_auth(
+            crate::connection::tests::authenticated_state(),
+        );
+        Arc::get_mut(&mut conn)
+            .expect("sole fixture owner")
+            .community_control = sessions[0].control.clone();
+        assert_eq!(
+            crate::connection::server_close_reason(&state, &conn),
+            Some("authorization_unavailable")
+        );
 
         assert_eq!(
             *sessions[0].reason_rx.borrow(),
