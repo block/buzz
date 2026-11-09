@@ -48,7 +48,6 @@ final class NativePhotoZoomCoordinator {
       }
       let controller = NativePhotoZoomViewController(
         image: image, labels: labels, initialIndex: initial,
-        previews: (args["previews"] as? [Any] ?? []).map { ($0 as? FlutterStandardTypedData).flatMap { UIImage(data: $0.data) } },
         canReply: args["canReply"] as? Bool ?? false,
         canMore: args["canMore"] as? Bool ?? false,
         canDelete: args["canDelete"] as? Bool ?? false
@@ -136,10 +135,9 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
   private let reply = UIButton(type: .system)
   private let more = UIButton(type: .system)
   private let labels: [String]
-  private var previews: [UIImage?]
-  private let images = NSCache<NSNumber, UIImage>()
-  private let initialImage: UIImage
-  private let initialIndex: Int
+  private var previews: [Int: UIImage] = [:]
+  private var images: [Int: UIImage] = [:]
+  private var pending: [String: UUID] = [:]
   private let canReply: Bool, canMore: Bool, canDelete: Bool
   private var index: Int
   private var action = "closed"
@@ -151,12 +149,11 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
   var request: ((String, Int, String?, @escaping FlutterResult) -> Void)?
   var onSelection: ((UIImage?, [String: Any]?) -> Void)?
 
-  init(image: UIImage, labels: [String], initialIndex: Int, previews: [UIImage?], canReply: Bool, canMore: Bool, canDelete: Bool) {
-    self.previews = labels.indices.map { previews.indices.contains($0) ? previews[$0] : nil }
-    initialImage = image; self.labels = labels; self.initialIndex = initialIndex; index = initialIndex
+  init(image: UIImage, labels: [String], initialIndex: Int, canReply: Bool, canMore: Bool, canDelete: Bool) {
+    self.previews[initialIndex] = image
+    self.labels = labels; index = initialIndex
     self.canReply = canReply; self.canMore = canMore; self.canDelete = canDelete
     super.init(nibName: nil, bundle: nil)
-    images.countLimit = 3
   }
   required init?(coder: NSCoder) { nil }
 
@@ -171,16 +168,7 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
     pager.dataSource = self; pager.delegate = self
     addChild(pager); view.addSubview(pager.view); pager.didMove(toParent: self)
     pager.setViewControllers([page(index)], direction: .forward, animated: false)
-    for value in labels.indices where previews[value] == nil {
-      request?("preview", value, nil) { [weak self] result in
-        guard let self, !self.finishing,
-          let bytes = result as? FlutterStandardTypedData,
-          let image = UIImage(data: bytes.data) else { return }
-        self.previews[value] = image
-        for page in self.pager.children.compactMap({ $0 as? NativePhotoPage })
-          where page.index == value && page.image == nil { page.setImage(image) }
-      }
-    }
+    loadWindow()
     configure(close, symbol: "xmark", label: "Close photo", selector: #selector(closePhoto))
     configure(reply, symbol: "arrowshape.turn.up.left", label: "Reply in thread", selector: #selector(replyToMessage))
     configure(more, symbol: "ellipsis", label: "More image actions", selector: nil)
@@ -301,23 +289,51 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
     button.configuration = config; button.accessibilityLabel = label
     if let selector { button.addTarget(self, action: selector, for: .touchUpInside) }
   }
-  private func page(_ value: Int) -> NativePhotoPage {
-    let cached = images.object(forKey: NSNumber(value: value))
-    let preview = previews.indices.contains(value) ? previews[value] : nil
-    let page = NativePhotoPage(index: value, label: labels[value], image: cached ?? preview ?? (value == initialIndex ? initialImage : nil))
-    if cached == nil {
-      request?("image", value, nil) { [weak self, weak page] result in
-        guard let self, let page, !self.finishing else { return }
-        let image = (result as? FlutterStandardTypedData).flatMap { UIImage(data: $0.data) }
-        if let image {
-          self.images.setObject(image, forKey: NSNumber(value: value))
-          page.setImage(image)
-        } else if page.image == nil {
-          page.setImage(nil)
-        }
-        if self.index == value { self.syncSelection() }
-      }
+  private func isNearby(_ value: Int) -> Bool { abs(value - index) <= 2 }
+  private func trimWindow() {
+    previews = previews.filter { isNearby($0.key) }
+    images = images.filter { isNearby($0.key) }
+    pending = pending.filter { key, _ in
+      key.split(separator: ":").last.flatMap { Int($0) }.map(isNearby) ?? false
     }
+    for page in pager.children.compactMap({ $0 as? NativePhotoPage }) where !isNearby(page.index) {
+      page.setImage(nil)
+    }
+  }
+  private func loadWindow() {
+    trimWindow()
+    for value in max(0, index - 2)...min(labels.count - 1, index + 2) {
+      load("preview", value)
+    }
+    for page in pager.children.compactMap({ $0 as? NativePhotoPage }) where isNearby(page.index) {
+      load("image", page.index)
+    }
+  }
+  private func load(_ method: String, _ value: Int) {
+    guard !finishing, isNearby(value),
+      (method == "preview" ? previews[value] : images[value]) == nil else { return }
+    let key = "\(method):\(value)"
+    guard pending[key] == nil else { return }
+    let token = UUID()
+    pending[key] = token
+    request?(method, value, nil) { [weak self] result in
+      guard let self, !self.finishing, self.isNearby(value), self.pending[key] == token else { return }
+      self.pending.removeValue(forKey: key)
+      let image = (result as? FlutterStandardTypedData).flatMap { UIImage(data: $0.data) }
+      if let image {
+        if method == "preview" { self.previews[value] = image }
+        else { self.images[value] = image }
+      }
+      for page in self.pager.children.compactMap({ $0 as? NativePhotoPage }) where page.index == value {
+        if let image = self.images[value] ?? self.previews[value] { page.setImage(image) }
+        else if method == "image" { page.setImage(nil) }
+      }
+      if self.index == value, method == "image" { self.syncSelection() }
+    }
+  }
+  private func page(_ value: Int) -> NativePhotoPage {
+    let page = NativePhotoPage(index: value, label: labels[value], image: images[value] ?? previews[value])
+    load("image", value)
     return page
   }
   func pageViewController(_ pageViewController: UIPageViewController, viewControllerBefore viewController: UIViewController) -> UIViewController? {
@@ -331,14 +347,20 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
     paging = false; indicator.isEnabled = true
     if completed, let page = pager.viewControllers?.first as? NativePhotoPage { selected(page.index) }
   }
-  private func selected(_ value: Int) { index = value; indicator.currentPage = value; syncSelection() }
+  private func selected(_ value: Int) {
+    index = value; indicator.currentPage = value
+    trimWindow()
+    // Move Dart's request window before asking for newly adjacent images.
+    syncSelection { [weak self] in self?.loadWindow() }
+  }
   @objc private func selectPage() {
     guard !paging, !finishing else { return }
     let target = indicator.currentPage
     guard target != index else { return }
     // Scrubbing must not disable its own control or wait for a page animation.
-    pager.setViewControllers([page(target)], direction: target >= index ? .forward : .reverse, animated: false)
+    let direction: UIPageViewController.NavigationDirection = target >= index ? .forward : .reverse
     selected(target)
+    pager.setViewControllers([page(target)], direction: direction, animated: false)
   }
   private func syncSelection(completion: (() -> Void)? = nil) {
     let selected = index
@@ -381,7 +403,12 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
   }
   override func viewDidDisappear(_ animated: Bool) {
     super.viewDidDisappear(animated)
-    if isBeingDismissed || presentingViewController == nil { onClose?(action); onClose = nil }
+    if isBeingDismissed || presentingViewController == nil {
+      finishing = true
+      pending.removeAll(); previews.removeAll(); images.removeAll()
+      request = nil
+      onClose?(action); onClose = nil
+    }
   }
   override func accessibilityPerformEscape() -> Bool { closePhoto(); return true }
 }

@@ -69,13 +69,14 @@ class _MessageImageStack extends HookConsumerWidget {
           final cardWidth = math.min(210.0, width * .62);
           final cardHeight = cardWidth;
           final height = cardHeight + Grid.xs * 2 + (mirrored ? 16 : 24);
-          final decodeWidth =
+          final decodeWidth = cardWidth;
+          final physicalDecodeWidth =
               (cardWidth * MediaQuery.devicePixelRatioOf(context))
                   .ceilToDouble();
           final providers = [
             for (final item in items)
               ResizeImage.resizeIfNeeded(
-                decodeWidth.toInt(),
+                physicalDecodeWidth.toInt(),
                 null,
                 MediaImageProvider(
                   url: item.url,
@@ -123,6 +124,7 @@ class _MessageImageStack extends HookConsumerWidget {
                       ),
                   ],
                   urls: [for (final item in items) item.url],
+                  mimeTypes: [for (final item in items) item.mimeType],
                   labels: [for (final item in items) item.semanticLabel],
                   initialIndex: selected,
                   onSelect: (index) async {
@@ -147,6 +149,13 @@ class _MessageImageStack extends HookConsumerWidget {
                 aspectRatio: items[selected].aspectRatio,
                 galleryItems: viewerItems,
                 initialIndex: selected,
+                onSelectionChanged: (index) {
+                  if (!context.mounted) return;
+                  dragging.value = false;
+                  start.value = index.toDouble();
+                  distance.value = 0;
+                  settle(index.toDouble(), instant: true);
+                },
                 onReply: onReply,
                 onMore: onMore,
               );

@@ -5,6 +5,8 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../../shared/relay/media_image.dart';
+
 /// Message-scoped actions shared with the Flutter gallery.
 class NativePhotoActions {
   const NativePhotoActions({required this.canDelete, required this.perform});
@@ -20,11 +22,16 @@ class NativePhotoZoomPreview {
   static int _session = 0;
 
   /// Returns true only when the existing Flutter gallery is needed as fallback.
+  ///
+  /// Only JPEG galleries use the static PNG bridge. Animation-capable formats
+  /// (including ordinary PNGs) and unknown types keep the Flutter renderer.
+  /// [mimeTypes], when provided, contains one declared type per [urls] entry.
   static Future<bool> open({
     required BuildContext context,
     required List<GlobalKey> sourceKeys,
     required List<ImageProvider<Object>> providers,
     required List<String> urls,
+    List<String?>? mimeTypes,
     required List<String> labels,
     ImageProvider<Object>? previewProvider,
     List<ImageProvider<Object>>? previewProviders,
@@ -34,33 +41,37 @@ class NativePhotoZoomPreview {
     NativePhotoActions? actions,
   }) async {
     if (!enabled || defaultTargetPlatform != TargetPlatform.iOS) return true;
+    // PNG/APNG, WebP, GIF and unknown formats may animate. The PNG bridge
+    // cannot preserve their frames, so keep the whole gallery in Flutter.
+    // Metadata wins over the extension (e.g. a GIF served at a .jpg URL).
+    for (var i = 0; i < urls.length; i++) {
+      final mime = mimeTypes?[i]?.split(';').first.trim().toLowerCase();
+      final path = Uri.tryParse(urls[i])?.path.toLowerCase() ?? '';
+      if (mime != null
+          ? mime != 'image/jpeg'
+          : !(path.endsWith('.jpg') || path.endsWith('.jpeg'))) {
+        return true;
+      }
+    }
     if (_presenting) return false;
     _presenting = true;
     final session = ++_session;
+    _PhotoWindow? window;
     try {
       if (await channel.invokeMethod<bool>('isSupported') != true) return true;
       if (!context.mounted) return false;
       final configuration = createLocalImageConfiguration(context);
       final reduceMotion = MediaQuery.disableAnimationsOf(context);
-      final bytes = await _imageBytes(
-        previewProvider ?? providers[initialIndex],
-        configuration,
+      final loads = _PhotoWindow(configuration, initialIndex);
+      window = loads;
+      final bytes = await loads.load(
+        initialIndex,
+        previewProvider ??
+            previewProviders?[initialIndex] ??
+            providers[initialIndex],
+        preview: true,
       );
-      // Prepare remaining previews without delaying the tapped photo's opening.
-      final previews = <Future<Uint8List?>>[
-        for (var i = 0; i < providers.length; i++)
-          i == initialIndex
-              ? Future.value(bytes)
-              : previewProviders == null
-              ? Future.value(null)
-              : _imageBytes(
-                  previewProviders[i],
-                  configuration,
-                ).then<Uint8List?>(
-                  (value) => value,
-                  onError: (Object _, StackTrace _) => null,
-                ),
-      ];
+      if (bytes == null) return true;
       if (!context.mounted) return false;
       final geometry = _geometry(sourceKeys[initialIndex]);
       if (geometry == null) return true;
@@ -75,10 +86,14 @@ class NativePhotoZoomPreview {
         }
         switch (call.method) {
           case 'preview':
-            return previews[index];
+            final provider = previewProviders?[index];
+            return provider == null
+                ? null
+                : loads.load(index, provider, preview: true);
           case 'image':
-            return _imageBytes(providers[index], configuration);
+            return loads.load(index, providers[index]);
           case 'select':
+            loads.select(index);
             await onSelect(index).timeout(const Duration(seconds: 2));
             if (!context.mounted) return null;
             return _geometry(sourceKeys[index]);
@@ -96,10 +111,6 @@ class NativePhotoZoomPreview {
       final result = await channel.invokeMethod<String>('present', {
         ...geometry,
         'bytes': bytes,
-        'previews': [
-          for (var i = 0; i < providers.length; i++)
-            i == initialIndex ? bytes : null,
-        ],
         'session': session,
         'labels': labels,
         'initialIndex': initialIndex,
@@ -114,6 +125,7 @@ class NativePhotoZoomPreview {
       // Preserve the established gallery and its error handling on bridge failure.
       return context.mounted;
     } finally {
+      window?.dispose();
       channel.setMethodCallHandler(null);
       _presenting = false;
     }
@@ -139,35 +151,104 @@ class NativePhotoZoomPreview {
       'angle': direction.direction,
     };
   }
+}
 
-  static Future<Uint8List> _imageBytes(
-    ImageProvider<Object> provider,
-    ImageConfiguration configuration,
-  ) async {
-    final completer = Completer<ImageInfo>();
-    final stream = provider.resolve(configuration);
-    final listener = ImageStreamListener(
+// At most five nearby photos, at preview and full resolution. Moving the window
+// abandons stale downloads; closing also releases all listeners and PNG bytes.
+class _PhotoWindow {
+  _PhotoWindow(this.configuration, this.index);
+  final ImageConfiguration configuration;
+  int index;
+  bool disposed = false;
+  final loads = <(int, bool), _PhotoLoad>{};
+
+  Future<Uint8List?> load(
+    int value,
+    ImageProvider<Object> provider, {
+    bool preview = false,
+  }) {
+    if (disposed || (value - index).abs() > 2) return Future.value(null);
+    return (loads[(value, preview)] ??= _PhotoLoad(
+      provider,
+      configuration,
+    )).result;
+  }
+
+  void select(int value) {
+    index = value;
+    for (final key in loads.keys.toList()) {
+      if ((key.$1 - value).abs() > 2) loads.remove(key)?.dispose();
+    }
+  }
+
+  void dispose() {
+    disposed = true;
+    for (final load in loads.values) {
+      load.dispose();
+    }
+    loads.clear();
+  }
+}
+
+class _PhotoLoad {
+  _PhotoLoad(this.provider, this.configuration) {
+    stream = provider.resolve(configuration);
+    listener = ImageStreamListener(
       (info, _) {
-        if (!completer.isCompleted) {
-          completer.complete(info);
+        receivedFrame = true;
+        if (!frame.isCompleted) {
+          frame.complete(info);
         } else {
           info.dispose();
         }
       },
-      onError: (Object error, StackTrace? stack) {
-        if (!completer.isCompleted) completer.completeError(error, stack);
+      onError: (Object _, StackTrace? _) {
+        if (!frame.isCompleted) frame.complete(null);
       },
     );
     stream.addListener(listener);
-    ImageInfo? frame;
+    timer = Timer(const Duration(seconds: 10), dispose);
+    result = encode();
+  }
+
+  final ImageProvider<Object> provider;
+  final ImageConfiguration configuration;
+  final frame = Completer<ImageInfo?>();
+  late final ImageStream stream;
+  late final ImageStreamListener listener;
+  late final Timer timer;
+  late final Future<Uint8List?> result;
+  bool disposed = false;
+  bool detached = false;
+  bool receivedFrame = false;
+
+  Future<Uint8List?> encode() async {
+    final info = await frame.future;
+    detach();
     try {
-      frame = await completer.future.timeout(const Duration(seconds: 10));
-      final data = await frame.image.toByteData(format: ui.ImageByteFormat.png);
-      if (data == null) throw StateError('Unable to encode photo');
+      if (info == null || disposed) return null;
+      final data = await info.image.toByteData(format: ui.ImageByteFormat.png);
+      if (disposed || data == null) return null;
       return data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes);
+    } catch (_) {
+      return null;
     } finally {
-      stream.removeListener(listener);
-      frame?.dispose();
+      info?.dispose();
+      timer.cancel();
     }
+  }
+
+  void detach() {
+    if (detached) return;
+    detached = true;
+    stream.removeListener(listener);
+    if (!receivedFrame) abandonPendingImage(stream, provider, configuration);
+  }
+
+  void dispose() {
+    disposed = true;
+    timer.cancel();
+    if (!frame.isCompleted) frame.complete(null);
+    detach();
   }
 }

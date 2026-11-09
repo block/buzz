@@ -5,6 +5,8 @@ void stackJourneyTests() {
     'sent and received stacks browse whole cards and open the selected gallery photo',
     (tester) async {
       _setSurfaceSize(tester, const Size(375, 800));
+      tester.view.devicePixelRatio = 3;
+      tester.view.physicalSize = const Size(1125, 2400);
       addTearDown(tester.view.resetPhysicalSize);
       addTearDown(tester.view.resetDevicePixelRatio);
       final semantics = tester.ensureSemantics();
@@ -203,10 +205,56 @@ void stackJourneyTests() {
           tester.widget<PageIndicator>(find.byType(PageIndicator)).selected,
           1,
         );
+        final viewer = tester.widget<MediaImageViewerPage>(
+          find.byType(MediaImageViewerPage),
+        );
+        final preview = viewer.galleryItems![1];
+        final cardImage = tester.widget<MediaImage>(
+          find
+              .descendant(
+                skipOffstage: false,
+                of: find.byKey(
+                  const ValueKey('stack-card:1'),
+                  skipOffstage: false,
+                ),
+                matching: find.byType(MediaImage, skipOffstage: false),
+              )
+              .first,
+        );
+        expect(cardImage.decodeWidth, lessThanOrEqualTo(210));
+        expect(preview.previewDecodeWidth, cardImage.decodeWidth);
+        final resized = preview.preloadProvider! as ResizeImage;
+        expect(resized.width, (cardImage.decodeWidth! * 3).ceil());
+        // Page in the full-screen gallery, close, then reopen the same photo.
+        await tester.drag(find.byType(PageView), const Offset(-350, 0));
+        await tester.pumpAndSettle();
+        expect(
+          tester.widget<PageIndicator>(find.byType(PageIndicator)).selected,
+          2,
+        );
         await tester.tap(
           find.byKey(const ValueKey('message-media-image-viewer-close')),
         );
         await tester.pumpAndSettle();
+        expect(
+          tester.widget<Semantics>(spoken).properties.value,
+          'Photo 3 of 3',
+        );
+        await tester.tap(stack);
+        await tester.pumpAndSettle();
+        expect(
+          tester.widget<PageIndicator>(find.byType(PageIndicator)).selected,
+          2,
+        );
+        await tester.drag(find.byType(PageView), const Offset(350, 0));
+        await tester.pumpAndSettle();
+        // System back must preserve selection as well as the Close control.
+        await tester.binding.handlePopRoute();
+        await tester.pumpAndSettle();
+        expect(
+          tester.widget<Semantics>(spoken).properties.value,
+          'Photo 2 of 3',
+        );
         await tester.drag(stack, const Offset(100, 0));
         await tester.pumpAndSettle();
         expect(

@@ -55,7 +55,7 @@ void main() {
             sourceKeys: [key],
             providers: [provider],
             previewProviders: [provider],
-            urls: ['https://example.org/photo.png'],
+            urls: ['https://example.org/photo.jpg'],
             initialIndex: 0,
             onSelect: (_) async {},
             labels: ['Selected photo'],
@@ -64,8 +64,7 @@ void main() {
         debugDefaultTargetPlatformOverride = null;
         expect(result, outcome == 'unavailable');
         expect(presented?['labels'], ['Selected photo']);
-        expect(presented?['previews'], hasLength(1));
-        expect((presented?['previews'] as List).single, isNotEmpty);
+        expect(presented?.containsKey('previews'), isFalse);
         expect(presented?['width'], 200);
         expect(presented?['height'], 200);
         expect(presented?['x'], 400);
@@ -125,7 +124,7 @@ void main() {
         final args = call.arguments as Map;
         expect(args['initialIndex'], 1);
         expect(pendingPreview.frame.isCompleted, isFalse);
-        expect((args['previews'] as List).first, isNull);
+        expect(args.containsKey('previews'), isFalse);
         final codec = await ui.instantiateImageCodec(provider.bytes);
         final frame = await codec.getNextFrame();
         pendingPreview.frame.complete(ImageInfo(image: frame.image));
@@ -159,8 +158,8 @@ void main() {
           providers: [provider, provider],
           previewProviders: [pendingPreview, provider],
           urls: [
-            'https://example.org/first.png',
-            'https://example.org/second.png',
+            'https://example.org/first.jpg',
+            'https://example.org/second.jpg',
           ],
           labels: ['First', 'Second'],
           initialIndex: 1,
@@ -183,10 +182,167 @@ void main() {
       expect(fallback, isFalse);
       expect(replied, isTrue);
       expect(selected, [1]);
-      expect(actions, ['copy:https://example.org/second.png']);
+      expect(actions, ['copy:https://example.org/second.jpg']);
     },
     skip: !NativePhotoZoomPreview.enabled,
   );
+
+  testWidgets(
+    'large native gallery loads only nearby requests and abandons work on move and close',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      final key = GlobalKey();
+      late BuildContext context;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Builder(
+            builder: (value) {
+              context = value;
+              return SizedBox(key: key, width: 100, height: 100);
+            },
+          ),
+        ),
+      );
+      final pending = List.generate(50, (_) => _PendingPreview());
+      final requests = <Future<Object?>>[];
+      const codec = StandardMethodCodec();
+      Future<Object?> nativeCall(String method, int session, int index) async {
+        final reply = Completer<Object?>();
+        await messenger.handlePlatformMessage(
+          NativePhotoZoomPreview.channel.name,
+          codec.encodeMethodCall(
+            MethodCall(method, {'session': session, 'index': index}),
+          ),
+          (data) =>
+              reply.complete(data == null ? null : codec.decodeEnvelope(data)),
+        );
+        return reply.future;
+      }
+
+      messenger.setMockMethodCallHandler(NativePhotoZoomPreview.channel, (
+        call,
+      ) async {
+        if (call.method == 'isSupported') return true;
+        final session = (call.arguments as Map)['session'] as int;
+        expect(pending.where((p) => p.started), isEmpty);
+        requests.add(nativeCall('preview', session, 1));
+        requests.add(nativeCall('image', session, 2));
+        expect(await nativeCall('preview', session, 49), isNull);
+        await nativeCall('select', session, 25);
+        expect(await Future.wait(requests), everyElement(isNull));
+        expect(pending[1].abandoned, isTrue);
+        expect(pending[2].abandoned, isTrue);
+        requests.add(nativeCall('preview', session, 24));
+        requests.add(nativeCall('image', session, 26));
+        // Drain delivery, without resolving either image, then dismiss.
+        await nativeCall('preview', session, 49);
+        expect(pending.where((p) => p.started).length, 4);
+        return 'closed';
+      });
+      await tester.runAsync(() async {
+        expect(
+          await NativePhotoZoomPreview.open(
+            context: context,
+            sourceKeys: List.filled(50, key),
+            providers: pending,
+            previewProvider: provider,
+            previewProviders: pending,
+            urls: List.generate(50, (i) => 'https://example.org/$i.jpg'),
+            labels: List.generate(50, (i) => 'Photo $i'),
+            initialIndex: 0,
+            onSelect: (_) async {},
+          ),
+          isFalse,
+        );
+        expect(pending[24].abandoned, isTrue);
+        expect(pending[26].abandoned, isTrue);
+        expect(await Future.wait(requests), everyElement(isNull));
+        // Late provider completion cannot resurrect a closed native session.
+        for (final load in pending.where((p) => p.started)) {
+          final imageCodec = await ui.instantiateImageCodec(provider.bytes);
+          final frame = await imageCodec.getNextFrame();
+          load.frame.complete(ImageInfo(image: frame.image));
+          imageCodec.dispose();
+        }
+      });
+      await tester.pump();
+      expect(tester.takeException(), isNull);
+      debugDefaultTargetPlatformOverride = null;
+    },
+    skip: !NativePhotoZoomPreview.enabled,
+  );
+
+  testWidgets('animation-capable galleries retain all frames in Flutter', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    // Two one-pixel frames, red then blue, with a 100ms frame delay.
+    final animated = base64Decode(
+      'R0lGODlhAQABAIAAAP8AAAAA/yH5BAAKAAAALAAAAAABAAEAAAICRAEAIfkEAAoAAAAsAAAAAAEAAQAAAgJMAQA7',
+    );
+    final image = MemoryImage(animated);
+    late BuildContext context;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder: (value) {
+            context = value;
+            return const SizedBox();
+          },
+        ),
+      ),
+    );
+    var bridgeCalls = 0;
+    messenger.setMockMethodCallHandler(NativePhotoZoomPreview.channel, (
+      _,
+    ) async {
+      bridgeCalls++;
+      return false;
+    });
+    for (final source in [
+      ('https://example.org/photo.png', null),
+      ('https://example.org/photo.apng', null),
+      ('https://example.org/photo.webp', null),
+      ('https://example.org/photo.jpg', 'image/gif'),
+      ('https://example.org/photo', 'image/webp'),
+      ('https://example.org/photo', null),
+    ]) {
+      expect(
+        await NativePhotoZoomPreview.open(
+          context: context,
+          sourceKeys: [GlobalKey(), GlobalKey()],
+          providers: [provider, image],
+          urls: ['https://example.org/still.jpg', source.$1],
+          mimeTypes: ['image/jpeg', source.$2],
+          labels: ['Still', 'Animated'],
+          initialIndex: 0,
+          onSelect: (_) async {},
+        ),
+        isTrue,
+      );
+    }
+    expect(
+      bridgeCalls,
+      0,
+      reason: 'Potential animations must bypass the PNG bridge',
+    );
+    await tester.runAsync(() async {
+      final codec = await ui.instantiateImageCodec(animated);
+      expect(codec.frameCount, 2);
+      final first = await codec.getNextFrame();
+      final second = await codec.getNextFrame();
+      final firstPixels = await first.image.toByteData();
+      final secondPixels = await second.image.toByteData();
+      expect(
+        firstPixels!.buffer.asUint8List(),
+        isNot(secondPixels!.buffer.asUint8List()),
+      );
+      first.image.dispose();
+      second.image.dispose();
+      codec.dispose();
+    });
+    debugDefaultTargetPlatformOverride = null;
+  });
 
   testWidgets(
     'unsupported platform preserves existing gallery without decoding',
@@ -214,7 +370,7 @@ void main() {
           context: context,
           sourceKeys: [GlobalKey()],
           providers: [provider],
-          urls: ['https://example.org/photo.png'],
+          urls: ['https://example.org/photo.jpg'],
           initialIndex: 0,
           onSelect: (_) async {},
           labels: ['Photo'],
@@ -228,6 +384,8 @@ void main() {
 
 class _PendingPreview extends ImageProvider<_PendingPreview> {
   late final frame = Completer<ImageInfo>();
+  bool started = false;
+  bool abandoned = false;
   @override
   Future<_PendingPreview> obtainKey(ImageConfiguration configuration) =>
       SynchronousFuture(this);
@@ -235,5 +393,11 @@ class _PendingPreview extends ImageProvider<_PendingPreview> {
   ImageStreamCompleter loadImage(
     _PendingPreview key,
     ImageDecoderCallback decode,
-  ) => OneFrameImageStreamCompleter(frame.future);
+  ) {
+    started = true;
+    return OneFrameImageStreamCompleter(frame.future)
+      ..addOnLastListenerRemovedCallback(() {
+        abandoned = true;
+      });
+  }
 }
