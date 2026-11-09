@@ -95,6 +95,9 @@ pub const EXPECTED_SCOPED_TABLES: &[&str] = &[
     "join_policy_acceptances",
     "media_uploaders",
     "media_publications",
+    "identity_retirement_actions",
+    "identity_retirement_holds",
+    "identity_retirement_workflows",
     "moderation_actions",
     "moderation_reports",
     "parameterized_event_watermarks",
@@ -125,11 +128,7 @@ pub const EXPECTED_SCOPED_TABLES: &[&str] = &[
 /// this release. The release that ships the table moves it to
 /// [`EXPECTED_SCOPED_TABLES`] and [`PURGE_SCOPED_TABLES`]. These tables have
 /// no foreign keys, so purge order does not matter.
-pub const PENDING_SCOPED_TABLES: &[&str] = &[
-    "identity_retirement_actions",
-    "identity_retirement_holds",
-    "identity_retirement_workflows",
-];
+pub const PENDING_SCOPED_TABLES: &[&str] = &[];
 
 /// Tenant tables an expand migration may add between a deletion's approval
 /// and its execution.
@@ -173,6 +172,9 @@ pub const PURGE_SCOPED_TABLES: &[&str] = &[
     "join_policy_acceptances",
     "media_uploaders",
     "media_publications",
+    "identity_retirement_actions",
+    "identity_retirement_holds",
+    "identity_retirement_workflows",
     "moderation_reports",
     "subscriptions",
     "api_tokens",
@@ -8163,6 +8165,23 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
         db.record_media_publications(request.community_id, vec![media_hash.clone()])
             .await
             .expect("publication boundary");
+        for insert in [
+            "INSERT INTO identity_retirement_actions \
+             (community_id, id, request_id, operation, target_pubkey, actor_pubkey, request, result) \
+             VALUES ($1, gen_random_uuid(), gen_random_uuid(), 'archive', $2, $2, '{}', '{}')",
+            "INSERT INTO identity_retirement_holds (community_id, pubkey, action_id) \
+             VALUES ($1, $2, gen_random_uuid())",
+            "INSERT INTO identity_retirement_workflows \
+             (community_id, workflow_id, owner_pubkey, action_id, archived_at) \
+             VALUES ($1, gen_random_uuid(), $2, gen_random_uuid(), now())",
+        ] {
+            sqlx::query(insert)
+                .bind(request.community_id.as_uuid())
+                .bind(vec![9_u8; 32])
+                .execute(&db.pool)
+                .await
+                .expect("insert identity retirement row");
+        }
         store
             .approve(request.id, "approver", None)
             .await
@@ -8179,6 +8198,23 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
             .is_err());
         assert!(db
             .record_media_publications(request.community_id, vec!["b".repeat(64)])
+            .await
+            .is_err());
+        let retirement = crate::identity_retirement::RetirementRequest {
+            community: request.community_id,
+            request_id: Uuid::new_v4(),
+            operation: crate::identity_retirement::RetirementOperation::Release,
+            target: [9; 32],
+            actor: [8; 32],
+            payload: crate::identity_retirement::RetirementPayload {
+                reason: None,
+                replaced_by: None,
+                inventory_version: None,
+            },
+        };
+        assert!(db.apply_identity_retirement(&retirement).await.is_err());
+        assert!(db
+            .mark_identity_retirement_published(request.community_id, Uuid::new_v4())
             .await
             .is_err());
         let generation = store.fence(&claim.lease).await.expect("fence");
@@ -8238,6 +8274,13 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
         let first = store.purge_postgres(&token).await.expect("purge postgres");
         assert_eq!(first["media_uploaders"], 1);
         assert_eq!(first["media_publications"], 1);
+        for table in [
+            "identity_retirement_actions",
+            "identity_retirement_holds",
+            "identity_retirement_workflows",
+        ] {
+            assert_eq!(first[table], 1, "{table}");
+        }
         let expected_tables: BTreeSet<&str> = EXPECTED_SCOPED_TABLES
             .iter()
             .chain(RELAY_ADMIN_TABLES.iter().map(|(table, _)| table))
@@ -8700,146 +8743,6 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
         .fetch_one(&db.pool)
         .await
         .expect("count relay admin rows")
-    }
-
-    /// A deletion inventoried before a later release's expand migration and
-    /// executed after it: each pending table is accepted absent and present,
-    /// purged for the target community only, and proven empty, while a table
-    /// the release does not know still fails closed.
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn pending_scoped_tables_are_optional_purged_and_verified() {
-        let (_, scratch) = scratch_desired_state_database("deletion_pending").await;
-        let db = Db::new(&DbConfig {
-            database_url: scratch.url().to_owned(),
-            max_connections: 5,
-            min_connections: 0,
-            ..DbConfig::default()
-        })
-        .await
-        .expect("connect scratch database");
-        let store = db.deletion_store();
-        store
-            .validate_catalog()
-            .await
-            .expect("pending tables absent");
-        let (request, inventory) = inventoried_request(&db, &store).await;
-        let community = *request.community_id.as_uuid();
-        let bystander = *db
-            .ensure_configured_community(&format!("bystander-{}.example", Uuid::new_v4().simple()))
-            .await
-            .expect("bystander community")
-            .id
-            .as_uuid();
-
-        // The expand migration lands after the request was inventoried.
-        for table in PENDING_SCOPED_TABLES {
-            sqlx::query(AssertSqlSafe(format!(
-                "CREATE TABLE {table} (community_id UUID NOT NULL)"
-            )))
-            .execute(&db.pool)
-            .await
-            .expect("create pending table");
-            for owner in [community, bystander] {
-                sqlx::query(AssertSqlSafe(format!(
-                    "INSERT INTO {table} (community_id) VALUES ($1)"
-                )))
-                .bind(owner)
-                .execute(&db.pool)
-                .await
-                .expect("seed pending table");
-            }
-        }
-        store
-            .validate_catalog()
-            .await
-            .expect("pending tables present");
-        sqlx::query("CREATE TABLE deletion_unknown_scoped (community_id UUID NOT NULL)")
-            .execute(&db.pool)
-            .await
-            .expect("create unknown table");
-        let error = store
-            .validate_catalog()
-            .await
-            .expect_err("an unknown tenant table fails closed");
-        assert!(
-            error
-                .to_string()
-                .contains("unknown=deletion_unknown_scoped"),
-            "{error}"
-        );
-        sqlx::query("DROP TABLE deletion_unknown_scoped")
-            .execute(&db.pool)
-            .await
-            .expect("drop unknown table");
-
-        store
-            .approve(request.id, "approver", None)
-            .await
-            .expect("approve");
-        let claim = store
-            .claim_specific(request.id, "executor", DEFAULT_LEASE_DURATION)
-            .await
-            .expect("claim")
-            .expect("won claim");
-        store.begin_quiescing(&claim.lease).await.expect("quiesce");
-        let generation = store.fence(&claim.lease).await.expect("fence");
-        let token = LeaseToken {
-            fence_generation: Some(generation),
-            ..claim.lease
-        };
-        store
-            .freeze_destructive_storage_manifest(&token, &inventory.storage)
-            .await
-            .expect("freeze destructive storage");
-        store.mark_drained(&token).await.expect("drain");
-        store
-            .mark_bindings_removed(&token, serde_json::json!({"keys": 0}))
-            .await
-            .expect("bindings");
-        let deleted = store.purge_postgres(&token).await.expect("purge postgres");
-        for table in PENDING_SCOPED_TABLES {
-            assert_eq!(deleted.get(*table), Some(&1), "{table}");
-        }
-        store
-            .mark_cache_purged(&token, serde_json::json!({"keys": 0}))
-            .await
-            .expect("cache");
-
-        // Verification covers the pending tables too: a straggler fails it.
-        for table in PENDING_SCOPED_TABLES {
-            let insert = format!("INSERT INTO {table} (community_id) VALUES ($1)");
-            sqlx::query(AssertSqlSafe(insert))
-                .bind(community)
-                .execute(&db.pool)
-                .await
-                .expect("seed straggler");
-            let error = store
-                .verify_postgres_logically_deleted(&token)
-                .await
-                .expect_err("a straggler in a pending table fails verification");
-            assert!(error.to_string().contains(table), "{error}");
-            let delete = format!("DELETE FROM {table} WHERE community_id = $1");
-            sqlx::query(AssertSqlSafe(delete))
-                .bind(community)
-                .execute(&db.pool)
-                .await
-                .expect("remove straggler");
-        }
-        store
-            .verify_postgres_logically_deleted(&token)
-            .await
-            .expect("verify");
-        for table in PENDING_SCOPED_TABLES {
-            let kept: i64 = sqlx::query_scalar(AssertSqlSafe(format!(
-                "SELECT count(*) FROM {table} WHERE community_id = $1"
-            )))
-            .bind(bystander)
-            .fetch_one(&db.pool)
-            .await
-            .expect("count bystander rows");
-            assert_eq!(kept, 1, "{table} keeps the bystander's row");
-        }
     }
 
     /// Report-backed staff actions FK `moderation_reports`, and outbox rows FK

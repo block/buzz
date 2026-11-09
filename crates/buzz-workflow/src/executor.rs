@@ -1167,6 +1167,21 @@ pub async fn execute_from_step(
     .await
 }
 
+/// Fail with [`WorkflowError::RunCancelled`] if the run is now `cancelled`.
+/// A failed read also stops the run (fail-closed).
+async fn ensure_not_cancelled(
+    engine: &WorkflowEngine,
+    community_id: CommunityId,
+    run_id: Uuid,
+) -> Result<(), WorkflowError> {
+    let run = engine.db.get_workflow_run(community_id, run_id).await?;
+    if run.status == buzz_db::workflow::RunStatus::Cancelled {
+        info!(run_id = %run_id, "Workflow run cancelled — stopping before next step");
+        return Err(WorkflowError::RunCancelled);
+    }
+    Ok(())
+}
+
 /// Internal: execute workflow steps starting from `start_index`, without
 /// acquiring the semaphore. Called by both [`execute_run`] and
 /// [`execute_from_step`] after they have already acquired a permit.
@@ -1230,6 +1245,16 @@ async fn execute_steps(
                 return Err((e, progress));
             }
         };
+
+        // Fence each side effect on the run's durable status: a run cancelled
+        // while executing (for example by identity retirement) stops here.
+        if let Err(e) = ensure_not_cancelled(engine, community_id, run_id).await {
+            let progress = crate::error::PartialProgress {
+                step_index: i,
+                trace,
+            };
+            return Err((e, progress));
+        }
 
         let timeout_secs = step
             .timeout_secs

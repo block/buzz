@@ -10,6 +10,7 @@ mod auth;
 mod direct;
 mod error;
 mod reads;
+mod retirement;
 
 use std::sync::Arc;
 
@@ -70,6 +71,15 @@ pub fn router(state: Arc<crate::state::AppState>) -> Router {
         .route(
             "/members/{pubkey}/ownership",
             get(reads::identity_inventory),
+        )
+        .route(
+            "/members/{pubkey}/archive",
+            axum::routing::post(retirement::archive),
+        )
+        .route("/members/{pubkey}/archive", delete(retirement::unarchive))
+        .route(
+            "/members/{pubkey}/execution-hold",
+            delete(retirement::release),
         )
         .route("/events/{id}", get(reads::event_preview))
         .route("/members/restrictions", get(list_member_restrictions))

@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::{Db, Result};
 
-const LIMIT: usize = 200;
+const LIMIT: usize = crate::identity_retirement::MAX_RETIREMENT_ITEMS;
 
 /// A bounded point-in-time preview; never an authorization to mutate this set.
 #[derive(Debug, Serialize)]
@@ -28,6 +28,9 @@ pub struct IdentityInventory {
     pub identities_truncated: bool,
     /// More workflows exist for the returned identities than this preview can return.
     pub workflows_truncated: bool,
+    /// Version an archive request must confirm; `None` when truncated, because
+    /// a truncated inventory cannot be retired.
+    pub inventory_version: Option<String>,
 }
 
 #[cfg(test)]
@@ -188,6 +191,8 @@ pub struct InventoryIdentity {
     pub owner_pubkey: Option<String>,
     /// Current community-local NIP-IA state.
     pub archived: bool,
+    /// This key has its own identity-retirement execution hold.
+    pub execution_held: bool,
 }
 
 /// Workflow metadata and run counts, excluding definitions and private approval data.
@@ -212,6 +217,8 @@ pub struct InventoryWorkflow {
     pub running_runs: i64,
     /// Runs awaiting approval.
     pub waiting_approval_runs: i64,
+    /// Cancelled runs whose executor has not yet confirmed it stopped.
+    pub draining_runs: i64,
 }
 
 impl Db {
@@ -249,7 +256,9 @@ impl Db {
             "WITH keys AS (SELECT $2::bytea AS pubkey UNION \
              SELECT pubkey FROM users WHERE community_id = $1 AND agent_owner_pubkey = $2) \
              SELECT k.pubkey, u.display_name, u.agent_owner_pubkey, \
-                    (a.pubkey IS NOT NULL) AS archived \
+                    (a.pubkey IS NOT NULL) AS archived, \
+                    EXISTS (SELECT 1 FROM identity_retirement_holds h \
+                      WHERE h.community_id = $1 AND h.pubkey = k.pubkey) AS execution_held \
              FROM keys k \
              LEFT JOIN users u ON u.community_id = $1 AND u.pubkey = k.pubkey \
              LEFT JOIN archived_identities a \
@@ -273,6 +282,7 @@ impl Db {
                 display_name: row.try_get("display_name")?,
                 owner_pubkey: owner.map(hex::encode),
                 archived: row.try_get("archived")?,
+                execution_held: row.try_get("execution_held")?,
             });
             owners.push(pubkey);
         }
@@ -281,14 +291,16 @@ impl Db {
                  SELECT id, name, owner_pubkey, channel_id, status, enabled FROM workflows \
                  WHERE community_id = $1 AND owner_pubkey = ANY($2) ORDER BY id LIMIT $3) \
              SELECT w.id, w.name, w.owner_pubkey, w.channel_id, w.status::text AS status, w.enabled, \
-                    r.pending_runs, r.running_runs, r.waiting_approval_runs \
+                    r.pending_runs, r.running_runs, r.waiting_approval_runs, r.draining_runs \
              FROM owned w \
              CROSS JOIN LATERAL (SELECT \
                  count(*) FILTER (WHERE status = 'pending') AS pending_runs, \
                  count(*) FILTER (WHERE status = 'running') AS running_runs, \
-                 count(*) FILTER (WHERE status = 'waiting_approval') AS waiting_approval_runs \
+                 count(*) FILTER (WHERE status = 'waiting_approval') AS waiting_approval_runs, \
+                 count(*) FILTER (WHERE status = 'cancelled') AS draining_runs \
                  FROM workflow_runs WHERE community_id = $1 AND workflow_id = w.id \
-                   AND status IN ('pending', 'running', 'waiting_approval')) r \
+                   AND (status IN ('pending', 'running', 'waiting_approval') \
+                        OR (status = 'cancelled' AND completed_at IS NULL))) r \
              ORDER BY w.id",
         )
         .bind(community.as_uuid())
@@ -312,10 +324,19 @@ impl Db {
                     pending_runs: row.try_get("pending_runs")?,
                     running_runs: row.try_get("running_runs")?,
                     waiting_approval_runs: row.try_get("waiting_approval_runs")?,
+                    draining_runs: row.try_get("draining_runs")?,
                 })
             })
             .collect::<Result<Vec<_>>>()?;
         tx.commit().await?;
+        let inventory_version = (!identities_truncated && !workflows_truncated).then(|| {
+            crate::identity_retirement::inventory_version(
+                identities.iter().map(|i| i.pubkey.as_str()),
+                workflows
+                    .iter()
+                    .map(|w| (w.id, w.owner_pubkey.as_str(), w.status.as_str(), w.enabled)),
+            )
+        });
         Ok(IdentityInventory {
             community_id: *community.as_uuid(),
             community_host,
@@ -324,6 +345,7 @@ impl Db {
             workflows,
             identities_truncated,
             workflows_truncated,
+            inventory_version,
         })
     }
 }

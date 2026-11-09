@@ -2989,7 +2989,11 @@ pub async fn workflow_webhook(
         .db
         .create_workflow_run(community_id, id, None, trigger_ctx_json.as_ref())
         .await
-        .map_err(|e| super::internal_error(&format!("db error: {e}")))?;
+        .map_err(|e| match e {
+            // Like every other authority denial, a held owner reads as not found.
+            buzz_db::DbError::ExecutionHeld => not_found("workflow not found"),
+            e => super::internal_error(&format!("db error: {e}")),
+        })?;
 
     // Spawn workflow execution asynchronously.
     let engine = Arc::clone(&state.workflow_engine);

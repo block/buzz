@@ -302,10 +302,7 @@ impl WorkflowEngine {
                         )
                         .await
                     {
-                        tracing::error!(
-                            run_id = %run_id,
-                            "Failed to update run to Failed (approval gate): {e}"
-                        );
+                        log_finalize_error(run_id, "Failed (approval gate)", &e);
                     }
                 } else {
                     tracing::info!(run_id = %run_id, "Workflow run completed");
@@ -321,15 +318,16 @@ impl WorkflowEngine {
                         )
                         .await
                     {
-                        tracing::error!(
-                            run_id = %run_id,
-                            "Failed to update run to Completed: {e}"
-                        );
+                        log_finalize_error(run_id, "Completed", &e);
                     }
                 }
             }
             Err((e, progress)) => {
-                tracing::error!(run_id = %run_id, error = %e.log_text(), "Workflow run failed");
+                if matches!(e, WorkflowError::RunCancelled) {
+                    tracing::info!(run_id = %run_id, "Workflow run stopped after cancellation");
+                } else {
+                    tracing::error!(run_id = %run_id, error = %e.log_text(), "Workflow run failed");
+                }
                 let mut full_trace = prefix;
                 full_trace.extend(progress.trace);
                 let trace_json = serde_json::Value::Array(full_trace);
@@ -348,10 +346,7 @@ impl WorkflowEngine {
                     )
                     .await
                 {
-                    tracing::error!(
-                        run_id = %run_id,
-                        "Failed to update run to Failed: {db_err}"
-                    );
+                    log_finalize_error(run_id, "Failed", &db_err);
                 }
             }
         }
@@ -463,6 +458,10 @@ impl WorkflowEngine {
                 .await
             {
                 Ok(id) => id,
+                Err(buzz_db::DbError::ExecutionHeld) => {
+                    tracing::debug!(workflow_id = %workflow.id, "Skipping run — owner execution held");
+                    continue;
+                }
                 Err(e) => {
                     tracing::error!(workflow_id = %workflow.id, "Failed to create run: {e}");
                     continue;
@@ -727,6 +726,10 @@ impl WorkflowEngine {
                 .await
             {
                 Ok(id) => id,
+                Err(buzz_db::DbError::ExecutionHeld) => {
+                    tracing::debug!(workflow_id = %workflow.id, "Cron tick: owner execution held");
+                    continue;
+                }
                 Err(e) => {
                     tracing::error!(
                         workflow_id = %workflow.id,
@@ -805,6 +808,16 @@ fn ban_denial_warn_cache(
         .max_capacity(10_000)
         .time_to_live(warn_interval)
         .build()
+}
+
+/// Log a failed terminal run write. A cancelled run refuses it by design and
+/// the write stamped its stop evidence, so that case is informational.
+fn log_finalize_error(run_id: Uuid, target: &str, err: &buzz_db::DbError) {
+    if matches!(err, buzz_db::DbError::RunCancelled(_)) {
+        tracing::info!(run_id = %run_id, "Run was cancelled; kept cancelled instead of {target}");
+    } else {
+        tracing::error!(run_id = %run_id, "Failed to update run to {target}: {err}");
+    }
 }
 
 /// Whether an owner-authority denial for this workflow logs at WARN. A ban
@@ -2617,5 +2630,124 @@ steps:
             "the stored run error keeps the diagnostic: {:?}",
             run.error_message
         );
+    }
+
+    async fn hold(db: &buzz_db::Db, community: CommunityId, owner: &[u8]) {
+        sqlx::query(
+            "INSERT INTO identity_retirement_holds (community_id, pubkey, action_id) \
+             VALUES ($1, $2, $3)",
+        )
+        .bind(community.as_uuid())
+        .bind(owner)
+        .bind(Uuid::new_v4())
+        .execute(db.pool())
+        .await
+        .expect("insert hold");
+    }
+
+    /// An identity-retirement hold stops the event path from creating runs
+    /// without failing the event (other workflows still fire).
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn on_event_skips_workflows_of_a_held_owner() {
+        let db = setup_db().await;
+        let creator = nostr::Keys::generate().public_key().to_bytes().to_vec();
+        let member = nostr::Keys::generate().public_key().to_bytes().to_vec();
+        let (community, channel_id) = setup_channel(&db, &creator, &member).await;
+        let def_json = serde_json::json!({
+            "name": "held-event",
+            "trigger": {"on": "message_posted"},
+            "steps": [{"id": "s1", "action": "send_message", "text": "hi"}],
+        })
+        .to_string();
+        let workflow_id = db
+            .create_workflow(
+                community,
+                Some(channel_id),
+                &member,
+                "held-event",
+                &def_json,
+                &[0u8; 32],
+            )
+            .await
+            .expect("create workflow");
+        hold(&db, community, &member).await;
+
+        let engine = Arc::new(WorkflowEngine::new(db.clone(), WorkflowConfig::default()));
+        engine
+            .on_event(community, &message_event(channel_id))
+            .await
+            .expect("on_event for a held owner");
+        let runs = db
+            .list_workflow_runs(community, workflow_id, 10)
+            .await
+            .expect("list runs");
+        assert!(runs.is_empty(), "a held owner's workflow must not fire");
+    }
+
+    /// A run cancelled while a step executes stops before its next step and
+    /// stays cancelled with its stop evidence recorded.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn executor_stops_a_run_cancelled_between_steps() {
+        let db = setup_db().await;
+        let creator = nostr::Keys::generate().public_key().to_bytes().to_vec();
+        let member = nostr::Keys::generate().public_key().to_bytes().to_vec();
+        let (community, channel_id) = setup_channel(&db, &creator, &member).await;
+        let (def, def_json) = schema::parse_yaml(
+            "name: cancel\ntrigger:\n  on: webhook\nsteps:\n  - id: wait\n    action: delay\n    duration: 1s\n  - id: after\n    action: send_message\n    text: 'must not send'\n",
+        )
+        .expect("parse");
+        let workflow_id = db
+            .create_workflow(
+                community,
+                Some(channel_id),
+                &creator,
+                "cancel",
+                &def_json,
+                &[0u8; 32],
+            )
+            .await
+            .expect("create workflow");
+        let run_id = db
+            .create_workflow_run(community, workflow_id, None, None)
+            .await
+            .expect("create run");
+        let engine = Arc::new(WorkflowEngine::new(db.clone(), WorkflowConfig::default()));
+
+        let task = {
+            let engine = engine.clone();
+            tokio::spawn(async move {
+                executor::execute_run(
+                    &engine,
+                    community,
+                    run_id,
+                    &def,
+                    &executor::TriggerContext::default(),
+                )
+                .await
+            })
+        };
+        // Cancel while the delay step runs, as retirement does.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        sqlx::query("UPDATE workflow_runs SET status = 'cancelled' WHERE id = $1")
+            .bind(run_id)
+            .execute(db.pool())
+            .await
+            .expect("cancel run");
+
+        let (err, progress) = task.await.expect("join").expect_err("run must stop");
+        assert!(matches!(err, WorkflowError::RunCancelled), "{err:?}");
+        assert_eq!(progress.step_index, 1, "stops before the second step");
+
+        engine
+            .finalize_run(community, run_id, Err((err, progress)), None)
+            .await;
+        let run = db
+            .get_workflow_run(community, run_id)
+            .await
+            .expect("get run");
+        assert_eq!(run.status, buzz_db::workflow::RunStatus::Cancelled);
+        assert!(run.completed_at.is_some(), "stop evidence recorded");
     }
 }

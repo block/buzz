@@ -795,6 +795,9 @@ async fn handle_workflow_def(
             DbError::AccessDenied(_) => IngestError::Rejected(
                 "forbidden: workflow belongs to a different owner or channel".into(),
             ),
+            DbError::ExecutionHeld => IngestError::Rejected(
+                "forbidden: workflow owner is under an identity retirement hold".into(),
+            ),
             other => IngestError::Internal(format!("error: db upsert_workflow: {other}")),
         })?;
 
@@ -935,7 +938,12 @@ async fn handle_workflow_trigger(
             trigger_ctx_json.as_ref(),
         )
         .await
-        .map_err(|e| IngestError::Internal(format!("error: db create_workflow_run: {e}")))?;
+        .map_err(|e| match e {
+            buzz_db::DbError::ExecutionHeld => IngestError::Rejected(
+                "forbidden: workflow owner is under an identity retirement hold".into(),
+            ),
+            e => IngestError::Internal(format!("error: db create_workflow_run: {e}")),
+        })?;
 
     // Finalize the idempotency record after the separate run creation succeeds.
     tx.commit()

@@ -120,6 +120,16 @@ pub enum DbError {
     /// Operator before demoting or deleting the current one.
     #[error("operation would remove the last relay operator")]
     LastOperator,
+
+    /// The workflow owner, or the owner's recorded owner, is under an
+    /// identity-retirement execution hold, so no new workflow work is admitted.
+    #[error("workflow owner is under an identity retirement hold")]
+    ExecutionHeld,
+
+    /// The run was cancelled; it is never moved out of `cancelled`. The write
+    /// that observed this stamped the run's `completed_at` as stop evidence.
+    #[error("workflow run {0} was cancelled")]
+    RunCancelled(uuid::Uuid),
 }
 
 impl DbError {
@@ -189,6 +199,8 @@ impl DbError {
             E::NotFound(_) | E::ChannelNotFound(_) | E::MemberNotFound(_) => "not_found",
             E::AccessDenied(_) => "access_denied",
             E::NipFiBindingRequired => "nip_fi_binding_required",
+            E::ExecutionHeld => "execution_held",
+            E::RunCancelled(_) => "run_cancelled",
             _ => "other",
         };
         kind.to_owned()
