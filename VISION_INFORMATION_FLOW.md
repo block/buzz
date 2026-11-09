@@ -45,27 +45,36 @@ Three of these paths use the agent's own key. The broker design takes the key aw
 
 ## Design
 
-### Restricted and unrestricted agents
+### Disclosure levels
 
-The agent rules below cost utility. A restricted agent cannot post a note, write in an open channel that its owner did not make it a member of, set up a channel for a team, or change its profile freely. Many agents do all of these. So the rules are a level that the owner sets for each agent:
+The agent rules below cost utility. A restricted agent cannot post a note, write in an open channel that its owner did not make it a member of, set up a channel for a team, or change its profile freely. Many agents do all of these. So the rules are a disclosure level that the owner sets for each agent:
 
 - **Restricted:** the relay applies every agent rule in this design.
 - **Unrestricted:** the relay applies none of them, and the agent works as it does now.
 
-The level is the owner's choice. The relay stores it next to `agent_owner_pubkey`. Only the owner can change it, with a signed command; the agent cannot.
+The disclosure level is the owner's choice. The relay stores it next to `agent_owner_pubkey`. Only the owner can change it, with a signed command; the agent cannot.
 
-An unrestricted agent still has the leak paths. The level only moves the decision to the people who share with the agent, so the level is public. Clients show it on the agent's profile and in the add flow: "This agent is unrestricted. It can post what it reads here anywhere it can write."
+An unrestricted agent still has the leak paths. The disclosure level only moves the decision to the people who share with the agent, so the disclosure level is public. Clients show it on the agent's profile and in the add flow: "This agent is unrestricted. It can post what it reads here anywhere it can write."
 
-A change of level applies to new actions:
+A change of disclosure level applies to new actions:
 
 - **Unrestricted to restricted:** the relay refuses new actions that break the rules. The agent keeps its current channels and roles, including channels that other people added it to. The owner can review them and demote or remove the agent.
 - **Restricted to unrestricted:** R can grow at once, for example when someone adds the agent to their channel.
 
-One rule applies to every channel, whatever the level: no private-to-open changes (see [Membership is a decision about the channel](#membership-is-a-decision-about-the-channel)). It protects people as well as agents.
+One rule applies to every channel, whatever the disclosure level: no private-to-open changes (see [Membership is a decision about the channel](#membership-is-a-decision-about-the-channel)). It protects people as well as agents.
 
-**Open question:** which level a new agent gets. Rollout starts with unrestricted, so that nothing changes until owners choose.
+**Open question:** which disclosure level a new agent gets. Rollout starts with unrestricted, so that nothing changes until owners choose.
 
-**Possible alternative to a stored level:** the relay skips the agent rules while the agent is a member of any open channel. In that state R is already the whole community, so the rules have nothing left to protect. This is one existence check on the agent's memberships, not a calculation of R. It removes the stored level and the owner's signed command, and the public label follows from memberships. The cost: the owner no longer chooses the level; the agent drifts into it. While the rules are off, the agent can create channels and add anyone, and those people stay in R after the owner demotes the agent in the open channel.
+**Possible alternative to a stored disclosure level:** the relay skips the agent rules while the agent is a member of any open channel. In that state R is already the whole community, so the rules have nothing left to protect. This is one existence check on the agent's memberships, not a calculation of R. It removes the stored disclosure level and the owner's signed command, and the public label follows from memberships. The cost: the owner no longer chooses the disclosure level; the agent drifts into it. While the rules are off, the agent can create channels and add anyone, and those people stay in R after the owner demotes the agent in the open channel.
+
+**Possible further disclosure levels.** A restricted agent is safe because the owner controls both W and R. Two more disclosure levels could be safe for other reasons. Neither is part of this design yet.
+
+| Disclosure level | Reads (W) | Writes to (R) | Why it is safe |
+|---|---|---|---|
+| Public | Only open channels, and the DMs that people open with it | Anyone | It reads nothing private. Anyone can open a DM with it, so one person's DM can reach another person. Clients tell people to treat what they tell it as public. |
+| Personal | Everything the owner can read | Only the owner, in its DM with the owner | The owner can already read everything it reads. To reach anyone else, it drafts and the owner sends, or the owner approves each send. |
+
+A personal agent reads with the owner's authority, so the app gives the owner's read tools only to agents at that disclosure level. Buzz cannot see what either level sends outside Buzz, through other tools or through model inference on another member's node (see [What this doesn't stop](#what-this-doesnt-stop)).
 
 ### Only the owner puts an agent in a channel
 
@@ -87,7 +96,7 @@ An agent sometimes needs a channel of its own, for example a system channel that
 - In a channel that it created, the agent can add only its owner, and can change only its owner's role. Anyone else gets in only through people: its owner, or someone that the channel's admission rules allow.
 - The agent can still lower roles and remove members, because that only makes R smaller.
 
-This is the largest cost of the restricted level. A restricted agent cannot set up a working channel for a team and invite the team. Its owner has to add the people, or make the agent unrestricted. A configuration channel is not affected: its roster is the agent and its owner.
+This is the largest cost of the restricted disclosure level. A restricted agent cannot set up a working channel for a team and invite the team. Its owner has to add the people, or make the agent unrestricted. A configuration channel is not affected: its roster is the agent and its owner.
 
 ### Agents are guests unless the owner says otherwise
 
@@ -143,7 +152,7 @@ The owner is whichever key signed the agent's NIP-OA attestation. It need not be
 ### Client work
 
 1. **The owner chooses member or guest for the agent in each channel.** Guest is the default.
-2. **Show the level and let the owner change it.** Show it on the agent's profile and in the add flow, for everyone.
+2. **Show the disclosure level and let the owner change it.** Show it on the agent's profile and in the add flow, for everyone.
 3. **Ask the owner to approve profile changes** of a restricted agent.
 4. **Offer the add only to the agent's owner.** Clients that let any member add an agent directly should not.
 
@@ -168,18 +177,18 @@ The owner is whichever key signed the agent's NIP-OA attestation. It need not be
 - **Owner decisions.** This is only as good as the owner's decisions about which channels the agent is in, and in which role.
 - **A wrong exception.** The exception list is the only way an agent can publish outside a channel, so every kind on it, except the profile, has to really limit its readers to the agent and its owner.
 - **The agent's profile is a leak path** for an unrestricted agent. Its fields are public and the agent can change them at any time.
-- **Owners choose unrestricted for convenience.** The level then protects nobody. The public label lets other people decide what to share with the agent, but only if they read it.
+- **Owners choose unrestricted for convenience.** The disclosure level then protects nobody. The public label lets other people decide what to share with the agent, but only if they read it.
 - **Refusing private-to-open breaks a workflow.** Some admins start a channel private and open it later. They have to create a new open channel instead.
 
 ## Rollout
 
 1. ✅ Announce channels: guests are read-only everywhere ([#8143](https://github.com/block/buzz/pull/8143)).
-2. Add the level, with every agent unrestricted. Nothing changes until an owner chooses restricted.
+2. Add the disclosure level, with every agent unrestricted. Nothing changes until an owner chooses restricted.
 3. For restricted agents: only the owner can add the agent to a channel or open a DM that includes it. The agent can join open channels by itself, as a guest only. The agent is a guest by default. Only the owner raises its role. Anyone with role authority can lower it. The agent creates only private channels, and adds only its owner to them.
 4. Refuse private-to-open visibility changes for every channel.
 5. For restricted agents: refuse events without an `h` tag, after checking what agents publish now, and require profile approval.
-6. Decide the default level for new agents.
+6. Decide the default disclosure level for new agents.
 
 Each step only refuses actions, so backing one out means turning the rule off. Existing agents keep their memberships and roles; the rules apply to new actions.
 
-The wire formats for the level and the profile approval tag are specified when they are built, in the NIPs that own agent identity.
+The wire formats for the disclosure level and the profile approval tag are specified when they are built, in the NIPs that own agent identity.
