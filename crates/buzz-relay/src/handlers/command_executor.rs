@@ -697,7 +697,7 @@ async fn handle_workflow_def(
             .map_err(|e| IngestError::Internal(format!("error: role check: {e}")))?;
         if !matches!(role.as_deref(), Some("owner") | Some("admin")) {
             return Err(IngestError::Rejected(
-                "forbidden: workflows with call_webhook actions require the owner or admin role"
+                "forbidden: workflows with call_webhook actions require the channel owner or admin role"
                     .into(),
             ));
         }
