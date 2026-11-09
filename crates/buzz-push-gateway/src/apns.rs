@@ -162,6 +162,43 @@ struct ApnsErrorBody {
     timestamp: Option<i64>,
 }
 
+// Emit only known provider reason names, never arbitrary response content.
+fn log_reason(reason: Option<&str>) -> &'static str {
+    match reason {
+        Some("BadCollapseId") => "BadCollapseId",
+        Some("BadDeviceToken") => "BadDeviceToken",
+        Some("BadExpirationDate") => "BadExpirationDate",
+        Some("BadMessageId") => "BadMessageId",
+        Some("BadPriority") => "BadPriority",
+        Some("BadTopic") => "BadTopic",
+        Some("DeviceTokenNotForTopic") => "DeviceTokenNotForTopic",
+        Some("DuplicateHeaders") => "DuplicateHeaders",
+        Some("IdleTimeout") => "IdleTimeout",
+        Some("InvalidPushType") => "InvalidPushType",
+        Some("MissingDeviceToken") => "MissingDeviceToken",
+        Some("MissingTopic") => "MissingTopic",
+        Some("PayloadEmpty") => "PayloadEmpty",
+        Some("TopicDisallowed") => "TopicDisallowed",
+        Some("BadCertificate") => "BadCertificate",
+        Some("BadCertificateEnvironment") => "BadCertificateEnvironment",
+        Some("ExpiredProviderToken") => "ExpiredProviderToken",
+        Some("Forbidden") => "Forbidden",
+        Some("InvalidProviderToken") => "InvalidProviderToken",
+        Some("MissingProviderToken") => "MissingProviderToken",
+        Some("BadPath") => "BadPath",
+        Some("MethodNotAllowed") => "MethodNotAllowed",
+        Some("Unregistered") => "Unregistered",
+        Some("PayloadTooLarge") => "PayloadTooLarge",
+        Some("TooManyProviderTokenUpdates") => "TooManyProviderTokenUpdates",
+        Some("TooManyRequests") => "TooManyRequests",
+        Some("InternalServerError") => "InternalServerError",
+        Some("ServiceUnavailable") => "ServiceUnavailable",
+        Some("Shutdown") => "Shutdown",
+        Some(_) => "unknown",
+        None => "missing",
+    }
+}
+
 #[async_trait]
 impl PushTransport for ApnsTransport {
     async fn send(&self, attempt: DeliveryAttempt, endpoint: &str) -> DeliveryOutcome {
@@ -186,6 +223,11 @@ impl PushTransport for ApnsTransport {
             .and_then(|value| value.parse::<i64>().ok())
             .map(|seconds| seconds.clamp(1, 3600));
         let detail = response.json::<ApnsErrorBody>().await.ok();
+        tracing::warn!(
+            apns_status = code,
+            apns_reason = log_reason(detail.as_ref().and_then(|d| d.reason.as_deref())),
+            "APNs rejected push delivery"
+        );
         let timestamp = detail.as_ref().and_then(|d| d.timestamp);
         match classify(
             code,
@@ -211,6 +253,164 @@ mod tests {
         Router,
     };
     use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Default)]
+    struct LogCapture(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogCapture {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn apns_rejections_log_status_and_only_allowlisted_reasons() {
+        let capture = LogCapture::default();
+        let writer = capture.clone();
+        // One subscriber owns this binary's APNs callsite for the entire table.
+        tracing::subscriber::set_global_default(
+            tracing_subscriber::fmt()
+                .json()
+                .with_max_level(tracing::Level::WARN)
+                .with_writer(move || writer.clone())
+                .finish(),
+        )
+        .unwrap();
+
+        for (status, body, reason, expected) in [
+            (200, "", None, DeliveryOutcome::Accepted),
+            (
+                400,
+                r#"{"reason":"BadDeviceToken"}"#,
+                Some("BadDeviceToken"),
+                DeliveryOutcome::ConfigurationFault,
+            ),
+            (
+                400,
+                r#"{"reason":"DeviceTokenNotForTopic"}"#,
+                Some("DeviceTokenNotForTopic"),
+                DeliveryOutcome::ConfigurationFault,
+            ),
+            (
+                403,
+                r#"{"reason":"BadCertificate"}"#,
+                Some("BadCertificate"),
+                DeliveryOutcome::ConfigurationFault,
+            ),
+            (
+                403,
+                r#"{"reason":"BadCertificateEnvironment"}"#,
+                Some("BadCertificateEnvironment"),
+                DeliveryOutcome::ConfigurationFault,
+            ),
+            (
+                403,
+                r#"{"reason":"ExpiredProviderToken"}"#,
+                Some("ExpiredProviderToken"),
+                DeliveryOutcome::ConfigurationFault,
+            ),
+            (
+                403,
+                r#"{"reason":"private-provider-detail","token":"private-device-token"}"#,
+                Some("unknown"),
+                DeliveryOutcome::ConfigurationFault,
+            ),
+            (
+                400,
+                r#"{"reason":null,"token":"private-device-token"}"#,
+                Some("missing"),
+                DeliveryOutcome::PermanentRequestFault,
+            ),
+            (
+                400,
+                r#"{"token":"private-device-token"}"#,
+                Some("missing"),
+                DeliveryOutcome::PermanentRequestFault,
+            ),
+            (
+                400,
+                "private-malformed-provider-body",
+                Some("missing"),
+                DeliveryOutcome::PermanentRequestFault,
+            ),
+            (
+                429,
+                r#"{"reason":"TooManyRequests"}"#,
+                Some("TooManyRequests"),
+                DeliveryOutcome::Retry {
+                    retry_after_seconds: Some(12),
+                },
+            ),
+            (
+                410,
+                r#"{"reason":"Unregistered","timestamp":42}"#,
+                Some("Unregistered"),
+                DeliveryOutcome::InvalidEndpoint {
+                    unregistered_at: Some(42),
+                },
+            ),
+        ] {
+            let app = Router::new()
+                .route(
+                    "/3/device/{endpoint}",
+                    post(
+                        |State((status, body)): State<(StatusCode, &'static str)>| async move {
+                            (status, [("retry-after", "12")], body)
+                        },
+                    ),
+                )
+                .with_state((StatusCode::from_u16(status).unwrap(), body));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base_url = format!("http://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let transport = ApnsTransport::certificate_with_base_url(
+                TEST_IDENTITY_PEM,
+                "private-app-topic".to_owned(),
+                base_url,
+            )
+            .unwrap();
+            let outcome = transport
+                .send(
+                    DeliveryAttempt {
+                        request_id: uuid::Uuid::nil(),
+                        expires_at: 1,
+                    },
+                    "private-device-token",
+                )
+                .await;
+            server.abort();
+            assert_eq!(outcome, expected);
+
+            let bytes = std::mem::take(&mut *capture.0.lock().unwrap());
+            let logs: Vec<serde_json::Value> = String::from_utf8(bytes)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .filter(|line: &serde_json::Value| {
+                    line["fields"]["message"] == "APNs rejected push delivery"
+                })
+                .collect();
+            if let Some(reason) = reason {
+                assert_eq!(logs.len(), 1, "status={status}, body={body}");
+                assert_eq!(logs[0]["level"], "WARN");
+                assert_eq!(
+                    logs[0]["fields"],
+                    serde_json::json!({
+                        "message": "APNs rejected push delivery",
+                        "apns_status": status,
+                        "apns_reason": reason,
+                    })
+                );
+            } else {
+                assert!(logs.is_empty(), "accepted sends should not log a rejection");
+            }
+        }
+    }
 
     // Self-signed test-only identity material. None of these are Apple credentials.
     const TEST_IDENTITY_PEM: &[u8] = include_bytes!("../tests/fixtures/apns-test-identity.pem");

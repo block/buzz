@@ -25,10 +25,19 @@ fn log_env_filter(rust_log: Option<&str>) -> EnvFilter {
     EnvFilter::new(rust_log.unwrap_or("error,buzz_push_gateway=warn"))
 }
 
+// Caller spans may carry identifiers; keep only each event's explicit fields.
+fn log_format() -> tracing_subscriber::fmt::format::Format<tracing_subscriber::fmt::format::Json> {
+    tracing_subscriber::fmt::format()
+        .json()
+        .with_current_span(false)
+        .with_span_list(false)
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .json()
+        .event_format(log_format())
         .with_env_filter(log_env_filter(std::env::var("RUST_LOG").ok().as_deref()))
         .init();
     if std::env::args().nth(1).as_deref() == Some("--migrate-only") {
@@ -158,7 +167,7 @@ async fn shutdown_signal() -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::log_env_filter;
+    use super::{log_env_filter, log_format};
     use std::sync::{Arc, Mutex};
 
     #[derive(Clone, Default)]
@@ -177,12 +186,19 @@ mod tests {
         let capture = Capture::default();
         let writer = capture.clone();
         let subscriber = tracing_subscriber::fmt()
+            .json()
+            .event_format(log_format())
             .with_env_filter(log_env_filter(rust_log))
             .with_writer(move || writer.clone())
             .finish();
         tracing::subscriber::with_default(subscriber, || {
             tracing::info!(target: "buzz_push_gateway", "gateway-info");
-            tracing::warn!(target: "buzz_push_gateway", "gateway-warn");
+            tracing::warn_span!(
+                "delivery",
+                email = "caller-pii@example.invalid",
+                device_token = "private-span-token"
+            )
+            .in_scope(|| tracing::warn!(target: "buzz_push_gateway", "gateway-warn"));
             tracing::warn!(target: "sqlx", "dependency-warn");
             tracing::error!(target: "sqlx", "dependency-error");
         });
@@ -196,6 +212,13 @@ mod tests {
     fn default_log_filter_keeps_gateway_warnings_and_dependency_errors() {
         let logs = emitted(None);
         assert!(logs.contains("gateway-warn"), "{logs}");
+        assert!(!logs.contains("caller-pii@example.invalid"), "{logs}");
+        assert!(!logs.contains("private-span-token"), "{logs}");
+        for line in logs.lines() {
+            let log: serde_json::Value = serde_json::from_str(line).unwrap();
+            assert!(log.get("span").is_none(), "{log}");
+            assert!(log.get("spans").is_none(), "{log}");
+        }
         assert!(logs.contains("dependency-error"), "{logs}");
         assert!(!logs.contains("gateway-info"), "{logs}");
         assert!(!logs.contains("dependency-warn"), "{logs}");
