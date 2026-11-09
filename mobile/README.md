@@ -313,6 +313,15 @@ When writing tests, favor a few journey tests that drive real user flows over
 many small logic tests. See
 [Testing Conventions](../AGENTS.md#testing-conventions).
 
+Any test that reaches a community join or leave seam (`authProvider`
+persistence, `communityListProvider.removeCommunity`, invite joins, the hosted
+flow) records a known-communities intent in secure storage. Override
+`knownCommunitiesOutboxProvider` with
+`KnownCommunitiesOutbox(storage: FakeSecureStorage())` in the test's
+`ProviderScope`, as `test/shared/push/push_root_isolation_test.dart` does;
+the real `FlutterSecureStorage` never answers under the test binding, so the
+join or leave hangs until the test times out.
+
 ## Android release signing
 
 Android release builds fail unless all upload-key inputs are supplied through the

@@ -532,6 +532,30 @@ void main() {
       expect((await f.state()).known, containsAll([one, two]));
     });
 
+    test('a relay that cannot be reached is retried with backoff and joined '
+        'once it answers, within the same sign-in', () async {
+      final f = _Fixture();
+      addTearDown(f.dispose);
+      f.account.rows.add(one);
+      f.account.subject.value = 'me';
+      // The probe socket never reached `connected`: transport, not refusal.
+      f.admissionFailures[one] = [AccountFailure.unavailable];
+      f.sync.start();
+      await f.settle();
+      expect(f.admissions, [one]);
+      expect(f.memberships, isEmpty);
+      expect(f.timers.map((t) => t.$1), [const Duration(seconds: 1)]);
+      expect(f.sync.parked, isEmpty);
+      await f.fireRetry();
+      expect(f.admissions, [one, one]);
+      expect(f.memberships, [one]);
+      expect(f.timers, isEmpty);
+      expect(f.sync.hasDeferredJoins, isFalse);
+      // One sign-in throughout: the list was read once.
+      expect(f.account.sent('list'), hasLength(1));
+      expect(f.account.sent('add'), isEmpty);
+    });
+
     test('a destination this identity alone cannot join does not hold up the '
         'ones after it and parks once it keeps being refused; one joined '
         'meanwhile is done without admission', () async {

@@ -127,7 +127,8 @@ Future<void> openFirstSavedCommunity(Ref ref) async {
 /// that ended or changed, waits for the next trigger
 /// ([KnownCommunitiesNotReady]); a community saved here under another key,
 /// or a relay that refuses this identity, fails this destination alone
-/// ([KnownCommunityAdmissionDenied]); other relay failures propagate.
+/// ([KnownCommunityAdmissionDenied]); a relay that cannot be reached, and any
+/// other relay failure, propagates for the sync's backoff retry.
 Future<void> admitKnownCommunity(
   Ref ref, {
   required String url,
