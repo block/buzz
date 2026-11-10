@@ -321,10 +321,10 @@ impl ActionSink for RelayActionSink {
             //    - one `buzz:workflow-mention` tag only when the same target was
             //      named in the workflow owner's stored step template. This is the
             //      authority-bearing provenance used by ACP; trigger-controlled
-            //      template substitutions cannot create it. Under owner-only agent mentions the
-            //      executor passes no authored template when the run's cause or
-            //      definition may not direct agents, so no such tag is added;
-            //      the plain `p` tags are still published.
+            //      template substitutions cannot create it. Under owner-only agent mentions, the
+            //      executor passes `may_direct_agents = false` when the run's
+            //      cause or definition may not direct agents, so no such tag is
+            //      added; the plain `p` tags are still published.
             let mut tags = vec![
                 Tag::parse(["p", &author_pubkey_hex, "", "owner"])
                     .map_err(|e| ActionSinkError::EventBuild(format!("p tag: {e}")))?,
