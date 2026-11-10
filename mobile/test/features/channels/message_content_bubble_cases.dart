@@ -436,5 +436,9 @@ void editedMarkerTests() {
     await show('Sneaky $editedSlot');
     expect(shows('Sneaky $editedSlot'), isTrue);
     expect(find.text('(edited)'), findsOneWidget);
+    // Also when the authored slot is in an earlier part of the message.
+    await show('Sneaky $editedSlot\n![](https://example.com/a.png)\nafter');
+    expect(shows('Sneaky $editedSlot'), isTrue);
+    expect(find.text('(edited)'), findsOneWidget);
   });
 }

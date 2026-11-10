@@ -483,7 +483,7 @@ class MessageContent extends HookConsumerWidget {
             ? segments.isNotEmpty && !segments.last.attachment
             : finalContent.trim().isNotEmpty);
     Widget renderBody(String text, {required bool last}) => editedInBody && last
-        ? markedEditedBody(text, renderMarkdown, editedStyle)
+        ? markedEditedBody(text, renderMarkdown, editedStyle, slot: markerSlot)
         : renderMarkdown(text);
     final markdown = bubble
         ? Column(

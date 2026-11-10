@@ -81,13 +81,16 @@ TextStyle editedMarkerStyle(BuildContext context, {required bool own}) =>
     );
 
 /// [markdown] drawn by [render] with the edited marker after its last line:
-/// joined to prose, else on its own line inside the same text bubble.
+/// joined to prose, else on its own line inside the same text bubble. [slot]
+/// says whether the message's renderer draws [editedSlot] as the marker; it
+/// does not when any part of the message has an authored slot.
 Widget markedEditedBody(
   String markdown,
   Widget Function(String) render,
-  TextStyle style,
-) {
-  final slotted = withEditedSlot(markdown);
+  TextStyle style, {
+  required bool slot,
+}) {
+  final slotted = slot ? withEditedSlot(markdown) : null;
   if (slotted != null) return render(slotted);
   return Column(
     crossAxisAlignment: CrossAxisAlignment.start,
