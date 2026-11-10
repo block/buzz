@@ -78,13 +78,14 @@ fn visit(
                     )
             }) {
                 let token = token.trim_end_matches([',', ';']);
-                if token.contains("#buzz-anim=") {
-                    let (poster, animation) = crate::media::animated_avatar_urls(token)
-                        .ok_or_else(|| "invalid animated-avatar descriptor".to_string())?;
+                if let Some((poster, animation)) = crate::media::animated_avatar_urls(token) {
                     for (suffix, url) in [("poster", poster), ("animation", animation)] {
                         add_url(&url, bases, &format!("{path}/{suffix}"), out);
                     }
                 } else {
+                    // Match avatar consumers: an invalid animation fragment
+                    // leaves only its poster URL. Prose mentioning the fragment
+                    // syntax does not turn an otherwise readable source into an error.
                     add_url(token, bases, path, out);
                 }
             }
@@ -179,10 +180,20 @@ mod tests {
         let refs = references(&value, &["https://example.org/media".into()]).unwrap();
         let hashes: BTreeSet<_> = refs.into_iter().map(|(h, _)| h).collect();
         assert_eq!(hashes, BTreeSet::from([a, b, c]));
-        assert!(references(
-            &serde_json::json!("https://example.org/media/a#buzz-anim=%QQ"),
-            &[]
-        )
-        .is_err());
+        let malformed = serde_json::json!(format!(
+            "Syntax: #buzz-anim=<url>. Poster: https://example.org/media/{}.jpg#buzz-anim=%QQ",
+            "e".repeat(64)
+        ));
+        let refs = references(&malformed, &["https://example.org/media".into()]).unwrap();
+        assert_eq!(
+            refs.into_iter()
+                .map(|(hash, _)| hash)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["e".repeat(64)])
+        );
+        assert_eq!(
+            write_hashes(&malformed).unwrap(),
+            BTreeSet::from(["e".repeat(64)])
+        );
     }
 }

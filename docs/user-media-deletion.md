@@ -39,7 +39,8 @@ command with `--run-id <uuid>` after an interruption. Use a **new** run UUID to
 observe changed source data. A retry intentionally reprints the saved observation.
 Additional canonical storage aliases can be supplied with repeated
 `--media-base https://files.example.org/media` arguments. The run binds the
-subject, agent-selection flag, source-connection fingerprint, storage namespace,
+subject, agent-selection flag, source-connection fingerprint (excluding rotating
+credentials), storage namespace,
 aliases and parser version. Changing any of these requires a new run.
 
 Exit 0 means no file decisions remain unknown, including a valid empty inventory.

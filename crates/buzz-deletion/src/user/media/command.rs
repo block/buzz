@@ -48,7 +48,7 @@ pub async fn run(options: Options) -> Result<i32> {
     let bucket = crate::required_env("BUZZ_S3_BUCKET")?;
     let namespace =
         buzz_db::entity_deletion::inventory_digest(&json!({"endpoint":endpoint,"bucket":bucket}))?;
-    let source_identity = buzz_db::entity_deletion::inventory_digest(&json!(source_url))?;
+    let source_identity = source_identity(&source_url)?;
     let run_id = options.run_id.unwrap_or_else(Uuid::new_v4);
     eprintln!("media inventory run {run_id}; retry with --run-id {run_id}");
     let journal = Db::connect_cold_start(
@@ -60,7 +60,7 @@ pub async fn run(options: Options) -> Result<i32> {
     )
     .await?;
     let store = journal.media_deletion_store();
-    let binding = json!({"version":2,"mode":"print-only","human":options.pubkey,"include_owned_agents":options.include_owned_agents,"source":source_identity,"namespace":namespace,"media_bases":options.media_base,"scan_budget":budget});
+    let binding = json!({"version":3,"mode":"print-only","human":options.pubkey,"include_owned_agents":options.include_owned_agents,"source":source_identity,"namespace":namespace,"media_bases":options.media_base,"scan_budget":budget});
     let run = store.open_preview(run_id, binding).await?;
     let (s3_access_key, s3_secret_key) = crate::s3_key_pair_from_env();
     let media = MediaStorage::new(&buzz_media::MediaConfig {
@@ -133,4 +133,51 @@ pub async fn run(options: Options) -> Result<i32> {
     let output: Value = json!({"discovery":discovery,"run_id":run_id,"mode":"print-only","discovery_complete":true,"candidate_count":files.len(),"decision_complete":unknown==0,"execution_authorized":false,"unknown_count":unknown,"files":files});
     crate::print_json(&output)?;
     Ok(if unknown == 0 { 0 } else { 2 })
+}
+
+// Credentials rotate independently of the database whose observation is saved.
+fn source_identity(connection: &str) -> Result<String> {
+    let mut url = url::Url::parse(connection).context("invalid media source connection URL")?;
+    url.set_password(None)
+        .map_err(|_| anyhow::anyhow!("invalid database URL authority"))?;
+    let query: Vec<_> = url
+        .query_pairs()
+        .filter(|(key, _)| !matches!(key.as_ref(), "password" | "passfile"))
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    url.set_query(None);
+    if !query.is_empty() {
+        url.query_pairs_mut().extend_pairs(query);
+    }
+    Ok(buzz_db::entity_deletion::inventory_digest(&json!(
+        url.as_str()
+    ))?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn saved_source_survives_credential_rotation_but_not_database_changes() {
+        let mut connection =
+            url::Url::parse("postgres://reader@example.org/buzz?sslmode=require").unwrap();
+        // Generate throwaway credentials; no connection or authentication occurs.
+        connection
+            .set_password(Some(&Uuid::new_v4().to_string()))
+            .unwrap();
+        let first = source_identity(connection.as_str()).unwrap();
+        connection
+            .set_password(Some(&Uuid::new_v4().to_string()))
+            .unwrap();
+        assert_eq!(first, source_identity(connection.as_str()).unwrap());
+        connection
+            .query_pairs_mut()
+            .append_pair("password", &Uuid::new_v4().to_string());
+        assert_eq!(first, source_identity(connection.as_str()).unwrap());
+        connection.set_path("/other");
+        assert_ne!(first, source_identity(connection.as_str()).unwrap());
+        connection.set_path("/buzz");
+        connection.set_host(Some("other.example.org")).unwrap();
+        assert_ne!(first, source_identity(connection.as_str()).unwrap());
+    }
 }
