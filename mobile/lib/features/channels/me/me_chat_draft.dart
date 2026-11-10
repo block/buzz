@@ -27,10 +27,13 @@ class _MeChatDraft extends HookConsumerWidget {
     final agent = choices
         .where((agent) => agent.pubkey == selected)
         .firstOrNull;
-    final name =
+    final names = watchMeAssistantNames(ref, choices);
+    // The composer keeps the plain name; only what the owner reads is labeled.
+    final plainName =
         agent?.displayName ??
         profile?.label ??
         (selected == null ? 'Choose an agent' : 'Agent');
+    final name = agent == null ? plainName : names.labelFor(agent.pubkey);
     final avatarInitial = name.isEmpty ? 'A' : name.characters.first;
     final scopeChanged = originalScope != (sync.community, sync.pubkey);
     final frozen =
@@ -249,7 +252,7 @@ class _MeChatDraft extends HookConsumerWidget {
                         pubkey: selected,
                         role: 'bot',
                         joinedAt: DateTime(2026),
-                        displayName: name,
+                        displayName: plainName,
                       ),
                   ],
                   onSendingChanged: (value) {
