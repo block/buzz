@@ -1417,7 +1417,8 @@ async fn update_channel_on(
     }
     if policy_changed {
         sqlx::query(
-            "UPDATE communities SET artifact_policy_modified_at=clock_timestamp() WHERE id=$1",
+            "UPDATE communities SET artifact_policy_modified_at=clock_timestamp() \
+             WHERE id=$1 AND deletion_state = 'active'",
         )
         .bind(community_id.as_uuid())
         .execute(tx.conn())
@@ -1838,10 +1839,13 @@ async fn soft_delete_on(w: &mut ChannelSettingsWriter<'_>) -> Result<()> {
         .bind(channel_id)
         .execute(w.tx.conn())
         .await?;
-    sqlx::query("UPDATE communities SET artifact_policy_modified_at=clock_timestamp() WHERE id=$1")
-        .bind(community_id.as_uuid())
-        .execute(w.tx.conn())
-        .await?;
+    sqlx::query(
+        "UPDATE communities SET artifact_policy_modified_at=clock_timestamp() \
+         WHERE id=$1 AND deletion_state = 'active'",
+    )
+    .bind(community_id.as_uuid())
+    .execute(w.tx.conn())
+    .await?;
     Ok(())
 }
 
