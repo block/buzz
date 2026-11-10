@@ -118,7 +118,7 @@ class _ChannelTile extends ConsumerWidget {
                   height: 6,
                   decoration: BoxDecoration(
                     shape: BoxShape.circle,
-                    color: context.colors.primary,
+                    color: context.appColors.unread,
                   ),
                 ),
               ),

@@ -40,6 +40,7 @@ class AppTheme {
       success: const Color(0xFF218358), // Desktop green-11
       warning: const Color(0xFFAB6400), // Desktop amber-11
       accent: scheme.tertiary,
+      unread: const Color(0xFFDF1E85), // Desktop status-unread (magenta-9)
       huddleDrawerSurface: const Color(0xFF000000),
       huddleControlSurface: const Color(0xFF333333),
       onHuddleDrawer: const Color(0xFFFAFAFA),
@@ -64,6 +65,7 @@ class AppTheme {
       success: const Color(0xFF3DD68C), // Desktop green-11
       warning: const Color(0xFFFFCA16), // Desktop amber-11
       accent: scheme.tertiary,
+      unread: const Color(0xFFF4BCCF), // Desktop status-unread (magenta-11)
       huddleDrawerSurface: scheme.primaryContainer,
       huddleControlSurface: Color.alphaBlend(
         scheme.onPrimaryContainer.withValues(alpha: 0.18),
