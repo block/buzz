@@ -2086,10 +2086,10 @@ fn every_production_event_insert_runs_the_roster_guard() {
         violations.is_empty(),
         "production `INSERT INTO events` writers must run the app-side roster guard: {violations:?}"
     );
-    // Five guarded writers plus the three explicitly exempt writers/probes.
+    // Five guarded writers plus the two explicitly exempt writers.
     assert!(
-        checked_writers >= 8,
-        "expected at least eight event writers, found {checked_writers}"
+        checked_writers >= 7,
+        "expected at least seven event writers, found {checked_writers}"
     );
 }
 
@@ -2199,8 +2199,8 @@ fn every_production_event_insert_names_d_tag() {
     // The same writer set as the roster-guard scan. A lower count means the
     // scan stopped seeing a writer, not that one was removed safely.
     assert!(
-        checked_writers >= 8,
-        "expected at least eight event writers, found {checked_writers}"
+        checked_writers >= 7,
+        "expected at least seven event writers, found {checked_writers}"
     );
 }
 
@@ -2256,8 +2256,15 @@ fn is_channel_null_event_writer(function: &str) -> bool {
 /// Whether a `SET` list assigns `created_at` or `channel_id`, including the
 /// row form `(a, b) = (...)`, or a column it cannot read (a `{…}`
 /// placeholder). Stops at the first `WHERE`.
-fn assigns_event_floor_column(assignments: &str) -> bool {
+/// The assignments of a `SET` list: it ends at `WHERE` or, for an upsert
+/// with no `WHERE`, at `RETURNING`.
+fn set_list(assignments: &str) -> &str {
     let assignments = assignments.split(" where ").next().expect("first part");
+    assignments.split(" returning ").next().expect("first part")
+}
+
+fn assigns_event_floor_column(assignments: &str) -> bool {
+    let assignments = set_list(assignments);
     let mut depth = 0usize;
     assignments
         .split(|ch| {
@@ -2287,7 +2294,7 @@ fn assigns_event_floor_column(assignments: &str) -> bool {
 /// literal: empty, or holding an item with no `=`, such as a `{…}`
 /// placeholder or a column whose value follows in another literal.
 fn set_list_is_unreadable(assignments: &str) -> bool {
-    let assignments = assignments.split(" where ").next().expect("first part");
+    let assignments = set_list(assignments);
     let mut depth = 0usize;
     assignments.trim().is_empty()
         || assignments
@@ -2733,6 +2740,10 @@ async fn guarded_upsert_row_time(tx: &mut AdmittedTx) {
     crate::replica_fence::guard_event_created_at_floor(tx, created_at, channel).await?;
     sqlx::query("INSERT INTO events (id) VALUES ($1) ON CONFLICT (id) DO UPDATE SET(kind, created_at) = (1, $2)");
 }
+async fn guarded_upsert_rehome_returning(tx: &mut AdmittedTx) {
+    crate::replica_fence::guard_event_created_at_floor(tx, created_at, channel).await?;
+    sqlx::query("INSERT INTO events (id, channel_id) VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET channel_id = EXCLUDED.channel_id RETURNING id, kind");
+}
 async fn guarded_upsert_other_column(tx: &mut AdmittedTx) {
     crate::replica_fence::guard_event_created_at_floor(tx, created_at, channel).await?;
     sqlx::query("INSERT INTO events (id) VALUES ($1) ON CONFLICT (id) DO UPDATE SET tags = EXCLUDED.tags");
@@ -2745,6 +2756,9 @@ async fn guarded_insert_then_other_table_upsert(tx: &mut AdmittedTx) {
     crate::replica_fence::guard_event_created_at_floor(tx, created_at, channel).await?;
     sqlx::query("INSERT INTO events (id) VALUES ($1) ON CONFLICT DO NOTHING");
     sqlx::query("INSERT INTO parameterized_event_watermarks (d_tag, created_at) VALUES ($1, $2) ON CONFLICT (d_tag) DO UPDATE SET created_at = EXCLUDED.created_at");
+}
+async fn other_table_upsert_returning(tx: &mut AdmittedTx) {
+    sqlx::query("INSERT INTO channel_members (pubkey, role) VALUES ($1, $2) ON CONFLICT (pubkey) DO UPDATE SET removed_at = NULL, role = EXCLUDED.role RETURNING pubkey, role, removed_at");
 }
 "#;
     assert_eq!(
@@ -2766,6 +2780,7 @@ async fn guarded_insert_then_other_table_upsert(tx: &mut AdmittedTx) {
             "async fn row_time_no_space(tx: &mut AdmittedTx) {",
             "async fn guarded_upsert_rehome(tx: &mut AdmittedTx) {",
             "async fn guarded_upsert_row_time(tx: &mut AdmittedTx) {",
+            "async fn guarded_upsert_rehome_returning(tx: &mut AdmittedTx) {",
         ]
     );
 }
