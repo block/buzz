@@ -2089,7 +2089,8 @@ mod postgres_tests {
     /// the incoming event's: a conforming read-state head superseded by a
     /// nonconforming event is still purged with its mentions, and a
     /// nonconforming head superseded by a conforming event keeps legacy
-    /// retention.
+    /// retention (a soft-deleted row) but, like every superseded head, loses
+    /// its mention rows.
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn mixed_shape_replacement_classifies_each_superseded_row() {
@@ -2123,7 +2124,7 @@ mod postgres_tests {
                 "nonconforming then conforming",
                 duplicate_t as fn(&str) -> Vec<Tag>,
                 conforming as fn(&str) -> Vec<Tag>,
-                (1, 0, 1),
+                (1, 0, 0),
             ),
         ] {
             let keys = Keys::generate();
@@ -2442,11 +2443,13 @@ mod postgres_tests {
                 (rows, live, mentions)
             }
         };
-        let expected = |purged: bool| -> (i64, i64, i64) {
-            if purged {
-                (0, 0, 0)
-            } else {
-                (1, 0, 1)
+        // A soft-deleted (non-purged) row keeps its mentions after a NIP-09
+        // deletion, but a superseded head leaves with its mention rows.
+        let expected = |purged: bool, mode: Delete| -> (i64, i64, i64) {
+            match (purged, mode) {
+                (true, _) => (0, 0, 0),
+                (false, Delete::Replace) => (1, 0, 0),
+                (false, _) => (1, 0, 1),
             }
         };
 
@@ -2493,7 +2496,7 @@ mod postgres_tests {
                 );
                 assert_eq!(
                     state(id.clone()).await,
-                    expected(purged),
+                    expected(purged, mode),
                     "{label}/{mode:?}: app classification"
                 );
                 assert!(
