@@ -265,3 +265,85 @@ async fn scheduled_writers_and_claims_honor_community_deletion_admission() {
         .iter()
         .all(|(community, _, _, _)| *community != c));
 }
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn scheduled_replay_uses_committed_event_and_revision_after_delivery() {
+    let (db, _scratch, c, keys, channel) = fixture().await;
+    let owner = keys.public_key().to_bytes();
+    let id = Uuid::new_v4();
+    let now = chrono::Utc::now().timestamp();
+    let initial = serde_json::to_value(queued_event(&keys, channel, now + 3600)).unwrap();
+    db.scheduled_mutate(c, &owner, id, None, Some(&initial), now + 3600)
+        .await
+        .unwrap();
+    assert!(db
+        .scheduled_replayed(c, &owner, id, None, &initial)
+        .await
+        .unwrap());
+    assert!(!db
+        .scheduled_replayed(c, &[7; 32], id, None, &initial)
+        .await
+        .unwrap());
+    assert!(!db
+        .scheduled_replayed(
+            CommunityId::from_uuid(Uuid::new_v4()),
+            &owner,
+            id,
+            None,
+            &initial
+        )
+        .await
+        .unwrap());
+    assert!(!db
+        .scheduled_replayed(c, &owner, id, Some(1), &initial)
+        .await
+        .unwrap());
+    let immediate = queued_event(&keys, channel, now - 2);
+    let value = serde_json::to_value(&immediate).unwrap();
+    db.scheduled_mutate(c, &owner, id, Some(1), Some(&value), now - 2)
+        .await
+        .unwrap();
+    assert!(db
+        .scheduled_replayed(c, &owner, id, Some(1), &value)
+        .await
+        .unwrap());
+    assert!(!db
+        .scheduled_replayed(c, &owner, id, None, &initial)
+        .await
+        .unwrap());
+    assert!(!db
+        .scheduled_replayed(c, &owner, id, Some(2), &value)
+        .await
+        .unwrap());
+    let mut claim = db
+        .scheduled_claim(c, &owner, id, now)
+        .await
+        .unwrap()
+        .unwrap();
+    claim
+        .persist(&db, &immediate, Some(channel), None)
+        .await
+        .unwrap();
+    assert!(db
+        .scheduled_replayed(c, &owner, id, Some(1), &value)
+        .await
+        .unwrap());
+    let rows = db.scheduled_list(c, &owner).await.unwrap();
+    assert_eq!(rows[0].revision, 2);
+    assert_eq!(rows[0].status, "sent");
+    assert_eq!(rows[0].send_at, now - 2);
+
+    let cancelled = Uuid::new_v4();
+    let other = serde_json::to_value(queued_event(&keys, channel, now + 7200)).unwrap();
+    db.scheduled_mutate(c, &owner, cancelled, None, Some(&other), now + 7200)
+        .await
+        .unwrap();
+    db.scheduled_mutate(c, &owner, cancelled, Some(1), None, now)
+        .await
+        .unwrap();
+    assert!(!db
+        .scheduled_replayed(c, &owner, cancelled, None, &other)
+        .await
+        .unwrap());
+}

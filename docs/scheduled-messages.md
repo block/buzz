@@ -46,6 +46,8 @@ non-guest conversation membership. Dispatch rechecks normal ingest permissions.
 | `cancel` | `id`, `revision` |
 | `send_now` | `id`, `revision`, freshly signed `event` |
 
+Exact accepted create and mutation retries are reconciled by owner, queue ID, revision, and signed event before freshness checks. Send-now uses the signed timestamp for its queue time, and retries must reuse the same signed event. A changed event, cancelled row, or superseded revision is not an accepted replay.
+
 Mutations return `{"accepted":true}` after commit. Listing returns `messages`
 with `id`, `revision`, `event`, `send_at`, `status`, `error`, plus
 `sent_history_limit:100`. Active work is capped at 256 per owner/community; the
