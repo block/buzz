@@ -18,7 +18,7 @@ use crate::handlers::side_effects::{
 use crate::state::AppState;
 
 const MAX_PENDING: usize = 2_048;
-const MAX_DATABASE_WORKERS: usize = 8;
+const MAX_WORKERS_PER_PHASE: usize = 8;
 const ENQUEUE_BUDGET: Duration = Duration::from_secs(2);
 const RESULT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 // Read committed outcomes after admission expiry, including a stopped processor.
@@ -48,7 +48,8 @@ struct LocalQueue {
 pub(crate) struct ClaimBatches {
     queues: Mutex<HashMap<CommunityId, LocalQueue>>,
     pending: Arc<Semaphore>,
-    database_workers: Arc<Semaphore>,
+    admission_workers: Arc<Semaphore>,
+    follow_up_workers: Arc<Semaphore>,
 }
 
 impl Default for ClaimBatches {
@@ -56,7 +57,8 @@ impl Default for ClaimBatches {
         Self {
             queues: Mutex::default(),
             pending: Arc::new(Semaphore::new(MAX_PENDING)),
-            database_workers: Arc::new(Semaphore::new(MAX_DATABASE_WORKERS)),
+            admission_workers: Arc::new(Semaphore::new(MAX_WORKERS_PER_PHASE)),
+            follow_up_workers: Arc::new(Semaphore::new(MAX_WORKERS_PER_PHASE)),
         }
     }
 }
@@ -104,7 +106,8 @@ impl ClaimBatches {
 
     async fn run(self: Arc<Self>, state: Arc<AppState>, tenant: TenantContext) {
         let mut active = Vec::new();
-        let mut processor: Option<tokio::task::JoinHandle<()>> = None;
+        let mut admission: Option<tokio::task::JoinHandle<()>> = None;
+        let mut follow_up: Option<tokio::task::JoinHandle<()>> = None;
         loop {
             let wake = {
                 let mut queues = self.queues.lock().await;
@@ -172,32 +175,46 @@ impl ClaimBatches {
                 }
                 Err(_) => {}
             }
-            if processor.as_ref().is_some_and(|task| task.is_finished()) {
-                if let Some(task) = processor.take() {
-                    if let Err(error) = task.await {
-                        tracing::error!(error = %error, "invite processor task failed");
+            for (worker, slots, phase) in [
+                (
+                    &mut admission,
+                    &self.admission_workers,
+                    ClaimPhase::Admission,
+                ),
+                (
+                    &mut follow_up,
+                    &self.follow_up_workers,
+                    ClaimPhase::FollowUp,
+                ),
+            ] {
+                if worker.as_ref().is_some_and(|task| task.is_finished()) {
+                    if let Some(task) = worker.take() {
+                        if let Err(error) = task.await {
+                            tracing::error!(?phase, error = %error, "invite processor task failed");
+                        }
                     }
                 }
-            }
-            if !active.is_empty() && processor.is_none() {
-                if let Ok(permit) = Arc::clone(&self.database_workers).try_acquire_owned() {
-                    let (state, tenant) = (Arc::clone(&state), tenant.clone());
-                    processor = Some(tokio::spawn(async move {
-                        let _permit = permit;
-                        // Includes pool acquisition before the selected batch supplies its deadline.
-                        let operation = process_pending_claims(&state, &tenant);
-                        match tokio::time::timeout(INVITE_CLAIM_TTL + ENQUEUE_BUDGET, operation)
-                            .await
-                        {
-                            Ok(Ok(())) => {}
-                            Ok(Err(error)) => {
-                                tracing::warn!(error_kind = %error.kind(), "invite processor attempt failed")
+                if !active.is_empty() && worker.is_none() {
+                    if let Ok(permit) = Arc::clone(slots).try_acquire_owned() {
+                        let (state, tenant) = (Arc::clone(&state), tenant.clone());
+                        *worker = Some(tokio::spawn(async move {
+                            let _permit = permit;
+                            // Includes pool acquisition before the batch supplies its deadline.
+                            let operation = phase.process(&state, &tenant);
+                            match tokio::time::timeout(INVITE_CLAIM_TTL + ENQUEUE_BUDGET, operation)
+                                .await
+                            {
+                                Ok(Ok(())) => {}
+                                Ok(Err(error)) => {
+                                    tracing::warn!(?phase, error_kind = %error.kind(), "invite processor attempt failed")
+                                }
+                                Err(_) => tracing::warn!(
+                                    ?phase,
+                                    "invite processor timed out; committed work remains retryable"
+                                ),
                             }
-                            Err(_) => tracing::warn!(
-                                "invite processor timed out; committed work remains retryable"
-                            ),
-                        }
-                    }));
+                        }));
+                    }
                 }
             }
             if !active.is_empty() {
@@ -210,35 +227,36 @@ impl ClaimBatches {
     }
 }
 
-pub(super) async fn process_pending_claims(
-    state: &Arc<AppState>,
-    tenant: &TenantContext,
-) -> buzz_db::Result<()> {
-    let admit = async {
-        if let Some(write) = state
-            .db
-            .try_admit_invite_claims(tenant.community(), &state.relay_keypair)
-            .await?
-        {
-            announce_committed_admission(state, tenant, write).await;
+#[derive(Clone, Copy, Debug)]
+enum ClaimPhase {
+    Admission,
+    FollowUp,
+}
+
+impl ClaimPhase {
+    async fn process(self, state: &Arc<AppState>, tenant: &TenantContext) -> buzz_db::Result<()> {
+        match self {
+            Self::Admission => {
+                if let Some(write) = state
+                    .db
+                    .try_admit_invite_claims(tenant.community(), &state.relay_keypair)
+                    .await?
+                {
+                    announce_committed_admission(state, tenant, write).await;
+                }
+            }
+            Self::FollowUp => {
+                if let Some(batch) = state
+                    .db
+                    .try_finish_invite_claims(tenant.community())
+                    .await?
+                {
+                    finish_committed_batch(state, tenant, batch).await;
+                }
+            }
         }
-        Ok::<_, buzz_db::DbError>(())
-    };
-    let finish = async {
-        if let Some(batch) = state
-            .db
-            .try_finish_invite_claims(tenant.community())
-            .await?
-        {
-            finish_committed_batch(state, tenant, batch).await;
-        }
-        Ok::<_, buzz_db::DbError>(())
-    };
-    // Channel follow-up owns a separate session guard, so a slow roster
-    // publication does not hold the transaction lock needed for admission.
-    let (admitted, finished) = tokio::join!(admit, finish);
-    admitted?;
-    finished
+        Ok(())
+    }
 }
 
 pub(super) async fn announce_committed_admission(

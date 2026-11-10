@@ -671,9 +671,9 @@ mod postgres_tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn admission_progresses_while_an_earlier_default_channel_followup_is_held() {
+    async fn later_claim_is_admitted_while_an_earlier_default_channel_followup_is_held() {
         use crate::handlers::group_state_postgres_tests::{create_channel, edit_channel};
-        use buzz_db::relay_invite::{ClaimCredential, ClaimRequest, EnqueuedClaim};
+        use buzz_db::relay_invite::{ClaimCredential, ClaimRequest};
 
         let host = format!("invite-pipeline-{}.example", Uuid::new_v4().simple());
         let state = invite_test_state(&host).await.expect("isolated Postgres");
@@ -710,51 +710,35 @@ mod postgres_tests {
                 role: "member".into(),
             },
         };
-        assert!(matches!(
-            state
-                .db
-                .enqueue_invite_claim(community, &request(&members[0]))
-                .await
-                .unwrap(),
-            EnqueuedClaim::Queued(_)
-        ));
-        let write = state
-            .db
-            .try_admit_invite_claims(community, &state.relay_keypair)
-            .await
-            .unwrap()
-            .unwrap();
-        crate::api::invites::claim_batches::announce_committed_admission(&state, &tenant, write)
-            .await;
-        let EnqueuedClaim::Queued(second_id) = state
-            .db
-            .enqueue_invite_claim(community, &request(&members[1]))
-            .await
-            .unwrap()
-        else {
-            panic!("second claim must enter the queue");
-        };
-
-        let mut admission_lock = state.db.pool().begin().await.unwrap();
-        sqlx::query("LOCK TABLE relay_members IN SHARE MODE")
-            .execute(&mut *admission_lock)
-            .await
-            .unwrap();
         let mut notice = crate::handlers::side_effects::notice_barrier::install(
             &members[0].public_key().to_bytes(),
         );
-        let processor = tokio::spawn({
-            let (state, tenant) = (state.clone(), tenant.clone());
+        let first_request = request(&members[0]);
+        let first = tokio::spawn({
+            let (state, tenant) = (Arc::clone(&state), tenant.clone());
             async move {
-                crate::api::invites::claim_batches::process_pending_claims(&state, &tenant).await
+                state
+                    .invite_claim_batches
+                    .submit(&state, &tenant, first_request)
+                    .await
             }
         });
         let (noticed_channel, release) =
             tokio::time::timeout(Duration::from_secs(5), notice.next())
                 .await
-                .expect("follow-up must progress while admission is locked")
+                .expect("first claim must reach its channel follow-up")
                 .unwrap();
-        admission_lock.commit().await.unwrap();
+        // Arrive after the first admission pass, while its channel worker is held.
+        let second_request = request(&members[1]);
+        let second = tokio::spawn({
+            let (state, tenant) = (Arc::clone(&state), tenant.clone());
+            async move {
+                state
+                    .invite_claim_batches
+                    .submit(&state, &tenant, second_request)
+                    .await
+            }
+        });
         let admitted = tokio::time::timeout(Duration::from_secs(5), async {
             while !state
                 .db
@@ -766,31 +750,29 @@ mod postgres_tests {
             }
         })
         .await;
-        let unreadied = state
-            .db
-            .invite_claim_results(community, &[second_id])
-            .await
-            .unwrap();
+        let second_waiting_for_channels = !second.is_finished();
         release.send(()).unwrap();
-        processor.await.unwrap().unwrap();
+        for claimant in [first, second] {
+            assert!(tokio::time::timeout(Duration::from_secs(5), claimant)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_ok());
+        }
         assert_eq!(noticed_channel, channel);
         admitted.expect("admission must progress while the earlier follow-up is held");
         assert!(
-            unreadied.is_empty(),
+            second_waiting_for_channels,
             "admission alone must not publish HTTP readiness"
         );
-        crate::api::invites::claim_batches::process_pending_claims(&state, &tenant)
-            .await
-            .unwrap();
-        assert_eq!(
-            state
+        for member in members {
+            assert!(state
                 .db
-                .invite_claim_results(community, &[second_id])
+                .pending_default_channel_join(community, &member.public_key().to_hex())
                 .await
                 .unwrap()
-                .len(),
-            1
-        );
+                .is_none());
+        }
     }
 
     #[tokio::test]
