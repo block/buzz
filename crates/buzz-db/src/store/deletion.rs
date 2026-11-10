@@ -3425,22 +3425,25 @@ async fn transition_community(
             "community {community} is permanently tombstoned"
         )));
     }
-    let (new_state, generation, restore_archive, tombstone) = match transition {
+    // `archive` pins the community archived for every forward step; abort
+    // restores the pre-deletion `archived_at` instead.
+    let (new_state, generation, archive, restore_archive, tombstone) = match transition {
         CommunityTransition::Quiesce if matches!(old.state.as_str(), "active" | "quiescing") => {
-            ("quiescing", old.generation, None, false)
+            ("quiescing", old.generation, true, None, false)
         }
         CommunityTransition::Fence if old.state == "quiescing" => (
             "fenced",
             old.generation.checked_add(1).ok_or_else(|| {
                 DbError::DeletionSafety("community deletion fence generation overflow".to_string())
             })?,
+            true,
             None,
             false,
         ),
         CommunityTransition::Tombstone { generation }
             if old.state == "fenced" && old.generation == generation =>
         {
-            ("tombstone", generation, None, true)
+            ("tombstone", generation, true, None, true)
         }
         CommunityTransition::Abort {
             restored_archived_at,
@@ -3449,6 +3452,7 @@ async fn transition_community(
             old.generation.checked_add(1).ok_or_else(|| {
                 DbError::DeletionSafety("community deletion fence generation overflow".to_string())
             })?,
+            false,
             restored_archived_at,
             false,
         ),
@@ -3466,13 +3470,12 @@ async fn transition_community(
          deleted_at = CASE WHEN $6 THEN now() ELSE deleted_at END, \
          signing_key = CASE WHEN $6 THEN NULL ELSE signing_key END, \
          icon = CASE WHEN $6 THEN NULL ELSE icon END \
-         WHERE id = $1 AND deletion_state = $7 AND deletion_fence_generation = $8 \
-           AND deleted_at IS NULL",
+         WHERE id = $1 AND deletion_state = $7 AND deletion_fence_generation = $8",
     )
     .bind(community.as_uuid())
     .bind(new_state)
     .bind(generation)
-    .bind(!matches!(transition, CommunityTransition::Abort { .. }))
+    .bind(archive)
     .bind(restore_archive)
     .bind(tombstone)
     .bind(&old.state)
