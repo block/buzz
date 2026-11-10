@@ -27,7 +27,7 @@ class _EphemeralBadge extends StatelessWidget {
   }
 }
 
-class _ErrorView extends StatelessWidget {
+class _ErrorView extends HookConsumerWidget {
   final Object error;
   final VoidCallback onRetry;
 
@@ -36,7 +36,8 @@ class _ErrorView extends StatelessWidget {
   static String _userMessage(Object error) {
     if (error is RelayException) {
       // There is no API token to check. A protected community's Retry gets a
-      // fresh token, and its shell banner takes over once sign-in has ended.
+      // fresh token; once the organization sign-in has ended, the shell
+      // banner owns the action instead (see build).
       if (error.statusCode == 401) {
         return "This community couldn't authenticate the request. Try again.";
       }
@@ -52,7 +53,18 @@ class _ErrorView extends StatelessWidget {
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    final signIn = ref.watch(organizationSignInProvider);
+    final auth = ref.watch(hostedRelayAuthProvider);
+    useListenable(signIn);
+    useListenable(auth);
+    // With the organization sign-in ended, a read goes out unsigned and Retry
+    // cannot succeed. The Home banner then shows the working action.
+    final signInOwned = organizationSignInPromptVisible(
+      signIn,
+      auth,
+      ref.watch(relayConfigProvider),
+    );
     return Center(
       child: Padding(
         padding: const EdgeInsets.all(Grid.sm),
@@ -67,7 +79,9 @@ class _ErrorView extends StatelessWidget {
             ),
             const SizedBox(height: Grid.xxs),
             Text(
-              _userMessage(error),
+              signInOwned
+                  ? 'Use the sign-in prompt below to reconnect.'
+                  : _userMessage(error),
               style: context.textTheme.bodySmall?.copyWith(
                 color: context.colors.onSurfaceVariant,
               ),
@@ -75,12 +89,14 @@ class _ErrorView extends StatelessWidget {
               maxLines: 3,
               overflow: TextOverflow.ellipsis,
             ),
-            const SizedBox(height: Grid.xs),
-            FilledButton.icon(
-              onPressed: onRetry,
-              icon: const Icon(BuzzIcons.refreshCw),
-              label: const Text('Retry'),
-            ),
+            if (!signInOwned) ...[
+              const SizedBox(height: Grid.xs),
+              FilledButton.icon(
+                onPressed: onRetry,
+                icon: const Icon(BuzzIcons.refreshCw),
+                label: const Text('Retry'),
+              ),
+            ],
           ],
         ),
       ),
