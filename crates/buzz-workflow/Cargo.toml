@@ -27,5 +27,9 @@ tracing     = { workspace = true }
 thiserror   = { workspace = true }
 reqwest     = { workspace = true, optional = true }
 
+[dev-dependencies]
+sqlx = { workspace = true }
+tracing-subscriber = { workspace = true }
+
 [features]
 reqwest = ["dep:reqwest"]

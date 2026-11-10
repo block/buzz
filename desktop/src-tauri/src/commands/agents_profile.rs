@@ -25,7 +25,8 @@ pub(crate) struct ProfileReconcileData {
     /// left unpinned (no tenant boundary) resolves the current workspace at
     /// execution time. See `resolve_reconcile_relay`.
     pub(crate) target_relay_url: Option<String>,
-    /// Expected avatar URL for the published profile. `None` for legacy records
+    /// Saved avatar source, localized to the target community before publishing.
+    /// `None` for legacy records
     /// that predate the `avatar_url` field — these will be backfilled from the
     /// relay's existing kind:0 profile on first reconciliation.
     pub(crate) avatar_url: Option<String>,
@@ -189,13 +190,13 @@ pub(crate) fn mark_profile_reconciled(
 /// keeps deferred reconciliation from following a community switch it was
 /// never authorized for while honoring a deliberate per-agent pin wherever
 /// it points.
-pub(crate) async fn reconcile_agent_profile(
+pub(crate) async fn reconcile_agent_profile<R: tauri::Runtime>(
     state: &AppState,
-    app: &AppHandle,
+    app: &AppHandle<R>,
     agent_pubkey: &str,
     data: &ProfileReconcileData,
 ) -> Result<ProfileReconcileOutcome, String> {
-    use crate::relay::{query_agent_profile, sync_managed_agent_profile};
+    use crate::relay::query_agent_profile;
 
     // Resolved ONCE and used for both the read and the write-back. A pinned
     // `target_relay_url` wins unconditionally — see `resolve_reconcile_relay`.
@@ -260,17 +261,51 @@ pub(crate) async fn reconcile_agent_profile(
         Some(expected_avatar)
     };
 
-    if !profile_needs_sync(
+    reconcile_profile_at(
+        state,
+        &relay_url,
+        data,
+        expected_avatar.as_deref(),
         existing.as_ref(),
+    )
+    .await
+}
+
+/// Network half of startup/restore reconciliation, after legacy source backfill.
+/// Kept separate from the disk migration so the production compare-and-publish
+/// seam can be exercised against two communities without a GUI runtime.
+pub(crate) async fn reconcile_profile_at(
+    state: &AppState,
+    relay_url: &str,
+    data: &ProfileReconcileData,
+    expected_avatar: Option<&str>,
+    existing: Option<&crate::relay::AgentProfileInfo>,
+) -> Result<ProfileReconcileOutcome, String> {
+    if !state
+        .managed_agent_profile_reconcile_enabled()
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        return Ok(ProfileReconcileOutcome::SkippedDisabled);
+    }
+    let agent_keys = Keys::parse(&data.private_key_nsec)
+        .map_err(|e| format!("failed to parse agent keys: {e}"))?;
+    let expected_avatar = crate::relay::profile_avatar::localize_avatar(
+        state,
+        relay_url,
+        &agent_keys,
+        expected_avatar,
+        data.auth_tag.as_deref(),
+    )
+    .await?;
+
+    if !profile_needs_sync(
+        existing,
         &data.name,
         expected_avatar.as_deref(),
         data.about.as_deref(),
     ) {
         return Ok(ProfileReconcileOutcome::Reconciled);
     }
-
-    let agent_keys = Keys::parse(&data.private_key_nsec)
-        .map_err(|e| format!("failed to parse agent keys: {e}"))?;
 
     if !state
         .managed_agent_profile_reconcile_enabled()
@@ -279,9 +314,9 @@ pub(crate) async fn reconcile_agent_profile(
         return Ok(ProfileReconcileOutcome::SkippedDisabled);
     }
 
-    sync_managed_agent_profile(
+    crate::relay::sync_managed_agent_profile(
         state,
-        &relay_url,
+        relay_url,
         &agent_keys,
         &data.name,
         expected_avatar.as_deref(),
@@ -314,44 +349,49 @@ pub(super) fn profile_needs_sync(
     }
 }
 
-/// Publish a managed agent's kind:0 profile with the authored public
-/// description as `about`, resolving the effective
-/// relay URL from the record's stored value. Returns the sync error (if any)
-/// rather than failing the caller — profile publish is best-effort in the
-/// create and snapshot-import flows that share this helper.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn publish_agent_profile_with_about(
+/// Capture authority while the creating workspace is still active, before awaits.
+pub(crate) fn creation_authority(
     state: &AppState,
-    record_relay_url: &str,
-    agent_keys: &nostr::Keys,
-    display_name: &str,
-    avatar_url: Option<&str>,
+    relay: &str,
+) -> Result<(nostr::Keys, String), String> {
+    Ok((
+        state.signing_keys()?,
+        crate::relay::effective_agent_relay_url(relay, &relay_ws_url_with_override(state)),
+    ))
+}
+
+/// Explicit owner action transfers verified bytes; reconcile has no owner signer.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn publish_created_agent_profile(
+    state: &AppState,
+    relay: &str,
+    owner: &nostr::Keys,
+    agent: &nostr::Keys,
+    name: &str,
+    avatar: Option<&str>,
     about: Option<&str>,
     auth_tag: Option<&str>,
 ) -> Option<String> {
-    let relay_url = crate::relay::effective_agent_relay_url(
-        record_relay_url,
-        &relay_ws_url_with_override(state),
-    );
-    crate::relay::sync_managed_agent_profile(
-        state,
-        &relay_url,
-        agent_keys,
-        display_name,
-        avatar_url,
-        about,
-        auth_tag,
+    if let Err(error) = crate::relay::profile_avatar::transfer_created_avatar(
+        state, relay, owner, agent, avatar, auth_tag,
     )
     .await
-    .err()
+    {
+        return Some(error);
+    }
+    crate::relay::sync_managed_agent_profile(state, relay, agent, name, avatar, about, auth_tag)
+        .await
+        .err()
 }
 
 /// Publish a fresh persona-backed agent's kind:0 profile, computing the
 /// effective public `about` from the persona itself.
 /// Shared by flows in files at the size ratchet (snapshot import).
+#[allow(clippy::too_many_arguments)] // Complete captured authority stays explicit.
 pub(crate) async fn publish_persona_profile(
     state: &AppState,
-    record_relay_url: &str,
+    relay_url: &str,
+    owner_keys: &nostr::Keys,
     agent_keys: &nostr::Keys,
     display_name: &str,
     avatar_url: Option<&str>,
@@ -359,9 +399,10 @@ pub(crate) async fn publish_persona_profile(
     auth_tag: Option<&str>,
 ) -> Option<String> {
     let about = crate::managed_agents::effective_agent_description(persona.description.as_deref());
-    publish_agent_profile_with_about(
+    publish_created_agent_profile(
         state,
-        record_relay_url,
+        relay_url,
+        owner_keys,
         agent_keys,
         display_name,
         avatar_url,

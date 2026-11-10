@@ -32,7 +32,7 @@ export function projectAgentMembershipInput({
 /**
  * True when `event` is the conversation opener or comes after it in the
  * timeline's `(created_at, event_id)` ordering (`compareRelayOrder` in
- * `channelWindowStore.ts`). A bare timestamp cannot make this call — every
+ * `shared/lib/eventOrder.ts`). A bare timestamp cannot make this call — every
  * unrelated event sharing the opener's second would pass — which is why the
  * opener's exact event id participates. Id equality is checked first so the
  * opener itself is admitted even against a legacy persisted `createdAt` that
@@ -194,7 +194,7 @@ export async function submitProjectAgentMessage<Ch extends { id: string }>({
   openDm,
   send,
 }: {
-  agent: { pubkey: string; isManaged: boolean; isActive: boolean };
+  agent: { pubkey: string; isManaged: boolean; isActive: boolean | null };
   conversation: { channel: Ch; opener: ProjectsConversationOpener } | null;
   content: string;
   mentionPubkeys: string[];

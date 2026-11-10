@@ -76,6 +76,38 @@ async fn proxy_handler(AxumState(state): AxumState<ProxyState>, req: Request) ->
         }
     };
 
+    // Re-mint and retry once on an auth failure (401 missing_evidence or 403
+    // evidence_rejected). Under NIP-FI strict mode a read token expires after
+    // 60s, so a long video range-request stream will exhaust its token mid-flight.
+    // Single retry; if the fresh token also fails, propagate the error to the caller.
+    let resp = if (resp.status() == reqwest::StatusCode::UNAUTHORIZED
+        || resp.status() == reqwest::StatusCode::FORBIDDEN)
+        && has_range
+    {
+        if let Some(fresh_auth) = mint_media_get_auth(&app_state, &base_url) {
+            let mut retry = state
+                .client
+                .get(&upstream_url)
+                .timeout(std::time::Duration::from_secs(120))
+                .header("authorization", fresh_auth);
+            if let Some(range) = req.headers().get("range") {
+                if let Ok(v) = range.to_str() {
+                    retry = retry.header("range", v);
+                }
+            }
+            match retry.send().await {
+                Ok(r) => r,
+                Err(_) => {
+                    return (StatusCode::BAD_GATEWAY, "upstream request failed").into_response();
+                }
+            }
+        } else {
+            resp
+        }
+    } else {
+        resp
+    };
+
     let status =
         StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
 
@@ -198,6 +230,34 @@ pub async fn handle_buzz_media(
     }
 
     let result = upstream.send().await;
+
+    // Re-mint and retry once on auth failure (401/403) for range requests.
+    // Under NIP-FI strict mode a read token expires after 60s, exhausting
+    // mid-stream. Single retry with a fresh token; propagate on second failure.
+    let result = match result {
+        Ok(resp)
+            if (resp.status() == reqwest::StatusCode::UNAUTHORIZED
+                || resp.status() == reqwest::StatusCode::FORBIDDEN)
+                && has_range =>
+        {
+            if let Some(fresh_auth) = mint_media_get_auth(&state, &base) {
+                let mut retry = state
+                    .http_client
+                    .get(&upstream_url)
+                    .timeout(std::time::Duration::from_secs(60))
+                    .header("authorization", fresh_auth);
+                if let Some(range) = request.headers().get("range") {
+                    if let Ok(v) = range.to_str() {
+                        retry = retry.header("range", v);
+                    }
+                }
+                retry.send().await
+            } else {
+                Ok(resp)
+            }
+        }
+        other => other,
+    };
 
     match result {
         Ok(resp) => {

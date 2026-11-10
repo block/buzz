@@ -1,6 +1,5 @@
 import CryptoKit
 import Foundation
-import P256K
 import XCTest
 
 @testable import BuzzPushKit
@@ -18,6 +17,10 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
   static let relayPrivateKey = String(repeating: "0", count: 63) + "3"
   static let gatewayBody = "Reconnect to your relay now"
   static let channelID = "123e4567-e89b-42d3-a456-426614174000"
+  static let unnamedSenderHex =
+    "aa4fc8665f5696e33db7e1a572e3b0f5b3d615837b0f362dcb1c8068b098c7b4"
+  static let unnamedSenderNpub =
+    "npub14f8usejl26twx0dhuxjh9cas7keav9vr0v8nvtwtrjqx3vycc76qqh9nsy"
 
   override func setUp() {
     super.setUp()
@@ -54,6 +57,77 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
     XCTAssertTrue(URLProtocolStub.requests.isEmpty)
   }
 
+  func testInitialAccountFanoutReadsSnapshotOnce() throws {
+    let communities = (0..<64).map { community(id: "community-\($0)") }
+    let snapshot = try snapshotData(communities)
+    let lock = NSLock()
+    var reads = 0
+    let started = expectation(description: "All community requests started")
+    started.expectedFulfillmentCount = communities.count
+    let finished = expectation(description: "Cancelled requests complete resolution")
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [URLProtocolStub.self]
+    let session = URLSession(configuration: configuration)
+    URLProtocolStub.handler = { request in
+      started.fulfill()
+      return Self.response(request, status: 200, data: Data("[]".utf8))
+    }
+    URLProtocolStub.finishLoading = { _ in false }
+    let resolver = BuzzPushNotificationResolver(session: session,
+      loadCommunitiesData: {
+        lock.lock()
+        reads += 1
+        lock.unlock()
+        return snapshot
+      }, loadPrivateKey: { _ in Self.privateKey })
+    resolver.resolve { result in
+      XCTAssertNil(result)
+      finished.fulfill()
+    }
+    wait(for: [started], timeout: 3)
+    lock.lock()
+    let initialReads = reads
+    lock.unlock()
+    XCTAssertEqual(initialReads, 1)
+    session.invalidateAndCancel()
+    wait(for: [finished], timeout: 3)
+  }
+
+  func testSnapshotAccountMustMatchKeychainBeforeAnyRequest() throws {
+    let configured = community(pubkey: try Self.pubkey(for: Self.profilePrivateKey))
+    URLProtocolStub.handler = { request in
+      XCTFail("Mismatched account key must not issue a request")
+      return Self.response(request, status: 200, data: Data("[]".utf8))
+    }
+    XCTAssertNil(resolve(makeResolver(communitiesData: try snapshotData([configured]))))
+    XCTAssertTrue(URLProtocolStub.requests.isEmpty)
+  }
+
+  func testKeyReplacementWhileRequestIsInFlightRejectsItsResult() throws {
+    let data = try snapshotData([community()])
+    let lock = NSLock()
+    var key = Self.privateKey
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [URLProtocolStub.self]
+    let message = try Self.signedEvent(privateKey: Self.profilePrivateKey,
+      createdAt: Self.now, kind: 9, tags: [["h", Self.channelID]], content: "Old account result")
+    URLProtocolStub.handler = { request in
+      lock.lock()
+      key = Self.profilePrivateKey
+      lock.unlock()
+      return Self.response(request, status: 200, data: try JSONEncoder().encode([message]))
+    }
+    let resolver = BuzzPushNotificationResolver(
+      session: URLSession(configuration: configuration), loadCommunitiesData: { data },
+      loadPrivateKey: { _ in
+        lock.lock()
+        defer { lock.unlock() }
+        return key
+      })
+    XCTAssertNil(resolve(resolver))
+    XCTAssertEqual(URLProtocolStub.requests.count, 1)
+  }
+
   func testResolveReturnsNilForNon2xxRelayResponse() throws {
     URLProtocolStub.handler = { request in
       Self.response(request, status: 503, data: Data())
@@ -61,6 +135,98 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
     let result = resolve(makeResolver(communitiesData: try snapshotData([community()])))
 
     XCTAssertNil(result)
+    XCTAssertEqual(URLProtocolStub.requests.count, 1)
+  }
+
+  func testResolveRetriesStaleConnectionOnceWithFreshProof() throws {
+    let event = try JSONDecoder().decode(
+      VerifiedNostrEvent.self,
+      from: Data(Self.fixtureEvent.utf8)
+    )
+    for code in [URLError.Code.timedOut, .networkConnectionLost] {
+      URLProtocolStub.reset()
+      var failed = false
+      URLProtocolStub.handler = { request in
+        if !failed {
+          failed = true
+          throw URLError(code)
+        }
+        return Self.response(request, status: 200, data: try JSONEncoder().encode([event]))
+      }
+
+      var retrySessions = 0
+      let result = try XCTUnwrap(
+        resolve(
+          makeResolver(
+            communitiesData: try snapshotData([community()]),
+            makeRetrySession: {
+              retrySessions += 1
+              let configuration = URLSessionConfiguration.ephemeral
+              configuration.protocolClasses = [URLProtocolStub.self]
+              configuration.httpAdditionalHeaders = ["X-Test-Session": "retry"]
+              return URLSession(configuration: configuration)
+            })), "\(code)")
+
+      XCTAssertEqual(result.body, "Hello Buzz")
+      XCTAssertEqual(retrySessions, 1)
+      let queries = URLProtocolStub.requests.prefix(2)
+      XCTAssertEqual(queries.map { $0.url?.path }, ["/query", "/query"])
+      XCTAssertEqual(
+        queries.map { $0.value(forHTTPHeaderField: "X-Test-Session") }, [nil, "retry"],
+        "The retry must not reuse the session whose connection failed.")
+      XCTAssertNotEqual(
+        queries.first?.value(forHTTPHeaderField: "Authorization"),
+        queries.last?.value(forHTTPHeaderField: "Authorization"),
+        "The relay rejects a replayed NIP-98 proof.")
+    }
+  }
+
+  func testResolveRetriesStaleConnectionOnlyOnce() throws {
+    URLProtocolStub.handler = { _ in throw URLError(.timedOut) }
+
+    XCTAssertNil(resolve(makeResolver(communitiesData: try snapshotData([community()]))))
+    XCTAssertEqual(URLProtocolStub.requests.count, 2)
+  }
+
+  func testResolveDoesNotRetryAfterAccountKeyChanges() throws {
+    let data = try snapshotData([community()])
+    let lock = NSLock()
+    var key = Self.privateKey
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [URLProtocolStub.self]
+    URLProtocolStub.handler = { _ in
+      lock.lock()
+      key = Self.profilePrivateKey
+      lock.unlock()
+      throw URLError(.timedOut)
+    }
+    let resolver = BuzzPushNotificationResolver(
+      session: URLSession(configuration: configuration), loadCommunitiesData: { data },
+      loadPrivateKey: { _ in
+        lock.lock()
+        defer { lock.unlock() }
+        return key
+      })
+
+    XCTAssertNil(resolve(resolver))
+    XCTAssertEqual(URLProtocolStub.requests.count, 1)
+  }
+
+  func testCancelStopsAPendingRetry() throws {
+    let resolver = makeResolver(communitiesData: try snapshotData([community()]))
+    URLProtocolStub.handler = { _ in
+      resolver.cancel()
+      throw URLError(.timedOut)
+    }
+
+    XCTAssertNil(resolve(resolver))
+    XCTAssertEqual(URLProtocolStub.requests.count, 1)
+  }
+
+  func testResolveDoesNotRetryOtherTransportFailures() throws {
+    URLProtocolStub.handler = { _ in throw URLError(.notConnectedToInternet) }
+
+    XCTAssertNil(resolve(makeResolver(communitiesData: try snapshotData([community()]))))
     XCTAssertEqual(URLProtocolStub.requests.count, 1)
   }
 
@@ -129,6 +295,59 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
     XCTAssertEqual(result?.0.body, "lower ID")
   }
 
+  func testMissingSenderNameOmitsLabelWithoutExposingKey() {
+    // Keep identity in the routing payload, but do not use it as a display name.
+    let senders: [(pubkey: String, title: String)] = [
+      (Self.unnamedSenderHex, ""),
+      (Self.unnamedSenderNpub, ""),
+      ("author-pubkey", ""),
+      (String(repeating: "+a", count: 32), ""),
+    ]
+    for sender in senders {
+      let result = BuzzPushNotificationResolver.decodeResolution(
+        events: [event(pubkey: sender.pubkey, content: "Preview")],
+        community: community()
+      )
+
+      XCTAssertEqual(result?.0.title, sender.title, "pubkey: \(sender.pubkey)")
+      XCTAssertEqual(result?.0.body, "Preview", "pubkey: \(sender.pubkey)")
+      XCTAssertNil(result?.0.subtitle, "pubkey: \(sender.pubkey)")
+      XCTAssertEqual(result?.0.senderPubkey, sender.pubkey, "pubkey: \(sender.pubkey)")
+      XCTAssertEqual(result?.0.threadIdentifier, "community-id", "pubkey: \(sender.pubkey)")
+    }
+  }
+
+  func testReplyNavigationUsesDirectParentAndKeepsExactEvent() throws {
+    let parent = String(repeating: "a", count: 64)
+    let reply = event(id: "reply-id", content: "Reply preview", tags: [
+      ["h", Self.channelID],
+      ["e", "outer-root", "", "root"],
+      ["e", parent, "", "reply"],
+      ["e", "bad", "", "reply"],
+      ["e", "", "", "reply"],
+    ])
+    let resolution = try XCTUnwrap(BuzzPushNotificationResolver.decodeResolution(
+      events: [reply], community: community()
+    )?.0)
+    let target = try XCTUnwrap(resolution.navigationTarget)
+    XCTAssertEqual(target.eventID, "reply-id")
+    XCTAssertEqual(target.userInfoValue["thread_root_id"], parent)
+  }
+
+  func testNavigationKeepsTopLevelAndBroadcastMessagesInChannel() throws {
+    for tags in [
+      [["h", Self.channelID]],
+      [["h", Self.channelID], ["e", "mention", "", "mention"]],
+      [["h", Self.channelID], ["e", "root", "", "root"]],
+      [["h", Self.channelID], ["e", "parent", "", "reply"], ["broadcast", "1"]],
+    ] {
+      let resolution = try XCTUnwrap(BuzzPushNotificationResolver.decodeResolution(
+        events: [event(content: "Preview", tags: tags)], community: community()
+      )?.0)
+      XCTAssertNil(resolution.navigationTarget?.threadRootID)
+    }
+  }
+
   func testResolveSucceedsAndMutatesGatewayContent() throws {
     let event = try JSONDecoder().decode(
       VerifiedNostrEvent.self,
@@ -146,9 +365,9 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
 
     XCTAssertNotEqual(result.title, Self.gatewayBody)
     XCTAssertNotEqual(result.body, Self.gatewayBody)
-    XCTAssertEqual(result.title, String(event.pubkey.prefix(8)) + "…")
+    XCTAssertEqual(result.title, "")
     XCTAssertEqual(result.body, "Hello Buzz")
-    XCTAssertEqual(result.subtitle, "Community")
+    XCTAssertNil(result.subtitle)
     XCTAssertEqual(
       result.threadIdentifier,
       BuzzPushPresentationIdentity.conversation(
@@ -165,6 +384,178 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
         channelID: Self.channelID
       )
     )
+  }
+
+  /// A push carries no event reference. Each push must show a message not shown before,
+  /// including after the extension process restarts, instead of the newest match again.
+  func testEachPushShowsANewMessageAndNeverRepeatsOne() throws {
+    let snapshot = try snapshotData([community()])
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+    let scope = try XCTUnwrap(BuzzNotificationCacheScope(community: community()))
+    let now = Date(timeIntervalSince1970: TimeInterval(Self.now))
+    // A fresh cache instance per push models a fresh extension process.
+    func push() -> String? {
+      resolve(makeResolver(communitiesData: snapshot,
+        cacheOverride: BuzzNotificationCache(directory: root, now: { now }, isCurrent: { $0 == scope }),
+        now: now))?.body
+    }
+    var relayEvents: [VerifiedNostrEvent] = []
+    URLProtocolStub.handler = { request in
+      Self.response(request, status: 200, data: try JSONEncoder().encode(relayEvents))
+    }
+    func message(_ content: String, secondsAgo: Int) throws -> VerifiedNostrEvent {
+      try Self.signedEvent(privateKey: Self.profilePrivateKey, createdAt: Self.now - secondsAgo,
+        kind: 9, tags: [["h", Self.channelID]], content: content)
+    }
+    let window = BuzzNotificationCache.presentationReorderWindow
+
+    let history = try message("Last week", secondsAgo: 7 * 24 * 3600)
+    let first = try message("First", secondsAgo: 3600)
+    relayEvents = [history, first]
+    XCTAssertEqual(push(), "First", "with nothing shown yet, the newest message")
+    XCTAssertNil(push(), "a push for a non-message event must not repeat it")
+
+    // Two messages whose pushes resolve out of order: the later push wins the first
+    // resolution, so the earlier push must still find its own message.
+    let early = try message("Early", secondsAgo: 60)
+    let late = try message("Late", secondsAgo: 59)
+    relayEvents = [late, early, first, history]
+    XCTAssertEqual(push(), "Late")
+    XCTAssertEqual(push(), "Early")
+    XCTAssertNil(push())
+
+    // Older history is never surfaced by a later push.
+    let stale = try message("Stale", secondsAgo: 59 + window + 1)
+    relayEvents = [late, early, stale, first, history]
+    XCTAssertNil(push(), "a message older than the reorder window is history")
+
+    // A future-dated message is shown once and doesn't hide messages that follow it.
+    let future = try message("Future", secondsAgo: -3600)
+    relayEvents = [future, late]
+    XCTAssertEqual(push(), "Future")
+    let next = try message("Next", secondsAgo: 0)
+    relayEvents = [future, next, late]
+    XCTAssertEqual(push(), "Next")
+    XCTAssertNil(push())
+  }
+
+  func testShownMessagesStayShownAcrossCommunitiesFailuresAndBursts() throws {
+    let a = community(id: "community-a", relayUrl: "https://a.example")
+    let b = community(id: "community-b", relayUrl: "https://b.example")
+    let snapshot = try snapshotData([a, b])
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+    let scopes = [a, b].compactMap { BuzzNotificationCacheScope(community: $0) }
+    var clock = Self.now
+    func push() -> String? {
+      let now = Date(timeIntervalSince1970: TimeInterval(clock))
+      return resolve(makeResolver(communitiesData: snapshot,
+        privateKeys: ["community-a": Self.privateKey, "community-b": Self.privateKey],
+        cacheOverride: BuzzNotificationCache(
+          directory: root, now: { now }, isCurrent: { scopes.contains($0) }),
+        now: now))?.body
+    }
+    var relayEvents: [String: [VerifiedNostrEvent]] = [:]
+    var failingHosts: Set<String> = []
+    URLProtocolStub.handler = { request in
+      let host = request.url?.host ?? ""
+      return Self.response(request, status: failingHosts.contains(host) ? 500 : 200,
+        data: try JSONEncoder().encode(relayEvents[host] ?? []))
+    }
+    func message(_ content: String, createdAt: Int) throws -> VerifiedNostrEvent {
+      try Self.signedEvent(privateKey: Self.profilePrivateKey, createdAt: createdAt,
+        kind: 9, tags: [["h", Self.channelID]], content: content)
+    }
+
+    // B has shown nothing yet, but A's shown message still marks B's last week as
+    // history, even when A's query fails.
+    let mention = try message("A mention", createdAt: clock - 60)
+    relayEvents["a.example"] = [mention]
+    relayEvents["b.example"] = [try message("B last week", createdAt: clock - 7 * 24 * 3600)]
+    XCTAssertEqual(push(), "A mention")
+    XCTAssertNil(push(), "an old message in another community is not new")
+    failingHosts = ["a.example"]
+    XCTAssertNil(push(), "a failed query doesn't drop its community's history")
+    failingHosts = []
+
+    // A burst of newer messages doesn't evict one the relay still returns.
+    var newest = mention
+    for index in 0..<100 {
+      clock += 1
+      newest = try message("Burst \(index)", createdAt: clock)
+      relayEvents["a.example"] = [newest, mention]
+      XCTAssertEqual(push(), "Burst \(index)")
+    }
+    XCTAssertNil(push(), "a shown message is not shown again after a burst")
+
+    // A store that can't be written still remembers what it already shows.
+    let directory = root.appendingPathComponent(scopes[0].directoryName, isDirectory: true)
+    try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: directory.path)
+    addTeardownBlock {
+      try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: directory.path)
+    }
+    XCTAssertNil(push(), "a read-only store does not repeat a shown message")
+    relayEvents["a.example"] = [try message("Unrecorded", createdAt: clock), newest, mention]
+    XCTAssertEqual(push(), "Unrecorded", "an unwritable store never hides a new message")
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: directory.path)
+
+    // A future-dated message stays remembered while the relay keeps returning it first,
+    // even after later messages push its capped time out of the window.
+    let future = try message("Future", createdAt: clock + 3600)
+    relayEvents["a.example"] = [future]
+    XCTAssertEqual(push(), "Future")
+    for index in 0..<40 {
+      clock += 30
+      relayEvents["a.example"] = [future, try message("Later \(index)", createdAt: clock)]
+      XCTAssertEqual(push(), "Later \(index)")
+    }
+    XCTAssertNil(push(), "a future-dated message is not shown again")
+  }
+
+  func testExtremeTimestampsDoNotCrashTheClaim() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+    let scope = try XCTUnwrap(BuzzNotificationCacheScope(community: community()))
+    let cache = BuzzNotificationCache(
+      directory: root, now: { Date(timeIntervalSince1970: TimeInterval(Self.now)) },
+      isCurrent: { $0 == scope })
+    func claim(_ event: VerifiedNostrEvent) throws -> Bool {
+      try cache.claimFirstUnpresented([(event: event, scope: scope)], scopes: [scope]) == 0
+    }
+    func message(_ content: String, createdAt: Int) throws -> VerifiedNostrEvent {
+      try Self.signedEvent(privateKey: Self.profilePrivateKey, createdAt: createdAt,
+        kind: 9, tags: [["h", Self.channelID]], content: content)
+    }
+    let ancient = try message("Ancient", createdAt: Int.min)
+    XCTAssertTrue(try claim(ancient))
+    XCTAssertFalse(try claim(ancient))
+    XCTAssertTrue(try claim(try message("Current", createdAt: Self.now)))
+    XCTAssertFalse(try claim(try message("Also ancient", createdAt: Int.min + 1)),
+      "a message far older than one already shown is history")
+    XCTAssertTrue(try claim(try message("Far future", createdAt: Int.max)))
+  }
+
+  func testFutureDatedEntriesDoNotEvictAClaimedMessage() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+    let scope = try XCTUnwrap(BuzzNotificationCacheScope(community: community()))
+    let cache = BuzzNotificationCache(
+      directory: root, now: { Date(timeIntervalSince1970: TimeInterval(Self.now)) },
+      isCurrent: { $0 == scope })
+    func claim(_ event: VerifiedNostrEvent) throws -> Bool {
+      try cache.claimFirstUnpresented([(event: event, scope: scope)], scopes: [scope]) == 0
+    }
+    for index in 0..<(BuzzNotificationCache.maximumPresentedMessages + 1) {
+      let ahead = try Self.signedEvent(privateKey: Self.profilePrivateKey,
+        createdAt: Self.now + 600 + index, kind: 9, tags: [["h", Self.channelID]],
+        content: "Ahead \(index)")
+      XCTAssertTrue(try claim(ahead))
+    }
+    let current = try Self.signedEvent(privateKey: Self.profilePrivateKey, createdAt: Self.now,
+      kind: 9, tags: [["h", Self.channelID]], content: "Current")
+    XCTAssertTrue(try claim(current))
+    XCTAssertFalse(try claim(current), "a claimed message survives retention")
   }
 
   func testFreshVerifiedCacheResolvesSenderAvatarAndChannelWithoutRefresh() throws {
@@ -231,7 +622,7 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
     XCTAssertEqual(URLProtocolStub.requests.count, 1)
   }
 
-  func testStaleVerifiedCacheIsUsedWhileOneBoundedRefreshFails() throws {
+  func testStaleVerifiedCacheIsUsedWhileBoundedRefreshesFail() throws {
     let message = try Self.signedEvent(
       privateKey: Self.profilePrivateKey,
       createdAt: Self.now,
@@ -278,7 +669,7 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
       if URLProtocolStub.requests.count == 1 {
         return Self.response(request, status: 200, data: try JSONEncoder().encode([message]))
       }
-      XCTAssertEqual(request.timeoutInterval, 3)
+      XCTAssertEqual(request.timeoutInterval, 60)
       return Self.response(request, status: 503, data: Data())
     }
 
@@ -295,7 +686,7 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
     XCTAssertEqual(result.title, "Stale Alice")
     XCTAssertEqual(result.conversationDisplayName, "#Stale General")
     XCTAssertEqual(result.conversationRecipientCount, 1)
-    XCTAssertEqual(URLProtocolStub.requests.count, 2)
+    XCTAssertEqual(URLProtocolStub.requests.count, 4)
   }
 
   func testOlderVerifiedRefreshCannotReplaceNewerStaleCache() throws {
@@ -455,7 +846,27 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
     XCTAssertEqual(result.conversationDisplayName, "#Stale General")
   }
 
-  func testMissingCacheRefreshesVerifiedProfileAndChannelTogether() throws {
+  func testLegacyAccountSnapshotEnrichesBeforeFirstAppLaunchAfterUpgrade() throws {
+    let message = try Self.signedEvent(privateKey: Self.profilePrivateKey,
+      createdAt: Self.now, kind: 9, tags: [["h", Self.channelID]], content: "Hello before app launch")
+    let profile = try Self.signedEvent(privateKey: Self.profilePrivateKey,
+      createdAt: Self.now, kind: 0, content: #"{"name":"Alice"}"#)
+    var legacy = community()
+    legacy.notificationSessionID = nil
+    URLProtocolStub.handler = { request in
+      Self.response(request, status: 200,
+        data: try JSONEncoder().encode(URLProtocolStub.requests.count == 1 ? [message] : [profile]))
+    }
+    let result = try XCTUnwrap(resolve(makeResolver(communitiesData: try snapshotData([legacy]))))
+    XCTAssertEqual(result.title, "Alice")
+    XCTAssertEqual(result.body, "Hello before app launch")
+    XCTAssertNotNil(result.notificationScope)
+    var newSignIn = legacy
+    newSignIn.notificationSessionID = UUID().uuidString
+    XCTAssertNotEqual(result.notificationScope, BuzzNotificationCacheScope(community: newSignIn))
+  }
+
+  func testMissingCacheRefreshesVerifiedProfileAndChannelIndependently() throws {
     let message = try Self.signedEvent(
       privateKey: Self.profilePrivateKey,
       createdAt: Self.now,
@@ -511,7 +922,59 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
     XCTAssertEqual(result.conversationDisplayName, "#Fresh General")
     XCTAssertEqual(result.conversationRecipientCount, 1)
     XCTAssertNil(result.senderAvatarPNG)
-    XCTAssertEqual(URLProtocolStub.requests.count, 2)
+    XCTAssertEqual(URLProtocolStub.requests.count, 4)
+  }
+
+  func testOnlyOwnSoloChatConversationNameDropsChannelHash() throws {
+    let message = try Self.signedEvent(
+      privateKey: Self.profilePrivateKey,
+      createdAt: Self.now,
+      kind: 9,
+      tags: [["h", Self.channelID]],
+      content: "Agent reply"
+    )
+    // Like the app's Channel.isPersonalChat: only the viewer's own Solo chat
+    // is personal; someone else's Solo chat stays an ordinary channel.
+    for (creator, expected) in [
+      (Self.ownPubkey, "Trip planning"), (message.pubkey, "#Trip planning"),
+    ] {
+      URLProtocolStub.requests = []
+      let channel = try Self.signedEvent(
+        privateKey: Self.relayPrivateKey,
+        createdAt: Self.now,
+        kind: 39_000,
+        tags: [
+          ["d", Self.channelID], ["name", "Trip planning"], ["t", "stream"],
+          ["t", "buzz.solo"], ["P", creator], ["private"],
+        ]
+      )
+      let membership = try Self.signedEvent(
+        privateKey: Self.relayPrivateKey,
+        createdAt: Self.now,
+        kind: 39_002,
+        tags: [["d", Self.channelID], ["p", Self.ownPubkey], ["p", message.pubkey]]
+      )
+      URLProtocolStub.handler = { request in
+        if URLProtocolStub.requests.count == 1 {
+          return Self.response(request, status: 200, data: try JSONEncoder().encode([message]))
+        }
+        return Self.response(
+          request, status: 200, data: try JSONEncoder().encode([channel, membership]))
+      }
+
+      let result = try XCTUnwrap(
+        resolve(
+          makeResolver(
+            communitiesData: try snapshotData([
+              community(relayMetadataPubkey: channel.pubkey)
+            ]),
+            now: Date(timeIntervalSince1970: TimeInterval(Self.now))
+          )
+        )
+      )
+
+      XCTAssertEqual(result.conversationDisplayName, expected)
+    }
   }
 
   func testMalformedAndUnverifiedRefreshFallsBackWithoutBlockingMessage() throws {
@@ -559,13 +1022,19 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
       )
     )
 
-    XCTAssertEqual(result.title, String(message.pubkey.prefix(8)) + "…")
+    XCTAssertEqual(result.title, "")
     XCTAssertNil(result.conversationDisplayName)
-    XCTAssertEqual(result.subtitle, "Community")
+    XCTAssertNil(result.subtitle)
     XCTAssertEqual(result.body, "Fallback content")
   }
 
   func testOversizedPresentationRefreshFallsBackWithoutBlockingMessage() throws {
+    let cancelled = expectation(description: "Oversized streaming responses are cancelled")
+    cancelled.expectedFulfillmentCount = 3
+    URLProtocolStub.finishLoading = { _ in URLProtocolStub.requests.count == 1 }
+    URLProtocolStub.onStopLoading = { _ in
+      if URLProtocolStub.requests.count > 1 { cancelled.fulfill() }
+    }
     let message = try Self.signedEvent(
       privateKey: Self.profilePrivateKey,
       createdAt: Self.now,
@@ -602,10 +1071,375 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
       )
     )
 
-    XCTAssertEqual(result.title, String(message.pubkey.prefix(8)) + "…")
+    XCTAssertEqual(result.title, "")
     XCTAssertNil(result.conversationDisplayName)
     XCTAssertEqual(result.body, "Bounded fallback")
-    XCTAssertEqual(URLProtocolStub.requests.count, 2)
+    XCTAssertEqual(URLProtocolStub.requests.count, 4)
+    wait(for: [cancelled], timeout: 1)
+  }
+
+  /// An enforcing organization relay refuses `/query` without a NIP-FI assertion. The extension
+  /// mints one from the shared organization session, reuses it across requests and
+  /// notifications, and never sends the session or an assertion to any other relay.
+  func testOrganizationRelayQueriesCarryMintedAssertion() throws {
+    let message = try Self.signedEvent(privateKey: Self.profilePrivateKey,
+      createdAt: Self.now, kind: 9, tags: [["h", Self.channelID]], content: "Enforced hello")
+    let profile = try Self.signedEvent(privateKey: Self.profilePrivateKey,
+      createdAt: Self.now, kind: 0, content: #"{"display_name":"Fizz"}"#)
+    let organization = BuzzOrganizationSession(
+      origin: "https://identity.org.example", credential: "session-credential",
+      relayHosts: ["relay.org.example"])
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [URLProtocolStub.self]
+    var sharedSession: BuzzOrganizationSession? = organization
+    let issuer = BuzzRelayAssertionIssuer(
+      session: URLSession(configuration: configuration), loadSession: { sharedSession },
+      now: { Date(timeIntervalSince1970: TimeInterval(Self.now)) })
+    let issued = "header.payload.signature"
+    var issuerBodies: [[String: Any]] = []
+    var signOutDuringQuery = false
+    var signOutDuringProfile = false
+    var redirectedHeaders: [String?] = []
+    URLProtocolStub.handler = { request in
+      let body = Self.body(of: request)
+      if request.url?.host == "identity.org.example" {
+        XCTAssertEqual(request.url?.path, "/api/goose/v1/buzz/identity/assertions")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "X-BB-Session-Credential"), "session-credential")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Origin"), "https://identity.org.example")
+        XCTAssertTrue(request.value(forHTTPHeaderField: "Authorization")?.hasPrefix("Nostr ") == true)
+        issuerBodies.append(try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any]))
+        return Self.response(request, status: 200, data: try JSONSerialization.data(withJSONObject: [
+          "assertion": issued, "nostr_pubkey": Self.ownPubkey, "expires_at": Self.now + 300,
+        ]))
+      }
+      XCTAssertNil(request.value(forHTTPHeaderField: "X-BB-Session-Credential"))
+      if request.url?.host == "elsewhere.example" {
+        redirectedHeaders.append(request.value(forHTTPHeaderField: "Nostr-Federated-Identity"))
+        return Self.response(request, status: 200, data: try JSONEncoder().encode([message]))
+      }
+      let enforced = request.url?.host == "relay.org.example"
+      let assertion = request.value(forHTTPHeaderField: "Nostr-Federated-Identity")
+      if enforced, assertion != "Bearer \(issued)" {
+        return Self.response(request, status: 401, data: Data())
+      }
+      if !enforced { XCTAssertNil(assertion) }
+      if enforced, signOutDuringQuery { sharedSession = nil }
+      let filters = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [[String: Any]])
+      let kinds = filters.flatMap { $0["kinds"] as? [Int] ?? [] }
+      if enforced, signOutDuringProfile, kinds.contains(0) { sharedSession = nil }
+      return Self.response(request, status: 200,
+        data: try JSONEncoder().encode(kinds.contains(0) ? [profile] : kinds.contains(9) ? [message] : []))
+    }
+
+    for relayUrl in ["wss://relay.org.example", "wss://relay.org.example", "https://relay.example"] {
+      let configured = community(relayUrl: relayUrl)
+      let result = try XCTUnwrap(resolve(makeResolver(
+        communitiesData: try snapshotData([configured]),
+        now: Date(timeIntervalSince1970: TimeInterval(Self.now)), assertionIssuer: issuer)))
+      XCTAssertEqual(result.body, "Enforced hello", relayUrl)
+      XCTAssertEqual(result.title, "Fizz", relayUrl)
+    }
+    // One issuance served the message and profile queries of both organization notifications.
+    XCTAssertEqual(issuerBodies.count, 1)
+    XCTAssertEqual(issuerBodies.first?["relay_url"] as? String, "wss://relay.org.example")
+    XCTAssertEqual(issuerBodies.first?["nostr_pubkey"] as? String, Self.ownPubkey)
+
+    // A redirecting relay is refused, so its target never sees the assertion.
+    URLProtocolStub.redirect = { request in
+      request.url?.host == "relay.org.example" ? URL(string: "https://elsewhere.example/query") : nil
+    }
+    XCTAssertNil(resolve(makeResolver(
+      communitiesData: try snapshotData([community(relayUrl: "wss://relay.org.example")]),
+      now: Date(timeIntervalSince1970: TimeInterval(Self.now)), assertionIssuer: issuer)))
+    XCTAssertEqual(redirectedHeaders, [])
+    URLProtocolStub.redirect = nil
+
+    // Signing out while the relay query is in flight drops what that assertion fetched.
+    signOutDuringQuery = true
+    XCTAssertNil(resolve(makeResolver(
+      communitiesData: try snapshotData([community(relayUrl: "wss://relay.org.example")]),
+      now: Date(timeIntervalSince1970: TimeInterval(Self.now)), assertionIssuer: issuer)))
+    signOutDuringQuery = false
+
+    // Signing out after the message arrived revokes delivery, which rechecks the session.
+    sharedSession = organization
+    let enriching = makeResolver(
+      communitiesData: try snapshotData([community(relayUrl: "wss://relay.org.example")]),
+      now: Date(timeIntervalSince1970: TimeInterval(Self.now)), assertionIssuer: issuer)
+    _ = resolve(enriching)
+    XCTAssertTrue(enriching.isStillAuthorized())
+    signOutDuringProfile = true
+    let revoked = makeResolver(
+      communitiesData: try snapshotData([community(relayUrl: "wss://relay.org.example")]),
+      now: Date(timeIntervalSince1970: TimeInterval(Self.now)), assertionIssuer: issuer)
+    _ = resolve(revoked)
+    XCTAssertFalse(revoked.isStillAuthorized())
+    signOutDuringProfile = false
+
+    // Signing out removes the shared session: the relay refuses, and the notification falls back.
+    sharedSession = nil
+    let signedOut = BuzzRelayAssertionIssuer(
+      session: URLSession(configuration: configuration), loadSession: { sharedSession })
+    XCTAssertNil(resolve(makeResolver(
+      communitiesData: try snapshotData([community(relayUrl: "wss://relay.org.example")]),
+      assertionIssuer: signedOut)))
+    XCTAssertEqual(issuerBodies.count, 1)
+  }
+
+  /// Hosted communities enforce NIP-FI one by one. The extension mints from the shared hosted
+  /// session for hosted relays only, and a community the hosted issuer refuses (one that doesn't
+  /// enforce) is queried without an assertion and not asked about again for a while.
+  func testHostedRelayQueriesMintFromHostedSession() throws {
+    let message = try Self.signedEvent(privateKey: Self.profilePrivateKey,
+      createdAt: Self.now, kind: 9, tags: [["h", Self.channelID]], content: "Hosted hello")
+    let organization = BuzzOrganizationSession(
+      origin: "https://identity.org.example", credential: "org-credential",
+      relayHosts: ["relay.org.example"])
+    let hosted = BuzzOrganizationSession(
+      origin: "https://app.example", credential: "hosted-credential", relayHosts: [],
+      relayDomains: ["communities.example"], communityDomain: "communities.example")
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [URLProtocolStub.self]
+    var sharedHosted: BuzzOrganizationSession? = hosted
+    var clock = Date(timeIntervalSince1970: TimeInterval(Self.now))
+    let issuer = BuzzRelayAssertionIssuer(
+      session: URLSession(configuration: configuration), loadSession: { organization },
+      loadHostedSession: { sharedHosted }, now: { clock })
+    let issued = "hosted.payload.signature"
+    let enforcing: Set<String> = ["team.communities.example", "pending.communities.example"]
+    var issuedRelays: [String] = []
+    var builderlabCalls = 0
+    var boundPubkey: String?
+    var relayAssertions: [String: [String?]] = [:]
+    URLProtocolStub.handler = { request in
+      let body = Self.body(of: request)
+      if request.url?.host == "app.example" {
+        builderlabCalls += 1
+        XCTAssertEqual(request.value(forHTTPHeaderField: "X-BB-Session-Credential"), "hosted-credential")
+        if request.url?.path == "/api/goose/v1/buzz/nostr-identities/current" {
+          let identity: Any = boundPubkey.map { ["pubkey_hex": $0] } ?? NSNull()
+          return Self.response(request, status: 200,
+            data: try JSONSerialization.data(withJSONObject: ["identity": identity]))
+        }
+        XCTAssertEqual(request.url?.path, "/api/goose/v1/buzz/identity/assertions")
+        let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        issuedRelays.append(try XCTUnwrap(fields["relay_url"] as? String))
+        return Self.response(request, status: 200, data: try JSONSerialization.data(withJSONObject: [
+          "assertion": issued, "nostr_pubkey": Self.ownPubkey, "expires_at": Self.now + 300,
+        ]))
+      }
+      XCTAssertNotEqual(request.url?.host, "identity.org.example")
+      XCTAssertNil(request.value(forHTTPHeaderField: "X-BB-Session-Credential"))
+      let host = try XCTUnwrap(request.url?.host)
+      let assertion = request.value(forHTTPHeaderField: "Nostr-Federated-Identity")
+      relayAssertions[host, default: []].append(assertion)
+      if enforcing.contains(host), assertion != "Bearer \(issued)" {
+        // The relay's NIP-FI challenge for missing evidence.
+        let response = HTTPURLResponse(
+          url: request.url!, statusCode: 401, httpVersion: "HTTP/1.1",
+          headerFields: ["WWW-Authenticate": "Nostr"])!
+        return (response, Data())
+      }
+      let filters = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [[String: Any]])
+      let kinds = filters.flatMap { $0["kinds"] as? [Int] ?? [] }
+      return Self.response(request, status: 200,
+        data: try JSONEncoder().encode(kinds.contains(9) ? [message] : []))
+    }
+    func notify(_ relayUrl: String, delivers: Bool = true) throws -> BuzzPushNotificationResolver {
+      let resolver = makeResolver(
+        communitiesData: try snapshotData([community(relayUrl: relayUrl)]),
+        now: clock, assertionIssuer: issuer)
+      let body = resolve(resolver)?.body
+      if delivers { XCTAssertEqual(body, "Hosted hello", relayUrl) } else { XCTAssertNotEqual(body, "Hosted hello", relayUrl) }
+      return resolver
+    }
+
+    // A community that doesn't enforce NIP-FI never costs a Builderlab call.
+    _ = try notify("wss://open.communities.example")
+    _ = try notify("wss://open.communities.example")
+    XCTAssertEqual(builderlabCalls, 0)
+    XCTAssertTrue(relayAssertions["open.communities.example"]?.allSatisfy { $0 == nil } == true)
+
+    // Issuance can bind the account's first identity, which only the app chooses: while the
+    // account is unbound, or bound to another key, the extension never asks the issuer, and
+    // its refusal stands until it lapses.
+    _ = try notify("wss://pending.communities.example", delivers: false)
+    _ = try notify("wss://pending.communities.example", delivers: false)
+    XCTAssertEqual(builderlabCalls, 1)
+    boundPubkey = String(repeating: "f", count: 64)
+    clock += BuzzRelayAssertionIssuer.refusalLifetime + 1
+    _ = try notify("wss://pending.communities.example", delivers: false)
+    XCTAssertEqual(builderlabCalls, 2)
+    XCTAssertTrue(issuedRelays.isEmpty)
+    boundPubkey = Self.ownPubkey
+    clock = Date(timeIntervalSince1970: TimeInterval(Self.now))
+
+    // An enforcing community challenges, then gets the hosted assertion on the retry.
+    let enforced = try notify("wss://team.communities.example")
+    XCTAssertTrue(enforced.isStillAuthorized())
+    XCTAssertEqual(issuedRelays, ["wss://team.communities.example"])
+    XCTAssertEqual(relayAssertions["team.communities.example"]?.first, .some(nil))
+    // Once challenged, the relay gets the reused assertion up front.
+    let before = relayAssertions["team.communities.example"]?.count ?? 0
+    _ = try notify("wss://team.communities.example")
+    XCTAssertEqual(issuedRelays.count, 1)
+    XCTAssertTrue(
+      relayAssertions["team.communities.example"]?.dropFirst(before).allSatisfy {
+        $0 == "Bearer \(issued)"
+      } == true)
+
+    // Hosts outside the hosted community domain never reach the hosted issuer.
+    let calls = builderlabCalls
+    for relayUrl in ["wss://communities.example", "wss://team.other.example", "wss://communities.example.evil"] {
+      _ = try notify(relayUrl)
+    }
+    XCTAssertEqual(builderlabCalls, calls)
+
+    // Signing out of the hosted account revokes delivery of what its assertion fetched.
+    sharedHosted = nil
+    XCTAssertFalse(enforced.isStillAuthorized())
+
+    // An account origin that redirects never gets the session forwarded: the redirect is
+    // refused, so the relay stub above never sees the credential.
+    let redirecting = BuzzRelayAssertionIssuer(
+      session: URLSession(configuration: configuration), loadSession: { nil },
+      loadHostedSession: { hosted }, now: { clock })
+    URLProtocolStub.redirect = { request in
+      request.url?.host == "app.example" ? URL(string: "https://elsewhere.example/steal") : nil
+    }
+    defer { URLProtocolStub.redirect = nil }
+    XCTAssertNotEqual(resolve(makeResolver(
+      communitiesData: try snapshotData([community(relayUrl: "wss://team.communities.example")]),
+      now: clock, assertionIssuer: redirecting))?.body, "Hosted hello")
+    XCTAssertNil(relayAssertions["elsewhere.example"])
+  }
+
+  /// A refused or malformed issuance never produces a header.
+  func testOrganizationAssertionIssuanceFailuresSendNoHeader() throws {
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [URLProtocolStub.self]
+    let organization = BuzzOrganizationSession(
+      origin: "https://identity.org.example", credential: "session-credential",
+      relayHosts: ["relay.org.example"])
+    let cases: [(String, Int, [String: Any])] = [
+      ("refused", 401, [:]),
+      ("other key", 200, ["assertion": "a.b.c", "nostr_pubkey": String(repeating: "f", count: 64),
+        "expires_at": Self.now + 300]),
+      ("expired", 200, ["assertion": "a.b.c", "nostr_pubkey": Self.ownPubkey, "expires_at": Self.now - 1]),
+      ("header injection", 200, ["assertion": "a.b\r\nX: y", "nostr_pubkey": Self.ownPubkey,
+        "expires_at": Self.now + 300]),
+    ]
+    for (name, status, body) in cases {
+      URLProtocolStub.handler = { request in
+        Self.response(request, status: status, data: try JSONSerialization.data(withJSONObject: body))
+      }
+      let issuer = BuzzRelayAssertionIssuer(
+        session: URLSession(configuration: configuration), loadSession: { organization })
+      let done = expectation(description: name)
+      issuer.header(
+        relayURL: URL(string: "https://relay.org.example")!, privateKeyHex: Self.privateKey
+      ) { header in
+        XCTAssertNil(header, name)
+        done.fulfill()
+      }
+      wait(for: [done], timeout: 2)
+    }
+    // Signing out while issuance is in flight discards the minted assertion.
+    var current: BuzzOrganizationSession? = organization
+    URLProtocolStub.handler = { request in
+      current = nil
+      return Self.response(request, status: 200, data: try JSONSerialization.data(withJSONObject: [
+        "assertion": "a.b.c", "nostr_pubkey": Self.ownPubkey, "expires_at": Self.now + 300,
+      ]))
+    }
+    let racing = BuzzRelayAssertionIssuer(
+      session: URLSession(configuration: configuration), loadSession: { current })
+    let raced = expectation(description: "sign-out during issuance")
+    racing.header(
+      relayURL: URL(string: "https://relay.org.example")!, privateKeyHex: Self.privateKey
+    ) { header in
+      XCTAssertNil(header)
+      raced.fulfill()
+    }
+    wait(for: [raced], timeout: 2)
+
+    // Hosts are exact: a subdomain or another port is not the organization relay.
+    for relay in ["https://evil.relay.org.example", "https://relay.org.example:8443"] {
+      URLProtocolStub.reset()
+      let issuer = BuzzRelayAssertionIssuer(
+        session: URLSession(configuration: configuration), loadSession: { organization })
+      let done = expectation(description: relay)
+      issuer.header(relayURL: URL(string: relay)!, privateKeyHex: Self.privateKey) { header in
+        XCTAssertNil(header, relay)
+        done.fulfill()
+      }
+      wait(for: [done], timeout: 2)
+      XCTAssertTrue(URLProtocolStub.requests.isEmpty, relay)
+    }
+  }
+
+  static func body(of request: URLRequest) -> Data {
+    var body = request.httpBody ?? Data()
+    if let stream = request.httpBodyStream {
+      stream.open()
+      defer { stream.close() }
+      var buffer = [UInt8](repeating: 0, count: 4096)
+      while stream.hasBytesAvailable {
+        let count = stream.read(&buffer, maxLength: buffer.count)
+        if count <= 0 { break }
+        body.append(contentsOf: buffer.prefix(count))
+      }
+    }
+    return body
+  }
+
+  func testLargeRosterCannotDiscardSenderProfileOrChannelMetadata() throws {
+    let message = try Self.signedEvent(privateKey: Self.profilePrivateKey,
+      createdAt: Self.now, kind: 9, tags: [["h", Self.channelID]], content: "Large channel")
+    let profile = try Self.signedEvent(privateKey: Self.profilePrivateKey,
+      createdAt: Self.now, kind: 0, content: #"{"display_name":"Fizz"}"#)
+    let members = try Self.signedEvent(privateKey: Self.relayPrivateKey,
+      createdAt: Self.now, kind: 39002,
+      tags: [["d", Self.channelID]] + (0..<30000).map { ["p", String(format: "%064x", $0)] })
+    let channel = try Self.signedEvent(privateKey: Self.relayPrivateKey,
+      createdAt: Self.now, kind: 39000,
+      tags: [["d", Self.channelID], ["name", "Large Channel"], ["t", "stream"]])
+    let roster = try JSONEncoder().encode([profile, channel, members])
+    XCTAssertGreaterThan(roster.count, BuzzPushNotificationResolver.maximumPresentationResponseBytes)
+    URLProtocolStub.handler = { request in
+      if URLProtocolStub.requests.count == 1 {
+        return Self.response(request, status: 200, data: try JSONEncoder().encode([message]))
+      }
+      var body = request.httpBody ?? Data()
+      if let stream = request.httpBodyStream {
+        stream.open()
+        defer { stream.close() }
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while stream.hasBytesAvailable {
+          let count = stream.read(&buffer, maxLength: buffer.count)
+          if count <= 0 { break }
+          body.append(contentsOf: buffer.prefix(count))
+        }
+      }
+      let filters = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [[String: Any]])
+      let kinds = filters.flatMap { $0["kinds"] as? [Int] ?? [] }
+      return Self.response(request, status: 200,
+        data: kinds.contains(39002) ? roster : try JSONEncoder().encode(kinds.contains(0) ? [profile] : [channel]))
+    }
+    let configured = community(relayMetadataPubkey: members.pubkey)
+    let scope = try XCTUnwrap(BuzzNotificationCacheScope(community: configured))
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let cache = BuzzNotificationCache(directory: root, isCurrent: { $0 == scope })
+    let result = try XCTUnwrap(resolve(makeResolver(
+      communitiesData: try snapshotData([configured]), cacheOverride: cache,
+      now: Date(timeIntervalSince1970: TimeInterval(Self.now)))))
+    XCTAssertEqual(result.title, "Fizz")
+    XCTAssertEqual(result.body, "Large channel")
+    XCTAssertEqual(try cache.metadata(scope: scope, kind: 39000,
+      author: channel.pubkey, identifier: Self.channelID)?.event, channel)
+    // Group specialization still requires a verified complete recipient count.
+    XCTAssertNil(result.conversationRecipientCount)
   }
 
   func testBoundedInlineAvatarProfileRefreshStillResolvesDisplayName() throws {
@@ -616,7 +1450,7 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
       tags: [["h", Self.channelID]],
       content: "Inline avatar profile"
     )
-    let picture = "data:image/png;base64," + String(repeating: "A", count: 170_000)
+    let picture = "data:image/png;base64," + String(repeating: "A", count: 262_050)
     let profileContent = try XCTUnwrap(
       String(
         data: JSONSerialization.data(withJSONObject: [
@@ -632,7 +1466,19 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
       kind: 0,
       content: profileContent
     )
-    let presentationData = try JSONEncoder().encode([profile])
+    let channel = try Self.signedEvent(
+      privateKey: Self.relayPrivateKey, createdAt: Self.now, kind: 39000,
+      tags: [["d", Self.channelID], ["name", "Large Channel"], ["t", "stream"]],
+      content: String(repeating: "\"", count: 256 * 1024)
+    )
+    let membership = try Self.signedEvent(
+      privateKey: Self.relayPrivateKey, createdAt: Self.now, kind: 39002,
+      tags: [["d", Self.channelID], ["p", Self.ownPubkey]],
+      content: String(repeating: "\"", count: 256 * 1024)
+    )
+    let presentationData = try JSONEncoder().encode([profile, channel, membership])
+    XCTAssertLessThanOrEqual(profileContent.utf8.count, 256 * 1024)
+    XCTAssertGreaterThan(presentationData.count, 256 * 1024)
     XCTAssertLessThan(
       presentationData.count,
       BuzzPushNotificationResolver.maximumPresentationResponseBytes
@@ -649,16 +1495,18 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
     let result = try XCTUnwrap(
       resolve(
         makeResolver(
-          communitiesData: try snapshotData([community()]),
+          communitiesData: try snapshotData([community(relayMetadataPubkey: channel.pubkey)]),
           now: Date(timeIntervalSince1970: TimeInterval(Self.now))
         )
       )
     )
 
     XCTAssertEqual(result.title, "Fizz")
+    XCTAssertEqual(result.conversationDisplayName, "#Large Channel")
+    XCTAssertEqual(result.conversationRecipientCount, 1)
     XCTAssertNil(result.senderAvatarPNG)
     XCTAssertEqual(result.body, "Inline avatar profile")
-    XCTAssertEqual(URLProtocolStub.requests.count, 2)
+    XCTAssertEqual(URLProtocolStub.requests.count, 4)
   }
 
   func testResolveCanonicalizesWebSocketRelayOriginForQuery() throws {
@@ -680,7 +1528,10 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
     communitiesData: Data?,
     privateKeys: [String: String] = ["community-id": privateKey],
     presentationCacheData: Data? = nil,
-    now: Date = Date()
+    cacheOverride: BuzzNotificationCache? = nil,
+    now: Date = Date(),
+    assertionIssuer: BuzzRelayAssertionIssuer? = nil,
+    makeRetrySession: (() -> URLSession)? = nil
   ) -> BuzzPushNotificationResolver {
     let configuration = URLSessionConfiguration.ephemeral
     configuration.protocolClasses = [URLProtocolStub.self]
@@ -688,9 +1539,60 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
       session: URLSession(configuration: configuration),
       loadCommunitiesData: { communitiesData },
       loadPrivateKey: { privateKeys[$0] },
-      loadPresentationCacheData: { presentationCacheData },
-      now: { now }
+      notificationCache: cacheOverride ?? makeNotificationCache(communitiesData: communitiesData, fixture: presentationCacheData, now: now),
+      assertionIssuer: assertionIssuer,
+      now: { now },
+      makeRetrySession: makeRetrySession
     )
+  }
+
+  private func makeNotificationCache(communitiesData: Data?, fixture: Data?, now: Date) -> BuzzNotificationCache {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+    let communities = communitiesData.flatMap { try? JSONDecoder().decode(PushLeaseSnapshot.self, from: $0) }?.communities ?? []
+    let scopes = communities.compactMap(BuzzNotificationCacheScope.init)
+    let cache = BuzzNotificationCache(directory: root, now: { now }, isCurrent: { scopes.contains($0) })
+    let snapshot = BuzzPushPresentationCacheSnapshot.decode(fixture)
+    do {
+      for profile in snapshot.profiles {
+        let scope = try XCTUnwrap(scopes.first { $0.communityID == profile.communityID })
+        var content = ["display_name": profile.displayName ?? ""]
+        if profile.avatarPNG != nil { content["picture"] = "https://images.example/avatar.png" }
+        let event = try Self.signedEvent(privateKey: Self.profilePrivateKey,
+          createdAt: profile.eventCreatedAt, kind: 0,
+          content: String(decoding: JSONEncoder().encode(content), as: UTF8.self))
+        let writer = BuzzNotificationCache(directory: root,
+          now: { Date(timeIntervalSince1970: Double(profile.cachedAt)) }, isCurrent: { scopes.contains($0) })
+        try writer.save(event: event, scope: scope)
+        if let image = profile.avatarPNG {
+          let requestID = try XCTUnwrap(writer.beginAvatarRequest(
+            profileID: event.id, pubkey: event.pubkey, scope: scope))
+          try writer.saveAvatar(image, source: "https://images.example/avatar.png",
+            profileID: event.id, requestID: requestID, pubkey: event.pubkey, scope: scope)
+        }
+      }
+      for channel in snapshot.channels {
+        let scope = try XCTUnwrap(scopes.first { $0.communityID == channel.communityID })
+        let event = try Self.signedEvent(privateKey: Self.relayPrivateKey,
+          createdAt: channel.eventCreatedAt, kind: 39000,
+          tags: [["d", channel.channelID], ["name", channel.displayName ?? ""], ["t", channel.channelType ?? "stream"]])
+        let writer = BuzzNotificationCache(directory: root,
+          now: { Date(timeIntervalSince1970: Double(channel.cachedAt)) }, isCurrent: { scopes.contains($0) })
+        try writer.save(event: event, scope: scope)
+        guard let digests = channel.memberDigests else { continue }
+        let candidates = [Self.ownPubkey, try Self.pubkey(for: Self.profilePrivateKey), try Self.pubkey(for: Self.relayPrivateKey)]
+        let members = candidates.filter { candidate in
+          Self.memberDigests([candidate]).contains { digests.contains($0) }
+        }
+        let membership = try Self.signedEvent(privateKey: Self.relayPrivateKey,
+          createdAt: channel.membershipEventCreatedAt ?? channel.eventCreatedAt, kind: 39002,
+          tags: [["d", channel.channelID]] + members.map { ["p", $0] })
+        let membershipWriter = BuzzNotificationCache(directory: root,
+          now: { Date(timeIntervalSince1970: Double(channel.membershipCachedAt ?? channel.cachedAt)) }, isCurrent: { scopes.contains($0) })
+        try membershipWriter.save(event: membership, scope: scope)
+      }
+    } catch { XCTFail("Cannot seed verified cache: \(error)") }
+    return cache
   }
 
   func resolve(_ resolver: BuzzPushNotificationResolver) -> BuzzPushResolution? {
@@ -724,7 +1626,8 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
               hTags: [Self.channelID]
             )
           )
-        ]
+        ],
+      notificationSessionID: "test-session"
     )
   }
 
@@ -771,8 +1674,8 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
 
   static func pubkey(for privateKey: String) throws -> String {
     let bytes = try XCTUnwrap(VerifiedNostrEvent.hexBytes(privateKey))
-    let key = try P256K.Schnorr.PrivateKey(dataRepresentation: bytes)
-    return VerifiedNostrEvent.hex(key.xonly.bytes)
+    let key = bytes
+    return VerifiedNostrEvent.hex(try NostrSchnorr.publicKey(secret: key))
   }
 
   static func memberDigests(_ pubkeys: [String]) -> [String] {
@@ -793,8 +1696,8 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
     content: String = ""
   ) throws -> VerifiedNostrEvent {
     let privateKeyBytes = try XCTUnwrap(VerifiedNostrEvent.hexBytes(privateKey))
-    let key = try P256K.Schnorr.PrivateKey(dataRepresentation: privateKeyBytes)
-    let pubkey = VerifiedNostrEvent.hex(key.xonly.bytes)
+    let key = privateKeyBytes
+    let pubkey = VerifiedNostrEvent.hex(try NostrSchnorr.publicKey(secret: key))
     let serialization = try VerifiedNostrEvent.canonicalSerialization(
       pubkey: pubkey,
       createdAt: createdAt,
@@ -803,9 +1706,9 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
       content: content
     )
     let digest = Array(SHA256.hash(data: serialization))
-    var message = digest
-    var randomness = [UInt8](repeating: UInt8(truncatingIfNeeded: createdAt), count: 32)
-    let signature = try key.signature(message: &message, auxiliaryRand: &randomness)
+    let message = digest
+    let randomness = [UInt8](repeating: UInt8(truncatingIfNeeded: createdAt), count: 32)
+    let signature = try NostrSchnorr.sign(message: message, secret: key, auxiliaryRandomness: randomness)
     return VerifiedNostrEvent(
       id: VerifiedNostrEvent.hex(digest),
       pubkey: pubkey,
@@ -813,13 +1716,16 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
       kind: kind,
       tags: tags,
       content: content,
-      sig: VerifiedNostrEvent.hex(signature.dataRepresentation)
+      sig: VerifiedNostrEvent.hex(signature)
     )
   }
 
   final class URLProtocolStub: URLProtocol, @unchecked Sendable {
     static let lock = NSLock()
     static var handler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
+    static var finishLoading: ((URLRequest) -> Bool)?
+    static var onStopLoading: ((URLRequest) -> Void)?
+    static var redirect: ((URLRequest) -> URL?)?
     static var requests: [URLRequest] = []
 
     override class func canInit(with request: URLRequest) -> Bool { true }
@@ -829,22 +1735,38 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
       Self.lock.lock()
       Self.requests.append(request)
       let handler = Self.handler
+      let redirect = Self.redirect
       Self.lock.unlock()
+      if let url = request.url, let target = redirect?(request) {
+        var next = request
+        next.url = target
+        let response = HTTPURLResponse(
+          url: url, statusCode: 307, httpVersion: nil, headerFields: ["Location": target.absoluteString])!
+        client?.urlProtocol(self, wasRedirectedTo: next, redirectResponse: response)
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocolDidFinishLoading(self)
+        return
+      }
       do {
         let (response, data) = try handler?(request) ?? { throw URLError(.unsupportedURL) }()
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: data)
-        client?.urlProtocolDidFinishLoading(self)
+        if Self.finishLoading?(request) ?? true {
+          client?.urlProtocolDidFinishLoading(self)
+        }
       } catch {
         client?.urlProtocol(self, didFailWithError: error)
       }
     }
 
-    override func stopLoading() {}
+    override func stopLoading() { Self.onStopLoading?(request) }
 
     static func reset() {
       lock.lock()
       handler = nil
+      finishLoading = nil
+      onStopLoading = nil
+      redirect = nil
       requests = []
       lock.unlock()
     }

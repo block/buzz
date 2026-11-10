@@ -21,11 +21,14 @@ export type MessageComposerEditTarget = {
   imetaMedia?: ImetaMedia[];
   mentionRefs?: DraftMentionRef[];
   unresolvedMentionPubkeys?: string[];
+  /** Historical alias candidates, for retention only; never notifying bindings. */
+  unresolvedMentionRefs?: DraftMentionRef[];
 };
 
 export type MessageComposerProps = {
   audienceContext?: {
-    type: "channel" | "thread";
+    rootTags?: readonly string[][];
+    type: "thread";
   } | null;
   channelId?: string | null;
   channelName: string;
@@ -55,6 +58,8 @@ export type MessageComposerProps = {
   editTarget?: MessageComposerEditTarget | null;
   isSending?: boolean;
   mediaController?: MediaUploadController;
+  /** Reports whether a surrounding drop zone may add an attachment. */
+  onAttachmentAcceptanceChange?: (acceptsAttachment: boolean) => void;
   onDeferredEditPendingChange?: (isPending: boolean) => void;
   onCancelEdit?: () => void;
   onCancelReply?: () => void;

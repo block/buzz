@@ -34,12 +34,17 @@ export function relayAgentIsSharedWithUser(
     ? normalizePubkey(currentPubkey)
     : null;
 
+  // Ownership is relay identity, not local key custody. Like the harness's
+  // author gate, every supported policy except nobody admits the owner.
   if (
-    agent.respondTo === "owner-only" &&
+    (agent.respondTo === "owner-only" ||
+      agent.respondTo === "allowlist" ||
+      agent.respondTo === "anyone") &&
     normalizedCurrentPubkey &&
-    agent.ownerPubkey
+    agent.ownerPubkey &&
+    normalizePubkey(agent.ownerPubkey) === normalizedCurrentPubkey
   ) {
-    return normalizePubkey(agent.ownerPubkey) === normalizedCurrentPubkey;
+    return true;
   }
 
   if (agent.respondTo === "allowlist" && normalizedCurrentPubkey) {
@@ -71,6 +76,7 @@ export function relayAgentCanRespondInChannel(
 export type AgentEligibilityScope =
   | { type: "community" }
   | { type: "channel"; channelId: string }
+  | { type: "owned"; channelId: string | null }
   | { type: "managed-only" };
 
 export function getMentionableAgentPubkeys({
@@ -79,9 +85,11 @@ export function getMentionableAgentPubkeys({
   managedAgentPubkeys,
   relayAgents,
   sharedChannelIds,
+  phase = "publish",
 }: {
   currentPubkey?: string | null;
   eligibilityScope: AgentEligibilityScope;
+  phase?: "prepare" | "publish";
   managedAgentPubkeys: Iterable<string>;
   relayAgents: readonly RelayAgent[] | undefined;
   sharedChannelIds: ReadonlySet<string>;
@@ -94,13 +102,38 @@ export function getMentionableAgentPubkeys({
     const isAllowed =
       eligibilityScope.type === "managed-only"
         ? false
-        : eligibilityScope.type === "community"
-          ? relayAgentIsSharedWithUser(agent, sharedChannelIds, currentPubkey)
-          : relayAgentCanRespondInChannel(
-              agent,
-              eligibilityScope.channelId,
-              currentPubkey,
-            );
+        : eligibilityScope.type === "owned"
+          ? Boolean(
+              currentPubkey &&
+                agent.ownerPubkey &&
+                normalizePubkey(agent.ownerPubkey) ===
+                  normalizePubkey(currentPubkey) &&
+                relayAgentIsSharedWithUser(
+                  agent,
+                  sharedChannelIds,
+                  currentPubkey,
+                ) &&
+                (phase === "prepare" ||
+                  (eligibilityScope.channelId !== null &&
+                    agent.channelIds.includes(eligibilityScope.channelId))),
+            )
+          : eligibilityScope.type === "community"
+            ? relayAgentIsSharedWithUser(agent, sharedChannelIds, currentPubkey)
+            : phase === "prepare" &&
+                currentPubkey &&
+                agent.ownerPubkey &&
+                normalizePubkey(agent.ownerPubkey) ===
+                  normalizePubkey(currentPubkey)
+              ? relayAgentIsSharedWithUser(
+                  agent,
+                  sharedChannelIds,
+                  currentPubkey,
+                )
+              : relayAgentCanRespondInChannel(
+                  agent,
+                  eligibilityScope.channelId,
+                  currentPubkey,
+                );
     if (isAllowed) {
       pubkeys.add(normalizePubkey(agent.pubkey));
     }

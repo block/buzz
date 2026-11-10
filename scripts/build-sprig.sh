@@ -3,10 +3,10 @@
 # harness, agent, and developer MCP. The archive exposes these command names:
 #
 #   sprig            implementation binary
-#   buzz-acp       link to sprig (ACP harness)
+#   buzz-acp       link to sprig (ACP harness and Git helper personalities)
 #   buzz-agent     link to sprig (ACP-compliant agent)
 #   buzz-dev-mcp   link to sprig (developer MCP server; also dispatches
-#                    rg/tree/buzz/git-credential-nostr/git-sign-nostr)
+#                    rg/tree/buzz)
 #
 # Usage:
 #   ./scripts/build-sprig.sh [version] [target]
@@ -140,12 +140,12 @@ to one multicall binary so shared Rust runtime/TLS code is stored only once.
 Commands:
 
 - `sprig` — prints usage/version. Invoke a personality by one of the links below.
-- `buzz-acp` — ACP harness that bridges Buzz channel events to an
+- `buzz-acp` — ACP harness and `git-credential-nostr` / `git-sign-nostr`
+  multicall entrypoint that bridges Buzz channel events to an
   ACP-compliant agent over stdio.
 - `buzz-agent` — ACP-compliant agent (spawns MCP servers, calls LLMs).
 - `buzz-dev-mcp` — Developer MCP server (shell, str_replace, todo) and
-  multicall entrypoint for `rg`, `tree`, `buzz`, `git-credential-nostr`,
-  `git-sign-nostr`.
+  multicall entrypoint for `rg`, `tree`, and `buzz`.
 
 See `sprig.json` for SHA-256s, sizes, target, and source git SHA.
 

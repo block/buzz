@@ -155,10 +155,12 @@ export function AgentDropdownSelect({
   const filteredOptions = React.useMemo(() => {
     const trimmed = query.trim().toLowerCase();
     if (!showSearch || trimmed === "") return options;
-    return options.filter((option) =>
-      (typeof option.label === "string" ? option.label : option.value)
-        .toLowerCase()
-        .includes(trimmed),
+    // Search the raw id too, so `system.ai` finds rows whose label hides it.
+    return options.filter(
+      (option) =>
+        (typeof option.label === "string" &&
+          option.label.toLowerCase().includes(trimmed)) ||
+        option.value.toLowerCase().includes(trimmed),
     );
   }, [options, query, showSearch]);
 

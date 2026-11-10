@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test";
 
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
+import { clearComposer } from "../helpers/composer";
 
 const GENERAL_CHANNEL_ID = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
 const CURRENT_PUBKEY = "deadbeef".repeat(8);
@@ -158,8 +159,7 @@ async function submitEmptyEdit(
   await expect(detail.getByTestId("edit-target")).toBeVisible();
   const input = detail.getByTestId("message-input");
   await expect(input).not.toBeEmpty();
-  await input.fill("");
-  await expect(input).toBeEmpty();
+  await clearComposer(input);
   await page.keyboard.press("Enter");
 }
 

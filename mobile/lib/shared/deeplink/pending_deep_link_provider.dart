@@ -53,7 +53,8 @@ class PendingDeepLinkNotifier extends Notifier<BuzzDeepLink?> {
   void open(Uri uri) {
     final link = parseBuzzDeepLink(uri);
     if (link == null) {
-      debugPrint('deep-link: ignoring unsupported link: $uri');
+      // Unknown links may contain OAuth codes or invite credentials.
+      debugPrint('deep-link: ignoring unsupported link');
       return;
     }
     _enqueue(link);

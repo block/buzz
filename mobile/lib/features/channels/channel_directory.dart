@@ -26,13 +26,21 @@ class ChannelDirectoryLoadState {
   /// Current loading status for [scope].
   final ChannelDirectoryLoadStatus status;
 
+  /// When the directory for [scope] last finished loading.
+  final DateTime? loadedAt;
+
   /// Creates directory loading state.
-  const ChannelDirectoryLoadState({required this.scope, required this.status});
+  const ChannelDirectoryLoadState({
+    required this.scope,
+    required this.status,
+    this.loadedAt,
+  });
 
   /// Initial state before any directory request has started.
   const ChannelDirectoryLoadState.idle()
     : scope = null,
-      status = ChannelDirectoryLoadStatus.idle;
+      status = ChannelDirectoryLoadStatus.idle,
+      loadedAt = null;
 }
 
 /// Returns the stable directory scope for a relay and signing identity.
@@ -48,6 +56,10 @@ class ChannelDirectoryLoadNotifier extends Notifier<ChannelDirectoryLoadState> {
   bool isLoading(String scope) =>
       state.scope == scope &&
       state.status == ChannelDirectoryLoadStatus.loading;
+
+  /// Whether the last directory request for [scope] failed.
+  bool hasFailed(String scope) =>
+      state.scope == scope && state.status == ChannelDirectoryLoadStatus.error;
 
   /// Marks the directory as loading.
   void markLoading(String scope) => state = ChannelDirectoryLoadState(
@@ -65,6 +77,7 @@ class ChannelDirectoryLoadNotifier extends Notifier<ChannelDirectoryLoadState> {
   void markLoaded(String scope) => state = ChannelDirectoryLoadState(
     scope: scope,
     status: ChannelDirectoryLoadStatus.loaded,
+    loadedAt: DateTime.now(),
   );
 
   /// Marks the directory request as unsuccessful.
@@ -82,22 +95,26 @@ final channelDirectoryLoadStatusProvider =
 
 Future<List<NostrEvent>> _fetchChannelMemberships(
   RelaySessionNotifier session,
-  String pubkey,
-) => _fetchPaginatedChannelEvents(
+  String pubkey, {
+  void Function()? ensureCurrent,
+}) => _fetchPaginatedChannelEvents(
   session,
   kind: 39002,
   tags: {
     '#p': [pubkey],
   },
   operation: 'Channel memberships',
+  ensureCurrent: ensureCurrent,
 );
 
 Future<List<NostrEvent>> _fetchChannelDirectoryMetas(
-  RelaySessionNotifier session,
-) => _fetchPaginatedChannelEvents(
+  RelaySessionNotifier session, {
+  void Function()? ensureCurrent,
+}) => _fetchPaginatedChannelEvents(
   session,
   kind: 39000,
   operation: 'Channel directory',
+  ensureCurrent: ensureCurrent,
 );
 
 /// Thrown when a channel-list request is retired before it settles.
@@ -128,6 +145,7 @@ class _ChannelRefreshFence {
 
   /// Whether the refresh still owns the active scope and generation.
   bool get isCurrent =>
+      _coordinator.isMounted() &&
       _generation == _coordinator.generation &&
       scope == _coordinator.currentScope();
 
@@ -150,7 +168,7 @@ class _ChannelRefreshFence {
 /// nothing awaits it, so a throw would only surface as an unhandled error.
 ///
 /// An extension in this part file rather than a method on the notifier because
-/// `channels_provider.dart` sits against the repository-wide 1000-line file
+/// `channels_provider.dart` sits against the repository-wide 1200-line file
 /// ceiling enforced by `just file-size-check`.
 extension _CatchUpFencing on ChannelsNotifier {
   bool _isCatchUpRetired(
@@ -188,17 +206,17 @@ Future<T> _fenced<T>(_ChannelRefreshFence fence, Future<T> future) async {
 /// profiles in one round-trip. Returns lowercase pubkey to label.
 ///
 /// Lives in this part file because `channels_provider.dart` sits against the
-/// repository-wide 1000-line file ceiling enforced by `just file-size-check`.
+/// repository-wide 1200-line file ceiling enforced by `just file-size-check`.
 Future<Map<String, String>> _resolveDmDisplayNames(
-  RelaySessionNotifier session,
+  Ref ref,
   _ChannelRefreshFence fence,
-  Iterable<NostrEvent> dedupedMetas,
-  String myPk,
-) async {
+  Iterable<ChannelData> channelMetas,
+  String myPk, {
+  required bool refreshCached,
+}) async {
   final dmParticipants = <String>{};
   final myPkLower = myPk.toLowerCase();
-  for (final event in dedupedMetas) {
-    final data = ChannelData.fromEvent(event);
+  for (final data in channelMetas) {
     if (data.channelType != 'dm') continue;
     for (final pk in data.participantPubkeys) {
       final lower = pk.toLowerCase();
@@ -207,42 +225,69 @@ Future<Map<String, String>> _resolveDmDisplayNames(
   }
   if (dmParticipants.isEmpty) return const {};
 
-  final profileEvents = await _fenced(
+  final profiles = await _fenced(
     fence,
-    session.fetchHistory(NostrFilters.profilesBatch(dmParticipants.toList())),
+    ref
+        .read(userCacheProvider.notifier)
+        .resolve(dmParticipants.toList(), refreshCached: refreshCached),
   );
   final displayNames = <String, String>{};
-  for (final event in profileEvents) {
-    if (event.kind != 0) continue;
-    final profile = ProfileData.fromEvent(event);
+  for (final profile in profiles.values) {
     final label = profile.displayName?.trim().isNotEmpty == true
         ? profile.displayName!.trim()
-        : profile.nip05?.trim().isNotEmpty == true
-        ? profile.nip05!.trim()
+        : profile.nip05Handle?.trim().isNotEmpty == true
+        ? profile.nip05Handle!.trim()
         : shortPubkey(profile.pubkey);
     displayNames[profile.pubkey.toLowerCase()] = label;
   }
   return displayNames;
 }
 
-Future<Set<String>> _fetchHiddenDmIds(
+List<NostrEvent> _latestChannelEvents(
+  Iterable<NostrEvent> events, {
+  required int kind,
+}) {
+  final latestById = <String, NostrEvent>{};
+  for (final event in events) {
+    if (event.kind != kind) continue;
+    final id = event.getTagValue('d');
+    if (id == null) continue;
+    final current = latestById[id];
+    if (current == null ||
+        event.createdAt > current.createdAt ||
+        (event.createdAt == current.createdAt &&
+            event.id.compareTo(current.id) < 0)) {
+      latestById[id] = event;
+    }
+  }
+  return latestById.values.toList();
+}
+
+/// The hidden DM ids, or null when the relay doesn't answer.
+Future<Set<String>?> _fetchHiddenDmIds(
   RelaySessionNotifier session,
   String myPk,
 ) async {
   try {
-    final events = await session.fetchHistory(NostrFilters.hiddenDms(myPk));
-    if (events.isEmpty) return const {};
-    NostrEvent latest = events.first;
-    for (final event in events.skip(1)) {
-      if (event.createdAt > latest.createdAt) latest = event;
-    }
-    return {
-      for (final tag in latest.tags)
-        if (tag.length >= 2 && tag[0] == 'h') tag[1],
-    };
+    return hiddenDmIdsFromEvents(
+      await session.fetchHistory(NostrFilters.hiddenDms(myPk)),
+    );
   } catch (_) {
-    return const {};
+    return null;
   }
+}
+
+/// The DM ids hidden by the newest of the caller's NIP-DV snapshots.
+Set<String> hiddenDmIdsFromEvents(List<NostrEvent> events) {
+  if (events.isEmpty) return const {};
+  NostrEvent latest = events.first;
+  for (final event in events.skip(1)) {
+    if (event.createdAt > latest.createdAt) latest = event;
+  }
+  return {
+    for (final tag in latest.tags)
+      if (tag.length >= 2 && tag[0] == 'h') tag[1],
+  };
 }
 
 Future<List<NostrEvent>> _fetchHuddleStarts(
@@ -252,14 +297,44 @@ Future<List<NostrEvent>> _fetchHuddleStarts(
   if (parentChannelIds.isEmpty) return const [];
   try {
     final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-    return await session.fetchHistory(
-      NostrFilter(
-        kinds: const [EventKind.huddleStarted],
-        tags: {'#h': parentChannelIds},
-        since: now - const Duration(hours: 2).inSeconds,
-        limit: 500,
-      ),
-    );
+    // Each REQ stays within the relay's aggregate explicit-channel cap, with
+    // the same bounded concurrency as channel history.
+    final filters = [
+      for (
+        var start = 0;
+        start < parentChannelIds.length;
+        start += kMaxExplicitChannelValues
+      )
+        NostrFilter(
+          kinds: const [EventKind.huddleStarted],
+          tags: {
+            '#h': parentChannelIds.sublist(
+              start,
+              min(start + kMaxExplicitChannelValues, parentChannelIds.length),
+            ),
+          },
+          since: now - const Duration(hours: 2).inSeconds,
+          limit: 500,
+        ),
+    ];
+    final results = <List<NostrEvent>>[];
+    for (
+      var start = 0;
+      start < filters.length;
+      start += _historyRequestConcurrency
+    ) {
+      results.addAll(
+        await Future.wait(
+          filters
+              .sublist(
+                start,
+                min(start + _historyRequestConcurrency, filters.length),
+              )
+              .map(session.fetchHistory),
+        ),
+      );
+    }
+    return [for (final events in results) ...events];
   } catch (error) {
     debugPrint(
       '[ChannelsNotifier] Huddle backing-channel query failed: $error',
@@ -271,7 +346,7 @@ Future<List<NostrEvent>> _fetchHuddleStarts(
 /// Counts distinct `p`-tagged members per channel from kind:39002 events.
 ///
 /// Lives in this part file to keep `channels_provider.dart` under the
-/// repository-wide 1000-line ceiling enforced by `just file-size-check`.
+/// repository-wide 1200-line ceiling enforced by `just file-size-check`.
 Map<String, int> _memberCountsByChannelId(Iterable<NostrEvent> memberEvents) {
   final memberCounts = <String, int>{};
   for (final event in memberEvents) {
@@ -297,8 +372,11 @@ Map<String, int> _memberCountsByChannelId(Iterable<NostrEvent> memberEvents) {
 /// filter, so a retired response is discarded rather than merged.
 ///
 /// Lives in this part file because `channels_provider.dart` sits against the
-/// repository-wide 1000-line file ceiling enforced by `just file-size-check`.
+/// repository-wide 1200-line file ceiling enforced by `just file-size-check`.
 class _ChannelRefreshCoordinator {
+  /// Whether the owning provider can still read its current scope.
+  final bool Function() isMounted;
+
   /// Resolves the relay-and-identity scope that is active right now.
   final String Function() currentScope;
 
@@ -311,16 +389,18 @@ class _ChannelRefreshCoordinator {
   int get generation => _generation;
 
   _ChannelRefreshCoordinator({
+    required this.isMounted,
     required this.currentScope,
     required this.loadStatus,
   });
 
   /// Binds the fence to a notifier's [Ref] so the provider needs one line.
   ///
-  /// Both closures read rather than watch: the fence asks what the scope is
-  /// right now, and must not make the notifier depend on it.
+  /// The closures read rather than watch: the fence checks the current
+  /// lifecycle and scope without making the notifier depend on them.
   factory _ChannelRefreshCoordinator.forRef(Ref ref) =>
       _ChannelRefreshCoordinator(
+        isMounted: () => ref.mounted,
         currentScope: () => channelDirectoryScope(
           ref.read(relayConfigProvider).baseUrl,
           ref.read(myPubkeyProvider),
@@ -339,23 +419,36 @@ class _ChannelRefreshCoordinator {
   /// Used by callers that must carry the scope across later awaits even when
   /// they do not refresh discovery, so a membership-only refresh cannot install
   /// an old scope's list either.
-  _ChannelRefreshFence beginRefresh({required bool fetchesDirectory}) {
+  Future<_ChannelRefreshFence> beginRefresh({
+    required bool fetchesDirectory,
+  }) async {
     final scope = currentScope();
     final generation = ++_generation;
+    final fence = _ChannelRefreshFence(this, scope, generation);
+    // Acquire ownership synchronously, but let the provider finish building
+    // before changing another provider's directory status.
+    await Future<void>.value();
+    fence.ensureCurrent();
     if (!fetchesDirectory) {
       final status = loadStatus();
       if (status.isLoading(scope)) {
         // This refresh takes ownership of the shared generation, so the
-        // in-flight directory response will be discarded. The mounted Browse
-        // sheet cannot restart an idle request on its own: it only starts a
-        // load when it mounts and deliberately renders idle as its initial
-        // spinner. Settle the displaced load to a retryable terminal state so
-        // the sheet never waits forever for a response that may no longer
-        // write results.
-        status.markError(scope);
+        // in-flight directory response will be discarded. Mark it idle, not
+        // error: nothing failed, so a caller may load it again, and search
+        // retries a displaced load once instead of reporting a failure.
+        status.markIdle(scope);
+      }
+    } else {
+      final status = loadStatus();
+      if (status.hasFailed(scope)) {
+        // A new attempt replaces the last failure. The status turns loading
+        // only after the membership reads, so a refresh that retires this
+        // attempt earlier must not leave the old error to be read as its
+        // result: idle lets search retry the displaced attempt.
+        status.markIdle(scope);
       }
     }
-    return _ChannelRefreshFence(this, scope, generation);
+    return fence;
   }
 
   /// Fetches the directory under [fence], or throws if the fence is retired.
@@ -391,12 +484,14 @@ Future<List<NostrEvent>> _fetchPaginatedChannelEvents(
   required int kind,
   required String operation,
   Map<String, List<String>> tags = const {},
+  void Function()? ensureCurrent,
 }) async {
   final events = <NostrEvent>[];
   final seenEventIds = <String>{};
   int? until;
   String? beforeId;
   for (var pageIndex = 0; pageIndex < _maxChannelDirectoryPages; pageIndex++) {
+    ensureCurrent?.call();
     final page = await session.queryRelay([
       NostrFilter(
         kinds: [kind],
@@ -406,6 +501,7 @@ Future<List<NostrEvent>> _fetchPaginatedChannelEvents(
         extensions: {'before_id': ?beforeId},
       ),
     ]);
+    ensureCurrent?.call();
     if (page.isEmpty) break;
     var madeProgress = false;
     for (final event in page) {
@@ -429,7 +525,7 @@ Future<List<NostrEvent>> _fetchPaginatedChannelEvents(
 /// Thread-interest and unread helpers shared by [ChannelsNotifier].
 ///
 /// Lives in this part file because `channels_provider.dart` sits against the
-/// repository-wide 1000-line file ceiling enforced by `just file-size-check`.
+/// repository-wide 1200-line file ceiling enforced by `just file-size-check`.
 String? _observedUnreadRootId(NostrEvent event) =>
     _isBroadcastReply(event) ? null : event.threadReference.rootId;
 
@@ -456,25 +552,40 @@ String _encodeRootIdSet(Set<String> values) => jsonEncode(values.toList());
 /// Records one observed unread event for a channel's badge state.
 ///
 /// An extension in this part file rather than a method on the notifier because
-/// `channels_provider.dart` sits against the repository-wide 1000-line file
+/// `channels_provider.dart` sits against the repository-wide 1200-line file
 /// ceiling enforced by `just file-size-check`. Private members stay reachable:
 /// a part shares its parent's library.
 extension _ObservedUnreadRecording on ChannelsNotifier {
-  void _recordUnreadEvent(Channel channel, NostrEvent event, String myPk) {
+  bool _recordUnreadEvent(
+    Channel channel,
+    NostrEvent event,
+    String myPk, {
+    bool countQuiet = false,
+  }) {
+    if (_unscopedUnreadDeletedIds.contains(event.id) ||
+        _unreadDeletedIdsByChannel[channel.id]?.contains(event.id) == true) {
+      return false;
+    }
+    if (!countQuiet && isQuietAgentMessage(event.tags)) return false;
+    // A counted quiet event is only a backlog marker: it never earns attention
+    // through its mentions or thread.
     final isThreadedReply =
-        event.threadReference.parentId != null && !_isBroadcastReply(event);
+        !countQuiet &&
+        event.threadReference.parentId != null &&
+        !_isBroadcastReply(event);
     final isHighPriority =
-        channel.isDm || isHighPriorityEvent(event.tags, myPk);
+        channel.isDm || (!countQuiet && isHighPriorityEvent(event.tags, myPk));
     recordObservedUnreadEvent(
       _observedUnreadEventsByChannel,
       channel.id,
       makeObservedUnreadEvent(
         id: event.id,
         createdAt: event.createdAt,
-        rootId: _observedUnreadRootId(event),
+        rootId: countQuiet ? null : _observedUnreadRootId(event),
         highPriority: isHighPriority,
         channelType: channel.channelType,
         isThreadedReply: isThreadedReply,
+        threadReply: isThreadedReply && !channel.isDm ? event : null,
       ),
       _unreadCatchUpLimit,
     );
@@ -482,6 +593,23 @@ extension _ObservedUnreadRecording on ChannelsNotifier {
     final current = _latestObservedByChannel[channel.id] ?? 0;
     if (event.createdAt > current) {
       _latestObservedByChannel[channel.id] = event.createdAt;
+    }
+    return true;
+  }
+}
+
+/// Activity projection of the channel unread registry.
+extension ObservedThreadActivity on ChannelsNotifier {
+  /// The same eligible replies that supply channel attention dots. Consumers
+  /// watch [channelsProvider] for changes; this does not fetch extra history.
+  Iterable<NostrEvent> observedThreadReplies(Iterable<Channel> channels) sync* {
+    for (final channel in channels) {
+      if (!channel.isMember || channel.isArchived || channel.isDm) continue;
+      for (final observed
+          in _observedUnreadEventsByChannel[channel.id]?.values ??
+              const <ObservedUnreadEvent>[]) {
+        if (observed.threadReply case final reply?) yield reply;
+      }
     }
   }
 }

@@ -1,0 +1,454 @@
+import 'dart:convert';
+import 'package:buzz/shared/crypto/nip44.dart';
+import 'package:buzz/features/channels/me/me_workspace_picker.dart';
+import 'package:buzz/features/channels/channel.dart';
+import 'package:buzz/features/channels/channels_provider.dart';
+import 'package:buzz/features/channels/me/me_page.dart';
+import 'package:buzz/features/channels/me/new_me_project.dart';
+import 'package:buzz/shared/me/me_assistants.dart';
+import 'package:buzz/shared/me/me_groups.dart';
+import 'package:buzz/shared/me/me_project_creation.dart';
+import 'package:buzz/shared/me/me_sync.dart';
+import 'package:buzz/shared/relay/relay.dart';
+import 'package:buzz/shared/theme/theme.dart';
+import 'package:buzz/shared/widgets/frosted_app_bar.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:nostr/nostr.dart' as nostr;
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:shared_preferences_platform_interface/shared_preferences_platform_interface.dart';
+
+class _FailingStore extends InMemorySharedPreferencesStore {
+  final bool throws;
+  _FailingStore(this.throws) : super.empty();
+  @override
+  Future<bool> setValue(String type, String key, Object value) async {
+    if (throws) throw StateError('disk failure');
+    return false;
+  }
+}
+
+class _Channels extends ChannelsNotifier {
+  @override
+  Future<List<Channel>> build() async => [];
+}
+
+class _Relay extends RelaySessionNotifier {
+  List<NostrEvent> events = [];
+  VoidCallback? beforeRead;
+  bool failRead = false;
+  bool failAfterPublish = false;
+  int writes = 0;
+  @override
+  Future<List<NostrEvent>> fetchHistory(
+    NostrFilter filter, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    beforeRead?.call();
+    if (failRead) throw StateError('interrupted before the first head');
+    return events;
+  }
+
+  @override
+  Future<NostrEvent> publish(
+    NostrEvent event, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    events = [event];
+    writes++;
+    if (failAfterPublish) throw StateError('lost acknowledgement');
+    return event;
+  }
+}
+
+class _WorkspaceHeader extends HookConsumerWidget {
+  const _WorkspaceHeader();
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final workspace = useMeWorkspace(
+      context,
+      ref,
+      enabled: true,
+      channelId: '10000000-0000-4000-8000-000000000001',
+    );
+    return Scaffold(
+      appBar: AppBar(actions: [workspace.action]),
+      body: TextButton(
+        onPressed: () async {
+          try {
+            await createMeProject(
+              context,
+              ref,
+              workspace: true,
+              channelId: '10000000-0000-4000-8000-000000000001',
+            );
+          } on StateError catch (error) {
+            expect(
+              error.message,
+              contains('Project setup saved on this phone'),
+            );
+          }
+        },
+        child: const Text('Open workspace creation'),
+      ),
+    );
+  }
+}
+
+void main() {
+  final config = RelayConfig(
+    baseUrl: 'https://relay.test',
+    nsec: nostr.Nip19.encode(
+      prefix: nostr.Nip19Prefix.nsec,
+      data: '0' * 63 + '1',
+    ),
+  );
+  testWidgets(
+    'workspace creation assigns the chat and resumes a lost acknowledgement',
+    (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final relay = _Relay()..failAfterPublish = true;
+      final sync = MeSync(relay, config, prefs: prefs);
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            meSyncProvider.overrideWithValue(sync),
+            meGroupsProvider.overrideWith(
+              (ref) => Stream.value(const MeGroups()),
+            ),
+          ],
+          child: MaterialApp(
+            theme: AppTheme.light(),
+            home: const _WorkspaceHeader(),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      Future<void> open() async {
+        await tester.tap(find.text('Open workspace creation'));
+        await tester.pumpAndSettle();
+      }
+
+      await open();
+      await tester.enterText(find.byType(TextField), 'Launch');
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(FilledButton, 'Create workspace'));
+      await tester.pumpAndSettle();
+      final saved = MeProjectCreation.pending(sync)!;
+      expect(saved.channelId, '10000000-0000-4000-8000-000000000001');
+      expect(
+        sync
+            .decode(relay.events.single)
+            .assignments['10000000-0000-4000-8000-000000000001'],
+        saved.id,
+      );
+      expect(sync.decode(relay.events.single).groups.single['name'], 'Launch');
+      relay.failAfterPublish = false;
+      for (var attempt = 0; attempt < 2; attempt++) {
+        await open();
+        await tester.tap(find.text('Resume'));
+        await tester.pumpAndSettle();
+      }
+      expect(MeProjectCreation.pending(sync), isNull);
+      expect(relay.writes, 1);
+      expect(
+        sync
+            .decode(relay.events.single)
+            .assignments['10000000-0000-4000-8000-000000000001'],
+        saved.id,
+      );
+
+      // A conflicting, unconfirmed phone move remains recoverable in-place.
+      const chat = '10000000-0000-4000-8000-000000000001';
+      MeGroups organization(String group) => MeGroups(
+        groups: [
+          for (final id in ['original', 'phone', 'desktop'])
+            {'id': id, 'name': id, 'defaultTemplateId': ''},
+        ],
+        assignments: {chat: group},
+        channels: const [chat],
+      );
+      NostrEvent signed(String group, int timestamp) => NostrEvent.fromJson(
+        nostr.Event.from(
+          kind: 30078,
+          content: nip44Encrypt(
+            sync.key,
+            organization(group).encode(sync.community),
+          ),
+          secretKey: sync.privateHex,
+          createdAt: timestamp,
+          tags: [
+            ['d', MeGroups.coordinate(sync.community)],
+            ['t', MeGroups.tag],
+          ],
+          verify: false,
+        ).toMap(),
+      );
+      final pending = jsonEncode({
+        'base': signed('original', 1).toJson(),
+        'event': signed('phone', 2).toJson(),
+      });
+      await prefs.setString(sync.pendingKey, pending);
+      relay.events = [signed('desktop', 3)];
+      Future<void> move() async {
+        await tester.tap(find.byKey(const ValueKey('me-workspace-button')));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('No Workspace'));
+        await tester.pumpAndSettle();
+      }
+
+      await move();
+      expect(find.text('Conflicting Solo changes'), findsOneWidget);
+      await tester.tap(find.text('Keep pending'));
+      await tester.pumpAndSettle();
+      expect(prefs.getString(sync.pendingKey), pending);
+      await move();
+      await tester.tap(find.text('Discard phone change'));
+      await tester.pumpAndSettle();
+      expect(prefs.getString(sync.pendingKey), isNull);
+      expect(sync.decode(relay.events.single).assignments[chat], 'desktop');
+      await move();
+      expect(
+        sync.decode(relay.events.single).assignments.containsKey(chat),
+        isFalse,
+      );
+      expect(find.text('Conflicting Solo changes'), findsNothing);
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.android),
+  );
+  for (final throws in [false, true]) {
+    testWidgets(
+      'failed project write ($throws) reopens the entered name without claiming recovery',
+      (tester) async {
+        SharedPreferences.setMockInitialValues({});
+        SharedPreferencesStorePlatform.instance = _FailingStore(throws);
+        final prefs = await SharedPreferences.getInstance();
+        final relay = _Relay();
+        final sync = MeSync(relay, config, prefs: prefs);
+        const channel = MethodChannel('buzz/profile_text_editor');
+        var forms = 0;
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          channel,
+          (call) async {
+            forms++;
+            if (forms == 1) return 'My entered name';
+            expectSync(
+              (call.arguments as Map)['initialValue'],
+              'My entered name',
+            );
+            return null;
+          },
+        );
+        addTearDown(
+          () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            channel,
+            null,
+          ),
+        );
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              meSyncProvider.overrideWithValue(sync),
+              meGroupsProvider.overrideWith(
+                (ref) => Stream.value(const MeGroups()),
+              ),
+              meAssistantsProvider.overrideWith((ref) async => []),
+              channelsProvider.overrideWith(_Channels.new),
+            ],
+            child: MaterialApp(theme: AppTheme.light(), home: const MePage()),
+          ),
+        );
+        await tester.pumpAndSettle();
+        tester
+            .widget<FrostedAppBar>(find.byType(FrostedAppBar))
+            .nativeActions!
+            .firstWhere((a) => a.label == 'New project')
+            .onPressed!();
+        await tester.pumpAndSettle();
+        expect(find.text('Project was not saved'), findsOneWidget);
+        expect(find.textContaining('Project setup saved'), findsNothing);
+        expect(MeProjectCreation.pending(sync), isNull);
+        expect(relay.writes, 0);
+        await tester.tap(find.text('Try again'));
+        await tester.pumpAndSettle();
+        expect(forms, 2);
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+    );
+  }
+  for (final recovery in ['Resume', 'Discard setup']) {
+    for (final offline in [true, false]) {
+      testWidgets(
+        'accepted project survives ${offline ? "offline" : "interrupted head"} restart with $recovery',
+        (tester) async {
+          SharedPreferences.setMockInitialValues({});
+          final prefs = await SharedPreferences.getInstance();
+          final relay = _Relay()..failRead = !offline;
+          var sync = MeSync(relay, config, prefs: prefs, connected: !offline);
+          var forms = 0;
+          relay.beforeRead = () => expectSync(
+            MeProjectCreation.pending(sync)?.name,
+            forms == 1 ? 'Private project' : 'Replacement project',
+          );
+          const channel = MethodChannel('buzz/profile_text_editor');
+          tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            channel,
+            (call) async {
+              expectSync(call.method, 'presentProject');
+              forms++;
+              return forms == 1 ? 'Private project' : 'Replacement project';
+            },
+          );
+          addTearDown(
+            () => tester.binding.defaultBinaryMessenger
+                .setMockMethodCallHandler(channel, null),
+          );
+          Future<void> mount() async {
+            await tester.pumpWidget(
+              ProviderScope(
+                key: UniqueKey(),
+                overrides: [
+                  meSyncProvider.overrideWithValue(sync),
+                  meGroupsProvider.overrideWith(
+                    (ref) => Stream.value(const MeGroups()),
+                  ),
+                  meAssistantsProvider.overrideWith((ref) async => []),
+                  channelsProvider.overrideWith(_Channels.new),
+                ],
+                child: MaterialApp(
+                  theme: AppTheme.light(),
+                  home: const MePage(),
+                ),
+              ),
+            );
+            await tester.pumpAndSettle();
+          }
+
+          Future<void> open() async {
+            tester
+                .widget<FrostedAppBar>(find.byType(FrostedAppBar))
+                .nativeActions!
+                .firstWhere((a) => a.label == 'New project')
+                .onPressed!();
+            await tester.pumpAndSettle();
+          }
+
+          await mount();
+          await open();
+          final saved = MeProjectCreation.pending(sync);
+          expect(
+            saved,
+            isNotNull,
+            reason: 'Accepted project intent must be durable before networking',
+          );
+          final pending = saved!;
+          expect(pending.name, 'Private project');
+          expect(
+            prefs.getString(MeProjectCreation.storageKey(sync)),
+            isNot(contains('Private project')),
+          );
+          expect(relay.writes, 0);
+          sync = MeSync(relay, config, prefs: prefs);
+          relay.failRead = false;
+          await mount();
+          await open();
+          expect(find.textContaining('Private project'), findsOneWidget);
+          await tester.tap(find.text('Later'));
+          await tester.pumpAndSettle();
+          expect(MeProjectCreation.pending(sync)?.id, pending.id);
+          expect(relay.writes, 0);
+          await open();
+          await tester.tap(find.text(recovery));
+          await tester.pumpAndSettle();
+          expect(forms, recovery == 'Resume' ? 1 : 2);
+          expect(
+            MeProjectCreation.pending(sync),
+            isNull,
+            reason: tester
+                .widgetList<Text>(find.byType(Text))
+                .map((t) => t.data)
+                .join(' | '),
+          );
+          expect(relay.writes, 1);
+          expect(
+            sync.decode(relay.events.single).groups.single['id'],
+            recovery == 'Resume' ? pending.id : isNot(pending.id),
+          );
+          expect(
+            sync.decode(relay.events.single).groups.single['name'],
+            recovery == 'Resume' ? pending.name : 'Replacement project',
+          );
+        },
+        variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+      );
+    }
+  }
+  test(
+    'scoped offline discard compares the reviewed intent and allows a different project',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final sync = MeSync(_Relay(), config, prefs: prefs, connected: false);
+      const original = MeProjectCreation('project', 'Private project');
+      await original.save(sync);
+      for (final other in [
+        RelayConfig(baseUrl: 'https://other.test', nsec: config.nsec),
+        RelayConfig(
+          baseUrl: config.baseUrl,
+          nsec: nostr.Nip19.encode(
+            prefix: nostr.Nip19Prefix.nsec,
+            data: '0' * 63 + '2',
+          ),
+        ),
+      ]) {
+        expect(
+          MeProjectCreation.pending(MeSync(_Relay(), other, prefs: prefs)),
+          isNull,
+        );
+      }
+      await expectLater(
+        const MeProjectCreation('different', 'Private project').discard(sync),
+        throwsStateError,
+      );
+      expect(MeProjectCreation.pending(sync)?.id, original.id);
+      await original.discard(sync);
+      await const MeProjectCreation('new', 'Different project').save(sync);
+      await expectLater(original.discard(sync), throwsStateError);
+      expect(MeProjectCreation.pending(sync)?.id, 'new');
+    },
+  );
+  test(
+    'lost publication acknowledgement retries the same ID without duplicating it',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final relay = _Relay()..failAfterPublish = true;
+      final sync = MeSync(relay, config, prefs: prefs);
+      const intent = MeProjectCreation(
+        'project',
+        'Name',
+        channelId: '10000000-0000-4000-8000-000000000001',
+      );
+      await expectLater(intent.complete(sync), throwsStateError);
+      final restarted = MeSync(relay, config, prefs: prefs);
+      relay.failAfterPublish = false;
+      await expectLater(
+        MeProjectCreation.pending(restarted)!.complete(restarted),
+        throwsStateError,
+      );
+      await MeProjectCreation.pending(restarted)!.complete(restarted);
+      expect(MeProjectCreation.pending(restarted), isNull);
+      expect(relay.writes, 1);
+      expect(restarted.decode(relay.events.single).groups, hasLength(1));
+      expect(
+        restarted
+            .decode(relay.events.single)
+            .assignments['10000000-0000-4000-8000-000000000001'],
+        'project',
+      );
+    },
+  );
+}

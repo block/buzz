@@ -1,6 +1,7 @@
 const RELAY_QUERY_ROOTS = new Set<string>([
   "archivedIdentities",
   "channel-canvas",
+  "channel-canvas-history",
   "channel-messages",
   "channels",
   "contact-list",

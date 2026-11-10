@@ -117,7 +117,6 @@ export function ChannelScreen({
     openChannelManagement: openGlobalChannelManagement,
     followThread,
     unfollowThread,
-    isFollowingThread,
     isNotifiedForThread,
     recordThreadInteraction,
     isThreadMuted,
@@ -205,6 +204,7 @@ export function ChannelScreen({
   const threadRepliesQuery = useThreadReplies(
     activeChannel,
     effectiveOpenThreadHeadId,
+    threadScrollTargetId,
   );
   useChannelSubscription(activeChannel);
   const { fetchOlder, hasOlderMessages, historyExhausted, isFetchingOlder } =
@@ -559,7 +559,7 @@ export function ChannelScreen({
       ? handleSendVideoReviewComment
       : undefined;
   const handleOpenAddBot = React.useCallback(
-    (options?: { beforeSend?: () => void }) =>
+    (options?: { beforeSend?: (channelId: string) => () => void }) =>
       welcomeAgentCreate.openAddAgent(() => setIsAddBotOpen(true), options),
     [welcomeAgentCreate],
   );
@@ -876,7 +876,7 @@ export function ChannelScreen({
                   }
                   followThreadById={followThread}
                   unfollowThreadById={unfollowThread}
-                  isFollowingThreadById={isFollowingThread}
+                  isFollowingThreadById={isNotifiedForThread}
                   isMessageUnreadById={isMessageUnread}
                   isFollowingThread={isNotifiedForEffectiveThread}
                   isSending={sendMessageMutation.isPending}

@@ -108,6 +108,14 @@ fn forced_discovery_probes_auth_but_cheap_discovery_reuses_cached_status() {
 #[cfg(unix)]
 #[test]
 fn cheap_discovery_reports_absent_before_any_forced_probe() {
+    let _path_guard = crate::managed_agents::lock_path_mutex();
+    super::super::login_shell_spawn_probe::run_in_isolated_process(
+        cheap_discovery_reports_absent_before_any_forced_probe_body,
+    );
+}
+
+#[cfg(unix)]
+fn cheap_discovery_reports_absent_before_any_forced_probe_body() {
     use crate::managed_agents::custom_harnesses::registry_test_lock;
     use crate::managed_agents::discovery::{
         clear_resolve_cache, discover_acp_runtimes_from, login_shell_spawn_probe,
@@ -115,7 +123,6 @@ fn cheap_discovery_reports_absent_before_any_forced_probe() {
     use crate::managed_agents::{AcpAvailabilityStatus, AuthStatus};
     use std::os::unix::fs::PermissionsExt;
 
-    let _path_guard = crate::managed_agents::lock_path_mutex();
     let _registry_guard = registry_test_lock();
 
     let dir = tempfile::tempdir().expect("tempdir");
