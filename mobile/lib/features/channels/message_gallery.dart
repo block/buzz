@@ -11,10 +11,14 @@ class MessageGalleryItem {
   final String semanticLabel;
   final double? aspectRatio;
 
+  /// Declared media type, used to keep potentially animated images in Flutter.
+  final String? mimeType;
+
   const MessageGalleryItem({
     required this.url,
     required this.semanticLabel,
     required this.aspectRatio,
+    this.mimeType,
   });
 }
 
@@ -60,6 +64,7 @@ TrailingImageGallery? extractTrailingImageGallery(
             imeta?.alt ??
             (markdownLabel.isNotEmpty ? markdownLabel : 'Message image'),
         aspectRatio: imeta?.aspectRatio,
+        mimeType: imeta?.mimeType,
       ),
     );
     cursor -= 1;

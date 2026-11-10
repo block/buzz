@@ -5666,9 +5666,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      await tester.longPress(
-        find.byKey(const ValueKey('message-media-carousel')),
-      );
+      await tester.longPress(find.byKey(const ValueKey('message-media-stack')));
       await tester.pumpAndSettle();
 
       expect(find.byKey(const ValueKey('quick-reaction-more')), findsOneWidget);
@@ -5685,7 +5683,7 @@ void main() {
     });
 
     testWidgets(
-      'keeps image galleries body-aligned and flush with the trailing edge',
+      'keeps photo stacks body-aligned and avatars visible while cycling',
       (tester) async {
         tester.view.physicalSize = const Size(400, 800);
         tester.view.devicePixelRatio = 1;
@@ -5717,22 +5715,31 @@ void main() {
         );
         await tester.pumpAndSettle();
 
-        final carousel = find.byKey(const ValueKey('message-media-carousel'));
+        final carousel = find.byKey(const ValueKey('message-media-stack'));
         final imageCount = find.byKey(
           const ValueKey('message-media-carousel-count'),
         );
         final carouselRect = tester.getRect(carousel);
-        final imageCountRect = tester.getRect(imageCount);
-
-        expect(imageCountRect.left, carouselRect.left + Grid.xs);
+        expect(imageCount, findsNothing);
         expect(
-          imageCountRect.left,
+          tester
+              .widget<Semantics>(
+                find.byKey(const ValueKey('message-media-stack-semantics')),
+              )
+              .properties
+              .value,
+          'Photo 1 of 2',
+        );
+        expect(
+          carouselRect.left + Grid.xs,
           tester
               .getRect(find.byKey(const ValueKey('message-author-gallery')))
               .left,
         );
-        expect(carouselRect.right, tester.view.physicalSize.width);
-        expect(carouselRect.top - imageCountRect.bottom, Grid.half + 2);
+        expect(
+          carouselRect.right,
+          lessThanOrEqualTo(tester.view.physicalSize.width),
+        );
         final galleryAvatar = find.descendant(
           of: find.byKey(const ValueKey('message-row-gallery')),
           matching: find.byType(MessageMediaAvatar),
@@ -5745,34 +5752,30 @@ void main() {
             )
             .opacity;
         expect(avatarOpacity(), 1);
-        final scroll = tester.widget<CustomScrollView>(
-          find.descendant(
-            of: carousel,
-            matching: find.byType(CustomScrollView),
-          ),
+        await tester.drag(carousel, const Offset(-140, 0));
+        await tester.pumpAndSettle();
+        expect(
+          tester
+              .widget<Semantics>(
+                find.byKey(const ValueKey('message-media-stack-semantics')),
+              )
+              .properties
+              .value,
+          'Photo 2 of 2',
         );
-        final controller = scroll.controller! as PageController;
-        final gesture = await tester.startGesture(tester.getCenter(carousel));
-        await gesture.moveBy(const Offset(-45, 0));
-        await tester.pump();
-        await gesture.moveBy(const Offset(-20, 0));
-        await tester.pump();
-        expect(avatarOpacity(), lessThan(1));
-        await gesture.moveBy(const Offset(-100, 0));
-        await tester.pump();
-        expect(avatarOpacity(), 0);
-        await gesture.up();
-        await tester.pumpAndSettle();
-        controller.jumpToPage(1);
-        await tester.pumpAndSettle();
-        expect(avatarOpacity(), 0);
-        controller.jumpToPage(0);
-        await tester.pumpAndSettle();
         expect(avatarOpacity(), 1);
-        await tester.drag(carousel, const Offset(100, 0));
-        await tester.pump();
-        expect(controller.offset, greaterThanOrEqualTo(0));
+        await tester.drag(carousel, const Offset(140, 0));
         await tester.pumpAndSettle();
+        expect(
+          tester
+              .widget<Semantics>(
+                find.byKey(const ValueKey('message-media-stack-semantics')),
+              )
+              .properties
+              .value,
+          'Photo 1 of 2',
+        );
+        expect(avatarOpacity(), 1);
 
         final messageMaterial = find
             .ancestor(
