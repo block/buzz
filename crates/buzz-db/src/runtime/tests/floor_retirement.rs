@@ -37,7 +37,7 @@ async fn migration_schema_floor_retirement_drops_parent_and_partition_clones() {
     let pool = PgPool::connect(&crate::test_support::database_url())
         .await
         .expect("connect isolated migration database");
-    crate::migration::run_migrations_through(&pool, 60)
+    crate::migration::run_migrations_through(&pool, 86)
         .await
         .expect("apply pre-contract schema");
     let partitions: i64 =
@@ -61,7 +61,7 @@ async fn migration_schema_floor_retirement_cleans_child_copies_idempotently() {
     let pool = PgPool::connect(&crate::test_support::database_url())
         .await
         .expect("connect isolated migration database");
-    crate::migration::run_migrations_through(&pool, 60)
+    crate::migration::run_migrations_through(&pool, 86)
         .await
         .expect("apply pre-contract schema");
     // Model independently attached copies after the parent guard was removed.
