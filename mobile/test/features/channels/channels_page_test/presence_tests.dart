@@ -35,7 +35,7 @@ void presenceListTests(
       expect((dot.decoration as BoxDecoration).color, switch (status) {
         'online' => theme.extension<AppColors>()!.success,
         'away' => theme.extension<AppColors>()!.warning,
-        _ => theme.colorScheme.outline,
+        _ => theme.colorScheme.onSurfaceVariant,
       });
       expect(tester.getRect(avatar), bounds);
     }

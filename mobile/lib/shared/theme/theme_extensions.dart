@@ -19,11 +19,13 @@ extension AppThemeExtension on BuildContext {
       : const Color(0xFF8D8D8D);
   TextTheme get textTheme => theme.textTheme;
 
-  /// Design-system availability color: success, warning, or outline.
+  /// Design-system availability color: success, warning, or the muted
+  /// text-tertiary foreground. `outline` is a hairline-border token and reads
+  /// as invisible on light surfaces, so it must not be used for a dot.
   Color presenceColor(String? presence) => switch (presence) {
     'online' => appColors.success,
     'away' => appColors.warning,
-    _ => colors.outline,
+    _ => colors.onSurfaceVariant,
   };
 
   AppColors get appColors {

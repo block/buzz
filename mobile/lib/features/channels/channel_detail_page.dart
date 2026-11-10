@@ -821,9 +821,9 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
         nativeTitlePresenceColor: switch (isOneToOneDm
             ? dmHeader?.presence
             : null) {
-          'online' => context.appColors.success,
-          'away' => context.appColors.warning,
-          'offline' => context.colors.outline,
+          'online' || 'away' || 'offline' => context.presenceColor(
+            dmHeader?.presence,
+          ),
           _ => null,
         },
         // Loaded content stays readable while it reconnects and catches up;

@@ -177,7 +177,7 @@ void main() {
           );
           expect(
             menuContext.presenceColor('offline'),
-            Theme.of(menuContext).colorScheme.outline,
+            Theme.of(menuContext).colorScheme.onSurfaceVariant,
           );
           final nativeMenu = nativeChannels.singleWhere(
             (channel) => channel.name.startsWith('buzz/presence_menu/'),

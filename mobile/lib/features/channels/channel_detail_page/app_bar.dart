@@ -93,9 +93,10 @@ class _ConversationAppBarTitle extends StatelessWidget {
                           decoration: BoxDecoration(
                             shape: BoxShape.circle,
                             color: switch (presence) {
-                              'online' => context.appColors.success,
-                              'away' => context.appColors.warning,
-                              _ => context.colors.outline,
+                              'online' ||
+                              'away' ||
+                              'offline' => context.presenceColor(presence),
+                              _ => context.presenceColor(null),
                             },
                           ),
                         ),
