@@ -890,7 +890,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 88);
+        assert_eq!(migrations.len(), 89);
         assert_eq!(migrations[87].version, 88);
         assert!(migrations[87]
             .sql
@@ -993,10 +993,10 @@ mod postgres_tests {
             .as_str()
             .contains("CREATE FUNCTION profile_name_fields"));
         // The app owns the NIP-RS watermark, retention-free purge and
-        // mention liveness, so 0066 drops the migration-only triggers that
+        // mention liveness, so 0089 drops the migration-only triggers that
         // 0009, 0010, 0011 and 0019 installed. Those files stay frozen.
-        assert_eq!(migrations[65].version, 66);
-        let retire_nip_rs = strip_sql_comments(migrations[65].sql.as_str());
+        assert_eq!(migrations[88].version, 89);
+        let retire_nip_rs = strip_sql_comments(migrations[88].sql.as_str());
         for statement in [
             "SET LOCAL lock_timeout = '5s';",
             "DROP TRIGGER trg_events_nip_rs_watermark ON events;",
@@ -1012,13 +1012,13 @@ mod postgres_tests {
         ] {
             assert!(
                 retire_nip_rs.contains(statement),
-                "0066 must run {statement}"
+                "0089 must run {statement}"
             );
         }
         assert!(
             retire_nip_rs.find("SET LOCAL lock_timeout").unwrap()
                 < retire_nip_rs.find("DROP TRIGGER").unwrap(),
-            "0066 must bound its ACCESS EXCLUSIVE lock on events before the first DROP"
+            "0089 must bound its ACCESS EXCLUSIVE lock on events before the first DROP"
         );
         assert_eq!(migrations[55].version, 56);
         assert!(migrations[55]
