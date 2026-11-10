@@ -689,10 +689,7 @@ class _FakeChannelsNotifier extends ChannelsNotifier {
   }
 
   @override
-  Future<void> refresh({
-    bool fetchDirectory = false,
-    bool strong = false,
-  }) async {
+  Future<void> refresh({bool fetchDirectory = false}) async {
     state = AsyncData(_channels);
   }
 

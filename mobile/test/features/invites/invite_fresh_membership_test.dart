@@ -73,15 +73,9 @@ class _CachedChannels extends ChannelsNotifier {
   ];
   // A best-effort refresh can retain stale data without failing its caller.
   @override
-  Future<void> refresh({
-    bool fetchDirectory = false,
-    bool strong = false,
-  }) async {}
+  Future<void> refresh({bool fetchDirectory = false}) async {}
   @override
-  Future<List<Channel>> fetchFresh({
-    bool fetchDirectory = false,
-    bool strong = false,
-  }) async {
+  Future<List<Channel>> fetchFresh({bool fetchDirectory = false}) async {
     freshReads++;
     throw StateError('membership fetch failed');
   }

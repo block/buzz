@@ -8,14 +8,24 @@ class _ReadOnlyNotice extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final isJoining = useState(false);
+    // The relay accepted a join that this client could not confirm yet.
+    final isUnconfirmed = useState(false);
     final place = channel.isForum ? 'forum' : 'channel';
-    final canJoin = channel.visibility == 'open' && !channel.isArchived;
+    final isOpen = channel.visibility == 'open' && !channel.isArchived;
+    // Joining a guest-join channel grants a role that cannot post, so it
+    // offers no Join (as on desktop).
+    final canJoin = isOpen && !channel.joinsAsGuest;
 
     Future<void> join() async {
       if (isJoining.value) return;
       isJoining.value = true;
+      final actions = ref.read(channelActionsProvider);
       try {
-        await ref.read(channelActionsProvider).joinChannel(channel.id);
+        await (isUnconfirmed.value
+            ? actions.recheckJoin(channel.id)
+            : actions.joinChannel(channel.id));
+      } on ChannelJoinUnconfirmed {
+        if (context.mounted) isUnconfirmed.value = true;
       } catch (_) {
         if (context.mounted) {
           ScaffoldMessenger.of(context).showFeedbackSnackBar(
@@ -30,9 +40,16 @@ class _ReadOnlyNotice extends HookConsumerWidget {
 
     final message = channel.isArchived
         ? 'This $place is archived and read-only on mobile.'
+        : isOpen && channel.joinsAsGuest
+        ? 'This $place is read-only'
+        : canJoin && isUnconfirmed.value
+        ? 'Join sent, but not confirmed yet'
         : canJoin
         ? 'Join $place to send messages'
         : 'You’re previewing this $place';
+    final buttonLabel = isJoining.value
+        ? (isUnconfirmed.value ? 'Checking…' : 'Joining…')
+        : (isUnconfirmed.value ? 'Check again' : 'Join');
 
     return Container(
       width: double.infinity,
@@ -67,7 +84,7 @@ class _ReadOnlyNotice extends HookConsumerWidget {
                 foregroundColor: context.colors.onPrimary,
               ),
               onPressed: isJoining.value ? null : join,
-              child: Text(isJoining.value ? 'Joining…' : 'Join'),
+              child: Text(buttonLabel),
             ),
         ],
       ),

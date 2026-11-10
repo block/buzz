@@ -534,13 +534,7 @@ void main() {
 
       await expectLater(
         container.read(actionsProvider).joinChannel(_channelId),
-        throwsA(
-          isA<StateError>().having(
-            (error) => error.message,
-            'message',
-            'Join was sent but is not confirmed yet',
-          ),
-        ),
+        throwsA(isA<ChannelJoinUnconfirmed>()),
       );
 
       expect(session.publishedEvents.single.kind, 9021);

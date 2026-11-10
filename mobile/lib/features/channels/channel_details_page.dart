@@ -293,6 +293,17 @@ class ChannelDetailsPage extends HookConsumerWidget {
       try {
         await ref.read(channelActionsProvider).joinChannel(resolvedChannel.id);
         if (context.mounted) Navigator.of(context).pop(false);
+      } on ChannelJoinUnconfirmed {
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showFeedbackSnackBar(
+            const SnackBar(
+              content: Text(
+                'Join sent, but not confirmed yet. Try again to check.',
+              ),
+            ),
+            kind: ToastKind.generic,
+          );
+        }
       } catch (_) {
         if (context.mounted) {
           ScaffoldMessenger.of(context).showFeedbackSnackBar(
