@@ -4629,7 +4629,7 @@ mod postgres_tests {
         .expect("connect isolated migration DB");
         // Stop just before the retirement migration so every current table
         // exists and the universal fence objects are still present.
-        crate::migration::run_migrations_through(&db.pool, 65)
+        crate::migration::run_migrations_through(&db.pool, 86)
             .await
             .expect("migrate with fence objects present");
         let store = db.deletion_store();
