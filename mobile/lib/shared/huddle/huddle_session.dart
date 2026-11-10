@@ -160,6 +160,7 @@ final huddleTransportFactoryProvider = Provider<HuddleTransportFactory>((ref) {
     parameters: parameters,
     headers: () => auth.headers(
       RelayConfig(baseUrl: parameters.relayWebSocketUrl, nsec: parameters.nsec),
+      fresh: true,
     ),
   );
 });

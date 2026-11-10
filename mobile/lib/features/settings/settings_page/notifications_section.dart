@@ -10,6 +10,7 @@ class _NotificationsSection extends ConsumerWidget {
     }
     final community = ref.watch(activeCommunityProvider).value;
     if (community == null) return const SizedBox.shrink();
+    final setup = ref.watch(buzzPushSetupStatusProvider);
     final capability = ref.watch(currentRelayPushDescriptorProvider);
     final hasCapability =
         !capability.isLoading &&
@@ -19,7 +20,8 @@ class _NotificationsSection extends ConsumerWidget {
         community.pushSubscriptionState.pendingTombstoneGeneration != null;
     if (!hasCapability &&
         !community.pushNotificationsEnabled &&
-        !optOutPending) {
+        !optOutPending &&
+        !setup.hasError) {
       return const SizedBox.shrink();
     }
     final canToggle = hasCapability || community.pushNotificationsEnabled;
@@ -35,6 +37,13 @@ class _NotificationsSection extends ConsumerWidget {
     return AppListCard(
       verticalPadding: Grid.twelve,
       children: [
+        if (setup.hasError)
+          AppListRow(
+            key: const ValueKey('push-setup-retry'),
+            title: 'Notification setup failed',
+            subtitle: 'You can keep using Buzz. Tap to retry notifications.',
+            onTap: () => retryBuzzPushSetup(ref),
+          ),
         MergeSemantics(
           key: const ValueKey('push-notifications-setting'),
           child: Stack(

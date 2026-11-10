@@ -1,0 +1,337 @@
+import 'package:buzz/shared/relay/media_image.dart';
+import 'package:buzz/shared/widgets/frosted_app_bar.dart';
+import 'package:buzz/shared/widgets/preset_agent_avatar.dart';
+import 'package:buzz/shared/agents/agent_avatar_catalog.dart';
+import 'package:buzz/features/agents/agent_avatar_editor_page.dart';
+
+import 'dart:async';
+
+import 'package:buzz/shared/agents/remote_agents.dart';
+
+import 'package:buzz/features/agents/agents_page.dart';
+import 'package:buzz/features/agents/create_agent_page.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:nostr/nostr.dart' as nostr;
+
+import 'agents_harness.dart';
+
+void main() {
+  final existing = existingDesktopKeys.public;
+
+  testWidgets(
+    'creation overlays the retained list, then failure and resume both land',
+    (tester) async {
+      final h = await AgentsHarness.create();
+      final controller = h.controller;
+      final added = nostr.Keys('0' * 63 + '2').public;
+      final posters = _PosterClient();
+      await h.open(
+        tester,
+        directory: [existing],
+        overrides: [mediaHttpClientProvider.overrideWithValue(posters)],
+      );
+      final list = tester.element(find.byType(AgentsPage));
+      if (!supportsRemoteAgents(h.community)) {
+        expect(find.byTooltip('Add agent'), findsNothing);
+        expect(find.text('Sign in to create an agent'), findsNothing);
+        expect(find.byKey(ValueKey(existing)), findsOneWidget);
+        return;
+      }
+      await tester.tap(find.byTooltip('Add agent'));
+      await tester.pumpAndSettle();
+      expect(find.byType(CreateAgentPage), findsOneWidget);
+      final createContext = tester.element(find.byType(CreateAgentPage));
+      expect(Navigator.of(list), same(Navigator.of(createContext)));
+
+      expect(find.text('Thinking'), findsOneWidget);
+      expect(find.byIcon(Icons.unfold_more), findsNWidgets(2));
+      expect(
+        tester.getTopLeft(find.text('Name')).dy,
+        lessThan(tester.getTopLeft(find.text('Model')).dy),
+      );
+      expect(
+        tester.getTopLeft(find.text('Model')).dy,
+        lessThan(tester.getTopLeft(find.text('Instructions')).dy),
+      );
+
+      await tester.ensureVisible(find.text('Model'));
+      await tester.tap(find.text('Model'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Test model').last);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Thinking'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('high').last);
+      await tester.pumpAndSettle();
+      // Switching models must clear an effort unsupported by the new choice.
+      await tester.tap(find.text('Test model'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Other model').last);
+      await tester.pumpAndSettle();
+      expect(
+        tester
+            .widget<IconButton>(find.widgetWithIcon(IconButton, Icons.check))
+            .onPressed,
+        isNull,
+      );
+      await tester.tap(find.text('Other model'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Test model').last);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Thinking'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('high').last);
+      await tester.pumpAndSettle();
+      controller.gate = Completer<void>();
+      await tester.enterText(
+        find.descendant(
+          of: find.byWidgetPredicate(
+            (widget) =>
+                widget is Semantics && widget.properties.label == 'Name',
+          ),
+          matching: find.byType(TextField),
+        ),
+        'Scout',
+      );
+      await tester.enterText(
+        find.descendant(
+          of: find.byWidgetPredicate(
+            (widget) =>
+                widget is Semantics &&
+                widget.properties.label == 'Instructions',
+          ),
+          matching: find.byType(TextField),
+        ),
+        'Reply concisely.',
+      );
+      await tester.pump();
+      final originalAvatar = tester
+          .widget<PresetAgentAvatar>(find.byType(PresetAgentAvatar))
+          .imageUrl;
+      final originalPack = AgentAvatarPack.values.firstWhere(
+        (pack) => pack.indices.any(
+          (i) => agentAvatarCatalog[i].url == originalAvatar,
+        ),
+      );
+      final targetIndex = originalPack.indices.firstWhere(
+        (i) => agentAvatarCatalog[i].url != originalAvatar,
+      );
+      await tester.ensureVisible(find.text('Choose avatar'));
+      // Repeated callbacks before the next rebuild must still open one editor.
+      final openAvatar = tester
+          .widget<FilledButton>(
+            find.widgetWithText(FilledButton, 'Choose avatar'),
+          )
+          .onPressed!;
+      // A stalled CDN must not prevent entry to the editor.
+      posters.stalled = true;
+      MediaImageProvider.debugResetCooldowns();
+      openAvatar();
+      openAvatar();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 301));
+      await tester.pumpAndSettle();
+      expect(posters.stalledRequests, greaterThan(0));
+      posters.release();
+      expect(find.byType(AgentAvatarEditorPage), findsOneWidget);
+      expect(find.text('Instructions'), findsNothing);
+      await tester.tap(find.byKey(ValueKey('agent-avatar-$targetIndex')));
+      await tester.pumpAndSettle();
+      // This harness disables motion, so the return transition completes
+      // immediately. Check suppression while editing, then restoration on exit.
+      final chooseButton = find.widgetWithText(
+        FilledButton,
+        'Choose avatar',
+        skipOffstage: false,
+      );
+      expect(tester.widget<FilledButton>(chooseButton).onPressed, isNull);
+      final playback = find.byKey(
+        const ValueKey('create-agent-avatar-playback'),
+        skipOffstage: false,
+      );
+      expect(tester.widget<TickerMode>(playback).enabled, isFalse);
+      final sourceBar = find.descendant(
+        of: find.byType(CreateAgentPage, skipOffstage: false),
+        matching: find.byType(FrostedAppBar, skipOffstage: false),
+        skipOffstage: false,
+      );
+      expect(
+        tester.widget<FrostedAppBar>(sourceBar).nativeViewSuppressed?.value,
+        isTrue,
+      );
+      await tester.tap(find.byTooltip('Cancel'));
+      await tester.pumpAndSettle();
+      expect(tester.widget<FilledButton>(chooseButton).onPressed, isNotNull);
+      expect(tester.widget<TickerMode>(playback).enabled, isTrue);
+      expect(
+        tester.widget<FrostedAppBar>(sourceBar).nativeViewSuppressed?.value,
+        isFalse,
+      );
+      expect(
+        tester
+            .widget<PresetAgentAvatar>(find.byType(PresetAgentAvatar))
+            .imageUrl,
+        originalAvatar,
+      );
+      await tester.tap(find.text('Choose avatar'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(ValueKey('agent-avatar-$targetIndex')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Done'));
+      await tester.pumpAndSettle();
+      expect(
+        tester
+            .widget<PresetAgentAvatar>(find.byType(PresetAgentAvatar))
+            .imageUrl,
+        isNot(originalAvatar),
+      );
+      expect(find.text('Scout'), findsOneWidget);
+      expect(find.text('Reply concisely.'), findsOneWidget);
+      await tester.tap(find.byTooltip('Create'));
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(controller.busy, isTrue);
+      expect(
+        find.descendant(
+          of: find.byType(CreateAgentPage),
+          matching: find.byType(LinearProgressIndicator),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        tester
+            .widget<IconButton>(
+              find.ancestor(
+                of: find.byTooltip('Create'),
+                matching: find.byType(IconButton),
+              ),
+            )
+            .onPressed,
+        isNull,
+      );
+      int catalogLoads() =>
+          h.registry.calls.where((call) => call == 'get-model-catalog').length;
+      final loadsBeforeFailure = catalogLoads();
+      controller.gate!.complete();
+      await tester.pumpAndSettle();
+      expect(find.byType(CreateAgentPage), findsOneWidget);
+      // A rejected choice may be stale, so the catalog reloads.
+      expect(catalogLoads(), loadsBeforeFailure + 1);
+      expect(find.byType(CreateAgentPage), findsOneWidget);
+      expect(find.text('Creation failed. Retry.'), findsOneWidget);
+      expect(controller.submittedName, 'Scout');
+      expect(controller.submittedInstructions, 'Reply concisely.');
+
+      // The real registry flow then succeeds and returns to the same list.
+      controller.gate = null;
+      await tester.tap(find.byTooltip('Create'));
+      await tester.pumpAndSettle();
+      expect(find.byType(BottomSheet), findsNothing);
+      expect(tester.element(find.byType(AgentsPage)), same(list));
+      expect(find.byKey(ValueKey(added)), findsOneWidget);
+      expect(h.registry.calls, contains('publish-policy'));
+    },
+  );
+
+  testWidgets('a new agent starts on the affordable default model', (
+    tester,
+  ) async {
+    final h = await AgentsHarness.create();
+    h.registry.models = [
+      {
+        'id': 'premium-model',
+        'display_name': 'Premium model',
+        'supported_reasoning_efforts': ['low', 'medium', 'high'],
+      },
+      {
+        'id': 'kgoose-claude-sonnet-4-6',
+        'display_name': 'Sonnet',
+        'supported_reasoning_efforts': ['low', 'medium', 'high'],
+      },
+    ];
+    await h.open(tester, directory: [existing]);
+    if (!supportsRemoteAgents(h.community)) return;
+    await tester.tap(find.byTooltip('Add agent'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Sonnet'), findsOneWidget);
+    expect(find.text('Premium model'), findsNothing);
+    expect(find.text('medium'), findsOneWidget);
+
+    // Naming it is all that's left before Create.
+    await tester.enterText(
+      find.descendant(
+        of: find.byWidgetPredicate(
+          (widget) => widget is Semantics && widget.properties.label == 'Name',
+        ),
+        matching: find.byType(TextField),
+      ),
+      'Scout',
+    );
+    await tester.pump();
+    expect(
+      tester
+          .widget<IconButton>(
+            find.ancestor(
+              of: find.byTooltip('Create'),
+              matching: find.byType(IconButton),
+            ),
+          )
+          .onPressed,
+      isNotNull,
+    );
+  });
+
+  testWidgets('a new agent starts on the service-recommended model', (
+    tester,
+  ) async {
+    final h = await AgentsHarness.create();
+    h.registry.models = [
+      {
+        'id': 'premium-model',
+        'display_name': 'Premium model',
+        'supported_reasoning_efforts': ['low', 'medium', 'high'],
+      },
+      {
+        'id': 'kgoose-claude-sonnet-4-6',
+        'display_name': 'Sonnet',
+        'supported_reasoning_efforts': ['low', 'medium', 'high'],
+      },
+    ];
+    h.registry.recommendedSelection = {
+      'model_id': 'premium-model',
+      'reasoning_effort': 'high',
+    };
+    await h.open(tester, directory: [existing]);
+    if (!supportsRemoteAgents(h.community)) return;
+    await tester.tap(find.byTooltip('Add agent'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Premium model'), findsOneWidget);
+    expect(find.text('Sonnet'), findsNothing);
+    expect(find.text('high'), findsOneWidget);
+  });
+}
+
+/// Serves no posters; while [stalled], requests hang until [release].
+class _PosterClient extends http.BaseClient {
+  bool stalled = false;
+  final _pending = <Completer<http.StreamedResponse>>[];
+  int get stalledRequests => _pending.length;
+
+  void release() {
+    stalled = false;
+    for (final pending in _pending) {
+      pending.complete(http.StreamedResponse(const Stream.empty(), 404));
+    }
+  }
+
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) {
+    if (!stalled) {
+      return Future.value(http.StreamedResponse(const Stream.empty(), 404));
+    }
+    return (_pending..add(Completer())).last.future;
+  }
+}

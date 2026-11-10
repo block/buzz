@@ -40,6 +40,7 @@ class _ThreadMessage extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final startsThreads = ref.watch(channelStartsThreadsProvider(channelId));
     final messageSnapshotKey = useMemoized(GlobalKey.new, const []);
     final swipeContentKey = useMemoized(GlobalKey.new, const []);
     final mediaOffset = useMessageMediaOffset(message.content, message.tags);
@@ -236,6 +237,14 @@ class _ThreadMessage extends HookConsumerWidget {
                                           children: [
                                             Expanded(
                                               child: MessageAuthorMeta(
+                                                timestampGap: Grid.half,
+                                                showIdentity:
+                                                    showMessageAuthorName(
+                                                      ref,
+                                                      channelId,
+                                                      message.pubkey,
+                                                      currentPubkey,
+                                                    ),
                                                 showTimestamp: true,
                                                 reversed: false,
                                                 alignment: ownMessage
@@ -244,14 +253,16 @@ class _ThreadMessage extends HookConsumerWidget {
                                                 nameStyle:
                                                     messageUsernameTextStyle
                                                         .copyWith(
-                                                          fontSize: 13.1,
-                                                          height: 17 / 13.1,
+                                                          fontWeight:
+                                                              FontWeight.w500,
+                                                          fontSize: 11,
+                                                          height: 17 / 11,
                                                         ),
                                                 metadataStyle:
                                                     messageMetadataTextStyle
                                                         .copyWith(
-                                                          fontSize: 13.1,
-                                                          height: 17 / 13.1,
+                                                          fontSize: 11,
+                                                          height: 17 / 11,
                                                         ),
                                                 timestampStyle:
                                                     messageTimestampTextStyle
@@ -259,18 +270,21 @@ class _ThreadMessage extends HookConsumerWidget {
                                                           fontSize: 11,
                                                           height: 17 / 11,
                                                         ),
-                                                displayName: displayName,
-                                                username: messageUsernameLabel(
-                                                  profile,
-                                                ),
+                                                displayName: ownMessage
+                                                    ? 'You'
+                                                    : displayName,
+                                                username: ownMessage
+                                                    ? null
+                                                    : messageUsernameLabel(
+                                                        profile,
+                                                      ),
                                                 timestamp: formatMessageTime(
                                                   message.createdAt,
                                                 ),
                                                 nameColor:
-                                                    context.colors.onSurface,
-                                                metadataColor: context
-                                                    .colors
-                                                    .onSurfaceVariant,
+                                                    context.tertiaryTextColor,
+                                                metadataColor:
+                                                    context.tertiaryTextColor,
                                                 onAuthorTap: () =>
                                                     showUserProfileSheet(
                                                       context,
@@ -319,7 +333,7 @@ class _ThreadMessage extends HookConsumerWidget {
                                       bubbleEnd: showAvatar,
                                       bubbleStart: showAuthor,
                                       ownMessage: ownMessage,
-                                      trimTrailingSpacing: endsDay,
+                                      trimTrailingSpacing: true,
                                       mentionNames: resolvedMentionNames,
                                       mentionLabels: mentionLabels,
                                       agentMentionPubkeys: agentMentionPubkeys,
@@ -331,7 +345,8 @@ class _ThreadMessage extends HookConsumerWidget {
                                       scaleEmojiOnly: true,
                                       mediaCarouselTrailingOverflow:
                                           Grid.gutter,
-                                      onMediaReply: allMessages == null
+                                      onMediaReply:
+                                          allMessages == null || !startsThreads
                                           ? null
                                           : () {
                                               if (!context.mounted) return;
@@ -351,6 +366,13 @@ class _ThreadMessage extends HookConsumerWidget {
                                                 ),
                                               );
                                             },
+                                      nativePhotoActions: nativeImageActions(
+                                        context: context,
+                                        ref: ref,
+                                        message: message,
+                                        channelId: channelId,
+                                        canManageMessage: canManageMessage,
+                                      ),
                                       onMediaMore: (viewerContext, imageUrl) =>
                                           showImageActions(
                                             context: viewerContext,
@@ -368,11 +390,13 @@ class _ThreadMessage extends HookConsumerWidget {
                                             },
                                           ),
                                       onChannelTap: (targetChannelId) {
-                                        openChannelLink(
-                                          context: context,
-                                          ref: ref,
-                                          channelId: targetChannelId,
-                                          currentChannelId: channelId,
+                                        unawaited(
+                                          openChannelLink(
+                                            context: context,
+                                            ref: ref,
+                                            channelId: targetChannelId,
+                                            currentChannelId: channelId,
+                                          ),
                                         );
                                       },
                                       onMentionTap: (pubkey) =>

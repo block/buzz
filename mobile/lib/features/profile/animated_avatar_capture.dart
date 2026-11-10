@@ -47,10 +47,22 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
     this.initialFrames = const [],
     this.disposalBarrier,
     this.previewKey,
+    this.previewSize,
+    this.controlsTransitionProgress = 1,
+    this.previewOffset = 0,
   });
 
   /// Identifies the visible avatar for the native sheet transition.
   final GlobalKey? previewKey;
+
+  /// Fixed visible preview diameter when hosted in profile setup.
+  final double? previewSize;
+
+  /// Entrance progress for the controls, independent of the fixed-size preview.
+  final double controlsTransitionProgress;
+
+  /// Moves the capture circle independently of its controls during tab changes.
+  final double previewOffset;
 
   /// The vertical space available to the capture surface.
   final double height;
@@ -578,7 +590,7 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
                   (errorStyle?.height ?? 1.2) *
                   textScale *
                   2;
-    final capturePreviewSize = compactCapture ? 180.0 : 228.0;
+    final capturePreviewSize = previewSize ?? (compactCapture ? 180.0 : 228.0);
     final recordGap = max(
       Grid.xs,
       height - capturePreviewSize - Grid.xs - statusHeight - errorHeight - 64,
@@ -586,88 +598,108 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
     Widget captureContent() => Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        SizedBox.square(
-          key: const ValueKey('animated-avatar-capture-preview'),
-          dimension: capturePreviewSize,
-          child: Stack(
-            key: previewKey,
-            fit: StackFit.expand,
-            children: [
-              Padding(
-                padding: const EdgeInsets.all(4),
-                child: ClipOval(
-                  child: ColoredBox(
-                    color: Colors.black,
-                    child: isPreparingFrames.value
-                        ? Center(
-                            child: BuzzLoadingIndicator(
-                              size: 44,
-                              color: context.colors.onSurface,
-                              semanticLabel: 'Preparing animated avatar',
-                            ),
-                          )
-                        : active != null
-                        ? _AspectCorrectCameraPreview(controller: active)
-                        : Center(
-                            child: isInitializing.value
-                                ? const BuzzLoadingIndicator(
-                                    color: Colors.white,
-                                    semanticLabel: 'Starting camera',
-                                  )
-                                : const Icon(
-                                    BuzzIcons.cameraOff,
-                                    color: Colors.white,
-                                    size: 32,
-                                  ),
-                          ),
-                  ),
-                ),
-              ),
-              if (isRecording.value)
+        Transform.translate(
+          offset: Offset(0, previewOffset),
+          child: SizedBox.square(
+            key: const ValueKey('animated-avatar-capture-preview'),
+            dimension: capturePreviewSize,
+            child: Stack(
+              key: previewKey,
+              fit: StackFit.expand,
+              children: [
                 Padding(
-                  // A progress stroke is centred on its circular path. Inset
-                  // it so the outer half is not clipped by the preview stack.
-                  padding: const EdgeInsets.all(2),
-                  child: CircularProgressIndicator(
-                    key: const ValueKey('animated-avatar-recording-ring'),
-                    value: progress.value,
-                    strokeWidth: 4,
-                    strokeCap: StrokeCap.round,
-                    color: context.colors.onSurface,
-                    backgroundColor: context.colors.outlineVariant,
+                  padding: previewSize == null
+                      ? const EdgeInsets.all(4)
+                      : EdgeInsets.zero,
+                  child: ClipOval(
+                    child: ColoredBox(
+                      color: Colors.black,
+                      child: isPreparingFrames.value
+                          ? Center(
+                              child: BuzzLoadingIndicator(
+                                size: 44,
+                                color: context.colors.onSurface,
+                                semanticLabel: 'Preparing animated avatar',
+                              ),
+                            )
+                          : active != null
+                          ? _AspectCorrectCameraPreview(controller: active)
+                          : Center(
+                              child: isInitializing.value
+                                  ? const BuzzLoadingIndicator(
+                                      color: Colors.white,
+                                      semanticLabel: 'Starting camera',
+                                    )
+                                  : const Icon(
+                                      BuzzIcons.cameraOff,
+                                      color: Colors.white,
+                                      size: 32,
+                                    ),
+                            ),
+                    ),
                   ),
                 ),
-            ],
+                if (isRecording.value)
+                  Padding(
+                    // A progress stroke is centred on its circular path. Inset
+                    // it so the outer half is not clipped by the preview stack.
+                    padding: const EdgeInsets.all(2),
+                    child: CircularProgressIndicator(
+                      key: const ValueKey('animated-avatar-recording-ring'),
+                      value: progress.value,
+                      strokeWidth: 4,
+                      strokeCap: StrokeCap.round,
+                      color: context.colors.onSurface,
+                      backgroundColor: context.colors.outlineVariant,
+                    ),
+                  ),
+              ],
+            ),
           ),
         ),
-        const SizedBox(height: Grid.xs),
-        Text(
-          isRecording.value
-              ? 'Recording…'
-              : isPreparingFrames.value
-              ? 'Cutting you out of the background…'
-              : 'Line up your shot.',
-          textAlign: TextAlign.center,
-          style: context.textTheme.bodyMedium?.copyWith(
-            color: context.colors.onSurfaceVariant,
+        Transform.translate(
+          key: const ValueKey('animated-avatar-controls-transition'),
+          offset: Offset(0, 16 * (1 - controlsTransitionProgress)),
+          child: Opacity(
+            opacity: controlsTransitionProgress,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const SizedBox(height: Grid.xs),
+                Text(
+                  isRecording.value
+                      ? 'Recording…'
+                      : isPreparingFrames.value
+                      ? 'Cutting you out of the background…'
+                      : 'Line up your shot.',
+                  textAlign: TextAlign.center,
+                  style: context.textTheme.bodyMedium?.copyWith(
+                    color: context.colors.onSurfaceVariant,
+                  ),
+                ),
+                if (error.value != null) _ErrorText(error.value!),
+                SizedBox(height: recordGap),
+                _AnimatedRecordButton(
+                  busy: isRecording.value || isPreparingFrames.value,
+                  onPressed: active == null
+                      ? null
+                      : () {
+                          unawaited(HapticFeedback.mediumImpact());
+                          unawaited(record());
+                        },
+                ),
+              ],
+            ),
           ),
-        ),
-        if (error.value != null) _ErrorText(error.value!),
-        SizedBox(height: recordGap),
-        _AnimatedRecordButton(
-          busy: isRecording.value || isPreparingFrames.value,
-          onPressed: active == null
-              ? null
-              : () {
-                  unawaited(HapticFeedback.mediumImpact());
-                  unawaited(record());
-                },
         ),
       ],
     );
     return SizedBox(
       height: height,
-      child: SingleChildScrollView(child: captureContent()),
+      child: SingleChildScrollView(
+        clipBehavior: Clip.none,
+        child: captureContent(),
+      ),
     );
   }
 }

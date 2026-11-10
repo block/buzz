@@ -275,6 +275,11 @@ type MockBridgeOptions = {
   /** Sequenced add-member failures. A string fails that call; null succeeds. */
   addChannelMembersErrors?: (string | null)[];
   channelMembersReadDelayMs?: number;
+  relayEntryPolicy?: {
+    requiredRelay?: string;
+    required: boolean;
+    error?: string;
+  };
   channelsReadError?: string;
   /** Reject successive mock `get_channels` calls, then resume. */
   channelsReadErrors?: (string | null)[];
@@ -285,6 +290,11 @@ type MockBridgeOptions = {
   /** Reject successive mock `join_channel` calls, then resume. */
   joinChannelErrors?: string[];
   channelsReadDelayMs?: number;
+  /**
+   * Hold the first `get_channels` read until
+   * `__BUZZ_E2E_RELEASE_CHANNELS_READ__` is called.
+   */
+  deferFirstChannelsRead?: boolean;
   /** Return not-modified for this many reads before resuming full payloads. */
   channelsNotModifiedResponses?: number;
   /** When true, a matching knownHash returns a not-modified channel payload. */

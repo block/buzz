@@ -3,10 +3,12 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../../shared/mentions/mention_tags.dart';
 import '../../shared/relay/relay.dart';
 import '../channels/channel.dart';
 import '../channels/channel_management_provider.dart';
 import '../channels/channels_provider.dart';
+import '../../shared/agents/is_quiet_agent_message.dart';
 import 'dm_resurface.dart';
 import 'feed_item.dart';
 import 'inbox_item.dart';
@@ -496,16 +498,18 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
     // executing the batch with bounded server-side concurrency. One request
     // here replaces the four simultaneous websocket history subscriptions that
     // otherwise compete with channel and preference startup sync.
-    final events = await _queryWithWebSocketFallback(session, filters);
+    // Quiet agent messages (`audience: agents`) are coordination between
+    // agents and never become Activity items, even when they tag the reader.
+    final fetched = await _queryWithWebSocketFallback(session, filters);
+    final events = [
+      for (final event in fetched)
+        if (!isQuietAgentMessage(event.tags)) event,
+      ...await _refillPastQuiet(session, filters, fetched),
+    ];
 
     bool isFromOther(NostrEvent e) =>
         e.pubkey.toLowerCase() != myPk.toLowerCase();
-    bool isAddressedToMe(NostrEvent event) => event.tags.any(
-      (tag) =>
-          tag.length > 1 &&
-          tag[0] == 'p' &&
-          tag[1].toLowerCase() == myPk.toLowerCase(),
-    );
+    bool isAddressedToMe(NostrEvent event) => tagsAddress(event.tags, myPk);
 
     const mentionKinds = {9, 40002, 1, 45001, 45003};
     const needsActionKinds = {46010, 46011, 46012};
@@ -582,6 +586,85 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
     );
   }
 
+  /// Quiet agent messages still count against each filter's relay limit, so a
+  /// window full of them can hide older items. For each filter, rebuilds its
+  /// own window from the batched result (the bridge concatenates every
+  /// filter's newest `limit` matches), then pages past a window that lost
+  /// items to the quiet filter, a few pages at most, refilling only up to the
+  /// original limit. Returns the non-quiet events found on those pages.
+  Future<List<NostrEvent>> _refillPastQuiet(
+    RelaySessionNotifier session,
+    List<NostrFilter> filters,
+    List<NostrEvent> fetched,
+  ) async {
+    const maxPages = 3;
+    final found = <NostrEvent>[];
+    for (final filter in filters) {
+      final seen = <String>{};
+      // Only the retained window is marked seen: matches past the cap came
+      // from overlapping sources and may still belong on a later page.
+      List<NostrEvent> window(Iterable<NostrEvent> events) {
+        final ids = <String>{};
+        final kept = _relayOrder([
+          for (final event in events)
+            if (_matchesFilter(filter, event) &&
+                !seen.contains(event.id) &&
+                ids.add(event.id))
+              event,
+        ]).take(filter.limit).toList();
+        seen.addAll(kept.map((event) => event.id));
+        return kept;
+      }
+
+      var page = window(fetched);
+      var visible = page.where((e) => !isQuietAgentMessage(e.tags)).length;
+      for (var i = 0; i < maxPages; i++) {
+        if (page.length < filter.limit || visible >= filter.limit) break;
+        // The relay's composite cursor, so events sharing the boundary
+        // second are not skipped.
+        final last = page.last;
+        page = window(
+          await _queryWithWebSocketFallback(session, [
+            NostrFilter(
+              kinds: filter.kinds,
+              tags: filter.tags,
+              limit: filter.limit,
+              until: last.createdAt,
+              extensions: {'before_id': last.id},
+            ),
+          ]),
+        );
+        final kept = page
+            .where((e) => !isQuietAgentMessage(e.tags))
+            .take(filter.limit - visible)
+            .toList();
+        found.addAll(kept);
+        visible += kept.length;
+      }
+    }
+    return found;
+  }
+
+  /// Newest first, ties by ascending id: the relay's history order.
+  static List<NostrEvent> _relayOrder(List<NostrEvent> events) =>
+      events..sort((a, b) {
+        final time = b.createdAt.compareTo(a.createdAt);
+        return time != 0 ? time : a.id.compareTo(b.id);
+      });
+
+  static bool _matchesFilter(NostrFilter filter, NostrEvent event) {
+    if (!filter.kinds.contains(event.kind)) return false;
+    for (final MapEntry(:key, :value) in filter.tags.entries) {
+      final name = key.startsWith('#') ? key.substring(1) : key;
+      if (!event.tags.any(
+        (tag) => tag.length > 1 && tag[0] == name && value.contains(tag[1]),
+      )) {
+        return false;
+      }
+    }
+    return true;
+  }
+
   Future<List<NostrEvent>> _queryWithWebSocketFallback(
     RelaySessionNotifier session,
     List<NostrFilter> filters,
@@ -656,11 +739,34 @@ final activityProvider =
 /// group by DM channel so one conversation renders as one row.
 final inboxItemsProvider = Provider<List<InboxItem>>((ref) {
   final feed = ref.watch(activityProvider).value;
-  if (feed == null) return const [];
+  final channels =
+      ref.watch(channelsProvider).asData?.value ?? const <Channel>[];
   final dmChannelIds = {
-    for (final channel
-        in ref.watch(channelsProvider).asData?.value ?? const <Channel>[])
+    for (final channel in channels)
       if (channel.isDm) channel.id,
   };
-  return buildInboxItems(feed.all, isDmChannel: dmChannelIds.contains);
+  final myPk = ref.watch(myPubkeyProvider);
+  // Channel discovery already catches up and subscribes to eligible replies.
+  // Keep that one source of truth for the dots and their Activity destination,
+  // rather than opening another set of channel subscriptions here.
+  final byId = <String, FeedItem>{
+    for (final event
+        in ref.read(channelsProvider.notifier).observedThreadReplies(channels))
+      event.id: FeedItem(
+        id: event.id,
+        kind: event.kind,
+        pubkey: event.pubkey,
+        content: event.content,
+        createdAt: event.createdAt,
+        channelId: event.channelId,
+        channelName: '',
+        tags: event.tags,
+        category: myPk != null && tagsAddress(event.tags, myPk)
+            ? 'mention'
+            : 'activity',
+      ),
+    // The addressed feed owns category precedence for overlapping events.
+    for (final item in feed?.all ?? const <FeedItem>[]) item.id: item,
+  };
+  return buildInboxItems(byId.values, isDmChannel: dmChannelIds.contains);
 });

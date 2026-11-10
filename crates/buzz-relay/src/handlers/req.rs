@@ -21,8 +21,9 @@ use buzz_auth::Scope;
 use crate::connection::{AuthState, ConnectionState};
 use crate::protocol::RelayMessage;
 use crate::state::AppState;
+use crate::subscription::SubscriptionScope;
 
-const MAX_SUBSCRIPTIONS: usize = 1024;
+pub(crate) const MAX_SUBSCRIPTIONS: usize = 1024;
 
 /// Maximum aggregate number of explicit `#h` values accepted in one REQ,
 /// COUNT, HTTP `/query`, or HTTP `/count` request.
@@ -60,15 +61,15 @@ pub async fn handle_req(
     conn: Arc<ConnectionState>,
     state: Arc<AppState>,
 ) {
+    let mut access = crate::access::ReadLog::req(&conn, &sub_id, &filters);
     let (conn_id, pubkey_bytes, token_channel_ids) = {
         match conn.auth_state_snapshot() {
             AuthState::Authenticated(ctx) => {
                 if !ctx.scopes.is_empty() && !ctx.scopes.contains(&Scope::MessagesRead) {
                     conn.send(RelayMessage::notice("restricted: insufficient scope"));
-                    conn.send(RelayMessage::closed(
-                        &sub_id,
-                        "restricted: insufficient scope",
-                    ));
+                    super::close::refuse(&sub_id, "restricted: insufficient scope", &conn, &state)
+                        .await;
+                    access.deny("insufficient_scope");
                     return;
                 }
 
@@ -76,10 +77,15 @@ pub async fn handle_req(
 
                 let subs = conn.subscriptions.lock().await;
                 if !subs.contains_key(&sub_id) && subs.len() >= MAX_SUBSCRIPTIONS {
-                    conn.send(RelayMessage::closed(
+                    // A new ID has no old holder to retire, but a lost CLOSED
+                    // would leave the client waiting on a refused request.
+                    if !conn.send(RelayMessage::closed(
                         &sub_id,
                         "error: too many subscriptions",
-                    ));
+                    )) {
+                        conn.cancel.cancel();
+                    }
+                    access.deny("too_many_subscriptions");
                     return;
                 }
 
@@ -89,10 +95,9 @@ pub async fn handle_req(
                 conn.send(RelayMessage::notice(
                     "auth-required: authenticate before subscribing",
                 ));
-                conn.send(RelayMessage::closed(
-                    &sub_id,
-                    "auth-required: not authenticated",
-                ));
+                super::close::refuse(&sub_id, "auth-required: not authenticated", &conn, &state)
+                    .await;
+                access.deny("auth_required");
                 return;
             }
         }
@@ -102,13 +107,24 @@ pub async fn handle_req(
     let requested_channel_ids = match extract_channel_ids_from_filters_limited(&filters) {
         Ok(ids) => ids,
         Err(()) => {
-            conn.send(RelayMessage::closed(
+            super::close::refuse(
                 &sub_id,
                 "restricted: too many explicit channels",
-            ));
+                &conn,
+                &state,
+            )
+            .await;
+            access.deny("too_many_channels");
             return;
         }
     };
+
+    // Every distinct channel a filter names, including group-state `#d`, is
+    // confirmed below. `#h` is bounded above; past the same limit, `#d`
+    // names are left out of confirmation and live routing rather than
+    // refused, as before `#d` routed live.
+    let (named_channels, live_names) =
+        super::system_channels::channels_named_by_filters(&filters, MAX_EXPLICIT_CHANNEL_VALUES);
 
     let mut accessible_channels = if filters_are_nip43_membership_only(&filters) {
         metrics::counter!("buzz_req_global_access_resolution_skips_total", "kind" => "13534")
@@ -121,8 +137,9 @@ pub async fn handle_req(
         {
             Ok(ids) => ids,
             Err(e) => {
-                warn!(conn_id = %conn_id, "Failed to get accessible channels: {e}");
-                conn.send(RelayMessage::closed(&sub_id, "error: database error"));
+                warn!(conn_id = %conn_id, error_kind = %e.kind(), "Failed to get accessible channels");
+                super::close::refuse(&sub_id, DATABASE_ERROR_CLOSED, &conn, &state).await;
+                access.error("database_error");
                 return;
             }
         }
@@ -145,8 +162,9 @@ pub async fn handle_req(
     {
         Ok(ids) => ids,
         Err(e) => {
-            warn!(conn_id = %conn_id, "Failed to get readable named-only channels: {e}");
-            conn.send(RelayMessage::closed(&sub_id, "error: database error"));
+            warn!(conn_id = %conn_id, error_kind = %e.kind(), "Failed to get readable named-only channels");
+            super::close::refuse(&sub_id, DATABASE_ERROR_CLOSED, &conn, &state).await;
+            access.error("database_error");
             return;
         }
     };
@@ -169,13 +187,18 @@ pub async fn handle_req(
     // `confirm_requested_channel_access`). Running this ahead of the search branch
     // is what fixes the search false-miss: a `#h=<just-added>` search would
     // otherwise be scoped against the stale vector and return empty.
-    if let Some(requested) = requested_channel_ids.as_ref() {
+    //
+    // Confirm every channel any filter names (`#h`, or `#d` on group-state
+    // kinds), not only the all-`#h` set: each filter's history and live
+    // scope come from its own names, and a live scope is fixed at
+    // registration, so a stale miss would last until the client resubscribes.
+    if !named_channels.is_empty() {
         let repaired_from = accessible_channels.len();
         let confirmed = match confirm_requested_channel_access(
             &state,
             conn.tenant.community(),
             &pubkey_bytes,
-            requested,
+            &named_channels,
             token_channel_ids.as_deref(),
             &mut accessible_channels,
             named_only.ids(),
@@ -184,8 +207,13 @@ pub async fn handle_req(
         {
             Ok(confirmed) => confirmed,
             Err(e) => {
-                warn!(conn_id = %conn_id, "Channel membership confirmation failed: {e}");
-                conn.send(RelayMessage::closed(&sub_id, "error: database error"));
+                warn!(
+                    conn_id = %conn_id,
+                    error_kind = %e.kind(),
+                    "Channel membership confirmation failed"
+                );
+                super::close::refuse(&sub_id, DATABASE_ERROR_CLOSED, &conn, &state).await;
+                access.error("database_error");
                 return;
             }
         };
@@ -203,8 +231,9 @@ pub async fn handle_req(
         )
         .await
         {
-            warn!(conn_id = %conn_id, "Failed to classify repaired channels: {e}");
-            conn.send(RelayMessage::closed(&sub_id, "error: database error"));
+            warn!(conn_id = %conn_id, error_kind = %e.kind(), "Failed to classify repaired channels");
+            super::close::refuse(&sub_id, DATABASE_ERROR_CLOSED, &conn, &state).await;
+            access.error("database_error");
             return;
         }
     }
@@ -229,10 +258,8 @@ pub async fn handle_req(
         .as_ref()
         .is_some_and(|authorized| authorized.is_empty())
     {
-        conn.send(RelayMessage::closed(
-            &sub_id,
-            "restricted: not a channel member",
-        ));
+        super::close::refuse(&sub_id, "restricted: not a channel member", &conn, &state).await;
+        access.deny("not_channel_member");
         return;
     }
 
@@ -251,24 +278,30 @@ pub async fn handle_req(
             Err(crate::nip_fi_gate::SessionExpired) => {
                 // Fix 4: [FI-TRACE-DENIAL-ORACLE] gate is off_mode when no assertion
                 // exists, so SessionExpired here always implies an active FI session.
-                conn.send(RelayMessage::closed(
-                    &sub_id,
-                    "restricted: authorization denied",
-                ));
+                super::close::refuse(&sub_id, "restricted: authorization denied", &conn, &state)
+                    .await;
+                access.deny("session_expired");
                 return;
             }
+        };
+        // One-shot like search: accepting it replaces the ID's old holder.
+        let Some(owner) = claim_search_subscription(&sub_id, &conn, &state).await else {
+            return;
         };
         unless_cancelled(
             &conn,
             handle_huddle_liveness_req(
                 &sub_id,
+                owner,
                 &filters,
                 authorized_requested_channels.as_deref().unwrap_or_default(),
                 &conn,
                 &state,
+                &mut access,
             ),
         )
         .await;
+        super::close::close_if_owner(&sub_id, owner, None, &conn, &state).await;
         return;
     }
 
@@ -283,24 +316,36 @@ pub async fn handle_req(
     if channel_id.is_none() {
         let authed_pubkey_hex = hex::encode(&pubkey_bytes);
         if !p_gated_filters_authorized(&filters, &authed_pubkey_hex) {
-            conn.send(RelayMessage::closed(
+            super::close::refuse(
                 &sub_id,
                 "restricted: p-gated events require #p matching your pubkey",
-            ));
+                &conn,
+                &state,
+            )
+            .await;
+            access.deny("p_gated");
             return;
         }
         if !engram_filters_authorized(&filters, &authed_pubkey_hex) {
-            conn.send(RelayMessage::closed(
+            super::close::refuse(
                 &sub_id,
                 "restricted: agent-engram reads require authors=[self] or #p=[self]",
-            ));
+                &conn,
+                &state,
+            )
+            .await;
+            access.deny("engram_gated");
             return;
         }
         if !author_only_filters_authorized(&filters, &authed_pubkey_hex) {
-            conn.send(RelayMessage::closed(
+            super::close::refuse(
                 &sub_id,
                 "restricted: author-only kinds require authors=[self]",
-            ));
+                &conn,
+                &state,
+            )
+            .await;
+            access.deny("author_only");
             return;
         }
     }
@@ -312,10 +357,14 @@ pub async fn handle_req(
     let has_search = filters.iter().any(|f| f.search.is_some());
     if has_search {
         if filters.iter().any(|f| f.search.is_none()) {
-            conn.send(RelayMessage::closed(
+            super::close::refuse(
                 &sub_id,
                 "error: mixed search and non-search filters not supported",
-            ));
+                &conn,
+                &state,
+            )
+            .await;
+            access.deny("mixed_search");
             return;
         }
         // IMPORTANT 6: acquire a REQ effect permit before the search query and
@@ -327,10 +376,9 @@ pub async fn handle_req(
             Ok(permit) => permit,
             Err(crate::nip_fi_gate::SessionExpired) => {
                 // Fix 4: [FI-TRACE-DENIAL-ORACLE]
-                conn.send(RelayMessage::closed(
-                    &sub_id,
-                    "restricted: authorization denied",
-                ));
+                super::close::refuse(&sub_id, "restricted: authorization denied", &conn, &state)
+                    .await;
+                access.deny("session_expired");
                 return;
             }
         };
@@ -352,6 +400,7 @@ pub async fn handle_req(
                 &conn,
                 &state,
                 trace_state.as_ref(),
+                &mut access,
             )
             .await;
         };
@@ -376,23 +425,29 @@ pub async fn handle_req(
         Ok(permit) => permit,
         Err(crate::nip_fi_gate::SessionExpired) => {
             // Fix 4: [FI-TRACE-DENIAL-ORACLE]
-            conn.send(RelayMessage::closed(
-                &sub_id,
-                "restricted: authorization denied",
-            ));
+            super::close::refuse(&sub_id, "restricted: authorization denied", &conn, &state).await;
+            access.deny("session_expired");
             return;
         }
     };
 
-    let Some(owner) = claim_live_subscription(
-        &sub_id,
-        &filters,
-        authorized_requested_channels.as_deref(),
-        &conn,
-        &state,
-    )
-    .await
-    else {
+    // Each filter routes live events under its own scope, so a channel one
+    // filter names never reaches a sibling filter (see `filter_live_scope`).
+    let live_filters = filters
+        .iter()
+        .map(|filter| {
+            (
+                filter.clone(),
+                super::system_channels::filter_live_scope(
+                    filter,
+                    &accessible_channels,
+                    &named_only,
+                    live_names,
+                ),
+            )
+        })
+        .collect();
+    let Some(owner) = claim_live_subscription(&sub_id, live_filters, &conn, &state).await else {
         return;
     };
 
@@ -401,8 +456,10 @@ pub async fn handle_req(
     // Registration above is one uncancellable unit; the history read below is
     // read-only delivery and races gate cancellation, so expiry drops it and
     // releases the permit without sending another EVENT or EOSE. It returns
-    // whether a statement timeout ended it: retirement then runs after the
-    // race, because a dropped retirement would leak its unreleased topics.
+    // the CLOSED reason when a failed read ended it: retirement then runs
+    // after the race, because a dropped retirement would leak its unreleased
+    // topics.
+    let access = &mut access;
     let history = async {
         #[cfg(test)]
         crate::nip_fi_test_hooks::before_req_history(conn.tenant.community()).await;
@@ -488,12 +545,20 @@ pub async fn handle_req(
             let events = match filter_events {
                 Ok(evs) => evs,
                 Err(e) => {
-                    warn!(conn_id = %conn_id, sub_id = %sub_id, "Historical query failed: {e}");
-                    if e.is_statement_cancelled() {
-                        return true;
-                    }
-                    conn.send(RelayMessage::eose(&sub_id));
-                    return false;
+                    warn!(
+                        conn_id = %conn_id,
+                        sub_id = %sub_id,
+                        error_kind = %e.kind(),
+                        "Historical query failed"
+                    );
+                    access.error(if e.is_statement_cancelled() {
+                        "query_timed_out"
+                    } else {
+                        "database_error"
+                    });
+                    // CLOSED, never EOSE: EOSE tells the client it has every
+                    // stored event, so a resuming client would skip this history.
+                    return Some(history_read_closed_reason(&e));
                 }
             };
 
@@ -524,7 +589,8 @@ pub async fn handle_req(
                     Err(e) => {
                         warn!(
                             conn_id = %conn_id, sub_id = %sub_id,
-                            "conformance row-community lookup failed: {e}"
+                            error_kind = %e.kind(),
+                            "conformance row-community lookup failed"
                         );
                         std::collections::HashMap::new()
                     }
@@ -569,9 +635,10 @@ pub async fn handle_req(
                 }
 
                 let msg = RelayMessage::event(&sub_id, &stored.event);
-                if !conn.send(msg) {
-                    return false;
+                if !super::close::send_if_owner(&sub_id, owner, msg, &conn).await {
+                    return None;
                 }
+                access.queued_one();
                 total_sent += 1;
                 if total_sent.is_multiple_of(100) {
                     tokio::task::yield_now().await;
@@ -579,7 +646,9 @@ pub async fn handle_req(
             }
         }
 
-        conn.send(RelayMessage::eose(&sub_id));
+        if super::close::send_if_owner(&sub_id, owner, RelayMessage::eose(&sub_id), &conn).await {
+            access.served();
+        }
 
         debug!(
             conn_id = %conn_id,
@@ -587,13 +656,15 @@ pub async fn handle_req(
             count = total_sent,
             "EOSE sent after historical delivery"
         );
-        false
+        None
     };
     let outcome = unless_cancelled(&conn, history).await;
     drop(_req_permit);
     match outcome {
-        Some(false) => {}
-        Some(true) => close_timed_out_subscription(&sub_id, owner, &conn, &state).await,
+        Some(None) => {}
+        Some(Some(reason)) => {
+            super::close::close_if_owner(&sub_id, owner, Some(reason), &conn, &state).await;
+        }
         None => {
             super::close::close_if_owner(&sub_id, owner, None, &conn, &state).await;
         }
@@ -770,6 +841,7 @@ async fn handle_search_req(
     conn: &ConnectionState,
     state: &AppState,
     trace_state: Option<&crate::conformance::AbstractState>,
+    access: &mut crate::access::ReadLog,
 ) {
     // `None` means "no accessible channels and no global access" → EOSE,
     // exactly as the legacy string-filter helper short-circuited. A filter
@@ -777,7 +849,9 @@ async fn handle_search_req(
     if build_search_channel_scope_filter(implicit_channels, include_global).is_none()
         && named_only.is_empty()
     {
-        conn.send(RelayMessage::eose(sub_id));
+        if super::close::send_if_owner(sub_id, owner, RelayMessage::eose(sub_id), conn).await {
+            access.served();
+        }
         return;
     }
 
@@ -875,8 +949,25 @@ async fn handle_search_req(
             let search_result = match state.search.search(&search_query).await {
                 Ok(r) => r,
                 Err(e) => {
-                    warn!(sub_id = %sub_id, "NIP-50 search failed: {e}");
-                    break;
+                    // CLOSED, not EOSE: an empty EOSE would read as "no
+                    // matches". Stop the whole REQ so later filters do not
+                    // each wait out the search pool's acquire timeout too.
+                    // Fixed kind only: the error must never carry query text.
+                    warn!(
+                        sub_id = %sub_id,
+                        error_kind = %e.kind(),
+                        "NIP-50 search failed"
+                    );
+                    access.error("search_failed");
+                    super::close::close_if_owner(
+                        sub_id,
+                        owner,
+                        Some(search_closed_reason(&e)),
+                        conn,
+                        state,
+                    )
+                    .await;
+                    return;
                 }
             };
 
@@ -885,26 +976,50 @@ async fn handle_search_req(
             let exhausted = search_result.hits.len() < SEARCH_PAGE_SIZE as usize;
             let page_empty = search_result.hits.is_empty();
 
-            let hit_ids: Vec<[u8; 32]> =
-                search_result.hits.into_iter().map(|h| h.event_id).collect();
+            let hit_keys: Vec<_> = search_result
+                .hits
+                .iter()
+                .map(|h| (h.event_id, h.created_at))
+                .collect();
 
-            if !hit_ids.is_empty() {
-                let id_refs: Vec<&[u8]> = hit_ids.iter().map(|b| b.as_slice()).collect();
+            if !hit_keys.is_empty() {
                 let events = match state
                     .db
-                    .get_events_by_ids_routed("req_search_hydrate", tenant.community(), &id_refs)
+                    .get_events_by_ids_at_routed(
+                        "req_search_hydrate",
+                        tenant.community(),
+                        &hit_keys,
+                    )
                     .await
                 {
                     Ok(evs) => evs,
                     Err(e) if e.is_statement_cancelled() => {
                         // CLOSED (not EOSE) keeps partial results from reading as complete.
-                        warn!(sub_id = %sub_id, "NIP-50 batch fetch timed out: {e}");
+                        warn!(sub_id = %sub_id, "NIP-50 batch fetch timed out");
+                        access.error("query_timed_out");
                         close_timed_out_subscription(sub_id, owner, conn, state).await;
                         return;
                     }
                     Err(e) => {
-                        warn!(sub_id = %sub_id, "NIP-50 batch fetch failed: {e}");
-                        break;
+                        // CLOSED, not EOSE: an EOSE after a failed hydration
+                        // would mark the hits never fetched as "no matches".
+                        // That includes a history read shed while the reader
+                        // is saturated, which the client should retry.
+                        warn!(
+                            sub_id = %sub_id,
+                            error_kind = %e.kind(),
+                            "NIP-50 batch fetch failed"
+                        );
+                        access.error("database_error");
+                        super::close::close_if_owner(
+                            sub_id,
+                            owner,
+                            Some(DATABASE_ERROR_CLOSED),
+                            conn,
+                            state,
+                        )
+                        .await;
+                        return;
                     }
                 };
 
@@ -934,7 +1049,8 @@ async fn handle_search_req(
                             Err(e) => {
                                 warn!(
                                     sub_id = %sub_id,
-                                    "conformance row-community lookup failed: {e}"
+                                    error_kind = %e.kind(),
+                                    "conformance row-community lookup failed"
                                 );
                                 std::collections::HashMap::new()
                             }
@@ -954,7 +1070,7 @@ async fn handle_search_req(
                         .map(|ev| (ev.event.id.to_bytes(), ev))
                         .collect();
 
-                for id_array in &hit_ids {
+                for (id_array, _) in &hit_keys {
                     if emitted >= limit {
                         break;
                     }
@@ -981,9 +1097,11 @@ async fn handle_search_req(
                     if !seen_ids.insert(stored.event.id) {
                         continue;
                     }
-                    if !conn.send(RelayMessage::event(sub_id, &stored.event)) {
+                    let frame = RelayMessage::event(sub_id, &stored.event);
+                    if !super::close::send_if_owner(sub_id, owner, frame, conn).await {
                         return;
                     }
+                    access.queued_one();
                     emitted += 1;
                 }
             }
@@ -994,7 +1112,9 @@ async fn handle_search_req(
         }
     }
 
-    conn.send(RelayMessage::eose(sub_id));
+    if super::close::send_if_owner(sub_id, owner, RelayMessage::eose(sub_id), conn).await {
+        access.served();
+    }
 }
 
 /// Convert a single NIP-01 filter into an [`EventQuery`] for the database.
@@ -1019,11 +1139,13 @@ pub async fn build_event_query_from_filter(
 /// returning a truncated count.
 pub(crate) const COUNT_FALLBACK_CANDIDATE_LIMIT: i64 = 5_000;
 
-/// Apply the bounded candidate budget used by COUNT post-filter fallbacks.
-pub(crate) fn apply_count_fallback_limit(query: &mut EventQuery) {
+/// Prepare a COUNT post-filter fallback query: the bounded candidate budget,
+/// and exact NIP-01 matching so it counts what the SQL COUNT path would.
+pub(crate) fn prepare_count_fallback(query: &mut EventQuery) {
     let fetch_limit = COUNT_FALLBACK_CANDIDATE_LIMIT + 1;
     query.limit = Some(fetch_limit);
     query.max_limit = Some(fetch_limit);
+    query.exact_match = true;
 }
 
 /// Return whether a COUNT fallback query exceeded its exact-count budget.
@@ -1254,9 +1376,13 @@ fn filter_to_query_params(
     // NIP-CL: a membership notice's `#t` is its channel type. SQL keeps only
     // the types this filter may see; a filter without `#t` sees legacy types.
     let notice_channel_types = buzz_core::filter::notice_channel_types(filter);
+    // NIP-CW: a filter with `#p` is never a plain thread-reply read. Only a
+    // single value reaches SQL as `p_tag_hex`, so mark every `#p` filter here.
+    let exact_match = filter.generic_tags.contains_key(&p_tag);
 
     EventQuery {
         notice_channel_types,
+        exact_match,
         channel_id,
         kinds,
         pubkey,
@@ -1413,16 +1539,23 @@ fn huddle_liveness_session_ids(filters: &[Filter]) -> Vec<uuid::Uuid> {
 
 async fn handle_huddle_liveness_req(
     sub_id: &str,
+    owner: u64,
     filters: &[Filter],
     parent_channel_ids: &[uuid::Uuid],
     conn: &ConnectionState,
     state: &AppState,
+    access: &mut crate::access::ReadLog,
 ) {
     if parent_channel_ids.is_empty() {
-        conn.send(RelayMessage::closed(
+        super::close::close_if_owner(
             sub_id,
-            "restricted: huddle liveness requires an authorized #h channel",
-        ));
+            owner,
+            Some("restricted: huddle liveness requires an authorized #h channel"),
+            conn,
+            state,
+        )
+        .await;
+        access.deny("not_channel_member");
         return;
     }
 
@@ -1438,8 +1571,13 @@ async fn handle_huddle_liveness_req(
     {
         Ok(links) => links,
         Err(error) => {
-            warn!("Huddle liveness linkage batch failed: {error}");
-            conn.send(RelayMessage::closed(sub_id, "error: database error"));
+            warn!(
+                error_kind = %error.kind(),
+                "Huddle liveness linkage batch failed"
+            );
+            super::close::close_if_owner(sub_id, owner, Some(DATABASE_ERROR_CLOSED), conn, state)
+                .await;
+            access.error("database_error");
             return;
         }
     };
@@ -1457,7 +1595,15 @@ async fn handle_huddle_liveness_req(
                 Ok(_) => continue,
                 Err(error) => {
                     warn!(session_id = %session_id, "Huddle liveness lease lookup failed: {error}");
-                    conn.send(RelayMessage::closed(sub_id, "error: liveness unavailable"));
+                    super::close::close_if_owner(
+                        sub_id,
+                        owner,
+                        Some("error: liveness unavailable"),
+                        conn,
+                        state,
+                    )
+                    .await;
+                    access.error("liveness_unavailable");
                     return;
                 }
             }
@@ -1495,26 +1641,39 @@ async fn handle_huddle_liveness_req(
             Ok(event) => event,
             Err(error) => {
                 warn!(session_id = %session_id, "Huddle liveness signing failed: {error}");
-                conn.send(RelayMessage::closed(sub_id, "error: signing failed"));
+                super::close::close_if_owner(
+                    sub_id,
+                    owner,
+                    Some("error: signing failed"),
+                    conn,
+                    state,
+                )
+                .await;
+                access.error("signing_failed");
                 return;
             }
         };
-        if !conn.send(RelayMessage::event(sub_id, &event)) {
+        let frame = RelayMessage::event(sub_id, &event);
+        if !super::close::send_if_owner(sub_id, owner, frame, conn).await {
             return;
         }
+        access.queued_one();
     }
 
-    conn.send(RelayMessage::eose(sub_id));
+    if super::close::send_if_owner(sub_id, owner, RelayMessage::eose(sub_id), conn).await {
+        access.served();
+    }
 }
 
 /// Claim `sub_id` for a live REQ under the lifecycle lock: record a fresh
 /// owner token, register for fan-out (replacing any same-ID entry), retain its
-/// topics, and release the replaced scope's. Returns the owner token, or
-/// `None` once the connection is closing — the caller then exits silently.
-async fn claim_live_subscription(
+/// topics, and release the replaced scope's. Each filter carries its own
+/// server-resolved live scope; the subscription retains each topic in their
+/// union once. Returns the owner token, or `None` once the connection is
+/// closing — the caller then exits silently.
+pub(crate) async fn claim_live_subscription(
     sub_id: &str,
-    filters: &[Filter],
-    channel_ids: Option<&[uuid::Uuid]>,
+    filters: Vec<(Filter, SubscriptionScope)>,
     conn: &ConnectionState,
     state: &AppState,
 ) -> Option<u64> {
@@ -1524,38 +1683,27 @@ async fn claim_live_subscription(
     }
     let owner = super::close::next_owner();
     subs.insert(sub_id.to_string(), owner);
-    let community = conn.tenant.community();
-    let replaced = match channel_ids {
-        Some(ids) => state.sub_registry.register_channels_scoped(
-            community,
-            conn.conn_id,
-            sub_id.to_string(),
-            filters.to_vec(),
-            ids.to_vec(),
-        ),
-        None => state.sub_registry.register_scoped(
-            community,
-            conn.conn_id,
-            sub_id.to_string(),
-            filters.to_vec(),
-            None,
-        ),
-    };
-    match channel_ids {
-        Some(ids) => {
-            for &channel_id in ids {
-                state
-                    .pubsub
-                    .retain_topic(&conn.tenant, EventTopic::Channel(channel_id))
-                    .await;
-            }
-        }
-        None => {
-            state
-                .pubsub
-                .retain_topic(&conn.tenant, EventTopic::Global)
-                .await;
-        }
+    // A sync that held the ID stops; the registry entry and topics below are
+    // replaced in place.
+    state.artifact_syncs.remove(conn.conn_id, sub_id);
+    let topics = SubscriptionScope::union(filters.iter().map(|(_, scope)| scope));
+    let replaced = state.sub_registry.register_filters_scoped(
+        conn.tenant.community(),
+        conn.conn_id,
+        sub_id.to_string(),
+        filters,
+    );
+    if topics.is_global() {
+        state
+            .pubsub
+            .retain_topic(&conn.tenant, EventTopic::Global)
+            .await;
+    }
+    for &channel_id in topics.channel_ids() {
+        state
+            .pubsub
+            .retain_topic(&conn.tenant, EventTopic::Channel(channel_id))
+            .await;
     }
     if let Some(replaced) = replaced {
         super::close::release_scope_topics(state, &conn.tenant, &replaced.scope).await;
@@ -1563,10 +1711,10 @@ async fn claim_live_subscription(
     Some(owner)
 }
 
-/// Claim `sub_id` for a one-shot search REQ under the lifecycle lock.
-/// Accepting it retires whatever holds the ID (NIP-01 replacement), even
-/// though search never registers for fan-out. `None` once the connection is
-/// closing.
+/// Claim `sub_id` for a one-shot search or huddle-liveness REQ under the
+/// lifecycle lock. Accepting it retires whatever holds the ID (NIP-01
+/// replacement), even though neither registers for fan-out. `None` once the
+/// connection is closing.
 async fn claim_search_subscription(
     sub_id: &str,
     conn: &ConnectionState,
@@ -1599,6 +1747,34 @@ async fn close_timed_out_subscription(
 /// Stable CLOSED reason for a read cancelled by its server statement deadline.
 /// Clients match it to skip retrying the same expensive query.
 pub(crate) const QUERY_TIMED_OUT_CLOSED: &str = "error: query timed out";
+
+/// CLOSED reason for any other failed DB read. Generic on purpose: the raw
+/// error stays in the relay log, and clients treat it as retryable.
+pub(crate) const DATABASE_ERROR_CLOSED: &str = "error: database error";
+
+/// CLOSED reason for a failed REQ history read.
+fn history_read_closed_reason(e: &buzz_db::DbError) -> &'static str {
+    if e.is_statement_cancelled() {
+        QUERY_TIMED_OUT_CLOSED
+    } else {
+        DATABASE_ERROR_CLOSED
+    }
+}
+
+/// CLOSED reason for a NIP-50 search the search service could not answer
+/// (e.g. the read replica it queries is down).
+pub(crate) const SEARCH_FAILED_CLOSED: &str = "error: search failed";
+
+/// CLOSED reason for a failed NIP-50 search: a search cancelled by the search
+/// pool's statement timeout gets the stable timeout reason, like any other
+/// cancelled read; anything else is the retryable [`SEARCH_FAILED_CLOSED`].
+fn search_closed_reason(e: &buzz_search::SearchError) -> &'static str {
+    if e.is_statement_cancelled() {
+        QUERY_TIMED_OUT_CLOSED
+    } else {
+        SEARCH_FAILED_CLOSED
+    }
+}
 
 /// CLOSED reason for a failed one-shot DB read (COUNT): a statement cancel gets
 /// the stable timeout reason; anything else keeps the raw error.
@@ -1892,6 +2068,7 @@ mod tests {
         let community = buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::new_v4());
         let cancel = tokio_util::sync::CancellationToken::new();
         let conn = ConnectionState {
+            refusal_budget: Default::default(),
             conn_id: uuid::Uuid::new_v4(),
             tenant: buzz_core::tenant::TenantContext::resolved(community, "t.local".to_string()),
             remote_addr: "127.0.0.1:1234".parse().expect("addr"),
@@ -1915,6 +2092,20 @@ mod tests {
         vec![Filter::new().kind(nostr::Kind::TextNote)]
     }
 
+    /// Give every filter the same live scope: `channels`, or global.
+    fn scoped(
+        filters: &[Filter],
+        channels: Option<&[uuid::Uuid]>,
+    ) -> Vec<(Filter, SubscriptionScope)> {
+        let scope = channels.map_or_else(SubscriptionScope::global, |channels| {
+            SubscriptionScope::channels(channels.iter().copied())
+        });
+        filters
+            .iter()
+            .map(|filter| (filter.clone(), scope.clone()))
+            .collect()
+    }
+
     fn registered(state: &AppState, conn: &ConnectionState, sub_id: &str) -> bool {
         state
             .sub_registry
@@ -1933,16 +2124,96 @@ mod tests {
             .collect()
     }
 
+    /// A live REQ that reuses a sync's ID retires the sync, so fan-out
+    /// delivers to the new subscription instead of the stale sync inbox.
+    /// Mutation: drop the `artifact_syncs.remove` in
+    /// `claim_live_subscription` → the event is diverted → RED.
+    #[tokio::test]
+    async fn live_req_replacing_a_sync_retires_it() {
+        let state = crate::state::tests::test_state().await;
+        let (conn, _send_rx) = lifecycle_conn();
+        state.artifact_syncs.insert_idle(conn.conn_id, "s");
+        claim_live_subscription(
+            "s",
+            scoped(&text_filters(), Some(&[uuid::Uuid::new_v4()])),
+            &conn,
+            &state,
+        )
+        .await
+        .expect("claim");
+        assert!(!state.artifact_syncs.contains(conn.conn_id, "s"));
+        let event = nostr::EventBuilder::text_note("x")
+            .sign_with_keys(&nostr::Keys::generate())
+            .expect("sign");
+        let matches = vec![(conn.conn_id, "s".to_string())];
+        let delivered = state
+            .artifact_syncs
+            .divert(&buzz_core::StoredEvent::new(event, None), matches.clone());
+        assert_eq!(delivered, matches);
+    }
+
+    /// A refused sync REQ answers `CLOSED`, so whatever held its ID must stop
+    /// first (NIP-01 replacement): no later frame may arrive under a closed
+    /// ID. Covers a filter refusal and an auth refusal. Mutation: send the
+    /// refusal without `retire_locked` → the old subscription stays → RED.
+    #[tokio::test]
+    async fn refused_sync_req_retires_the_old_holder() {
+        let state = crate::state::tests::test_state().await;
+        let (conn, mut send_rx) = lifecycle_conn();
+        let conn = Arc::new(conn);
+        let channel = uuid::Uuid::new_v4();
+        let topic = EventTopic::Channel(channel);
+        let valid = buzz_core::artifact_sync::parse_sync(
+            &serde_json::json!({"artifact":"current","#h":[channel.to_string()]}),
+        );
+        for (filter, reason) in [
+            (Err("sync requires #h"), "invalid: sync requires #h"),
+            (valid, "auth-required: not authenticated"),
+        ] {
+            claim_live_subscription(
+                "s",
+                scoped(&text_filters(), Some(&[channel])),
+                &conn,
+                &state,
+            )
+            .await
+            .expect("claim");
+            let permit = Arc::new(tokio::sync::Semaphore::new(1))
+                .acquire_owned()
+                .await
+                .expect("permit");
+            super::super::artifact_sync::handle_sync(
+                "s".into(),
+                filter,
+                Arc::clone(&conn),
+                Arc::clone(&state),
+                permit,
+            )
+            .await;
+            assert!(conn.subscriptions.lock().await.is_empty(), "{reason}");
+            assert!(!registered(&state, &conn, "s"), "{reason}");
+            assert_eq!(state.pubsub.topic_refcount(&conn.tenant, topic).await, 0);
+            assert_eq!(
+                closed_frames(&mut send_rx),
+                vec![serde_json::json!(["CLOSED", "s", reason]).to_string()]
+            );
+        }
+    }
+
     #[tokio::test]
     async fn timed_out_historical_read_deregisters_before_closed() {
         let state = crate::state::tests::test_state().await;
         let (conn, mut send_rx) = lifecycle_conn();
         let channel = uuid::Uuid::new_v4();
         let topic = EventTopic::Channel(channel);
-        let owner =
-            claim_live_subscription("thread", &text_filters(), Some(&[channel]), &conn, &state)
-                .await
-                .expect("claim");
+        let owner = claim_live_subscription(
+            "thread",
+            scoped(&text_filters(), Some(&[channel])),
+            &conn,
+            &state,
+        )
+        .await
+        .expect("claim");
         assert_eq!(state.pubsub.topic_refcount(&conn.tenant, topic).await, 1);
 
         close_timed_out_subscription("thread", owner, &conn, &state).await;
@@ -1974,14 +2245,22 @@ mod tests {
             EventTopic::Channel(old_channel),
             EventTopic::Channel(new_channel),
         );
-        let old =
-            claim_live_subscription("x", &text_filters(), Some(&[old_channel]), &conn, &state)
-                .await
-                .expect("claim");
-        let new =
-            claim_live_subscription("x", &text_filters(), Some(&[new_channel]), &conn, &state)
-                .await
-                .expect("claim");
+        let old = claim_live_subscription(
+            "x",
+            scoped(&text_filters(), Some(&[old_channel])),
+            &conn,
+            &state,
+        )
+        .await
+        .expect("claim");
+        let new = claim_live_subscription(
+            "x",
+            scoped(&text_filters(), Some(&[new_channel])),
+            &conn,
+            &state,
+        )
+        .await
+        .expect("claim");
         assert_eq!(
             state.pubsub.topic_refcount(&conn.tenant, old_topic).await,
             0
@@ -2013,9 +2292,14 @@ mod tests {
         let (conn, mut send_rx) = lifecycle_conn();
         let channel = uuid::Uuid::new_v4();
         let topic = EventTopic::Channel(channel);
-        claim_live_subscription("x", &text_filters(), Some(&[channel]), &conn, &state)
-            .await
-            .expect("claim");
+        claim_live_subscription(
+            "x",
+            scoped(&text_filters(), Some(&[channel])),
+            &conn,
+            &state,
+        )
+        .await
+        .expect("claim");
 
         let search = claim_search_subscription("x", &conn, &state)
             .await
@@ -2026,15 +2310,153 @@ mod tests {
         );
         assert_eq!(state.pubsub.topic_refcount(&conn.tenant, topic).await, 0);
 
-        let live = claim_live_subscription("x", &text_filters(), Some(&[channel]), &conn, &state)
-            .await
-            .expect("claim");
+        let live = claim_live_subscription(
+            "x",
+            scoped(&text_filters(), Some(&[channel])),
+            &conn,
+            &state,
+        )
+        .await
+        .expect("claim");
         close_timed_out_subscription("x", search, &conn, &state).await;
 
         assert_eq!(conn.subscriptions.lock().await.get("x"), Some(&live));
         assert!(registered(&state, &conn, "x"));
         assert_eq!(state.pubsub.topic_refcount(&conn.tenant, topic).await, 1);
         assert!(closed_frames(&mut send_rx).is_empty());
+    }
+
+    /// A NIP-50 search the search pool cannot serve (its reader is down) ends
+    /// the REQ with a CLOSED error, never an EOSE that reads as "no matches",
+    /// and the REQ's later search filters never wait on the pool.
+    #[tokio::test]
+    async fn failed_search_closes_without_eose_or_trying_later_filters() {
+        const ACQUIRE: std::time::Duration = std::time::Duration::from_millis(500);
+        let state = crate::state::tests::test_state_with_database_url_and_pool_options(
+            "postgres://127.0.0.1:1/none",
+            sqlx::postgres::PgPoolOptions::new().acquire_timeout(ACQUIRE),
+        )
+        .await;
+        let (conn, mut send_rx) = lifecycle_conn();
+        let owner = claim_search_subscription("s", &conn, &state)
+            .await
+            .expect("claim");
+        let filters: Vec<Filter> = (0..4)
+            .map(|i| {
+                Filter::new()
+                    .kind(nostr::Kind::TextNote)
+                    .search(format!("needle{i}"))
+            })
+            .collect();
+
+        let (_guard, out) = crate::access::tests::capture_scoped();
+        let mut access = crate::access::ReadLog::req(&conn, "s", &filters);
+        let started = std::time::Instant::now();
+        handle_search_req(
+            "s",
+            owner,
+            &filters,
+            &[],
+            &super::super::system_channels::NamedOnlyChannels::default(),
+            true,
+            &conn.tenant,
+            &[0; 32],
+            &conn,
+            &state,
+            None,
+            &mut access,
+        )
+        .await;
+        let elapsed = started.elapsed();
+        drop(access);
+        let lines = out.lines();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!(lines[0]["level"], "WARN", "{}", lines[0]);
+        assert_eq!(lines[0]["outcome"], "error", "{}", lines[0]);
+        assert_eq!(lines[0]["reason"], "search_failed", "{}", lines[0]);
+        assert_eq!(lines[0]["search"], true, "{}", lines[0]);
+
+        assert_eq!(
+            closed_frames(&mut send_rx),
+            vec![format!(r#"["CLOSED","s","{SEARCH_FAILED_CLOSED}"]"#)],
+            "exactly one CLOSED error and no EOSE"
+        );
+        assert!(
+            conn.subscriptions.lock().await.is_empty(),
+            "the failed search must release its ID"
+        );
+        // Each filter that reaches the pool waits out ACQUIRE on the dead port.
+        assert!(
+            elapsed < ACQUIRE * 3,
+            "later filters must not try the pool: took {elapsed:?} for {} filters",
+            filters.len()
+        );
+    }
+
+    /// A REQ whose `EOSE` is not queued did not complete, so it must log
+    /// `aborted`, not `served`: once when a same-ID replacement takes the ID
+    /// while the empty search waits to send its `EOSE`, and once when the
+    /// outbound queue rejects the frame. Mutation: ignore `send_if_owner`'s
+    /// result before `access.served()` → `served` → RED.
+    #[tokio::test]
+    async fn unqueued_eose_logs_aborted_not_served() {
+        use super::super::close::test_seam::{Pause, SEND_PAUSE};
+        let state = crate::state::tests::test_state().await;
+        let filters = vec![Filter::new().search("needle")];
+        for case in ["replaced", "queue_rejected"] {
+            let (conn, send_rx) = lifecycle_conn();
+            let owner = claim_search_subscription("s", &conn, &state)
+                .await
+                .expect("claim");
+            let (_guard, out) = crate::access::tests::capture_scoped();
+            let mut access = crate::access::ReadLog::req(&conn, "s", &filters);
+            let mut send_rx = Some(send_rx);
+            if case == "queue_rejected" {
+                drop(send_rx.take());
+            }
+            let pause = Arc::new(Pause::default());
+            let named_only = super::super::system_channels::NamedOnlyChannels::default();
+            {
+                let search = SEND_PAUSE.scope(
+                    Arc::clone(&pause),
+                    handle_search_req(
+                        "s",
+                        owner,
+                        &filters,
+                        &[],
+                        &named_only,
+                        false,
+                        &conn.tenant,
+                        &[0; 32],
+                        &conn,
+                        &state,
+                        None,
+                        &mut access,
+                    ),
+                );
+                tokio::pin!(search);
+                tokio::select! {
+                    _ = &mut search => panic!("{case}: the search must pause before EOSE"),
+                    _ = pause.reached.notified() => {}
+                }
+                if case == "replaced" {
+                    conn.subscriptions
+                        .lock()
+                        .await
+                        .insert("s".to_string(), owner + 1_000_000);
+                }
+                pause.resume.notify_one();
+                search.await;
+            }
+            drop(access);
+            let lines = out.lines();
+            assert_eq!(lines.len(), 1, "{case}: {lines:?}");
+            assert_eq!(lines[0]["outcome"], "aborted", "{case}: {}", lines[0]);
+            assert_eq!(lines[0]["level"], "INFO", "{case}: {}", lines[0]);
+            if let Some(rx) = send_rx.as_mut() {
+                assert!(closed_frames(rx).is_empty(), "{case}: no stale EOSE");
+            }
+        }
     }
 
     /// Concurrent same-ID claims and stale teardowns: whichever claim lands
@@ -2046,17 +2468,27 @@ mod tests {
         let conn = Arc::new(conn);
         let channel = uuid::Uuid::new_v4();
         let topic = EventTopic::Channel(channel);
-        let stale = claim_live_subscription("x", &text_filters(), Some(&[channel]), &conn, &state)
-            .await
-            .expect("claim");
+        let stale = claim_live_subscription(
+            "x",
+            scoped(&text_filters(), Some(&[channel])),
+            &conn,
+            &state,
+        )
+        .await
+        .expect("claim");
 
         let tasks = (0..16).map(|i| {
             let (conn, state) = (Arc::clone(&conn), Arc::clone(&state));
             tokio::spawn(async move {
                 if i % 2 == 0 {
-                    claim_live_subscription("x", &text_filters(), Some(&[channel]), &conn, &state)
-                        .await
-                        .expect("claim");
+                    claim_live_subscription(
+                        "x",
+                        scoped(&text_filters(), Some(&[channel])),
+                        &conn,
+                        &state,
+                    )
+                    .await
+                    .expect("claim");
                 } else {
                     close_timed_out_subscription("x", stale, &conn, &state).await;
                 }
@@ -2107,7 +2539,7 @@ mod tests {
         let (conn, mut send_rx) = lifecycle_conn();
         let conn = Arc::new(conn);
         let (a, b) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
-        let old = claim_live_subscription("x", &text_filters(), Some(&[a]), &conn, &state)
+        let old = claim_live_subscription("x", scoped(&text_filters(), Some(&[a])), &conn, &state)
             .await
             .expect("claim");
 
@@ -2120,8 +2552,7 @@ mod tests {
         let (filters, b_scope) = (text_filters(), [b]);
         let mut replacement = Box::pin(claim_live_subscription(
             "x",
-            &filters,
-            Some(&b_scope),
+            scoped(&filters, Some(&b_scope)),
             &conn,
             &state,
         ));
@@ -2171,7 +2602,7 @@ mod tests {
             crate::state::CommunityConnectionControl::new(conn.cancel.clone()),
         );
         let (a, b) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
-        claim_live_subscription("x", &text_filters(), Some(&[a]), &conn, &state)
+        claim_live_subscription("x", scoped(&text_filters(), Some(&[a])), &conn, &state)
             .await
             .expect("claim");
 
@@ -2188,8 +2619,7 @@ mod tests {
         let (filters, b_scope) = (text_filters(), [b]);
         let mut replacement = Box::pin(claim_live_subscription(
             "x",
-            &filters,
-            Some(&b_scope),
+            scoped(&filters, Some(&b_scope)),
             &conn,
             &state,
         ));
@@ -2226,14 +2656,24 @@ mod tests {
         let (conn, mut send_rx) = lifecycle_conn();
         let channel = uuid::Uuid::new_v4();
         let topic = EventTopic::Channel(channel);
-        claim_live_subscription("live", &text_filters(), Some(&[channel]), &conn, &state)
-            .await
-            .expect("claim");
+        claim_live_subscription(
+            "live",
+            scoped(&text_filters(), Some(&[channel])),
+            &conn,
+            &state,
+        )
+        .await
+        .expect("claim");
 
         conn.cancel.cancel();
         super::super::close::release_connection_subscriptions(&conn, &state).await;
-        let late_live =
-            claim_live_subscription("late", &text_filters(), Some(&[channel]), &conn, &state).await;
+        let late_live = claim_live_subscription(
+            "late",
+            scoped(&text_filters(), Some(&[channel])),
+            &conn,
+            &state,
+        )
+        .await;
         let late_search = claim_search_subscription("search", &conn, &state).await;
 
         assert_eq!((late_live, late_search), (None, None));
@@ -2267,6 +2707,7 @@ mod tests {
         let community = buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::new_v4());
         let cancel = tokio_util::sync::CancellationToken::new();
         let conn = Arc::new(ConnectionState {
+            refusal_budget: Default::default(),
             conn_id: uuid::Uuid::new_v4(),
             tenant: buzz_core::tenant::TenantContext::resolved(community, "t.local".to_string()),
             remote_addr: "127.0.0.1:1234".parse().expect("addr"),
@@ -2285,7 +2726,7 @@ mod tests {
         });
 
         // Claim, then fill the send buffer so the next `send` returns false.
-        let owner = claim_live_subscription("x", &text_filters(), None, &conn, &state)
+        let owner = claim_live_subscription("x", scoped(&text_filters(), None), &conn, &state)
             .await
             .expect("claim");
         // Occupy the one slot so try_send returns Full on the CLOSED.
@@ -2327,6 +2768,7 @@ mod tests {
         let community = buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::new_v4());
         let cancel = tokio_util::sync::CancellationToken::new();
         let conn = Arc::new(ConnectionState {
+            refusal_budget: Default::default(),
             conn_id: uuid::Uuid::new_v4(),
             tenant: buzz_core::tenant::TenantContext::resolved(community, "t.local".to_string()),
             remote_addr: "127.0.0.1:1234".parse().expect("addr"),
@@ -2360,9 +2802,14 @@ mod tests {
         );
 
         let channel = uuid::Uuid::new_v4();
-        claim_live_subscription("x", &text_filters(), Some(&[channel]), &conn, &state)
-            .await
-            .expect("claim");
+        claim_live_subscription(
+            "x",
+            scoped(&text_filters(), Some(&[channel])),
+            &conn,
+            &state,
+        )
+        .await
+        .expect("claim");
 
         // Fill the one send slot so the CLOSED restricted try_send returns Full.
         send_rx.try_recv().ok(); // drain any earlier messages
@@ -2647,7 +3094,11 @@ mod tests {
     fn count_fallback_fetches_one_extra_candidate() {
         let mut query =
             EventQuery::for_community(buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::nil()));
-        apply_count_fallback_limit(&mut query);
+        prepare_count_fallback(&mut query);
+        assert!(
+            query.exact_match,
+            "COUNT fallbacks never take the thread route"
+        );
         assert_eq!(query.limit, Some(COUNT_FALLBACK_CANDIDATE_LIMIT + 1));
         assert_eq!(query.max_limit, Some(COUNT_FALLBACK_CANDIDATE_LIMIT + 1));
         assert!(!count_fallback_exceeded(
@@ -3488,6 +3939,7 @@ mod tests {
         let subscriptions = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
 
         let conn = Arc::new(crate::connection::ConnectionState {
+            refusal_budget: Default::default(),
             conn_id: Uuid::new_v4(),
             tenant: buzz_core::tenant::TenantContext::resolved(community, "test.local".to_string()),
             remote_addr: "127.0.0.1:1234".parse().unwrap(),
@@ -3572,7 +4024,7 @@ mod tests {
     // Arms `before_liveness_req` — the hook immediately before `acquire_effect()`
     // in the `filters_are_huddle_liveness_only` branch of `handle_req`. Dispatches
     // `handle_req` with a KIND_HUDDLE_LIVENESS filter with an authorized `#h` channel
-    // (pre-populated in accessible_channels_cache so no DB call is needed) and a live
+    // (seeded into the accessible-channel caches so no DB call is needed) and a live
     // gate. Waits for the hook, fires expiry, then releases. The handler must return
     // CLOSED "authorization denied" and the `liveness_query_counter` must remain 0 —
     // proving the permit gate stopped execution before the `huddle_started_links` DB
@@ -3617,6 +4069,7 @@ mod tests {
         let subscriptions = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
 
         let conn = Arc::new(crate::connection::ConnectionState {
+            refusal_budget: Default::default(),
             conn_id: Uuid::new_v4(),
             tenant: buzz_core::tenant::TenantContext::resolved(community, "test.local".to_string()),
             remote_addr: "127.0.0.1:1234".parse().unwrap(),
@@ -3644,13 +4097,11 @@ mod tests {
 
         let state = crate::state::tests::test_state().await;
 
-        // Pre-populate the accessible_channels_cache so the handle_req
+        // Seed the accessible-channel caches so the handle_req
         // membership check succeeds without a real DB connection.
         let channel_uuid = Uuid::from_u128(0xDEAD_BEEF_CAFE_1500);
         let pubkey_bytes = keys.public_key().to_bytes().to_vec();
-        state
-            .accessible_channels_cache
-            .insert((community, pubkey_bytes), vec![channel_uuid]);
+        state.seed_accessible_channels(community, pubkey_bytes, vec![channel_uuid]);
 
         // Register the liveness query counter — proves the DB call boundary.
         let query_count = crate::nip_fi_test_hooks::liveness_query_counter::register(community);
@@ -3660,7 +4111,7 @@ mod tests {
         // KIND_HUDDLE_LIVENESS with #h = channel_uuid:
         //   - `filters_are_huddle_liveness_only` → true (kind-only check)
         //   - `extract_channel_ids_from_filters_limited` → Some([channel_uuid])
-        //   - accessible_channels_cache hit → channel is authorized
+        //   - accessible-channel cache hit → channel is authorized
         //   - `authorized_requested_channels` = Some([channel_uuid]) → non-empty
         //   - handler enters the liveness branch, reaches before_liveness_req hook
         let h_tag = nostr::SingleLetterTag::lowercase(nostr::Alphabet::H);
@@ -3754,6 +4205,7 @@ mod tests {
         let (terminal_ctrl_tx, _terminal_ctrl_rx) = mpsc::channel::<axum::extract::ws::Message>(1);
         let subscriptions = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
         let conn = Arc::new(crate::connection::ConnectionState {
+            refusal_budget: Default::default(),
             conn_id: Uuid::new_v4(),
             tenant: buzz_core::tenant::TenantContext::resolved(community, "test.local".to_string()),
             remote_addr: "127.0.0.1:1234".parse().unwrap(),
@@ -3779,9 +4231,7 @@ mod tests {
             community_control: crate::state::CommunityConnectionControl::new(cancel.clone()),
         });
         let state = crate::state::tests::test_state().await;
-        state
-            .accessible_channels_cache
-            .insert((community, keys.public_key().to_bytes().to_vec()), vec![]);
+        state.seed_accessible_channels(community, keys.public_key().to_bytes().to_vec(), vec![]);
 
         let mut filter = Filter::new().kind(nostr::Kind::TextNote).limit(1);
         let (arrived_rx, _release) = if search {
@@ -3897,6 +4347,7 @@ mod tests {
         let (terminal_ctrl_tx, _terminal_ctrl_rx) = mpsc::channel::<axum::extract::ws::Message>(1);
         let subscriptions = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
         let conn = Arc::new(crate::connection::ConnectionState {
+            refusal_budget: Default::default(),
             conn_id: Uuid::new_v4(),
             tenant: buzz_core::tenant::TenantContext::resolved(community, "test.local".to_string()),
             remote_addr: "127.0.0.1:1234".parse().unwrap(),
@@ -3922,8 +4373,9 @@ mod tests {
             community_control: crate::state::CommunityConnectionControl::new(cancel.clone()),
         });
         let channels = [Uuid::new_v4(), Uuid::new_v4()];
-        state.accessible_channels_cache.insert(
-            (community, keys.public_key().to_bytes().to_vec()),
+        state.seed_accessible_channels(
+            community,
+            keys.public_key().to_bytes().to_vec(),
             channels.to_vec(),
         );
         let filters: Vec<Filter> = channels
@@ -3986,6 +4438,8 @@ mod tests {
     }
 
     mod postgres_tests {
+        use super::*;
+
         #[tokio::test]
         #[ignore = "requires Postgres"]
         async fn w3_b2_req_barrier_expiry_mid_flight_blocks_subscription_registration() {
@@ -3997,6 +4451,75 @@ mod tests {
         #[ignore = "requires Postgres"]
         async fn history_timeout_retirement_survives_expiry() {
             super::history_timeout_retirement_survives_expiry_body().await;
+        }
+
+        /// NIP-CW keeps any `#p` filter off the narrowed thread route. Two
+        /// `#p` values never reach SQL as `p_tag_hex`, so without the adapter's
+        /// mark this read took the route and lost a bare reference to the root.
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn multi_p_thread_filter_keeps_nip01_results() {
+            use nostr::{EventBuilder, Keys, Kind, Tag};
+            let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
+                .await
+                .expect("connect");
+            let db = buzz_db::Db::from_pool(pool.clone());
+            let community_uuid = uuid::Uuid::new_v4();
+            sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+                .bind(community_uuid)
+                .bind(format!("multi-p-{}.example", community_uuid.simple()))
+                .execute(&pool)
+                .await
+                .expect("insert community");
+            let channel = uuid::Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO channels (id, community_id, name, created_by) VALUES ($1, $2, $3, $4)",
+            )
+            .bind(channel)
+            .bind(community_uuid)
+            .bind(format!("multi-p-{}", channel.simple()))
+            .bind(vec![7_u8; 32])
+            .execute(&pool)
+            .await
+            .expect("insert channel");
+            let community = buzz_core::tenant::CommunityId::from_uuid(community_uuid);
+            let h = Tag::parse(["h", &channel.to_string()]).expect("h tag");
+            let (author, alice, bob) = (Keys::generate(), Keys::generate(), Keys::generate());
+            let root = EventBuilder::new(Kind::Custom(9), "root")
+                .tags([h.clone()])
+                .sign_with_keys(&author)
+                .expect("sign root");
+            let root_hex = root.id.to_hex();
+            // Names the root only in a bare `e` tag, so it has no thread row.
+            let bare = EventBuilder::new(Kind::Custom(9), "bare reference")
+                .tags([
+                    h,
+                    Tag::parse(["e", &root_hex]).expect("e tag"),
+                    Tag::public_key(alice.public_key()),
+                ])
+                .sign_with_keys(&author)
+                .expect("sign bare");
+            for event in [&root, &bare] {
+                db.insert_event(community, event, Some(channel))
+                    .await
+                    .expect("insert event");
+            }
+
+            let filter = Filter::new()
+                .kinds([Kind::Custom(9), Kind::Custom(40002)])
+                .custom_tag(SingleLetterTag::lowercase(Alphabet::H), channel.to_string())
+                .custom_tag(SingleLetterTag::lowercase(Alphabet::E), root_hex)
+                .pubkeys([alice.public_key(), bob.public_key()]);
+            let params = filter_to_query_params(&filter, Some(channel), community);
+            let ids: Vec<_> = db
+                .query_events_routed("req_historical", &params)
+                .await
+                .expect("query")
+                .into_iter()
+                .filter(|stored| filters_match(std::slice::from_ref(&filter), stored))
+                .map(|stored| stored.event.id)
+                .collect();
+            assert_eq!(ids, vec![bare.id], "two-value #p reads match NIP-01");
         }
     }
 }

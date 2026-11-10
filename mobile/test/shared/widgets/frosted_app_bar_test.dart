@@ -162,7 +162,7 @@ void main() {
       matching: find.byType(ClipRect),
     );
     expect(tester.getSize(clip).height, closeTo(reportedHeight, 0.01));
-    expect(reportedHeight, closeTo(titleContentHeight + Grid.xs + 1, 0.01));
+    expect(reportedHeight, closeTo(titleContentHeight + Grid.xs, 0.01));
     expect(tester.takeException(), isNull);
   });
 

@@ -20,6 +20,30 @@ void main() {
     return result;
   }
 
+  for (final changedAccount in [false, true]) {
+    test(
+      'picker snapshot rejects ${changedAccount ? "changed" : "expired"} account',
+      () async {
+        final f = HostedCommunitiesFixture();
+        await f.initialize(widget: true);
+        addTearDown(f.dispose);
+        f.rows = [f.row('one')];
+        await f.flow.signInAccount();
+        final choices = f.flow.captureCommunityChoices()!;
+        await f.flow.leave();
+        if (changedAccount) {
+          f.subject = 'other-owner';
+        } else {
+          f.expired = true;
+        }
+        expect(f.flow.restoreCommunityChoices(choices), isFalse);
+        expect(f.flow.stage, HostedFlowStage.idle);
+        expect(f.flow.communities, isEmpty);
+        expect(f.admitted, isEmpty);
+      },
+    );
+  }
+
   for (final failure in ['binding', 'backup']) {
     test(
       '$failure proof failure blocks discovery and preserves saved identity',
@@ -33,7 +57,7 @@ void main() {
           expect(f.flow.problem, HostedFlowProblem.identityMismatch);
         }
         expect(
-          f.requests.any((path) => path.endsWith('/communities/joined')),
+          f.requests.any((path) => path.endsWith('/known-communities/list')),
           isFalse,
         );
         expect(await const FlutterSecureStorage().readAll(), before);
@@ -42,10 +66,33 @@ void main() {
     );
   }
 
+  test('selecting a skipped relay retries only that community', () async {
+    final f = await fixture();
+    f.rows = [f.row('one'), f.row('two'), f.row('three')];
+    f.beforeAdmission = (name) async {
+      if (name != 'one.communities.buzz.xyz') {
+        throw AccountFailure.unavailable;
+      }
+    };
+    await f.flow.signInAccount();
+    await f.flow.addSelectedCommunities();
+    await f.flow.skipFailedCommunity();
+    expect(f.flow.stage, HostedFlowStage.blocked);
+    f.flow.backToCommunityChoices();
+    f.flow.chooseLandingCommunity('wss://two.communities.buzz.xyz');
+    f.beforeAdmission = null;
+    await f.flow.addSelectedCommunities();
+    expect(f.admitted, [
+      'one.communities.buzz.xyz',
+      'two.communities.buzz.xyz',
+    ]);
+    expect(f.openedCommunity, 'wss://two.communities.buzz.xyz');
+  });
+
   test('malformed list targets cannot authorize admission', () async {
     final f = await fixture();
     f.rows = [
-      {...f.row('one'), 'normalized_host': 'wss://user@evil.example/path'},
+      {...f.row('one'), 'community_url': 42},
     ];
     await f.flow.signInAccount();
     expect(f.flow.problem, HostedFlowProblem.invalidResponse);
@@ -56,10 +103,15 @@ void main() {
     await f.flow.initialize();
     f.rows = [f.row('a-one'), f.row('a-two')];
     f.beforeAdmission = (name) async {
-      if (name == 'a-two') throw AccountFailure.unavailable;
+      if (name == 'a-two.communities.buzz.xyz') {
+        throw AccountFailure.unavailable;
+      }
     };
     await f.flow.signInAccount();
-    expect(f.admitted, ['a-one']);
+    expect(f.flow.stage, HostedFlowStage.chooseCommunities);
+    expect(f.admitted, isEmpty);
+    await f.flow.addSelectedCommunities();
+    expect(f.admitted, ['a-one.communities.buzz.xyz']);
     f.expired = true;
     await f.flow.retry();
     expect(f.flow.stage, HostedFlowStage.signIn);
@@ -78,7 +130,8 @@ void main() {
     );
     final completed = Completer<void>();
     f.flow.addListener(() {
-      if (f.flow.stage == HostedFlowStage.complete && !completed.isCompleted) {
+      if (f.flow.stage == HostedFlowStage.chooseCommunities &&
+          !completed.isCompleted) {
         completed.complete();
       }
     });
@@ -86,6 +139,10 @@ void main() {
       BrowserAuthCode('other-code', 'a' * 43, {'type': 'account'}),
     );
     await completed.future.timeout(const Duration(seconds: 2));
-    expect(f.admitted, ['a-one', 'b-one']);
+    await f.flow.addSelectedCommunities();
+    expect(f.admitted, [
+      'a-one.communities.buzz.xyz',
+      'b-one.communities.buzz.xyz',
+    ]);
   });
 }

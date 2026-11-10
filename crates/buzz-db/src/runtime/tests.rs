@@ -1,8 +1,10 @@
 use super::*;
+use crate::test_support::ScratchDb;
 use crate::{relay_members, thread};
 use buzz_core::CommunityId;
 use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
 use sqlx::{Connection, PgPool};
+use std::time::Instant;
 use uuid::Uuid;
 
 const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1 -- local test-only credentials
@@ -168,6 +170,7 @@ async fn event_write_transaction_preserves_legacy_acquisition_metrics() {
             (
                 "buzz_db_pool_acquisitions_total".to_owned(),
                 [
+                    ("operation".to_owned(), "event_write".to_owned()),
                     ("outcome".to_owned(), "error".to_owned()),
                     ("pool_role".to_owned(), "writer".to_owned()),
                 ]
@@ -360,11 +363,34 @@ async fn readiness_check_cancellation_balances_waiter_and_inflight_connection() 
         querying_db
             .readiness_check_sql(
                 tokio::time::Instant::now() + std::time::Duration::from_secs(5),
-                "SELECT pg_sleep(5)",
+                "SELECT pg_sleep(1)",
             )
             .await
     });
-    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    // Abort only once the server is running the query. sqlx's release ping
+    // waits for it to finish, so the connection returns about 1 s later,
+    // well inside the 5 s recovery bound below.
+    let observer = PgPool::connect(&database_url)
+        .await
+        .expect("connect activity observer");
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let running: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM pg_stat_activity \
+                 WHERE datname = current_database() AND state = 'active' \
+                   AND query = 'SELECT pg_sleep(1)')",
+            )
+            .fetch_one(&observer)
+            .await
+            .expect("inspect readiness query");
+            if running {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("readiness query reached the server");
     querying.abort();
     assert!(querying
         .await
@@ -746,59 +772,14 @@ async fn admin_url() -> String {
     std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| TEST_DB_URL.into())
 }
 
-/// Create a fresh scratch database on the same server and optionally run migrations.
-async fn create_scratch_db_through(
-    admin: &PgPool,
-    prefix: &str,
-    target: Option<i64>,
-) -> (PgPool, String) {
-    let name = format!("{}_{}", prefix, Uuid::new_v4().simple());
-    sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {name}")))
-        .execute(admin)
-        .await
-        .expect("create scratch db");
-    let base = admin_url().await;
-    // Swap the database path segment of the admin URL for the scratch name.
-    let scratch_url = {
-        let idx = base.rfind('/').expect("db url has a path segment");
-        format!("{}/{}", &base[..idx], name)
-    };
-    let pool = PgPool::connect(&scratch_url)
-        .await
-        .expect("connect scratch db");
-    match target {
-        Some(target) => migration::run_migrations_through(&pool, target)
-            .await
-            .expect("migrate scratch db through target"),
-        None => migration::run_migrations(&pool)
-            .await
-            .expect("migrate scratch db"),
-    }
-    (pool, name)
-}
-
-/// Create a fresh scratch database on the same server and run all migrations.
-/// Returns (pool, db_name); callers should `drop_scratch_db` when done.
-async fn create_scratch_db(admin: &PgPool, prefix: &str) -> (PgPool, String) {
-    create_scratch_db_through(admin, prefix, None).await
-}
-
-async fn drop_scratch_db(admin: &PgPool, pool: PgPool, name: &str) {
-    pool.close().await;
-    let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
-        "DROP DATABASE IF EXISTS {name} WITH (FORCE)"
-    )))
-    .execute(admin)
-    .await;
-}
-
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn push_gateway_profile_migration_converges_brownfield_authority() {
     let admin = PgPool::connect(&admin_url().await)
         .await
         .expect("connect admin database");
-    let (pool, name) = create_scratch_db_through(&admin, "push_profile", Some(42)).await;
+    let (pool, _scratch) =
+        ScratchDb::migrated_through(&admin_url().await, "push_profile", 42).await;
     let installation_id = Uuid::new_v4();
     let now = chrono::Utc::now();
 
@@ -880,7 +861,6 @@ async fn push_gateway_profile_migration_converges_brownfield_authority() {
     .await;
     assert!(sandbox.is_err(), "legacy sandbox profile must be rejected");
 
-    drop_scratch_db(&admin, pool, &name).await;
     admin.close().await;
 }
 
@@ -1006,6 +986,120 @@ async fn read_falls_back_to_writer_when_no_replica_configured() {
         "read() must be the writer pool when no replica is configured"
     );
     assert!(db.read_pool_stats().is_none());
+}
+
+/// A match-nothing read is answered before any pool acquire, on every query
+/// entry point, and an invalid query that would also match nothing still
+/// returns its validation error. Replica routing is on and the fence is open,
+/// so a routed read that reached `route_read` would try the reader first. Both
+/// pools point at a closed port, and the `limit: 1` control proves that a real
+/// page does try to acquire, from the reader and then the writer.
+#[tokio::test]
+async fn match_nothing_reads_take_no_connection() {
+    use metrics_util::debugging::DebuggingRecorder;
+
+    let dead_pool = || {
+        sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(200))
+            .connect_lazy("postgres://unused@127.0.0.1:1/unused") // sadscan:disable np.postgres.1
+            .expect("lazy pool")
+    };
+    let mut db = Db::from_pools(dead_pool(), dead_pool());
+    db.set_replica_read_max_age_for_tests(Some(std::time::Duration::from_secs(3600)));
+    db.fence().force_open_for_tests(chrono::Utc::now());
+    let community = CommunityId::from_uuid(Uuid::new_v4());
+    let page = |limit| {
+        let mut q = EventQuery::for_community(community);
+        q.limit = Some(limit);
+        q
+    };
+    let with = |edit: fn(&mut EventQuery)| {
+        let mut q = page(10);
+        edit(&mut q);
+        q
+    };
+    let empty_pages = [
+        ("limit 0", page(0)),
+        ("max_limit 0", with(|q| q.max_limit = Some(0))),
+        ("empty kinds", with(|q| q.kinds = Some(vec![]))),
+        ("empty authors", with(|q| q.authors = Some(vec![]))),
+        ("empty ids", with(|q| q.ids = Some(vec![]))),
+        ("empty #e", with(|q| q.e_tags = Some(vec![]))),
+    ];
+    // Validation runs before the match-nothing check, so the error wins.
+    let invalid = [
+        (
+            "before_id without until",
+            with(|q| {
+                q.limit = Some(0);
+                q.before_id = Some(vec![0; 32]);
+            }),
+        ),
+        (
+            "global_only with channel_id",
+            with(|q| {
+                q.kinds = Some(vec![]);
+                q.global_only = true;
+                q.channel_id = Some(Uuid::nil());
+            }),
+        ),
+    ];
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    let _guard = metrics::set_default_local_recorder(&recorder);
+    let acquiring_roles = || {
+        snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .filter(|(key, _, _, _)| key.key().name() == "buzz_db_pool_acquire_attempts_total")
+            .filter_map(|(key, _, _, _)| {
+                key.key()
+                    .labels()
+                    .find(|label| label.key() == "pool_role")
+                    .map(|label| label.value().to_owned())
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+
+    for (case, q) in &empty_pages {
+        let results = [
+            db.query_events(q).await,
+            db.query_events_routed("test", q).await,
+            db.query_events_routed_bounded("test", q).await,
+        ];
+        for (entry, result) in ["writer", "routed", "routed bounded"].iter().zip(results) {
+            let events = result.unwrap_or_else(|e| panic!("{case} via {entry}: {e}"));
+            assert!(events.is_empty(), "{case} via {entry} must match nothing");
+        }
+    }
+    for (case, q) in &invalid {
+        let results = [
+            db.query_events(q).await,
+            db.query_events_routed("test", q).await,
+            db.query_events_routed_bounded("test", q).await,
+        ];
+        for (entry, result) in ["writer", "routed", "routed bounded"].iter().zip(results) {
+            assert!(
+                matches!(result, Err(DbError::InvalidData(_))),
+                "{case} via {entry} must fail validation, got {result:?}"
+            );
+        }
+    }
+    assert!(
+        acquiring_roles().is_empty(),
+        "a match-nothing read must not try to acquire: {:?}",
+        acquiring_roles()
+    );
+
+    db.query_events_routed("test", &page(1))
+        .await
+        .expect_err("a real page needs the (unreachable) pools");
+    assert_eq!(
+        acquiring_roles(),
+        ["reader", "writer"].map(str::to_owned).into(),
+        "the control must have tried the reader, then the writer"
+    );
 }
 
 #[test]
@@ -1139,30 +1233,52 @@ async fn read_pool_stats_reports_reader_ceiling_not_writer() {
     );
 }
 
-/// D4 wiring: the reader pool is built lazily with `min_connections(0)`
-/// and the short reader acquire timeout — construction must succeed
-/// with no replica listening (reader-down at boot must not crash the
-/// relay), and `read_max_connections` must honour
-/// `DbConfig::read_max_connections` over the writer sizing.
+/// D4 wiring: the reader pool is built lazily with the short reader
+/// acquire timeout, a warm `min_connections` floor, and no pre-acquire
+/// ping — construction must succeed with no replica listening
+/// (reader-down at boot must not crash the relay), and
+/// `read_max_connections` must honour `DbConfig::read_max_connections`
+/// over the writer sizing.
 /// `#[tokio::test]` because `connect_lazy` spawns the pool reaper task,
 /// which needs a Tokio runtime even though nothing is dialed.
 #[tokio::test]
 async fn connect_read_pool_is_lazy_and_independently_sized() {
     let config = DbConfig {
         max_connections: 20,
-        read_max_connections: Some(7),
+        read_max_connections: Some(10),
         ..DbConfig::default()
     };
     // Unroutable per RFC 5737 TEST-NET-1: proves nothing is dialed at
     // construction time.
-    let pool = Db::connect_read_pool(&config, "postgres://user:pw@192.0.2.1:5432/none", 7)
+    let pool = Db::connect_read_pool(&config, "postgres://user:pw@192.0.2.1:5432/none", 10)
         .expect("lazy construction must not dial the replica");
-    assert_eq!(pool.options().get_max_connections(), 7);
-    assert_eq!(pool.options().get_min_connections(), 0);
+    assert_eq!(pool.options().get_max_connections(), 10);
+    assert_eq!(pool.options().get_min_connections(), 2);
+    assert!(
+        !pool.options().get_test_before_acquire(),
+        "the idle ping must not spend the 150ms reader acquire budget"
+    );
     assert_eq!(
         pool.options().get_acquire_timeout(),
         Db::READER_ACQUIRE_TIMEOUT
     );
+    // A nonzero floor must not turn construction into a dial: sqlx 0.9 only
+    // tops up the floor from the reaper or after a connection closes.
+    tokio::task::yield_now().await;
+    assert_eq!(pool.size(), 0, "construction must not dial the replica");
+}
+
+/// The reader warm floor is a fifth of the ceiling, never zero, and never
+/// above the ceiling.
+#[test]
+fn reader_min_connections_is_a_fifth_of_max_with_a_floor_of_one() {
+    for (max, min) in [(1, 1), (4, 1), (5, 1), (9, 1), (10, 2), (50, 10), (100, 20)] {
+        assert_eq!(
+            Db::reader_min_connections(max),
+            min,
+            "max_connections={max}"
+        );
+    }
 }
 
 /// Channel window: head fetch (no cursor) reads the WRITER; cursor pages
@@ -1170,11 +1286,8 @@ async fn connect_read_pool_is_lazy_and_independently_sized() {
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn channel_window_routes_head_to_writer_and_cursor_pages_to_replica() {
-    let admin = PgPool::connect(&admin_url().await)
-        .await
-        .expect("connect admin");
-    let (writer, wname) = create_scratch_db(&admin, "routing_w").await;
-    let (replica, rname) = create_scratch_db(&admin, "routing_r").await;
+    let (writer, _writer_db) = ScratchDb::migrated(&admin_url().await, "routing_w").await;
+    let (replica, _replica_db) = ScratchDb::migrated(&admin_url().await, "routing_r").await;
 
     let author = nostr::Keys::generate();
     let community = Uuid::new_v4();
@@ -1243,9 +1356,6 @@ async fn channel_window_routes_head_to_writer_and_cursor_pages_to_replica() {
         ],
         "cursor page must be served by the replica"
     );
-
-    drop_scratch_db(&admin, replica, &rname).await;
-    drop_scratch_db(&admin, writer, &wname).await;
 }
 
 /// Fail-closed on a mid-request replica failure (Dawn, review of
@@ -1257,11 +1367,8 @@ async fn channel_window_routes_head_to_writer_and_cursor_pages_to_replica() {
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn replica_window_failure_falls_back_to_writer() {
-    let admin = PgPool::connect(&admin_url().await)
-        .await
-        .expect("connect admin");
-    let (writer, wname) = create_scratch_db(&admin, "fb_w").await;
-    let (replica, rname) = create_scratch_db(&admin, "fb_r").await;
+    let (writer, _writer_db) = ScratchDb::migrated(&admin_url().await, "fb_w").await;
+    let (replica, _replica_db) = ScratchDb::migrated(&admin_url().await, "fb_r").await;
 
     let author = nostr::Keys::generate();
     let community = Uuid::new_v4();
@@ -1326,9 +1433,6 @@ async fn replica_window_failure_falls_back_to_writer() {
         vec!["m2", "m1"],
         "fallback page must be the writer's answer (no replica marker)"
     );
-
-    drop_scratch_db(&admin, replica, &rname).await;
-    drop_scratch_db(&admin, writer, &wname).await;
 }
 
 /// [`replica_window_failure_falls_back_to_writer`] for the thread-replies
@@ -1337,11 +1441,8 @@ async fn replica_window_failure_falls_back_to_writer() {
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn replica_thread_failure_falls_back_to_writer() {
-    let admin = PgPool::connect(&admin_url().await)
-        .await
-        .expect("connect admin");
-    let (writer, wname) = create_scratch_db(&admin, "fbt_w").await;
-    let (replica, rname) = create_scratch_db(&admin, "fbt_r").await;
+    let (writer, _writer_db) = ScratchDb::migrated(&admin_url().await, "fbt_w").await;
+    let (replica, _replica_db) = ScratchDb::migrated(&admin_url().await, "fbt_r").await;
 
     let author = nostr::Keys::generate();
     let community = Uuid::new_v4();
@@ -1399,9 +1500,6 @@ async fn replica_thread_failure_falls_back_to_writer() {
         page[0].stored_event.event.content, "r3",
         "fallback page must be the writer's answer"
     );
-
-    drop_scratch_db(&admin, replica, &rname).await;
-    drop_scratch_db(&admin, writer, &wname).await;
 }
 
 /// Mid-request degradation of the held session (Dawn, review of
@@ -1416,8 +1514,8 @@ async fn read_session_degrades_to_writer_when_replica_connection_dies() {
     let admin = PgPool::connect(&admin_url().await)
         .await
         .expect("connect admin");
-    let (writer, wname) = create_scratch_db(&admin, "deg_w").await;
-    let (replica, rname) = create_scratch_db(&admin, "deg_r").await;
+    let (writer, _writer_db) = ScratchDb::migrated(&admin_url().await, "deg_w").await;
+    let (replica, replica_db) = ScratchDb::migrated(&admin_url().await, "deg_r").await;
 
     let author = nostr::Keys::generate();
     let community = Uuid::new_v4();
@@ -1460,7 +1558,7 @@ async fn read_session_degrades_to_writer_when_replica_connection_dies() {
         "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
              WHERE datname = $1 AND pid <> pg_backend_pid()",
     )
-    .bind(&rname)
+    .bind(replica_db.name())
     .execute(&admin)
     .await
     .expect("terminate replica backends");
@@ -1482,8 +1580,146 @@ async fn read_session_degrades_to_writer_when_replica_connection_dies() {
     );
 
     drop(session);
-    drop_scratch_db(&admin, replica, &rname).await;
-    drop_scratch_db(&admin, writer, &wname).await;
+}
+
+/// The history-read permit lives exactly as long as the reader transaction
+/// it admitted, including a [`ReadSession`] held for follow-up queries; a
+/// history read that cannot get a permit within the bounded wait is
+/// rejected as retryable and never moves to the writer.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires Postgres"]
+async fn history_permit_follows_the_read_session_and_a_full_gate_rejects() {
+    let (writer, _writer_db) = ScratchDb::migrated(&admin_url().await, "cap_w").await;
+    let (replica, _replica_db) = ScratchDb::migrated(&admin_url().await, "cap_r").await;
+
+    let author = nostr::Keys::generate();
+    let community = Uuid::new_v4();
+    let channel = Uuid::new_v4();
+    seed_community_channel(&writer, community, channel, &author).await;
+    seed_community_channel(&replica, community, channel, &author).await;
+    let base = 1_700_000_000u64;
+    for pool in [&writer, &replica] {
+        for (content, at) in [("m1", base), ("m2", base + 10)] {
+            insert_top_level(
+                pool,
+                community,
+                channel,
+                &signed_event_at(&author, content, at),
+            )
+            .await;
+        }
+    }
+
+    let db = Db::from_pools(writer.clone(), replica.clone());
+    db.fence().force_open_for_tests(chrono::Utc::now());
+    let cid = CommunityId::from_uuid(community);
+    let cap = db.history_reads.available();
+    assert_eq!(
+        cap,
+        super::history_reads::cap(db.read_max_connections) as usize
+    );
+
+    let head = db
+        .get_channel_window(cid, channel, 1, None, None)
+        .await
+        .expect("head window");
+    let cursor = head.next_cursor.expect("has_more implies next_cursor");
+    let (_window, session) = db
+        .get_channel_window_with_session(cid, channel, 10, Some(cursor.clone()), None)
+        .await
+        .expect("routed cursor window");
+    assert!(session.is_replica(), "fixture must route to the replica");
+    assert_eq!(
+        db.history_reads.available(),
+        cap - 1,
+        "the held session must keep its permit"
+    );
+
+    // Fill the gate: every remaining permit is held elsewhere.
+    let mut others = Vec::new();
+    for _ in 1..cap {
+        others.push(
+            db.history_reads
+                .admit(super::history_reads::PERMIT_WAIT)
+                .await
+                .expect("free permit"),
+        );
+    }
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    let started = Instant::now();
+    let rejected = {
+        let _guard = metrics::set_default_local_recorder(&recorder);
+        db.get_channel_window_with_session(cid, channel, 10, Some(cursor.clone()), None)
+            .await
+    }
+    .err()
+    .expect("a full gate must reject the history read");
+    assert!(
+        matches!(rejected, DbError::Sqlx(sqlx::Error::PoolTimedOut)),
+        "the rejection must be the retryable pool timeout; got {rejected:?}"
+    );
+    assert!(
+        started.elapsed() >= super::history_reads::PERMIT_WAIT,
+        "the read must wait out the bounded permit wait before rejecting"
+    );
+    let decisions: Vec<(String, String)> = snapshotter
+        .snapshot()
+        .into_vec()
+        .into_iter()
+        .filter(|(key, ..)| key.key().name() == "buzz_db_route_decision")
+        .map(|(key, ..)| {
+            let label = |name: &str| {
+                key.key()
+                    .labels()
+                    .find(|l| l.key() == name)
+                    .map(|l| l.value().to_owned())
+                    .unwrap_or_default()
+            };
+            (label("decision"), label("reason"))
+        })
+        .collect();
+    assert_eq!(
+        decisions,
+        vec![("rejected".to_owned(), "history_read_cap".to_owned())],
+        "a capped history read is rejected once and never served by the writer"
+    );
+
+    // Dropping the session releases its permit, and the next read routes.
+    drop(session);
+    assert_eq!(db.history_reads.available(), 1);
+    let (_window, session) = db
+        .get_channel_window_with_session(cid, channel, 10, Some(cursor.clone()), None)
+        .await
+        .expect("a released permit admits the next read");
+    assert!(session.is_replica());
+    drop(session);
+    drop(others);
+    assert_eq!(db.history_reads.available(), cap);
+
+    // An operator lowering the cap at runtime holds new reads to the new
+    // limit while one is in flight, and raising it readmits them.
+    let (_window, held) = db
+        .get_channel_window_with_session(cid, channel, 10, Some(cursor.clone()), None)
+        .await
+        .expect("routed cursor window");
+    assert_eq!(db.history_read_gate().set_limit(1), 1);
+    let rejected = db
+        .get_channel_window_with_session(cid, channel, 10, Some(cursor.clone()), None)
+        .await
+        .err()
+        .expect("a lowered cap must reject the next history read");
+    assert!(
+        matches!(rejected, DbError::Sqlx(sqlx::Error::PoolTimedOut)),
+        "a lowered cap sheds as retryable; got {rejected:?}"
+    );
+    assert_eq!(db.history_read_gate().set_limit(cap), cap);
+    let (_window, second) = db
+        .get_channel_window_with_session(cid, channel, 10, Some(cursor), None)
+        .await
+        .expect("a raised cap admits the next read");
+    drop((held, second));
+    assert_eq!(db.history_reads.available(), cap);
 }
 
 /// Snapshot continuity (Wren, review of 17ea2ff6a): the routed request
@@ -1497,11 +1733,8 @@ async fn read_session_degrades_to_writer_when_replica_connection_dies() {
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn routed_request_holds_one_snapshot_across_page_and_aux() {
-    let admin = PgPool::connect(&admin_url().await)
-        .await
-        .expect("connect admin");
-    let (writer, wname) = create_scratch_db(&admin, "snap_w").await;
-    let (replica, rname) = create_scratch_db(&admin, "snap_r").await;
+    let (writer, _writer_db) = ScratchDb::migrated(&admin_url().await, "snap_w").await;
+    let (replica, _replica_db) = ScratchDb::migrated(&admin_url().await, "snap_r").await;
 
     let author = nostr::Keys::generate();
     let community = Uuid::new_v4();
@@ -1579,8 +1812,6 @@ async fn routed_request_holds_one_snapshot_across_page_and_aux() {
     );
 
     drop(session);
-    drop_scratch_db(&admin, replica, &rname).await;
-    drop_scratch_db(&admin, writer, &wname).await;
 }
 
 /// Head gate (Predicate A): with the budget unset, a head fetch reads
@@ -1591,11 +1822,8 @@ async fn routed_request_holds_one_snapshot_across_page_and_aux() {
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn head_fetch_routes_by_configured_budget() {
-    let admin = PgPool::connect(&admin_url().await)
-        .await
-        .expect("connect admin");
-    let (writer, wname) = create_scratch_db(&admin, "head_w").await;
-    let (replica, rname) = create_scratch_db(&admin, "head_r").await;
+    let (writer, _writer_db) = ScratchDb::migrated(&admin_url().await, "head_w").await;
+    let (replica, _replica_db) = ScratchDb::migrated(&admin_url().await, "head_r").await;
 
     let author = nostr::Keys::generate();
     let community = Uuid::new_v4();
@@ -1662,9 +1890,6 @@ async fn head_fetch_routes_by_configured_budget() {
         vec!["fresh-writer-only".to_string(), "shared".to_string()],
         "an over-budget entry must fail the head gate closed"
     );
-
-    drop_scratch_db(&admin, replica, &rname).await;
-    drop_scratch_db(&admin, writer, &wname).await;
 }
 
 /// End-to-end deploy-default proof for the NEW routed seams: with the
@@ -1676,11 +1901,8 @@ async fn head_fetch_routes_by_configured_budget() {
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn query_events_routed_defaults_dark_and_routes_covered_when_enabled() {
-    let admin = PgPool::connect(&admin_url().await)
-        .await
-        .expect("connect admin");
-    let (writer, wname) = create_scratch_db(&admin, "qer_w").await;
-    let (replica, rname) = create_scratch_db(&admin, "qer_r").await;
+    let (writer, _writer_db) = ScratchDb::migrated(&admin_url().await, "qer_w").await;
+    let (replica, _replica_db) = ScratchDb::migrated(&admin_url().await, "qer_r").await;
 
     let author = nostr::Keys::generate();
     let community = Uuid::new_v4();
@@ -1740,9 +1962,6 @@ async fn query_events_routed_defaults_dark_and_routes_covered_when_enabled() {
         "budget set + covered-eligible must route to the replica"
     );
     assert!(!contents(&rows).contains("writer-only"));
-
-    drop_scratch_db(&admin, replica, &rname).await;
-    drop_scratch_db(&admin, writer, &wname).await;
 }
 
 /// COUNT is bounded-only (rev 5 deletion-visibility rule): a
@@ -1753,11 +1972,8 @@ async fn query_events_routed_defaults_dark_and_routes_covered_when_enabled() {
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn count_events_routed_is_bounded_only() {
-    let admin = PgPool::connect(&admin_url().await)
-        .await
-        .expect("connect admin");
-    let (writer, wname) = create_scratch_db(&admin, "cnt_w").await;
-    let (replica, rname) = create_scratch_db(&admin, "cnt_r").await;
+    let (writer, _writer_db) = ScratchDb::migrated(&admin_url().await, "cnt_w").await;
+    let (replica, _replica_db) = ScratchDb::migrated(&admin_url().await, "cnt_r").await;
 
     let author = nostr::Keys::generate();
     let community = Uuid::new_v4();
@@ -1819,9 +2035,6 @@ async fn count_events_routed_is_bounded_only() {
         "an over-budget entry must fail the count closed to the writer, \
              even when the covered arm would admit the shape"
     );
-
-    drop_scratch_db(&admin, replica, &rname).await;
-    drop_scratch_db(&admin, writer, &wname).await;
 }
 
 /// Routed relay-membership check: budget unset ⇒ writer; budget set +
@@ -1830,11 +2043,8 @@ async fn count_events_routed_is_bounded_only() {
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn is_relay_member_is_bounded_routed_and_fails_closed() {
-    let admin = PgPool::connect(&admin_url().await)
-        .await
-        .expect("connect admin");
-    let (writer, wname) = create_scratch_db(&admin, "mem_w").await;
-    let (replica, rname) = create_scratch_db(&admin, "mem_r").await;
+    let (writer, _writer_db) = ScratchDb::migrated(&admin_url().await, "mem_w").await;
+    let (replica, _replica_db) = ScratchDb::migrated(&admin_url().await, "mem_r").await;
 
     let community = Uuid::new_v4();
     for pool in [&writer, &replica] {
@@ -1907,9 +2117,65 @@ async fn is_relay_member_is_bounded_routed_and_fails_closed() {
             .expect("entry too old"),
         "an over-budget entry must fail closed to the writer"
     );
+}
 
-    drop_scratch_db(&admin, replica, &rname).await;
-    drop_scratch_db(&admin, writer, &wname).await;
+/// The per-AUTH pending default-channel read is bounded-routed like
+/// membership; the roster writers' read stays on the writer. A different
+/// token on each pool proves which pool answered.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn pending_default_channel_join_routed_reads_the_bounded_replica() {
+    let (writer, _writer_db) = ScratchDb::migrated(&admin_url().await, "pend_w").await;
+    let (replica, _replica_db) = ScratchDb::migrated(&admin_url().await, "pend_r").await;
+
+    let community = Uuid::new_v4();
+    let pubkey = "cc".repeat(32);
+    let (writer_token, replica_token) = (Uuid::new_v4(), Uuid::new_v4());
+    for (pool, token) in [(&writer, writer_token), (&replica, replica_token)] {
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(community)
+            .bind(format!("pending-routing-{}.example", community.simple()))
+            .execute(pool)
+            .await
+            .expect("insert community");
+        sqlx::query(
+            "INSERT INTO relay_members (community_id, pubkey, role, auto_join_pending) \
+             VALUES ($1, $2, 'member', $3)",
+        )
+        .bind(community)
+        .bind(&pubkey)
+        .bind(token)
+        .execute(pool)
+        .await
+        .expect("seed pending work");
+    }
+    let cid = CommunityId::from_uuid(community);
+    let token = |pending: Option<relay_members::PendingDefaultChannelJoin>| {
+        pending.expect("pending work").token
+    };
+
+    let mut db = Db::from_pools(writer.clone(), replica.clone());
+    db.fence().force_open_for_tests(chrono::Utc::now());
+
+    // Budget unset ⇒ writer.
+    let pending = db.pending_default_channel_join_routed(cid, &pubkey).await;
+    assert_eq!(token(pending.expect("gate off")), writer_token);
+
+    // Budget set + fresh entry ⇒ replica; the writer-only read ignores it.
+    db.set_replica_read_max_age_for_tests(Some(std::time::Duration::from_secs(5)));
+    let pending = db.pending_default_channel_join_routed(cid, &pubkey).await;
+    assert_eq!(token(pending.expect("gate on")), replica_token);
+    let pending = db.pending_default_channel_join(cid, &pubkey).await;
+    assert_eq!(token(pending.expect("writer read")), writer_token);
+
+    // Entry older than the budget ⇒ fail closed to the writer.
+    db.fence().close();
+    db.fence().force_open_for_tests_at(
+        chrono::Utc::now(),
+        std::time::Instant::now() - std::time::Duration::from_secs(10),
+    );
+    let pending = db.pending_default_channel_join_routed(cid, &pubkey).await;
+    assert_eq!(token(pending.expect("entry too old")), writer_token);
 }
 
 /// Community separation across every routed seam, verified on
@@ -1928,8 +2194,10 @@ async fn is_relay_member_is_bounded_routed_and_fails_closed() {
 /// the replica (not the writer) served the read. Every assertion
 /// requests A and demands B's rows never appear, including B's
 /// `replica-only` row, which is the one a leaky predicate would surface.
-/// The routed fallback must cost ONE reader acquire budget, even when the
-/// Aurora capability cache is cold.
+/// A saturated reader must cost a routed read ONE reader acquire budget,
+/// even when the Aurora capability cache is cold. A history read is then
+/// rejected as retryable instead of moving to the writer; an authorization
+/// read still falls back to the writer.
 ///
 /// Regression test for a stacked-budget bug found at `9fa3c9c0b`: the
 /// capability probe used to `acquire()` from the pool itself and return
@@ -1954,20 +2222,13 @@ async fn is_relay_member_is_bounded_routed_and_fails_closed() {
 /// already covers.
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires Postgres"]
-async fn routed_fallback_spends_one_acquire_budget_when_aurora_cache_is_cold() {
-    let admin = PgPool::connect(&admin_url().await)
-        .await
-        .expect("connect admin");
-    let (seed, wname) = create_scratch_db(&admin, "one_budget").await;
+async fn saturated_reader_spends_one_acquire_budget_and_rejects_history_reads() {
+    let (seed, scratch) = ScratchDb::migrated(&admin_url().await, "one_budget").await;
     seed.close().await;
-    let base = admin_url().await;
-    let scratch_url = {
-        let idx = base.rfind('/').expect("db url has a path segment");
-        format!("{}/{}", &base[..idx], wname)
-    };
+    let scratch_url = scratch.url().to_owned();
 
     // `Db::new` so the writer arms the floor guard and the reader is the
-    // real lazy `connect_read_pool` pool (min_connections=0, 150ms
+    // real lazy `connect_read_pool` pool (warm floor of 1, 150ms
     // acquire timeout). Reader is sized 1 so holding one connection
     // saturates it.
     let mut db = Db::new(&DbConfig {
@@ -2026,20 +2287,41 @@ async fn routed_fallback_spends_one_acquire_budget_when_aurora_cache_is_cold() {
     // local recorder is installed and the label assertions would vacuously
     // see an empty snapshot.
     let start = std::time::Instant::now();
-    let count = {
+    let rejected = {
         let _guard = metrics::set_default_local_recorder(&recorder);
         db.count_events_routed("one_budget_probe", &query).await
     }
-    .expect("writer fallback still answers the read");
+    .expect_err("a history read must not spill onto the writer");
     let elapsed = start.elapsed();
 
-    assert_eq!(count, 0, "writer answered on an empty scratch database");
+    assert!(
+        matches!(rejected, DbError::Sqlx(sqlx::Error::PoolTimedOut)),
+        "the rejection must be the retryable pool timeout; got {rejected:?}"
+    );
     assert!(
         elapsed < Duration::from_millis(250),
-        "routed fallback must spend ONE {}ms acquire budget, not two; took {}ms",
+        "routed read must spend ONE {}ms acquire budget, not two; took {}ms",
         Db::READER_ACQUIRE_TIMEOUT.as_millis(),
         elapsed.as_millis()
     );
+    assert_eq!(
+        db.history_reads.available(),
+        1,
+        "a rejected history read must release its permit"
+    );
+
+    // An authorization read on the same saturated reader keeps the writer
+    // fallback: only history reads are rejected.
+    let is_member = {
+        let _guard = metrics::set_default_local_recorder(&recorder);
+        db.is_relay_member(
+            CommunityId::from_uuid(Uuid::new_v4()),
+            &nostr::Keys::generate().public_key().to_hex(),
+        )
+        .await
+    }
+    .expect("authorization read falls back to the writer");
+    assert!(!is_member, "writer answered on an empty scratch database");
 
     let reasons: std::collections::HashMap<(String, String), u64> = snapshotter
         .snapshot()
@@ -2063,9 +2345,14 @@ async fn routed_fallback_spends_one_acquire_budget_when_aurora_cache_is_cold() {
         .collect();
 
     assert_eq!(
+        reasons.get(&("rejected".to_owned(), "reader_acquire_timeout".to_owned())),
+        Some(&1),
+        "the history read must be rejected as reader_acquire_timeout; got {reasons:?}"
+    );
+    assert_eq!(
         reasons.get(&("writer".to_owned(), "reader_acquire_timeout".to_owned())),
         Some(&1),
-        "saturated reader must fall back as writer/reader_acquire_timeout; got {reasons:?}"
+        "only the authorization read may fall back to the writer; got {reasons:?}"
     );
     // `reader_validation_error` would mean we misclassified a timeout as a
     // broken reader, and `pool_busy` is the retired name — neither may
@@ -2078,17 +2365,13 @@ async fn routed_fallback_spends_one_acquire_budget_when_aurora_cache_is_cold() {
     );
 
     drop(held);
-    drop_scratch_db(&admin, db.pool.clone(), &wname).await;
 }
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn routed_reads_are_confined_to_the_requested_community() {
-    let admin = PgPool::connect(&admin_url().await)
-        .await
-        .expect("connect admin");
-    let (writer, wname) = create_scratch_db(&admin, "sep_w").await;
-    let (replica, rname) = create_scratch_db(&admin, "sep_r").await;
+    let (writer, _writer_db) = ScratchDb::migrated(&admin_url().await, "sep_w").await;
+    let (replica, _replica_db) = ScratchDb::migrated(&admin_url().await, "sep_r").await;
 
     let author = nostr::Keys::generate();
     let (comm_a, chan_a) = (Uuid::new_v4(), Uuid::new_v4());
@@ -2241,17 +2524,15 @@ async fn routed_reads_are_confined_to_the_requested_community() {
 
     // 4. By-ID hydration — ids carry no channel pin, and B's ids are
     //    requested alongside A's. Only A's may hydrate.
-    let ids: Vec<&[u8]> = vec![
-        a_shared.id.as_bytes(),
-        a_replica_only.id.as_bytes(),
-        b_shared.id.as_bytes(),
-        b_replica_only.id.as_bytes(),
-    ];
+    let hits: Vec<([u8; 32], i64)> = [&a_shared, &a_replica_only, &b_shared, &b_replica_only]
+        .iter()
+        .map(|e| (e.id.to_bytes(), e.created_at.as_secs() as i64))
+        .collect();
     let rows = db
-        .get_events_by_ids_routed("sep_by_ids", cid_a, &ids)
+        .get_events_by_ids_at_routed("sep_by_ids", cid_a, &hits)
         .await
         .expect("routed by-ids");
-    assert_a_only(&rows, "a-replica-only", "get_events_by_ids_routed");
+    assert_a_only(&rows, "a-replica-only", "get_events_by_ids_at_routed");
 
     // 5-7. All three feed builders, each given BOTH channels as
     //      accessible — so only the community predicate can exclude B.
@@ -2277,32 +2558,22 @@ async fn routed_reads_are_confined_to_the_requested_community() {
         .await
         .expect("routed activity");
     assert_a_only(&rows, "a-replica-only", "query_feed_activity_routed");
-
-    drop_scratch_db(&admin, replica, &rname).await;
-    drop_scratch_db(&admin, writer, &wname).await;
 }
 
-/// D4: a LAZY reader pool (connect_lazy, min_connections=0, never yet
+/// D4: a LAZY reader pool (connect_lazy, never yet
 /// used) must still let [`Db::spawn_fence_probe`] verify the writer's
 /// floor guard and spawn — reader-down or reader-idle at boot must not
 /// disable fence probing.
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn lazy_reader_pool_still_spawns_fence_probe() {
-    let admin = PgPool::connect(&admin_url().await)
-        .await
-        .expect("connect admin");
-    let (seed, wname) = create_scratch_db(&admin, "lazy_w").await;
+    let (seed, scratch) = ScratchDb::migrated(&admin_url().await, "lazy_w").await;
     seed.close().await;
 
-    let writer_url = {
-        let base = admin_url().await;
-        let idx = base.rfind('/').expect("db url has a path segment");
-        format!("{}/{}", &base[..idx], wname)
-    };
+    let writer_url = scratch.url().to_owned();
     // `Db::new` (not `from_pools`) so the WRITER pool arms the
     // `buzz.created_at_floor` GUC — `spawn_fence_probe` verifies the
-    // floor guard on a writer connection, and `create_scratch_db`'s
+    // floor guard on a writer connection, and `ScratchDb::migrated`'s
     // plain `PgPool::connect` never arms it. The reader is still the
     // lazy `connect_read_pool` pool this test is about.
     let db = Db::new(&DbConfig {
@@ -2319,8 +2590,66 @@ async fn lazy_reader_pool_still_spawns_fence_probe() {
         .await
         .expect("floor-guard verification must pass on the migrated writer");
     assert!(spawned, "a configured (lazy) reader must spawn the probe");
+}
 
-    drop_scratch_db(&admin, db.pool.clone(), &wname).await;
+/// The fence probe must keep beating while every serving writer connection
+/// is checked out. On the serving pool its beat queued behind request
+/// traffic, so under load every pod's newest token aged past the
+/// bounded-read budget and reads spilled onto the saturated writer.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn fence_probe_beats_while_serving_writer_pool_is_exhausted() {
+    let (seed, scratch) = ScratchDb::migrated(&admin_url().await, "fence_own_pool").await;
+    seed.close().await;
+
+    let url = scratch.url().to_owned();
+    let db = Db::new(&DbConfig {
+        database_url: url.clone(),
+        read_database_url: Some(url),
+        max_connections: 1,
+        min_connections: 0,
+        acquire_timeout_secs: 1,
+        ..DbConfig::default()
+    })
+    .await
+    .expect("connect armed Db with one serving writer connection");
+    assert!(
+        db.spawn_fence_probe().await.expect("verification passes"),
+        "a configured reader must spawn the probe"
+    );
+
+    // Hold the serving writer pool's only connection for the whole test.
+    let mut held = db.pool.acquire().await.expect("hold serving connection");
+    let baseline = db.fence().newest().map(|entry| entry.token);
+
+    // Two beats strictly after the hold: one in flight when the hold began
+    // cannot satisfy this on its own.
+    let mut beats = 0;
+    let mut last = baseline;
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while beats < 2 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "probe stopped beating while the serving writer pool was exhausted"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let newest = db.fence().newest().map(|entry| entry.token);
+        if newest > last {
+            beats += 1;
+            last = newest;
+        }
+    }
+
+    // The beats come from the probe's own, identifiable session.
+    let probe_sessions: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pg_stat_activity \
+         WHERE datname = current_database() AND application_name = $1",
+    )
+    .bind(replica_fence::PROBE_APPLICATION_NAME)
+    .fetch_one(&mut *held)
+    .await
+    .expect("count probe sessions");
+    assert_eq!(probe_sessions, 1, "the probe holds exactly one connection");
 }
 
 /// Thread replies: head fetch reads the writer; a FULL cursor page is
@@ -2330,11 +2659,8 @@ async fn lazy_reader_pool_still_spawns_fence_probe() {
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn thread_replies_cursor_pages_route_to_replica_with_writer_terminal_verification() {
-    let admin = PgPool::connect(&admin_url().await)
-        .await
-        .expect("connect admin");
-    let (writer, wname) = create_scratch_db(&admin, "routing_tw").await;
-    let (replica, rname) = create_scratch_db(&admin, "routing_tr").await;
+    let (writer, _writer_db) = ScratchDb::migrated(&admin_url().await, "routing_tw").await;
+    let (replica, _replica_db) = ScratchDb::migrated(&admin_url().await, "routing_tr").await;
 
     let author = nostr::Keys::generate();
     let community = Uuid::new_v4();
@@ -2425,9 +2751,6 @@ async fn thread_replies_cursor_pages_route_to_replica_with_writer_terminal_verif
         .map(|r| r.stored_event.event.content.as_str())
         .collect();
     assert_eq!(contents, vec!["r3"], "unset replica falls back to writer");
-
-    drop_scratch_db(&admin, replica, &rname).await;
-    drop_scratch_db(&admin, writer, &wname).await;
 }
 
 /// Channel DESC scrollback, out-of-order commit adversary: the replica is
@@ -2439,11 +2762,8 @@ async fn thread_replies_cursor_pages_route_to_replica_with_writer_terminal_verif
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn channel_cursor_above_fence_stays_on_writer_preventing_middle_hole() {
-    let admin = PgPool::connect(&admin_url().await)
-        .await
-        .expect("connect admin");
-    let (writer, wname) = create_scratch_db(&admin, "fence_cw").await;
-    let (replica, rname) = create_scratch_db(&admin, "fence_cr").await;
+    let (writer, _writer_db) = ScratchDb::migrated(&admin_url().await, "fence_cw").await;
+    let (replica, _replica_db) = ScratchDb::migrated(&admin_url().await, "fence_cr").await;
 
     let author = nostr::Keys::generate();
     let community = Uuid::new_v4();
@@ -2518,9 +2838,6 @@ async fn channel_cursor_above_fence_stays_on_writer_preventing_middle_hole() {
         vec!["m1".to_string()],
         "fixture models the inversion: an over-open fence would skip m2"
     );
-
-    drop_scratch_db(&admin, replica, &rname).await;
-    drop_scratch_db(&admin, writer, &wname).await;
 }
 
 /// Thread ASC pagination, out-of-order commit adversary: the replica
@@ -2532,11 +2849,8 @@ async fn channel_cursor_above_fence_stays_on_writer_preventing_middle_hole() {
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn thread_full_replica_page_above_fence_is_reverified_on_writer() {
-    let admin = PgPool::connect(&admin_url().await)
-        .await
-        .expect("connect admin");
-    let (writer, wname) = create_scratch_db(&admin, "fence_tw").await;
-    let (replica, rname) = create_scratch_db(&admin, "fence_tr").await;
+    let (writer, _writer_db) = ScratchDb::migrated(&admin_url().await, "fence_tw").await;
+    let (replica, _replica_db) = ScratchDb::migrated(&admin_url().await, "fence_tr").await;
 
     let author = nostr::Keys::generate();
     let community = Uuid::new_v4();
@@ -2605,9 +2919,6 @@ async fn thread_full_replica_page_above_fence_is_reverified_on_writer() {
         vec!["r4"],
         "fixture models the inversion: an over-open fence would skip r3"
     );
-
-    drop_scratch_db(&admin, replica, &rname).await;
-    drop_scratch_db(&admin, writer, &wname).await;
 }
 
 /// Commit-time floor guard (migration 0021), exact held-transaction
@@ -2619,10 +2930,7 @@ async fn thread_full_replica_page_above_fence_is_reverified_on_writer() {
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn created_at_floor_guard_aborts_old_channel_rows_at_commit() {
-    let admin = PgPool::connect(&admin_url().await)
-        .await
-        .expect("connect admin");
-    let (pool, name) = create_scratch_db(&admin, "floor_guard").await;
+    let (pool, _scratch) = ScratchDb::migrated(&admin_url().await, "floor_guard").await;
 
     let author = nostr::Keys::generate();
     let community = Uuid::new_v4();
@@ -2700,8 +3008,6 @@ async fn created_at_floor_guard_aborts_old_channel_rows_at_commit() {
     // (and must hold the fence closed, per the migration header).
     let old_backfill = signed_event_at(&author, "old-backfill", now_secs - floor - 60);
     insert_top_level(&pool, community, channel, &old_backfill).await;
-
-    drop_scratch_db(&admin, pool, &name).await;
 }
 
 #[test]
@@ -2884,18 +3190,17 @@ async fn writer_pool_rejects_non_read_committed_database_default() {
     let admin = PgPool::connect(&admin_url().await)
         .await
         .expect("connect admin");
-    let (seed_pool, name) = create_scratch_db(&admin, "writer_isolation").await;
+    let (seed_pool, scratch) = ScratchDb::migrated(&admin_url().await, "writer_isolation").await;
     sqlx::query(sqlx::AssertSqlSafe(format!(
-        "ALTER DATABASE {name} SET default_transaction_isolation = 'repeatable read'"
+        "ALTER DATABASE {} SET default_transaction_isolation = 'repeatable read'",
+        scratch.name()
     )))
     .execute(&admin)
     .await
     .expect("set unsafe database default");
     seed_pool.close().await;
 
-    let base = admin_url().await;
-    let idx = base.rfind('/').expect("db url has a path segment");
-    let scratch_url = format!("{}/{}", &base[..idx], name);
+    let scratch_url = scratch.url().to_owned();
     let error = Db::new(&DbConfig {
         database_url: scratch_url,
         max_connections: 1,
@@ -2930,13 +3235,6 @@ async fn writer_pool_rejects_non_read_committed_database_default() {
         0,
         "an isolation-rejected connection must never reach ready"
     );
-
-    sqlx::query(sqlx::AssertSqlSafe(format!(
-        "DROP DATABASE {name} WITH (FORCE)"
-    )))
-    .execute(&admin)
-    .await
-    .expect("drop isolation test database");
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -3080,6 +3378,22 @@ fn writer_statement_timeout_is_always_bounded() {
     assert_eq!(MAX_STATEMENT_TIMEOUT_MS, 300_000);
 }
 
+/// Poll until the reader pool holds exactly `target` connections, all idle.
+/// Returned and floor-maintenance connections land asynchronously, from
+/// tasks sqlx spawns on drop.
+async fn await_idle_floor(read_pool: &PgPool, target: u32) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while read_pool.size() != target || read_pool.num_idle() != target as usize {
+        assert!(
+            Instant::now() < deadline,
+            "reader pool never settled at {target} idle; size={} idle={}",
+            read_pool.size(),
+            read_pool.num_idle()
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 /// Through the production constructors, every writer session carries the
 /// clamped statement timeout and every replica session the 20 s read
 /// deadline. Mutation oracles: dropping the clamp leaves `0`/`10min` on the
@@ -3109,7 +3423,11 @@ async fn session_statement_timeouts_bound_writer_and_reader_sessions() {
             .await
             .expect("writer timeout");
         assert_eq!(writer, writer_expected, "writer, configured {configured}");
+        // Warm the reader the way the relay boots it: the routed-read acquire
+        // budget is 150 ms, and a cold dial on a busy server can exceed it.
         let reader_pool = db.read_pool.clone().expect("reader configured");
+        db.read_pool_boot_ping_for_tests().await;
+        await_idle_floor(&reader_pool, 1).await;
         let reader: String = sqlx::query_scalar("SHOW statement_timeout")
             .fetch_one(&reader_pool)
             .await
@@ -3125,15 +3443,10 @@ async fn session_statement_timeouts_bound_writer_and_reader_sessions() {
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn session_timeouts_install_through_db_new_and_bound_lock_waits() {
-    let admin = PgPool::connect(&admin_url().await)
-        .await
-        .expect("connect admin");
-    let (seed_pool, name) = create_scratch_db(&admin, "session_timeouts").await;
+    let (seed_pool, scratch) = ScratchDb::migrated(&admin_url().await, "session_timeouts").await;
     seed_pool.close().await;
 
-    let base = admin_url().await;
-    let idx = base.rfind('/').expect("db url has a path segment");
-    let scratch_url = format!("{}/{}", &base[..idx], name);
+    let scratch_url = scratch.url().to_owned();
     let db = Db::new(&DbConfig {
         database_url: scratch_url.clone(),
         max_connections: 2,
@@ -3206,7 +3519,6 @@ async fn session_timeouts_install_through_db_new_and_bound_lock_waits() {
 
     let _ = sqlx::query("ROLLBACK").execute(&mut *holder).await;
     drop(holder);
-    drop_scratch_db(&admin, db.pool.clone(), &name).await;
 }
 
 /// The armed writer pool (`Db::new`) must enforce the floor end-to-end
@@ -3215,10 +3527,7 @@ async fn session_timeouts_install_through_db_new_and_bound_lock_waits() {
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn armed_pool_rejects_old_channel_inserts_through_public_api() {
-    let admin = PgPool::connect(&admin_url().await)
-        .await
-        .expect("connect admin");
-    let (seed_pool, name) = create_scratch_db(&admin, "floor_pool").await;
+    let (seed_pool, scratch) = ScratchDb::migrated(&admin_url().await, "floor_pool").await;
 
     let author = nostr::Keys::generate();
     let community = Uuid::new_v4();
@@ -3226,9 +3535,7 @@ async fn armed_pool_rejects_old_channel_inserts_through_public_api() {
     seed_community_channel(&seed_pool, community, channel, &author).await;
 
     // Connect a Db the production way: after_connect arms the guard.
-    let base = admin_url().await;
-    let idx = base.rfind('/').expect("db url has a path segment");
-    let scratch_url = format!("{}/{}", &base[..idx], name);
+    let scratch_url = scratch.url().to_owned();
     let db = Db::new(&DbConfig {
         database_url: scratch_url,
         max_connections: 2,
@@ -3304,8 +3611,7 @@ async fn armed_pool_rejects_old_channel_inserts_through_public_api() {
         .await
         .expect("fresh insert passes the armed guard");
 
-    drop_scratch_db(&admin, seed_pool, &name).await;
-    // db pool still holds connections to the dropped DB; close it.
+    // Close before the `scratch` guard force-drops the database on return.
     db.pool.close().await;
 }
 
@@ -3328,14 +3634,10 @@ async fn begin_replica_floor_locked_writer(db: &Db) -> sqlx::Transaction<'static
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn replica_floor_writer_transaction_holds_shared_lock() {
-    let admin = PgPool::connect(&admin_url().await)
-        .await
-        .expect("connect admin");
-    let (seed_pool, name) = create_scratch_db(&admin, "floor_writer_foundation").await;
+    let (_seed_pool, scratch) =
+        ScratchDb::migrated(&admin_url().await, "floor_writer_foundation").await;
 
-    let base = admin_url().await;
-    let idx = base.rfind('/').expect("db url has a path segment");
-    let scratch_url = format!("{}/{}", &base[..idx], name);
+    let scratch_url = scratch.url().to_owned();
     let db = Db::new(&DbConfig {
         database_url: scratch_url,
         max_connections: 3,
@@ -3378,20 +3680,15 @@ async fn replica_floor_writer_transaction_holds_shared_lock() {
         .expect("rollback exclusive contender");
     writer.rollback().await.expect("rollback writer tx");
     db.pool.close().await;
-    drop_scratch_db(&admin, seed_pool, &name).await;
 }
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn replica_floor_probe_waits_for_shared_writer_and_records_after_release() {
-    let admin = PgPool::connect(&admin_url().await)
-        .await
-        .expect("connect admin");
-    let (seed_pool, name) = create_scratch_db(&admin, "floor_probe_foundation").await;
+async fn cluster_global_replica_floor_probe_waits_for_shared_writer_and_records_after_release() {
+    let (_seed_pool, scratch) =
+        ScratchDb::migrated(&admin_url().await, "floor_probe_foundation").await;
 
-    let base = admin_url().await;
-    let idx = base.rfind('/').expect("db url has a path segment");
-    let scratch_url = format!("{}/{}", &base[..idx], name);
+    let scratch_url = scratch.url().to_owned();
     let db = Db::new(&DbConfig {
         database_url: scratch_url,
         max_connections: 2,
@@ -3441,7 +3738,6 @@ async fn replica_floor_probe_waits_for_shared_writer_and_records_after_release()
     );
 
     db.pool.close().await;
-    drop_scratch_db(&admin, seed_pool, &name).await;
 }
 
 /// `spawn_fence_probe` must verify the floor guard before letting the
@@ -3452,18 +3748,13 @@ async fn replica_floor_probe_waits_for_shared_writer_and_records_after_release()
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn fence_probe_refuses_to_start_without_verified_floor_guard() {
-    let admin = PgPool::connect(&admin_url().await)
-        .await
-        .expect("connect admin");
-    let (seed_pool, wname) = create_scratch_db(&admin, "fence_gate_w").await;
-    let (replica_pool, rname) = create_scratch_db(&admin, "fence_gate_r").await;
+    let (seed_pool, writer_db) = ScratchDb::migrated(&admin_url().await, "fence_gate_w").await;
+    let (replica_pool, replica_db) = ScratchDb::migrated(&admin_url().await, "fence_gate_r").await;
     seed_pool.close().await;
     replica_pool.close().await;
 
-    let base = admin_url().await;
-    let idx = base.rfind('/').expect("db url has a path segment");
-    let writer_url = format!("{}/{}", &base[..idx], wname);
-    let replica_url = format!("{}/{}", &base[..idx], rname);
+    let writer_url = writer_db.url().to_owned();
+    let replica_url = replica_db.url().to_owned();
 
     // Healthy schema: verification passes, probe starts. A SEPARATE Db
     // instance, because its background probe legitimately opens its own
@@ -3533,25 +3824,6 @@ async fn fence_probe_refuses_to_start_without_verified_floor_guard() {
         db.fence().verified_through().is_none(),
         "fence must remain closed when verification refuses the probe"
     );
-
-    db_healthy.pool.close().await;
-    if let Some(rp) = &db_healthy.read_pool {
-        rp.close().await;
-    }
-    db.pool.close().await;
-    if let Some(rp) = &db.read_pool {
-        rp.close().await;
-    }
-    let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
-        "DROP DATABASE IF EXISTS {wname} WITH (FORCE)"
-    )))
-    .execute(&admin)
-    .await;
-    let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
-        "DROP DATABASE IF EXISTS {rname} WITH (FORCE)"
-    )))
-    .execute(&admin)
-    .await;
 }
 
 /// The `UPDATE OF` arm of the floor guard (Perci's second structural
@@ -3561,10 +3833,7 @@ async fn fence_probe_refuses_to_start_without_verified_floor_guard() {
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn floor_guard_blocks_updates_that_move_rows_below_the_fence() {
-    let admin = PgPool::connect(&admin_url().await)
-        .await
-        .expect("connect admin");
-    let (pool, name) = create_scratch_db(&admin, "floor_upd").await;
+    let (pool, _scratch) = ScratchDb::migrated(&admin_url().await, "floor_upd").await;
 
     let author = nostr::Keys::generate();
     let community = Uuid::new_v4();
@@ -3635,8 +3904,6 @@ async fn floor_guard_blocks_updates_that_move_rows_below_the_fence() {
         matches!(&err, sqlx::Error::Database(e) if e.code().as_deref() == Some("23514")),
         "unexpected error: {err}"
     );
-
-    drop_scratch_db(&admin, pool, &name).await;
 }
 
 // ---- Statement-deadline cancellation vs. replica fallback ----------------
@@ -3650,15 +3917,17 @@ async fn floor_guard_blocks_updates_that_move_rows_below_the_fence() {
 /// Writer and replica scratch DBs holding one root plus an `e`-tagged reply
 /// that mentions `mentioned` — the writer copy says "writer-reply" so a
 /// writer re-run is observable. Returns the reply-targeted query shape.
+/// Dropping the fixture drops both databases.
 struct EtagFixture {
     admin: PgPool,
     writer: PgPool,
-    wname: String,
+    _writer_db: ScratchDb,
     replica: PgPool,
-    rname: String,
+    replica_db: ScratchDb,
     cid: CommunityId,
     channel: Uuid,
     root_hex: String,
+    root_seconds: i64,
     mentioned_hex: String,
 }
 
@@ -3666,8 +3935,9 @@ async fn e_tag_fixture(prefix: &str) -> EtagFixture {
     let admin = PgPool::connect(&admin_url().await)
         .await
         .expect("connect admin");
-    let (writer, wname) = create_scratch_db(&admin, &format!("{prefix}_w")).await;
-    let (replica, rname) = create_scratch_db(&admin, &format!("{prefix}_r")).await;
+    let (writer, writer_db) = ScratchDb::migrated(&admin_url().await, &format!("{prefix}_w")).await;
+    let (replica, replica_db) =
+        ScratchDb::migrated(&admin_url().await, &format!("{prefix}_r")).await;
     let author = nostr::Keys::generate();
     let mentioned = nostr::Keys::generate();
     let community = Uuid::new_v4();
@@ -3698,12 +3968,13 @@ async fn e_tag_fixture(prefix: &str) -> EtagFixture {
     EtagFixture {
         admin,
         writer,
-        wname,
+        _writer_db: writer_db,
         replica,
-        rname,
+        replica_db,
         cid: CommunityId::from_uuid(community),
         channel,
         root_hex: root.id.to_hex(),
+        root_seconds: base as i64,
         mentioned_hex: mentioned.public_key().to_hex(),
     }
 }
@@ -3719,18 +3990,13 @@ impl EtagFixture {
     /// `ALTER DATABASE` settings made on the replica), with the fence open
     /// and a bounded budget so unpinned reads route to the replica.
     async fn routed_db(&self) -> Db {
-        let base = admin_url().await;
-        let url = format!("{}/{}", &base[..base.rfind('/').expect("path")], self.rname);
-        let reader = PgPool::connect(&url).await.expect("connect reader");
+        let reader = PgPool::connect(self.replica_db.url())
+            .await
+            .expect("connect reader");
         let mut db = Db::from_pools(self.writer.clone(), reader);
         db.fence().force_open_for_tests(chrono::Utc::now());
         db.set_replica_read_max_age_for_tests(Some(std::time::Duration::from_secs(5)));
         db
-    }
-
-    async fn drop(self) {
-        drop_scratch_db(&self.admin, self.replica, &self.rname).await;
-        drop_scratch_db(&self.admin, self.writer, &self.wname).await;
     }
 }
 
@@ -3747,7 +4013,7 @@ async fn replica_statement_cancel_propagates_without_writer_rerun() {
     // heartbeat proof still succeeds, then the routed read is cancelled.
     sqlx::query(sqlx::AssertSqlSafe(format!(
         "ALTER DATABASE {} SET statement_timeout = '300ms'",
-        fx.rname
+        fx.replica_db.name()
     )))
     .execute(&fx.admin)
     .await
@@ -3784,12 +4050,15 @@ async fn replica_statement_cancel_propagates_without_writer_rerun() {
         db.count_events_routed("t_cxl", &q).await.map(drop),
         "count_events_routed",
     );
-    let root_id = hex::decode(&fx.root_hex).expect("hex");
+    let root_id: [u8; 32] = hex::decode(&fx.root_hex)
+        .expect("hex")
+        .try_into()
+        .expect("32-byte id");
     cancelled(
-        db.get_events_by_ids_routed("t_cxl", fx.cid, &[root_id.as_slice()])
+        db.get_events_by_ids_at_routed("t_cxl", fx.cid, &[(root_id, fx.root_seconds)])
             .await
             .map(drop),
-        "get_events_by_ids_routed",
+        "get_events_by_ids_at_routed",
     );
     // The routed reads with their own SQL (feed, thread, channel window,
     // relay membership) fall back to the writer on replica failure, but not
@@ -3835,7 +4104,6 @@ async fn replica_statement_cancel_propagates_without_writer_rerun() {
 
     locker.rollback().await.expect("unlock");
     drop(db);
-    fx.drop().await;
 }
 
 /// [`replica_statement_cancel_propagates_without_writer_rerun`] for the
@@ -3855,7 +4123,7 @@ async fn read_session_statement_cancel_propagates_without_writer_rerun() {
         .expect("begin reader tx");
     let mut session = ReadSession {
         inner: ReadSessionInner::Replica {
-            tx: reader_tx,
+            tx: super::history_reads::ReaderTx::new(reader_tx, None),
             writer: fx.writer.clone(),
         },
     };
@@ -3870,7 +4138,7 @@ async fn read_session_statement_cancel_propagates_without_writer_rerun() {
         unreachable!()
     };
     sqlx::query("SET LOCAL statement_timeout = '50ms'")
-        .execute(&mut **tx)
+        .execute(&mut ***tx)
         .await
         .expect("cap session");
     let mut locker = fx.replica.begin().await.expect("begin locker");
@@ -3891,7 +4159,6 @@ async fn read_session_statement_cancel_propagates_without_writer_rerun() {
     locker.rollback().await.expect("unlock");
     drop(session);
     drop(db);
-    fx.drop().await;
 }
 
 /// Cancels (57014) the backend on `db_name` parked behind a lock. The thread
@@ -3952,7 +4219,7 @@ async fn thread_window_statement_cancel_propagates_without_writer_rerun() {
     let mut budget = ScanBudget::default();
     let (window, ()) = tokio::join!(
         db.get_thread_window_with_session(fx.cid, &request, &mut budget),
-        cancel_lock_waiter(&fx.admin, &fx.rname),
+        cancel_lock_waiter(&fx.admin, fx.replica_db.name()),
     );
     match window {
         Err(e) => assert!(e.is_statement_cancelled(), "window: want 57014, got {e}"),
@@ -3970,7 +4237,7 @@ async fn thread_window_statement_cancel_propagates_without_writer_rerun() {
         .expect("begin reader tx");
     let mut session = ReadSession {
         inner: ReadSessionInner::Replica {
-            tx: reader_tx,
+            tx: super::history_reads::ReaderTx::new(reader_tx, None),
             writer: fx.writer.clone(),
         },
     };
@@ -3978,7 +4245,7 @@ async fn thread_window_statement_cancel_propagates_without_writer_rerun() {
         unreachable!()
     };
     sqlx::query("SET LOCAL statement_timeout = '50ms'")
-        .execute(&mut **tx)
+        .execute(&mut ***tx)
         .await
         .expect("cap session");
     let targets = [fx.root_hex.clone()];
@@ -4005,7 +4272,6 @@ async fn thread_window_statement_cancel_propagates_without_writer_rerun() {
     locker.rollback().await.expect("unlock");
     drop(session);
     drop(db);
-    fx.drop().await;
 }
 
 #[tokio::test]
@@ -4045,7 +4311,6 @@ async fn replica_non_cancel_failure_still_falls_back_to_writer() {
     );
 
     drop(db);
-    fx.drop().await;
 }
 
 /// The `#p`-joined SELECT (fenced, `e.` column prefix) and the COUNT `ANY`
@@ -4090,12 +4355,22 @@ async fn e_tag_any_runs_with_real_binds_on_p_join_and_count() {
             .expect("miss count"),
         0
     );
-
-    fx.drop().await;
 }
 
 #[path = "tests/thread_window_postgres_tests.rs"]
 mod thread_window_postgres_tests;
+
+#[path = "tests/listed_channel_name_postgres_tests.rs"]
+mod listed_channel_name_postgres_tests;
+
+#[path = "tests/reader_pool_postgres_tests.rs"]
+mod reader_pool_postgres_tests;
+
+#[path = "tests/writer_pool_postgres_tests.rs"]
+mod writer_pool_postgres_tests;
+
+#[path = "tests/event_hydration_postgres_tests.rs"]
+mod event_hydration_postgres_tests;
 
 /// `insert_event_with_serving_write_guard` indexes mentions in the event's own
 /// transaction, and an indexing failure stays best-effort: the savepoint rolls
@@ -4252,3 +4527,6 @@ async fn serving_write_guard_insert_indexes_mentions_in_event_transaction() {
         .await
         .expect("release serving-write lease"));
 }
+
+#[path = "tests/pool_release_postgres_tests.rs"]
+mod pool_release_postgres_tests;

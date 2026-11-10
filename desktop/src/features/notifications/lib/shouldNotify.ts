@@ -4,15 +4,26 @@ import {
   isBroadcastReply,
 } from "@/features/messages/lib/threading";
 
+/**
+ * Whether the event's `p` tags address `currentPubkey`. A workflow message
+ * names its owner in `["p", owner, "", "owner"]` for attribution only; that
+ * tag is not a mention. A workflow that mentions its owner adds a plain `p`.
+ */
 export function hasMentionForEvent(
   event: RelayEvent,
   currentPubkey: string,
 ): boolean {
-  return (
-    currentPubkey.length > 0 &&
-    event.tags.some(
-      (tag) => tag[0] === "p" && tag[1]?.toLowerCase() === currentPubkey,
-    )
+  if (currentPubkey.length === 0) {
+    return false;
+  }
+  const workflow = event.tags.some(
+    (tag) => tag[0] === "buzz:workflow" && tag[1] === "true",
+  );
+  return event.tags.some(
+    (tag) =>
+      tag[0] === "p" &&
+      tag[1]?.toLowerCase() === currentPubkey &&
+      !(workflow && tag[3] === "owner"),
   );
 }
 
@@ -79,12 +90,7 @@ export function isHighPriorityEventForUser(
   event: RelayEvent,
   currentPubkey: string,
 ): boolean {
-  if (
-    currentPubkey.length > 0 &&
-    event.tags.some(
-      (tag) => tag[0] === "p" && tag[1]?.toLowerCase() === currentPubkey,
-    )
-  ) {
+  if (hasMentionForEvent(event, currentPubkey)) {
     return true;
   }
   if (isBroadcastReply(event.tags)) {
