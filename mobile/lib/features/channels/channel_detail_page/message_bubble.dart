@@ -404,6 +404,13 @@ class _MessageBubble extends HookConsumerWidget {
                                                 ),
                                               );
                                             },
+                                      nativePhotoActions: nativeImageActions(
+                                        context: context,
+                                        ref: ref,
+                                        message: message,
+                                        channelId: currentChannelId,
+                                        canManageMessage: canManageMessage,
+                                      ),
                                       onMediaMore: (viewerContext, imageUrl) =>
                                           showImageActions(
                                             context: viewerContext,

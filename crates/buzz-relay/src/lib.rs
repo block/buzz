@@ -9,6 +9,7 @@ mod build_info;
 mod community_active;
 mod fenced_cache;
 mod host_cache;
+mod invite_preview;
 mod rejection;
 
 /// Shared NIP-FI assertion evaluation, denial rendering, and key pairing.
