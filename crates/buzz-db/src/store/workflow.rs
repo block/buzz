@@ -920,7 +920,7 @@ pub async fn create_workflow_run(
         r#"
         INSERT INTO workflow_runs
             (community_id, id, workflow_id, status, trigger_event_id, current_step, execution_trace,
-             trigger_context, trigger_source, cause_pubkey)
+             trigger_context, cause_source, cause_pubkey)
         VALUES ($1, $2, $3, 'pending', $4, 0, '[]', $5, $6, $7)
         "#,
     )
@@ -947,7 +947,7 @@ pub async fn get_workflow_run(
     let row = sqlx::query(
         r#"
         SELECT community_id, id, workflow_id, status::text AS status, trigger_event_id, current_step,
-               execution_trace, trigger_context, trigger_source, cause_pubkey, started_at, completed_at,
+               execution_trace, trigger_context, cause_source, cause_pubkey, started_at, completed_at,
                error_message, error_code, created_at
         FROM workflow_runs
         WHERE community_id = $1 AND id = $2
@@ -980,7 +980,7 @@ pub async fn list_workflow_runs_page(
     let rows = sqlx::query(
         r#"
         SELECT community_id, id, workflow_id, status::text AS status, trigger_event_id, current_step,
-               execution_trace, trigger_context, trigger_source, cause_pubkey, started_at, completed_at,
+               execution_trace, trigger_context, cause_source, cause_pubkey, started_at, completed_at,
                error_message, error_code, created_at
         FROM workflow_runs
         WHERE community_id = $1 AND workflow_id = $2
@@ -1344,8 +1344,7 @@ fn row_to_run_record(row: sqlx::postgres::PgRow) -> Result<WorkflowRunRecord> {
         execution_trace: row.try_get("execution_trace")?,
         trigger_context: row.try_get("trigger_context")?,
         cause: RunCause::from_columns(
-            row.try_get::<Option<String>, _>("trigger_source")?
-                .as_deref(),
+            row.try_get::<Option<String>, _>("cause_source")?.as_deref(),
             row.try_get("cause_pubkey")?,
         ),
         started_at: row.try_get("started_at")?,

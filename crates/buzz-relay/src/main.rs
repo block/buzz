@@ -1707,6 +1707,28 @@ mod env_filter_tests {
     }
 
     #[test]
+    fn withheld_agent_mentions_log_under_default_filters() {
+        let example =
+            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../.env.example"))
+                .unwrap();
+        let example = example
+            .lines()
+            .find_map(|line| line.strip_prefix("RUST_LOG="))
+            .unwrap()
+            .to_owned();
+        for filter in [log_filter(None), log_filter(Some(&example))] {
+            let logs = logged(filter, || {
+                tracing::info!(target: buzz_workflow::AGENT_MENTIONS_LOG_TARGET, "withheld");
+                tracing::info!(target: "buzz_workflow::executor", "workflow-noise");
+            });
+            assert!(
+                logs.contains("withheld") && !logs.contains("workflow-noise"),
+                "{logs}"
+            );
+        }
+    }
+
+    #[test]
     fn explicit_filters_replace_the_defaults() {
         let off = logged(
             otel_filter(Some("buzz_datastore=off")),

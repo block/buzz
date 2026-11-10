@@ -918,7 +918,7 @@ mod postgres_tests {
         assert!(migrations[86]
             .sql
             .as_str()
-            .contains("ADD COLUMN trigger_source TEXT"));
+            .contains("ADD COLUMN cause_source TEXT"));
         assert!(migrations[87]
             .sql
             .as_str()
@@ -3362,7 +3362,7 @@ mod postgres_tests {
 
         for id in [before, after] {
             let cause: (Option<String>, Option<Vec<u8>>) = sqlx::query_as(
-                "SELECT trigger_source, cause_pubkey FROM workflow_runs WHERE id = $1",
+                "SELECT cause_source, cause_pubkey FROM workflow_runs WHERE id = $1",
             )
             .bind(id)
             .fetch_one(&pool)
@@ -3380,7 +3380,7 @@ mod postgres_tests {
         .unwrap();
         assert_eq!(unvalidated, 0, "0088 validates every cause check");
         let unknown_source = sqlx::query(
-            "INSERT INTO workflow_runs (community_id, id, workflow_id, trigger_source) \
+            "INSERT INTO workflow_runs (community_id, id, workflow_id, cause_source) \
              VALUES ($1, $2, $3, 'relay')",
         )
         .bind(community_id)

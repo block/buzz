@@ -712,6 +712,7 @@ pub async fn dispatch_action(
                     });
                     if sent.agent_mentions_withheld {
                         info!(
+                            target: crate::AGENT_MENTIONS_LOG_TARGET,
                             community = %community_id,
                             workflow = %wf_run.workflow_id,
                             run_id = %run_id,

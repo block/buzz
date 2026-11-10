@@ -9,7 +9,7 @@ CREATE TABLE workflow_runs (
     current_step        INT NOT NULL DEFAULT 0,
     execution_trace     JSONB NOT NULL DEFAULT '[]',
     trigger_context     JSONB,
-    trigger_source      TEXT,
+    cause_source      TEXT,
     cause_pubkey        BYTEA,
     started_at          TIMESTAMPTZ,
     completed_at        TIMESTAMPTZ,
@@ -17,8 +17,8 @@ CREATE TABLE workflow_runs (
     error_code          TEXT,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (community_id, id),
-    CONSTRAINT workflow_runs_trigger_source_check
-        CHECK (trigger_source IN ('event', 'schedule', 'webhook', 'manual')),
+    CONSTRAINT workflow_runs_cause_source_check
+        CHECK (cause_source IN ('event', 'schedule', 'webhook', 'manual')),
     CONSTRAINT workflow_runs_cause_pubkey_check
         CHECK (length(cause_pubkey) = 32),
     FOREIGN KEY (community_id, workflow_id)

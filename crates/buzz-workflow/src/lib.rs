@@ -40,6 +40,10 @@ pub use error::{PartialProgress, WorkflowError};
 pub use executor::ExecutionResult;
 pub use schema::{ActionDef, Step, TriggerDef, WorkflowDef};
 
+/// Tracing target for withheld agent mentions. It sits under `buzz_relay` so
+/// the relay's default log filter shows it without enabling other workflow logs.
+pub const AGENT_MENTIONS_LOG_TARGET: &str = "buzz_relay::workflow_agent_mentions";
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::OnceLock;
