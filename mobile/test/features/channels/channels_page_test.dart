@@ -3569,6 +3569,47 @@ void main() {
     expect(find.text('Retry'), findsOneWidget);
   });
 
+  testWidgets(
+    'an ended organization sign-in leaves the action to the banner, not Retry',
+    (tester) async {
+      final account = BuilderlabAccountClient();
+      final signIn = OrganizationSignIn(
+        account: account,
+        browser: BrowserAuth(),
+        reconnect: () async {},
+      )..status = OrganizationSessionStatus.signedOut;
+      final auth = HostedRelayAuth(
+        BuilderlabAccountClient(),
+        organization: account,
+        organizationRelay: (_) => true,
+      );
+      addTearDown(() {
+        signIn.dispose();
+        auth.dispose();
+        account.dispose();
+      });
+      await tester.pumpWidget(
+        buildTestable(
+          overrides: [
+            organizationSignInProvider.overrideWithValue(signIn),
+            hostedRelayAuthProvider.overrideWithValue(auth),
+            channelsProvider.overrideWith(() => _UnauthorizedNotifier()),
+          ],
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 3));
+      await tester.pump();
+
+      expect(find.text('Could not load channels'), findsOneWidget);
+      expect(
+        find.text('Use the sign-in prompt below to reconnect.'),
+        findsOneWidget,
+      );
+      expect(find.text('Retry'), findsNothing);
+    },
+  );
+
   testWidgets('bolds and clears unread channel labels', (tester) async {
     final channels = [
       Channel(
