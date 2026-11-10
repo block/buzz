@@ -361,7 +361,7 @@ class MessageContent extends HookConsumerWidget {
       // so the gpt_markdown combined regex can match multi-word names
       // even when caseSensitive is not preserved.
       // Skip content inside backticks to avoid altering inline code.
-      final mentionParts = withoutEditedSlot(markdownContent).split('`');
+      final mentionParts = markdownContent.split('`');
       final mentionBuf = StringBuffer();
       for (var i = 0; i < mentionParts.length; i++) {
         if (i.isOdd) {
@@ -408,9 +408,11 @@ class MessageContent extends HookConsumerWidget {
       onChannelTap: resolvedChannelTap,
     );
     final editedStyle = editedMarkerStyle(context, own: bubble && ownMessage);
+    // An authored slot is drawn as written; the marker takes its own line.
+    final markerSlot = edited && !finalContent.contains(editedSlot);
     final components = useMemoized(
-      () => [EditedMarkerMd(editedStyle), ...inlineComponents],
-      [inlineComponents, editedStyle],
+      () => [if (markerSlot) EditedMarkerMd(editedStyle), ...inlineComponents],
+      [inlineComponents, editedStyle, markerSlot],
     );
 
     Widget renderMarkdown(String text) => KeyedSubtree(

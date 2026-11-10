@@ -61,6 +61,7 @@ void main() {
         'go to(https://x.io',
         'see x+1.y-z://host',
         'buzz://message?channel=c&id=e',
+        'kept $editedSlot as written',
       ]) {
         expect(withEditedSlot(markdown), isNull, reason: markdown);
       }

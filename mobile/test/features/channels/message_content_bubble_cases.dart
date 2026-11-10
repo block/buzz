@@ -423,11 +423,18 @@ void editedMarkerTests() {
       findsNothing,
     );
 
-    // Unedited bodies, including authored slot characters, stay unmarked.
+    // Unedited bodies stay unmarked. An authored slot character is drawn as
+    // written, and only an edit adds the marker, on its own line.
+    bool shows(String text) => tester
+        .widgetList<RichText>(find.byType(RichText))
+        .any((rich) => rich.text.toPlainText().contains(text));
     await show('Plain', edited: false);
     expect(markerSpan(tester), isNull);
     await show('Sneaky $editedSlot', edited: false);
+    expect(shows('Sneaky $editedSlot'), isTrue);
     expect(markerSpan(tester), isNull);
-    expect(find.text('(edited)'), findsNothing);
+    await show('Sneaky $editedSlot');
+    expect(shows('Sneaky $editedSlot'), isTrue);
+    expect(find.text('(edited)'), findsOneWidget);
   });
 }

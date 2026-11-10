@@ -4,11 +4,9 @@ import 'package:gpt_markdown/gpt_markdown.dart';
 import '../../../shared/theme/theme.dart';
 
 /// Marks where an edited body draws its "(edited)" marker. A private-use
-/// character, removed from authored content, so only the renderer adds it.
+/// character. A body that already has one is drawn as written, and its
+/// marker takes its own line.
 const editedSlot = '';
-
-/// [text] without authored edited slots, so only the renderer places one.
-String withoutEditedSlot(String text) => text.replaceAll(editedSlot, '');
 
 /// The visible text of the edited marker.
 const editedMarkerText = '(edited)';
@@ -31,10 +29,13 @@ final _block = RegExp(
 /// marker must take its own line instead. It joins prose (a paragraph, list
 /// item or quote). Bodies with a code fence anywhere never get the
 /// slot: gpt_markdown's fence rules differ from CommonMark, so the slot could
-/// land inside code or open a new block.
+/// land inside code or open a new block. Bodies with an authored slot never
+/// get one either, so that character is not drawn as the marker.
 String? withEditedSlot(String markdown) {
   final body = markdown.trimRight();
-  if (body.isEmpty || body.contains('```')) return null;
+  if (body.isEmpty || body.contains('```') || body.contains(editedSlot)) {
+    return null;
+  }
   final last = body.substring(body.lastIndexOf('\n') + 1);
   if (_block.hasMatch(last) || _endsInLink(last)) return null;
   return '$body $editedSlot';
