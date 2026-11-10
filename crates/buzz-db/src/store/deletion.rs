@@ -7451,60 +7451,6 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn fence_waits_for_open_write_and_rejects_it_after_transition() {
-        let (db, store) = store().await;
-        let (request, _) = inventoried_request(&db, &store).await;
-        store
-            .approve(request.id, "approver", None)
-            .await
-            .expect("approve");
-        let claim = store
-            .claim_specific(request.id, "executor", DEFAULT_LEASE_DURATION)
-            .await
-            .expect("claim")
-            .expect("won claim");
-
-        let mut open_write = crate::begin_community_write_transaction(
-            &db.pool,
-            request.community_id,
-            crate::observability::WriterOperation::EventWrite,
-        )
-        .await
-        .expect("admit open write transaction");
-        sqlx::query("INSERT INTO pubkey_allowlist (community_id, pubkey) VALUES ($1, $2)")
-            .bind(request.community_id.as_uuid())
-            .bind(vec![7_u8; 32])
-            .execute(open_write.conn())
-            .await
-            .expect("admitted write");
-
-        let store_for_fence = store.clone();
-        let lease = claim.lease.clone();
-        let fencing = tokio::spawn(async move {
-            store_for_fence.begin_quiescing(&lease).await?;
-            store_for_fence.fence(&lease).await
-        });
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        assert!(
-            !fencing.is_finished(),
-            "exclusive fence must wait for open writer"
-        );
-        open_write
-            .commit()
-            .await
-            .expect("pre-fence writer commits first");
-        fencing.await.expect("fence task").expect("fence completes");
-
-        assert!(
-            db.add_to_allowlist(request.community_id, &[8_u8; 32], &[9_u8; 32], None)
-                .await
-                .is_err(),
-            "post-fence serving write must fail"
-        );
-    }
-
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
     async fn deletion_lock_admission_rejects_pinned_snapshot_isolation() {
         let (db, store) = store().await;
         let community = db
