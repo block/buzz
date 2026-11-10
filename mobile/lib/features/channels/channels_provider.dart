@@ -1155,6 +1155,18 @@ final channelByIdProvider = Provider.autoDispose.family<Channel?, String>(
       ref.watch(_openedAheadProvider.select((opened) => opened[channelId])),
 );
 
+/// Whether this channel can start or continue threads. A Solo chat's agents
+/// answer at its top level, so it keeps existing threads readable but starts
+/// none and takes no thread replies, as desktop does. A channel not loaded yet
+/// keeps the default thread behavior.
+final channelStartsThreadsProvider = Provider.autoDispose.family<bool, String>(
+  (ref, channelId) => !(ref.watch(
+    channelByIdProvider(
+      channelId,
+    ).select((channel) => channel?.isSolo ?? false),
+  )),
+);
+
 /// Channels opened from their own metadata before the list had them, as a
 /// fast DM open does. Scoped to one relay and identity. Each is dropped once
 /// the list has it, so a DM later hidden or left is not found through it.

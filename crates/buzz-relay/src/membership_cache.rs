@@ -1,26 +1,64 @@
 //! One active-membership snapshot per community and user, shared by all of
 //! their channel checks. Discovery lists have different channel-type rules.
 
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::{Arc, Mutex as PublicationMutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use buzz_core::CommunityId;
 use buzz_db::{DbError, ReadAt};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OwnedMutexGuard};
 use uuid::Uuid;
 
 type Key = (CommunityId, Vec<u8>);
+/// A loading entry's gate, and the lock this load holds on it.
+type HeldGate = (Arc<Mutex<()>>, OwnedMutexGuard<()>);
 type Snapshot = ReadAt<Memberships>;
 
 const MAX_AGE: Duration = Duration::from_secs(10);
 const CACHE_BYTES: u64 = 64 * 1024 * 1024;
 pub(crate) const MAX_MEMBERSHIPS: usize = 16_384;
 
+/// Users per bulk read in [`MembershipCache::members`]. Each may return up
+/// to [`MAX_MEMBERSHIPS`] + 1 rows.
+const BULK_USERS: usize = 64;
+
 /// Oversized users retain authoritative point checks, never a truncated set.
 enum Memberships {
     Ids(Box<[Uuid]>),
     PointChecks,
+}
+
+impl Memberships {
+    /// The memberships a bounded read returned. A read past the cap may be
+    /// truncated, so it means point checks, never a partial set.
+    fn from_read(mut ids: Vec<Uuid>) -> Self {
+        if ids.len() > MAX_MEMBERSHIPS {
+            return Self::PointChecks;
+        }
+        ids.sort_unstable();
+        ids.dedup();
+        Self::Ids(ids.into_boxed_slice())
+    }
+
+    /// Whether `channel` is one of them, or `None` when only a point check
+    /// can tell.
+    fn contains(&self, channel: Uuid) -> Option<bool> {
+        match self {
+            Self::Ids(ids) => Some(ids.binary_search(&channel).is_ok()),
+            Self::PointChecks => None,
+        }
+    }
+}
+
+/// [`MembershipCache::members`]'s answer. A pubkey in neither set is not a
+/// member.
+#[derive(Debug, Default)]
+pub(crate) struct Members {
+    pub(crate) members: HashSet<Vec<u8>>,
+    /// Pubkeys whose membership could not be read.
+    pub(crate) unverified: HashSet<Vec<u8>>,
 }
 
 /// The snapshot is immutable. Replacing this value through Moka updates its
@@ -137,41 +175,131 @@ impl MembershipCache {
         }
         metrics::counter!("buzz_membership_cache_misses_total").increment(1);
         let read = read.await?;
-        let memberships = if read.value.len() > MAX_MEMBERSHIPS {
-            // Do not retain the query buffer while a point check waits.
-            drop(read.value);
-            Memberships::PointChecks
-        } else {
-            let mut ids = read.value;
-            ids.sort_unstable();
-            ids.dedup();
-            Memberships::Ids(ids.into_boxed_slice())
-        };
-        let answer = match &memberships {
-            Memberships::Ids(ids) => Some(ids.binary_search(&channel).is_ok()),
-            Memberships::PointChecks => None,
-        };
-        let completed = Entry {
-            gate: gate.clone(),
-            snapshot: Some(Arc::new(ReadAt {
-                value: memberships,
-                read_at: read.read_at,
-            })),
-        };
-        {
-            let _publication = self.publication.lock().unwrap_or_else(|e| e.into_inner());
-            if self
-                .entries
-                .get(&key)
-                .is_some_and(|current| Arc::ptr_eq(&current.gate, &gate))
-            {
-                self.entries.insert(key, completed);
-            }
-        }
+        let memberships = Memberships::from_read(read.value);
+        let answer = memberships.contains(channel);
+        self.publish(key, &gate, memberships, read.read_at);
         drop(guard);
         match answer {
             Some(member) => Ok(member),
             None => Self::point_check("oversize", point).await,
+        }
+    }
+
+    /// Which of `pubkeys` are members of `channel`, for one fan-out's
+    /// recipients. Fresh sets answer directly. The other users' sets load in
+    /// one bulk read per [`BULK_USERS`] users and are published as
+    /// [`Self::contains`] publishes its loads. A user whose set another
+    /// request is loading is read again here rather than waited for, so a
+    /// batch never queues behind single loads. Oversized users share one point
+    /// read. Users whose read failed are returned as unverified.
+    pub(crate) async fn members<R, P>(
+        &self,
+        community: CommunityId,
+        channel: Uuid,
+        pubkeys: impl IntoIterator<Item = Vec<u8>>,
+        read: impl Fn(Vec<Vec<u8>>) -> R,
+        point: impl FnOnce(Vec<Vec<u8>>) -> P,
+    ) -> Members
+    where
+        R: Future<Output = Result<ReadAt<buzz_db::channel_members::PubkeyChannels>, DbError>>,
+        P: Future<Output = Result<Vec<Vec<u8>>, DbError>>,
+    {
+        let mut out = Members::default();
+        let mut points = Vec::new();
+        let mut misses = Vec::new();
+        for pubkey in pubkeys.into_iter().collect::<HashSet<_>>() {
+            let key = (community, pubkey);
+            match self
+                .entries
+                .get(&key)
+                .and_then(|entry| Self::answer(&entry, channel))
+            {
+                Some(Some(true)) => {
+                    out.members.insert(key.1);
+                }
+                Some(Some(false)) => {}
+                Some(None) => points.push(key.1),
+                None => misses.push(key.1),
+            }
+        }
+        for chunk in misses.chunks(BULK_USERS) {
+            // Hold the gates no other load holds, so these reads can publish.
+            let mut gates: HashMap<&[u8], HeldGate> = chunk
+                .iter()
+                .filter_map(|pubkey| {
+                    let gate = {
+                        let _publication =
+                            self.publication.lock().unwrap_or_else(|e| e.into_inner());
+                        self.entries
+                            .get_with((community, pubkey.clone()), Entry::loading)
+                            .gate
+                    };
+                    let guard = Arc::clone(&gate).try_lock_owned().ok()?;
+                    Some((pubkey.as_slice(), (gate, guard)))
+                })
+                .collect();
+            metrics::counter!("buzz_membership_cache_misses_total").increment(chunk.len() as u64);
+            let read = match read(chunk.to_vec()).await {
+                Ok(read) => read,
+                Err(error) => {
+                    tracing::warn!(%channel, "bulk membership read failed: {error}");
+                    out.unverified.extend(chunk.iter().cloned());
+                    continue;
+                }
+            };
+            let mut sets: HashMap<Vec<u8>, Vec<Uuid>> = HashMap::new();
+            for (pubkey, id) in read.value {
+                sets.entry(pubkey).or_default().push(id);
+            }
+            for pubkey in chunk {
+                let memberships = Memberships::from_read(sets.remove(pubkey).unwrap_or_default());
+                match memberships.contains(channel) {
+                    Some(true) => {
+                        out.members.insert(pubkey.clone());
+                    }
+                    Some(false) => {}
+                    None => points.push(pubkey.clone()),
+                }
+                if let Some((gate, guard)) = gates.remove(pubkey.as_slice()) {
+                    self.publish(
+                        (community, pubkey.clone()),
+                        &gate,
+                        memberships,
+                        read.read_at,
+                    );
+                    drop(guard);
+                }
+            }
+        }
+        if !points.is_empty() {
+            metrics::counter!("buzz_membership_cache_fallbacks_total", "reason" => "oversize")
+                .increment(points.len() as u64);
+            match point(points.clone()).await {
+                Ok(members) => out.members.extend(members),
+                Err(error) => {
+                    tracing::warn!(%channel, "membership point read failed: {error}");
+                    out.unverified.extend(points);
+                }
+            }
+        }
+        out
+    }
+
+    /// Publish a completed load, unless an invalidation replaced its entry
+    /// while it read: an old loader may answer its own request, but only
+    /// publishes while its gate is still current.
+    fn publish(&self, key: Key, gate: &Arc<Mutex<()>>, value: Memberships, read_at: Instant) {
+        let completed = Entry {
+            gate: Arc::clone(gate),
+            snapshot: Some(Arc::new(ReadAt { value, read_at })),
+        };
+        let _publication = self.publication.lock().unwrap_or_else(|e| e.into_inner());
+        if self
+            .entries
+            .get(&key)
+            .is_some_and(|current| Arc::ptr_eq(&current.gate, gate))
+        {
+            self.entries.insert(key, completed);
         }
     }
 

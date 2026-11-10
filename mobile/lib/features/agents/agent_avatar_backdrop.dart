@@ -2,6 +2,8 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 
+import '../../shared/relay/relay.dart';
+
 import 'agent_avatar_picker.dart';
 
 /// A soft artwork tint behind the avatar editor, matching desktop creation.
@@ -82,11 +84,12 @@ class AgentAvatarBackdrop extends StatelessWidget {
                                       errorBuilder: (_, _, _) =>
                                           const SizedBox.expand(),
                                     )
-                                  : Image.network(
-                                      selection.url!,
+                                  : MediaImage(
+                                      url: selection.url!,
                                       fit: BoxFit.cover,
-                                      cacheWidth: 256,
-                                      excludeFromSemantics: true,
+                                      // About 256 physical pixels: the
+                                      // blur hides any more detail.
+                                      decodeWidth: 96,
                                       errorBuilder: (_, _, _) =>
                                           const SizedBox.expand(),
                                     ),

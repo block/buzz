@@ -934,7 +934,16 @@ test.describe("community rail", () => {
       ),
     ).toBe(1);
     await page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`).click();
-    await expect(page).not.toHaveURL(/#\/channels\/general$/);
+    // The switch runs inside a view transition, so its update (which writes the
+    // remembered channel into the route, then activates the community) lands
+    // frames after the click returns. Wait for it to finish before judging the
+    // route; checking the URL right after the click only passes when it has not
+    // run yet. The remembered route is kept until the live read validates it,
+    // so the channel absent from the cached list is not repaired away.
+    await expect(
+      page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`),
+    ).toHaveAttribute("aria-current", "true");
+    await expect(page).toHaveURL(/#\/channels\/general$/);
     await expect
       .poll(() =>
         page.evaluate((communityId) => {
@@ -1021,6 +1030,8 @@ test.describe("community rail", () => {
         }, COMMUNITY_B.id),
       )
       .toEqual({ kind: "home" });
+    // Live validation succeeded, so the missing channel is now repaired to Home.
+    await expect(page).toHaveURL(/#\/$/);
   });
 
   test("does not restore a remembered destination on cold boot", async ({

@@ -97,6 +97,15 @@ final class NativeAddMembersViewController: UITableViewController, UISearchResul
   private var state: [String: Any]
   private let send: (String, [String: Any]) -> Void
   private let loadAvatar: (String, String, @escaping (Data?) -> Void) -> Void
+  /// Loaded avatars by key. Every state update rebuilds the cells, so a row
+  /// draws its known avatar at once instead of blinking to its initial while
+  /// the image comes back over the channel. Bounded like the Dart-side
+  /// cache, so browsing a large community doesn't grow it without limit.
+  private let avatars: NSCache<NSString, UIImage> = {
+    let cache = NSCache<NSString, UIImage>()
+    cache.countLimit = 64
+    return cache
+  }()
   private let search = UISearchController(searchResultsController: nil)
   private let pageColor: UIColor
   private let rowColor: UIColor
@@ -160,6 +169,13 @@ final class NativeAddMembersViewController: UITableViewController, UISearchResul
       navigationItem.rightBarButtonItem?.accessibilityLabel = "Create message"
     }
     NavigationTopEdge.configure(tableView, item: navigationItem)
+    tableView.register(UITableViewCell.self, forCellReuseIdentifier: Self.cellIdentifier)
+    rows = UITableViewDiffableDataSource(tableView: tableView) { [weak self] tableView, indexPath, item in
+      let cell = tableView.dequeueReusableCell(withIdentifier: Self.cellIdentifier, for: indexPath)
+      self?.configure(cell, item: item)
+      return cell
+    }
+    rows.defaultRowAnimation = .fade
     applyState()
   }
 
@@ -177,6 +193,8 @@ final class NativeAddMembersViewController: UITableViewController, UISearchResul
   func update(_ data: [String: Any]) {
     // A queued render from before the latest keystroke must not replace results.
     guard (data["query"] as? String ?? "") == (search.searchBar.text ?? "") else { return }
+    // Flutter sends the whole state on every rebuild, often unchanged.
+    guard !NSDictionary(dictionary: data).isEqual(to: state) else { return }
     state = data
     if isViewLoaded { applyState() }
   }
@@ -191,7 +209,7 @@ final class NativeAddMembersViewController: UITableViewController, UISearchResul
       navigationItem.rightBarButtonItem?.title = busy ? "Adding…" : selected.isEmpty ? "Add" : "Add (\(selected.count))"
     }
     search.searchBar.isUserInteractionEnabled = !busy
-    tableView.reloadData()
+    applySnapshot()
     let error = state["error"] as? String ?? ""
     if error.isEmpty {
       tableView.tableFooterView = nil
@@ -241,11 +259,56 @@ final class NativeAddMembersViewController: UITableViewController, UISearchResul
     return "No matching people or agents."
   }
   private var shownUsers: [[String: Any]] { atLimit ? [] : users }
-  private func isStatus(_ indexPath: IndexPath) -> Bool {
-    indexPath.section == 1 && indexPath.row >= shownUsers.count
+
+  /// A row: a member by pubkey, or the status row after the results. A
+  /// member keeps its identity across sections, so a pick moves its row.
+  private enum Item: Hashable {
+    case member(String)
+    case status
+  }
+  private static let cellIdentifier = "member"
+  private var rows: UITableViewDiffableDataSource<Int, Item>!
+  /// What each shown row was last drawn from, to redraw only changed rows.
+  private var drawn: [Item: NSDictionary] = [:]
+
+  private func member(_ pubkey: String) -> [String: Any]? {
+    (selected + shownUsers).first { $0["pubkey"] as? String == pubkey }
   }
 
-  override func numberOfSections(in tableView: UITableView) -> Int { 2 }
+  private func drawing(_ item: Item) -> NSDictionary {
+    switch item {
+    case .member(let pubkey):
+      return ["user": member(pubkey) ?? [:], "busy": busy, "selected": selected.contains { $0["pubkey"] as? String == pubkey }]
+    case .status:
+      return ["text": status ?? "", "retry": loadError && !atLimit, "busy": busy]
+    }
+  }
+
+  /// Applies the state as a diff: unchanged rows keep their cells, changed
+  /// ones are redrawn in place, and a pick or removal animates its row
+  /// between the chosen and result sections.
+  private func applySnapshot() {
+    let chosen = selected.compactMap { $0["pubkey"] as? String }
+    var results: [Item] = shownUsers.compactMap { ($0["pubkey"] as? String).map(Item.member) }
+    if status != nil { results.append(.status) }
+    var snapshot = NSDiffableDataSourceSnapshot<Int, Item>()
+    snapshot.appendSections([0, 1])
+    snapshot.appendItems(chosen.map(Item.member), toSection: 0)
+    snapshot.appendItems(results, toSection: 1)
+    let previous = rows.snapshot()
+    let wasChosen = previous.numberOfSections > 0 ? previous.itemIdentifiers(inSection: 0) : []
+    let next = Dictionary(uniqueKeysWithValues: snapshot.itemIdentifiers.map { ($0, drawing($0)) })
+    let changed = snapshot.itemIdentifiers.filter { item in
+      drawn[item].map { $0 != next[item] } ?? false
+    }
+    let shown = Set(previous.itemIdentifiers)
+    snapshot.reconfigureItems(changed.filter(shown.contains))
+    drawn = next
+    let animate = view.window != nil && wasChosen != chosen.map(Item.member)
+      && !UIAccessibility.isReduceMotionEnabled
+    rows.apply(snapshot, animatingDifferences: animate)
+  }
+
   // No section titles, and no grouped-table header bands: a small gap
   // above the first shown card and between the two.
   override func tableView(_ tableView: UITableView, heightForHeaderInSection section: Int) -> CGFloat {
@@ -258,77 +321,76 @@ final class NativeAddMembersViewController: UITableViewController, UISearchResul
   override func tableView(_ tableView: UITableView, viewForHeaderInSection section: Int) -> UIView? { nil }
   override func tableView(_ tableView: UITableView, viewForFooterInSection section: Int) -> UIView? { nil }
   private static let cardGap: CGFloat = 8
-  override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
-    section == 0 ? selected.count : shownUsers.count + (status == nil ? 0 : 1)
-  }
-  override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
-    let cell = UITableViewCell(style: .subtitle, reuseIdentifier: nil)
+
+  private func configure(_ cell: UITableViewCell, item: Item) {
     cell.backgroundColor = rowColor
-    var content = cell.defaultContentConfiguration()
-    var avatarRequest: (String, String)?
-    var memberLabel: String?
-    if isStatus(indexPath) {
+    cell.accessoryType = .none
+    cell.selectionStyle = .default
+    cell.accessibilityTraits = .none
+    cell.isAccessibilityElement = false
+    cell.accessibilityLabel = nil
+    cell.accessibilityIdentifier = nil
+    cell.contentView.accessibilityElementsHidden = false
+    cell.isUserInteractionEnabled = !busy
+    var content = UIListContentConfiguration.subtitleCell()
+    guard case .member(let pubkey) = item else {
       content.text = status
       content.textProperties.color = loadError && !atLimit ? Self.errorColor : .secondaryLabel
       content.textProperties.numberOfLines = 0
       cell.selectionStyle = loadError && !atLimit ? .default : .none
       if loadError && !atLimit { cell.accessibilityTraits.insert(.button) }
-    } else {
-      let user = indexPath.section == 0 ? selected[indexPath.row] : shownUsers[indexPath.row]
-      let unavailable = user["unavailable"] as? Bool == true
-      content.text = user["name"] as? String
-      content.secondaryText = user["detail"] as? String
-      memberLabel = [content.text, content.secondaryText]
-        .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: ", ")
-      content.textProperties.numberOfLines = 0
-      content.secondaryTextProperties.numberOfLines = 1
-      content.image = fallbackAvatar(user)
-      content.imageProperties.maximumSize = CGSize(width: 40, height: 40)
-      content.imageProperties.reservedLayoutSize = CGSize(width: 40, height: 40)
-      if let pubkey = user["pubkey"] as? String, let key = user["avatarKey"] as? String {
-        avatarRequest = (pubkey, key)
-      }
-      cell.accessoryType = indexPath.section == 0 ? .checkmark : .none
-      if unavailable {
-        content.textProperties.color = .secondaryLabel
-        cell.selectionStyle = .none
-        cell.accessibilityTraits.insert(.notEnabled)
-      }
-      cell.accessibilityTraits.insert(.button)
-      if indexPath.section == 0 { cell.accessibilityTraits.insert(.selected) }
+      cell.contentConfiguration = content
+      return
     }
+    guard let user = member(pubkey) else { preconditionFailure("A shown member row must be in the state") }
+    let chosen = selected.contains { $0["pubkey"] as? String == pubkey }
+    let key = user["avatarKey"] as? String
+    content.text = user["name"] as? String
+    content.secondaryText = user["detail"] as? String
+    content.textProperties.numberOfLines = 0
+    content.secondaryTextProperties.numberOfLines = 1
+    content.image = key.flatMap { avatars.object(forKey: $0 as NSString) } ?? fallbackAvatar(user)
+    content.imageProperties.maximumSize = CGSize(width: 40, height: 40)
+    content.imageProperties.reservedLayoutSize = CGSize(width: 40, height: 40)
+    cell.accessoryType = chosen ? .checkmark : .none
+    if user["unavailable"] as? Bool == true {
+      content.textProperties.color = .secondaryLabel
+      cell.selectionStyle = .none
+      cell.accessibilityTraits.insert(.notEnabled)
+    }
+    cell.accessibilityTraits.insert(.button)
+    if chosen { cell.accessibilityTraits.insert(.selected) }
     cell.contentConfiguration = content
-    if let memberLabel {
-      cell.isAccessibilityElement = true
-      cell.accessibilityLabel = memberLabel
+    cell.isAccessibilityElement = true
+    cell.accessibilityLabel = [content.text, content.secondaryText]
+      .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: ", ")
+    cell.contentView.accessibilityElementsHidden = true
+    guard let key else { return }
+    cell.accessibilityIdentifier = key
+    guard avatars.object(forKey: key as NSString) == nil else { return }
+    loadAvatar(pubkey, key) { [weak self, weak cell] data in
+      guard let data, let image = UIImage(data: data) else { return }
+      let avatar = image.withRenderingMode(.alwaysOriginal)
+      self?.avatars.setObject(avatar, forKey: key as NSString)
+      guard let cell, cell.accessibilityIdentifier == key,
+        var configuration = cell.contentConfiguration as? UIListContentConfiguration else { return }
+      configuration.image = avatar
+      let label = cell.accessibilityLabel
+      cell.contentConfiguration = configuration
+      cell.accessibilityLabel = label
       cell.contentView.accessibilityElementsHidden = true
     }
-    if let (pubkey, key) = avatarRequest {
-      cell.accessibilityIdentifier = key
-      loadAvatar(pubkey, key) { [weak cell] data in
-        guard let cell, cell.accessibilityIdentifier == key,
-          let data, let image = UIImage(data: data),
-          var configuration = cell.contentConfiguration as? UIListContentConfiguration else { return }
-        configuration.image = image.withRenderingMode(.alwaysOriginal)
-        let label = cell.accessibilityLabel
-        cell.contentConfiguration = configuration
-        cell.accessibilityLabel = label
-        cell.contentView.accessibilityElementsHidden = true
-      }
-    }
-    cell.isUserInteractionEnabled = !busy
-    return cell
   }
+
   override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
     tableView.deselectRow(at: indexPath, animated: true)
-    guard !busy else { return }
-    if isStatus(indexPath) {
+    guard !busy, let item = rows.itemIdentifier(for: indexPath) else { return }
+    guard case .member(let pubkey) = item else {
       if loadError && !atLimit { send("retry", [:]) }
       return
     }
-    let user = indexPath.section == 0 ? selected[indexPath.row] : shownUsers[indexPath.row]
+    guard let user = member(pubkey) else { preconditionFailure("A shown member row must be in the state") }
     if user["unavailable"] as? Bool == true { return }
-    guard let pubkey = user["pubkey"] as? String else { return }
     send("toggle", ["pubkey": pubkey])
     // Where asked (New DM), a pick ends its query, as an inserted mention
     // does, so the next name starts fresh.

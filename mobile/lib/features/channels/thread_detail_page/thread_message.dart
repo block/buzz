@@ -40,6 +40,7 @@ class _ThreadMessage extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final startsThreads = ref.watch(channelStartsThreadsProvider(channelId));
     final messageSnapshotKey = useMemoized(GlobalKey.new, const []);
     final swipeContentKey = useMemoized(GlobalKey.new, const []);
     final mediaOffset = useMessageMediaOffset(message.content, message.tags);
@@ -344,7 +345,8 @@ class _ThreadMessage extends HookConsumerWidget {
                                       scaleEmojiOnly: true,
                                       mediaCarouselTrailingOverflow:
                                           Grid.gutter,
-                                      onMediaReply: allMessages == null
+                                      onMediaReply:
+                                          allMessages == null || !startsThreads
                                           ? null
                                           : () {
                                               if (!context.mounted) return;

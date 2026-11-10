@@ -1,5 +1,4 @@
-import 'dart:io';
-
+import 'package:buzz/shared/relay/media_image.dart';
 import 'package:buzz/shared/widgets/frosted_app_bar.dart';
 import 'package:buzz/shared/widgets/preset_agent_avatar.dart';
 import 'package:buzz/shared/agents/agent_avatar_catalog.dart';
@@ -13,6 +12,7 @@ import 'package:buzz/features/agents/agents_page.dart';
 import 'package:buzz/features/agents/create_agent_page.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
 import 'package:nostr/nostr.dart' as nostr;
 
 import 'agents_harness.dart';
@@ -26,7 +26,12 @@ void main() {
       final h = await AgentsHarness.create();
       final controller = h.controller;
       final added = nostr.Keys('0' * 63 + '2').public;
-      await h.open(tester, directory: [existing]);
+      final posters = _PosterClient();
+      await h.open(
+        tester,
+        directory: [existing],
+        overrides: [mediaHttpClientProvider.overrideWithValue(posters)],
+      );
       final list = tester.element(find.byType(AgentsPage));
       if (!supportsRemoteAgents(h.community)) {
         expect(find.byTooltip('Add agent'), findsNothing);
@@ -121,17 +126,15 @@ void main() {
           )
           .onPressed!;
       // A stalled CDN must not prevent entry to the editor.
-      final stalledClient = _StalledPosterClient();
-      debugNetworkImageHttpClientProvider = () => stalledClient;
-      addTearDown(() => debugNetworkImageHttpClientProvider = null);
-      await NetworkImage(originalAvatar).evict();
+      posters.stalled = true;
+      MediaImageProvider.debugResetCooldowns();
       openAvatar();
       openAvatar();
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 301));
       await tester.pumpAndSettle();
-      expect(stalledClient.requests, greaterThan(0));
-      debugNetworkImageHttpClientProvider = null;
+      expect(posters.stalledRequests, greaterThan(0));
+      posters.release();
       expect(find.byType(AgentAvatarEditorPage), findsOneWidget);
       expect(find.text('Instructions'), findsNothing);
       await tester.tap(find.byKey(ValueKey('agent-avatar-$targetIndex')));
@@ -311,14 +314,24 @@ void main() {
   });
 }
 
-class _StalledPosterClient implements HttpClient {
-  int requests = 0;
-  @override
-  Future<HttpClientRequest> getUrl(Uri url) {
-    requests++;
-    return Completer<HttpClientRequest>().future;
+/// Serves no posters; while [stalled], requests hang until [release].
+class _PosterClient extends http.BaseClient {
+  bool stalled = false;
+  final _pending = <Completer<http.StreamedResponse>>[];
+  int get stalledRequests => _pending.length;
+
+  void release() {
+    stalled = false;
+    for (final pending in _pending) {
+      pending.complete(http.StreamedResponse(const Stream.empty(), 404));
+    }
   }
 
   @override
-  dynamic noSuchMethod(Invocation invocation) => null;
+  Future<http.StreamedResponse> send(http.BaseRequest request) {
+    if (!stalled) {
+      return Future.value(http.StreamedResponse(const Stream.empty(), 404));
+    }
+    return (_pending..add(Completer())).last.future;
+  }
 }

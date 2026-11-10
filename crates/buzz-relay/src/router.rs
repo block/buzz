@@ -522,6 +522,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/operator/communities/transfer",
             post(api::operator::transfer_community),
         )
+        .route(
+            "/operator/communities/invites",
+            post(api::operator::mint_community_invite),
+        )
         // Relay invites: mint (owner/admin) + claim (membership-gate exempt)
         .route("/api/invites", post(api::invites::mint_invite))
         .route("/api/join-policy", get(api::invites::join_policy))
@@ -611,6 +615,18 @@ pub fn build_router(state: Arc<AppState>) -> Router {
                 if let (Some(index), Some(files)) = (web_index, web_files) {
                     if path.starts_with("/assets/") {
                         return files.oneshot(req).await.map(IntoResponse::into_response);
+                    }
+                    if is_invite_landing_path(path) {
+                        return Ok(crate::invite_preview::response(
+                            &index,
+                            &state.config.relay_url,
+                            state.as_ref(),
+                            req.headers()
+                                .get(axum::http::header::HOST)
+                                .and_then(|host| host.to_str().ok())
+                                .unwrap_or(""),
+                        )
+                        .await);
                     }
                     if should_serve_spa(path, serve_git_web_gui) {
                         return Ok(read_spa_index(&index).await);
@@ -2124,6 +2140,154 @@ mod tests {
             )
             .await
             .expect("response")
+    }
+
+    #[tokio::test]
+    async fn invite_preview_is_public_and_media_supports_range_requests() {
+        let admin_dir = tempfile::tempdir().unwrap();
+        let web_dir = tempfile::tempdir().unwrap();
+        write_admin_bundle(admin_dir.path());
+        write_bundle(web_dir.path());
+        std::fs::write(
+            web_dir.path().join("index.html"),
+            "<html><head></head><body>invite app</body></html>",
+        )
+        .unwrap();
+        let media_dir = web_dir.path().join("assets/invite-preview");
+        std::fs::create_dir_all(&media_dir).unwrap();
+        for (name, bytes) in [
+            (
+                "buzz-invite-loop-v1.mp4",
+                include_bytes!("../../../previews/invite-video/buzz-invite-loop.mp4").as_slice(),
+            ),
+            (
+                "buzz-invite-poster-v1.png",
+                include_bytes!("../../../previews/invite-video/buzz-invite-poster.png").as_slice(),
+            ),
+        ] {
+            std::fs::write(media_dir.join(name), bytes).unwrap();
+        }
+        let state = spa_state(admin_dir.path(), web_dir.path()).await;
+        for (host, id) in [("alpha.example", 1), ("beta.example", 2)] {
+            state.tenant_host_cache.insert(
+                host.into(),
+                (
+                    buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::from_u128(id)),
+                    std::time::Instant::now(),
+                ),
+            );
+        }
+        // Also exercise the production router over a real HTTP connection.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = build_router(state.clone());
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let fetched = client
+            .get(format!("http://{address}/invite/unused-token"))
+            .header("host", "alpha.example")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(fetched.status(), StatusCode::OK);
+        assert!(fetched.text().await.unwrap().contains("og:video"));
+        let fetched = client
+            .get(format!(
+                "http://{address}/assets/invite-preview/buzz-invite-loop-v1.mp4"
+            ))
+            .header("range", "bytes=0-31")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(fetched.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(fetched.bytes().await.unwrap().len(), 32);
+        server.abort();
+        for host in ["alpha.example", "beta.example", ""] {
+            let response = spa_response(state.clone(), host, "/invite/unused-token").await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let html = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let html = std::str::from_utf8(&html).unwrap();
+            if host.is_empty() {
+                assert!(!html.contains("og:video"));
+                assert!(!html.contains("og:image"));
+                continue;
+            }
+            assert!(html.contains(&format!("http://{host}/assets/invite-preview/")));
+            assert!(!html.contains(if host == "alpha.example" {
+                "beta.example"
+            } else {
+                "alpha.example"
+            }));
+            assert!(html.contains("og:video"));
+            assert!(html.contains("og:image"));
+            assert!(!html.contains("untrusted.example"));
+            assert!(!html.contains("unused-token"));
+        }
+        for path in ["/repos", "/invite/"] {
+            let response = spa_response(state.clone(), "public.example", path).await;
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            assert!(!String::from_utf8_lossy(&body).contains("og:video"));
+        }
+        let response = spa_response(state.clone(), "admin.example", "/invite/unused-token").await;
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(!String::from_utf8_lossy(&body).contains("og:video"));
+        for (name, mime) in [
+            ("buzz-invite-loop-v1.mp4", "video/mp4"),
+            ("buzz-invite-poster-v1.png", "image/png"),
+        ] {
+            let path = format!("/assets/invite-preview/{name}");
+            for method in ["GET", "HEAD"] {
+                let response = build_router(state.clone())
+                    .oneshot(
+                        Request::builder()
+                            .method(method)
+                            .uri(&path)
+                            .header("host", "public.example")
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+                assert_eq!(response.headers()["content-type"], mime);
+                assert!(
+                    response.headers()["content-length"]
+                        .to_str()
+                        .unwrap()
+                        .parse::<usize>()
+                        .unwrap()
+                        > 1000
+                );
+            }
+            let response = build_router(state.clone())
+                .oneshot(
+                    Request::get(&path)
+                        .header("host", "public.example")
+                        .header("range", "bytes=0-31")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            assert_eq!(bytes.len(), 32);
+        }
     }
 
     #[tokio::test]
