@@ -41,6 +41,7 @@ import 'channel_ids_by_name_provider.dart';
 import 'local_send_bubble_surface.dart';
 import 'media_viewer_page.dart';
 import 'native_photo_zoom_preview.dart';
+import 'message_content/details_blocks.dart';
 import 'message_content/link_normalizer.dart';
 import 'message_content/markdown_escapes.dart';
 import 'message_content/preview_text.dart';
@@ -56,6 +57,7 @@ import 'message_media_avatar.dart';
 import 'message_media_geometry.dart';
 import 'voice_note_attachment.dart';
 
+part 'message_content/details_section.dart';
 part 'message_content/media_carousel.dart';
 part 'message_content/media_stack.dart';
 part 'message_content/media_stack_tuning.dart';
@@ -111,6 +113,10 @@ String _safeDownloadedFilename(String filename) {
 /// and media-aware markdown images/videos.
 class MessageContent extends HookConsumerWidget {
   final String content;
+
+  /// Event id of the message, when there is one. Keys reader-local state such
+  /// as which collapsible sections are open, so it survives in-place edits.
+  final String? messageId;
 
   /// Paint conversation text bubbles while keeping attachments on the page.
   final bool bubble;
@@ -190,6 +196,7 @@ class MessageContent extends HookConsumerWidget {
   const MessageContent({
     super.key,
     required this.content,
+    this.messageId,
     this.bubble = false,
     this.ownMessage = false,
     this.trimTrailingSpacing = false,
@@ -402,66 +409,102 @@ class MessageContent extends HookConsumerWidget {
       onChannelTap: resolvedChannelTap,
     );
 
-    Widget renderMarkdown(String text) => KeyedSubtree(
-      key: ValueKey(
-        '$text\u0000$mentionPresentationKey\u0000$channelPresentationKey',
+    Widget buildMarkdown(
+      String text, {
+      TextStyle? textStyle,
+      bool plain = false,
+    }) => GptMarkdown(
+      text,
+      style: textStyle ?? style,
+      styleSheet: bubble
+          ? GptMarkdownStyleSheet(
+              blockQuote: BlockQuoteStyle(barColor: bubbleInk),
+              hr: HrStyle(color: bubbleInk.withValues(alpha: 0.3)),
+              table: TableStyle(
+                borderColor: bubbleInk.withValues(alpha: 0.3),
+                headerBackground: Colors.transparent,
+                headerTextStyle: TextStyle(color: bubbleInk),
+              ),
+            )
+          : null,
+      followLinkColor: false,
+      // normalizeBareLinks() already turns bare URLs into Markdown links;
+      // gpt_markdown 1.2.0 autolinks by default, so both would run.
+      autolink: false,
+      codeBuilder: (context, name, code, closed) => _MessageCodeBlock(
+        name: name,
+        code: code,
+        bubble: bubble,
+        ink: bubble && ownMessage ? ownTextColor : null,
       ),
-      child: GptMarkdown(
-        text,
-        style: style,
-        styleSheet: bubble
-            ? GptMarkdownStyleSheet(
-                blockQuote: BlockQuoteStyle(barColor: bubbleInk),
-                hr: HrStyle(color: bubbleInk.withValues(alpha: 0.3)),
-                table: TableStyle(
-                  borderColor: bubbleInk.withValues(alpha: 0.3),
-                  headerBackground: Colors.transparent,
-                  headerTextStyle: TextStyle(color: bubbleInk),
-                ),
-              )
-            : null,
-        followLinkColor: false,
-        // normalizeBareLinks() already turns bare URLs into Markdown links;
-        // gpt_markdown 1.2.0 autolinks by default, so both would run.
-        autolink: false,
-        codeBuilder: (context, name, code, closed) => _MessageCodeBlock(
-          name: name,
-          code: code,
-          bubble: bubble,
-          ink: bubble && ownMessage ? ownTextColor : null,
-        ),
-        linkBuilder: (context, linkText, shieldedUrl, linkStyle) {
-          final url = unshieldMarkdownEscapes(shieldedUrl);
-          return _buildLink(
-            context,
-            ref,
-            linkText,
-            url,
-            imetaByUrl[url],
-            linkStyle,
-            style,
-            resolvedChannelTap,
-            resolvedChannelNames,
-          );
-        },
-        imageBuilder: (context, shieldedUrl, _, _) {
-          final imageUrl = unshieldMarkdownEscapes(shieldedUrl);
-          return _buildMedia(
-            context,
-            imageUrl,
-            imetaByUrl[imageUrl],
-            onReply: onMediaReply == null ? null : mediaReply,
-            onMore: onMediaMore == null ? null : mediaMore,
-          );
-        },
-        textAlign: textAlign ?? (bubble ? TextAlign.start : null),
-        maxLines: maxLines,
-        inlineComponents: inlineComponents,
-      ),
+      // Plain markdown (section titles) never builds links or media, even
+      // for a construct the title sanitizer did not flatten.
+      linkBuilder: plain
+          ? (context, linkText, _, _) => Text.rich(linkText)
+          : (context, linkText, shieldedUrl, linkStyle) {
+              final url = unshieldMarkdownEscapes(shieldedUrl);
+              return _buildLink(
+                context,
+                ref,
+                linkText,
+                url,
+                imetaByUrl[url],
+                linkStyle,
+                style,
+                resolvedChannelTap,
+                resolvedChannelNames,
+              );
+            },
+      imageBuilder: plain
+          ? (context, _, _, _) => const SizedBox.shrink()
+          : (context, shieldedUrl, _, _) {
+              final imageUrl = unshieldMarkdownEscapes(shieldedUrl);
+              return _buildMedia(
+                context,
+                imageUrl,
+                imetaByUrl[imageUrl],
+                onReply: onMediaReply == null ? null : mediaReply,
+                onMore: onMediaMore == null ? null : mediaMore,
+              );
+            },
+      textAlign: textAlign ?? (bubble ? TextAlign.start : null),
+      maxLines: maxLines,
+      inlineComponents: plain ? null : inlineComponents,
     );
-    final segments = bubble
-        ? messageBubbleSegments(finalContent, imetaByUrl)
-        : const <({String text, bool attachment})>[];
+
+    // Compact previews (maxLines) show section titles and bodies inline.
+    List<DetailsSegment> detailsSegments(String text) => maxLines == null
+        ? splitDetailsBlocks(text)
+        : [DetailsText(flattenDetailsBlocks(text))];
+    final hasDetails = detailsSegments(
+      finalContent,
+    ).any((segment) => segment is DetailsBlock);
+
+    Widget renderMarkdown(String text) {
+      final segments = detailsSegments(text);
+      return KeyedSubtree(
+        key: ValueKey(
+          '$text\u0000$mentionPresentationKey\u0000$channelPresentationKey',
+        ),
+        child: segments.length == 1 && segments.single is DetailsText
+            ? buildMarkdown((segments.single as DetailsText).text)
+            : _MessageDetailsContent(
+                segments: segments,
+                messageId: messageId,
+                titleStyle: style,
+                buildMarkdown: buildMarkdown,
+              ),
+      );
+    }
+
+    // A section keeps its media inside it: splitting attachments out of the
+    // bubble would cut a section in two, so content with sections stays one
+    // text bubble.
+    final segments = !bubble
+        ? const <({String text, bool attachment})>[]
+        : hasDetails
+        ? [(text: finalContent, attachment: false)]
+        : messageBubbleSegments(finalContent, imetaByUrl);
     final markdown = bubble
         ? Column(
             crossAxisAlignment: ownMessage

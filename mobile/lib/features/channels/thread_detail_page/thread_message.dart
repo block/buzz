@@ -327,6 +327,7 @@ class _ThreadMessage extends HookConsumerWidget {
                                     MessageContent(
                                       key: swipeContentKey,
                                       content: message.content,
+                                      messageId: message.id,
                                       bubble: true,
                                       hasReactions:
                                           message.reactions.isNotEmpty,
