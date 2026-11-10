@@ -5033,8 +5033,10 @@ void main() {
         _testChannel,
         otherChannel,
       ]);
+      final profiles = _FakeUserCacheNotifier({});
       await tester.pumpWidget(
         _buildTestable(
+          userCacheNotifier: profiles,
           messages: [
             for (var i = 0; i < 5; i++)
               _textMsg(
@@ -5062,6 +5064,22 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(rebuilt.whereType<MessageContent>(), isEmpty);
+
+      // A profile learned in another surface must not rebuild this ordinary
+      // channel: the Solo naming hook is disabled here.
+      rebuilt.clear();
+      profiles.replace(
+        UserProfile(pubkey: 'f' * 64, displayName: 'Unrelated profile'),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        rebuilt.where(
+          (widget) =>
+              widget.runtimeType.toString() == '_ResolvedChannelDetailPage',
+        ),
+        isEmpty,
+        reason: 'an unrelated profile must not rebuild the open channel page',
+      );
     });
 
     testWidgets('clears the composer inset when membership is revoked', (
