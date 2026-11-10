@@ -332,17 +332,10 @@ class ComposeBar extends HookConsumerWidget {
         for (final entry in mentionMap.value.entries)
           entry.key: entry.value.pubkey,
       };
-      final name = selectedMentionLabel(
-        candidate.label,
-        candidate.pubkey,
-        selected,
-      );
+      final (label, pk) = (candidate.label, candidate.pubkey);
+      final name = selectedMentionLabel(label, pk, selected);
       // A namesake qualifies every same-name mention, earlier ones included.
-      final renames = namesakeRequalifications(
-        candidate.label,
-        candidate.pubkey,
-        selected,
-      );
+      final renames = namesakeRequalifications(label, pk, selected);
       for (final entry in renames.entries) {
         mentionMap.value[entry.value] = mentionMap.value.remove(entry.key)!;
       }
@@ -353,26 +346,8 @@ class ComposeBar extends HookConsumerWidget {
       var start = mentionStartIdx.value.clamp(0, controller.text.length);
       isModifyingText.value = true;
       try {
-        if (renames.isNotEmpty) {
-          final cursor = controller.selection.isValid
-              ? controller.selection.baseOffset
-              : controller.text.length;
-          final renamed = renameMentions(
-            controller.text,
-            selected.keys,
-            renames,
-            start,
-          );
-          final delta = renamed.offset - start;
-          controller.value = TextEditingValue(
-            text: renamed.text,
-            selection: TextSelection.collapsed(offset: cursor + delta),
-          );
-          start = renamed.offset;
-        }
-        // Track the resolved candidate so we can pass its pubkey and prepare
-        // selected non-member agents at send time. Registered after the
-        // rename edit: persistence prunes keys the text does not yet contain.
+        start = _requalifyNamesakes(controller, selected.keys, renames, start);
+        // After the rename: persistence prunes keys absent from the text.
         mentionMap.value[name] = candidate;
         spliceAndMoveCursor(
           controller,

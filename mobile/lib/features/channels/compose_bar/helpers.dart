@@ -376,6 +376,26 @@ void spliceAndMoveCursor(
   focusNode.requestFocus();
 }
 
+/// Rewrite earlier namesake mentions to their qualified labels, keeping the
+/// cursor in place. Returns [start] shifted by the edits before it.
+int _requalifyNamesakes(
+  TextEditingController controller,
+  Iterable<String> labels,
+  Map<String, String> renames,
+  int start,
+) {
+  if (renames.isEmpty) return start;
+  final cursor = controller.selection.isValid
+      ? controller.selection.baseOffset
+      : controller.text.length;
+  final renamed = renameMentions(controller.text, labels, renames, start);
+  controller.value = TextEditingValue(
+    text: renamed.text,
+    selection: TextSelection.collapsed(offset: cursor + renamed.offset - start),
+  );
+  return renamed.offset;
+}
+
 /// Insert [trigger] (e.g. `@` or `#`) at the cursor position, prefixed with
 /// a space if needed for word separation. Used by `triggerMention` and
 /// `triggerChannel`.
