@@ -22,6 +22,7 @@
 mod communities;
 mod deletions;
 mod nip_fi;
+mod nip_fi_policy;
 mod user_deletions;
 
 use std::future::Future;
@@ -56,7 +57,9 @@ enum Command {
     ///
     /// Accepts a bech32 npub or 64-char hex pubkey. After inserting the DB row,
     /// publishes a kind:13534 membership roster via Redis so live clients see
-    /// the updated list immediately.
+    /// the updated list immediately. Does not join the member to the
+    /// community's default (`auto_join`) channels: the relay does that on an
+    /// invite claim or a kind:9030 add, which this command bypasses.
     AddMember {
         /// Nostr public key — bech32 npub or 64-char hex.
         #[arg(long)]
@@ -122,12 +125,14 @@ enum Command {
         #[command(subcommand)]
         command: nip_fi::NipFiCommand,
     },
+    /// Change or inspect a community stored NIP-FI requirement.
+    NipFiPolicy(nip_fi_policy::Args),
     /// Durable CLI-only whole-community deletion control plane.
     Deletions {
         #[command(subcommand)]
         command: deletions::DeletionsCommand,
     },
-    /// Submit and inspect synthetic user-deletion requests.
+    /// Preview real user memberships or manage synthetic user-deletion requests.
     UserDeletions {
         #[command(subcommand)]
         command: user_deletions::UserDeletionsCommand,
@@ -211,6 +216,11 @@ async fn run(cli: Cli) -> Result<i32> {
         Command::Deletions { command } => deletions::run(command).await,
         Command::UserDeletions { command } => user_deletions::run(command).await,
         Command::NipFi { command } => nip_fi::run(command).await,
+        // Retain transport/file causes for this operator command without changing
+        // the diagnostics of other admin commands. Key parse errors are redacted.
+        Command::NipFiPolicy(args) => nip_fi_policy::run(args)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e:#}")),
         Command::ReconcileChannels { channel, relay_key } => {
             reconcile_channels(channel, relay_key).await?;
             Ok(0)
@@ -661,11 +671,8 @@ async fn connect_member_services() -> Result<(Db, Arc<PubSubManager>, Keys)> {
     let redis_url =
         std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".to_string());
 
-    let redis_pool = {
-        let cfg = deadpool_redis::Config::from_url(&redis_url);
-        cfg.create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .map_err(|e| anyhow::anyhow!("Redis pool creation failed: {e}"))?
-    };
+    let redis_pool = buzz_pubsub::redis_connection(&redis_url)
+        .map_err(|e| anyhow::anyhow!("Redis connection setup failed: {e}"))?;
 
     let pubsub = Arc::new(
         PubSubManager::new(&redis_url, redis_pool)

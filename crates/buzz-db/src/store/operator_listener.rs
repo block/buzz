@@ -70,7 +70,9 @@ fn event_targets(event: &Event) -> Vec<Vec<u8>> {
     let mut targets = Vec::new();
     for tag in event.tags.iter() {
         let parts = tag.as_slice();
-        if parts.first().map(String::as_str) != Some("p") {
+        if parts.first().map(String::as_str) != Some("p")
+            || buzz_core::filter::is_workflow_owner_attribution(event, tag)
+        {
             continue;
         }
         let Some(value) = parts.get(1) else {
@@ -522,6 +524,30 @@ mod tests {
         }
         assert!(!is_listener_mention_kind(1));
         assert!(!is_listener_mention_kind(40003));
+    }
+
+    #[test]
+    fn a_workflow_owner_attribution_is_not_a_listener_target() {
+        let owner = nostr::Keys::generate().public_key();
+        let agent = nostr::Keys::generate().public_key();
+        let targets = |mention_owner: bool| {
+            let mut tags = vec![
+                nostr::Tag::parse(["p", &owner.to_hex(), "", "owner"]).unwrap(),
+                nostr::Tag::parse(["buzz:workflow", "true"]).unwrap(),
+                nostr::Tag::public_key(agent),
+            ];
+            if mention_owner {
+                tags.push(nostr::Tag::public_key(owner));
+            }
+            let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "run")
+                .tags(tags)
+                .sign_with_keys(&nostr::Keys::generate())
+                .unwrap();
+            event_targets(&event)
+        };
+        let bytes = |pubkey: nostr::PublicKey| pubkey.to_bytes().to_vec();
+        assert_eq!(targets(false), vec![bytes(agent)]);
+        assert_eq!(targets(true), vec![bytes(agent), bytes(owner)]);
     }
 }
 

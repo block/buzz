@@ -1,3 +1,4 @@
+import 'package:buzz/shared/widgets/buzz_toast.dart';
 import 'dart:async';
 import 'dart:io';
 import 'dart:ui' show ImageFilter;
@@ -20,6 +21,7 @@ import '../../shared/widgets/concentric_sheet_surface.dart';
 import '../../shared/widgets/page_indicator.dart';
 import '../../shared/widgets/ios_glass_navigation_button.dart';
 import '../../shared/widgets/ios_navigation_bar.dart';
+import '../../shared/widgets/navigation_backdrop.dart';
 import 'media_viewer_hero.dart';
 
 export 'media_viewer_hero.dart';
@@ -82,6 +84,7 @@ PageRoute<void> buildImageViewerRoute({
   double? aspectRatio,
   List<MediaViewerImage>? galleryItems,
   int initialIndex = 0,
+  ValueChanged<int>? onSelectionChanged,
   VoidCallback? onReply,
   MediaViewerMoreAction? onMore,
   bool disableAnimations = false,
@@ -112,6 +115,7 @@ PageRoute<void> buildImageViewerRoute({
           semanticLabel: semanticLabel,
           galleryItems: images,
           initialIndex: safeInitialIndex,
+          onSelectionChanged: onSelectionChanged,
           onReply: onReply,
           onMore: onMore,
         ),
@@ -129,6 +133,7 @@ void openImageViewer(
   double? aspectRatio,
   List<MediaViewerImage>? galleryItems,
   int initialIndex = 0,
+  ValueChanged<int>? onSelectionChanged,
   VoidCallback? onReply,
   MediaViewerMoreAction? onMore,
 }) {
@@ -141,6 +146,7 @@ void openImageViewer(
       aspectRatio: aspectRatio,
       galleryItems: galleryItems,
       initialIndex: initialIndex,
+      onSelectionChanged: onSelectionChanged,
       onReply: onReply,
       onMore: onMore,
       disableAnimations: MediaQuery.disableAnimationsOf(context),
@@ -180,6 +186,9 @@ class MediaImageViewerPage extends HookConsumerWidget {
   final String? semanticLabel;
   final List<MediaViewerImage>? galleryItems;
   final int initialIndex;
+
+  /// Reports the visible photo immediately, including before any exit path.
+  final ValueChanged<int>? onSelectionChanged;
   final VoidCallback? onReply;
   final MediaViewerMoreAction? onMore;
 
@@ -190,6 +199,7 @@ class MediaImageViewerPage extends HookConsumerWidget {
     this.semanticLabel,
     this.galleryItems,
     this.initialIndex = 0,
+    this.onSelectionChanged,
     this.onReply,
     this.onMore,
   });
@@ -293,6 +303,7 @@ class MediaImageViewerPage extends HookConsumerWidget {
       }
       _precacheViewerImages(context, images, index);
       currentIndex.value = index;
+      onSelectionChanged?.call(index);
       isTransformed.value = _hasImageTransform(
         transformationControllers[index].value,
       );
@@ -627,16 +638,33 @@ class MediaImageViewerPage extends HookConsumerWidget {
                 ),
               )
             else
-              PositionedDirectional(
+              Positioned(
                 top: 0,
-                end: Grid.sm,
+                left: 0,
+                right: 0,
                 child: Opacity(
                   opacity: chromeOpacity,
-                  child: SafeArea(
-                    child: _MediaViewerCloseButton(
-                      key: const ValueKey('message-media-image-viewer-close'),
-                      tooltip: 'Close image viewer',
-                      onPressed: () => unawaited(dismiss()),
+                  child: Theme(
+                    data: ThemeData.dark(),
+                    child: NavigationBackdrop(
+                      child: SafeArea(
+                        bottom: false,
+                        child: Align(
+                          alignment: AlignmentDirectional.centerEnd,
+                          child: Padding(
+                            padding: const EdgeInsetsDirectional.only(
+                              end: Grid.sm,
+                            ),
+                            child: _MediaViewerCloseButton(
+                              key: const ValueKey(
+                                'message-media-image-viewer-close',
+                              ),
+                              tooltip: 'Close image viewer',
+                              onPressed: () => unawaited(dismiss()),
+                            ),
+                          ),
+                        ),
+                      ),
                     ),
                   ),
                 ),

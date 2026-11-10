@@ -2,6 +2,7 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
 
 import { KIND_HUDDLE_STARTED } from "../../src/shared/constants/kinds";
 import { installMockBridge } from "../helpers/bridge";
+import { waitForMockChannelHeadReady } from "../helpers/channelHeadReady";
 
 const GENERAL_CHANNEL_ID = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
 
@@ -163,21 +164,19 @@ test("pending and huddle rows omit both copy-link surfaces", async ({
   await page.goto("/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
-  await expect
-    .poll(() =>
-      page.evaluate(
-        () => typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function",
-      ),
-    )
-    .toBe(true);
+  // Emit only after history and its head refresh settle, so neither can
+  // replace the rows under test.
+  await waitForMockChannelHeadReady(page, "general", GENERAL_CHANNEL_ID);
 
+  // The ids must not match a seeded #general message. "d".repeat(64) is the
+  // seeded reaction target, which has a copy-link button of its own.
   const { huddleId, pendingId } = await page.evaluate((huddleKind) => {
     const emit = window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__;
     if (!emit) throw new Error("Mock message emitter is unavailable.");
     const pending = emit({
       channelName: "general",
       content: "Pending copy-link regression",
-      id: "c".repeat(64),
+      id: "2e".repeat(32),
       pending: true,
     });
     const huddle = emit({
@@ -185,7 +184,7 @@ test("pending and huddle rows omit both copy-link surfaces", async ({
       content: JSON.stringify({
         ephemeral_channel_id: "10000000-0000-4000-8000-000000000001",
       }),
-      id: "d".repeat(64),
+      id: "1d".repeat(32),
       kind: huddleKind,
     });
     return { huddleId: huddle.id, pendingId: pending.id };

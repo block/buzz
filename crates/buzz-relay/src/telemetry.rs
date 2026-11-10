@@ -33,10 +33,12 @@ use opentelemetry_otlp::ExporterBuildError;
 use opentelemetry_sdk::{resource::EnvResourceDetector, trace::SdkTracerProvider, Resource};
 use tracing::{Event, Subscriber};
 use tracing_subscriber::{
+    filter::Targets,
     fmt::{
         format::{Format, FormatEvent, FormatFields, Json, Writer},
         FmtContext,
     },
+    layer::Filter,
     registry::LookupSpan,
     EnvFilter, Layer,
 };
@@ -52,7 +54,11 @@ impl TraceContextLookup {
     /// Build a JSON formatter backed by this subscriber dispatch lookup.
     pub fn json_formatter(&self, enabled: bool) -> TraceContextJson {
         TraceContextJson {
-            inner: tracing_subscriber::fmt::format().json().flatten_event(true),
+            inner: tracing_subscriber::fmt::format()
+                .json()
+                .flatten_event(true)
+                // `spans` already ends with the current span.
+                .with_current_span(false),
             enabled,
             context_lookup: self.clone(),
         }
@@ -179,9 +185,49 @@ where
 ///
 /// This is intentionally independent from `RUST_LOG`: changing stdout log
 /// verbosity must not remove parent spans from exported traces. Set
-/// `BUZZ_OTEL_FILTER` to override the default targets.
-pub fn otel_env_filter(configured: Option<&str>) -> EnvFilter {
-    EnvFilter::new(configured.unwrap_or("buzz_relay=info,buzz_datastore=info"))
+/// `BUZZ_OTEL_FILTER` to override the default targets. Access lines
+/// (`buzz_relay::access`) are off by default: they already reach stdout, and
+/// exporting them again as span events would duplicate every pubkey.
+pub fn otel_filter<S>(configured: Option<&str>) -> DirectiveFilter<S> {
+    directive_filter(
+        configured.unwrap_or("buzz_relay=info,buzz_relay::access=off,buzz_datastore=info"),
+    )
+}
+
+/// A per-layer filter built from `RUST_LOG`-style directives.
+pub type DirectiveFilter<S> = Box<dyn Filter<S> + Send + Sync>;
+
+/// Builds a per-layer filter from `RUST_LOG`-style directives.
+///
+/// A plain list of `target=level` directives filters through [`Targets`],
+/// which keeps no per-span state. [`EnvFilter`] takes a shared lock on every
+/// span enter and exit even when no directive names a span, and every poll
+/// of an instrumented future enters its span, so under a connection burst
+/// that lock is contended on every worker. Directives naming spans or fields
+/// keep `EnvFilter`, which alone understands them.
+pub fn directive_filter<S>(directives: &str) -> DirectiveFilter<S> {
+    match plain_targets(directives) {
+        Some(targets) => Box::new(targets),
+        None => Box::new(EnvFilter::new(directives)),
+    }
+}
+
+/// `directives` as [`Targets`] when each one is a bare level, a bare target
+/// or `target=level`. `Targets` would read a span directive such as
+/// `[conn]=debug` as a target name, so anything else is not plain.
+fn plain_targets(directives: &str) -> Option<Targets> {
+    let plain = directives.split(',').all(|directive| {
+        // `Targets` reads `=debug` as an empty target prefix that matches
+        // everything; `EnvFilter` rejects it. `EnvFilter` reads an empty
+        // level (`buzz_relay=`) as TRACE; `Targets` reads it as ERROR.
+        !directive.is_empty()
+            && !directive.starts_with('=')
+            && !directive.ends_with('=')
+            && directive
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | ':' | '-' | '='))
+    });
+    plain.then(|| directives.parse().ok()).flatten()
 }
 
 /// Build the OTEL [`Resource`] used by the trace provider.
@@ -278,6 +324,32 @@ mod tests {
         sync::{Arc, Mutex},
     };
     use tracing_subscriber::prelude::*;
+
+    #[test]
+    fn only_plain_target_level_directives_use_targets() {
+        for plain in [
+            "warn",
+            "buzz_relay",
+            "buzz_relay=info,buzz_db::store=DEBUG,off",
+        ] {
+            assert!(plain_targets(plain).is_some(), "{plain}");
+        }
+        for env in [
+            "",
+            "buzz_relay=info,",
+            "buzz_relay=info, sqlx=warn",
+            "[conn]=debug",
+            "buzz_relay[conn{id=1}]=trace",
+            "buzz_relay[{peer}]=debug",
+            "buzz_relay=loud",
+            "=debug",
+            "buzz_relay=info,=debug",
+            "buzz_relay=",
+            "buzz_relay=info,buzz_datastore=",
+        ] {
+            assert!(plain_targets(env).is_none(), "{env}");
+        }
+    }
 
     // Env vars are process-global — serialize tests that mutate them to prevent
     // cross-test races when the suite runs with multiple threads.
@@ -391,6 +463,8 @@ mod tests {
             .map(|line| serde_json::from_str(line).unwrap())
             .collect();
         assert_eq!(logs.len(), 11);
+        // The current span appears once, as the last entry of `spans`.
+        assert!(logs.iter().all(|log| log.get("span").is_none()), "{logs:?}");
 
         assert_eq!(logs[0]["message"], "root event");
         assert_eq!(logs[0]["answer"], 42);

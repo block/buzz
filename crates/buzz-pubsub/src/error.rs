@@ -7,10 +7,6 @@ pub enum PubSubError {
     #[error("Redis error: {0}")]
     Redis(#[from] redis::RedisError),
 
-    /// Failed to acquire a connection from the Redis pool.
-    #[error("Redis pool error: {0}")]
-    Pool(#[from] deadpool_redis::PoolError),
-
     /// JSON serialization or deserialization failed.
     #[error("Serialization error: {0}")]
     Serialization(#[from] serde_json::Error),

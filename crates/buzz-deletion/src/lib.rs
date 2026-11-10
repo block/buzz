@@ -5,6 +5,9 @@
 /// Synthetic user-deletion request intake.
 pub mod user;
 
+/// Community submission and preparation shared by operator entry points.
+pub mod community;
+
 use std::future::Future;
 #[cfg(test)]
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,6 +25,7 @@ use buzz_media::{
     is_tenant_owned_key, tenant_prefixes, BulkDeleteOutcome, MediaStorage, ObjectVersionKind,
     ObjectVersionRef,
 };
+use buzz_pubsub::{redis_connection, RedisConnection};
 use clap::Subcommand;
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
@@ -337,7 +341,7 @@ impl LoopMode {
 struct Services {
     store: DeletionStore,
     media: Arc<MediaStorage>,
-    redis: deadpool_redis::Pool,
+    redis: RedisConnection,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -461,15 +465,15 @@ async fn run_with_services(command: Command, services: Services) -> Result<i32> 
         } => {
             let relay_url = std::env::var("RELAY_URL").ok();
             let host = resolve_submit_host(host.as_deref(), relay_url.as_deref())?;
-            let request = services
-                .store
-                .submit(&host, &requested_by, reason.as_deref())
-                .await?;
-            let inventory = build_inventory(&services, &request, None).await?;
-            let request = services
-                .store
-                .freeze_inventory(request.id, &inventory)
-                .await?;
+            let request = community::submit_and_prepare(
+                &services.store,
+                &services.media,
+                Some(&host),
+                &requested_by,
+                reason.as_deref(),
+                None,
+            )
+            .await?;
             print_json(&request)?;
             Ok(0)
         }
@@ -609,14 +613,7 @@ async fn connect_services_with_store(store: DeletionStore) -> Result<Services> {
     };
     let media = Arc::new(MediaStorage::new(&media_config)?);
     let redis_url = required_env("REDIS_URL")?;
-    let mut redis_config = deadpool_redis::Config::from_url(&redis_url);
-    redis_config.pool = Some(deadpool_redis::PoolConfig::new(env_parse(
-        "BUZZ_REDIS_POOL_SIZE",
-        16,
-    )));
-    let redis = redis_config
-        .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-        .context("create deletion Redis pool")?;
+    let redis = redis_connection(&redis_url).context("create deletion Redis connection")?;
     Ok(Services {
         store,
         media,
@@ -703,15 +700,13 @@ fn validate_storage_ownership(request: &DeletionRequest, manifest: &StorageManif
 }
 
 async fn build_inventory(
-    services: &Services,
+    store: &DeletionStore,
+    media: &MediaStorage,
     request: &DeletionRequest,
     heartbeat_lost: Option<&CancellationToken>,
 ) -> Result<FrozenInventory> {
-    let schema = services
-        .store
-        .inventory_schema(request.community_id)
-        .await?;
-    let storage = enumerate_tenant_prefixes(services, request, heartbeat_lost, None).await?;
+    let schema = store.inventory_schema(request.community_id).await?;
+    let storage = enumerate_tenant_prefixes(store, media, request, heartbeat_lost, None).await?;
     Ok(FrozenInventory { schema, storage })
 }
 
@@ -722,12 +717,11 @@ struct ChunkSink<'a> {
     buffered: Vec<String>,
 }
 
-async fn flush_chunk(services: &Services, sink: &mut ChunkSink<'_>, prefix: &str) -> Result<()> {
+async fn flush_chunk(store: &DeletionStore, sink: &mut ChunkSink<'_>, prefix: &str) -> Result<()> {
     if sink.buffered.is_empty() {
         return Ok(());
     }
-    services
-        .store
+    store
         .append_manifest_key_chunk(sink.token, sink.next_chunk_no, prefix, &sink.buffered)
         .await?;
     sink.next_chunk_no += 1;
@@ -765,7 +759,8 @@ fn manifest_chunk_deleted_detail(
 /// (never spanning prefixes) for the destructive freeze to bind against these
 /// digests.
 async fn enumerate_tenant_prefixes(
-    services: &Services,
+    store: &DeletionStore,
+    media: &MediaStorage,
     request: &DeletionRequest,
     heartbeat_lost: Option<&CancellationToken>,
     mut sink: Option<&mut ChunkSink<'_>>,
@@ -782,8 +777,7 @@ async fn enumerate_tenant_prefixes(
             if heartbeat_lost.is_some_and(CancellationToken::is_cancelled) {
                 return Err(DeletionLeaseLost.into());
             }
-            let page = services
-                .media
+            let page = media
                 .list_prefix_versions_page(
                     &prefix,
                     key_marker.take(),
@@ -809,7 +803,7 @@ async fn enumerate_tenant_prefixes(
                 if let Some(sink) = sink.as_deref_mut() {
                     sink.buffered.push(encoded);
                     if sink.buffered.len() >= chunk_keys {
-                        flush_chunk(services, sink, &prefix).await?;
+                        flush_chunk(store, sink, &prefix).await?;
                     }
                 }
             }
@@ -824,7 +818,7 @@ async fn enumerate_tenant_prefixes(
             version_id_marker = Some(next_version_id_marker);
         }
         if let Some(sink) = sink.as_deref_mut() {
-            flush_chunk(services, sink, &prefix).await?;
+            flush_chunk(store, sink, &prefix).await?;
         }
         let (keys_digest, object_count) = digest.finish();
         prefixes.push(PrefixManifest {
@@ -960,8 +954,14 @@ async fn freeze_destructive_manifest(
         next_chunk_no: 0,
         buffered: Vec::new(),
     };
-    let manifest =
-        enumerate_tenant_prefixes(services, request, Some(heartbeat_lost), Some(&mut sink)).await?;
+    let manifest = enumerate_tenant_prefixes(
+        &services.store,
+        &services.media,
+        request,
+        Some(heartbeat_lost),
+        Some(&mut sink),
+    )
+    .await?;
     services
         .store
         .freeze_destructive_storage_manifest(token, &manifest)
@@ -1028,7 +1028,8 @@ async fn run_loop(
                 HEARTBEAT_INTERVAL,
                 |heartbeat_lost| async move {
                     build_inventory(
-                        preparation_services,
+                        &preparation_services.store,
+                        &preparation_services.media,
                         &preparation_request,
                         Some(&heartbeat_lost),
                     )
@@ -1682,24 +1683,24 @@ async fn verify_storage_absence(services: &Services, request: &DeletionRequest) 
 }
 
 async fn publish_disconnect_community(
-    pool: &deadpool_redis::Pool,
+    pool: &RedisConnection,
     community: buzz_core::CommunityId,
 ) -> Result<()> {
-    let mut connection = pool.get().await?;
+    let mut connection = pool.clone();
     let channel = format!("buzz:{community}:conn-control");
     let _: u64 = redis::cmd("PUBLISH")
         .arg(channel)
         .arg(r#"{"op":"DisconnectCommunity"}"#)
-        .query_async(&mut *connection)
+        .query_async(&mut connection)
         .await?;
     Ok(())
 }
 
 async fn purge_redis_namespace(
-    pool: &deadpool_redis::Pool,
+    pool: &RedisConnection,
     community: buzz_core::CommunityId,
 ) -> Result<u64> {
-    let mut connection = pool.get().await?;
+    let mut connection = pool.clone();
     let pattern = format!("buzz:{community}:*");
     let mut cursor = 0u64;
     let mut deleted = 0u64;
@@ -1710,12 +1711,12 @@ async fn purge_redis_namespace(
             .arg(&pattern)
             .arg("COUNT")
             .arg(1000)
-            .query_async(&mut *connection)
+            .query_async(&mut connection)
             .await?;
         if !keys.is_empty() {
             let count: u64 = redis::cmd("UNLINK")
                 .arg(&keys)
-                .query_async(&mut *connection)
+                .query_async(&mut connection)
                 .await?;
             deleted = deleted.saturating_add(count);
         }
@@ -1733,7 +1734,7 @@ fn scan_proves_absence(pages: &[(u64, Vec<String>)]) -> bool {
 }
 
 async fn scan_redis_namespace(
-    connection: &mut deadpool_redis::Connection,
+    connection: &mut RedisConnection,
     pattern: &str,
 ) -> Result<Vec<(u64, Vec<String>)>> {
     let mut cursor = 0u64;
@@ -1745,7 +1746,7 @@ async fn scan_redis_namespace(
             .arg(pattern)
             .arg("COUNT")
             .arg(1000)
-            .query_async(&mut **connection)
+            .query_async(connection)
             .await?;
         cursor = page.0;
         pages.push(page);
@@ -1756,10 +1757,10 @@ async fn scan_redis_namespace(
 }
 
 async fn verify_redis_absence(
-    pool: &deadpool_redis::Pool,
+    pool: &RedisConnection,
     community: buzz_core::CommunityId,
 ) -> Result<()> {
-    let mut connection = pool.get().await?;
+    let mut connection = pool.clone();
     let pattern = format!("buzz:{community}:*");
     // SCAN is weakly consistent. Two complete empty passes ensure a cursor
     // rollover or concurrent expiry cannot make one sparse pass look absent.
@@ -1906,7 +1907,7 @@ mod postgres_tests {
             .await
             .expect("create deletion engine test community");
         let request = store
-            .submit(&host, "test", None)
+            .submit(Some(&host), "test", None, None)
             .await
             .expect("submit deletion request");
         let inventory = FrozenInventory {
@@ -1950,9 +1951,8 @@ mod postgres_tests {
                 })
                 .expect("construct unused media service"),
             ),
-            redis: deadpool_redis::Config::from_url("redis://127.0.0.1:1")
-                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-                .expect("construct unused Redis pool"),
+            redis: redis_connection("redis://127.0.0.1:1")
+                .expect("construct unused Redis connection"),
         };
         (db, services, claim)
     }
@@ -2021,9 +2021,8 @@ mod postgres_tests {
                 })
                 .expect("construct unused media service"),
             ),
-            redis: deadpool_redis::Config::from_url("redis://127.0.0.1:1")
-                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-                .expect("construct unused Redis pool"),
+            redis: redis_connection("redis://127.0.0.1:1")
+                .expect("construct unused Redis connection"),
         };
         (db, services, *request, inventory)
     }
@@ -2053,7 +2052,7 @@ mod postgres_tests {
             .expect("create approved community");
         let approved = services
             .store
-            .submit(&approved_host, "manual-operator", None)
+            .submit(Some(&approved_host), "manual-operator", None, None)
             .await
             .expect("submit approved request");
         let inventory = FrozenInventory {
@@ -2139,7 +2138,7 @@ mod postgres_tests {
             .expect("create manual community");
         let manual = services
             .store
-            .submit(&operator_host, "manual-operator", None)
+            .submit(Some(&operator_host), "manual-operator", None, None)
             .await
             .expect("submit manual request");
 

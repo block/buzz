@@ -1,11 +1,17 @@
 /// NIP-42 authentication handler.
 pub mod admin_action_worker;
 pub mod admin_outbox_worker;
+/// NIP-AR Sync subscriptions.
+pub mod artifact_sync;
+#[cfg(test)]
+mod artifact_sync_postgres_tests;
 pub mod auth;
 /// Pure NIP-29 channel membership-authority decisions (kinds 9000/9001/9022).
 pub mod channel_authz;
 /// Subscription close (CLOSE) handler.
 pub mod close;
+/// Per-key single-flight refresh with a minimum interval.
+pub mod coalesced_refresh;
 /// Command executor — transactional processing for command kinds.
 pub mod command_executor;
 /// Relay-operator community provisioning HTTP support.
@@ -14,6 +20,8 @@ pub mod community_provisioning;
 pub mod count;
 #[cfg(test)]
 mod create_with_members_postgres_tests;
+#[cfg(test)]
+mod deletion_postgres_tests;
 #[cfg(test)]
 mod edit_metadata_postgres_tests;
 /// EVENT handler — WS dispatcher → ingest pipeline → fan-out.
@@ -26,16 +34,24 @@ pub mod identity_archive;
 pub mod imeta;
 /// Transport-neutral event ingestion pipeline.
 pub mod ingest;
+/// Local media publication authorization.
+pub mod media_access;
+#[cfg(test)]
+mod membership_notice_postgres_tests;
 /// Community moderation authorization seam (capability helper).
 pub mod moderation_authz;
 /// Community moderation command handler (kinds 9040–9044).
 pub mod moderation_commands;
 /// Relay-signed moderation notice DMs.
 pub mod moderation_notices;
+/// Multi-node fan-out: Redis events to local subscribers, with lossless lag handling.
+pub mod multinode_fanout;
 /// Product-feedback validation + deployment sidecar persistence.
 pub mod product_feedback;
 #[allow(dead_code, missing_docs)]
 pub mod push_lease;
+#[cfg(test)]
+mod put_user_postgres_tests;
 /// NIP-43 relay membership admin command handler (kinds 9030–9032).
 pub mod relay_admin;
 /// NIP-56 report (kind:1984) validation + moderation queue persistence.

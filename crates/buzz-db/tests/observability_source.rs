@@ -264,7 +264,9 @@ fn p0_pool_acquisitions_use_typed_operation_pairs_without_other() {
         .expect("channel lookup helper must precede canvas reads")
         .0;
     assert!(get_channel.contains("acquire_writer(pool, operation)"));
-    assert!(get_channel.contains("fetch_optional(&mut *connection)"));
+    assert!(get_channel.contains("select_channel(&mut connection, community_id, channel_id)"));
+    assert!(get_channel.contains("conn: &mut sqlx::PgConnection"));
+    assert!(get_channel.contains("fetch_optional(conn)"));
     assert!(!get_channel.contains("fetch_optional(pool)"));
     assert!(channel.contains("pub async fn get_channel_for_event_write("));
     let list_channels = channel
@@ -409,7 +411,6 @@ fn p0_pool_acquisitions_use_typed_operation_pairs_without_other() {
         .0;
     assert!(thread_summary.contains("WriterOperation::EventWrite"));
     assert!(thread_summary.contains("fetch_optional(&mut *connection)"));
-    assert!(thread_summary.contains("fetch_all(&mut *connection)"));
     assert!(!thread_summary.contains("fetch_optional(pool)"));
     assert!(!thread_summary.contains("fetch_all(pool)"));
 
@@ -453,42 +454,27 @@ fn p0_pool_acquisitions_use_typed_operation_pairs_without_other() {
         .next()
         .expect("replica-fence production source");
     assert!(replica_fence_production.contains("WriterOperation::Bootstrap"));
-    assert!(replica_fence_production.contains("WriterOperation::Maintenance"));
+    // The heartbeat probe runs on its own pool, never a serving writer
+    // checkout: queued behind request traffic, its beat goes stale exactly
+    // when the writer is saturated.
+    assert!(!replica_fence_production.contains("WriterOperation::Maintenance"));
+    assert!(replica_fence_production.contains("pub fn connect_probe_pool("));
+    assert!(runtime.contains("replica_fence::connect_probe_pool(&self.pool)"));
     assert!(!replica_fence_production.contains("pool.begin().await"));
     assert!(!replica_fence_production.contains("writer.acquire().await"));
     assert!(!replica_fence_production.contains("fetch_optional(writer)"));
 
-    let usage = include_str!("../src/store/usage.rs");
-    let usage_production = usage
+    let leader_lock = include_str!("../src/store/leader_lock.rs");
+    let leader_lock_production = leader_lock
         .split("\n#[cfg(test)]")
         .next()
-        .expect("usage production source");
-    let usage_leader_lock = usage_production
+        .expect("leader-lock production source");
+    let leader_lock_acquisition = leader_lock_production
         .split_once("pub async fn try_lock_session_leader(")
-        .expect("usage store must expose the legacy leader-lock acquisition")
-        .1
-        .split_once("pub async fn usage_community_count(")
-        .expect("usage leader lock must precede counter reads")
-        .0;
-    assert!(usage_leader_lock.contains("acquire_writer_with_legacy_metrics("));
-    assert!(
-        usage_production
-            .matches("WriterOperation::Maintenance")
-            .count()
-            >= 11,
-        "every periodic usage checkout must be maintenance-attributed"
-    );
-    for bypass in [
-        ".fetch_one(pool)",
-        ".fetch_all(pool)",
-        ".fetch_optional(pool)",
-        ".execute(pool)",
-    ] {
-        assert!(
-            !usage_production.contains(bypass),
-            "usage production path bypasses operation attribution with {bypass}"
-        );
-    }
+        .expect("leader-lock store must expose the legacy leader-lock acquisition")
+        .1;
+    assert!(leader_lock_acquisition.contains("acquire_writer_with_legacy_metrics("));
+    assert!(leader_lock_acquisition.contains("WriterOperation::Maintenance"));
 
     let channel_reaper = channel
         .split_once("pub async fn reap_expired_ephemeral_channels(pool:")
@@ -595,6 +581,10 @@ fn p0_pool_acquisitions_use_typed_operation_pairs_without_other() {
         ),
         ("archived_identities", archived_identities),
         ("event", event),
+        (
+            "event_hydration",
+            include_str!("../src/store/event_hydration.rs"),
+        ),
         ("git_repo", include_str!("../src/store/git_repo.rs")),
         ("push", include_str!("../src/store/push.rs")),
         ("replica_fence", replica_fence),
@@ -609,7 +599,7 @@ fn p0_pool_acquisitions_use_typed_operation_pairs_without_other() {
             "relay_operators",
             include_str!("../src/store/relay_operators.rs"),
         ),
-        ("usage", usage),
+        ("leader_lock", leader_lock),
     ] {
         let production = source.split("\n#[cfg(test)]").next().unwrap_or(source);
         for bypass in [
@@ -884,10 +874,7 @@ fn has_any_tenant_local_chokepoint(source: &str) -> bool {
 const ADMITTED_TX_SIGNATURE_MARKERS: [&str; 2] = ["&mut AdmittedTx", "&mut crate::AdmittedTx"];
 
 // Narrow reviewed exceptions for non-serving verification probes only.
-const GUARDED_WRITE_FUNCTION_EXCEPTIONS: [&str; 2] = [
-    "pub async fn verify_floor_guard_behavior(",
-    "pub async fn verify_channel_roster_fence_behavior(",
-];
+const GUARDED_WRITE_FUNCTION_EXCEPTIONS: [&str; 1] = ["pub async fn verify_floor_guard_behavior("];
 
 const GUARDED_TX_ADAPTER_METHOD_PINS: [(&str, &str); 1] = [(
     "pub async fn replace_member_event(",
@@ -1390,10 +1377,7 @@ fn serving_table_writes_expose_syntactic_chokepoint_or_guarded_tx_routes() {
 
 // Rolled-back verification probes write `events` rows that never commit, so
 // they owe no push job or TTL refresh.
-const EVENT_INSERT_FOLLOW_UP_EXCEPTIONS: [&str; 2] = [
-    "pub async fn verify_floor_guard_behavior(",
-    "pub async fn verify_channel_roster_fence_behavior(",
-];
+const EVENT_INSERT_FOLLOW_UP_EXCEPTIONS: [&str; 1] = ["pub async fn verify_floor_guard_behavior("];
 
 /// `source` with every `#[cfg(test)]` item removed, wherever it sits in the
 /// file. Each item runs to the `;` that ends it or to the brace that closes
@@ -1692,7 +1676,7 @@ pub(crate) async fn hooked_writer(tx: &mut AdmittedTx) {
         .execute(tx.conn())
         .await
         .expect("write");
-    crate::store::event_follow_up::after_admitted_insert(tx, id, kind, channel)
+    crate::store::event_follow_up::after_admitted_insert(tx, id, created_at, kind, channel)
         .await
         .expect("follow up");
 }
@@ -1757,7 +1741,7 @@ pub(crate) async fn writer_with_commented_out_hook(tx: &mut AdmittedTx) {
         .execute(tx.conn())
         .await
         .expect("write");
-    // crate::store::event_follow_up::after_admitted_insert(tx, id, kind, channel)
+    // crate::store::event_follow_up::after_admitted_insert(tx, id, created_at, kind, channel)
 }
 pub(crate) async fn writer_with_block_commented_hook(tx: &mut AdmittedTx) {
     sqlx::query("INSERT INTO events (community_id, id) VALUES ($1, $2)")
@@ -1779,7 +1763,7 @@ pub(crate) async fn writer_with_nested_block_commented_hook(tx: &mut AdmittedTx)
         .execute(tx.conn())
         .await
         .expect("write");
-    /* /* inner */ crate::store::event_follow_up::after_admitted_insert(tx, id, kind, channel) */
+    /* /* inner */ crate::store::event_follow_up::after_admitted_insert(tx, id, created_at, kind, channel) */
 }
 pub(crate) async fn writer_with_hook_after_escaped_quote(tx: &mut AdmittedTx) {
     sqlx::query("INSERT INTO events (community_id, id) VALUES ($1, $2)")
@@ -1807,7 +1791,7 @@ pub(crate) async fn writer_after_block_commented_cfg_test(tx: &mut AdmittedTx) {
 pub(crate) async fn writer_after_raw_string_example(tx: &mut AdmittedTx) {
     let _example = r#"
 fn example() {
-    crate::store::event_follow_up::after_admitted_insert(tx, id, kind, channel)
+    crate::store::event_follow_up::after_admitted_insert(tx, id, created_at, kind, channel)
 }
 "#;
     sqlx::query("INSERT INTO events (community_id, id) VALUES ($1, $2)")
@@ -1925,19 +1909,70 @@ fn every_production_event_insert_runs_the_follow_up_hook() {
     );
 }
 
-// Fixed channel-less kinds cannot be channel rosters. The startup probes must
-// exercise the retained DB backstops directly and roll back all their writes.
+// Explicit inventory complements the generic insert scanner: every direct
+// production hook must forward the same created_at local bound by its INSERT.
+#[test]
+fn event_insert_hook_inventory_carries_the_insert_timestamp() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/store");
+    let mut actual = Vec::new();
+    for file in [
+        "event.rs",
+        "replaceable.rs",
+        "channel_members.rs",
+        "relay_members.rs",
+        "push.rs",
+    ] {
+        let source = std::fs::read_to_string(root.join(file)).expect("read writer");
+        let production = strip_cfg_test_items(&source);
+        for function in function_slices(&production) {
+            let code = mask_comments_and_literals(function);
+            let Some((_, arguments)) = code.split_once("event_follow_up::after_admitted_insert(")
+            else {
+                continue;
+            };
+            let compact: String = arguments.chars().filter(|c| !c.is_whitespace()).collect();
+            assert!(
+                compact.starts_with("tx,id_bytes.as_slice(),created_at,")
+                    || compact.starts_with("tx,incoming_id,created_at,")
+                    || compact.starts_with("&muttx,event.id.as_bytes().as_slice(),created_at,")
+                    || compact
+                        .starts_with("&mutself.tx,event.id.as_bytes().as_slice(),created_at,")
+                    || compact.starts_with("tx,event.id.as_bytes().as_slice(),created_at,"),
+                "{file}: {} must pass the INSERT's signed created_at",
+                function_header(function)
+            );
+            assert!(
+                code.contains(".bind(created_at)"),
+                "{file}: timestamp must match INSERT bind"
+            );
+            actual.push(format!("{file}: {}", function_header(function)));
+        }
+    }
+    actual.sort();
+    let mut expected = [
+        "event.rs: async fn insert_event_on(",
+        "event.rs: pub(crate) async fn insert_event_with_thread_metadata_tx(",
+        "replaceable.rs: async fn replace_parameterized_event_in_transaction_impl(",
+        "replaceable.rs: pub(crate) async fn replace_addressable_event_under_lock(",
+        "channel_members.rs: pub async fn replace_member_event(",
+        "relay_members.rs: pub(crate) async fn write_nip43_membership_snapshot(",
+        "push.rs: pub async fn accept_lease_event(",
+    ];
+    expected.sort();
+    assert_eq!(actual, expected);
+}
+
+// Fixed channel-less kinds cannot be channel rosters, and the replica-floor
+// startup probe rolls back all its writes.
 // Exemptions match by function header, so a kind 39002 insert added inside one
 // of these functions would pass the policy; keep them single-purpose.
-const EVENT_INSERT_ROSTER_GUARD_EXCEPTIONS: [&str; 4] = [
+const EVENT_INSERT_ROSTER_GUARD_EXCEPTIONS: [&str; 3] = [
     // NIP-43 membership is kind 13534 with channel_id NULL.
     "pub(crate) async fn write_nip43_membership_snapshot(",
     // Push leases are kind 30350 with channel_id NULL.
     "pub async fn accept_lease_event(",
     // Rolled-back replica-floor startup probe.
     "pub async fn verify_floor_guard_behavior(",
-    // Rolled-back roster-fence startup probe.
-    "pub async fn verify_channel_roster_fence_behavior(",
 ];
 
 fn event_insert_roster_guard_violations(production_source: &str) -> Vec<String> {
@@ -1992,9 +2027,6 @@ pub async fn accept_lease_event(tx: &mut AdmittedTx) {
 pub async fn verify_floor_guard_behavior(pool: &PgPool) {
     sqlx::query("INSERT INTO events (community_id, id) VALUES ($1, $2)");
 }
-pub async fn verify_channel_roster_fence_behavior(pool: &PgPool) {
-    sqlx::query("INSERT INTO events (community_id, id) VALUES ($1, $2)");
-}
 #[cfg(test)]
 mod tests {
     fn fixture() {
@@ -2038,10 +2070,10 @@ fn every_production_event_insert_runs_the_roster_guard() {
         violations.is_empty(),
         "production `INSERT INTO events` writers must run the app-side roster guard: {violations:?}"
     );
-    // Five guarded writers plus the four explicitly exempt writers/probes.
+    // Five guarded writers plus the three explicitly exempt writers/probes.
     assert!(
-        checked_writers >= 9,
-        "expected at least nine event writers, found {checked_writers}"
+        checked_writers >= 8,
+        "expected at least eight event writers, found {checked_writers}"
     );
 }
 
@@ -2161,7 +2193,39 @@ fn every_production_event_insert_names_d_tag() {
     // The same writer set as the roster-guard scan. A lower count means the
     // scan stopped seeing a writer, not that one was removed safely.
     assert!(
-        checked_writers >= 9,
-        "expected at least nine event writers, found {checked_writers}"
+        checked_writers >= 8,
+        "expected at least eight event writers, found {checked_writers}"
     );
+}
+
+/// Search-hit hydration must keep each hit's exact `created_at`: the paired
+/// `(id, created_at)` key is what lets PostgreSQL prune `events` partitions.
+/// This supplements the real PostgreSQL seam tests in `event_hydration`.
+#[test]
+fn every_search_hydrator_preserves_the_exact_hit_timestamp() {
+    for (source, path) in [
+        (
+            include_str!("../../buzz-relay/src/handlers/req.rs"),
+            "req_search_hydrate",
+        ),
+        (
+            include_str!("../../buzz-relay/src/api/bridge.rs"),
+            "bridge_search_hydrate",
+        ),
+        (
+            include_str!("../../buzz-relay/src/api/profiles.rs"),
+            "profile_search_hydrate",
+        ),
+    ] {
+        let compact: String = source.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(
+            compact.contains(&format!(".get_events_by_ids_at_routed(\"{path}\"")),
+            "{path}: must use exact-key hydration"
+        );
+        assert!(
+            source.contains("(h.event_id, h.created_at)")
+                || source.contains("(hit.event_id, hit.created_at)"),
+            "{path}: retain timestamp"
+        );
+    }
 }

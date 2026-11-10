@@ -3,6 +3,7 @@ part of '../pairing_page.dart';
 /// SAS verification screen shown during NIP-AB pairing.
 class _SasVerificationView extends HookConsumerWidget {
   final String sasCode;
+  final bool fullScreen;
   final Future<bool> Function(String)? verifyDesktopCode;
   final bool confirmed;
   final bool sendsIdentityToDesktop;
@@ -14,6 +15,7 @@ class _SasVerificationView extends HookConsumerWidget {
 
   const _SasVerificationView({
     super.key,
+    this.fullScreen = false,
     required this.sasCode,
     this.verifyDesktopCode,
     required this.confirmed,
@@ -124,36 +126,37 @@ class _SasVerificationView extends HookConsumerWidget {
             color: context._onboardingInk,
           ),
           const SizedBox(height: Grid.sm),
-          Text(
-            'Protect your identity',
-            textAlign: TextAlign.center,
-            style: context.textTheme.headlineSmall?.copyWith(
-              color: context._onboardingInk,
-              fontWeight: FontWeight.w600,
+          if (!fullScreen)
+            Text(
+              'Protect your identity',
+              textAlign: TextAlign.center,
+              style: OnboardingTypography.title.copyWith(
+                color: context._onboardingInk,
+              ),
             ),
-          ),
-          const SizedBox(height: Grid.xxs),
-          Text(
-            '$biometricLabel to confirm it’s you before sending your Buzz identity to another device.',
-            textAlign: TextAlign.center,
-            style: context.textTheme.bodyMedium?.copyWith(
-              color: context._onboardingMutedInk,
+          const SizedBox(height: Grid.xs),
+          if (!fullScreen)
+            Text(
+              '$biometricLabel to confirm it’s you before sending your Buzz identity to another device.',
+              textAlign: TextAlign.center,
+              style: OnboardingTypography.subtitle.copyWith(
+                color: context._onboardingMutedInk,
+              ),
             ),
-          ),
         ] else if (codeAccepted.value) ...[
           Icon(BuzzIcons.shieldCheck, size: 64, color: context._onboardingInk),
           const SizedBox(height: Grid.sm),
-          Text('Code confirmed', style: context.textTheme.headlineSmall),
+          if (!fullScreen)
+            Text('Code confirmed', style: OnboardingTypography.title),
         ] else ...[
-          Text(
-            'Enter pairing code',
-            textAlign: TextAlign.center,
-            style: context.textTheme.headlineSmall?.copyWith(
-              color: context._onboardingInk,
-              fontWeight: FontWeight.w600,
-              letterSpacing: -0.4,
+          if (!fullScreen)
+            Text(
+              'Enter pairing code',
+              textAlign: TextAlign.center,
+              style: OnboardingTypography.title.copyWith(
+                color: context._onboardingInk,
+              ),
             ),
-          ),
           const SizedBox(height: Grid.md),
           _PairingErrorShake(
             revision: shakeRevision.value,
@@ -248,6 +251,23 @@ class _SasVerificationView extends HookConsumerWidget {
             ),
           );
 
+    if (fullScreen) {
+      return OnboardingStepPage(
+        title: showProtection
+            ? 'Protect your identity'
+            : codeAccepted.value
+            ? 'Code confirmed'
+            : 'Enter pairing code',
+        subtitle: showProtection
+            ? '$biometricLabel to confirm it’s you before sending your Buzz identity to another device.'
+            : codeAccepted.value
+            ? null
+            : 'Enter the six-digit code shown on your desktop.',
+        onBack: onDeny,
+        content: verificationContent,
+        actions: [verificationActions],
+      );
+    }
     return Column(
       children: [
         Expanded(

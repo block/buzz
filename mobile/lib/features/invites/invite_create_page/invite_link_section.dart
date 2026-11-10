@@ -57,8 +57,9 @@ class _InviteLinkSection extends HookConsumerWidget {
         await ref.read(shareCommunityInviteProvider)(url, origin);
       } catch (_) {
         if (!context.mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showFeedbackSnackBar(
           const SnackBar(content: Text('Could not share invite link')),
+          kind: ToastKind.error,
         );
       }
     }
