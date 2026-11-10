@@ -1457,10 +1457,13 @@ mod tests {
         let query = crate::EventQuery::for_community(test_scope);
 
         writer_db
-            .ensure_configured_community_for_bootstrap(&format!(
-                "pool-operation-bootstrap-{}.invalid",
-                Uuid::new_v4().simple()
-            ))
+            .ensure_configured_community_for_bootstrap(
+                &format!(
+                    "pool-operation-bootstrap-{}.invalid",
+                    Uuid::new_v4().simple()
+                ),
+                &[],
+            )
             .await
             .expect("real community bootstrap succeeds");
         routed_db.read_pool_boot_ping_for_tests().await;
