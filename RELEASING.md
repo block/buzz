@@ -107,7 +107,8 @@ prior release's recorded squash commit; tag ancestry is deliberately irrelevant.
 Every push to `main` that changes the image build context continues to
 publish the rolling relay `:main` and `:sha-<7>` tags, plus matching
 `:debug-main` and `:debug-sha-<7>` variants. Pushes that only touch paths
-`.dockerignore` excludes (such as `desktop/` and `mobile/`) publish nothing.
+`.dockerignore` excludes (such as `desktop/`, `mobile/` and `docs/`) publish
+nothing.
 
 ### Mobile
 

@@ -38,7 +38,7 @@ push_trigger=$(awk '/^  push:$/{f=1;next} f&&/^  [a-z_]+:/{exit} f' "$workflow")
 push_paths=()
 while IFS= read -r entry; do
   push_paths+=("$entry")
-done < <(awk '/^    paths:$/{f=1;next} f&&/^      - /{print;next} f{exit}' <<<"$push_trigger")
+done < <(awk '/^    paths:$/{f=1;next} f&&/^[[:space:]]*(#.*)?$/{next} f&&/^      - /{print;next} f{exit}' <<<"$push_trigger")
 fail_push_paths() {
   echo "main push path filter: $1" >&2
   exit 1

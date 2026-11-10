@@ -65,6 +65,9 @@ on:
       - "**"
       - "!desktop/**"
       - "!mobile/**"
+      - "!docs/**"
+      - "!bin/**"
+      - "!sidecars/**"
       - "!.github/**"
       - ".github/workflows/docker.yml"
   pull_request:
