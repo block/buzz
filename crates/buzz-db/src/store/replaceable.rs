@@ -2603,7 +2603,7 @@ mod postgres_tests {
         );
         assert_eq!(
             state(id).await,
-            expected(false),
+            expected(false, Delete::Id),
             "NULL d_tag/Id: app classification"
         );
     }
