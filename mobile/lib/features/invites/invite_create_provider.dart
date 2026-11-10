@@ -11,6 +11,7 @@ import '../../shared/hosted/hosted_relay_auth.dart';
 import '../../shared/community/community_membership_provider.dart';
 import '../../shared/utils/string_utils.dart';
 import '../../shared/relay/relay.dart';
+import '../../shared/text/initial.dart';
 
 /// The default lifetime of a newly minted community invite link.
 const defaultCommunityInviteTtlSeconds = 3 * 24 * 60 * 60;
@@ -132,10 +133,10 @@ class CommunityInviteDirectoryUser {
   /// npub would render `N` for everyone).
   String get initial {
     final display = displayName?.trim();
-    if (display != null && display.isNotEmpty) return display[0].toUpperCase();
+    if (display != null && display.isNotEmpty) return avatarInitial(display);
     final nip05 = nip05Handle?.trim();
-    if (nip05 != null && nip05.isNotEmpty) return nip05[0].toUpperCase();
-    return pubkey.isNotEmpty ? pubkey[0].toUpperCase() : '?';
+    if (nip05 != null && nip05.isNotEmpty) return avatarInitial(nip05);
+    return avatarInitial(pubkey);
   }
 }
 

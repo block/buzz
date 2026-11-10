@@ -34,6 +34,7 @@ import '../../shared/widgets/app_list_card.dart';
 import '../../shared/widgets/app_list_card_item.dart';
 import '../../shared/widgets/sheet_action_section.dart';
 import '../../shared/relay/relay.dart';
+import '../../shared/text/initial.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/anchored_popover_menu.dart';
@@ -631,9 +632,7 @@ class ChannelsPage extends HookConsumerWidget {
                 avatarIdentity: activeCommunity?.id,
                 symbol: 'building.2.crop.circle',
                 imageUrl: communityAvatar,
-                avatarInitial: communityName.isEmpty
-                    ? '?'
-                    : communityName.substring(0, 1).toUpperCase(),
+                avatarInitial: avatarInitial(communityName),
                 onPressed: openCommunitySwitcher,
               ),
         nativeActions: messagesFilters != null
