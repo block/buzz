@@ -134,3 +134,6 @@ use buzz_core::CommunityId;
 
 /// Durable NIP-FI verified-profile projection state.
 pub use store::verified_profiles;
+
+/// Operator media inventory and deletion journal.
+pub use store::media_deletion;
