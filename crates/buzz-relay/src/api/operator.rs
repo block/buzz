@@ -6,6 +6,7 @@
 
 mod community_policy;
 mod invites;
+pub mod members;
 pub use community_policy::{community_nip_fi_policy_status, set_community_nip_fi_policy};
 pub use invites::mint_community_invite;
 
@@ -1250,6 +1251,7 @@ pub async fn no_store_policy_response(
 mod postgres_tests {
     mod initial_policy_postgres_tests;
     mod invite_postgres_tests;
+    mod members_postgres_tests;
     use std::{
         collections::HashSet,
         sync::{Arc, Mutex},

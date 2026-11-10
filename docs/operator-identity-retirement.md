@@ -40,6 +40,35 @@ DELETE /api/admin/v1/members/<hex>/execution-hold?communityHost=<host>
 
 `<hex>` is the 64-character lowercase key.
 
+### Operator API routes
+
+A deployment operator that reaches the relay at `RELAY_OPERATOR_API_ORIGIN`,
+for example over an internal service mesh, uses the same operations under
+`/operator/communities/members`, with the same query, bodies and responses:
+
+```http
+GET    /operator/communities/members/search?communityHost=<host>&q=<text>&limit=<n>
+GET    /operator/communities/members/<hex>/ownership?communityHost=<host>
+POST   /operator/communities/members/<hex>/archive?communityHost=<host>
+DELETE /operator/communities/members/<hex>/archive?communityHost=<host>
+DELETE /operator/communities/members/<hex>/execution-hold?communityHost=<host>
+```
+
+These routes do not use `BUZZ_ADMIN_HOST` or the inbound `Host`. Only keys in
+`RELAY_OPERATOR_PUBKEYS` are accepted (Operators added through the admin
+roster are not). The NIP-98 `u` tag must be `RELAY_OPERATOR_API_ORIGIN`
+followed by the path and query exactly as sent, so the signature covers
+`communityHost`; every mutation needs a `payload` tag for its exact body,
+`DELETE` included. Bodies are limited to 4096 bytes.
+
+An authorization refusal uses the operator API's envelope, `{"error":
+"<text>", "code": "unauthorized" | "not_operator"}` (401 or 403) and applies
+nothing. Every other error uses the lifecycle envelope described under
+*Responses*. A proxy error without either envelope (such as a gateway 502,
+503 or 504) or a lost response is an unknown outcome: repeat the same request
+to get the stored result. Only the lifecycle `503 retry_later` means the
+transaction rolled back.
+
 ### Archive
 
 In one transaction, serialized against agent-owner link writers and every
@@ -156,11 +185,18 @@ has two separate hops, and each needs its own routing check:
 
 On the portal → relay hop, every proxy and ingress must forward the method,
 the exact body bytes (including on `DELETE`) and the path and query unchanged.
-The relay checks the signed URL against its configured `BUZZ_ADMIN_HOST`, not
-the inbound `Host` header, so the portal must sign that origin. A dropped `DELETE` body answers `400 invalid_body`;
-a changed body or URL fails NIP-98 (`401`). Both fail closed, but leave keys
-held that cannot be released. Before enabling mutations, run unarchive and
-release through the real ingress, not only against the relay directly.
+The relay checks the signed URL against configuration, never the inbound
+`Host` header: `BUZZ_ADMIN_HOST` for the admin routes (which also require that
+`Host`), `RELAY_OPERATOR_API_ORIGIN` for the operator routes. A dropped
+`DELETE` body answers `400 invalid_body`; a changed body or URL fails NIP-98
+(`401`). Both fail closed, but leave keys held that cannot be released. Before
+enabling mutations, run unarchive and release through the real ingress, not
+only against the relay directly.
+
+A proxy or client deadline can expire while the relay is still working: the
+transaction waits at most 5 s for each lock and 15 s for each statement, and
+publication follows it, so there is no fixed bound on the whole request. Treat
+a timed-out request as an unknown outcome and repeat it.
 
 ## Rollout
 

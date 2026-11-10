@@ -12,6 +12,12 @@ Sign the full admin-origin URL, including the community query and actual HTTP
 method. This route requires the Operator role even when other moderation reads
 are network-trusted; Moderators and unsigned callers cannot use it.
 
+The same preview is served at
+`GET /operator/communities/members/<hex-pubkey>/ownership?communityHost=…` for
+an operator in `RELAY_OPERATOR_PUBKEYS`, signed against
+`RELAY_OPERATOR_API_ORIGIN` (see [Operator API
+routes](operator-identity-retirement.md#operator-api-routes)).
+
 The response contains:
 
 - `communityId`, `communityHost`, and the requested canonical `pubkey`;

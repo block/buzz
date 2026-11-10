@@ -266,6 +266,29 @@ async fn run(
     let principal = authorize_write(&state, &slot, &headers, &method, &uri, Some(&body))
         .await?
         .operator(&slot)?;
+    execute(
+        &state,
+        principal.pubkey,
+        operation,
+        target_hex,
+        &q.community_host,
+        &body,
+    )
+    .await
+}
+
+/// Apply one retirement operation for an already-authorized Operator `actor`.
+/// Shared by the admin-host routes and the `/operator` routes, so both answer
+/// with the same lifecycle semantics, body and error envelope. The caller has
+/// verified the signature over the exact `communityHost` and `body` passed in.
+pub(crate) async fn execute(
+    state: &Arc<AppState>,
+    actor: [u8; 32],
+    operation: RetirementOperation,
+    target_hex: String,
+    community_host: &str,
+    body: &[u8],
+) -> Reply {
     if !state.config.admin_identity_retirement {
         return Err(ApiError {
             status: StatusCode::SERVICE_UNAVAILABLE,
@@ -281,17 +304,17 @@ async fn run(
     }
     let mut target = [0u8; 32];
     hex::decode_to_slice(&target_hex, &mut target).map_err(|_| ApiError::internal())?;
-    let (request_id, payload) = parse_body(operation, &target_hex, &body)?;
-    let tenant = tenant_for_host(&state, &q.community_host).await?;
+    let (request_id, payload) = parse_body(operation, &target_hex, body)?;
+    let tenant = tenant_for_host(state, community_host).await?;
     if operation == RetirementOperation::Archive {
-        refuse_staff_target(&state, &target).await?;
+        refuse_staff_target(state, &target).await?;
     }
     let request = RetirementRequest {
         community: tenant.community(),
         request_id,
         operation,
         target,
-        actor: principal.pubkey,
+        actor,
         payload,
     };
     let outcome = state
@@ -315,11 +338,11 @@ async fn run(
                 unarchived = unarchived.len(),
                 "identity retirement action applied"
             );
-            publish_deltas(&tenant, &state, &request, &archived, &unarchived).await;
+            publish_deltas(&tenant, state, &request, &archived, &unarchived).await;
             (record, false)
         }
     };
-    let published = record.published || publish(&tenant, &state, &record).await;
+    let published = record.published || publish(&tenant, state, &record).await;
     Ok(respond(&tenant, record, replayed, published))
 }
 
