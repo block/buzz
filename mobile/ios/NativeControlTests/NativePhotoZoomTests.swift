@@ -35,6 +35,17 @@ struct NativePhotoZoomTests {
       requests.removeAll()
       for request in current { request.2(FlutterStandardTypedData(bytes: data)) }
       precondition(photo.image != nil, "Current-window responses must paint the actual page")
+      let blueData = UIGraphicsImageRenderer(size: CGSize(width: 2, height: 2)).pngData { context in
+        UIColor.blue.setFill(); context.fill(CGRect(x: 0, y: 0, width: 2, height: 2))
+      }
+      let previous = photo.image
+      viewer.updateFrame(blueData, at: 0)
+      precondition(photo.image === previous, "Offscreen animation frames cannot paint the selected photo")
+      viewer.updateFrame(blueData, at: 50)
+      precondition(photo.image !== previous, "Continuing animation frames must update the selected photo")
+      let updated = photo.image
+      viewer.updateFrame(Data([0, 1]), at: 50)
+      precondition(photo.image === updated, "Malformed frames must preserve the last displayed image")
       indicator.currentPage = 0; sendValueChanged(indicator)
       precondition(requests.contains { $0.1 == 0 }, "Leaving the window evicts old decoded images")
       let closing = requests
@@ -44,6 +55,12 @@ struct NativePhotoZoomTests {
       viewer.viewDidDisappear(false)
       for request in closing { request.2(FlutterStandardTypedData(bytes: data)) }
       precondition(closed && requests.isEmpty, "Teardown must ignore late loads and stop requesting")
+      let closedPage = pager.viewControllers!.first!
+      closedPage.loadViewIfNeeded()
+      let closedPhoto = descendants(closedPage.view).compactMap { $0 as? UIImageView }.first!
+      let closedImage = closedPhoto.image
+      viewer.updateFrame(data, at: 0)
+      precondition(closedPhoto.image === closedImage, "Closed viewers must ignore continuing frames")
       print("PASS: native photo window, stale responses, eviction and teardown")
     }
   }
