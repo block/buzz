@@ -275,7 +275,7 @@ class _DmAvatar extends ConsumerWidget {
                 width: 8,
                 height: 8,
                 decoration: BoxDecoration(
-                  color: _presenceColor(context, presence),
+                  color: context.presenceColor(presence),
                   shape: BoxShape.circle,
                   border: Border.all(
                     color: context.theme.scaffoldBackgroundColor,
@@ -287,13 +287,5 @@ class _DmAvatar extends ConsumerWidget {
         ],
       ),
     );
-  }
-
-  Color _presenceColor(BuildContext context, String? presence) {
-    return switch (presence) {
-      'online' => context.appColors.success,
-      'away' => context.appColors.warning,
-      _ => context.colors.outline,
-    };
   }
 }

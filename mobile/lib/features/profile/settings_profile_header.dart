@@ -296,7 +296,7 @@ class _PresencePill extends StatelessWidget {
                               width: 10,
                               height: 10,
                               decoration: BoxDecoration(
-                                color: _presenceColor(context, option),
+                                color: context.presenceColor(option),
                                 shape: BoxShape.circle,
                               ),
                             ),
@@ -361,10 +361,3 @@ String _presenceLabel(String presence) => switch (presence) {
   'away' => 'Away',
   _ => 'Offline',
 };
-
-Color _presenceColor(BuildContext context, String presence) =>
-    switch (presence) {
-      'online' => context.appColors.success,
-      'away' => context.appColors.warning,
-      _ => context.colors.outline,
-    };

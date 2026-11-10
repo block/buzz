@@ -160,6 +160,25 @@ void main() {
           );
           expect(menu.viewType, 'buzz/presence_menu');
           expect(menu.creationParams, containsPair('presence', 'offline'));
+          final menuContext = tester.element(
+            find.byKey(const ValueKey('settings-presence-menu')),
+          );
+          expect((menu.creationParams! as Map)['dotColors'], {
+            for (final value in const ['online', 'away', 'offline'])
+              value: menuContext.presenceColor(value).toARGB32(),
+          });
+          expect(
+            menuContext.presenceColor('online'),
+            menuContext.appColors.success,
+          );
+          expect(
+            menuContext.presenceColor('away'),
+            menuContext.appColors.warning,
+          );
+          expect(
+            menuContext.presenceColor('offline'),
+            Theme.of(menuContext).colorScheme.outline,
+          );
           final nativeMenu = nativeChannels.singleWhere(
             (channel) => channel.name.startsWith('buzz/presence_menu/'),
           );

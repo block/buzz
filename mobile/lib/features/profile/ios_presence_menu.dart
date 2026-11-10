@@ -3,6 +3,8 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../../shared/theme/theme.dart';
+
 /// Native iOS availability pill with a system menu owned by UIKit.
 class IosPresenceMenu extends StatefulWidget {
   const IosPresenceMenu({
@@ -63,6 +65,10 @@ class _IosPresenceMenuState extends State<IosPresenceMenu> {
     'label': widget.label,
     'foreground': widget.foreground.toARGB32(),
     'background': widget.background.toARGB32(),
+    'dotColors': {
+      for (final value in const ['online', 'away', 'offline'])
+        value: context.presenceColor(value).toARGB32(),
+    },
     'dark': Theme.of(context).brightness == Brightness.dark,
     'fontSize': MediaQuery.textScalerOf(context).scale(15),
   };

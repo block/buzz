@@ -62,13 +62,24 @@ private final class NativePresenceMenu: NSObject, FlutterPlatformView {
     button.configuration = configuration
     button.accessibilityLabel = "Availability"
     button.accessibilityValue = label
-    let options: [(String, String, UIColor)] = [("online", "Online", .systemGreen), ("away", "Away", .systemOrange), ("offline", "Offline", .systemGray)]
-    button.menu = UIMenu(children: options.map { value, title, color in
+    // Dot colors come from the Flutter design system (context.presenceColor).
+    let dotColors = data["dotColors"] as? [String: Any] ?? [:]
+    let options = [("online", "Online"), ("away", "Away"), ("offline", "Offline")]
+    button.menu = UIMenu(children: options.map { value, title in
       UIAction(title: title,
-        image: NativeTabler.image("circle.fill")?.withTintColor(color, renderingMode: .alwaysOriginal),
+        image: Self.dot(Self.color(dotColors[value])),
         state: presence == value ? .on : .off
       ) { [weak self] _ in self?.channel.invokeMethod("selected", arguments: value) }
     })
+  }
+
+  /// A solid availability dot, matching Flutter's 10pt filled circle.
+  private static func dot(_ color: UIColor, size: CGFloat = 20, diameter: CGFloat = 10) -> UIImage {
+    UIGraphicsImageRenderer(size: CGSize(width: size, height: size)).image { _ in
+      color.setFill()
+      let inset = (size - diameter) / 2
+      UIBezierPath(ovalIn: CGRect(x: inset, y: inset, width: diameter, height: diameter)).fill()
+    }.withRenderingMode(.alwaysOriginal)
   }
 
   private static func color(_ value: Any?) -> UIColor {

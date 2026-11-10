@@ -19,6 +19,13 @@ extension AppThemeExtension on BuildContext {
       : const Color(0xFF8D8D8D);
   TextTheme get textTheme => theme.textTheme;
 
+  /// Design-system availability color: success, warning, or outline.
+  Color presenceColor(String? presence) => switch (presence) {
+    'online' => appColors.success,
+    'away' => appColors.warning,
+    _ => colors.outline,
+  };
+
   AppColors get appColors {
     final ext = theme.extension<AppColors>();
     assert(ext != null, 'AppColors not found in ThemeData.extensions');
