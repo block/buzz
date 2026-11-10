@@ -12,6 +12,28 @@ void main() {
       'Scout ($second) 2',
     );
   });
+  test('a namesake qualifies earlier plain selections too', () {
+    expect(
+      selectedMentionLabel('Scout', second, {'Scout': first}),
+      'Scout ($second)',
+    );
+    expect(
+      selectedMentionLabel('Scout', first, {'Scout ($second)': second}),
+      'Scout ($first)',
+    );
+    expect(selectedMentionLabel('Other', second, {'Scout': first}), 'Other');
+    final renames = namesakeRequalifications('scout', second, {
+      'Scout': first,
+      'Other': first,
+    });
+    expect(renames, {'Scout': 'Scout ($first)'});
+    expect(namesakeRequalifications('Scout', first, {'Scout': first}), isEmpty);
+    // Offsets before the query shift; a query at the offset is left to splice.
+    const text = '@Scout and @Scout @Scout';
+    final renamed = renameMentions(text, ['Scout'], renames, 18);
+    expect(renamed.text, '@Scout ($first) and @Scout ($first) @Scout');
+    expect(renamed.offset, 18 + 2 * ' ($first)'.length);
+  });
   test('longest occurrences block shorter and interior recipients', () {
     expect(
       mentionOccurrences('@Scout ($second) 2', [

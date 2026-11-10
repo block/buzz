@@ -52,7 +52,7 @@ void exactMentionTests() {
   }
 
   // Same-name members get contextual picker labels (`Scout · <npub suffix>`);
-  // the inserted mention text still uses the plain name.
+  // namesake mentions are all inserted qualified with their pubkey.
   Finder scoutRows() => find.descendant(
     of: find.byKey(const ValueKey('mention-suggestions-popover')),
     matching: find.textContaining('Scout'),
@@ -309,7 +309,7 @@ void exactMentionTests() {
           .controller!;
       expect(controller.text, '@Scout ');
       await pick(tester, '@Scout @', last: true);
-      expect(controller.text, '@Scout @Scout ($second) ');
+      expect(controller.text, '@Scout ($first) @Scout ($second) ');
       await tester.tap(find.byIcon(BuzzIcons.arrowUp));
       await tester.pumpAndSettle();
       expect(sent, [first, second]);

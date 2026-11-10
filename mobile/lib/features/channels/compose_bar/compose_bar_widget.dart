@@ -328,20 +328,52 @@ class ComposeBar extends HookConsumerWidget {
 
     // Insert a selected mention into the text field.
     void insertMention(MentionCandidate candidate) {
-      final name = selectedMentionLabel(candidate.label, candidate.pubkey, {
+      final selected = {
         for (final entry in mentionMap.value.entries)
           entry.key: entry.value.pubkey,
-      });
-      // Track the resolved candidate so we can pass its pubkey and prepare
-      // selected non-member agents at send time.
-      mentionMap.value[name] = candidate;
+      };
+      final name = selectedMentionLabel(
+        candidate.label,
+        candidate.pubkey,
+        selected,
+      );
+      // A namesake qualifies every same-name mention, earlier ones included.
+      final renames = namesakeRequalifications(
+        candidate.label,
+        candidate.pubkey,
+        selected,
+      );
+      for (final entry in renames.entries) {
+        mentionMap.value[entry.value] = mentionMap.value.remove(entry.key)!;
+      }
       ref
           .read(mentionHistoryProvider.notifier)
           .remember(channelId, candidate.pubkey);
 
-      final start = mentionStartIdx.value.clamp(0, controller.text.length);
+      var start = mentionStartIdx.value.clamp(0, controller.text.length);
       isModifyingText.value = true;
       try {
+        if (renames.isNotEmpty) {
+          final cursor = controller.selection.isValid
+              ? controller.selection.baseOffset
+              : controller.text.length;
+          final renamed = renameMentions(
+            controller.text,
+            selected.keys,
+            renames,
+            start,
+          );
+          final delta = renamed.offset - start;
+          controller.value = TextEditingValue(
+            text: renamed.text,
+            selection: TextSelection.collapsed(offset: cursor + delta),
+          );
+          start = renamed.offset;
+        }
+        // Track the resolved candidate so we can pass its pubkey and prepare
+        // selected non-member agents at send time. Registered after the
+        // rename edit: persistence prunes keys the text does not yet contain.
+        mentionMap.value[name] = candidate;
         spliceAndMoveCursor(
           controller,
           focusNode,
