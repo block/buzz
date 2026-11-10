@@ -41,6 +41,7 @@ import 'channel_ids_by_name_provider.dart';
 import 'local_send_bubble_surface.dart';
 import 'media_viewer_page.dart';
 import 'native_photo_zoom_preview.dart';
+import 'native_video_files.dart';
 import 'message_content/link_normalizer.dart';
 import 'message_content/markdown_escapes.dart';
 import 'message_content/preview_text.dart';
@@ -308,7 +309,11 @@ class MessageContent extends HookConsumerWidget {
       content,
     ]);
     final trailingGallery = maxLines == null
-        ? extractTrailingImageGallery(normalizedContent, imetaByUrl)
+        ? extractTrailingImageGallery(
+            normalizedContent,
+            imetaByUrl,
+            includeVideos: bubble,
+          )
         : null;
     final galleryText = trailingGallery?.content ?? normalizedContent;
     // gpt_markdown has no backslash escapes, so hold escaped characters as
@@ -548,7 +553,7 @@ class MessageContent extends HookConsumerWidget {
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: Grid.xs),
             child: Text(
-              '${trailingGallery.items.length} photos',
+              '${trailingGallery.items.length} ${trailingGallery.items.any((item) => item.isVideo) ? 'attachments' : 'photos'}',
               key: const ValueKey('message-media-stack-count'),
               style: context.textTheme.labelSmall?.copyWith(
                 color: context.colors.onSurfaceVariant,

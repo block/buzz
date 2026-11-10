@@ -470,6 +470,98 @@ void main() {
   }, skip: !NativePhotoZoomPreview.enabled);
 
   testWidgets(
+    'video opens from its rendered source and only loads the selected video',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      final key = GlobalKey();
+      late BuildContext context;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Builder(
+            builder: (value) {
+              context = value;
+              return Center(
+                child: RepaintBoundary(
+                  key: key,
+                  child: const SizedBox(
+                    width: 100,
+                    height: 100,
+                    child: ColoredBox(color: Colors.black),
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+      );
+      final image = _PendingPreview();
+      final videos = <int>[];
+      const codec = StandardMethodCodec();
+      Future<Object?> nativeCall(String method, int session, int index) async {
+        final reply = Completer<Object?>();
+        await messenger.handlePlatformMessage(
+          NativePhotoZoomPreview.channel.name,
+          codec.encodeMethodCall(
+            MethodCall(method, {'session': session, 'index': index}),
+          ),
+          (data) => reply.complete(codec.decodeEnvelope(data!)),
+        );
+        return reply.future;
+      }
+
+      messenger.setMockMethodCallHandler(NativePhotoZoomPreview.channel, (
+        call,
+      ) async {
+        if (call.method == 'isSupported') return true;
+        final args = call.arguments as Map;
+        expect(args['videoIndices'], [0, 2]);
+        expect(args['bytes'], isA<Uint8List>());
+        final session = args['session'] as int;
+        expect(await nativeCall('image', session, 0), isNull);
+        expect(await nativeCall('video', session, 1), isNull);
+        expect(await nativeCall('video', session, 2), isNull);
+        expect(await nativeCall('video', session - 1, 0), isNull);
+        expect(await nativeCall('video', session, 0), '/temporary/clip.mp4');
+        await nativeCall('select', session, 2);
+        expect(await nativeCall('video', session, 0), isNull);
+        expect(await nativeCall('video', session, 2), '/temporary/clip.mp4');
+        return 'closed';
+      });
+      await tester.runAsync(() async {
+        expect(
+          await NativePhotoZoomPreview.open(
+            context: context,
+            sourceKeys: [key, key, key],
+            providers: [image, provider, image],
+            urls: [
+              'https://example.org/clip.mp4',
+              'https://example.org/photo.jpg',
+              'https://example.org/second.mov',
+            ],
+            labels: ['Clip', 'Photo', 'Second'],
+            initialIndex: 0,
+            videoIndices: {0, 2},
+            loadVideo: (index) async {
+              videos.add(index);
+              return '/temporary/clip.mp4';
+            },
+            onSelect: (_) async {},
+          ),
+          isFalse,
+        );
+      });
+      expect(videos, [0, 2]);
+      expect(
+        image.started,
+        isFalse,
+        reason: 'A video URL must never enter the image decoder',
+      );
+      debugDefaultTargetPlatformOverride = null;
+    },
+    skip: !NativePhotoZoomPreview.enabled,
+  );
+
+  testWidgets(
     'unsupported platform preserves existing gallery without decoding',
     (tester) async {
       debugDefaultTargetPlatformOverride = TargetPlatform.iOS;

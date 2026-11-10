@@ -3,6 +3,7 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 
 import '../../shared/relay/media_image.dart';
@@ -26,6 +27,8 @@ class NativePhotoZoomPreview {
   /// JPEG, PNG and HEIC/HEIF photos use the native gallery. Continuing frames
   /// are forwarded for animated PNGs; other formats keep the Flutter renderer.
   /// [mimeTypes], when provided, contains one declared type per [urls] entry.
+  /// [videoIndices] use rendered source snapshots and [loadVideo] local files;
+  /// their URLs never enter the image decoder.
   static Future<bool> open({
     required BuildContext context,
     required List<GlobalKey> sourceKeys,
@@ -39,10 +42,13 @@ class NativePhotoZoomPreview {
     required Future<void> Function(int) onSelect,
     VoidCallback? onReply,
     NativePhotoActions? actions,
+    Set<int> videoIndices = const {},
+    Future<String?> Function(int)? loadVideo,
   }) async {
     if (!enabled || defaultTargetPlatform != TargetPlatform.iOS) return true;
     // Metadata wins over the extension (e.g. a GIF served at a .jpg URL).
     for (var i = 0; i < urls.length; i++) {
+      if (videoIndices.contains(i)) continue;
       final mime = mimeTypes?[i]?.split(';').first.trim().toLowerCase();
       final path = Uri.tryParse(urls[i])?.path.toLowerCase() ?? '';
       if (mime != null
@@ -85,13 +91,15 @@ class NativePhotoZoomPreview {
         });
       });
       window = loads;
-      final bytes = await loads.load(
-        initialIndex,
-        previewProvider ??
-            previewProviders?[initialIndex] ??
-            providers[initialIndex],
-        preview: true,
-      );
+      final bytes = videoIndices.contains(initialIndex)
+          ? await _snapshot(sourceKeys[initialIndex])
+          : await loads.load(
+              initialIndex,
+              previewProvider ??
+                  previewProviders?[initialIndex] ??
+                  providers[initialIndex],
+              preview: true,
+            );
       if (bytes == null) return true;
       if (!context.mounted) return false;
       final geometry = _geometry(sourceKeys[initialIndex]);
@@ -106,12 +114,21 @@ class NativePhotoZoomPreview {
           return null;
         }
         switch (call.method) {
+          case 'video':
+            if (!videoIndices.contains(index) || index != loads.index) {
+              return null;
+            }
+            return loadVideo?.call(index);
           case 'preview':
+            if (videoIndices.contains(index)) {
+              return _snapshot(sourceKeys[index]);
+            }
             final provider = previewProviders?[index];
             return provider == null
                 ? null
                 : loads.load(index, provider, preview: true);
           case 'image':
+            if (videoIndices.contains(index)) return null;
             return loads.load(index, providers[index]);
           case 'select':
             loads.select(index);
@@ -120,7 +137,8 @@ class NativePhotoZoomPreview {
             return _geometry(sourceKeys[index]);
           case 'action':
             final action = args['action'];
-            if (actions == null ||
+            if (videoIndices.contains(index) ||
+                actions == null ||
                 !['save', 'share', 'copy', 'delete'].contains(action)) {
               return null;
             }
@@ -134,6 +152,7 @@ class NativePhotoZoomPreview {
         'bytes': bytes,
         'session': session,
         'labels': labels,
+        'videoIndices': videoIndices.toList(),
         'initialIndex': initialIndex,
         'canReply': onReply != null,
         'canMore': actions != null,
@@ -149,6 +168,20 @@ class NativePhotoZoomPreview {
       window?.dispose();
       channel.setMethodCallHandler(null);
       _presenting = false;
+    }
+  }
+
+  static Future<Uint8List?> _snapshot(GlobalKey key) async {
+    final boundary = key.currentContext?.findRenderObject();
+    if (boundary is! RenderRepaintBoundary || boundary.debugNeedsPaint) {
+      return null;
+    }
+    final image = await boundary.toImage(pixelRatio: 1);
+    try {
+      final data = await image.toByteData(format: ui.ImageByteFormat.png);
+      return data?.buffer.asUint8List();
+    } finally {
+      image.dispose();
     }
   }
 

@@ -62,7 +62,53 @@ struct NativePhotoZoomTests {
       viewer.updateFrame(data, at: 0)
       precondition(closedPhoto.image === closedImage, "Closed viewers must ignore continuing frames")
       print("PASS: native photo window, stale responses, eviction and teardown")
+      videoJourney(data: data)
+
     }
+  }
+  @available(iOS 18.0, *)
+  @MainActor static func videoJourney(data: Data) {
+    let path = CommandLine.arguments[1]
+    let viewer = NativePhotoZoomViewController(image: UIImage(data: data)!,
+      labels: ["Clip", "Photo", "Second clip"], initialIndex: 0,
+      canReply: true, canMore: true, canDelete: false, videoIndices: [0, 2])
+    var requested: [Int] = []
+    var lateVideo: FlutterResult?
+    viewer.request = { method, index, _, completion in
+      if method == "video" {
+        requested.append(index)
+        if index == 0 { completion(path) } else { lateVideo = completion }
+      } else { completion(method == "select" ? nil : FlutterStandardTypedData(bytes: data)) }
+    }
+    viewer.loadViewIfNeeded()
+    viewer.view.frame = CGRect(x: 0, y: 0, width: 390, height: 844)
+    viewer.view.layoutIfNeeded()
+    viewer.viewDidAppear(false)
+    let pager = viewer.children.compactMap { $0 as? UIPageViewController }.first!
+    let indicator = descendants(viewer.view).compactMap { $0 as? UIPageControl }.first!
+    let first = pager.viewControllers!.first!
+    first.loadViewIfNeeded()
+    let playerController = first.children.compactMap { $0 as? AVPlayerViewController }.first!
+    let player = playerController.player!
+    let item = player.currentItem!
+    let deadline = Date().addingTimeInterval(5)
+    while item.status == .unknown && Date() < deadline {
+      RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+    }
+    precondition(item.status == .readyToPlay, "Real MP4 fixture must become playable")
+    precondition(requested == [0], "Only the selected video may download")
+    indicator.currentPage = 2; sendValueChanged(indicator)
+    precondition(player.currentItem == nil && playerController.player == nil, "Paging releases the old player before Dart deletes its file")
+    precondition(requested == [0, 2], "Paging requests the selected video")
+    indicator.currentPage = 0; sendValueChanged(indicator)
+    lateVideo?(path)
+    let current = pager.viewControllers!.first!
+    current.loadViewIfNeeded()
+    let active = current.children.compactMap { $0 as? AVPlayerViewController }.first!
+    precondition(active.player != nil, "Returning to a video restores its player")
+    viewer.viewDidDisappear(false)
+    precondition(active.player == nil, "Closing releases the player before returning to Flutter")
+    print("PASS: native video decoding, selected-only loading, paging and teardown")
   }
   @MainActor static func sendValueChanged(_ control: UIControl) {
     // A command-line UIKit fixture has no UIApplication action dispatcher.
