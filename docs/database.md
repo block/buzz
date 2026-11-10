@@ -485,3 +485,11 @@ description:
 - [crates/buzz-db/TESTING.md](../crates/buzz-db/TESTING.md): desired-state
   and migration-mode tests.
 - `schema/schema.sql` header: the desired-state layout.
+
+## Scheduled-delivery timestamp reservations
+
+Scheduled messages reserve their future history position until event storage and
+sent state commit atomically. Replica-fence probes cap completeness proofs below
+all pending reservations. See [scheduled messages](scheduled-messages.md#replica-completeness)
+for the admission bounds, proof and mandatory two-phase rollout. Do not enable
+the feature while a reservation-unaware probe can still publish heartbeat tokens.
