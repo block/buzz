@@ -1687,7 +1687,10 @@ fn count_events_sql(q: &EventQuery) -> QueryBuilder<sqlx::Postgres> {
 }
 
 // Preserve the public event-store deletion API after the focused extraction.
-pub(crate) use super::event_deletion::soft_delete_event_and_update_thread_in_tx;
+pub(crate) use super::event_deletion::{
+    is_nip_rs_event, remove_coordinate_versions_in_tx, soft_delete_event_and_update_thread_in_tx,
+    CoordinateRemoval,
+};
 pub use super::event_deletion::{
     soft_delete_by_coordinate, soft_delete_event_and_update_thread, DeletionTarget,
 };

@@ -992,6 +992,34 @@ mod postgres_tests {
             .sql
             .as_str()
             .contains("CREATE FUNCTION profile_name_fields"));
+        // The app owns the NIP-RS watermark, retention-free purge and
+        // mention liveness, so 0066 drops the migration-only triggers that
+        // 0009, 0010, 0011 and 0019 installed. Those files stay frozen.
+        assert_eq!(migrations[65].version, 66);
+        let retire_nip_rs = strip_sql_comments(migrations[65].sql.as_str());
+        for statement in [
+            "SET LOCAL lock_timeout = '5s';",
+            "DROP TRIGGER trg_events_nip_rs_watermark ON events;",
+            "DROP TRIGGER trg_events_guard_nip_rs_hard_delete ON events;",
+            "DROP TRIGGER trg_events_purge_soft_deleted_nip_rs ON events;",
+            "DROP TRIGGER trg_events_purge_soft_deleted_buzz_mesh_status ON events;",
+            "DROP TRIGGER trg_event_mentions_require_live_event ON event_mentions;",
+            "DROP FUNCTION guard_nip_rs_watermark();",
+            "DROP FUNCTION guard_nip_rs_hard_delete();",
+            "DROP FUNCTION purge_soft_deleted_nip_rs();",
+            "DROP FUNCTION purge_soft_deleted_buzz_mesh_status();",
+            "DROP FUNCTION guard_event_mention_live();",
+        ] {
+            assert!(
+                retire_nip_rs.contains(statement),
+                "0066 must run {statement}"
+            );
+        }
+        assert!(
+            retire_nip_rs.find("SET LOCAL lock_timeout").unwrap()
+                < retire_nip_rs.find("DROP TRIGGER").unwrap(),
+            "0066 must bound its ACCESS EXCLUSIVE lock on events before the first DROP"
+        );
         assert_eq!(migrations[55].version, 56);
         assert!(migrations[55]
             .sql
@@ -2928,6 +2956,10 @@ mod postgres_tests {
     /// drift this test guards against. `indoption` (not just `indexdef` text) is
     /// asserted so a resurrected `NULLS FIRST` in a migration that `pgschema`
     /// cannot represent is caught.
+    ///
+    /// It also asserts the fully migrated `events` and
+    /// `event_mentions` row triggers match `schema/` exactly, so no
+    /// migration-only trigger survives on the event write path.
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn admin_schema_parity_between_desired_state_and_migrations() {
@@ -3005,6 +3037,25 @@ mod postgres_tests {
             .fetch_all(pool)
             .await
             .expect("read events key definitions")
+        }
+
+        // Row triggers on a parent table (partition clones follow the parent):
+        // name, function, enable mode and the tgtype bitmask.
+        async fn trigger_shapes(pool: &PgPool, table: &str) -> Vec<(String, String, String, i16)> {
+            sqlx::query_as(
+                "SELECT trigger.tgname::text, procedure.proname::text, \
+                 trigger.tgenabled::text, trigger.tgtype \
+                 FROM pg_trigger trigger \
+                 JOIN pg_class c ON c.oid = trigger.tgrelid \
+                 JOIN pg_namespace n ON n.oid = c.relnamespace \
+                 JOIN pg_proc procedure ON procedure.oid = trigger.tgfoid \
+                 WHERE n.nspname = 'public' AND c.relname = $1 AND NOT trigger.tgisinternal \
+                 ORDER BY trigger.tgname",
+            )
+            .bind(table)
+            .fetch_all(pool)
+            .await
+            .expect("read trigger shapes")
         }
 
         let base_url = std::env::var("BUZZ_TEST_DATABASE_URL")
@@ -3126,6 +3177,17 @@ mod postgres_tests {
                 constraints(&desired, table).await,
                 constraints(&migrated, table).await,
                 "constraint parity mismatch for {table}"
+            );
+        }
+
+        // Every migration-only trigger on the event tables is retired, so a
+        // fully migrated database carries exactly the desired-state triggers.
+        for table in ["events", "event_mentions"] {
+            assert_eq!(
+                trigger_shapes(&desired, table).await,
+                trigger_shapes(&migrated, table).await,
+                "trigger parity mismatch for {table}: a migration installs a trigger that \
+                 schema/ does not declare (or the reverse)"
             );
         }
     }
