@@ -23,8 +23,8 @@ class NativePhotoZoomPreview {
 
   /// Returns true only when the existing Flutter gallery is needed as fallback.
   ///
-  /// Only JPEG galleries use the static PNG bridge. Animation-capable formats
-  /// (including ordinary PNGs) and unknown types keep the Flutter renderer.
+  /// JPEG, PNG and HEIC/HEIF photos use the native gallery. Continuing frames
+  /// are forwarded for animated PNGs; other formats keep the Flutter renderer.
   /// [mimeTypes], when provided, contains one declared type per [urls] entry.
   static Future<bool> open({
     required BuildContext context,
@@ -41,15 +41,26 @@ class NativePhotoZoomPreview {
     NativePhotoActions? actions,
   }) async {
     if (!enabled || defaultTargetPlatform != TargetPlatform.iOS) return true;
-    // PNG/APNG, WebP, GIF and unknown formats may animate. The PNG bridge
-    // cannot preserve their frames, so keep the whole gallery in Flutter.
     // Metadata wins over the extension (e.g. a GIF served at a .jpg URL).
     for (var i = 0; i < urls.length; i++) {
       final mime = mimeTypes?[i]?.split(';').first.trim().toLowerCase();
       final path = Uri.tryParse(urls[i])?.path.toLowerCase() ?? '';
       if (mime != null
-          ? mime != 'image/jpeg'
-          : !(path.endsWith('.jpg') || path.endsWith('.jpeg'))) {
+          ? !const {
+              'image/jpeg',
+              'image/png',
+              'image/apng',
+              'image/heic',
+              'image/heif',
+            }.contains(mime)
+          : !const [
+              '.jpg',
+              '.jpeg',
+              '.png',
+              '.apng',
+              '.heic',
+              '.heif',
+            ].any(path.endsWith)) {
         return true;
       }
     }
@@ -62,7 +73,17 @@ class NativePhotoZoomPreview {
       if (!context.mounted) return false;
       final configuration = createLocalImageConfiguration(context);
       final reduceMotion = MediaQuery.disableAnimationsOf(context);
-      final loads = _PhotoWindow(configuration, initialIndex);
+      final loads = _PhotoWindow(configuration, initialIndex, (
+        index,
+        bytes,
+      ) async {
+        if (!context.mounted) return;
+        await channel.invokeMethod<void>('imageFrame', {
+          'session': session,
+          'index': index,
+          'bytes': bytes,
+        });
+      });
       window = loads;
       final bytes = await loads.load(
         initialIndex,
@@ -156,7 +177,8 @@ class NativePhotoZoomPreview {
 // At most five nearby photos, at preview and full resolution. Moving the window
 // abandons stale downloads; closing also releases all listeners and PNG bytes.
 class _PhotoWindow {
-  _PhotoWindow(this.configuration, this.index);
+  _PhotoWindow(this.configuration, this.index, this.onFrame);
+  final Future<void> Function(int, Uint8List) onFrame;
   final ImageConfiguration configuration;
   int index;
   bool disposed = false;
@@ -171,6 +193,12 @@ class _PhotoWindow {
     return (loads[(value, preview)] ??= _PhotoLoad(
       provider,
       configuration,
+      shouldForwardFrame: () => !disposed && value == index,
+      onFrame: preview
+          ? null
+          : (bytes) async {
+              if (!disposed && value == index) await onFrame(value, bytes);
+            },
     )).result;
   }
 
@@ -191,50 +219,80 @@ class _PhotoWindow {
 }
 
 class _PhotoLoad {
-  _PhotoLoad(this.provider, this.configuration) {
+  _PhotoLoad(
+    this.provider,
+    this.configuration, {
+    this.onFrame,
+    required this.shouldForwardFrame,
+  }) {
     stream = provider.resolve(configuration);
-    listener = ImageStreamListener(
-      (info, _) {
-        receivedFrame = true;
-        if (!frame.isCompleted) {
-          frame.complete(info);
-        } else {
-          info.dispose();
-        }
-      },
-      onError: (Object _, StackTrace? _) {
-        if (!frame.isCompleted) frame.complete(null);
-      },
-    );
-    stream.addListener(listener);
+    listener = ImageStreamListener((info, _) {
+      receivedFrame = true;
+      if (disposed || (first.isCompleted && !shouldForwardFrame())) {
+        info.dispose();
+        return;
+      }
+      nextFrame?.dispose();
+      nextFrame = info;
+      if (!encoding) unawaited(encode());
+    }, onError: (Object _, StackTrace? _) => dispose());
     timer = Timer(const Duration(seconds: 10), dispose);
-    result = encode();
+    stream.addListener(listener);
   }
 
   final ImageProvider<Object> provider;
   final ImageConfiguration configuration;
-  final frame = Completer<ImageInfo?>();
+  final Future<void> Function(Uint8List)? onFrame;
+  final bool Function() shouldForwardFrame;
+  final first = Completer<Uint8List?>();
+  Future<Uint8List?> get result => first.future;
   late final ImageStream stream;
   late final ImageStreamListener listener;
   late final Timer timer;
-  late final Future<Uint8List?> result;
+  ImageInfo? nextFrame;
+  bool encoding = false;
   bool disposed = false;
   bool detached = false;
   bool receivedFrame = false;
 
-  Future<Uint8List?> encode() async {
-    final info = await frame.future;
-    detach();
+  // One encoding and one latest frame per load, including while the platform
+  // channel is busy. Never queue an animation's entire decoded frame history.
+  Future<void> encode() async {
+    encoding = true;
     try {
-      if (info == null || disposed) return null;
-      final data = await info.image.toByteData(format: ui.ImageByteFormat.png);
-      if (disposed || data == null) return null;
-      return data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes);
+      while (!disposed && nextFrame != null) {
+        final info = nextFrame!;
+        nextFrame = null;
+        try {
+          final data = await info.image.toByteData(
+            format: ui.ImageByteFormat.png,
+          );
+          if (disposed || data == null) {
+            dispose();
+            return;
+          }
+          final bytes = data.buffer.asUint8List(
+            data.offsetInBytes,
+            data.lengthInBytes,
+          );
+          if (!first.isCompleted) {
+            first.complete(bytes);
+            timer.cancel();
+            if (onFrame == null) {
+              dispose();
+              return;
+            }
+          } else {
+            await onFrame?.call(bytes);
+          }
+        } finally {
+          info.dispose();
+        }
+      }
     } catch (_) {
-      return null;
+      dispose();
     } finally {
-      info?.dispose();
-      timer.cancel();
+      encoding = false;
     }
   }
 
@@ -246,9 +304,12 @@ class _PhotoLoad {
   }
 
   void dispose() {
+    if (disposed) return;
     disposed = true;
     timer.cancel();
-    if (!frame.isCompleted) frame.complete(null);
+    if (!first.isCompleted) first.complete(null);
+    nextFrame?.dispose();
+    nextFrame = null;
     detach();
   }
 }

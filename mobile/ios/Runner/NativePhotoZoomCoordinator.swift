@@ -6,6 +6,7 @@ final class NativePhotoZoomCoordinator {
   private let channel: FlutterMethodChannel
   private weak var parent: UIViewController?
   private var active: UIViewController?
+  private var activeSession: Int?
 
   init(messenger: FlutterBinaryMessenger, parentViewController: UIViewController?) {
     channel = FlutterMethodChannel(name: "buzz/native_photo_zoom", binaryMessenger: messenger)
@@ -14,6 +15,19 @@ final class NativePhotoZoomCoordinator {
       guard let self else { result("unavailable"); return }
       if call.method == "isSupported" {
         if #available(iOS 18.0, *) { result(true) } else { result(false) }
+        return
+      }
+      if call.method == "imageFrame" {
+        if #available(iOS 18.0, *),
+          let args = call.arguments as? [String: Any],
+          let session = args["session"] as? Int, session == self.activeSession,
+          let index = args["index"] as? Int,
+          let bytes = args["bytes"] as? FlutterStandardTypedData,
+          let controller = self.active as? NativePhotoZoomViewController
+        {
+          controller.updateFrame(bytes.data, at: index)
+        }
+        result(nil)
         return
       }
       guard call.method == "present" else { result(FlutterMethodNotImplemented); return }
@@ -94,9 +108,11 @@ final class NativePhotoZoomCoordinator {
         presenter?.view.accessibilityElementsHidden = previousAccessibilityHidden
         anchor?.removeFromSuperview()
         self?.active = nil
+        self?.activeSession = nil
         result(action)
       }
       self.active = controller
+      self.activeSession = session
       presenter.present(controller, animated: animate)
     }
   }
@@ -320,7 +336,9 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
       guard let self, !self.finishing, self.isNearby(value), self.pending[key] == token else { return }
       self.pending.removeValue(forKey: key)
       let image = (result as? FlutterStandardTypedData).flatMap { UIImage(data: $0.data) }
-      if let image {
+      // A continuing frame can arrive before this initial reply. Keep the
+      // newer full image authoritative over both delayed image and preview data.
+      if let image, self.images[value] == nil {
         if method == "preview" { self.previews[value] = image }
         else { self.images[value] = image }
       }
@@ -329,6 +347,15 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
         else if method == "image" { page.setImage(nil) }
       }
       if self.index == value, method == "image" { self.syncSelection() }
+    }
+  }
+  // Flutter decodes authenticated originals and forwards continuing frames.
+  // Ignore old pages and closed presentations before allocating a UIImage.
+  func updateFrame(_ data: Data, at value: Int) {
+    guard !finishing, value == index, let image = UIImage(data: data) else { return }
+    images[value] = image
+    for page in pager.children.compactMap({ $0 as? NativePhotoPage }) where page.index == value {
+      page.setImage(image)
     }
   }
   private func page(_ value: Int) -> NativePhotoPage {
