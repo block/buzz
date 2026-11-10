@@ -3,6 +3,7 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
 
+import '../../shared/identity_archives/identity_archives.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/sheet_action_section.dart';
 import '../../shared/widgets/avatar_image.dart';
@@ -37,8 +38,19 @@ class MembersSheet extends HookConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final membersAsync = ref.watch(channelMembersProvider(channel.id));
     final allMembers = membersAsync.asData?.value ?? const <ChannelMember>[];
-    final people = allMembers.where((member) => !member.isBot).toList();
-    final bots = allMembers.where((member) => member.isBot).toList();
+    // Known-archived members follow the live ones in each group, each part
+    // in the relay's order.
+    final archived = ref.watch(hiddenArchivedIdentitiesProvider);
+    bool isArchived(ChannelMember member) =>
+        archived.contains(member.pubkey.toLowerCase());
+    List<ChannelMember> group(bool Function(ChannelMember) inGroup) => [
+      for (final member in allMembers)
+        if (inGroup(member) && !isArchived(member)) member,
+      for (final member in allMembers)
+        if (inGroup(member) && isArchived(member)) member,
+    ];
+    final people = group((member) => !member.isBot);
+    final bots = group((member) => member.isBot);
     final userCache = ref.watch(userCacheProvider);
     final typingBotPubkeys = ref.watch(workingBotPubkeysProvider(channel.id));
     final statusCache = ref.watch(userStatusCacheProvider);
@@ -113,6 +125,7 @@ class MembersSheet extends HookConsumerWidget {
                       currentPubkey: currentPubkey,
                       profile: userCache[member.pubkey.toLowerCase()],
                       canManage: canManage,
+                      isArchived: isArchived(member),
                       isSelf:
                           member.pubkey.toLowerCase() ==
                           currentPubkey?.toLowerCase(),
@@ -136,6 +149,7 @@ class MembersSheet extends HookConsumerWidget {
                       currentPubkey: currentPubkey,
                       profile: userCache[bot.pubkey.toLowerCase()],
                       canManage: canManage,
+                      isArchived: isArchived(bot),
                       isSelf: false,
                       channelId: channel.id,
                       isWorking: typingBotPubkeys.contains(
@@ -196,6 +210,9 @@ class _MemberTile extends ConsumerWidget {
   final String? currentPubkey;
   final UserProfile? profile;
   final bool canManage;
+
+  /// Known-archived: the row says so, in text a screen reader reads too.
+  final bool isArchived;
   final bool isSelf;
   final String channelId;
   final bool isWorking;
@@ -208,6 +225,7 @@ class _MemberTile extends ConsumerWidget {
     required this.currentPubkey,
     required this.profile,
     required this.canManage,
+    this.isArchived = false,
     required this.isSelf,
     required this.channelId,
     this.isWorking = false,
@@ -240,7 +258,7 @@ class _MemberTile extends ConsumerWidget {
         isAgent: member.isBot || profile?.isAgent == true,
       ),
       title: Text(label),
-      subtitle: isWorking
+      subtitle: isWorking && !isArchived
           ? Row(
               mainAxisSize: MainAxisSize.min,
               children: [
@@ -259,7 +277,7 @@ class _MemberTile extends ConsumerWidget {
                 ),
               ],
             )
-          : userStatus != null && !userStatus!.isEmpty
+          : !isArchived && userStatus != null && !userStatus!.isEmpty
           ? Text(
               '${userStatus!.emoji.isNotEmpty ? '${userStatus!.emoji} ' : ''}${userStatus!.text}',
               style: context.textTheme.bodySmall?.copyWith(
@@ -269,7 +287,9 @@ class _MemberTile extends ConsumerWidget {
               overflow: TextOverflow.ellipsis,
             )
           : Text(
-              _roleLabel(member.role),
+              isArchived
+                  ? 'Archived \u00b7 ${_roleLabel(member.role)}'
+                  : _roleLabel(member.role),
               style: context.textTheme.bodySmall?.copyWith(
                 color: context.colors.onSurfaceVariant,
               ),
