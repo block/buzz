@@ -3562,7 +3562,7 @@ void main() {
     await tester.pump();
 
     expect(
-      find.text("This community didn't accept your sign-in. Try again."),
+      find.text("This community couldn't authenticate the request. Try again."),
       findsOneWidget,
     );
     expect(find.textContaining('API token'), findsNothing);
