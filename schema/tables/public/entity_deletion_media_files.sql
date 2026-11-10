@@ -9,9 +9,12 @@ CREATE TABLE entity_deletion_media_files (
     evidence_json JSONB NOT NULL,
     delete_targets_json JSONB NOT NULL DEFAULT '[]'::jsonb
         CHECK (jsonb_typeof(delete_targets_json) = 'array'),
+    reserved BOOLEAN NOT NULL DEFAULT false,
     reason TEXT,
     last_error TEXT,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (stage_id, storage_namespace, file_hash),
     CHECK (status NOT IN ('to_be_deleted', 'deleted') OR jsonb_array_length(delete_targets_json) > 0)
 );
+CREATE INDEX entity_deletion_media_reserved_hash_idx
+    ON entity_deletion_media_files (file_hash) WHERE reserved;

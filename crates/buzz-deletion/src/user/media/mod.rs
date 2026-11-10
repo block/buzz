@@ -8,8 +8,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use uuid::Uuid;
 mod command;
+mod decision;
+mod stage;
 mod storage;
+mod upload;
 pub use command::{run, Options};
+pub use stage::{run_stage, StageOptions};
+pub use upload::UploadClaims;
 
 /// Output/execution policy for the media stage.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, ValueEnum, PartialEq, Eq)]
@@ -26,12 +31,16 @@ pub enum Mode {
 /// The workflow's safety boundary, distinct from its worker lease. The provider
 /// must verify approved scope/removal fingerprints, storage retention/holds,
 /// complete cross-community scans and crash-persistent all-writer reservations.
-/// There is deliberately no permissive production implementation until those
-/// writer integrations exist. The standalone command cannot mint this authority.
+/// The concrete implementation is used by run_stage. The standalone preview
+/// cannot grant execution authority.
 #[allow(async_fn_in_trait)]
 pub trait ProtectedMedia {
     /// Validate the same durable protection and scope before each external action.
     async fn verify(&self, run: &MediaRun) -> Result<()>;
+    /// Validate the completed decisions once before the first storage deletion.
+    async fn ready(&self, run: &MediaRun) -> Result<()> {
+        self.verify(run).await
+    }
     /// Perform the final checks and return keep, unresolved or exact delete targets.
     /// Failure must leave the saved row unknown, never manufacture a keep decision.
     async fn decide(&self, run: &MediaRun, file: &MediaFile) -> Result<MediaFile>;
@@ -87,6 +96,7 @@ pub async fn handle<P: ProtectedMedia>(
     if files.iter().any(|f| f.status == "unknown") {
         bail!("media decisions unresolved; step 3 cannot start");
     }
+    protected.ready(run).await?;
     for file in files.iter().filter(|f| f.status == "to_be_deleted") {
         let targets: Vec<MediaTarget> = serde_json::from_value(file.delete_targets_json.clone())?;
         let result = delete_targets(run, &targets, protected).await;
@@ -174,63 +184,6 @@ pub async fn delete_version(media: &MediaStorage, target: &MediaTarget) -> Resul
         bail!("storage refused selected version deletion");
     }
     Ok(())
-}
-
-/// Classify an unfenced observation. Shared references are concrete keep evidence;
-/// absence of known survivors cannot authorize deletion of a live file.
-pub fn classify_preview(mut file: MediaFile) -> Result<MediaFile> {
-    let sources = file.evidence_json["sources"]
-        .as_array()
-        .context("missing media source evidence")?;
-    let surviving = sources.iter().any(|s| s["surviving"] == true);
-    file.evidence_json["preview_checks"] = json!({
-        "database_sources": "scanned",
-        "storage_versions": "listed",
-        "surviving_reference_or_upload": surviving,
-        "exact_source_removal_approval": "unresolved",
-        "historical_upload_coverage": "unresolved",
-        "version_retention_and_holds": "unresolved",
-        "upload_record_retention_policy": "unresolved",
-        "durable_all_writer_reservation": "unavailable"
-    });
-    if surviving {
-        file.status = "dont_delete".into();
-        file.reason =
-            Some("surviving reference or uploader claim; retain all components in preview".into());
-        file.last_error = None;
-    } else {
-        file.last_error=Some("unresolved: exact source-removal approval, historical upload coverage, version retention/holds, upload-record retention policy, and durable file reservation".into());
-        file.reason = Some(
-            "associated with subject; no known surviving reference in this observation".into(),
-        );
-    }
-    Ok(file)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn preview_does_not_confuse_missing_checks_with_keep_or_delete() {
-        let file = MediaFile {
-            storage_namespace: "fixture".into(),
-            file_hash: "a".repeat(64),
-            status: "unknown".into(),
-            evidence_json: json!({"sources":[{"selected_subject":true,"surviving":false}]}),
-            delete_targets_json: json!([]),
-            reason: None,
-            last_error: None,
-        };
-        let unknown = classify_preview(file.clone()).unwrap();
-        assert_eq!(unknown.status, "unknown");
-        assert!(unknown.last_error.is_some());
-        let mut shared = file;
-        shared.evidence_json["sources"]
-            .as_array_mut()
-            .unwrap()
-            .push(json!({"surviving":true}));
-        assert_eq!(classify_preview(shared).unwrap().status, "dont_delete");
-    }
 }
 
 #[cfg(test)]

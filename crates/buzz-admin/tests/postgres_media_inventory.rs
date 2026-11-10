@@ -24,6 +24,12 @@ async fn storage(State(state): State<S3Fixture>, method: Method, uri: Uri) -> im
     if method != Method::GET {
         return (StatusCode::FORBIDDEN, "unexpected storage operation".into());
     }
+    if uri.query().unwrap_or_default().contains("object-lock") {
+        return (
+            StatusCode::NOT_FOUND,
+            "<Error><Code>ObjectLockConfigurationNotFoundError</Code></Error>".into(),
+        );
+    }
     if uri.query().unwrap_or_default().contains("versions") {
         return (StatusCode::OK,format!("<ListVersionsResult><IsTruncated>false</IsTruncated><Version><Key>{}.jpg</Key><VersionId>fixture-v1</VersionId><Size>4</Size><IsLatest>true</IsLatest></Version><Version><Key>{}</Key><VersionId>upload-v1</VersionId><Size>{}</Size><IsLatest>false</IsLatest></Version></ListVersionsResult>",state.hash,state.upload_key,state.upload_record.len()));
     }
@@ -126,7 +132,7 @@ async fn preview_cli_saves_inventory_resumes_and_never_calls_delete() {
     let first = invoke(run, 10_000_000).output().await.unwrap();
     assert_eq!(
         first.status.code(),
-        Some(2),
+        Some(0),
         "{}",
         String::from_utf8_lossy(&first.stderr)
     );
@@ -135,7 +141,7 @@ async fn preview_cli_saves_inventory_resumes_and_never_calls_delete() {
     assert_eq!(inventory["candidate_count"], 2);
     assert_eq!(inventory["execution_authorized"], false);
     assert_eq!(inventory["files"][0]["file_hash"], hash);
-    assert_eq!(inventory["files"][0]["status"], "unknown");
+    assert_eq!(inventory["files"][0]["status"], "to_be_deleted");
     assert_eq!(
         inventory["files"][0]["evidence_json"]["observed_objects"][0]["version_id"],
         "fixture-v1"
@@ -154,7 +160,7 @@ async fn preview_cli_saves_inventory_resumes_and_never_calls_delete() {
     let second = invoke(run, 10_000_000).output().await.unwrap();
     assert_eq!(
         second.status.code(),
-        Some(2),
+        Some(0),
         "{}",
         String::from_utf8_lossy(&second.stderr)
     );
@@ -188,5 +194,5 @@ async fn preview_cli_saves_inventory_resumes_and_never_calls_delete() {
         .await
         .unwrap();
     assert!(!rejected.status.success());
-    assert!(String::from_utf8_lossy(&rejected.stderr).contains("ProtectedMedia"));
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("approved workflow stage"));
 }

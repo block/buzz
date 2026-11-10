@@ -6,6 +6,8 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 mod execution;
+mod reservation;
+pub use reservation::{guard_hashes, guard_payload};
 mod scan;
 pub use scan::{MediaScan, MediaScanBudget, MediaSource, SubjectScope};
 
@@ -216,24 +218,13 @@ impl MediaDeletionStore {
         Ok(())
     }
 
-    /// Save a decision and its targets together. Preview rows may only be kept
-    /// or unresolved; execution cannot promote these unfenced observations.
+    /// Save the same decisions and exact targets as execution, but keep the
+    /// isolated preview non-executable. It never acquires deletion authority.
     pub async fn save_preview_decision(&self, run: &MediaRun, file: &MediaFile) -> Result<()> {
-        if !matches!(file.status.as_str(), "unknown" | "dont_delete")
-            || file.delete_targets_json != json!([])
-            || serde_json::to_vec(file)?.len() > MAX_FILE_BYTES
-        {
-            return Err(invalid("a preview cannot authorize or report deletion"));
+        if run.lease.is_some() {
+            return Err(invalid("execution must use execution decision writes"));
         }
-        let mut tx = self.pool.begin().await?;
-        let metadata = self.lock(&mut tx, run).await?;
-        if metadata["media_discovery"]["complete"] != true {
-            return Err(invalid("discovery unfinished"));
-        }
-        sqlx::query("UPDATE entity_deletion_media_files SET status=$4,evidence_json=$5,reason=$6,last_error=$7,updated_at=now() WHERE stage_id=$1 AND storage_namespace=$2 AND file_hash=$3 AND status='unknown'")
-            .bind(run.id).bind(&file.storage_namespace).bind(&file.file_hash).bind(&file.status).bind(&file.evidence_json).bind(&file.reason).bind(&file.last_error).execute(&mut *tx).await?;
-        tx.commit().await?;
-        Ok(())
+        self.save_decision(run, file).await
     }
 }
 

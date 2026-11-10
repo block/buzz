@@ -77,22 +77,15 @@ async fn preview_cannot_authorize_deletion_and_preserves_control_evidence() {
         .unwrap();
     file.status = "to_be_deleted".into();
     file.delete_targets_json = json!([{"key":"a.jpg","version_id":"v1"}]);
-    assert!(store.save_preview_decision(&run, &file).await.is_err());
+    store.save_preview_decision(&run, &file).await.unwrap();
     assert!(store.save_execution_decision(&run, &file).await.is_err());
     assert!(store
         .save_execution_outcome(&run, &file, None)
         .await
         .is_err());
     let rows = store.load(&run).await.unwrap().unwrap();
-    assert_eq!(rows[0].status, "unknown");
-    file = rows[0].clone();
-    file.status = "dont_delete".into();
-    file.reason = Some("surviving private reference".into());
-    store.save_preview_decision(&run, &file).await.unwrap();
-    assert_eq!(
-        store.load(&run).await.unwrap().unwrap()[0].status,
-        "dont_delete"
-    );
+    assert_eq!(rows[0].status, "to_be_deleted");
+    assert_eq!(rows[0].delete_targets_json, file.delete_targets_json);
 }
 
 #[tokio::test]
@@ -146,6 +139,29 @@ async fn exact_execution_plan_survives_failure_and_cannot_be_replaced() {
         .publish(&run, &[file.clone()], json!({}))
         .await
         .unwrap();
+    // A writer admitted before reservation holds its shared lock until commit.
+    // Reservation must wait, then reject later writers using its durable flag.
+    let mut writer = db.pool().begin().await.unwrap();
+    guard_hashes(&mut writer, std::slice::from_ref(&file.file_hash))
+        .await
+        .unwrap();
+    let reserve = store.reserve(&run);
+    tokio::pin!(reserve);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut reserve)
+            .await
+            .is_err()
+    );
+    writer.commit().await.unwrap();
+    reserve.await.unwrap();
+    store.verify_reserved(&run).await.unwrap();
+    let mut later = db.pool().begin().await.unwrap();
+    assert!(
+        guard_hashes(&mut later, std::slice::from_ref(&file.file_hash))
+            .await
+            .is_err()
+    );
+    later.rollback().await.unwrap();
     file.status = "to_be_deleted".into();
     file.delete_targets_json = json!([{"key":format!("{}.jpg",file.file_hash),"version_id":"v1"}]);
     store.save_execution_decision(&run, &file).await.unwrap();
@@ -171,6 +187,8 @@ async fn exact_execution_plan_survives_failure_and_cannot_be_replaced() {
         store.load(&run).await.unwrap().unwrap()[0].status,
         "deleted"
     );
+    store.release_reserved(&run).await.unwrap();
+    assert!(store.verify_reserved(&run).await.is_err());
 }
 
 #[tokio::test]

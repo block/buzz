@@ -159,6 +159,36 @@ impl AdmittedTx {
         &mut self.tx
     }
 
+    /// Refuse new uses of reserved files and retain the shared file locks through
+    /// this transaction's commit. Call before a media-bearing insert or update.
+    pub async fn guard_media(&mut self, payload: &serde_json::Value) -> Result<()> {
+        crate::media_deletion::guard_payload(&mut self.tx, payload).await
+    }
+
+    /// Reject upload claims from a person or scoped agent being removed. The
+    /// identity locks serialize with installation of the durable restriction.
+    pub(crate) async fn guard_media_uploader(&mut self, pubkey: &[u8]) -> Result<()> {
+        use crate::user_deletion_fences::{self, FenceIdentity};
+        let key = nostr::PublicKey::from_slice(pubkey)
+            .map_err(|e| crate::DbError::InvalidData(e.to_string()))?;
+        let identities = [
+            FenceIdentity::user(key),
+            FenceIdentity::agent(self.community, key),
+        ];
+        user_deletion_fences::lock_shared(&mut self.tx, &identities).await?;
+        for identity in identities {
+            if user_deletion_fences::find(&mut self.tx, identity)
+                .await?
+                .is_some()
+            {
+                return Err(crate::DbError::AccessDenied(
+                    "uploads are disabled for this deletion subject".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Record that an event committed with this transaction belongs to
     /// `channel_id`, so [`AdmittedTx::commit`] refreshes the channel's TTL.
     pub(crate) fn record_channel_event(&mut self, channel_id: Option<Uuid>, kind: i32) {

@@ -16,6 +16,9 @@ use s3::request::Request as _;
 use s3::{Bucket, Region};
 use serde::{Deserialize, Serialize};
 
+mod retention;
+pub use retention::VersionRetention;
+
 /// A stream of byte chunks from S3, usable with `axum::body::Body::from_stream()`.
 pub type ByteStream = Pin<Box<dyn futures_core::Stream<Item = Result<Bytes, MediaError>> + Send>>;
 
@@ -204,6 +207,19 @@ fn parse_object_versions_page(xml: &[u8]) -> Result<ObjectVersionsPage, MediaErr
 /// S3-compatible object storage client.
 pub struct MediaStorage {
     bucket: Box<Bucket>,
+    upload_admission: Option<std::sync::Arc<dyn UploadAdmission>>,
+}
+
+/// Record a verified uploader claim and reject deletion restrictions before any
+/// upload storage writes, including the idempotent existing-blob path.
+pub trait UploadAdmission: Send + Sync {
+    /// Admission runs after computing and verifying the actual content hash.
+    fn admit<'a>(
+        &'a self,
+        community: CommunityId,
+        hash: &'a str,
+        uploader: &'a [u8],
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<(), MediaError>> + Send + 'a>>;
 }
 
 impl MediaStorage {
@@ -252,7 +268,28 @@ impl MediaStorage {
             S3AddressingStyle::Path => bucket.with_path_style(),
             S3AddressingStyle::Virtual => bucket,
         };
-        Ok(Self { bucket })
+        Ok(Self {
+            bucket,
+            upload_admission: None,
+        })
+    }
+
+    /// Install the relay's database admission before accepting uploads.
+    pub fn with_upload_admission(mut self, admission: std::sync::Arc<dyn UploadAdmission>) -> Self {
+        self.upload_admission = Some(admission);
+        self
+    }
+
+    pub(crate) async fn admit_upload(
+        &self,
+        community: CommunityId,
+        hash: &str,
+        uploader: &[u8],
+    ) -> Result<(), MediaError> {
+        if let Some(admission) = &self.upload_admission {
+            admission.admit(community, hash, uploader).await?;
+        }
+        Ok(())
     }
 
     /// Store an object from a byte slice.

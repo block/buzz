@@ -62,6 +62,12 @@ pub async fn insert(
     community: CommunityId,
     feedback: NewProductFeedback<'_>,
 ) -> Result<Uuid> {
+    let mut tx = pool.begin().await?;
+    crate::media_deletion::guard_payload(
+        &mut tx,
+        &serde_json::json!([feedback.body, feedback.tags]),
+    )
+    .await?;
     let row = sqlx::query(
         r#"
         INSERT INTO product_feedback (
@@ -80,9 +86,10 @@ pub async fn insert(
     .bind(feedback.body)
     .bind(feedback.tags)
     .bind(feedback.event_created_at)
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await?;
 
+    tx.commit().await?;
     Ok(row.try_get("id")?)
 }
 

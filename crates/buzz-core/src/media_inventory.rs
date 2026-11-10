@@ -8,15 +8,25 @@ use std::collections::BTreeSet;
 /// must not be interpreted as an empty reference set by the caller.
 pub fn references(value: &Value, bases: &[String]) -> Result<BTreeSet<(String, String)>, String> {
     let mut out = BTreeSet::new();
-    visit(value, bases, "", 0, &mut out)?;
+    visit(value, Some(bases), "", 0, &mut 0, &mut out)?;
     Ok(out)
+}
+
+/// Extract file hashes for write exclusion, including absolute URL aliases.
+/// Shares the inventory parser, but accepts any HTTP origin and drops evidence
+/// paths. Public keys and event IDs in ordinary tags are not file references.
+pub fn write_hashes(value: &Value) -> Result<BTreeSet<String>, String> {
+    let mut out = BTreeSet::new();
+    visit(value, None, "", 0, &mut 0, &mut out)?;
+    Ok(out.into_iter().map(|(hash, _)| hash).collect())
 }
 
 fn visit(
     value: &Value,
-    bases: &[String],
+    bases: Option<&[String]>,
     path: &str,
     depth: usize,
+    work: &mut usize,
     out: &mut BTreeSet<(String, String)>,
 ) -> Result<(), String> {
     if depth > 32 || out.len() > 10_000 {
@@ -25,7 +35,7 @@ fn visit(
     match value {
         Value::Array(items) => {
             for (i, v) in items.iter().enumerate() {
-                visit(v, bases, &format!("{path}/{i}"), depth + 1, out)?;
+                visit(v, bases, &format!("{path}/{i}"), depth + 1, work, out)?;
             }
         }
         Value::Object(items) => {
@@ -35,17 +45,29 @@ fn visit(
                     bases,
                     &format!("{path}/{}", k.replace('~', "~0").replace('/', "~1")),
                     depth + 1,
+                    work,
                     out,
                 )?;
             }
         }
         Value::String(s) => {
+            *work = work.saturating_add(s.len());
+            if *work > 128 * 1024 * 1024 {
+                return Err("media reference parsing byte budget exceeded".into());
+            }
             // JSON embedded in event content is commonplace. Decode before URL tokenization.
             if (s.trim_start().starts_with('{') || s.trim_start().starts_with('['))
-                && s.len() <= 1_048_576
+                && (bases.is_none() || s.len() <= 1_048_576)
             {
                 if let Ok(decoded) = serde_json::from_str::<Value>(s) {
-                    visit(&decoded, bases, &format!("{path}/json"), depth + 1, out)?;
+                    visit(
+                        &decoded,
+                        bases,
+                        &format!("{path}/json"),
+                        depth + 1,
+                        work,
+                        out,
+                    )?;
                 }
             }
             for token in s.split(|c: char| {
@@ -67,7 +89,14 @@ fn visit(
                 }
             }
             if let Some(hash) = s.strip_prefix("x ").filter(|h| valid_hash(h)) {
-                out.insert((hash.into(), path.into()));
+                out.insert((
+                    hash.into(),
+                    if bases.is_some() {
+                        path.into()
+                    } else {
+                        String::new()
+                    },
+                ));
             }
         }
         _ => {}
@@ -75,18 +104,31 @@ fn visit(
     Ok(())
 }
 
-fn add_url(url: &str, bases: &[String], path: &str, out: &mut BTreeSet<(String, String)>) {
+fn add_url(url: &str, bases: Option<&[String]>, path: &str, out: &mut BTreeSet<(String, String)>) {
     let url = url
         .split(['?', '#'])
         .next()
         .unwrap_or(url)
         .trim_end_matches('.');
-    // Always validate absolute URLs against configured/local hosts. A foreign
-    // /media path is not an object in this namespace.
-    for base in bases {
-        if let Some(hash) = crate::media::local_hash(url, base) {
-            out.insert((hash, path.into()));
-            break;
+    if let Some(bases) = bases {
+        // Discovery only attributes URLs in this storage namespace.
+        for base in bases {
+            if let Some(hash) = crate::media::local_hash(url, base) {
+                out.insert((hash, path.into()));
+                break;
+            }
+        }
+    } else if url.starts_with("/media/")
+        || url.starts_with("https://")
+        || url.starts_with("http://")
+    {
+        // A writer must also cover configured aliases without an unbounded
+        // community-host lookup on every event. Foreign URL matches can only
+        // conservatively reject use of a currently reserved content hash.
+        if let Some((base, _)) = url.rsplit_once('/') {
+            if let Some(hash) = crate::media::local_hash(url, base) {
+                out.insert((hash, String::new()));
+            }
         }
     }
 }
@@ -102,6 +144,32 @@ pub fn valid_hash(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn write_guard_decodes_large_embedded_json_and_ignores_public_keys() {
+        let hash = "a".repeat(64);
+        let escaped = "\\u0061".repeat(64);
+        let content = format!(
+            r#"{{"padding":"{}","url":"/media/{}.jpg"}}"#,
+            " ".repeat(1_048_576),
+            escaped
+        );
+        let value = serde_json::json!({"content": content});
+        assert_eq!(
+            write_hashes(&value).unwrap(),
+            BTreeSet::from([hash.clone()])
+        );
+        let tags: Vec<_> = (0..12_000)
+            .map(|_| serde_json::json!(["p", hash]))
+            .collect();
+        assert!(write_hashes(&serde_json::json!({"tags": tags}))
+            .unwrap()
+            .is_empty());
+        assert!(
+            write_hashes(&serde_json::json!("x".repeat(16 * 1024 * 1024)))
+                .unwrap()
+                .is_empty()
+        );
+    }
     #[test]
     fn attachments_nested_json_animation_and_foreign_hosts() {
         let a = "a".repeat(64);

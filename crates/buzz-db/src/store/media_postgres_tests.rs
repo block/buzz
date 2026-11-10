@@ -83,12 +83,28 @@ async fn edits_deletion_legacy_profiles_and_publication_boundaries() {
         .id;
     let a = "a".repeat(64);
     let b = "b".repeat(64);
+    db.begin_media_upload(community, &a, owner.public_key().as_bytes())
+        .await
+        .unwrap();
+    assert_eq!(
+        allowed(&db, community, &a, &base, &owner).await,
+        MediaAccess::NoReference,
+        "a pre-storage claim must not grant uploader preview access"
+    );
     db.record_media_upload(community, &a, owner.public_key().as_bytes())
         .await
         .unwrap();
     assert_eq!(
         allowed(&db, community, &a, &base, &owner).await,
         MediaAccess::UploaderPreview
+    );
+    db.begin_media_upload(community, &a, owner.public_key().as_bytes())
+        .await
+        .unwrap();
+    assert_eq!(
+        allowed(&db, community, &a, &base, &owner).await,
+        MediaAccess::UploaderPreview,
+        "a new pending attempt must not revoke an earlier confirmed upload"
     );
     assert_eq!(
         allowed(&db, community, &a, &base, &outsider).await,
