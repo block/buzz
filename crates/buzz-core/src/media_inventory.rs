@@ -106,6 +106,12 @@ fn visit(
 }
 
 fn add_url(url: &str, bases: Option<&[String]>, path: &str, out: &mut BTreeSet<(String, String)>) {
+    // Every accepted path contains a slash and a full 64-byte hash. Most
+    // message tokens cannot be media URLs; avoid allocating three prefixes per
+    // community for each of those ordinary words during a whole-database scan.
+    if url.len() < 65 || !url.contains('/') {
+        return;
+    }
     let url = url
         .split(['?', '#'])
         .next()
