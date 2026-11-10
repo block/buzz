@@ -47,11 +47,15 @@ async fn migration_schema_floor_retirement_drops_parent_and_partition_clones() {
             .expect("count parent and partitions");
     assert_eq!(floor_objects(&pool).await, (partitions, 1));
     let before = retained_guards(&pool).await;
-    crate::migration::run_migrations(&pool)
+    crate::migration::run_migrations_through(&pool, 87)
         .await
-        .expect("apply contract migration and retained startup checks");
+        .expect("apply contract migration");
     assert_eq!(floor_objects(&pool).await, (0, 0));
     assert_eq!(retained_guards(&pool).await, before);
+    crate::migration::run_migrations(&pool)
+        .await
+        .expect("apply later migrations and retained startup checks");
+    assert_eq!(floor_objects(&pool).await, (0, 0));
     pool.close().await;
 }
 
@@ -77,7 +81,7 @@ async fn migration_schema_floor_retirement_cleans_child_copies_idempotently() {
     .expect("install independent child copy");
     assert_eq!(floor_objects(&pool).await, (1, 1));
     let before = retained_guards(&pool).await;
-    crate::migration::run_migrations(&pool)
+    crate::migration::run_migrations_through(&pool, 87)
         .await
         .expect("retire independent copy");
     assert_eq!(floor_objects(&pool).await, (0, 0));
