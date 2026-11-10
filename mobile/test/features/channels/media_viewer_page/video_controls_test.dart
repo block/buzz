@@ -19,8 +19,12 @@ import 'package:video_player/video_player.dart';
 class _TempDirectory extends Fake
     with MockPlatformInterfaceMixin
     implements PathProviderPlatform {
+  _TempDirectory(this.path);
+
+  final String path;
+
   @override
-  Future<String?> getTemporaryPath() async => Directory.systemTemp.path;
+  Future<String?> getTemporaryPath() async => path;
 }
 
 class _Player extends VideoPlayerPlatform {
@@ -136,8 +140,14 @@ Future<_Player> _pumpVideo(
   final oldPlayer = VideoPlayerPlatform.instance;
   final oldPath = PathProviderPlatform.instance;
   final player = _Player(size: videoSize);
+  // Registered first so it runs after the viewer is disposed. The viewer's
+  // async delete of its buzz-video-* file never completes under FakeAsync.
+  final temporaryDirectory = Directory.systemTemp.createTempSync(
+    'video_controls_test_',
+  );
+  addTearDown(() => temporaryDirectory.deleteSync(recursive: true));
   VideoPlayerPlatform.instance = player;
-  PathProviderPlatform.instance = _TempDirectory();
+  PathProviderPlatform.instance = _TempDirectory(temporaryDirectory.path);
   addTearDown(() {
     VideoPlayerPlatform.instance = oldPlayer;
     PathProviderPlatform.instance = oldPath;

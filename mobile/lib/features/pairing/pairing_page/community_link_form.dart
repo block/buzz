@@ -84,40 +84,25 @@ class _CommunityLinkForm extends HookConsumerWidget {
       if (fullPage && showHeading) ...[
         Text(
           'Enter a community link',
-          style: context.textTheme.headlineSmall?.copyWith(
-            fontWeight: FontWeight.w600,
+          style: OnboardingTypography.title.copyWith(
+            color: context.colors.onSurface,
           ),
         ),
         const SizedBox(height: Grid.xs),
         Text(
           'Paste an invite link or community address.',
-          style: context.textTheme.titleLarge?.copyWith(
+          style: OnboardingTypography.subtitle.copyWith(
             color: context.colors.onSurfaceVariant,
           ),
         ),
         const SizedBox(height: Grid.lg),
       ],
       if (iosInput) ...[
-        CupertinoTextField(
-          key: const Key('community-link-input'),
+        IosCommunityLinkInput(
           controller: controller,
           focusNode: focusNode,
           autofocus: fullPage && autofocus,
           enabled: !busy,
-          placeholder: 'Community link or address',
-          placeholderStyle: context.textTheme.titleLarge?.copyWith(
-            color: CupertinoColors.placeholderText.resolveFrom(context),
-          ),
-          keyboardType: TextInputType.url,
-          textInputAction: TextInputAction.go,
-          autocorrect: false,
-          enableSuggestions: false,
-          padding: const EdgeInsets.symmetric(vertical: Grid.xs),
-          style: context.textTheme.titleLarge?.copyWith(
-            color: context.colors.onSurface,
-          ),
-          cursorColor: context.colors.primary,
-          decoration: null,
           onChanged: changed,
           onSubmitted: (_) => submit(),
         ),

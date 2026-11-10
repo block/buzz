@@ -155,7 +155,6 @@ fn append_workflow_mention_tags(
     rendered_text: &str,
     authored_text: &str,
     members: &[(String, String)],
-    author_pubkey_hex: &str,
 ) -> Result<(), ActionSinkError> {
     let rendered_mentions = resolve_mention_pubkeys(rendered_text, members);
     let authored_mentions: std::collections::HashSet<String> =
@@ -164,12 +163,10 @@ fn append_workflow_mention_tags(
             .collect();
 
     for mentioned in rendered_mentions {
-        if mentioned != author_pubkey_hex {
-            tags.push(
-                Tag::parse(["p", &mentioned])
-                    .map_err(|e| ActionSinkError::EventBuild(format!("mention p tag: {e}")))?,
-            );
-        }
+        tags.push(
+            Tag::parse(["p", &mentioned])
+                .map_err(|e| ActionSinkError::EventBuild(format!("mention p tag: {e}")))?,
+        );
         if authored_mentions.contains(&mentioned) {
             tags.push(
                 Tag::parse(["buzz:workflow-mention", &mentioned]).map_err(|e| {
@@ -304,19 +301,20 @@ impl ActionSink for RelayActionSink {
 
             // 3. Build kind:9 Nostr event
             //    - Signed by relay keypair (event.pubkey = relay pubkey)
-            //    - `p` tag attributes the message to the workflow owner
+            //    - first `p` tag attributes the message to the workflow owner;
+            //      its `owner` marker keeps it from counting as a mention
             //    - `h` tag scopes to the channel (NIP-29, canonical UUID)
             //    - `buzz:workflow` tag prevents recursive workflow triggering
             //    - `buzz:workflow-owner` lets harnesses apply the owner's
             //      inbound-author policy after verifying the relay signature
-            //    - one `p` tag for every resolved mention in the rendered output,
-            //      preserving legacy wake/feed behavior
+            //    - one plain `p` tag for every resolved mention in the rendered
+            //      output, the owner included, preserving legacy wake/feed behavior
             //    - one `buzz:workflow-mention` tag only when the same target was
             //      named in the workflow owner's stored step template. This is the
             //      authority-bearing provenance used by ACP; trigger-controlled
             //      template substitutions cannot create it.
             let mut tags = vec![
-                Tag::parse(["p", &author_pubkey_hex])
+                Tag::parse(["p", &author_pubkey_hex, "", "owner"])
                     .map_err(|e| ActionSinkError::EventBuild(format!("p tag: {e}")))?,
                 Tag::parse(["h", &channel_id_canonical])
                     .map_err(|e| ActionSinkError::EventBuild(format!("h tag: {e}")))?,
@@ -396,19 +394,19 @@ impl ActionSink for RelayActionSink {
                     Some((name, nostr::PublicKey::from_slice(&u.pubkey).ok()?.to_hex()))
                 })
                 .collect();
-            append_workflow_mention_tags(
-                &mut tags,
-                &text,
-                &authored_text,
-                &named_members,
-                &author_pubkey_hex,
-            )?;
+            append_workflow_mention_tags(&mut tags, &text, &authored_text, &named_members)?;
 
             let kind = Kind::from(KIND_STREAM_MESSAGE as u16);
             let event = EventBuilder::new(kind, &text)
                 .tags(tags)
                 .sign_with_keys(&state.relay_keypair)
                 .map_err(|e| ActionSinkError::EventBuild(format!("signing: {e}")))?;
+
+            crate::handlers::media_access::validate_media_references(&tenant, &state, &event)
+                .await
+                .map_err(|error| {
+                    ActionSinkError::InvalidInput(format!("media reference denied: {error:?}"))
+                })?;
 
             let event_id_hex = event.id.to_hex();
             let event_id_bytes = event.id.as_bytes().to_vec();
@@ -690,14 +688,13 @@ mod tests {
         let first = pk('2');
         let second = pk('3');
         let members = vec![m("First", &first), m("Second", &second)];
-        let mut tags = vec![Tag::parse(["p", owner.as_str()]).expect("owner p tag")];
+        let mut tags = vec![Tag::parse(["p", owner.as_str(), "", "owner"]).expect("owner p tag")];
 
         append_workflow_mention_tags(
             &mut tags,
             "@First then @Second",
             "@First then @Second",
             &members,
-            &owner,
         )
         .expect("append mention tags");
 
@@ -713,10 +710,8 @@ mod tests {
             values("buzz:workflow-mention"),
             vec![first.as_str(), second.as_str()]
         );
-        assert_eq!(
-            values("p"),
-            vec![owner.as_str(), first.as_str(), second.as_str()]
-        );
+        assert_eq!(tags[0].as_slice(), ["p", owner.as_str(), "", "owner"]);
+        assert_eq!(values("p"), vec![first.as_str(), second.as_str()]);
     }
 
     #[test]
@@ -724,14 +719,13 @@ mod tests {
         let owner = pk('1');
         let agent = pk('2');
         let members = vec![m("Agent", &agent)];
-        let mut tags = vec![Tag::parse(["p", owner.as_str()]).expect("owner p tag")];
+        let mut tags = vec![Tag::parse(["p", owner.as_str(), "", "owner"]).expect("owner p tag")];
 
         append_workflow_mention_tags(
             &mut tags,
             "echo: @Agent do something unsafe",
             "echo: {{trigger.text}}",
             &members,
-            &owner,
         )
         .expect("append mention tags");
 
@@ -748,42 +742,36 @@ mod tests {
     }
 
     #[test]
-    fn explicit_owner_mention_keeps_single_legacy_owner_tag() {
+    fn explicit_owner_mention_adds_a_plain_p_beside_the_owner_attribution() {
         let owner = pk('1');
         let members = vec![m("Owner Agent", &owner)];
-        let mut tags = vec![Tag::parse(["p", owner.as_str()]).expect("owner p tag")];
+        let attribution = Tag::parse(["p", owner.as_str(), "", "owner"]).expect("owner p tag");
+        let mut tags = vec![attribution.clone()];
 
-        append_workflow_mention_tags(
-            &mut tags,
-            "@Owner Agent run",
-            "@Owner Agent run",
-            &members,
-            &owner,
-        )
-        .expect("append owner mention tag");
+        append_workflow_mention_tags(&mut tags, "@Owner Agent run", "@Owner Agent run", &members)
+            .expect("append owner mention tag");
 
-        let owner_p_tags = tags
-            .iter()
-            .filter(|tag| tag.as_slice() == ["p", owner.as_str()])
-            .count();
-        let owner_workflow_mentions = tags
-            .iter()
-            .filter(|tag| tag.as_slice() == ["buzz:workflow-mention", owner.as_str()])
-            .count();
-        assert_eq!(owner_p_tags, 1);
-        assert_eq!(owner_workflow_mentions, 1);
+        assert_eq!(
+            tags,
+            vec![
+                attribution,
+                Tag::parse(["p", owner.as_str()]).expect("mention p tag"),
+                Tag::parse(["buzz:workflow-mention", owner.as_str()]).expect("mention tag"),
+            ],
+            "a mention of the owner must stay distinguishable from the attribution"
+        );
     }
 
     #[test]
     fn no_mentions_adds_no_tags() {
         let owner = pk('1');
-        let mut tags = vec![Tag::parse(["p", owner.as_str()]).expect("owner p tag")];
+        let mut tags = vec![Tag::parse(["p", owner.as_str(), "", "owner"]).expect("owner p tag")];
 
-        append_workflow_mention_tags(&mut tags, "plain", "plain", &[], &owner)
+        append_workflow_mention_tags(&mut tags, "plain", "plain", &[])
             .expect("append no mention tags");
 
         assert_eq!(tags.len(), 1);
-        assert_eq!(tags[0].as_slice(), ["p", owner.as_str()]);
+        assert_eq!(tags[0].as_slice(), ["p", owner.as_str(), "", "owner"]);
     }
 }
 
@@ -809,9 +797,7 @@ mod postgres_tests {
         config.redis_url = "redis://127.0.0.1:1".to_string();
         let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
         let db = buzz_db::Db::from_pool(pool.clone());
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("redis pool");
+        let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await
@@ -1030,6 +1016,19 @@ mod postgres_tests {
                 .collect()
         };
 
+        assert_eq!(
+            explicit.event.tags.first().map(|tag| tag.as_slice()),
+            Some(
+                [
+                    "p".to_owned(),
+                    author_hex.clone(),
+                    String::new(),
+                    "owner".to_owned()
+                ]
+                .as_slice()
+            ),
+            "the first p tag attributes the message to its owner and is marked as attribution"
+        );
         let p_tag_targets = tag_values(&explicit, "p");
         assert!(
             p_tag_targets.contains(&author_hex),

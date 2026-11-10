@@ -117,7 +117,9 @@ impl fmt::Debug for RevalidationDependencies {
 #[derive(Clone, PartialEq, Eq)]
 pub struct VerifiedAssertion {
     identity: FederatedIdentity,
+    profile_assertion: Option<super::public_profile::ProfileAssertion>,
     asserted_key: Option<PublicKey>,
+    owner: Option<PublicKey>,
     capabilities: CanonicalCapabilities,
     authority_deadlines: Vec<DateTime<Utc>>,
     assertion_policy_id: AssertionPolicyId,
@@ -133,6 +135,7 @@ impl VerifiedAssertion {
         issuer: String,
         subject: String,
         asserted_key: Option<PublicKey>,
+        owner: Option<PublicKey>,
         capabilities: CanonicalCapabilities,
         authority_deadlines: Vec<DateTime<Utc>>,
         assertion_policy_id: AssertionPolicyId,
@@ -145,13 +148,28 @@ impl VerifiedAssertion {
         );
         Self {
             identity: FederatedIdentity { issuer, subject },
+            profile_assertion: None,
             asserted_key,
+            owner,
             capabilities,
             authority_deadlines,
             assertion_policy_id,
             transport_contract_id,
             revalidation_dependencies,
         }
+    }
+
+    /// Optional output-only evidence; absent for OAuth client-subject assertions.
+    pub fn profile_assertion(&self) -> Option<&super::public_profile::ProfileAssertion> {
+        self.profile_assertion.as_ref()
+    }
+
+    pub(super) fn with_profile_assertion(
+        mut self,
+        value: Option<super::public_profile::ProfileAssertion>,
+    ) -> Self {
+        self.profile_assertion = value;
+        self
     }
 
     /// The issuer-qualified identity.
@@ -163,6 +181,12 @@ impl VerifiedAssertion {
     /// this must equal the proven actor.
     pub const fn asserted_key(&self) -> Option<PublicKey> {
         self.asserted_key
+    }
+
+    /// The verified `nostr_owner_pubkey` of an agent assertion; `None` for a
+    /// key acting for itself.
+    pub const fn owner(&self) -> Option<PublicKey> {
+        self.owner
     }
 
     /// The canonical closed claims/capabilities carried by the assertion.
@@ -212,6 +236,7 @@ impl VerifiedAssertion {
             "https://test.issuer.example".to_owned(),
             "test-subject".to_owned(),
             Some(asserted_key),
+            None,
             CanonicalCapabilities::from_pairs(vec![]),
             vec![Utc::now() + Duration::seconds(3600)],
             AssertionPolicyId::zero(),
@@ -258,6 +283,8 @@ impl VerifiedAssertion {
                 subject: "test-subject".to_string(),
             },
             asserted_key,
+            profile_assertion: None,
+            owner: None,
             capabilities: CanonicalCapabilities::from_pairs(vec![]),
             authority_deadlines,
             assertion_policy_id: AssertionPolicyId::zero(),
@@ -271,6 +298,13 @@ impl VerifiedAssertion {
                 },
             },
         }
+    }
+
+    /// Test-only: the same assertion as an agent assertion owned by `owner`.
+    #[must_use]
+    pub fn with_owner_for_test(mut self, owner: PublicKey) -> Self {
+        self.owner = Some(owner);
+        self
     }
 }
 

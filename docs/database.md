@@ -100,7 +100,7 @@ writer of a fenced table already goes through admission. The remaining
 fence-retirement work drops the fence triggers and functions, and MUST also
 update ARCHITECTURE.md § *Dual enforcement*.
 
-**Today this blocks new tenant-owned tables.** Startup and deletion validation
+**New tenant-owned tables use application admission.** Startup and deletion validation
 no longer require a fence on any table; they pass with every universal fence
 object dropped (`migration_schema_fence_objects_are_optional_for_serving_and_deletion`
 in `crates/buzz-db/src/store/deletion.rs`). Two things still matter:
@@ -110,21 +110,19 @@ in `crates/buzz-db/src/store/deletion.rs`). Two things still matter:
   (`community deletion catalog drift (missing=…, unknown=…)`), and deletion
   fails closed for every community, not only the new table's. Listing the
   table is enough to pass.
-- Desired-state bootstraps run `schema/community_write_fence.sql`, which
-  attaches a fence trigger to every `community_id` table not excluded by
-  `community_write_fence_excluded_table`. A fresh desired-state database would
-  put a trigger on the new table and a migrated one would not, so the two
-  schema paths would diverge.
+- Desired-state bootstraps install only the legacy fences explicitly listed
+  under `schema/triggers/`. They do not discover and fence new tables.
+  Keep those existing backstops until their own retirement is verified;
+  new tables receive no fence in either schema path.
 
-So before a feature can add a tenant-owned `community_id` table, the
-desired-state bootstrap must stop attaching fence triggers. That change belongs
-to the fence-retirement work. Land it before the feature, or as the feature's
-first PR. Do not work around it with a trigger, or with an entry in
+The blanket desired-state fence attachment has been removed. A feature may
+add a tenant-owned `community_id` table when it follows the checklist below.
+Do not add a trigger, or an entry in
 `community_write_fence_excluded_table` for a table the community owns.
 
 #### Checklist: adding a tenant-owned `community_id` table
 
-After the desired-state change above has landed, all in the same PR:
+All in the same PR:
 
 - [ ] Every writer of the table goes through community admission
       (`begin_community_write_transaction` or another constructor that returns
@@ -207,9 +205,10 @@ deletes to ship first, then the constraint drop as a separate contract step.
 ### 3. Backfills are not migrations
 
 A migration MUST contain schema changes only. It MUST NOT `UPDATE`, `INSERT`,
-or `DELETE` existing rows, and MUST NOT scan or rewrite a table while holding a
-write-blocking lock. Scans that do not block writes, such as
-`VALIDATE CONSTRAINT` or a bounded concurrent index build, are allowed (Rule 6).
+or `DELETE` existing rows, and MUST NOT scan or rewrite a large table while
+holding a write-blocking lock. Scans that do not block writes, such as
+`VALIDATE CONSTRAINT` or a concurrent index build, are allowed, as is a plain
+`CREATE INDEX` under Rule 6's lock and statement budgets (Rule 6).
 
 - Historical data repair MUST be a backfill definition that conforms to
   [data-backfills.md](data-backfills.md): stable ID, finite upper bound,
@@ -412,11 +411,24 @@ parity assertion on the table for that window.
   `SET LOCAL statement_timeout` when a statement can scan. A migration that
   cannot get its lock fails and is retried. It MUST NOT queue behind
   traffic on a hot table.
-- In `migrations/`, an index on an existing populated table MUST be built
-  with `CREATE INDEX CONCURRENTLY`, because auto-migrating deployments have no
-  online schema change tool to build it for them. CONCURRENTLY cannot run
-  inside the migration transaction, so follow the prebuild-then-verify
-  procedure in [thread-window-deployment.md](thread-window-deployment.md).
+- With `BUZZ_AUTO_MIGRATE` on, migrations are the whole upgrade procedure, so
+  every migration MUST apply its own change on a database that holds data. A
+  migration MUST NOT refuse to run because a table has rows: every
+  auto-migrating relay with data would crash-loop on that version until
+  someone intervened by hand.
+- In `migrations/`, a new index on an existing table is built by the
+  migration itself. Skip `CREATE INDEX` when `to_regclass` finds the index,
+  otherwise build it inline under the migration's lock and statement budgets,
+  then verify its definition and flags, as `0049` does. A deployment too
+  large for those budgets runs with auto-migration off and applies migrations
+  out of band; only such a deployment prebuilds the exact index with
+  `CREATE INDEX CONCURRENTLY` (procedure in
+  [thread-window-deployment.md](thread-window-deployment.md)) before applying
+  the migration, which then verifies it. Frozen migrations `0076`, `0078` and
+  `0081` predate this rule; the startup runner builds their indexes first
+  (`INLINE_INDEX_BUILDS` in `crates/buzz-db/src/runtime/migration.rs`). A
+  source test rejects any other migration that raises `'prebuild …'`; it
+  matches that wording only, so review must catch other refusals.
   Partitioned parents need per-partition concurrent builds attached to an
   `ON ONLY` parent index.
 - The declarative schema source declares indexes with plain `CREATE INDEX`.
@@ -458,8 +470,8 @@ description:
       test for each changed table and index.
 - [ ] That the currently deployed relay works against the new schema, and how
       that was checked.
-- [ ] Lock and statement timeouts, concurrent index builds in `migrations/`,
-      and any operator prebuild step.
+- [ ] Lock and statement timeouts, how each new index is built inline, and
+      any prebuild step for deployments that apply migrations out of band.
 
 ## Related documents
 

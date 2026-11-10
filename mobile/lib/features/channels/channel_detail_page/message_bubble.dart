@@ -39,6 +39,9 @@ class _MessageBubble extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final startsThreads = ref.watch(
+      channelStartsThreadsProvider(currentChannelId),
+    );
     final messageSnapshotKey = useMemoized(GlobalKey.new, const []);
     final swipeContentKey = useMemoized(GlobalKey.new, const []);
     final mediaOffset = useMessageMediaOffset(message.content, message.tags);
@@ -185,16 +188,9 @@ class _MessageBubble extends HookConsumerWidget {
                             : Alignment.centerLeft,
                         child: Padding(
                           padding: EdgeInsets.only(
-                            right: ownMessage
-                                ? messageAvatarSize +
-                                      messageAvatarContentGap +
-                                      Grid.xxs
-                                : 0,
                             left: ownMessage
                                 ? 0
-                                : messageAvatarSize +
-                                      messageAvatarContentGap +
-                                      Grid.xxs,
+                                : messageAvatarSize + messageAvatarContentGap,
                           ),
                           child: Column(
                             mainAxisSize: MainAxisSize.min,
@@ -203,18 +199,24 @@ class _MessageBubble extends HookConsumerWidget {
                                 : CrossAxisAlignment.start,
                             children: [
                               if (message.reactions.isNotEmpty)
-                                ReactionRow(
-                                  combined: true,
-                                  messageId: message.id,
-                                  channelId: currentChannelId,
-                                  reactions: message.reactions,
-                                  onToggle: (emoji) =>
-                                      toggleReaction(ref, message, emoji),
-                                  showAddButton: isMember && !isArchived,
-                                  onAddReaction: () => showAddReactionPicker(
-                                    context: context,
-                                    ref: ref,
-                                    message: message,
+                                Padding(
+                                  padding: EdgeInsets.only(
+                                    right: ownMessage ? Grid.xxs : 0,
+                                    left: ownMessage ? 0 : Grid.xxs,
+                                  ),
+                                  child: ReactionRow(
+                                    combined: true,
+                                    messageId: message.id,
+                                    channelId: currentChannelId,
+                                    reactions: message.reactions,
+                                    onToggle: (emoji) =>
+                                        toggleReaction(ref, message, emoji),
+                                    showAddButton: isMember && !isArchived,
+                                    onAddReaction: () => showAddReactionPicker(
+                                      context: context,
+                                      ref: ref,
+                                      message: message,
+                                    ),
                                   ),
                                 ),
                               if (replyFooter != null)
@@ -243,8 +245,10 @@ class _MessageBubble extends HookConsumerWidget {
                             : TextDirection.ltr,
                         crossAxisAlignment: CrossAxisAlignment.end,
                         children: [
-                          const SizedBox(width: messageAvatarSize),
-                          const SizedBox(width: messageAvatarContentGap),
+                          if (!ownMessage) ...[
+                            const SizedBox(width: messageAvatarSize),
+                            const SizedBox(width: messageAvatarContentGap),
+                          ],
                           Expanded(
                             child: Padding(
                               padding: EdgeInsets.only(
@@ -266,6 +270,14 @@ class _MessageBubble extends HookConsumerWidget {
                                         children: [
                                           Expanded(
                                             child: MessageAuthorMeta(
+                                              timestampGap: Grid.half,
+                                              showIdentity:
+                                                  showMessageAuthorName(
+                                                    ref,
+                                                    currentChannelId,
+                                                    message.pubkey,
+                                                    currentPubkey,
+                                                  ),
                                               showTimestamp: true,
                                               reversed: false,
                                               alignment: ownMessage
@@ -274,14 +286,16 @@ class _MessageBubble extends HookConsumerWidget {
                                               nameStyle:
                                                   messageUsernameTextStyle
                                                       .copyWith(
-                                                        fontSize: 13.1,
-                                                        height: 17 / 13.1,
+                                                        fontWeight:
+                                                            FontWeight.w500,
+                                                        fontSize: 11,
+                                                        height: 17 / 11,
                                                       ),
                                               metadataStyle:
                                                   messageMetadataTextStyle
                                                       .copyWith(
-                                                        fontSize: 13.1,
-                                                        height: 17 / 13.1,
+                                                        fontSize: 11,
+                                                        height: 17 / 11,
                                                       ),
                                               timestampStyle:
                                                   messageTimestampTextStyle
@@ -289,18 +303,21 @@ class _MessageBubble extends HookConsumerWidget {
                                                         fontSize: 11,
                                                         height: 17 / 11,
                                                       ),
-                                              displayName: displayName,
-                                              username: messageUsernameLabel(
-                                                profile,
-                                              ),
+                                              displayName: ownMessage
+                                                  ? 'You'
+                                                  : displayName,
+                                              username: ownMessage
+                                                  ? null
+                                                  : messageUsernameLabel(
+                                                      profile,
+                                                    ),
                                               timestamp: formatMessageTime(
                                                 message.createdAt,
                                               ),
                                               nameColor:
-                                                  context.colors.onSurface,
-                                              metadataColor: context
-                                                  .colors
-                                                  .onSurfaceVariant,
+                                                  context.tertiaryTextColor,
+                                              metadataColor:
+                                                  context.tertiaryTextColor,
                                               onAuthorTap: () =>
                                                   showUserProfileSheet(
                                                     context,
@@ -349,12 +366,11 @@ class _MessageBubble extends HookConsumerWidget {
                                       content: message.content,
                                       bubble: true,
                                       hasReactions:
-                                          message.reactions.isNotEmpty ||
-                                          replyFooter != null,
+                                          message.reactions.isNotEmpty,
                                       bubbleEnd: showAvatar,
                                       bubbleStart: showAuthor,
                                       ownMessage: ownMessage,
-                                      trimTrailingSpacing: endsDay,
+                                      trimTrailingSpacing: true,
                                       mentionNames: resolvedMentionNames,
                                       mentionLabels: mentionLabels,
                                       agentMentionPubkeys: agentMentionPubkeys,
@@ -366,7 +382,8 @@ class _MessageBubble extends HookConsumerWidget {
                                       scaleEmojiOnly: true,
                                       mediaCarouselTrailingOverflow:
                                           Grid.gutter,
-                                      onMediaReply: allMessages == null
+                                      onMediaReply:
+                                          allMessages == null || !startsThreads
                                           ? null
                                           : () {
                                               if (!context.mounted) return;
@@ -387,6 +404,13 @@ class _MessageBubble extends HookConsumerWidget {
                                                 ),
                                               );
                                             },
+                                      nativePhotoActions: nativeImageActions(
+                                        context: context,
+                                        ref: ref,
+                                        message: message,
+                                        channelId: currentChannelId,
+                                        canManageMessage: canManageMessage,
+                                      ),
                                       onMediaMore: (viewerContext, imageUrl) =>
                                           showImageActions(
                                             context: viewerContext,
@@ -404,11 +428,13 @@ class _MessageBubble extends HookConsumerWidget {
                                             },
                                           ),
                                       onChannelTap: (channelId) {
-                                        openChannelLink(
-                                          context: context,
-                                          ref: ref,
-                                          channelId: channelId,
-                                          currentChannelId: currentChannelId,
+                                        unawaited(
+                                          openChannelLink(
+                                            context: context,
+                                            ref: ref,
+                                            channelId: channelId,
+                                            currentChannelId: currentChannelId,
+                                          ),
                                         );
                                       },
                                       onMentionTap: (pubkey) =>
@@ -427,10 +453,9 @@ class _MessageBubble extends HookConsumerWidget {
                           ),
                         ],
                       ),
-                      if (showAvatar)
+                      if (showAvatar && !ownMessage)
                         Positioned(
-                          left: ownMessage ? null : 0,
-                          right: ownMessage ? 0 : null,
+                          left: 0,
                           bottom: 0,
                           child: MessageMediaAvatar(
                             offset: mediaOffset,

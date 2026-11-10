@@ -59,13 +59,9 @@ void main() {
             ],
           ];
           final response = Completer<http.Response>();
-          final frame = Completer<LoadedVideoPreviewFrame?>();
           await tester.pumpWidget(
             ProviderScope(
               overrides: [
-                videoPreviewFrameLoaderProvider.overrideWithValue(
-                  (_) => frame.future,
-                ),
                 mediaGetAuthServiceProvider.overrideWithValue(
                   MediaGetAuthService(
                     baseUrl: 'https://example.com',
@@ -127,15 +123,7 @@ void main() {
             tester.getSize(skeleton).height,
             closeTo(expected.height, 0.001),
           );
-          if (kind == 'video') {
-            frame.complete(
-              LoadedVideoPreviewFrame(
-                child: const ColoredBox(color: Colors.black),
-                aspectRatio: 0.5,
-                dispose: () async {},
-              ),
-            );
-          } else {
+          if (kind != 'video') {
             response.complete(
               http.Response.bytes(
                 kind == 'unknown'

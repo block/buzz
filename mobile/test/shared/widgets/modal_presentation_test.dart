@@ -158,13 +158,17 @@ void main() {
 
         expect(find.byType(UiKitView), findsOneWidget);
         expect(
+          tester.widget<UiKitView>(find.byType(UiKitView)).hitTestBehavior,
+          PlatformViewHitTestBehavior.translucent,
+        );
+        expect(
           find.ancestor(
             of: find.byType(UiKitView),
             matching: find.byWidgetPredicate(
               (widget) => widget is IgnorePointer && widget.ignoring,
             ),
           ),
-          findsOneWidget,
+          findsNothing,
         );
         expect(
           find.byWidgetPredicate(
@@ -456,7 +460,14 @@ void main() {
       final contentClip = tester.widget<ClipRSuperellipse>(
         find.byKey(const ValueKey('concentric-sheet-content-clip')),
       );
-      expect(contentClip.borderRadius, BorderRadius.circular(Radii.dialog * 2));
+      expect(
+        contentClip.borderRadius,
+        const BorderRadius.vertical(
+          top: Radius.circular(ConcentricSheetSurface.sheetTopRadius),
+          bottom: Radius.circular(Radii.dialog * 2),
+        ),
+      );
+      expect((nativeSurface.creationParams as Map)['topRadius'], 40.0);
       expect(contentClip.clipBehavior, Clip.antiAlias);
       expect(find.text('Members'), findsOneWidget);
       final nativeClose = tester.widget<UiKitView>(

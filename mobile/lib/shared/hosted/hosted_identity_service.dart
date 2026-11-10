@@ -9,6 +9,7 @@ import 'device_identity_source.dart';
 enum HostedIdentityState {
   ready,
   needsSelection,
+  needsSetup,
   needsBinding,
   needsBackup,
   mismatch,
@@ -21,9 +22,11 @@ class HostedIdentityResult {
     this.state, {
     this.pubkey,
     this.choices = const [],
+    this.canCreate = false,
   });
   final HostedIdentityState state;
   final String? pubkey;
+  final bool canCreate;
   final List<DeviceIdentityChoice> choices;
 }
 
@@ -44,11 +47,17 @@ class HostedIdentityService {
   Future<HostedIdentityResult> resolve({
     bool Function()? isCurrent,
     String? selectedPubkey,
-  }) => _resolve(isCurrent, selectedPubkey);
+    bool createNew = false,
+    Set<String> offered = const {},
+    String? importNsec,
+  }) => _resolve(isCurrent, selectedPubkey, createNew, offered, importNsec);
 
   Future<HostedIdentityResult> _resolve(
     bool Function()? isCurrent,
     String? selectedPubkey,
+    bool createNew,
+    Set<String> offered,
+    String? importNsec,
   ) async {
     void checkCurrent() {
       if (isCurrent != null && !isCurrent()) throw AccountFailure.unavailable;
@@ -71,7 +80,9 @@ class HostedIdentityService {
     } else {
       throw AccountFailure.invalidResponse;
     }
-    if (local != null && bound != null) return _result(local, bound, subject);
+    if (local != null && bound != null && importNsec == null) {
+      return _result(local, bound, subject);
+    }
 
     final status = await account.post('/v1/buzz/nsec-backups/status', {});
     _sameAccount(subject);
@@ -85,6 +96,25 @@ class HostedIdentityService {
         : _pubkey(status['current_nostr_pubkey']);
     final statusKeys = listed.map(_pubkey).toSet();
     if (statusBound != bound) throw AccountFailure.invalidResponse;
+    if (importNsec != null) {
+      final pubkey = AccountIdentityStore.publicKeyForNsec(importNsec);
+      // A backup arriving while setup is open must use normal recovery, which
+      // records the selected backup receipt before adopting its identity.
+      if (bound == null && statusKeys.isNotEmpty) {
+        throw AccountFailure.unavailable;
+      }
+      if (bound != null && bound != pubkey) {
+        throw AccountIdentityFailure.mismatch;
+      }
+      final imported = await store.create(
+        importNsec,
+        checkCurrent: () {
+          _sameAccount(subject);
+          checkCurrent();
+        },
+      );
+      return _result(imported, bound, subject);
+    }
     if (local != null) {
       // A previously chosen recovery key may still await binding after a
       // restart. Its account-scoped receipt and current backup listing preserve
@@ -114,7 +144,9 @@ class HostedIdentityService {
     // decryption, even when the account retains backups of older identities.
     final matchingDevice =
         bound != null && choices.any((item) => item.pubkey == bound);
-    if ((statusKeys.isEmpty && bound == null) || matchingDevice) {
+    // An unclaimed account may keep its saved keys and start a new identity.
+    final unclaimed = statusKeys.isEmpty && bound == null;
+    if ((unclaimed && !createNew) || matchingDevice) {
       final eligible = choices
           .where((item) => bound == null || item.pubkey == bound)
           .toList();
@@ -128,6 +160,7 @@ class HostedIdentityService {
           return HostedIdentityResult(
             HostedIdentityState.needsSelection,
             choices: eligible,
+            canCreate: unclaimed,
           );
         }
         void checkSelection() {
@@ -145,12 +178,28 @@ class HostedIdentityService {
         return _result(saved, bound, subject);
       }
     }
+    if (statusKeys.isEmpty && bound != null && !matchingDevice) {
+      return HostedIdentityResult(
+        HostedIdentityState.needsSetup,
+        pubkey: bound,
+      );
+    }
     if (statusBound == null && statusKeys.isEmpty) {
+      if (!createNew) {
+        return const HostedIdentityResult(
+          HostedIdentityState.needsSetup,
+          canCreate: true,
+        );
+      }
       final generated = await store.generateIfAbsent(
         authorize: () async {
           _sameAccount(subject);
           checkCurrent();
-          final reconciled = (await deviceIdentities.choices()).isEmpty;
+          // Every device key must have been offered beside creation, so a
+          // new identity never silently passes over an unseen prior one.
+          final reconciled = (await deviceIdentities.choices()).every(
+            (item) => offered.contains(item.pubkey),
+          );
           _sameAccount(subject);
           checkCurrent();
           return reconciled;
@@ -167,54 +216,16 @@ class HostedIdentityService {
 
     final recovered = await account.post('/v1/buzz/nsec-backups/recovery', {});
     _sameAccount(subject);
-    final backups = recovered['backups'];
-    final failed = recovered['failed_backup_ids'];
-    if (recovered['error'] != null ||
-        backups is! List ||
-        failed is! List ||
-        failed.any((id) => id is! String)) {
-      throw AccountFailure.invalidResponse;
-    }
-    if (failed.isNotEmpty) {
+    final candidates = openRecoveredBackups(recovered);
+    if (candidates == null) {
       return const HostedIdentityResult(HostedIdentityState.recoveryBlocked);
     }
-    if (backups.isEmpty) {
+    if (candidates.isEmpty) {
       return HostedIdentityResult(
         bound == null
             ? HostedIdentityState.needsAuthoritativeAbsence
             : HostedIdentityState.recoveryBlocked,
       );
-    }
-    // Validate the entire result before storing anything. Never trust its
-    // advertised pubkey without deriving it from the actual secret.
-    final candidates = <String, ({nostr.Keys keys, String backupId})>{};
-    try {
-      for (final backup in backups) {
-        if (backup is! Map<String, dynamic>) throw const FormatException();
-        final secret = backup['secret_key'];
-        final backupId = backup['backup_id'];
-        if (secret is! String ||
-            !RegExp(r'^[A-Za-z0-9_-]{43}$').hasMatch(secret) ||
-            backupId is! String ||
-            backupId.isEmpty) {
-          throw const FormatException();
-        }
-        final bytes = base64Url.decode(base64Url.normalize(secret));
-        if (bytes.length != 32) throw const FormatException();
-        final hex = bytes
-            .map((b) => b.toRadixString(16).padLeft(2, '0'))
-            .join();
-        final keys = AccountIdentityStore.keysForHex(hex);
-        if (keys.public != _pubkey(backup['nostr_pubkey'])) {
-          throw const FormatException();
-        }
-        candidates.putIfAbsent(
-          keys.public,
-          () => (keys: keys, backupId: backupId),
-        );
-      }
-    } catch (_) {
-      throw AccountFailure.invalidResponse;
     }
     if (bound == null &&
         (statusKeys.length != candidates.length ||
@@ -279,6 +290,49 @@ class HostedIdentityService {
     return _result(saved, bound, subject);
   }
 
+  /// After a definitive binding rejection of [pubkey], release this account's
+  /// unconfirmed copy so the user can choose again. Rechecks that the account
+  /// is still unbound with no backups and that the key survives elsewhere;
+  /// returns false and keeps the slot otherwise.
+  Future<bool> releaseRejected(
+    String pubkey, {
+    required String subject,
+    bool Function()? isCurrent,
+  }) async {
+    void checkCurrent() {
+      if (isCurrent != null && !isCurrent()) throw AccountFailure.unavailable;
+    }
+
+    checkCurrent();
+    _sameAccount(subject);
+    final store = this.store.forSubject(subject);
+    final local = await store.read();
+    if (local == null) return true;
+    if (local.pubkey != pubkey || local.backup != null) return false;
+    final current = await account.currentIdentity();
+    _sameAccount(subject);
+    if (current['error'] != null) throw AccountFailure.invalidResponse;
+    if (current['identity'] != null) return false;
+    final status = await account.post('/v1/buzz/nsec-backups/status', {});
+    _sameAccount(subject);
+    final listed = status['backup_nostr_pubkeys'];
+    if (status['error'] != null || listed is! List) {
+      throw AccountFailure.invalidResponse;
+    }
+    if (status['current_nostr_pubkey'] != null || listed.isNotEmpty) {
+      return false;
+    }
+    checkCurrent();
+    return store.releaseUnconfirmed(
+      pubkey,
+      heldElsewhere: deviceIdentities.holds,
+      checkCurrent: () {
+        _sameAccount(subject);
+        checkCurrent();
+      },
+    );
+  }
+
   HostedIdentityResult _result(
     AccountIdentitySnapshot local,
     String? bound,
@@ -320,4 +374,54 @@ class HostedIdentityService {
     }
     return value.toLowerCase();
   }
+}
+
+/// A recovered backup's key, derived from its secret, and its backup id.
+typedef RecoveredBackup = ({nostr.Keys keys, String backupId});
+
+/// Validates an `/v1/buzz/nsec-backups/recovery` response, keyed by the public
+/// key derived from each secret, never by the advertised one. Null when any
+/// backup failed to open; throws [AccountFailure.invalidResponse] when the
+/// response is malformed, so nothing is stored from a partial result.
+Map<String, RecoveredBackup>? openRecoveredBackups(
+  Map<String, dynamic> recovered,
+) {
+  final backups = recovered['backups'];
+  final failed = recovered['failed_backup_ids'];
+  if (recovered['error'] != null ||
+      backups is! List ||
+      failed is! List ||
+      failed.any((id) => id is! String)) {
+    throw AccountFailure.invalidResponse;
+  }
+  if (failed.isNotEmpty) return null;
+  final candidates = <String, RecoveredBackup>{};
+  try {
+    for (final backup in backups) {
+      if (backup is! Map<String, dynamic>) throw const FormatException();
+      final secret = backup['secret_key'];
+      final backupId = backup['backup_id'];
+      if (secret is! String ||
+          !RegExp(r'^[A-Za-z0-9_-]{43}$').hasMatch(secret) ||
+          backupId is! String ||
+          backupId.isEmpty) {
+        throw const FormatException();
+      }
+      final bytes = base64Url.decode(base64Url.normalize(secret));
+      if (bytes.length != 32) throw const FormatException();
+      final hex = bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+      final keys = AccountIdentityStore.keysForHex(hex);
+      if (keys.public !=
+          HostedIdentityService._pubkey(backup['nostr_pubkey'])) {
+        throw const FormatException();
+      }
+      candidates.putIfAbsent(
+        keys.public,
+        () => (keys: keys, backupId: backupId),
+      );
+    }
+  } catch (_) {
+    throw AccountFailure.invalidResponse;
+  }
+  return candidates;
 }

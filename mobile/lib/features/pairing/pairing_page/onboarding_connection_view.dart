@@ -7,7 +7,6 @@ class _OnboardingConnectionView extends HookWidget {
     required this.onCommunityLink,
     required this.onBack,
     required this.onOpenCommunity,
-    required this.onScan,
     required this.onPairing,
   });
 
@@ -15,7 +14,6 @@ class _OnboardingConnectionView extends HookWidget {
   final VoidCallback? onCommunityLink;
   final VoidCallback? onBack;
   final ValueChanged<Uri> onOpenCommunity;
-  final VoidCallback? onScan;
   final VoidCallback? onPairing;
 
   double _textProgress(double progress, bool opening) =>
@@ -25,7 +23,6 @@ class _OnboardingConnectionView extends HookWidget {
   Widget build(BuildContext context) {
     final reducedMotion = MediaQuery.disableAnimationsOf(context);
     final ios = defaultTargetPlatform == TargetPlatform.iOS;
-    final keyboardReady = useState(false);
     final staggerEntrance = enteringLink && !ios;
     // Match the iOS return motion, starting after keyboard preparation.
     final duration = reducedMotion
@@ -37,46 +34,11 @@ class _OnboardingConnectionView extends HookWidget {
     // A new viewport (for example rotation) gets a fresh measurement.
     final viewport = MediaQuery.sizeOf(context);
     final restingHeight = useMemoized(() => <double?>[null], [viewport]);
-    final enteringLinkRef = useRef(enteringLink)..value = enteringLink;
-    useEffect(() {
-      const channel = MethodChannel('buzz/community_keyboard');
-      Timer? fallback;
-      var disposed = false;
-      void beginOpening() {
-        if (disposed || !enteringLinkRef.value || keyboardReady.value) return;
-        fallback?.cancel();
-        keyboardReady.value = true;
-      }
-
-      if (ios && enteringLink) {
-        channel.setMethodCallHandler((call) async {
-          if (call.method != 'willShow') return;
-          beginOpening();
-        });
-      }
-      if (enteringLink) {
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (disposed || !context.mounted || !enteringLinkRef.value) return;
-          focus.requestFocus();
-          if (!ios ||
-              reducedMotion ||
-              MediaQuery.viewInsetsOf(context).bottom > 0) {
-            beginOpening();
-          } else {
-            // Hardware keyboards and older hosts may send no show notification.
-            fallback = Timer(const Duration(milliseconds: 350), beginOpening);
-          }
-        });
-      } else {
-        focus.unfocus();
-        keyboardReady.value = false;
-      }
-      return () {
-        disposed = true;
-        fallback?.cancel();
-        if (ios && enteringLink) channel.setMethodCallHandler(null);
-      };
-    }, [enteringLink, ios, reducedMotion]);
+    final keyboardReady = useCommunityLinkFocus(
+      context,
+      enteringLink: enteringLink,
+      focus: focus,
+    );
 
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: Grid.gutter),
@@ -107,7 +69,7 @@ class _OnboardingConnectionView extends HookWidget {
                 }
                 return TweenAnimationBuilder<double>(
                   tween: Tween(
-                    end: enteringLink && (!ios || keyboardReady.value) ? 1 : 0,
+                    end: enteringLink && (!ios || keyboardReady) ? 1 : 0,
                   ),
                   duration: duration,
                   curve: ios
@@ -145,7 +107,7 @@ class _OnboardingConnectionView extends HookWidget {
                                   child: const _ConnectionHeading(
                                     title: 'Connect to a community',
                                     subtitle:
-                                        'Scan a QR code or enter a community link to continue.',
+                                        'Enter a community link or use a pairing code to continue.',
                                   ),
                                 ),
                                 _ConnectionMotionLayer(
@@ -173,12 +135,11 @@ class _OnboardingConnectionView extends HookWidget {
                             active: !enteringLink,
                             maintainSize: true,
                             child: _OnboardingChoiceContainer(
-                              title: 'Scan a QR code',
+                              title: 'Use a pairing code',
                               icon: BuzzIcons.qrcode,
                               subtitle:
-                                  'Scan a community or desktop pairing code.',
-                              onTap: onScan,
-                              onIconDoubleTap: onPairing,
+                                  'Paste the pairing code from your desktop app.',
+                              onTap: onPairing,
                             ),
                           ),
                         ),
@@ -358,11 +319,16 @@ class _ConnectionHeading extends StatelessWidget {
   Widget build(BuildContext context) => Column(
     crossAxisAlignment: CrossAxisAlignment.start,
     children: [
-      Text(title, style: context.textTheme.headlineSmall),
+      Text(
+        title,
+        style: OnboardingTypography.title.copyWith(
+          color: context.colors.onSurface,
+        ),
+      ),
       const SizedBox(height: Grid.xs),
       Text(
         subtitle,
-        style: context.textTheme.bodyLarge?.copyWith(
+        style: OnboardingTypography.subtitle.copyWith(
           color: context.colors.onSurfaceVariant,
         ),
       ),
@@ -408,7 +374,6 @@ class _OnboardingChoiceContainer extends StatelessWidget {
     required this.subtitle,
     required this.icon,
     this.onTap,
-    this.onIconDoubleTap,
     this.transparent = false,
   });
 
@@ -417,7 +382,6 @@ class _OnboardingChoiceContainer extends StatelessWidget {
   final IconData icon;
   final bool transparent;
   final VoidCallback? onTap;
-  final VoidCallback? onIconDoubleTap;
 
   @override
   Widget build(BuildContext context) => Semantics(
@@ -445,20 +409,13 @@ class _OnboardingChoiceContainer extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     ExcludeSemantics(
-                      child: GestureDetector(
-                        key: onIconDoubleTap == null
-                            ? null
-                            : const Key('developer-pairing-trigger'),
-                        excludeFromSemantics: true,
-                        onDoubleTap: onIconDoubleTap,
-                        child: SizedBox(
-                          width: Grid.sm,
-                          height: Grid.sm,
-                          child: Icon(
-                            icon,
-                            size: Grid.sm,
-                            color: context.colors.onSurface,
-                          ),
+                      child: SizedBox(
+                        width: Grid.sm,
+                        height: Grid.sm,
+                        child: Icon(
+                          icon,
+                          size: Grid.sm,
+                          color: context.colors.onSurface,
                         ),
                       ),
                     ),

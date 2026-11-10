@@ -8,6 +8,8 @@ pub mod gifs;
 pub mod git;
 pub mod invites;
 pub mod media;
+/// Channel-aware media authorization.
+pub mod media_access;
 pub mod mesh_demo;
 pub mod nip05;
 pub mod nip_fi;
@@ -35,17 +37,45 @@ pub(crate) fn internal_error(msg: &str) -> (StatusCode, Json<serde_json::Value>)
 /// would re-run the same expensive query.
 pub(crate) const QUERY_TIMED_OUT: &str = "query timed out";
 
+/// Stable client-visible body for a read the relay could not get a database
+/// connection for (pool timeout, closed pool, socket failure), including a
+/// history read shed because the reader is busy. Transient: retry later.
+pub(crate) const DATABASE_UNAVAILABLE: &str = "database unavailable";
+
 /// Map a DB read failure: a statement-deadline cancel becomes a distinct
-/// 503 `query timed out`; anything else stays a generic 500.
+/// 503 `query timed out`, an unreachable or saturated database a 503
+/// `database unavailable`; anything else stays a generic 500.
 pub(crate) fn db_read_error(
     context: &str,
     e: &buzz_db::DbError,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    if e.is_statement_cancelled() {
-        tracing::warn!("{context}: {e}");
+    if e.is_connection_unavailable() {
+        tracing::warn!(error_kind = %e.kind(), "{context}");
+        return api_error(StatusCode::SERVICE_UNAVAILABLE, DATABASE_UNAVAILABLE);
+    }
+    read_error(context, e.is_statement_cancelled(), e.kind())
+}
+
+/// [`db_read_error`] for a search: a search cancelled by the search pool's
+/// statement timeout gets the same 503 `query timed out`.
+pub(crate) fn search_read_error(
+    context: &str,
+    e: &buzz_search::SearchError,
+) -> (StatusCode, Json<serde_json::Value>) {
+    read_error(context, e.is_statement_cancelled(), e.kind())
+}
+
+/// Only the error kind is logged: DB error text can repeat a bound value.
+fn read_error(
+    context: &str,
+    statement_cancelled: bool,
+    kind: String,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if statement_cancelled {
+        tracing::warn!(error_kind = %kind, "{context}");
         return api_error(StatusCode::SERVICE_UNAVAILABLE, QUERY_TIMED_OUT);
     }
-    internal_error(&format!("{context}: {e}"))
+    internal_error(&format!("{context}: {kind}"))
 }
 
 #[allow(dead_code)]
@@ -82,11 +112,13 @@ pub(crate) fn parse_query_or_400<T: serde::de::DeserializeOwned + Default>(
 pub mod relay_members {
     use axum::{
         http::{HeaderMap, StatusCode},
-        response::Json,
+        response::{IntoResponse, Json, Response},
     };
+    use buzz_auth::DenialClass;
     use buzz_core::{tenant::CommunityId, TenantContext};
     use tracing::{debug, info};
 
+    use crate::access::AuthReason;
     use crate::state::AppState;
 
     /// Transport-neutral outcome of a relay-membership check.
@@ -100,6 +132,52 @@ pub mod relay_members {
         ViaOwner(nostr::PublicKey),
         /// Caller is not admitted.
         Denied,
+    }
+
+    /// An HTTP relay-membership refusal, with its access-log reason.
+    #[derive(Debug)]
+    pub(crate) enum MembershipRefusal {
+        /// The relay's own JSON refusal.
+        Api(AuthReason, (StatusCode, Json<serde_json::Value>)),
+        /// NIP-FI's fixed denial. A request carrying a verified agent token
+        /// gets only this, so the response never shows which step refused it
+        /// or whether the agent already has a stored owner.
+        NipFi(AuthReason, DenialClass),
+    }
+
+    /// A refusal decided inside [`admit_member`], before the agent-token
+    /// rule picks its response shape, with shadow's `owner` reason when the
+    /// agent token's owner decided it.
+    type Refused = (
+        AuthReason,
+        (StatusCode, Json<serde_json::Value>),
+        Option<&'static str>,
+    );
+
+    impl MembershipRefusal {
+        /// The access-log result for this refusal.
+        pub(crate) fn auth_result(&self) -> crate::access::AuthResult {
+            let (Self::Api(reason, _) | Self::NipFi(reason, _)) = self;
+            crate::access::AuthResult::Denied(*reason)
+        }
+
+        /// The response status.
+        pub fn status(&self) -> StatusCode {
+            match self {
+                Self::Api(_, (status, _)) => *status,
+                Self::NipFi(_, class) => StatusCode::from_u16(class.http_status())
+                    .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            }
+        }
+    }
+
+    impl IntoResponse for MembershipRefusal {
+        fn into_response(self) -> Response {
+            match self {
+                Self::Api(_, refusal) => refusal.into_response(),
+                Self::NipFi(_, class) => crate::nip_fi_core::http_denial(class),
+            }
+        }
     }
 
     /// Return the sole NIP-OA credential header, if one was supplied.
@@ -120,12 +198,15 @@ pub mod relay_members {
     /// scoped to it so admitting a pubkey to community A never admits it to B.
     /// A NIP-OA credential is usable only when `signed_auth_created_at` came
     /// from the already-verified authentication event carrying that request.
+    /// `token_owner` is the owner named by the request's verified NIP-FI agent
+    /// assertion; when present it is the only owner considered.
     pub async fn check_relay_membership(
         state: &AppState,
         community: CommunityId,
         pubkey_bytes: &[u8],
         auth_tag_header: Option<&str>,
         signed_auth_created_at: Option<u64>,
+        token_owner: Option<nostr::PublicKey>,
     ) -> Result<MembershipDecision, String> {
         check_membership(
             state,
@@ -133,6 +214,7 @@ pub mod relay_members {
             pubkey_bytes,
             auth_tag_header,
             signed_auth_created_at,
+            token_owner,
             false,
         )
         .await
@@ -147,6 +229,7 @@ pub mod relay_members {
         pubkey_bytes: &[u8],
         auth_tag_header: Option<&str>,
         signed_auth_created_at: Option<u64>,
+        token_owner: Option<nostr::PublicKey>,
     ) -> Result<MembershipDecision, String> {
         check_membership(
             state,
@@ -154,6 +237,7 @@ pub mod relay_members {
             pubkey_bytes,
             auth_tag_header,
             signed_auth_created_at,
+            token_owner,
             true,
         )
         .await
@@ -178,6 +262,7 @@ pub mod relay_members {
         pubkey_bytes: &[u8],
         auth_tag_header: Option<&str>,
         signed_auth_created_at: Option<u64>,
+        token_owner: Option<nostr::PublicKey>,
         writer: bool,
     ) -> Result<MembershipDecision, String> {
         if !state.config.require_relay_membership {
@@ -190,6 +275,20 @@ pub mod relay_members {
             .map_err(|e| format!("relay membership check failed: {e}"))?;
         if is_member {
             return Ok(MembershipDecision::Member);
+        }
+
+        // A verified agent assertion's issuer already passed this community's
+        // NIP-FI binding check, so its owner's membership admits the agent
+        // without NIP-OA.
+        if let Some(owner) = token_owner {
+            let owner_is_member = read_membership(state, community, &owner.to_hex(), writer)
+                .await
+                .map_err(|e| format!("relay membership check (token owner) failed: {e}"))?;
+            return Ok(if owner_is_member {
+                MembershipDecision::ViaOwner(owner)
+            } else {
+                MembershipDecision::Denied
+            });
         }
 
         if state.config.allow_nip_oa_auth {
@@ -241,135 +340,194 @@ pub mod relay_members {
     ///
     /// Returns `Ok(None)` when the caller is a direct member (closed relay) or when
     /// no NIP-OA tag is present/applicable (open relay without auth tag).
-    pub async fn enforce_relay_membership(
+    pub(crate) async fn enforce_relay_membership(
         state: &AppState,
-        community: CommunityId,
+        tenant: &TenantContext,
         pubkey_bytes: &[u8],
         auth_tag_header: Option<&str>,
         signed_auth_created_at: Option<u64>,
-    ) -> Result<Option<nostr::PublicKey>, (StatusCode, Json<serde_json::Value>)> {
+        token_owner: Option<nostr::PublicKey>,
+    ) -> Result<Option<nostr::PublicKey>, MembershipRefusal> {
         enforce_membership(
             state,
-            community,
+            tenant,
             pubkey_bytes,
             auth_tag_header,
             signed_auth_created_at,
-            false,
+            token_owner,
         )
         .await
     }
 
-    /// [`enforce_relay_membership`] for HTTP typing pulses: the ban check
-    /// reads through the 30-second ephemeral-path restriction cache, the same
-    /// staleness bound the pulse's own write-restriction check already has.
-    /// Every other HTTP request reads ban state fresh.
-    pub async fn enforce_relay_membership_ephemeral(
-        state: &AppState,
-        community: CommunityId,
-        pubkey_bytes: &[u8],
-        auth_tag_header: Option<&str>,
-        signed_auth_created_at: Option<u64>,
-    ) -> Result<Option<nostr::PublicKey>, (StatusCode, Json<serde_json::Value>)> {
-        enforce_membership(
-            state,
-            community,
-            pubkey_bytes,
-            auth_tag_header,
-            signed_auth_created_at,
-            true,
-        )
-        .await
-    }
-
+    /// With a verified agent token, every refusal is NIP-FI's fixed denial.
     async fn enforce_membership(
         state: &AppState,
-        community: CommunityId,
+        tenant: &TenantContext,
         pubkey_bytes: &[u8],
         auth_tag_header: Option<&str>,
         signed_auth_created_at: Option<u64>,
-        cached_ban: bool,
-    ) -> Result<Option<nostr::PublicKey>, (StatusCode, Json<serde_json::Value>)> {
-        match check_relay_membership(
+        token_owner: Option<nostr::PublicKey>,
+    ) -> Result<Option<nostr::PublicKey>, MembershipRefusal> {
+        let result = admit_member(
+            state,
+            tenant,
+            pubkey_bytes,
+            auth_tag_header,
+            signed_auth_created_at,
+            token_owner,
+        )
+        .await;
+        // An agent token's owner-decided refusal is its request's NIP-FI
+        // verdict, as shadow's verdict includes it.
+        if let (Some(_), Err((_, refusal, Some(owner_reason)))) = (token_owner, &result) {
+            crate::nip_fi_http::owner_refused(refusal_class(refusal.0), owner_reason);
+        }
+        result.map_err(|(reason, refusal, _)| match token_owner {
+            None => MembershipRefusal::Api(reason, refusal),
+            Some(_) => MembershipRefusal::NipFi(reason, refusal_class(refusal.0)),
+        })
+    }
+
+    fn refusal_class(status: StatusCode) -> DenialClass {
+        if status.is_server_error() {
+            DenialClass::AuthorizationUnavailable
+        } else {
+            DenialClass::AuthorizationDenied
+        }
+    }
+
+    async fn admit_member(
+        state: &AppState,
+        tenant: &TenantContext,
+        pubkey_bytes: &[u8],
+        auth_tag_header: Option<&str>,
+        signed_auth_created_at: Option<u64>,
+        token_owner: Option<nostr::PublicKey>,
+    ) -> Result<Option<nostr::PublicKey>, Refused> {
+        let community = tenant.community();
+        let owner = match check_relay_membership(
             state,
             community,
             pubkey_bytes,
             auth_tag_header,
             signed_auth_created_at,
+            token_owner,
         )
         .await
         {
-            Ok(MembershipDecision::OpenRelay) | Ok(MembershipDecision::Member) => {
-                deny_banned(
-                    state,
-                    community,
-                    pubkey_bytes,
-                    auth_tag_header,
-                    signed_auth_created_at,
-                    cached_ban,
-                )
-                .await?;
-                Ok(None)
+            Ok(MembershipDecision::OpenRelay) | Ok(MembershipDecision::Member) => None,
+            Ok(MembershipDecision::ViaOwner(owner)) => Some(owner),
+            Ok(MembershipDecision::Denied) => {
+                return Err((
+                    AuthReason::NotRelayMember,
+                    (
+                        StatusCode::FORBIDDEN,
+                        Json(serde_json::json!({
+                            "error": "relay_membership_required",
+                            "message": "You must be a relay member to access this relay"
+                        })),
+                    ),
+                    None,
+                ))
             }
-            Ok(MembershipDecision::ViaOwner(owner)) => {
-                deny_banned(
-                    state,
-                    community,
-                    pubkey_bytes,
-                    auth_tag_header,
-                    signed_auth_created_at,
-                    cached_ban,
-                )
-                .await?;
-                Ok(Some(owner))
-            }
-            Ok(MembershipDecision::Denied) => Err((
-                StatusCode::FORBIDDEN,
-                Json(serde_json::json!({
-                    "error": "relay_membership_required",
-                    "message": "You must be a relay member to access this relay"
-                })),
-            )),
             Err(e) => {
                 tracing::error!("relay membership check errored: {e}");
-                Err(super::internal_error(&e))
+                return Err((
+                    AuthReason::MembershipUnavailable,
+                    super::internal_error(&e),
+                    None,
+                ));
+            }
+        };
+        deny_banned(
+            state,
+            community,
+            pubkey_bytes,
+            auth_tag_header,
+            signed_auth_created_at,
+            token_owner,
+        )
+        .await?;
+        if let Some(token_owner) = token_owner {
+            let Ok(agent) = nostr::PublicKey::from_slice(pubkey_bytes) else {
+                return Err((
+                    AuthReason::MembershipUnavailable,
+                    super::internal_error("invalid pubkey for owner link"),
+                    None,
+                ));
+            };
+            match link_agent_owner(state, tenant, &agent, &token_owner).await {
+                OwnerLink::Linked => {}
+                OwnerLink::Conflict => {
+                    return Err((
+                        AuthReason::OwnerMismatch,
+                        super::api_error(StatusCode::FORBIDDEN, OWNER_MISMATCH),
+                        Some("not_stored_owner"),
+                    ))
+                }
+                OwnerLink::Unavailable => {
+                    return Err((
+                        AuthReason::NipOaOwnerUnlinked,
+                        super::api_error(
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            crate::handlers::auth::OWNER_LINK_ERROR,
+                        ),
+                        Some("owner_link_unavailable"),
+                    ))
+                }
             }
         }
+        Ok(owner)
     }
 
     /// Refuse a community-banned principal (own ban or its agent owner's) on
     /// HTTP. Bans only: a timeout blocks writes, and HTTP writes reach the
-    /// ingest gate, while reads stay allowed. Fails closed with 503.
+    /// ingest gate, while reads stay allowed. Each request's grant ends with
+    /// the request, so this reads through the restriction cache (see
+    /// [`AppState::restriction_state_cached`]). Fails closed with 503.
     async fn deny_banned(
         state: &AppState,
         community: CommunityId,
         pubkey_bytes: &[u8],
         auth_tag_header: Option<&str>,
         signed_auth_created_at: Option<u64>,
-        cached: bool,
-    ) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+        token_owner: Option<nostr::PublicKey>,
+    ) -> Result<(), Refused> {
         let Ok(pubkey) = nostr::PublicKey::from_slice(pubkey_bytes) else {
-            return Err(super::internal_error("invalid pubkey for ban check"));
+            return Err((
+                AuthReason::MembershipUnavailable,
+                super::internal_error("invalid pubkey for ban check"),
+                None,
+            ));
         };
-        match crate::handlers::auth::community_ban_outcome(
+        let verdict = crate::handlers::auth::community_ban_verdict(
             state,
             community,
             pubkey,
             auth_tag_header,
             signed_auth_created_at,
-            cached,
+            token_owner,
+            true,
         )
-        .await
-        {
-            crate::handlers::auth::BanOutcome::Clear => Ok(()),
-            crate::handlers::auth::BanOutcome::Banned => Err(super::api_error(
-                StatusCode::FORBIDDEN,
-                "blocked: you are banned from this community",
-            )),
-            crate::handlers::auth::BanOutcome::DbError => Err(super::api_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "error: internal error checking restriction state",
-            )),
-        }
+        .await;
+        let (reason, refusal) = match verdict.outcome {
+            crate::handlers::auth::BanOutcome::Clear => return Ok(()),
+            crate::handlers::auth::BanOutcome::Banned => (
+                AuthReason::Banned,
+                super::api_error(
+                    StatusCode::FORBIDDEN,
+                    "blocked: you are banned from this community",
+                ),
+            ),
+            crate::handlers::auth::BanOutcome::DbError => (
+                AuthReason::BanCheckUnavailable,
+                super::api_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "error: internal error checking restriction state",
+                ),
+            ),
+        };
+        Err((reason, refusal, verdict.owner_reason()))
     }
 
     /// Extract NIP-OA owner from an auth tag without membership enforcement.
@@ -405,6 +563,9 @@ pub mod relay_members {
     /// Both principals are ensured first because `agent_owner_pubkey` has a
     /// community-scoped foreign key. The mapping is first-write-wins; an
     /// existing mapping is accepted only when it names the same owner.
+    /// Returns `true` only when the link is recorded; an owner conflict and a
+    /// storage failure both return `false`. Callers that must tell denial
+    /// from unavailability use `link_agent_owner` directly.
     ///
     /// A mapping already confirmed in `observer_owner_cache` returns early:
     /// `agent_owner_pubkey` is set once and never cleared, so the writes
@@ -415,14 +576,89 @@ pub mod relay_members {
         agent: &nostr::PublicKey,
         owner: &nostr::PublicKey,
     ) -> bool {
+        link_agent_owner(state, tenant, agent, owner).await == OwnerLink::Linked
+    }
+
+    /// Refusal when a verified agent assertion names an owner other than the
+    /// one already stored for the agent (NIP-FI agent keys).
+    pub(crate) const OWNER_MISMATCH: &str = "restricted: agent owner mismatch";
+
+    /// Result of recording an agent's owner.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum OwnerLink {
+        /// The stored owner is now `owner`.
+        Linked,
+        /// The agent already has a different stored owner.
+        Conflict,
+        /// The link could not be read or written.
+        Unavailable,
+    }
+
+    /// The agent's stored owner compared with `owner`, or `None` when the
+    /// agent has no stored owner yet. Shadow and enforce both apply the
+    /// owner-conflict rule through this read; [`link_agent_owner`] writes only
+    /// when it returns `None`.
+    pub(crate) async fn stored_owner_link(
+        state: &AppState,
+        community: CommunityId,
+        agent: &nostr::PublicKey,
+        owner: &nostr::PublicKey,
+    ) -> Option<OwnerLink> {
+        match state
+            .db
+            .get_agent_channel_policy(community, agent.as_bytes())
+            .await
+        {
+            Ok(Some((_, Some(stored)))) if stored.as_slice() == owner.as_bytes() => {
+                Some(OwnerLink::Linked)
+            }
+            Ok(Some((_, Some(_)))) => Some(OwnerLink::Conflict),
+            Ok(_) => None,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to read agent_owner_pubkey");
+                Some(OwnerLink::Unavailable)
+            }
+        }
+    }
+
+    /// [`materialize_nip_oa_owner`], distinguishing a different stored owner
+    /// from a failed read or write.
+    pub async fn link_agent_owner(
+        state: &AppState,
+        tenant: &TenantContext,
+        agent: &nostr::PublicKey,
+        owner: &nostr::PublicKey,
+    ) -> OwnerLink {
         let owner_key = (
             tenant.community(),
             agent.to_bytes().to_vec(),
             owner.to_bytes().to_vec(),
         );
         if state.observer_owner_cache.get(&owner_key) == Some(true) {
-            return true;
+            return OwnerLink::Linked;
         }
+        let link = match stored_owner_link(state, tenant.community(), agent, owner).await {
+            Some(link) => link,
+            None => write_agent_owner(state, tenant, agent, owner).await,
+        };
+        if link == OwnerLink::Linked {
+            state
+                .author_type_cache
+                .insert((tenant.community(), agent.to_bytes().to_vec()), true);
+            state.observer_owner_cache.insert(owner_key, true);
+        }
+        link
+    }
+
+    /// Record `owner` for an agent that had none when read. The write is
+    /// first-write-wins, so a concurrent writer that got there first is
+    /// judged by the same read.
+    async fn write_agent_owner(
+        state: &AppState,
+        tenant: &TenantContext,
+        agent: &nostr::PublicKey,
+        owner: &nostr::PublicKey,
+    ) -> OwnerLink {
         for (role, pubkey) in [("agent", agent), ("owner", owner)] {
             match state
                 .db
@@ -439,12 +675,11 @@ pub mod relay_members {
                 Ok(false) => {}
                 Err(e) => {
                     tracing::warn!(%role, error = %e, "ensure_user failed during NIP-OA backfill");
-                    return false;
+                    return OwnerLink::Unavailable;
                 }
             }
         }
-
-        let materialized = match state
+        match state
             .db
             .set_agent_owner_for_authorization(
                 tenant.community(),
@@ -458,26 +693,17 @@ pub mod relay_members {
                 // without it would only be found by an owner-to-agent lookup
                 // at revoke time; make them reconnect with the owner attached.
                 state.disconnect_unowned_agent_clusterwide(tenant, &agent.to_bytes());
-                true
+                OwnerLink::Linked
             }
-            Ok(false) => state
-                .db
-                .is_agent_owner(tenant.community(), agent.as_bytes(), owner.as_bytes())
+            // Another writer stored an owner first.
+            Ok(false) => stored_owner_link(state, tenant.community(), agent, owner)
                 .await
-                .unwrap_or(false),
+                .unwrap_or(OwnerLink::Unavailable),
             Err(e) => {
                 tracing::warn!(error = %e, "failed to backfill agent_owner_pubkey");
-                false
+                OwnerLink::Unavailable
             }
-        };
-
-        if materialized {
-            state
-                .author_type_cache
-                .insert((tenant.community(), agent.to_bytes().to_vec()), true);
-            state.observer_owner_cache.insert(owner_key, true);
         }
-        materialized
     }
 
     #[cfg(test)]
@@ -596,6 +822,29 @@ mod db_read_error_tests {
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(body.0["error"], "internal server error");
     }
+
+    #[test]
+    fn unavailable_database_maps_to_retryable_503() {
+        for error in [
+            sqlx::Error::PoolTimedOut,
+            sqlx::Error::PoolClosed,
+            sqlx::Error::Io(std::io::Error::from(std::io::ErrorKind::ConnectionReset)),
+        ] {
+            let (status, body) = db_read_error("ctx", &buzz_db::DbError::Sqlx(error));
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(body.0["error"], DATABASE_UNAVAILABLE);
+        }
+    }
+
+    #[test]
+    fn non_cancel_search_error_stays_generic_500() {
+        let (status, body) = search_read_error(
+            "ctx",
+            &buzz_search::SearchError::Db(sqlx::Error::PoolTimedOut),
+        );
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body.0["error"], "internal server error");
+    }
 }
 
 #[cfg(test)]
@@ -696,3 +945,7 @@ mod parse_query_tests {
 }
 
 mod artifact;
+pub(crate) mod artifact_sync;
+
+#[cfg(test)]
+mod media_access_postgres_tests;

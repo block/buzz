@@ -48,6 +48,7 @@ extension BuzzPushNotificationResolverTests {
     )
 
     XCTAssertEqual(result.conversationDisplayName, "#General")
+    XCTAssertEqual(result.subtitle, "#General")
     XCTAssertEqual(result.conversationRecipientCount, 2)
   }
 
@@ -96,7 +97,7 @@ extension BuzzPushNotificationResolverTests {
 
     XCTAssertNil(result.conversationDisplayName)
     XCTAssertNil(result.conversationRecipientCount)
-    XCTAssertEqual(result.subtitle, "Community")
+    XCTAssertEqual(result.subtitle, "#General")
   }
 
   func testPartialMembershipRefreshDoesNotReuseCachedChannel() throws {
@@ -262,6 +263,6 @@ extension BuzzPushNotificationResolverTests {
 
     XCTAssertNil(result.conversationDisplayName)
     XCTAssertNil(result.conversationRecipientCount)
-    XCTAssertEqual(result.subtitle, "Community")
+    XCTAssertNil(result.subtitle)
   }
 }

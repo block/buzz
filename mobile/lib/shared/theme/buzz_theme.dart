@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 
-import 'accent_colors.dart';
 import 'app_colors.dart';
 import 'theme_extensions.dart';
 
@@ -63,53 +62,25 @@ Color navigationSearchSurface(BuildContext context) {
 Color navigationDivider(BuildContext context, double opacity) =>
     navigationPrimaryForeground(context).withValues(alpha: opacity);
 
-/// Buzz renders with its fixed neutral foreground while preserving the stored
-/// wire accent so the user's choice returns on another theme.
-int effectiveAccentIndex(String themeName, String storedAccent) {
-  if (isBuzzTheme(themeName)) return neutralAccentIndex;
-  return accentIndexForWireValue(storedAccent) ?? defaultAccentIndex;
-}
-
-/// Gradient stops, matching desktop's `--buzz-gradient-*` custom properties.
-const _lightTop = Color(0xFFE6E6B6);
-const _lightBottom = Color(0xFFC4D0DA);
-const _darkTop = Color(0xFF4A4616);
-const _darkBottom = Color(0xFF0A1423);
-
-/// The Buzz gradient for the app's top section, or null when [themeName] is not
-/// a Buzz theme — in which case the section keeps its default frosted fill.
-///
-/// The stops are fully opaque: under Buzz the color replaces the frosted
-/// treatment rather than tinting it, matching desktop's solid sidebar canvas.
-///
-/// [brightness] comes from the applied color scheme rather than the theme name,
-/// so System mode picks the right stops as the OS switches.
-LinearGradient? buzzTopSectionGradient(
-  String themeName,
-  Brightness brightness,
-) {
-  if (!isBuzzTheme(themeName)) return null;
-
-  final isDark = brightness == Brightness.dark;
-  return LinearGradient(
-    begin: Alignment.topCenter,
-    end: Alignment.bottomCenter,
-    colors: [
-      isDark ? _darkTop : _lightTop,
-      isDark ? _darkBottom : _lightBottom,
-    ],
-  );
-}
-
 /// Desktop navigation ink distinguishes read destinations from unread labels.
 Color channelNavigationForeground(BuildContext context, {bool unread = false}) {
-  if (unread || Theme.of(context).brightness != Brightness.dark) {
-    return navigationPrimaryForeground(context);
-  }
-  return Theme.of(context).colorScheme.onSurfaceVariant;
+  final dark = Theme.of(context).brightness == Brightness.dark;
+  return unread
+      ? (dark ? const Color(0xFFFFFFFF) : const Color(0xFF262626))
+      : (dark ? const Color(0xFFC7C7C7) : const Color(0xFF404040));
 }
 
-/// Metadata ink used by Home section headings and muted destinations.
+/// Shared desktop section-heading ink.
+Color navigationHeadingForeground(BuildContext context) =>
+    Theme.of(context).brightness == Brightness.dark
+    ? const Color(0xFFC7C7C7)
+    : const Color(0xFF525252);
+
+/// Section disclosure controls share the heading's foreground role.
+Color navigationAccessoryForeground(BuildContext context) =>
+    navigationHeadingForeground(context);
+
+/// Muted destinations remain quieter than ordinary rows and section headings.
 Color navigationMetadataForeground(BuildContext context) =>
     Theme.of(context).brightness == Brightness.dark
     ? const Color(0xFFA4A4A4)

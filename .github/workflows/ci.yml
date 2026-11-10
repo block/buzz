@@ -34,6 +34,12 @@ jobs:
         with:
           fetch-depth: 2
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
+      # The first call of each Hermit tool downloads it. A stalled Node download
+      # hung the selection step until this job's cap cancelled every gate. One
+      # invocation fetches both tools, so its worst case (under 6 minutes)
+      # still leaves the rest of the job inside the 10-minute cap.
+      - name: Fetch Hermit tools
+        run: scripts/ci-hermit-retry.sh sh -c './bin/node --version && ./bin/just --version'
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         id: filter
         with:
@@ -69,6 +75,7 @@ jobs:
               - 'scripts/model-capabilities.json'
               - 'scripts/normative-corpus.json'
               - 'scripts/ci-apt-retry.sh'
+              - 'scripts/ci-hermit-retry.sh'
               - 'Justfile'
             desktop:
               - '.github/workflows/ci.yml'
@@ -83,6 +90,9 @@ jobs:
               - 'scripts/normative-corpus.json'
               - 'desktop/**'
               - 'pnpm-lock.yaml'
+              - 'scripts/flake-check.mjs'
+              - 'scripts/flake-check.test.mjs'
+              - '.github/workflows/_ci-flake.yml'
             desktop-rust:
               - 'desktop/src-tauri/**'
             web:
@@ -96,12 +106,10 @@ jobs:
               - 'scripts/mobile-release-source.sh'
               - 'scripts/mobile-worktree-overrides.sh'
               - 'scripts/mobile-worktree-clean.sh'
-              - 'scripts/publish-mobile-release-candidate.sh'
               - 'scripts/release-rulesets.sh'
               - 'scripts/test-mobile-release-contract.sh'
-              - 'scripts/test-mobile-release-candidate-publisher.sh'
               - 'scripts/test-mobile-worktree-overrides.sh'
-              - '.github/workflows/mobile-release-candidate.yml'
+              - 'scripts/ci-hermit-retry.sh'
               - '.github/workflows/ci.yml'
               - '.github/workflows/_ci-*.yml'
       - name: Select runtime suites conservatively at the PR file-list limit
@@ -125,9 +133,7 @@ jobs:
           scripts/test-oss-desktop-promotion.sh
           scripts/test-oss-desktop-promotion-behavior.sh
       - name: Mobile release contract
-        run: |
-          scripts/test-mobile-release-contract.sh
-          scripts/test-mobile-release-candidate-publisher.sh
+        run: scripts/test-mobile-release-contract.sh
       - name: Desktop instance environment contract
         run: scripts/test-desktop-instance-detection.sh
       - name: Mobile worktree identity contract
@@ -138,10 +144,14 @@ jobs:
         run: |
           scripts/test-rust-cache-contract.sh
           scripts/test-rust-cache-contract-regressions.sh
+      - name: SQLx dependency pin
+        run: |
+          python3 scripts/check-sqlx-pin.py
+          python3 scripts/test-sqlx-pin.py
       - name: CI required-context isolation contract
         run: scripts/test-ci-required-context-isolation.sh
       - name: CI path selection regression tests
-        run: node --test scripts/ci-selection.test.mjs scripts/ci-required-gates.test.mjs scripts/ci-apt-retry.test.mjs
+        run: node --test scripts/ci-selection.test.mjs scripts/ci-required-gates.test.mjs scripts/ci-apt-retry.test.mjs scripts/ci-hermit-retry.test.mjs
       - name: File size policy
         run: just file-size-check
 
@@ -258,6 +268,14 @@ jobs:
       web: ${{ needs.changes.outputs.web == 'true' }}
       mobile: ${{ needs.changes.outputs.mobile == 'true' }}
       lane: mobile-swift
+
+  # Advisory flake check: repeats the tests a pull request changes. Its lanes
+  # skip when no test changed and none of the required gates below reads them;
+  # their own statuses and step summaries carry the result.
+  flake-check:
+    name: Flake Check
+    if: github.event_name == 'pull_request'
+    uses: ./.github/workflows/_ci-flake.yml
 
   security-domain:
     name: Security Domain

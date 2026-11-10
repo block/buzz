@@ -311,6 +311,7 @@ struct AssertionChallenge<'a> {
     text: &'a str,
 }
 
+#[allow(clippy::result_large_err)] // Response is the natural error type for axum handlers
 async fn verify_installation_assertion<T: serde::Serialize>(
     s: &AppState,
     installation_id: uuid::Uuid,
