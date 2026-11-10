@@ -1187,11 +1187,8 @@ mod postgres_tests {
         assert_eq!(unique.len(), 5, "all channel IDs must be distinct");
     }
 
-    /// `insert_mentions` must index every p-tag even past Postgres's
-    /// bind-parameter statement cap.
-    ///
-    /// A multi-row INSERT binds 6 parameters per p-tag, so a single statement
-    /// tops out at ~10.9k rows against the 65,535-parameter limit.
+    /// Large mention arrays keep every valid key visible to indexed reads,
+    /// while duplicate spellings and malformed tags add no index rows.
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn insert_mentions_indexes_p_tags_past_bind_parameter_cap() {
@@ -1199,7 +1196,7 @@ mod postgres_tests {
         let community = CommunityId::from_uuid(make_test_community(&pool).await);
         let channel = insert_test_channel(&pool, community).await;
 
-        // 11,000 rows x 6 binds = 66,000 > 65,535: overflows a single statement.
+        // More keys than a statement with six binds per row could accept.
         let mention_count = 11_000usize;
         sqlx::query(
             "INSERT INTO channel_members (community_id, channel_id, pubkey, role) \
@@ -1212,9 +1209,14 @@ mod postgres_tests {
         .execute(&pool)
         .await
         .expect("insert canonical roster members");
-        let tags: Vec<Tag> = (1..=mention_count)
+        let mut tags: Vec<Tag> = (1..=mention_count)
             .map(|n| Tag::parse(["p", &format!("{n:064x}"), "", "member"]).expect("p tag"))
             .collect();
+        let last_key = format!("{mention_count:064x}");
+        tags.push(Tag::parse(["p", &last_key.to_ascii_uppercase()]).unwrap());
+        tags.push(Tag::parse(["p", &last_key]).unwrap());
+        tags.push(Tag::parse(["p", "too-short"]).unwrap());
+        tags.push(Tag::parse(["p", &"g".repeat(64)]).unwrap());
         let event = store_feed_event(
             &pool,
             community,
@@ -1235,7 +1237,17 @@ mod postgres_tests {
         .expect("count indexed mentions");
         assert_eq!(
             indexed as usize, mention_count,
-            "every p-tag must land in event_mentions"
+            "every valid key is indexed once despite duplicate spellings and malformed tags"
         );
+        for key in [1, mention_count / 2, mention_count] {
+            let mut query = crate::EventQuery::for_community(community);
+            query.channel_id = Some(channel);
+            query.p_tag_hex = Some(format!("{key:064X}"));
+            let rows = crate::event::query_events(&pool, &query)
+                .await
+                .expect("generic #p lookup");
+            assert_eq!(rows.len(), 1, "key {key} must find the event exactly once");
+            assert_eq!(rows[0].event.id, event.id);
+        }
     }
 }

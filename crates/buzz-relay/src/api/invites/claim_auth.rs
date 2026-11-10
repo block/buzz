@@ -59,7 +59,7 @@ pub(super) async fn authenticate(
 /// The claim write's refusal, recording an active ban or timeout on `slot`.
 pub(super) fn map_claim_error(
     slot: &crate::access::AccessSlot,
-    error: buzz_db::DbError,
+    error: &buzz_db::DbError,
 ) -> (StatusCode, Json<Value>) {
     match error {
         buzz_db::DbError::InviteRestricted => {

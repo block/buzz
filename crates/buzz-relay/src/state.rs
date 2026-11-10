@@ -1566,6 +1566,8 @@ pub struct AppState {
     /// generate fresh Nostr keys.
     pub invite_claim_rate_limiter:
         Arc<moka::sync::Cache<ScopedPubkeyKey, Arc<std::sync::atomic::AtomicU32>>>,
+    /// Bounded local waiters for the database's shared invite claim queue.
+    pub(crate) invite_claim_batches: Arc<crate::api::invites::ClaimBatches>,
     /// Current in-flight media uploads per (community, uploader pubkey).
     pub media_uploads_in_flight: Arc<DashMap<ScopedPubkeyKey, u32>>,
     /// Per-(community, thread root) coalescing for live `kind:39005` thread
@@ -1886,6 +1888,7 @@ impl AppState {
                     .time_to_live(crate::api::invites::CLAIM_RATE_WINDOW)
                     .build(),
             ),
+            invite_claim_batches: Arc::default(),
             media_uploads_in_flight: Arc::new(DashMap::new()),
             thread_summary_refresh: Arc::new(
                 crate::handlers::coalesced_refresh::CoalescedRefresh::new(

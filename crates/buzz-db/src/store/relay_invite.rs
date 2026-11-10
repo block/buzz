@@ -30,15 +30,29 @@ use crate::error::Result;
 use crate::relay_members::{write_nip43_membership_snapshot, MembershipWrite};
 use crate::{CommunityId, Db};
 
+mod batch;
 mod claim_owner;
+mod queue;
 mod revocation;
+
+use batch::apply_claim_batch;
+pub use batch::{ClaimCredential, ClaimRequest, ClaimResult, MAX_CLAIM_BATCH_SIZE};
 pub use claim_owner::{claim_relay_membership_with_owner, MembershipClaimResult};
+pub use queue::{
+    CompletedClaim, EnqueuedClaim, ProcessedInviteBatch, ProcessedInviteClaim, StoredClaimResult,
+    INVITE_CLAIM_TTL,
+};
 pub(crate) use revocation::{revoke_banned_issuer_invites, revoke_restricted_agent_invites};
+
+#[cfg(test)]
+mod batch_postgres_tests;
+#[cfg(test)]
+mod queue_postgres_tests;
 
 /// Outcome of a v2 invite claim. Expected invalid/expired/exhausted states are
 /// typed variants so the relay layer can map them to distinct HTTP responses
 /// without inspecting database errors.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum ClaimOutcome {
     /// A new relay member was inserted. `use_count` is the post-increment count;
     /// `uses_remaining` is `None` for unlimited invites.
@@ -70,6 +84,7 @@ pub enum ClaimOutcome {
 }
 
 /// A completed claim and whether its committed transaction first recorded an owner.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct InviteClaimResult {
     /// Membership or denial outcome.
     pub outcome: ClaimOutcome,
@@ -473,14 +488,7 @@ pub async fn claim_relay_invite_with_owner(
     // Unknown codes are free to forge, so reject them after the tenant fence
     // but before the community-wide admission lock; the locked read below
     // stays authoritative.
-    let known: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM relay_invites \
-         WHERE community_id = $1 AND token_hash = $2)",
-    )
-    .bind(community.as_uuid())
-    .bind(token_hash)
-    .fetch_one(tx.conn())
-    .await?;
+    let known = invite_known(&mut tx, community, token_hash).await?;
     if !known {
         tx.rollback().await?;
         log_claim_outcome(community, None, "invalid", None, None);
@@ -488,12 +496,106 @@ pub async fn claim_relay_invite_with_owner(
     }
 
     lock_admission(tx.conn(), community).await?;
+    let prepared = claim_relay_invite_in_tx(
+        &mut tx,
+        community,
+        token_hash,
+        claimer_pubkey,
+        policy_version,
+        verified_owner,
+    )
+    .await?;
+    let snapshot = if matches!(prepared.result.outcome, ClaimOutcome::Joined { .. }) {
+        Some(write_nip43_membership_snapshot(&mut tx, relay_keypair).await?)
+    } else {
+        None
+    };
+    tx.commit().await?;
+    prepared.log.emit();
+    Ok(MembershipWrite {
+        outcome: prepared.result,
+        snapshot,
+    })
+}
+
+async fn invite_known(
+    tx: &mut crate::AdmittedTx,
+    community: CommunityId,
+    token_hash: &[u8; 32],
+) -> Result<bool> {
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM relay_invites \
+         WHERE community_id = $1 AND token_hash = $2)",
+    )
+    .bind(community.as_uuid())
+    .bind(token_hash)
+    .fetch_one(tx.conn())
+    .await?)
+}
+
+struct ClaimLog {
+    community: CommunityId,
+    invite_id: Option<Uuid>,
+    outcome: &'static str,
+    max_uses: Option<i32>,
+    use_count: Option<i32>,
+}
+
+impl ClaimLog {
+    fn new(
+        community: CommunityId,
+        invite_id: Option<Uuid>,
+        outcome: &'static str,
+        max_uses: Option<i32>,
+        use_count: Option<i32>,
+    ) -> Self {
+        Self {
+            community,
+            invite_id,
+            outcome,
+            max_uses,
+            use_count,
+        }
+    }
+
+    fn emit(self) {
+        log_claim_outcome(
+            self.community,
+            self.invite_id,
+            self.outcome,
+            self.max_uses,
+            self.use_count,
+        );
+    }
+}
+
+struct PreparedInviteClaim {
+    result: InviteClaimResult,
+    log: ClaimLog,
+}
+
+impl PreparedInviteClaim {
+    fn new(result: InviteClaimResult, log: ClaimLog) -> Self {
+        Self { result, log }
+    }
+}
+
+async fn claim_relay_invite_in_tx(
+    tx: &mut crate::AdmittedTx,
+    community: CommunityId,
+    token_hash: &[u8; 32],
+    claimer_pubkey: &str,
+    policy_version: Option<&str>,
+    verified_owner: Option<&str>,
+) -> Result<PreparedInviteClaim> {
     if claim_owner::claimant_restricted(tx.conn(), community, claimer_pubkey, verified_owner)
         .await?
     {
-        tx.rollback().await?;
-        log_claim_outcome(community, None, "restricted", None, None);
-        return Ok(MembershipWrite::unchanged(ClaimOutcome::Restricted.into()));
+        let log = ClaimLog::new(community, None, "restricted", None, None);
+        return Ok(PreparedInviteClaim::new(
+            ClaimOutcome::Restricted.into(),
+            log,
+        ));
     }
 
     // `FOR UPDATE` serializes concurrent claims so exactly one claimant wins
@@ -510,9 +612,8 @@ pub async fn claim_relay_invite_with_owner(
     .await?;
 
     let Some(invite) = row else {
-        tx.rollback().await?;
-        log_claim_outcome(community, None, "invalid", None, None);
-        return Ok(MembershipWrite::unchanged(ClaimOutcome::Invalid.into()));
+        let log = ClaimLog::new(community, None, "invalid", None, None);
+        return Ok(PreparedInviteClaim::new(ClaimOutcome::Invalid.into(), log));
     };
 
     let invite_id: uuid::Uuid = invite.try_get("id")?;
@@ -520,80 +621,75 @@ pub async fn claim_relay_invite_with_owner(
     let use_count: i32 = invite.try_get("use_count")?;
     let expires_at: DateTime<Utc> = invite.try_get("expires_at")?;
     if expires_at <= Utc::now() {
-        tx.rollback().await?;
-        log_claim_outcome(
+        let log = ClaimLog::new(
             community,
             Some(invite_id),
             "expired",
             max_uses,
             Some(use_count),
         );
-        return Ok(MembershipWrite::unchanged(ClaimOutcome::Expired.into()));
+        return Ok(PreparedInviteClaim::new(ClaimOutcome::Expired.into(), log));
     }
 
     let revoked_at: Option<DateTime<Utc>> = invite.try_get("revoked_at")?;
     let issuer: String = invite.try_get("created_by")?;
     let legacy_admission: bool = invite.try_get("legacy_admission")?;
     if revoked_at.is_some() {
-        tx.rollback().await?;
-        log_claim_outcome(
+        let log = ClaimLog::new(
             community,
             Some(invite_id),
             "revoked",
             max_uses,
             Some(use_count),
         );
-        return Ok(MembershipWrite::unchanged(ClaimOutcome::Revoked.into()));
+        return Ok(PreparedInviteClaim::new(ClaimOutcome::Revoked.into(), log));
     }
     if !is_canonical_invite_pubkey(&issuer) {
         if legacy_admission {
             persist_claim_revocation(tx.conn(), community, invite_id).await?;
-            tx.commit().await?;
-            log_claim_outcome(
+            let log = ClaimLog::new(
                 community,
                 Some(invite_id),
                 "revoked",
                 max_uses,
                 Some(use_count),
             );
-            return Ok(MembershipWrite::unchanged(ClaimOutcome::Revoked.into()));
+            return Ok(PreparedInviteClaim::new(ClaimOutcome::Revoked.into(), log));
         }
-        tx.rollback().await?;
-        log_claim_outcome(
+        let log = ClaimLog::new(
             community,
             Some(invite_id),
             "invalid",
             max_uses,
             Some(use_count),
         );
-        return Ok(MembershipWrite::unchanged(ClaimOutcome::Invalid.into()));
+        return Ok(PreparedInviteClaim::new(ClaimOutcome::Invalid.into(), log));
     }
 
     let issuer_bytes = hex::decode(&issuer)
         .map_err(|_| crate::DbError::InvalidData("invalid invitation issuer".into()))?;
     if has_revoking_restriction(tx.conn(), community, &issuer_bytes, legacy_admission).await? {
         persist_claim_revocation(tx.conn(), community, invite_id).await?;
-        tx.commit().await?;
-        log_claim_outcome(
+        let log = ClaimLog::new(
             community,
             Some(invite_id),
             "revoked",
             max_uses,
             Some(use_count),
         );
-        return Ok(MembershipWrite::unchanged(ClaimOutcome::Revoked.into()));
+        return Ok(PreparedInviteClaim::new(ClaimOutcome::Revoked.into(), log));
     }
     if principal_restricted(tx.conn(), community, &issuer).await? {
-        tx.rollback().await?;
-        log_claim_outcome(
+        let log = ClaimLog::new(
             community,
             Some(invite_id),
             "issuer_restricted",
             max_uses,
             Some(use_count),
         );
-        return Ok(MembershipWrite::unchanged(
+        return Ok(PreparedInviteClaim::new(
             ClaimOutcome::IssuerRestricted.into(),
+            log,
         ));
     }
 
@@ -620,34 +716,38 @@ pub async fn claim_relay_invite_with_owner(
         let owner =
             claim_owner::persist_claim_owner(tx.conn(), community, claimer_pubkey, verified_owner)
                 .await?;
-        tx.commit().await?;
-        log_claim_outcome(
+        let log = ClaimLog::new(
             community,
             Some(invite_id),
             "already_member",
             max_uses,
             Some(use_count),
         );
-        return Ok(MembershipWrite::unchanged(InviteClaimResult {
-            outcome: ClaimOutcome::AlreadyMember {
-                use_count,
-                uses_remaining: uses_remaining(),
+        return Ok(PreparedInviteClaim::new(
+            InviteClaimResult {
+                outcome: ClaimOutcome::AlreadyMember {
+                    use_count,
+                    uses_remaining: uses_remaining(),
+                },
+                owner_link_created: owner.link_created,
+                users_created: owner.users_created,
             },
-            owner_link_created: owner.link_created,
-            users_created: owner.users_created,
-        }));
+            log,
+        ));
     }
 
     if max_uses.is_some_and(|max_uses| use_count >= max_uses) {
-        tx.rollback().await?;
-        log_claim_outcome(
+        let log = ClaimLog::new(
             community,
             Some(invite_id),
             "exhausted",
             max_uses,
             Some(use_count),
         );
-        return Ok(MembershipWrite::unchanged(ClaimOutcome::Exhausted.into()));
+        return Ok(PreparedInviteClaim::new(
+            ClaimOutcome::Exhausted.into(),
+            log,
+        ));
     }
 
     let inserted = sqlx::query(
@@ -678,22 +778,24 @@ pub async fn claim_relay_invite_with_owner(
         let owner =
             claim_owner::persist_claim_owner(tx.conn(), community, claimer_pubkey, verified_owner)
                 .await?;
-        tx.commit().await?;
-        log_claim_outcome(
+        let log = ClaimLog::new(
             community,
             Some(invite_id),
             "already_member",
             max_uses,
             Some(use_count),
         );
-        return Ok(MembershipWrite::unchanged(InviteClaimResult {
-            outcome: ClaimOutcome::AlreadyMember {
-                use_count,
-                uses_remaining: uses_remaining(),
+        return Ok(PreparedInviteClaim::new(
+            InviteClaimResult {
+                outcome: ClaimOutcome::AlreadyMember {
+                    use_count,
+                    uses_remaining: uses_remaining(),
+                },
+                owner_link_created: owner.link_created,
+                users_created: owner.users_created,
             },
-            owner_link_created: owner.link_created,
-            users_created: owner.users_created,
-        }));
+            log,
+        ));
     }
 
     let new_use_count = use_count + 1;
@@ -707,11 +809,9 @@ pub async fn claim_relay_invite_with_owner(
     let owner =
         claim_owner::persist_claim_owner(tx.conn(), community, claimer_pubkey, verified_owner)
             .await?;
-    let snapshot = write_nip43_membership_snapshot(&mut tx, relay_keypair).await?;
-    tx.commit().await?;
 
     let new_uses_remaining = max_uses.map(|mu| mu - new_use_count);
-    log_claim_outcome(
+    let log = ClaimLog::new(
         community,
         Some(invite_id),
         "joined",
@@ -719,8 +819,8 @@ pub async fn claim_relay_invite_with_owner(
         Some(new_use_count),
     );
 
-    Ok(MembershipWrite {
-        outcome: InviteClaimResult {
+    Ok(PreparedInviteClaim {
+        result: InviteClaimResult {
             outcome: ClaimOutcome::Joined {
                 use_count: new_use_count,
                 uses_remaining: new_uses_remaining,
@@ -728,7 +828,7 @@ pub async fn claim_relay_invite_with_owner(
             owner_link_created: owner.link_created,
             users_created: owner.users_created,
         },
-        snapshot: Some(snapshot),
+        log,
     })
 }
 

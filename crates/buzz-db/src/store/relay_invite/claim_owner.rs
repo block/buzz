@@ -3,6 +3,7 @@ use crate::{CommunityId, DbError};
 use sqlx::PgPool;
 
 /// Result of a committed legacy invitation claim.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct MembershipClaimResult {
     /// Whether this claim inserted membership.
     pub inserted: bool,
@@ -112,6 +113,36 @@ pub async fn claim_relay_membership_with_owner(
     )
     .await?;
     super::lock_admission(tx.conn(), community).await?;
+    let result = claim_relay_membership_in_tx(
+        &mut tx,
+        community,
+        pubkey,
+        role,
+        policy_version,
+        verified_owner,
+    )
+    .await?;
+    let snapshot = if result.inserted {
+        Some(super::write_nip43_membership_snapshot(&mut tx, relay_keypair).await?)
+    } else {
+        None
+    };
+    tx.commit().await?;
+    Ok(super::MembershipWrite {
+        outcome: result,
+        snapshot,
+    })
+}
+
+/// Check and apply a legacy claim without committing or writing its roster.
+pub(super) async fn claim_relay_membership_in_tx(
+    tx: &mut crate::AdmittedTx,
+    community: CommunityId,
+    pubkey: &str,
+    role: &str,
+    policy_version: Option<&str>,
+    verified_owner: Option<&str>,
+) -> Result<MembershipClaimResult> {
     if claimant_restricted(tx.conn(), community, pubkey, verified_owner).await? {
         return Err(DbError::InviteRestricted);
     }
@@ -141,18 +172,9 @@ pub async fn claim_relay_membership_with_owner(
     }
 
     let owner = persist_claim_owner(tx.conn(), community, pubkey, verified_owner).await?;
-    let snapshot = if inserted {
-        Some(super::write_nip43_membership_snapshot(&mut tx, relay_keypair).await?)
-    } else {
-        None
-    };
-    tx.commit().await?;
-    Ok(super::MembershipWrite {
-        outcome: MembershipClaimResult {
-            inserted,
-            owner_link_created: owner.link_created,
-            users_created: owner.users_created,
-        },
-        snapshot,
+    Ok(MembershipClaimResult {
+        inserted,
+        owner_link_created: owner.link_created,
+        users_created: owner.users_created,
     })
 }

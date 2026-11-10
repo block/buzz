@@ -2346,6 +2346,9 @@ async fn run_usage_metrics_tick(
                 warn!(error = %error, "failed to reap expired relay invites");
             }
         }
+        if let Err(error) = state.db.reap_expired_invite_claims().await {
+            warn!(error_kind = %error.kind(), "failed to reap expired invite claims");
+        }
         run_storage_sweep_tick(state).await;
     }
 
