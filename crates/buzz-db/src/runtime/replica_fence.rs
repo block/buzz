@@ -642,6 +642,8 @@ fn rand_id() -> [u8; 32] {
 /// One writer-side sample of the ordered handshake.
 #[derive(Debug)]
 struct WriterSample {
+    /// Below every pending scheduled timestamp (including send-now clock slack).
+    scheduled_wall: Option<DateTime<Utc>>,
     /// `S`: writer `clock_timestamp()` captured first.
     sampled_at: DateTime<Utc>,
     /// Oldest open transaction among other client backends at scan time,
@@ -901,6 +903,12 @@ async fn sample_writer(
     })
     .await?;
 
+    let scheduled_wall: Option<DateTime<Utc>> = sqlx::query_scalar(
+        "SELECT to_timestamp(min(send_at)-301) FROM scheduled_messages WHERE status='scheduled'",
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+
     // 3. Token commit LAST, on the same pinned connection. The single-row
     //    UPDATE serializes concurrent pods' probes, so RETURNING token is
     //    globally commit-ordered. `committed_at` is captured before the
@@ -918,6 +926,7 @@ async fn sample_writer(
     .ok_or(ProbeError::HeartbeatRowMissing)?;
 
     let sample = WriterSample {
+        scheduled_wall,
         sampled_at,
         oldest_xact_start,
         token: row.get("token"),
@@ -1017,7 +1026,10 @@ async fn probe_untraced(
     timings: &mut ProbeTimings,
 ) -> Result<TokenEntry, ProbeError> {
     let sample = sample_writer(writer, timings).await?;
-    let wall = fence_wall(sample.sampled_at, sample.oldest_xact_start);
+    let ordinary_wall = fence_wall(sample.sampled_at, sample.oldest_xact_start);
+    let wall = sample
+        .scheduled_wall
+        .map_or(ordinary_wall, |reservation| ordinary_wall.min(reservation));
     match fence.record(sample.token, sample.epoch, sample.committed_at, wall) {
         RecordOutcome::Recorded => Ok(TokenEntry {
             token: sample.token,

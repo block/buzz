@@ -15,6 +15,8 @@ pub mod nip05;
 pub mod nip_fi;
 pub mod operator;
 pub mod profiles;
+/// Owner-only scheduled message queue.
+pub mod scheduled_messages;
 pub mod workflows;
 
 // Re-export imeta helpers used by ingest pipeline.
