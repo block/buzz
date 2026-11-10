@@ -5193,10 +5193,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(
-        find.text('Join this channel from Manage to participate.'),
-        findsOneWidget,
-      );
+      expect(find.text('Join channel to send messages'), findsOneWidget);
       expect(find.text('Message…'), findsNothing);
 
       await tester.tap(
@@ -5212,12 +5209,151 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('Join channel'), findsNothing);
-      expect(
-        find.text('Join this channel from Manage to participate.'),
-        findsNothing,
-      );
+      expect(find.text('Join channel to send messages'), findsNothing);
 
       expect(find.text('Message #general'), findsOneWidget);
+    });
+
+    testWidgets('joins an open channel from the footer Join button', (
+      tester,
+    ) async {
+      final openChannel = _testChannel.copyWith(isMember: false);
+      final channelsNotifier = _FakeChannelsNotifier([openChannel]);
+      final joined = <String>[];
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          channel: openChannel,
+          channelsNotifier: channelsNotifier,
+          createChannelActions: (ref) => _FakeChannelActions(
+            ref,
+            onJoinChannel: (channelId) async {
+              joined.add(channelId);
+              channelsNotifier.setChannels([
+                openChannel.copyWith(isMember: true),
+              ]);
+            },
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Message #general'), findsNothing);
+      await tester.tap(find.byKey(const ValueKey('channel-join-button')));
+      await tester.pumpAndSettle();
+
+      expect(joined, [openChannel.id]);
+      expect(find.byKey(const ValueKey('channel-join-button')), findsNothing);
+      expect(find.text('Message #general'), findsOneWidget);
+    });
+
+    testWidgets(
+      'a refused join keeps Join; an unconfirmed one offers a check',
+      (tester) async {
+        final openChannel = _testChannel.copyWith(isMember: false);
+        final channelsNotifier = _FakeChannelsNotifier([openChannel]);
+        final outcomes = <Object>[
+          StateError('rejected'),
+          const ChannelJoinUnconfirmed(),
+        ];
+        final rechecks = <String>[];
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: const [],
+            channel: openChannel,
+            channelsNotifier: channelsNotifier,
+            createChannelActions: (ref) => _FakeChannelActions(
+              ref,
+              onJoinChannel: (_) async => throw outcomes.removeAt(0),
+              onRecheckJoin: (channelId) async {
+                rechecks.add(channelId);
+                channelsNotifier.setChannels([
+                  openChannel.copyWith(isMember: true),
+                ]);
+              },
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        final joinButton = find.byKey(const ValueKey('channel-join-button'));
+
+        await tester.tap(joinButton);
+        await tester.pumpAndSettle();
+        expect(find.text('Couldn’t join channel. Try again.'), findsOneWidget);
+        expect(find.widgetWithText(FilledButton, 'Join'), findsOneWidget);
+        expect(tester.widget<FilledButton>(joinButton).onPressed, isNotNull);
+        // The toast sits over the footer until it goes away.
+        ScaffoldMessenger.of(tester.element(joinButton)).hideCurrentSnackBar();
+        await tester.pumpAndSettle();
+
+        await tester.tap(joinButton);
+        await tester.pumpAndSettle();
+        expect(find.text('Join sent, but not confirmed yet'), findsOneWidget);
+        expect(
+          find.widgetWithText(FilledButton, 'Check again'),
+          findsOneWidget,
+        );
+        expect(find.text('Message #general'), findsNothing);
+
+        await tester.tap(joinButton);
+        await tester.pumpAndSettle();
+        expect(rechecks, [openChannel.id]);
+        expect(outcomes, isEmpty);
+        expect(joinButton, findsNothing);
+        expect(find.text('Message #general'), findsOneWidget);
+      },
+    );
+
+    testWidgets('a guest-join channel reads as read-only with no Join', (
+      tester,
+    ) async {
+      final guestChannel = _testChannel.copyWith(
+        isMember: false,
+        joinsAsGuest: true,
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          channel: guestChannel,
+          channelsNotifier: _FakeChannelsNotifier([guestChannel]),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('This channel is read-only'), findsOneWidget);
+      expect(find.byKey(const ValueKey('channel-join-button')), findsNothing);
+      expect(find.text('Message #general'), findsNothing);
+    });
+
+    testWidgets('offers no Join button for a private channel preview', (
+      tester,
+    ) async {
+      final privateChannel = Channel(
+        id: _channelId,
+        name: 'general',
+        channelType: 'stream',
+        visibility: 'private',
+        description: '',
+        createdBy: 'abc123',
+        createdAt: DateTime(2025),
+        memberCount: 5,
+        isMember: false,
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          channel: privateChannel,
+          channelsNotifier: _FakeChannelsNotifier([privateChannel]),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('You’re previewing this channel'), findsOneWidget);
+      expect(find.byKey(const ValueKey('channel-join-button')), findsNothing);
     });
 
     testWidgets('Leave lives on the detail page instead of Manage', (
@@ -20622,6 +20758,7 @@ class _FakeChannelsNotifier extends ChannelsNotifier {
 
 class _FakeChannelActions extends ChannelActions {
   final Future<void> Function(String channelId)? onJoinChannel;
+  final Future<void> Function(String channelId)? onRecheckJoin;
   final Future<void> Function(String channelId)? onLeaveChannel;
   final Future<void> Function(String channelId)? onArchiveChannel;
   final Future<void> Function(String channelId, List<String> pubkeys)?
@@ -20636,6 +20773,7 @@ class _FakeChannelActions extends ChannelActions {
   _FakeChannelActions(
     Ref ref, {
     this.onJoinChannel,
+    this.onRecheckJoin,
     this.onLeaveChannel,
     this.onArchiveChannel,
     this.onAddMembers,
@@ -20653,6 +20791,11 @@ class _FakeChannelActions extends ChannelActions {
   @override
   Future<void> joinChannel(String channelId) async {
     await onJoinChannel?.call(channelId);
+  }
+
+  @override
+  Future<void> recheckJoin(String channelId) async {
+    await onRecheckJoin?.call(channelId);
   }
 
   @override

@@ -25,6 +25,7 @@ import 'package:buzz/shared/profile/user_cache_provider.dart';
 import 'package:buzz/features/activity/activity_provider.dart';
 import 'package:buzz/features/activity/inbox_item.dart';
 import 'package:buzz/features/activity/inbox_read_state.dart';
+import 'package:nostr/nostr.dart' as nostr;
 
 part 'channels_provider_live_cases.dart';
 part 'channels_provider_deletion_cases.dart';
@@ -32,6 +33,7 @@ part 'channels_provider_terminal_cases.dart';
 part 'channels_provider_readiness_cases.dart';
 part 'channels_provider_request_path_cases.dart';
 part 'channels_provider_activity_cases.dart';
+part 'channels_provider_join_cases.dart';
 
 /// Tests for [ChannelsNotifier] in the pure-Nostr world.
 ///
@@ -50,6 +52,7 @@ void main() {
   _unreadDeletionCases();
   _requestPathCases();
   _threadActivityCases();
+  _confirmedJoinCases();
   const myPk = 'me';
 
   test(
