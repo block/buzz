@@ -83,9 +83,10 @@ pub const CREATED_AT_FLOOR_SECS: i64 = 960;
 
 /// Enforce the channel-event floor on the admitted INSERT connection.
 ///
-/// One SELECT keeps the five existing INSERT shapes intact. Ordinary/thread
-/// writers check after INSERT only when it inserted a row, before follow-ups;
-/// replacements check after replay exits, before superseding the old head.
+/// One SELECT keeps the five existing INSERT shapes intact. Every writer
+/// checks after its INSERT, only when it inserted a row, before follow-ups, so
+/// replaying a stored id (even a soft-deleted one) stays a duplicate.
+/// Replacements roll back the supersede with it (savepoint or caller).
 /// The caller must propagate failure and roll back the write transaction. Its
 /// database clock is sampled after BEGIN: transactions open at the probe scan
 /// are bounded by xact_start; transactions starting later sample after S. No

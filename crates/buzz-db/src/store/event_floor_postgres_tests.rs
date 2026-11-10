@@ -268,6 +268,51 @@ async fn addressable_event_floor_rejects_old_and_accepts_fresh() {
     assert_eq!(count(&db, community, &fresh).await, 1);
 }
 
+/// Seed an aged, stored and then soft-deleted event, as NIP-09 leaves it.
+async fn soft_deleted_aged(db: &Db, community: CommunityId, channel: Uuid, keys: &Keys, kind: u16) -> Event {
+    let now = database_clock(db).await;
+    let aged = signed(
+        keys,
+        kind,
+        channel,
+        now - chrono::Duration::seconds(CREATED_AT_FLOOR_SECS + 60),
+    );
+    crate::test_support::insert_historical_event(db.pool(), community, &aged, channel).await;
+    sqlx::query("UPDATE events SET deleted_at = now() WHERE community_id = $1 AND id = $2")
+        .bind(community.as_uuid())
+        .bind(aged.id.as_bytes().as_slice())
+        .execute(db.pool())
+        .await
+        .expect("soft-delete");
+    aged
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn parameterized_replay_of_soft_deleted_aged_event_is_a_duplicate() {
+    let (db, community, channel, keys) = fixture().await;
+    let aged = soft_deleted_aged(&db, community, channel, &keys, 30078).await;
+    let (_, stored) = db
+        .replace_parameterized_event(community, &aged, &channel.to_string(), Some(channel))
+        .await
+        .expect("replay of a stored id is a duplicate, not a floor rejection");
+    assert!(!stored);
+    assert_eq!(count(&db, community, &aged).await, 1);
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn addressable_replay_of_soft_deleted_aged_event_is_a_duplicate() {
+    let (db, community, channel, keys) = fixture().await;
+    let aged = soft_deleted_aged(&db, community, channel, &keys, 39000).await;
+    let (_, stored) = db
+        .replace_addressable_event(community, &aged, Some(channel))
+        .await
+        .expect("replay of a stored id is a duplicate, not a floor rejection");
+    assert!(!stored);
+    assert_eq!(count(&db, community, &aged).await, 1);
+}
+
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn member_snapshot_event_floor_rejects_old_and_accepts_fresh() {
