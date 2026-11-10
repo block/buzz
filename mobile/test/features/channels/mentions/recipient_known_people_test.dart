@@ -93,8 +93,17 @@ class _Cache extends UserCacheNotifier {
       pubkey: UserProfile(pubkey: pubkey, displayName: name),
   };
 
+  /// Loads a name for an unnamed person when the picker asks for it.
   @override
-  Future<bool> preload(List<String> pubkeys) async => true;
+  Future<bool> preload(List<String> pubkeys) async {
+    if (pubkeys.contains(_nameless)) {
+      state = {
+        ...state,
+        _nameless: UserProfile(pubkey: _nameless, displayName: 'Bo'),
+      };
+    }
+    return true;
+  }
 }
 
 void main() {
@@ -135,9 +144,9 @@ void main() {
   }
 
   test(
-    'an empty query lists named people from open channels and DMs',
+    'an empty query lists people from open channels and DMs, loading names',
     () async {
-      expect(await pick(''), ['Ada', 'Eve']);
+      expect(await pick(''), ['Ada', 'Bo', 'Eve']);
     },
   );
 

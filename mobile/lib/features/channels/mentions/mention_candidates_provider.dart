@@ -252,14 +252,19 @@ final recipientSearchFailedProvider = Provider.family.autoDispose<bool, String>(
 );
 
 /// Named people in the viewer's open channels and DMs, as directory search
-/// results, from the member lists the channel list already loaded.
+/// results, from the member lists the channel list already loaded. DM
+/// partners come first. Profiles are loaded for unnamed people only until
+/// a full picker list of [mentionSuggestionLimit] people has names.
 List<UserProfile> _knownPeople(Ref ref) {
-  final channels =
-      ref.watch(channelsProvider).asData?.value ?? const <Channel>[];
+  final channels = [...?ref.watch(channelsProvider).asData?.value]
+    ..sort((a, b) => (a.isDm ? 0 : 1) - (b.isDm ? 0 : 1));
   final notifier = ref.read(channelsProvider.notifier);
   final userCache = ref.watch(userCacheProvider);
   final verified = ref.watch(verifiedProfilesProvider);
-  final people = <String, UserProfile>{};
+  final viewer = ref.watch(currentPubkeyProvider)?.toLowerCase();
+  final seen = <String>{?viewer};
+  final people = <UserProfile>[];
+  final unnamed = <String>[];
   for (final channel in channels) {
     if (!channel.isMember || channel.isArchived) continue;
     final pubkeys = [
@@ -269,16 +274,23 @@ List<UserProfile> _knownPeople(Ref ref) {
     ];
     for (final pubkey in pubkeys) {
       final key = pubkey.toLowerCase();
-      if (people.containsKey(key)) continue;
+      if (!seen.add(key)) continue;
       final profile = userCache[key];
       if (profile?.displayName?.trim().isNotEmpty == true) {
-        people[key] = profile!;
+        people.add(profile!);
       } else if (verified[key] case final name?) {
-        people[key] = UserProfile(pubkey: key, displayName: name.displayName);
+        people.add(UserProfile(pubkey: key, displayName: name.displayName));
+      } else if (people.length + unnamed.length < mentionSuggestionLimit) {
+        unnamed.add(key);
       }
     }
   }
-  return people.values.toList();
+  if (unnamed.isNotEmpty) {
+    Future.microtask(() {
+      if (ref.mounted) ref.read(userCacheProvider.notifier).preload(unnamed);
+    });
+  }
+  return people;
 }
 
 List<MentionCandidate> _chooserCandidates(
