@@ -223,7 +223,7 @@ void main() {
     await open(tester);
     await tester.enterText(
       find.byKey(const ValueKey('add-channel-members-search')),
-      'Person 00',
+      'Person',
     );
     await tester.pump(const Duration(milliseconds: 300));
     await tester.pumpAndSettle();
