@@ -68,13 +68,29 @@ final identityArchivesProvider = FutureProvider<Set<String>>((ref) async {
   }
 });
 
+/// [identityArchivesProvider] with the relay configuration (community and
+/// account) it was read for.
+final _scopedArchivesProvider = FutureProvider<(RelayConfig, Set<String>)>((
+  ref,
+) async {
+  final config = ref.watch(relayConfigProvider);
+  return (config, await ref.watch(identityArchivesProvider.future));
+});
+
 /// Identities to leave out of forward-looking choices (pickers, search and
 /// the Agents page), as desktop's `archiveHides`: the known-archived ones.
 /// None while the archive list loads or cannot be read. History (messages,
 /// activity, profiles) keeps showing archived identities.
-final hiddenArchivedIdentitiesProvider = Provider<Set<String>>(
-  (ref) => ref.watch(identityArchivesProvider).value ?? const <String>{},
-);
+///
+/// A refresh keeps the last known set, but after a community or account
+/// switch the previous set does not apply: nobody is hidden until the new
+/// community's list arrives.
+final hiddenArchivedIdentitiesProvider = Provider<Set<String>>((ref) {
+  final config = ref.watch(relayConfigProvider);
+  final known = ref.watch(_scopedArchivesProvider).value;
+  if (known == null || !identical(known.$1, config)) return const {};
+  return known.$2;
+});
 
 Future<Set<String>> _parseArchives(List<NostrEvent> events, String authority) =>
     Isolate.run(() => _archived(events, authority));

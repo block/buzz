@@ -69,6 +69,73 @@ void main() {
     },
   );
 
+  test(
+    'hides archived identities for the current community only, never the viewer',
+    () async {
+      final viewer = nostr.Keys.generate();
+      final other = nostr.Keys.generate();
+      final authority = nostr.Keys.generate();
+      final archivedInA = 'a' * 64;
+      final archivedInB = 'b' * 64;
+      NostrEvent snapshot(List<String> keys) => NostrEvent.fromJson(
+        nostr.Event.from(
+          kind: 13535,
+          content: '',
+          secretKey: authority.secret,
+          tags: [
+            ['-'],
+            for (final key in keys) ['p', key],
+          ],
+        ).toMap(),
+      );
+      // Community A's list also names the viewer, who must stay visible.
+      final relay = _ArchiveRelay(snapshot([archivedInA, viewer.public]));
+      final communityB = Completer<void>();
+      final client = MockClient((request) async {
+        if (request.url.host == 'b.test') await communityB.future;
+        return http.Response(jsonEncode({'self': authority.public}), 200);
+      });
+      final container = ProviderContainer(
+        overrides: [
+          relayConfigProvider.overrideWith(
+            () => _Config(
+              RelayConfig(baseUrl: 'https://a.test', nsec: viewer.nsec),
+            ),
+          ),
+          meSyncProvider.overrideWith(
+            (ref) => MeSync(relay, ref.watch(relayConfigProvider)),
+          ),
+          relayInformationClientProvider.overrideWithValue(client),
+        ],
+      );
+      addTearDown(container.dispose);
+      addTearDown(client.close);
+      container.listen(hiddenArchivedIdentitiesProvider, (_, _) {});
+      Future<Set<String>> settled() async {
+        await container.read(identityArchivesProvider.future);
+        await pumpEventQueue();
+        return container.read(hiddenArchivedIdentitiesProvider);
+      }
+
+      expect(await settled(), {archivedInA});
+      // A refresh in the same community keeps the known set meanwhile.
+      container.invalidate(identityArchivesProvider);
+      expect(container.read(hiddenArchivedIdentitiesProvider), {archivedInA});
+      expect(await settled(), {archivedInA});
+
+      // Switch community and account: A's list no longer applies, so nobody
+      // is hidden until B's list arrives.
+      relay.event = snapshot([archivedInB]);
+      container
+          .read(relayConfigProvider.notifier)
+          .update(baseUrl: 'https://b.test', nsec: other.nsec);
+      await pumpEventQueue();
+      expect(container.read(hiddenArchivedIdentitiesProvider), isEmpty);
+      communityB.complete();
+      expect(await settled(), {archivedInB});
+    },
+  );
+
   test('slow metadata has a total deadline and cancels its stream', () async {
     final owner = nostr.Keys.generate();
     final relay = _ArchiveRelay(null);
@@ -143,4 +210,11 @@ class _ArchiveRelay extends RelaySessionNotifier {
     author = filter.authors!.single;
     return [?event];
   }
+}
+
+class _Config extends RelayConfigNotifier {
+  _Config(this.initial);
+  final RelayConfig initial;
+  @override
+  RelayConfig build() => initial;
 }
