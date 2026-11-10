@@ -3547,6 +3547,28 @@ void main() {
     expect(find.text('Retry'), findsOneWidget);
   });
 
+  testWidgets('a refused sign-in names no API token and keeps retry', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      buildTestable(
+        overrides: [
+          channelsProvider.overrideWith(() => _UnauthorizedNotifier()),
+        ],
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 3));
+    await tester.pump();
+
+    expect(
+      find.text("This community didn't accept your sign-in. Try again."),
+      findsOneWidget,
+    );
+    expect(find.textContaining('API token'), findsNothing);
+    expect(find.text('Retry'), findsOneWidget);
+  });
+
   testWidgets('bolds and clears unread channel labels', (tester) async {
     final channels = [
       Channel(
@@ -3964,6 +3986,12 @@ class _FakeCommunityListNotifier extends CommunityListNotifier {
 class _ErrorNotifier extends ChannelsNotifier {
   @override
   Future<List<Channel>> build() => Future.error('Connection refused');
+}
+
+class _UnauthorizedNotifier extends ChannelsNotifier {
+  @override
+  Future<List<Channel>> build() =>
+      Future.error(RelayException(401, 'authentication required\n'));
 }
 
 class _LoadingNotifier extends ChannelsNotifier {

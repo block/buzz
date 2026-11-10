@@ -35,8 +35,10 @@ class _ErrorView extends StatelessWidget {
 
   static String _userMessage(Object error) {
     if (error is RelayException) {
+      // There is no API token to check. A protected community's Retry gets a
+      // fresh token, and its shell banner takes over once sign-in has ended.
       if (error.statusCode == 401) {
-        return 'Not authorized. Check your API token.';
+        return "This community didn't accept your sign-in. Try again.";
       }
       if (error.statusCode == 403) {
         return 'Access denied.';
