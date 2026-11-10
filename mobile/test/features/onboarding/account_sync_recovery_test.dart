@@ -1,3 +1,8 @@
+import 'package:buzz/hosted_app_gate.dart';
+import 'package:buzz/onboarding_app_entry.dart';
+import 'package:buzz/shared/deeplink/pending_deep_link_provider.dart';
+import 'package:buzz/shared/hosted/hosted_environment.dart';
+import 'package:buzz/shared/theme/theme.dart';
 import 'dart:async';
 import 'dart:convert';
 
@@ -225,6 +230,54 @@ void main() {
     },
   );
 
+  for (final queuedFirst in [false, true]) {
+    test(
+      'A removal preserves B at the same URL (queued first: $queuedFirst)',
+      () async {
+        final backend = _Backend();
+        final account = backend.client();
+        await _signIn(account);
+        final storage = CommunityStorage(secure: FakeSecureStorage());
+        final sync = _sync(account, storage)..setActive(false);
+        final container = _container(account, storage, sync);
+        addTearDown(() {
+          container.dispose();
+          sync.dispose();
+          account.dispose();
+        });
+        await storage.save(await sync.prepareAddition(_community('A')));
+        if (queuedFirst) await sync.remove('wss://private.example');
+        await account.clearLocalSession();
+        backend.subject = 'B';
+        await _signIn(account);
+        final b = _community(
+          'B',
+        ).copyWith(nsec: nostr.Keys('2'.padLeft(64, '0')).nsec);
+        await storage.save(await sync.prepareAddition(b));
+        await account.clearLocalSession();
+        backend.subject = 'A';
+        await _signIn(account);
+        await container.read(communityListProvider.future);
+        if (queuedFirst) {
+          // Old journal ordering: local deletion committed before restart.
+          await storage.remove('A');
+        } else {
+          await container
+              .read(communityListProvider.notifier)
+              .removeCommunity('A');
+        }
+        sync.setActive(true);
+        await sync.synchronize();
+        expect((await storage.loadAll()).single.nsec, b.nsec);
+        expect((await storage.loadAll()).single.id, 'B');
+        expect(backend.edits, [
+          (subject: 'A', op: 'remove', url: 'wss://private.example'),
+        ]);
+        expect(await sync.pendingRemovals('A'), isEmpty);
+      },
+    );
+  }
+
   for (final failure in ['read', 'write']) {
     test(
       'local removal survives $failure failure and duplicate identities, then restart converges',
@@ -368,6 +421,16 @@ void main() {
         ),
       );
       await sync.remove('wss://private.example');
+      await account.clearLocalSession();
+      backend.subject = 'B';
+      await _signIn(account);
+      final b = _community(
+        'B',
+      ).copyWith(nsec: nostr.Keys('2'.padLeft(64, '0')).nsec);
+      await storage.save(await sync.prepareAddition(b));
+      await account.clearLocalSession();
+      backend.subject = 'A';
+      await _signIn(account);
       // Old preview prefix: journal committed but local deletion did not happen.
       sync.dispose();
       sync = _sync(account, storage, journal: journal);
@@ -396,7 +459,8 @@ void main() {
       await tester.tap(find.text('Remove').last);
       await tester.pumpAndSettle();
       await sync.synchronize();
-      expect(await storage.loadAll(), isEmpty);
+      expect((await storage.loadAll()).single.id, 'B');
+      expect((await storage.loadAll()).single.nsec, b.nsec);
       expect(await sync.pendingRemovals('A'), isEmpty);
       expect(
         backend.edits.every(
@@ -463,6 +527,10 @@ void main() {
   testWidgets(
     'denied removal recovery opens browser and same-account exchange resumes it',
     (tester) async {
+      if (!HostedEnvironment.enabled) return;
+      PendingDeepLinkNotifier.debugUriStreamOverride =
+          const Stream<Uri>.empty();
+      addTearDown(() => PendingDeepLinkNotifier.debugUriStreamOverride = null);
       final backend = _Backend();
       final account = backend.client();
       await _signIn(account);
@@ -484,19 +552,34 @@ void main() {
       await sync.synchronize();
       expect(sync.failure, AccountFailure.denied);
       await tester.pumpWidget(
-        WidgetHelpers.testable(
-          enableAccountCommunitySync: true,
+        ProviderScope(
           overrides: [
             builderlabAccountProvider.overrideWithValue(account),
             knownCommunitySyncProvider.overrideWithValue(sync),
             hostedFlowProvider.overrideWithValue(flow),
           ],
-          child: const AccountCommunitySyncStatus(),
+          child: MaterialApp(
+            theme: AppTheme.light(),
+            home: const HostedAppGate(
+              authenticated: false,
+              child: OnboardingAppEntry(),
+            ),
+          ),
         ),
       );
       await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+      expect(find.text('Retry account sync'), findsOneWidget);
+      expect(
+        find.ancestor(
+          of: find.byType(AccountCommunitySyncStatus),
+          matching: find.byType(Material),
+        ),
+        findsWidgets,
+      );
       await tester.tap(find.text('Sign in again'));
-      await tester.pumpAndSettle();
+      await tester.pump();
+      await tester.pump();
       expect(browser.startedIntent, isNotNull);
       backend.denied = false;
       browser.callbacks.add(

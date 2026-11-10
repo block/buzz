@@ -49,7 +49,13 @@ class AccountCommunitySyncStatus extends HookConsumerWidget {
     final removals = value?.subject == account.account?.subject
         ? value?.urls ?? <String>{}
         : <String>{};
-    final local = ref.watch(communityListProvider).value ?? const [];
+    final subject = account.account?.subject;
+    final owner = subject == null
+        ? null
+        : '${account.accountOrigin.origin}\n$subject';
+    final local = (ref.watch(communityListProvider).value ?? const [])
+        .where((c) => owner != null && c.accountSyncOwner == owner)
+        .toList();
     final failed = sync?.failure != null || pending.hasError;
     if (removals.isEmpty && !failed) return const SizedBox.shrink();
     return Semantics(
@@ -66,7 +72,9 @@ class AccountCommunitySyncStatus extends HookConsumerWidget {
             if (local.any((c) => knownCommunityAddress(c.relayUrl) == url))
               TextButton(
                 onPressed: () async {
-                  final subject = account.account?.subject;
+                  if (subject == null || account.account?.subject != subject) {
+                    return;
+                  }
                   final confirmed = await showDestructiveConfirmation(
                     context: context,
                     title: 'Finish removal?',

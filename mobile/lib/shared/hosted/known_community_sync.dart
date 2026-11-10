@@ -212,6 +212,7 @@ class KnownCommunitySync extends ChangeNotifier {
             .where((c) => !c.accountSyncRemoved)
             .toList();
         local = records
+            .where((c) => c.accountSyncOwner == _owner(subject))
             .map((c) => knownCommunityAddress(c.relayUrl))
             .whereType<String>()
             .toSet();

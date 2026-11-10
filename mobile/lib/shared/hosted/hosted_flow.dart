@@ -278,6 +278,7 @@ class HostedFlow extends ChangeNotifier {
       final generation = _generation;
       _enqueue(() async {
         _importRequested = code.intent['import_identity'] == 'true';
+        _discoverOnly = code.intent['discover_only'] == 'true';
         reconnecting = code.intent['type'] == 'reconnect';
         accountOnly = reconnecting || code.intent['type'] == 'account';
         if (accountOnly) {
@@ -324,6 +325,7 @@ class HostedFlow extends ChangeNotifier {
         if (_disposed || generation != _generation) return;
         if (retained != null && _target == null) {
           _importRequested = retained['import_identity'] == 'true';
+          _discoverOnly = retained['discover_only'] == 'true';
           if (retained['type'] == 'reconnect') {
             reconnecting = true;
             accountOnly = true;
@@ -362,6 +364,7 @@ class HostedFlow extends ChangeNotifier {
   Map<String, String> get _accountIntent => {
     'type': 'account',
     if (_importRequested) 'import_identity': 'true',
+    if (_discoverOnly) 'discover_only': 'true',
   };
 
   /// Opens account sign-in, optional address discovery, or explicit reauthentication.

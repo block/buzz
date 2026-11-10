@@ -281,7 +281,7 @@ class OnboardingAppEntry extends HookConsumerWidget {
             ConstrainedBox(
               constraints: const BoxConstraints(maxHeight: 180),
               child: const SingleChildScrollView(
-                child: AccountCommunitySyncStatus(),
+                child: Material(child: AccountCommunitySyncStatus()),
               ),
             ),
         ],

@@ -1,3 +1,8 @@
+import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
+import 'package:buzz/shared/hosted/browser_auth.dart';
+import 'package:buzz/shared/hosted/hosted_flow.dart';
+import 'package:buzz/shared/hosted/hosted_identity_service.dart';
 import 'package:buzz/features/onboarding/self_hosted_entry_sheet.dart';
 import 'package:buzz/hosted_app_gate.dart';
 import 'package:buzz/onboarding_app_entry.dart';
@@ -14,6 +19,86 @@ import '../../helpers/hosted_communities_fixture.dart';
 import '../../helpers/widget_helpers.dart';
 
 void main() {
+  for (final discover in [true, false]) {
+    for (final callback in [true, false]) {
+      testWidgets(
+        'browser restart retains discovery=$discover callback=$callback',
+        (tester) async {
+          if (!HostedEnvironment.enabled) return;
+          FlutterSecureStorage.setMockInitialValues({});
+          debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+          tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            const MethodChannel('buzz/hosted_hpke'),
+            (_) async => false,
+          );
+          addTearDown(() {
+            debugDefaultTargetPlatformOverride = null;
+            tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+              const MethodChannel('buzz/hosted_hpke'),
+              null,
+            );
+          });
+          final fixture = HostedCommunitiesFixture();
+          await fixture.initialize(withIdentity: false);
+          fixture.rows = [
+            {'community_url': 'wss://external.example:8443'},
+          ];
+          await fixture.account.clearLocalSession();
+          await fixture.flow.initialize();
+          await fixture.flow.signInAccount(discoverOnly: discover);
+          final intent = fixture.browser.startedIntent!;
+          fixture.flow.dispose();
+          await fixture.browser.dispose();
+          final browser = DiscoveryBrowser();
+          final flow = HostedFlow(
+            account: fixture.account,
+            browser: browser,
+            store: fixture.store,
+            identity: HostedIdentityService(
+              account: fixture.account,
+              store: fixture.store,
+            ),
+            openWeb: (_) async => true,
+            enterCommunity: (_, _, _, _) async {},
+          );
+          await flow.initialize();
+          if (callback) {
+            browser.callbacks.add(BrowserAuthCode('return', 'a' * 43, intent));
+            await tester.pumpAndSettle();
+          } else {
+            // Restored intent also survives a retry before the browser returns.
+            await flow.retry();
+            browser.callbacks.add(
+              BrowserAuthCode('return', 'a' * 43, browser.startedIntent!),
+            );
+            await tester.pumpAndSettle();
+          }
+          if (discover) {
+            expect(flow.stage, HostedFlowStage.chooseCommunities);
+            expect(flow.communities.map((c) => c.relayUrl), [
+              'wss://external.example:8443',
+            ]);
+            expect(
+              fixture.requests.where((p) => p.contains('nostr-identities')),
+              isEmpty,
+            );
+          } else {
+            expect(flow.stage, HostedFlowStage.blocked);
+            expect(flow.problem, HostedFlowProblem.unsupportedPlatform);
+            expect(
+              fixture.requests.where((p) => p.endsWith('/current')),
+              isNotEmpty,
+            );
+          }
+          debugDefaultTargetPlatformOverride = null;
+          flow.dispose();
+          await browser.dispose();
+          fixture.account.dispose();
+        },
+      );
+    }
+  }
+
   for (final scenario in ['external-only', 'mixed', 'hosted-selection']) {
     final mixed = scenario != 'external-only';
     testWidgets(

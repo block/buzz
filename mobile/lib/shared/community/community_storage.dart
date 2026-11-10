@@ -174,7 +174,7 @@ class CommunityStorage {
       _pendingInvites.run(() => _saveList(communities));
 
   /// Remove locally and retain the confirmed account edit in the same write.
-  /// Other local identities at this destination keep its account entry alive.
+  /// Other identities owned by this account keep its destination entry alive.
   Future<void> remove(
     String id, {
     String? accountSyncOwner,
@@ -204,12 +204,17 @@ class CommunityStorage {
     final removedUrl = removed == null
         ? null
         : knownCommunityAddress(removed.relayUrl);
-    // Another local identity still uses this destination: retain the account row.
+    // Another identity owned by this account retains its destination row.
     // Otherwise commit deletion and remote intent in the same storage write.
     if (removed != null &&
         removedUrl != null &&
         accountSyncOwner != null &&
-        !all.any((c) => knownCommunityAddress(c.relayUrl) == removedUrl)) {
+        !all.any(
+          (c) =>
+              !c.accountSyncRemoved &&
+              c.accountSyncOwner == accountSyncOwner &&
+              knownCommunityAddress(c.relayUrl) == removedUrl,
+        )) {
       all.add(
         Community(
           id: 'account-removal-${const Uuid().v4()}',

@@ -135,7 +135,16 @@ class HostedCommunitiesFixture {
         if (path.endsWith('/current')) {
           return http.Response(
             jsonEncode({
-              'identity': {'pubkey_hex': bound},
+              'identity': bound == null ? null : {'pubkey_hex': bound},
+            }),
+            200,
+          );
+        }
+        if (path.endsWith('/nsec-backups/status')) {
+          return http.Response(
+            jsonEncode({
+              'backup_nostr_pubkeys': <String>[],
+              'current_nostr_pubkey': bound,
             }),
             200,
           );
