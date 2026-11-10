@@ -278,7 +278,7 @@ class _MessageImageStack extends HookConsumerWidget {
                         shape: BoxShape.circle,
                       ),
                       child: Icon(
-                        BuzzIcons.play,
+                        Icons.play_arrow,
                         key: ValueKey('message-media-stack-video:${item.url}'),
                         color: Colors.white,
                         size: 24,
