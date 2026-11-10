@@ -74,6 +74,23 @@ struct SourceRow {
     subject_owned: bool,
 }
 
+/// Operator-selected work limits; exceeding either aborts the entire observation.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct MediaScanBudget {
+    /// Maximum inspected database records, including records without references.
+    pub max_source_rows: usize,
+    /// Per-statement deadline for the read-only source scan.
+    pub statement_timeout_secs: u64,
+}
+impl Default for MediaScanBudget {
+    fn default() -> Self {
+        Self {
+            max_source_rows: 1_000_000,
+            statement_timeout_secs: 120,
+        }
+    }
+}
+
 impl Db {
     /// Scan media-bearing records in all communities under one read-only repeatable
     /// read transaction. Bounds fail the whole scan; no partial inventory is returned.
@@ -84,12 +101,36 @@ impl Db {
         namespace: &str,
         extra_bases: &[String],
     ) -> Result<MediaScan> {
+        self.scan_user_media_with_budget(
+            human,
+            include_agents,
+            namespace,
+            extra_bases,
+            MediaScanBudget::default(),
+        )
+        .await
+    }
+
+    /// Scan with explicit limits for a larger source database. Memory and per-file
+    /// bounds still apply; a larger row budget never permits partial publication.
+    pub async fn scan_user_media_with_budget(
+        &self,
+        human: &str,
+        include_agents: bool,
+        namespace: &str,
+        extra_bases: &[String],
+        budget: MediaScanBudget,
+    ) -> Result<MediaScan> {
+        if budget.max_source_rows == 0 || budget.statement_timeout_secs == 0 {
+            return Err(invalid("media scan budgets must be positive"));
+        }
         let human = crate::user_deletion::normalize_user_deletion_pubkey(human)?;
         let mut tx = self.pool().begin().await?;
         sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
             .execute(&mut *tx)
             .await?;
-        sqlx::query("SET LOCAL statement_timeout = '120s'")
+        sqlx::query("SELECT set_config('statement_timeout', $1, true)")
+            .bind(format!("{}s", budget.statement_timeout_secs))
             .execute(&mut *tx)
             .await?;
         let database_snapshot_at: String =
@@ -129,9 +170,9 @@ impl Db {
                 sqlx::query_as::<_, SourceRow>(include_str!("sources.sql")).fetch(&mut *tx);
             while let Some(row) = rows.try_next().await? {
                 count += 1;
-                if count > 1_000_000 {
+                if count > budget.max_source_rows {
                     return Err(invalid(
-                        "source scan exceeds one million rows; no partial inventory published",
+                        "source scan exceeds max-source-rows; no partial inventory published",
                     ));
                 }
                 *scanned.entry(row.source_table.clone()).or_insert(0) += 1;
