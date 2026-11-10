@@ -508,7 +508,7 @@ class _StackPhotoCard extends StatelessWidget {
         height: height,
         child: DecoratedBox(
           decoration: ShapeDecoration(
-            color: Colors.white,
+            color: context.colors.surface,
             shape: RoundedSuperellipseBorder(borderRadius: radius),
             shadows: shadow > 0
                 ? [
