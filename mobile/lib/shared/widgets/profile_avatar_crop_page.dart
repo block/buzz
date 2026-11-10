@@ -545,5 +545,7 @@ Uint8List _cropAvatar(_CropRequest request) {
     width: _cropOutputSize,
     height: _cropOutputSize,
   );
-  return image.encodeJpg(resized, quality: 90);
+  return resized.any((pixel) => pixel.a < pixel.maxChannelValue)
+      ? image.encodePng(resized)
+      : image.encodeJpg(resized, quality: 90);
 }

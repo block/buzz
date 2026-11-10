@@ -647,6 +647,39 @@ void main() {
 
     expect(notifier.savedAvatarUrls, ['https://relay.example/profile.png']);
     expect(uploadService.uploadCount, 1);
+    expect(uploadService.uploadedMimeType, 'image/jpeg');
+  });
+
+  testWidgets('uploads a transparent photo crop as PNG', (tester) async {
+    final notifier = _FakeProfileNotifier();
+    final uploadService = _FakeMediaUploadService(
+      galleryBytes: image.encodePng(
+        image.Image(width: 8, height: 8, numChannels: 4),
+      ),
+    );
+    addTearDown(uploadService.dispose);
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [
+          profileProvider.overrideWith(() => notifier),
+          mediaUploadServiceProvider.overrideWithValue(uploadService),
+        ],
+        child: const ProfileEditPage(),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Edit Photo'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Photo Library'));
+    await _waitForAvatarCropToLoad(tester);
+    await tester.tap(find.byKey(const ValueKey('avatar-crop-use-photo')));
+    await _waitForAvatarCropToClose(tester);
+    await tester.tap(find.byKey(const ValueKey('avatar-save')));
+    await tester.pumpAndSettle();
+
+    expect(uploadService.uploadedMimeType, 'image/png');
+    final uploaded = image.decodePng(uploadService.uploadedBytes!)!;
+    expect(uploaded.getPixel(0, 0).a, 0);
   });
 
   testWidgets('keeps a failed avatar draft visible and retries publish', (
@@ -1233,6 +1266,7 @@ class _FakeMediaUploadService extends MediaUploadService {
   _FakeMediaUploadService({
     this.delayGallery = false,
     this.failImagePreparation = false,
+    this.galleryBytes,
   }) : super(
          baseUrl: 'https://relay.example',
          nsec: null,
@@ -1242,11 +1276,14 @@ class _FakeMediaUploadService extends MediaUploadService {
 
   final bool delayGallery;
   final bool failImagePreparation;
+  final Uint8List? galleryBytes;
   final _gallerySelection = Completer<XFile?>();
   int uploadCount = 0;
+  Uint8List? uploadedBytes;
+  String? uploadedMimeType;
 
   XFile _image() => XFile.fromData(
-    image.encodePng(image.Image(width: 8, height: 8)),
+    galleryBytes ?? image.encodePng(image.Image(width: 8, height: 8)),
     mimeType: 'image/png',
     name: 'avatar.png',
   );
@@ -1273,6 +1310,8 @@ class _FakeMediaUploadService extends MediaUploadService {
     UploadCancellationToken? cancellationToken,
   }) async {
     uploadCount++;
+    uploadedBytes = bytes;
+    uploadedMimeType = mimeType;
     return BlobDescriptor(
       url: 'https://relay.example/profile.png',
       sha256: 'hash',
