@@ -104,8 +104,10 @@ prior release's recorded squash commit; tag ancestry is deliberately irrelevant.
    `debug-0.3.0` and `debug-latest`) for native profiling. The ordinary tags
    remain stripped and are the default for deployments that do not need it.
 
-Every push to `main` continues to publish the rolling relay `:main` and
-`:sha-<7>` tags, plus matching `:debug-main` and `:debug-sha-<7>` variants.
+Every push to `main` that changes the image build context continues to
+publish the rolling relay `:main` and `:sha-<7>` tags, plus matching
+`:debug-main` and `:debug-sha-<7>` variants. Pushes that only touch paths
+`.dockerignore` excludes (such as `desktop/` and `mobile/`) publish nothing.
 
 ### Mobile
 

@@ -30,6 +30,30 @@ require_literal '- "scripts/create-deployment-eligibility-predicate.jq"'
 require_literal '- "scripts/select-qualified-ci-run.jq"'
 require_literal '- "scripts/test-relay-image-eligibility-workflow.sh"'
 
+# Main pushes may skip only paths Docker never sees. Every exclusion in the push
+# trigger must also be excluded by .dockerignore, so a filter cannot hide a
+# change that would alter the published image.
+push_trigger=$(awk '/^  push:$/{f=1;next} f&&/^  [a-z_]+:/{exit} f' "$workflow")
+grep -Fxq '      - "**"' <<<"$push_trigger" || {
+  echo "main push path filter must start from every path" >&2
+  exit 1
+}
+grep -Fxq '      - ".github/workflows/docker.yml"' <<<"$push_trigger" || {
+  echo "main push path filter must re-include the image workflow" >&2
+  exit 1
+}
+exclusions=$(sed -n 's|^      - "!\(.*\)/\*\*"$|\1|p' <<<"$push_trigger")
+[[ -n "$exclusions" ]] || {
+  echo "main push path filter has no exclusions to check" >&2
+  exit 1
+}
+while IFS= read -r excluded; do
+  grep -Fxq "$excluded/" "$repo_root/.dockerignore" || {
+    echo "main push skips $excluded/, which .dockerignore keeps in the image build context" >&2
+    exit 1
+  }
+done <<<"$exclusions"
+
 if grep -Fq "buzz-staging-dev" "$workflow"; then
   echo "canonical relay image workflow references the preview-only image package" >&2
   exit 1
