@@ -10,8 +10,13 @@
   <a href="VISION_PROJECTS.md">Forge</a> ·
   <a href="VISION_AGENT.md">Agents</a> ·
   <a href="ARCHITECTURE.md">Architecture</a> ·
+  <a href="RELEASING.md">Releasing</a> ·
   <a href="LICENSE">Apache 2.0</a>
 </p>
+
+> [!NOTE]
+> **Buzz 1.0 is at [block/buzz-app](https://github.com/block/buzz-app).** This repository is Buzz 0.X, which is still available and supported.
+> Buzz 1.0 adds [plugins](https://github.com/block/buzz-app/blob/main/docs/plugin-architecture.md); their API is a preview, so updates can break them.
 
 <p align="center">
   <img src="docs/assets/screenshots/channel-thread.png" alt="A Buzz project channel where people and an agent coordinate on a release plan" width="100%">
@@ -115,9 +120,29 @@ New to Buzz? Pick the path that matches you.
 
 ### I just want to try the app
 
-Grab a packaged build from the [latest release](https://github.com/block/buzz/releases/latest) — macOS (`.dmg`), Linux (`.AppImage` / `.deb`), or Windows (`.exe`). Install it like any other app.
+Grab a packaged build from the [latest release](https://github.com/block/buzz/releases/latest):
+
+| Platform | File |
+|---|---|
+| macOS (Apple Silicon) | `Buzz_<version>_aarch64.dmg` |
+| macOS (Intel) | `Buzz_<version>_x64.dmg` |
+| Linux (x86_64) | `Buzz_<version>_amd64.AppImage` or `Buzz_<version>_amd64.deb` |
+| Windows (x64) | `Buzz_<version>_x64-setup_alpha-unsigned.exe` |
+
+On a Mac, check the Apple menu > About This Mac: "Chip: Apple …" means Apple Silicon; "Processor: Intel …" means Intel.
+
+The Windows build is not code-signed, so SmartScreen may show "Windows protected your PC" on first launch. If available, click **More info**, then **Run anyway**.
+
 
 By default the app connects to `ws://localhost:3000`. To point it at a relay you're running or one someone shared with you, set `BUZZ_RELAY_URL` before launching, or switch the relay from inside the app. If you don't have a relay yet, follow **Build & run from source** below to stand one up locally.
+
+### I want my own hosted relay
+
+To run a relay for your team without managing servers, you can deploy one to Railway in a click:
+
+[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/buzz-relay-block)
+
+See [here](https://engineering.block.xyz/blog/run-your-own-buzz-relay) for details.
 
 ### I work at Block
 
@@ -248,6 +273,13 @@ just reset          # ⚠️  Wipe data + recreate
 ```
 
 </details>
+
+---
+
+## Community
+
+- **[Buzz feedback community](https://feedback.communities.buzz.xyz/invite/v2.yC8ZZIz5vwWCZYo2RRheuY1a0IKZRTXvxTmK7vIFIIY)** — ask questions, share feedback, and connect with other Buzz users
+- **[@buzzdotxyz on X](https://x.com/buzzdotxyz)** — news and updates
 
 ---
 

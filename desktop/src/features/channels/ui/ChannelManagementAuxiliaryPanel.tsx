@@ -11,6 +11,7 @@ type ChannelManagementAuxiliaryPanelProps = {
   isSinglePanelView: boolean;
   onChannelManagementDeleted?: () => void;
   onCloseChannelManagement?: () => void;
+  onOpenMembers?: () => void;
   onResetThreadPanelWidth: () => void;
   onThreadPanelResizeStart: (
     event: React.PointerEvent<HTMLButtonElement>,
@@ -27,6 +28,7 @@ export function ChannelManagementAuxiliaryPanel({
   isSinglePanelView,
   onChannelManagementDeleted,
   onCloseChannelManagement,
+  onOpenMembers,
   onResetThreadPanelWidth,
   onThreadPanelResizeStart,
   threadPanelWidthPx,
@@ -40,6 +42,7 @@ export function ChannelManagementAuxiliaryPanel({
       currentPubkey={currentPubkey}
       layout={useSplitAuxiliaryPane || isSinglePanelView ? "split" : "overlay"}
       onDeleted={onChannelManagementDeleted}
+      onOpenMembers={onOpenMembers}
       onOpenChange={(nextOpen) => {
         if (!nextOpen) {
           onCloseChannelManagement?.();

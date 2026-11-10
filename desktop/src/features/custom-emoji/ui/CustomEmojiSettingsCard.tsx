@@ -143,11 +143,14 @@ export function CustomEmojiSettingsCard() {
             if (canSubmit) void handleAdd();
           }}
         >
-          <SettingsOptionGroup>
+          <SettingsOptionGroup title="Add emoji">
             <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 text-sm">
               <div className="min-w-0 flex-[1_1_22rem]">
                 <h4 className="text-sm font-medium">Upload an image</h4>
-                <p className="text-sm font-normal text-muted-foreground">
+                <p
+                  className="text-sm font-normal text-muted-foreground/70"
+                  data-settings-subcopy
+                >
                   Square images work best. GIF, PNG, JPEG, and WebP files are
                   supported.
                 </p>
@@ -191,7 +194,10 @@ export function CustomEmojiSettingsCard() {
             <div className="flex flex-wrap items-start justify-between gap-3 px-4 py-3 text-sm">
               <div className="min-w-0 flex-[1_1_22rem]">
                 <h4 className="text-sm font-medium">Give it a name</h4>
-                <p className="text-sm font-normal text-muted-foreground">
+                <p
+                  className="text-sm font-normal text-muted-foreground/70"
+                  data-settings-subcopy
+                >
                   This is what you’ll type to add this emoji to messages and
                   reactions.
                 </p>
@@ -221,12 +227,18 @@ export function CustomEmojiSettingsCard() {
                     Use only letters, numbers, hyphen, or underscore.
                   </p>
                 ) : pendingUpload === null ? (
-                  <p className="text-sm font-normal text-muted-foreground">
+                  <p
+                    className="text-sm font-normal text-muted-foreground/70"
+                    data-settings-subcopy
+                  >
                     Choose an image first; Buzz will suggest a name from the
                     filename.
                   </p>
                 ) : ownDuplicate ? (
-                  <p className="text-sm font-normal text-muted-foreground">
+                  <p
+                    className="text-sm font-normal text-muted-foreground/70"
+                    data-settings-subcopy
+                  >
                     You already have :{normalized}: — saving will replace its
                     image.
                   </p>
@@ -256,24 +268,21 @@ export function CustomEmojiSettingsCard() {
           </SettingsOptionGroup>
         </form>
 
-        <div className="space-y-3" data-testid="custom-emoji-mine">
-          <h2 className="text-lg font-semibold tracking-tight">
-            My emoji{own.length > 0 ? ` (${own.length})` : ""}
-          </h2>
+        <div data-testid="custom-emoji-mine">
           {ownLoading ? (
-            <SettingsOptionGroup>
+            <SettingsOptionGroup title="My emoji">
               <div className="px-4 py-3 text-sm font-normal text-muted-foreground">
                 Loading…
               </div>
             </SettingsOptionGroup>
           ) : own.length === 0 ? (
-            <SettingsOptionGroup>
+            <SettingsOptionGroup title="My emoji">
               <div className="px-4 py-3 text-sm font-normal text-muted-foreground">
                 You haven&apos;t added any emoji yet. Add one above.
               </div>
             </SettingsOptionGroup>
           ) : (
-            <SettingsOptionGroup>
+            <SettingsOptionGroup title={`My emoji (${own.length})`}>
               {own.map((e) => (
                 <div
                   key={e.shortcode}
@@ -304,15 +313,11 @@ export function CustomEmojiSettingsCard() {
         </div>
 
         {!communityLoading && othersEmoji.length > 0 ? (
-          <div className="space-y-3" data-testid="custom-emoji-community">
-            <h2 className="text-lg font-semibold tracking-tight">
-              Community emoji ({othersEmoji.length})
-            </h2>
-            <p className="text-sm font-normal text-muted-foreground">
-              Added by other members. You can use these, but only their owner
-              can remove them.
-            </p>
-            <SettingsOptionGroup>
+          <div data-testid="custom-emoji-community">
+            <SettingsOptionGroup
+              description="Added by other members. You can use these, but only their owner can remove them."
+              title={`Community emoji (${othersEmoji.length})`}
+            >
               {othersEmoji.map((e) => (
                 <div
                   key={e.shortcode}

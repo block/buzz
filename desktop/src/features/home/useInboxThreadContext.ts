@@ -2,6 +2,7 @@ import * as React from "react";
 
 import { isInboxThreadContextEvent } from "@/features/home/lib/inboxViewHelpers";
 import { relayEventFromFeedItem } from "@/features/home/lib/inbox";
+import { fetchStructuralAuxForMessages } from "@/features/messages/lib/auxBackfill";
 import { getThreadReference } from "@/features/messages/lib/threading";
 import { relayClient } from "@/shared/api/relayClient";
 import { buildChannelReactionAuxFilter } from "@/shared/api/relayChannelFilters";
@@ -16,6 +17,10 @@ type InboxThreadContextResult = {
   events: RelayEvent[];
   hasLoadError: boolean;
   isLoading: boolean;
+  /** Edits/deletions referencing context messages, fetched by `#e`. */
+  structuralEvents: RelayEvent[];
+  /** Re-fetch structural events after an Inbox edit is published. */
+  refreshStructuralEvents: () => Promise<void>;
   /** kind:7 events referencing the context messages, fetched by `#e`. */
   reactionEvents: RelayEvent[];
   /** Re-fetch reaction events (e.g. after a toggle) without reloading context. */
@@ -52,7 +57,12 @@ export function useInboxThreadContext(
 ): InboxThreadContextResult {
   const [fetchedEvents, setFetchedEvents] = React.useState<RelayEvent[]>([]);
   const [hasLoadError, setHasLoadError] = React.useState(false);
-  const [isLoading, setIsLoading] = React.useState(false);
+  // Readiness belongs to the selection whose context actually settled. A
+  // boolean set in the effect reports false for the first render of a new
+  // selection, allowing the scroll owner to center before its rows arrive.
+  const [settledEvent, setSettledEvent] = React.useState<RelayEvent | null>(
+    null,
+  );
 
   const selectedEvent = React.useMemo(
     () => (item ? relayEventFromFeedItem(item) : null),
@@ -74,7 +84,7 @@ export function useInboxThreadContext(
     if (fullChannel || !selectedEvent || !selectedThreadRootId) {
       setFetchedEvents([]);
       setHasLoadError(false);
-      setIsLoading(false);
+      setSettledEvent(null);
       return () => {
         isCancelled = true;
       };
@@ -87,7 +97,7 @@ export function useInboxThreadContext(
         return;
       }
 
-      setIsLoading(true);
+      setSettledEvent(null);
       setHasLoadError(false);
 
       try {
@@ -185,7 +195,7 @@ export function useInboxThreadContext(
         }
       } finally {
         if (!isCancelled) {
-          setIsLoading(false);
+          setSettledEvent(targetEvent);
         }
       }
     }
@@ -250,9 +260,10 @@ export function useInboxThreadContext(
     selectedThreadRootId,
   ]);
 
-  // Reactions carry only an `#e` reference, so the channel-window cache never
-  // has them for thread replies — fetch them for the rendered context messages.
-  const [reactionEvents, setReactionEvents] = React.useState<RelayEvent[]>([]);
+  // Auxiliary events carry only an `#e` reference, so they may be absent from
+  // both the selected feed item and the channel-window cache. Hydrate them by
+  // the context message ids so cold Inbox items receive edits, deletions, and
+  // reactions without requiring the full channel timeline to be open.
   const contextEventIdsKey = React.useMemo(
     () =>
       events
@@ -261,6 +272,58 @@ export function useInboxThreadContext(
         .join(","),
     [events],
   );
+  const [structuralEvents, setStructuralEvents] = React.useState<RelayEvent[]>(
+    [],
+  );
+
+  const fetchStructuralEvents = React.useCallback(async (): Promise<
+    RelayEvent[] | null
+  > => {
+    const eventIds = contextEventIdsKey ? contextEventIdsKey.split(",") : [];
+    if (!selectedChannelId || eventIds.length === 0) {
+      return [];
+    }
+
+    try {
+      // Two hops, not one. A deletion can target an edit event rather than the
+      // original message, and `formatTimelineMessages` drops an edit only when
+      // the edit's own id is in the deletion set. A one-hop fetch therefore
+      // re-applies retracted content on a cold Inbox open. The channel and
+      // thread paths already resolve this closure with the same helper.
+      return await fetchStructuralAuxForMessages(selectedChannelId, eventIds);
+    } catch (error) {
+      console.error(
+        "Failed to hydrate structural events for Inbox context messages",
+        selectedChannelId,
+        error,
+      );
+      return null;
+    }
+  }, [contextEventIdsKey, selectedChannelId]);
+
+  React.useEffect(() => {
+    let isCancelled = false;
+    setStructuralEvents([]);
+
+    void fetchStructuralEvents().then((fetched) => {
+      if (!isCancelled && fetched !== null) {
+        setStructuralEvents(fetched);
+      }
+    });
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [fetchStructuralEvents]);
+
+  const refreshStructuralEvents = React.useCallback(async () => {
+    const fetched = await fetchStructuralEvents();
+    if (fetched !== null) {
+      setStructuralEvents(fetched);
+    }
+  }, [fetchStructuralEvents]);
+
+  const [reactionEvents, setReactionEvents] = React.useState<RelayEvent[]>([]);
 
   const fetchReactions = React.useCallback(async (): Promise<
     RelayEvent[] | null
@@ -288,6 +351,7 @@ export function useInboxThreadContext(
 
   React.useEffect(() => {
     let isCancelled = false;
+    setReactionEvents([]);
 
     void fetchReactions().then((fetched) => {
       if (!isCancelled && fetched !== null) {
@@ -312,7 +376,11 @@ export function useInboxThreadContext(
     hasLoadError: fullChannel
       ? options.hasChannelLoadError === true
       : hasLoadError,
-    isLoading: fullChannel ? options.isChannelLoading === true : isLoading,
+    isLoading: fullChannel
+      ? options.isChannelLoading === true
+      : selectedEvent !== null && settledEvent !== selectedEvent,
+    structuralEvents,
+    refreshStructuralEvents,
     reactionEvents,
     refreshReactions,
   };

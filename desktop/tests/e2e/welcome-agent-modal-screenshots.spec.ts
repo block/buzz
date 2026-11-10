@@ -69,7 +69,6 @@ test.describe("welcome and channel agent entry points", () => {
     await page
       .getByTestId("create-channel-description")
       .fill("A private channel for getting oriented in this workspace.");
-    await page.getByTestId("create-channel-permissions").click();
     await page.getByTestId("create-channel-permissions-option-private").click();
     await page.getByTestId("create-channel-submit").click();
     await expect(page.getByTestId("chat-title")).toHaveText("Welcome");
@@ -109,7 +108,6 @@ test.describe("welcome and channel agent entry points", () => {
     await page.goto("/", { waitUntil: "domcontentloaded" });
     await openCreateChannelDialog(page);
     await page.getByTestId("create-channel-name").fill("Welcome");
-    await page.getByTestId("create-channel-permissions").click();
     await page.getByTestId("create-channel-permissions-option-private").click();
     await page.getByTestId("create-channel-submit").click();
     await expect(page.getByTestId("chat-title")).toHaveText("Welcome");
@@ -159,16 +157,16 @@ test.describe("welcome and channel agent entry points", () => {
     await expect(page.getByTestId("persona-dialog-submit")).toBeEnabled();
     await page.getByTestId("persona-dialog-submit").click();
 
-    const createdDialog = page.getByRole("dialog");
-    await expect(
-      createdDialog.getByRole("heading", { name: "Agent created" }),
-    ).toBeVisible({ timeout: 10_000 });
-    await expect(createdDialog).toContainText(
-      "Scout was created, but couldn’t be added to #random.",
+    const createdToast = page
+      .locator("[data-sonner-toast][data-removed='false']")
+      .filter({ hasText: "Agent created" });
+    await expect(createdToast).toBeVisible({ timeout: 10_000 });
+    await expect(createdToast).toContainText(
+      "Scout couldn’t be added to #random. Relay unavailable.",
     );
-    await expect(createdDialog).toContainText("Relay unavailable.");
+    await expect(page.getByRole("dialog")).toHaveCount(0);
     await waitForAnimations(page);
-    await createdDialog.screenshot({
+    await createdToast.screenshot({
       path: `${SHOTS}/05-agent-channel-attachment-failed.png`,
     });
 
@@ -179,10 +177,19 @@ test.describe("welcome and channel agent entry points", () => {
     );
     const addCount = commandCount(commandsBeforeRetry, "add_channel_members");
 
-    await createdDialog.getByRole("button", { name: "Try again" }).click();
-    await expect(createdDialog).toContainText("Scout is ready and running.");
+    await createdToast.getByRole("button", { name: "Try again" }).click();
+    await expect
+      .poll(async () => {
+        const commands = await readCommandLog(page);
+        return commandCount(commands, "add_channel_members");
+      })
+      .toEqual(addCount + 1);
+    const attachedToast = page
+      .locator("[data-sonner-toast][data-removed='false']")
+      .filter({ hasText: "Added Scout to #random" });
+    await expect(attachedToast).toBeVisible();
     await expect(
-      createdDialog.getByRole("button", { name: "Try again" }),
+      attachedToast.getByRole("button", { name: "Try again" }),
     ).toHaveCount(0);
 
     const commandsAfterRetry = await readCommandLog(page);
@@ -192,7 +199,6 @@ test.describe("welcome and channel agent entry points", () => {
     expect(commandCount(commandsAfterRetry, "add_channel_members")).toEqual(
       addCount + 1,
     );
-    await createdDialog.getByRole("button", { name: "Done" }).click();
     await expect(page.getByTestId("chat-title")).toHaveText("random");
   });
 

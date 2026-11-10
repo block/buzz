@@ -9,12 +9,16 @@ class _IOSInlinePhotoPicker extends HookWidget {
   final VoidCallback onBack;
   final Future<List<XFile>> Function() onPickAllPhotos;
   final Future<void> Function(List<XFile> photos) onChoosePhotos;
+  final Future<void> Function(List<XFile> photos) onChooseAllPhotos;
+  final Future<void> Function(Future<void> Function()) preparePhotos;
   final Widget fallback;
 
   const _IOSInlinePhotoPicker({
     required this.onBack,
     required this.onPickAllPhotos,
     required this.onChoosePhotos,
+    required this.onChooseAllPhotos,
+    required this.preparePhotos,
     required this.fallback,
   });
 
@@ -53,13 +57,13 @@ class _IOSInlinePhotoPicker extends HookWidget {
           case 'didFail':
             isPreparingSelection.value = false;
             if (!context.mounted) return;
-            ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+            ScaffoldMessenger.maybeOf(context)?.showFeedbackSnackBar(
               SnackBar(
                 content: Text(
-                  call.arguments as String? ??
-                      'Unable to prepare the selected photos.',
+                  call.arguments as String? ?? 'Couldn’t prepare photos',
                 ),
               ),
+              kind: ToastKind.error,
             );
         }
       });
@@ -72,7 +76,7 @@ class _IOSInlinePhotoPicker extends HookWidget {
         !isPreparingSelection.value &&
         !isProcessing.value;
 
-    Future<void> submitSelection() async {
+    Future<void> submitSelection() => preparePhotos(() async {
       if (!canSelect) return;
       isProcessing.value = true;
       try {
@@ -89,7 +93,7 @@ class _IOSInlinePhotoPicker extends HookWidget {
       } finally {
         if (context.mounted) isProcessing.value = false;
       }
-    }
+    });
 
     Future<void> openAllPhotos() async {
       if (isPreparingSelection.value || isProcessing.value) return;
@@ -97,12 +101,13 @@ class _IOSInlinePhotoPicker extends HookWidget {
       try {
         final photos = await onPickAllPhotos();
         if (photos.isNotEmpty) {
-          await onChoosePhotos(photos);
+          await onChooseAllPhotos(photos);
         }
       } catch (_) {
         if (context.mounted) {
-          ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-            const SnackBar(content: Text('Unable to open your photo library.')),
+          ScaffoldMessenger.maybeOf(context)?.showFeedbackSnackBar(
+            const SnackBar(content: Text('Couldn’t open photo library')),
+            kind: ToastKind.error,
           );
         }
       } finally {
@@ -136,23 +141,14 @@ class _IOSInlinePhotoPicker extends HookWidget {
             bottom: Grid.twelve,
             child: SafeArea(
               top: false,
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  color: Colors.black.withValues(alpha: 0.62),
-                  shape: BoxShape.circle,
-                  border: Border.all(
-                    color: Colors.white.withValues(alpha: 0.28),
-                  ),
-                ),
-                child: IconButton(
-                  key: const ValueKey('ios-inline-photo-picker-back'),
-                  onPressed: isProcessing.value ? null : onBack,
-                  tooltip: 'Back to attachment options',
-                  icon: const Icon(
-                    LucideIcons.chevronLeft,
-                    color: Colors.white,
-                  ),
-                ),
+              child: IosGlassNavigationButton(
+                key: const ValueKey('ios-inline-photo-picker-back'),
+                icon: IosGlassNavigationIcon.back,
+                semanticLabel: 'Back to attachment options',
+                onPressed: isProcessing.value
+                    ? null
+                    : () => _runComposerAction(onBack),
+                foregroundColor: Colors.white,
               ),
             ),
           ),
@@ -164,11 +160,12 @@ class _IOSInlinePhotoPicker extends HookWidget {
               child: FilledButton(
                 key: const ValueKey('ios-inline-photo-picker-select'),
                 onPressed: canSelect
-                    ? submitSelection
+                    ? () =>
+                          _runComposerAction(() => unawaited(submitSelection()))
                     : selectedCount.value == 0 &&
                           !isPreparingSelection.value &&
                           !isProcessing.value
-                    ? openAllPhotos
+                    ? () => _runComposerAction(() => unawaited(openAllPhotos()))
                     : null,
                 style: FilledButton.styleFrom(
                   backgroundColor: Colors.black.withValues(alpha: 0.76),

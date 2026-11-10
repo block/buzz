@@ -46,7 +46,7 @@ export function SelectedRecipientChip({
   user: UserSearchResult;
 }) {
   return (
-    <div className="inline-flex h-7 max-w-56 items-center gap-1.5 rounded-full bg-muted px-1.5 pr-2.5 text-sm transition-colors hover:bg-muted/80">
+    <div className="inline-flex h-7 max-w-56 items-center gap-1.5 rounded-full bg-muted px-1 pr-2.5 text-sm transition-colors hover:bg-muted/80">
       <button
         aria-label={`Remove ${label}`}
         className={cn(
@@ -75,8 +75,15 @@ export function SelectedRecipientChip({
           className="h-5 w-5 text-3xs shadow-none transition-opacity group-hover/remove-recipient:opacity-0 group-focus-visible/remove-recipient:opacity-0"
           iconClassName="h-2.5 w-2.5"
           label={label}
+          shape={user.isAgent ? "squircle" : "circle"}
         />
-        <span className="absolute inset-0 flex items-center justify-center rounded-full bg-foreground text-background opacity-0 transition-opacity group-hover/remove-recipient:opacity-100 group-focus-visible/remove-recipient:opacity-100">
+        <span
+          className={cn(
+            "absolute inset-0 flex items-center justify-center bg-foreground text-background opacity-0 transition-opacity group-hover/remove-recipient:opacity-100 group-focus-visible/remove-recipient:opacity-100",
+            user.isAgent ? "rounded-squircle" : "rounded-full",
+          )}
+          data-avatar-shape={user.isAgent ? "squircle" : "circle"}
+        >
           <X aria-hidden="true" className="h-3 w-3" />
         </span>
       </button>
@@ -111,9 +118,6 @@ export function SelectedRecipientChip({
               testId={testIds?.pubkey}
               variant="full"
             />
-            <p className="break-all font-mono text-xs text-muted-foreground">
-              {user.pubkey}
-            </p>
           </PopoverContent>
         </Popover>
       ) : (

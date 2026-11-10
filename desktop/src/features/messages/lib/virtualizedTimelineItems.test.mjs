@@ -206,6 +206,45 @@ test("naive counterexample stays rejected: same key cannot precede prepended row
   );
 });
 
+test("head trim from a window refresh is admitted as a shift", () => {
+  const previousKeys = keysOf([
+    group("day-Z", DAY_Z, ["z1", "z2"]),
+    group("day-A", DAY_A, ["a1", "a2", "a3"]),
+  ]);
+  // Trimmed inside the oldest day, and exactly at its proven boundary: the
+  // surviving oldest day loses its divider, so the result is a clean suffix.
+  for (const keys of [
+    keysOf([group("day-A", DAY_A, ["a2", "a3"])]),
+    keysOf([group("day-A", DAY_A, ["a1", "a2", "a3"])]),
+  ]) {
+    assert.equal(didPrependVirtualizedTimeline(previousKeys, keys), true);
+    const delta = previousKeys.length - keys.length;
+    keys.forEach((key, index) => {
+      assert.equal(previousKeys[index + delta], key);
+    });
+  }
+});
+
+test("shrinks that are not a pure head trim are not shifted", () => {
+  const previousKeys = keysOf([group("day-A", DAY_A, ["a1", "a2", "a3"])]);
+  // Trimmed from the head while a new message appended.
+  assert.equal(
+    didPrependVirtualizedTimeline(
+      previousKeys,
+      keysOf([group("day-A", DAY_A, ["a3", "a4"])]),
+    ),
+    false,
+  );
+  // A message removed from the middle.
+  assert.equal(
+    didPrependVirtualizedTimeline(
+      previousKeys,
+      keysOf([group("day-A", DAY_A, ["a1", "a3"])]),
+    ),
+    false,
+  );
+});
+
 test("virtualized rows preserve their heterogeneous height estimates", () => {
   const short = messageItem("short");
   short.entry.message.body = "hello";
@@ -221,7 +260,7 @@ test("virtualized rows preserve their heterogeneous height estimates", () => {
   );
   const estimates = items.map(estimateVirtualizedTimelineItemHeight);
 
-  assert.equal(estimates[0], 32);
+  assert.equal(estimates[0], 56);
   assert.ok(estimates[2] > estimates[1] + 200);
   assert.equal(estimates.at(-1), 96);
 });

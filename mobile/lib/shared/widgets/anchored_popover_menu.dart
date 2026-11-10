@@ -5,14 +5,37 @@ import 'package:flutter/material.dart';
 
 import '../theme/theme.dart';
 
-const _popoverEnterDuration = Duration(milliseconds: 150);
+/// How app popovers enter: a quick fade while scaling up from slightly small.
+const appPopoverEnterDuration = Duration(milliseconds: 150);
+const appPopoverEnterCurve = Curves.easeOutCubic;
+const appPopoverStartScale = 0.96;
 const _popoverExitDuration = Duration(milliseconds: 110);
-const _popoverStartScale = 0.96;
+
+/// Elevation shared by anchored menus and composer popover surfaces.
+const appPopoverElevation = 8.0;
+
+/// Returns the translucent surface color shared by app popovers.
+Color appPopoverColor(BuildContext context) =>
+    context.colors.surface.withValues(alpha: 0.98);
+
+/// Returns the shadow color shared by app popovers.
+Color appPopoverShadowColor(BuildContext context) =>
+    context.colors.shadow.withValues(alpha: 0.18);
+
+/// Returns the grouped-container shape and shared popover hairline.
+RoundedRectangleBorder appPopoverShape(BuildContext context) =>
+    RoundedRectangleBorder(
+      borderRadius: BorderRadius.circular(Radii.popover),
+      side: BorderSide(color: Colors.black.withValues(alpha: 0.04), width: 1),
+    );
 
 /// The horizontal edge a popover aligns to on its triggering control.
 enum AnchoredPopoverAlignment {
   /// Aligns the popover's leading edge with the trigger's leading edge.
   start,
+
+  /// Centers the popover horizontally on the trigger.
+  center,
 
   /// Aligns the popover's trailing edge with the trigger's trailing edge.
   end,
@@ -25,15 +48,15 @@ Future<T?> showAnchoredPopover<T>({
   required List<PopupMenuEntry<T>> items,
   required double width,
   required AnchoredPopoverAlignment alignment,
-  required Color color,
-  required ShapeBorder shape,
-  required double elevation,
-  required Color shadowColor,
+  Color? color,
+  ShapeBorder? shape,
+  double elevation = appPopoverElevation,
+  Color? shadowColor,
   Offset offset = Offset.zero,
   EdgeInsetsGeometry menuPadding = EdgeInsets.zero,
   Clip clipBehavior = Clip.antiAlias,
   Key? surfaceKey,
-}) {
+}) async {
   final navigator = Navigator.of(context);
   final overlay = navigator.overlay;
   final triggerRenderObject = context.findRenderObject();
@@ -49,30 +72,30 @@ Future<T?> showAnchoredPopover<T>({
   final overlayRect = Offset.zero & overlayRenderObject.size;
   final mediaQuery = MediaQuery.of(context);
 
-  return navigator.push<T>(
-    _AnchoredPopoverRoute<T>(
-      position: RelativeRect.fromRect(triggerRect, overlayRect),
-      items: items,
-      width: width,
-      alignment: alignment,
-      offset: offset,
-      color: color,
-      shape: shape,
-      elevation: elevation,
-      shadowColor: shadowColor,
-      menuPadding: menuPadding,
-      clipBehavior: clipBehavior,
-      surfaceKey: surfaceKey,
-      screenPadding: EdgeInsets.fromLTRB(
-        math.max(Grid.xxs, mediaQuery.padding.left),
-        math.max(Grid.xxs, mediaQuery.padding.top),
-        math.max(Grid.xxs, mediaQuery.padding.right),
-        math.max(Grid.xxs, mediaQuery.padding.bottom),
-      ),
-      reducedMotion: mediaQuery.disableAnimations,
-      barrierLabel: MaterialLocalizations.of(context).modalBarrierDismissLabel,
+  final route = _AnchoredPopoverRoute<T>(
+    position: RelativeRect.fromRect(triggerRect, overlayRect),
+    items: items,
+    width: width,
+    alignment: alignment,
+    offset: offset,
+    color: color ?? appPopoverColor(context),
+    shape: shape ?? appPopoverShape(context),
+    elevation: elevation,
+    shadowColor: shadowColor ?? appPopoverShadowColor(context),
+    menuPadding: menuPadding,
+    clipBehavior: clipBehavior,
+    surfaceKey: surfaceKey,
+    screenPadding: EdgeInsets.fromLTRB(
+      math.max(Grid.xxs, mediaQuery.padding.left),
+      math.max(Grid.xxs, mediaQuery.padding.top),
+      math.max(Grid.xxs, mediaQuery.padding.right),
+      math.max(Grid.xxs, mediaQuery.padding.bottom),
     ),
+    reducedMotion: mediaQuery.disableAnimations,
+    barrierLabel: MaterialLocalizations.of(context).modalBarrierDismissLabel,
   );
+  final result = await navigator.push<T>(route);
+  return result;
 }
 
 class _AnchoredPopoverRoute<T> extends PopupRoute<T> {
@@ -121,7 +144,7 @@ class _AnchoredPopoverRoute<T> extends PopupRoute<T> {
 
   @override
   Duration get transitionDuration =>
-      reducedMotion ? Duration.zero : _popoverEnterDuration;
+      reducedMotion ? Duration.zero : appPopoverEnterDuration;
 
   @override
   Duration get reverseTransitionDuration =>
@@ -134,14 +157,15 @@ class _AnchoredPopoverRoute<T> extends PopupRoute<T> {
     Animation<double> secondaryAnimation,
   ) {
     final curvedAnimation = animation.drive(
-      CurveTween(curve: Curves.easeOutCubic),
+      CurveTween(curve: appPopoverEnterCurve),
     );
     final scaleAnimation = Tween<double>(
-      begin: _popoverStartScale,
+      begin: appPopoverStartScale,
       end: 1,
     ).animate(curvedAnimation);
     final transformOrigin = switch (alignment) {
       AnchoredPopoverAlignment.start => Alignment.topLeft,
+      AnchoredPopoverAlignment.center => Alignment.topCenter,
       AnchoredPopoverAlignment.end => Alignment.topRight,
     };
 
@@ -216,6 +240,11 @@ class _AnchoredPopoverLayoutDelegate extends SingleChildLayoutDelegate {
     final anchorBottom = size.height - position.bottom;
     final desiredX = switch (alignment) {
       AnchoredPopoverAlignment.start => position.left + offset.dx,
+      AnchoredPopoverAlignment.center =>
+        position.left +
+            (size.width - position.left - position.right - childSize.width) /
+                2 +
+            offset.dx,
       AnchoredPopoverAlignment.end =>
         size.width - position.right - childSize.width + offset.dx,
     };

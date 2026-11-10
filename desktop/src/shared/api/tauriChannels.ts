@@ -6,12 +6,15 @@ import type {
   ChannelPageCursor,
   ChannelType,
   CreateChannelInput,
-  OpenDmInput,
   SetChannelPurposeInput,
   SetChannelTopicInput,
   UpdateChannelInput,
 } from "@/shared/api/types";
-import { invokeTauri } from "@/shared/api/tauri";
+import {
+  beginChannelMembershipWrite,
+  shouldReadChannelMembersFromWriter,
+} from "@/shared/api/channelMembershipWrites";
+import { invokeTauri, toTauriError } from "@/shared/api/tauri";
 
 export type RawChannel = {
   id: string;
@@ -30,6 +33,22 @@ export type RawChannel = {
   is_member?: boolean;
   ttl_seconds: number | null;
   ttl_deadline: string | null;
+};
+
+/**
+ * Response payload for the `get_channels` Tauri command.
+ *
+ * When `channels` is `null`, the caller's `knownHash` matched the relay
+ * snapshot and the expensive channel list was not re-serialized across IPC.
+ * `lastMessages` is always present so the caller can update sidebar
+ * timestamps without a full channel-list re-render.
+ */
+export type GetChannelsPayload = {
+  hash: string;
+  /** Full channel list, or `null` on a not-modified (hash-match) response. */
+  channels: Channel[] | null;
+  /** Map of channel id → ISO-8601 timestamp of its most recent message. */
+  lastMessages: Record<string, string>;
 };
 
 type RawChannelDetail = RawChannel & {
@@ -105,25 +124,113 @@ function fromRawChannelMember(member: RawChannelMember): ChannelMember {
   };
 }
 
-export async function getChannels(): Promise<Channel[]> {
-  const channels = await invokeTauri<RawChannel[]>("get_channels");
-  return channels.map(fromRawChannel);
+/**
+ * Fetch the channel list from the backend.
+ *
+ * Pass `knownHash` from a previous response to enable the not-modified
+ * short-circuit: when the relay snapshot is unchanged, `channels` in the
+ * returned payload will be `null` so the multi-MB list is not deserialized.
+ * Pass `null` to always request the full list.
+ */
+export async function getChannels(
+  knownHash: string | null,
+): Promise<GetChannelsPayload> {
+  const raw = await invokeTauri<{
+    hash: string;
+    channels: RawChannel[] | null;
+    last_messages: Record<string, string>;
+  }>("get_channels", { knownHash });
+  return {
+    hash: raw.hash,
+    channels: raw.channels !== null ? raw.channels.map(fromRawChannel) : null,
+    lastMessages: raw.last_messages,
+  };
+}
+
+/**
+ * Fetch the open-channel directory: every joinable open channel plus the
+ * active identity's own channels, each carrying its `isMember` flag.
+ *
+ * `getChannels` intentionally omits this discovery superset from the 60s poll
+ * because it requires an unbounded all-open relay scan. Call this on demand —
+ * when the channel browser opens or a global search goes active — with a
+ * generous staleTime so the expensive scan runs only when a user is actually
+ * looking for channels to join.
+ */
+export async function getOpenChannelDirectory(): Promise<Channel[]> {
+  return (await invokeTauri<RawChannel[]>("get_open_channel_directory")).map(
+    fromRawChannel,
+  );
 }
 
 export async function createChannel(
   input: CreateChannelInput,
 ): Promise<Channel> {
-  return fromRawChannel(await invokeTauri<RawChannel>("create_channel", input));
+  const record = beginChannelMembershipWrite();
+  const channel = fromRawChannel(
+    await invokeTauri<RawChannel>("create_channel", input),
+  );
+  record(channel.id);
+  return channel;
 }
 
 export async function ensureStarterChannels(): Promise<Channel[]> {
-  return (await invokeTauri<RawChannel[]>("ensure_starter_channels")).map(
-    fromRawChannel,
-  );
+  const record = beginChannelMembershipWrite();
+  // Channels created or joined are reported even when a later step fails.
+  const result = await invokeTauri<{
+    channels: RawChannel[];
+    changed_channel_ids: string[];
+    error: string | null;
+  }>("ensure_starter_channels");
+  for (const id of result.changed_channel_ids) record(id);
+  if (result.error !== null) throw toTauriError(result.error);
+  return result.channels.map(fromRawChannel);
 }
 
+/**
+ * Enrolls channel agents into the active Huddle. Native sync can add them to
+ * the Huddle's ephemeral and parent channels, whichever `channelId` names, so
+ * it reports every channel it changed, including before a failure.
+ */
+export async function syncAgentsToActiveHuddle(
+  channelId: string,
+  agentPubkeys: string[],
+): Promise<void> {
+  const record = beginChannelMembershipWrite();
+  const result = await invokeTauri<{
+    changed_channel_ids: string[];
+    error: string | null;
+  }>("sync_agents_to_active_huddle", { channelId, agentPubkeys });
+  for (const id of result.changed_channel_ids) record(id);
+  if (result.error !== null) throw toTauriError(result.error);
+}
+
+export type OpenDmInput = {
+  pubkeys: string[];
+  /**
+   * Tenant scope captured by the caller before its first await (community
+   * relay URL). The backend fails closed when the active community no longer
+   * matches, so a suspended callback can never open a DM in the wrong
+   * community. Omit for callers without a tenant boundary.
+   */
+  expectedRelayUrl?: string;
+  /**
+   * Signer identity captured together with the relay scope (owner pubkey,
+   * hex). Relay and keys change under separate locks during a community
+   * switch, so the backend also fails closed when the active identity no
+   * longer matches — a stale callback can neither open the DM in the wrong
+   * community nor open it under the wrong identity.
+   */
+  expectedSignerPubkey?: string;
+};
+
 export async function openDm(input: OpenDmInput): Promise<Channel> {
-  return fromRawChannel(await invokeTauri<RawChannel>("open_dm", input));
+  const record = beginChannelMembershipWrite();
+  const channel = fromRawChannel(
+    await invokeTauri<RawChannel>("open_dm", input),
+  );
+  record(channel.id);
+  return channel;
 }
 
 export async function hideDm(channelId: string): Promise<void> {
@@ -217,14 +324,23 @@ export async function getChannelMessagesBefore(
 
 export async function getChannelMembers(
   channelId: string,
+  options?: { readYourWrites?: boolean },
 ): Promise<ChannelMember[]> {
   const response = await invokeTauri<RawChannelMembersResponse>(
     "get_channel_members",
-    { channelId },
+    {
+      channelId,
+      readYourWrites:
+        options?.readYourWrites ||
+        shouldReadChannelMembersFromWriter(channelId) ||
+        undefined,
+    },
   );
   return response.members.map(fromRawChannelMember);
 }
 
 export async function joinChannel(channelId: string): Promise<void> {
+  const record = beginChannelMembershipWrite();
   await invokeTauri<void>("join_channel", { channelId });
+  record(channelId);
 }

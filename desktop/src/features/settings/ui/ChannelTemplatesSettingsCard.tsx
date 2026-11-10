@@ -34,6 +34,7 @@ import type {
   UpdateChannelTemplateInput,
 } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
+import { SettingsOptionGroup } from "./SettingsOptionGroup";
 import { SettingsSectionHeader } from "./SettingsSectionHeader";
 import {
   AlertDialog,
@@ -123,15 +124,20 @@ export function ChannelTemplatesSettingsCard() {
       />
 
       {templatesQuery.isLoading ? (
-        <p className="py-6 text-center text-sm text-muted-foreground">
-          Loading templates...
-        </p>
+        <SettingsOptionGroup title="Templates">
+          <p className="px-4 py-6 text-center text-sm text-muted-foreground">
+            Loading templates...
+          </p>
+        </SettingsOptionGroup>
       ) : templates.length === 0 ? (
-        <div className="rounded-xl border border-dashed border-border/70 bg-muted/15 px-4 py-8 text-center text-sm text-muted-foreground">
-          No templates yet. Create one to save a reusable channel configuration.
-        </div>
+        <SettingsOptionGroup title="Templates">
+          <div className="px-4 py-8 text-center text-sm text-muted-foreground">
+            No templates yet. Create one to save a reusable channel
+            configuration.
+          </div>
+        </SettingsOptionGroup>
       ) : (
-        <div className="space-y-1">
+        <SettingsOptionGroup title="Templates">
           {templates.map((template) => (
             <TemplateRow
               key={template.id}
@@ -141,7 +147,7 @@ export function ChannelTemplatesSettingsCard() {
               template={template}
             />
           ))}
-        </div>
+        </SettingsOptionGroup>
       )}
 
       <TemplateFormDialog
@@ -215,11 +221,17 @@ function TemplateRow({
           ) : null}
         </div>
         {template.description ? (
-          <p className="mt-0.5 truncate text-sm font-normal text-muted-foreground">
+          <p
+            className="mt-0.5 truncate text-sm font-normal text-muted-foreground/70"
+            data-settings-subcopy
+          >
             {template.description}
           </p>
         ) : null}
-        <div className="mt-1 flex items-center gap-3 text-xs text-muted-foreground">
+        <div
+          className="mt-1 flex items-center gap-3 text-xs text-muted-foreground/70"
+          data-settings-subcopy
+        >
           {personaCount > 0 ? (
             <span className="flex items-center gap-1">
               <Bot className="h-4 w-4" />
@@ -276,14 +288,16 @@ function TemplateRow({
   );
 }
 
-function TemplateFormDialog({
+export function TemplateFormDialog({
   template,
   open,
   onOpenChange,
+  onCreated,
 }: {
   template: ChannelTemplate | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  onCreated?: (template: ChannelTemplate) => void;
 }) {
   const isEditing = template !== null;
   const createMutation = useCreateChannelTemplateMutation();
@@ -388,8 +402,9 @@ function TemplateFormDialog({
       };
 
       createMutation.mutate(input, {
-        onSuccess: () => {
+        onSuccess: (created) => {
           toast.success(`Created "${trimmedName}"`);
+          onCreated?.(created);
           onOpenChange(false);
         },
         onError: (error) => {
@@ -526,7 +541,10 @@ function TemplateFormDialog({
               rows={4}
               value={canvasTemplate}
             />
-            <p className="text-xs text-muted-foreground">
+            <p
+              className="text-xs text-muted-foreground/70"
+              data-settings-subcopy
+            >
               Use {"{channel.name}"} and {"{template.name}"} as placeholders.
             </p>
           </div>
@@ -600,7 +618,10 @@ function TemplateTeamSelector({
     <div className="space-y-3">
       <div>
         <div className="text-sm font-medium">Teams</div>
-        <p className="text-sm font-normal text-muted-foreground">
+        <p
+          className="text-sm font-normal text-muted-foreground/70"
+          data-settings-subcopy
+        >
           Select teams to include in this template.
         </p>
       </div>
@@ -675,7 +696,10 @@ function RuntimeAssignments({
     <div className="space-y-3">
       <div>
         <div className="text-sm font-medium">Runtimes</div>
-        <p className="text-sm font-normal text-muted-foreground">
+        <p
+          className="text-sm font-normal text-muted-foreground/70"
+          data-settings-subcopy
+        >
           Choose which runtime to use for each agent.
         </p>
       </div>

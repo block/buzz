@@ -1,0 +1,18 @@
+[package]
+name = "buzz-terminal"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[dependencies]
+alacritty_terminal = { version = "0.26.0", default-features = false }
+parking_lot = "0.12"
+portable-pty = "0.9"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+# Tests reach into the grid to prove content survived a frame.
+alacritty_terminal = { version = "0.26.0", default-features = false }
+parking_lot = "0.12"

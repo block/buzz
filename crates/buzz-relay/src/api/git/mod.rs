@@ -22,6 +22,7 @@ use tower_http::limit::RequestBodyLimitLayer;
 
 use crate::state::AppState;
 
+pub mod binding;
 pub mod cas_publish;
 pub mod hook;
 pub mod hydrate;
@@ -29,6 +30,7 @@ pub mod manifest;
 pub mod manifest_event;
 pub mod pack_cache;
 pub mod policy;
+mod settings;
 pub mod store;
 pub mod transport;
 
@@ -60,7 +62,9 @@ async fn require_localhost(req: Request<Body>, next: Next) -> Response {
 pub fn git_policy_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/internal/git/policy", post(policy::hook_policy_check))
-        .layer(RequestBodyLimitLayer::new(1024 * 1024)) // 1 MB
-        .layer(middleware::from_fn(require_localhost))
+        // Scope both guards to this path; Router::layer also wraps the default
+        // fallback, which would reject unrelated unknown URLs after merging.
+        .route_layer(RequestBodyLimitLayer::new(1024 * 1024)) // 1 MB
+        .route_layer(middleware::from_fn(require_localhost))
         .with_state(state)
 }

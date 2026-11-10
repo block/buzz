@@ -1,4 +1,103 @@
+import { KIND_AGENT_TURN_METRIC } from "@/shared/constants/kinds";
+
 import { invokeTauri } from "./tauri";
+
+// ── Agent usage wire types (NIP-AM, `get_agent_usage_series`) ────────────────
+//
+// Mirrors `desktop-src-tauri/src/archive/agent_usage.rs` field-for-field.
+// Token counters cross the Tauri boundary as decimal strings (JS cannot
+// exactly represent the full `u64` range); parse with `BigInt(...)` in the
+// feature slice, never `Number(...)`.
+
+export type UsageField = { value: string | null; incomplete: boolean };
+export type CostField = { value: number | null; incomplete: boolean };
+
+export type ReportedUsage = {
+  inputTokens: UsageField;
+  outputTokens: UsageField;
+  totalTokens: UsageField;
+  estimatedCostUsd: CostField;
+  /**
+   * Cache-read (served) token count. A `null` value with `incomplete: false`
+   * means no events in this scope reported the field. A non-empty scope where
+   * all events had absent cache-read tokens produces `incomplete: true`
+   * (unknown, not zero).
+   */
+  cacheReadTokens: UsageField;
+  /**
+   * Cache-write (creation) token count. Same absence semantics as
+   * `cacheReadTokens`.
+   */
+  cacheWriteTokens: UsageField;
+  /**
+   * Input tokens minus cache-served and cache-write subsets. Computed only
+   * when all three inputs are complete and the arithmetic succeeds
+   * (`cacheRead + cacheWrite ≤ input`). Otherwise `incomplete: true`.
+   */
+  freshInputTokens: UsageField;
+};
+
+export type AgentUsageSeriesBucket = {
+  start: number;
+  end: number;
+  usage: ReportedUsage;
+  reportCount: number;
+  hasUnknownUsage: boolean;
+};
+
+export type AgentUsageModel = {
+  harness: string | null;
+  model: string | null;
+  usage: ReportedUsage;
+  reportCount: number;
+  hasUnknownUsage: boolean;
+};
+
+export type AgentUsage = {
+  agentPubkey: string;
+  usage: ReportedUsage;
+  buckets: AgentUsageSeriesBucket[];
+  models: AgentUsageModel[];
+  reportCount: number;
+  hasUnknownUsage: boolean;
+};
+
+export type AgentUsageCoverage = {
+  firstArchivedAt: number | null;
+  lastArchivedAt: number | null;
+  firstReportedAt: number | null;
+  lastReportedAt: number | null;
+  reportCount: number;
+  invalidReportCount: number;
+  hasUnknownUsage: boolean;
+};
+
+export type AgentUsageSeries = {
+  collectionEnabled: boolean;
+  buckets: AgentUsageSeriesBucket[];
+  agents: AgentUsage[];
+  coverage: AgentUsageCoverage;
+  /**
+   * A13: `null` when the request had no `agentPubkey` filter; otherwise
+   * `true` iff at least one surviving `agent_metric_index` row (either
+   * `parseStatus`) exists for that author, independent of the requested
+   * bucket window. Drives profile focused-view eligibility for historical
+   * agents whose only evidence falls outside the current 7d/30d window.
+   */
+  hasArchivedEvidence: boolean | null;
+};
+
+export type AgentUsageSeriesRequest = {
+  /**
+   * Exact local-midnight Unix-second boundaries, inclusive start/exclusive
+   * end per adjacent pair. Exactly 8 entries (7 buckets) or 31 entries (30
+   * buckets) — build with the feature slice's DST-safe boundary helper,
+   * never `N * 86_400`.
+   */
+  bucketBoundaries: number[];
+  /** Normalized 64-hex author filter for the profile drill-in, or omit for the overview. */
+  agentPubkey?: string;
+};
 
 // ── Wire-shape types (raw Tauri responses) ───────────────────────────────────
 
@@ -32,25 +131,54 @@ export type SaveSubscription = {
 
 export type ArchiveBatchResult = {
   persisted: number;
+  /**
+   * Newly-indexed `agent_metric_index` rows (valid or invalid) written by
+   * this call. A re-ingested duplicate event does not increment this even
+   * when `persisted` counts it, because the index row for that id was
+   * already written by whichever earlier batch first saw it. Missing on
+   * the wire (older/mocked responses) decodes as `0` — see
+   * `decodeArchiveBatchResult`.
+   */
+  persistedAgentMetrics: number;
   dropped: number;
 };
 
-// ── Subscription-change notifier ─────────────────────────────────────────────
-
 /**
- * Module-level notifier for subscription mutations (create/delete).
- * The archive sync manager subscribes to this to reload live subscriptions
- * without needing manager instances threaded through UI props.
+ * Rust sends camelCase (`#[serde(rename_all = "camelCase")]` on
+ * `ArchiveBatchResult`), but decode defensively rather than trust every
+ * caller (including mocks/tests) to supply every field.
  */
-const subscriptionChangeListeners = new Set<() => void>();
-
-export function onSubscriptionChange(listener: () => void): () => void {
-  subscriptionChangeListeners.add(listener);
-  return () => subscriptionChangeListeners.delete(listener);
+function decodeArchiveBatchResult(
+  raw: Partial<ArchiveBatchResult>,
+): ArchiveBatchResult {
+  return {
+    persisted: raw.persisted ?? 0,
+    persistedAgentMetrics: raw.persistedAgentMetrics ?? 0,
+    dropped: raw.dropped ?? 0,
+  };
 }
 
-function notifySubscriptionChange(): void {
-  for (const listener of subscriptionChangeListeners) {
+// ── Agent-metrics-change notifier ────────────────────────────────────────────
+
+/**
+ * Module-level notifier for newly persisted agent turn metrics (kind 44200).
+ * `useAgentUsageSeries` subscribes to this to invalidate its query without
+ * polling. Two producers: a kind-44200 subscription mutation succeeding here
+ * (`collectionEnabled` is part of the usage query result), and the native
+ * archive sync task persisting new metric rows — that one arrives as the
+ * `archive-agent-metrics-changed` Tauri event, bridged by
+ * `useArchiveAgentMetricsBridge`, since the batch it belongs to no longer
+ * passes through JS.
+ */
+const agentMetricsChangeListeners = new Set<() => void>();
+
+export function onAgentMetricsChanged(listener: () => void): () => void {
+  agentMetricsChangeListeners.add(listener);
+  return () => agentMetricsChangeListeners.delete(listener);
+}
+
+export function notifyAgentMetricsChanged(): void {
+  for (const listener of agentMetricsChangeListeners) {
     listener();
   }
 }
@@ -88,23 +216,22 @@ function decodeRawSubscription(raw: RawSaveSubscription): SaveSubscription {
 // ── API wrappers ─────────────────────────────────────────────────────────────
 
 /**
- * Returns `true` when observer-feed archive policy is enforced.
+ * Returns `true` when observer-feed archive is enabled by default.
  *
- * Internal builds set `BUZZ_BUILD_OBSERVER_ARCHIVE_DEFAULT` at build time;
- * OSS builds never set it, so this returns `false`.  The frontend calls this
- * every startup to decide whether to reconcile the `owner_p` subscription.
+ * Always returns `true` — archive defaults to enabled for all builds.
+ * The frontend calls this every startup to decide whether to reconcile
+ * the `owner_p` subscription for kind 24200 (observer frames).
  */
 export async function observerArchiveDefaultEnabled(): Promise<boolean> {
   return invokeTauri<boolean>("observer_archive_default_enabled");
 }
 
 /**
- * Returns `true` when the build has agent-turn-metric archive default-on.
+ * Returns `true` when agent-turn-metric archive is enabled by default.
  *
- * Internal builds set `BUZZ_BUILD_AGENT_METRIC_ARCHIVE_DEFAULT` at build time;
- * OSS builds never set it, so this returns `false`.  The frontend calls this
- * once at startup to decide whether to auto-seed an `owner_p` [44200]
- * subscription.
+ * Always returns `true` — archive defaults to enabled for all builds.
+ * The frontend calls this once at startup to decide whether to auto-seed
+ * an `owner_p` [44200] subscription for new identities.
  */
 export async function agentMetricArchiveDefaultEnabled(): Promise<boolean> {
   return invokeTauri<boolean>("agent_metric_archive_default_enabled");
@@ -123,7 +250,12 @@ export async function agentMetricArchiveDefaultEnabled(): Promise<boolean> {
  */
 export async function mergeSaveSubscriptionKinds(kind: number): Promise<void> {
   await invokeTauri("merge_save_subscription_kinds", { kind });
-  notifySubscriptionChange();
+  // `collectionEnabled` is part of the usage query result — toggling kind
+  // 44200 on must invalidate mounted usage queries. Other kinds don't affect
+  // usage state.
+  if (kind === KIND_AGENT_TURN_METRIC) {
+    notifyAgentMetricsChanged();
+  }
 }
 
 /**
@@ -141,7 +273,9 @@ export async function mergeSaveSubscriptionKinds(kind: number): Promise<void> {
  */
 export async function removeSaveSubscriptionKind(kind: number): Promise<void> {
   await invokeTauri("remove_save_subscription_kind", { kind });
-  notifySubscriptionChange();
+  if (kind === KIND_AGENT_TURN_METRIC) {
+    notifyAgentMetricsChanged();
+  }
 }
 
 /**
@@ -159,7 +293,71 @@ export async function createSaveSubscription(
     scopeValue,
     kinds,
   });
-  notifySubscriptionChange();
+}
+
+// ── Native archive sync lifecycle ────────────────────────────────────────────
+
+/**
+ * Monotonic lease counter for archive-sync lifecycle commands.
+ *
+ * Allocated synchronously in the renderer, before `invoke`, because effect
+ * execution order IS intent order and it is the only place that ordering is
+ * free. Tauri commands complete in an unconstrained order, so a token minted by
+ * the backend records which call reached the mutex first — not which the app
+ * actually wants. A remount whose `start` is delayed past the newer effect's
+ * would otherwise mint the newest token for the stalest caller, whose cleanup
+ * then holds a valid warrant to cancel the live task.
+ *
+ * This counter is realm-scoped: it resets to zero whenever the renderer
+ * reloads, while the backend's mark persists for the life of the Tauri
+ * process. The epoch below is what orders those successive realms.
+ */
+let archiveSyncLease = 0;
+
+/** Allocates the next lease. Call synchronously in effect order. */
+export function nextArchiveSyncLease(): number {
+  archiveSyncLease += 1;
+  return archiveSyncLease;
+}
+
+/**
+ * Announces this renderer realm and resolves its epoch.
+ *
+ * Must be awaited before any lifecycle command is issued: an unawaited
+ * announcement is just another racing `invoke`, which would order
+ * announcements rather than realms and reintroduce the arrival-order bug one
+ * level up.
+ *
+ * Only the main window announces. Archive sync is app-global and
+ * main-window-owned — the same rule that keeps the main window the owner of
+ * microphone capture. Epochs order realms in time; a companion window is a
+ * second realm in space, and a newest-wins clock cannot model two concurrent
+ * owners (the companion's cleanup would cancel the live main-window task).
+ */
+export async function announceArchiveSyncEpoch(): Promise<number> {
+  return await invokeTauri<number>("announce_archive_sync_epoch");
+}
+
+/**
+ * Start the backend archive sync task for the current identity.
+ *
+ * Idempotent per identity + relay. Must only be called after observer
+ * reconciliation resolves — see `useArchiveSync` for why the backend cannot
+ * gate itself. The backend ignores a mark older than the newest it has seen.
+ */
+export async function startArchiveSync(
+  epoch: number,
+  lease: number,
+): Promise<void> {
+  await invokeTauri("start_archive_sync", { epoch, lease });
+}
+
+/** Stop the backend archive sync task. Ignored if `(epoch, lease)` is stale. */
+export async function stopArchiveSync(
+  epoch: number,
+  lease: number,
+): Promise<void> {
+  await invokeTauri("stop_archive_sync", { epoch, lease });
 }
 
 /**
@@ -185,9 +383,6 @@ export async function deleteSaveSubscription(
     scopeType,
     scopeValue,
   });
-  if (removed) {
-    notifySubscriptionChange();
-  }
   return removed;
 }
 
@@ -209,7 +404,7 @@ export async function archiveEvents(
     matchedScope: { scopeType: ScopeType; scopeValue: string };
   }>,
 ): Promise<ArchiveBatchResult> {
-  return invokeTauri<ArchiveBatchResult>("archive_events", {
+  const raw = await invokeTauri<Partial<ArchiveBatchResult>>("archive_events", {
     candidates: candidates.map((c) => ({
       raw_event_json: c.rawEventJson,
       matched_scope: {
@@ -218,6 +413,7 @@ export async function archiveEvents(
       },
     })),
   });
+  return decodeArchiveBatchResult(raw);
 }
 
 /**
@@ -304,6 +500,18 @@ export async function readUnindexedObserverRows(): Promise<
     rawJson: r.raw_json,
     createdAt: r.created_at,
   }));
+}
+
+/**
+ * Read the locally archived NIP-AM usage series for the active identity +
+ * relay (Rev 3 frozen contract). Rust owns identity/relay scoping, request
+ * validation, backfill-before-read, and the accounting ladder — this is a
+ * thin typed wrapper with no client-side logic.
+ */
+export async function getAgentUsageSeries(
+  request: AgentUsageSeriesRequest,
+): Promise<AgentUsageSeries> {
+  return invokeTauri<AgentUsageSeries>("get_agent_usage_series", { request });
 }
 
 /**

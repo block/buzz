@@ -3,7 +3,7 @@
  *
  * Signing out wipes the identity key and all local data, so the dialog gates
  * "Delete My Data" behind two explicit steps:
- *   1. backup — reveal/copy the nsec, then check "I have saved my private key"
+ *   1. backup — check "I have saved my private key"
  *   2. typed confirmation — type the exact phrase "wipe all my data"
  */
 import { expect, type Page, test } from "@playwright/test";
@@ -12,10 +12,6 @@ import { installMockBridge } from "../helpers/bridge";
 import { openSettings } from "../helpers/settings";
 
 const CONFIRM_PHRASE = "wipe all my data";
-
-// The mock bridge routes copy_text_to_clipboard through navigator.clipboard,
-// which requires explicit permissions in headless Chromium.
-test.use({ permissions: ["clipboard-read", "clipboard-write"] });
 
 async function openSignOutDialog(page: Page) {
   await openSettings(page, "profile");
@@ -36,12 +32,8 @@ test("delete button unlocks only after backup + typed phrase", async ({
   const backupCheckbox = page.getByTestId("signout-backup-confirm");
   const phraseInput = page.getByTestId("signout-confirm-phrase");
 
-  // Everything locked initially: no key interaction yet.
+  // Delete is locked initially; the backup checkbox is immediately usable.
   await expect(deleteButton).toBeDisabled();
-  await expect(backupCheckbox).toBeDisabled();
-
-  // Copying the key unlocks the backup checkbox.
-  await page.getByTestId("nsec-copy").click();
   await expect(backupCheckbox).toBeEnabled();
   await backupCheckbox.click();
 
@@ -61,24 +53,11 @@ test("delete button unlocks only after backup + typed phrase", async ({
   await expect(deleteButton).toBeDisabled();
 });
 
-test("reveal also unlocks the backup checkbox", async ({ page }) => {
-  await installMockBridge(page);
-  await page.goto("/");
-  await openSignOutDialog(page);
-
-  const backupCheckbox = page.getByTestId("signout-backup-confirm");
-  await expect(backupCheckbox).toBeDisabled();
-
-  await page.getByTestId("nsec-reveal-toggle").click();
-  await expect(backupCheckbox).toBeEnabled();
-});
-
 test("completing both gates invokes sign_out", async ({ page }) => {
   await installMockBridge(page);
   await page.goto("/");
   await openSignOutDialog(page);
 
-  await page.getByTestId("nsec-copy").click();
   await page.getByTestId("signout-backup-confirm").click();
   await page.getByTestId("signout-confirm-phrase").fill(CONFIRM_PHRASE);
 
@@ -104,16 +83,15 @@ test("cancel resets the gates for the next open", async ({ page }) => {
   await openSignOutDialog(page);
 
   // Satisfy both gates, then cancel.
-  await page.getByTestId("nsec-copy").click();
   await page.getByTestId("signout-backup-confirm").click();
   await page.getByTestId("signout-confirm-phrase").fill(CONFIRM_PHRASE);
   await page.getByRole("button", { name: "Cancel" }).click();
   await expect(page.getByRole("alertdialog")).not.toBeVisible();
 
-  // Reopen — everything must be locked again.
+  // Reopen — everything must be reset again.
   await page.getByTestId("signout-open-dialog").click();
   await expect(page.getByRole("alertdialog")).toBeVisible();
-  await expect(page.getByTestId("signout-backup-confirm")).toBeDisabled();
+  await expect(page.getByTestId("signout-backup-confirm")).not.toBeChecked();
   await expect(page.getByTestId("signout-confirm-phrase")).toHaveValue("");
   await expect(page.getByTestId("signout-confirm")).toBeDisabled();
 });
@@ -125,8 +103,8 @@ test("nsec load failure still allows sign-out (backup step degrades)", async ({
   await page.goto("/");
   await openSignOutDialog(page);
 
-  // Error shown in place of the key; checkbox is usable so the user is not
-  // permanently locked out of signing out.
+  // Error shown in place of the key; checkbox is still usable so the user is
+  // not locked out of signing out.
   await expect(page.getByTestId("signout-nsec-error")).toContainText(
     "Keychain locked",
   );

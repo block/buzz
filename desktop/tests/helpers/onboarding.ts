@@ -16,9 +16,8 @@ export async function seedActiveIdentity(
   );
 }
 
-/** Navigate through the backup step (fresh-key path). */
+/** Continue past the created-key page without opening optional backup options. */
 export async function passThroughBackupStep(page: Page) {
   await expect(page.getByTestId("onboarding-page-backup")).toBeVisible();
-  await expect(page.getByTestId("nsec-value")).toBeVisible();
   await page.getByTestId("onboarding-next").click();
 }

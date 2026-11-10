@@ -20,6 +20,7 @@ import {
 import { resolveMentionProps } from "@/shared/lib/resolveMentionNames";
 import { Button } from "@/shared/ui/button";
 import { Markdown } from "@/shared/ui/markdown";
+import { hasLinkPreviewSuppression } from "@/features/messages/lib/formatTimelineMessages";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
 const relativeTimeFormatter = new Intl.RelativeTimeFormat("en-US", {
@@ -169,6 +170,7 @@ export function FeedSection({
             const { mentionNames, mentionPubkeysByName } = resolveMentionProps(
               item.tags,
               profiles,
+              item.content,
             );
 
             return (
@@ -205,6 +207,11 @@ export function FeedSection({
                         profiles,
                         preferResolvedSelfLabel: true,
                       })}
+                      shape={
+                        profiles?.[item.pubkey.toLowerCase()]?.isAgent === true
+                          ? "squircle"
+                          : "circle"
+                      }
                       size="xs"
                     />
                     {resolveUserLabel({
@@ -228,6 +235,10 @@ export function FeedSection({
                   <Markdown
                     className="max-w-none text-sm leading-snug text-muted-foreground"
                     content={feedContent(item)}
+                    messageId={item.id}
+                    linkPreviewsSuppressed={hasLinkPreviewSuppression(
+                      item.tags,
+                    )}
                     mentionNames={mentionNames}
                     mentionPubkeysByName={mentionPubkeysByName}
                   />

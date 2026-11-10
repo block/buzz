@@ -47,6 +47,21 @@ export function agentAiConfigurationPairForMode({
  * runtime capability, so the gate never diverges from the visible picker. It
  * defaults to `true` so existing callers keep the provider+model requirement.
  */
+export function agentAiConfigurationSubmitBlockReason(
+  mode: AgentAiConfigurationMode,
+  pair: AgentAiConfigurationPair,
+  needsProviderSelection = true,
+): string | null {
+  if (
+    mode !== "custom" ||
+    agentAiConfigurationModeSatisfied(mode, pair, needsProviderSelection)
+  )
+    return null;
+  return needsProviderSelection && !pair.provider.trim()
+    ? "Choose a provider to save custom AI configuration."
+    : "Choose a model to save custom AI configuration.";
+}
+
 export function agentAiConfigurationModeSatisfied(
   mode: AgentAiConfigurationMode,
   pair: AgentAiConfigurationPair,

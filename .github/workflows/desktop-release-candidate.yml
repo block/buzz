@@ -1,0 +1,55 @@
+name: Desktop Release Candidate
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Existing candidate version to validate (version-bump/<version>)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  validate:
+    name: Desktop Release Candidate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Authorize manual candidate validation
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DISPATCH_REF: ${{ github.ref }}
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+        run: |
+          set -euo pipefail
+          if [[ "$DISPATCH_REF" != refs/heads/main ]]; then
+            echo "::error::Dispatch candidate validation from main."
+            exit 1
+          fi
+          # Re-runs retain the original actor; authorize the re-runner too.
+          for actor in "$GITHUB_ACTOR" "$TRIGGERING_ACTOR"; do
+            permission=$(gh api "repos/$GITHUB_REPOSITORY/collaborators/$actor/permission" --jq '.permission')
+            if [[ "$permission" != admin ]]; then
+              echo "::error::Manual candidate validation requires repository admin permission."
+              exit 1
+            fi
+          done
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/heads/version-bump/{0}', inputs.version) || github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate immutable desktop candidate
+        if: github.event_name == 'workflow_dispatch' || startsWith(github.event.pull_request.head.ref, 'version-bump/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.event.pull_request.head.ref }}
+        run: |
+          VERSION="${VERSION#version-bump/}"
+          scripts/desktop_release.py validate --candidate HEAD --version "$VERSION" --repo "$GITHUB_REPOSITORY"

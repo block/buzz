@@ -3,10 +3,15 @@ part of '../activity_page.dart';
 /// Reminders surface for the Reminders filter — due/pending NIP-ER
 /// reminders that deep-link to their target message.
 class _RemindersList extends ConsumerWidget {
+  final ScrollController scrollController;
   final void Function(Reminder reminder) onOpen;
   final Future<void> Function() onRefresh;
 
-  const _RemindersList({required this.onOpen, required this.onRefresh});
+  const _RemindersList({
+    required this.scrollController,
+    required this.onOpen,
+    required this.onRefresh,
+  });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -26,17 +31,18 @@ class _RemindersList extends ConsumerWidget {
     }
     if (reminders.isEmpty) {
       return const _EmptySurface(
-        icon: LucideIcons.clock,
+        icon: BuzzIcons.clock,
         message: 'No reminders',
         detail: 'Reminders you set will show up here.',
       );
     }
 
     final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-    return RefreshIndicator(
+    return BeeRefreshIndicator(
       onRefresh: onRefresh,
       child: ListView.builder(
-        padding: const EdgeInsets.symmetric(vertical: Grid.xxs),
+        controller: scrollController,
+        padding: _activityScrollPadding(context),
         itemCount: reminders.length,
         itemBuilder: (context, index) {
           final reminder = reminders[index];
@@ -47,7 +53,7 @@ class _RemindersList extends ConsumerWidget {
           return ListTile(
             key: ValueKey('reminder-row-${reminder.id}'),
             leading: Icon(
-              due ? LucideIcons.bellRing : LucideIcons.clock,
+              due ? BuzzIcons.bellRing : BuzzIcons.clock,
               size: 20,
               color: due
                   ? context.colors.primary
@@ -71,8 +77,9 @@ class _RemindersList extends ConsumerWidget {
 
 /// Drafts surface for the Drafts filter — locally saved unsent composer
 /// text that reopens the target composer.
-class _DraftsList extends StatelessWidget {
+class _DraftsList extends ConsumerWidget {
   final List<ComposeDraft> drafts;
+  final ScrollController scrollController;
   final Map<String, Channel> channelById;
   final String? myPubkey;
   final void Function(ComposeDraft draft) onOpen;
@@ -80,6 +87,7 @@ class _DraftsList extends StatelessWidget {
 
   const _DraftsList({
     required this.drafts,
+    required this.scrollController,
     required this.channelById,
     required this.myPubkey,
     required this.onOpen,
@@ -87,17 +95,19 @@ class _DraftsList extends StatelessWidget {
   });
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    final names = ref.watch(identityNameSourcesProvider);
     if (drafts.isEmpty) {
       return const _EmptySurface(
-        icon: LucideIcons.filePen,
+        icon: BuzzIcons.edit,
         message: 'No drafts',
         detail: 'Unsent messages you start composing will show up here.',
       );
     }
 
     return ListView.builder(
-      padding: const EdgeInsets.symmetric(vertical: Grid.xxs),
+      controller: scrollController,
+      padding: _activityScrollPadding(context),
       itemCount: drafts.length,
       itemBuilder: (context, index) {
         final draft = drafts[index];
@@ -105,12 +115,16 @@ class _DraftsList extends StatelessWidget {
         final destination = channel == null
             ? 'Unavailable channel'
             : channel.isDm
-            ? resolveDmChannelDisplayLabel(channel, currentPubkey: myPubkey)
+            ? resolveDmChannelDisplayLabel(
+                channel,
+                currentPubkey: myPubkey,
+                names: names,
+              )
             : '#${channel.name}';
         return ListTile(
           key: ValueKey('draft-row-${draft.key}'),
           leading: Icon(
-            LucideIcons.filePen,
+            BuzzIcons.edit,
             size: 20,
             color: context.colors.onSurfaceVariant,
           ),
@@ -119,7 +133,7 @@ class _DraftsList extends StatelessWidget {
             draft.threadHeadId != null ? 'Thread in $destination' : destination,
           ),
           trailing: IconButton(
-            icon: const Icon(LucideIcons.trash2, size: 18),
+            icon: const Icon(BuzzIcons.trash2, size: 18),
             tooltip: 'Delete draft',
             onPressed: () => onDelete(draft),
           ),

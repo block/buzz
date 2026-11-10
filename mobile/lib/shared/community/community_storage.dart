@@ -1,6 +1,11 @@
 import 'dart:convert';
 
+import 'package:crypto/crypto.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+
+import '../hosted/organization_environment.dart';
+import '../storage/secure_storage.dart';
+import '../storage/serial_queue.dart';
 
 import 'community.dart';
 
@@ -18,12 +23,27 @@ class CommunityStorage {
 
   final FlutterSecureStorage _secure;
 
-  CommunityStorage({FlutterSecureStorage? secure})
-    : _secure = secure ?? const FlutterSecureStorage();
+  /// Whether this build shows a saved community. Others stay stored, with
+  /// their keys, for a build that can reach them.
+  final bool Function(Community community) _visible;
 
-  /// Load all communities. On first call, migrates legacy single-community
-  /// credentials if present.
-  Future<List<Community>> loadAll() async {
+  CommunityStorage({
+    FlutterSecureStorage? secure,
+    bool Function(Community community)? visible,
+  }) : _secure = secure ?? communitySecureStorage,
+       _visible = visible ?? reachableInBuild;
+
+  /// An internal build reaches only its organization's community.
+  static bool reachableInBuild(Community community) =>
+      !OrganizationEnvironment.enabled ||
+      OrganizationEnvironment.protects(Uri.parse(community.relayUrl));
+
+  /// Load all communities this build shows. On first call, migrates legacy
+  /// single-community credentials if present.
+  Future<List<Community>> loadAll() async =>
+      (await _loadStored()).where(_visible).toList();
+
+  Future<List<Community>> _loadStored() async {
     final raw = await _secure.read(key: _keyCommunities);
     if (raw != null) return _decodeList(raw);
 
@@ -51,6 +71,7 @@ class CommunityStorage {
         relayUrl: legacyUrl,
         pubkey: legacyPubkey,
         nsec: legacyNsec,
+        sensitiveActionPolicy: SensitiveActionPolicy.disabledByUser,
       );
 
       await _saveList([community]);
@@ -68,6 +89,55 @@ class CommunityStorage {
     return [];
   }
 
+  static final _pendingInvites = SerialQueue();
+  static const _pendingInvitePrefix = 'buzz_pending_invite_v1_';
+
+  static String _pendingInviteKey(String relayUrl, String code) {
+    final uri = Uri.parse(relayUrl);
+    final origin = uri
+        .replace(
+          scheme: ['https', 'wss'].contains(uri.scheme) ? 'https' : 'http',
+        )
+        .origin;
+    return '$_pendingInvitePrefix${sha256.convert(utf8.encode(jsonEncode([origin, code])))}';
+  }
+
+  /// Retain the claim identity before sending a request with uncertain outcomes.
+  /// A failed read/write must never generate a replacement for an unknown key.
+  Future<String> pendingInviteIdentity(
+    String relayUrl,
+    String code,
+    String Function() generate,
+  ) => _pendingInvites.run(() async {
+    final key = _pendingInviteKey(relayUrl, code);
+    final saved = await _secure.read(key: key);
+    if (saved != null) return saved;
+    final nsec = generate();
+    await _secure.write(key: key, value: nsec);
+    if (await _secure.read(key: key) != nsec) {
+      throw StateError('Could not retain the pending invite identity');
+    }
+    return nsec;
+  });
+
+  /// Retire the journal only after the destination identity is durably saved.
+  Future<void> completePendingInvite(
+    String relayUrl,
+    String code,
+    Community community,
+  ) => _pendingInvites.run(() async {
+    final saved = await loadAll();
+    if (!saved.any(
+      (item) => item.id == community.id && item.nsec == community.nsec,
+    )) {
+      return;
+    }
+    final key = _pendingInviteKey(relayUrl, code);
+    if (await _secure.read(key: key) == community.nsec) {
+      await _secure.delete(key: key);
+    }
+  });
+
   Future<void> save(Community community) async {
     final all = await loadAll();
     final index = all.indexWhere((w) => w.id == community.id);
@@ -79,11 +149,33 @@ class CommunityStorage {
     await _saveList(all);
   }
 
-  Future<void> remove(String id) async {
+  /// Replaces the complete stored community list in one secure-storage write.
+  Future<void> saveAll(List<Community> communities) => _saveList(communities);
+
+  Future<void> remove(String id) => _pendingInvites.run(() async {
     final all = await loadAll();
+    final removedKeys = all
+        .where((item) => item.id == id)
+        .map((item) => item.nsec)
+        .whereType<String>()
+        .toSet();
+    if (removedKeys.isNotEmpty) {
+      // Retire every journal copy before removing the saved community. If a
+      // deletion fails, keep that community so sign-out can safely retry.
+      final records = await _secure.readAll();
+      for (final entry in records.entries) {
+        if (entry.key.startsWith(_pendingInvitePrefix) &&
+            removedKeys.contains(entry.value)) {
+          await _secure.delete(key: entry.key);
+          if (await _secure.read(key: entry.key) != null) {
+            throw StateError('Could not remove the pending invite identity');
+          }
+        }
+      }
+    }
     all.removeWhere((w) => w.id == id);
     await _saveList(all);
-  }
+  });
 
   Future<String?> loadActiveId() async {
     return _secure.read(key: _keyActiveId);
@@ -104,8 +196,15 @@ class CommunityStorage {
         .toList();
   }
 
+  /// Replaces the communities this build shows, keeping the others.
   Future<void> _saveList(List<Community> communities) async {
-    final json = jsonEncode(communities.map((item) => item.toJson()).toList());
+    final raw = await _secure.read(key: _keyCommunities);
+    final hidden = raw == null
+        ? const <Community>[]
+        : _decodeList(raw).where((item) => !_visible(item));
+    final json = jsonEncode(
+      [...hidden, ...communities].map((item) => item.toJson()).toList(),
+    );
     await _secure.write(key: _keyCommunities, value: json);
   }
 }

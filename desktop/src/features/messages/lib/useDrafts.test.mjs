@@ -488,6 +488,20 @@ test("markDraftSent_new_active_draft_after_send_is_independent", () => {
   assert.equal(getSentDraftEntries().length, 0, "no sent records");
 });
 
+test("markDraftSent_keeps_a_newer_draft_with_the_same_key", () => {
+  setup("pubkey-sent-race");
+  persistDraftEntry("chan-race", "submitted", "chan-race", [IMG_A], []);
+  // A background upload is still in flight when the user starts the next
+  // message in this channel. Its completion must not clear this newer entry.
+  persistDraftEntry("chan-race", "next draft", "chan-race", [IMG_B], []);
+
+  markDraftSentEntry("chan-race", "submitted", "chan-race", [IMG_A], []);
+
+  const draft = loadDraftEntry("chan-race");
+  assert.equal(draft?.content, "next draft");
+  assert.deepEqual(draft?.pendingImeta, [IMG_B]);
+});
+
 test("getActiveDraftEntries_excludes_cleared_drafts", () => {
   setup("pubkey-active");
   persistDraftEntry("chan-active", "active draft", "chan-active", [], []);

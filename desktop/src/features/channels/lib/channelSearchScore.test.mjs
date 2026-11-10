@@ -60,6 +60,21 @@ test("scoreChannelName: unrelated query returns null", () => {
   assert.equal(scoreChannelName("release-notes", "budget"), null);
 });
 
+test("scoreChannelName: one typo still matches without outranking a prefix", () => {
+  const exactPrefix = scoreChannelName("general", "gene");
+  const missingLetter = scoreChannelName("general", "genral");
+  const transposedLetters = scoreChannelName("engineering", "engienering");
+
+  assert.notEqual(missingLetter, null);
+  assert.notEqual(transposedLetters, null);
+  assert.ok(exactPrefix < missingLetter, "a clean prefix should rank first");
+});
+
+test("scoreChannelName: short and multi-edit fuzzy noise is rejected", () => {
+  assert.equal(scoreChannelName("general", "gxl"), null);
+  assert.equal(scoreChannelName("general", "gxxral"), null);
+});
+
 test("scoreChannelName: subsequence requires correct order", () => {
   // "sn" — 's' then 'n' — is NOT in order in "release-notes" (n comes... yes it
   // is: relea-s-e-n-otes). Use a genuinely out-of-order example instead.

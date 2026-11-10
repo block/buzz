@@ -2,6 +2,11 @@ import * as React from "react";
 
 import type { AudioWorkletHandle } from "./audioWorklet";
 
+export type AudioInputDevice = {
+  deviceId: string;
+  label: string;
+};
+
 /**
  * Manages audio input device enumeration, device selection, and mic gain.
  * Extracted from HuddleContext to keep file sizes manageable.
@@ -9,7 +14,9 @@ import type { AudioWorkletHandle } from "./audioWorklet";
 export function useAudioDevices(
   workletRef: React.RefObject<AudioWorkletHandle | null>,
 ) {
-  const [audioDevices, setAudioDevices] = React.useState<MediaDeviceInfo[]>([]);
+  const [audioDevices, setAudioDevices] = React.useState<AudioInputDevice[]>(
+    [],
+  );
   const [selectedDeviceId, setSelectedDeviceId] = React.useState("");
   const [micGain, setMicGainState] = React.useState(1);
   const micGainRef = React.useRef(1);
@@ -20,7 +27,14 @@ export function useAudioDevices(
       navigator.mediaDevices
         .enumerateDevices()
         .then((devices) =>
-          setAudioDevices(devices.filter((d) => d.kind === "audioinput")),
+          setAudioDevices(
+            devices
+              .filter((device) => device.kind === "audioinput")
+              .map((device) => ({
+                deviceId: device.deviceId,
+                label: device.label,
+              })),
+          ),
         )
         .catch(() => {
           /* best-effort */

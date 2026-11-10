@@ -1,6 +1,7 @@
 //! imeta tag validation helpers — shared between ingest pipeline and bridge.
 
 use buzz_core::tenant::TenantContext;
+use buzz_media::thumbnail::Thumb;
 use buzz_media::validation::mime_to_ext;
 
 /// Validate imeta tags for correctness and safety.
@@ -100,9 +101,8 @@ pub fn validate_imeta_tags(tags: &[Vec<String>], media_base_url: &str) -> Result
                     has_size = true;
                 }
                 "thumb" => {
-                    if !is_local_media_url(value, media_base_url) || !value.ends_with(".thumb.jpg")
-                    {
-                        return Err("imeta thumb must be a local .thumb.jpg path".into());
+                    if !is_local_media_url(value, media_base_url) || !value.contains(".thumb.") {
+                        return Err("imeta thumb must be a local thumbnail path".into());
                     }
                     thumb_value = value.to_string();
                 }
@@ -277,7 +277,12 @@ pub async fn verify_imeta_blobs(
 
         // 4. If thumb is claimed, HEAD the thumbnail object too.
         if !thumb_value.is_empty() {
-            let thumb_key = format!("{x_value}.thumb.jpg");
+            let (_, thumb) = thumb_value
+                .rsplit('/')
+                .next()
+                .and_then(Thumb::parse)
+                .ok_or_else(|| format!("imeta thumb is not a thumbnail path: {thumb_value}"))?;
+            let thumb_key = thumb.key(&x_value);
             let thumb_exists = storage
                 .head(&thumb_key)
                 .await
@@ -369,6 +374,55 @@ fn extract_ext_from_media_url(url: &str) -> Option<&str> {
     }
 }
 
+/// Validate an authored link-preview media URL/hash pair.
+///
+/// Empty pairs are allowed. Non-empty media must be an exact, credential-free
+/// URL on this tenant's media origin with a content-addressed image path.
+pub fn validate_local_image_media_pair(
+    media_url: &str,
+    sha256: &str,
+    media_base_url: &str,
+) -> bool {
+    const IMAGE_EXTS: &[&str] = &["jpg", "png", "gif", "webp"];
+    if media_url.is_empty() && sha256.is_empty() {
+        return true;
+    }
+    if media_url.is_empty()
+        || sha256.len() != 64
+        || !sha256.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f'))
+    {
+        return false;
+    }
+
+    let Ok(parsed) = url::Url::parse(media_url) else {
+        return false;
+    };
+    let Ok(base) = url::Url::parse(media_base_url) else {
+        return false;
+    };
+    if parsed.scheme() != base.scheme()
+        || parsed.host_str() != base.host_str()
+        || parsed.port_or_known_default() != base.port_or_known_default()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return false;
+    }
+
+    let Some(filename) = parsed.path().strip_prefix("/media/") else {
+        return false;
+    };
+    let Some((path_hash, ext)) = filename.split_once('.') else {
+        return false;
+    };
+    !filename.contains('/')
+        && !filename.contains('%')
+        && path_hash == sha256
+        && IMAGE_EXTS.contains(&ext)
+}
+
 /// Validate that a URL references a valid local media blob path.
 fn is_local_media_url(url: &str, media_base_url: &str) -> bool {
     // A safe extension token: 1–8 lowercase alphanumeric chars. Covers media
@@ -409,8 +463,7 @@ fn is_local_media_url(url: &str, media_base_url: &str) -> bool {
             let hash = segments[0];
             hash.len() == 64
                 && hash.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f'))
-                && segments[1] == "thumb"
-                && segments[2] == "jpg"
+                && Thumb::parse(path_after_media).is_some()
         }
         _ => false,
     }
@@ -422,6 +475,48 @@ mod tests {
 
     const HASH: &str = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
     const BASE: &str = "https://relay.example.com/media";
+
+    #[test]
+    fn link_preview_media_pair_requires_exact_local_image_url_and_hash() {
+        let hash = HASH;
+        let valid = format!("{BASE}/{hash}.png");
+        assert!(validate_local_image_media_pair(&valid, hash, BASE));
+        assert!(!validate_local_image_media_pair(
+            &format!("https://evil.example/media/{hash}.png"),
+            hash,
+            BASE
+        ));
+        assert!(!validate_local_image_media_pair(
+            &format!("{BASE}/{hash}.png?token=leak"),
+            hash,
+            BASE
+        ));
+        assert!(!validate_local_image_media_pair(
+            &format!("{BASE}/{hash}.png#fragment"),
+            hash,
+            BASE
+        ));
+        assert!(!validate_local_image_media_pair(
+            &format!("https://user@relay.example.com/media/{hash}.png"),
+            hash,
+            BASE
+        ));
+        assert!(!validate_local_image_media_pair(
+            &format!("{BASE}/{hash}.svg"),
+            hash,
+            BASE
+        ));
+        assert!(!validate_local_image_media_pair(
+            &format!("{BASE}/{hash}.png/extra"),
+            hash,
+            BASE
+        ));
+        assert!(!validate_local_image_media_pair(
+            &format!("{BASE}/{hash}.png"),
+            &"0".repeat(64),
+            BASE
+        ));
+    }
 
     #[test]
     fn test_local_media_url_relative() {
@@ -465,6 +560,27 @@ mod tests {
             "size 100".into(),
         ];
         assert!(validate_imeta_tags(&[tag], BASE).is_ok());
+    }
+
+    #[test]
+    fn test_imeta_thumb_accepts_stored_variants_only() {
+        let tag = |thumb: &str| {
+            vec![
+                "imeta".into(),
+                format!("url /media/{HASH}.png"),
+                "m image/png".into(),
+                format!("x {HASH}"),
+                "size 100".into(),
+                format!("thumb /media/{HASH}.thumb.{thumb}"),
+            ]
+        };
+        assert!(validate_imeta_tags(&[tag("webp")], BASE).is_ok());
+        assert!(validate_imeta_tags(&[tag("jpg")], BASE).is_ok());
+        let err = validate_imeta_tags(&[tag("png")], BASE).unwrap_err();
+        assert!(
+            err.contains("thumb must be a local thumbnail path"),
+            "{err}"
+        );
     }
 
     #[test]

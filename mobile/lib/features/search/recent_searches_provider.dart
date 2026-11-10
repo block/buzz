@@ -19,8 +19,16 @@ class RecentSearchesNotifier extends Notifier<List<String>> {
     final pubkey = ref.watch(myPubkeyProvider) ?? 'anon';
     _prefsKey = '$_recentSearchesPrefsKey:${config.baseUrl}:$pubkey';
 
+    final prefs = ref.read(savedPrefsProvider);
     final stored =
-        ref.read(savedPrefsProvider).getStringList(_prefsKey) ?? const [];
+        readMigratedPref<List<String>>(
+          prefs,
+          canonicalKey: _prefsKey,
+          legacyKey: '$_recentSearchesPrefsKey:${config.storedOrigin}:$pubkey',
+          read: prefs.getStringList,
+          write: prefs.setStringList,
+        ) ??
+        const [];
     return List.unmodifiable(
       stored
           .map((query) => query.trim())

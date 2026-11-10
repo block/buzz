@@ -20,8 +20,10 @@
 use std::sync::Arc;
 
 use buzz_core::tenant::TenantContext;
+use buzz_core::StoredEvent;
 use buzz_db::moderation::{NewReport, ReportTarget};
 use nostr::Event;
+use uuid::Uuid;
 
 use crate::state::AppState;
 
@@ -41,10 +43,13 @@ pub const REPORT_TYPES: &[&str] = &[
 /// Rejections use client-safe `invalid:`/`restricted:` reasons. On success
 /// the report is queued (idempotently, keyed by the signed event id) and the
 /// event itself is **not** stored or broadcast as a regular event.
+///
+/// `token_channels` is the sender's channel-scoped token restriction, if any.
 pub async fn handle_report_event(
     tenant: &TenantContext,
     event: &Event,
     state: &Arc<AppState>,
+    token_channels: Option<&[Uuid]>,
 ) -> Result<(), String> {
     let parsed = parse_report(event)?;
     let reporter_pubkey = event.pubkey.to_bytes();
@@ -55,20 +60,56 @@ pub async fn handle_report_event(
                 .db
                 .get_event_by_id(tenant.community(), &event_id)
                 .await
-                .map_err(|e| format!("error: database error resolving report target: {e}"))?
-                .ok_or_else(|| "invalid: report target event not found".to_string())?;
-            (ReportTarget::Event(event_id), stored.channel_id)
+                .map_err(|e| format!("error: database error resolving report target: {e}"))?;
+            // A target the reporter cannot read is rejected exactly like a
+            // missing one, so the response never reveals whether it exists.
+            let readable = match &stored {
+                Some(stored) => {
+                    reporter_can_read(tenant, state, stored, &reporter_pubkey, token_channels)
+                        .await?
+                }
+                None => false,
+            };
+            match stored {
+                Some(stored) if readable => (ReportTarget::Event(event_id), stored.channel_id),
+                _ => return Err("invalid: report target event not found".to_string()),
+            }
         }
         ParsedReportTarget::Blob { sha256, .. } => {
             let sha_hex = hex::encode(&sha256);
             // Known Phase-1 limitation: the media sidecar API does not expose a
             // cheap typed not-found vs transient-storage distinction here, so
             // all lookup failures surface as a missing blob to the reporter.
-            state
+            let meta = state
                 .media_storage
                 .get_sidecar(tenant, &sha_hex)
                 .await
                 .map_err(|_| "invalid: report target blob not found".to_string())?;
+            if state.config.media_read_mode == crate::api::media_access::MediaReadMode::Enforce {
+                let base = crate::api::media::media_base_url_for_tenant(
+                    &state.config.relay_url,
+                    tenant.host(),
+                );
+                let access = state
+                    .db
+                    .media_access(
+                        tenant.community(),
+                        &sha_hex,
+                        &meta.ext,
+                        &base,
+                        &reporter_pubkey,
+                        false,
+                        super::req::event_visible_to_reader,
+                    )
+                    .await;
+                if !matches!(
+                    access,
+                    Ok(buzz_db::media::MediaAccess::Allowed
+                        | buzz_db::media::MediaAccess::UploaderPreview)
+                ) {
+                    return Err("invalid: report target blob not found".to_owned());
+                }
+            }
             (ReportTarget::Blob(sha256), None)
         }
         ParsedReportTarget::Pubkey { pubkey } => (ReportTarget::Pubkey(pubkey), None),
@@ -91,6 +132,43 @@ pub async fn handle_report_event(
         .map_err(|e| format!("error: database error inserting report: {e}"))?;
 
     Ok(())
+}
+
+/// Whether `reporter` may read `target`: the event-level read gate, plus the
+/// channel's membership-or-open rule and the token's channel scope for a
+/// channel event.
+async fn reporter_can_read(
+    tenant: &TenantContext,
+    state: &AppState,
+    target: &StoredEvent,
+    reporter: &[u8],
+    token_channels: Option<&[Uuid]>,
+) -> Result<bool, String> {
+    if !super::req::event_visible_to_reader(&target.event, reporter) {
+        return Ok(false);
+    }
+    let Some(channel_id) = target.channel_id else {
+        return Ok(true);
+    };
+    if token_channels.is_some_and(|allowed| !allowed.contains(&channel_id)) {
+        return Ok(false);
+    }
+    // Reading is enough to report: the role-table write rule does not
+    // apply, so a guest may report what it can read.
+    match super::ingest::check_channel_membership(
+        tenant.community(),
+        state,
+        channel_id,
+        reporter,
+        None,
+        super::ingest::ChannelWrite::Membership,
+    )
+    .await
+    {
+        Ok(()) => Ok(true),
+        Err(reason) if reason.starts_with("error:") => Err(reason),
+        Err(_) => Ok(false),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

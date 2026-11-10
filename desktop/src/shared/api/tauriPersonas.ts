@@ -10,7 +10,10 @@ export type RawPersona = {
   id: string;
   display_name: string;
   avatar_url: string | null;
+  /** Optional short, PUBLIC description (max 280 chars). */
+  description?: string | null;
   system_prompt: string;
+  acp_command?: string | null;
   runtime?: string | null;
   model?: string | null;
   provider?: string | null;
@@ -29,6 +32,7 @@ export type RawPersona = {
   respond_to?: string | null;
   respond_to_allowlist?: string[];
   parallelism?: number | null;
+  session_policy?: "channel" | "thread";
   created_at: string;
   updated_at: string;
   /** Non-null when the pack `.persona.md` write-back failed (non-fatal). */
@@ -40,7 +44,9 @@ export function fromRawPersona(persona: RawPersona): AgentPersona {
     id: persona.id,
     displayName: persona.display_name,
     avatarUrl: persona.avatar_url,
+    description: persona.description ?? null,
     systemPrompt: persona.system_prompt,
+    acpCommand: persona.acp_command ?? "buzz-acp",
     runtime: persona.runtime ?? null,
     model: persona.model ?? null,
     provider: persona.provider ?? null,
@@ -59,9 +65,26 @@ export function fromRawPersona(persona: RawPersona): AgentPersona {
     respondTo: (persona.respond_to as RespondToMode | undefined) ?? null,
     respondToAllowlist: persona.respond_to_allowlist ?? [],
     parallelism: persona.parallelism ?? null,
+    sessionPolicy: persona.session_policy ?? "channel",
     createdAt: persona.created_at,
     updatedAt: persona.updated_at,
   };
+}
+
+/**
+ * Normalize only the unambiguous empty/absent cases for the wire. The trusted
+ * Rust boundary validates the authored bytes before applying trim/empty
+ * storage normalization.
+ */
+function normalizeDescription(
+  description: string | null | undefined,
+): string | null {
+  if (description === null || description === undefined || description === "") {
+    return null;
+  }
+  // Preserve the authored bytes for the Rust boundary to validate. Trimming
+  // here could turn a prohibited edge control into apparently valid text.
+  return description;
 }
 
 export async function listPersonas(): Promise<AgentPersona[]> {
@@ -76,7 +99,9 @@ export async function createPersona(
       input: {
         displayName: input.displayName,
         avatarUrl: input.avatarUrl,
+        description: normalizeDescription(input.description),
         systemPrompt: input.systemPrompt,
+        acpCommand: input.acpCommand,
         runtime: input.runtime,
         model: input.model,
         provider: input.provider,
@@ -95,7 +120,9 @@ function updatePersonaPayload(input: UpdatePersonaInput) {
     id: input.id,
     displayName: input.displayName,
     avatarUrl: input.avatarUrl,
+    description: normalizeDescription(input.description),
     systemPrompt: input.systemPrompt,
+    acpCommand: input.acpCommand,
     runtime: input.runtime,
     model: input.model,
     provider: input.provider,
@@ -240,6 +267,129 @@ export async function encodeAgentSnapshotForSend(
   });
 }
 
+// ── Agent trading cards ───────────────────────────────────────────────────────
+
+/** Result of `mint_agent_card`. */
+export type MintedAgentCard = {
+  /** Final `.agent.png` bytes (chunk-injected, verified), base64-encoded. */
+  cardPngBase64: string;
+  /** Suggested filename, e.g. `eva.agent.png`. */
+  fileName: string;
+  /** Designer commentary emitted alongside the image (may be empty). */
+  designerNotes: string;
+  /** True when the embedded manifest is encrypted to the (owner, agent) pair. */
+  locked: boolean;
+  /** How much memory is embedded in the card's snapshot. */
+  memoryLevel: SnapshotMemoryLevel;
+};
+
+/** Error prefix Rust returns when no OpenAI key is configured. */
+export const NO_OPENAI_KEY_PREFIX = "NO_OPENAI_KEY:";
+
+/**
+ * Which env layer resolves the OpenAI key for a card mint of this agent.
+ *
+ * - `"none"` — no key configured anywhere; show the first-time setup panel.
+ * - `"global"` — key comes from global Agent Defaults env; writable from the
+ *   dialog via `cardMintSaveOpenaiKey`.
+ * - `"persona"` — key is set on the linked persona; cannot be updated from
+ *   the mint dialog (would be shadowed by the higher-priority layer).
+ * - `"agent"` — key is set directly on the agent record; same restriction.
+ * - `"process"` — key comes from the process environment (dev fallback);
+ *   same restriction.
+ */
+export type CardMintKeyLayer =
+  | "none"
+  | "global"
+  | "persona"
+  | "agent"
+  | "process";
+
+/**
+ * Report which env layer resolves the OpenAI key for a card mint of this agent
+ * (same layering as the mint itself). Returns a layer discriminant — never the
+ * key value itself. Use to decide whether to show a writable key input (none /
+ * global) or a read-only redirect (persona / agent / process).
+ */
+export async function cardMintKeyStatus(id: string): Promise<CardMintKeyLayer> {
+  return invokeTauri<CardMintKeyLayer>("card_mint_key_status", { id });
+}
+
+/**
+ * Save an OPENAI_API_KEY into the global Agent Defaults env for card minting.
+ *
+ * Narrow seam: validated read-modify-write of the single key against the
+ * latest on-disk config. Unlike the general set_global_agent_config, this
+ * NEVER restarts running agents — the mint re-reads config per call, and a
+ * card setup must not disrupt unrelated agents.
+ */
+export async function cardMintSaveOpenaiKey(key: string): Promise<void> {
+  return invokeTauri<void>("card_mint_save_openai_key", { key });
+}
+
+/**
+ * Mint a trading card for an agent. One long API call (~2–3 minutes).
+ * Reroll = call again; the backend holds no session state.
+ *
+ * When `lock` is true, the embedded manifest is NIP-44-encrypted to the
+ * (owner, agent) pair: only those two keys can import the card. Requires a
+ * linked agent instance.
+ *
+ * `memoryLevel` (default `"none"`) embeds the owner's decrypted memory in
+ * the card's snapshot — same levels as snapshot export. Levels other than
+ * `"none"` require a linked agent instance; Rust derives the memory source
+ * from the resolved instance itself.
+ */
+export async function mintAgentCard(
+  id: string,
+  styleNotes?: string,
+  lock?: boolean,
+  memoryLevel?: SnapshotMemoryLevel,
+): Promise<MintedAgentCard> {
+  return invokeTauri<MintedAgentCard>("mint_agent_card", {
+    id,
+    styleNotes: styleNotes || null,
+    lock: lock ?? null,
+    memoryLevel: memoryLevel ?? null,
+  });
+}
+
+/** Save minted card bytes to disk via the OS save dialog. */
+export async function saveAgentCard(
+  cardPngBase64: string,
+  fileName: string,
+): Promise<boolean> {
+  return invokeTauri<boolean>("save_agent_card", { cardPngBase64, fileName });
+}
+
+/** One archived (previously minted) card, as listed by `list_agent_cards`. */
+export type ArchivedAgentCard = {
+  /** On-disk archive key — pass to `loadAgentCard`. */
+  storedFileName: string;
+  /** Suggested save-as name, e.g. `eva.agent.png`. */
+  fileName: string;
+  agentId: string;
+  agentName: string;
+  designerNotes: string;
+  locked: boolean;
+  /** Memory embedded in the card's snapshot ("none" for pre-field archives). */
+  memoryLevel: SnapshotMemoryLevel;
+  /** ISO-8601 mint timestamp. */
+  mintedAt: string;
+  /** Small JPEG grid preview, base64 (absent if the thumb write failed). */
+  thumbJpegBase64: string | null;
+};
+
+/** List all archived cards, newest first. */
+export async function listAgentCards(): Promise<ArchivedAgentCard[]> {
+  return invokeTauri<ArchivedAgentCard[]>("list_agent_cards");
+}
+
+/** Load one archived card's full PNG bytes (base64) by its archive key. */
+export async function loadAgentCard(storedFileName: string): Promise<string> {
+  return invokeTauri<string>("load_agent_card", { storedFileName });
+}
+
 // ── Snapshot import ───────────────────────────────────────────────────────────
 
 /** Preview returned by `preview_agent_snapshot_import` before any write. */
@@ -258,6 +408,16 @@ export type AgentSnapshotImportPreview = {
   /** True when the snapshot's respond_to_allowlist is non-empty. */
   hasSourceAllowlist: boolean;
   sourceAllowlistCount: number;
+  /** Full source pubkeys shown before import, not only their count. */
+  sourceAllowlist: string[];
+  /** Validated, pretty-printed manifest for full payload disclosure. */
+  manifestJson: string;
+  /**
+   * True when the snapshot came from a locked (encrypted) card this machine
+   * unlocked. Cards that cannot be unlocked fail with a refusal error and
+   * never reach a preview.
+   */
+  locked: boolean;
 };
 
 /** Confirmation sent to `confirm_agent_snapshot_import`. */

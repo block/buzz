@@ -760,6 +760,114 @@ async fn test_no_reasoning_no_thought_chunk() {
     h.shutdown().await;
 }
 
+/// An Anthropic Messages API response whose inclusive input sum overflows u64.
+/// `input_tokens: u64::MAX` + `cache_read_input_tokens: 1` → overflow.
+/// buzz-agent must emit a `usage_update` notification with `accumulatedInputTokens`
+/// **absent** (never null, never u64::MAX) and `accumulatedOutputTokens` present.
+fn anthropic_input_overflow_response() -> Value {
+    json!({
+        "id": "msg_overflow",
+        "type": "message",
+        "role": "assistant",
+        "model": "claude-fake",
+        "stop_reason": "end_turn",
+        "content": [{ "type": "text", "text": "overflow" }],
+        "usage": {
+            "input_tokens": u64::MAX,
+            "cache_read_input_tokens": 1,
+            "output_tokens": 7,
+        },
+    })
+}
+
+/// Collect every frame that arrives before the frame matching `pred`, then
+/// return (frames_before, matching_frame). Used to inspect notifications
+/// emitted before a specific response.
+async fn drain_until<F>(h: &mut Harness, mut pred: F) -> (Vec<Value>, Value)
+where
+    F: FnMut(&Value) -> bool,
+{
+    let mut before = Vec::new();
+    loop {
+        let v = h.recv().await;
+        if pred(&v) {
+            return (before, v);
+        }
+        before.push(v);
+    }
+}
+
+/// When the Anthropic parser produces an input-sum overflow, buzz-agent must
+/// omit `accumulatedInputTokens` from the `_goose/unstable/session/update`
+/// `usage_update` notification — never null, never u64::MAX — while still
+/// emitting `accumulatedOutputTokens` normally.
+///
+/// This is an end-to-end regression test: the canned response flows through
+/// parse_anthropic → run loop → wire emission via the real production code
+/// with no logic duplication.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_anthropic_input_overflow_omits_accumulated_input_tokens() {
+    let url = spawn_fake_llm(vec![anthropic_input_overflow_response()]).await;
+    let mut h = Harness::spawn(&[
+        ("BUZZ_AGENT_PROVIDER", "anthropic"),
+        ("ANTHROPIC_API_KEY", "test"),
+        ("ANTHROPIC_MODEL", "claude-fake"),
+        ("ANTHROPIC_BASE_URL", &url),
+        ("OPENAI_COMPAT_BASE_URL", ""),
+    ])
+    .await;
+
+    let sid = handshake(&mut h).await;
+    let p = h
+        .send(
+            "session/prompt",
+            json!({
+                "sessionId": sid,
+                "prompt": [{ "type": "text", "text": "overflow test" }],
+            }),
+        )
+        .await;
+
+    let (frames, final_resp) = drain_until(&mut h, |v| v.get("id") == Some(&json!(p))).await;
+    assert_eq!(
+        final_resp["result"]["stopReason"], "end_turn",
+        "turn must complete normally despite input overflow"
+    );
+
+    // Find the usage_update notification emitted before the response.
+    let usage = frames
+        .iter()
+        .find(|v| {
+            v.get("method") == Some(&json!("_goose/unstable/session/update"))
+                && v["params"]["update"]["sessionUpdate"] == "usage_update"
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "expected _goose/unstable/session/update usage_update before response; frames: {frames:#?}"
+            )
+        });
+
+    let update = &usage["params"]["update"];
+
+    // Core regression: input overflow → accumulatedInputTokens ABSENT.
+    // A present value (even u64::MAX) would mean the saturated clamped sum
+    // leaked through the parse layer as an exact reading.
+    assert!(
+        update.get("accumulatedInputTokens").is_none(),
+        "accumulatedInputTokens must be absent when input sum overflows; got: {:?}",
+        update.get("accumulatedInputTokens")
+    );
+
+    // Output tokens are unaffected by the input overflow and must still emit.
+    assert_eq!(
+        update["accumulatedOutputTokens"],
+        json!(7u64),
+        "accumulatedOutputTokens must be present and exact despite input overflow"
+    );
+
+    h.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_cancel_notification_no_reply() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -804,6 +912,140 @@ async fn test_cancel_notification_no_reply() {
     assert!(
         stop == "cancelled" || stop == "end_turn",
         "unexpected stopReason {stop}"
+    );
+
+    h.shutdown().await;
+}
+
+/// ACP v2 ContentChunk compliance: both `agent_thought_chunk` and
+/// `agent_message_chunk` must carry `messageId` and `content` when the
+/// client negotiates protocol version 2.
+///
+/// ACP v2 requires `ContentChunk.messageId` (required in v2 schema at
+/// agentclientprotocol/agent-client-protocol schema/v2/schema.json @d13d1baa).
+/// ACP v1 allows the field, so adding it is backwards-safe.
+///
+/// Additional invariants verified here:
+/// - The thought and assistant message IDs are **distinct** (two logical messages).
+/// - IDs do **not** recur across two consecutive `session/prompt` calls in the same
+///   ACP session (`run_id` is fresh per prompt, so no cross-turn collision).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_acp_v2_chunks_carry_message_id() {
+    // OpenAI Responses API: reasoning item + text item. Both emitted chunks
+    // must have messageId + content on a v2 connection.
+    // Two responses so we can send two session/prompt calls and verify no ID reuse.
+    let url = spawn_fake_llm(vec![
+        responses_reasoning_response("Thinking about it.", "Here is my response."),
+        responses_reasoning_response("Thinking again.", "Second response."),
+    ])
+    .await;
+    let mut h = Harness::spawn(&[
+        ("BUZZ_AGENT_PROVIDER", "openai"),
+        ("OPENAI_COMPAT_API_KEY", "test"),
+        ("OPENAI_COMPAT_MODEL", "fake-model"),
+        ("OPENAI_COMPAT_API", "responses"),
+        ("OPENAI_COMPAT_BASE_URL", &url),
+    ])
+    .await;
+
+    let sid = handshake(&mut h).await; // negotiates protocolVersion: 2
+
+    // ── First prompt ──────────────────────────────────────────────────────────
+    let p1 = h
+        .send(
+            "session/prompt",
+            json!({
+                "sessionId": sid,
+                "prompt": [{ "type": "text", "text": "think and respond" }],
+            }),
+        )
+        .await;
+    let updates1 = collect_updates_until_done(&mut h, p1).await;
+
+    let thought1 = updates1
+        .iter()
+        .find(|u| u["sessionUpdate"] == "agent_thought_chunk")
+        .expect("agent_thought_chunk must be emitted on prompt 1");
+    let message1 = updates1
+        .iter()
+        .find(|u| u["sessionUpdate"] == "agent_message_chunk")
+        .expect("agent_message_chunk must be emitted on prompt 1");
+
+    // ACP v2 ContentChunk compliance: messageId must be present and non-empty.
+    let thought_id1 = thought1["messageId"]
+        .as_str()
+        .expect("agent_thought_chunk must carry messageId (ACP v2 required field)");
+    assert!(
+        !thought_id1.is_empty(),
+        "agent_thought_chunk messageId must not be empty"
+    );
+
+    let message_id1 = message1["messageId"]
+        .as_str()
+        .expect("agent_message_chunk must carry messageId (ACP v2 required field)");
+    assert!(
+        !message_id1.is_empty(),
+        "agent_message_chunk messageId must not be empty"
+    );
+
+    // Thought and assistant message are two distinct logical messages — their IDs must differ.
+    assert_ne!(
+        thought_id1, message_id1,
+        "agent_thought_chunk and agent_message_chunk are distinct logical messages; their messageIds must differ"
+    );
+
+    // content must be present and correct.
+    assert_eq!(
+        thought1["content"]["text"], "Thinking about it.",
+        "thought content mismatch"
+    );
+    assert_eq!(
+        message1["content"]["text"], "Here is my response.",
+        "message content mismatch"
+    );
+
+    // ── Second prompt (same ACP session) ─────────────────────────────────────
+    let p2 = h
+        .send(
+            "session/prompt",
+            json!({
+                "sessionId": sid,
+                "prompt": [{ "type": "text", "text": "think again" }],
+            }),
+        )
+        .await;
+    let updates2 = collect_updates_until_done(&mut h, p2).await;
+
+    let thought2 = updates2
+        .iter()
+        .find(|u| u["sessionUpdate"] == "agent_thought_chunk")
+        .expect("agent_thought_chunk must be emitted on prompt 2");
+    let message2 = updates2
+        .iter()
+        .find(|u| u["sessionUpdate"] == "agent_message_chunk")
+        .expect("agent_message_chunk must be emitted on prompt 2");
+
+    let thought_id2 = thought2["messageId"]
+        .as_str()
+        .expect("agent_thought_chunk must carry messageId on prompt 2");
+    let message_id2 = message2["messageId"]
+        .as_str()
+        .expect("agent_message_chunk must carry messageId on prompt 2");
+
+    // IDs from prompt 2 must be distinct from each other.
+    assert_ne!(
+        thought_id2, message_id2,
+        "prompt 2: thought and message IDs must differ"
+    );
+
+    // IDs must NOT recur across prompts — ACP requires session-unique messageIds.
+    assert_ne!(
+        thought_id1, thought_id2,
+        "thought messageId must not recur across session/prompt calls (run_id must differ)"
+    );
+    assert_ne!(
+        message_id1, message_id2,
+        "message messageId must not recur across session/prompt calls (run_id must differ)"
     );
 
     h.shutdown().await;

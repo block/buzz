@@ -4,7 +4,41 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
-  testWidgets('keeps the separator and timestamp next to a short name', (
+  testWidgets(
+    'hidden identity stays accessible without a visible name or gap',
+    (tester) async {
+      final semantics = tester.ensureSemantics();
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: SizedBox(
+              width: 300,
+              child: MessageAuthorMeta(
+                displayName: 'Alice',
+                username: 'alice@example.com',
+                timestamp: '2m',
+                showIdentity: false,
+                nameColor: Colors.black,
+                metadataColor: Colors.grey,
+              ),
+            ),
+          ),
+        ),
+      );
+      expect(find.text('Alice'), findsNothing);
+      expect(find.text('alice@example.com'), findsNothing);
+      expect(find.byIcon(Icons.verified), findsNothing);
+      expect(find.bySemanticsLabel(RegExp('Alice')), findsOneWidget);
+      expect(
+        tester.getTopLeft(find.text('2m')).dx,
+        tester.getTopLeft(find.byType(MessageAuthorMeta)).dx,
+      );
+      semantics.dispose();
+    },
+  );
+
+  testWidgets('keeps the timestamp next to a short name without a separator', (
     tester,
   ) async {
     const displayNameKey = Key('author-display-name');
@@ -31,11 +65,14 @@ void main() {
     await tester.pumpAndSettle();
 
     final displayNameRect = tester.getRect(find.byKey(displayNameKey));
-    final separatorRect = tester.getRect(find.text('·'));
     final timestampRect = tester.getRect(find.byKey(timestampKey));
 
-    expect(separatorRect.left - displayNameRect.right, Grid.half);
-    expect(timestampRect.left - separatorRect.right, Grid.half);
+    expect(find.text('·'), findsNothing);
+    expect(timestampRect.left - displayNameRect.right, Grid.xxs);
+    expect(
+      tester.widget<Text>(find.byKey(timestampKey)).style?.fontSize,
+      messageTimestampTextStyle.fontSize,
+    );
     expect(tester.takeException(), isNull);
   });
 
@@ -84,6 +121,7 @@ void main() {
   testWidgets('constrains long metadata at large accessible text sizes', (
     tester,
   ) async {
+    const displayNameKey = Key('author-display-name');
     const timestampKey = Key('author-timestamp');
 
     await tester.pumpWidget(
@@ -98,6 +136,7 @@ void main() {
                 displayName: 'A very long display name',
                 username: 'a-very-long-username',
                 timestamp: 'Mar 15, 2025',
+                displayNameKey: displayNameKey,
                 timestampKey: timestampKey,
                 nameColor: Colors.black,
                 metadataColor: Colors.grey,
@@ -112,6 +151,20 @@ void main() {
     final timestamp = tester.widget<Text>(find.byKey(timestampKey));
     expect(timestamp.maxLines, 1);
     expect(timestamp.overflow, TextOverflow.ellipsis);
+    final nameRichText = tester.widget<RichText>(
+      find.descendant(
+        of: find.byKey(displayNameKey),
+        matching: find.byType(RichText),
+      ),
+    );
+    final timestampRichText = tester.widget<RichText>(
+      find.descendant(
+        of: find.byKey(timestampKey),
+        matching: find.byType(RichText),
+      ),
+    );
+    expect(nameRichText.textScaler.scale(15), 30);
+    expect(timestampRichText.textScaler.scale(13.1), 26.2);
     expect(tester.takeException(), isNull);
   });
 }

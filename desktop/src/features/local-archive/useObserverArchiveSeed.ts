@@ -1,40 +1,46 @@
 import * as React from "react";
 
 import { KIND_AGENT_OBSERVER_FRAME } from "@/shared/constants/kinds";
+import { mergeSaveSubscriptionKinds } from "@/shared/api/tauriArchive";
 import {
-  mergeSaveSubscriptionKinds,
-  observerArchiveDefaultEnabled,
-} from "@/shared/api/tauriArchive";
+  readExplicitObserverArchiveChoice,
+  setExplicitObserverArchiveChoice,
+} from "./observerArchivePreference";
 
 export interface ObserverArchiveSeedDeps {
-  observerArchiveDefaultEnabled: () => Promise<boolean>;
   mergeSaveSubscriptionKinds: (kind: number) => Promise<void>;
+  readExplicitChoice: (pubkey: string) => boolean | "unset";
+  setExplicitChoice: (pubkey: string, enabled: boolean) => void;
 }
 
 const defaultDeps: ObserverArchiveSeedDeps = {
-  observerArchiveDefaultEnabled,
   mergeSaveSubscriptionKinds,
+  readExplicitChoice: readExplicitObserverArchiveChoice,
+  setExplicitChoice: setExplicitObserverArchiveChoice,
 };
 
 /**
  * Reconcile observer-feed archive state for the current identity.
  *
- * Internal builds (policy flag ON): unconditionally ensure kind 24200 exists
- * in the DB subscription.
- *
- * OSS builds (policy flag OFF): no-op. The Settings toggle is the only
- * mutation path for OSS users.
+ * Archive defaults to enabled for all builds. Merges kind 24200 into the
+ * DB subscription via an atomic DB-side merge — UNLESS the user has
+ * previously made an explicit opt-out choice for this identity, in which
+ * case we skip the merge to preserve their preference across restarts.
  *
  * Rejects on failure — callers must not open archive listeners against
  * unreconciled state.
  */
 export async function reconcileObserverArchive(
+  pubkey: string,
   deps: ObserverArchiveSeedDeps = defaultDeps,
 ): Promise<void> {
-  const policyOn = await deps.observerArchiveDefaultEnabled();
-  if (!policyOn) return;
-
+  const choice = deps.readExplicitChoice(pubkey);
+  // Any explicit choice (or a storage error treated as fail-closed) skips the
+  // merge: opted-out users stay opted out; already-seeded users stay seeded.
+  if (choice !== "unset") return;
+  // No prior choice: seed the default-on subscription and record it.
   await deps.mergeSaveSubscriptionKinds(KIND_AGENT_OBSERVER_FRAME);
+  deps.setExplicitChoice(pubkey, true);
 }
 
 /**
@@ -73,7 +79,7 @@ export function startReconciliation(
 ): () => void {
   let cancelled = false;
 
-  reconcileObserverArchive(deps)
+  reconcileObserverArchive(pubkey, deps)
     .then(() => {
       if (!cancelled) onReady(pubkey);
     })
