@@ -24,6 +24,9 @@ class _PairingWelcomeView extends HookWidget {
   final Widget? setupContent;
   final String builderlabLabel;
   final bool builderlabBusy;
+  final bool signInPending;
+  final VoidCallback? onSignIn;
+  final bool signInBusy;
   final ValueChanged<Uri> onOpenCommunity;
 
   const _PairingWelcomeView({
@@ -51,6 +54,9 @@ class _PairingWelcomeView extends HookWidget {
     this.setupContent,
     this.builderlabLabel = 'Connect to Builderlab',
     this.builderlabBusy = false,
+    this.signInPending = false,
+    this.onSignIn,
+    this.signInBusy = false,
   });
 
   @override
@@ -123,8 +129,32 @@ class _PairingWelcomeView extends HookWidget {
                 ),
                 const SizedBox(height: Grid.xs),
               ],
-              if (page == 1) ...[
-                if (HostedEnvironment.enabled)
+              if (page == 1 && onSignIn != null)
+                SizedBox(
+                  width: double.infinity,
+                  child: FilledButton(
+                    style: context._onboardingButtonStyle,
+                    onPressed: signInBusy ? null : onSignIn,
+                    child: signInBusy
+                        ? BuzzLoadingIndicator(
+                            size: 20,
+                            color: context._onboardingInk,
+                            semanticLabel: 'Signing in',
+                          )
+                        : const Text('Sign in'),
+                  ),
+                )
+              else if (page == 1) ...[
+                if (!showConnectionOptions && !signInPending)
+                  SizedBox(
+                    width: double.infinity,
+                    child: FilledButton(
+                      style: context._onboardingButtonStyle,
+                      onPressed: isBusy ? null : onScan,
+                      child: const Text('Scan a QR code'),
+                    ),
+                  )
+                else if (HostedEnvironment.enabled)
                   FilledButton(
                     style: context._onboardingGlassButtonStyle,
                     onPressed: onBuilderlab,
@@ -136,14 +166,17 @@ class _PairingWelcomeView extends HookWidget {
                           )
                         : Text(builderlabLabel),
                   ),
-                if (!showConnectionOptions) ...[
+                if (!showConnectionOptions &&
+                    !signInPending &&
+                    HostedEnvironment.enabled) ...[
                   const SizedBox(height: Grid.xxs),
-                  TextButton(
-                    style: context._onboardingGhostButtonStyle,
-                    onPressed: isBusy
-                        ? null
-                        : () => optionsExpanded.value = !optionsExpanded.value,
-                    child: const Text('Other options'),
+                  SizedBox(
+                    width: double.infinity,
+                    child: TextButton(
+                      style: context._onboardingGhostButtonStyle,
+                      onPressed: isBusy ? null : onBuilderlab,
+                      child: const Text('or sign in with email'),
+                    ),
                   ),
                 ],
                 if (showConnectionOptions) ...connectionActions(),
@@ -298,6 +331,17 @@ class _PairingWelcomeView extends HookWidget {
             ],
           );
 
+    void revealOptions() {
+      optionsExpanded.value = true;
+    }
+
+    final canRevealOptions =
+        connectionLanding &&
+        !showConnectionOptions &&
+        !existingUser &&
+        setupContent == null &&
+        !signInPending &&
+        !isBusy;
     final welcome = Padding(
       padding: const EdgeInsets.symmetric(
         horizontal: Grid.gutter,
@@ -313,31 +357,46 @@ class _PairingWelcomeView extends HookWidget {
             child: Column(
               children: [
                 Expanded(
-                  child: Center(
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        ConstrainedBox(
-                          constraints: const BoxConstraints(maxWidth: 320),
-                          child: AspectRatio(
-                            aspectRatio: 777 / 326,
-                            child: OnboardingWordmark(
-                              key: const Key('pairing-buzz-wordmark'),
-                              color: context._onboardingIsDark
-                                  ? context._onboardingInk
-                                  : null,
+                  child: _TwoFingerDoubleTapSurface(
+                    onDoubleTap: canRevealOptions ? revealOptions : null,
+                    child: Center(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          ConstrainedBox(
+                            constraints: const BoxConstraints(maxWidth: 320),
+                            child: AspectRatio(
+                              aspectRatio: 777 / 326,
+                              child: Semantics(
+                                // Hidden developer entry intentionally has no
+                                // keyboard shortcut. Keep its assistive action
+                                // on the existing labelled wordmark node.
+                                customSemanticsActions: canRevealOptions
+                                    ? {
+                                        const CustomSemanticsAction(
+                                          label: 'More connection options',
+                                        ): revealOptions,
+                                      }
+                                    : null,
+                                child: OnboardingWordmark(
+                                  key: const Key('pairing-buzz-wordmark'),
+                                  color: context._onboardingIsDark
+                                      ? context._onboardingInk
+                                      : null,
+                                ),
+                              ),
                             ),
                           ),
-                        ),
-                        const SizedBox(height: Grid.xxs),
-                        Text(
-                          'Your people, your agents, your projects —\nall in one place.',
-                          textAlign: TextAlign.center,
-                          style: context.textTheme.bodyLarge?.copyWith(
-                            color: context._onboardingInk,
+                          const SizedBox(height: Grid.xxs),
+                          Text(
+                            'Your people, your agents, your projects —\nall in one place.',
+                            textAlign: TextAlign.center,
+                            style: context.textTheme.bodyLarge?.copyWith(
+                              color: context._onboardingInk,
+                            ),
                           ),
-                        ),
-                      ],
+                        ],
+                      ),
                     ),
                   ),
                 ),
@@ -455,8 +514,12 @@ class _PairingWelcomeView extends HookWidget {
                             }
                           },
                           onOpenCommunity: onOpenCommunity,
-                          onScan: isBusy ? null : onScan,
-                          onPairing: isBusy ? null : onAlreadyUseBuzz,
+                          onPairing: isBusy
+                              ? null
+                              : () {
+                                  optionsExpanded.value = false;
+                                  onAlreadyUseBuzz?.call();
+                                },
                         ),
                       ),
                     ),

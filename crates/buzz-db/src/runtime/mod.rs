@@ -1,6 +1,7 @@
 mod admitted_tx;
 mod cold_start;
 mod connection_observability;
+mod history_reads;
 pub mod migration;
 pub(crate) mod observability;
 pub(crate) mod push_enqueue;
@@ -64,7 +65,10 @@ pub(crate) async fn insert_mentions_in_transaction(
         .iter()
         .filter_map(|tag| {
             let tag_vec = tag.as_slice();
-            if tag_vec.len() >= 2 && tag_vec[0] == "p" {
+            if tag_vec.len() >= 2
+                && tag_vec[0] == "p"
+                && !buzz_core::filter::is_workflow_owner_attribution(event, tag)
+            {
                 Some(tag_vec[1].as_str())
             } else {
                 None
@@ -260,6 +264,9 @@ where
 #[derive(Clone, Debug)]
 pub struct Db {
     pub(crate) pool: PgPool,
+    /// Shared across clones; media authorization may use at most a quarter of
+    /// the writer pool (capped at eight), leaving capacity for ordinary writes.
+    pub(crate) media_authorization_slots: std::sync::Arc<tokio::sync::Semaphore>,
     /// Optional bounded post-commit producer, shared across handle clones.
     pub(crate) push_enqueue: Option<push_enqueue::PushEnqueue>,
     /// Maximum connections configured for this pool (from [`DbConfig::max_connections`]).
@@ -292,10 +299,9 @@ pub struct Db {
     /// bounded-stale read semantics are a product decision, not an
     /// invariant, so the gate ships off.
     pub(crate) replica_read_max_age: Option<Duration>,
-    /// Replica freshness budget used only by the leader's fleet telemetry
-    /// queries. This is independent of serving-read rollout policy: telemetry
-    /// may be stale or skipped, but it must never fall back to the writer.
-    pub(crate) usage_metrics_replica_max_age: Option<Duration>,
+    /// Interval at which [`Db::spawn_fence_probe`]'s probe commits
+    /// heartbeat tokens ([`DbConfig::replica_fence_probe_interval_ms`]).
+    pub(crate) fence_probe_interval: Duration,
     /// Whether the reader endpoint supports the Aurora PostgreSQL identity
     /// function ([`replica_fence::AURORA_IDENTITY_FN`]) — probed
     /// once per process on the first routed read (on a plain autocommit
@@ -303,6 +309,10 @@ pub struct Db {
     /// not yet probed (or the probe hit a transient error and will retry).
     /// Shared across `Db` clones.
     pub(crate) reader_aurora_identity: std::sync::Arc<std::sync::OnceLock<bool>>,
+    /// Concurrency cap on replica-served subscription-history reads, sized
+    /// from [`Db::read_max_connections`] (see [`history_reads`]). Shared
+    /// across `Db` clones.
+    pub(crate) history_reads: crate::concurrency_gate::ConcurrencyGate,
 }
 
 /// The session that served (or will serve) a routed read, so follow-up
@@ -330,7 +340,7 @@ pub(crate) enum ReadSessionInner {
     /// to the writer instead of surfacing an error: degraded capacity,
     /// never holes — and never a 500 the writer could have served.
     Replica {
-        tx: sqlx::Transaction<'static, sqlx::Postgres>,
+        tx: history_reads::ReaderTx,
         writer: PgPool,
     },
     /// The writer pool (cheap clone; Arc-backed).
@@ -352,7 +362,7 @@ impl ReadSession {
     pub async fn query_events(&mut self, q: &EventQuery) -> Result<Vec<StoredEvent>> {
         let degraded = match &mut self.inner {
             ReadSessionInner::Replica { tx, writer } => {
-                match event::query_events_on(tx, q).await {
+                match event::query_events_on(tx, q, event::ReadDeadline::Session).await {
                     Ok(rows) => return Ok(rows),
                     // Surface a cancel instead of re-running it on the writer; see
                     // `DbError::is_statement_cancelled` for the trade-off.
@@ -393,8 +403,11 @@ pub(crate) enum RouteDecision {
     /// replica, so a post-verification writer re-run or a mid-query replica
     /// failure emits exactly one `buzz_db_route_decision` event per request
     /// (the offload percentage is read straight off `decision="replica"`).
+    ///
+    /// A history read's transaction carries its [`history_reads`] permit, so
+    /// the permit is released when the transaction is dropped.
     Replica(
-        sqlx::Transaction<'static, sqlx::Postgres>,
+        history_reads::ReaderTx,
         replica_fence::TokenEntry,
         &'static str,
     ),
@@ -569,6 +582,18 @@ fn read_budget_from_ms(ms: u64) -> Option<Duration> {
     }
 }
 
+/// Outcome of one reader-pool warm pass (see [`Db::warm_read_pool`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ReaderWarmReport {
+    /// Connections the pass aimed to hold: the pool's ceiling.
+    target: u32,
+    /// Connections held at the end of the pass, then released back to idle:
+    /// the ones it dialed plus any idle floor connections it reused.
+    held: u32,
+    /// Acquires that errored or timed out.
+    failed: u32,
+}
+
 /// Snapshot of Postgres connection pool utilisation.
 #[derive(Debug, Clone, Copy)]
 pub struct DbPoolStats {
@@ -678,10 +703,14 @@ pub struct DbConfig {
     /// than the staleness gate never routes anyway, so a larger budget
     /// would only misrepresent the config.
     pub replica_read_max_age_ms: u64,
-    /// Replica freshness budget for usage telemetry, in milliseconds
-    /// (`BUZZ_USAGE_METRICS_REPLICA_MAX_AGE_MS`). `0` disables fleet database
-    /// telemetry. This does not enable replica routing for serving reads.
-    pub usage_metrics_replica_max_age_ms: u64,
+    /// Replica fence heartbeat interval in milliseconds (env
+    /// `BUZZ_REPLICA_FENCE_PROBE_INTERVAL_MS`). `0` selects
+    /// [`replica_fence::DEFAULT_PROBE_INTERVAL`]; other values are clamped
+    /// to [`replica_fence::MIN_PROBE_INTERVAL`]..=
+    /// [`replica_fence::MAX_PROBE_INTERVAL`]. Only used when a read pool is
+    /// configured. The bounded-read budget should be at least
+    /// [`replica_fence::min_read_budget`] of this interval.
+    pub replica_fence_probe_interval_ms: u64,
     /// Session `lock_timeout` in milliseconds for writer connections (env
     /// `BUZZ_DB_LOCK_TIMEOUT_MS`). `0` disables the timeout.
     pub lock_timeout_ms: u64,
@@ -714,10 +743,10 @@ impl Default for DbConfig {
             read_max_connections: None,
             min_connections: 2,
             acquire_timeout_secs: 3,
-            max_lifetime_secs: 1800,
+            max_lifetime_secs: 300,
             idle_timeout_secs: 600,
             replica_read_max_age_ms: 0,
-            usage_metrics_replica_max_age_ms: 30_000,
+            replica_fence_probe_interval_ms: 0,
             lock_timeout_ms: DEFAULT_LOCK_TIMEOUT_MS,
             idle_txn_timeout_ms: DEFAULT_IDLE_TXN_TIMEOUT_MS,
             statement_timeout_ms: DEFAULT_STATEMENT_TIMEOUT_MS,
@@ -801,12 +830,24 @@ impl Db {
             None => None,
         };
         let replica_read_max_age = read_budget_from_ms(config.replica_read_max_age_ms);
-        let usage_metrics_replica_max_age =
-            read_budget_from_ms(config.usage_metrics_replica_max_age_ms);
+        let fence_probe_interval =
+            replica_fence::probe_interval_from_ms(config.replica_fence_probe_interval_ms);
+        let min_read_budget = replica_fence::min_read_budget(fence_probe_interval);
+        if let Some(budget) = replica_read_max_age.filter(|b| *b < min_read_budget) {
+            tracing::warn!(
+                budget_ms = budget.as_millis() as u64,
+                probe_interval_ms = fence_probe_interval.as_millis() as u64,
+                recommended_min_ms = min_read_budget.as_millis() as u64,
+                "BUZZ_REPLICA_READ_MAX_AGE_MS cannot absorb one fence heartbeat that waits out \
+                 its lock timeout; bounded replica reads will spill to the writer whenever \
+                 a beat is late"
+            );
+        }
         let push_enqueue = config
             .push_enabled
             .then(|| push_enqueue::PushEnqueue::new(&pool));
         Ok(Self {
+            media_authorization_slots: media_authorization_slots(&pool),
             push_enqueue,
             pool,
             max_connections: config.max_connections,
@@ -814,8 +855,9 @@ impl Db {
             read_max_connections,
             fence: std::sync::Arc::new(replica_fence::ReplicaFence::new()),
             replica_read_max_age,
-            usage_metrics_replica_max_age,
+            fence_probe_interval,
             reader_aurora_identity: std::sync::Arc::new(std::sync::OnceLock::new()),
+            history_reads: history_reads::gate_for_read_pool(read_max_connections),
         })
     }
 
@@ -827,6 +869,19 @@ impl Db {
     /// Additional writer pools, including the relay audit pool, must use this
     /// constructor so they inherit the timeout, floor-guard, and isolation
     /// policy installed by [`Db::new`].
+    ///
+    /// Two single-connection side pools deliberately do not, so serving-pool
+    /// saturation cannot delay their work. Neither inserts into `events`, so
+    /// neither needs the `buzz.created_at_floor` guard, and each installs
+    /// its own shorter timeouts so it fails fast instead of queueing:
+    /// - [`replica_fence::connect_probe_pool`]: the fence probe takes the
+    ///   floor lock itself (exclusive) and writes only `replica_heartbeat`.
+    /// - the push-enqueue pool (`push_enqueue::PushEnqueue::new`): it writes
+    ///   only `push_match_queue`, and is lazy so relay startup never depends
+    ///   on push.
+    ///
+    /// New pools follow the rule above unless they have a reason as specific
+    /// as these.
     pub async fn connect_writer_pool(config: &DbConfig) -> Result<PgPool> {
         use connection_observability::{
             classify_pool_outcome, record_milestone, DbConnectionStep, DbConnectionStepAttempt,
@@ -961,25 +1016,61 @@ impl Db {
     }
 
     /// Reader acquire timeout — deliberately far below the writer's
-    /// (seconds-denominated) timeout. Failing closed to the writer must be
-    /// fast: a saturated reader pool that made routed reads wait the full
-    /// writer-style timeout would add dead latency during exactly the load
-    /// spike the offload exists for. A miss here surfaces as
-    /// `writer/reader_acquire_timeout` (see [`Db::proved_reader`] for why
-    /// the reason names the mechanism rather than a diagnosis).
+    /// (seconds-denominated) timeout. A miss must resolve fast: a saturated
+    /// reader pool that made routed reads wait the full writer-style timeout
+    /// would add dead latency during exactly the load spike the offload
+    /// exists for. A miss surfaces as `writer/reader_acquire_timeout`, or as
+    /// `rejected/reader_acquire_timeout` for a history read, which is not
+    /// moved to the writer (see [`Db::route_read`], and
+    /// [`Db::proved_reader`] for why the reason names the mechanism rather
+    /// than a diagnosis).
     const READER_ACQUIRE_TIMEOUT: Duration = Duration::from_millis(150);
+
+    /// Client-side bound on a routed read's fence proof (Aurora capability
+    /// probe, `BEGIN`, heartbeat observation) once a connection is in hand.
+    /// Well above a normal round trip, so a brief reader stall waits on the
+    /// reader instead of flooding the writer; finite, so a reader that stops
+    /// answering without closing its sockets fails closed to the writer as
+    /// `reader_proof_timeout`.
+    const READER_PROOF_TIMEOUT: Duration = Duration::from_secs(1);
+
+    /// Warm floor for a reader pool of `max_connections`: one fifth of the
+    /// ceiling, at least one.
+    ///
+    /// The floor exists so routed reads find an established connection
+    /// instead of dialing one inside [`Db::READER_ACQUIRE_TIMEOUT`]. A cold
+    /// dial (TCP+TLS+SCRAM) that outlasts that budget is dropped mid-handshake
+    /// (the reader logs `could not accept SSL connection: EOF detected`), the
+    /// read falls back to the writer, and the next read dials again. Under a
+    /// fleet-wide burst that loop turns brief reader slowness into writer pool
+    /// exhaustion. The floor is per relay process, but every boot also
+    /// warms the pool to its ceiling ([`Db::warm_read_pool`]) and keeps the
+    /// surplus until `idle_timeout` reaps it: size the reader's
+    /// `max_connections` for the ceiling times the number of relay
+    /// processes, counting old and new pods that overlap in a rolling deploy.
+    fn reader_min_connections(max_connections: u32) -> u32 {
+        (max_connections / 5).max(1).min(max_connections)
+    }
 
     /// Connect the read-replica pool **lazily** — no connection is
     /// attempted at construction, so a reader that is down at boot cannot
     /// crash the relay (it starts all-writer with the fence closed and
     /// recovers when the replica returns).
     ///
-    /// `min_connections` is pinned to 0 explicitly: sqlx's lazy pool still
-    /// spawns an eager background connect task to satisfy a nonzero
-    /// minimum, which would reintroduce boot-time reader dial attempts (and
-    /// their log noise) that "lazy" is meant to avoid. With 0, connections
-    /// are dialed only on first acquire; the ~10-minute reaper never tops
-    /// the pool back up, which is fine — routed reads re-fill it on demand.
+    /// The pool keeps a warm floor of [`Db::reader_min_connections`]. With
+    /// `max_lifetime` and `idle_timeout` both set, sqlx 0.9 does not dial
+    /// that floor at construction; it re-dials it in the background, outside
+    /// the 150ms request budget, from its reaper and whenever a connection is
+    /// closed instead of released. [`Db::spawn_read_pool_boot_ping`] fills it
+    /// at boot.
+    ///
+    /// `test_before_acquire(false)`: the idle-connection ping runs inside the
+    /// 150ms acquire budget, and a ping that overruns closes a healthy warm
+    /// connection instead of returning it. The routed read's first statement
+    /// (`BEGIN ... READ ONLY` in [`Db::proved_reader`]) already proves the
+    /// connection and fails closed to the writer as `reader_validation_error`,
+    /// and every released connection still passes the bounded release check
+    /// in [`Db::read_pool_options`].
     ///
     /// No floor guard or writer-isolation assertion: replica sessions are
     /// read-only, so the commit-time trigger from migration 0021 never fires
@@ -990,32 +1081,108 @@ impl Db {
     /// the server/role default is already tighter, so no replica read is
     /// unbounded; per-call `SET LOCAL` caps still apply on top.
     fn connect_read_pool(config: &DbConfig, url: &str, max_connections: u32) -> Result<PgPool> {
-        Ok(PgPoolOptions::new()
-            .max_connections(max_connections)
-            .min_connections(0)
-            .acquire_timeout(Self::READER_ACQUIRE_TIMEOUT)
+        let options: sqlx::postgres::PgConnectOptions = url.parse()?;
+        Ok(Self::read_pool_options(max_connections)
             .max_lifetime(Duration::from_secs(config.max_lifetime_secs))
             .idle_timeout(Duration::from_secs(config.idle_timeout_secs))
-            .after_connect(|conn, _meta| {
-                Box::pin(async move {
-                    sqlx::query(crate::event::TIGHTEN_STATEMENT_TIMEOUT_SQL)
-                        .bind(crate::event::READ_STATEMENT_TIMEOUT)
-                        .bind(false)
-                        .execute(&mut *conn)
-                        .await
-                        .map(|_| ())
-                })
-            })
-            .connect_lazy(url)?)
+            .connect_lazy_with(Self::reader_connect_options(options)))
     }
 
-    /// Spawn a one-shot reader reachability probe that only WARNs.
+    /// Reader session options: pins `default_transaction_isolation` to
+    /// `read committed` in the startup packet (no extra round trip), which
+    /// overrides any database or role default. The release check in
+    /// [`Db::read_pool_options`] relies on it: routed reads begin
+    /// `REPEATABLE READ`, so a session default of `read committed` is what
+    /// makes a transaction left open by a dropped `BEGIN` visible.
+    pub(crate) fn reader_connect_options(
+        options: sqlx::postgres::PgConnectOptions,
+    ) -> sqlx::postgres::PgConnectOptions {
+        options.options([("default_transaction_isolation", "read committed")])
+    }
+
+    /// Leave headroom inside SQLx's five-second whole-return deadline so this
+    /// check records the reason before SQLx cancels the release future.
+    const READER_RELEASE_TIMEOUT: Duration = Duration::from_secs(4);
+
+    /// Reader pool options apart from connection lifetimes (see
+    /// [`Db::connect_read_pool`]).
     ///
-    /// With a lazy pool and `min_connections(0)`, nothing dials the replica
-    /// until the first routed read — so a misconfigured `READ_DATABASE_URL`
-    /// would otherwise be invisible until traffic arrives and quietly falls
-    /// back to the writer. This ping is the only boot-time reader-down
-    /// visibility; it must never gate startup or [`Db::spawn_fence_probe`].
+    /// Every checkout that goes back to the pool first passes a release
+    /// check bounded by [`Db::READER_RELEASE_TIMEOUT`]. A check that times
+    /// out or errors records the reason, closes the socket, and frees the
+    /// slot. SQLx bounds the whole return, including its subsequent ping,
+    /// so a reader that stops answering without closing cannot strand pool
+    /// capacity. Its floor maintenance dials a replacement.
+    ///
+    /// The check also closes, rather than returns, a connection still inside
+    /// a transaction. sqlx rolls back a checkout dropped while its `BEGIN`
+    /// was in flight (a timed-out proof, a cancelled caller) since
+    /// transact-rs/sqlx#4394, so this is a backstop: a connection that still
+    /// came back inside a transaction would otherwise go back to the pool
+    /// `idle in transaction`. Closing it ends the session, and the server
+    /// rolls the transaction back. Routed reads only begin `REPEATABLE READ`
+    /// (see [`Db::proved_reader`]) and reader sessions default to `READ
+    /// COMMITTED` (see [`Db::reader_connect_options`]), so an isolation level
+    /// other than the session default means a transaction is still open.
+    pub(crate) fn read_pool_options(max_connections: u32) -> PgPoolOptions {
+        PgPoolOptions::new()
+            .max_connections(max_connections)
+            .min_connections(Self::reader_min_connections(max_connections))
+            .test_before_acquire(false)
+            .acquire_timeout(Self::READER_ACQUIRE_TIMEOUT)
+            .after_connect(|conn, _meta| {
+                Box::pin(crate::event::tighten_session_read_statement_timeout(conn))
+            })
+            .after_release(|conn, _meta| Box::pin(Self::reader_release_check(conn)))
+    }
+
+    /// The reader pool's release check (see [`Db::read_pool_options`]):
+    /// `Ok(true)` returns the connection to the pool; anything else closes it
+    /// and counts the close in `buzz_db_reader_release_closed_total` by
+    /// `reason`. A rise in `timeout` means reader sockets stopped answering.
+    async fn reader_release_check(
+        conn: &mut sqlx::PgConnection,
+    ) -> std::result::Result<bool, sqlx::Error> {
+        let outside_transaction = sqlx::query_scalar::<_, bool>(
+            "SELECT pg_catalog.current_setting('transaction_isolation') \
+             = pg_catalog.current_setting('default_transaction_isolation')",
+        )
+        .fetch_one(conn);
+        let (reason, closed) =
+            match tokio::time::timeout(Self::READER_RELEASE_TIMEOUT, outside_transaction).await {
+                Ok(Ok(true)) => return Ok(true),
+                Ok(Ok(false)) => ("open_transaction", Ok(false)),
+                Ok(Err(e)) => ("error", Err(e)),
+                Err(_) => (
+                    "timeout",
+                    Err(sqlx::Error::Io(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "reader release check timed out",
+                    ))),
+                ),
+            };
+        metrics::counter!("buzz_db_reader_release_closed_total", "reason" => reason).increment(1);
+        closed
+    }
+
+    /// Spawn a one-shot reader reachability probe that only WARNs, then
+    /// fills the reader's warm floor.
+    ///
+    /// The lazy pool dials nothing at construction, so without this ping a
+    /// misconfigured `READ_DATABASE_URL` would be invisible until traffic
+    /// arrives and quietly falls back to the writer. This ping is the only
+    /// boot-time reader-down visibility; it must never gate startup or
+    /// [`Db::spawn_fence_probe`].
+    ///
+    /// On success it closes its probe connection, which makes sqlx dial the
+    /// pool up to [`Db::reader_min_connections`] in the background, so a
+    /// freshly started pod does not meet its first traffic with an empty
+    /// reader pool and pay every dial inside the 150ms request budget.
+    /// It then warms the pool toward its ceiling ([`Db::warm_read_pool`]),
+    /// still in the spawned task: a failed or partial warm only logs and
+    /// never affects startup or readiness.
+    /// Probe acquires that overrun that budget are retried with
+    /// [`Db::READER_BOOT_PROBE_BACKOFF`].
     ///
     /// On success it also primes the Aurora identity capability cache
     /// ([`Db::reader_aurora_identity`]) on the connection it already holds,
@@ -1029,35 +1196,206 @@ impl Db {
             return;
         };
         let aurora_identity = self.reader_aurora_identity.clone();
-        tokio::spawn(Self::read_pool_boot_ping_once(read_pool, aurora_identity));
+        tokio::spawn(Self::read_pool_boot_ping_then_warm(
+            read_pool,
+            aurora_identity,
+        ));
     }
 
+    /// Connections each warm wave dials at once. Small enough that a pod
+    /// starting alongside its peers does not stampede the reader with
+    /// simultaneous TCP+TLS+SCRAM handshakes (a stampede is what pushes a
+    /// dial past [`Db::READER_ACQUIRE_TIMEOUT`]), large enough that a full
+    /// pool is warm within a handful of dial times. sqlx's floor maintenance,
+    /// triggered by the boot ping, dials alongside the first wave, so a
+    /// booting pod can have up to the floor plus this many dials in flight.
+    const READER_WARM_CONCURRENCY: u32 = 5;
+
+    /// Connections the next warm wave should open: the remaining shortfall,
+    /// at most [`Db::READER_WARM_CONCURRENCY`].
+    fn reader_warm_wave_size(target: u32, held: u32) -> u32 {
+        target
+            .saturating_sub(held)
+            .min(Self::READER_WARM_CONCURRENCY)
+    }
+
+    /// The boot ping, then (only if the reader answered) a warm pass.
+    ///
+    /// Returns `None` when the ping found the reader unreachable: warming a
+    /// pool whose reader is down would only add abandoned dials.
+    async fn read_pool_boot_ping_then_warm(
+        read_pool: PgPool,
+        aurora_identity: std::sync::Arc<std::sync::OnceLock<bool>>,
+    ) -> Option<ReaderWarmReport> {
+        if !Self::read_pool_boot_ping_once(read_pool.clone(), aurora_identity).await {
+            return None;
+        }
+        let started = std::time::Instant::now();
+        let report = Self::warm_read_pool(&read_pool).await;
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+        if report.held < report.target {
+            tracing::warn!(
+                ceiling = report.target,
+                held = report.held,
+                failed = report.failed,
+                elapsed_ms,
+                "read pool warm-up holds fewer connections than its ceiling; \
+                 the rest dial on demand (warm-up is best effort)"
+            );
+        } else {
+            tracing::info!(
+                ceiling = report.target,
+                held = report.held,
+                failed = report.failed,
+                elapsed_ms,
+                "read pool warmed to its ceiling"
+            );
+        }
+        Some(report)
+    }
+
+    /// Open the reader pool toward its ceiling, once, then release every
+    /// connection back to the pool idle.
+    ///
+    /// Why: the boot ping leaves only the warm floor
+    /// ([`Db::reader_min_connections`]). A pod that meets a reconnect burst
+    /// with that floor dials the rest inside [`Db::READER_ACQUIRE_TIMEOUT`],
+    /// overruns it, and serves the read from the writer. Warming moves those
+    /// dials off the request path. sqlx's idle reaper closes the surplus
+    /// after `idle_timeout`, back down to the floor, so no reaping logic
+    /// lives here.
+    ///
+    /// Connections are held until the pass ends (an acquire from a pool
+    /// with an idle connection reuses it instead of dialing) and dropped
+    /// rather than `close_on_drop`ped, so they return idle. Bounded: a
+    /// single pass of bounded waves of [`Db::READER_WARM_CONCURRENCY`]
+    /// dials (see [`Db::warm_toward`]), each acquire bounded by the pool's
+    /// own acquire timeout ([`Db::READER_ACQUIRE_TIMEOUT`]). sqlx counts the
+    /// dial inside that timeout, so a dial slower than the request budget is
+    /// dropped and counts as a failed acquire, exactly as it would on the
+    /// request path. A wave that opens nothing (the reader is down,
+    /// saturated, or dialing slower than the budget) ends the pass. There is
+    /// no backoff and no second pass.
+    ///
+    /// Uses plain `acquire`, not the instrumented reader acquire: warm
+    /// misses must not inflate the `buzz_db_reader_*` acquire-timeout
+    /// signal that the fallback alerts watch. The pool gauges
+    /// (`buzz_db_read_pool_*`) show the result.
+    ///
+    /// Holding connections briefly lowers the capacity left for routed
+    /// reads: until the pass ends it holds every reader connection,
+    /// including the floor. The window is a few dial times, usually before
+    /// the pod takes traffic. Nothing orders it before serving, though:
+    /// boot-probe retries ([`Db::READER_BOOT_PROBE_BACKOFF`]) can push it
+    /// past the listener bind, so it can briefly overlap traffic. A routed
+    /// read that misses in it falls back to the writer, as it would on any
+    /// exhausted pool.
+    async fn warm_read_pool(read_pool: &PgPool) -> ReaderWarmReport {
+        let target = read_pool.options().get_max_connections();
+        let (held, failed) =
+            Self::warm_toward(target, || async { read_pool.acquire().await.ok() }).await;
+        let report = ReaderWarmReport {
+            target,
+            held: held.len() as u32,
+            failed,
+        };
+        // Dropping returns each connection to the pool idle (after the
+        // reader release check); it does not close it.
+        drop(held);
+        report
+    }
+
+    /// The warm pass's loop, apart from the pool: runs `acquire` in waves of
+    /// at most [`Db::READER_WARM_CONCURRENCY`] until `target` connections are
+    /// held, and returns them with the number of failed acquires (`None`).
+    ///
+    /// Each wave tops up the remaining shortfall, so an acquire that missed
+    /// its deadline in one wave is covered by the next. Bounded three ways:
+    /// at most twice the waves a failure-free pass needs, so a reader that
+    /// admits only some dials cannot keep the pass running; a wave that
+    /// holds nothing new ends it; and no wave dials more than the shortfall.
+    /// There is no sleep or backoff between waves.
+    async fn warm_toward<C, F, Fut>(target: u32, mut acquire: F) -> (Vec<C>, u32)
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Option<C>>,
+    {
+        let mut held = Vec::new();
+        let mut failed = 0_u32;
+        let max_waves = target.div_ceil(Self::READER_WARM_CONCURRENCY) * 2;
+        for _ in 0..max_waves {
+            let wave = Self::reader_warm_wave_size(target, held.len() as u32);
+            if wave == 0 {
+                break;
+            }
+            let held_before = held.len();
+            for result in futures_util::future::join_all((0..wave).map(|_| acquire())).await {
+                match result {
+                    Some(conn) => held.push(conn),
+                    None => failed += 1,
+                }
+            }
+            if held.len() == held_before {
+                break;
+            }
+        }
+        (held, failed)
+    }
+
+    /// Backoff before each boot-probe retry after an acquire that overran
+    /// [`Db::READER_ACQUIRE_TIMEOUT`]. Bounded and spaced out so a reader
+    /// that is slow at boot sees a handful of abandoned dials per pod, not
+    /// a tight retry loop; off the request path, so a slow boot dial costs
+    /// a retry, not a fallback.
+    const READER_BOOT_PROBE_BACKOFF: [Duration; 4] = [
+        Duration::from_millis(250),
+        Duration::from_millis(500),
+        Duration::from_secs(1),
+        Duration::from_secs(2),
+    ];
+
+    /// Returns whether the reader answered.
     async fn read_pool_boot_ping_once(
         read_pool: PgPool,
         aurora_identity: std::sync::Arc<std::sync::OnceLock<bool>>,
-    ) {
-        match observability::acquire_reader_with_legacy_metrics(
-            &read_pool,
-            observability::ReaderOperation::Bootstrap,
-        )
-        .await
-        {
-            Ok(mut conn) => {
-                tracing::info!("read replica reachable at boot");
-                match replica_fence::reader_supports_aurora_identity(&mut conn).await {
-                    Ok(supported) => {
-                        let _ = aurora_identity.set(supported);
-                    }
-                    Err(e) => tracing::debug!(
-                        error = %e,
-                        "aurora identity boot prime failed; first routed read will probe"
-                    ),
+    ) -> bool {
+        let mut backoff = Self::READER_BOOT_PROBE_BACKOFF.into_iter();
+        let mut conn = loop {
+            let error = match observability::acquire_reader_with_legacy_metrics(
+                &read_pool,
+                observability::ReaderOperation::Bootstrap,
+            )
+            .await
+            {
+                Ok(conn) => break conn,
+                Err(error) => error,
+            };
+            match (error, backoff.next()) {
+                (sqlx::Error::PoolTimedOut, Some(delay)) => tokio::time::sleep(delay).await,
+                (e, _) => {
+                    tracing::warn!(
+                        "read replica unreachable at boot; serving all-writer until it recovers: {e}"
+                    );
+                    return false;
                 }
             }
-            Err(e) => tracing::warn!(
-                "read replica unreachable at boot; serving all-writer until it recovers: {e}"
+        };
+        tracing::info!("read replica reachable at boot");
+        match replica_fence::reader_supports_aurora_identity(&mut conn).await {
+            Ok(supported) => {
+                let _ = aurora_identity.set(supported);
+            }
+            Err(e) => tracing::debug!(
+                error = %e,
+                "aurora identity boot prime failed; first routed read will probe"
             ),
         }
+        // Closing (rather than returning) the probe connection makes sqlx
+        // run its `min_connections` maintenance, which dials the warm floor
+        // in the background under its own 300s deadline, outside the 150ms
+        // request budget, releasing each connection idle as it lands.
+        conn.close_on_drop();
+        true
     }
 
     #[cfg(test)]
@@ -1074,14 +1412,16 @@ impl Db {
     /// that need push must use [`Db::new`] with `push_enabled` instead.
     pub fn from_pool(pool: PgPool) -> Self {
         Self {
+            media_authorization_slots: media_authorization_slots(&pool),
             push_enqueue: None,
             max_connections: pool.options().get_max_connections(),
             read_max_connections: pool.options().get_max_connections(),
+            history_reads: history_reads::gate_for_read_pool(pool.options().get_max_connections()),
             pool,
             read_pool: None,
             fence: std::sync::Arc::new(replica_fence::ReplicaFence::new()),
             replica_read_max_age: None,
-            usage_metrics_replica_max_age: None,
+            fence_probe_interval: replica_fence::DEFAULT_PROBE_INTERVAL,
             reader_aurora_identity: std::sync::Arc::new(std::sync::OnceLock::new()),
         }
     }
@@ -1095,14 +1435,18 @@ impl Db {
     /// [`Db::fence`]).
     pub fn from_pools(pool: PgPool, read_pool: PgPool) -> Self {
         Self {
+            media_authorization_slots: media_authorization_slots(&pool),
             push_enqueue: None,
             max_connections: pool.options().get_max_connections(),
             read_max_connections: read_pool.options().get_max_connections(),
             pool,
+            history_reads: history_reads::gate_for_read_pool(
+                read_pool.options().get_max_connections(),
+            ),
             read_pool: Some(read_pool),
             fence: std::sync::Arc::new(replica_fence::ReplicaFence::new()),
             replica_read_max_age: None,
-            usage_metrics_replica_max_age: Some(replica_fence::FENCE_STALENESS),
+            fence_probe_interval: replica_fence::DEFAULT_PROBE_INTERVAL,
             reader_aurora_identity: std::sync::Arc::new(std::sync::OnceLock::new()),
         }
     }
@@ -1139,9 +1483,12 @@ impl Db {
             return Ok(false);
         }
         self.verify_replica_fence_at_boot().await?;
+        // The probe gets its own connection so serving-pool saturation
+        // cannot delay the beat (see `replica_fence::connect_probe_pool`).
         tokio::spawn(replica_fence::run_probe(
-            self.pool.clone(),
+            replica_fence::connect_probe_pool(&self.pool),
             std::sync::Arc::clone(&self.fence),
+            self.fence_probe_interval,
         ));
         Ok(true)
     }
@@ -1173,6 +1520,13 @@ impl Db {
     /// Whether a distinct read-replica pool is configured.
     pub fn has_read_pool(&self) -> bool {
         self.read_pool.is_some()
+    }
+
+    /// The cap on concurrent subscription-history reads (see
+    /// [`history_reads`]). Its ceiling is the share of the reader pool that
+    /// leaves room for authorization reads; operators may lower it at runtime.
+    pub fn history_read_gate(&self) -> &crate::concurrency_gate::ConcurrencyGate {
+        &self.history_reads
     }
 
     /// Open a reader request transaction and complete the connection-local
@@ -1208,7 +1562,7 @@ impl Db {
         // `read_pool` separately would spend a second budget whenever the
         // capability is uncached — i.e. after a failed boot ping, which is
         // precisely the reader-unavailable case the bound must hold for.
-        let conn =
+        let mut conn =
             match observability::acquire_reader_with_legacy_metrics(read_pool, operation).await {
                 Ok(conn) => conn,
                 Err(sqlx::Error::PoolTimedOut) => {
@@ -1220,60 +1574,70 @@ impl Db {
                     return Err("reader_validation_error");
                 }
             };
-        let mut conn = conn;
-        if operation.bounded_release() {
-            // Must precede the first post-acquire await: a caller deadline
-            // can drop this checkout at any of them.
-            conn.close_on_drop();
-        }
-        let aurora = self.reader_aurora_capability_on(&mut conn).await;
-        let mut tx = match sqlx::Transaction::begin(
-            conn,
-            Some(sqlx::SqlStr::from_static(
-                "BEGIN ISOLATION LEVEL REPEATABLE READ, READ ONLY",
-            )),
-        )
-        .await
-        {
-            Ok(tx) => tx,
-            // The acquire miss gets its own reason code: the reader pool's
-            // short acquire timeout (READER_ACQUIRE_TIMEOUT) makes this the
-            // fast fail-closed path under load, and
-            // `buzz_db_route_decision{decision="writer",reason="reader_acquire_timeout"}`
-            // is the operator's alert signal for a struggling reader pool.
-            //
-            // The reason deliberately names the mechanism, not a diagnosis:
-            // `PoolTimedOut` proves only that no connection was handed out
-            // within the 150ms budget. That budget includes cold connect
-            // (TCP+TLS+auth), and sqlx's `size` counts in-flight dials, so
-            // this fires for slow connection establishment as well as for
-            // established-connection contention — and neither `size == 0`
-            // nor `size >= max` recovers the missing causal bit (in-flight
-            // dials hold a size slot, and a cold burst can push
-            // `active = size - idle` toward max with zero busy connections).
-            // Runbook: correlate with `buzz_db_read_pool_active` / `_max`
-            // and reader connection health/latency; high active suggests
-            // contention, but this metric alone does not distinguish
-            // contention from slow connects. Note the gauge is a coarse
-            // sample (BUZZ_POOL_METRICS_INTERVAL_SECS, default 10s) while
-            // the event it explains lasts ~150ms — a short burst may fall
-            // between samples entirely, so absence of elevated active is
-            // NOT evidence of a cold connect.
-            Err(sqlx::Error::PoolTimedOut) => {
-                tracing::warn!("reader pool acquire timed out");
-                return Err("reader_acquire_timeout");
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "reader transaction begin failed");
-                return Err("reader_validation_error");
-            }
+        // The proof is the reader's first wire round trip (no pre-acquire
+        // ping, see `connect_read_pool`), so it carries the liveness bound:
+        // a half-open socket to a vanished reader would otherwise hang the
+        // request until TCP gives up. An expired proof is simply dropped:
+        // the reader pool's release check (`read_pool_options`) bounds how
+        // long its connection holds a slot and closes it if `BEGIN` landed.
+        let proof = async move {
+            let aurora = self.reader_aurora_capability_on(&mut conn).await;
+            let mut tx = match sqlx::Transaction::begin(
+                conn,
+                Some(sqlx::SqlStr::from_static(
+                    "BEGIN ISOLATION LEVEL REPEATABLE READ, READ ONLY",
+                )),
+            )
+            .await
+            {
+                Ok(tx) => tx,
+                // The acquire miss gets its own reason code: the reader pool's
+                // short acquire timeout (READER_ACQUIRE_TIMEOUT) makes this the
+                // fast fail-closed path under load, and
+                // `buzz_db_route_decision{decision="writer",reason="reader_acquire_timeout"}`
+                // is the operator's alert signal for a struggling reader pool.
+                //
+                // The reason deliberately names the mechanism, not a diagnosis:
+                // `PoolTimedOut` proves only that no connection was handed out
+                // within the 150ms budget. That budget includes cold connect
+                // (TCP+TLS+auth), and sqlx's `size` counts in-flight dials, so
+                // this fires for slow connection establishment as well as for
+                // established-connection contention — and neither `size == 0`
+                // nor `size >= max` recovers the missing causal bit (in-flight
+                // dials hold a size slot, and a cold burst can push
+                // `active = size - idle` toward max with zero busy connections).
+                // Runbook: correlate with `buzz_db_read_pool_active` / `_max`
+                // and reader connection health/latency; high active suggests
+                // contention, but this metric alone does not distinguish
+                // contention from slow connects. Note the gauge is a coarse
+                // sample (BUZZ_POOL_METRICS_INTERVAL_SECS, default 10s) while
+                // the event it explains lasts ~150ms — a short burst may fall
+                // between samples entirely, so absence of elevated active is
+                // NOT evidence of a cold connect.
+                Err(sqlx::Error::PoolTimedOut) => {
+                    tracing::warn!("reader pool acquire timed out");
+                    return Err("reader_acquire_timeout");
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "reader transaction begin failed");
+                    return Err("reader_validation_error");
+                }
+            };
+            let obs = match replica_fence::observe_heartbeat(&mut tx, aurora).await {
+                Ok(Some(observation)) => observation,
+                Ok(None) => return Err("reader_validation_error"),
+                Err(e) => {
+                    tracing::warn!(error = %e, "heartbeat observation failed");
+                    return Err("reader_validation_error");
+                }
+            };
+            Ok((tx, obs))
         };
-        let obs = match replica_fence::observe_heartbeat(&mut tx, aurora).await {
-            Ok(Some(observation)) => observation,
-            Ok(None) => return Err("reader_validation_error"),
-            Err(e) => {
-                tracing::warn!(error = %e, "heartbeat observation failed");
-                return Err("reader_validation_error");
+        let (tx, obs) = match tokio::time::timeout(Self::READER_PROOF_TIMEOUT, proof).await {
+            Ok(proved) => proved?,
+            Err(_) => {
+                tracing::warn!("reader fence proof timed out");
+                return Err("reader_proof_timeout");
             }
         };
         match self.fence.resolve(obs.token, obs.epoch) {
@@ -1315,6 +1679,32 @@ impl Db {
                 false
             }
         }
+    }
+
+    /// Count one routed read the replica could have served that the writer
+    /// served instead (`buzz_db_reader_spill_total{path, reason}`).
+    ///
+    /// A subset of `buzz_db_route_decision{decision="writer"}` that leaves
+    /// out configuration (`disabled`) and splits its ambiguous `stale`
+    /// reason by cause. Reasons:
+    /// - `heartbeat_stale`: the newest heartbeat is older than the
+    ///   bounded-read budget (`BUZZ_REPLICA_READ_MAX_AGE_MS`) — the probe
+    ///   is late, not the replica;
+    /// - `heartbeat_missing`: no live heartbeat proof at all (the probe has
+    ///   not committed one, or none in [`replica_fence::FENCE_STALENESS`]);
+    /// - `fence_wall_behind`: the read's upper bound is newer than the
+    ///   newest fence wall;
+    /// - `replica_lag`: the serving session proved only an older entry than
+    ///   the read needs;
+    /// - `reader_acquire_timeout`, `reader_proof_timeout`,
+    ///   `reader_token_behind`, `reader_validation_error`: the reader
+    ///   session could not be checked out or could not prove the fence.
+    ///
+    /// History reads rejected on a saturated reader are not spills; they
+    /// stay `buzz_db_route_decision{decision="rejected"}`.
+    fn record_spill(path: &'static str, reason: &'static str) {
+        metrics::counter!("buzz_db_reader_spill_total", "path" => path, "reason" => reason)
+            .increment(1);
     }
 
     /// Record one route decision (Rev 2 observability): which path, where it
@@ -1537,73 +1927,60 @@ impl Db {
         Ok(result)
     }
 
-    /// Route a usage-telemetry query only to a proved, sufficiently fresh
-    /// reader. Unlike serving reads, an unavailable reader is recorded as
-    /// skipped and never represented as or executed on the writer.
-    pub(crate) async fn route_usage_read(
-        &self,
-        path: &'static str,
-    ) -> Option<(sqlx::Transaction<'static, sqlx::Postgres>, &'static str)> {
-        let skip = |reason| {
-            Self::record_route(path, "skipped", reason);
-            None
-        };
-        let Some(read_pool) = &self.read_pool else {
-            return skip("disabled");
-        };
-        let Some(budget) = self.usage_metrics_replica_max_age else {
-            return skip("disabled");
-        };
-        let Some(newest) = self.fence.newest() else {
-            return skip("uninitialized");
-        };
-        if newest.committed_at.elapsed() > budget {
-            return skip("stale");
-        }
-        match self
-            .proved_reader(read_pool, observability::ReaderOperation::Maintenance)
-            .await
-        {
-            Ok((tx, entry)) if entry.committed_at.elapsed() <= budget => Some((tx, "fresh")),
-            Ok((_tx, _entry)) => skip("stale"),
-            Err(reason) => skip(reason),
-        }
-    }
-
     /// Shared route decision for one read: evaluate the predicate against a
     /// proved reader session and record the decision. Fail closed to the
-    /// writer everywhere.
+    /// writer, with one exception for subscription-history reads.
+    ///
+    /// History reads are the heavy, high-volume routed reads. They hold a
+    /// [`history_reads`] permit for as long as their reader transaction, so
+    /// they never fill the reader pool, and they are never moved to the
+    /// writer merely because the reader is busy: a history read that waits
+    /// out its permit ([`history_reads::PERMIT_WAIT`]) or
+    /// its reader acquire ([`Db::READER_ACQUIRE_TIMEOUT`]) on a saturated
+    /// reader pool ([`Db::reader_saturated`]) is rejected with
+    /// [`sqlx::Error::PoolTimedOut`], which the relay answers with its
+    /// retryable `CLOSED`. Spilling that load onto the writer starved the
+    /// authentication, tenant and moderation reads only the writer serves.
+    /// A reader that is wrong rather than busy (unreachable, validation
+    /// failure, proof timeout, stale token) still falls back to the writer,
+    /// as do prechecks that never reach the reader. Recorded as
+    /// `decision="rejected"` with `reason="history_read_cap"` or
+    /// `"reader_acquire_timeout"`.
     pub(crate) async fn route_read(
         &self,
         path: &'static str,
         predicate: RoutePredicate,
         operation: observability::ReaderOperation,
-    ) -> RouteDecision {
+    ) -> Result<RouteDecision> {
         let Some(read_pool) = &self.read_pool else {
             Self::record_route(path, "writer", "disabled");
-            return RouteDecision::Writer;
+            return Ok(RouteDecision::Writer);
         };
         // Cheap prechecks on the shared ring before spending a reader
         // checkout; the connection-local observation still has to prove it.
         let Some(newest) = self.fence.newest() else {
             Self::record_route(path, "writer", "uninitialized");
-            return RouteDecision::Writer;
+            Self::record_spill(path, "heartbeat_missing");
+            return Ok(RouteDecision::Writer);
         };
         // Precheck helpers against the newest shared entry: if the newest
-        // cannot satisfy an arm, no proved (older-or-equal) entry can.
-        let bounded_precheck =
-            |budget: &Option<Duration>| -> std::result::Result<(), &'static str> {
-                match budget {
-                    Some(budget) if newest.committed_at.elapsed() <= *budget => Ok(()),
-                    Some(_) => Err("stale"),
-                    None => Err("disabled"),
-                }
-            };
-        let covered_precheck = |upper: &DateTime<Utc>| -> std::result::Result<(), &'static str> {
+        // cannot satisfy an arm, no proved (older-or-equal) entry can. Each
+        // failure carries its `buzz_db_route_decision` reason and, when the
+        // read is a spill rather than a configuration choice, its
+        // `buzz_db_reader_spill_total` reason.
+        type Precheck = std::result::Result<(), (&'static str, Option<&'static str>)>;
+        let bounded_precheck = |budget: &Option<Duration>| -> Precheck {
+            match budget {
+                Some(budget) if newest.committed_at.elapsed() <= *budget => Ok(()),
+                Some(_) => Err(("stale", Some("heartbeat_stale"))),
+                None => Err(("disabled", None)),
+            }
+        };
+        let covered_precheck = |upper: &DateTime<Utc>| -> Precheck {
             if *upper <= newest.fence_wall {
                 Ok(())
             } else {
-                Err("stale")
+                Err(("stale", Some("fence_wall_behind")))
             }
         };
         let precheck = match &predicate {
@@ -1611,15 +1988,31 @@ impl Db {
             RoutePredicate::Covered { upper, .. } => covered_precheck(upper),
             // No upper bound: the caller post-verifies served rows.
             RoutePredicate::CoveredPostVerified { .. } => Ok(()),
-            // Covered first (no budget dependence), else bounded.
+            // Covered first (no budget dependence), else bounded. With the
+            // bounded arm disabled the read still spilled for its wall.
             RoutePredicate::BoundedOrCovered { upper, .. } => {
-                covered_precheck(upper).or_else(|_| bounded_precheck(&self.replica_read_max_age))
+                covered_precheck(upper).or_else(|(_, covered_spill)| {
+                    bounded_precheck(&self.replica_read_max_age)
+                        .map_err(|(reason, spill)| (reason, spill.or(covered_spill)))
+                })
             }
         };
-        if let Err(reason) = precheck {
+        if let Err((reason, spill)) = precheck {
             Self::record_route(path, "writer", reason);
-            return RouteDecision::Writer;
+            if let Some(spill) = spill {
+                Self::record_spill(path, spill);
+            }
+            return Ok(RouteDecision::Writer);
         }
+        let history = operation == observability::ReaderOperation::SubscriptionHistory;
+        let permit = if history {
+            let Some(permit) = self.history_reads.admit(history_reads::PERMIT_WAIT).await else {
+                return Err(Self::reject_history_read(path, "history_read_cap"));
+            };
+            Some(permit)
+        } else {
+            None
+        };
         match self.proved_reader(read_pool, operation).await {
             Ok((tx, entry)) => {
                 // Re-evaluate against the entry the session actually proved
@@ -1645,20 +2038,164 @@ impl Db {
                     }
                 };
                 match verdict {
-                    Some(reason) => RouteDecision::Replica(tx, entry, reason),
+                    Some(reason) => Ok(RouteDecision::Replica(
+                        history_reads::ReaderTx::new(tx, permit),
+                        entry,
+                        reason,
+                    )),
                     None => {
                         // The session proves an older entry than the
                         // predicate needs (replication lag) — fail closed.
                         Self::record_route(path, "writer", "stale");
-                        RouteDecision::Writer
+                        Self::record_spill(path, "replica_lag");
+                        Ok(RouteDecision::Writer)
                     }
                 }
             }
+            Err(reason @ "reader_acquire_timeout")
+                if history && Self::reader_saturated(read_pool) =>
+            {
+                Err(Self::reject_history_read(path, reason))
+            }
             Err(reason) => {
                 Self::record_route(path, "writer", reason);
-                RouteDecision::Writer
+                Self::record_spill(path, reason);
+                Ok(RouteDecision::Writer)
             }
         }
+    }
+
+    /// Whether a reader acquire timeout means the reader is busy rather than
+    /// unreachable: every connection the pool may hold exists and none is
+    /// idle. `PoolTimedOut` alone cannot tell them apart, because sqlx keeps
+    /// retrying a refused or failing dial until the acquire budget runs out.
+    /// A reader that refuses or drops dials leaves the pool below its ceiling,
+    /// so its history reads still fall back to the writer. A reader that
+    /// accepts no TCP at all can fill the ceiling with in-flight dials and
+    /// read as busy; those reads are rejected as retryable, the same outcome
+    /// as a full gate.
+    fn reader_saturated(read_pool: &PgPool) -> bool {
+        read_pool.size() >= read_pool.options().get_max_connections() && read_pool.num_idle() == 0
+    }
+
+    /// Record a rejected history read (see [`Db::route_read`]) and build its
+    /// retryable error.
+    fn reject_history_read(path: &'static str, reason: &'static str) -> DbError {
+        Self::record_route(path, "rejected", reason);
+        DbError::Sqlx(sqlx::Error::PoolTimedOut)
+    }
+}
+
+#[cfg(test)]
+mod reader_warm_tests {
+    use super::{Db, ReaderWarmReport};
+    use std::sync::{Arc, OnceLock};
+
+    /// A lazy reader pool whose server accepts TCP and immediately closes
+    /// it, so every dial fails fast without Postgres.
+    async fn dead_reader_pool(max_connections: u32) -> sqlx::PgPool {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback listener");
+        let port = listener.local_addr().expect("listener address").port();
+        tokio::spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                drop(socket);
+            }
+        });
+        let url = format!("postgres://u@127.0.0.1:{port}/db?sslmode=disable");
+        let options: sqlx::postgres::PgConnectOptions = url.parse().expect("parse url");
+        Db::read_pool_options(max_connections).connect_lazy_with(options)
+    }
+
+    /// Table test for the wave sizing: the remaining shortfall, capped at the
+    /// concurrency bound, never underflowing once the target is met.
+    #[test]
+    fn warm_wave_size_is_the_shortfall_capped_at_the_concurrency_bound() {
+        let c = Db::READER_WARM_CONCURRENCY;
+        for (target, held, expected) in [
+            (25, 0, c),
+            (25, 20, c),
+            (25, 22, 3),
+            (25, 24, 1),
+            (25, 25, 0),
+            (25, 30, 0),
+            (1, 0, 1),
+            (0, 0, 0),
+        ] {
+            assert_eq!(
+                Db::reader_warm_wave_size(target, held),
+                expected,
+                "target={target} held={held}"
+            );
+        }
+    }
+
+    /// A fake acquire that succeeds when `ok(call_index)` says so, counting
+    /// every call.
+    fn counting_acquire(
+        calls: &std::sync::atomic::AtomicU32,
+        ok: impl Fn(u32) -> bool,
+    ) -> impl std::future::Future<Output = Option<u32>> {
+        let n = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        std::future::ready(ok(n).then_some(n))
+    }
+
+    /// With every dial succeeding the pass opens exactly the target, no more.
+    #[tokio::test]
+    async fn warm_toward_opens_exactly_the_target() {
+        let calls = std::sync::atomic::AtomicU32::new(0);
+        let (held, failed) = Db::warm_toward(25, || counting_acquire(&calls, |_| true)).await;
+        assert_eq!((held.len(), failed), (25, 0));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 25);
+    }
+
+    /// A reader that admits one dial per wave cannot keep the pass running:
+    /// attempts stop at twice the waves a clean pass needs (target 25, wave
+    /// 5: 10 waves of 5), well short of the shortfall-driven 25 waves.
+    #[tokio::test]
+    async fn warm_toward_is_bounded_when_dials_keep_missing() {
+        let calls = std::sync::atomic::AtomicU32::new(0);
+        let w = Db::READER_WARM_CONCURRENCY;
+        let (held, failed) = Db::warm_toward(25, || counting_acquire(&calls, |n| n % w == 0)).await;
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 50);
+        assert_eq!((held.len(), failed), (10, 40));
+    }
+
+    /// A wave that misses some dials is topped up by the next, so a slow
+    /// first wave does not leave the pool short.
+    #[tokio::test]
+    async fn warm_toward_tops_up_a_partially_failed_wave() {
+        let calls = std::sync::atomic::AtomicU32::new(0);
+        let (held, failed) = Db::warm_toward(10, || counting_acquire(&calls, |n| n != 1)).await;
+        assert_eq!((held.len(), failed), (10, 1));
+    }
+
+    /// A reader that refuses every dial ends the pass after one wave: warming
+    /// is a single bounded attempt, not a loop that hammers a dead reader
+    /// `target` times.
+    #[tokio::test]
+    async fn warm_pass_stops_after_one_wave_that_opens_nothing() {
+        let pool = dead_reader_pool(25).await;
+        let report = Db::warm_read_pool(&pool).await;
+        assert_eq!(
+            report,
+            ReaderWarmReport {
+                target: 25,
+                held: 0,
+                failed: Db::READER_WARM_CONCURRENCY,
+            }
+        );
+    }
+
+    /// An unreachable reader at boot is not warmed: the ping's failure ends
+    /// the task before any warm dial, and nothing panics or errors.
+    #[tokio::test]
+    async fn unreachable_reader_skips_the_warm_pass() {
+        let pool = dead_reader_pool(25).await;
+        let report =
+            Db::read_pool_boot_ping_then_warm(pool.clone(), Arc::new(OnceLock::new())).await;
+        assert_eq!(report, None);
     }
 }
 
@@ -1716,3 +2253,9 @@ mod pool_role_tests {
 #[cfg(test)]
 #[path = "tests.rs"]
 mod postgres_tests;
+
+fn media_authorization_slots(pool: &PgPool) -> std::sync::Arc<tokio::sync::Semaphore> {
+    std::sync::Arc::new(tokio::sync::Semaphore::new(
+        (pool.options().get_max_connections() as usize / 4).clamp(1, 8),
+    ))
+}

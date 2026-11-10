@@ -19,9 +19,7 @@ use std::time::SystemTime;
 
 use sha2::{Digest, Sha256};
 
-use buzz_core::engram::{
-    self, conversation_key, d_tag, normalize_slug, select_head, validate_and_decrypt, Body, Listing,
-};
+use buzz_core::engram::{self, normalize_slug, select_head, Body, Listing};
 use buzz_core::kind::KIND_AGENT_ENGRAM;
 use nostr::PublicKey;
 
@@ -64,16 +62,16 @@ fn resolve_reader(
         }
         let agent = PublicKey::from_hex(agent)
             .map_err(|e| CliError::Usage(format!("--agent must be a 64-hex pubkey: {e}")))?;
-        if agent == client.keys().public_key() {
+        if agent == client.public_key() {
             return Err(CliError::Usage(
                 "--agent must differ from the CLI identity; omit --agent for agent-side reads"
                     .into(),
             ));
         }
-        return Ok((agent, client.keys().public_key(), agent));
+        return Ok((agent, client.public_key(), agent));
     }
 
-    let agent = client.keys().public_key();
+    let agent = client.public_key();
     let owner = resolve_owner(client, owner_flag)?;
     Ok((agent, owner, owner))
 }
@@ -132,6 +130,48 @@ fn parse_events(json: &str) -> Result<Vec<nostr::Event>, CliError> {
     Ok(out)
 }
 
+/// NIP-AE read validation through the client's credentials: the envelope,
+/// then NIP-44 decryption, then the slug re-deriving to the `d` tag.
+/// `Ok(None)` means the event is not a valid engram and is skipped; `Err` is
+/// a credential failure, which aborts rather than reading as "no entries".
+async fn open_engram(
+    client: &BuzzClient,
+    ev: &nostr::Event,
+    agent: &PublicKey,
+    owner: &PublicKey,
+    their_pubkey: &PublicKey,
+) -> Result<Option<Body>, CliError> {
+    let Ok(d_value) = engram::validate_envelope(ev, agent, owner) else {
+        return Ok(None);
+    };
+    let credentials = client.credentials();
+    let Some(plaintext) = credentials.nip44_decrypt(their_pubkey, &ev.content).await? else {
+        return Ok(None);
+    };
+    let Ok(body) = Body::from_json_bytes(plaintext.as_bytes()) else {
+        return Ok(None);
+    };
+    let derived = credentials.engram_d_tag(their_pubkey, body.slug()).await?;
+    Ok(engram::check_d_tag(&d_value, &derived).ok().map(|()| body))
+}
+
+/// Encrypt `body` to `owner` and sign the `kind:30174` event with the
+/// client's credentials (NIP-AE write path).
+async fn seal_engram(
+    client: &BuzzClient,
+    owner: &PublicKey,
+    body: &Body,
+    created_at: u64,
+) -> Result<nostr::Event, CliError> {
+    let build_failed = |e: engram::EngramError| CliError::Other(format!("build event failed: {e}"));
+    let credentials = client.credentials();
+    let plaintext = engram::encode_body(body).map_err(build_failed)?;
+    let ciphertext = credentials.nip44_encrypt(owner, &plaintext).await?;
+    let d = credentials.engram_d_tag(owner, body.slug()).await?;
+    let builder = engram::event_builder(owner, &d, ciphertext, created_at).map_err(build_failed)?;
+    credentials.sign(builder).await
+}
+
 /// Fetch the head event for `slug`, returning `(Option<Event>, Option<Body>)`.
 async fn fetch_head(
     client: &BuzzClient,
@@ -139,13 +179,15 @@ async fn fetch_head(
     owner: &PublicKey,
     slug: &str,
 ) -> Result<(Option<nostr::Event>, Option<Body>), CliError> {
-    let their_pubkey = if client.keys().public_key() == *agent {
+    let their_pubkey = if client.public_key() == *agent {
         owner
     } else {
         agent
     };
-    let k_c = conversation_key(client.keys().secret_key(), their_pubkey);
-    let d = d_tag(&k_c, slug);
+    let d = client
+        .credentials()
+        .engram_d_tag(their_pubkey, slug)
+        .await?;
 
     let filter = serde_json::json!({
         "kinds": [KIND_AGENT_ENGRAM],
@@ -164,9 +206,8 @@ async fn fetch_head(
         if ev.verify().is_err() {
             continue;
         }
-        match validate_and_decrypt(&ev, agent, owner, client.keys().secret_key(), their_pubkey) {
-            Ok(body) => valid_with_body.push((ev, body)),
-            Err(_) => continue,
+        if let Some(body) = open_engram(client, &ev, agent, owner, their_pubkey).await? {
+            valid_with_body.push((ev, body));
         }
     }
     if valid_with_body.is_empty() {
@@ -219,15 +260,8 @@ pub async fn cmd_ls(
         else {
             continue;
         };
-        let body = match validate_and_decrypt(
-            &ev,
-            &agent,
-            &owner,
-            client.keys().secret_key(),
-            &their_pubkey,
-        ) {
-            Ok(b) => b,
-            Err(_) => continue,
+        let Some(body) = open_engram(client, &ev, &agent, &owner, &their_pubkey).await? else {
+            continue;
         };
         groups.entry(d_value).or_default().push((ev, body));
     }
@@ -357,14 +391,12 @@ pub async fn cmd_set(
             value: Some(value),
         }
     };
-    let agent_pubkey = client.keys().public_key();
+    let agent_pubkey = client.public_key();
     let (head, _) = fetch_head(client, &agent_pubkey, &owner, &slug).await?;
     let prior_created_at = head.map(|e| e.created_at.as_secs());
     let created_at = engram::monotonic_created_at(now_secs(), prior_created_at);
 
-    let agent = client.keys();
-    let event = engram::build_event(agent, &owner, &body, created_at)
-        .map_err(|e| CliError::Other(format!("build event failed: {e}")))?;
+    let event = seal_engram(client, &owner, &body, created_at).await?;
     let id = event.id.to_hex();
     submit_engram(client, event).await?;
     eprintln!("wrote {slug} (event {id}, created_at {created_at})");
@@ -598,7 +630,7 @@ pub async fn cmd_patch(
     };
 
     let owner = resolve_owner(client, owner_flag)?;
-    let agent_pubkey = client.keys().public_key();
+    let agent_pubkey = client.public_key();
     let (head, current) = fetch_value(client, &agent_pubkey, &owner, &slug).await?;
 
     // Base-hash gate: concurrent-edit safety.
@@ -688,9 +720,7 @@ pub async fn cmd_patch(
     let prior_created_at = Some(head.created_at.as_secs());
     let created_at = engram::monotonic_created_at(now_secs(), prior_created_at);
 
-    let agent = client.keys();
-    let event = engram::build_event(agent, &owner, &body, created_at)
-        .map_err(|e| CliError::Other(format!("build event failed: {e}")))?;
+    let event = seal_engram(client, &owner, &body, created_at).await?;
     let id = event.id.to_hex();
     submit_engram(client, event).await?;
     eprintln!("wrote {slug} (event {id}, created_at {created_at}, sha256 {new_hash})");
@@ -720,14 +750,12 @@ pub async fn cmd_rm(
         slug: slug.clone(),
         value: None,
     };
-    let agent_pubkey = client.keys().public_key();
+    let agent_pubkey = client.public_key();
     let (head, _) = fetch_head(client, &agent_pubkey, &owner, &slug).await?;
     let prior_created_at = head.map(|e| e.created_at.as_secs());
     let created_at = engram::monotonic_created_at(now_secs(), prior_created_at);
 
-    let agent = client.keys();
-    let event = engram::build_event(agent, &owner, &body, created_at)
-        .map_err(|e| CliError::Other(format!("build event failed: {e}")))?;
+    let event = seal_engram(client, &owner, &body, created_at).await?;
     let id = event.id.to_hex();
     submit_engram(client, event).await?;
     eprintln!("tombstoned {slug} (event {id}, created_at {created_at})");
@@ -785,8 +813,134 @@ mod tests {
     // verify base-hash from the shell. Hard-coded vectors from the NIST and
     // common quick-check inputs.
 
+    /// Through the desktop, an engram with bad ciphertext is skipped while
+    /// a valid one opens; a credential failure aborts instead of reading as
+    /// "no entries".
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_desktop_skips_bad_ciphertext_but_aborts_on_credential_failure() {
+        use crate::desktop_provider::{tests as dp, Provider};
+        const RELAY: &str = "wss://community.example";
+        let owner = nostr::Keys::generate();
+        let agent = nostr::Keys::generate();
+        let body = Body::Memory {
+            slug: "mem/a".into(),
+            value: Some("v".into()),
+        };
+        let valid = engram::build_event(&agent, &owner.public_key(), &body, 1).unwrap();
+        let k_c = engram::conversation_key(agent.secret_key(), &owner.public_key());
+        let corrupt = engram::event_builder(
+            &owner.public_key(),
+            &engram::d_tag(&k_c, "mem/a"),
+            "AAAA".into(),
+            2,
+        )
+        .unwrap()
+        .sign_with_keys(&agent)
+        .unwrap();
+        let open = |endpoint| async move {
+            let p = Provider::open(endpoint, "t".into(), false, RELAY)
+                .await
+                .unwrap()
+                .ok()
+                .unwrap();
+            let credentials = crate::credentials::Credentials::from_desktop(p)
+                .await
+                .unwrap();
+            BuzzClient::new("http://127.0.0.1:9".into(), credentials).unwrap()
+        };
+        let (endpoint, _) = dp::desktop(owner.clone(), vec![RELAY.into()]).await;
+        let client = open(endpoint).await;
+        let (a, o) = (agent.public_key(), owner.public_key());
+        let opened = open_engram(&client, &valid, &a, &o, &a).await.unwrap();
+        assert!(matches!(opened, Some(Body::Memory { .. })));
+        assert!(open_engram(&client, &corrupt, &a, &o, &a)
+            .await
+            .unwrap()
+            .is_none());
+
+        let (endpoint, _) = dp::provider(move |_, r| match r["method"].as_str() {
+            Some("describe") => serde_json::json!({"result": serde_json::json!({
+                "pubkey": owner.public_key().to_hex(), "relays": [RELAY], "methods": [],
+            }).to_string()}),
+            _ => serde_json::json!({"result": "", "error": "unavailable"}),
+        })
+        .await;
+        let client = open(endpoint).await;
+        assert!(open_engram(&client, &valid, &a, &o, &a).await.is_err());
+    }
+
+    /// A desktop that throttles partway through `buzz mem ls` is waited out,
+    /// and the list completes.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_list_completes_when_the_desktop_throttles_partway() {
+        use crate::desktop_provider::{tests as dp, Provider};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let agent = nostr::Keys::generate();
+        let owner = nostr::Keys::generate().public_key();
+        let events: Vec<serde_json::Value> = (0..3)
+            .map(|i| {
+                let body = Body::Memory {
+                    slug: format!("mem/{i}"),
+                    value: Some("v".into()),
+                };
+                let ev = engram::build_event(&agent, &owner, &body, 1).unwrap();
+                serde_json::to_value(&ev).unwrap()
+            })
+            .collect();
+        let app = axum::Router::new().route(
+            "/query",
+            axum::routing::post(move || async move { axum::Json(events) }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let relay = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        // The second decrypt is refused once with `rate_limited`.
+        let decrypts = std::sync::Arc::new(AtomicUsize::new(0));
+        let counted = decrypts.clone();
+        let answer = dp::desktop_answers(agent.clone(), vec![relay.clone()]);
+        let (endpoint, seen) = dp::provider(move |version, request| {
+            if request["method"] == "nip44_decrypt" && counted.fetch_add(1, Ordering::SeqCst) == 1 {
+                return serde_json::json!({"result": "", "error": "rate_limited", "retry_after": 1});
+            }
+            answer(version, request)
+        })
+        .await;
+        let provider = Provider::open(endpoint, "t".into(), false, &relay)
+            .await
+            .unwrap()
+            .ok()
+            .unwrap();
+        let credentials = crate::credentials::Credentials::from_desktop(provider)
+            .await
+            .unwrap();
+        let client = BuzzClient::new(relay, credentials).unwrap();
+
+        cmd_ls(&client, Some(&owner.to_hex()), None, true)
+            .await
+            .unwrap();
+        assert_eq!(
+            decrypts.load(Ordering::SeqCst),
+            4,
+            "three entries, one retry"
+        );
+        let d_tags = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, _, r)| r["method"] == "engram_d_tag")
+            .count();
+        assert_eq!(d_tags, 3);
+    }
+
     fn test_client(keys: nostr::Keys) -> BuzzClient {
-        BuzzClient::new("http://127.0.0.1:9".into(), keys, None, None).unwrap()
+        BuzzClient::new(
+            "http://127.0.0.1:9".into(),
+            crate::credentials::Credentials::from_keys(keys),
+        )
+        .unwrap()
     }
 
     #[test]

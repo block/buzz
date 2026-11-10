@@ -30,6 +30,10 @@ class Channel {
   final int? ttlSeconds;
   final DateTime? ttlDeadline;
 
+  /// Left out of listings; such a channel does not hold its name in the
+  /// relay's listed-name rule.
+  final bool isUnlisted;
+
   const Channel({
     required this.id,
     required this.name,
@@ -49,6 +53,7 @@ class Channel {
     this.isMember = false,
     this.ttlSeconds,
     this.ttlDeadline,
+    this.isUnlisted = false,
   });
 
   factory Channel.fromJson(Map<String, dynamic> json) => Channel(
@@ -79,7 +84,31 @@ class Channel {
     ttlDeadline: json['ttl_deadline'] != null
         ? DateTime.parse(json['ttl_deadline'] as String)
         : null,
+    isUnlisted: json['unlisted'] as bool? ?? false,
   );
+
+  /// Inverse of [Channel.fromJson].
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'name': name,
+    'channel_type': channelType,
+    'labels': labels,
+    'visibility': visibility,
+    'description': description,
+    'topic': topic,
+    'purpose': purpose,
+    'created_by': createdBy,
+    'created_at': createdAt.toIso8601String(),
+    'member_count': memberCount,
+    'last_message_at': lastMessageAt?.toIso8601String(),
+    'archived_at': archivedAt?.toIso8601String(),
+    'participants': participants,
+    'participant_pubkeys': participantPubkeys,
+    'is_member': isMember,
+    'ttl_seconds': ttlSeconds,
+    'ttl_deadline': ttlDeadline?.toIso8601String(),
+    'unlisted': isUnlisted,
+  };
 
   bool get isEphemeral => ttlSeconds != null || ttlDeadline != null;
 
@@ -159,6 +188,7 @@ class Channel {
     isMember: isMember,
     ttlSeconds: details.ttlSeconds,
     ttlDeadline: details.ttlDeadline,
+    isUnlisted: isUnlisted,
   );
 
   Channel copyWith({
@@ -191,6 +221,7 @@ class Channel {
     isMember: isMember ?? this.isMember,
     ttlSeconds: ttlSeconds,
     ttlDeadline: ttlDeadline,
+    isUnlisted: isUnlisted,
   );
 }
 

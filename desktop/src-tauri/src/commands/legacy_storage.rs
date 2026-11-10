@@ -81,11 +81,13 @@ fn decode_webkit_local_storage_value(bytes: &[u8]) -> Option<String> {
     }
 
     if bytes.len().is_multiple_of(2) {
-        let has_utf16_ascii_shape = bytes.chunks_exact(2).any(|chunk| chunk[1] == 0);
+        let has_utf16_ascii_shape = bytes.as_chunks::<2>().0.iter().any(|chunk| chunk[1] == 0);
         if has_utf16_ascii_shape {
             let utf16: Vec<u16> = bytes
-                .chunks_exact(2)
-                .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|chunk| u16::from_le_bytes(*chunk))
                 .collect();
             if let Ok(value) = String::from_utf16(&utf16) {
                 return Some(value.trim_end_matches('\0').to_string());

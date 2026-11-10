@@ -5,6 +5,8 @@ final class BuzzNotificationDownload: NSObject, URLSessionDataDelegate, @uncheck
   enum Failure: Error {
     case tooLarge
     case status(Int)
+    /// A 401 carrying `WWW-Authenticate: Nostr`: the relay requires NIP-FI evidence.
+    case challenged
     case empty, invalidResponse
   }
   private let maximumBytes: Int
@@ -38,7 +40,9 @@ final class BuzzNotificationDownload: NSObject, URLSessionDataDelegate, @uncheck
       return
     }
     guard (200..<300).contains(response.statusCode) else {
-      failure = Failure.status(response.statusCode)
+      failure =
+        BuzzRelayAssertionIssuer.isChallenge(response)
+        ? Failure.challenged : Failure.status(response.statusCode)
       completionHandler(.cancel)
       return
     }
@@ -80,8 +84,13 @@ final class BuzzNotificationDownload: NSObject, URLSessionDataDelegate, @uncheck
     willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest,
     completionHandler: @escaping (URLRequest?) -> Void
   ) {
-    // Signed relay requests must not follow redirects or forward their proof.
-    guard task.originalRequest?.value(forHTTPHeaderField: "Authorization") == nil,
+    // Signed relay requests and account requests must not follow redirects or
+    // forward their proof or session.
+    let original = task.originalRequest
+    guard
+      ["Authorization", "X-BB-Session-Credential", "Nostr-Federated-Identity"].allSatisfy({
+        original?.value(forHTTPHeaderField: $0) == nil
+      }),
       let url = request.url, ["https", "http"].contains(url.scheme?.lowercased() ?? ""),
       url.user == nil, url.password == nil,
       !(task.originalRequest?.url?.scheme == "https" && url.scheme != "https")

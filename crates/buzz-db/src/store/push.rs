@@ -14,6 +14,9 @@ use crate::error::Result;
 use crate::Db;
 use buzz_datastore_tracing::datastore_span;
 
+mod delivery;
+pub use delivery::due_wake_communities;
+
 async fn acquire_operation_connection(
     pool: &PgPool,
     operation: crate::observability::WriterOperation,
@@ -363,6 +366,7 @@ pub async fn accept_lease_event(
     crate::store::event_follow_up::after_admitted_insert(
         &mut tx,
         event.id.as_bytes().as_slice(),
+        created_at,
         30350,
         None,
     )
@@ -1482,6 +1486,18 @@ impl Db {
         crate::push::enqueue_wakes(&self.pool, community, requests).await
     }
 
+    /// Discover the next bounded page of communities with eligible delivery work.
+    ///
+    /// Continue after the last returned ID until empty, then start a new sweep.
+    /// Discovery is advisory: claims and send-time validation remain authoritative.
+    #[datastore_span(name = "due_push_wake_communities", system = "postgresql")]
+    pub async fn due_push_wake_communities(
+        &self,
+        after: Option<CommunityId>,
+    ) -> Result<Vec<CommunityId>> {
+        due_wake_communities(&self.pool, after).await
+    }
+
     /// Exclusively claim due wake jobs for one community.
     #[datastore_span(name = "claim_due_push_wakes", system = "postgresql")]
     pub async fn claim_due_push_wakes(
@@ -1583,6 +1599,10 @@ impl Db {
 }
 
 #[cfg(test)]
+#[path = "push/delivery_postgres_tests.rs"]
+mod delivery_postgres_tests;
+
+#[cfg(test)]
 mod postgres_tests {
     use super::*;
     use crate::migration;
@@ -1638,7 +1658,7 @@ mod postgres_tests {
             .expect("sign lease event")
     }
 
-    async fn make_community(pool: &PgPool) -> CommunityId {
+    pub(super) async fn make_community(pool: &PgPool) -> CommunityId {
         let id = Uuid::new_v4();
         sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
             .bind(id)
@@ -1658,7 +1678,7 @@ mod postgres_tests {
         }
     }
 
-    async fn activate(
+    pub(super) async fn activate(
         pool: &PgPool,
         community: CommunityId,
         author: &[u8],
@@ -2087,7 +2107,7 @@ mod postgres_tests {
         assert_eq!(total, 3, "one row per distinct (endpoint, event) key");
     }
 
-    async fn enqueue_one(
+    pub(super) async fn enqueue_one(
         pool: &PgPool,
         community: CommunityId,
         author: &[u8],
@@ -2627,7 +2647,7 @@ mod postgres_tests {
         .expect("seed matcher row");
     }
 
-    async fn quiesce_test_community(pool: &PgPool, community: CommunityId) {
+    pub(super) async fn quiesce_test_community(pool: &PgPool, community: CommunityId) {
         let mut lifecycle = pool.begin().await.expect("begin lifecycle fixture");
         sqlx::query(
             "SELECT set_config('buzz.deletion_executor_community', $1, true), \
@@ -2870,6 +2890,8 @@ mod postgres_tests {
                     &pool,
                     community,
                     raced.id.as_bytes().to_vec(),
+                    DateTime::from_timestamp(raced.created_at.as_secs() as i64, 0)
+                        .expect("signed timestamp"),
                     (held_tx, release_rx),
                 )
                 .await

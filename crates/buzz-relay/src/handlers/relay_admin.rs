@@ -25,7 +25,8 @@ use buzz_core::tenant::TenantContext;
 use buzz_db::relay_members::RemoveResult;
 
 use crate::handlers::side_effects::{
-    fan_out_nip43_membership_list, publish_nip43_member_added, publish_nip43_member_removed,
+    auto_join_default_channels, fan_out_nip43_membership_list, publish_nip43_member_added,
+    publish_nip43_member_removed,
 };
 use crate::state::AppState;
 
@@ -133,8 +134,9 @@ fn may_set_workspace_profile(
 /// [`super::push_lease::AcceptError`] and its `map_push_accept_error` seam.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum RelayAdminError {
-    /// Sender is under a durable community ban — `blocked:` / HTTP 403.
-    Banned,
+    /// Sender is under a durable community ban — `blocked:` / HTTP 403. The
+    /// source says whether its own row or its owner's decided it.
+    Banned(crate::handlers::auth::BanSource),
     /// Legacy command rejection — `invalid:` / HTTP 400. This is whatever
     /// [`execute_relay_admin_command`] returned as a `String`, which is mostly
     /// validation and authorization but also still includes that function's own
@@ -161,7 +163,9 @@ fn admits_relay_admin_command(
     restriction: &buzz_db::moderation::RestrictionState,
 ) -> Result<(), RelayAdminError> {
     if restriction.banned {
-        return Err(RelayAdminError::Banned);
+        return Err(RelayAdminError::Banned(
+            crate::handlers::auth::BanSource::of(restriction),
+        ));
     }
     Ok(())
 }
@@ -192,6 +196,8 @@ pub(super) async fn handle_relay_admin_event(
     //
     // This gate wraps execution rather than opening it so no future early
     // return inside the command body can precede it.
+    #[cfg(test)]
+    crate::nip_fi_test_hooks::before_command_ban_check(tenant.community()).await;
     let restriction = state
         .db
         .moderation_restriction_state(tenant.community(), &event.pubkey.to_bytes())
@@ -335,11 +341,11 @@ async fn execute_relay_admin_command(
             // to change an existing member's role.
             let write = state
                 .db
-                .add_relay_member(
+                .add_relay_member_with_default_channels(
                     tenant.community(),
                     &target_hex,
                     &role,
-                    Some(&sender_hex),
+                    &sender_hex,
                     &state.relay_keypair,
                 )
                 .await
@@ -361,6 +367,8 @@ async fn execute_relay_admin_command(
                     warn!(error = %e, "failed to publish NIP-43 member added event");
                 }
             }
+            // A no-op re-add also resumes unfinished work from the original actor.
+            auto_join_default_channels(tenant, state, &target_hex, None).await;
             fan_out_nip43_membership_list(tenant, state, write.snapshot).await;
         }
 
@@ -525,11 +533,14 @@ mod postgres_tests {
     fn banned_actor_is_not_admitted_to_a_relay_admin_command() {
         let banned = buzz_db::moderation::RestrictionState {
             banned: true,
+            own_banned: true,
             muted_until: None,
         };
         assert_eq!(
             admits_relay_admin_command(&banned),
-            Err(RelayAdminError::Banned),
+            Err(RelayAdminError::Banned(
+                crate::handlers::auth::BanSource::Own
+            )),
             "a durably banned admin must never reach a relay-admin command"
         );
     }
@@ -541,6 +552,7 @@ mod postgres_tests {
     fn timed_out_actor_is_still_admitted() {
         let timed_out = buzz_db::moderation::RestrictionState {
             banned: false,
+            own_banned: false,
             muted_until: Some(chrono::Utc::now() + chrono::Duration::minutes(5)),
         };
         assert!(
@@ -752,9 +764,8 @@ mod postgres_tests {
             .expect("ensure community");
         let tenant = TenantContext::resolved(record.id, host);
 
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("redis pool config");
+        let redis_pool =
+            buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool config");
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await
@@ -984,6 +995,163 @@ mod postgres_tests {
 
         assert!(member_socket.cancellation_token().is_cancelled());
         assert!(!bystander_socket.cancellation_token().is_cancelled());
+    }
+
+    /// A kind:9030 add joins the new relay member to the community's
+    /// effective default channels, once: the flagged open channel gains them
+    /// as a member with one kind:44100; the unflagged channel does not. A
+    /// kind:9022 leave followed by a repeat kind:9030 (an idempotent no-op on
+    /// the roster) does not re-add them. An added agent's `channel_add_policy`
+    /// holds against the adder. Mutations: delete the
+    /// `auto_join_default_channels` call → RED; pass no actor, or drop the
+    /// policy check → the `nobody` agent is joined (RED); check the policy
+    /// against anyone but the adder → the owned `owner_only` agent is not
+    /// (RED).
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn adding_a_member_auto_joins_default_channels() {
+        use crate::handlers::group_state_postgres_tests::{
+            create_channel, edit_channel, http_auth,
+        };
+        use crate::handlers::ingest::ingest_event;
+
+        let host = format!("add-auto-join-{}.example", uuid::Uuid::new_v4().simple());
+        let (state, tenant) = workspace_profile_test_state(&host, true).await;
+        let (owner, target) = (Keys::generate(), Keys::generate());
+        state
+            .db
+            .add_relay_member(
+                tenant.community(),
+                &owner.public_key().to_hex(),
+                "owner",
+                None,
+                &nostr::Keys::generate(),
+            )
+            .await
+            .map(|write| write.outcome)
+            .expect("seed owner");
+        let flagged = create_channel(&state, &tenant, &owner, &[]).await;
+        let control = create_channel(&state, &tenant, &owner, &[]).await;
+        edit_channel(&state, &tenant, &owner, flagged, &[&["auto_join", "true"]])
+            .await
+            .expect("relay owner flags channel");
+
+        let roles = |keys: &Keys| {
+            let state = state.clone();
+            let community = tenant.community();
+            let pubkey = keys.public_key().to_bytes();
+            async move {
+                let mut roles = Vec::new();
+                for channel_id in [flagged, control] {
+                    roles.push(
+                        state
+                            .db
+                            .get_member_role(community, channel_id, &pubkey)
+                            .await
+                            .expect("member role"),
+                    );
+                }
+                roles
+            }
+        };
+        let added_notifications = || {
+            let state = state.clone();
+            let community = tenant.community();
+            let target_hex = target.public_key().to_hex();
+            async move {
+                state
+                    .db
+                    .count_events(&buzz_db::EventQuery {
+                        kinds: Some(vec![buzz_core::kind::KIND_MEMBER_ADDED_NOTIFICATION as i32]),
+                        p_tag_hex: Some(target_hex),
+                        global_only: true,
+                        ..buzz_db::EventQuery::for_community(community)
+                    })
+                    .await
+                    .expect("count 44100")
+            }
+        };
+        let add = || {
+            EventBuilder::new(Kind::Custom(RELAY_ADMIN_ADD_MEMBER as u16), "")
+                .tags(vec![Tag::public_key(target.public_key())])
+                .sign_with_keys(&owner)
+                .expect("sign 9030")
+        };
+
+        handle_relay_admin_event(&tenant, &state, &add())
+            .await
+            .expect("owner adds member");
+        assert_eq!(roles(&target).await, [Some("member".to_string()), None]);
+        assert_eq!(added_notifications().await, 1);
+
+        let leave = EventBuilder::new(Kind::Custom(9022), "")
+            .tags([Tag::parse(["h", &flagged.to_string()]).expect("h tag")])
+            .sign_with_keys(&target)
+            .expect("sign 9022");
+        let left = ingest_event(&state, &tenant, leave, http_auth(&target))
+            .await
+            .expect("ingest 9022");
+        assert!(left.accepted, "{:?}", left.message);
+        handle_relay_admin_event(&tenant, &state, &add())
+            .await
+            .expect("repeat add is a roster no-op");
+        assert_eq!(
+            roles(&target).await,
+            [None, None],
+            "a repeat kind:9030 must not resurrect a kind:9022 leave"
+        );
+        assert_eq!(added_notifications().await, 1);
+
+        // The adder acts for someone else, so the added agent's
+        // `channel_add_policy` decides, as for the same actor's kind:9000:
+        // `nobody` refuses every default channel; `owner_only` admits only
+        // the agent's owner.
+        let (refusing, owned) = (Keys::generate(), Keys::generate());
+        for keys in [&owner, &refusing, &owned] {
+            state
+                .db
+                .ensure_user(tenant.community(), &keys.public_key().to_bytes())
+                .await
+                .expect("user row");
+        }
+        for (agent, policy) in [(&refusing, "nobody"), (&owned, "owner_only")] {
+            state
+                .db
+                .set_channel_add_policy(tenant.community(), &agent.public_key().to_bytes(), policy)
+                .await
+                .expect("agent policy");
+        }
+        state
+            .db
+            .set_agent_owner(
+                tenant.community(),
+                &owned.public_key().to_bytes(),
+                &owner.public_key().to_bytes(),
+            )
+            .await
+            .expect("agent owner");
+        for (agent, expected) in [
+            (&refusing, [None, None]),
+            (&owned, [Some("member".to_string()), None]),
+        ] {
+            let add = EventBuilder::new(Kind::Custom(RELAY_ADMIN_ADD_MEMBER as u16), "")
+                .tags(vec![Tag::public_key(agent.public_key())])
+                .sign_with_keys(&owner)
+                .expect("sign 9030");
+            handle_relay_admin_event(&tenant, &state, &add)
+                .await
+                .expect("owner adds agent");
+            assert!(
+                state
+                    .db
+                    .get_relay_member(tenant.community(), &agent.public_key().to_hex())
+                    .await
+                    .expect("relay member")
+                    .is_some(),
+                "the roster add stands either way"
+            );
+            assert_eq!(roles(agent).await, expected);
+        }
     }
 
     /// A pod-local root socket registered and bound to `keys`, as root AUTH
@@ -1246,8 +1414,8 @@ mod postgres_tests {
 
         let error = result.expect_err("the audit failure is reported");
         assert!(
-            error.contains("audit"),
-            "reports the audit failure: {error}"
+            matches!(&error, crate::handlers::ingest::IngestError::Rejected(m) if m.contains("audit")),
+            "reports the audit failure: {error:?}"
         );
         assert!(
             state
@@ -1262,13 +1430,13 @@ mod postgres_tests {
         assert!(!bystander_socket.is_cancelled(), "the bystander stays");
     }
 
-    /// A timeout and an untimeout each drop the target's cached restriction
-    /// row on the pod that handles them, so typing and observer frames see
-    /// the change at once instead of after the cache TTL.
-    /// Mutation: remove `invalidate_restriction_cache` from either → RED.
+    /// Each of the ban, unban, timeout and untimeout commands drops the
+    /// target's cached restriction row, so HTTP gates, typing and observer
+    /// frames see the change at once instead of after the cache's max age.
+    /// Mutation: remove `invalidate_restrictions` from any of them → RED.
     #[tokio::test]
     #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
-    async fn timeout_commands_drop_the_cached_restriction_row() {
+    async fn restriction_commands_drop_the_cached_restriction_row() {
         let host = format!("timeout-cache-{}.example", uuid::Uuid::new_v4().simple());
         let (state, tenant) = workspace_profile_test_state(&host, true).await;
         let (owner, target) = (Keys::generate(), Keys::generate());
@@ -1307,8 +1475,16 @@ mod postgres_tests {
                 buzz_core::kind::KIND_MODERATION_UNTIMEOUT,
                 vec![Tag::public_key(target.public_key())],
             ),
+            command(
+                buzz_core::kind::KIND_MODERATION_BAN,
+                vec![Tag::public_key(target.public_key())],
+            ),
+            command(
+                buzz_core::kind::KIND_MODERATION_UNBAN,
+                vec![Tag::public_key(target.public_key())],
+            ),
         ] {
-            state.restriction_cache.insert(
+            state.seed_restriction(
                 key.clone(),
                 buzz_db::moderation::RestrictionState::default(),
             );
@@ -1316,9 +1492,9 @@ mod postgres_tests {
                 &tenant, &state, &event,
             )
             .await
-            .unwrap_or_else(|e| panic!("kind {} must apply: {e}", event.kind.as_u16()));
+            .unwrap_or_else(|e| panic!("kind {} must apply: {e:?}", event.kind.as_u16()));
             assert_eq!(
-                state.restriction_cache.get(&key),
+                state.restriction_cache.entry(&key).map(|(state, _)| state),
                 None,
                 "kind {} must drop the cached row",
                 event.kind.as_u16()

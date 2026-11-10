@@ -10,15 +10,28 @@ public final class BuzzNotificationAvatarLoader {
   private let directory: URL
   private let privateKey: (String) -> String?
   private let isCurrent: (BuzzNotificationCacheScope) -> Bool
+  private let assertionIssuer: BuzzRelayAssertionIssuer?
   private static let maximumDownloadBytes = 2 * 1024 * 1024
+  /// The network transfer; tests substitute it to observe whether a request would be sent.
+  var startDownload:
+    (URLRequest, URLSessionConfiguration, Int, @escaping (Result<Data, Error>) -> Void) -> Void =
+      { request, configuration, maximumBytes, completion in
+        BuzzNotificationDownload.start(
+          request: request, configuration: configuration, maximumBytes: maximumBytes,
+          completion: completion)
+      }
 
+  /// `assertionIssuer` supplies the NIP-FI assertion an organization relay requires on media
+  /// reads, as it does for the resolver's `/query`; without it those avatars are refused.
   public init(
     directory: URL, privateKey: @escaping (String) -> String?,
-    isCurrent: @escaping (BuzzNotificationCacheScope) -> Bool
+    isCurrent: @escaping (BuzzNotificationCacheScope) -> Bool,
+    assertionIssuer: BuzzRelayAssertionIssuer? = nil
   ) {
     self.directory = directory
     self.privateKey = privateKey
     self.isCurrent = isCurrent
+    self.assertionIssuer = assertionIssuer
   }
 
   /// Returns a bounded PNG suitable for INImage. HTTP caching retains the original response.
@@ -41,11 +54,19 @@ public final class BuzzNotificationAvatarLoader {
       completion(.failure(BuzzNotificationCacheError.invalidRecord))
       return
     }
-    let thumbnail = Self.thumbnailURL(original, scope: scope)
-    fetch(thumbnail ?? original, scope: scope) { result in
-      if thumbnail != nil, case .failure(BuzzNotificationDownload.Failure.status(404)) = result {
-        // Older or externally populated media may not have a generated thumbnail.
-        self.fetch(original, scope: scope, completion: completion)
+    fetchFirst(
+      Self.thumbnailURLs(original, scope: scope) + [original], scope: scope, completion: completion)
+  }
+
+  /// Fetches the first of `urls` the relay has: older relays, and media uploaded before WebP
+  /// thumbnails, have only the JPEG one, and externally populated media may have neither.
+  private func fetchFirst(
+    _ urls: [URL], scope: BuzzNotificationCacheScope,
+    completion: @escaping (Result<Data, Error>) -> Void
+  ) {
+    fetch(urls[0], scope: scope) { result in
+      if urls.count > 1, case .failure(BuzzNotificationDownload.Failure.status(404)) = result {
+        self.fetchFirst(Array(urls.dropFirst()), scope: scope, completion: completion)
       } else {
         completion(result)
       }
@@ -61,11 +82,15 @@ public final class BuzzNotificationAvatarLoader {
       return
     }
     var request = URLRequest(url: url)
-    if Self.isRelayMedia(url, scope: scope) {
-      guard let key = privateKey(scope.communityID) else {
-        completion(.failure(BuzzNotificationCacheError.revoked))
-        return
-      }
+    guard Self.isRelayMedia(url, scope: scope) else {
+      download(request, scope: scope, completion: completion)
+      return
+    }
+    guard let key = privateKey(scope.communityID) else {
+      completion(.failure(BuzzNotificationCacheError.revoked))
+      return
+    }
+    guard let assertionIssuer, let relayURL = URL(string: scope.relayOrigin) else {
       do {
         request.setValue(
           try Self.authorization(url: url, key: key, account: scope.account),
@@ -74,14 +99,71 @@ public final class BuzzNotificationAvatarLoader {
         completion(.failure(error))
         return
       }
+      download(request, scope: scope, completion: completion)
+      return
     }
+    // Each attempt is signed afresh. The signed request never follows a redirect, so the
+    // assertion stays on the relay.
+    func fetch(
+      _ assertion: BuzzRelayAssertion?, _ completion: @escaping (Result<Data, Error>) -> Void
+    ) {
+      // The community may have been removed or its key changed while the assertion was issued.
+      // Sending the signed request now would present revoked proofs to the relay.
+      guard self.isCurrent(scope) else {
+        completion(.failure(BuzzNotificationCacheError.revoked))
+        return
+      }
+      var signed = request
+      do {
+        signed.setValue(
+          try Self.authorization(url: url, key: key, account: scope.account),
+          forHTTPHeaderField: "Authorization")
+      } catch {
+        completion(.failure(error))
+        return
+      }
+      if let assertion {
+        signed.setValue(assertion.header, forHTTPHeaderField: "Nostr-Federated-Identity")
+      }
+      self.download(signed, scope: scope, assertion: assertion, completion: completion)
+    }
+    assertionIssuer.header(relayURL: relayURL, privateKeyHex: key) { assertion in
+      fetch(assertion) { result in
+        // A hosted relay is tried without an assertion first, and asks for one by challenging.
+        guard assertion == nil, case .failure(BuzzNotificationDownload.Failure.challenged) = result
+        else {
+          completion(result)
+          return
+        }
+        assertionIssuer.header(relayURL: relayURL, privateKeyHex: key, challenged: true) { answer in
+          guard let answer else {
+            completion(result)
+            return
+          }
+          fetch(answer, completion)
+        }
+      }
+    }
+  }
+
+  /// Bytes fetched with `assertion` are accepted only while the organization session that
+  /// issued it is still the shared one, so a retired session's avatar never reaches the cache.
+  private func download(
+    _ request: URLRequest, scope: BuzzNotificationCacheScope,
+    assertion: BuzzRelayAssertion? = nil,
+    completion: @escaping (Result<Data, Error>) -> Void
+  ) {
     let configuration = URLSessionConfiguration.default
     configuration.httpCookieStorage = nil
     configuration.urlCredentialStorage = nil
-    configuration.urlCache = httpCache(scope)
-    BuzzNotificationDownload.start(
-      request: request, configuration: configuration, maximumBytes: Self.maximumDownloadBytes
-    ) { result in
+    let cache = httpCache(scope)
+    configuration.urlCache = cache
+    startDownload(request, configuration, Self.maximumDownloadBytes) { result in
+      if let assertion, self.assertionIssuer?.isCurrent(assertion) != true {
+        cache.removeCachedResponse(for: request)
+        completion(.failure(BuzzNotificationCacheError.revoked))
+        return
+      }
       guard self.isCurrent(scope) else {
         completion(.failure(BuzzNotificationCacheError.revoked))
         return
@@ -126,14 +208,17 @@ public final class BuzzNotificationAvatarLoader {
     return components.url
   }
 
-  static func thumbnailURL(_ url: URL, scope: BuzzNotificationCacheScope) -> URL? {
-    guard isRelayMedia(url, scope: scope) else { return nil }
+  /// The relay's thumbnails, best first: the WebP keeps transparency; every relay writes the JPEG.
+  static func thumbnailURLs(_ url: URL, scope: BuzzNotificationCacheScope) -> [URL] {
+    guard isRelayMedia(url, scope: scope) else { return [] }
     let parts = url.lastPathComponent.split(separator: ".")
     guard let hash = parts.first, hash.count == 64,
       VerifiedNostrEvent.hexBytes(String(hash))?.count == 32,
       parts.count <= 2
-    else { return nil }
-    return url.deletingLastPathComponent().appendingPathComponent("\(hash).thumb.jpg")
+    else { return [] }
+    return ["webp", "jpg"].map {
+      url.deletingLastPathComponent().appendingPathComponent("\(hash).thumb.\($0)")
+    }
   }
 
   private static func isRelayMedia(_ url: URL, scope: BuzzNotificationCacheScope) -> Bool {

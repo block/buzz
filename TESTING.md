@@ -146,6 +146,88 @@ backgrounded or you lost the terminal: `pkill -f buzz-relay`. Leaving
 it running will collide with the next reviewer who follows this doc on
 the same machine.
 
+### Invitation compatibility and revocation
+
+New invitations are durable v2 bearers. A community ban permanently revokes
+outstanding v2 invitations issued by that principal or its recorded agents.
+Unban does not restore them; an unrestricted issuer can mint new invitations.
+Existing durable rows default to legacy admission. Until the separately
+reviewed historical repair processes them, any retained `community_bans` row
+for a canonical issuer or its currently recorded owner permanently revokes a
+legacy row, including expired, lifted, and timeout-only restrictions. The
+repair clears that legacy marker after deciding the row's historical state.
+Afterward, only an active ban permanently revokes it; timeouts and mutes block
+claims only while active. New mints explicitly mark their rows as protocol
+native. Audit and action records alone do not establish enforcement.
+An issuer or verified owner timeout also blocks claims on existing invitations
+while it lasts, without durable revocation. Claims resume after timeout expiry.
+Claim credentials are verified without user writes. Successful claims commit
+verified ownership with membership, policy evidence, and v2 consumption.
+Rejected claims create no users or owner links.
+Minting with a verified owner that differs from an agent's recorded owner
+returns HTTP 403 `invite_owner_mismatch`; a storage failure while establishing
+that link remains HTTP 503. Web, desktop, and mobile claim errors explain
+`invite_restricted` as a restriction on the claiming account, or on the account
+that owns it, in this community: contact a community administrator, or retry
+after a temporary restriction ends. An issuer restriction returns
+`invite_invalid`, so a claim never reveals the issuer's moderation state.
+`invite_owner_mismatch` asks for the correct account or owner identity. Neither
+error suggests a fresh link as a workaround, and neither automatically retries.
+Claim and mint restriction reads use the writer inside a transaction serialized
+with community restriction and agent-owner writes. Admission committed first
+precedes the ban; a ban committed first prevents subsequent admission. Restriction
+lookup failures deny admission, and onboarding does not require prior membership.
+
+Legacy v1 bearers contain no issuer identity. Unset `BUZZ_INVITE_V1_INVALID_AFTER`
+preserves their natural expiry and claimant restriction checks, but cannot revoke
+an individual legacy issuer's bearers. Drain for at most 30 days from the last
+possible v1 issuance across **all serving and rollback versions**; do not use merge
+time as the start. Full issuer-revocation coverage requires completing that drain
+or an explicitly approved compatibility scope decision.
+
+Operators may set `BUZZ_INVITE_V1_INVALID_AFTER` to an absolute UTC RFC3339
+whole-second timestamp (for example `2026-12-01T00:00:00Z`). v1 verification
+rejects at and after that instant, never extends bearer expiry, and leaves v2
+unchanged. Invalid or empty values fail configuration. Apply the same setting to
+all serving pods and retain it on compatible rollbacks; rolling back to a version
+without this setting's enforcement restores legacy acceptance until natural expiry.
+This change does not choose or deploy a cutoff.
+
+The historical maintenance companion must be separately reviewed and approved
+**before deploying this core change**. Both steps belong to the same controlled
+rollout: leaving unrepaired rows serving indefinitely would extend historical
+restriction rejection until their repair. Migration 0075 is schema-only: it adds
+`revoked_at` and `legacy_admission` without rewriting existing invite rows.
+Reconcile any previously applied invitation migration version with the schema
+and migration history before applying it.
+
+There is no invitation-maintenance feature switch. Operators must prevent
+invitation mint/claim, ban lifts, and **new timeout/mute restrictions** throughout
+the drain/repair interval, including signed events, HTTP, administrative tools,
+background jobs and direct writers. If this cannot be enforced for every writer
+with existing operational controls, use a maintenance window: remove public
+traffic, stop all relay instances and other writers, drain in-flight work and
+verify no old writer remains. Keep them stopped while applying schema 0075 and
+running the separately approved repair with its isolated operator connection.
+Prepare only new-code instances; do not reopen traffic or restart other writers
+until repair validation succeeds. Readers that may run before repair must use
+new code, which rejects historical restrictions lazily on unrepaired legacy rows.
+
+The repair must report zero unrepaired invites in active communities and an
+idempotent second run before reopening. Review every skipped/fenced community;
+keep it closed until it is active and repaired, then recheck zero before admitting
+traffic. After repair, timeouts/mutes only block temporarily; active bans still
+revoke permanently. A rollback to code that ignores `revoked_at` requires
+invitation admission paused, using the same traffic/writer controls if needed.
+It also requires `BUZZ_AUTO_MIGRATE` off: with auto-migration on (the Helm
+default), the old binary fails at startup with SQLx `VersionMissing(75)`. See
+[docs/database.md](docs/database.md) Rule 5.
+Legacy owner attribution uses the agent's currently recorded
+`agent_owner_pubkey`; deleting an owner user row out of band clears that link
+through its foreign key, so a later repair cannot recover the former
+relationship. Reconcile before any external user-row cleanup that could erase
+this provenance.
+
 ### 4. Smoke test the CLI against the relay
 
 End-to-end: generate an identity, create a channel, post a message, read it
@@ -190,7 +272,7 @@ relay key for authoritative replacement:
 
 ```bash
 export PATH="$PWD/target/release:$PATH"
-export DATABASE_URL="postgres://buzz:buzz_dev@localhost:5432/buzz_roster_e2e"
+export DATABASE_URL="${DATABASE_URL:?set an isolated local PostgreSQL URL}"
 export BUZZ_RELAY_URL="http://localhost:3030"  # match the relay from step 3
 export RELAY_URL="ws://localhost:3030"
 export BUZZ_RELAY_PRIVATE_KEY="<same key used by buzz-relay>"
@@ -331,7 +413,7 @@ out of the box with `just setup` or `just relay`. Common overrides:
 | `BUZZ_HEALTH_PORT`              | `8080`                      | `/_liveness`, `/_readiness` |
 | `BUZZ_METRICS_PORT`             | `9102`                      | Prometheus `/metrics` |
 | `RELAY_URL`                       | `ws://localhost:3000`       | Advertised in NIP-11 / NIP-42 challenges. **Note: no `BUZZ_` prefix.** |
-| `DATABASE_URL`                    | `postgres://buzz:buzz_dev@localhost:5432/buzz` | |
+| `DATABASE_URL`                    | Local PostgreSQL database `buzz` (development default) | |
 | `REDIS_URL`                       | `redis://localhost:6379`    | |
 | `BUZZ_REQUIRE_AUTH_TOKEN`       | `false`                     | When true, REST requires NIP-98 (no `X-Pubkey` fallback) |
 | `BUZZ_REQUIRE_RELAY_MEMBERSHIP` | `false`                     | When true, only pubkeys in `relay_members` can connect |

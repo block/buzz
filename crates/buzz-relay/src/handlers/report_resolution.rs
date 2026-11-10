@@ -667,6 +667,11 @@ async fn drive_enforcement(
                 }
             }
         }
+        // The restriction row changed: drop the community's cached rows on
+        // every pod. On every convergence path, so recovery repeats it.
+        if matches!(action, "ban" | "timeout") {
+            state.invalidate_restrictions(tenant);
+        }
         // A ban closes the target's open sessions clusterwide, matching the
         // in-community kind-9040 ban. It runs before finalize so a crash in
         // between leaves the action non-terminal and recovery re-runs it here;

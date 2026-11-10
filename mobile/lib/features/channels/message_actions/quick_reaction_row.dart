@@ -58,7 +58,9 @@ class _QuickReactionRow extends ConsumerWidget {
       if (onToggleReaction != null) {
         onToggleReaction!(value);
       } else {
-        pageRef.read(channelActionsProvider).addReaction(message.id, value);
+        pageRef
+            .read(channelActionsProvider)
+            .addReaction(message.id, value, targetAuthor: message.pubkey);
       }
     }
 

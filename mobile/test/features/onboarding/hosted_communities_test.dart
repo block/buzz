@@ -1,3 +1,7 @@
+import 'package:buzz/shared/community/community_grid_option.dart';
+import 'dart:ui' as ui;
+
+import 'package:buzz/shared/hosted/hosted_community_creation.dart';
 import 'package:buzz/shared/hosted/hosted_environment.dart';
 import 'package:buzz/features/onboarding/hosted_connect_page.dart';
 import 'package:buzz/hosted_app_gate.dart';
@@ -9,6 +13,7 @@ import 'package:buzz/shared/hosted/builderlab_account.dart';
 import 'package:buzz/shared/hosted/hosted_community_connection.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/semantics.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -44,29 +49,30 @@ void main() {
             overrides: [hostedFlowProvider.overrideWithValue(f.flow)],
           ),
         );
-        await tester.pumpAndSettle();
-        await tester.tap(find.text('Other options'));
-        await tester.pumpAndSettle();
+        await pumpUntilVisible(tester, find.bySemanticsLabel('Buzz'));
+        await revealOptionsWithSemantics(tester);
+        await tester.pump();
         tester.view.physicalSize = const Size(420, 900);
-        await tester.pumpAndSettle();
+        await tester.pump();
         final linkCard = find.ancestor(
           of: find.text('Enter a community link').hitTestable(),
           matching: find.byType(InkWell),
         );
         expect(tester.getBottomRight(linkCard).dy, closeTo(876, 1));
         final scanCard = find.ancestor(
-          of: find.text('Scan a QR code').hitTestable(),
+          of: find.text('Use a pairing code').hitTestable(),
           matching: find.byType(InkWell),
         );
         final subtitle = find
-            .text('Scan a QR code or enter a community link to continue.')
+            .text('Enter a community link or use a pairing code to continue.')
             .hitTestable();
         expect(
           tester.getTopLeft(scanCard).dy - tester.getBottomLeft(subtitle).dy,
-          closeTo(24, 1),
+          // The transitioning heading reserves the taller of both text blocks.
+          greaterThanOrEqualTo(24),
         );
         tester.view.physicalSize = const Size(320, 640);
-        await tester.pumpAndSettle();
+        await tester.pump();
         final optionTop = tester
             .getTopLeft(find.text('Enter a community link').hitTestable())
             .dy;
@@ -112,9 +118,9 @@ void main() {
         }
         await tester.pump(const Duration(milliseconds: 50));
         await tester.binding.handlePopRoute();
-        await tester.pumpAndSettle();
+        await pumpUntilVisible(tester, find.text('Use a pairing code'));
         expect(tester.testTextInput.isVisible, isFalse);
-        expect(find.text('Scan a QR code').hitTestable(), findsOneWidget);
+        expect(find.text('Use a pairing code').hitTestable(), findsOneWidget);
         await tester.tap(find.text('Enter a community link').hitTestable());
         await tester.pump();
         // A hardware keyboard produces no software-keyboard notification.
@@ -144,15 +150,10 @@ void main() {
         expect(tester.takeException(), isNull);
         tester.view.viewInsets = const FakeViewPadding();
         await tester.binding.handlePopRoute();
-        await tester.pumpAndSettle();
+        await pumpUntilVisible(tester, find.text('Use a pairing code'));
         expect(tester.testTextInput.isVisible, isFalse);
         expect(find.text('Use pairing code'), findsNothing);
-        final developerTrigger = find
-            .byKey(const Key('developer-pairing-trigger'))
-            .hitTestable();
-        await tester.tap(developerTrigger);
-        await tester.pump(const Duration(milliseconds: 50));
-        await tester.tap(developerTrigger);
+        await tester.tap(find.text('Use a pairing code').hitTestable());
         await tester.pumpAndSettle();
         expect(
           find
@@ -161,8 +162,11 @@ void main() {
           findsOneWidget,
         );
         await tester.tap(find.text('Back').hitTestable());
-        await tester.pumpAndSettle();
-        expect(find.text('Scan a QR code').hitTestable(), findsOneWidget);
+        await pumpUntilVisible(tester, find.text('or sign in with email'));
+        expect(
+          find.text('or sign in with email').hitTestable(),
+          findsOneWidget,
+        );
         await tester.pumpWidget(const SizedBox.shrink());
         await tester.pumpAndSettle();
         await f.dispose();
@@ -195,31 +199,31 @@ void main() {
           ),
         );
         await tester.pumpAndSettle();
-        expect(
-          find.text('Sign in with builderlab').hitTestable(),
-          findsOneWidget,
-        );
+        expect(find.text('Scan a QR code').hitTestable(), findsOneWidget);
         expect(find.text('Enter a community link').hitTestable(), findsNothing);
-        expect(find.text('Scan a QR code'), findsNothing);
+        expect(find.text('Sign in with email').hitTestable(), findsNothing);
         expect(find.text('Use pairing code'), findsNothing);
-        await tester.tap(find.text('Other options'));
+        await revealOptions(tester);
         await tester.pumpAndSettle();
         expect(
           find.text('Enter a community link').hitTestable(),
           findsOneWidget,
         );
-        expect(find.text('Scan a QR code').hitTestable(), findsOneWidget);
+        expect(find.text('Use a pairing code').hitTestable(), findsOneWidget);
         expect(find.text('Use pairing code').hitTestable(), findsNothing);
         await tester.tap(find.byType(BackButton));
         await tester.pumpAndSettle();
         expect(find.text('Enter a community link').hitTestable(), findsNothing);
-        await tester.tap(find.text('Other options'));
+        await revealOptions(tester);
         await tester.pumpAndSettle();
         await tester.binding.handlePopRoute();
         await tester.pumpAndSettle();
-        expect(find.text('Other options').hitTestable(), findsOneWidget);
+        expect(
+          find.text('or sign in with email').hitTestable(),
+          findsOneWidget,
+        );
         expect(find.text('Enter a community link').hitTestable(), findsNothing);
-        await tester.tap(find.text('Sign in with builderlab'));
+        await tester.tap(find.text('or sign in with email').hitTestable());
         await tester.pump();
         await tester.pump(const Duration(milliseconds: 300));
         expect(f.browser.startedIntent, {'type': 'account'});
@@ -229,15 +233,23 @@ void main() {
         );
         await tester.tap(find.bySemanticsLabel('Cancel sign-in').hitTestable());
         await tester.pumpAndSettle();
-        expect(
-          find.text('Sign in with builderlab').hitTestable(),
-          findsOneWidget,
-        );
+        expect(find.text('Scan a QR code').hitTestable(), findsOneWidget);
+        // Target sign-in remains pending when an Android Custom Tab closes.
+        await f.flow.start(HostedCreateCommunity('new-community'));
+        await tester.pumpAndSettle();
+        expect(f.flow.accountOnly, isFalse);
+        expect(f.flow.stage, HostedFlowStage.signIn);
+        expect(find.text('Cancel sign-in').hitTestable(), findsOneWidget);
+        expect(find.text('Scan a QR code').hitTestable(), findsNothing);
+        await tester.tap(find.text('Cancel sign-in').hitTestable());
+        await tester.pumpAndSettle();
+        expect(f.flow.stage, HostedFlowStage.idle);
+        expect(find.text('Scan a QR code').hitTestable(), findsOneWidget);
         f.expired = false;
         await f.flow.signInAccount(openBrowser: false);
         await tester.pumpAndSettle();
         f.expired = true;
-        await tester.tap(find.text('Continue with Builderlab'));
+        await tester.tap(find.text('Find my communities'));
         await tester.pump();
         await tester.pump(const Duration(milliseconds: 300));
         expect(f.flow.stage, HostedFlowStage.signIn);
@@ -253,39 +265,142 @@ void main() {
         await tester.pumpAndSettle();
         expect(f.flow.stage, HostedFlowStage.idle);
         await tester.pumpAndSettle();
-        expect(find.text('Continue with Builderlab'), findsOneWidget);
+        expect(find.text('Find my communities'), findsOneWidget);
         expect(find.byType(HostedConnectPage), findsNothing);
-        await tester.tap(find.text('Continue with Builderlab'));
+        await tester.tap(find.text('Find my communities'));
         await tester.pumpAndSettle();
-        expect(find.byType(CheckboxListTile), findsNothing);
-        expect(f.admitted, ['one', 'two']);
+        expect(f.flow.stage, HostedFlowStage.chooseCommunities);
+        expect(find.byType(CommunityGridOption), findsWidgets);
+        await tester.tap(find.byType(CommunityGridOption).first);
+        await tester.pumpAndSettle();
+        expect(find.byType(CommunityGridOption), findsNothing);
+        expect(f.admitted, ['one.communities.buzz.xyz']);
         expect(find.byType(HostedConnectPage), findsNothing);
         f.admitted.clear();
         f.beforeAdmission = (name) async {
-          if (name == 'two') throw const SavedCommunityIdentityConflict();
+          if (name == 'two.communities.buzz.xyz') {
+            throw const SavedCommunityIdentityConflict();
+          }
         };
-        await tester.tap(find.text('Continue with Builderlab'));
+        await tester.tap(find.text('Find my communities'));
+        await tester.pumpAndSettle();
+        expect(f.flow.stage, HostedFlowStage.chooseCommunities);
+        expect(find.byType(CommunityGridOption), findsWidgets);
+        await tester.tap(find.byType(CommunityGridOption).last);
         await tester.pumpAndSettle();
         expect(find.text('Keep saved identity and skip'), findsOneWidget);
-        expect(find.text('1 community added and kept.'), findsOneWidget);
+        expect(find.text('1 community added and kept.'), findsNothing);
         await tester.tap(find.text('Keep saved identity and skip'));
         await tester.pumpAndSettle();
-        expect(f.admitted, ['one']);
+        expect(f.admitted, isEmpty);
         expect(find.byType(HostedConnectPage), findsNothing);
         f.admitted.clear();
         f.beforeAdmission = (name) async {
-          if (name == 'two') throw AccountFailure.rejected;
+          if (name == 'two.communities.buzz.xyz') throw AccountFailure.rejected;
         };
-        await tester.tap(find.text('Continue with Builderlab'));
+        await tester.tap(find.text('Find my communities'));
         await tester.pumpAndSettle();
-        expect(find.text('1 community added and kept.'), findsOneWidget);
+        expect(f.flow.stage, HostedFlowStage.chooseCommunities);
+        expect(find.byType(CommunityGridOption), findsWidgets);
+        await tester.tap(find.byType(CommunityGridOption).last);
+        await tester.pumpAndSettle();
+        expect(find.text('1 community added and kept.'), findsNothing);
         expect(find.text('Try again').hitTestable(), findsNothing);
+        expect(find.text('Skip this community').hitTestable(), findsOneWidget);
         await tester.tap(find.text('Back to choices'));
         await tester.pumpAndSettle();
-        expect(find.byType(CheckboxListTile), findsOneWidget);
-        expect(find.text('two'), findsOneWidget);
+        expect(find.byType(CommunityGridOption), findsNWidgets(2));
+        expect(
+          find.descendant(
+            of: find.byType(CommunityGridOption),
+            matching: find.text('two'),
+          ),
+          findsWidgets,
+        );
+        await tester.tap(find.byType(CommunityGridOption).last);
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Skip this community'));
+        await tester.pumpAndSettle();
+        expect(f.admitted, isEmpty);
+        expect(f.openedCommunity, 'wss://one.communities.buzz.xyz');
+        expect(find.byType(HostedConnectPage), findsNothing);
       }
     },
     skip: HostedEnvironment.authDomains.isEmpty,
   );
+}
+
+Future<void> revealOptions(WidgetTester tester) async {
+  // Ordinary double taps must not expose the hidden connection options.
+  await tester.tapAt(const Offset(24, 120));
+  await tester.pump(const Duration(milliseconds: 50));
+  await tester.tapAt(const Offset(24, 120));
+  await tester.pumpAndSettle();
+  expect(find.text('Use a pairing code').hitTestable(), findsNothing);
+
+  for (var tap = 0; tap < 2; tap++) {
+    final first = await tester.createGesture(pointer: 11);
+    final second = await tester.createGesture(pointer: 12);
+    await first.down(
+      const Offset(24, 120),
+      timeStamp: Duration(milliseconds: tap * 70),
+    );
+    await second.down(
+      const Offset(70, 120),
+      timeStamp: Duration(milliseconds: tap * 70),
+    );
+    await tester.pump(const Duration(milliseconds: 20));
+    await first.up(timeStamp: Duration(milliseconds: tap * 70 + 20));
+    await second.up(timeStamp: Duration(milliseconds: tap * 70 + 20));
+    await tester.pump(const Duration(milliseconds: 50));
+  }
+}
+
+Future<void> revealOptionsWithSemantics(WidgetTester tester) async {
+  final handle = tester.ensureSemantics();
+  try {
+    await tester.pump();
+    final wordmark = tester.getSemantics(find.bySemanticsLabel('Buzz'));
+    final data = wordmark.getSemanticsData();
+    final actionIds = data.customSemanticsActionIds!;
+    expect(actionIds, hasLength(1));
+    expect(
+      CustomSemanticsAction.getAction(actionIds.single)!.label,
+      'More connection options',
+    );
+    // The action belongs to the wordmark, never an unlabelled page-sized stop.
+    expect(data.label, 'Buzz');
+    expect(wordmark.rect.height, lessThan(200));
+    wordmark.owner!.performAction(
+      wordmark.id,
+      ui.SemanticsAction.customAction,
+      actionIds.single,
+    );
+    await pumpUntilVisible(tester, find.text('Use a pairing code'));
+    expect(find.text('Enter a community link').hitTestable(), findsOneWidget);
+    expect(find.text('Use a pairing code').hitTestable(), findsOneWidget);
+  } finally {
+    handle.dispose();
+  }
+}
+
+// The welcome bees intentionally never settle. Wait for the requested control
+// and its ancestor fades to finish instead of waiting for every app animation.
+Future<void> pumpUntilVisible(WidgetTester tester, Finder target) async {
+  bool visible() {
+    final hit = target.hitTestable();
+    if (hit.evaluate().length != 1) return false;
+    return tester
+        .widgetList<Opacity>(
+          find.ancestor(of: hit, matching: find.byType(Opacity)),
+        )
+        .every((opacity) => opacity.opacity == 1);
+  }
+
+  for (var frame = 0; frame < 120; frame++) {
+    await tester.pump(const Duration(milliseconds: 16));
+    if (visible()) return;
+  }
+  expect(target.hitTestable(), findsOneWidget);
+  expect(visible(), isTrue, reason: 'The control must finish fading in');
 }
