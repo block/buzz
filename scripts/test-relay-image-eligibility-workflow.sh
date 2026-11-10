@@ -30,29 +30,31 @@ require_literal '- "scripts/create-deployment-eligibility-predicate.jq"'
 require_literal '- "scripts/select-qualified-ci-run.jq"'
 require_literal '- "scripts/test-relay-image-eligibility-workflow.sh"'
 
-# Main pushes may skip only paths Docker never sees. Every exclusion in the push
-# trigger must also be excluded by .dockerignore, so a filter cannot hide a
-# change that would alter the published image.
+# Main pushes may skip only paths Docker never sees. The push filter must be, in
+# order: "**", then directory exclusions that .dockerignore also excludes, then
+# the re-included image workflow. Any other entry, or another order, could stop
+# a change that alters the published image from publishing it.
 push_trigger=$(awk '/^  push:$/{f=1;next} f&&/^  [a-z_]+:/{exit} f' "$workflow")
-grep -Fxq '      - "**"' <<<"$push_trigger" || {
-  echo "main push path filter must start from every path" >&2
+push_paths=()
+while IFS= read -r entry; do
+  push_paths+=("$entry")
+done < <(awk '/^    paths:$/{f=1;next} f&&/^      - /{print;next} f{exit}' <<<"$push_trigger")
+fail_push_paths() {
+  echo "main push path filter: $1" >&2
   exit 1
 }
-grep -Fxq '      - ".github/workflows/docker.yml"' <<<"$push_trigger" || {
-  echo "main push path filter must re-include the image workflow" >&2
-  exit 1
-}
-exclusions=$(sed -n 's|^      - "!\(.*\)/\*\*"$|\1|p' <<<"$push_trigger")
-[[ -n "$exclusions" ]] || {
-  echo "main push path filter has no exclusions to check" >&2
-  exit 1
-}
-while IFS= read -r excluded; do
-  grep -Fxq "$excluded/" "$repo_root/.dockerignore" || {
-    echo "main push skips $excluded/, which .dockerignore keeps in the image build context" >&2
-    exit 1
-  }
-done <<<"$exclusions"
+(( ${#push_paths[@]} >= 3 )) || fail_push_paths "expected \"**\", directory exclusions, then the workflow"
+[[ "${push_paths[0]}" == '      - "**"' ]] || fail_push_paths 'first entry must be "**"'
+last=$(( ${#push_paths[@]} - 1 ))
+[[ "${push_paths[$last]}" == '      - ".github/workflows/docker.yml"' ]] ||
+  fail_push_paths "last entry must re-include .github/workflows/docker.yml"
+for entry in "${push_paths[@]:1:last-1}"; do
+  [[ "$entry" =~ ^\ {6}-\ \"!([A-Za-z0-9._-]+)/\*\*\"$ ]] ||
+    fail_push_paths "only \"!<dir>/**\" exclusions may sit between \"**\" and the workflow, found: ${entry#      - }"
+  excluded=${BASH_REMATCH[1]}
+  grep -Fxq "$excluded/" "$repo_root/.dockerignore" ||
+    fail_push_paths "skips $excluded/, which .dockerignore keeps in the image build context"
+done
 
 if grep -Fq "buzz-staging-dev" "$workflow"; then
   echo "canonical relay image workflow references the preview-only image package" >&2
