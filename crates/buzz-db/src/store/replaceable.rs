@@ -2215,7 +2215,7 @@ mod postgres_tests {
         assert_nip09_deletion_purges_retention_free_rows_and_mentions(false).await;
     }
 
-    /// The same contract on a migration-built database, where migration 0066
+    /// The same contract on a migration-built database, where migration 0091
     /// dropped the 0009/0011/0019 purge and hard-delete fence triggers.
     #[tokio::test]
     #[ignore = "requires Postgres"]
