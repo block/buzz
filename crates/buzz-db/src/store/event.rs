@@ -3557,7 +3557,6 @@ mod postgres_tests {
             channels.push(make_test_channel(&pool, community_uuid, None).await);
         }
         let (busy, quiet, empty, outside) = (channels[0], channels[1], channels[2], channels[3]);
-        let db = crate::Db::from_pool(pool.clone());
         let author = Keys::generate();
         let now = Utc::now().timestamp() as u64;
         let floor = crate::store::recent_pass::floor_at(Utc::now()).timestamp() as u64;
@@ -3588,9 +3587,8 @@ mod postgres_tests {
         events.push(insert(busy, 9, floor - 86_400, true));
         events.push(insert(quiet, 9, floor - 2 * 86_400, true));
         for (channel, event) in &events {
-            db.insert_event(community, event, Some(*channel))
-                .await
-                .expect("insert");
+            // Rows already in storage: the floor rejects the aged ones.
+            crate::test_support::insert_historical_event(&pool, community, event, *channel).await;
         }
         matching.sort_by(|a, b| {
             b.0.cmp(&a.0)
@@ -3727,9 +3725,7 @@ mod postgres_tests {
                 .custom_created_at(nostr::Timestamp::from(at.timestamp() as u64))
                 .sign_with_keys(&author)
                 .expect("sign");
-            db.insert_event(community, &event, Some(channel))
-                .await
-                .expect("insert");
+            crate::test_support::insert_historical_event(&pool, community, &event, channel).await;
             let partition: String =
                 sqlx::query_scalar("SELECT tableoid::regclass::text FROM events WHERE id = $1")
                     .bind(event.id.as_bytes().to_vec())
@@ -3799,9 +3795,7 @@ mod postgres_tests {
                 .custom_created_at(nostr::Timestamp::from(at.timestamp() as u64))
                 .sign_with_keys(&author)
                 .expect("sign");
-            db.insert_event(community, &event, Some(channel))
-                .await
-                .expect("insert");
+            crate::test_support::insert_historical_event(&pool, community, &event, channel).await;
             if at >= floor {
                 recent.push(event.id);
                 let partition: String =
@@ -3883,7 +3877,6 @@ mod postgres_tests {
         let community_uuid = make_test_community(&pool).await;
         let community = CommunityId::from_uuid(community_uuid);
         let channel = make_test_channel(&pool, community_uuid, None).await;
-        let db = crate::Db::from_pool(pool.clone());
         let author = Keys::generate();
         let now = Utc::now().timestamp() as u64;
         let floor = crate::store::recent_pass::floor_at(Utc::now()).timestamp() as u64;
@@ -3900,9 +3893,7 @@ mod postgres_tests {
                 .custom_created_at(nostr::Timestamp::from(at))
                 .sign_with_keys(&author)
                 .expect("sign");
-            db.insert_event(community, &event, Some(channel))
-                .await
-                .expect("insert");
+            crate::test_support::insert_historical_event(&pool, community, &event, channel).await;
             newest_first.push(event.id);
         }
 
@@ -3977,9 +3968,7 @@ mod postgres_tests {
             .custom_created_at(nostr::Timestamp::from(1_748_736_000)) // 2025-06-01
             .sign_with_keys(&author)
             .expect("sign");
-        db.insert_event(community, &ancient, Some(channel))
-            .await
-            .expect("insert ancient");
+        crate::test_support::insert_historical_event(&pool, community, &ancient, channel).await;
         let partition_of = |id: nostr::EventId| {
             let pool = pool.clone();
             async move {
@@ -4251,7 +4240,8 @@ mod postgres_tests {
         let community = CommunityId::from_uuid(community_uuid);
         let channel = make_test_channel(&pool, community_uuid, None).await;
         let keys = Keys::generate();
-        let now = nostr::Timestamp::now().as_secs() - 1_000;
+        // Inside the `created_at` floor (960 s) even with the later offsets.
+        let now = nostr::Timestamp::now().as_secs() - 600;
         let h = channel.to_string();
         let message = |kind: u16, tags: Vec<Vec<String>>, at: u64| {
             EventBuilder::new(Kind::Custom(kind), "")

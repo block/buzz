@@ -369,6 +369,36 @@ pub(crate) async fn insert_historical_event(
     tx.commit().await.expect("commit historical fixture");
 }
 
+/// [`insert_historical_event`] plus the thread metadata the serving writer
+/// records for it, through the same `insert_thread_metadata` store function
+/// (parent and root stubs, reply and descendant counters). For aged rows whose
+/// thread state a test reads or deletes through the production paths.
+#[cfg(test)]
+pub(crate) async fn insert_historical_event_with_thread_metadata(
+    pool: &sqlx::PgPool,
+    community: buzz_core::CommunityId,
+    event: &nostr::Event,
+    channel: uuid::Uuid,
+    meta: crate::event::ThreadMetadataParams<'_>,
+) {
+    insert_historical_event(pool, community, event, channel).await;
+    crate::thread::insert_thread_metadata(
+        pool,
+        community,
+        meta.event_id,
+        meta.event_created_at,
+        meta.channel_id,
+        meta.parent_event_id,
+        meta.parent_event_created_at,
+        meta.root_event_id,
+        meta.root_event_created_at,
+        meta.depth,
+        meta.broadcast,
+    )
+    .await
+    .expect("fixture thread metadata");
+}
+
 /// Move a community fixture into a deletion lifecycle state the way the
 /// executor does: the tombstone trigger only accepts lifecycle changes from a
 /// transaction carrying the executor GUCs for that community, including its
