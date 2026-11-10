@@ -507,6 +507,7 @@ impl ProbeError {
             Self::Writer(sqlx::Error::Io(_)) => "io",
             Self::Writer(_) => "writer",
             Self::MaskedActivity { .. } => "masked_activity",
+            Self::PreparedTransactions { .. } => "prepared_transactions",
             Self::HeartbeatRowMissing => "heartbeat_row_missing",
             Self::Deadline(_) => "deadline",
         }
@@ -1526,7 +1527,7 @@ mod postgres_tests {
 
         prepare.expect("prepare transaction");
         drop(conn);
-        let result = sample_writer(&pool).await;
+        let result = sample_writer(&pool, &mut ProbeTimings::default()).await;
         sqlx::query(sqlx::AssertSqlSafe(format!("ROLLBACK PREPARED '{gid}'")))
             .execute(&pool)
             .await
@@ -1536,7 +1537,7 @@ mod postgres_tests {
             matches!(err, ProbeError::PreparedTransactions { prepared } if prepared >= 1),
             "expected PreparedTransactions, got {err:?}"
         );
-        sample_writer(&pool)
+        sample_writer(&pool, &mut ProbeTimings::default())
             .await
             .expect("sample succeeds once no transaction is prepared");
     }
