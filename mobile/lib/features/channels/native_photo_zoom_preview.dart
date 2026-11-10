@@ -40,7 +40,7 @@ class NativePhotoZoomPreview {
     List<String?>? mimeTypes,
     required List<String> labels,
     ImageProvider<Object>? previewProvider,
-    List<ImageProvider<Object>>? previewProviders,
+    List<ImageProvider<Object>?>? previewProviders,
     required int initialIndex,
     required Future<void> Function(int) onSelect,
     VoidCallback? onReply,

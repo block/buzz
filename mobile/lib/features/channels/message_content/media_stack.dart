@@ -77,15 +77,18 @@ class _MessageImageStack extends HookConsumerWidget {
                   .ceilToDouble();
           final providers = [
             for (final item in items)
-              ResizeImage.resizeIfNeeded(
-                physicalDecodeWidth.toInt(),
-                null,
-                MediaImageProvider(
-                  url: item.isVideo ? (item.posterUrl ?? item.url) : item.url,
-                  auth: auth,
-                  client: ref.watch(mediaHttpClientProvider),
+              if (item.isVideo && item.posterUrl == null)
+                null
+              else
+                ResizeImage.resizeIfNeeded(
+                  physicalDecodeWidth.toInt(),
+                  null,
+                  MediaImageProvider(
+                    url: item.isVideo ? item.posterUrl! : item.url,
+                    auth: auth,
+                    client: ref.watch(mediaHttpClientProvider),
+                  ),
                 ),
-              ),
           ];
           final imageIndices = [
             for (var i = 0; i < items.length; i++)
