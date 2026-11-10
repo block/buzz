@@ -4676,15 +4676,15 @@ void main() {
       await tester.pumpAndSettle();
 
       final rows = [
-        // People, then agents; archived Alice last among the people.
-        for (final key in ['self', 'bob', 'alice', 'agent'])
+        // People, agents, then archived Alice, as in the members sheet.
+        for (final key in ['self', 'bob', 'agent', 'alice'])
           find.byKey(ValueKey('channel-details-member-$key')),
       ];
       final tops = [for (final row in rows) tester.getTopLeft(row).dy];
       expect(tops, orderedEquals([...tops]..sort()));
       expect(
         find.descendant(
-          of: rows[2],
+          of: rows[3],
           matching: find.textContaining(
             'Archived \u00b7 Member',
             findRichText: true,

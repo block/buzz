@@ -151,14 +151,14 @@ class ChannelDetailsPage extends HookConsumerWidget {
         membersAsync.value?.length ?? resolvedChannel.memberCount;
     final memberLabel =
         '$memberCount ${memberCount == 1 ? 'member' : 'members'}';
-    // People, then agents, each with known-archived members after the live
-    // ones, as in the members sheet.
+    // People, agents, then known-archived people and agents, as in the
+    // members sheet.
     final archived = ref.watch(hiddenArchivedIdentitiesProvider);
     bool isArchived(ChannelMember member) =>
         archived.contains(member.pubkey.toLowerCase());
     final previewMembers = [
-      for (final bot in [false, true])
-        for (final archivedPart in [false, true])
+      for (final archivedPart in [false, true])
+        for (final bot in [false, true])
           ...members.where(
             (member) =>
                 member.isBot == bot && isArchived(member) == archivedPart,

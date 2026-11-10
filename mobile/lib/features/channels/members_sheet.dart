@@ -38,19 +38,24 @@ class MembersSheet extends HookConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final membersAsync = ref.watch(channelMembersProvider(channel.id));
     final allMembers = membersAsync.asData?.value ?? const <ChannelMember>[];
-    // Known-archived members follow the live ones in each group, each part
-    // in the relay's order.
+    // Known-archived members leave People and Agents for their own section
+    // after both: archived people, then archived agents, in the relay's order.
     final archived = ref.watch(hiddenArchivedIdentitiesProvider);
     bool isArchived(ChannelMember member) =>
         archived.contains(member.pubkey.toLowerCase());
-    List<ChannelMember> group(bool Function(ChannelMember) inGroup) => [
+    final people = [
       for (final member in allMembers)
-        if (inGroup(member) && !isArchived(member)) member,
-      for (final member in allMembers)
-        if (inGroup(member) && isArchived(member)) member,
+        if (!member.isBot && !isArchived(member)) member,
     ];
-    final people = group((member) => !member.isBot);
-    final bots = group((member) => member.isBot);
+    final bots = [
+      for (final member in allMembers)
+        if (member.isBot && !isArchived(member)) member,
+    ];
+    final archivedMembers = [
+      for (final bot in [false, true])
+        for (final member in allMembers)
+          if (member.isBot == bot && isArchived(member)) member,
+    ];
     final userCache = ref.watch(userCacheProvider);
     final typingBotPubkeys = ref.watch(workingBotPubkeysProvider(channel.id));
     final statusCache = ref.watch(userStatusCacheProvider);
@@ -101,6 +106,28 @@ class MembersSheet extends HookConsumerWidget {
       return null;
     }, [allMembers.length]);
 
+    Widget tile(ChannelMember member) {
+      final key = member.pubkey.toLowerCase();
+      final working = member.isBot && typingBotPubkeys.contains(key);
+      return _MemberTile(
+        member: member,
+        currentPubkey: currentPubkey,
+        profile: userCache[key],
+        canManage: canManage,
+        isArchived: isArchived(member),
+        isSelf: !member.isBot && key == currentPubkey?.toLowerCase(),
+        channelId: channel.id,
+        userStatus: member.isBot ? null : statusCache[key],
+        isWorking: working,
+        onViewActivity: member.isBot ? () => openActivity(member) : null,
+        onActivityTap: member.isBot
+            ? (working ? () => openActivity(member) : null)
+            : onMemberTap == null
+            ? null
+            : () => onMemberTap!(context, member.pubkey),
+      );
+    }
+
     return Padding(
       key: const ValueKey('members-sheet-content-padding'),
       padding: EdgeInsets.fromLTRB(Grid.gutter, 0, Grid.gutter, 0),
@@ -114,56 +141,19 @@ class MembersSheet extends HookConsumerWidget {
             shrinkWrap: true,
             slivers: [
               const SliverToBoxAdapter(child: SizedBox(height: Grid.xxs)),
-              if (people.isNotEmpty)
-                _MemberSection(
-                  label: 'People · ${people.length}',
-                  itemCount: people.length,
-                  itemBuilder: (context, index) {
-                    final member = people[index];
-                    return _MemberTile(
-                      member: member,
-                      currentPubkey: currentPubkey,
-                      profile: userCache[member.pubkey.toLowerCase()],
-                      canManage: canManage,
-                      isArchived: isArchived(member),
-                      isSelf:
-                          member.pubkey.toLowerCase() ==
-                          currentPubkey?.toLowerCase(),
-                      channelId: channel.id,
-                      userStatus: statusCache[member.pubkey.toLowerCase()],
-                      onActivityTap: onMemberTap == null
-                          ? null
-                          : () => onMemberTap!(context, member.pubkey),
-                    );
-                  },
-                ),
-              if (bots.isNotEmpty)
-                _MemberSection(
-                  label: 'Agents · ${bots.length}',
-                  semanticIndexOffset: people.length,
-                  itemCount: bots.length,
-                  itemBuilder: (context, index) {
-                    final bot = bots[index];
-                    return _MemberTile(
-                      member: bot,
-                      currentPubkey: currentPubkey,
-                      profile: userCache[bot.pubkey.toLowerCase()],
-                      canManage: canManage,
-                      isArchived: isArchived(bot),
-                      isSelf: false,
-                      channelId: channel.id,
-                      isWorking: typingBotPubkeys.contains(
-                        bot.pubkey.toLowerCase(),
-                      ),
-                      onViewActivity: () => openActivity(bot),
-                      onActivityTap:
-                          typingBotPubkeys.contains(bot.pubkey.toLowerCase())
-                          ? () => openActivity(bot)
-                          : null,
-                    );
-                  },
-                ),
-              if (people.isEmpty && bots.isEmpty)
+              for (final (label, members, offset) in [
+                ('People', people, 0),
+                ('Agents', bots, people.length),
+                ('Archived', archivedMembers, people.length + bots.length),
+              ])
+                if (members.isNotEmpty)
+                  _MemberSection(
+                    label: '$label · ${members.length}',
+                    semanticIndexOffset: offset,
+                    itemCount: members.length,
+                    itemBuilder: (context, index) => tile(members[index]),
+                  ),
+              if (allMembers.isEmpty)
                 SliverToBoxAdapter(
                   child: Center(
                     child: Text(

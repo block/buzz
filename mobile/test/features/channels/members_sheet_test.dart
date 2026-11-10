@@ -170,7 +170,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('archived members go last in each group and say so', (
+  testWidgets('archived members get their own section and say so', (
     tester,
   ) async {
     final semantics = tester.ensureSemantics();
@@ -185,7 +185,15 @@ void main() {
       for (final tile in tester.widgetList<ListTile>(find.byType(ListTile)))
         (tile.title! as Text).data!,
     ];
-    expect(titles(), ['You', 'Person 2', 'Person 1', 'Agent 4', 'Agent 3']);
+    // Archived people, then archived agents, after People and Agents.
+    expect(find.text('People \u00b7 2'), findsOne);
+    expect(find.text('Agents \u00b7 1'), findsOne);
+    expect(find.text('Archived \u00b7 2'), findsOne);
+    expect(titles(), ['You', 'Person 2', 'Agent 4', 'Person 1', 'Agent 3']);
+    expect(
+      tester.getTopLeft(find.text('Archived \u00b7 2')).dy,
+      greaterThan(tester.getTopLeft(find.text('Agent 4')).dy),
+    );
     String subtitle(String name) =>
         ((tester
                     .widget<ListTile>(
