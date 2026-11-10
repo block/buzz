@@ -213,7 +213,8 @@ typedef RecipientSearch = ({
 /// mention autocomplete in a stream: no channel members yet, the viewer's
 /// own agents offered unprompted, agents shared with the viewer, and people
 /// from the community directory search, with the same debounce and search
-/// cache.
+/// cache. Before a name is typed, where `@` lists the channel's members, a
+/// picker lists the named people the viewer shares a channel or DM with.
 final recipientCandidatesProvider = Provider.family
     .autoDispose<List<MentionCandidate>, RecipientSearch>((ref, search) {
       final currentPubkey = ref.watch(currentPubkeyProvider)?.toLowerCase();
@@ -226,6 +227,9 @@ final recipientCandidatesProvider = Provider.family
           offerOwnedAgents: true,
           offerUnsharedAgents: search.unsharedAgents,
           historyKey: search.historyKey,
+          knownPeople: search.query.trim().isEmpty
+              ? _knownPeople(ref)
+              : const [],
         ))
           if (candidate.pubkey != currentPubkey) candidate,
       ];
@@ -247,6 +251,36 @@ final recipientSearchFailedProvider = Provider.family.autoDispose<bool, String>(
   },
 );
 
+/// Named people in the viewer's open channels and DMs, as directory search
+/// results, from the member lists the channel list already loaded.
+List<UserProfile> _knownPeople(Ref ref) {
+  final channels =
+      ref.watch(channelsProvider).asData?.value ?? const <Channel>[];
+  final notifier = ref.read(channelsProvider.notifier);
+  final userCache = ref.watch(userCacheProvider);
+  final verified = ref.watch(verifiedProfilesProvider);
+  final people = <String, UserProfile>{};
+  for (final channel in channels) {
+    if (!channel.isMember || channel.isArchived) continue;
+    final pubkeys = [
+      ...channel.participantPubkeys,
+      for (final member in notifier.cachedMembersForChannel(channel.id))
+        member.pubkey,
+    ];
+    for (final pubkey in pubkeys) {
+      final key = pubkey.toLowerCase();
+      if (people.containsKey(key)) continue;
+      final profile = userCache[key];
+      if (profile?.displayName?.trim().isNotEmpty == true) {
+        people[key] = profile!;
+      } else if (verified[key] case final name?) {
+        people[key] = UserProfile(pubkey: key, displayName: name.displayName);
+      }
+    }
+  }
+  return people.values.toList();
+}
+
 List<MentionCandidate> _chooserCandidates(
   Ref ref, {
   required List<ChannelMember> members,
@@ -255,6 +289,7 @@ List<MentionCandidate> _chooserCandidates(
   required bool offerOwnedAgents,
   bool offerUnsharedAgents = false,
   required String historyKey,
+  List<UserProfile> knownPeople = const [],
 }) {
   final channels =
       ref.watch(channelsProvider).asData?.value ?? const <Channel>[];
@@ -289,7 +324,7 @@ List<MentionCandidate> _chooserCandidates(
       sharedChannelIds: sharedChannelIds,
       userCache: userCache,
       ownerByAgentPubkey: owners,
-      searchResults: [...searchResults, ...verifiedMatches],
+      searchResults: [...searchResults, ...verifiedMatches, ...knownPeople],
       currentPubkey: currentPubkey,
       ownedAgents: ownedAgents,
       offerOwnedAgents: offerOwnedAgents,
