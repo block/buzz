@@ -2,6 +2,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../../shared/agents/owned_agent_directory.dart';
 import '../../../shared/crypto/nip_oa.dart';
+import '../../../shared/identity_archive/archived_identities_provider.dart';
 import '../../../shared/identity_names/identity_names.dart';
 import '../../../shared/identity_names/identity_names_provider.dart';
 import '../../../shared/mentions/agent_identity_provider.dart';
@@ -262,6 +263,8 @@ List<MentionCandidate> _chooserCandidates(
       ref.watch(agentDirectoryProvider).asData?.value ??
       const <AgentDirectoryEntry>[];
   final owners = ref.watch(agentOwnersProvider).asData?.value ?? const {};
+  final archivedPubkeys =
+      ref.watch(archivedIdentitiesProvider).asData?.value ?? const {};
   // Null while loading or failed: nothing is known to be unlisted.
   final ownedAgents = ref.watch(ownedAgentDirectoryProvider).asData?.value;
   final userCache = ref.watch(userCacheProvider);
@@ -292,6 +295,7 @@ List<MentionCandidate> _chooserCandidates(
       searchResults: [...searchResults, ...verifiedMatches],
       currentPubkey: currentPubkey,
       ownedAgents: ownedAgents,
+      archivedPubkeys: archivedPubkeys,
       offerOwnedAgents: offerOwnedAgents,
       offerUnsharedAgents: offerUnsharedAgents,
     ))
