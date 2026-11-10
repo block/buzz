@@ -2615,7 +2615,7 @@ async fn fence_probe_beats_while_serving_writer_pool_is_exhausted() {
     .await
     .expect("connect armed Db with one serving writer connection");
     assert!(
-        db.spawn_fence_probe().await.expect("verification passes"),
+        db.spawn_fence_probe(),
         "a configured reader must spawn the probe"
     );
 
