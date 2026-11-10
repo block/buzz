@@ -1451,7 +1451,11 @@ mod postgres_tests {
             .as_str();
         assert!(retirement.starts_with("SET LOCAL lock_timeout = '5s';"));
         // Tables added after docs/database.md Rule 1 never had a fence.
-        let never_fenced = ["nip_fi_profile_heads", "media_uploaders", "media_publications"];
+        let never_fenced = [
+            "nip_fi_profile_heads",
+            "media_uploaders",
+            "media_publications",
+        ];
         for table in crate::deletion::EXPECTED_SCOPED_TABLES
             .iter()
             .filter(|table| !never_fenced.contains(table))
