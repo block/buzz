@@ -4124,10 +4124,15 @@ mod postgres_tests {
                 .await
                 .unwrap();
             if prebuilt {
-                run_migrations(&pool)
+                // Stop at 0086: later trigger retirements take ACCESS
+                // EXCLUSIVE on events, which this held writer lock blocks.
+                run_migrations_through(&pool, 86)
                     .await
                     .expect("verified prebuild does not request an index-build lock");
                 writer.rollback().await.unwrap();
+                run_migrations(&pool)
+                    .await
+                    .expect("later migrations apply once the writer is gone");
             } else {
                 let error = run_migrations(&pool).await.unwrap_err();
                 assert!(
