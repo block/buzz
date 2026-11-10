@@ -718,14 +718,16 @@ async fn consumed_denial_receipts_release_capacity_without_discarding_unconsumed
 async fn acknowledgment_only_removes_readable_receipts_in_its_community() {
     let (db, community, keys) = fixture().await;
     let ready = enqueue(&db, community, &request()).await;
-    db.try_admit_invite_claims(community, &keys)
+    let _ready_admission = db
+        .try_admit_invite_claims(community, &keys)
         .await
         .unwrap()
         .unwrap();
     finish(&db, community).await.complete().await.unwrap();
     let unready = enqueue(&db, community, &request()).await;
     let expired_admitted = enqueue(&db, community, &request()).await;
-    db.try_admit_invite_claims(community, &keys)
+    let _unready_admission = db
+        .try_admit_invite_claims(community, &keys)
         .await
         .unwrap()
         .unwrap();

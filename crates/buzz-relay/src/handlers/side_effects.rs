@@ -3023,7 +3023,15 @@ async fn announce_self_join_with_discovery(
         }
         None => chrono::Utc::now(),
     };
-    emit_system_message(tenant, state, channel_id, content, idempotency_ts).await?;
+    // A delayed optional chat notice cannot cross the production event floor.
+    // Still send fresh discovery below so old pending work can finish.
+    let historical_notice_expired = admission.is_some()
+        && idempotency_ts
+            < chrono::Utc::now()
+                - chrono::Duration::seconds(buzz_db::replica_fence::CREATED_AT_FLOOR_SECS);
+    if !historical_notice_expired {
+        emit_system_message(tenant, state, channel_id, content, idempotency_ts).await?;
+    }
 
     if admission.is_none() {
         if let Err(e) = emit_group_discovery_events(tenant, state, channel_id).await {

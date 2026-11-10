@@ -505,6 +505,172 @@ mod postgres_tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
+    async fn delayed_default_join_recovers_discovery_after_historical_message_floor() {
+        use crate::handlers::group_state_postgres_tests::{
+            create_channel, edit_channel, test_conn,
+        };
+        use crate::handlers::side_effects::auto_join_default_channels;
+
+        let host = format!("invite-delayed-notice-{}.example", Uuid::new_v4().simple());
+        let original = invite_test_state(&host).await.expect("isolated Postgres");
+        let community = original
+            .db
+            .lookup_community_by_host(&host)
+            .await
+            .unwrap()
+            .unwrap()
+            .id;
+        let tenant = buzz_core::TenantContext::resolved(community, &host);
+        let owner = Keys::generate();
+        let _ = original
+            .db
+            .add_relay_member(
+                community,
+                &owner.public_key().to_hex(),
+                "owner",
+                None,
+                &original.relay_keypair,
+            )
+            .await
+            .unwrap();
+        let channel = create_channel(&original, &tenant, &owner, &[]).await;
+        edit_channel(
+            &original,
+            &tenant,
+            &owner,
+            channel,
+            &[&["auto_join", "true"]],
+        )
+        .await
+        .unwrap();
+        let member = Keys::generate();
+        let member_hex = member.public_key().to_hex();
+        let _ = original
+            .db
+            .add_relay_member_with_default_channels(
+                community,
+                &member_hex,
+                "member",
+                &member_hex,
+                &original.relay_keypair,
+            )
+            .await
+            .unwrap();
+        let pending = original
+            .db
+            .pending_default_channel_join(community, &member_hex)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(original
+            .db
+            .put_pending_default_member(
+                community,
+                channel,
+                &member.public_key().to_bytes(),
+                pending.token,
+            )
+            .await
+            .unwrap()
+            .is_some());
+        let old_version =
+            chrono::DateTime::from_timestamp(chrono::Utc::now().timestamp() - 20 * 60, 0).unwrap();
+        sqlx::query("UPDATE channel_members SET sync_modified_at=$4,auto_join_version=$4 WHERE community_id=$1 AND channel_id=$2 AND pubkey=$3 AND auto_join_token=$5")
+            .bind(community.as_uuid()).bind(channel).bind(member.public_key().to_bytes().as_slice())
+            .bind(old_version).bind(pending.token).execute(original.db.pool()).await.unwrap();
+
+        let mut production = (*original).clone();
+        production.db = buzz_db::Db::new(&buzz_db::DbConfig {
+            database_url: crate::test_support::database_url(),
+            max_connections: 4,
+            min_connections: 0,
+            read_database_url: None,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let state = Arc::new(production);
+        let floor: String = sqlx::query_scalar("SHOW buzz.created_at_floor")
+            .fetch_one(state.db.pool())
+            .await
+            .unwrap();
+        assert_eq!(
+            floor,
+            buzz_db::replica_fence::CREATED_AT_FLOOR_SECS.to_string()
+        );
+        assert_eq!(
+            state
+                .db
+                .pending_default_channel_announcement_at(
+                    community,
+                    channel,
+                    &member.public_key().to_bytes(),
+                    pending.token,
+                )
+                .await
+                .unwrap(),
+            Some(old_version)
+        );
+
+        let since = nostr::Timestamp::now().as_secs();
+        let (conn, mut frames) = test_conn(&tenant, &member);
+        state.conn_manager.register(
+            conn.conn_id,
+            conn.send_tx.clone(),
+            conn.ctrl_tx.clone(),
+            conn.terminal_ctrl_tx.clone(),
+            None,
+            conn.cancel.clone(),
+            community,
+            conn.backpressure_count.clone(),
+            conn.subscriptions.clone(),
+            conn.grace_limit,
+            conn.community_control.clone(),
+        );
+        state
+            .conn_manager
+            .set_authenticated_pubkey(conn.conn_id, member.public_key().to_bytes().to_vec());
+        state.sub_registry.register_scoped(
+            community,
+            conn.conn_id,
+            "fresh-notices".into(),
+            vec![serde_json::from_value(serde_json::json!({
+                "kinds": [44100], "#p": [member_hex], "since": since,
+            }))
+            .unwrap()],
+            None,
+        );
+        auto_join_default_channels(&tenant, &state, &member_hex, None).await;
+        assert_eq!(
+            member_joined_notice_count(&state, community, channel, &member_hex).await,
+            0,
+            "historical optional messages must not bypass the production timestamp floor"
+        );
+        assert!(
+            state
+                .db
+                .pending_default_channel_join(community, &member_hex)
+                .await
+                .unwrap()
+                .is_none(),
+            "an old optional chat notice must not strand fresh discovery recovery"
+        );
+        let frame = tokio::time::timeout(Duration::from_secs(5), frames.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let axum::extract::ws::Message::Text(text) = frame else {
+            panic!("expected notice frame")
+        };
+        let notice: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(notice[0], "EVENT");
+        assert_eq!(notice[2]["kind"], 44100);
+        assert!(notice[2]["created_at"].as_u64().unwrap() >= since);
+        state.db.pool().close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
     async fn admission_progresses_while_an_earlier_default_channel_followup_is_held() {
         use crate::handlers::group_state_postgres_tests::{create_channel, edit_channel};
         use buzz_db::relay_invite::{ClaimCredential, ClaimRequest, EnqueuedClaim};
