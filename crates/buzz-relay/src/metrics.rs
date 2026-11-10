@@ -706,6 +706,52 @@ pub(crate) fn readiness_test_recorder_with_idle_timeout(
     (recorder, handle)
 }
 
+/// Request-local event classification shared by the bridge and outer timer.
+/// Unknown covers failures before parsing; invalid covers malformed event JSON.
+#[derive(Clone, Default)]
+pub struct EventMetricType(std::sync::Arc<std::sync::atomic::AtomicU32>);
+
+impl EventMetricType {
+    pub(crate) fn parsed(&self, kind: u32) {
+        use buzz_core::kind::*;
+
+        self.0.store(
+            match kind {
+                KIND_STREAM_MESSAGE
+                | KIND_STREAM_MESSAGE_V2
+                | KIND_TEXT_NOTE
+                | KIND_FORUM_POST
+                | KIND_FORUM_COMMENT => 1,
+                KIND_PROFILE | KIND_AGENT_PROFILE => 2,
+                KIND_IA_ARCHIVE_REQUEST => 3,
+                KIND_IA_UNARCHIVE_REQUEST => 4,
+                KIND_REACTION => 5,
+                KIND_TYPING_INDICATOR => 6,
+                _ => 7,
+            },
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
+    pub(crate) fn invalid(&self) {
+        self.0.store(8, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn label(&self) -> &'static str {
+        match self.0.load(std::sync::atomic::Ordering::Relaxed) {
+            1 => "message",
+            2 => "profile_update",
+            3 => "identity_archive",
+            4 => "identity_unarchive",
+            5 => "reaction",
+            6 => "typing",
+            7 => "other",
+            8 => "invalid",
+            _ => "unknown",
+        }
+    }
+}
+
 /// Axum middleware that records CAKE framework HTTP metrics.
 ///
 /// Emits:
@@ -718,7 +764,8 @@ pub(crate) fn readiness_test_recorder_with_idle_timeout(
 /// - `code`: exact HTTP status code (e.g. "200", "404")
 /// - `caller`: upstream service from Istio `x-envoy-downstream-service-cluster` header
 /// - `action`: matched route pattern (e.g. `/api/channels/{channel_id}`)
-pub async fn track_metrics(req: Request, next: Next) -> Response {
+/// - `event_type`: bounded event class on `/events` only; `unknown` before parsing
+pub async fn track_metrics(mut req: Request, next: Next) -> Response {
     // Use the route pattern (e.g. "/api/channels/{channel_id}"), NOT the raw URI.
     // Falling back to raw URI on 404s would create unbounded cardinality from scanners.
     let path = req
@@ -754,12 +801,21 @@ pub async fn track_metrics(req: Request, next: Next) -> Response {
         .unwrap_or("unknown")
         .to_owned();
 
+    // Share classification without reading, buffering or re-parsing the body.
+    // The bridge sets it only when its normal admission/parse path reaches it.
+    let event_type = (action == "/events").then(EventMetricType::default);
+    if let Some(event_type) = &event_type {
+        req.extensions_mut().insert(event_type.clone());
+    }
     let start = Instant::now();
     let response = next.run(req).await;
     let status = response.status().as_u16().to_string();
     let latency_ms = start.elapsed().as_secs_f64() * 1000.0;
 
-    let labels = [("code", status), ("caller", caller), ("action", action)];
+    let mut labels = vec![("code", status), ("caller", caller), ("action", action)];
+    if let Some(event_type) = event_type {
+        labels.push(("event_type", event_type.label().to_owned()));
+    }
     metrics::counter!("http_requests_total", &labels).increment(1);
     metrics::histogram!("http_request_latency_ms", &labels).record(latency_ms);
 
@@ -771,6 +827,130 @@ mod contract_tests {
     use std::time::Duration;
 
     const OUTCOMES: [&str; 4] = ["success", "timeout", "error", "cancelled"];
+
+    #[test]
+    fn event_type_labels_are_bounded_and_request_local() {
+        let classification = super::EventMetricType::default();
+        assert_eq!(classification.label(), "unknown");
+        for (kind, expected) in [
+            (0, "profile_update"),
+            (10100, "profile_update"),
+            (1, "message"),
+            (9, "message"),
+            (40002, "message"),
+            (45001, "message"),
+            (45003, "message"),
+            (9035, "identity_archive"),
+            (9036, "identity_unarchive"),
+            (7, "reaction"),
+            (20002, "typing"),
+            (u32::MAX, "other"),
+        ] {
+            classification.parsed(kind);
+            assert_eq!(classification.label(), expected);
+        }
+        classification.invalid();
+        assert_eq!(classification.label(), "invalid");
+        assert_eq!(super::EventMetricType::default().label(), "unknown");
+    }
+
+    #[tokio::test]
+    async fn event_metrics_time_full_request_and_preserve_early_failures() {
+        use axum::{body::Body, middleware, routing::post, Extension, Router};
+        use tower::ServiceExt;
+        let app =
+            Router::new()
+                .route(
+                    "/events",
+                    post(
+                        |Extension(classification): Extension<super::EventMetricType>,
+                         body: String| async move {
+                            if body == "archive" {
+                                classification.parsed(buzz_core::kind::KIND_IA_ARCHIVE_REQUEST);
+                            } else {
+                                classification.invalid();
+                            }
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                            axum::http::StatusCode::BAD_REQUEST
+                        },
+                    ),
+                )
+                .route("/query", post(|| async { axum::http::StatusCode::OK }))
+                .layer(middleware::from_fn(
+                    |req: axum::extract::Request, next: axum::middleware::Next| async move {
+                        if req.headers().contains_key("x-refuse-admission") {
+                            return axum::http::StatusCode::UNAUTHORIZED.into_response();
+                        }
+                        next.run(req).await
+                    },
+                ))
+                .layer(middleware::from_fn(super::track_metrics));
+        use axum::response::IntoResponse;
+        let (recorder, handle) = super::readiness_test_recorder();
+        for body in ["archive", "invalid", "auth-refused"] {
+            let mut request = axum::http::Request::builder().uri("/events").method("POST");
+            if body == "auth-refused" {
+                request = request.header("x-refuse-admission", "true");
+            }
+            let request = request.body(Body::from(body)).expect("request");
+            let _guard = metrics::set_default_local_recorder(&recorder);
+            let response = app.clone().oneshot(request).await.expect("response");
+            assert_eq!(
+                response.status(),
+                if body == "auth-refused" {
+                    axum::http::StatusCode::UNAUTHORIZED
+                } else {
+                    axum::http::StatusCode::BAD_REQUEST
+                }
+            );
+        }
+        let exported = handle.render();
+        for label in ["identity_archive", "invalid", "unknown"] {
+            assert!(
+                exported
+                    .lines()
+                    .any(|line| line.starts_with("http_requests_total{")
+                        && line.contains(&format!("event_type=\"{label}\""))
+                        && line.ends_with(" 1")),
+                "{exported}"
+            );
+            assert!(
+                exported
+                    .lines()
+                    .any(|line| line.starts_with("http_request_latency_ms_count{")
+                        && line.contains(&format!("event_type=\"{label}\""))),
+                "{exported}"
+            );
+        }
+        for label in ["identity_archive", "invalid"] {
+            let sum: f64 = sample_value(
+                &exported,
+                "http_request_latency_ms_sum{",
+                &[("event_type", label)],
+            )
+            .parse()
+            .expect("latency sample");
+            assert!(sum >= 10.0, "the whole handler must be timed: {exported}");
+        }
+        let _guard = metrics::set_default_local_recorder(&recorder);
+        app.oneshot(
+            axum::http::Request::builder()
+                .uri("/query")
+                .method("POST")
+                .body(Body::empty())
+                .expect("query request"),
+        )
+        .await
+        .expect("query response");
+        let exported = handle.render();
+        let query = exported
+            .lines()
+            .find(|line| {
+                line.starts_with("http_requests_total{") && line.contains("action=\"/query\"")
+            })
+            .expect("non-event request counted");
+        assert!(!query.contains("event_type="), "{query}");
+    }
 
     #[test]
     fn redis_ping_probe_exports_bucketed_round_trips_and_failures() {
