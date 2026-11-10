@@ -894,7 +894,12 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 89);
+        assert_eq!(migrations.len(), 90);
+        assert_eq!(migrations[89].version, 90);
+        assert!(migrations[89]
+            .sql
+            .as_str()
+            .contains("DROP FUNCTION enforce_community_write_fence();"));
         assert!(migrations[83]
             .sql
             .as_str()
@@ -1452,13 +1457,17 @@ mod postgres_tests {
         assert!(deletion.contains("CREATE FUNCTION enforce_community_tombstone"));
         let retirement = migrations
             .iter()
-            .find(|migration| migration.version == 66)
-            .expect("retirement migration 0066")
+            .find(|migration| migration.version == 88)
+            .expect("retirement migration 0088")
             .sql
             .as_str();
         assert!(retirement.starts_with("SET LOCAL lock_timeout = '5s';"));
         // Tables added after docs/database.md Rule 1 never had a fence.
-        let never_fenced = ["nip_fi_profile_heads", "media_uploaders", "media_publications"];
+        let never_fenced = [
+            "nip_fi_profile_heads",
+            "media_uploaders",
+            "media_publications",
+        ];
         for table in crate::deletion::EXPECTED_SCOPED_TABLES
             .iter()
             .filter(|table| !never_fenced.contains(table))
@@ -1467,7 +1476,7 @@ mod postgres_tests {
                 retirement.contains(&format!(
                     "DROP TRIGGER IF EXISTS community_write_fence_{table} ON {table};"
                 )),
-                "0066 must retire the universal fence on {table}"
+                "0088 must retire the universal fence on {table}"
             );
         }
         for signature in [
