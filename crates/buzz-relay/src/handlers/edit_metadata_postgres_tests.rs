@@ -868,7 +868,8 @@ async fn seed_agent(
 /// the sender's own agents is a member (Channels for IFC): opening it would
 /// change the admission rules under anyone else who joined. Someone else's
 /// agent counts as someone else, and so does the sender's owner when an
-/// agent sends. Removed members do not count. A refused change stores
+/// agent sends. Removed members count too: their posts stay in the
+/// history that opening would publish. A refused change stores
 /// nothing and leaves the channel private. Mutation: drop the check in
 /// `apply_channel_metadata_event` → the refused rows open → RED.
 #[tokio::test]
