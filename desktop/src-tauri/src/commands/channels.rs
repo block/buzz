@@ -18,7 +18,9 @@ use crate::{
 // the directory cursor, the not-modified hash, and member-count collection)
 // lives in the `fetch` submodule to keep this file under the per-file line cap.
 mod fetch;
-use fetch::{compute_channels_hash, fetch_channels, DirectoryScope};
+use fetch::{
+    compute_channels_hash, fetch_channels, fetch_open_directory_from_writer, DirectoryScope,
+};
 
 const STARTER_CHANNEL_NAMESPACE: uuid::Uuid = uuid::uuid!("3ce33bea-8f09-5f1b-9c85-8a7d2659e6b0");
 
@@ -146,15 +148,15 @@ fn profile_join_pubkeys(members: &[crate::models::ChannelMemberInfo], limit: usi
 #[tauri::command]
 pub async fn get_channel_members(
     channel_id: String,
+    read_your_writes: Option<bool>,
     state: State<'_, AppState>,
 ) -> Result<ChannelMembersResponse, String> {
     let events = query_relay(
         &state,
-        &[serde_json::json!({
-            "kinds": [39002],
-            "#d": [channel_id],
-            "limit": 1
-        })],
+        &[channel_members_filter(
+            &channel_id,
+            read_your_writes.unwrap_or(false),
+        )],
     )
     .await?;
 
@@ -230,6 +232,17 @@ fn is_duplicate_channel_rejection(error: &str) -> bool {
     error.contains("relay rejected event:") && error.contains("duplicate: channel already exists")
 }
 
+/// A starter create the relay will refuse on every retry, with HTTP 400:
+/// - another listed channel, archived ones included, holds its name:
+///   `invalid: an open channel named "general" already exists`;
+/// - an archived channel holds its deterministic id, which the relay checks
+///   before duplicates: `invalid: channel is archived`.
+fn is_permanent_starter_rejection(error: &str) -> bool {
+    error.starts_with("relay returned 400")
+        && ((error.contains("invalid: an open channel named") && error.contains("already exists"))
+            || error.contains("invalid: channel is archived"))
+}
+
 fn is_matching_starter_channel(channel: &ChannelInfo, spec: &StarterChannelSpec) -> bool {
     normalize_channel_name(&channel.name) == normalize_channel_name(spec.name)
         && channel.channel_type == "stream"
@@ -237,18 +250,26 @@ fn is_matching_starter_channel(channel: &ChannelInfo, spec: &StarterChannelSpec)
         && channel.archived_at.is_none()
 }
 
-fn has_all_starter_channels(channels: &[ChannelInfo]) -> bool {
-    STARTER_CHANNELS.iter().all(|spec| {
-        channels
-            .iter()
-            .any(|channel| is_matching_starter_channel(channel, spec))
-    })
+/// Every starter that was not skipped has a usable channel.
+fn has_all_starter_channels(
+    channels: &[ChannelInfo],
+    skipped: &std::collections::HashSet<&str>,
+) -> bool {
+    STARTER_CHANNELS
+        .iter()
+        .filter(|spec| !skipped.contains(spec.slug))
+        .all(|spec| {
+            channels
+                .iter()
+                .any(|channel| is_matching_starter_channel(channel, spec))
+        })
 }
 
 async fn ensure_starter_channel_memberships(
     state: &AppState,
     keys: &nostr::Keys,
     channels: &mut [ChannelInfo],
+    changed_channel_ids: &mut Vec<String>,
 ) -> Result<(), String> {
     for spec in STARTER_CHANNELS {
         let Some(channel) = channels
@@ -266,9 +287,39 @@ async fn ensure_starter_channel_memberships(
         let builder = events::build_join(channel_uuid)?;
         submit_event_with_keys(builder, state, keys, None).await?;
         channel.is_member = true;
+        changed_channel_ids.push(channel.id.clone());
     }
 
     Ok(())
+}
+
+/// Build the kind:39002 member-list filter. Display reads stay replica-eligible;
+/// `read_your_writes` is for callers acting on state this client just wrote.
+fn channel_members_filter(channel_id: &str, read_your_writes: bool) -> serde_json::Value {
+    let mut filter = serde_json::json!({
+        "kinds": [39002],
+        "#d": [channel_id],
+        "limit": 1,
+    });
+    if read_your_writes {
+        // Read-your-writes: pin to the writer so a lagging replica cannot hide
+        // the member list the relay wrote for a just-created channel.
+        filter["consistency"] = serde_json::json!("strong");
+    }
+    filter
+}
+
+/// Build the kind:39000 filter that reads back channel metadata by ID right
+/// after this client created or edited those channels.
+pub(crate) fn channel_metadata_filter(channel_ids: &[impl serde::Serialize]) -> serde_json::Value {
+    serde_json::json!({
+        "kinds": [39000],
+        "#d": channel_ids,
+        "limit": channel_ids.len(),
+        // Read-your-writes: a lagging read replica would miss the metadata the
+        // relay just wrote, so pin this read to the writer.
+        "consistency": "strong",
+    })
 }
 
 async fn fetch_starter_channel_metadata(
@@ -279,15 +330,7 @@ async fn fetch_starter_channel_metadata(
         return Ok(Vec::new());
     }
 
-    let events = query_relay(
-        state,
-        &[serde_json::json!({
-            "kinds": [39000],
-            "#d": channel_ids,
-            "limit": channel_ids.len(),
-        })],
-    )
-    .await?;
+    let events = query_relay(state, &[channel_metadata_filter(channel_ids)]).await?;
 
     events
         .iter()
@@ -343,15 +386,7 @@ pub async fn create_channel(
     state.mark_pending_owned_channel(&creator_pubkey, &channel_uuid_string);
 
     // Re-fetch the canonical metadata event to return ChannelInfo.
-    let events = query_relay(
-        &state,
-        &[serde_json::json!({
-            "kinds": [39000],
-            "#d": [channel_uuid_string],
-            "limit": 1
-        })],
-    )
-    .await?;
+    let events = query_relay(&state, &[channel_metadata_filter(&[&channel_uuid_string])]).await?;
 
     events
         .first()
@@ -360,17 +395,52 @@ pub async fn create_channel(
         .ok_or_else(|| "channel created but metadata not yet available".to_string())
 }
 
+/// Starter channels plus every channel this call created or joined. Any
+/// failure is reported in `error` rather than as the command error, so the
+/// writes accepted before it are still reported; the frontend rethrows
+/// `error` unchanged.
+#[derive(serde::Serialize)]
+pub struct StarterChannelsResult {
+    channels: Vec<ChannelInfo>,
+    changed_channel_ids: Vec<String>,
+    error: Option<String>,
+}
+
 #[tauri::command]
 pub async fn ensure_starter_channels(
     state: State<'_, AppState>,
+) -> Result<StarterChannelsResult, String> {
+    let mut changed_channel_ids = Vec::new();
+    let (channels, error) =
+        match ensure_starter_channels_inner(&state, &mut changed_channel_ids).await {
+            Ok(channels) => (channels, None),
+            Err(error) => (Vec::new(), Some(error)),
+        };
+    Ok(StarterChannelsResult {
+        channels,
+        changed_channel_ids,
+        error,
+    })
+}
+
+async fn ensure_starter_channels_inner(
+    state: &AppState,
+    changed_channel_ids: &mut Vec<String>,
 ) -> Result<Vec<ChannelInfo>, String> {
-    let mut existing_channels =
-        fetch_channels(&state, DirectoryScope::IncludeOpenDirectory).await?;
-    let relay_scope = relay_api_base_url_with_override(&state);
+    let mut existing_channels = fetch_channels(state, DirectoryScope::IncludeOpenDirectory).await?;
+    let relay_scope = relay_api_base_url_with_override(state);
     let creator_keys = state.signing_keys()?;
     let creator_pubkey = creator_keys.public_key().to_hex();
     let mut starter_ids = Vec::with_capacity(STARTER_CHANNELS.len());
     let mut created_ids = std::collections::HashSet::new();
+    // Starters whose deterministic id the relay already holds.
+    let mut duplicate_starters = Vec::new();
+    // Starters that can never be created here: their name or id belongs to a
+    // channel that cannot serve as the starter, such as an archived one. They
+    // are left out instead of blocking the remaining starters.
+    let mut skipped = std::collections::HashSet::new();
+    // Starters the relay refused for good, waiting on a second look.
+    let mut refused = Vec::new();
 
     for spec in STARTER_CHANNELS {
         if existing_channels
@@ -382,7 +452,6 @@ pub async fn ensure_starter_channels(
 
         let channel_uuid = starter_channel_uuid(&relay_scope, spec.slug);
         let channel_uuid_string = channel_uuid.to_string();
-        starter_ids.push(channel_uuid_string.clone());
         let builder = events::build_create_channel(
             channel_uuid,
             spec.name,
@@ -392,20 +461,52 @@ pub async fn ensure_starter_channels(
             None,
         )?;
 
-        match submit_event_with_keys(builder, &state, &creator_keys, None).await {
+        match submit_event_with_keys(builder, state, &creator_keys, None).await {
             Ok(_) => {
                 state.mark_pending_owned_channel(&creator_pubkey, &channel_uuid_string);
                 created_ids.insert(channel_uuid_string.clone());
+                changed_channel_ids.push(channel_uuid_string.clone());
             }
             Err(error) if is_duplicate_channel_rejection(&error) => {
                 state.mark_pending_owned_channel(&creator_pubkey, &channel_uuid_string);
+                duplicate_starters.push((spec, channel_uuid_string.clone()));
+            }
+            // A retry would be refused the same way. The name may still
+            // belong to a live starter the first read missed, such as one
+            // created since, so it is looked up again below.
+            Err(error) if is_permanent_starter_rejection(&error) => {
+                refused.push(spec);
+                continue;
             }
             Err(error) => return Err(error),
+        }
+        starter_ids.push(channel_uuid_string);
+    }
+
+    if !refused.is_empty() {
+        // Read from the writer: the relay refused the create against the
+        // writer's state, and a lagging replica could miss the same starter
+        // again.
+        let mut directory = fetch_open_directory_from_writer(state).await?;
+        for spec in refused {
+            match directory
+                .iter()
+                .position(|channel| is_matching_starter_channel(channel, spec))
+            {
+                Some(index) => {
+                    let channel = directory.swap_remove(index);
+                    existing_channels.retain(|existing| existing.id != channel.id);
+                    existing_channels.push(channel);
+                }
+                None => {
+                    skipped.insert(spec.slug);
+                }
+            }
         }
     }
 
     for _ in 0..3 {
-        let metadata = fetch_starter_channel_metadata(&state, &starter_ids).await?;
+        let metadata = fetch_starter_channel_metadata(state, &starter_ids).await?;
         for mut channel in metadata {
             if created_ids.contains(&channel.id) {
                 channel.is_member = true;
@@ -417,21 +518,47 @@ pub async fn ensure_starter_channels(
                 existing_channels.push(channel);
             }
         }
-        if has_all_starter_channels(&existing_channels) {
+        // A live channel at the starter id that cannot serve as the starter
+        // (renamed or retyped) stays that way, so stop waiting on it.
+        for (spec, id) in &duplicate_starters {
+            if existing_channels
+                .iter()
+                .any(|channel| channel.id == *id && !is_matching_starter_channel(channel, spec))
+            {
+                state.clear_pending_owned_channel(&creator_pubkey, id);
+                skipped.insert(spec.slug);
+            }
+        }
+        if has_all_starter_channels(&existing_channels, &skipped) {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
     }
 
-    if !has_all_starter_channels(&existing_channels) {
-        existing_channels = fetch_channels(&state, DirectoryScope::IncludeOpenDirectory).await?;
+    if !has_all_starter_channels(&existing_channels, &skipped) {
+        existing_channels = fetch_channels(state, DirectoryScope::IncludeOpenDirectory).await?;
+        // A starter id the relay holds but still does not serve, even from
+        // the writer, most likely belongs to a channel this user cannot see,
+        // such as a deleted one.
+        for (spec, id) in &duplicate_starters {
+            if !existing_channels.iter().any(|channel| channel.id == *id) {
+                state.clear_pending_owned_channel(&creator_pubkey, id);
+                skipped.insert(spec.slug);
+            }
+        }
     }
 
-    if !has_all_starter_channels(&existing_channels) {
+    if !has_all_starter_channels(&existing_channels, &skipped) {
         return Err("starter channels created but metadata not yet available".to_string());
     }
 
-    ensure_starter_channel_memberships(&state, &creator_keys, &mut existing_channels).await?;
+    ensure_starter_channel_memberships(
+        state,
+        &creator_keys,
+        &mut existing_channels,
+        changed_channel_ids,
+    )
+    .await?;
     Ok(existing_channels)
 }
 
@@ -465,15 +592,7 @@ pub async fn update_channel(
     )?;
     submit_event(builder, &state).await?;
 
-    let events = query_relay(
-        &state,
-        &[serde_json::json!({
-            "kinds": [39000],
-            "#d": [input.channel_id],
-            "limit": 1
-        })],
-    )
-    .await?;
+    let events = query_relay(&state, &[channel_metadata_filter(&[&input.channel_id])]).await?;
 
     events
         .first()
@@ -629,3 +748,6 @@ pub async fn leave_channel(channel_id: String, state: State<'_, AppState>) -> Re
 #[cfg(test)]
 #[path = "channels_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod starter_tests;

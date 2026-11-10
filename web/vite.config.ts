@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import { tanstackRouter } from "@tanstack/router-plugin/vite";
@@ -17,6 +18,23 @@ export default defineConfig({
       ],
     }),
     react(),
+    {
+      name: "invite-preview-media",
+      generateBundle() {
+        for (const [source, output] of [
+          ["buzz-invite-loop.mp4", "buzz-invite-loop-v1.mp4"],
+          ["buzz-invite-poster.png", "buzz-invite-poster-v1.png"],
+        ]) {
+          this.emitFile({
+            type: "asset",
+            fileName: `assets/invite-preview/${output}`,
+            source: readFileSync(
+              new URL(`../previews/invite-video/${source}`, import.meta.url),
+            ),
+          });
+        }
+      },
+    },
   ],
   resolve: {
     alias: {

@@ -383,7 +383,6 @@ test("starter matching prefers running, then deployed instances", () => {
   );
 });
 
-
 test("filterWelcomeTeamAgentsMissingFromChannel skips same-named agent members", () => {
   const localFizz = makeAgent({ name: "Fizz", pubkey: PUB_A });
   const localHoney = makeAgent({ name: "Honey", pubkey: PUB_B });
@@ -431,7 +430,7 @@ test("filterWelcomeTeamAgentsMissingFromChannel skips pubkeys already present", 
     filterWelcomeTeamAgentsMissingFromChannel([localFizz], members),
     [],
   );
-
+});
 
 test("owner-only-access policy accepts local Welcome teammates", () => {
   const teammate = makeAgent({
@@ -502,5 +501,4 @@ test("owner-only-access policy accepts provider Welcome teammates", () => {
   });
   assert.equal(welcomeTeammateHasExpectedAccess(teammate, PUB_B, true), true);
   assert.equal(welcomeTeammateHasExpectedAccess(teammate, PUB_B, false), false);
-
 });

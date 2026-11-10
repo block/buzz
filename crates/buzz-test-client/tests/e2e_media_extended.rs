@@ -19,6 +19,17 @@ fn relay_ws_url() -> String {
         .replace("https://", "wss://")
 }
 
+/// Extract the host:port authority from the relay URL for use as the `server` tag.
+fn relay_server_authority() -> String {
+    let url = relay_http_url();
+    url.trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .split('/')
+        .next()
+        .unwrap_or("localhost:3000")
+        .to_string()
+}
+
 fn http_client() -> Client {
     Client::builder()
         .timeout(Duration::from_secs(15))
@@ -28,10 +39,12 @@ fn http_client() -> Client {
 
 fn sign_blossom_auth(keys: &Keys, sha256: &str) -> nostr::Event {
     let now = Timestamp::now().as_secs();
+    let server = relay_server_authority();
     let tags = vec![
         Tag::parse(["t", "upload"]).unwrap(),
         Tag::parse(["x", sha256]).unwrap(),
-        Tag::parse(["expiration", &(now + 300).to_string()]).unwrap(),
+        Tag::parse(["expiration", &(now + 55).to_string()]).unwrap(),
+        Tag::parse(["server", &server]).unwrap(),
     ];
     EventBuilder::new(Kind::from(24242), "Upload test")
         .tags(tags)
@@ -43,10 +56,12 @@ fn sign_blossom_auth(keys: &Keys, sha256: &str) -> nostr::Event {
 /// unconditionally, so round-trip GETs must present one of these.
 fn sign_blossom_get_auth(keys: &Keys, sha256: &str) -> nostr::Event {
     let now = Timestamp::now().as_secs();
+    let server = relay_server_authority();
     let tags = vec![
         Tag::parse(["t", "get"]).unwrap(),
         Tag::parse(["x", sha256]).unwrap(),
-        Tag::parse(["expiration", &(now + 300).to_string()]).unwrap(),
+        Tag::parse(["expiration", &(now + 55).to_string()]).unwrap(),
+        Tag::parse(["server", &server]).unwrap(),
     ];
     EventBuilder::new(Kind::from(24242), "Get test")
         .tags(tags)
@@ -110,6 +125,19 @@ fn tiny_jpeg() -> Vec<u8> {
         0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0xFF, 0xD9,
     ]
+}
+
+/// An 8x8 PNG of random pixels, so every call has its own blob hash.
+/// Publishing a hash leaves a sticky publication marker. Until the hash has a
+/// readable reference (never, if the event is rejected), the relay refuses
+/// uploader previews of it. A blob of its own keeps a publishing test from
+/// reaching the fixed blobs, like `tiny_jpeg`, that other media tests read.
+fn unique_png() -> Vec<u8> {
+    let mut png = Vec::new();
+    image::RgbImage::from_fn(8, 8, |_, _| image::Rgb(rand::random()))
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .expect("encode PNG");
+    png
 }
 
 fn tiny_png() -> Vec<u8> {
@@ -259,7 +287,7 @@ async fn test_auth_wrong_kind() {
         vec![
             Tag::parse(["t", "upload"]).unwrap(),
             Tag::parse(["x", &sha256]).unwrap(),
-            Tag::parse(["expiration", &(now + 300).to_string()]).unwrap(),
+            Tag::parse(["expiration", &(now + 55).to_string()]).unwrap(),
         ],
     );
     let resp = upload_with_auth(&client, &auth, &sha256, &jpeg).await;
@@ -281,7 +309,7 @@ async fn test_auth_missing_t_tag() {
         "Upload test",
         vec![
             Tag::parse(["x", &sha256]).unwrap(),
-            Tag::parse(["expiration", &(now + 300).to_string()]).unwrap(),
+            Tag::parse(["expiration", &(now + 55).to_string()]).unwrap(),
         ],
     );
     let resp = upload_with_auth(&client, &auth, &sha256, &jpeg).await;
@@ -348,7 +376,7 @@ async fn test_auth_empty_content() {
         vec![
             Tag::parse(["t", "upload"]).unwrap(),
             Tag::parse(["x", &sha256]).unwrap(),
-            Tag::parse(["expiration", &(now + 300).to_string()]).unwrap(),
+            Tag::parse(["expiration", &(now + 55).to_string()]).unwrap(),
         ],
     );
     let resp = upload_with_auth(&client, &auth, &sha256, &jpeg).await;
@@ -371,7 +399,7 @@ async fn test_auth_server_tag_mismatch() {
         vec![
             Tag::parse(["t", "upload"]).unwrap(),
             Tag::parse(["x", &sha256]).unwrap(),
-            Tag::parse(["expiration", &(now + 300).to_string()]).unwrap(),
+            Tag::parse(["expiration", &(now + 55).to_string()]).unwrap(),
             Tag::parse(["server", "evil.example.com"]).unwrap(),
         ],
     );
@@ -395,7 +423,7 @@ async fn test_auth_server_tag_correct() {
         vec![
             Tag::parse(["t", "upload"]).unwrap(),
             Tag::parse(["x", &sha256]).unwrap(),
-            Tag::parse(["expiration", &(now + 300).to_string()]).unwrap(),
+            Tag::parse(["expiration", &(now + 55).to_string()]).unwrap(),
             Tag::parse(["server", "localhost:3000"]).unwrap(),
         ],
     );
@@ -643,10 +671,10 @@ async fn test_ws_valid_imeta() {
     let channel_id = channel_uuid.to_string();
     println!("Channel: {channel_id}");
 
-    // Upload a JPEG to get a valid sha256
-    let jpeg = tiny_jpeg();
-    let sha256 = hex::encode(Sha256::digest(&jpeg));
-    let resp = upload(&http, &keys, &jpeg).await;
+    // Upload an image of its own to get a valid sha256
+    let png = unique_png();
+    let sha256 = hex::encode(Sha256::digest(&png));
+    let resp = upload(&http, &keys, &png).await;
     assert_eq!(resp.status(), 200);
 
     // Connect via WebSocket
@@ -660,10 +688,10 @@ async fn test_ws_valid_imeta() {
             Tag::parse(["h", &channel_id]).unwrap(),
             Tag::parse([
                 "imeta",
-                &format!("url http://localhost:3000/media/{sha256}.jpg"),
-                "m image/jpeg",
+                &format!("url http://localhost:3000/media/{sha256}.png"),
+                "m image/png",
                 &format!("x {sha256}"),
-                "size 347",
+                &format!("size {}", png.len()),
             ])
             .unwrap(),
         ])
@@ -678,6 +706,71 @@ async fn test_ws_valid_imeta() {
     );
     println!("✅ WS valid imeta accepted");
 
+    client.disconnect().await.unwrap();
+}
+
+/// An imeta `thumb` naming an image's WebP thumbnail passes the storage check.
+#[tokio::test]
+#[ignore]
+async fn test_ws_imeta_webp_thumb() {
+    use buzz_test_client::BuzzTestClient;
+
+    let keys = Keys::generate();
+    let http = http_client();
+    let channel_id = uuid::Uuid::new_v4().to_string();
+    let create_event = EventBuilder::new(Kind::from(9007), "")
+        .tags(vec![
+            Tag::parse(["h", &channel_id]).unwrap(),
+            Tag::parse(["name", &format!("ws-imeta-webp-{channel_id}")]).unwrap(),
+            Tag::parse(["channel_type", "stream"]).unwrap(),
+            Tag::parse(["visibility", "open"]).unwrap(),
+        ])
+        .sign_with_keys(&keys)
+        .unwrap();
+    let create_resp = http
+        .post(format!("{}/events", relay_http_url()))
+        .header("X-Pubkey", keys.public_key().to_hex())
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&create_event).unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert!(create_resp.status().is_success(), "channel creation failed");
+
+    // A random color keeps the bytes, and so the sha, unique per run.
+    let [r, g, b]: [u8; 3] = rand::random();
+    let mut png = Vec::new();
+    image::RgbaImage::from_pixel(8, 8, image::Rgba([r, g, b, 0]))
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .unwrap();
+    let sha256 = hex::encode(Sha256::digest(&png));
+    let resp = upload(&http, &keys, &png).await;
+    assert_eq!(resp.status(), 200);
+
+    let mut client = BuzzTestClient::connect(&relay_ws_url(), &keys)
+        .await
+        .unwrap();
+    let event = EventBuilder::new(Kind::from(9), "transparent image via ws")
+        .tags(vec![
+            Tag::parse(["h", &channel_id]).unwrap(),
+            Tag::parse([
+                "imeta",
+                &format!("url http://localhost:3000/media/{sha256}.png"),
+                "m image/png",
+                &format!("x {sha256}"),
+                &format!("size {}", png.len()),
+                &format!("thumb http://localhost:3000/media/{sha256}.thumb.webp"),
+            ])
+            .unwrap(),
+        ])
+        .sign_with_keys(&keys)
+        .unwrap();
+    let ok = client.send_event(event).await.unwrap();
+    assert!(
+        ok.accepted,
+        "WebP imeta thumb must be accepted: {:?}",
+        ok.message
+    );
     client.disconnect().await.unwrap();
 }
 
@@ -801,4 +894,129 @@ async fn test_ws_invalid_imeta_missing_fields() {
     println!("✅ WS incomplete imeta rejected: {:?}", ok.message);
 
     client.disconnect().await.unwrap();
+}
+
+/// Run against an isolated relay with BUZZ_MEDIA_READ_MODE=enforce.
+#[tokio::test]
+#[ignore = "requires a relay with channel media enforcement"]
+async fn test_private_channel_media_revocation() {
+    use buzz_test_client::BuzzTestClient;
+    let owner = Keys::generate();
+    let member = Keys::generate();
+    let survivor = Keys::generate();
+    let mut owner_ws = BuzzTestClient::connect(&relay_ws_url(), &owner)
+        .await
+        .unwrap();
+    let mut member_ws = BuzzTestClient::connect(&relay_ws_url(), &member)
+        .await
+        .unwrap();
+    let survivor_ws = BuzzTestClient::connect(&relay_ws_url(), &survivor)
+        .await
+        .unwrap();
+    let channel = uuid::Uuid::new_v4().to_string();
+    let create = EventBuilder::new(Kind::Custom(9007), "")
+        .tags([
+            Tag::parse(["h", &channel]).unwrap(),
+            Tag::parse(["name", &format!("private-{channel}")]).unwrap(),
+            Tag::parse(["channel_type", "stream"]).unwrap(),
+            Tag::parse(["visibility", "private"]).unwrap(),
+        ])
+        .sign_with_keys(&owner)
+        .unwrap();
+    let ok = owner_ws.send_event(create).await.unwrap();
+    assert!(ok.accepted, "create: {}", ok.message);
+    for keys in [&member, &survivor] {
+        let add = EventBuilder::new(Kind::Custom(9000), "")
+            .tags([
+                Tag::parse(["h", &channel]).unwrap(),
+                Tag::parse(["p", &keys.public_key().to_hex()]).unwrap(),
+            ])
+            .sign_with_keys(&owner)
+            .unwrap();
+        let ok = owner_ws.send_event(add).await.unwrap();
+        assert!(ok.accepted, "add: {}", ok.message);
+    }
+    let http = http_client();
+    let bytes = format!("private attachment {channel}").into_bytes();
+    let hash = hex::encode(Sha256::digest(&bytes));
+    let response = upload(&http, &owner, &bytes).await;
+    assert_eq!(response.status(), 200);
+    let descriptor: serde_json::Value = response.json().await.unwrap();
+    let url = descriptor["url"].as_str().unwrap();
+    let post = EventBuilder::new(Kind::Custom(9), "private media")
+        .tags([
+            Tag::parse(["h", &channel]).unwrap(),
+            Tag::parse([
+                "imeta",
+                &format!("url {url}"),
+                &format!("x {hash}"),
+                "m application/octet-stream",
+                &format!("size {}", bytes.len()),
+            ])
+            .unwrap(),
+        ])
+        .sign_with_keys(&owner)
+        .unwrap();
+    let ok = owner_ws.send_event(post).await.unwrap();
+    assert!(ok.accepted, "post: {}", ok.message);
+    let auth = || blossom_auth_header(&sign_blossom_get_auth(&member, &hash));
+    let response = http
+        .get(url)
+        .header("Authorization", auth())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.headers()["cache-control"], "private, no-store");
+    let remove = EventBuilder::new(Kind::Custom(9001), "")
+        .tags([
+            Tag::parse(["h", &channel]).unwrap(),
+            Tag::parse(["p", &member.public_key().to_hex()]).unwrap(),
+        ])
+        .sign_with_keys(&owner)
+        .unwrap();
+    let ok = owner_ws.send_event(remove).await.unwrap();
+    assert!(ok.accepted, "remove: {}", ok.message);
+    for (method, range) in [
+        (reqwest::Method::GET, None),
+        (reqwest::Method::HEAD, None),
+        (reqwest::Method::GET, Some("bytes=0-3")),
+        (reqwest::Method::GET, Some("bytes=999999-")),
+    ] {
+        let mut request = http
+            .request(method.clone(), url)
+            .header("Authorization", auth());
+        if let Some(range) = range {
+            request = request.header("Range", range);
+        }
+        let response = request.send().await.unwrap();
+        assert_eq!(response.status(), 404, "{method} {range:?}");
+        assert!(!response.headers().contains_key("content-range"));
+    }
+    for keys in [&owner, &survivor] {
+        let response = http
+            .get(url)
+            .header(
+                "Authorization",
+                blossom_auth_header(&sign_blossom_get_auth(keys, &hash)),
+            )
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200, "positive control");
+    }
+    let copy = EventBuilder::new(
+        Kind::Metadata,
+        serde_json::json!({"picture":url}).to_string(),
+    )
+    .sign_with_keys(&member)
+    .unwrap();
+    let ok = member_ws.send_event(copy).await.unwrap();
+    assert!(
+        !ok.accepted && ok.message.contains("attachment is not accessible"),
+        "copy: {ok:?}"
+    );
+    owner_ws.disconnect().await.unwrap();
+    member_ws.disconnect().await.unwrap();
+    survivor_ws.disconnect().await.unwrap();
 }

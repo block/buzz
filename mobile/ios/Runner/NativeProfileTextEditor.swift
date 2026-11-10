@@ -28,7 +28,7 @@ final class NativeProfileTextEditorCoordinator: NSObject,
     _ call: FlutterMethodCall,
     result: @escaping FlutterResult
   ) {
-    guard call.method == "present" else {
+    guard call.method == "present" || call.method == "presentChannel" || call.method == "presentProject" else {
       result(FlutterMethodNotImplemented)
       return
     }
@@ -66,6 +66,14 @@ final class NativeProfileTextEditorCoordinator: NSObject,
         containerBackgroundColor: UIColor(argb: containerBackgroundArgb.uint32Value),
         containerCornerRadius: CGFloat(containerCornerRadius.doubleValue),
         allowUnchangedSubmission: allowUnchangedSubmission,
+        channelDescription: call.method == "presentChannel" ? arguments["description"] as? String : nil,
+        originalName: arguments["originalName"] as? String,
+        originalDescription: arguments["originalDescription"] as? String,
+        canEditDetails: arguments["canEditDetails"] as? Bool ?? true,
+        canEditCanvas: arguments["canEditCanvas"] as? Bool ?? false,
+        canvasContent: arguments["canvasContent"] as? String ?? "",
+        canvasLoaded: arguments["canvasLoaded"] as? Bool ?? false,
+        isProjectEditor: call.method == "presentProject",
         result: result
       )
     }
@@ -82,6 +90,14 @@ final class NativeProfileTextEditorCoordinator: NSObject,
     containerBackgroundColor: UIColor,
     containerCornerRadius: CGFloat,
     allowUnchangedSubmission: Bool,
+    channelDescription: String?,
+    originalName: String?,
+    originalDescription: String?,
+    canEditDetails: Bool,
+    canEditCanvas: Bool,
+    canvasContent: String,
+    canvasLoaded: Bool,
+    isProjectEditor: Bool,
     result: @escaping FlutterResult
   ) {
     guard presentedController == nil else {
@@ -118,6 +134,14 @@ final class NativeProfileTextEditorCoordinator: NSObject,
       containerBackgroundColor: containerBackgroundColor,
       containerCornerRadius: containerCornerRadius,
       allowUnchangedSubmission: allowUnchangedSubmission,
+      channelDescription: channelDescription,
+      originalName: originalName,
+      originalDescription: originalDescription,
+      canEditDetails: canEditDetails,
+      canEditCanvas: canEditCanvas,
+      canvasContent: canvasContent,
+      canvasLoaded: canvasLoaded,
+      isProjectEditor: isProjectEditor,
       onCancel: { [weak self] in self?.finish(value: nil) },
       onSet: { [weak self] value in self?.finish(value: value) }
     )
@@ -129,6 +153,10 @@ final class NativeProfileTextEditorCoordinator: NSObject,
       navigationController.modalPresentationStyle = .formSheet
     }
 
+    if channelDescription != nil {
+      navigationController.sheetPresentationController?.detents = [.large()]
+    }
+
     pendingResult = result
     presentedController = navigationController
     presenter.present(navigationController, animated: true) { [weak self] in
@@ -137,7 +165,7 @@ final class NativeProfileTextEditorCoordinator: NSObject,
   }
 
   @MainActor
-  private func finish(value: String?) {
+  private func finish(value: Any?) {
     guard let controller = presentedController else {
       resolve(value: value)
       return
@@ -154,7 +182,7 @@ final class NativeProfileTextEditorCoordinator: NSObject,
   }
 
   @MainActor
-  private func resolve(value: String?) {
+  private func resolve(value: Any?) {
     let result = pendingResult
     pendingResult = nil
     presentedController = nil
@@ -201,7 +229,20 @@ private final class NativeProfileTextEditorViewController:
   private let containerCornerRadius: CGFloat
   private let allowUnchangedSubmission: Bool
   private let onCancel: () -> Void
-  private let onSet: (String) -> Void
+  private let onSet: (Any) -> Void
+  private let channelDescription: String?
+  private let originalName: String?
+  private let originalDescription: String?
+  private let canEditDetails: Bool
+  private let canEditCanvas: Bool
+  private let canvasContent: String
+  private let canvasLoaded: Bool
+  private var hasCanvas: Bool {
+    canvasLoaded && !canvasContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+  }
+  private let isProjectEditor: Bool
+  private var hasFocusedEditor = false
+  private var isChannelEditor: Bool { channelDescription != nil }
 
   private lazy var textField: UITextField = {
     let field = UITextField()
@@ -211,7 +252,9 @@ private final class NativeProfileTextEditorViewController:
     field.font = .preferredFont(forTextStyle: .body)
     field.adjustsFontForContentSizeCategory = true
     field.clearButtonMode = .whileEditing
-    field.returnKeyType = .done
+    field.returnKeyType = isChannelEditor ? .next : .done
+    field.isEnabled = canEditDetails
+    field.accessibilityLabel = placeholder
     field.autocapitalizationType = .sentences
     field.delegate = self
     field.addTarget(self, action: #selector(textDidChange), for: .editingChanged)
@@ -221,7 +264,9 @@ private final class NativeProfileTextEditorViewController:
   private lazy var textView: UITextView = {
     let view = UITextView()
     view.translatesAutoresizingMaskIntoConstraints = false
-    view.text = initialValue
+    view.text = channelDescription ?? initialValue
+    view.isEditable = canEditDetails
+    view.accessibilityLabel = isChannelEditor ? "Description" : placeholder
     view.font = .preferredFont(forTextStyle: .body)
     view.adjustsFontForContentSizeCategory = true
     view.backgroundColor = .clear
@@ -235,7 +280,7 @@ private final class NativeProfileTextEditorViewController:
   private lazy var placeholderLabel: UILabel = {
     let label = UILabel()
     label.translatesAutoresizingMaskIntoConstraints = false
-    label.text = placeholder
+    label.text = isChannelEditor ? "Description" : placeholder
     label.font = .preferredFont(forTextStyle: .body)
     label.adjustsFontForContentSizeCategory = true
     label.textColor = .placeholderText
@@ -252,8 +297,16 @@ private final class NativeProfileTextEditorViewController:
     containerBackgroundColor: UIColor,
     containerCornerRadius: CGFloat,
     allowUnchangedSubmission: Bool,
+    channelDescription: String?,
+    originalName: String?,
+    originalDescription: String?,
+    canEditDetails: Bool,
+    canEditCanvas: Bool,
+    canvasContent: String,
+    canvasLoaded: Bool,
+    isProjectEditor: Bool,
     onCancel: @escaping () -> Void,
-    onSet: @escaping (String) -> Void
+    onSet: @escaping (Any) -> Void
   ) {
     self.initialValue = initialValue
     self.placeholder = placeholder
@@ -262,6 +315,14 @@ private final class NativeProfileTextEditorViewController:
     self.containerBackgroundColor = containerBackgroundColor
     self.containerCornerRadius = containerCornerRadius
     self.allowUnchangedSubmission = allowUnchangedSubmission
+    self.channelDescription = channelDescription
+    self.originalName = originalName
+    self.originalDescription = originalDescription
+    self.canEditDetails = canEditDetails
+    self.canEditCanvas = canEditCanvas
+    self.canvasContent = canvasContent
+    self.canvasLoaded = canvasLoaded
+    self.isProjectEditor = isProjectEditor
     self.onCancel = onCancel
     self.onSet = onSet
     super.init(style: .insetGrouped)
@@ -279,25 +340,14 @@ private final class NativeProfileTextEditorViewController:
     tableView.backgroundColor = pageBackgroundColor
     tableView.keyboardDismissMode = .interactive
     tableView.alwaysBounceVertical = false
-    let navigationAppearance = UINavigationBarAppearance()
-    navigationAppearance.configureWithOpaqueBackground()
-    navigationAppearance.backgroundColor = pageBackgroundColor
-    navigationAppearance.shadowColor = UIColor.separator.withAlphaComponent(0.2)
-    let scrollEdgeAppearance = UINavigationBarAppearance()
-    scrollEdgeAppearance.configureWithOpaqueBackground()
-    scrollEdgeAppearance.backgroundColor = pageBackgroundColor
-    scrollEdgeAppearance.shadowColor = .clear
-    navigationItem.standardAppearance = navigationAppearance
-    navigationItem.scrollEdgeAppearance = scrollEdgeAppearance
-    navigationItem.compactAppearance = navigationAppearance
-    navigationItem.compactScrollEdgeAppearance = scrollEdgeAppearance
+    NavigationTopEdge.configure(tableView, item: navigationItem)
     navigationItem.leftBarButtonItem = UIBarButtonItem(
       barButtonSystemItem: .cancel,
       target: self,
       action: #selector(cancelTapped)
     )
     navigationItem.rightBarButtonItem = UIBarButtonItem(
-      title: "Set",
+      title: isProjectEditor ? "Create" : (isChannelEditor ? "Save" : "Set"),
       style: .done,
       target: self,
       action: #selector(setTapped)
@@ -307,6 +357,8 @@ private final class NativeProfileTextEditorViewController:
 
   override func viewDidAppear(_ animated: Bool) {
     super.viewDidAppear(animated)
+    guard canEditDetails && !hasFocusedEditor else { return }
+    hasFocusedEditor = true
     if multiline {
       textView.becomeFirstResponder()
     } else {
@@ -319,7 +371,17 @@ private final class NativeProfileTextEditorViewController:
   }
 
   private var hasUnsavedChanges: Bool {
-    allowUnchangedSubmission
+    if isProjectEditor {
+      return !currentValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+    if isChannelEditor {
+      return allowUnchangedSubmission
+        || currentValue.trimmingCharacters(in: .whitespacesAndNewlines)
+          != (originalName ?? initialValue).trimmingCharacters(in: .whitespacesAndNewlines)
+        || textView.text.trimmingCharacters(in: .whitespacesAndNewlines)
+          != (originalDescription ?? channelDescription ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    return allowUnchangedSubmission
       || currentValue.trimmingCharacters(in: .whitespacesAndNewlines)
       != initialValue.trimmingCharacters(in: .whitespacesAndNewlines)
   }
@@ -338,7 +400,12 @@ private final class NativeProfileTextEditorViewController:
   }
 
   private func updateNavigation() {
-    navigationItem.rightBarButtonItem?.isEnabled = hasUnsavedChanges
+    navigationItem.rightBarButtonItem?.isEnabled = canEditDetails && hasUnsavedChanges
+      && (!isChannelEditor || !canonicalChannelName.isEmpty)
+      && (!isProjectEditor || (
+        !currentValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+          && currentValue.count <= 120
+      ))
     navigationController?.isModalInPresentation = hasUnsavedChanges
     placeholderLabel.isHidden = !textView.text.isEmpty
   }
@@ -365,17 +432,63 @@ private final class NativeProfileTextEditorViewController:
     present(alert, animated: true)
   }
 
+  private var canonicalChannelName: String {
+    currentValue.trimmingCharacters(in: .whitespacesAndNewlines)
+      .replacingOccurrences(of: "^#+", with: "", options: .regularExpression)
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+  }
+
   @objc private func setTapped() {
-    guard hasUnsavedChanges else { return }
-    onSet(currentValue)
+    guard canEditDetails && hasUnsavedChanges else { return }
+    if isProjectEditor {
+      let name = currentValue.trimmingCharacters(in: .whitespacesAndNewlines)
+      guard !name.isEmpty, currentValue.count <= 120 else { return }
+      onSet(name)
+    } else if isChannelEditor {
+      guard !canonicalChannelName.isEmpty else { return }
+      onSet(["action": "save", "name": canonicalChannelName, "description": textView.text ?? ""])
+    } else {
+      onSet(currentValue)
+    }
+  }
+
+  @objc private func editCanvasTapped() {
+    guard canEditCanvas else { return }
+    onSet(["action": "canvas", "name": currentValue, "description": textView.text ?? ""])
+  }
+
+  private func removeCanvasTapped() {
+    guard canEditCanvas && hasCanvas else { return }
+    let alert = UIAlertController(
+      title: "Remove canvas?",
+      message: "This removes the canvas content for everyone in this channel.",
+      preferredStyle: .alert
+    )
+    alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+    alert.addAction(UIAlertAction(title: "Remove", style: .destructive) { [weak self] _ in
+      guard let self else { return }
+      self.onSet(["action": "removeCanvas", "name": self.currentValue, "description": self.textView.text ?? ""])
+    })
+    present(alert, animated: true)
+  }
+
+  override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
+    tableView.deselectRow(at: indexPath, animated: true)
+    guard isChannelEditor && canEditCanvas else { return }
+    if indexPath.section == 2 { editCanvasTapped() }
+    if indexPath.section == 3 { removeCanvasTapped() }
   }
 
   func textFieldShouldReturn(_ textField: UITextField) -> Bool {
-    setTapped()
+    if isChannelEditor {
+      textView.becomeFirstResponder()
+    } else {
+      setTapped()
+    }
     return false
   }
 
-  override func numberOfSections(in tableView: UITableView) -> Int { 1 }
+  override func numberOfSections(in tableView: UITableView) -> Int { isChannelEditor ? (hasCanvas && canEditCanvas ? 4 : 3) : 1 }
 
   override func tableView(
     _ tableView: UITableView,
@@ -386,7 +499,8 @@ private final class NativeProfileTextEditorViewController:
     _ tableView: UITableView,
     heightForRowAt indexPath: IndexPath
   ) -> CGFloat {
-    multiline ? 132 : 52
+    if isChannelEditor && indexPath.section >= 2 { return UITableView.automaticDimension }
+    return (isChannelEditor ? indexPath.section == 1 : multiline && indexPath.section == 0) ? 132 : 52
   }
 
   override func tableView(
@@ -399,7 +513,29 @@ private final class NativeProfileTextEditorViewController:
     cell.layer.cornerRadius = containerCornerRadius
     cell.layer.cornerCurve = .continuous
     cell.clipsToBounds = true
-    if multiline {
+    if isChannelEditor && indexPath.section >= 2 {
+      var content = cell.defaultContentConfiguration()
+      content.textProperties.font = .preferredFont(forTextStyle: .body)
+      if indexPath.section == 3 {
+        content.text = "Remove Canvas"
+        content.textProperties.color = .systemRed
+      } else if hasCanvas {
+        content.text = "Canvas"
+        content.secondaryText = String(canvasContent.prefix(600))
+        content.secondaryTextProperties.font = .preferredFont(forTextStyle: .body)
+        content.secondaryTextProperties.numberOfLines = 4
+        cell.accessoryType = canEditCanvas ? .disclosureIndicator : .none
+        cell.accessibilityHint = canEditCanvas ? "Opens the canvas editor" : nil
+      } else {
+        content.text = canvasLoaded ? "Add Canvas" : "Retry loading canvas"
+        content.textProperties.color = canEditCanvas ? .label : .secondaryLabel
+        cell.accessoryType = canEditCanvas ? .disclosureIndicator : .none
+      }
+      cell.contentConfiguration = content
+      cell.selectionStyle = canEditCanvas ? .default : .none
+      cell.isUserInteractionEnabled = canEditCanvas
+      cell.accessibilityTraits = canEditCanvas ? .button : .staticText
+    } else if isChannelEditor ? indexPath.section == 1 : multiline {
       cell.contentView.addSubview(textView)
       textView.addSubview(placeholderLabel)
       NSLayoutConstraint.activate([

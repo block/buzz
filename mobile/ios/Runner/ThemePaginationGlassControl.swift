@@ -28,15 +28,15 @@ final class ThemePaginationGlassControlFactory: NSObject, FlutterPlatformViewFac
 }
 
 private final class ThemePaginationControl: UIControl {
-  private static let maximumVisibleDots = 7
-  private static let fullDotSize: CGFloat = 6
+  private static let fullDotSize = ThemePaginationGeometry.dotSize
   private static let selectedDotSize: CGFloat = 10
-  private static let dotSpacing: CGFloat = 6
   private let glassView: UIVisualEffectView
   private let dotsContainer = UIView()
+  private var glassHeightConstraint: NSLayoutConstraint?
   private var dots: [UIView] = []
   private var totalCount = 1
   private var selectedIndex = 0
+  private var scrub = ThemePaginationScrub()
   private var activeColor = UIColor.label
   private var inactiveColor = UIColor.secondaryLabel.withAlphaComponent(0.32)
   var onSelectionChanged: ((Int) -> Void)?
@@ -53,6 +53,7 @@ private final class ThemePaginationControl: UIControl {
 
     backgroundColor = .clear
     isOpaque = false
+    isAccessibilityElement = true
     accessibilityTraits = [.adjustable]
     accessibilityLabel = "Theme"
 
@@ -67,11 +68,13 @@ private final class ThemePaginationControl: UIControl {
     dotsContainer.isUserInteractionEnabled = false
     glassView.contentView.addSubview(dotsContainer)
 
+    let glassHeightConstraint = glassView.heightAnchor.constraint(equalToConstant: 30)
+    self.glassHeightConstraint = glassHeightConstraint
     NSLayoutConstraint.activate([
       glassView.leadingAnchor.constraint(equalTo: leadingAnchor),
       glassView.trailingAnchor.constraint(equalTo: trailingAnchor),
       glassView.centerYAnchor.constraint(equalTo: centerYAnchor),
-      glassView.heightAnchor.constraint(equalToConstant: 30),
+      glassHeightConstraint,
       dotsContainer.leadingAnchor.constraint(equalTo: glassView.contentView.leadingAnchor, constant: 12),
       dotsContainer.trailingAnchor.constraint(equalTo: glassView.contentView.trailingAnchor, constant: -12),
       dotsContainer.topAnchor.constraint(equalTo: glassView.contentView.topAnchor),
@@ -108,6 +111,15 @@ private final class ThemePaginationControl: UIControl {
       inactiveColor = Self.color(fromARGB: value.uint32Value)
     }
 
+    accessibilityLabel = arguments["accessibilityLabel"] as? String ?? accessibilityLabel
+    if let height = arguments["containerHeight"] as? NSNumber {
+      glassHeightConstraint?.constant = max(10, CGFloat(height.doubleValue))
+      setNeedsLayout()
+    }
+    if let isRTL = arguments["isRTL"] as? Bool {
+      semanticContentAttribute = isRTL ? .forceRightToLeft : .forceLeftToRight
+    }
+    if count != totalCount { scrub.end() }
     totalCount = count
     if count != dots.count {
       rebuildDots(count: count)
@@ -126,11 +138,39 @@ private final class ThemePaginationControl: UIControl {
     select(index: max(selectedIndex - 1, 0))
   }
 
+  private var geometry: ThemePaginationGeometry {
+    ThemePaginationGeometry(
+      count: totalCount, selected: selectedIndex, width: dotsContainer.bounds.width,
+      isRTL: effectiveUserInterfaceLayoutDirection == .rightToLeft
+    )
+  }
+
   @objc private func handleGesture(_ recognizer: UIGestureRecognizer) {
-    guard totalCount > 0 else { return }
-    let location = recognizer.location(in: glassView)
-    let progress = max(0, min(0.999_999, location.x / max(1, glassView.bounds.width)))
-    select(index: Int(progress * CGFloat(totalCount)))
+    guard dotsContainer.bounds.width > 0 else { return }
+    let location = recognizer.location(in: dotsContainer)
+    if recognizer is UIPanGestureRecognizer {
+      switch recognizer.state {
+      case .began:
+        scrub.begin(geometry)
+      case .changed:
+        guard scrub.geometry != nil else { return }
+      case .ended:
+        let page = scrub.page(at: location.x, current: geometry)
+        scrub.end()
+        select(index: page)
+        updateDots(animated: true)
+        return
+      case .cancelled, .failed:
+        scrub.end()
+        updateDots(animated: true)
+        return
+      default:
+        return
+      }
+      select(index: scrub.page(at: location.x, current: geometry))
+    } else if recognizer.state == .ended {
+      select(index: geometry.page(at: location.x))
+    }
   }
 
   private func select(index: Int) {
@@ -163,20 +203,13 @@ private final class ThemePaginationControl: UIControl {
 
   private func updateDots(animated: Bool) {
     guard !dots.isEmpty, dotsContainer.bounds.width > 0 else { return }
-    let visibleCount = min(totalCount, Self.maximumVisibleDots)
-    let maximumStart = max(0, totalCount - visibleCount)
-    let centerSlot = visibleCount / 2
-    let windowStart = min(max(0, selectedIndex - centerSlot), maximumStart)
-    let windowEnd = windowStart + visibleCount - 1
-    let hasEarlierDots = windowStart > 0
-    let hasLaterDots = windowEnd < totalCount - 1
-    let pitch = Self.fullDotSize + Self.dotSpacing
-    let trackWidth = CGFloat(visibleCount) * Self.fullDotSize
-      + CGFloat(max(0, visibleCount - 1)) * Self.dotSpacing
-    let trackOrigin = (dotsContainer.bounds.width - trackWidth) / 2
+    let geometry = scrub.geometry ?? self.geometry
+    let visibleCount = geometry.visibleCount
+    let hasEarlierDots = geometry.isRTL ? geometry.hasLaterDots : geometry.hasEarlierDots
+    let hasLaterDots = geometry.isRTL ? geometry.hasEarlierDots : geometry.hasLaterDots
     let changes = {
       for (page, dot) in self.dots.enumerated() {
-        let slot = page - windowStart
+        let slot = geometry.slot(for: page)
         let isVisible = (0..<visibleCount).contains(slot)
         var diameter = Self.fullDotSize
         if page == self.selectedIndex {
@@ -191,7 +224,7 @@ private final class ThemePaginationControl: UIControl {
           diameter = 4
         }
         dot.center = CGPoint(
-          x: trackOrigin + Self.fullDotSize / 2 + CGFloat(slot) * pitch,
+          x: geometry.centerX(for: page),
           y: self.dotsContainer.bounds.midY
         )
         dot.alpha = isVisible ? 1 : 0

@@ -9,7 +9,6 @@ import {
 import { toast } from "sonner";
 
 import { useAgentWorking } from "@/features/agents/agentWorkingSignal";
-import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
 import {
   mergeObserverEventWindows,
   observerEventScrollId,
@@ -26,7 +25,10 @@ import { useAnchoredScroll } from "@/features/messages/ui/useAnchoredScroll";
 import { useStableArrayShallow } from "@/shared/hooks/useStableReference";
 import { cancelManagedAgentTurn } from "@/shared/api/agentControl";
 import { awaitCancelTurnOutcome } from "@/features/agents/lib/cancelTurnOutcome";
-import { subscribeControlResults } from "@/features/agents/observerRelayStore";
+import {
+  ensureRelayObserverSubscription,
+  subscribeControlResults,
+} from "@/features/agents/observerRelayStore";
 import type { Channel } from "@/shared/api/types";
 import { useEscapeKey } from "@/shared/hooks/useEscapeKey";
 import { useIsThreadPanelOverlay } from "@/shared/hooks/use-mobile";
@@ -98,7 +100,7 @@ export function AgentSessionThreadPanel({
   widthPx,
   transparentChrome = false,
 }: AgentSessionThreadPanelProps) {
-  const isLive = isManagedAgentActive(agent);
+  const isLive = agent.status === "running" || agent.status === "deployed";
   const isOverlay = useIsThreadPanelOverlay();
   const sessionChannelId = channelId ?? channel?.id ?? null;
   // Unified working signal, scoped to this panel's channel (or all channels
@@ -255,8 +257,14 @@ export function AgentSessionThreadPanel({
         channelId: sessionChannelId,
         subscribe: (listener) =>
           subscribeControlResults(agent.pubkey, listener),
-        sendCancel: () =>
-          cancelManagedAgentTurn(agent.pubkey, sessionChannelId, requestId),
+        sendCancel: async () => {
+          await ensureRelayObserverSubscription();
+          await cancelManagedAgentTurn(
+            agent.pubkey,
+            sessionChannelId,
+            requestId,
+          );
+        },
         scheduleTimeout: (onTimeout) => {
           const timeout = window.setTimeout(onTimeout, 8_000);
           return () => window.clearTimeout(timeout);

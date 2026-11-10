@@ -1,5 +1,17 @@
 [advisories]
 ignore = [
+    # SQLite's crafted database/WAL disclosure requires opening files supplied
+    # by an attacker. In this workspace SQLite is only mesh-llm-log-store's
+    # private local log database, through the examples-only buzz-mesh-smoke
+    # dev-dependencies; it is not linked into the relay. mesh-llm v0.76.2
+    # requires rusqlite ^0.40, so libsqlite3-sys 0.39 is not yet selectable.
+    # Remove when mesh-llm moves to rusqlite 0.41; bans below fence this path.
+    { id = "RUSTSEC-2026-0459", reason = "mesh smoke harness private local log database only; no untrusted database/WAL import; upstream rusqlite ^0.40 prevents patched SQLite" },
+    # rmcp 1.8 is used only by buzz-agent, with default-features=false and
+    # client + transport-child-process. Neither affected HTTP client transport
+    # is compiled. All rmcp 3 consumers use the patched 3.9.0 lockfile entry.
+    # Remove on buzz-agent's rmcp 3 migration; the ban below fences consumers.
+    { id = "RUSTSEC-2026-0462", reason = "rmcp 1.8 only in buzz-agent's subprocess client; vulnerable Streamable HTTP transport features disabled; rmcp 3 updated to 3.9.0" },
     # instant 0.1.13 — unmaintained crate. Transitive dep: nostr → instant.
     # Will be resolved when nostr crate updates its dependencies.
     { id = "RUSTSEC-2024-0384", reason = "transitive dep via nostr; no upstream fix available" },
@@ -15,6 +27,41 @@ ignore = [
     # remove these when upstream catches up.
     { id = "RUSTSEC-2026-0194", reason = "transitive via rust-s3 and mesh-llm→plist; trusted-input XML only; no upstream fix available yet" },
     { id = "RUSTSEC-2026-0195", reason = "transitive via rust-s3 and mesh-llm→plist; trusted-input XML only; no upstream fix available yet" },
+    # unsafe-libyaml 0.2.11 — unmaintained (repository archived 2024-03-25), not a
+    # vulnerability report. Transitive dep: serde_yaml → unsafe-libyaml. The serde_yaml_ng
+    # fork uses the same crate, so removing it means migrating YAML parsing in
+    # buzz-agent, buzz-persona, buzz-relay, buzz-workflow and desktop.
+    { id = "RUSTSEC-2024-0449", reason = "transitive via serde_yaml; unmaintained, not vulnerable; removal needs a YAML parser migration" },
+    # NetEQ =0.8.3 declares ringbuf but its published Rust sources never use it,
+    # so Consumer::skip/clear and their panic-unsafe Drop path are unreachable.
+    # NetEQ 0.9.1 still declares ringbuf 0.3; ringbuf itself is fixed in 0.5.2.
+    # Keep the exact NetEQ pin and the wrapper ban below together. Re-audit or
+    # remove this exception when NetEQ removes/updates the unused dependency.
+    { id = "RUSTSEC-2026-0293", reason = "unused dependency of audited, exactly pinned neteq 0.8.3; no Rust references to ringbuf; other consumers forbidden by bans.deny" },
+    # zip 8.6.0 < 9: extraction keeps setuid/setgid bits (0367), creates
+    # symlinks that escape the destination (0368), applies permissions through
+    # symlinks (0369), and aborts the process when sizing a symlink target from
+    # an attacker-declared length (0429). Only path: buzz-mesh-smoke → mesh-llm v0.76.2 →
+    # mesh-llm-host-runtime / mesh-llm-plugin-manager / mesh-llm-system → zip 8.
+    # mesh-llm's zip readers copy entries manually and never call
+    # ZipArchive::extract; recheck if that changes. Remove on the mesh-llm bump
+    # that ships Mesh-LLM/mesh-llm#2471.
+    { id = "RUSTSEC-2026-0367", reason = "zip 8.6.0 via buzz-mesh-smoke → mesh-llm v0.76.2; manual entry copy, never extracts; fix in unreleased mesh-llm#2471" },
+    { id = "RUSTSEC-2026-0368", reason = "zip 8.6.0 via buzz-mesh-smoke → mesh-llm v0.76.2; manual entry copy, never extracts; fix in unreleased mesh-llm#2471" },
+    { id = "RUSTSEC-2026-0369", reason = "zip 8.6.0 via buzz-mesh-smoke → mesh-llm v0.76.2; manual entry copy, never extracts; fix in unreleased mesh-llm#2471" },
+    { id = "RUSTSEC-2026-0429", reason = "zip 8.6.0 via buzz-mesh-smoke → mesh-llm v0.76.2; manual entry copy, never extracts; fix in unreleased mesh-llm#2471" },
+    # zbus 5 D-Bus crates (zvariant, zbus_names, zvariant_derive) — unmaintained,
+    # not vulnerable. Only path: buzz-mesh-smoke → mesh-llm → keyring 4 →
+    # zbus-secret-service-keyring-store / secret-service 5 → zbus 5.
+    # Remove when mesh-llm's keyring stack moves off zbus 5.
+    { id = "RUSTSEC-2026-0370", reason = "zvariant via buzz-mesh-smoke → mesh-llm → keyring 4 → secret-service 5 → zbus 5; unmaintained, not vulnerable" },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names via buzz-mesh-smoke → mesh-llm → keyring 4 → secret-service 5 → zbus 5; unmaintained, not vulnerable" },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive via buzz-mesh-smoke → mesh-llm → keyring 4 → secret-service 5 → zbus 5; unmaintained, not vulnerable" },
+    # webpki-roots 0.26.11 bundles no certificates: it re-exports webpki-roots 1,
+    # which the lockfile pins at the patched 1.0.10. tokio-tungstenite 0.28/0.29
+    # (via axum and nostr-sdk) still require ^0.26, and no patched 0.26 release
+    # exists. Remove when those consumers move to webpki-roots 1.
+    { id = "RUSTSEC-2026-0381", reason = "only webpki-roots 0.26.11 remains: a shim re-exporting the patched 1.0.10; required by tokio-tungstenite 0.28/0.29" },
 ]
 
 [licenses]
@@ -90,3 +137,15 @@ ignore = true
 [bans]
 multiple-versions = "warn"
 wildcards = "allow"
+deny = [
+    { name = "rmcp", version = "<3.9.0", wrappers = ["buzz-agent"], reason = "only buzz-agent's subprocess-only rmcp 1 client may use an older version; HTTP consumers must use patched rmcp" },
+    { name = "rusqlite", version = "<0.41", wrappers = ["mesh-llm-log-store"], reason = "older SQLite is limited to mesh smoke's private local log store" },
+    { name = "libsqlite3-sys", version = "<0.39", wrappers = ["rusqlite"], reason = "older SQLite is limited to the guarded rusqlite dependency" },
+    { name = "ringbuf", version = "<0.5.2", wrappers = ["neteq"], reason = "only audited NetEQ may declare this unused vulnerable dependency; all other consumers must use a patched release" },
+]
+
+# The rmcp 1 advisory exception is valid only without HTTP transports.
+[[bans.features]]
+name = "rmcp"
+version = "<3.9.0"
+allow = ["client", "transport-child-process", "transport-async-rw"]

@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   envVarsClearingManagedApiKey,
   envVarsWithoutKey,
+  envVarsWithoutKeyCaseInsensitive,
 } from "./providerEnvVarUpdates.ts";
 
 test("envVarsWithoutKey removes a present key", () => {
@@ -45,5 +46,28 @@ test("envVarsClearingManagedApiKey is a no-op when the managed key is shared or 
   assert.equal(
     envVarsClearingManagedApiKey(noManaged, "", "openai"),
     noManaged,
+  );
+});
+
+test("envVarsWithoutKeyCaseInsensitive removes every case-colliding alias in one pass", () => {
+  // Windows Command case-folds env names, so a persisted state can hold both
+  // the canonical key and a mixed-case duplicate; a runtime switch must clear
+  // all of them or a survivor keeps shadowing the projected value on launch.
+  const next = envVarsWithoutKeyCaseInsensitive(
+    {
+      GOOSE_THINKING_EFFORT: "high",
+      goose_thinking_effort: "low",
+      KEEP: "x",
+    },
+    "GOOSE_THINKING_EFFORT",
+  );
+  assert.deepEqual(next, { KEEP: "x" });
+});
+
+test("envVarsWithoutKeyCaseInsensitive returns the same reference when no alias matches", () => {
+  const current = { KEEP: "x" };
+  assert.equal(
+    envVarsWithoutKeyCaseInsensitive(current, "GOOSE_THINKING_EFFORT"),
+    current,
   );
 });

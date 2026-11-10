@@ -134,9 +134,27 @@ async fn list_relay_agents_for_selection(
         .await?
         .ok_or_else(|| "relay agent membership authority is unavailable".to_string())?;
 
-    // Membership is the authoritative and bounded candidate source. Only
-    // channels visible to this identity are read, and only bot-role p-tags can
-    // drive the downstream managed-policy and owner-profile lookups.
+    // Owned identities are relay state, even when this Desktop has never run
+    // them or they have not joined a channel yet. Owner-authored coordinates
+    // seed discovery only; the agent's signed NIP-OA profile still has to
+    // authenticate ownership below. Scope selection queries to the exact keys.
+    let mut owned_filter = serde_json::json!({
+        "kinds": [30177],
+        "authors": [&viewer_pubkey],
+    });
+    if let Some(requested_pubkeys) = requested_pubkeys {
+        owned_filter["#d"] = serde_json::json!(requested_pubkeys);
+    }
+    let owned_query = async {
+        query_all_relay_pages(state, owned_filter)
+            .await
+            .map_err(|error| format!("relay owned-agent query failed: {error}"))
+    };
+
+    // Membership remains the authoritative and bounded authorization scope,
+    // visible only to this viewer. Known owned identities can have any
+    // membership role; other candidates must still have explicit bot-role
+    // evidence.
     let mut membership_filter = serde_json::json!({
         "kinds": [39002],
         "authors": [&relay_pubkey],
@@ -145,39 +163,107 @@ async fn list_relay_agents_for_selection(
     if let Some(channel_id) = channel_id {
         membership_filter["#d"] = serde_json::json!([channel_id]);
     }
-    let membership_events = query_all_relay_pages(state, membership_filter)
-        .await
-        .map_err(|error| format!("relay agent channel-membership query failed: {error}"))?;
-    let mut member_agent_channel_ids =
-        nostr_convert::member_agent_channel_ids_from_events(&membership_events, &relay_pubkey);
-    if let Some(requested_pubkeys) = requested_pubkeys {
-        member_agent_channel_ids.retain(|pubkey, _| requested_pubkeys.contains(pubkey));
-    }
-    let candidate_pubkeys: Vec<String> = member_agent_channel_ids.keys().cloned().collect();
-    if candidate_pubkeys.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let directory_filters = exact_author_filters(&candidate_pubkeys, 10100);
-    let profile_filters = exact_author_filters(&candidate_pubkeys, 0);
-    // One semaphore per rebuild caps `/query` requests across this rebuild's
-    // phases, so its runtime-directory and owner-profile phases below stay
-    // within the ceiling even though `try_join!` runs them concurrently.
+    let membership_query = async {
+        query_all_relay_pages(state, membership_filter)
+            .await
+            .map_err(|error| format!("relay agent channel-membership query failed: {error}"))
+    };
+    // One semaphore per rebuild caps batched `/query` requests across this
+    // rebuild's phases, so its runtime-directory and owner-profile phases stay
+    // within the ceiling even though `try_join!` runs them concurrently. The
+    // owned-agent and membership pagers are single sequential request streams
+    // and run outside the semaphore, so the targeted path's ceiling is the
+    // batches plus two.
     let semaphore = tokio::sync::Semaphore::new(RELAY_DIRECTORY_MAX_CONCURRENCY);
-    let (directory_events, profile_events) = tokio::try_join!(
-        query_filter_batches(
-            state,
-            &semaphore,
-            &directory_filters,
-            "relay agent runtime-directory query failed",
-        ),
-        query_filter_batches(
-            state,
-            &semaphore,
-            &profile_filters,
-            "relay agent owner-profile query failed",
-        ),
-    )?;
+    let (member_agent_channel_ids, candidate_pubkeys, directory_events, profile_events) =
+        if let Some(requested_pubkeys) = requested_pubkeys {
+            // Targeted path: the caller already names the candidates, so
+            // neither the owned-agent read nor the membership read gates the
+            // directory/profile fan-out — they all join it, one round-trip
+            // stage instead of three. The owned read is `#d`-scoped to the
+            // requested keys, so it can only ever name candidates already in
+            // this set. Directory, profile, and (below) policy reads may now
+            // issue for requested pubkeys membership excludes — bounded by the
+            // user-typed mention set — but the membership/owner retain on the
+            // final result still drops them, so what is returned is identical.
+            let candidate_pubkeys: Vec<String> = requested_pubkeys.iter().cloned().collect();
+            let directory_filters = exact_author_filters(&candidate_pubkeys, 10100);
+            let profile_filters = exact_author_filters(&candidate_pubkeys, 0);
+            let (owned_events, membership_events, directory_events, profile_events) = tokio::try_join!(
+                owned_query,
+                membership_query,
+                query_filter_batches(
+                    state,
+                    &semaphore,
+                    &directory_filters,
+                    "relay agent runtime-directory query failed",
+                ),
+                query_filter_batches(
+                    state,
+                    &semaphore,
+                    &profile_filters,
+                    "relay agent owner-profile query failed",
+                ),
+            )?;
+            let owned_candidates = nostr_convert::managed_agent_pubkeys_from_events(&owned_events);
+            let mut member_agent_channel_ids = nostr_convert::member_agent_channel_ids_from_events(
+                &membership_events,
+                &relay_pubkey,
+                &owned_candidates,
+            );
+            member_agent_channel_ids.retain(|pubkey, _| requested_pubkeys.contains(pubkey));
+            (
+                member_agent_channel_ids,
+                candidate_pubkeys,
+                directory_events,
+                profile_events,
+            )
+        } else {
+            // Full rebuild: the owned-agent and membership reads *discover* the
+            // candidates, so both must resolve before the batch filters can be
+            // built. Sequential shape retained — this is the autocomplete path,
+            // not the send path.
+            let owned_events = owned_query.await?;
+            let membership_events = membership_query.await?;
+            let owned_candidates = nostr_convert::managed_agent_pubkeys_from_events(&owned_events);
+            let member_agent_channel_ids = nostr_convert::member_agent_channel_ids_from_events(
+                &membership_events,
+                &relay_pubkey,
+                &owned_candidates,
+            );
+            let candidate_pubkeys: Vec<String> = member_agent_channel_ids
+                .keys()
+                .cloned()
+                .chain(owned_candidates)
+                .collect::<std::collections::HashSet<_>>()
+                .into_iter()
+                .collect();
+            if candidate_pubkeys.is_empty() {
+                return Ok(Vec::new());
+            }
+            let directory_filters = exact_author_filters(&candidate_pubkeys, 10100);
+            let profile_filters = exact_author_filters(&candidate_pubkeys, 0);
+            let (directory_events, profile_events) = tokio::try_join!(
+                query_filter_batches(
+                    state,
+                    &semaphore,
+                    &directory_filters,
+                    "relay agent runtime-directory query failed",
+                ),
+                query_filter_batches(
+                    state,
+                    &semaphore,
+                    &profile_filters,
+                    "relay agent owner-profile query failed",
+                ),
+            )?;
+            (
+                member_agent_channel_ids,
+                candidate_pubkeys,
+                directory_events,
+                profile_events,
+            )
+        };
 
     // Only the agent's signed NIP-OA profile can name the owner coordinate to
     // query. Each exact `(owner, d=agent)` filter returns at most one current
@@ -206,7 +292,10 @@ async fn list_relay_agents_for_selection(
         &mut agents,
         crate::managed_agents::owner_only_access_build(),
     );
-    agents.retain(|agent| member_agent_channel_ids.contains_key(&agent.pubkey));
+    agents.retain(|agent| {
+        member_agent_channel_ids.contains_key(&agent.pubkey)
+            || agent.owner_pubkey.as_deref() == Some(viewer_pubkey.as_str())
+    });
     for agent in &mut agents {
         agent.channel_ids = member_agent_channel_ids
             .get(&agent.pubkey)
@@ -569,3 +658,6 @@ mod real_relay_tests {
         assert_eq!(emitted_mentions, vec![agent.public_key().to_hex()]);
     }
 }
+
+#[cfg(test)]
+mod owned_tests;

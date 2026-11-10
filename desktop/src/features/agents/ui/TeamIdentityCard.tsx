@@ -120,8 +120,13 @@ function TeamAvatarRow({
   if (visiblePersonas.length === 0 && overflowCount === 0) {
     return (
       <div className="absolute inset-x-4 top-0 bottom-12 flex items-center justify-center">
-        <div className="flex h-24 w-24 items-center justify-center rounded-[30%] border border-border/65 bg-background/80 text-muted-foreground shadow-xs">
-          <Users className="h-9 w-9" />
+        <div className="relative h-24 w-24 before:rounded-squircle before:absolute before:-inset-px before:bg-border/65 before:content-['']">
+          <div
+            className="relative z-10 flex h-full w-full items-center justify-center rounded-squircle bg-background/80 text-muted-foreground shadow-xs"
+            data-team-empty-avatar="avatar"
+          >
+            <Users className="h-9 w-9" />
+          </div>
         </div>
       </div>
     );
@@ -142,7 +147,7 @@ function TeamAvatarRow({
             className={visiblePersonas.length > 0 ? "-ml-5" : ""}
             style={{ zIndex: stackItemCount }}
           >
-            <span className="flex h-14 w-14 items-center justify-center rounded-[30%] bg-card text-sm font-semibold text-muted-foreground ring-2 ring-card">
+            <span className="flex h-14 w-14 items-center justify-center rounded-squircle bg-card text-sm font-semibold text-muted-foreground ring-2 ring-card">
               +{overflowCount}
             </span>
           </div>
@@ -163,7 +168,7 @@ function TeamAvatarItem({
 
   return (
     <div
-      className={`relative h-14 w-14 before:absolute before:-inset-0.5 before:rounded-[calc(30%+2px)] before:bg-card before:content-[''] ${index > 0 ? "-ml-5" : ""}`}
+      className={`relative h-14 w-14 before:rounded-squircle before:absolute before:-inset-0.5 before:bg-card before:content-[''] ${index > 0 ? "-ml-5" : ""}`}
       data-team-member-avatar="avatar"
       style={{
         zIndex: index + 1,

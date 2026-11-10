@@ -1,14 +1,31 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:http/http.dart' as http;
+import 'package:http/io_client.dart';
+
+/// The default transport. `dart:io` would inflate gzip responses on the
+/// calling isolate, so leave them compressed for the response decoder.
+///
+/// A non-`dart:io` client supplied through `http.runWithClient`, such as a
+/// `MockClient`, is used as is. An `IOClient` is replaced, not closed, since
+/// it may be shared.
+http.Client _gzipPassthroughClient() {
+  final client = http.Client();
+  if (client is! IOClient) return client;
+  return IOClient(HttpClient()..autoUncompress = false);
+}
 
 /// Owns the reusable HTTP transport used for relay `/query` requests.
+///
+/// Requests advertise gzip. A response body may therefore come back
+/// compressed; decode it with `relayResponseText` or `decodeRelayQueryResponse`.
 class RelayHttpQueryClient {
   RelayHttpQueryClient({
     http.Client? client,
     http.Client Function()? clientFactory,
   }) : _injectedClient = client,
-       _clientFactory = clientFactory ?? (() => http.Client());
+       _clientFactory = clientFactory ?? _gzipPassthroughClient;
 
   final http.Client? _injectedClient;
   final http.Client Function() _clientFactory;
@@ -20,14 +37,24 @@ class RelayHttpQueryClient {
     required Map<String, String> headers,
     required List<int> body,
     required Duration timeout,
+    http.Client Function(http.Client, bool Function())? decorate,
   }) async {
     final generation = _injectedClient == null
         ? (_currentGeneration ??= _createGeneration())
         : null;
     generation?.acquire();
+    var active = true;
     try {
-      return await (_injectedClient ?? generation!.client)
-          .post(url, headers: headers, body: body)
+      final request = http.Request('POST', url)
+        ..followRedirects = false
+        ..headers['Accept-Encoding'] = 'gzip'
+        ..headers.addAll(headers)
+        ..bodyBytes = body;
+      final transport = _injectedClient ?? generation!.client;
+      final client = decorate?.call(transport, () => active) ?? transport;
+      return await client
+          .send(request)
+          .then(http.Response.fromStream)
           .timeout(timeout);
     } on TimeoutException {
       if (identical(_currentGeneration, generation)) {
@@ -36,6 +63,66 @@ class RelayHttpQueryClient {
       generation?.retire();
       rethrow;
     } finally {
+      active = false;
+      generation?.release();
+    }
+  }
+
+  /// Sends a non-redirecting request, bounding bytes before buffering or parsing.
+  /// The deadline includes headers and the entire response body.
+  Future<http.Response> sendBounded(
+    http.Request request, {
+    required int maxBytes,
+    required Duration timeout,
+    http.Client Function(http.Client, bool Function())? decorate,
+  }) async {
+    request.followRedirects = false;
+    final generation = _injectedClient == null
+        ? (_currentGeneration ??= _createGeneration())
+        : null;
+    generation?.acquire();
+    StreamIterator<List<int>>? iterator;
+    var finished = false;
+    Future<http.Response> receive() async {
+      final transport = _injectedClient ?? generation!.client;
+      final client = decorate?.call(transport, () => !finished) ?? transport;
+      final response = await client.send(request);
+      if (finished) {
+        await response.stream.listen(null).cancel();
+        throw StateError('Relay request already timed out');
+      }
+      iterator = StreamIterator(response.stream);
+      if ((response.contentLength ?? 0) > maxBytes) {
+        throw const FormatException('Relay response exceeds byte limit');
+      }
+      final bytes = <int>[];
+      while (await iterator!.moveNext()) {
+        final chunk = iterator!.current;
+        if (bytes.length + chunk.length > maxBytes) {
+          throw const FormatException('Relay response exceeds byte limit');
+        }
+        bytes.addAll(chunk);
+      }
+      iterator = null; // An exhausted stream needs no cancellation.
+      return http.Response.bytes(
+        bytes,
+        response.statusCode,
+        headers: response.headers,
+        request: request,
+      );
+    }
+
+    try {
+      return await receive().timeout(timeout);
+    } on TimeoutException {
+      if (identical(_currentGeneration, generation)) {
+        _currentGeneration = null;
+      }
+      generation?.retire();
+      rethrow;
+    } finally {
+      finished = true;
+      if (iterator != null) await iterator!.cancel();
       generation?.release();
     }
   }

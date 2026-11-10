@@ -158,6 +158,27 @@ pub fn verify_invite(
     community: CommunityId,
     code: &str,
 ) -> Result<InvitePayload, InviteError> {
+    verify_invite_at(key, community, code, now_unix(), None)
+}
+
+/// Verify a legacy bearer with the configured absolute invalid-after time.
+/// v2 admission never calls this verifier.
+pub fn verify_invite_with_cutoff(
+    key: &[u8; 32],
+    community: CommunityId,
+    code: &str,
+    invalid_after: Option<u64>,
+) -> Result<InvitePayload, InviteError> {
+    verify_invite_at(key, community, code, now_unix(), invalid_after)
+}
+
+fn verify_invite_at(
+    key: &[u8; 32],
+    community: CommunityId,
+    code: &str,
+    now: u64,
+    invalid_after: Option<u64>,
+) -> Result<InvitePayload, InviteError> {
     if code.len() > MAX_CODE_LEN {
         return Err(InviteError::Malformed);
     }
@@ -178,7 +199,7 @@ pub fn verify_invite(
     let payload: InvitePayload =
         serde_json::from_slice(&payload_bytes).map_err(|_| InviteError::Malformed)?;
 
-    if payload.e < now_unix() {
+    if payload.e < now || invalid_after.is_some_and(|cutoff| now >= cutoff) {
         return Err(InviteError::Expired);
     }
     if payload.c != community.as_uuid().to_string() {
@@ -402,5 +423,43 @@ mod policy_acceptance_tests {
         assert!(verify_policy_acceptance(&key, &receipt, "invite-b", "v1").is_err());
         assert!(verify_policy_acceptance(&key, &receipt, "invite-a", "v2").is_err());
         assert!(verify_policy_acceptance(&[8_u8; 32], &receipt, "invite-a", "v1").is_err());
+    }
+}
+
+#[cfg(test)]
+mod cutoff_tests {
+    use super::*;
+
+    #[test]
+    fn cutoff_never_extends_expiry_and_rejects_at_boundary() {
+        let key = [42; 32];
+        let community = CommunityId::from_uuid(uuid::Uuid::new_v4());
+        let payload = InvitePayload {
+            c: community.to_string(),
+            r: "member".into(),
+            e: 200,
+            n: "fixture".into(),
+        };
+        let bytes = serde_json::to_vec(&payload).unwrap();
+        let code = format!(
+            "{}.{}",
+            URL_SAFE_NO_PAD.encode(&bytes),
+            URL_SAFE_NO_PAD.encode(sign_payload(&key, &bytes))
+        );
+        for (now, cutoff, allowed) in [
+            (100, None, true),
+            (199, None, true),
+            (201, None, false),
+            (99, Some(100), true),
+            (100, Some(100), false),
+            (101, Some(100), false),
+            (201, Some(300), false),
+        ] {
+            assert_eq!(
+                verify_invite_at(&key, community, &code, now, cutoff).is_ok(),
+                allowed,
+                "now={now} cutoff={cutoff:?}"
+            );
+        }
     }
 }
