@@ -38,7 +38,7 @@ class _ErrorView extends StatelessWidget {
       // There is no API token to check. A protected community's Retry gets a
       // fresh token, and its shell banner takes over once sign-in has ended.
       if (error.statusCode == 401) {
-        return "This community didn't accept your sign-in. Try again.";
+        return "This community couldn't authenticate the request. Try again.";
       }
       if (error.statusCode == 403) {
         return 'Access denied.';
