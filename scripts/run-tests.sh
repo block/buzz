@@ -532,6 +532,9 @@ run_unit_tests() {
   run_test_step "buzz-relay binary tests" \
     cargo test -p buzz-relay --bin buzz-relay -- --nocapture
 
+  run_test_step "buzz-relay public invite previews" \
+    cargo test -p buzz-relay --lib invite_preview -- --nocapture
+
   run_test_step "buzz-relay invitation token and cutoff contracts" \
     cargo test -p buzz-relay --lib invite_token:: -- --nocapture
   run_test_step "buzz-relay invitation cutoff configuration" \

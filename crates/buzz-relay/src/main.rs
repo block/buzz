@@ -349,6 +349,7 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         database_url: config.database_url.clone(),
         read_database_url: config.read_database_url.clone(),
         replica_read_max_age_ms: config.replica_read_max_age_ms,
+        replica_fence_probe_interval_ms: config.replica_fence_probe_interval_ms,
         max_connections: config.db_pool_size,
         read_max_connections: config.db_read_pool_size,
         ..DbConfig::default()

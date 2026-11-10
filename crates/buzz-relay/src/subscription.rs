@@ -655,15 +655,6 @@ impl SubscriptionRegistry {
         self.subs.len()
     }
 
-    /// Return every connection with at least one active subscription.
-    pub fn subscribed_connections(&self) -> Vec<ConnId> {
-        self.subs
-            .iter()
-            .filter(|entry| !entry.value().is_empty())
-            .map(|entry| *entry.key())
-            .collect()
-    }
-
     /// Snapshot the number of active subscriptions per community.
     ///
     /// The usage poller sums it into `buzz_total_subscriptions`.

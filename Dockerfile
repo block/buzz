@@ -124,6 +124,7 @@ COPY web/package.json web/
 COPY admin-web/package.json admin-web/
 RUN pnpm install --frozen-lockfile --filter buzz-web --filter buzz-admin-web
 COPY web/ web/
+COPY previews/invite-video/buzz-invite-loop.mp4 previews/invite-video/buzz-invite-poster.png previews/invite-video/
 COPY admin-web/ admin-web/
 RUN pnpm -C web build && pnpm -C admin-web build
 

@@ -187,7 +187,6 @@ async fn connect_and_subscribe(
                     community_id: topic_key.community_id,
                     topic: topic_key.topic,
                     event,
-                    received_at: tokio::time::Instant::now(),
                 };
 
                 if let Err(_e) = broadcast_tx.send(channel_event) {
