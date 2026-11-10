@@ -12,10 +12,11 @@ import 'mention_ranking.dart';
 /// space instead of moving the row under a finger.
 ///
 /// With [restartForNewAgents], the shown rows start over when [ranked]
-/// offers an agent this query and opening have not shown, so an agent that
+/// offers an agent this query and opening have not offered, so an agent that
 /// loads after people filled the list still takes its place ahead of them.
-/// An agent that drops out during a reload keeps its row, marked
-/// unavailable, and its return moves nothing.
+/// Agent rows already shown keep their places across a restart, and one
+/// that drops out during a reload stays, marked unavailable, until it
+/// returns.
 ({List<MentionCandidate> rows, Set<String> unavailable, bool reserveHeight})
 useStableMentionRows(
   List<MentionCandidate> ranked, {
@@ -35,10 +36,21 @@ useStableMentionRows(
           ranked
               .take(mentionSuggestionLimit)
               .any((c) => c.isAgent && !seenAgents.contains(c.pubkey)));
-  final result = stableMentionRows(same ? last.$3 : const [], ranked);
+  // A restart for a new agent keeps the agent rows already shown, so one
+  // whose list is still reloading keeps its place, marked unavailable.
+  final result = stableMentionRows(switch ((same, kept)) {
+    (true, _) => last!.$3,
+    (false, true) => [
+      for (final row in last!.$3)
+        if (row.isAgent) row,
+    ],
+    _ => const [],
+  }, ranked);
+  // Every agent offered this opening counts as seen, shown or past the cap,
+  // so a reload that only reorders them or brings one back moves nothing.
   seenAgents.addAll([
-    for (final row in result.rows)
-      if (row.isAgent) row.pubkey,
+    for (final candidate in ranked)
+      if (candidate.isAgent) candidate.pubkey,
   ]);
   final reserveHeight = pending || (same && last.$4);
   shown.value = (query, opening, result.rows, reserveHeight, seenAgents);

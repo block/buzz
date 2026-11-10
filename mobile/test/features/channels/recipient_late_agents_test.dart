@@ -69,10 +69,10 @@ class _Cache extends UserCacheNotifier {
   Future<bool> preload(List<String> pubkeys) async => true;
 }
 
-/// The viewer's agent list. Each [reload] starts a load that keeps the
-/// earlier list, as a session status change does, until [land].
-class _Owned extends Notifier<int> {
-  final loads = [Completer<List<OwnedAgentDirectoryEntry>>()];
+/// An agent list. Each [reload] starts a load that keeps the earlier list,
+/// as a session status change does, until [land].
+class _Loads<T> extends Notifier<int> {
+  final loads = [Completer<List<T>>()];
 
   @override
   int build() => 0;
@@ -82,16 +82,33 @@ class _Owned extends Notifier<int> {
     state++;
   }
 
-  void land(List<OwnedAgentDirectoryEntry> agents) =>
-      loads.last.complete(agents);
+  void land(List<T> agents) => loads.last.complete(agents);
 }
 
-final _owned = NotifierProvider<_Owned, int>(_Owned.new);
+/// The viewer's own agents.
+final _owned = NotifierProvider<_Loads<OwnedAgentDirectoryEntry>, int>(
+  _Loads.new,
+);
+
+/// Relay directory agents that answer anyone.
+final _shared = NotifierProvider<_Loads<AgentDirectoryEntry>, int>(_Loads.new);
+
+AgentDirectoryEntry _sharedAgent(String pubkey, String name) =>
+    AgentDirectoryEntry(
+      pubkey: pubkey,
+      displayName: name,
+      respondTo: 'anyone',
+      channelIds: const ['crowd'],
+    );
 
 void main() {
   late ProviderContainer container;
 
-  Future<void> open(WidgetTester tester, {bool loadFirst = false}) async {
+  Future<void> open(
+    WidgetTester tester, {
+    bool loadFirst = false,
+    bool sharedLater = false,
+  }) async {
     container = ProviderContainer(
       retry: (_, _) => null,
       overrides: [
@@ -99,7 +116,10 @@ void main() {
         channelsProvider.overrideWith(_Channels.new),
         userCacheProvider.overrideWith(_Cache.new),
         channelMembersProvider('channel').overrideWith((ref) async => []),
-        agentDirectoryProvider.overrideWith((ref) async => const []),
+        agentDirectoryProvider.overrideWith((ref) {
+          final load = ref.watch(_shared);
+          return ref.read(_shared.notifier).loads[load].future;
+        }),
         agentOwnersProvider.overrideWith((ref) async => const {}),
         ownedAgentDirectoryProvider.overrideWith((ref) {
           final load = ref.watch(_owned);
@@ -110,6 +130,7 @@ void main() {
         ),
       ],
     );
+    if (!sharedLater) container.read(_shared.notifier).land(const []);
     if (loadFirst) {
       container.listen(ownedAgentDirectoryProvider, (_, _) {});
       container.read(_owned.notifier).land(const []);
@@ -133,7 +154,8 @@ void main() {
     await tester.pumpAndSettle();
   }
 
-  _Owned owned() => container.read(_owned.notifier);
+  _Loads<OwnedAgentDirectoryEntry> owned() => container.read(_owned.notifier);
+  _Loads<AgentDirectoryEntry> shared() => container.read(_shared.notifier);
 
   /// Closes the sheet and lets its pending timers run.
   Future<void> close(WidgetTester tester) async {
@@ -236,6 +258,15 @@ void main() {
       await tester.pumpAndSettle();
       expect(rows(tester), shown);
     }
+    // A reload that only reorders the agents moves nothing either.
+    owned().reload();
+    await tester.pumpAndSettle();
+    owned().land([
+      ...many.take(54),
+      OwnedAgentDirectoryEntry(pubkey: many.last.pubkey, displayName: 'Aa'),
+    ]);
+    await tester.pumpAndSettle();
+    expect(rows(tester), shown);
     await tester.drag(
       find.byKey(const ValueKey('add-channel-members-results')),
       const Offset(0, -10000),
@@ -243,5 +274,48 @@ void main() {
     await tester.pumpAndSettle();
     expect(rows(tester).last, 'Agent 49');
     await close(tester);
+  });
+
+  testWidgets('agents keep their rows while the other list reloads', (
+    tester,
+  ) async {
+    final sam = _sharedAgent('5' * 64, 'Sam');
+    final zed = _sharedAgent('6' * 64, 'Zed');
+    final bea = _bea;
+    for (final ownedFirst in [true, false]) {
+      await open(tester, sharedLater: true);
+      owned().land([_ann]);
+      shared().land([sam]);
+      await tester.pumpAndSettle();
+      expect(rows(tester).take(3), ['Ann', 'Sam', 'Person 00']);
+
+      // Both lists reload after a reconnect. The first to land brings a new
+      // agent; the other's agent keeps its row until its list lands, and
+      // that landing moves nothing.
+      owned().reload();
+      shared().reload();
+      await tester.pumpAndSettle();
+      if (ownedFirst) {
+        owned().land([_ann, bea]);
+      } else {
+        shared().land([sam, zed]);
+      }
+      await tester.pumpAndSettle();
+      final restarted = rows(tester);
+      expect(restarted.take(4), [
+        'Ann',
+        'Sam',
+        ownedFirst ? 'Bea' : 'Zed',
+        'Person 00',
+      ]);
+      if (ownedFirst) {
+        shared().land([sam]);
+      } else {
+        owned().land([_ann]);
+      }
+      await tester.pumpAndSettle();
+      expect(rows(tester), restarted);
+      await close(tester);
+    }
   });
 }
