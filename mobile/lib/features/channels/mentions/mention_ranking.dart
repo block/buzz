@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 
 import '../../../shared/mentions/mention_rules.dart';
 import '../../../shared/utils/string_utils.dart';
+import '../../../shared/verified_profiles/verified_profile.dart';
 
 /// A mention autocomplete candidate. Mirrors the desktop's
 /// `MentionCandidateForRanking` (desktop/src/features/messages/lib/mentionRanking.ts).
@@ -23,6 +24,10 @@ class MentionCandidate {
   /// inserted mention text still uses [label] and binds the exact [pubkey].
   final String? contextLabel;
 
+  /// Other searchable names, such as the self-declared kind 0 name of a
+  /// candidate whose [displayName] is NIP-FI verified.
+  final List<String> aliases;
+
   const MentionCandidate({
     required this.pubkey,
     this.requiresRevalidation = false,
@@ -34,6 +39,7 @@ class MentionCandidate {
     this.role,
     this.ownerPubkey,
     this.contextLabel,
+    this.aliases = const [],
   });
 
   /// The row label shown in the picker.
@@ -50,7 +56,40 @@ class MentionCandidate {
     role: role,
     ownerPubkey: ownerPubkey,
     contextLabel: contextLabel,
+    aliases: aliases,
   );
+
+  /// This candidate named by its NIP-FI [verified] display name, which it is
+  /// then matched, ranked and inserted as. The self-declared name stays
+  /// searchable, and so do the verified full name and username, which the
+  /// relay's profile search matches too.
+  MentionCandidate withVerifiedName(VerifiedProfile verified) {
+    final name = verified.displayName;
+    final declared = displayName?.trim();
+    return MentionCandidate(
+      pubkey: pubkey,
+      requiresRevalidation: requiresRevalidation,
+      displayName: name,
+      secondaryLabel: secondaryLabel,
+      avatarUrl: avatarUrl,
+      isAgent: isAgent,
+      isMember: isMember,
+      role: role,
+      ownerPubkey: ownerPubkey,
+      contextLabel: contextLabel,
+      aliases: [
+        ...aliases,
+        for (final alias in [declared, ...verifiedAliases(verified)])
+          if (alias != null && alias.isNotEmpty && alias != name) alias,
+      ],
+    );
+  }
+
+  /// Every name a query can match: the display name, then [aliases].
+  List<String> get searchNames {
+    final name = displayName?.trim() ?? '';
+    return [if (name.isNotEmpty) name, ...aliases];
+  }
 
   String get label {
     final name = displayName?.trim();
@@ -76,7 +115,7 @@ MentionChoice mentionChoiceOf(MentionCandidate candidate, String? viewer) {
     pubkey: candidate.pubkey,
     name: name,
     label: candidate.label,
-    aliases: name.isEmpty ? const [] : [name],
+    aliases: candidate.searchNames,
     member: candidate.isMember,
     agent: candidate.isAgent,
     owned:

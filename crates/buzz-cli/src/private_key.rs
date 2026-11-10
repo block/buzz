@@ -22,8 +22,8 @@ pub struct PrivateKeyInputs {
     pub private_key_from_argv: bool,
 }
 
-/// Resolve the private key string, applying preference order and deprecation.
-pub fn resolve_private_key(inputs: PrivateKeyInputs) -> Result<String, CliError> {
+/// Resolve the private key string, or leave identity selection to the desktop when no key was supplied.
+pub fn resolve_private_key(inputs: PrivateKeyInputs) -> Result<Option<String>, CliError> {
     let mut sources = 0u8;
     if inputs.private_key_file.is_some() {
         sources += 1;
@@ -42,11 +42,11 @@ pub fn resolve_private_key(inputs: PrivateKeyInputs) -> Result<String, CliError>
     }
 
     if let Some(path) = inputs.private_key_file.as_deref() {
-        return read_private_key_file(path);
+        return read_private_key_file(path).map(Some);
     }
 
     if inputs.private_key_stdin {
-        return read_private_key_stdin();
+        return read_private_key_stdin().map(Some);
     }
 
     if let Some(key) = inputs.private_key {
@@ -63,13 +63,10 @@ prefer BUZZ_PRIVATE_KEY, --private-key-file, or --private-key-stdin (see https:/
                     .into(),
             ));
         }
-        return Ok(trimmed);
+        return Ok(Some(trimmed));
     }
 
-    Err(CliError::Auth(
-        "BUZZ_PRIVATE_KEY is required (prefer --private-key-file / --private-key-stdin / env; \
---private-key is deprecated)".into(),
-    ))
+    Ok(None)
 }
 
 fn read_private_key_file(path: &Path) -> Result<String, CliError> {
@@ -118,18 +115,6 @@ fn read_private_key_stdin() -> Result<String, CliError> {
     Ok(trimmed)
 }
 
-/// Detect whether `--private-key` was present on argv (vs env-only).
-pub fn private_key_flag_on_argv<I, S>(args: I) -> bool
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<str>,
-{
-    args.into_iter().any(|a| {
-        let a = a.as_ref();
-        a == "--private-key" || a.starts_with("--private-key=")
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -137,10 +122,11 @@ mod tests {
     use tempfile::NamedTempFile;
 
     #[test]
-    fn argv_detector_matches_flag_forms() {
-        assert!(private_key_flag_on_argv(["buzz", "--private-key", "nsec1x"]));
-        assert!(private_key_flag_on_argv(["buzz", "--private-key=nsec1x"]));
-        assert!(!private_key_flag_on_argv(["buzz", "channels", "list"]));
+    fn no_key_leaves_desktop_credential_selection_available() {
+        assert_eq!(
+            resolve_private_key(PrivateKeyInputs::default()).unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -152,7 +138,7 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        assert_eq!(key, "nsec1filekey");
+        assert_eq!(key.as_deref(), Some("nsec1filekey"));
     }
 
     #[test]
@@ -174,6 +160,6 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        assert_eq!(key, "nsec1env");
+        assert_eq!(key.as_deref(), Some("nsec1env"));
     }
 }

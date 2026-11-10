@@ -1425,6 +1425,10 @@ async fn cancel_kills_inflight_tool_via_mcp_notification() {
     ])
     .await;
 
+    // The agent stops buzz-dev-mcp with SIGKILL, so the server never deletes
+    // its own temp dirs. Point its TMPDIR at a dir this test owns and removes.
+    // Declared before `h` so it drops after the harness.
+    let dev_mcp_tmp = tempfile::TempDir::new().expect("create buzz-dev-mcp TMPDIR");
     let mut h = Harness::spawn(&llm.url).await;
     let sid = init_session(
         &mut h,
@@ -1432,7 +1436,7 @@ async fn cancel_kills_inflight_tool_via_mcp_notification() {
             "name": "dev",
             "command": &dev_mcp_bin,
             "args": [],
-            "env": []
+            "env": [{"name": "TMPDIR", "value": dev_mcp_tmp.path()}]
         }]),
     )
     .await;

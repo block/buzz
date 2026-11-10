@@ -3,7 +3,8 @@
 use serde_json::{json, Value};
 use std::{
     fs,
-    io::Write,
+    io::{ErrorKind, Write},
+    os::unix::{io::OwnedFd, net::UnixStream},
     path::PathBuf,
     process::{Child, Command, Output, Stdio},
     time::{Duration, Instant},
@@ -97,7 +98,8 @@ fn terminal(output: &Output, code: i32, status: &str) -> Value {
     assert_eq!(
         output.status.code(),
         Some(code),
-        "stderr={} stdout={}",
+        "exit={:?} stderr={} stdout={}",
+        output.status,
         String::from_utf8_lossy(&output.stderr),
         String::from_utf8_lossy(&output.stdout)
     );
@@ -419,6 +421,32 @@ fn deadline_covers_initialize_session_and_turn_and_cleans_descendants() {
     }
 }
 
+fn backpressured_stdin() -> (UnixStream, UnixStream) {
+    let (reader, mut writer) = UnixStream::pair().unwrap();
+    writer.set_nonblocking(true).unwrap();
+    // Fill before spawning: the next write cannot finish until the runner reads
+    // stdin, which happens after signal registration. Keep below the task limit
+    // and leave the writer open so read_to_end still awaits EOF when cancelled.
+    let mut queued = 0;
+    loop {
+        match writer.write(b" ") {
+            Ok(0) => panic!("stdin fixture stopped accepting bytes"),
+            Ok(n) => {
+                queued += n;
+                assert!(queued < 1024 * 1024 - 1, "stdin fixture exceeds task limit");
+            }
+            Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+            Err(error) if error.kind() == ErrorKind::WouldBlock => break,
+            Err(error) => panic!("cannot fill stdin fixture: {error}"),
+        }
+    }
+    writer.set_nonblocking(false).unwrap();
+    writer
+        .set_write_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    (reader, writer)
+}
+
 #[test]
 fn signals_cancel_startup_turn_and_pending_stdin_without_hanging() {
     use nix::{
@@ -435,9 +463,20 @@ fn signals_cancel_startup_turn_and_pending_stdin_without_hanging() {
         command
             .env("TASK_AGENT_MODE", mode)
             .args(["--no-memory", "--task", "-"]);
+        let mut held_stdin = if mode == "stdin" {
+            let (reader, writer) = backpressured_stdin();
+            command.stdin(Stdio::from(OwnedFd::from(reader)));
+            Some(writer)
+        } else {
+            None
+        };
         let mut child = command.spawn().unwrap();
-        let held_stdin = if mode == "stdin" {
-            child.stdin.take()
+        if let Some(writer) = held_stdin.as_mut() {
+            if let Err(error) = writer.write_all(b" ") {
+                let status = child.try_wait();
+                let _ = child.kill();
+                panic!("{mode} never drained pending input: {error}; status={status:?}");
+            }
         } else {
             child
                 .stdin
@@ -445,24 +484,34 @@ fn signals_cancel_startup_turn_and_pending_stdin_without_hanging() {
                 .unwrap()
                 .write_all(f.task().to_string().as_bytes())
                 .unwrap();
-            None
-        };
-        let until = Instant::now() + Duration::from_secs(3);
-        if mode == "stdin" {
-            std::thread::sleep(Duration::from_millis(250));
-        } else {
+            let until = Instant::now() + Duration::from_secs(3);
             let method = if mode == "turn-hang" {
                 "session/prompt"
             } else {
                 "initialize"
             };
             while !f.wire().iter().any(|v| v["method"] == method) {
-                assert!(Instant::now() < until);
+                if Instant::now() >= until {
+                    let status = child.try_wait();
+                    let _ = child.kill();
+                    panic!("{mode} never reached {method}: status={status:?}");
+                }
                 std::thread::sleep(Duration::from_millis(10));
             }
         }
+        eprintln!(
+            "cancelling case={mode} signal={signal:?} pid={}",
+            child.id()
+        );
         kill(Pid::from_raw(child.id() as i32), signal).unwrap();
-        terminal(&wait(child), code, "cancelled");
+        let result = terminal(&wait(child), code, "cancelled");
+        if mode == "stdin" {
+            assert!(result["taskId"].is_null());
+            assert!(
+                f.wire().is_empty(),
+                "incomplete input must not start an agent"
+            );
+        }
         drop(held_stdin);
         for frame in f.wire() {
             if let Some(pid) = frame["pid"].as_u64() {

@@ -8,6 +8,56 @@ void main() {
   const channelA = '123e4567-e89b-42d3-a456-426614174000';
   const channelB = '123e4567-e89b-42d3-a456-426614174001';
 
+  test('subscribes to and mutes UUIDv5 starter channels', () {
+    const starter = 'fee88e92-da9f-5958-a910-48db3264ad38';
+    final subscriptions = buildDesiredBuzzPushSubscriptions(
+      myPubkey: me,
+      channelIds: [starter, channelA],
+    );
+    expect(subscriptions.last.filter.hTags, [channelA, starter]);
+    final muted = buildDesiredBuzzPushSubscriptions(
+      myPubkey: me,
+      channelIds: [starter, channelA],
+      mutedChannelIds: [starter],
+    );
+    expect(muted.last.filter.hTags, [channelA]);
+    expect(muted.first.ignore.last.hTags, [starter]);
+    expect(
+      BuzzPushSubscription.fromJson(muted.first.toJson()).toJson(),
+      muted.first.toJson(),
+    );
+  });
+
+  test('channel filters preserve exact canonical UUID text', () {
+    for (final channel in [
+      channelA,
+      'fee88e92-da9f-5958-a910-48db3264ad38',
+      '01890abc-def0-7890-abcd-0123456789ab',
+      '00000000-0000-0000-0000-000000000000',
+      'ffffffff-ffff-ffff-ffff-ffffffffffff',
+    ]) {
+      final filter = BuzzPushFilter(kinds: [9], hTags: [channel]);
+      expect(BuzzPushFilter.fromJson(filter.toJson()).hTags, [channel]);
+    }
+    for (final channel in [
+      '',
+      channelA.toUpperCase(),
+      channelA.replaceAll('-', ''),
+      '{$channelA}',
+      'urn:uuid:$channelA',
+      '$channelA ',
+      '$channelA\n',
+      'g23e4567-e89b-42d3-a456-426614174000',
+      'a' * 129,
+    ]) {
+      expect(
+        () => BuzzPushFilter(kinds: [9], hTags: [channel]),
+        throwsFormatException,
+        reason: channel,
+      );
+    }
+  });
+
   test(
     'desired subscription state round-trips with an accepted-state seam',
     () {
@@ -91,6 +141,21 @@ void main() {
       subscriptions.first.suppress?.pTagsMax,
       buzzPushHellthreadParticipantLimit,
     );
+  });
+
+  test('ignores mutes outside the push channel grammar', () {
+    // Starter channels use UUIDv5 IDs; muting one must not break push setup.
+    const starterChannel = 'fee88e92-da9f-5958-a910-48db3264ad38';
+
+    final subscriptions = buildDesiredBuzzPushSubscriptions(
+      myPubkey: me,
+      channelIds: [channelA],
+      mutedChannelIds: [starterChannel, 'not-a-channel'],
+    );
+
+    expect(subscriptions, hasLength(2));
+    expect(subscriptions.first.ignore, hasLength(1));
+    expect(subscriptions.last.filter.hTags, [channelA]);
   });
 
   test('chunks channel subscriptions to relay limits deterministically', () {

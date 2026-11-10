@@ -8,7 +8,7 @@ Future<Uint8List?> nativeAvatarImage({
   bool circular = false,
   required Color background,
   required Color foreground,
-  required ImageProvider Function(String) networkImage,
+  required List<ImageProvider> Function(String url) networkImages,
 }) async {
   const dimension = 72.0;
   final animatedAvatar = parseAnimatedAvatarUrl(url);
@@ -17,12 +17,7 @@ Future<Uint8List?> nativeAvatarImage({
   final recorder = ui.PictureRecorder();
   final canvas = Canvas(recorder);
   final bounds = const Rect.fromLTWH(0, 0, dimension, dimension);
-  canvas.clipRRect(
-    RRect.fromRectAndRadius(
-      bounds,
-      Radius.circular(dimension * (isAgent && !circular ? 0.3 : 0.5)),
-    ),
-  );
+  canvas.clipPath(avatarPath(bounds, isAgent: isAgent && !circular));
   canvas.drawColor(background, BlendMode.src);
   final imageBounds = isAgent && usesInsetAgentArtwork(url)
       ? bounds.deflate(dimension * (1 - animatedAvatarArtworkScale) / 2)
@@ -74,26 +69,16 @@ Future<Uint8List?> nativeAvatarImage({
         }
         rendered = true;
       case _NetworkAvatarSource(:final url):
-        final stream = ResizeImage(
-          networkImage(url),
-          width: dimension.toInt(),
-          height: dimension.toInt(),
-          policy: ResizeImagePolicy.fit,
-        ).resolve(ImageConfiguration.empty);
-        final completer = Completer<ImageInfo>();
-        final listener = ImageStreamListener(
-          (image, _) {
-            if (!completer.isCompleted) completer.complete(image.clone());
-          },
-          onError: (Object error, StackTrace? stack) {
-            if (!completer.isCompleted) completer.completeError(error, stack);
-          },
-        );
-        stream.addListener(listener);
-        try {
-          final image = await completer.future.timeout(
-            const Duration(seconds: 10),
-          );
+        final providers = networkImages(url);
+        for (var i = 0; i < providers.length; i++) {
+          final ImageInfo image;
+          try {
+            image = await _loadNativeAvatar(providers[i], dimension.toInt());
+          } on NetworkImageLoadException catch (error) {
+            // A missing relay thumbnail moves on to the next one.
+            if (error.statusCode == 404 && i < providers.length - 1) continue;
+            rethrow;
+          }
           paintImage(
             canvas: canvas,
             rect: imageBounds,
@@ -102,8 +87,7 @@ Future<Uint8List?> nativeAvatarImage({
           );
           image.dispose();
           rendered = true;
-        } finally {
-          stream.removeListener(listener);
+          break;
         }
       case null:
         break;
@@ -121,6 +105,33 @@ Future<Uint8List?> nativeAvatarImage({
     ))?.buffer.asUint8List();
   } finally {
     image.dispose();
+  }
+}
+
+Future<ImageInfo> _loadNativeAvatar(
+  ImageProvider provider,
+  int dimension,
+) async {
+  final stream = ResizeImage(
+    provider,
+    width: dimension,
+    height: dimension,
+    policy: ResizeImagePolicy.fit,
+  ).resolve(ImageConfiguration.empty);
+  final completer = Completer<ImageInfo>();
+  final listener = ImageStreamListener(
+    (image, _) {
+      if (!completer.isCompleted) completer.complete(image.clone());
+    },
+    onError: (Object error, StackTrace? stack) {
+      if (!completer.isCompleted) completer.completeError(error, stack);
+    },
+  );
+  stream.addListener(listener);
+  try {
+    return await completer.future.timeout(const Duration(seconds: 10));
+  } finally {
+    stream.removeListener(listener);
   }
 }
 

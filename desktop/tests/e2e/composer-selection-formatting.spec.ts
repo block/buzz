@@ -8,6 +8,15 @@ async function openGeneral(page: Page) {
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 }
 
+async function lastSignedMessageContent(page: Page) {
+  // Read-state and presence events can be signed after the message.
+  return page.evaluate(
+    () =>
+      window.__BUZZ_E2E_SIGNED_EVENTS__?.findLast((event) => event.kind === 9)
+        ?.content,
+  );
+}
+
 async function selectText(input: Locator, selectedText: string) {
   await input.evaluate((element, text) => {
     const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
@@ -478,16 +487,7 @@ test("selected hard-break lines stay newline-separated in one code block", async
 
   await page.getByTestId("send-message").click();
   await expect
-    .poll(() =>
-      page.evaluate(
-        () =>
-          (
-            window as Window & {
-              __BUZZ_E2E_SIGNED_EVENTS__?: Array<{ content: string }>;
-            }
-          ).__BUZZ_E2E_SIGNED_EVENTS__?.at(-1)?.content,
-      ),
-    )
+    .poll(() => lastSignedMessageContent(page))
     .toBe("```\none\ntwo\nthree\n```");
 });
 
@@ -521,16 +521,7 @@ test("selected list items become one multiline code block and keep neighbors", a
 
   await page.getByTestId("send-message").click();
   await expect
-    .poll(() =>
-      page.evaluate(
-        () =>
-          (
-            window as Window & {
-              __BUZZ_E2E_SIGNED_EVENTS__?: Array<{ content: string }>;
-            }
-          ).__BUZZ_E2E_SIGNED_EVENTS__?.at(-1)?.content,
-      ),
-    )
+    .poll(() => lastSignedMessageContent(page))
     .toBe("- before\n\n```\none\ntwo\n```\n\n- after");
 });
 
@@ -548,16 +539,7 @@ test("caret-only block formatting serializes the prior draft unchanged", async (
 
   await page.getByTestId("send-message").click();
   await expect
-    .poll(() =>
-      page.evaluate(
-        () =>
-          (
-            window as Window & {
-              __BUZZ_E2E_SIGNED_EVENTS__?: Array<{ content: string }>;
-            }
-          ).__BUZZ_E2E_SIGNED_EVENTS__?.at(-1)?.content,
-      ),
-    )
+    .poll(() => lastSignedMessageContent(page))
     .toBe("before\n\n- item");
 });
 
@@ -581,16 +563,7 @@ test("block formatting preserves the lines around a selected composer line", asy
 
   await page.getByTestId("send-message").click();
   await expect
-    .poll(() =>
-      page.evaluate(
-        () =>
-          (
-            window as Window & {
-              __BUZZ_E2E_SIGNED_EVENTS__?: Array<{ content: string }>;
-            }
-          ).__BUZZ_E2E_SIGNED_EVENTS__?.at(-1)?.content,
-      ),
-    )
+    .poll(() => lastSignedMessageContent(page))
     .toBe("before\n\n- selected\n\nafter");
 });
 

@@ -41,8 +41,12 @@ type StarterChannelsClient = {
 
 export type StarterChannelsResult = {
   channels: Channel[];
-  generalChannel: Channel;
-  welcomeChannel: Channel;
+  /**
+   * Null when setup skipped this starter because its name or id belongs to a
+   * channel that cannot serve as it, such as an archived one.
+   */
+  generalChannel: Channel | null;
+  welcomeChannel: Channel | null;
 };
 
 type WelcomeChannelOptions = {
@@ -269,15 +273,18 @@ export async function ensureStarterChannels(
     };
   }
 
+  // The native command fails unless every starter it did not skip is usable.
   const ensuredChannels = await client.ensureStarterChannels();
-  const ensuredStarters = findStarterChannels(ensuredChannels);
-  if (!ensuredStarters) {
-    throw new Error("Starter channels were not available after setup");
-  }
-
   return {
     channels: ensuredChannels,
-    ...ensuredStarters,
+    generalChannel: findStarterChannel(
+      ensuredChannels,
+      STARTER_GENERAL_CHANNEL_NAME,
+    ),
+    welcomeChannel: findStarterChannel(
+      ensuredChannels,
+      STARTER_WELCOME_CHANNEL_NAME,
+    ),
   };
 }
 

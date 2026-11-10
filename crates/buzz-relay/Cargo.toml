@@ -19,6 +19,9 @@ path = "src/main.rs"
 buzz-core = { workspace = true }
 buzz-conformance = { workspace = true }
 buzz-db = { workspace = true }
+# The relay chooses its flag provider at startup (BUZZ_FEATURE_FLAGS_PROVIDER),
+# so every build carries the LaunchDarkly adapter; it is inert unless selected.
+buzz-feature-flags = { workspace = true, features = ["launchdarkly"] }
 buzz-datastore-tracing = { workspace = true }
 buzz-deletion = { workspace = true }
 buzz-auth = { workspace = true }
@@ -56,7 +59,6 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 dashmap = { workspace = true }
 futures-util = { workspace = true }
-deadpool-redis = { workspace = true }
 redis = { workspace = true }
 # Redis TLS (rediss://, e.g. ElastiCache) uses rustls, which needs a process
 # CryptoProvider installed at startup. Both aws-lc-rs and ring are compiled in
@@ -93,6 +95,7 @@ async-compression = { version = "0.4.42", features = ["tokio", "gzip"] }
 dev = ["buzz-auth/dev"]
 
 [dev-dependencies]
+buzz-cli = { path = "../buzz-cli" }
 # Generate ephemeral P-256 signing fixtures; already in the runtime dependency graph.
 ring = "0.17"
 # The mesh-llm smoke harnesses moved to `crates/buzz-mesh-smoke`. A

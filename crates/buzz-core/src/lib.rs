@@ -84,3 +84,8 @@ pub mod test_helpers {
 
 /// NIP-AR channel artifact envelope and limits.
 pub mod artifact;
+/// NIP-AR sync filter parsing and limits.
+pub mod artifact_sync;
+
+/// Local media reference extraction.
+pub mod media;

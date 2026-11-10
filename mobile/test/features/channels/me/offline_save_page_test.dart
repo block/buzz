@@ -51,6 +51,11 @@ class _Store extends InMemorySharedPreferencesStore {
   }
 }
 
+class _Lifecycle extends AppLifecycleNotifier {
+  @override
+  AppLifecycleState build() => AppLifecycleState.resumed;
+}
+
 class _Navigation extends NavigatorObserver {
   int pushes = 0;
   @override
@@ -109,6 +114,7 @@ void main() {
             meSyncProvider.overrideWithValue(service),
             meAssistantsProvider.overrideWith((ref) async => []),
             channelsProvider.overrideWith(_Channels.new),
+            appLifecycleProvider.overrideWith(_Lifecycle.new),
           ],
           child: MaterialApp(
             theme: AppTheme.light(),
@@ -144,40 +150,33 @@ void main() {
       expect(find.text('Retry offline save'), findsNothing);
       expect(find.text('Saved chat'), findsOneWidget);
       expect(service.cachedSnapshot()?.event?.id, fresh.id);
+
+      // A closed reader resubscribes on resume without user action.
+      final scope = ProviderScope.containerOf(
+        tester.element(find.byType(MePage)),
+      );
+      final lifecycle = scope.read(appLifecycleProvider.notifier);
+      final rejected = relay.closeSubscription;
+      relay.closeSubscription!('terminal CLOSED');
+      lifecycle.state = AppLifecycleState.paused;
+      lifecycle.state = AppLifecycleState.resumed;
+      await tester.pumpAndSettle();
+      expect(relay.closeSubscription, isNot(same(rejected)));
+      final newer = head(3);
+      relay.emit!(newer);
+      await tester.pumpAndSettle();
+      expect(service.cachedSnapshot()?.event?.id, newer.id);
+      expect(find.text('Saved chat'), findsOneWidget);
+      expect(find.textContaining('Live updates'), findsNothing);
+
       final invalid = NostrEvent.fromJson({
-        ...head(3).toJson(),
+        ...head(4).toJson(),
         'sig': '0' * 128,
       });
       relay.emit!(invalid);
       await tester.pumpAndSettle();
       expect(find.text('Saved chat'), findsOneWidget);
-      expect(find.text('Retry live updates'), findsOneWidget);
-      expect(service.cachedSnapshot()?.event?.id, fresh.id);
-      relay.events = [invalid];
-      await tester.tap(find.text('Retry live updates'));
-      await tester.pumpAndSettle();
-      expect(find.text('Retry live updates'), findsOneWidget);
-      expect(find.text('Saved chat'), findsOneWidget);
-      relay.events = [fresh];
-      await tester.tap(find.text('Retry live updates'));
-      await tester.pumpAndSettle();
-      expect(find.text('Retry live updates'), findsNothing);
-      relay.closeSubscription!('terminal CLOSED');
-      await tester.pumpAndSettle();
-      expect(find.text('Saved chat'), findsOneWidget);
-      expect(find.text('Retry live updates'), findsOneWidget);
-      final pendingRefresh = Completer<List<NostrEvent>>();
-      relay.pendingRead = pendingRefresh.future;
-      await tester.tap(find.text('Retry live updates'));
-      await tester.pumpAndSettle();
-      expect(find.text('Saved chat'), findsOneWidget);
-      expect(find.text('Retry live updates'), findsOneWidget);
-      pendingRefresh.complete([fresh]);
-      await tester.pumpAndSettle();
-      expect(find.text('Retry live updates'), findsNothing);
-      relay.closeSubscription!('closed again');
-      await tester.pumpAndSettle();
-      expect(find.text('Retry live updates'), findsOneWidget);
+      expect(service.cachedSnapshot()?.event?.id, newer.id);
     },
   );
 }

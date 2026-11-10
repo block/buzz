@@ -7,7 +7,7 @@ class _ComposeBarLayout extends HookWidget {
   final ValueChanged<int> onRemoveAttachment;
   final String? uploadError;
   final bool isExpanded;
-  final TextEditingController controller;
+  final _MarkdownEditingController controller;
   final FocusNode focusNode;
   final EditableTextContextMenuBuilder contextMenuBuilder;
   final ValueChanged<KeyboardInsertedContent> onContentInserted;
@@ -29,6 +29,7 @@ class _ComposeBarLayout extends HookWidget {
   final bool canSend;
   final bool hasPendingUploads;
   final bool isSending;
+  final bool readOnly;
 
   const _ComposeBarLayout({
     required this.surfaceKey,
@@ -59,6 +60,7 @@ class _ComposeBarLayout extends HookWidget {
     required this.canSend,
     required this.hasPendingUploads,
     required this.isSending,
+    this.readOnly = false,
   });
 
   @override
@@ -331,6 +333,8 @@ class _ComposeBarLayout extends HookWidget {
     return TextField(
       controller: controller,
       focusNode: focusNode,
+      readOnly: readOnly,
+      inputFormatters: [_ComposerChipEditingFormatter(controller)],
       keyboardType: TextInputType.multiline,
       textInputAction: TextInputAction.newline,
       contextMenuBuilder: contextMenuBuilder,

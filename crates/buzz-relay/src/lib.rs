@@ -2,8 +2,14 @@
 #![warn(missing_docs)]
 //! NIP-01 WebSocket relay for Buzz private team communication.
 
+/// Stdout access log: reads, auth attempts, and connection lifecycle.
+pub(crate) mod access;
 mod admission;
 mod build_info;
+mod community_active;
+mod fenced_cache;
+mod host_cache;
+mod invite_preview;
 mod rejection;
 
 /// Shared NIP-FI assertion evaluation, denial rendering, and key pairing.
@@ -23,6 +29,8 @@ pub(crate) mod nip_fi_upgrade;
 pub mod api;
 /// WebSocket audio relay for huddle voice channels.
 pub mod audio;
+/// Operator-tunable concurrency caps, re-read from feature flags at runtime.
+pub mod concurrency_limits;
 /// Relay configuration from environment variables.
 pub mod config;
 /// Runtime conformance harness — abstract trace emission at the
@@ -34,12 +42,15 @@ pub mod conformance;
 pub mod connection;
 /// Relay error types.
 pub mod error;
+/// The feature-flag provider, chosen once at startup.
+pub mod feature_flags;
 /// WebSocket message handlers for NIP-01 client commands.
 pub mod handlers;
 /// Stateless HMAC-signed relay invite tokens (mint/verify).
 pub mod invite_token;
 /// Fixed-schema evidence for the relay's earliest startup steps.
 pub mod lifecycle;
+mod membership_cache;
 /// Inter-relay mesh startup wiring (`BUZZ_MESH` seam).
 pub mod mesh_boot;
 /// Prometheus metrics: recorder, upkeep, HTTP middleware.
@@ -52,6 +63,7 @@ pub mod nip_fi_config;
 /// NIP-FI HTTP ingress enforcement: assertion extraction, verification,
 /// key-pairing check, and deny-map gate for every protected HTTP surface.
 pub(crate) mod nip_fi_http;
+pub(crate) mod nip_fi_policy;
 pub mod nip_fi_resolver;
 /// Deployment-global operator-listener mention delivery worker.
 pub mod operator_listener;
@@ -63,11 +75,15 @@ pub mod push_runtime;
 pub mod readiness;
 /// Axum router construction.
 pub mod router;
+/// Per-key gates that let concurrent cache misses share one database read.
+mod shared_reads;
 /// Timing for startup work between metrics bind and serving.
 pub mod startup_steps;
 /// Shared application state.
 pub mod state;
 pub mod storage_sweep;
+/// Push each new per-community storage snapshot to an operator endpoint.
+pub mod storage_usage_delivery;
 /// Subscription registry with (channel, kind) fan-out index.
 pub mod subscription;
 /// OpenTelemetry tracing initialisation (tracer provider + OTLP exporter).
@@ -86,3 +102,6 @@ pub mod workflow_sink;
 pub use config::Config;
 pub use error::{RelayError, Result};
 pub use state::AppState;
+
+/// Optional relay-signed verified profiles.
+pub mod verified_profiles;
