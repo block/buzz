@@ -194,6 +194,8 @@ fn relay_limitation(max_message_length: usize, advertise_fi: bool) -> RelayLimit
 /// clippy threshold.
 #[derive(Default, Clone, Copy)]
 pub(crate) struct RelayCapabilityFlags {
+    /// Reservation-aware scheduled delivery was explicitly enabled.
+    pub scheduled_messages: bool,
     /// Whether NIP-43 (relay membership) is advertised in `supported_nips`.
     pub advertise_nip43: bool,
     /// Whether NIP-FI (federated identity) is advertised.
@@ -240,6 +242,7 @@ impl RelayInfo {
         let RelayCapabilityFlags {
             advertise_nip43,
             advertise_fi,
+            scheduled_messages,
         } = flags;
         debug_assert!(
             !advertise_nip43 || relay_self.is_some(),
@@ -263,6 +266,9 @@ impl RelayInfo {
             // checks this before opening a channel as unlisted.
             "buzz-unlisted-channels".to_string(),
         ];
+        if scheduled_messages {
+            supported_extensions.push("buzz-scheduled-messages-v1".to_string());
+        }
         let gif = gif_provider.map(|provider| {
             supported_extensions.push("buzz-gif".to_string());
             GifDescriptor {
@@ -465,6 +471,7 @@ pub(crate) async fn nip11_document(
         RelayCapabilityFlags {
             advertise_nip43,
             advertise_fi,
+            scheduled_messages: state.config.scheduled_messages_enabled,
         },
         state.config.max_frame_bytes,
         state.config.pairing_relay_url.as_deref(),
@@ -938,6 +945,7 @@ mod tests {
             RelayCapabilityFlags {
                 advertise_nip43: true,
                 advertise_fi: false,
+                scheduled_messages: false,
             },
             DEFAULT_MAX_FRAME_BYTES,
             None,
@@ -960,6 +968,7 @@ mod tests {
             RelayCapabilityFlags {
                 advertise_nip43: true,
                 advertise_fi: false,
+                scheduled_messages: false,
             },
             DEFAULT_MAX_FRAME_BYTES,
             None,
