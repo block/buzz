@@ -143,6 +143,28 @@ impl Db {
         rows.iter().map(row_message).collect()
     }
 
+    /// Recognize an exact committed operation before retry-time freshness checks.
+    /// No write is performed, and cancelled or superseded operations never replay.
+    pub async fn scheduled_replayed(
+        &self,
+        community: CommunityId,
+        owner: &[u8],
+        id: Uuid,
+        expected: Option<i64>,
+        event: &serde_json::Value,
+    ) -> Result<bool> {
+        let revision = match expected {
+            Some(value) => match value.checked_add(1) {
+                Some(value) => value,
+                None => return Ok(false),
+            },
+            None => 1,
+        };
+        Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM scheduled_messages WHERE community_id=$1 AND owner=$2 AND id=$3 AND revision=$4 AND event=$5 AND status IN ('scheduled','sent','failed'))")
+            .bind(community.as_uuid()).bind(owner).bind(id).bind(revision).bind(event)
+            .fetch_one(&self.pool).await?)
+    }
+
     /// Insert/update/cancel under the owner's lock, using an explicit revision.
     /// Identical retries succeed after an acknowledgement was lost.
     #[allow(clippy::too_many_arguments)]

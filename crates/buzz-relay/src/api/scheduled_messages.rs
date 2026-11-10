@@ -47,12 +47,7 @@ enum Request {
     },
 }
 
-fn validate_message(
-    event: &Event,
-    owner: nostr::PublicKey,
-    immediate: bool,
-    now: i64,
-) -> Result<(Uuid, i64), &'static str> {
+fn validate_message(event: &Event, owner: nostr::PublicKey) -> Result<(Uuid, i64), &'static str> {
     if event.pubkey != owner
         || event.kind.as_u16() != 9
         || event.content.trim().is_empty()
@@ -61,11 +56,6 @@ fn validate_message(
         return Err("Invalid scheduled message");
     }
     let at = i64::try_from(event.created_at.as_secs()).map_err(|_| "Invalid send time")?;
-    if (immediate && !(now - 300..=now + 5).contains(&at))
-        || (!immediate && (at <= now || at > now + MAX_DAYS))
-    {
-        return Err("Choose a future time within 120 days");
-    }
     let channels: Vec<_> = event
         .tags
         .iter()
@@ -83,6 +73,15 @@ fn validate_message(
         return Err("Message is too large");
     }
     Ok((id, at))
+}
+
+fn validate_send_time(at: i64, immediate: bool, now: i64) -> Result<(), &'static str> {
+    if (immediate && !(now - 300..=now + 5).contains(&at))
+        || (!immediate && (at <= now || at > now + MAX_DAYS))
+    {
+        return Err("Choose a future time within 120 days");
+    }
+    Ok(())
 }
 
 /// Handle bounded queue reads and compare-and-swap mutations for the proved owner.
@@ -141,14 +140,18 @@ pub async fn handle(
             return api_error(StatusCode::BAD_REQUEST, "Invalid operation").into_response()
         }
     };
+    let value = match event.as_ref().map(serde_json::to_value).transpose() {
+        Ok(v) => v,
+        Err(_) => return api_error(StatusCode::BAD_REQUEST, "Invalid message").into_response(),
+    };
     let now = chrono::Utc::now().timestamp();
     let mut at = now;
     if let Some(event) = &event {
-        let (channel, send_at) = match validate_message(event, owner, immediate, now) {
+        let (channel, send_at) = match validate_message(event, owner) {
             Ok(v) => v,
             Err(reason) => return api_error(StatusCode::BAD_REQUEST, reason).into_response(),
         };
-        at = if immediate { now } else { send_at };
+        at = send_at;
         let verify = event.clone();
         if !tokio::task::spawn_blocking(move || {
             buzz_core::verification::verify_event(&verify).is_ok()
@@ -157,6 +160,28 @@ pub async fn handle(
         .unwrap_or(false)
         {
             return api_error(StatusCode::BAD_REQUEST, "Invalid message signature").into_response();
+        }
+        // An exact, already-committed request is an acknowledgement, not a new
+        // admission. Its signed timestamp may no longer be fresh on retry.
+        match state
+            .db
+            .scheduled_replayed(
+                tenant.community(),
+                &owner_bytes,
+                id,
+                revision,
+                value.as_ref().unwrap_or(&Value::Null),
+            )
+            .await
+        {
+            Ok(true) => return Json(json!({"accepted":true})).into_response(),
+            Ok(false) => {}
+            Err(_) => {
+                return internal_error("Could not reconcile scheduled message").into_response()
+            }
+        }
+        if let Err(reason) = validate_send_time(send_at, immediate, now) {
+            return api_error(StatusCode::BAD_REQUEST, reason).into_response();
         }
         match state
             .db
@@ -199,11 +224,6 @@ pub async fn handle(
             }
         }
     }
-    let value = event.as_ref().map(serde_json::to_value).transpose();
-    let value = match value {
-        Ok(v) => v,
-        Err(_) => return api_error(StatusCode::BAD_REQUEST, "Invalid message").into_response(),
-    };
     match state
         .db
         .scheduled_mutate(
@@ -359,12 +379,17 @@ mod tests {
                 .unwrap()
         };
         let tags = || vec![Tag::parse(["h".to_string(), channel.to_string()]).unwrap()];
+        let validate = |event: &Event, owner, immediate, now| {
+            validate_message(event, owner).and_then(|(channel, at)| {
+                validate_send_time(at, immediate, now).map(|()| (channel, at))
+            })
+        };
         let good = build(9, now + 3600, "Tomorrow", tags());
         assert_eq!(
-            validate_message(&good, keys.public_key(), false, now),
+            validate(&good, keys.public_key(), false, now),
             Ok((channel, now + 3600))
         );
-        assert!(validate_message(&good, other.public_key(), false, now).is_err());
+        assert!(validate(&good, other.public_key(), false, now).is_err());
         for bad in [
             build(1, now + 3600, "Wrong kind", tags()),
             build(9, now, "Past", tags()),
@@ -374,7 +399,7 @@ mod tests {
             build(9, now + 3600, "Two channels", [tags(), tags()].concat()),
             build(9, now + 3600, &"x".repeat(24 * 1024 + 1), tags()),
         ] {
-            assert!(validate_message(&bad, keys.public_key(), false, now).is_err());
+            assert!(validate(&bad, keys.public_key(), false, now).is_err());
         }
         for (at, valid) in [
             (now - 301, false),
@@ -383,8 +408,7 @@ mod tests {
             (now + 6, false),
         ] {
             assert_eq!(
-                validate_message(&build(9, at, "Now", tags()), keys.public_key(), true, now)
-                    .is_ok(),
+                validate(&build(9, at, "Now", tags()), keys.public_key(), true, now).is_ok(),
                 valid
             );
         }
