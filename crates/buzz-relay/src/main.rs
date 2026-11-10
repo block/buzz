@@ -666,7 +666,7 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
     );
 
     let workflow_config = buzz_workflow::WorkflowConfig {
-        secure_workflows: config.secure_workflows,
+        agent_mentions: config.workflow_agent_mentions,
         ..Default::default()
     };
     let workflow_engine = Arc::new(WorkflowEngine::new(db.clone(), workflow_config));

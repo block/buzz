@@ -327,14 +327,14 @@ pub struct Config {
     /// Set `BUZZ_AUDIT_ENABLED=false` for deployments that do not require it.
     pub audit_enabled: bool,
 
-    /// Secure workflows mode. When on, a workflow message carries
-    /// `buzz:workflow-mention` tags only if its run was caused by the
-    /// workflow's owner or by a timer and every step of the definition is
-    /// `send_message` or `delay`. Turn it on when people other than a
-    /// workflow's owner can trigger it.
+    /// Which workflow runs may direct agents. With `owner` (owner-only agent
+    /// mentions), a workflow message carries `buzz:workflow-mention` tags only
+    /// if its run was started by the workflow's owner or by a timer and every
+    /// step of the definition is `send_message` or `delay`. Use `owner` when
+    /// people other than a workflow's owner can trigger it.
     ///
-    /// Default: `false`. Set via `BUZZ_SECURE_WORKFLOWS=true`.
-    pub secure_workflows: bool,
+    /// Default: `any`. Set via `BUZZ_WORKFLOW_AGENT_MENTIONS=any|owner`.
+    pub workflow_agent_mentions: buzz_workflow::AgentMentions,
 
     /// Optional override for ephemeral channel TTL (in seconds).
     /// When set, any channel created with a TTL tag will use this value instead
@@ -630,6 +630,19 @@ fn parse_bool(name: &str, default: bool) -> Result<bool, ConfigError> {
                 "{name} must be true or false"
             ))),
         },
+    }
+}
+
+fn parse_workflow_agent_mentions() -> Result<buzz_workflow::AgentMentions, ConfigError> {
+    const NAME: &str = "BUZZ_WORKFLOW_AGENT_MENTIONS";
+    match std::env::var(NAME) {
+        Err(std::env::VarError::NotPresent) => Ok(buzz_workflow::AgentMentions::Any),
+        Err(error) => Err(ConfigError::InvalidValue(format!(
+            "{NAME} must be valid UTF-8: {error}"
+        ))),
+        Ok(value) => value
+            .parse()
+            .map_err(|error| ConfigError::InvalidValue(format!("{NAME}: {error}"))),
     }
 }
 
@@ -1248,7 +1261,7 @@ impl Config {
         let privacy_markdown = read_policy_markdown("BUZZ_PRIVACY_POLICY_MARKDOWN")?;
         let age_attestation_required = parse_optional_bool("BUZZ_AGE_ATTESTATION_REQUIRED")?;
         let audit_enabled = parse_bool("BUZZ_AUDIT_ENABLED", true)?;
-        let secure_workflows = parse_bool("BUZZ_SECURE_WORKFLOWS", false)?;
+        let workflow_agent_mentions = parse_workflow_agent_mentions()?;
         let join_policy = if terms_markdown.is_none()
             && privacy_markdown.is_none()
             && !age_attestation_required
@@ -1509,7 +1522,7 @@ impl Config {
             media_max_concurrent_uploads_per_pubkey,
             media_uploads_per_minute,
             audit_enabled,
-            secure_workflows,
+            workflow_agent_mentions,
             ephemeral_ttl_override,
             git_repo_path,
             git_pack_cache_path,
@@ -2562,6 +2575,32 @@ mod tests {
             std::env::set_var("BUZZ_AUDIT_ENABLED", value);
         } else {
             std::env::remove_var("BUZZ_AUDIT_ENABLED");
+        }
+    }
+
+    #[test]
+    fn workflow_agent_mentions_defaults_to_any_and_rejects_other_values() {
+        use buzz_workflow::AgentMentions;
+        const NAME: &str = "BUZZ_WORKFLOW_AGENT_MENTIONS";
+        let _guards = env_guards();
+        let previous = std::env::var_os(NAME);
+        std::env::remove_var(NAME);
+        assert_eq!(parse_workflow_agent_mentions().unwrap(), AgentMentions::Any);
+        std::env::set_var(NAME, "any");
+        assert_eq!(parse_workflow_agent_mentions().unwrap(), AgentMentions::Any);
+        std::env::set_var(NAME, "owner");
+        assert_eq!(
+            parse_workflow_agent_mentions().unwrap(),
+            AgentMentions::Owner
+        );
+        for invalid in ["true", "", "OWNER"] {
+            std::env::set_var(NAME, invalid);
+            assert!(parse_workflow_agent_mentions().is_err(), "{invalid:?}");
+        }
+        if let Some(value) = previous {
+            std::env::set_var(NAME, value);
+        } else {
+            std::env::remove_var(NAME);
         }
     }
 

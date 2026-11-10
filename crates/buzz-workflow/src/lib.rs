@@ -60,9 +60,33 @@ pub struct WorkflowConfig {
     pub max_concurrent: usize,
     /// Default per-step timeout in seconds. Default: 300 (5 minutes).
     pub default_timeout_secs: u64,
-    /// Secure workflows mode: messages carry agent-directing mentions only
-    /// for runs whose cause and definition may direct agents. Default: off.
-    pub secure_workflows: bool,
+    /// Which workflow runs may direct agents. Default: [`AgentMentions::Any`].
+    pub agent_mentions: AgentMentions,
+}
+
+/// Which workflow runs' messages carry agent-directing `buzz:workflow-mention`
+/// tags. Set relay-wide by `BUZZ_WORKFLOW_AGENT_MENTIONS`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentMentions {
+    /// Every run may direct the agents its owner's step text names.
+    #[default]
+    Any,
+    /// Owner-only agent mentions: only runs the owner or a timer started, on a
+    /// definition of only `send_message` and `delay` steps, may direct agents.
+    Owner,
+}
+
+impl std::str::FromStr for AgentMentions {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "any" => Ok(Self::Any),
+            "owner" => Ok(Self::Owner),
+            other => Err(format!("expected `any` or `owner`, got `{other}`")),
+        }
+    }
 }
 
 impl Default for WorkflowConfig {
@@ -70,7 +94,7 @@ impl Default for WorkflowConfig {
         Self {
             max_concurrent: 100,
             default_timeout_secs: 300,
-            secure_workflows: false,
+            agent_mentions: AgentMentions::Any,
         }
     }
 }
@@ -1413,7 +1437,7 @@ mod postgres_tests {
         let cfg = WorkflowConfig::default();
         assert_eq!(cfg.max_concurrent, 100);
         assert_eq!(cfg.default_timeout_secs, 300);
-        assert!(!cfg.secure_workflows);
+        assert_eq!(cfg.agent_mentions, AgentMentions::Any);
     }
 
     #[test]
@@ -1636,15 +1660,24 @@ steps:
     }
 
     #[test]
+    fn agent_mentions_parses_only_any_and_owner() {
+        assert_eq!("any".parse(), Ok(AgentMentions::Any));
+        assert_eq!("owner".parse(), Ok(AgentMentions::Owner));
+        for invalid in ["", "true", "Owner", "all"] {
+            assert!(invalid.parse::<AgentMentions>().is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
     fn workflow_config_custom_values() {
         let cfg = WorkflowConfig {
             max_concurrent: 50,
             default_timeout_secs: 600,
-            secure_workflows: true,
+            agent_mentions: AgentMentions::Owner,
         };
         assert_eq!(cfg.max_concurrent, 50);
         assert_eq!(cfg.default_timeout_secs, 600);
-        assert!(cfg.secure_workflows);
+        assert_eq!(cfg.agent_mentions, AgentMentions::Owner);
     }
 
     fn make_message_event() -> buzz_core::StoredEvent {

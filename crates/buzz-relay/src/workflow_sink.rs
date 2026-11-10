@@ -314,7 +314,7 @@ impl ActionSink for RelayActionSink {
             //      named in the workflow owner's stored step template. This is the
             //      authority-bearing provenance used by ACP; trigger-controlled
             //      template substitutions cannot create it. The executor
-            //      withholds the template (secure workflows mode) when the
+            //      withholds the template (owner-only agent mentions) when the
             //      run's cause or definition may not direct agents.
             let mut tags = vec![
                 Tag::parse(["p", &author_pubkey_hex, "", "owner"])
@@ -825,10 +825,12 @@ mod postgres_tests {
 
     /// Real-PG state mirroring `handlers::event::tests::test_state_with_redis_url`.
     async fn test_state() -> Arc<AppState> {
-        test_state_with_secure_workflows(false).await
+        test_state_with_agent_mentions(buzz_workflow::AgentMentions::Any).await
     }
 
-    async fn test_state_with_secure_workflows(secure_workflows: bool) -> Arc<AppState> {
+    async fn test_state_with_agent_mentions(
+        agent_mentions: buzz_workflow::AgentMentions,
+    ) -> Arc<AppState> {
         let mut config = crate::config::Config::for_test(); // [FI-TRACE-ENV-RACE]
         config.require_relay_membership = false;
         config.redis_url = "redis://127.0.0.1:1".to_string();
@@ -846,7 +848,7 @@ mod postgres_tests {
         let workflow_engine = Arc::new(buzz_workflow::WorkflowEngine::new(
             db.clone(),
             buzz_workflow::WorkflowConfig {
-                secure_workflows,
+                agent_mentions,
                 ..Default::default()
             },
         ));
@@ -978,6 +980,31 @@ mod postgres_tests {
         trigger_text: &str,
         cause: Option<&buzz_db::workflow::RunCause>,
     ) -> String {
+        run_workflow_send_output(
+            state,
+            community,
+            channel_id,
+            owner_pubkey,
+            definition,
+            trigger_text,
+            cause,
+        )
+        .await["event_id"]
+            .as_str()
+            .expect("send_message event id")
+            .to_owned()
+    }
+
+    /// Runs a workflow and returns its `send` step's recorded output.
+    async fn run_workflow_send_output(
+        state: &Arc<AppState>,
+        community: CommunityId,
+        channel_id: Uuid,
+        owner_pubkey: &[u8],
+        definition: serde_json::Value,
+        trigger_text: &str,
+        cause: Option<&buzz_db::workflow::RunCause>,
+    ) -> serde_json::Value {
         let (_, run_id, trigger_ctx, definition) = create_run(
             state,
             community,
@@ -998,10 +1025,7 @@ mod postgres_tests {
         .await
         .expect("execute workflow");
 
-        result.step_outputs["send"]["event_id"]
-            .as_str()
-            .expect("send_message event id")
-            .to_owned()
+        result.step_outputs["send"].clone()
     }
 
     #[tokio::test]
@@ -1649,13 +1673,15 @@ mod postgres_tests {
             .await
             .expect("owner replies to a parent only they can read");
     }
-    /// With secure workflows on, only runs caused by the owner or a timer whose
-    /// definitions have only `send_message` and `delay` steps carry
-    /// `buzz:workflow-mention`. Every message keeps its plain `p` tags. With it
-    /// off, every authored mention is stamped as before.
+    /// With owner-only agent mentions, only runs started by the owner or a
+    /// timer whose definitions have only `send_message` and `delay` steps
+    /// carry `buzz:workflow-mention`; the step's trace output records every
+    /// reason it was withheld. Every message keeps its plain `p` tags. With
+    /// `any`, every authored mention is stamped as before and nothing is
+    /// recorded.
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn secure_workflows_stamp_mentions_only_for_eligible_runs() {
+    async fn owner_only_agent_mentions_stamp_mentions_only_for_eligible_runs() {
         use buzz_db::workflow::RunCause;
 
         let setup_state = test_state().await;
@@ -1730,14 +1756,14 @@ mod postgres_tests {
                 serde_json::json!({"on": "message_posted"}),
                 vec![send.clone()],
                 Some(owner_event.clone()),
-                true,
+                Vec::<&str>::new(),
             ),
             (
                 "outsider-message",
                 serde_json::json!({"on": "message_posted"}),
                 vec![send.clone()],
                 Some(outsider_event.clone()),
-                false,
+                vec!["cause"],
             ),
             // The reaction signer is the cause, whoever wrote the reacted-to message.
             (
@@ -1745,70 +1771,70 @@ mod postgres_tests {
                 serde_json::json!({"on": "reaction_added"}),
                 vec![send.clone()],
                 Some(owner_event.clone()),
-                true,
+                Vec::<&str>::new(),
             ),
             (
                 "outsider-reaction",
                 serde_json::json!({"on": "reaction_added"}),
                 vec![send.clone()],
                 Some(outsider_event.clone()),
-                false,
+                vec!["cause"],
             ),
             (
                 "owner-diff",
                 serde_json::json!({"on": "diff_posted"}),
                 vec![send.clone()],
                 Some(owner_event.clone()),
-                true,
+                Vec::<&str>::new(),
             ),
             (
                 "outsider-diff",
                 serde_json::json!({"on": "diff_posted"}),
                 vec![send.clone()],
                 Some(outsider_event.clone()),
-                false,
+                vec!["cause"],
             ),
             (
                 "webhook",
                 serde_json::json!({"on": "webhook"}),
                 vec![send.clone()],
                 Some(RunCause::Webhook),
-                false,
+                vec!["cause"],
             ),
             (
                 "cron",
                 serde_json::json!({"on": "schedule", "cron": "0 * * * *"}),
                 vec![send.clone(), delay.clone()],
                 Some(RunCause::Schedule),
-                true,
+                Vec::<&str>::new(),
             ),
             (
                 "interval",
                 serde_json::json!({"on": "schedule", "interval": "1h"}),
                 vec![send.clone()],
                 Some(RunCause::Schedule),
-                true,
+                Vec::<&str>::new(),
             ),
             (
                 "manual-schedule",
                 serde_json::json!({"on": "schedule", "cron": "0 * * * *"}),
                 vec![send.clone()],
                 Some(RunCause::Manual(owner_bytes.clone())),
-                true,
+                Vec::<&str>::new(),
             ),
             (
                 "call-webhook",
                 serde_json::json!({"on": "message_posted"}),
                 vec![hook.clone(), send.clone()],
                 Some(owner_event.clone()),
-                false,
+                vec!["steps"],
             ),
             (
                 "legacy",
                 serde_json::json!({"on": "message_posted"}),
                 vec![send.clone()],
                 None,
-                false,
+                vec!["cause"],
             ),
         ];
 
@@ -1841,18 +1867,23 @@ mod postgres_tests {
         }
 
         for secure in [false, true] {
-            let state = test_state_with_secure_workflows(secure).await;
+            let state = test_state_with_agent_mentions(if secure {
+                buzz_workflow::AgentMentions::Owner
+            } else {
+                buzz_workflow::AgentMentions::Any
+            })
+            .await;
             state
                 .workflow_engine
                 .set_action_sink(Arc::new(RelayActionSink::new(&state)));
-            for (name, trigger, steps, cause, eligible) in &cases {
+            for (name, trigger, steps, cause, reasons) in &cases {
                 let definition = serde_json::json!({
                     "name": format!("{name}-{secure}"),
                     "trigger": trigger,
                     "steps": steps,
                     "enabled": true,
                 });
-                let event_id_hex = run_workflow(
+                let output = run_workflow_send_output(
                     &state,
                     community,
                     channel.id,
@@ -1862,10 +1893,19 @@ mod postgres_tests {
                     cause.as_ref(),
                 )
                 .await;
+                let withheld = secure && !reasons.is_empty();
+                let event_id_hex = output["event_id"].as_str().expect("send_message event id");
                 assert_eq!(
-                    agent_tags(&state, community, &event_id_hex, &agent_hex).await,
-                    (true, !secure || *eligible),
+                    agent_tags(&state, community, event_id_hex, &agent_hex).await,
+                    (true, !withheld),
                     "{name} (secure={secure}): (p, workflow-mention)"
+                );
+                let expected_trace =
+                    withheld.then(|| serde_json::json!({"withheld": true, "reasons": reasons}));
+                assert_eq!(
+                    output.get("agent_mentions").cloned(),
+                    expected_trace,
+                    "{name} (secure={secure}): trace agent_mentions"
                 );
             }
 
@@ -1921,12 +1961,21 @@ mod postgres_tests {
                 .get_workflow_run(community, run_id)
                 .await
                 .expect("load resumed run");
-            let resumed_event_id = resumed
+            let resumed_output = resumed
                 .execution_trace
                 .as_array()
                 .and_then(|trace| trace.iter().find(|entry| entry["step_id"] == "send"))
-                .and_then(|entry| entry["output"]["event_id"].as_str())
-                .unwrap_or_else(|| panic!("resumed run posted: {:?}", resumed.execution_trace))
+                .map(|entry| entry["output"].clone())
+                .unwrap_or_else(|| panic!("resumed run posted: {:?}", resumed.execution_trace));
+            // The persisted run trace, which the app's run history shows.
+            assert_eq!(
+                resumed_output.get("agent_mentions").cloned(),
+                secure.then(|| serde_json::json!({"withheld": true, "reasons": ["resumed"]})),
+                "approval resume (secure={secure}): trace agent_mentions"
+            );
+            let resumed_event_id = resumed_output["event_id"]
+                .as_str()
+                .expect("resumed send_message event id")
                 .to_owned();
             assert_eq!(
                 agent_tags(&state, community, &resumed_event_id, &agent_hex).await,

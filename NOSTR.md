@@ -399,8 +399,12 @@ an agent.
 
 A relay may leave out `buzz:workflow-mention` tags under a policy. The message
 still posts with its `p` tags, and an agent that no tag names does not act on
-it. For Buzz's secure workflows mode, see
-[docs/operator-secure-workflows.md](docs/operator-secure-workflows.md).
+it. A relay's NIP-11 document MUST carry `workflow_agent_mentions`: `"any"`
+when every run may carry the tags, or `"owner"` when only runs the workflow's
+owner or a timer started, on a definition of only `send_message` and `delay`
+steps, carry them; a client MUST treat a missing field as an older relay whose
+policy is unknown. For Buzz's owner-only agent mentions, see
+[docs/operator-workflow-agent-mentions.md](docs/operator-workflow-agent-mentions.md).
 
 ### Sending Messages
 

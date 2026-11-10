@@ -13,6 +13,8 @@ use std::collections::HashMap;
 
 use buzz_core::tenant::CommunityId;
 use buzz_db::workflow::RunCause;
+
+use crate::AgentMentions;
 use evalexpr::HashMapContext;
 use nostr::ToBech32;
 use serde_json::Value as JsonValue;
@@ -551,6 +553,30 @@ pub fn cause_may_direct_agents(cause: Option<&RunCause>, owner_pubkey: &[u8]) ->
     }
 }
 
+/// Why a `send_message` step withholds `buzz:workflow-mention` tags, in the
+/// order recorded in its trace: `cause` (not started by the owner or a timer),
+/// `steps` (the definition has a step other than `send_message` or `delay`),
+/// and `resumed` (the run resumed after an approval). Empty when the message
+/// may direct agents, which is always the case in [`AgentMentions::Any`].
+pub fn agent_mentions_withheld_reasons(
+    mode: AgentMentions,
+    cause_may_direct_agents: bool,
+    definition_may_direct_agents: bool,
+    resumed: bool,
+) -> Vec<&'static str> {
+    if mode == AgentMentions::Any {
+        return Vec::new();
+    }
+    [
+        (!cause_may_direct_agents, "cause"),
+        (!definition_may_direct_agents, "steps"),
+        (resumed, "resumed"),
+    ]
+    .into_iter()
+    .filter_map(|(applies, reason)| applies.then_some(reason))
+    .collect()
+}
+
 /// Dispatch a resolved action and return its output.
 ///
 /// For MVP, most actions log their intent and return a success output.
@@ -558,6 +584,7 @@ pub fn cause_may_direct_agents(cause: Option<&RunCause>, owner_pubkey: &[u8]) ->
 ///
 /// `RequestApproval` returns `StepResult::Suspended` — the caller must
 /// persist state and stop the execution loop.
+#[allow(clippy::too_many_arguments)]
 pub async fn dispatch_action(
     step: &Step,
     action: &ActionDef,
@@ -566,6 +593,7 @@ pub async fn dispatch_action(
     run_id: Uuid,
     trigger_ctx: &TriggerContext,
     definition_may_direct_agents: bool,
+    resumed: bool,
 ) -> Result<StepResult, WorkflowError> {
     use ActionDef::*;
 
@@ -625,12 +653,12 @@ pub async fn dispatch_action(
                         workflow.channel_id,
                     )?;
                     let owner_pubkey_hex = hex::encode(&workflow.owner_pubkey);
-                    let may_direct_agents = !engine.config.secure_workflows
-                        || (definition_may_direct_agents
-                            && cause_may_direct_agents(
-                                wf_run.cause.as_ref(),
-                                &workflow.owner_pubkey,
-                            ));
+                    let withheld_reasons = agent_mentions_withheld_reasons(
+                        engine.config.agent_mentions,
+                        cause_may_direct_agents(wf_run.cause.as_ref(), &workflow.owner_pubkey),
+                        definition_may_direct_agents,
+                        resumed,
+                    );
 
                     // Thread the reply onto the triggering message when requested.
                     // The trigger must carry the event to reply to; schema
@@ -664,7 +692,7 @@ pub async fn dispatch_action(
                             ));
                         }
                     };
-                    let authorized_text = may_direct_agents.then_some(authored_text);
+                    let authorized_text = withheld_reasons.is_empty().then_some(authored_text);
                     let event_id = engine
                         .action_sink()?
                         .send_message(
@@ -678,10 +706,32 @@ pub async fn dispatch_action(
                         .await
                         .map_err(WorkflowError::from)?;
 
-                    Ok(StepResult::Completed(serde_json::json!({
+                    let mut output = serde_json::json!({
                         "sent": true,
                         "event_id": event_id,
-                    })))
+                    });
+                    if !withheld_reasons.is_empty() {
+                        info!(
+                            community = %community_id,
+                            workflow = %wf_run.workflow_id,
+                            run_id = %run_id,
+                            step = step_id,
+                            reasons = ?withheld_reasons,
+                            "owner-only agent mentions withheld buzz:workflow-mention tags"
+                        );
+                        for reason in &withheld_reasons {
+                            metrics::counter!(
+                                "buzz_workflow_agent_mentions_withheld_total",
+                                "reason" => *reason
+                            )
+                            .increment(1);
+                        }
+                        output["agent_mentions"] = serde_json::json!({
+                            "withheld": true,
+                            "reasons": withheld_reasons,
+                        });
+                    }
+                    Ok(StepResult::Completed(output))
                 }
 
                 SendDm { to, text: _ } => {
@@ -1129,7 +1179,7 @@ pub async fn execute_run(
 }
 
 /// Resume a run after its approval was granted, from a specific step index.
-/// Messages from a resumed run never direct agents in secure workflows mode.
+/// With owner-only agent mentions, messages from a resumed run never direct agents.
 ///
 /// Acquires a concurrency permit from `engine.run_semaphore` before executing —
 /// returns [`WorkflowError::CapacityExceeded`] immediately if all permits are
@@ -1216,7 +1266,8 @@ async fn execute_steps(
 ) -> Result<ExecutionResult, (WorkflowError, crate::error::PartialProgress)> {
     // A resumed run continues on restored outputs and on a definition that
     // may have changed since the approval, so it never directs agents.
-    let definition_may_direct_agents = resume.is_none() && definition_may_direct_agents(def);
+    let resumed = resume.is_some();
+    let definition_may_direct_agents = definition_may_direct_agents(def);
     let (start_index, mut step_outputs) = resume.unwrap_or_default();
     let mut trace: Vec<JsonValue> = Vec::new();
 
@@ -1279,6 +1330,7 @@ async fn execute_steps(
                 run_id,
                 trigger_ctx,
                 definition_may_direct_agents,
+                resumed,
             ),
         )
         .await;
@@ -2056,6 +2108,29 @@ mod tests {
                 "{other}"
             );
         }
+    }
+
+    #[test]
+    fn owner_mode_lists_every_withheld_reason_in_order() {
+        use AgentMentions::{Any, Owner};
+        assert!(agent_mentions_withheld_reasons(Any, false, false, true).is_empty());
+        assert!(agent_mentions_withheld_reasons(Owner, true, true, false).is_empty());
+        assert_eq!(
+            agent_mentions_withheld_reasons(Owner, false, true, false),
+            ["cause"]
+        );
+        assert_eq!(
+            agent_mentions_withheld_reasons(Owner, true, false, false),
+            ["steps"]
+        );
+        assert_eq!(
+            agent_mentions_withheld_reasons(Owner, true, true, true),
+            ["resumed"]
+        );
+        assert_eq!(
+            agent_mentions_withheld_reasons(Owner, false, false, true),
+            ["cause", "steps", "resumed"]
+        );
     }
 
     #[test]
