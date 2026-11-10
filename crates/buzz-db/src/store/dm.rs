@@ -76,7 +76,7 @@ pub async fn find_dm_by_participants(
                created_by, created_at, updated_at, archived_at, deleted_at,
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
-               purpose, purpose_set_by, purpose_set_at, labels, join_role, unlisted, auto_join
+               purpose, purpose_set_by, purpose_set_at, labels, join_role, unlisted, auto_join, fork_source_channel_id, fork_source_message_id
         FROM channels
         WHERE community_id = $1
           AND participant_hash = $2
@@ -142,7 +142,7 @@ pub async fn create_dm(
                created_by, created_at, updated_at, archived_at, deleted_at,
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
-               purpose, purpose_set_by, purpose_set_at, labels, join_role, unlisted, auto_join
+               purpose, purpose_set_by, purpose_set_at, labels, join_role, unlisted, auto_join, fork_source_channel_id, fork_source_message_id
         FROM channels
         WHERE community_id = $1
           AND participant_hash = $2
@@ -213,7 +213,7 @@ pub async fn create_dm(
                created_by, created_at, updated_at, archived_at, deleted_at,
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
-               purpose, purpose_set_by, purpose_set_at, labels, join_role, unlisted, auto_join
+               purpose, purpose_set_by, purpose_set_at, labels, join_role, unlisted, auto_join, fork_source_channel_id, fork_source_message_id
         FROM channels WHERE community_id = $1 AND id = $2
         "#,
     )
@@ -537,6 +537,8 @@ fn row_to_channel_record(row: sqlx::postgres::PgRow) -> Result<ChannelRecord> {
         join_role: row.try_get("join_role")?,
         unlisted: row.try_get("unlisted")?,
         auto_join: row.try_get("auto_join")?,
+        fork_source_channel_id: row.try_get("fork_source_channel_id")?,
+        fork_source_message_id: row.try_get("fork_source_message_id")?,
     })
 }
 

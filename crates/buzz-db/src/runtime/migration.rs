@@ -902,7 +902,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 86);
+        assert_eq!(migrations.len(), 88);
         assert!(migrations[83]
             .sql
             .as_str()
@@ -3089,6 +3089,18 @@ mod postgres_tests {
             columns(&migrated, "channels").await,
             "column parity mismatch for channels: schema.sql desired state has drifted \
              from the migrations; update schema/tables/public/channels.sql to match"
+        );
+        let fork_constraint = |shapes: Vec<(String, String, bool)>| {
+            shapes
+                .into_iter()
+                .filter(|(name, _, _)| name == "channels_fork_source_paired")
+                .collect::<Vec<_>>()
+        };
+        let desired_fork = fork_constraint(constraints(&desired, "channels").await);
+        assert_eq!(desired_fork.len(), 1);
+        assert_eq!(
+            desired_fork,
+            fork_constraint(constraints(&migrated, "channels").await)
         );
         // The listed-name index (0083) is compared on its own for that reason.
         let listed_name = |shapes: Vec<(String, String, String)>| {
