@@ -1158,6 +1158,70 @@ void main() {
       );
     });
 
+    test(
+      'retains picked files through source removal and allows recovery',
+      () async {
+        final directory = await Directory.systemTemp.createTemp('attachment-');
+        addTearDown(() => directory.delete(recursive: true));
+        final source = File('${directory.path}/Meeting: planning notes.m4a');
+        final contents = [1, 2, 3, 4];
+        await source.writeAsBytes(contents);
+        final uploads = <List<int>>[];
+        final service = MediaUploadService(
+          baseUrl: 'https://relay.example',
+          nsec: nostr.Keys.generate().nsec,
+          pickGalleryVideo: () async => null,
+          pickGalleryImage: () async => null,
+          pickAttachmentFile: () async => XFile(source.path),
+          httpClient: http_testing.MockClient((request) async {
+            uploads.add(request.bodyBytes);
+            return http.Response(
+              jsonEncode({
+                'url': 'https://relay.example/media/recording.m4a',
+                'sha256':
+                    '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+                'size': request.bodyBytes.length,
+                'type': 'application/octet-stream',
+                'uploaded': 1,
+              }),
+              HttpStatus.ok,
+            );
+          }),
+        );
+        addTearDown(service.dispose);
+        final picked = await service.pickAttachmentFile();
+        final retained = picked!;
+        if (retained is RetainedAttachmentFile) {
+          addTearDown(retained.dispose);
+        }
+        await source.delete();
+        final uploaded = await service.uploadFile(retained);
+        expect(uploads.single, contents);
+        expect(uploaded.filename, 'Meeting: planning notes.m4a');
+
+        await expectLater(
+          service.pickAttachmentFile(),
+          throwsA(
+            isA<Exception>().having(
+              (e) => e.toString(),
+              'recovery',
+              contains('Save a copy in Files, then attach it again'),
+            ),
+          ),
+        );
+        expect(uploads, hasLength(1));
+        await source.writeAsBytes([5, 6]);
+        final replacement = await service.pickAttachmentFile();
+        await service.uploadFile(replacement!);
+        expect(uploads.last, [5, 6]);
+        await (replacement as RetainedAttachmentFile).dispose();
+        expect(await File(replacement.path).parent.exists(), isFalse);
+        expect(await source.readAsBytes(), [5, 6]);
+        await (retained as RetainedAttachmentFile).dispose();
+        expect(await File(retained.path).parent.exists(), isFalse);
+      },
+    );
+
     test('rejects empty generic file attachments before upload', () async {
       var uploadRequested = false;
       final service = MediaUploadService(
@@ -1716,7 +1780,11 @@ extension on MediaUploadService {
 
   Future<BlobDescriptor?> pickAndUploadFile() async {
     final file = await pickAttachmentFile();
-    return file == null ? null : uploadFile(file);
+    try {
+      return file == null ? null : await uploadFile(file);
+    } finally {
+      if (file is RetainedAttachmentFile) await file.dispose();
+    }
   }
 
   Future<BlobDescriptor> readAndUploadClipboardImage() async {

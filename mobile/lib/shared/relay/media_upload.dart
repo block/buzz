@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
+import 'dart:typed_data';
 
 import 'package:file_selector/file_selector.dart' as file_selector;
 import 'package:flutter/foundation.dart';
@@ -480,7 +481,12 @@ class MediaUploadService {
     if (pickAttachmentFile == null) {
       throw Exception("File attachments aren't available on this device.");
     }
-    return pickAttachmentFile();
+    final pickedFile = await pickAttachmentFile();
+    if (pickedFile == null) return null;
+    // Document pickers can return an iOS Inbox URL whose lifetime is shorter
+    // than the composer draft. Capture the contents before displaying a chip
+    // that promises the file is ready to send.
+    return RetainedAttachmentFile.capture(pickedFile);
   }
 
   /// Uploads [pickedFile] as a size-limited generic attachment.
@@ -490,16 +496,7 @@ class MediaUploadService {
     UploadCancellationToken? cancellationToken,
   }) async {
     _throwIfCancelled(cancellationToken);
-    final length = await pickedFile.length();
-    if (length == 0) {
-      throw Exception('File is empty.');
-    }
-    if (length > _maxFileSizeBytes) {
-      throw Exception(
-        'File is too large (${(length / 1024 / 1024).toStringAsFixed(0)}MB). Maximum is 100MB.',
-      );
-    }
-    final bytes = await pickedFile.readAsBytes();
+    final bytes = await _readAttachmentBytes(pickedFile);
     _throwIfCancelled(cancellationToken);
     final descriptor = await _uploadPreparedBytes(
       bytes,

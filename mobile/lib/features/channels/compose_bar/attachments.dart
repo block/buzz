@@ -368,6 +368,10 @@ class _PendingAttachment {
 }
 
 Future<void> _deleteXFile(XFile file) async {
+  if (file is RetainedAttachmentFile) {
+    await file.dispose();
+    return;
+  }
   final path = file.path;
   if (path.isEmpty) return;
   try {
