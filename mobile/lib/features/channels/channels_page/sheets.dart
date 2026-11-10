@@ -339,9 +339,10 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
           if (!selectedPubkeys.contains(candidate.pubkey)) candidate,
       ],
       query: search,
-      // Agents that settle after the rows were shown start them over, so
-      // they keep their places ahead of known people.
-      opening: opening.value * 2 + (agentsSettled ? 1 : 0),
+      // Agents that settle after empty-query rows were shown start them
+      // over, so they keep their places ahead of known people. Typed rows
+      // keep their places.
+      opening: opening.value * 2 + (search.isEmpty && agentsSettled ? 1 : 0),
       pending: searching,
     );
     final availableResults = shown.rows;
