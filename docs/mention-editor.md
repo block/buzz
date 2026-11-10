@@ -44,8 +44,9 @@ production hook), and the send-window, namesake, and delete-then-retype cases in
 ## Exact recipient labels
 
 A selected label is a binding to one exact public key, not a lookup by the latest
-profile name. Selecting a second identity with the same name reserves a qualified
-label containing its full key (and, if needed, a collision suffix). Team members
+profile name. Selecting a second identity with the same name qualifies every
+same-name label, earlier selections included, with its full key (and, if
+needed, a collision suffix). Team members
 reserve labels sequentially. Automatic addressing inserts/restores/removes that
 registered label, never a different recipient with the same name.
 
