@@ -3,6 +3,7 @@ import 'package:buzz/features/agents/agents_page.dart';
 import 'package:buzz/shared/identity_archives/identity_archives.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
@@ -39,14 +40,17 @@ void main() {
     );
   });
 
-  testWidgets('leaves archived agents out of the directory', (tester) async {
+  testWidgets('leaves archived agents out of the directory until restored', (
+    tester,
+  ) async {
     final h = await AgentsHarness.create();
     final existing = existingDesktopKeys.public;
+    var archived = {fakeAgent};
     await h.open(
       tester,
       directory: [existing, fakeAgent],
       overrides: [
-        identityArchivesProvider.overrideWith((ref) async => {fakeAgent}),
+        identityArchivesProvider.overrideWith((ref) async => archived),
       ],
     );
     final container = ProviderScope.containerOf(
@@ -61,6 +65,20 @@ void main() {
           .widgetList<AgentCard>(find.byType(AgentCard))
           .map((card) => card.name),
       ['Zulu'],
+    );
+    // Restored elsewhere: pulling to refresh rereads the archive list.
+    archived = {};
+    await tester.fling(
+      find.byType(CustomScrollView).first,
+      const Offset(0, 400),
+      1000,
+    );
+    await tester.pumpAndSettle();
+    expect(
+      tester
+          .widgetList<AgentCard>(find.byType(AgentCard))
+          .map((card) => card.name),
+      ['alpha', 'Zulu'],
     );
   });
 }

@@ -374,6 +374,9 @@ class AgentsPage extends HookConsumerWidget {
       if (context.mounted) {
         attempt.value++;
         ref.invalidate(ownedAgentDirectoryProvider);
+        // A refresh also rereads archives: an agent restored elsewhere
+        // reappears, and one archived elsewhere leaves.
+        ref.invalidate(identityArchivesProvider);
       }
     }
 
