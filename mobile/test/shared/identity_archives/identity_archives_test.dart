@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
-import 'package:buzz/shared/me/me_archived_agents.dart';
+import 'package:buzz/shared/identity_archives/identity_archives.dart';
 import 'package:buzz/shared/me/me_sync.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -47,12 +47,12 @@ void main() {
               RelayConfig(baseUrl: 'https://relay.test', nsec: owner.nsec),
             ),
           ),
-          meRelayInformationClientProvider.overrideWithValue(client),
+          relayInformationClientProvider.overrideWithValue(client),
         ],
       );
       addTearDown(container.dispose);
       addTearDown(client.close);
-      expect(await container.read(meArchivedAgentsProvider.future), {target});
+      expect(await container.read(identityArchivesProvider.future), {target});
       expect(relay.author, authority.public);
       for (final invalid in [
         snapshot(impostor),
@@ -60,12 +60,12 @@ void main() {
         NostrEvent.fromJson(snapshot(authority).toJson()..['sig'] = '0' * 128),
       ]) {
         relay.event = invalid;
-        container.invalidate(meArchivedAgentsProvider);
-        expect(await container.read(meArchivedAgentsProvider.future), isEmpty);
+        container.invalidate(identityArchivesProvider);
+        expect(await container.read(identityArchivesProvider.future), isEmpty);
       }
       relay.event = snapshot(authority);
-      container.invalidate(meArchivedAgentsProvider);
-      expect(await container.read(meArchivedAgentsProvider.future), {target});
+      container.invalidate(identityArchivesProvider);
+      expect(await container.read(identityArchivesProvider.future), {target});
     },
   );
 
@@ -85,7 +85,7 @@ void main() {
             RelayConfig(baseUrl: 'https://relay.test', nsec: owner.nsec),
           ),
         ),
-        meRelayInformationClientProvider.overrideWithValue(client),
+        relayInformationClientProvider.overrideWithValue(client),
       ],
     );
     addTearDown(container.dispose);
@@ -96,7 +96,7 @@ void main() {
     });
     addTearDown(trickle.cancel);
     final result = await container
-        .read(meArchivedAgentsProvider.future)
+        .read(identityArchivesProvider.future)
         .timeout(const Duration(seconds: 5));
     expect(result, isEmpty);
     expect(cancelled, isTrue);
@@ -119,12 +119,12 @@ void main() {
               RelayConfig(baseUrl: 'https://relay.test', nsec: owner.nsec),
             ),
           ),
-          meRelayInformationClientProvider.overrideWithValue(client),
+          relayInformationClientProvider.overrideWithValue(client),
         ],
       );
       addTearDown(container.dispose);
       addTearDown(client.close);
-      expect(await container.read(meArchivedAgentsProvider.future), isEmpty);
+      expect(await container.read(identityArchivesProvider.future), isEmpty);
       expect(relay.author, isNull);
     },
   );

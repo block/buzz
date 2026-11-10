@@ -1,5 +1,6 @@
 import 'package:buzz/features/agents/agent_card.dart';
 import 'package:buzz/features/agents/agents_page.dart';
+import 'package:buzz/shared/identity_archives/identity_archives.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -35,6 +36,31 @@ void main() {
           .widgetList<AgentCard>(find.byType(AgentCard))
           .map((card) => card.name),
       ['aardvark', 'alpha'],
+    );
+  });
+
+  testWidgets('leaves archived agents out of the directory', (tester) async {
+    final h = await AgentsHarness.create();
+    final existing = existingDesktopKeys.public;
+    await h.open(
+      tester,
+      directory: [existing, fakeAgent],
+      overrides: [
+        identityArchivesProvider.overrideWith((ref) async => {fakeAgent}),
+      ],
+    );
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(AgentsPage)),
+    );
+    final profiles = container.read(userCacheProvider.notifier);
+    profiles.put(UserProfile(pubkey: existing, displayName: 'Zulu'));
+    profiles.put(UserProfile(pubkey: fakeAgent, displayName: 'alpha'));
+    await tester.pumpAndSettle();
+    expect(
+      tester
+          .widgetList<AgentCard>(find.byType(AgentCard))
+          .map((card) => card.name),
+      ['Zulu'],
     );
   });
 }

@@ -2,6 +2,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../../shared/agents/owned_agent_directory.dart';
 import '../../../shared/crypto/nip_oa.dart';
+import '../../../shared/identity_archives/identity_archives.dart';
 import '../../../shared/identity_names/identity_names.dart';
 import '../../../shared/identity_names/identity_names_provider.dart';
 import '../../../shared/mentions/agent_identity_provider.dart';
@@ -356,6 +357,9 @@ List<MentionCandidate> _chooserCandidates(
   final userCache = ref.watch(userCacheProvider);
   final currentPubkey = ref.watch(currentPubkeyProvider);
   final searches = ref.watch(mentionSearchCacheProvider);
+  // Removed before labels are scoped, so an archived namesake never adds a
+  // qualifier to a live name.
+  final archived = ref.watch(hiddenArchivedIdentitiesProvider);
 
   final sharedChannelIds = {
     for (final channel in channels)
@@ -384,7 +388,9 @@ List<MentionCandidate> _chooserCandidates(
       offerOwnedAgents: offerOwnedAgents,
       offerUnsharedAgents: offerUnsharedAgents,
     ))
-      if (isMentionKey(candidate.pubkey)) candidate,
+      if (isMentionKey(candidate.pubkey) &&
+          !archived.contains(candidate.pubkey))
+        candidate,
   ];
 
   // Admission does not gate the search: `@Mary J` can name a person

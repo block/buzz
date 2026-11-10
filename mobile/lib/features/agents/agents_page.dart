@@ -14,6 +14,7 @@ import '../../shared/community/community_provider.dart';
 import '../../shared/me/default_agent.dart';
 import '../../shared/hosted/hosted_flow.dart';
 import '../../shared/hosted/hosted_flow_provider.dart';
+import '../../shared/identity_archives/identity_archives.dart';
 import '../../shared/identity_names/identity_names_provider.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/profile/user_cache_provider.dart';
@@ -317,12 +318,22 @@ class AgentsPage extends HookConsumerWidget {
     final owned =
         registered.data ??
         (lastOwned.value?.$1 == scope ? lastOwned.value?.$2 : null);
-    final keys = {
-      ...?owned,
-      for (final entry
-          in ownedDirectory.asData?.value ?? <AgentDirectoryEntry>[])
-        entry.pubkey,
-    }.where((key) => !controller.deletedAgents.contains(key)).toList();
+    // Archived agents are not offered, as on desktop, where archiving an
+    // agent takes it out of the library.
+    final archived = ref.watch(hiddenArchivedIdentitiesProvider);
+    final keys =
+        {
+              ...?owned,
+              for (final entry
+                  in ownedDirectory.asData?.value ?? <AgentDirectoryEntry>[])
+                entry.pubkey,
+            }
+            .where(
+              (key) =>
+                  !controller.deletedAgents.contains(key) &&
+                  !archived.contains(key),
+            )
+            .toList();
     final names = watchIdentityNames(
       ref,
       keys,
