@@ -131,7 +131,8 @@ class ChannelDetailsPage extends HookConsumerWidget {
     final canJoin =
         resolvedChannel.visibility == 'open' &&
         !resolvedChannel.isArchived &&
-        !resolvedChannel.isMember;
+        !resolvedChannel.isMember &&
+        !resolvedChannel.joinsAsGuest;
     final canAddMembers =
         membersAsync.hasValue &&
         !membersAsync.isLoading &&

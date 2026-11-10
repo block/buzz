@@ -225,6 +225,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       _directoryMetas = const [];
       _directoryMetasScope = null;
       _hiddenDmIds = const {};
+      _confirmedJoins.clear();
       // Retire any in-flight directory request: its response describes the
       // previous relay or identity and must not reach this scope's state.
       _refreshCoordinator.retireInFlight();

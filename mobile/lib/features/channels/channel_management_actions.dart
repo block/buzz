@@ -282,7 +282,8 @@ class ChannelActions {
             extensions: const {'consistency': 'strong'},
           ),
         ]);
-      } catch (_) {
+      } catch (error) {
+        debugPrint('Join confirmation read failed: $error');
         throw const ChannelJoinUnconfirmed();
       }
       confirmed = rosters.any(
@@ -297,8 +298,9 @@ class ChannelActions {
       shown = await _ref
           .read(channelsProvider.notifier)
           .installConfirmedJoin(channelId);
-    } catch (_) {
+    } catch (error) {
       _ensureCommunityValid();
+      debugPrint('Showing a confirmed join failed: $error');
       throw const ChannelJoinUnconfirmed();
     }
     _ensureCommunityValid();

@@ -97,6 +97,21 @@ void _confirmedJoinCases() {
         final afterRemoval = session.strongMembershipReads;
         await notifier.refresh();
         expect(session.strongMembershipReads, afterRemoval);
+
+        // A join recorded for one identity never pins another's reads.
+        session.writerMemberships = [
+          _membership(_joinedChannel, 'me'),
+          _membership(_otherJoinedChannel, 'me'),
+        ];
+        expect(
+          await notifier.installConfirmedJoin(_otherJoinedChannel),
+          isTrue,
+        );
+        final beforeSwitch = session.strongMembershipReads;
+        container.read(_testPubkeyProvider.notifier).set('someone-else');
+        await container.read(channelsProvider.future);
+        await notifier.refresh();
+        expect(session.strongMembershipReads, beforeSwitch);
       },
     );
 
@@ -132,14 +147,32 @@ void _confirmedJoinCases() {
         await container.read(channelsProvider.future);
         final actions = container.read(actionsProvider);
 
-        // Accepted and confirmed, but the list read fails: not a rejection.
+        // Accepted, but the roster read fails: not a rejection.
         session.writerMemberships = [_membership(_joinedChannel, 'me')];
-        session.membershipFailures = 1;
+        session.rosterFailures = 1;
         await expectLater(
           actions.joinChannel(_joinedChannel),
           throwsA(isA<ChannelJoinUnconfirmed>()),
         );
         expect(session.published.map((event) => event.kind), [9021]);
+        expect(isMember(), isFalse);
+
+        // Confirmed, but the list can't show the channel (no metadata yet).
+        final metadata = session.metadata;
+        session.metadata = const [];
+        await expectLater(
+          actions.recheckJoin(_joinedChannel),
+          throwsA(isA<ChannelJoinUnconfirmed>()),
+        );
+        expect(isMember(), isFalse);
+        session.metadata = metadata;
+
+        // Confirmed, but the list read fails: not a rejection either.
+        session.membershipFailures = 1;
+        await expectLater(
+          actions.recheckJoin(_joinedChannel),
+          throwsA(isA<ChannelJoinUnconfirmed>()),
+        );
         expect(isMember(), isFalse);
 
         // Checking again shows the membership without sending the join again.
@@ -182,6 +215,7 @@ class _WriterReplicaRelaySession extends _FakeRelaySession {
 
   List<NostrEvent> writerMemberships = const [];
   int strongMembershipReads = 0;
+  int rosterFailures = 0;
   final published = <NostrEvent>[];
 
   @override
@@ -204,6 +238,10 @@ class _WriterReplicaRelaySession extends _FakeRelaySession {
             filter.extensions['consistency'] == 'strong') {
       final channelIds = filter.tags['#d']?.toSet();
       if (channelIds != null) {
+        if (rosterFailures > 0) {
+          rosterFailures--;
+          throw Exception('roster read failed');
+        }
         return writerMemberships
             .where((event) => channelIds.contains(event.getTagValue('d')))
             .toList();
