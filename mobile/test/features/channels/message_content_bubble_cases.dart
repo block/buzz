@@ -197,7 +197,7 @@ void bubbleContentTests() {
       ),
     );
     await tester.pumpAndSettle();
-    final gallery = find.byKey(const ValueKey('message-media-carousel'));
+    final gallery = find.byKey(const ValueKey('message-media-stack'));
     expect(gallery, findsOneWidget);
     expect(bubbles, findsOneWidget);
     expect(find.descendant(of: bubbles, matching: gallery), findsNothing);

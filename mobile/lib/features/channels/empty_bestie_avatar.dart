@@ -2,12 +2,15 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
+import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/agents/agent_avatar_catalog.dart';
+import '../../shared/relay/media_image.dart';
 import '../../shared/widgets/agent_navigation_icon.dart';
 import '../../shared/widgets/avatar_image.dart';
 
-final _characters = [
+/// The agent pictures new people are invited with, in the order shown.
+final emptyBestieCharacters = [
   for (var i = 0; i < AgentAvatarPack.gloopies.indices.length; i++)
     for (final pack in [
       AgentAvatarPack.fuzzies,
@@ -18,11 +21,11 @@ final _characters = [
 ];
 
 /// A quiet invitation to create a first companion, cycling every five seconds.
-class EmptyBestieAvatar extends HookWidget {
+class EmptyBestieAvatar extends HookConsumerWidget {
   const EmptyBestieAvatar({super.key});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final index = useState(0);
     final reducedMotion = MediaQuery.disableAnimationsOf(context);
     final lifecycle = useAppLifecycleState();
@@ -33,22 +36,24 @@ class EmptyBestieAvatar extends HookWidget {
     useEffect(() {
       if (reducedMotion || !visible) return null;
       final timer = Timer.periodic(const Duration(seconds: 5), (_) {
-        index.value = (index.value + 1) % _characters.length;
+        index.value = (index.value + 1) % emptyBestieCharacters.length;
       });
       return timer.cancel;
     }, [reducedMotion, visible]);
-    final character = _characters[index.value];
+    final character = emptyBestieCharacters[index.value];
     useEffect(() {
       var cancelled = false;
       if (visible && !reducedMotion) {
         final nextPoster =
-            _characters[(index.value + 1) % _characters.length].url;
+            emptyBestieCharacters[(index.value + 1) %
+                    emptyBestieCharacters.length]
+                .url;
         // precacheImage reads inherited configuration; do so after hook setup.
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (cancelled || !context.mounted) return;
           unawaited(
             precacheImage(
-              NetworkImage(nextPoster),
+              mediaImageProviderFor(ref, nextPoster),
               context,
               onError: (_, _) {}, // Keep the offline avatar fallback.
             ),

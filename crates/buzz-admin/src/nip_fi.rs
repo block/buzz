@@ -188,6 +188,10 @@ async fn unbind(
     {
         NipFiUnbind::Removed => true,
         NipFiUnbind::NotBound => false,
+        NipFiUnbind::RequiredIssuer => anyhow::bail!(
+            "refusing to remove the last NIP-FI issuer: this community requires NIP-FI; \
+             bind a replacement first, or archive or delete the community to stop it logging in"
+        ),
         NipFiUnbind::LastIssuer => anyhow::bail!(
             "refusing to remove the community's last NIP-FI issuer: backfill would rebind it; \
              bind a replacement first, or archive or delete the community to stop it logging in"
@@ -273,11 +277,18 @@ mod postgres_tests {
 
     const ISS: &str = "https://issuer.example/api/goose";
 
+    /// The production writer pool, with the connection budget of the sqlx
+    /// pools the other PostgreSQL tests use. The relay's 3 s acquire timeout
+    /// and two eager spare connections are sized for a warm relay pod, not for
+    /// the first wave of a test lane, where every worker clones its database
+    /// at once and a first connection can take longer than 3 s.
     async fn db() -> Db {
         let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
             .unwrap_or_else(|_| DbConfig::default().database_url);
         Db::new(&DbConfig {
             database_url,
+            min_connections: 0,
+            acquire_timeout_secs: 30,
             ..DbConfig::default()
         })
         .await

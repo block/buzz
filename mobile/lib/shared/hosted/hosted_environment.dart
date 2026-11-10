@@ -1,32 +1,43 @@
-/// Trusted build configuration, never supplied by a deep link or relay.
-abstract final class HostedEnvironment {
-  /// Account UI and startup work are opt-in, independently of the backend URL.
-  static bool get enabled => authDomains.isNotEmpty;
+import 'builderlab_build.dart';
 
-  static final Uri origin = _origin();
-  static const _communityAccounts = {
-    'communities.buzz.xyz': 'https://app.builderlab.xyz',
-    'communities.public.builderlabstaging.xyz':
-        'https://app.builderlabstaging.xyz',
-  };
+/// The public Builderlab account of a public build. Trusted build
+/// configuration from [BuilderlabBuild], never supplied by a deep link or
+/// relay.
+abstract final class HostedEnvironment {
+  /// Account UI and startup work run only in a public build.
+  static bool get enabled =>
+      BuilderlabBuild.distribution == BuilderlabDistribution.public;
+
+  /// The public build's Builderlab. Other builds never contact it; their
+  /// value only keys inert local storage.
+  static final Uri origin = enabled
+      ? BuilderlabBuild.origin!
+      : BuilderlabBuild.publicStorageOrigin;
 
   /// Public CDN serving each published Builderlab agent card's
   /// `<id>/agent.json` and images, for this build's account environment.
-  static Uri get avatarsCdnOrigin => Uri.parse(switch (origin.host) {
-    'app.builderlab.xyz' => 'https://d2z0pbxrxbsiz5.cloudfront.net',
-    'app.builderlabstaging.xyz' => 'https://d10hx6rb3fdt3l.cloudfront.net',
-    _ => throw StateError('Unsupported hosted account environment'),
-  });
+  /// Null for an internal build or a Builderlab without a known CDN, which
+  /// have no agent cards.
+  static Uri? get avatarsCdnOrigin =>
+      BuilderlabBuild.distribution == BuilderlabDistribution.internal
+      ? null
+      : switch (origin.host) {
+          'app.builderlab.xyz' => Uri.parse(
+            'https://d2z0pbxrxbsiz5.cloudfront.net',
+          ),
+          'app.builderlabstaging.xyz' => Uri.parse(
+            'https://d10hx6rb3fdt3l.cloudfront.net',
+          ),
+          _ => null,
+        };
 
   /// Shortens hostname fallbacks for display without changing relay identity.
   static String communityDisplayName(String name, String relayUrl) {
     final relay = Uri.tryParse(relayUrl);
-    if (relay == null ||
-        name != relay.host ||
-        accountOriginFor(relay) == null) {
+    if (relay == null || name != relay.host || !supportsRelay(relay)) {
       return name;
     }
-    for (final domain in _communityAccounts.keys) {
+    for (final domain in _relayDomains) {
       final suffix = '.$domain';
       if (name.endsWith(suffix)) {
         return name.substring(0, name.length - suffix.length);
@@ -35,74 +46,33 @@ abstract final class HostedEnvironment {
     return name;
   }
 
-  /// Creation and admission use the same trusted build-specific host mapping.
-  static String get communitySuffix => _communityAccounts.entries
-      .singleWhere((entry) => Uri.parse(entry.value) == origin)
-      .key;
+  /// Creation and admission place new communities under the first domain.
+  static String get communitySuffix =>
+      enabled ? BuilderlabBuild.relayDomains.first : _publicCommunities;
 
-  /// Comma-separated DNS domains requiring Builderlab authentication.
-  /// Empty builds keep Nostr-only entry available, including hosted QR pairing.
-  static final List<String> authDomains = List.unmodifiable(
-    const String.fromEnvironment('BUZZ_AUTH_DOMAINS')
-        .split(',')
-        .map(
-          (domain) =>
-              domain.trim().toLowerCase().replaceFirst(RegExp(r'\.+$'), ''),
-        )
-        .where((domain) => domain.isNotEmpty)
-        .map((domain) {
-          if (!RegExp(
-            r'^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*$',
-          ).hasMatch(domain)) {
-            throw StateError(
-              'BUZZ_AUTH_DOMAINS must contain DNS names, not URLs or wildcards',
-            );
-          }
-          return domain;
-        }),
-  );
+  /// Domains whose communities require this build's Builderlab account.
+  /// Empty unless [enabled]; such builds keep Nostr-only entry available,
+  /// including hosted QR pairing.
+  static List<String> get authDomains =>
+      enabled ? BuilderlabBuild.relayDomains : const [];
 
   /// Matches a configured domain and its subdomains, never a string suffix.
-  static bool requiresAuth(String host) {
-    final normalized = host.toLowerCase().replaceFirst(RegExp(r'\.+$'), '');
-    return authDomains.any(
-      (domain) => normalized == domain || normalized.endsWith('.$domain'),
-    );
-  }
-
-  /// Explicit community-to-account mapping. Never infer an account endpoint
-  /// from arbitrary relay metadata or send this build's session across realms.
-  static Uri? accountOriginFor(Uri relay) {
-    if (!['wss', 'https'].contains(relay.scheme) ||
-        relay.userInfo.isNotEmpty ||
-        relay.hasQuery ||
-        relay.hasFragment ||
-        (relay.path.isNotEmpty && relay.path != '/') ||
-        (relay.hasPort && relay.port != 443)) {
-      return null;
-    }
-    final host = relay.host.toLowerCase();
-    for (final entry in _communityAccounts.entries) {
-      if (host.endsWith('.${entry.key}')) return Uri.parse(entry.value);
-    }
-    return null;
-  }
+  static bool requiresAuth(String host) =>
+      BuilderlabBuild.matchesHost(host, authDomains);
 
   /// Whether this build can use its account session for this relay.
-  static bool supportsRelay(Uri relay) => accountOriginFor(relay) == origin;
+  static bool supportsRelay(Uri relay) =>
+      BuilderlabBuild.matchesRelay(relay, _relayDomains);
 
-  static Uri _origin() {
-    const configured = String.fromEnvironment(
-      'BUZZ_BUILDERLAB_URL',
-      defaultValue: 'https://app.builderlab.xyz',
-    );
-    final uri = Uri.parse(configured);
-    if (!{
-      'https://app.builderlab.xyz',
-      'https://app.builderlabstaging.xyz',
-    }.contains(configured)) {
-      throw StateError('Unsupported hosted account environment');
-    }
-    return uri;
-  }
+  /// The public Builderlab's communities, which a build without Builderlab
+  /// still recognizes so a later public build finds them unchanged.
+  static const _publicCommunities = 'communities.buzz.xyz';
+
+  /// An internal build never treats a relay as a public community.
+  static List<String> get _relayDomains =>
+      switch (BuilderlabBuild.distribution) {
+        BuilderlabDistribution.public => BuilderlabBuild.relayDomains,
+        BuilderlabDistribution.internal => const [],
+        null => const [_publicCommunities],
+      };
 }

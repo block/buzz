@@ -2,11 +2,14 @@ import 'dart:async';
 
 import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/deeplink/deep_link.dart';
+import 'package:buzz/shared/hosted/hosted_environment.dart';
+import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
 import 'package:buzz/shared/push/push_bridge.dart';
 import 'package:buzz/shared/relay/relay_provider.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 const _channel = MethodChannel('buzz/push');
 
@@ -173,6 +176,57 @@ void main() {
         },
       ]);
       expect(pushEndpointGrants.value.single.endpointGrant, 'new-grant');
+    },
+  );
+
+  test('shares and clears the hosted session with the extension', () async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    final shared = <Object?>[];
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(_channel, (call) async {
+          expect(call.method, 'syncPushSnapshot');
+          shared.add(call.arguments);
+          return null;
+        });
+
+    for (final credential in ['session-credential', null]) {
+      await shareHostedSessionWithNotifications(
+        origin: Uri.parse('https://app.example'),
+        credential: credential,
+        relayDomains: const ['communities.example'],
+        communityDomain: 'communities.example',
+      );
+    }
+
+    expect(shared, [
+      for (final credential in ['session-credential', null])
+        {
+          'section': 'hostedSession',
+          'origin': 'https://app.example',
+          'credential': credential,
+          'relayDomains': ['communities.example'],
+          'communityDomain': 'communities.example',
+        },
+    ]);
+  });
+
+  test(
+    'a build without hosted relay auth clears a shared hosted session',
+    () async {
+      expect(HostedRelayAuth.configured && HostedEnvironment.enabled, isFalse);
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      final shared = <Object?>[];
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(_channel, (call) async {
+            shared.add((call.arguments as Map)['credential']);
+            return null;
+          });
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+
+      // A copy an earlier flag-on build shared is removed instead of kept.
+      await container.read(builderlabAccountProvider).onSessionChanged!('live');
+      expect(shared, [null]);
     },
   );
 

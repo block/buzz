@@ -5,12 +5,14 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import 'features/pairing/pairing_page.dart';
+import 'organization_app_entry.dart';
 import 'features/pairing/pairing_provider.dart';
 import 'shared/hosted/hosted_flow_provider.dart';
 import 'shared/hosted/hosted_flow.dart';
 import 'shared/hosted/hosted_communities.dart';
 import 'shared/hosted/use_known_communities.dart';
 import 'shared/hosted/hosted_environment.dart';
+import 'shared/hosted/organization_environment.dart';
 import 'shared/hosted/hosted_community_creation.dart';
 import 'shared/hosted/hosted_flow_problem_message.dart';
 import 'shared/widgets/confirmation_dialog.dart';
@@ -33,6 +35,8 @@ class OnboardingAppEntry extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    // Fixed per build, so the hooks below always run in the same order.
+    if (OrganizationEnvironment.enabled) return const OrganizationAppEntry();
     final existingUser = useState(false);
     final creating = useState(false);
     final enteringCommunityLink = useState(false);
@@ -45,6 +49,10 @@ class OnboardingAppEntry extends HookConsumerWidget {
       if (flow == null || !restoreAccount) return null;
       Future<void> restore() async {
         await flow.initialize();
+        if (!context.mounted) return;
+        if (addingCommunity && flow.stage == HostedFlowStage.complete) {
+          await flow.leave();
+        }
         if (context.mounted) await flow.signInAccount(openBrowser: false);
       }
 
@@ -102,7 +110,6 @@ class OnboardingAppEntry extends HookConsumerWidget {
     final hasKnownCommunities = useKnownCommunities(
       accountKey: flow?.account.account?.subject,
       active:
-          !addingCommunity &&
           !existingUser.value &&
           !enteringCommunityLink.value &&
           !creating.value &&
@@ -241,6 +248,9 @@ class OnboardingAppEntry extends HookConsumerWidget {
             : busy
             ? null
             : () => unawaited(flow.signInAccount()),
+        onImportIdentity: flow == null || busy
+            ? null
+            : () => unawaited(flow.signInAccount(importIdentity: true)),
         accountStatus: status,
         builderlabBusy: busy && !signingIn,
         signInPending: signingIn || busy,

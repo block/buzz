@@ -76,11 +76,17 @@ class PairingPage extends HookConsumerWidget {
   final VoidCallback? onCommunityLink;
   final VoidCallback? onCreateCommunity;
   final VoidCallback? onBuilderlab;
+  final VoidCallback? onImportIdentity;
   final String? accountStatus;
   final Widget? setupContent;
   final String builderlabLabel;
   final bool builderlabBusy;
   final bool signInPending;
+
+  /// An internal build's only way in: its organization's single sign-on.
+  /// When set, the landing offers this one action and no pairing.
+  final VoidCallback? onSignIn;
+  final bool signInBusy;
 
   const PairingPage({
     super.key,
@@ -99,11 +105,14 @@ class PairingPage extends HookConsumerWidget {
     this.onCommunityLink,
     this.onCreateCommunity,
     this.onBuilderlab,
+    this.onImportIdentity,
     this.accountStatus,
     this.setupContent,
     this.builderlabLabel = 'Connect to Builderlab',
     this.builderlabBusy = false,
     this.signInPending = false,
+    this.onSignIn,
+    this.signInBusy = false,
   });
 
   @override
@@ -300,18 +309,18 @@ class PairingPage extends HookConsumerWidget {
                     ),
                   ),
                 )
-        : (addingCommunity || (signedInOnboarding && !creatingCommunity)) &&
-              connectionLanding
+        : (addingCommunity || signedInOnboarding) && connectionLanding
         ? ValueListenableBuilder<double>(
             valueListenable: islandScannerProgress,
             builder: (context, progress, _) => AddCommunityPage(
               scannerProgress: progress,
               onboarding: signedInOnboarding,
-              onFindCommunities: signedInOnboarding && hasKnownCommunities
-                  ? onBuilderlab
-                  : null,
+              onFindCommunities: hasKnownCommunities ? onBuilderlab : null,
+              onImportIdentity: signedInOnboarding ? onImportIdentity : null,
               onCreateCommunity: signedInOnboarding ? onCreateCommunity : null,
               enteringCommunityLink: enteringCommunityLink,
+              creatingCommunity: creatingCommunity,
+              onSubmitCommunity: onSubmitCommunity,
               existingUser: existingUser,
               onBack: onWelcomeBack ?? () => Navigator.of(context).pop(),
               onCommunityLink: onCommunityLink,
@@ -407,6 +416,8 @@ class PairingPage extends HookConsumerWidget {
                       builderlabLabel: builderlabLabel,
                       builderlabBusy: builderlabBusy,
                       signInPending: signInPending,
+                      onSignIn: onSignIn,
+                      signInBusy: signInBusy,
                       codeController: codeController,
                       isBusy: isBusy,
                       pairingCodeExpanded: pairingCodeExpanded.value,

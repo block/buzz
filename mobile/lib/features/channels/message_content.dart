@@ -1,25 +1,30 @@
 import 'message_reply_drag_target.dart';
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 import 'dart:async';
+import 'dart:convert';
 import '../../shared/widgets/ios_media_carousel.dart';
 import '../../shared/widgets/message_attachment_corners.dart';
 import 'dart:io';
 import 'dart:math' as math;
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/semantics.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:gpt_markdown/gpt_markdown.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:open_filex/open_filex.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:share_plus/share_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
-import 'package:video_player/video_player.dart';
 
 import '../../shared/clipboard_utils.dart';
 import '../../shared/widgets/media_loading_placeholder.dart';
+import '../../shared/widgets/modal_presentation.dart';
+import '../../shared/widgets/sheet_action_section.dart';
 import '../../shared/mentions/mention_bindings.dart';
 import '../../shared/mentions/mention_tags.dart';
 import '../../shared/deeplink/deep_link.dart';
@@ -35,6 +40,7 @@ import '../../shared/emoji/emoji_only.dart';
 import 'channel_ids_by_name_provider.dart';
 import 'local_send_bubble_surface.dart';
 import 'media_viewer_page.dart';
+import 'native_photo_zoom_preview.dart';
 import 'message_content/details_blocks.dart';
 import 'message_content/link_normalizer.dart';
 import 'message_content/markdown_escapes.dart';
@@ -46,17 +52,21 @@ import 'message_content/channel_token_pattern.dart';
 import 'message_mention_pill.dart';
 import 'message_gallery.dart';
 import 'message_gallery_frame.dart';
+import 'message_long_press_region.dart';
 import 'message_media_avatar.dart';
 import 'message_media_geometry.dart';
 import 'voice_note_attachment.dart';
 
 part 'message_content/details_section.dart';
 part 'message_content/media_carousel.dart';
+part 'message_content/media_stack.dart';
+part 'message_content/media_stack_tuning.dart';
 part 'message_content/message_preview.dart';
 part 'message_content/bubble_shape.dart';
 part 'message_content/inline_components.dart';
 part 'message_content/token_pill.dart';
 part 'message_content/video_preview.dart';
+part 'message_content/link_actions.dart';
 
 typedef OpenDownloadedFile =
     Future<void> Function(
@@ -159,6 +169,7 @@ class MessageContent extends HookConsumerWidget {
 
   /// Opens message-specific actions for an image in the full-screen viewer.
   final MediaViewerMoreAction? onMediaMore;
+  final NativePhotoActions? nativePhotoActions;
 
   final TextStyle? baseStyle;
 
@@ -201,6 +212,7 @@ class MessageContent extends HookConsumerWidget {
     this.onMentionTap,
     this.onMediaReply,
     this.onMediaMore,
+    this.nativePhotoActions,
     this.baseStyle,
     this.textAlign,
     this.maxLines,
@@ -575,6 +587,17 @@ class MessageContent extends HookConsumerWidget {
           : CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
+        if (bubble)
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: Grid.xs),
+            child: Text(
+              '${trailingGallery.items.length} photos',
+              key: const ValueKey('message-media-stack-count'),
+              style: context.textTheme.labelSmall?.copyWith(
+                color: context.colors.onSurfaceVariant,
+              ),
+            ),
+          ),
         if (trailingGallery.content.trim().isNotEmpty) markdown,
         MessageReplyDragTarget(
           child: MessageAttachmentCorners(
@@ -582,17 +605,32 @@ class MessageContent extends HookConsumerWidget {
               start: bubbleStart && trailingGallery.content.trim().isEmpty,
               end: bubbleEnd,
             ),
-            child: _MessageImageCarousel(
-              key: ValueKey(
-                trailingGallery.items.map((item) => item.url).join('\u0000'),
-              ),
-              items: trailingGallery.items,
-              mirrored: ownMessage,
-              leadingOverflow: mediaCarouselLeadingOverflow,
-              trailingOverflow: mediaCarouselTrailingOverflow,
-              onReply: onMediaReply,
-              onMore: onMediaMore,
-            ),
+            child: bubble
+                ? _MessageImageStack(
+                    key: ValueKey(
+                      trailingGallery.items
+                          .map((item) => item.url)
+                          .join('\u0000'),
+                    ),
+                    items: trailingGallery.items,
+                    mirrored: ownMessage,
+                    nativeActions: nativePhotoActions,
+                    onReply: onMediaReply,
+                    onMore: onMediaMore,
+                  )
+                : _MessageImageCarousel(
+                    key: ValueKey(
+                      trailingGallery.items
+                          .map((item) => item.url)
+                          .join('\u0000'),
+                    ),
+                    items: trailingGallery.items,
+                    mirrored: ownMessage,
+                    leadingOverflow: mediaCarouselLeadingOverflow,
+                    trailingOverflow: mediaCarouselTrailingOverflow,
+                    onReply: onMediaReply,
+                    onMore: onMediaMore,
+                  ),
           ),
         ),
       ],
@@ -728,54 +766,68 @@ class MessageContent extends HookConsumerWidget {
           )
         : linkTextWidget;
 
-    // Mobile has no repo/PR/issue destination yet. Keep these presentation-only
-    // instead of exposing a control whose tap cannot do anything.
+    final highlightColor = (baseStyle.color ?? context.colors.primary)
+        .withValues(alpha: 0.2);
+
+    // Mobile has no repo/PR/issue destination yet, so these chips have no tap
+    // and no Open action, but a hold still copies or shares the link.
     if (buzzLink is EntityDeepLink) {
-      return IgnorePointer(child: renderedLink);
+      return _LinkLongPress(
+        url: url,
+        onOpen: null,
+        highlightColor: highlightColor,
+        child: renderedLink,
+      );
     }
 
-    return GestureDetector(
-      onTap: () async {
-        final uri = Uri.tryParse(url);
-        if (uri == null) return;
+    Future<void> openLink() async {
+      final uri = Uri.tryParse(url);
+      if (uri == null) return;
 
-        // Rendered channel URLs must use the same callback as `#channel`
-        // references so detail-page callers can suppress self-navigation.
-        // Message and join links still need the top-level authenticated
-        // dispatcher.
-        if (uri.scheme == 'buzz') {
-          final deepLink = parseBuzzDeepLink(uri);
-          if (deepLink case ChannelDeepLink(:final channelId)) {
-            resolvedChannelTap(channelId);
-          } else if (deepLink is MessageDeepLink ||
-              deepLink is InviteDeepLink) {
-            ref.read(pendingDeepLinkProvider.notifier).open(uri);
-          }
-          return;
+      // Rendered channel URLs must use the same callback as `#channel`
+      // references so detail-page callers can suppress self-navigation.
+      // Message and join links still need the top-level authenticated
+      // dispatcher.
+      if (uri.scheme == 'buzz') {
+        final deepLink = parseBuzzDeepLink(uri);
+        if (deepLink case ChannelDeepLink(:final channelId)) {
+          resolvedChannelTap(channelId);
+        } else if (deepLink is MessageDeepLink || deepLink is InviteDeepLink) {
+          ref.read(pendingDeepLinkProvider.notifier).open(uri);
         }
-        if (uri.scheme != 'http' && uri.scheme != 'https') return;
+        return;
+      }
+      if (uri.scheme != 'http' && uri.scheme != 'https') return;
 
-        final auth = ref.read(mediaGetAuthServiceProvider);
-        if (!auth.isRelayMediaUrl(url)) {
-          await launchUrl(uri, mode: LaunchMode.externalApplication);
-          return;
-        }
+      final auth = ref.read(mediaGetAuthServiceProvider);
+      if (!auth.isRelayMediaUrl(url)) {
+        await launchUrl(uri, mode: LaunchMode.externalApplication);
+        return;
+      }
 
-        try {
-          await ref.read(openDownloadedFileProvider)(
-            url,
-            auth.headersFor(url),
-            text,
-          );
-        } catch (_) {
-          if (!context.mounted) return;
-          ScaffoldMessenger.maybeOf(context)?.showFeedbackSnackBar(
-            const SnackBar(content: Text('Could not open attachment')),
-            kind: ToastKind.error,
-          );
-        }
-      },
-      child: renderedLink,
+      try {
+        await ref.read(openDownloadedFileProvider)(
+          url,
+          auth.headersFor(url),
+          text,
+        );
+      } catch (_) {
+        if (!context.mounted) return;
+        ScaffoldMessenger.maybeOf(context)?.showFeedbackSnackBar(
+          const SnackBar(content: Text('Could not open attachment')),
+          kind: ToastKind.error,
+        );
+      }
+    }
+
+    // openLink handles only these schemes; the sheet hides Open for others.
+    final scheme = Uri.tryParse(url)?.scheme;
+    final canOpen = scheme == 'buzz' || scheme == 'http' || scheme == 'https';
+    return _LinkLongPress(
+      url: url,
+      onOpen: canOpen ? () => unawaited(openLink()) : null,
+      highlightColor: highlightColor,
+      child: GestureDetector(onTap: openLink, child: renderedLink),
     );
   }
 }

@@ -1,5 +1,17 @@
 [advisories]
 ignore = [
+    # SQLite's crafted database/WAL disclosure requires opening files supplied
+    # by an attacker. In this workspace SQLite is only mesh-llm-log-store's
+    # private local log database, through the examples-only buzz-mesh-smoke
+    # dev-dependencies; it is not linked into the relay. mesh-llm v0.76.2
+    # requires rusqlite ^0.40, so libsqlite3-sys 0.39 is not yet selectable.
+    # Remove when mesh-llm moves to rusqlite 0.41; bans below fence this path.
+    { id = "RUSTSEC-2026-0459", reason = "mesh smoke harness private local log database only; no untrusted database/WAL import; upstream rusqlite ^0.40 prevents patched SQLite" },
+    # rmcp 1.8 is used only by buzz-agent, with default-features=false and
+    # client + transport-child-process. Neither affected HTTP client transport
+    # is compiled. All rmcp 3 consumers use the patched 3.9.0 lockfile entry.
+    # Remove on buzz-agent's rmcp 3 migration; the ban below fences consumers.
+    { id = "RUSTSEC-2026-0462", reason = "rmcp 1.8 only in buzz-agent's subprocess client; vulnerable Streamable HTTP transport features disabled; rmcp 3 updated to 3.9.0" },
     # instant 0.1.13 — unmaintained crate. Transitive dep: nostr → instant.
     # Will be resolved when nostr crate updates its dependencies.
     { id = "RUSTSEC-2024-0384", reason = "transitive dep via nostr; no upstream fix available" },
@@ -126,5 +138,14 @@ ignore = true
 multiple-versions = "warn"
 wildcards = "allow"
 deny = [
+    { name = "rmcp", version = "<3.9.0", wrappers = ["buzz-agent"], reason = "only buzz-agent's subprocess-only rmcp 1 client may use an older version; HTTP consumers must use patched rmcp" },
+    { name = "rusqlite", version = "<0.41", wrappers = ["mesh-llm-log-store"], reason = "older SQLite is limited to mesh smoke's private local log store" },
+    { name = "libsqlite3-sys", version = "<0.39", wrappers = ["rusqlite"], reason = "older SQLite is limited to the guarded rusqlite dependency" },
     { name = "ringbuf", version = "<0.5.2", wrappers = ["neteq"], reason = "only audited NetEQ may declare this unused vulnerable dependency; all other consumers must use a patched release" },
 ]
+
+# The rmcp 1 advisory exception is valid only without HTTP transports.
+[[bans.features]]
+name = "rmcp"
+version = "<3.9.0"
+allow = ["client", "transport-child-process", "transport-async-rw"]

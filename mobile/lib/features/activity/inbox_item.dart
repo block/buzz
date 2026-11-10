@@ -8,6 +8,7 @@ import 'feed_item.dart';
 enum InboxFilter {
   all,
   mention,
+  dm,
   thread,
   needsAction,
   activity,
@@ -56,8 +57,8 @@ String inboxConversationId(
 }) {
   final thread = threadReferenceOf(tags);
   final threadId = thread.rootId ?? thread.parentId;
-  if (threadId != null) return threadId;
   if (dmChannelId != null) return 'dm:$dmChannelId';
+  if (threadId != null) return threadId;
   return eventId;
 }
 
@@ -133,7 +134,10 @@ class InboxItem {
     );
   }
 
-  final category = item.categories.firstOrNull ?? item.item.category;
+  // Label the event the row displays. A group can hold an older mention and
+  // a newer plain reply; the row shows the reply, so it must not say
+  // "Mentioned in". [InboxItem.categories] still drives filtering.
+  final category = item.item.category;
   if (category == 'mention') {
     return (
       text: channelName != null ? 'Mentioned in' : 'Mentioned',
@@ -165,6 +169,7 @@ class InboxItem {
 bool matchesInboxFilter(InboxItem item, InboxFilter filter) {
   return switch (filter) {
     InboxFilter.all => true,
+    InboxFilter.dm => item.conversationId.startsWith('dm:'),
     InboxFilter.thread => [
       item.item,
       ...item.groupItems,

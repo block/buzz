@@ -46,6 +46,9 @@ macro_rules! superseded_with_mentions_sql {
 mod runtime;
 mod store;
 
+/// Concurrency caps whose limit can change at runtime.
+pub mod concurrency_gate;
+
 /// Database error types.
 pub mod error;
 
@@ -59,7 +62,7 @@ pub use runtime::{
 };
 
 /// Valid low-cardinality `(pool_role, operation)` pairs for pool-acquisition telemetry.
-pub const DB_POOL_ACQUIRE_VALID_PAIRS: [(&str, &str); 12] =
+pub const DB_POOL_ACQUIRE_VALID_PAIRS: [(&str, &str); 11] =
     runtime::observability::POOL_ACQUIRE_VALID_PAIRS;
 
 /// Raw Prometheus series ceiling per relay pod for the operation-aware contract.
@@ -88,11 +91,11 @@ pub(crate) use runtime::{
 };
 pub use store::{
     admin_moderation, allowlist, api_token, archived_identities, artifact, artifact_sync, channel,
-    channel_members, community, deletion, dm, entity_deletion, event, feed, git_repo, moderation,
-    nip_fi_binding, operator_listener, partition, personal_read, product_feedback, push, reaction,
-    read_state, relay_admin_actions, relay_invite, relay_members, relay_operators, reminder,
-    replaceable, storage_accounting, thread, thread_window, usage, user, user_deletion,
-    user_deletion_fences, workflow,
+    channel_members, community, community_auth, deletion, dm, entity_deletion, event, feed,
+    git_repo, leader_lock, media, membership_snapshot, moderation, nip_fi_binding,
+    operator_listener, partition, personal_read, product_feedback, push, reaction, read_state,
+    relay_admin_actions, relay_invite, relay_members, relay_operators, reminder, replaceable,
+    storage_accounting, thread, thread_window, user, user_deletion, user_deletion_fences, workflow,
 };
 
 pub use allowlist::AllowlistEntry;
@@ -102,14 +105,30 @@ pub use community::{
     CreatedCommunityRecord, EnsuredCommunityRecord, OwnedCommunityRecord, UnarchiveCommunityResult,
     UnarchivedCommunityRecord,
 };
+pub use concurrency_gate::{ConcurrencyGate, GatePermit};
 pub use error::{DbError, Result};
 pub use event::{ChannelHeadPrecondition, ChannelHeadWriteStatus, DeletionTarget};
 pub use event::{EventQuery, DEFAULT_MAX_PAGE_LIMIT};
+pub use leader_lock::SessionLeader;
 pub use nip_fi_binding::{NipFiBindingRecord, NipFiUnbind, RowCapExceeded};
 pub use reaction::ReactionEventInsertOutcome;
 pub use reminder::DueReminder;
 pub use store::{ArtifactSnapshot, SnapshotDenied};
-pub use usage::SessionLeader;
+
+/// A value read from the database, with when its reading connection was
+/// checked out of the pool.
+///
+/// The statement that produced `value` started after `read_at`, so its
+/// snapshot is no older than `read_at`. A cache that serves `value` for a
+/// bound after `read_at` is never staler than that bound, however long the
+/// read waited for a connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReadAt<T> {
+    /// The value as read.
+    pub value: T,
+    /// When the connection that read `value` was checked out.
+    pub read_at: std::time::Instant,
+}
 
 use buzz_core::CommunityId;
 

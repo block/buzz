@@ -144,10 +144,13 @@ async fn reader_boot_ping_warms_pool_to_max_in_background() {
 /// At the production acquire budget, a reader that admits only some dials
 /// ends the warm pass bounded and partial, with no re-dialing. The pool is
 /// built by the production constructor, so each warm acquire, dial
-/// included, gets only [`Db::READER_ACQUIRE_TIMEOUT`]. The proxy relays the
-/// first 3 sessions and stalls every later dial mid-handshake: the first
-/// wave of 5 holds 3, the second wave's 5 dials all miss, and that wave's
-/// lack of progress ends the pass after exactly 10 dials.
+/// included, gets only [`Db::READER_ACQUIRE_TIMEOUT`]. The boot ping first
+/// fills the warm floor of 3, dialed outside that budget, and the proxy then
+/// stalls every later dial mid-handshake: the first wave of 5 holds the 3
+/// idle connections and its 2 dials miss, the second wave's 5 dials all
+/// miss, and that wave's lack of progress ends the pass after exactly 7
+/// dials. The pass needs no dial to beat the budget: on a loaded host every
+/// dial can miss it, which would end the pass after one empty wave.
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn reader_warm_at_production_budget_ends_partial_when_dials_stall() {
@@ -156,7 +159,6 @@ async fn reader_warm_at_production_budget_ends_partial_when_dials_stall() {
     let writer_options = writer.connect_options();
     let (host, port) = (writer_options.get_host(), writer_options.get_port());
     let proxy = crate::test_support::PausingProxy::spawn(host.to_owned(), port).await;
-    proxy.stall_from(3);
     let scratch_url = scratch.url();
     let proxied_url = scratch_url.replacen(
         &format!("{host}:{port}"),
@@ -169,6 +171,13 @@ async fn reader_warm_at_production_budget_ends_partial_when_dials_stall() {
     );
     let read_pool = Db::connect_read_pool(&DbConfig::default(), &proxied_url, max)
         .expect("production reader pool");
+    assert!(
+        Db::read_pool_boot_ping_once(read_pool.clone(), Default::default()).await,
+        "boot ping must reach the reader"
+    );
+    await_idle_floor(&read_pool, 3).await;
+    let relayed = proxy.sessions();
+    proxy.stall_from(relayed);
 
     let started = Instant::now();
     let report = Db::warm_read_pool(&read_pool).await;
@@ -179,14 +188,19 @@ async fn reader_warm_at_production_budget_ends_partial_when_dials_stall() {
         (max, 3, 7),
         "one partial wave, then one wave that opens nothing"
     );
-    assert_eq!(proxy.sessions(), 10, "the pass must stop dialing");
     assert!(
         elapsed < Duration::from_secs(2),
         "two waves at the production budget must end promptly: {elapsed:?}"
     );
     await_idle_floor(&read_pool, 3).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(proxy.sessions(), 10, "nothing re-dials after the pass");
+    // Counted after the settle: the proxy accepts on this runtime, so a dial
+    // that missed its budget can still be queued for accept when the pass ends.
+    assert_eq!(
+        proxy.sessions() - relayed,
+        7,
+        "the pass must stop dialing, and nothing re-dials after it"
+    );
 
     read_pool.close().await;
 }
@@ -297,13 +311,14 @@ async fn terminated_warm_reader_connection_fails_closed_to_writer() {
 
 /// A proof that times out while its `BEGIN` is still in flight must not
 /// return the connection to the pool with a server-side transaction open.
-/// sqlx counts the transaction only once `BEGIN` is acknowledged, so a
-/// cancelled begin queues no `ROLLBACK`, and the release ping consumes the
-/// late `BEGIN` reply: without the reader pool's release check, the
-/// connection comes back `idle in transaction` once the reader resumes.
-/// The database defaults to `REPEATABLE READ`, the isolation routed reads
-/// begin with, so the check only sees the open transaction because reader
-/// sessions pin their own default.
+/// sqlx queues a `ROLLBACK` for a begin cancelled in flight
+/// (transact-rs/sqlx#4394), so the connection comes back clean and the
+/// reader pool's release check has nothing to close. Before that fix the
+/// release ping consumed the late `BEGIN` reply and only the release check
+/// kept the connection from returning `idle in transaction`. The database
+/// defaults to `REPEATABLE READ`, the isolation routed reads begin with, so
+/// the check can only see an open transaction because reader sessions pin
+/// their own default.
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires Postgres"]
 async fn proof_timeout_mid_begin_leaves_no_reader_transaction_open() {
@@ -379,8 +394,8 @@ async fn proof_timeout_mid_begin_leaves_no_reader_transaction_open() {
     let closes = release_closes(&snapshotter);
     assert_eq!(
         closes.get("open_transaction"),
-        Some(&1),
-        "the release check must close the connection left inside BEGIN; got {closes:?}"
+        None,
+        "sqlx must roll back the cancelled BEGIN before the release check runs; got {closes:?}"
     );
 
     read_pool.close().await;
@@ -390,8 +405,9 @@ async fn proof_timeout_mid_begin_leaves_no_reader_transaction_open() {
 /// not strand the reader pool. Each stalled warm connection costs one routed
 /// read a proof timeout; once the release check gives up on those sockets,
 /// their slots are freed and routed reads reach the reader again through
-/// new connections, instead of falling back to the writer until the kernel
-/// gives up on the old sockets.
+/// new connections, instead of falling back to the writer (or, for history
+/// reads on the saturated pool, being rejected) until the kernel gives up on
+/// the old sockets.
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires Postgres"]
 async fn stalled_reader_sessions_release_their_slots_for_new_connections() {
@@ -463,9 +479,13 @@ async fn stalled_reader_sessions_release_their_slots_for_new_connections() {
             .sum::<u64>()
     };
     loop {
-        db.count_events_routed("stalled_reader_probe", &query)
-            .await
-            .expect("routed read answers");
+        // While both slots sit in the release check the reader pool is
+        // saturated, so a history read is rejected as retryable rather than
+        // moved to the writer; the caller retries, as a client would.
+        match db.count_events_routed("stalled_reader_probe", &query).await {
+            Ok(_) | Err(crate::error::DbError::Sqlx(sqlx::Error::PoolTimedOut)) => {}
+            Err(e) => panic!("routed read answers or is rejected as retryable: {e:?}"),
+        }
         for (key, n) in drain_counters(&snapshotter) {
             *totals.entry(key).or_default() += n;
         }
@@ -495,4 +515,92 @@ async fn stalled_reader_sessions_release_their_slots_for_new_connections() {
     );
     drop(_guard);
     read_pool.close().await;
+}
+
+/// Reads that spill to the writer are counted by cause, so a late fence
+/// heartbeat is distinguishable from a busy or lagging reader, while the
+/// legacy `buzz_db_route_decision` reasons stay as they were.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn reader_spills_are_counted_by_cause() {
+    let (mut db, _scratch) = same_db_reader("spill_cause", 2).await;
+    db.set_replica_read_max_age_for_tests(Some(Duration::from_secs(1)));
+    let query = EventQuery::for_community(CommunityId::from_uuid(Uuid::new_v4()));
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    let _guard = metrics::set_default_local_recorder(&recorder);
+
+    // Counters drained since the last step: (route decisions, spills).
+    let step = || {
+        let mut routes = std::collections::HashMap::new();
+        let mut spills = std::collections::HashMap::new();
+        for ((name, decision, reason), n) in drain_counters(&snapshotter) {
+            // Drained counters linger at zero.
+            if n == 0 {
+                continue;
+            }
+            match name.as_str() {
+                "buzz_db_route_decision" => {
+                    routes.insert((decision, reason), n);
+                }
+                "buzz_db_reader_spill_total" => {
+                    spills.insert(reason, n);
+                }
+                _ => {}
+            }
+        }
+        (routes, spills)
+    };
+    let writer = |reason: &str| ("writer".to_owned(), reason.to_owned());
+
+    // A fresh heartbeat: the replica serves the read, nothing spills.
+    db.fence().force_open_for_tests(chrono::Utc::now());
+    db.count_events_routed("spill_cause", &query)
+        .await
+        .expect("replica read");
+    let (_, spills) = step();
+    assert!(
+        spills.is_empty(),
+        "a served read is not a spill: {spills:?}"
+    );
+
+    // Older than the 1s budget but inside the staleness gate: the probe is
+    // late, the replica is fine.
+    db.fence()
+        .force_open_for_tests_at(chrono::Utc::now(), Instant::now() - Duration::from_secs(2));
+    db.count_events_routed("spill_cause", &query)
+        .await
+        .expect("writer answers a late-heartbeat read");
+    let (routes, spills) = step();
+    assert_eq!(routes.get(&writer("stale")), Some(&1), "{routes:?}");
+    assert_eq!(
+        spills,
+        [("heartbeat_stale".to_owned(), 1)].into(),
+        "a late heartbeat must be its own spill reason"
+    );
+
+    // Past the staleness gate: no live heartbeat proof at all.
+    db.fence().force_open_for_tests_at(
+        chrono::Utc::now(),
+        Instant::now() - replica_fence::FENCE_STALENESS - Duration::from_secs(1),
+    );
+    db.count_events_routed("spill_cause", &query)
+        .await
+        .expect("writer answers a missing-heartbeat read");
+    let (routes, spills) = step();
+    assert_eq!(routes.get(&writer("uninitialized")), Some(&1), "{routes:?}");
+    assert_eq!(spills, [("heartbeat_missing".to_owned(), 1)].into());
+
+    // A disabled bounded arm is configuration, not a spill.
+    db.set_replica_read_max_age_for_tests(None);
+    db.fence().force_open_for_tests(chrono::Utc::now());
+    db.count_events_routed("spill_cause", &query)
+        .await
+        .expect("writer answers with routing disabled");
+    let (routes, spills) = step();
+    assert_eq!(routes.get(&writer("disabled")), Some(&1), "{routes:?}");
+    assert!(
+        spills.is_empty(),
+        "disabled routing is not a spill: {spills:?}"
+    );
 }

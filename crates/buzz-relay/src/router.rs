@@ -28,7 +28,7 @@ use crate::api;
 use crate::audio;
 use crate::connection::handle_connection;
 use crate::metrics::track_metrics;
-use crate::nip11::{nip11_document, relay_info_handler};
+use crate::nip11::{nip11_response, relay_info_handler};
 use crate::nip_fi_core::http_denial;
 use crate::readiness::{self, DependencySnapshot, ReadinessReason};
 use crate::state::AppState;
@@ -72,8 +72,8 @@ use crate::state::AppState;
 //
 // ## Relationship to Off and Shadow
 //
-// When `NipFiMode::Off` or `NipFiMode::Shadow` the guard is fully transparent —
-// no request is touched; Shadow records its verdict elsewhere.  [FI-INV-15]
+// Off skips FI policy reads and enforcement. Shadow preserves optional-community
+// admission and enforces stored requirements. Enforce requires FI everywhere.
 //
 // ## What this guard checks (and does NOT check)
 //
@@ -155,6 +155,14 @@ const NIP_FI_EXEMPT_PREFIXES: &[&str] = &[
     "/internal/git/policy",
 ];
 
+fn nip_fi_unavailable(slot: &crate::access::AccessSlot) -> axum::response::Response {
+    slot.method(AuthMethod::NipFi);
+    slot.finish(AuthResult::Denied(
+        crate::access::AuthReason::AuthorizationUnavailable,
+    ));
+    http_denial(buzz_auth::DenialClass::AuthorizationUnavailable)
+}
+
 /// Middleware: full offline assertion guard for NIP-FI protected paths.
 ///
 /// Fires before any handler.  In Enforce mode, if the request path is not
@@ -175,17 +183,79 @@ const NIP_FI_EXEMPT_PREFIXES: &[&str] = &[
 /// Only a cryptographically verified assertion reaches the handler; the
 /// handler then performs the key pairing and deny-map checks via
 /// `admit_nip_fi_http_on_state`.
-///
-/// In Off mode the middleware is fully transparent; in Shadow it only records.
 async fn nip_fi_assertion_guard(
     State(state): State<Arc<AppState>>,
     slot: crate::access::AccessSlot,
     request: Request<Body>,
     next: middleware::Next,
 ) -> axum::response::Response {
-    let mode = state.config.nip_fi.mode;
-    // Off: fully transparent. [FI-INV-15]
-    if mode.is_off() || nip_fi_guard_exempts(&state, &request) {
+    if state.config.nip_fi.mode.is_off() || nip_fi_guard_exempts(&state, &request) {
+        return next.run(request).await;
+    }
+    if state.config.nip_fi.mode.denies_unconditionally() {
+        return nip_fi_unavailable(&slot);
+    }
+    let policy = match crate::nip_fi_policy::resolve(&state, request.headers()).await {
+        Ok(policy) => policy,
+        Err(response) if response.status() == StatusCode::NOT_FOUND => {
+            // The authoritative read found no serving policy. Let the route
+            // retain its legacy rejection (e.g. Git's credential challenge).
+            // The shared admission gate refuses this scope unconditionally;
+            // this is never an optional-policy fallback or a data admission.
+            let mode = state.config.nip_fi.mode;
+            let policy = crate::nip_fi_policy::Policy {
+                community_id: uuid::Uuid::nil(),
+                mode,
+                required: mode.enforces(),
+                stored_required: false,
+
+                mapped: false,
+            };
+            return crate::nip_fi_policy::with_policy(
+                policy,
+                nip_fi_assertion_guard_with_policy(state, slot, request, next, mode),
+            )
+            .await;
+        }
+        Err(response) => {
+            slot.method(AuthMethod::NipFi);
+            slot.finish(AuthResult::Denied(
+                crate::access::AuthReason::AuthorizationUnavailable,
+            ));
+            if state.config.nip_fi.mode.observes_only() {
+                crate::nip_fi_shadow::record_for(
+                    "http",
+                    crate::nip_fi_shadow::label(&Err(
+                        buzz_auth::DenialClass::AuthorizationUnavailable,
+                    )),
+                    Err(crate::nip_fi_shadow::WouldDeny::new(
+                        crate::nip_fi_shadow::Stage::Community,
+                        buzz_auth::DenialClass::AuthorizationUnavailable,
+                        crate::nip_fi_shadow::UNRESOLVED,
+                    )),
+                );
+            }
+            return response;
+        }
+    };
+    if policy.stored_required && state.nip_fi_deny_map.is_none() {
+        return nip_fi_unavailable(&slot);
+    }
+    crate::nip_fi_policy::with_policy(
+        policy,
+        nip_fi_assertion_guard_with_policy(state, slot, request, next, policy.mode),
+    )
+    .await
+}
+
+async fn nip_fi_assertion_guard_with_policy(
+    state: Arc<AppState>,
+    slot: crate::access::AccessSlot,
+    request: Request<Body>,
+    next: middleware::Next,
+    mode: buzz_auth::NipFiMode,
+) -> axum::response::Response {
+    if mode.is_off() {
         return next.run(request).await;
     }
 
@@ -444,8 +514,17 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             get(api::operator::community_nip_fi_binding),
         )
         .route(
+            "/operator/communities/nip-fi-policy",
+            get(api::operator::community_nip_fi_policy_status)
+                .post(api::operator::set_community_nip_fi_policy),
+        )
+        .route(
             "/operator/communities/transfer",
             post(api::operator::transfer_community),
+        )
+        .route(
+            "/operator/communities/invites",
+            post(api::operator::mint_community_invite),
         )
         // Relay invites: mint (owner/admin) + claim (membership-gate exempt)
         .route("/api/invites", post(api::invites::mint_invite))
@@ -537,6 +616,18 @@ pub fn build_router(state: Arc<AppState>) -> Router {
                     if path.starts_with("/assets/") {
                         return files.oneshot(req).await.map(IntoResponse::into_response);
                     }
+                    if is_invite_landing_path(path) {
+                        return Ok(crate::invite_preview::response(
+                            &index,
+                            &state.config.relay_url,
+                            state.as_ref(),
+                            req.headers()
+                                .get(axum::http::header::HOST)
+                                .and_then(|host| host.to_str().ok())
+                                .unwrap_or(""),
+                        )
+                        .await);
+                    }
                     if should_serve_spa(path, serve_git_web_gui) {
                         return Ok(read_spa_index(&index).await);
                     }
@@ -559,6 +650,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         ))
         .layer(http_trace_layer())
         .layer(build_cors_layer(&state.config.cors_origins))
+        // Outside all rejection-producing layers, including the API body limit.
+        .layer(middleware::from_fn(api::operator::no_store_policy_response))
 }
 
 type MakeHttpSpan = fn(&Request<Body>) -> tracing::Span;
@@ -740,7 +833,7 @@ async fn nip11_or_ws_handler(
     }
 
     if accept.contains("application/nostr+json") {
-        return Json(nip11_document(&state, raw_host).await).into_response();
+        return nip11_response(&state, raw_host).await;
     }
 
     // NIP-FI assertion gate at WebSocket upgrade.
@@ -774,7 +867,13 @@ async fn nip11_or_ws_handler(
     //
     // Keying on the header pair (not on `Accept`) means an HTML Accept header
     // on a real WS upgrade is still gated correctly.
-    let (upgrade_checked, nip_fi_assertion, shadow_assertion, nip_fi_deadline, shadow_line) = {
+    let (
+        upgrade_checked,
+        mut nip_fi_assertion,
+        shadow_assertion,
+        mut nip_fi_deadline,
+        mut shadow_line,
+    ) = {
         let is_h1_ws_upgrade = headers
             .get(axum::http::header::UPGRADE)
             .and_then(|v| v.to_str().ok())
@@ -799,7 +898,7 @@ async fn nip11_or_ws_handler(
         if is_h1_ws_upgrade || is_h2_ws_connect {
             use crate::nip_fi_session::NipFiWsRoute::Root;
             use crate::nip_fi_upgrade::check_nip_fi_at_upgrade;
-            let mode = state.config.nip_fi.mode;
+            let mode = crate::nip_fi_policy::mode(&state, &headers).await;
             let verifier = state.nip_fi_verifier.as_deref();
             let communities = state.nip_fi_communities();
             match check_nip_fi_at_upgrade(&slot, Root, &headers, communities, verifier, mode)
@@ -847,7 +946,7 @@ async fn nip11_or_ws_handler(
             }
         }
     }
-    let shadow_assertion = shadow_assertion.filter(|(a, c)| {
+    let mut shadow_assertion = shadow_assertion.filter(|(a, c)| {
         !crate::nip_fi_shadow_session::upgrade_denied(&state, &c.shadow_label(), a)
     });
 
@@ -855,25 +954,45 @@ async fn nip11_or_ws_handler(
     // BEFORE the WebSocket upgrade, so no frame is ever read on an unbound
     // connection. The host is the authoritative selector; an unmapped host or a
     // lookup failure fails closed with a generic rejection — never a default
-    // tenant. NIP-11 above is served before binding and stays fail-open: an
-    // unmapped host still gets the document (with host-scoped fields like
-    // `icon` simply absent), so the doc cannot leak which hosts are mapped.
+    // tenant. NIP-11 above resolves host policy independently and fails closed
+    // when that policy cannot be loaded.
     //
     // The NIP-FI upgrade gate runs above (before bind_community) so denied
     // upgrades skip the tenant lookup; the `Ok(ws)` backstop runs below.
-    let tenant = match crate::tenant::bind_community(&*state, raw_host).await {
-        Ok(ctx) => ctx,
-        Err(_) => {
-            // Generic rejection: do not distinguish "unmapped" from "lookup
-            // error", and never echo the host, so an unauthenticated caller
-            // cannot probe which communities exist on this deployment.
-            return (
-                StatusCode::NOT_FOUND,
-                "relay: no community is configured for this host",
-            )
-                .into_response();
-        }
+    let (tenant, bound_mode) = match crate::nip_fi_policy::bind_for_upgrade(&state, raw_host).await
+    {
+        Ok(binding) => binding,
+        Err(response) => return response,
     };
+    // An initially missing/optional host may have become required while the
+    // early gate awaited. Only the policy read with the bound row authorizes
+    // this socket; a shadow observation is not an enforced admission.
+    if upgrade_checked
+        && bound_mode.restricts()
+        && (nip_fi_assertion.is_none() || bound_mode.denies_unconditionally())
+    {
+        match crate::nip_fi_upgrade::check_nip_fi_at_upgrade(
+            &slot,
+            crate::nip_fi_session::NipFiWsRoute::Root,
+            &headers,
+            state.nip_fi_communities(),
+            state.nip_fi_verifier.as_deref(),
+            bound_mode,
+        )
+        .await
+        .into_assertions()
+        {
+            Ok(assertions) => {
+                (
+                    nip_fi_assertion,
+                    shadow_assertion,
+                    nip_fi_deadline,
+                    shadow_line,
+                ) = assertions
+            }
+            Err(response) => return (*response).into_response(),
+        }
+    }
     // The tenant lookup awaited since the community resolved; a snapshot
     // that went stale meanwhile accepts no socket.
     if let Err(class) = nip_fi_deadline.check() {
@@ -908,7 +1027,7 @@ async fn nip11_or_ws_handler(
                 // Only re-check if the pre-extractor gate did not fire (h2 path).
                 use crate::nip_fi_session::NipFiWsRoute::Root;
                 use crate::nip_fi_upgrade::check_nip_fi_at_upgrade;
-                let mode = state.config.nip_fi.mode;
+                let mode = bound_mode;
                 let verifier = state.nip_fi_verifier.as_deref();
                 let communities = state.nip_fi_communities();
                 // Resolved after every await of this upgrade: nothing to re-check.
@@ -977,7 +1096,7 @@ async fn nip11_or_ws_handler(
                 }
             }
             // Not a WS upgrade request — serve NIP-11 as fallback.
-            Json(nip11_document(&state, raw_host).await).into_response()
+            nip11_response(&state, raw_host).await
         }
     }
 }
@@ -1217,7 +1336,7 @@ mod tests {
         async fn evaluate(
             &self,
             _db: &buzz_db::Db,
-            _redis_pool: &deadpool_redis::Pool,
+            _redis_pool: &buzz_pubsub::RedisConnection,
         ) -> DependencyReport {
             self.evaluations_started.fetch_add(1, Ordering::SeqCst);
             self.evaluations
@@ -1293,9 +1412,7 @@ mod tests {
         });
         let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
         let db = buzz_db::Db::from_pool(pool.clone());
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("redis pool");
+        let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await
@@ -1309,7 +1426,7 @@ mod tests {
             buzz_workflow::WorkflowConfig::default(),
         ));
         let media_storage = buzz_media::MediaStorage::new(&config.media).expect("media storage");
-        let (state, _audit_shutdown) = AppState::new(
+        let (mut state, _audit_shutdown) = AppState::new(
             config,
             db,
             redis_pool,
@@ -1321,6 +1438,7 @@ mod tests {
             nostr::Keys::generate(),
             media_storage,
         );
+        state.nip_fi_policy = Arc::new(crate::nip_fi_policy::OptionalPolicy);
         Arc::new(state)
     }
 
@@ -1340,9 +1458,7 @@ mod tests {
         config.redis_url = "redis://127.0.0.1:1".to_string();
         let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
         let db = buzz_db::Db::from_pool(pool.clone());
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("redis pool");
+        let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await
@@ -1602,7 +1718,7 @@ mod tests {
         async fn evaluate(
             &self,
             _db: &buzz_db::Db,
-            _redis_pool: &deadpool_redis::Pool,
+            _redis_pool: &buzz_pubsub::RedisConnection,
         ) -> DependencyReport {
             self.started.fetch_add(1, Ordering::SeqCst);
             let in_flight = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
@@ -2027,6 +2143,154 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn invite_preview_is_public_and_media_supports_range_requests() {
+        let admin_dir = tempfile::tempdir().unwrap();
+        let web_dir = tempfile::tempdir().unwrap();
+        write_admin_bundle(admin_dir.path());
+        write_bundle(web_dir.path());
+        std::fs::write(
+            web_dir.path().join("index.html"),
+            "<html><head></head><body>invite app</body></html>",
+        )
+        .unwrap();
+        let media_dir = web_dir.path().join("assets/invite-preview");
+        std::fs::create_dir_all(&media_dir).unwrap();
+        for (name, bytes) in [
+            (
+                "buzz-invite-loop-v1.mp4",
+                include_bytes!("../../../previews/invite-video/buzz-invite-loop.mp4").as_slice(),
+            ),
+            (
+                "buzz-invite-poster-v1.png",
+                include_bytes!("../../../previews/invite-video/buzz-invite-poster.png").as_slice(),
+            ),
+        ] {
+            std::fs::write(media_dir.join(name), bytes).unwrap();
+        }
+        let state = spa_state(admin_dir.path(), web_dir.path()).await;
+        for (host, id) in [("alpha.example", 1), ("beta.example", 2)] {
+            state.tenant_host_cache.insert(
+                host.into(),
+                (
+                    buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::from_u128(id)),
+                    std::time::Instant::now(),
+                ),
+            );
+        }
+        // Also exercise the production router over a real HTTP connection.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = build_router(state.clone());
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let fetched = client
+            .get(format!("http://{address}/invite/unused-token"))
+            .header("host", "alpha.example")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(fetched.status(), StatusCode::OK);
+        assert!(fetched.text().await.unwrap().contains("og:video"));
+        let fetched = client
+            .get(format!(
+                "http://{address}/assets/invite-preview/buzz-invite-loop-v1.mp4"
+            ))
+            .header("range", "bytes=0-31")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(fetched.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(fetched.bytes().await.unwrap().len(), 32);
+        server.abort();
+        for host in ["alpha.example", "beta.example", ""] {
+            let response = spa_response(state.clone(), host, "/invite/unused-token").await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let html = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let html = std::str::from_utf8(&html).unwrap();
+            if host.is_empty() {
+                assert!(!html.contains("og:video"));
+                assert!(!html.contains("og:image"));
+                continue;
+            }
+            assert!(html.contains(&format!("http://{host}/assets/invite-preview/")));
+            assert!(!html.contains(if host == "alpha.example" {
+                "beta.example"
+            } else {
+                "alpha.example"
+            }));
+            assert!(html.contains("og:video"));
+            assert!(html.contains("og:image"));
+            assert!(!html.contains("untrusted.example"));
+            assert!(!html.contains("unused-token"));
+        }
+        for path in ["/repos", "/invite/"] {
+            let response = spa_response(state.clone(), "public.example", path).await;
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            assert!(!String::from_utf8_lossy(&body).contains("og:video"));
+        }
+        let response = spa_response(state.clone(), "admin.example", "/invite/unused-token").await;
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(!String::from_utf8_lossy(&body).contains("og:video"));
+        for (name, mime) in [
+            ("buzz-invite-loop-v1.mp4", "video/mp4"),
+            ("buzz-invite-poster-v1.png", "image/png"),
+        ] {
+            let path = format!("/assets/invite-preview/{name}");
+            for method in ["GET", "HEAD"] {
+                let response = build_router(state.clone())
+                    .oneshot(
+                        Request::builder()
+                            .method(method)
+                            .uri(&path)
+                            .header("host", "public.example")
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+                assert_eq!(response.headers()["content-type"], mime);
+                assert!(
+                    response.headers()["content-length"]
+                        .to_str()
+                        .unwrap()
+                        .parse::<usize>()
+                        .unwrap()
+                        > 1000
+                );
+            }
+            let response = build_router(state.clone())
+                .oneshot(
+                    Request::get(&path)
+                        .header("host", "public.example")
+                        .header("range", "bytes=0-31")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            assert_eq!(bytes.len(), 32);
+        }
+    }
+
+    #[tokio::test]
     async fn admin_spa_documents_and_assets_carry_the_admin_csp() {
         let admin_dir = tempfile::tempdir().expect("admin bundle dir");
         let web_dir = tempfile::tempdir().expect("public bundle dir");
@@ -2293,6 +2557,92 @@ mod tests {
         nip_fi_state(buzz_auth::NipFiMode::Off).await
     }
 
+    #[tokio::test]
+    async fn git_policy_guards_preserve_unmatched_routes() {
+        use axum::{body::to_bytes, extract::ConnectInfo, http::Request};
+        use std::net::SocketAddr;
+        use tower::ServiceExt;
+
+        let app = build_router(nip_fi_off_state().await);
+        let localhost: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        let remote: SocketAddr = "192.0.2.1:12345".parse().unwrap();
+        // Exercise the merged production router, including its default fallback.
+        for peer in [None, Some(remote), Some(localhost)] {
+            for method in ["GET", "POST"] {
+                for path in ["/operator/communities/nip-fi-upgrade", "/unknown-route"] {
+                    let mut req = Request::builder()
+                        .method(method)
+                        .uri(path)
+                        .header("content-type", "application/json")
+                        .header("content-length", 1024 * 1024 + 1)
+                        .body(Body::from(vec![b' '; 1024 * 1024 + 1]))
+                        .unwrap();
+                    if let Some(peer) = peer {
+                        req.extensions_mut().insert(ConnectInfo(peer));
+                    }
+                    let res = app.clone().oneshot(req).await.unwrap();
+                    let status = res.status();
+                    let body = to_bytes(res.into_body(), usize::MAX).await.unwrap();
+                    assert_eq!(
+                        status,
+                        StatusCode::NOT_FOUND,
+                        "{method} {path}, peer={peer:?}, body={body:?}"
+                    );
+                }
+            }
+        }
+        for (peer, size, expected) in [
+            (None, 2, StatusCode::FORBIDDEN),
+            (Some(remote), 1024 * 1024 + 1, StatusCode::FORBIDDEN),
+            (
+                Some(localhost),
+                1024 * 1024 + 1,
+                StatusCode::PAYLOAD_TOO_LARGE,
+            ),
+            // A small JSON object reaches the real handler's JSON extractor.
+            (Some(localhost), 2, StatusCode::UNPROCESSABLE_ENTITY),
+        ] {
+            let mut payload = b"{}".to_vec();
+            payload.resize(size, b' ');
+            let mut req = Request::builder()
+                .method("POST")
+                .uri("/internal/git/policy")
+                .header("content-type", "application/json")
+                .header("content-length", size)
+                .body(Body::from(payload))
+                .unwrap();
+            if let Some(peer) = peer {
+                req.extensions_mut().insert(ConnectInfo(peer));
+            }
+            let res = app.clone().oneshot(req).await.unwrap();
+            let status = res.status();
+            let body = to_bytes(res.into_body(), usize::MAX).await.unwrap();
+            assert_eq!(
+                status, expected,
+                "peer={peer:?}, size={size}, body={body:?}"
+            );
+            if expected == StatusCode::FORBIDDEN {
+                assert_eq!(&body[..], b"internal endpoint: localhost only");
+            }
+        }
+        // The path's method fallback remains protected, too.
+        for (peer, expected) in [
+            (None, StatusCode::FORBIDDEN),
+            (Some(remote), StatusCode::FORBIDDEN),
+            (Some(localhost), StatusCode::METHOD_NOT_ALLOWED),
+        ] {
+            let mut req = Request::builder()
+                .uri("/internal/git/policy")
+                .body(Body::empty())
+                .unwrap();
+            if let Some(peer) = peer {
+                req.extensions_mut().insert(ConnectInfo(peer));
+            }
+            let res = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(res.status(), expected, "GET policy, peer={peer:?}");
+        }
+    }
+
     async fn nip_fi_state(mode: buzz_auth::NipFiMode) -> Arc<AppState> {
         use crate::nip_fi_config::NipFiRelayConfig;
         use buzz_auth::IssuerRegistry;
@@ -2326,9 +2676,7 @@ mod tests {
             .connect_lazy(&config.database_url)
             .expect("lazy pg pool");
         let db = buzz_db::Db::from_pool(pool.clone());
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("redis pool");
+        let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await
@@ -2342,7 +2690,7 @@ mod tests {
             buzz_workflow::WorkflowConfig::default(),
         ));
         let media_storage = buzz_media::MediaStorage::new(&config.media).expect("media storage");
-        let (state, _audit_shutdown) = AppState::new(
+        let (mut state, _audit_shutdown) = AppState::new(
             config,
             db,
             redis_pool,
@@ -2354,6 +2702,7 @@ mod tests {
             nostr::Keys::generate(),
             media_storage,
         );
+        state.nip_fi_policy = Arc::new(crate::nip_fi_policy::OptionalPolicy);
         Arc::new(state)
     }
 
@@ -2691,6 +3040,9 @@ mod tests {
         );
     }
 
+    #[path = "policy_sweep_postgres_tests.rs"]
+    mod policy_sweep;
+
     // ── F6: document fallback (postgres-only) ───────────────────────────────────
     //
     // A no-`Accept` plain GET / to a successfully mapped host must bypass the
@@ -2926,10 +3278,9 @@ mod tests {
                 );
                 // Real Redis so admission reaches the handler, not the
                 // fail-closed rate limiter.
-                let redis = deadpool_redis::Config::from_url(
-                    std::env::var("REDIS_URL").unwrap_or("redis://127.0.0.1:6379".into()),
+                let redis = buzz_pubsub::redis_connection(
+                    &std::env::var("REDIS_URL").unwrap_or("redis://127.0.0.1:6379".into()),
                 )
-                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
                 .unwrap();
                 state.admission_rate_limiter = Arc::new(
                     buzz_pubsub::rate_limiter::RedisRateLimiter::new(redis.clone()),
@@ -3093,7 +3444,7 @@ mod tests {
             }
         }
 
-        async fn real_db_state() -> Option<Arc<AppState>> {
+        pub(super) async fn real_db_state() -> Option<Arc<AppState>> {
             let db_url = crate::test_support::database_url();
             let pool = sqlx::PgPool::connect(&db_url).await.ok()?;
 
@@ -3102,9 +3453,7 @@ mod tests {
             config.redis_url = "redis://127.0.0.1:1".to_string();
             config.database_url = db_url;
             let db = buzz_db::Db::from_pool(pool.clone());
-            let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-                .expect("redis pool");
+            let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
             let pubsub = Arc::new(
                 buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                     .await
@@ -3687,9 +4036,7 @@ mod tests {
 
         let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
         let db = buzz_db::Db::from_pool(pool.clone());
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("redis pool");
+        let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await
@@ -3788,9 +4135,7 @@ mod tests {
 
             let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
             let db = buzz_db::Db::from_pool(pool.clone());
-            let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-                .expect("redis pool");
+            let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
             let pubsub = Arc::new(
                 buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                     .await
@@ -3805,7 +4150,7 @@ mod tests {
             ));
             let media_storage =
                 buzz_media::MediaStorage::new(&config.media).expect("media storage");
-            let (state, _audit_shutdown) = AppState::new(
+            let (mut state, _audit_shutdown) = AppState::new(
                 config,
                 db,
                 redis_pool,
@@ -3817,6 +4162,7 @@ mod tests {
                 nostr::Keys::generate(),
                 media_storage,
             );
+            state.nip_fi_policy = Arc::new(crate::nip_fi_policy::OptionalPolicy);
             Arc::new(state)
         }
 
@@ -4191,9 +4537,7 @@ mod tests {
             .connect_lazy(&config.database_url)
             .expect("lazy pg pool");
         let db = buzz_db::Db::from_pool(pool.clone());
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("redis pool");
+        let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await
@@ -4266,6 +4610,7 @@ mod tests {
         );
         state.nip_fi_deny_map = Some(deny_map);
 
+        state.nip_fi_policy = Arc::new(crate::nip_fi_policy::OptionalPolicy);
         Arc::new(state)
     }
 

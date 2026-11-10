@@ -306,51 +306,44 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
     final queryController = useTextEditingController();
     final queryFocusNode = useFocusNode();
     final query = useState('');
-    final debouncedQuery = useState('');
-    final selectedUsers = useState<List<DirectoryUser>>([]);
+    // A new opening after each pick, as the mention chooser starts one per
+    // `@`: shown rows keep their places only within one query and opening.
+    final opening = useState(0);
+    final selectedUsers = useState<List<MentionCandidate>>([]);
     final isSubmitting = useState(false);
     final submitError = useState<String?>(null);
     final completedChannel = useState<Channel?>(null);
-    final previewDirectoryActive = ref.watch(dmDirectoryPreviewEnabledProvider);
 
-    useEffect(() {
-      final timer = Timer(const Duration(milliseconds: 250), () {
-        debouncedQuery.value = query.value.trim().toLowerCase();
-      });
-      return timer.cancel;
-    }, [query.value]);
-
-    final normalizedQuery = previewDirectoryActive
-        ? query.value.trim().toLowerCase()
-        : debouncedQuery.value;
-    final isSearchTransitionPending =
-        !previewDirectoryActive &&
-        query.value.trim().toLowerCase() != normalizedQuery;
-    final directoryAsync = previewDirectoryActive
-        ? AsyncValue.data(dmDirectoryPreviewUsers)
-        : normalizedQuery.isEmpty
-        ? ref.watch(relayDirectoryUsersProvider)
-        : ref.watch(relayDirectorySearchProvider(normalizedQuery));
-
-    final selectedPubkeys = selectedUsers.value
-        .map((user) => user.pubkey.toLowerCase())
-        .toSet();
-    final availableResults =
-        directoryAsync.asData?.value.where((user) {
-          final normalizedPubkey = user.pubkey.toLowerCase();
-          if (selectedPubkeys.contains(normalizedPubkey) ||
-              normalizedPubkey == currentPubkey?.toLowerCase()) {
-            return false;
-          }
-          if (normalizedQuery.isEmpty) {
-            return true;
-          }
-          return user.label.toLowerCase().contains(normalizedQuery) ||
-              user.secondaryLabel.toLowerCase().contains(normalizedQuery) ||
-              normalizedPubkey.contains(normalizedQuery);
-        }).toList() ??
-        const <DirectoryUser>[];
-    // Eligible recipients shown or chosen here are the comparison context.
+    // The same candidates, ranking, debounce and search cache as mention
+    // autocomplete, so a name finds the same people and agents in both.
+    // A Space never picks here, so a search ignores its edge spaces where a
+    // composer query would end at one.
+    final search = query.value.trim();
+    final ranked = ref.watch(
+      recipientCandidatesProvider((
+        query: search,
+        historyKey: newDmMentionHistoryKey,
+        unsharedAgents: false,
+      )),
+    );
+    final searching = ref.watch(recipientSearchPendingProvider(search));
+    final searchFailed = ref.watch(recipientSearchFailedProvider(search));
+    final selectedPubkeys = {
+      for (final user in selectedUsers.value) user.pubkey,
+    };
+    final shown = useStableMentionRows(
+      [
+        for (final candidate in ranked)
+          if (!selectedPubkeys.contains(candidate.pubkey)) candidate,
+      ],
+      query: search,
+      opening: opening.value,
+      pending: searching,
+    );
+    final availableResults = shown.rows;
+    // Shown and chosen recipients are named together on every build, so a
+    // pick stays told apart from a same-name result of a later search, and
+    // loading their profiles tracks them for verified names.
     final recipients = [...availableResults, ...selectedUsers.value];
     final names = watchIdentityNames(
       ref,
@@ -359,19 +352,29 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
         for (final user in recipients)
           if (user.isAgent) user.pubkey,
       },
-      fallbackNames: {for (final user in recipients) user.pubkey: user.label},
+      fallbackNames: {
+        for (final user in recipients) user.pubkey: user.pickerLabel,
+      },
     );
+    String labelFor(MentionCandidate user) => names.labelFor(user.pubkey);
+    final userCache = ref.watch(userCacheProvider);
+    String? detail(MentionCandidate user) =>
+        recipientRowDetail(user, currentPubkey, userCache);
+    void select(MentionCandidate user) {
+      selectedUsers.value = [...selectedUsers.value, user];
+      opening.value++;
+      ref
+          .read(mentionHistoryProvider.notifier)
+          .remember(newDmMentionHistoryKey, user.pubkey);
+    }
+
+    void retry() => ref.invalidate(mentionUserSearchProvider(search));
     final canSubmit = !isSubmitting.value && selectedUsers.value.isNotEmpty;
 
     Future<void> submit() async {
       if (selectedUsers.value.isEmpty || isSubmitting.value) {
         return;
       }
-      if (previewDirectoryActive) {
-        submitError.value = 'Preview only — mock people cannot be messaged.';
-        return;
-      }
-
       isSubmitting.value = true;
       submitError.value = null;
       try {
@@ -396,13 +399,13 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
     }
 
     if (nativePresentation) {
-      final profiles = ref.watch(userCacheProvider);
       final auth = ref.watch(mediaGetAuthServiceProvider);
       final client = ref.watch(mediaHttpClientProvider);
+      final diskCache = ref.watch(mediaDiskCacheProvider);
       final colors = context.colors;
-      String? avatarUrl(DirectoryUser user) =>
-          profiles[user.pubkey]?.avatarUrl ?? user.avatarUrl;
-      String avatarKey(DirectoryUser user) => jsonEncode([
+      String? avatarUrl(MentionCandidate user) =>
+          user.avatarUrl ?? userCache[user.pubkey]?.avatarUrl;
+      String avatarKey(MentionCandidate user) => jsonEncode([
         user.pubkey,
         avatarUrl(user),
         user.initial,
@@ -410,21 +413,24 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
         colors.primaryContainer.toARGB32(),
         colors.onPrimaryContainer.toARGB32(),
       ]);
-      Map<String, Object?> row(DirectoryUser user) => {
+      Map<String, Object?> row(MentionCandidate user) => {
         'pubkey': user.pubkey,
-        'name': names.labelFor(user.pubkey),
-        'detail': user.secondaryLabel,
+        'name': labelFor(user),
+        'detail': detail(user),
         'agent': user.isAgent,
+        'unavailable': shown.unavailable.contains(user.pubkey),
         'avatarKey': avatarKey(user),
         'initial': user.initial,
         'avatarBackground': colors.primaryContainer.toARGB32(),
         'avatarForeground': colors.onPrimaryContainer.toARGB32(),
       };
+      MentionCandidate? find(String pubkey) => [
+        ...selectedUsers.value,
+        ...availableResults,
+      ].where((user) => user.pubkey == pubkey).firstOrNull;
       return IosAddMembersSheet(
         onAvatar: (pubkey, key) async {
-          final user = recipients
-              .where((user) => user.pubkey == pubkey)
-              .firstOrNull;
+          final user = find(pubkey);
           if (user == null || avatarKey(user) != key) return null;
           return nativeAvatarImage(
             url: avatarUrl(user),
@@ -432,18 +438,24 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
             isAgent: user.isAgent,
             background: colors.primaryContainer,
             foreground: colors.onPrimaryContainer,
-            networkImage: (url) =>
-                MediaImageProvider(url: url, auth: auth, client: client),
+            networkImages: (url) => smallMediaImageProviders(
+              url: url,
+              auth: auth,
+              client: client,
+              diskCache: diskCache,
+            ),
           );
         },
         state: {
-          'title': 'New message',
+          'title': 'New DM',
           'confirmWithCheckmark': true,
+          'clearQueryOnPick': true,
+          'emptyQueryHint': 'Type a name to find people or agents.',
           'selectionLimit': 8,
           'completed': completedChannel.value != null,
           'query': query.value,
-          'loading': directoryAsync.isLoading || isSearchTransitionPending,
-          'loadError': directoryAsync.hasError,
+          'loading': searching,
+          'loadError': searchFailed,
           'error': submitError.value,
           'submitting': isSubmitting.value,
           'selected': [for (final user in selectedUsers.value) row(user)],
@@ -454,32 +466,31 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
         },
         onToggle: (pubkey) {
           if (isSubmitting.value) return;
-          final user = recipients
-              .where((user) => user.pubkey == pubkey)
-              .firstOrNull;
-          if (user == null) return;
-          if (selectedPubkeys.contains(pubkey.toLowerCase())) {
+          // The current selection, not this build's: a second tap can land
+          // before the rebuild that reflects the first.
+          if (selectedUsers.value.any((user) => user.pubkey == pubkey)) {
             selectedUsers.value = selectedUsers.value
                 .where((user) => user.pubkey != pubkey)
                 .toList();
-          } else if (selectedUsers.value.length < 8) {
-            selectedUsers.value = [...selectedUsers.value, user];
+            opening.value++;
+            return;
           }
+          final user = find(pubkey);
+          if (user == null ||
+              shown.unavailable.contains(pubkey) ||
+              selectedUsers.value.length >= 8) {
+            return;
+          }
+          select(user);
         },
         onSubmit: () => unawaited(submit()),
-        onRetry: () {
-          if (normalizedQuery.isEmpty) {
-            ref.invalidate(relayDirectoryUsersProvider);
-          } else {
-            ref.invalidate(relayDirectorySearchProvider(normalizedQuery));
-          }
-        },
+        onRetry: retry,
         onClose: () => Navigator.of(context).pop(completedChannel.value),
       );
     }
 
     return _CreationSheetLayout(
-      title: 'New message',
+      title: 'New DM',
       actionKey: const Key('new-dm-submit'),
       actionLabel: 'Done',
       busy: isSubmitting.value,
@@ -555,7 +566,7 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
                                   for (final user in selectedUsers.value)
                                     _SelectedDmRecipientChip(
                                       user: user,
-                                      label: names.labelFor(user.pubkey),
+                                      label: labelFor(user),
                                       enabled: !isSubmitting.value,
                                       onDeleted: () {
                                         selectedUsers.value = [
@@ -564,6 +575,7 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
                                             if (candidate.pubkey != user.pubkey)
                                               candidate,
                                         ];
+                                        opening.value++;
                                         queryFocusNode.requestFocus();
                                       },
                                     ),
@@ -586,7 +598,7 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
                                       decoration: InputDecoration(
                                         hintText: hasSelectedUsers
                                             ? null
-                                            : 'Search for a person',
+                                            : 'Search for people or agents',
                                         border: InputBorder.none,
                                         enabledBorder: InputBorder.none,
                                         focusedBorder: InputBorder.none,
@@ -645,79 +657,62 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
                       ),
                     );
                   }
-                  if (directoryAsync.isLoading &&
-                          directoryAsync.asData == null ||
-                      isSearchTransitionPending) {
-                    return const SliverToBoxAdapter(
-                      child: SizedBox(
-                        height: 280,
-                        child: Center(
-                          child: BuzzLoadingIndicator(
-                            size: 44,
-                            semanticLabel: 'Loading people',
-                          ),
-                        ),
-                      ),
-                    );
-                  }
-                  if (directoryAsync.hasError) {
+                  if (availableResults.isEmpty && !searchFailed) {
                     return SliverToBoxAdapter(
                       child: SizedBox(
-                        height: 280,
+                        height: 96,
                         child: Center(
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              const Text(
-                                'Could not load people from this relay.',
-                              ),
-                              const SizedBox(height: Grid.half),
-                              TextButton(
-                                onPressed: () {
-                                  if (normalizedQuery.isEmpty) {
-                                    ref.invalidate(relayDirectoryUsersProvider);
-                                  } else {
-                                    ref.invalidate(
-                                      relayDirectorySearchProvider(
-                                        normalizedQuery,
-                                      ),
-                                    );
-                                  }
-                                },
-                                child: const Text('Retry'),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                    );
-                  }
-                  if (availableResults.isEmpty) {
-                    return SliverToBoxAdapter(
-                      child: SizedBox(
-                        height: 280,
-                        child: Center(
-                          child: Text(
-                            normalizedQuery.isEmpty
-                                ? 'No people or agents available to message.'
-                                : 'No matching users.',
-                          ),
+                          child: searching
+                              ? const BuzzLoadingIndicator(
+                                  size: 32,
+                                  semanticLabel: 'Searching people',
+                                )
+                              : Text(
+                                  query.value.trim().isEmpty
+                                      ? 'Type a name to find people or agents.'
+                                      : 'No matching people or agents.',
+                                ),
                         ),
                       ),
                     );
                   }
                   return SliverList.builder(
-                    itemCount: availableResults.length,
+                    itemCount: availableResults.length + (searchFailed ? 1 : 0),
                     itemBuilder: (context, index) {
+                      if (index == availableResults.length) {
+                        return Material(
+                          type: MaterialType.transparency,
+                          child: ListTile(
+                            key: const Key('new-dm-search-error'),
+                            title: Text(
+                              'Could not search community people.',
+                              style: context.textTheme.bodySmall?.copyWith(
+                                color: context.colors.error,
+                              ),
+                            ),
+                            trailing: TextButton(
+                              onPressed: retry,
+                              child: const Text('Retry'),
+                            ),
+                          ),
+                        );
+                      }
                       final user = availableResults[index];
+                      final available = !shown.unavailable.contains(
+                        user.pubkey,
+                      );
+                      final info = detail(user);
                       return AppListCardItem(
                         index: index,
                         itemCount: availableResults.length,
                         dividerIndent: Grid.xs + 40 + Grid.xs,
                         child: ListTile(
                           key: Key('new-dm-person-${user.pubkey}'),
+                          enabled: available,
                           leading: AvatarImage(
-                            imageUrl: user.avatarUrl,
+                            imageUrl:
+                                user.avatarUrl ??
+                                userCache[user.pubkey]?.avatarUrl,
                             radius: 20,
                             backgroundColor: context.controlSurface,
                             fallback: Text(
@@ -730,30 +725,23 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
                             isAgent: user.isAgent,
                           ),
                           title: Text(
-                            names.labelFor(user.pubkey),
+                            labelFor(user),
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                           ),
-                          subtitle: Text(
-                            user.secondaryLabel,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                          trailing: Icon(
-                            BuzzIcons.plus,
-                            size: 18,
-                            color: context.colors.onSurfaceVariant,
-                          ),
-                          onTap: isSubmitting.value
+                          subtitle: info == null
+                              ? null
+                              : Text(
+                                  info,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                          onTap: isSubmitting.value || !available
                               ? null
                               : () {
-                                  selectedUsers.value = [
-                                    ...selectedUsers.value,
-                                    user,
-                                  ];
+                                  select(user);
                                   queryController.clear();
                                   query.value = '';
-                                  debouncedQuery.value = '';
                                   submitError.value = null;
                                   queryFocusNode.requestFocus();
                                 },
@@ -783,7 +771,7 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
 }
 
 class _SelectedDmRecipientChip extends StatelessWidget {
-  final DirectoryUser user;
+  final MentionCandidate user;
   final String label;
   final bool enabled;
   final VoidCallback onDeleted;

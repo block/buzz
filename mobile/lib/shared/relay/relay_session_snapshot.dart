@@ -24,7 +24,7 @@ extension on RelaySessionNotifier {
       }
     }
 
-    Future<String> send(http.Request request, int maxBytes) async {
+    Future<http.Response> send(http.Request request, int maxBytes) async {
       final response = await _httpQueryClient.sendBounded(
         request,
         maxBytes: maxBytes,
@@ -38,18 +38,33 @@ extension on RelaySessionNotifier {
         ),
       );
       checkContext();
-      final text = utf8.decode(response.bodyBytes);
       if (response.statusCode < 200 || response.statusCode >= 300) {
+        final text = relayResponseText(
+          response.bodyBytes,
+          response.headers['content-type'],
+          maxInflatedBytes: maxBytes,
+        );
         _activateRateLimitGateFromHttpError(text);
         throw RelayException(response.statusCode, text);
       }
-      return text;
+      return response;
     }
 
     final origin = Uri.parse(config.baseUrl);
     final discovery = http.Request('GET', origin.resolve('/'))
       ..headers['Accept'] = 'application/nostr+json';
-    final info = jsonDecode(await send(discovery, 64 * 1024));
+    // The query transport leaves gzip bodies compressed (see
+    // RelayHttpQueryClient), and the relay's CDN gzips both responses. The
+    // inflated size is capped too: the transport cap only sees the
+    // compressed bytes.
+    final discovered = await send(discovery, 64 * 1024);
+    final info = jsonDecode(
+      relayResponseText(
+        discovered.bodyBytes,
+        discovered.headers['content-type'],
+        maxInflatedBytes: 64 * 1024,
+      ),
+    );
     final descriptor = info is Map<String, dynamic>
         ? info['read_state_snapshot']
         : null;
@@ -76,10 +91,12 @@ extension on RelaySessionNotifier {
           nsec: nsec,
         ),
       });
-    final text = await send(request, readStateSnapshotMaxBytes + 4096);
-    // Parsing and Schnorr verification must not block Flutter's UI isolate.
+    final response = await send(request, readStateSnapshotMaxEnvelopeBytes);
+    // Inflating, parsing and Schnorr verification must not block Flutter's
+    // UI isolate.
     final events = await _snapshotDecoder((
-      text: text,
+      bytes: response.bodyBytes,
+      contentType: response.headers['content-type'],
       viewer: viewer,
       community: community,
     ));

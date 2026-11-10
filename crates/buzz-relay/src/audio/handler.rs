@@ -102,9 +102,9 @@ pub async fn ws_audio_handler(
     // WebSocket handshake. Running pre-lookup means a denied request skips the tenant
     // lookup (a resolver miss costs one bounded binding lookup) and the gate is reachable in tests without a live community.
     // [FI-TRACE-TRANSPORT-CLOSED] [NIP-FI.md §Admission pairing sequence]
-    let (nip_fi_assertion, shadow_assertion, nip_fi_deadline, shadow_line) = {
+    let (mut nip_fi_assertion, mut shadow_assertion, mut nip_fi_deadline, mut shadow_line) = {
         use crate::nip_fi_upgrade::check_nip_fi_at_upgrade;
-        let mode = state.config.nip_fi.mode;
+        let mode = crate::nip_fi_policy::mode(&state, &headers).await;
         let verifier = state.nip_fi_verifier.as_deref();
         let communities = state.nip_fi_communities();
         match check_nip_fi_at_upgrade(
@@ -132,16 +132,35 @@ pub async fn ws_audio_handler(
         .get(axum::http::header::HOST)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let tenant = match crate::tenant::bind_community(&*state, raw_host).await {
-        Ok(ctx) => ctx,
-        Err(_) => {
-            return (
-                StatusCode::NOT_FOUND,
-                "relay: no community is configured for this host",
-            )
-                .into_response();
-        }
+    let (tenant, bound_mode) = match crate::nip_fi_policy::bind_for_upgrade(&state, raw_host).await
+    {
+        Ok(binding) => binding,
+        Err(response) => return response,
     };
+    if bound_mode.restricts() && (nip_fi_assertion.is_none() || bound_mode.denies_unconditionally())
+    {
+        match crate::nip_fi_upgrade::check_nip_fi_at_upgrade(
+            &slot,
+            crate::nip_fi_session::NipFiWsRoute::Audio,
+            &headers,
+            state.nip_fi_communities(),
+            state.nip_fi_verifier.as_deref(),
+            bound_mode,
+        )
+        .await
+        .into_assertions()
+        {
+            Ok(assertions) => {
+                (
+                    nip_fi_assertion,
+                    shadow_assertion,
+                    nip_fi_deadline,
+                    shadow_line,
+                ) = assertions
+            }
+            Err(response) => return (*response).into_response(),
+        }
+    }
 
     // The tenant lookup awaited since the community resolved; a snapshot
     // that went stale meanwhile accepts no socket.
@@ -337,7 +356,7 @@ pub(crate) async fn handle_audio_connection(
         Uuid::new_v4(),
         community_id,
         control,
-        move || async move { check_state.db.is_community_active(community_id).await },
+        move || async move { check_state.is_community_active_cached(community_id).await },
         move |control| async move {
             let socket = socket_for_run
                 .lock()
@@ -4320,9 +4339,7 @@ mod tests {
             .connect_lazy(&config.database_url)
             .expect("lazy pg pool");
         let db = buzz_db::Db::from_pool(pool.clone());
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("redis pool");
+        let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await
@@ -5910,9 +5927,7 @@ mod tests {
         configure(&mut config);
         let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
         let db = buzz_db::Db::from_pool(pool.clone());
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("redis pool");
+        let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await
@@ -13667,9 +13682,7 @@ mod tests {
             let community = tenant.community();
             let redis_url =
                 std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
-            let redis = deadpool_redis::Config::from_url(&redis_url)
-                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-                .expect("redis pool");
+            let redis = buzz_pubsub::redis_connection(&redis_url).expect("redis pool");
             let directory = SessionDirectory::with_db(redis, state.db.clone());
             let (arrived_rx, release) =
                 crate::nip_fi_test_hooks::directory_cas_hook::arm(community);
@@ -13745,9 +13758,7 @@ mod tests {
             let relay_url = format!("ws://{}", tenant.host());
             let redis_url =
                 std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
-            let redis = deadpool_redis::Config::from_url(&redis_url)
-                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-                .expect("redis pool");
+            let redis = buzz_pubsub::redis_connection(&redis_url).expect("redis pool");
             let directory =
                 crate::tunnel::directory::SessionDirectory::with_db(redis, state.db.clone());
             let mut mesh =
@@ -13919,9 +13930,7 @@ mod tests {
             config.database_url = db_url.clone();
             config.redis_url = "redis://127.0.0.1:1".to_string();
             let db = buzz_db::Db::from_pool(pool.clone());
-            let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-                .expect("redis pool");
+            let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
             let pubsub = Arc::new(
                 buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                     .await

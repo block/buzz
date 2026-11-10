@@ -1,3 +1,5 @@
+import 'package:buzz/shared/verified_profiles/verified_profile.dart';
+import 'package:buzz/shared/verified_profiles/verified_profile_directory.dart';
 import 'package:buzz/features/profile/user_profile_sheet.dart';
 import 'package:buzz/shared/identity_names/identity_names.dart';
 import 'package:buzz/shared/identity_names/identity_names_provider.dart';
@@ -26,6 +28,13 @@ class _UserCache extends UserCacheNotifier {
       state = {...state, profile.pubkey: profile};
 }
 
+class _VerifiedProfiles extends VerifiedProfilesNotifier {
+  @override
+  Map<String, VerifiedProfile> build() => {};
+
+  void replace(Map<String, VerifiedProfile> profiles) => state = profiles;
+}
+
 void main() {
   final scout = 'a' * 64;
   final other = 'b' * 64;
@@ -37,10 +46,14 @@ void main() {
       scout: UserProfile(pubkey: scout, displayName: 'Scout'),
       other: UserProfile(pubkey: other, displayName: 'Scout'),
     });
+    final verified = _VerifiedProfiles();
     late IdentityNames opened;
     await tester.pumpWidget(
       ProviderScope(
-        overrides: [userCacheProvider.overrideWith(() => cache)],
+        overrides: [
+          userCacheProvider.overrideWith(() => cache),
+          verifiedProfilesProvider.overrideWith(() => verified),
+        ],
         child: MaterialApp(
           theme: AppTheme.light(),
           home: Consumer(
@@ -76,5 +89,45 @@ void main() {
     await tester.pump();
     expect(find.text('Scout'), findsOneWidget);
     expect(find.text(suffixed), findsNothing);
+
+    // A community full name becomes the title, with the display name below.
+    for (final checked in [true, false]) {
+      verified.replace({
+        scout: VerifiedProfile(
+          displayName: 'Scout',
+          username: 'scout',
+          fullName: 'Scout Example',
+          issuerLabel: 'Block',
+          verifiedAt: 1000000,
+          checked: checked,
+          multipleIssuers: false,
+        ),
+      });
+      await tester.pump();
+      final title = find.text('Scout Example');
+      final subtitle = find.text('Scout');
+      expect(title, findsOneWidget);
+      expect(subtitle, findsOneWidget);
+      expect(
+        tester.getTopLeft(title).dy,
+        lessThan(tester.getTopLeft(subtitle).dy),
+      );
+      expect(
+        tester.getCenter(title).dx,
+        closeTo(tester.getCenter(subtitle).dx, 1),
+      );
+      expect(
+        tester.widget<Text>(title).style!.fontSize,
+        greaterThan(tester.widget<Text>(subtitle).style!.fontSize!),
+      );
+      expect(find.byKey(const ValueKey('verified-mark')), findsNothing);
+      expect(find.textContaining('Name verified'), findsNothing);
+      expect(find.textContaining('Last verified'), findsNothing);
+      expect(find.textContaining('current account access'), findsNothing);
+    }
+    verified.replace({});
+    await tester.pump();
+    expect(find.text('Scout Example'), findsNothing);
+    expect(find.text('Scout'), findsOneWidget);
   });
 }

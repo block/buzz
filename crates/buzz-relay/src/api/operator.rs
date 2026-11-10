@@ -4,6 +4,11 @@
 //! request signing and replay protection, but they do not run through event
 //! ingest, relay membership, channel scoping, storage, or fan-out.
 
+mod community_policy;
+mod invites;
+pub use community_policy::{community_nip_fi_policy_status, set_community_nip_fi_policy};
+pub use invites::mint_community_invite;
+
 use crate::access::{AccessSlot, AuthMethod, AuthResult};
 use std::sync::Arc;
 
@@ -423,6 +428,18 @@ pub async fn provision_community(
         Err(msg) if msg.starts_with("actor not authorized") => {
             Err(api_error(StatusCode::FORBIDDEN, &msg))
         }
+        Err(msg) if msg.starts_with("nip_fi_binding_required:") => Err(coded_api_error(
+            StatusCode::BAD_REQUEST,
+            "nip_fi_binding_required",
+            &msg,
+        )),
+        Err(msg) if msg.starts_with("initial_policy_requires_create_only:") => {
+            Err(coded_api_error(
+                StatusCode::BAD_REQUEST,
+                "initial_policy_requires_create_only",
+                &msg,
+            ))
+        }
         Err(msg) if msg.starts_with("limit_reached:") => {
             Err(coded_api_error(StatusCode::CONFLICT, "limit_reached", &msg))
         }
@@ -497,6 +514,7 @@ pub async fn archive_community(
         .map_err(|e| internal_error(&format!("archive community: {e}")))?
         .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "community not found"))?;
     let tenant = TenantContext::resolved(record.id, &record.host);
+    state.invalidate_community_host(&tenant);
     let closed = match state
         .disconnect_community_clusterwide(&tenant, record.archived_at)
         .await
@@ -568,6 +586,7 @@ pub async fn unarchive_community(
         }
     };
     tracing::info!(community = %record.id, host = %record.host, "community unarchived");
+    state.invalidate_community_host(&TenantContext::resolved(record.id, &record.host));
     Ok(Json(serde_json::json!({
         "community_id": record.id.to_string(),
         "host": record.host,
@@ -1183,8 +1202,54 @@ mod tests {
     }
 }
 
+fn upgrade_configured_trust(
+    state: &AppState,
+    host: &str,
+    issuer: &str,
+) -> Result<(), &'static str> {
+    let policy = state
+        .config
+        .nip_fi_provision_binding
+        .as_ref()
+        .ok_or("authorization_unavailable")?;
+    let [configured_issuer] = policy.authorized_issuers() else {
+        return Err("authorization_unavailable");
+    };
+    if !policy.is_bindable(host) || configured_issuer != issuer {
+        return Err("issuer_conflict");
+    }
+    if state
+        .config
+        .nip_fi
+        .registry
+        .policy_for_issuer(issuer)
+        .is_none()
+    {
+        return Err("authorization_unavailable");
+    }
+    Ok(())
+}
+
+/// Keep all policy responses, including auth and dependency errors, out of caches.
+pub async fn no_store_policy_response(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let policy = request.uri().path() == "/operator/communities/nip-fi-policy";
+    let mut response = next.run(request).await;
+    if policy {
+        response.headers_mut().insert(
+            axum::http::header::CACHE_CONTROL,
+            axum::http::HeaderValue::from_static("no-store"),
+        );
+    }
+    response
+}
+
 #[cfg(test)]
 mod postgres_tests {
+    mod initial_policy_postgres_tests;
+    mod invite_postgres_tests;
     use std::{
         collections::HashSet,
         sync::{Arc, Mutex},
@@ -1301,9 +1366,7 @@ mod postgres_tests {
             .ok()?;
         let db = buzz_db::Db::from_pool(pool.clone());
 
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .ok()?;
+        let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).ok()?;
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await
@@ -2889,17 +2952,39 @@ mod postgres_tests {
         (policy, reserved, format!("acme.{suffix}"))
     }
 
-    async fn nip_fi_lookup(state: Arc<AppState>, operator: &Keys, host: &str) -> Value {
-        let response = signed_operator_request(
-            state,
-            operator,
-            "GET",
-            &format!("/operator/communities/nip-fi-binding?host={host}"),
-            None,
+    fn fresh_upgrade_auth(keys: &Keys, url: &str, method: &str, body: Option<&[u8]>) -> String {
+        let mut tags = vec![
+            Tag::parse(["u", url]).unwrap(),
+            Tag::parse(["method", method]).unwrap(),
+            Tag::parse(["nonce", &Uuid::new_v4().to_string()]).unwrap(),
+        ];
+        if let Some(body) = body {
+            tags.push(Tag::parse(["payload", &hex::encode(Sha256::digest(body))]).unwrap());
+        }
+        let event = EventBuilder::new(Kind::HttpAuth, "")
+            .tags(tags)
+            .sign_with_keys(keys)
+            .unwrap();
+        format!(
+            "Nostr {}",
+            base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&event).unwrap())
         )
-        .await;
-        assert_eq!(response.status(), StatusCode::OK, "{host}");
-        read_json(response).await
+    }
+
+    async fn fresh_upgrade_request(
+        state: Arc<AppState>,
+        keys: &Keys,
+        method: &str,
+        path: &str,
+        body: Option<String>,
+    ) -> axum::response::Response {
+        let auth = fresh_upgrade_auth(
+            keys,
+            &format!("http://{INGRESS_HOST}{path}"),
+            method,
+            body.as_deref().map(str::as_bytes),
+        );
+        operator_request_with_auth(state, method, path, body, auth).await
     }
 
     #[tokio::test]
@@ -4304,9 +4389,7 @@ mod postgres_tests {
 
         let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
         let db = buzz_db::Db::from_pool(pool.clone());
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("redis pool");
+        let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await
@@ -4345,4 +4428,18 @@ mod postgres_tests {
         let body = read_json(response).await;
         assert_eq!(body["error"], "internal server error");
     }
+    async fn nip_fi_lookup(state: Arc<AppState>, operator: &Keys, host: &str) -> Value {
+        let response = signed_operator_request(
+            state,
+            operator,
+            "GET",
+            &format!("/operator/communities/nip-fi-binding?host={host}"),
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK, "{host}");
+        read_json(response).await
+    }
+
+    mod policy_tests;
 }

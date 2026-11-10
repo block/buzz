@@ -71,7 +71,7 @@ async fn cluster_global_inventory_cli_uses_only_existing_membership_tables() {
     for target in [community, participant_community] {
         for _ in 0..2 {
             let channel = Uuid::new_v4();
-            sqlx::query("INSERT INTO channels (community_id, id, name, created_by) VALUES ($1, $2, 'inventory-test', decode($3, 'hex'))")
+            sqlx::query("INSERT INTO channels (community_id, id, name, created_by) VALUES ($1, $2, 'inventory-test-' || $2::uuid::text, decode($3, 'hex'))")
                 .bind(target).bind(channel).bind(pubkey).execute(&mut *tx).await.unwrap();
             sqlx::query("INSERT INTO channel_members (community_id, channel_id, pubkey) VALUES ($1, $2, decode($3, 'hex'))")
                 .bind(target).bind(channel).bind(pubkey).execute(&mut *tx).await.unwrap();
