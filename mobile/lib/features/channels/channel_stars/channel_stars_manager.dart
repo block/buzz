@@ -30,6 +30,7 @@ class ChannelStarsCrypto {
 
 class ChannelStarsManager {
   final String pubkey;
+  final String relayUrl;
   final ChannelStarsStorage _storage;
   final ChannelStarsCrypto _crypto;
   final RelaySessionNotifier? _relaySession;
@@ -58,6 +59,7 @@ class ChannelStarsManager {
 
   ChannelStarsManager({
     required this.pubkey,
+    required this.relayUrl,
     required SharedPreferences prefs,
     required ChannelStarsCrypto crypto,
     required RelaySessionNotifier? relaySession,
@@ -73,7 +75,7 @@ class ChannelStarsManager {
        _remoteEnabled = remoteEnabled,
        _onChanged = onChanged,
        _startupRetryBaseDelay = startupRetryBaseDelay,
-       _store = ChannelStarsStorage(prefs).read(pubkey);
+       _store = ChannelStarsStorage(prefs).read(pubkey, relayUrl);
 
   ChannelStarStore get store => _store;
 
@@ -283,6 +285,8 @@ class ChannelStarsManager {
   /// then stays put so the same head is retried. An undecodable head is
   /// skipped without holding startup open.
   Future<bool> _applyEvents(List<NostrEvent> events) async {
+    // Another community's head must never reach this community's store.
+    if (!_servesThisCommunity) return true;
     var applied = true;
     for (final event in events) {
       if (event.pubkey != pubkey || event.getTagValue('d') != 'channel-stars') {
@@ -336,7 +340,8 @@ class ChannelStarsManager {
   Future<void> _publish({bool allowDisposed = false}) async {
     if ((!allowDisposed && _disposed) ||
         !_remoteEnabled ||
-        _signedEventRelay == null) {
+        _signedEventRelay == null ||
+        !_servesThisCommunity) {
       return;
     }
 
@@ -346,7 +351,7 @@ class ChannelStarsManager {
     if (!_disposed) _onChanged();
 
     // No-op suppression: skip if nothing changed
-    if (_isIdenticalToLastPublished()) return;
+    if (_isIdenticalToLastPublished() || !_servesThisCommunity) return;
 
     try {
       final payload = jsonEncode(_store.toJson());
@@ -378,9 +383,16 @@ class ChannelStarsManager {
     }
   }
 
+  /// Switching community rebuilds the session in place before this manager
+  /// is retired, so in between it must neither take in nor publish data.
+  bool get _servesThisCommunity {
+    final served = _relaySession?.relayUrl;
+    return served == null || served == relayUrl;
+  }
+
   Future<bool> _persist() async {
     try {
-      if (await _storage.write(pubkey, _store)) return true;
+      if (await _storage.write(pubkey, relayUrl, _store)) return true;
       debugPrint('[ChannelStarsManager] persist returned false');
     } catch (error) {
       debugPrint('[ChannelStarsManager] persist failed: $error');

@@ -57,7 +57,7 @@
 //! | **CW5** (AutoAddRequired joint-tx rollback) | `audio/handler.rs` — `before_participant_commit` fires after BOTH membership insert AND 48101 insert are in the uncommitted tx | Delete `before_participant_commit(...)` call | `arrived_rx` times out — test panics |
 //! | **CW5** (AutoAddRequired joint-tx rollback) | same | Remove `acquire_effect()` from `commit_participant_join` | both rows committed — membership row-count assertion panics |
 //! | **CW5** (AutoAddRequired joint-tx rollback) | same | Change `membership_admission` to `Existing` | auto-add path never entered; membership seam not covered — test fails at isolation |
-//! | **CW5-variant** (concurrent external membership add) | `audio/handler.rs` — `before_membership_lock` fires inside the `AutoAddRequired` branch immediately before the channel membership lock | Delete `before_membership_lock(...)` call | `arrived_rx` times out — test panics |
+//! | **CW5-variant** (concurrent external membership add) | `audio/handler.rs` — `before_membership_lock` fires in `commit_participant_join` immediately before the channel membership locks | Delete `before_membership_lock(...)` call | `arrived_rx` times out — test panics |
 //! | **CW5-variant** (concurrent external membership add) | same | Remove the `still_absent` re-read and always insert | external membership may be double-written (ON CONFLICT behaviour) — re-read path is the contract seam; removing it bypasses the contract |
 //! | **CW5-variant** (concurrent external membership add) | same | Remove the `if still_absent { insert }` guard | same as above — auto-add fires unconditionally alongside the external row |
 //! | **CW8** (post-add_peer cancel → cleanup) | `audio/handler.rs` — `after_add_peer` fires immediately after `room.add_peer` succeeds and before `check_cancel!(cleanup:...)` | Delete `after_add_peer(...)` call | `arrived_rx` times out — test panics |
@@ -133,6 +133,12 @@ macro_rules! make_hook {
                 (rx, release)
             }
 
+            /// Remove an armed barrier that production code never reached.
+            #[allow(dead_code)]
+            pub(crate) fn disarm(community: CommunityId) {
+                GATE.lock().unwrap().remove(&community);
+            }
+
             pub(crate) async fn trigger(community: CommunityId) {
                 let gate = GATE.lock().unwrap().remove(&community);
                 if let Some(g) = gate {
@@ -148,6 +154,7 @@ macro_rules! make_hook {
     };
 }
 
+make_hook!(community_registration_hook, before_community_registration);
 make_hook!(auth_commit_hook, before_auth_commit);
 make_hook!(event_ingest_hook, before_event_ingest);
 make_hook!(req_registration_hook, before_req_registration);
@@ -172,9 +179,8 @@ make_hook!(audio_auth_verify_hook, before_auth_verify);
 // DB read inside `check_membership_for_admission`. Arms expiry here → proves
 // that a cancellation before membership check produces zero DB side effects.
 //
-// `before_membership_lock`: fires inside the AutoAddRequired branch of
-// `commit_participant_join`, immediately before
-// `acquire_channel_membership_lock_in_transaction`. Arms an external
+// `before_membership_lock`: fires in `commit_participant_join` (all paths),
+// immediately before the membership locks of the huddle and its parent. Arms an external
 // membership insert here → proves that a concurrent add is observed by the
 // re-read and the auto-add insert is skipped, leaving membership preserved.
 //
@@ -199,6 +205,32 @@ make_hook!(audio_membership_check_hook, before_membership_check);
 // immediately before the relay membership lookup. Closing the pool here makes
 // that lookup fail with the tenant already bound.
 make_hook!(git_membership_hook, before_git_membership);
+// `before_auto_join_channel`: fires in the admission auto-join before each
+// default channel's effect permit. Cancelling the socket here proves that
+// channel is not joined.
+make_hook!(auto_join_channel_hook, before_auto_join_channel);
+// `after_auto_join`: fires when an admission auto-join task has finished, so
+// a test can assert what it did (or did not) write.
+make_hook!(auto_join_done_hook, after_auto_join);
+// `before_group_state_lock`: fires immediately before a kind:39000/39001
+// publisher takes its replacement lock. Anything it read before this point
+// was read outside the lock; a publisher held here while the channel is
+// edited and republished must still store the edit's state.
+make_hook!(group_state_lock_hook, before_group_state_lock);
+// `after_group_state_read`: fires when a kind:39000/39001 publisher has read
+// the channel and its members behind the lock, before it signs and stores.
+// A publisher held here makes a racing edit wait for it.
+make_hook!(group_state_read_hook, after_group_state_read);
+// `before_http_ban_recheck`: fires in `buzz_v1` and Git settings after the
+// shared membership check passes, immediately before the fresh ban reread.
+// A ban or closed pool here makes only the reread refuse.
+make_hook!(http_ban_recheck_hook, before_http_ban_recheck);
+// `before_write_ban_check`: fires in ingest's write-restriction gates (plain
+// and cached) immediately before the restriction read.
+// `before_command_ban_check`: fires in the moderation and relay-admin command
+// handlers immediately before their own ban reread, after the write gate.
+make_hook!(write_ban_check_hook, before_write_ban_check);
+make_hook!(command_ban_check_hook, before_command_ban_check);
 make_hook!(audio_membership_lock_hook, before_membership_lock);
 make_hook!(audio_participant_commit_hook, before_participant_commit);
 // `before_audio_refusal_frames`: fires in `audio/handler.rs` once a NIP-42
@@ -210,6 +242,19 @@ make_hook!(audio_refusal_frames_hook, before_audio_refusal_frames);
 make_hook!(join_refusal_rollback_hook, before_join_refusal_rollback);
 make_hook!(audio_participant_fanout_hook, after_participant_fanout);
 make_hook!(audio_add_peer_hook, after_add_peer);
+// `before_audio_teardown_cleanup`: fires in `run_active_audio_connection` once
+// the writer has sent its Close and the socket is handed off, before the
+// teardown that writes to Postgres and Redis. Holding it stands in for a
+// stalled cleanup that must not hold the socket open.
+make_hook!(audio_teardown_cleanup_hook, before_audio_teardown_cleanup);
+// `before_room_archive_recheck`: fires in `run_active_audio_connection` after the
+// membership check, just before the archive re-check, so a test can archive
+// the channel between the two and drive the archived-channel exit.
+make_hook!(room_archive_recheck_hook, before_room_archive_recheck);
+// `before_archived_exit_cleanup`: fires on the archived-channel exit once the
+// socket is handed off, before the lease release. Holding it stands in for a
+// stalled Redis release that must not hold the socket open.
+make_hook!(archived_exit_cleanup_hook, before_archived_exit_cleanup);
 // `before_lease_permit`: fires in `handle_active_audio_connection` immediately
 // before the effect permit that covers join-owner resolution. Cancelling here
 // proves the resolver (and its lease CAS) never runs without a permit.
@@ -226,12 +271,45 @@ make_hook!(directory_cas_hook, after_directory_cas);
 // test can stall that release after the CAS has landed.
 make_hook!(directory_acquire_hook, after_directory_acquire);
 // `before_archive_recheck`: fires in `commit_participant_join` immediately
-// after the `SELECT archived_at ... FOR UPDATE` row lock is acquired and the
-// snapshot value is read, but before the archived check / any write. At this
+// after the membership and TTL locks and the `SELECT archived_at ... FOR NO
+// KEY UPDATE` row lock are acquired and the snapshot value is read, but before the archived check / any write. At this
 // point the channels row is locked in the active transaction. A test can
 // attempt a concurrent archive UPDATE here to prove it blocks (55P03) and is
 // serialized against the join commit.
 make_hook!(audio_archive_recheck_hook, before_archive_recheck);
+
+// ── Login decision hook ────────────────────────────────────────────────────
+// `before_auth_decision`: fires synchronously in the root WS auth handler
+// after its last cancellation check and before the login decides it won.
+// The armed action runs inline, with no await, so a disconnect lands in the
+// window a concurrent thread would hit, without the handler being dropped.
+pub(crate) mod auth_decision_hook {
+    use super::*;
+
+    type Action = Box<dyn FnOnce(&crate::connection::ConnectionState) + Send>;
+
+    static ACTIONS: LazyLock<Mutex<HashMap<CommunityId, Action>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    /// Run `action` once when a login in `community` reaches its decision.
+    pub(crate) fn arm(
+        community: CommunityId,
+        action: impl FnOnce(&crate::connection::ConnectionState) + Send + 'static,
+    ) {
+        ACTIONS.lock().unwrap().insert(community, Box::new(action));
+    }
+
+    pub(crate) fn trigger(conn: &crate::connection::ConnectionState) {
+        let action = ACTIONS.lock().unwrap().remove(&conn.tenant.community());
+        if let Some(action) = action {
+            action(conn);
+        }
+    }
+}
+
+pub(crate) fn before_auth_decision(conn: &crate::connection::ConnectionState) {
+    auth_decision_hook::trigger(conn);
+}
 
 // ── Deny-set admission hooks ───────────────────────────────────────────────
 // `before_deny_set_check`: fires in both the root WS auth handler and the audio

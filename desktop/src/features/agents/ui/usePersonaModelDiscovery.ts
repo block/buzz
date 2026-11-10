@@ -441,5 +441,7 @@ export function usePersonaModelDiscovery({
         ? null
         : activeModelDiscoveryStatus,
     modelDiscoverySuccessfulEmpty,
+    agentDefaultModel:
+      activeModelDiscoveryData?.agentDefaultModel?.trim() || null,
   };
 }

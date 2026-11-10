@@ -402,15 +402,16 @@ const OWNER_READY_BUDGET: Duration = Duration::from_secs(2);
 /// Per-await bounds of the production [`SessionDirectory`] call chain.
 ///
 /// Each constant mirrors the awaits of one directory method, in order, and
-/// each await's own bound: the whole-checkout Redis deadline, the redis 1.2
-/// driver's default 500 ms response timeout for one command (every script is a
-/// single `EVAL`), and the serving-write lease SQL bound.
+/// each await's own bound: the shared Redis connection's connect timeout (a
+/// command issued while it is down waits for one attempt), its response
+/// timeout for one command (every script is a single `EVAL`), and the
+/// serving-write lease SQL bound.
 #[cfg(test)]
 pub(crate) mod worst_case {
     use std::time::Duration;
 
-    const CHECKOUT: Duration = crate::tunnel::directory::POOL_CHECKOUT_TIMEOUT;
-    const REDIS_COMMAND: Duration = Duration::from_millis(500);
+    const CHECKOUT: Duration = buzz_pubsub::REDIS_CONNECT_TIMEOUT;
+    const REDIS_COMMAND: Duration = buzz_pubsub::REDIS_RESPONSE_TIMEOUT;
     const LEASE_SQL: Duration = buzz_db::deletion::SERVING_WRITE_LEASE_SQL_TIMEOUT;
 
     const fn max(a: Duration, b: Duration) -> Duration {

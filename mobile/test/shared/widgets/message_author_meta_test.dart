@@ -4,6 +4,40 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  testWidgets(
+    'hidden identity stays accessible without a visible name or gap',
+    (tester) async {
+      final semantics = tester.ensureSemantics();
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: SizedBox(
+              width: 300,
+              child: MessageAuthorMeta(
+                displayName: 'Alice',
+                username: 'alice@example.com',
+                timestamp: '2m',
+                showIdentity: false,
+                nameColor: Colors.black,
+                metadataColor: Colors.grey,
+              ),
+            ),
+          ),
+        ),
+      );
+      expect(find.text('Alice'), findsNothing);
+      expect(find.text('alice@example.com'), findsNothing);
+      expect(find.byIcon(Icons.verified), findsNothing);
+      expect(find.bySemanticsLabel(RegExp('Alice')), findsOneWidget);
+      expect(
+        tester.getTopLeft(find.text('2m')).dx,
+        tester.getTopLeft(find.byType(MessageAuthorMeta)).dx,
+      );
+      semantics.dispose();
+    },
+  );
+
   testWidgets('keeps the timestamp next to a short name without a separator', (
     tester,
   ) async {

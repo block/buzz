@@ -56,7 +56,7 @@ class AppListCard extends StatelessWidget {
             // which lands them within a few levels of the card fill — invisible.
             // Tinting with the text color instead keeps the hairline readable on
             // the card in both brightnesses.
-            color: context.colors.onSurface.withValues(alpha: 0.12),
+            color: context.colors.onSurface.withValues(alpha: 0.07),
           ),
         );
       }
@@ -71,6 +71,7 @@ class AppListCard extends StatelessWidget {
         verticalPadding,
       ),
       child: Column(
+        mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           if (label != null)
@@ -96,7 +97,10 @@ class AppListCard extends StatelessWidget {
             clipBehavior: Clip.antiAlias,
             child: AppListInset(
               horizontal: _inset,
-              child: Column(children: separated),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: separated,
+              ),
             ),
           ),
         ],

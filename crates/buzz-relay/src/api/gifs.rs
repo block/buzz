@@ -25,7 +25,7 @@ use crate::state::AppState;
 
 use buzz_auth::LimitType;
 
-use super::{api_error, bridge, internal_error, relay_members};
+use super::{api_error, bridge, internal_error};
 
 const KLIPY_API_ROOT: &str = "https://api.klipy.com/api/v1/";
 pub(crate) const SEARCH_PATH: &str = "/gifs/search";
@@ -116,60 +116,6 @@ fn klipy_share_request(
     Ok(client
         .post(url)
         .json(&serde_json::json!({ "customer_id": request.customer_id })))
-}
-
-#[allow(clippy::result_large_err)] // Response is the natural error type for axum handlers
-async fn authenticate(
-    state: &Arc<AppState>,
-    headers: &HeaderMap,
-    path: &str,
-    body: &[u8],
-) -> Result<(buzz_core::TenantContext, nostr::PublicKey), Response> {
-    let tenant = crate::nip_fi_shadow::bind_tenant(state, headers)
-        .await
-        .ok_or_else(|| {
-            api_error(
-                StatusCode::NOT_FOUND,
-                "relay: no community is configured for this host",
-            )
-            .into_response()
-        })?;
-
-    let expected_url = bridge::nip98_expected_url(&state.config.relay_url, &tenant, path);
-
-    // NIP-FI admission. [FI-TRACE-AUTHORITY-UNIFORM]
-    let admission = crate::nip_fi_http::admit_nip_fi_http_on_state(
-        state,
-        headers,
-        bridge::make_nip98_closure_for_admission(
-            headers.clone(),
-            "POST",
-            expected_url,
-            Some(body.to_vec()),
-            true,
-            true,
-        ),
-    )?;
-    let pubkey = *admission.proven_pubkey();
-    let (event_id_bytes, signed_created_at) = admission.into_extra();
-
-    bridge::enforce_http_admission(state, &tenant, &pubkey)
-        .await
-        .map_err(|e| e.into_response())?;
-    bridge::check_nip98_replay(state, &tenant, event_id_bytes)
-        .await
-        .map_err(|e| e.into_response())?;
-    relay_members::enforce_relay_membership(
-        state,
-        tenant.community(),
-        &pubkey.to_bytes(),
-        relay_members::extract_auth_tag_header(headers),
-        signed_created_at,
-    )
-    .await
-    .map_err(|e| e.into_response())?;
-
-    Ok((tenant, pubkey))
 }
 
 async fn send_upstream(
@@ -271,21 +217,27 @@ fn successful_search_payload(upstream: &Value) -> Result<Value, (StatusCode, Jso
 /// Search or browse trending KLIPY GIF metadata for an authenticated member.
 pub async fn search(
     State(state): State<Arc<AppState>>,
+    slot: crate::access::AccessSlot,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
-    search_inner(state, headers, body).await.into_response()
+    search_inner(state, slot, headers, body)
+        .await
+        .into_response()
 }
 
+#[allow(clippy::result_large_err)] // Response is the natural error type for axum handlers
 async fn search_inner(
     state: Arc<AppState>,
+    slot: crate::access::AccessSlot,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Json<Value>, Response> {
     // Admission first: NIP-98 + NIP-FI must fire before any application-level
     // check (including provider availability) so the denial contract wins over
     // config or request-validation errors. [FI-TRACE-HTTP-INGRESS]
-    let (tenant, pubkey) = authenticate(&state, &headers, SEARCH_PATH, &body).await?;
+    let (tenant, pubkey) =
+        bridge::authenticate_member_post(&state, &slot, &headers, SEARCH_PATH, &body).await?;
 
     let Some(config) = state.config.klipy.as_ref() else {
         return Err(
@@ -346,20 +298,25 @@ async fn search_inner(
 /// Report a selected GIF to KLIPY so the provider can update Recents.
 pub async fn share(
     State(state): State<Arc<AppState>>,
+    slot: crate::access::AccessSlot,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
-    share_inner(state, headers, body).await.into_response()
+    share_inner(state, slot, headers, body)
+        .await
+        .into_response()
 }
 
+#[allow(clippy::result_large_err)] // Response is the natural error type for axum handlers
 async fn share_inner(
     state: Arc<AppState>,
+    slot: crate::access::AccessSlot,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<StatusCode, Response> {
     // Admission first: NIP-98 + NIP-FI must fire before provider availability
     // check. [FI-TRACE-HTTP-INGRESS]
-    authenticate(&state, &headers, SHARE_PATH, &body).await?;
+    bridge::authenticate_member_post(&state, &slot, &headers, SHARE_PATH, &body).await?;
 
     let Some(config) = state.config.klipy.as_ref() else {
         return Err(
@@ -411,9 +368,8 @@ mod tests {
             .connect_lazy("postgres://buzz:buzz_dev@127.0.0.1:1/buzz") // sadscan:disable np.postgres.1
             .expect("lazy test database pool");
         let db = buzz_db::Db::from_pool(pool.clone());
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("lazy test Redis pool");
+        let redis_pool =
+            buzz_pubsub::redis_connection(&config.redis_url).expect("lazy test Redis pool");
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await

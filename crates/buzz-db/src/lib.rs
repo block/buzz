@@ -21,8 +21,33 @@
 //! Existing crate-root modules, records, and [`Db`] methods remain the public
 //! API. The internal `runtime` and `store` namespaces are not public APIs.
 
+/// Wrap `$retire`, an `UPDATE`/`DELETE` on `events` that retires a
+/// coordinate's previous head, so the same statement drops those rows' mention
+/// index entries. Mention-index reads (`#p` filters and feeds) never return a
+/// retired row, so its mention rows are dead weight they must walk and
+/// discard: one per member for every kind:39002 roster republish. `$1` must
+/// bind the community.
+///
+/// The three replacement paths that index mentions (NIP-33 parameterized,
+/// addressable, and the relay's member snapshot) go through this, so a head
+/// and its mention rows leave together on those paths.
+macro_rules! superseded_with_mentions_sql {
+    ($retire:literal) => {
+        concat!(
+            "WITH superseded AS (",
+            $retire,
+            " RETURNING id) \
+             DELETE FROM event_mentions mention USING superseded \
+             WHERE mention.community_id = $1 AND mention.event_id = superseded.id"
+        )
+    };
+}
+
 mod runtime;
 mod store;
+
+/// Concurrency caps whose limit can change at runtime.
+pub mod concurrency_gate;
 
 /// Database error types.
 pub mod error;
@@ -31,8 +56,9 @@ pub mod error;
 mod test_support;
 
 pub use runtime::{
-    insert_mentions, migration, replica_fence, Db, DbConfig, DbConnectionOutcome, DbConnectionStep,
-    DbPoolRole, DbPoolStats, DbReadinessOutcome, ReadSession,
+    insert_mentions, migration, replica_fence, AdmittedTx, ColdStartError, Db, DbConfig,
+    DbConnectionOutcome, DbConnectionStep, DbPoolRole, DbPoolStats, DbReadinessOutcome,
+    ReadSession,
 };
 
 /// Valid low-cardinality `(pool_role, operation)` pairs for pool-acquisition telemetry.
@@ -58,15 +84,18 @@ pub const DB_CONNECTION_TERMINALS: [(DbPoolRole, DbConnectionStep, DbConnectionO
 /// Raw Prometheus series ceiling per pod for connection-step telemetry.
 pub const DB_CONNECTION_RAW_SERIES_PER_POD: usize = runtime::CONNECTION_RAW_SERIES_PER_POD;
 pub(crate) use runtime::{
-    insert_mentions_in_transaction, observability, route_proof, ReadSessionInner, RouteDecision,
-    RoutePredicate,
+    begin_community_event_write_transaction,
+    begin_community_event_write_transaction_with_legacy_metrics, begin_community_sweep_transaction,
+    begin_community_write_transaction, insert_mentions_in_transaction, observability, route_proof,
+    sweep_admitted_communities, ReadSessionInner, RouteDecision, RoutePredicate,
 };
 pub use store::{
-    admin_moderation, allowlist, api_token, archived_identities, artifact, channel,
-    channel_members, community, deletion, dm, event, feed, git_repo, moderation, operator_listener,
-    partition, product_feedback, push, reaction, read_state, relay_admin_actions, relay_invite,
-    relay_members, relay_operators, reminder, replaceable, storage_accounting, thread,
-    thread_window, usage, user, workflow,
+    admin_moderation, allowlist, api_token, archived_identities, artifact, artifact_sync, channel,
+    channel_members, community, community_auth, deletion, dm, entity_deletion, event, feed,
+    git_repo, leader_lock, media, membership_snapshot, moderation, nip_fi_binding,
+    operator_listener, partition, personal_read, product_feedback, push, reaction, read_state,
+    relay_admin_actions, relay_invite, relay_members, relay_operators, reminder, replaceable,
+    storage_accounting, thread, thread_window, user, user_deletion, user_deletion_fences, workflow,
 };
 
 pub use allowlist::AllowlistEntry;
@@ -76,11 +105,32 @@ pub use community::{
     CreatedCommunityRecord, EnsuredCommunityRecord, OwnedCommunityRecord, UnarchiveCommunityResult,
     UnarchivedCommunityRecord,
 };
+pub use concurrency_gate::{ConcurrencyGate, GatePermit};
 pub use error::{DbError, Result};
-pub use event::{ChannelHeadPrecondition, ChannelHeadWriteStatus};
+pub use event::{ChannelHeadPrecondition, ChannelHeadWriteStatus, DeletionTarget};
 pub use event::{EventQuery, DEFAULT_MAX_PAGE_LIMIT};
+pub use leader_lock::SessionLeader;
+pub use nip_fi_binding::{NipFiBindingRecord, NipFiUnbind, RowCapExceeded};
 pub use reaction::ReactionEventInsertOutcome;
 pub use reminder::DueReminder;
-pub use usage::UsageMetricsLeader;
+pub use store::{ArtifactSnapshot, SnapshotDenied};
+
+/// A value read from the database, with when its reading connection was
+/// checked out of the pool.
+///
+/// The statement that produced `value` started after `read_at`, so its
+/// snapshot is no older than `read_at`. A cache that serves `value` for a
+/// bound after `read_at` is never staler than that bound, however long the
+/// read waited for a connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReadAt<T> {
+    /// The value as read.
+    pub value: T,
+    /// When the connection that read `value` was checked out.
+    pub read_at: std::time::Instant,
+}
 
 use buzz_core::CommunityId;
+
+/// Durable NIP-FI verified-profile projection state.
+pub use store::verified_profiles;

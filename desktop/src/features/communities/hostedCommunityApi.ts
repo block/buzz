@@ -3,7 +3,6 @@ import { invoke } from "@tauri-apps/api/core";
 import { safeNpub } from "@/shared/lib/nostrUtils";
 
 export const HOSTED_COMMUNITY_SUFFIX = "communities.buzz.xyz";
-export const HOSTED_COMMUNITY_LIMIT = 5;
 export const VALID_HOSTED_COMMUNITY_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
 export type BuilderlabAuth = {
@@ -40,6 +39,9 @@ export type HostedCommunity = {
 
 export type HostedCommunitiesResponse = {
   communities?: HostedCommunity[];
+  quota_used?: number;
+  quota_limit?: number;
+  can_create?: boolean;
   error?: HostedCommunityApiError;
   correlation_id?: string;
 };
@@ -59,8 +61,26 @@ export type HostedCommunityMutationResponse = {
 
 export type HostedCommunityAccount = {
   communities: HostedCommunity[];
+  canCreate: boolean;
   identity: HostedNostrIdentity | null;
 };
+
+/** A missing projection must not invent a client-side quota; create remains server-authoritative. */
+export function hostedCommunityQuotaLimit(
+  value: number | undefined,
+): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0
+    ? value
+    : null;
+}
+
+export function hostedCommunityQuotaUsed(
+  value: number | undefined,
+): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+    ? value
+    : null;
+}
 
 export function hostedCommunityErrorMessage(
   error: HostedCommunityApiError | undefined,
@@ -71,7 +91,7 @@ export function hostedCommunityErrorMessage(
     missing_mapping: "Connect your Buzz identity before creating a community.",
     invalid_name: "Use lowercase letters, numbers, and hyphens.",
     taken: "That Buzz address is already taken.",
-    limit_reached: `You've reached the limit of ${HOSTED_COMMUNITY_LIMIT} hosted communities.`,
+    limit_reached: "You’ve reached your hosted community creation limit.",
     relay_unavailable: "Community provisioning is temporarily unavailable.",
     identity_already_bound:
       "This Builderlab account is connected to another Buzz identity.",
@@ -187,6 +207,7 @@ export async function loadHostedCommunityAccount(): Promise<HostedCommunityAccou
   return {
     identity: identityResponse.identity ?? null,
     communities: communitiesResponse.communities ?? [],
+    canCreate: communitiesResponse.can_create !== false,
   };
 }
 

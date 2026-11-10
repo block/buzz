@@ -1,9 +1,10 @@
 //! Owner-reviewed agent draft requests published through Buzz observer frames.
 
-use buzz_core::observer::{encrypt_observer_payload, OBSERVER_FRAME_TELEMETRY};
-use nostr::{Event, Keys, PublicKey};
+use buzz_core::observer::{OBSERVER_FRAME_TELEMETRY, OBSERVER_MAX_PLAINTEXT_LEN};
+use nostr::{Event, PublicKey};
 use serde::Serialize;
 
+use crate::credentials::Credentials;
 use crate::error::CliError;
 
 const AGENT_REQUEST_KIND: &str = "agent_management_request";
@@ -118,9 +119,7 @@ pub fn normalize_allowlist_pubkeys(
         let hex = if trimmed.starts_with("npub1") {
             PublicKey::parse(trimmed)
                 .map_err(|_| {
-                    CliError::Usage(format!(
-                        "invalid npub in respond-to-allowlist: {trimmed}"
-                    ))
+                    CliError::Usage(format!("invalid npub in respond-to-allowlist: {trimmed}"))
                 })?
                 .to_hex()
         } else if trimmed.len() == 64 && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -137,8 +136,8 @@ pub fn normalize_allowlist_pubkeys(
     Ok(Some(out))
 }
 
-fn build<T: Serialize>(
-    keys: &Keys,
+async fn build<T: Serialize>(
+    credentials: &Credentials,
     owner: &PublicKey,
     channel_id: String,
     request_kind: &'static str,
@@ -161,17 +160,23 @@ fn build<T: Serialize>(
             request,
         },
     };
-    let encrypted = encrypt_observer_payload(keys, owner, &payload)
-        .map_err(|error| CliError::Other(format!("could not encrypt draft request: {error}")))?;
-    let event = buzz_sdk::build_agent_observer_frame(
+    let plaintext = serde_json::to_string(&payload)
+        .map_err(|error| CliError::Other(format!("could not encode draft request: {error}")))?;
+    if plaintext.len() > OBSERVER_MAX_PLAINTEXT_LEN {
+        return Err(CliError::Usage(format!(
+            "draft request is too large: {} bytes (max {OBSERVER_MAX_PLAINTEXT_LEN})",
+            plaintext.len()
+        )));
+    }
+    let encrypted = credentials.nip44_encrypt(owner, &plaintext).await?;
+    let builder = buzz_sdk::build_agent_observer_frame(
         &owner.to_hex(),
-        &keys.public_key().to_hex(),
+        &credentials.public_key().to_hex(),
         OBSERVER_FRAME_TELEMETRY,
         &encrypted,
     )
-    .map_err(|error| CliError::Other(format!("could not build draft request: {error}")))?
-    .sign_with_keys(keys)
-    .map_err(|error| CliError::Other(format!("could not sign draft request: {error}")))?;
+    .map_err(|error| CliError::Other(format!("could not build draft request: {error}")))?;
+    let event = credentials.sign(builder).await?;
     Ok(BuiltDraftRequest {
         event,
         request_id,
@@ -179,8 +184,8 @@ fn build<T: Serialize>(
     })
 }
 
-pub fn build_create(
-    keys: &Keys,
+pub(crate) async fn build_create(
+    credentials: &Credentials,
     owner: &PublicKey,
     draft: CreateAgentDraft,
 ) -> Result<BuiltDraftRequest, CliError> {
@@ -193,17 +198,18 @@ pub fn build_create(
         system_prompt: required(draft.system_prompt, "system prompt", MAX_PROMPT_CHARS)?,
     };
     build(
-        keys,
+        credentials,
         owner,
         channel_id,
         AGENT_REQUEST_KIND,
         "create",
         request,
     )
+    .await
 }
 
-pub fn build_update(
-    keys: &Keys,
+pub(crate) async fn build_update(
+    credentials: &Credentials,
     owner: &PublicKey,
     draft: UpdateAgentDraft,
 ) -> Result<BuiltDraftRequest, CliError> {
@@ -211,9 +217,10 @@ pub fn build_update(
     uuid::Uuid::parse_str(&channel_id)
         .map_err(|_| CliError::Usage(format!("invalid channel UUID: {channel_id}")))?;
     let respond_to = optional(draft.respond_to, "respond-to")?;
-    if respond_to.as_deref().is_some_and(|value| {
-        value != "owner-only" && value != "allowlist" && value != "anyone"
-    }) {
+    if respond_to
+        .as_deref()
+        .is_some_and(|value| value != "owner-only" && value != "allowlist" && value != "anyone")
+    {
         return Err(CliError::Usage(
             "respond-to must be owner-only, allowlist, or anyone".into(),
         ));
@@ -258,17 +265,18 @@ pub fn build_update(
         ));
     }
     build(
-        keys,
+        credentials,
         owner,
         channel_id,
         AGENT_REQUEST_KIND,
         "update",
         request,
     )
+    .await
 }
 
-pub fn build_project_channel(
-    keys: &Keys,
+pub(crate) async fn build_project_channel(
+    credentials: &Credentials,
     owner: &PublicKey,
     draft: CreateProjectChannelDraft,
 ) -> Result<BuiltDraftRequest, CliError> {
@@ -294,28 +302,30 @@ pub fn build_project_channel(
         template_name: optional(draft.template_name, "template")?,
     };
     build(
-        keys,
+        credentials,
         owner,
         home_channel_id,
         PROJECT_CHANNEL_REQUEST_KIND,
         "create",
         request,
     )
+    .await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use buzz_core::observer::{decrypt_observer_payload, OBSERVER_AGENT_TAG, OBSERVER_FRAME_TAG};
+    use nostr::Keys;
 
     const CHANNEL: &str = "7c07e659-3610-42f4-9a5e-1e9973c09da9";
 
-    #[test]
-    fn create_is_owner_encrypted_and_matches_desktop_contract() {
+    #[tokio::test]
+    async fn create_is_owner_encrypted_and_matches_desktop_contract() {
         let agent = Keys::generate();
         let owner = Keys::generate();
         let built = build_create(
-            &agent,
+            &Credentials::from_keys(agent.clone()),
             &owner.public_key(),
             CreateAgentDraft {
                 channel_id: CHANNEL.into(),
@@ -323,6 +333,7 @@ mod tests {
                 system_prompt: "Find sources.".into(),
             },
         )
+        .await
         .unwrap();
 
         assert_eq!(built.event.kind.as_u16(), 24_200);
@@ -358,10 +369,10 @@ mod tests {
         assert!(payload["payload"]["request"].get("respondTo").is_none());
     }
 
-    #[test]
-    fn update_requires_a_change() {
+    #[tokio::test]
+    async fn update_requires_a_change() {
         let error = build_update(
-            &Keys::generate(),
+            &Credentials::from_keys(Keys::generate()),
             &Keys::generate().public_key(),
             UpdateAgentDraft {
                 channel_id: CHANNEL.into(),
@@ -375,17 +386,18 @@ mod tests {
                 respond_to_allowlist: None,
             },
         )
+        .await
         .unwrap_err();
         assert!(error.to_string().contains("at least one field"));
     }
 
-    #[test]
-    fn update_allowlist_round_trips_pubkeys() {
+    #[tokio::test]
+    async fn update_allowlist_round_trips_pubkeys() {
         let agent = Keys::generate();
         let owner = Keys::generate();
         let allowed = Keys::generate().public_key().to_hex();
         let built = build_update(
-            &agent,
+            &Credentials::from_keys(agent.clone()),
             &owner.public_key(),
             UpdateAgentDraft {
                 channel_id: CHANNEL.into(),
@@ -399,6 +411,7 @@ mod tests {
                 respond_to_allowlist: Some(vec![allowed.clone(), allowed.clone()]),
             },
         )
+        .await
         .unwrap();
         let payload: serde_json::Value = decrypt_observer_payload(&owner, &built.event).unwrap();
         assert_eq!(payload["payload"]["request"]["respondTo"], "allowlist");
@@ -408,10 +421,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn update_allowlist_requires_pubkeys() {
+    #[tokio::test]
+    async fn update_allowlist_requires_pubkeys() {
         let error = build_update(
-            &Keys::generate(),
+            &Credentials::from_keys(Keys::generate()),
             &Keys::generate().public_key(),
             UpdateAgentDraft {
                 channel_id: CHANNEL.into(),
@@ -425,14 +438,15 @@ mod tests {
                 respond_to_allowlist: None,
             },
         )
+        .await
         .unwrap_err();
         assert!(error.to_string().contains("respond-to-allowlist"));
     }
 
-    #[test]
-    fn create_rejects_invalid_channel() {
+    #[tokio::test]
+    async fn create_rejects_invalid_channel() {
         let error = build_create(
-            &Keys::generate(),
+            &Credentials::from_keys(Keys::generate()),
             &Keys::generate().public_key(),
             CreateAgentDraft {
                 channel_id: "general".into(),
@@ -440,16 +454,17 @@ mod tests {
                 system_prompt: "Help".into(),
             },
         )
+        .await
         .unwrap_err();
         assert!(error.to_string().contains("invalid channel UUID"));
     }
 
-    #[test]
-    fn project_channel_request_is_owner_encrypted() {
+    #[tokio::test]
+    async fn project_channel_request_is_owner_encrypted() {
         let agent = Keys::generate();
         let owner = Keys::generate();
         let built = build_project_channel(
-            &agent,
+            &Credentials::from_keys(agent.clone()),
             &owner.public_key(),
             CreateProjectChannelDraft {
                 home_channel_id: CHANNEL.into(),
@@ -460,6 +475,7 @@ mod tests {
                 template_name: Some("Release team".into()),
             },
         )
+        .await
         .unwrap();
 
         let payload: serde_json::Value = decrypt_observer_payload(&owner, &built.event).unwrap();

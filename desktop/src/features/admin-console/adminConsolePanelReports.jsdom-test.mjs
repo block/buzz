@@ -42,7 +42,7 @@ async function openFirstDetailRow(container) {
   const allButtons = container.querySelectorAll("button");
   for (const btn of allButtons) {
     const testid = btn.getAttribute("data-testid") ?? "";
-    if (testid.startsWith("admin-tab")) continue;
+    if (testid.match(/^(admin-tab|community-badge)/)) continue;
     await act(async () => {
       fireEvent.click(btn);
       await new Promise((r) => setTimeout(r, 30));
@@ -336,7 +336,10 @@ test("processing-report-navigable-suppresses-resolve-form: a processing report o
 
   // The processing row must be a navigable (non-disabled) button.
   const rowButtons = Array.from(container.querySelectorAll("button")).filter(
-    (btn) => !(btn.getAttribute("data-testid") ?? "").startsWith("admin-tab"),
+    (btn) =>
+      !(btn.getAttribute("data-testid") ?? "").match(
+        /^(admin-tab|community-badge)/,
+      ),
   );
   const processingRow = rowButtons.find((btn) =>
     btn.textContent?.includes("spam"),
@@ -429,7 +432,9 @@ test("reports-grouped-by-community: multi-community reports render per-community
   );
 
   const hosts = Array.from(
-    container.querySelectorAll("[data-testid='community-group-host']"),
+    container.querySelectorAll(
+      "[data-testid='community-group-host'] [data-testid='community-badge-host']",
+    ),
   ).map((el) => el.textContent);
   assert.deepEqual(
     hosts,
@@ -450,7 +455,7 @@ async function openFirstReportDetail(container) {
   const allButtons = container.querySelectorAll("button");
   for (const btn of allButtons) {
     const testid = btn.getAttribute("data-testid") ?? "";
-    if (testid.startsWith("admin-tab")) continue;
+    if (testid.match(/^(admin-tab|community-badge)/)) continue;
     await act(async () => {
       fireEvent.click(btn);
       await new Promise((r) => setTimeout(r, 30));
@@ -1500,7 +1505,10 @@ test("attachment-budget-seam: only 5 of 7 image attachments trigger native fetch
 
   // Click the feedback list item to open detail — the first non-tab button.
   const listButtons = Array.from(container.querySelectorAll("button")).filter(
-    (b) => !(b.getAttribute("data-testid") ?? "").startsWith("admin-tab"),
+    (b) =>
+      !(b.getAttribute("data-testid") ?? "").match(
+        /^(admin-tab|community-badge)/,
+      ),
   );
   assert.ok(
     listButtons.length > 0,
@@ -2781,4 +2789,133 @@ test("report-detail-event-target: event targets show and copy the raw event ID, 
   } finally {
     await unmount();
   }
+});
+
+test("list-load-forbidden-shows-parsed-message: a 403 list load shows the relay message, not the raw envelope", async () => {
+  // Mutation evidence: restore `e instanceof Error ? e.message : String(e)` in
+  // useAsyncLoad's error branch → the envelope renders and this goes red.
+  const forbidden = `admin API error: {"error":{"code":"forbidden","message":"request is not authorized","requestId":"00000000-0000-0000-0000-0000000000a3"}}`;
+  setIpcHandler("admin_list_reports", () => mutationReject(forbidden, 403));
+  setIpcHandler("admin_list_feedback", () => Promise.resolve([]));
+
+  const { container, doRender, unmount } = mountPanel({
+    origin: "https://admin.example.com",
+    pubkey: "a3".repeat(32),
+  });
+  await doRender();
+  await settle(30);
+
+  const text = container.textContent ?? "";
+  assert.ok(
+    text.includes("request is not authorized"),
+    `the parsed relay message must render; got: ${text.slice(0, 400)}`,
+  );
+  assert.ok(
+    !text.includes('{"error"') && !text.includes("admin API error:"),
+    `the raw envelope must not render; got: ${text.slice(0, 400)}`,
+  );
+
+  await unmount();
+});
+
+test("resolve-enforcement-failed-reloads-detail: a 422 enforcement_failed resolve shows the failed action and Cancel & reopen in place", async () => {
+  // The relay persists the report as `processing` with a failed action before
+  // answering 422. Mutation evidence: drop the `enforcement_failed` reload in
+  // ResolveReportForm's catch → the detail stays `open` and this goes red.
+  const openItem = {
+    id: "00000000-0000-0000-0000-0000000000b4",
+    communityId: "comm-1",
+    communityHost: "alpha.example.com",
+    reportEventId: "aa",
+    reporterPubkey: "bb",
+    targetKind: "event",
+    target: "cc",
+    reportType: "spam",
+    status: "open",
+    createdAt: "2024-06-01T12:00:00Z",
+  };
+  const openDetail = {
+    ...openItem,
+    channelId: "00000000-0000-0000-0000-0000000000ff",
+    note: null,
+    resolvedBy: null,
+    resolvedAt: null,
+    actionId: null,
+    activeAction: null,
+    message: null,
+  };
+  const failedDetail = {
+    ...openDetail,
+    status: "processing",
+    activeAction: {
+      id: "00000000-0000-0000-0000-0000000000b5",
+      requestId: "00000000-0000-0000-0000-0000000000b6",
+      actorPubkey: "11".repeat(32),
+      actorRole: "operator",
+      action: "kick",
+      status: "failed",
+      reason: null,
+      expiresAt: null,
+      errorMessage: "kick target was already absent before this action",
+      createdAt: "2024-06-01T12:00:00Z",
+      updatedAt: "2024-06-01T12:00:05Z",
+    },
+  };
+  let resolved = false;
+  setIpcHandler("admin_list_reports", () =>
+    Promise.resolve([
+      { ...openItem, status: resolved ? "processing" : "open" },
+    ]),
+  );
+  setIpcHandler("admin_get_report", () =>
+    Promise.resolve(resolved ? failedDetail : openDetail),
+  );
+  setIpcHandler("admin_list_feedback", () => Promise.resolve([]));
+  setIpcHandler("admin_resolve_report", () => {
+    resolved = true;
+    return mutationReject(
+      `admin API error: {"error":{"code":"enforcement_failed","message":"kick target was already absent before this action","requestId":"00000000-0000-0000-0000-0000000000b6"}}`,
+      422,
+    );
+  });
+
+  const { container, doRender, unmount } = mountPanel({
+    origin: "https://admin.example.com",
+    pubkey: "b4".repeat(32),
+  });
+  await doRender();
+  await settle(30);
+  await openFirstReportDetail(container);
+  await settle(20);
+
+  const kickBtn = container.querySelector("[data-testid='action-btn-kick']");
+  assert.ok(kickBtn, "kick action must be present (channel is set)");
+  await act(async () => {
+    fireEvent.click(kickBtn);
+    await new Promise((r) => setTimeout(r, 10));
+  });
+  const submit = container.querySelector("[data-testid='resolve-submit-btn']");
+  assert.ok(submit, "resolve submit button must appear after selecting kick");
+  await act(async () => {
+    fireEvent.click(submit);
+    await new Promise((r) => setTimeout(r, 30));
+  });
+  await settle(30);
+
+  const text = container.textContent ?? "";
+  assert.ok(
+    capturedErrorToasts.some((m) => m.includes("already absent")),
+    `the failure toast must remain; got: ${JSON.stringify(capturedErrorToasts)}`,
+  );
+  assert.ok(
+    text.includes("Cancel & reopen"),
+    `Cancel & reopen must appear without navigating away; got: ${text.slice(0, 600)}`,
+  );
+  assert.equal(
+    container.querySelector("[data-testid='resolve-report-form']"),
+    null,
+    "the resolve form must be replaced by the reloaded processing detail",
+  );
+
+  await unmount();
 });

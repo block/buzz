@@ -3198,10 +3198,30 @@ mod tests {
         );
     }
 
+    /// Spawn `script` under bash and return once it is running.
+    ///
+    /// Process startup can take hundreds of milliseconds on a loaded host,
+    /// which would otherwise eat into the idle and timing windows the tests
+    /// measure. The script prints a ready line first, consumed here, so each
+    /// test's clock starts only after the child is actually executing.
     async fn spawn_script(script: &str) -> AcpClient {
-        AcpClient::spawn("bash", &["-c".into(), script.into()], &[], false)
+        const READY: &str = "buzz-acp-test-script-ready";
+        let mut client = AcpClient::spawn(
+            "bash",
+            &["-c".into(), format!("echo {READY}; {script}")],
+            &[],
+            false,
+        )
+        .await
+        .expect("failed to spawn test script");
+        let ready = tokio::time::timeout(std::time::Duration::from_secs(10), client.reader.next())
             .await
-            .expect("failed to spawn test script")
+            .expect("test script should start within 10s");
+        assert!(
+            matches!(&ready, Some(Ok(line)) if line == READY),
+            "expected ready line, got {ready:?}"
+        );
+        client
     }
 
     #[cfg(unix)]
@@ -3364,29 +3384,85 @@ mod tests {
 
     #[tokio::test]
     async fn idle_resets_on_stdout_activity() {
-        // Send valid JSON (session/update notifications) to reset the idle timer.
-        // Non-JSON lines no longer reset idle — only valid JSON notifications do.
-        let mut client = spawn_script(
-            r#"for i in $(seq 1 10); do echo '{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"agent_thought_chunk","content":{"text":"thinking"}}}}'; sleep 0.05; done; sleep 10"#,
-        )
+        assert_activity_resets_idle(serde_json::json!({
+            "sessionUpdate": "agent_thought_chunk", "content": { "text": "thinking" }
+        }))
         .await;
-        let max_dur = std::time::Duration::from_secs(10);
-        let hard_deadline = tokio::time::Instant::now() + max_dur;
-        let start = std::time::Instant::now();
-        let result = client
-            .read_until_response_with_idle_timeout(
+    }
+
+    /// Exercise the real stdout reader with a paused clock. Advance only after
+    /// each notification is observed, so OS scheduling cannot consume the idle
+    /// window. Each update must extend the deadline; silence must still expire.
+    async fn assert_activity_resets_idle(update: serde_json::Value) {
+        use tokio::io::AsyncWriteExt;
+
+        let mut client =
+            spawn_script(r#"while IFS= read -r line; do printf '%s\n' "$line"; done"#).await;
+        let mut stdin = client.stdin.take().expect("test stdin");
+        let observer = ObserverHandle::in_process();
+        let mut events = observer.subscribe();
+        client.set_observer(Some(observer), 0);
+        // Prevent Tokio from auto-advancing while waiting for real pipe I/O.
+        let clock_guard = tokio::spawn(async {
+            loop {
+                tokio::task::yield_now().await;
+            }
+        });
+        tokio::time::pause();
+        let idle = std::time::Duration::from_secs(1);
+        let hard = std::time::Duration::from_secs(10);
+        let hard_deadline = tokio::time::Instant::now() + hard;
+        let mut frame = serde_json::json!({
+            "jsonrpc": "2.0", "method": "session/update", "params": { "update": update }
+        })
+        .to_string();
+        frame.push('\n');
+        {
+            let read = client.read_until_response_with_idle_timeout(
                 "test",
                 999,
-                std::time::Duration::from_millis(200),
+                idle,
                 hard_deadline,
-                max_dur,
-            )
-            .await;
-        let elapsed = start.elapsed();
-        // 10 messages × 50ms = ~500ms of activity, then idle timeout fires after 200ms more
-        assert!(elapsed >= std::time::Duration::from_millis(400));
-        assert!(elapsed < std::time::Duration::from_secs(3));
-        assert!(matches!(result, Err(AcpError::IdleTimeout(_))));
+                hard,
+            );
+            tokio::pin!(read);
+            assert!(futures_util::poll!(&mut read).is_pending());
+            for _ in 0..3 {
+                tokio::time::advance(std::time::Duration::from_millis(750)).await;
+                stdin
+                    .write_all(frame.as_bytes())
+                    .await
+                    .expect("write activity");
+                let watchdog = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                loop {
+                    assert!(
+                        futures_util::poll!(&mut read).is_pending(),
+                        "activity must extend the idle deadline"
+                    );
+                    if let Ok(event) = events.try_recv() {
+                        assert_eq!(event.kind, "acp_read");
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < watchdog,
+                        "activity was not read from the pipe"
+                    );
+                    tokio::task::yield_now().await;
+                }
+            }
+            tokio::time::advance(idle - std::time::Duration::from_millis(1)).await;
+            assert!(
+                futures_util::poll!(&mut read).is_pending(),
+                "the last activity must reset the full idle window"
+            );
+            tokio::time::advance(std::time::Duration::from_millis(1)).await;
+            // Pipe I/O is done. Let Tokio drive the timer wheel, whose wakeup
+            // can round the deadline up to the next millisecond.
+            clock_guard.abort();
+            assert!(matches!(read.await, Err(AcpError::IdleTimeout(duration)) if duration == idle));
+        }
+        tokio::time::resume();
+        client.shutdown().await;
     }
 
     #[tokio::test]
@@ -3561,33 +3637,7 @@ mod tests {
 
     #[tokio::test]
     async fn keepalive_resets_idle_past_deadline() {
-        // Keepalive session/update lines every 50ms against a 100ms idle deadline.
-        // The turn should survive well past the 100ms deadline (proves the fix).
-        let mut client = spawn_script(
-            r#"for i in $(seq 1 20); do echo '{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"keepalive"}}}'; sleep 0.05; done; sleep 10"#,
-        )
-        .await;
-        let max_dur = std::time::Duration::from_secs(10);
-        let hard_deadline = tokio::time::Instant::now() + max_dur;
-        let start = std::time::Instant::now();
-        let result = client
-            .read_until_response_with_idle_timeout(
-                "test",
-                999,
-                std::time::Duration::from_millis(100),
-                hard_deadline,
-                max_dur,
-            )
-            .await;
-        let elapsed = start.elapsed();
-        // 20 keepalives × 50ms = ~1000ms of activity, then idle fires after 100ms more.
-        // Must survive well past the 100ms deadline.
-        assert!(
-            elapsed >= std::time::Duration::from_millis(500),
-            "keepalive should reset idle past the deadline; elapsed only {elapsed:?}"
-        );
-        assert!(elapsed < std::time::Duration::from_secs(5));
-        assert!(matches!(result, Err(AcpError::IdleTimeout(_))));
+        assert_activity_resets_idle(serde_json::json!({ "sessionUpdate": "keepalive" })).await;
     }
 
     #[tokio::test]

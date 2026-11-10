@@ -14,6 +14,7 @@ pub(super) async fn fetch_admin_json(
 ) -> Result<Vec<u8>, String> {
     use crate::relay::build_nip98_auth_header_for_keys;
 
+    crate::egress_guard::assert_no_key_backup(url, "admin API request URL")?;
     let keys = state.signing_keys()?;
     let http_client = client::ADMIN_CLIENT
         .get()
@@ -163,6 +164,9 @@ pub(super) async fn send_admin_mutation(
 /// [`crate::relay::build_nip98_auth_header_for_keys`]), which is why the
 /// 401-retry re-invokes this rather than resending the first request.
 ///
+/// The URL passes the key-backup egress guard before signing: the NIP-98
+/// header embeds it, and admin searches put typed text in its query.
+///
 /// State-free (`&Client` + `&Keys`) so the wire shape is unit-testable without
 /// a running Tauri app.
 pub(super) fn build_admin_mutation_request(
@@ -172,6 +176,7 @@ pub(super) fn build_admin_mutation_request(
     url: &str,
     body: Option<&[u8]>,
 ) -> Result<reqwest::RequestBuilder, String> {
+    crate::egress_guard::assert_no_key_backup(url, "admin API request URL")?;
     let auth_header =
         crate::relay::build_nip98_auth_header_for_keys(keys, method, url, body.unwrap_or(&[]))
             .map_err(|e| format!("nip98 build failed: {e}"))?;
@@ -378,6 +383,7 @@ async fn read_admin_mutation_response(
         return Err(AdminMutationError::authoritative(
             status,
             format!("admin API error: {body}"),
+            bytes.is_empty(),
         ));
     }
 

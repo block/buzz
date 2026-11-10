@@ -1,110 +1,82 @@
 part of '../activity_page.dart';
 
-const _filterLabels = <InboxFilter, String>{
-  InboxFilter.all: 'All',
-  InboxFilter.mention: 'Mentions',
-  InboxFilter.thread: 'Threads',
-  InboxFilter.needsAction: 'Needs Action',
-  InboxFilter.activity: 'Activity',
-  InboxFilter.agentActivity: 'Agents',
-  InboxFilter.reminders: 'Reminders',
-  InboxFilter.drafts: 'Drafts',
-};
-
-class _ActivityActionsPill extends StatelessWidget {
-  final InboxFilter filter;
-  final bool unreadOnly;
-  final int unreadCount;
-  final ValueChanged<InboxFilter> onFilterChanged;
-  final ValueChanged<bool> onUnreadOnlyChanged;
-  final VoidCallback onMarkAllRead;
-
-  const _ActivityActionsPill({
-    required this.filter,
-    required this.unreadOnly,
-    required this.unreadCount,
-    required this.onFilterChanged,
-    required this.onUnreadOnlyChanged,
-    required this.onMarkAllRead,
+class _ActivityMenuButton<T> extends StatelessWidget {
+  const _ActivityMenuButton({
+    required this.value,
+    required this.options,
+    required this.onChanged,
+    required this.controlKey,
+    required this.popoverKey,
+    required this.semanticLabel,
+    required this.active,
   });
-
-  @override
-  Widget build(BuildContext context) => ClipRRect(
-    borderRadius: BorderRadius.circular(Radii.full),
-    child: DecoratedBox(
-      decoration: BoxDecoration(
-        color: context.colors.primaryContainer,
-        borderRadius: BorderRadius.circular(Radii.full),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: Grid.quarter),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            _FilterMenuButton(filter: filter, onChanged: onFilterChanged),
-            _InboxOptionsButton(
-              unreadOnly: unreadOnly,
-              unreadCount: unreadCount,
-              onUnreadOnlyChanged: onUnreadOnlyChanged,
-              onMarkAllRead: onMarkAllRead,
-            ),
-          ],
-        ),
-      ),
-    ),
-  );
-}
-
-/// Compact filter dropdown replacing the old chip rail — mirrors desktop's
-/// inbox filter menu (`FILTER_OPTIONS`).
-class _FilterMenuButton extends StatelessWidget {
-  final InboxFilter filter;
-  final ValueChanged<InboxFilter> onChanged;
-
-  const _FilterMenuButton({required this.filter, required this.onChanged});
+  final T value;
+  final Map<T, String> options;
+  final ValueChanged<T> onChanged;
+  final String controlKey, popoverKey, semanticLabel;
+  final bool active;
+  String get label => options[value]!;
 
   @override
   Widget build(BuildContext context) {
+    if (defaultTargetPlatform == TargetPlatform.iOS) {
+      final textScaler = MediaQuery.textScalerOf(context);
+      final height = max(48.0, textScaler.scale(16) * 1.4 + 16);
+      final labelWidth = (TextPainter(
+        text: TextSpan(
+          text: label,
+          style: filterChipTextStyle.copyWith(fontWeight: FontWeight.w600),
+        ),
+        textScaler: textScaler,
+        textDirection: Directionality.of(context),
+      )..layout()).width;
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 4),
+        child: IosMessageCreateButton(
+          key: ValueKey(controlKey),
+          label: label,
+          labelFontSize: 16,
+          icon: 'chevronDown',
+          showIconWithLabel: true,
+          eagerGestures: false,
+          accessibilityLabel: semanticLabel,
+          width: labelWidth + 56,
+          height: height - 8,
+          plain: false,
+          fillWidth: true,
+          deferMenuActions: false,
+          selectedIndex: options.keys.toList().indexOf(value),
+          actions: [
+            for (final entry in options.entries)
+              (
+                label: entry.value,
+                symbol: '',
+                onPressed: () => onChanged(entry.key),
+              ),
+          ],
+        ),
+      );
+    }
     return Builder(
-      builder: (buttonContext) => InkWell(
-        key: const ValueKey('activity-filter-menu'),
-        borderRadius: BorderRadius.circular(Radii.md),
-        onTap: () async {
-          final selected = await showAnchoredPopover<InboxFilter>(
+      builder: (buttonContext) => TextButton(
+        key: ValueKey(controlKey),
+        style: _activityFilterStyle(context, active),
+        onPressed: () async {
+          final selected = await showAnchoredPopover<T>(
             context: buttonContext,
             width: 240,
             alignment: AnchoredPopoverAlignment.start,
-            offset: const Offset(0, Grid.half),
-            menuPadding: const EdgeInsets.symmetric(vertical: Grid.half),
-            surfaceKey: const ValueKey('activity-filter-popover'),
+            surfaceKey: ValueKey(popoverKey),
             items: [
-              for (final entry in _filterLabels.entries)
+              for (final entry in options.entries)
                 PopupMenuItem(
                   value: entry.key,
                   height: Grid.xl,
-                  padding: const EdgeInsets.symmetric(horizontal: Grid.twelve),
                   child: Row(
                     children: [
-                      SizedBox(
-                        width: Grid.sm,
-                        child: entry.key == filter
-                            ? Icon(
-                                LucideIcons.check,
-                                size: 16,
-                                color: context.colors.primary,
-                              )
-                            : null,
-                      ),
-                      Expanded(
-                        child: Text(
-                          entry.value,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: context.textTheme.labelLarge?.copyWith(
-                            color: context.colors.onSurface,
-                          ),
-                        ),
-                      ),
+                      Expanded(child: Text(entry.value)),
+                      if (value == entry.key)
+                        const Icon(BuzzIcons.check, size: 16),
                     ],
                   ),
                 ),
@@ -112,28 +84,23 @@ class _FilterMenuButton extends StatelessWidget {
           );
           if (buttonContext.mounted && selected != null) onChanged(selected);
         },
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(minHeight: Grid.xl),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: Grid.xxs),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  _filterLabels[filter]!,
-                  style: context.textTheme.labelLarge?.copyWith(
-                    color: navigationPrimaryForeground(context),
-                    fontWeight: FontWeight.w600,
-                  ),
+        child: Semantics(
+          label: semanticLabel,
+          selected: active,
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Flexible(
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                 ),
-                const SizedBox(width: Grid.quarter),
-                Icon(
-                  LucideIcons.chevronDown,
-                  size: 16,
-                  color: navigationPrimaryForeground(context),
-                ),
-              ],
-            ),
+              ),
+              const SizedBox(width: Grid.quarter),
+              const Icon(BuzzIcons.chevronDown, size: 16),
+            ],
           ),
         ),
       ),
@@ -141,80 +108,68 @@ class _FilterMenuButton extends StatelessWidget {
   }
 }
 
-/// Overflow menu with the unread-only toggle and mark-all-read, mirroring
-/// desktop's inbox options popover.
-class _InboxOptionsButton extends StatelessWidget {
-  final bool unreadOnly;
-  final int unreadCount;
-  final ValueChanged<bool> onUnreadOnlyChanged;
-  final VoidCallback onMarkAllRead;
-
-  const _InboxOptionsButton({
-    required this.unreadOnly,
-    required this.unreadCount,
-    required this.onUnreadOnlyChanged,
-    required this.onMarkAllRead,
-  });
-
+class _UnreadFilterButton extends StatelessWidget {
+  const _UnreadFilterButton({required this.selected, required this.onPressed});
+  final bool selected;
+  final VoidCallback onPressed;
   @override
   Widget build(BuildContext context) {
-    return Builder(
-      builder: (buttonContext) => IconButton(
-        key: const ValueKey('activity-options-menu'),
-        tooltip: 'Activity options',
-        color: navigationPrimaryForeground(context),
-        padding: const EdgeInsets.symmetric(horizontal: Grid.xxs),
-        constraints: const BoxConstraints.tightFor(
-          width: Grid.xl,
-          height: Grid.xl,
-        ),
-        icon: const Icon(LucideIcons.ellipsis, size: 20),
-        onPressed: () async {
-          final selected = await showAnchoredPopover<String>(
-            context: buttonContext,
-            width: 216,
-            alignment: AnchoredPopoverAlignment.end,
-            surfaceKey: const ValueKey('activity-options-popover'),
-            items: [
-              PopupMenuItem(
-                value: 'unread-only',
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: Text(unreadOnly ? 'Show all' : 'Show unread'),
-                    ),
-                    if (unreadOnly)
-                      Icon(
-                        LucideIcons.check,
-                        size: 16,
-                        color: context.colors.primary,
-                      ),
-                  ],
-                ),
-              ),
-              PopupMenuItem(
-                value: 'mark-all-read',
-                enabled: unreadCount > 0,
-                child: Row(
-                  children: [
-                    const Expanded(child: Text('Mark all as read')),
-                    if (unreadCount > 0)
-                      Text(
-                        '$unreadCount',
-                        style: context.textTheme.labelSmall?.copyWith(
-                          color: context.colors.onSurfaceVariant,
-                        ),
-                      ),
-                  ],
-                ),
-              ),
-            ],
-          );
-          if (!buttonContext.mounted || selected == null) return;
-          if (selected == 'unread-only') onUnreadOnlyChanged(!unreadOnly);
-          if (selected == 'mark-all-read') onMarkAllRead();
-        },
+    if (defaultTargetPlatform == TargetPlatform.iOS) {
+      final scaler = MediaQuery.textScalerOf(context);
+      final height = max(48.0, scaler.scale(16) * 1.4 + 16);
+      final width =
+          (TextPainter(
+            text: TextSpan(
+              text: 'Unread',
+              style: filterChipTextStyle.copyWith(fontWeight: FontWeight.w600),
+            ),
+            textScaler: scaler,
+            textDirection: Directionality.of(context),
+          )..layout()).width +
+          32;
+      return IosGlassNavigationButton(
+        key: const ValueKey('activity-unread-filter'),
+        icon: IosGlassNavigationIcon.more,
+        label: 'Unread',
+        semanticLabel: 'Unread',
+        isSelected: selected,
+        onPressed: onPressed,
+        width: width,
+        height: height,
+        controlSize: height - 8,
+        fillWidth: true,
+        foregroundColor: context.colors.primary,
+      );
+    }
+    return Semantics(
+      toggled: selected,
+      child: TextButton(
+        key: const ValueKey('activity-unread-filter'),
+        style: _activityFilterStyle(context, selected),
+        onPressed: onPressed,
+        child: const Text('Unread'),
       ),
     );
   }
 }
+
+ButtonStyle _activityFilterStyle(BuildContext context, bool active) =>
+    TextButton.styleFrom(
+      minimumSize: Size(
+        0,
+        max(44.0, MediaQuery.textScalerOf(context).scale(16) * 1.4 + 12),
+      ),
+      padding: const EdgeInsets.symmetric(horizontal: 12),
+      shape: const StadiumBorder(),
+      textStyle: filterChipTextStyle.copyWith(
+        leadingDistribution: TextLeadingDistribution.even,
+      ),
+      visualDensity: VisualDensity.standard,
+      tapTargetSize: MaterialTapTargetSize.padded,
+      foregroundColor: active
+          ? context.colors.primary
+          : context.colors.onSurface,
+      backgroundColor: active
+          ? context.colors.primaryContainer
+          : context.controlSurface,
+    );

@@ -956,10 +956,18 @@ async fn steer_rejected_when_no_active_run() {
 async fn steer_rejected_on_run_id_mismatch() {
     // A live run, but the caller targets a stale/wrong run id → invalid_params,
     // so the client falls back to cancel+merge instead of injecting blind.
-    let (url, _captures) = spawn_capturing_fake_llm(vec![
-        openai_tool_call("call_x", "fake__noop", json!({})),
-        openai_text("done"),
-    ])
+    // Hold the provider response until the rejection is observed. Otherwise
+    // the turn can finish before the client sends or receives the steer.
+    let (gate_tx, gate_rx) = tokio::sync::oneshot::channel();
+    let responses = vec![CannedResponse {
+        status: 200,
+        body: openai_text("done"),
+    }];
+    let (url, _) = spawn_gated_capturing_fake_llm(
+        responses,
+        Arc::new(Mutex::new(Vec::new())),
+        Arc::new(Mutex::new(Some(gate_rx))),
+    )
     .await;
     let mut h = Harness::spawn(&url).await;
     let sid = init_session(&mut h).await;
@@ -983,21 +991,14 @@ async fn steer_rejected_on_run_id_mismatch() {
         )
         .await;
 
-    let mut saw_reject = false;
-    for _ in 0..40 {
-        let v = h.recv().await;
-        if v["id"] == json!(s_id) {
-            assert_eq!(
-                v["error"]["code"], -32602,
-                "mismatched runId must be rejected"
-            );
-            saw_reject = true;
-        } else if v["id"] == json!(p_id) {
-            // Turn finishes normally regardless of the rejected steer.
-            break;
-        }
-    }
-    assert!(saw_reject, "run-id mismatch was not rejected");
+    let rejected = h.recv_until(|v| v["id"] == json!(s_id)).await;
+    assert_eq!(
+        rejected["error"]["code"], -32602,
+        "mismatched runId must be rejected"
+    );
+    gate_tx.send(()).expect("provider gate should remain live");
+    let completed = h.recv_until(|v| v["id"] == json!(p_id)).await;
+    assert_eq!(completed["result"]["stopReason"], "end_turn");
     h.shutdown().await;
 }
 
@@ -1520,17 +1521,33 @@ async fn steer_rejected_on_empty_prompt() {
             json!({"sessionId": sid, "expectedRunId": run_id, "prompt": []}),
         )
         .await;
-    let mut saw_reject = false;
+    // The prompt runs in its own task while the steer is answered from the
+    // read loop, so the turn can finish before the steer is even read: wait
+    // for both responses in either order.
+    let (mut steer_reply, mut prompt_done) = (None, false);
     for _ in 0..40 {
-        let v = h.recv().await;
-        if v["id"] == json!(s_id) {
-            assert_eq!(v["error"]["code"], -32602, "empty prompt must be rejected");
-            saw_reject = true;
-        } else if v["id"] == json!(p_id) {
+        if steer_reply.is_some() && prompt_done {
             break;
         }
+        let v = h.recv().await;
+        if v["id"] == json!(s_id) {
+            steer_reply = Some(v);
+        } else if v["id"] == json!(p_id) {
+            prompt_done = true;
+        }
     }
-    assert!(saw_reject, "empty steer prompt was not rejected");
+    let steer_reply = steer_reply.expect("empty steer prompt got no response");
+    assert_eq!(
+        steer_reply["error"]["code"], -32602,
+        "empty prompt must be rejected"
+    );
+    // "no active run" and a run-id mismatch also answer -32602, and either can
+    // win if the turn ends first; the empty-prompt guard runs before both.
+    assert_eq!(
+        steer_reply["error"]["message"], "steer: prompt must not be empty",
+        "the empty-prompt guard must be what rejects the steer"
+    );
+    assert!(prompt_done, "session/prompt did not finish");
     h.shutdown().await;
 }
 

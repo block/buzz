@@ -145,7 +145,7 @@ buzz-admin          (operator CLI: relay membership + key generation)
 buzz-test-client    (integration test harness + manual CLI)
 ```
 
-**Key architectural principle:** The relay is the single source of truth. `buzz-relay` orchestrates all subsystems by calling them directly — it imports `buzz-db`, `buzz-auth`, `buzz-pubsub`, `buzz-search`, `buzz-audit`, and `buzz-workflow`. However, those subsystems are isolated from each other: `buzz-workflow` never calls `buzz-pubsub`, `buzz-search` never calls `buzz-db`, etc. Cross-subsystem coordination happens only through the relay. In multi-community mode, the relay also owns propagation of `TenantContext`; service crates should receive community-scoped inputs rather than independently deriving tenancy from client-controlled event tags.
+**Key architectural principle:** The relay is the single source of truth. `buzz-relay` orchestrates all subsystems by calling them directly — it imports `buzz-db`, `buzz-auth`, `buzz-pubsub`, `buzz-search`, `buzz-audit`, and `buzz-workflow`. However, those subsystems are isolated from each other: `buzz-workflow` never calls `buzz-pubsub`, `buzz-search` never calls `buzz-db`, etc. The one sanctioned exception is `buzz-audit`, which calls `buzz_db::deletion::guard_community_write` to admit each audit append into its community before taking the chain lock. Cross-subsystem coordination happens only through the relay. In multi-community mode, the relay also owns propagation of `TenantContext`; service crates should receive community-scoped inputs rather than independently deriving tenancy from client-controlled event tags.
 
 ---
 
@@ -189,6 +189,7 @@ The `kind` integer is the only dispatch switch. The relay routes, stores, and fa
 | 45003 | KIND_FORUM_COMMENT | Forum thread reply |
 | 46001–46012 | KIND_WORKFLOW_* | Workflow execution events |
 | 20001 | KIND_PRESENCE_UPDATE | Ephemeral presence heartbeat |
+| 20003 | KIND_AGENT_PRESENCE | Ephemeral presence heartbeat an owner sends for its agents |
 
 `buzz-core` defines each event kind as a `pub const u32` and exports the full registry as `ALL_KINDS: &[u32]` (127 kinds at the time of writing); `crates/buzz-core/src/kind.rs` is the source of truth for the current list. Kinds are `u32` (NIP-01 specifies unsigned integer; `u32` covers the full range). Buzz uses both standard Nostr kinds (e.g., kind 7 for reactions) and custom ranges (40000+).
 
@@ -305,6 +306,8 @@ Ephemeral events bypass DB storage, audit, and search. Two sub-paths:
 ```
 Presence events skip membership checks and use local-only fan-out. Multi-node presence fan-out would require Redis pub/sub (documented as future work).
 
+**Agent presence (kind 20003):** an owner's one heartbeat for all its agents, so an app that runs agents without a socket per agent can still show them online. Content is the status (`online`, `away` or `offline`) and each `p` tag names an agent, at most 256. WebSocket only. The relay keeps the agents the signer owns (`users.agent_owner_pubkey`, through the owner cache), skips the rest, and sets or clears their presence exactly as their own kind 20001 would, so the presence snapshot reports them unchanged. It is not fanned out, since live presence is matched by author; viewers see it on their next snapshot read.
+
 **Other ephemeral events (e.g., typing indicators):**
 ```
 1. VERIFY            — spawn_blocking(verify_event)
@@ -313,6 +316,8 @@ Presence events skip membership checks and use local-only fan-out. Multi-node pr
 4. REDIS PUBLISH     — pubsub.publish_event (no DB write)
 5. LOCAL FAN-OUT     — sub_registry.fan_out → conn_manager.send_to
 ```
+
+Typing indicators (kind 20002) are also accepted through HTTP `POST /events`, for clients that sign events but hold no WebSocket, such as app-hosted agents. The HTTP route requires an `h` tag, checks bans/timeouts and the community write fence, then runs steps 1–5 above.
 
 Ephemeral events are never stored in Postgres and never appear in REQ historical queries.
 
@@ -373,7 +378,7 @@ This prevents a race where a non-member receives live fan-out events from a priv
 
 ### Historical Query (EOSE)
 
-After registering, the REQ handler queries Postgres for stored events matching the filters (up to 500 per filter, hard cap). These are sent as `["EVENT", sub_id, event]` frames before `["EOSE", sub_id]`. New events arriving after EOSE are delivered via the fan-out path.
+After registering, the REQ handler queries Postgres for stored events matching the filters (up to 500 per filter, hard cap). These are sent as `["EVENT", sub_id, event]` frames before `["EOSE", sub_id]`. New events arriving after EOSE are delivered via the fan-out path. For an ordinary (non-search) REQ, EOSE marks a successful bounded history query, so a failed history read never ends in EOSE: it retires the subscription with `["CLOSED", sub_id, "error: query timed out"]` for a statement timeout or `"error: database error"` for anything else.
 
 **Client consumption invariant.** A client rebuilding channel state must
 open its live subscription before (or overlapping) the finite history
@@ -462,14 +467,14 @@ All database access. Uses `sqlx::query()` (runtime, not compile-time macros) —
 | `channel.rs` | Channel CRUD, membership management, role enforcement (transactional) |
 | `feed.rs` | `query_mentions` (INNER JOIN event_mentions), `query_needs_action`, `query_activity` |
 | `workflow.rs` | Full workflow/run/approval CRUD; SHA-256 hashed approval tokens |
-| `partition.rs` | Monthly range partitioning for `events` and `delivery_log` tables |
+| `partition.rs` | Monthly range partitioning for `events` and `delivery_log` tables: read-only catalog audit plus advisory-locked, time-bounded maintenance that creates uncovered months and advances an empty catch-all (`partition/maintenance.rs`) |
 | `dm.rs` | DM channel management |
 | `reaction.rs` | Reaction storage and retrieval |
 | `thread.rs` | Thread/reply tracking |
 | `user.rs` | User profile storage |
 | `error.rs` | Database error types |
 
-**Channel types:** `Stream`, `Forum`, `Dm`, `Workflow`  
+**Channel types:** `Stream`, `Forum`, `Dm`, `Workflow`, `System`  
 **Member roles:** `Owner`, `Admin`, `Member`, `Guest`, `Bot`  
 **Workflow statuses:** `Active`, `Disabled`, `Archived`  
 **Run statuses:** `Pending`, `Running`, `WaitingApproval`, `Completed`, `Failed`, `Cancelled`
@@ -496,8 +501,11 @@ shape is an explicit transition, not a flag day:
 - **Community fence (transition foundation):** runtime admission APIs now offer
   one shared community deletion lock per transaction, while deletion lifecycle
   transitions take the matching exclusive lock. A supported serving transaction
-  never spans communities; unmigrated paths still rely on trigger/function
-  backstops.
+  never spans communities. Serving leases use the same application admission.
+  Startup and deletion catalog validation tolerate the universal fence objects
+  being absent; inventories still record live fences for older executors.
+  Desired-state bootstraps install only explicitly declared legacy fences.
+  New tenant-owned tables rely on application admission, without a fence trigger.
 - **Replica floor (transition foundation):** runtime now provides a shared
   replica-floor lock helper for compliant channel-event writers, and the writer
   probe handshake takes the exclusive counterpart before sampling `S`, scanning
@@ -508,7 +516,8 @@ shape is an explicit transition, not a flag day:
 - **Dual enforcement (current):** application-owned lock+precheck paths run in
   front of the existing trigger/function enforcement; commit-time trigger checks
   remain authoritative during this phase. Removing those backstops is a separate
-  gated migration, not part of the lock foundation.
+  gated migration, after every pod tolerates their absence and no rollback below
+  that version is expected.
 - **Role separation:** relay/runtime code owns admission and lock protocols;
   operator maintenance/backfill workflows must either use those protocols or run
   under explicit reviewed procedures that keep routing fences closed.
@@ -517,6 +526,11 @@ shape is an explicit transition, not a flag day:
 - **Fleet gates and reconciliation:** startup/fence probes verify guard catalog +
   behavior, pgschema bootstraps run reconciliation, and lock/pool metrics remain
   the operational evidence path for rollout safety.
+
+The database end state (a declarative schema source, applied out of band at
+scale; no triggers, functions, or foreign keys; backfills outside migrations)
+and the expand → deploy → backfill → contract rules every schema change follows
+are in [docs/database.md](docs/database.md).
 
 **Does NOT:** cache queries, implement connection pooling logic (delegated to sqlx), or make network calls outside Postgres.
 
@@ -536,7 +550,7 @@ Subscriber → dedicated PubSub  → PSUBSCRIBE buzz:channel:*
 
 The subscriber uses a **dedicated** `redis::aio::PubSub` connection — not from the pool. This is intentional: pool connections cannot hold `PSUBSCRIBE` state.
 
-**Current state:** The subscriber loop is spawned in `buzz-relay/src/main.rs` and populates the broadcast channel. A consumer task subscribes via `pubsub.subscribe_local()`, calls `sub_registry.fan_out()` on each received event, and delivers matches to local WebSocket connections via `conn_manager.send_to()`. Multi-node fan-out is now wired end-to-end. Local-echo deduplication is implemented via `AppState.local_event_ids` — events published by the local relay instance are tracked and skipped when received via the Redis round-trip.
+**Current state:** The subscriber loop is spawned in `buzz-relay/src/main.rs` and populates the broadcast channel. A dispatcher task subscribes via `pubsub.subscribe_local()` and routes each event to one of 16 delivery workers by `(community, topic)`, so one channel's events keep their order while channels deliver concurrently (`handlers/multinode_fanout.rs`). Each worker calls `sub_registry.fan_out()`, applies the access gate (one bulk membership read for the recipients the membership cache lacks), and delivers matches to local WebSocket connections via `conn_manager.send_to()`. A slow delivery holds only its own worker and arrives late; falling behind never closes a connection, because a database stall slows every node at once and closing recipients then would send the whole fleet back to that database together. An event is dropped on this node only when its worker's bounded queue is full or the dispatcher lags the broadcast; both are counted (`buzz_multinode_fanout_dropped_total`, `buzz_multinode_fanout_lag_total`), and the affected syncs get `CLOSED "resync: ..."` (NIP-AR Sync rule 5). A recipient the access gate cannot check misses that event. Multi-node fan-out is now wired end-to-end. Local-echo deduplication is implemented via `AppState.local_event_ids` — events published by the local relay instance are tracked and skipped when received via the Redis round-trip.
 
 **Reconnection:** exponential backoff 1s → 30s (`backoff_secs * 2`). Backoff resets to 1s only after a clean stream end, not on each reconnect attempt.
 
@@ -565,15 +579,25 @@ multi-community mode every query filter includes `community_id`, so the shared
 `events` table is infrastructure, not a cross-community result space; the relay
 re-authorizes every candidate hit before returning it.
 
+A database built from `migrations/0008_fresh_install_search_allowlist.sql` indexes
+only an allowlist of kinds, and so does one converted by
+`scripts/maintenance/nip_rs_search_allowlist.sql`. Such a database does not index
+kind 30180 (custom emoji entries) until an operator runs the updated maintenance
+script, which must happen before the emoji migration rollout.
+
 **Key behaviors:**
 - `SearchService::new(pool)` wraps a `PgPool`; `search(&SearchQuery)` runs a
   parameterized FTS query against the `events.search_tsv` GIN index and returns
-  `SearchResult` (candidate `SearchHit`s).
+  `SearchResult` (candidate `SearchHit`s). Prefix-mode relevance (outside
+  profile search) ranks only the newest 1000 matches, which Postgres may read
+  from the primary key backward instead of the GIN index.
 - `ChannelScope` makes the channel constraint explicit (`Any` /
   `ChannelLessOnly` / `Channels` / `ChannelsOrChannelLess`), closing the
   ambiguity the old `Option<Vec<Uuid>> + bool` matrix could not express.
-- Every query carries `community_id`; the FTS predicate is BitmapAnd-ed with
-  the community-leading btree filters so a query never crosses tenants.
+- Every query carries `community_id`, and every access path leads with it (the
+  FTS predicate BitmapAnd-ed with community-leading btree filters, or the
+  `(community_id, created_at, id)` primary key read backward), so a query never
+  crosses tenants.
 - Permission filtering is **caller's responsibility** — `buzz-search` returns
   candidate hits; the relay re-authorizes each one (channel membership, `#p`,
   owner gates) before delivering it.
@@ -591,7 +615,7 @@ Tamper-evident append-only log with SHA-256 hash chaining.
 
 **Hash covers:** seq (big-endian bytes), timestamp (RFC3339), event_id, event_kind (big-endian), actor_pubkey, action string, channel_id (16 bytes or 16 zero bytes if None), canonical metadata JSON (BTreeMap for deterministic key ordering), prev_hash.
 
-**Single-writer guarantee:** `pg_advisory_lock` before each transaction. Lock released in all branches including panic (`catch_unwind`).
+**Single-writer guarantee:** each append runs in one transaction that first passes community write admission (the shared community deletion lock plus the active/undeleted check, via `buzz-db`'s `DeletionStore::guard_transaction`), then takes a per-community `pg_advisory_xact_lock`. Both locks release on commit or rollback, including a dropped future.
 
 **10 audit actions:** `EventCreated`, `EventDeleted`, `ChannelCreated`, `ChannelUpdated`, `ChannelDeleted`, `MemberAdded`, `MemberRemoved`, `AuthSuccess`, `AuthFailure`, `RateLimitExceeded`.
 
@@ -719,6 +743,8 @@ pub struct ConnectionState {
 }
 pub enum AuthState { Pending { challenge: String }, Authenticated(AuthContext), Failed }
 ```
+
+**Community FI admission:** Protected HTTP and root/audio WebSocket requests read the normalized Host's active authentication policy from the primary database. Stored `requires_nip_fi` OR global enforce requires FI; repair mode denies first. HTTP middleware shares one request-local policy read with handlers. Root NIP-11 and `/info` publish a no-store host-specific requirement and compatible capability fields. Policy lookup failure is unavailable, never optional. See [community auth upgrades](docs/community-auth-upgrades.md); completed activation additionally requires existing-session drain evidence.
 
 **HTTP endpoints:**
 
@@ -868,6 +894,18 @@ Every security-sensitive operation uses an explicit, verified pattern. No implic
 Applied in: `buzz-auth` (JWKS boundary), `buzz-workflow` (CallWebhook action),
 desktop `link_preview` (SSRF check).
 
+JWKS uses `public_https` by default and applies this public-address check to
+every resolved answer before pinning the first permitted address. Explicit
+`mesh` mode accepts HTTP only for a DNS hostname (not an IP literal) without
+userinfo, query, fragment, or backslash. It checks every DNS answer against the
+positive address allow-list in the
+[NIP-FI JWKS snapshot contract](docs/nips/NIP-FI.md#jwks-snapshot), rejects
+empty or mixed answers, and pins the first checked address. Mesh selection is
+an operator assertion, not a transport property the Rust relay verifies.
+Operators must enforce mutual TLS peer authentication and integrity
+protection, authorize the JWKS endpoint, and restrict egress. Unauthenticated
+HTTP permits key substitution and issuer impersonation.
+
 ### Audit Integrity
 
 - Hash chain: each entry's SHA-256 covers all fields including `prev_hash` — tampering any entry breaks all subsequent hashes
@@ -900,7 +938,7 @@ Docker Compose provides the full local development stack. All services include h
 | Postgres | `postgres:17-alpine` | 5432 | Primary event store — events, channels, tokens, workflows, audit; full-text search (`search_tsv` GIN) |
 | Redis | `redis:7-alpine` | 6379 | Pub/sub fan-out, presence (SET EX), typing (sorted sets) |
 | Adminer | `adminer` | 8082 | DB web UI (dev only) |
-| MinIO | `quay.io/minio/minio` | 9000 (API), 9001 (console) | S3-compatible object storage (media) |
+| Silo (MinIO fork) | `pgsty/silo` | 9000 (API), 9001 (console) | S3-compatible object storage (media) |
 | Prometheus | `prom/prometheus` | 9090 | Metrics collection |
 
 ### Postgres Schema (key tables)
@@ -933,7 +971,10 @@ kinds via `CASE WHEN kind IN (1059, 30300, 30622) THEN NULL`, so those rows are
 storage-level unsearchable (a `NULL` tsvector never matches `@@`). A GIN index
 (`idx_events_search_tsv`) backs the `@@` probe; in multi-community mode the
 community-leading btree filters BitmapAnd with the GIN probe so every query is
-fenced to its `community_id`.
+fenced to its `community_id`. Prefix-mode relevance ranks only the newest 1000
+matches; for a common prefix Postgres reads the `(community_id, created_at, id)`
+primary key backward and stops there, still fenced by its leading
+`community_id`.
 
 ---
 

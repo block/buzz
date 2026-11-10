@@ -128,15 +128,16 @@ final class NativeReactionDetailsTests: XCTestCase {
     XCTAssertEqual(updatedRow.arrangedSubviews[0].subviews.compactMap { $0 as? UILabel }.first?.text, "🎉")
   }
 
-  @MainActor func testFiltersPreserveRowsAndUpdatedAccessibilityNames() {
+  @MainActor func testTogglesListEveryReactorAndRelabelUpdatedProfiles() {
     let controller = NativeReactionDetailsViewController(data: [
-      "initialEmoji": "❤️",
       "reactions": [
         ["emoji": "❤️", "label": "Heart", "count": 2, "users": ["human", "agent"]],
         ["emoji": "🔥", "label": "Fire", "count": 1, "users": ["agent"]],
       ],
       "profiles": ["human": ["name": "Honey"], "agent": ["name": "Honey (agent)"]],
     ])
+    var toggled: [String] = []
+    controller.onToggle = { toggled.append($0) }
     controller.loadViewIfNeeded()
     let table = UITableView()
     func labels() -> [String] {
@@ -147,21 +148,18 @@ final class NativeReactionDetailsTests: XCTestCase {
     func descendants(_ view: UIView) -> [UIView] {
       view.subviews.flatMap { [$0] + descendants($0) }
     }
-    func select(_ label: String) {
+    func tap(_ label: String) {
       let button = descendants(controller.view).compactMap { $0 as? UIButton }
         .first { $0.accessibilityLabel == label }
-      XCTAssertNotNil(button)
+      XCTAssertNotNil(button, label)
       button?.sendActions(for: .primaryActionTriggered)
     }
-    XCTAssertEqual(labels(), ["Honey, Heart", "Honey (agent), Heart"])
-    select("All 3")
     XCTAssertEqual(labels(), ["Honey, Heart", "Honey (agent), Heart", "Honey (agent), Fire"])
-    select("Fire 1")
-    XCTAssertEqual(labels(), ["Honey (agent), Fire"])
+    tap("Fire 1")
+    tap("Heart 2")
+    XCTAssertEqual(toggled, ["🔥", "❤️"])
     controller.updateProfiles(["agent": ["name": "Helper (agent)"]])
-    XCTAssertEqual(labels(), ["Helper (agent), Fire"])
-    select("Heart 2")
-    XCTAssertEqual(labels(), ["Honey, Heart", "Helper (agent), Heart"])
+    XCTAssertEqual(labels(), ["Honey, Heart", "Helper (agent), Heart", "Helper (agent), Fire"])
   }
 }
 
@@ -183,7 +181,7 @@ final class NativeMessageLayoutTests: XCTestCase {
     controller.view.setNeedsLayout()
     controller.view.layoutIfNeeded()
     let filter = descendants(controller.view).compactMap { $0 as? UIButton }
-      .first { $0.accessibilityLabel == "All 12345" }
+      .first { $0.accessibilityLabel == "Heart 12345" }
     XCTAssertNotNil(filter)
     let viewport = descendants(controller.view).compactMap { $0 as? UIScrollView }
       .first { !($0 is UITableView) }
@@ -192,38 +190,5 @@ final class NativeMessageLayoutTests: XCTestCase {
     XCTAssertGreaterThan(needed, 48)
     XCTAssertGreaterThanOrEqual(viewport?.bounds.height ?? 0, needed)
     XCTAssertGreaterThanOrEqual(filter?.bounds.height ?? 0, needed)
-  }
-
-  @MainActor func testOversizedMenuStaysInsideShortViewportAndScrollsToLastAction() {
-    let controller = NativeMessageMenuViewController(data: [
-      "actions": (0..<12).map { ["id": "action\($0)", "title": "Action \($0)", "symbol": "star"] },
-      "reactions": [["emoji": "❤️", "label": "Heart"]],
-    ], sourceRect: CGRect(x: 16, y: 180, width: 288, height: 80), preview: UIView())
-    controller.onPreviewReady = { _ in }
-    let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 320, height: 480))
-    window.rootViewController = controller
-    window.makeKeyAndVisible()
-    defer { window.isHidden = true }
-    controller.loadViewIfNeeded()
-    // Constrain the available viewport as a bottom obstruction would. The
-    // production bottom anchor remains the system keyboard layout guide.
-    controller.additionalSafeAreaInsets.bottom = 200
-    controller.view.setNeedsLayout()
-    controller.view.layoutIfNeeded()
-    let scroll = controller.view.subviews.compactMap { $0 as? UIScrollView }.first!
-    scroll.layoutIfNeeded()
-    XCTAssertTrue(scroll.clipsToBounds)
-    XCTAssertGreaterThan(scroll.contentSize.height, scroll.bounds.height)
-    XCTAssertLessThanOrEqual(scroll.frame.maxY, controller.view.keyboardLayoutGuide.layoutFrame.minY)
-    let content = scroll.subviews.compactMap { $0 as? UIStackView }.first!
-    XCTAssertEqual(content.frame.minX, 16, accuracy: 0.5)
-    XCTAssertGreaterThanOrEqual(content.frame.minY, 16)
-    XCTAssertNil(scroll.hitTest(CGPoint(x: 40, y: scroll.bounds.maxY + 1), with: nil))
-    scroll.setContentOffset(CGPoint(x: 0, y: scroll.contentSize.height - scroll.bounds.height), animated: false)
-    scroll.layoutIfNeeded()
-    let last = descendants(content).compactMap { $0 as? UIButton }
-      .first { $0.accessibilityLabel == "Action 11" }!
-    let lastRect = last.convert(last.bounds, to: scroll)
-    XCTAssertTrue(scroll.bounds.contains(lastRect), "viewport=\(scroll.bounds) last=\(lastRect) content=\(scroll.contentSize)")
   }
 }

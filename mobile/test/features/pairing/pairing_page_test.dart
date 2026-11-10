@@ -1,25 +1,222 @@
 import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/cupertino.dart';
+import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:local_auth/local_auth.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:buzz/features/pairing/pairing_page.dart';
 import 'package:buzz/features/pairing/pairing_page/onboarding_wordmark.dart';
 import 'package:buzz/features/pairing/pairing_provider.dart';
 import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/security/sensitive_action_authorizer.dart';
 import 'package:buzz/shared/theme/theme.dart';
+import 'package:buzz/shared/widgets/frosted_app_bar.dart';
 import 'package:buzz/shared/widgets/buzz_loading_indicator.dart';
 
 import '../../helpers/widget_helpers.dart';
 
 void main() {
   group('PairingPage', () {
+    testWidgets('create reuses join form, motion, validation and Back', (
+      tester,
+    ) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      await tester.binding.setSurfaceSize(const Size(393, 852));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      for (final reduced in [false, true]) {
+        String? submitted;
+        await tester.pumpWidget(
+          WidgetHelpers.testable(
+            disableAnimations: reduced,
+            child: HookBuilder(
+              builder: (context) {
+                final creating = useState(false);
+                final joining = useState(false);
+                return PairingPage(
+                  connectionLanding: true,
+                  signedInOnboarding: true,
+                  creatingCommunity: creating.value,
+                  enteringCommunityLink: joining.value,
+                  onCreateCommunity: () => creating.value = true,
+                  onCommunityLink: () => joining.value = true,
+                  onSubmitCommunity: (name) => submitted = name,
+                  onWelcomeBack: () {
+                    creating.value = false;
+                    joining.value = false;
+                  },
+                );
+              },
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        final action = find.byKey(const Key('add-community-link-action'));
+        final originalAction = tester.element(action);
+        await tester.tap(find.text('Create a community'));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 400));
+        await tester.pumpAndSettle();
+        expect(tester.element(action), same(originalAction));
+        expect(find.bySemanticsLabel('Buzz'), findsNothing);
+        expect(
+          find.text('Choose an address for your community.'),
+          findsOneWidget,
+        );
+        final input = find.byKey(const Key('community-create-input'));
+        final field = tester.widget<CupertinoTextField>(input);
+        expect(field.decoration, isNull);
+        expect(field.focusNode!.hasFocus, isTrue);
+        expect(
+          tester
+              .widget<Transform>(
+                find.byKey(const Key('add-community-link-rise')),
+              )
+              .transform
+              .getTranslation()
+              .y,
+          0,
+        );
+        await tester.enterText(input, 'not a name');
+        await tester.tap(find.text('Continue'));
+        await tester.pumpAndSettle();
+        expect(submitted, isNull);
+        expect(
+          find.text(
+            'Use letters, numbers and single hyphens (up to 63 characters).',
+          ),
+          findsOneWidget,
+        );
+        expect(
+          find.ancestor(
+            of: find.text(
+              'Use letters, numbers and single hyphens (up to 63 characters).',
+            ),
+            matching: find.byWidgetPredicate(
+              (widget) =>
+                  widget is Semantics && widget.properties.liveRegion == true,
+            ),
+          ),
+          findsOneWidget,
+        );
+        await tester.enterText(input, '  My-Community  ');
+        await tester.testTextInput.receiveAction(TextInputAction.go);
+        await tester.pumpAndSettle();
+        expect(submitted, 'my-community');
+        await tester.binding.handlePopRoute();
+        await tester.pumpAndSettle();
+        expect(find.text('Add a community'), findsOneWidget);
+        await tester.tap(find.text('Enter community link'));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 400));
+        await tester.pumpAndSettle();
+        final joinInput = tester.widget<CupertinoTextField>(
+          find.byKey(const Key('community-link-input')),
+        );
+        expect(joinInput.controller!.text, isEmpty);
+        expect(joinInput.decoration, isNull);
+        expect(joinInput.focusNode!.hasFocus, isTrue);
+        expect(tester.takeException(), isNull);
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pumpAndSettle();
+      }
+      debugDefaultTargetPlatformOverride = null;
+    });
+
+    testWidgets(
+      'signed-in onboarding has ordered actions and switcher Add stays separate',
+      (tester) async {
+        var found = false;
+        var created = false;
+        for (final hasCommunities in [true, false]) {
+          await tester.pumpWidget(
+            WidgetHelpers.testable(
+              child: PairingPage(
+                connectionLanding: true,
+                signedInOnboarding: true,
+                hasKnownCommunities: hasCommunities,
+                onBuilderlab: () => found = true,
+                onCreateCommunity: () => created = true,
+                onCommunityLink: () {},
+                onWelcomeBack: () {},
+              ),
+            ),
+          );
+          await tester.pumpAndSettle();
+          expect(find.bySemanticsLabel('Buzz'), findsNothing);
+          expect(find.text('Scan a QR code'), findsOneWidget);
+          expect(find.text('Enter community link'), findsOneWidget);
+          expect(find.text('Create a community'), findsOneWidget);
+          expect(
+            find.text('Find my communities'),
+            hasCommunities ? findsOneWidget : findsNothing,
+          );
+          expect(
+            tester.getTopLeft(find.text('Scan a QR code')).dy,
+            lessThan(tester.getTopLeft(find.text('Enter community link')).dy),
+          );
+          if (hasCommunities) {
+            await tester.tap(find.text('Find my communities'));
+            expect(found, isTrue);
+          }
+          await tester.tap(find.text('Create a community'));
+          expect(created, isTrue);
+        }
+        await tester.pumpWidget(
+          WidgetHelpers.testable(
+            child: PairingPage(
+              connectionLanding: true,
+              addingCommunity: true,
+              onWelcomeBack: () {},
+              onCommunityLink: () {},
+              onBuilderlab: () {},
+              onCreateCommunity: () {},
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(find.text('Scan a QR code'), findsOneWidget);
+        expect(find.text('Enter a community link'), findsOneWidget);
+        expect(find.text('Find my communities'), findsNothing);
+        expect(find.text('Create a community'), findsNothing);
+      },
+    );
+
+    testWidgets(
+      'verified pairing stays on loading through transfer and import',
+      (tester) async {
+        final notifier = _ConfirmingSasPairingNotifier();
+        await tester.pumpWidget(
+          WidgetHelpers.testable(
+            child: const PairingPage(),
+            overrides: [pairingProvider.overrideWith(() => notifier)],
+          ),
+        );
+        await tester.pump();
+        for (final status in [
+          PairingStatus.transferring,
+          PairingStatus.storing,
+          PairingStatus.success,
+        ]) {
+          notifier.advance(status);
+          await tester.pump();
+          expect(
+            find.byKey(const Key('pairing-community-loading')),
+            findsOneWidget,
+          );
+          expect(find.text('Scan a QR code'), findsNothing);
+          expect(find.text('Use pairing code'), findsNothing);
+          expect(find.byType(BuzzLoadingIndicator), findsOneWidget);
+        }
+      },
+    );
+
     testWidgets('renders branding and progressive pairing actions', (
       tester,
     ) async {
@@ -254,52 +451,55 @@ void main() {
         tester.widget<Scaffold>(find.byType(Scaffold)).backgroundColor,
         Colors.transparent,
       );
-      expect(find.text('Confirm desktop code'), findsOneWidget);
+      expect(find.text('Enter pairing code'), findsOneWidget);
       expect(
         find.text(
           'Make sure the six-digit code matches on both devices. Your Buzz identity will transfer to this device. Only continue if you started this pairing from your desktop.',
         ),
-        findsOneWidget,
+        findsNothing,
       );
       expect(find.text('Does your desktop app show this code?'), findsNothing);
     });
 
-    testWidgets('uses Cancel as the only visible SAS exit', (tester) async {
+    testWidgets('fullscreen pairing supports Cancel and system Back', (
+      tester,
+    ) async {
       final notifier = _ConfirmingSasPairingNotifier();
       await tester.pumpWidget(
         ProviderScope(
           overrides: [pairingProvider.overrideWith(() => notifier)],
           child: MaterialApp(
             theme: AppTheme.dark(),
-            home: const PairingPage(addingCommunity: true),
+            home: const PairingPage(
+              addingCommunity: true,
+              connectionLanding: true,
+            ),
           ),
         ),
       );
 
       expect(find.byType(AppBar), findsNothing);
       expect(find.text('Add Community'), findsNothing);
-      expect(find.byIcon(LucideIcons.arrowLeft), findsNothing);
+      expect(find.byIcon(BuzzIcons.arrowLeft), findsNothing);
       expect(find.byKey(const Key('pairing-pop-scope')), findsOneWidget);
 
       await tester.tap(find.widgetWithText(TextButton, 'Cancel'));
       expect(notifier.denied, isTrue);
+      notifier.denied = false;
+      await tester.binding.handlePopRoute();
+      expect(notifier.denied, isTrue);
     });
 
-    testWidgets('keeps only Back on the clear add-community header', (
-      tester,
-    ) async {
+    testWidgets('uses the shared frosted add-community header', (tester) async {
       await tester.pumpWidget(
         WidgetHelpers.testable(child: const PairingPage(addingCommunity: true)),
       );
-
-      expect(find.byType(AppBar), findsOneWidget);
+      expect(find.byType(AppBar), findsNothing);
+      expect(find.byType(FrostedAppBar), findsOneWidget);
       expect(find.text('Add Community'), findsNothing);
-      final appBar = tester.widget<AppBar>(find.byType(AppBar));
-      expect(appBar.backgroundColor, Colors.transparent);
-      expect(appBar.surfaceTintColor, Colors.transparent);
-      expect(appBar.elevation, 0);
-      expect(appBar.scrolledUnderElevation, 0);
-      expect(find.byIcon(LucideIcons.arrowLeft), findsOneWidget);
+      final appBar = tester.widget<FrostedAppBar>(find.byType(FrostedAppBar));
+      expect(appBar.alwaysFrosted, isTrue);
+      expect(find.byTooltip('Back'), findsOneWidget);
     });
 
     testWidgets('uses the native navigation bar on iOS', (tester) async {
@@ -394,7 +594,7 @@ void main() {
       expect(find.text('Connect'), findsNothing);
     });
 
-    testWidgets('pairing actions are disabled when connecting', (tester) async {
+    testWidgets('connection progress replaces pairing actions', (tester) async {
       await tester.pumpWidget(
         WidgetHelpers.testable(
           overrides: [
@@ -405,13 +605,44 @@ void main() {
       );
       await tester.pump();
 
-      final scanButton = tester.widget<FilledButton>(find.byType(FilledButton));
-      final pairingCodeButton = tester.widget<TextButton>(
-        find.widgetWithText(TextButton, 'Use pairing code'),
+      expect(
+        find.byKey(const Key('pairing-community-loading')),
+        findsOneWidget,
       );
+      expect(find.text('Scan a QR code'), findsNothing);
+      expect(find.text('Use pairing code'), findsNothing);
+    });
 
-      expect(scanButton.onPressed, isNull);
-      expect(pairingCodeButton.onPressed, isNull);
+    testWidgets('connection Cancel closes the identity recovery route', (
+      tester,
+    ) async {
+      final navigator = GlobalKey<NavigatorState>();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            pairingProvider.overrideWith(() => _ConnectingPairingNotifier()),
+          ],
+          child: MaterialApp(
+            navigatorKey: navigator,
+            theme: AppTheme.light(),
+            home: const Scaffold(body: Text('Settings')),
+          ),
+        ),
+      );
+      navigator.currentState!.push(
+        MaterialPageRoute<void>(
+          builder: (_) => const PairingPage(
+            addingCommunity: true,
+            identityRecoveryOnly: true,
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      await tester.tap(find.widgetWithText(TextButton, 'Cancel'));
+      await tester.pumpAndSettle();
+      expect(find.byType(PairingPage), findsNothing);
+      expect(find.text('Settings'), findsOneWidget);
     });
 
     testWidgets('recovery entry rejects ordinary nostrpair codes', (
@@ -462,7 +693,7 @@ void main() {
       expect(notifier.pairedCodes, [code]);
     });
 
-    testWidgets('new identity import offers protection checked by default', (
+    testWidgets('new identity import offers protection after code entry', (
       tester,
     ) async {
       await tester.pumpWidget(
@@ -474,12 +705,16 @@ void main() {
         ),
       );
 
-      final checkbox = tester.widget<CheckboxListTile>(
-        find.byKey(const Key('protect-sensitive-actions-checkbox')),
+      expect(find.text('Use biometrics'), findsNothing);
+      await tester.enterText(
+        find.byKey(const Key('pairing-code-input')),
+        '123456',
       );
-      expect(checkbox.value, isTrue);
+      await tester.pump();
+      expect(find.text('Protect your identity'), findsOneWidget);
       expect(find.text('Use biometrics'), findsOneWidget);
-      expect(find.text('For secure actions'), findsOneWidget);
+      expect(find.text('Skip'), findsOneWidget);
+      expect(find.byType(Checkbox), findsNothing);
     });
 
     testWidgets('uses the native Face ID label on iOS', (tester) async {
@@ -504,6 +739,11 @@ void main() {
         );
         await tester.pump();
 
+        await tester.enterText(
+          find.byKey(const Key('pairing-code-input')),
+          '123456',
+        );
+        await tester.pump();
         expect(find.text('Use Face ID'), findsOneWidget);
         expect(find.text('Use biometrics'), findsNothing);
       } finally {
@@ -533,6 +773,11 @@ void main() {
         );
         await tester.pump();
 
+        await tester.enterText(
+          find.byKey(const Key('pairing-code-input')),
+          '123456',
+        );
+        await tester.pump();
         expect(find.text('Use Touch ID'), findsOneWidget);
         expect(find.text('Use Face ID'), findsNothing);
       } finally {
@@ -560,7 +805,7 @@ void main() {
       );
     });
 
-    testWidgets('recovery SAS puts permanent desktop access in the subtitle', (
+    testWidgets('recovery SAS shows the code without explanatory subcopy', (
       tester,
     ) async {
       await tester.pumpWidget(
@@ -574,10 +819,10 @@ void main() {
         ),
       );
 
-      expect(find.textContaining('full Buzz identity'), findsOneWidget);
-      expect(find.textContaining('permanent access'), findsOneWidget);
-      expect(find.textContaining('started this recovery'), findsOneWidget);
-      expect(find.text('Codes match'), findsOneWidget);
+      expect(find.textContaining('full Buzz identity'), findsNothing);
+      expect(find.textContaining('permanent access'), findsNothing);
+      expect(find.textContaining('started this recovery'), findsNothing);
+      expect(find.text('Continue'), findsNothing);
     });
 
     testWidgets('matches the onboarding visual system and SAS action layout', (
@@ -592,73 +837,26 @@ void main() {
         ),
       );
 
-      expect(find.byIcon(LucideIcons.shieldCheck), findsNothing);
-      expect(find.text('Confirm desktop code'), findsOneWidget);
+      expect(find.byIcon(BuzzIcons.shieldCheck), findsNothing);
+      expect(find.text('Enter pairing code'), findsOneWidget);
       expect(
         find.text(
           'Make sure the six-digit code matches on both devices. Your Buzz identity will transfer to this device. Only continue if you started this pairing from your desktop.',
         ),
-        findsOneWidget,
+        findsNothing,
       );
       expect(find.text('Does your desktop app show this code?'), findsNothing);
 
-      final digitFinders = [
-        for (var index = 1; index <= 6; index++)
-          find.byKey(Key('pairing-sas-code-digit-$index')),
-      ];
-      for (final digitFinder in digitFinders) {
-        expect(tester.getSize(digitFinder).width, 54);
-        expect(
-          tester.widget<Container>(digitFinder).padding,
-          const EdgeInsets.symmetric(vertical: Grid.xs),
-        );
-      }
+      final codeFinder = find.byKey(const Key('pairing-code-input'));
+      expect(codeFinder, findsOneWidget);
+      expect(find.text('123 456'), findsNothing);
 
       const onboardingInk = Color(0xFFE6EDF0);
-      const onboardingMutedInk = Color(0xFFAAB8C0);
       const onboardingCtaLabel = Color(0xFF172229);
-      final theme = AppTheme.dark();
-      final protectionTile = tester.widget<CheckboxListTile>(
-        find.byKey(const Key('protect-sensitive-actions-checkbox')),
-      );
-      expect(protectionTile.activeColor, onboardingInk);
-      expect(protectionTile.checkColor, onboardingCtaLabel);
-      expect(protectionTile.side?.color, onboardingInk);
-      expect((protectionTile.title as Text).style?.color, onboardingInk);
-      expect(
-        (protectionTile.subtitle as Text).style?.color,
-        onboardingMutedInk,
-      );
-      final firstDigitContainer = tester.widget<Container>(digitFinders.first);
-      final firstDigitDecoration =
-          firstDigitContainer.decoration! as BoxDecoration;
-      expect(firstDigitDecoration.color, const Color(0xFF233039));
-      expect(
-        (firstDigitDecoration.border! as Border).top.color,
-        theme.colorScheme.primary.withValues(alpha: 0.15),
-      );
-      final firstDigitText = tester.widget<Text>(
-        find.descendant(of: digitFinders.first, matching: find.text('1')),
-      );
-      expect(firstDigitText.style?.fontFamily, 'Inter');
-      expect(
-        firstDigitText.style?.fontSize,
-        theme.textTheme.displaySmall?.fontSize,
-      );
-      expect(firstDigitText.style?.fontSize, greaterThanOrEqualTo(36));
-      expect(firstDigitText.style?.fontWeight, FontWeight.w600);
-      expect(firstDigitText.style?.fontFeatures, isNull);
-      expect(firstDigitText.style?.color, onboardingInk);
-
-      final firstDigit = tester.getTopLeft(digitFinders[0]);
-      final secondDigit = tester.getTopLeft(digitFinders[1]);
-      final thirdDigit = tester.getTopLeft(digitFinders[2]);
-      final fourthDigit = tester.getTopLeft(digitFinders[3]);
-      expect(secondDigit.dx - firstDigit.dx, 60);
-      expect(fourthDigit.dx - thirdDigit.dx, 68);
-
-      final confirmFinder = find.widgetWithText(FilledButton, 'Codes match');
-      final cancelFinder = find.widgetWithText(TextButton, 'Cancel');
+      await tester.enterText(codeFinder, '123456');
+      await tester.pump();
+      final confirmFinder = find.widgetWithText(FilledButton, 'Use biometrics');
+      final cancelFinder = find.widgetWithText(TextButton, 'Skip');
       final confirmButton = tester.widget<FilledButton>(confirmFinder);
       final cancelButton = tester.widget<TextButton>(cancelFinder);
       expect(
@@ -693,13 +891,13 @@ void main() {
       expect(confirmTopLeft.dx, Grid.sm);
       expect(tester.getSize(confirmFinder).width, scaffoldWidth - Grid.sm * 2);
       expect(tester.getSize(cancelFinder).width, scaffoldWidth - Grid.sm * 2);
-      expect(tester.getSize(confirmFinder).height, 48);
-      expect(tester.getSize(cancelFinder).height, 48);
+      expect(tester.getSize(confirmFinder).height, 52);
+      expect(tester.getSize(cancelFinder).height, 52);
       expect(
         find.textContaining(
           'Only continue if you started this pairing from your desktop.',
         ),
-        findsOneWidget,
+        findsNothing,
       );
       expect(
         tester.getBottomLeft(find.byType(Scaffold)).dy -
@@ -735,7 +933,7 @@ void main() {
         final errorInk = tester.widget<Text>(errorFinder).style!.color!;
         expect(
           errorInk,
-          isDark ? const Color(0xFFFFAAA0) : const Color(0xFF7A1025),
+          isDark ? const Color(0xFFE6EDF0) : const Color(0xFF111111),
         );
 
         final backgroundFinder = find.byKey(
@@ -849,13 +1047,10 @@ void main() {
       );
       await tester.pump();
       expect(tester.takeException(), isNull);
-      expect(find.text('Confirm desktop code'), findsOneWidget);
-      expect(find.textContaining('matches on both devices'), findsOneWidget);
-      expect(
-        find.textContaining('Buzz identity will transfer'),
-        findsOneWidget,
-      );
-      expect(find.text('Codes match'), findsOneWidget);
+      expect(find.text('Enter pairing code'), findsOneWidget);
+      expect(find.textContaining('matches on both devices'), findsNothing);
+      expect(find.textContaining('Buzz identity will transfer'), findsNothing);
+      expect(find.text('Continue'), findsNothing);
     });
   });
 }
@@ -882,6 +1077,8 @@ Future<void> _expandPairingCode(WidgetTester tester) async {
 
 class _ErrorPairingNotifier extends Notifier<PairingState>
     implements PairingNotifier {
+  @override
+  Future<bool> verifyDesktopCode(String code) async => false;
   final String error;
   _ErrorPairingNotifier(this.error);
 
@@ -912,6 +1109,8 @@ class _ErrorPairingNotifier extends Notifier<PairingState>
 class _ConnectingPairingNotifier extends Notifier<PairingState>
     implements PairingNotifier {
   @override
+  Future<bool> verifyDesktopCode(String code) async => false;
+  @override
   PairingState build() => const PairingState(status: PairingStatus.connecting);
 
   @override
@@ -936,6 +1135,8 @@ class _ConnectingPairingNotifier extends Notifier<PairingState>
 
 class _RecordingPairingNotifier extends Notifier<PairingState>
     implements PairingNotifier {
+  @override
+  Future<bool> verifyDesktopCode(String code) async => false;
   final pairedCodes = <String>[];
 
   @override
@@ -963,6 +1164,8 @@ class _RecordingPairingNotifier extends Notifier<PairingState>
 
 class _ConfirmingSasPairingNotifier extends Notifier<PairingState>
     implements PairingNotifier {
+  @override
+  Future<bool> verifyDesktopCode(String code) async => false;
   _ConfirmingSasPairingNotifier({
     this.sendsIdentityToDesktop = false,
     this.errorMessage,
@@ -971,6 +1174,8 @@ class _ConfirmingSasPairingNotifier extends Notifier<PairingState>
   final bool sendsIdentityToDesktop;
   final String? errorMessage;
   bool denied = false;
+
+  void advance(PairingStatus status) => state = state.copyWith(status: status);
 
   @override
   PairingState build() => PairingState(
@@ -994,7 +1199,9 @@ class _ConfirmingSasPairingNotifier extends Notifier<PairingState>
   void confirmSas() {}
 
   @override
-  void setProtectSensitiveActions(bool value) {}
+  void setProtectSensitiveActions(bool value) {
+    state = state.copyWith(protectSensitiveActions: value);
+  }
 
   @override
   void denySas() => denied = true;

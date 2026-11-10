@@ -29,12 +29,17 @@ import {
   type AdminReportResolution,
 } from "./api";
 import {
+  CommunityBadge,
+  NotConnectedWarning,
+} from "./AdminConsoleCommunityBadge";
+import {
   DetailRow,
   ErrorMessage,
   LoadingSpinner,
   CommunityGroupedList,
   formatTimestamp,
   useAsyncLoad,
+  adminErrorCode,
   adminErrorMessage,
   preserveRequestIdOnError,
 } from "./AdminConsolePanelHelpers";
@@ -427,6 +432,9 @@ function ResolveReportForm({
         frozenRef.current = null;
       }
       toast.error(adminErrorMessage(e));
+      // The relay persists the failed action before answering
+      // `enforcement_failed`; reload so the detail shows it and its recovery.
+      if (adminErrorCode(e) === "enforcement_failed") onResolved();
     } finally {
       setIsSubmitting(false);
     }
@@ -505,6 +513,19 @@ function ResolveReportForm({
       </div>
 
       {selectedAction && (
+        <p
+          className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground"
+          data-testid="resolve-community"
+        >
+          In{" "}
+          <CommunityBadge host={report.communityHost} id={report.communityId} />
+          {report.communityHost && (
+            <NotConnectedWarning host={report.communityHost} />
+          )}
+        </p>
+      )}
+
+      {selectedAction && (
         <Button
           data-testid="resolve-submit-btn"
           disabled={
@@ -520,7 +541,7 @@ function ResolveReportForm({
           {isSubmitting ? (
             <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
           ) : (
-            `Confirm: ${actionLabel(frozenRef.current?.action ?? selectedAction)}`
+            `Confirm: ${actionLabel(frozenRef.current?.action ?? selectedAction)} in ${report.communityHost}`
           )}
         </Button>
       )}
@@ -636,11 +657,14 @@ function ReopenReportForm({
 
 export function ReportsTab({
   canMutate,
+  communityId,
   origin,
   pubkey,
   generation,
 }: {
   canMutate: boolean;
+  /** Only this community's reports (a community page); all when omitted. */
+  communityId?: string;
   origin: string;
   pubkey: string;
   generation: number;
@@ -655,8 +679,8 @@ export function ReportsTab({
     // escalated. The relay's omitted-scope default is escalated-only (the
     // platform-safety backstop); scope=all gives this console access to the
     // states its own resolve/cancel/reopen controls act on.
-    () => listAdminReports(origin, { scope: "all" }),
-    [origin, pubkey],
+    () => listAdminReports(origin, { scope: "all", communityId }),
+    [origin, pubkey, communityId],
     generation + listGen,
   );
 
@@ -708,6 +732,7 @@ export function ReportsTab({
 
   return (
     <CommunityGroupedList
+      hideHeadings={communityId != null}
       items={reports}
       renderItem={(report: AdminReportDto) => {
         const id = report.id;
@@ -778,7 +803,10 @@ function ReportFields({ data }: { data: AdminReportDetailDto }) {
       </div>
       <DetailRow label="ID" value={data.id} mono />
       <DetailRow label="Community" value={data.communityId} mono />
-      <DetailRow label="Host" value={data.communityHost} />
+      <div className="flex items-center gap-2 text-xs">
+        <span className="text-muted-foreground">Host</span>
+        <CommunityBadge host={data.communityHost} id={data.communityId} />
+      </div>
       <DetailRow label="Event ID" value={data.reportEventId} mono />
       {/* Reporter uses PubKey widget for valid keys; falls back to mono text. */}
       {isHex64(data.reporterPubkey) ? (

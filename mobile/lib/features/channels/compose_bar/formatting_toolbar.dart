@@ -12,27 +12,27 @@ class _FormattingToolbar extends StatelessWidget {
       mainAxisSize: MainAxisSize.min,
       children: [
         _FormatButton(
-          icon: LucideIcons.bold,
+          icon: BuzzIcons.bold,
           tooltip: 'Bold',
           onTap: () => onFormat('**'),
         ),
         _FormatButton(
-          icon: LucideIcons.italic,
+          icon: BuzzIcons.italic,
           tooltip: 'Italic',
           onTap: () => onFormat('_'),
         ),
         _FormatButton(
-          icon: LucideIcons.strikethrough,
+          icon: BuzzIcons.strikethrough,
           tooltip: 'Strikethrough',
           onTap: () => onFormat('~~'),
         ),
         _FormatButton(
-          icon: LucideIcons.code,
+          icon: BuzzIcons.code,
           tooltip: 'Code',
           onTap: () => onFormat('`'),
         ),
         _FormatButton(
-          icon: LucideIcons.squareCode,
+          icon: BuzzIcons.squareCode,
           tooltip: 'Code block',
           onTap: () => onFormat('```\n', '\n```'),
         ),

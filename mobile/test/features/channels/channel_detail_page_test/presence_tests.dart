@@ -1,6 +1,56 @@
 part of '../channel_detail_page_test.dart';
 
 void presenceTests() {
+  testWidgets(
+    'hosted agent DM stays Online when its worker socket is offline',
+    (tester) async {
+      final cache = _PresenceFixture();
+      final channel = Channel(
+        id: _channelId,
+        name: 'DM',
+        channelType: 'dm',
+        description: 'Direct message',
+        visibility: 'private',
+        createdBy: 'self',
+        createdAt: DateTime(2025),
+        memberCount: 2,
+        participants: const ['Self', 'Alice'],
+        participantPubkeys: const ['self', 'alice'],
+        isMember: true,
+      );
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          channel: channel,
+          presenceCache: cache,
+          ownedAgents: const [
+            OwnedAgentDirectoryEntry(
+              pubkey: 'alice',
+              runtime: 'block.builderlab/builderlab',
+            ),
+          ],
+          users: const {
+            'alice': UserProfile(
+              pubkey: 'alice',
+              displayName: 'Alice',
+              ownerPubkey: 'self',
+            ),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+      cache.setPresence('offline');
+      await tester.pumpAndSettle();
+      expect(
+        tester
+            .widget<Text>(find.byKey(const ValueKey('dm-header-presence')))
+            .data,
+        'Online',
+      );
+      expect(find.text('Offline'), findsNothing);
+    },
+  );
+
   testWidgets('DM header never substitutes offline for unknown presence', (
     tester,
   ) async {
@@ -34,8 +84,8 @@ void presenceTests() {
       ),
     );
     await tester.pumpAndSettle();
-    final avatar = find.byKey(const ValueKey('dm-header-avatar'));
-    final bounds = tester.getRect(avatar);
+    final header = find.byKey(const ValueKey('dm-header-text-stack'));
+    final center = tester.getCenter(header).dx;
     for (final entry in <String?, String>{
       null: 'Unknown',
       'online': 'Online',
@@ -51,10 +101,11 @@ void presenceTests() {
         entry.value,
       );
       expect(
-        tester.widget<MaskedAvatarBadge>(avatar).badge,
-        entry.key == null ? isNull : isNotNull,
+        find.byKey(const ValueKey('dm-header-presence-dot')),
+        entry.key == null ? findsNothing : findsOneWidget,
       );
-      expect(tester.getRect(avatar), bounds);
+      expect(find.byKey(const ValueKey('dm-header-avatar')), findsNothing);
+      expect(tester.getCenter(header).dx, center);
       await _capturePresence(tester, 'dm-${entry.value}');
     }
     cache.setPresence(null);

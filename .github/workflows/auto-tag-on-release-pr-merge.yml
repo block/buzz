@@ -11,9 +11,10 @@ name: Auto-tag on Release PR Merge
 #   any internal PR that bumps deploy/charts/buzz/Chart.yaml `version`
 #                       → tag chart-v<v>  → helm-chart.yml (helm chart)
 #
-# Mobile candidate tags do not come from merged PRs. Operators create immutable
-# mobile-v<v>-rc.N tags directly from remote main with scripts/mobile-release.sh,
-# then hand the exact tag to buzz-releases.
+# Mobile candidate tags do not come from merged PRs or from this App. Release
+# managers push immutable mobile-v<v>-rc.N tags themselves with
+# scripts/mobile-release.sh, gated by a dedicated mobile tag ruleset whose only
+# bypass is the mobile release team, then hand the exact tag to buzz-releases.
 #
 # Release tags are created with a short-lived token from the dedicated
 # buzz-release-bot GitHub App. GitHub attributes the ref creation to that

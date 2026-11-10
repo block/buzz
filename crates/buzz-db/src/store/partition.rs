@@ -7,18 +7,24 @@ use std::time::{Duration, Instant};
 use buzz_datastore_tracing::datastore_span;
 use chrono::{DateTime, Datelike, NaiveDate, TimeZone, Timelike, Utc};
 use serde::Serialize;
-use sqlx::{Connection, PgConnection, PgPool, Row};
-use tracing::info;
+use sqlx::{PgConnection, PgPool, Row};
 
 use crate::error::{DbError, Result};
 use crate::Db;
+
+mod maintenance;
+
+pub use maintenance::{
+    maintain_partitions, PartitionMaintenanceOutcome, PartitionMaintenancePolicy,
+    PARTITION_MANAGER_MONTHS_AHEAD,
+};
 
 /// Tables that may be partition-managed. The allowlist prevents DDL injection.
 const PARTITIONED_TABLES: &[&str] = &["events", "delivery_log"];
 
 /// Maximum future-month horizon accepted by catalog audits and creation.
 ///
-/// The relay uses three months. Keeping the public API bounded prevents an
+/// The relay uses [`PARTITION_MANAGER_MONTHS_AHEAD`]. Keeping the public API bounded prevents an
 /// operator-supplied `buzz-admin partition-audit --months-ahead` value from
 /// allocating or iterating an effectively unbounded report.
 pub const MAX_PARTITION_MONTHS_AHEAD: u32 = 120;
@@ -28,6 +34,10 @@ const PARTITION_AUDIT_STATEMENT_TIMEOUT: &str = "5s";
 
 /// Maximum wall-clock duration for one complete multi-table catalog audit.
 const PARTITION_AUDIT_TOTAL_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Fresh-snapshot retries after a partition vanishes mid-audit, such as when
+/// another relay's maintenance replaces a catch-all.
+const PARTITION_AUDIT_CONCURRENT_DROP_RETRIES: usize = 2;
 
 fn expected_partition_key(table: &str) -> Option<&'static str> {
     match table {
@@ -176,7 +186,7 @@ pub struct PartitionTableAudit {
     pub children: Vec<PartitionChildAudit>,
     /// Cached effective bounds for every routable leaf in the catalog tree.
     pub coverage_leaves: Vec<PartitionLeafAudit>,
-    /// Coverage of the current month and the requested future months.
+    /// Coverage of the current month, first, and the requested future months.
     pub months: Vec<MonthCoverage>,
     /// Whether a parseable routable leaf covers the audit timestamp.
     pub serving_safe: bool,
@@ -224,15 +234,18 @@ impl PartitionTableAudit {
     }
 
     /// Whether the table is serving but has state requiring operator attention.
+    ///
+    /// A legacy leaf that ends at or before the current month start is
+    /// historical: it stays in `children` but no longer degrades the table.
     pub fn degraded(&self) -> bool {
         !self.partition_key_valid
             || self.children.iter().any(|child| {
                 matches!(
                     child.kind,
-                    PartitionChildKind::LegacyLeaf
-                        | PartitionChildKind::Default
-                        | PartitionChildKind::Anomalous
-                ) || !child.missing_triggers.is_empty()
+                    PartitionChildKind::Default | PartitionChildKind::Anomalous
+                ) || (child.kind == PartitionChildKind::LegacyLeaf
+                    && !self.ends_by_current_month(child))
+                    || !child.missing_triggers.is_empty()
                     || !child.extra_triggers.is_empty()
                     || child.catch_all_nonempty == Some(true)
                     || child.default_nonempty == Some(true)
@@ -241,6 +254,18 @@ impl PartitionTableAudit {
                 .months
                 .iter()
                 .any(|month| month.kind != MonthCoverageKind::CoveredByMonthly)
+    }
+
+    /// Whether `child` has a finite upper bound at or before the audited month start.
+    ///
+    /// Without an audited month, no child is treated as historical.
+    fn ends_by_current_month(&self, child: &PartitionChildAudit) -> bool {
+        self.months.first().is_some_and(|current_month| {
+            matches!(
+                &child.upper,
+                Some(PartitionBound::Finite(upper)) if *upper <= current_month.start
+            )
+        })
     }
 
     /// Whether the catalog is understood well enough to authorize automatic DDL.
@@ -287,12 +312,39 @@ pub struct PartitionAuditReport {
     pub errors: Vec<PartitionAuditError>,
 }
 
+/// Operator-facing verdict for a best-effort catalog audit report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PartitionAuditOutcome {
+    /// Every managed parent is serving safely without operator attention.
+    Ok,
+    /// Every managed parent is serving safely, but one needs operator attention.
+    Degraded,
+    /// The report is complete, but a managed parent is not serving safely.
+    Unsafe,
+    /// At least one managed parent could not be audited.
+    Error,
+}
+
 impl PartitionAuditReport {
     /// Whether the report is complete and every managed parent is serving safely.
     pub fn serving_safe(&self) -> bool {
         self.errors.is_empty()
             && self.tables.len() == PARTITIONED_TABLES.len()
             && self.tables.iter().all(|table| table.serving_safe)
+    }
+
+    /// Most severe verdict across audit errors, serving safety, and degradation.
+    pub fn outcome(&self) -> PartitionAuditOutcome {
+        if !self.errors.is_empty() {
+            PartitionAuditOutcome::Error
+        } else if !self.serving_safe() {
+            PartitionAuditOutcome::Unsafe
+        } else if self.tables.iter().any(PartitionTableAudit::degraded) {
+            PartitionAuditOutcome::Degraded
+        } else {
+            PartitionAuditOutcome::Ok
+        }
     }
 
     fn into_complete_audit(self) -> Result<PartitionAudit> {
@@ -411,6 +463,7 @@ async fn audit_partition_catalog_report_at_with_timeout(
                     "outcome" => "error"
                 )
                 .increment(1);
+                refresh_last_success_recency(table);
                 metrics::histogram!(
                     "buzz_partition_audit_duration_seconds",
                     "table" => table
@@ -428,6 +481,7 @@ async fn audit_partition_catalog_report_at_with_timeout(
                     "outcome" => "error"
                 )
                 .increment(1);
+                refresh_last_success_recency(table);
                 metrics::histogram!(
                     "buzz_partition_audit_duration_seconds",
                     "table" => table
@@ -451,131 +505,24 @@ async fn audit_partition_catalog_report_at_with_timeout(
     }
 }
 
-/// Audit first, then create only months proven to be uncovered.
-///
-/// Covered ranges are never probed with DDL. Creation failures are collected
-/// across all managed parents and months before an aggregate error is returned.
-pub async fn ensure_future_partitions(
-    pool: &PgPool,
-    months_ahead: u32,
-    create_enabled: bool,
-) -> Result<PartitionAudit> {
-    ensure_future_partitions_at(pool, months_ahead, create_enabled, Utc::now()).await
-}
-
+/// Create-only maintenance at a fixed clock, for tests of month creation.
+#[cfg(test)]
 async fn ensure_future_partitions_at(
     pool: &PgPool,
     months_ahead: u32,
     create_enabled: bool,
     now: DateTime<Utc>,
 ) -> Result<PartitionAudit> {
-    let audit = audit_partition_catalog_at(pool, months_ahead, now).await?;
-    let mut errors = Vec::new();
-    let mut created_any = false;
-
-    for table in &audit.tables {
-        for month in &table.months {
-            match month.kind {
-                MonthCoverageKind::CoveredByMonthly
-                | MonthCoverageKind::CoveredByCatchAll
-                | MonthCoverageKind::CoveredByDefault => {
-                    metrics::counter!(
-                        "buzz_partition_create_attempts_total",
-                        "table" => table.table,
-                        "outcome" => "skipped_covered"
-                    )
-                    .increment(1);
-                }
-                MonthCoverageKind::Uncovered if !create_enabled => {}
-                MonthCoverageKind::Uncovered => {
-                    let expected_name = partition_name(table.table, month.start);
-                    let collision = match relation_name_exists(pool, &expected_name).await {
-                        Ok(collision) => collision,
-                        Err(error) => {
-                            metrics::counter!(
-                                "buzz_partition_create_attempts_total",
-                                "table" => table.table,
-                                "outcome" => "error"
-                            )
-                            .increment(1);
-                            errors.push(format!(
-                                "{} {}: failed to check canonical name {expected_name}: {error}",
-                                table.table,
-                                month.start.format("%Y-%m")
-                            ));
-                            continue;
-                        }
-                    };
-                    if collision {
-                        metrics::counter!(
-                            "buzz_partition_create_attempts_total",
-                            "table" => table.table,
-                            "outcome" => "error"
-                        )
-                        .increment(1);
-                        errors.push(format!(
-                            "{} {}: canonical name {expected_name} already exists without the expected attachment and bounds",
-                            table.table,
-                            month.start.format("%Y-%m")
-                        ));
-                        continue;
-                    }
-                    if !table.structurally_safe_for_creation() {
-                        metrics::counter!(
-                            "buzz_partition_create_attempts_total",
-                            "table" => table.table,
-                            "outcome" => "error"
-                        )
-                        .increment(1);
-                        errors.push(format!(
-                            "{} {}: catalog is not structurally safe for automatic partition creation",
-                            table.table,
-                            month.start.format("%Y-%m")
-                        ));
-                        continue;
-                    }
-                    match create_month_partition(pool, table.table, month.start).await {
-                        Ok(name) => {
-                            created_any = true;
-                            metrics::counter!(
-                                "buzz_partition_create_attempts_total",
-                                "table" => table.table,
-                                "outcome" => "created"
-                            )
-                            .increment(1);
-                            info!(table = table.table, partition = name, "added partition");
-                        }
-                        Err(error) => {
-                            metrics::counter!(
-                                "buzz_partition_create_attempts_total",
-                                "table" => table.table,
-                                "outcome" => "error"
-                            )
-                            .increment(1);
-                            errors.push(format!(
-                                "{} {}: {error}",
-                                table.table,
-                                month.start.format("%Y-%m")
-                            ));
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    if errors.is_empty() {
-        if created_any {
-            audit_partition_catalog_at(pool, months_ahead, now).await
-        } else {
-            Ok(audit)
-        }
-    } else {
-        Err(DbError::InvalidData(format!(
-            "partition creation failed: {}",
-            errors.join("; ")
-        )))
-    }
+    maintenance::maintain_partitions_at(
+        pool,
+        months_ahead,
+        PartitionMaintenancePolicy {
+            create_enabled,
+            advance_enabled: false,
+        },
+        now,
+    )
+    .await
 }
 
 async fn audit_table(
@@ -585,6 +532,26 @@ async fn audit_table(
     now: DateTime<Utc>,
 ) -> Result<PartitionTableAudit> {
     let months_ahead = validated_months_ahead(months_ahead)?;
+    let mut retries = 0;
+    loop {
+        match audit_table_once(pool, table, months_ahead, now).await {
+            Err(error)
+                if retries < PARTITION_AUDIT_CONCURRENT_DROP_RETRIES
+                    && is_concurrent_drop(&error) =>
+            {
+                retries += 1;
+            }
+            result => return result,
+        }
+    }
+}
+
+async fn audit_table_once(
+    pool: &PgPool,
+    table: &'static str,
+    months_ahead: i32,
+    now: DateTime<Utc>,
+) -> Result<PartitionTableAudit> {
     let mut transaction = pool.begin().await?;
     sqlx::query("SET TRANSACTION READ ONLY")
         .execute(&mut *transaction)
@@ -593,6 +560,20 @@ async fn audit_table(
     let audit = audit_table_on(&mut transaction, table, months_ahead, now).await?;
     transaction.commit().await?;
     Ok(audit)
+}
+
+/// Whether an audit failed only because a partition it had already listed was
+/// dropped by a concurrent transaction. A fresh snapshot sees a consistent
+/// catalog, so the audit can be retried.
+fn is_concurrent_drop(error: &DbError) -> bool {
+    match error {
+        DbError::PartitionDroppedMidAudit(_) => true,
+        // `relation_contains_rows` names a leaf that no longer exists.
+        DbError::Sqlx(sqlx::Error::Database(database)) => {
+            database.code().as_deref() == Some("42P01")
+        }
+        _ => false,
+    }
 }
 
 async fn configure_audit_transaction(connection: &mut PgConnection) -> Result<()> {
@@ -627,14 +608,14 @@ impl Db {
         audit_partition_catalog_report(&self.pool, months_ahead).await
     }
 
-    /// Ensures monthly partitions exist for the next N months when creation is enabled.
-    #[datastore_span(name = "ensure_future_partitions", system = "postgresql")]
-    pub async fn ensure_future_partitions(
+    /// Issues the bounded partition DDL `policy` permits, then returns a fresh audit.
+    #[datastore_span(name = "maintain_partitions", system = "postgresql")]
+    pub async fn maintain_partitions(
         &self,
         months_ahead: u32,
-        create_enabled: bool,
+        policy: PartitionMaintenancePolicy,
     ) -> Result<PartitionAudit> {
-        ensure_future_partitions(&self.pool, months_ahead, create_enabled).await
+        maintain_partitions(&self.pool, months_ahead, policy).await
     }
 }
 
@@ -758,14 +739,25 @@ async fn audit_table_on(
         let is_leaf: bool = row.try_get("is_leaf")?;
         let bound_partition_key: Option<String> = row.try_get("bound_partition_key")?;
         let detach_pending: bool = row.try_get("detach_pending")?;
-        let sibling_bounds: Vec<String> = row.try_get("sibling_bounds")?;
+        // Catalog rows come from the statement snapshot, but `pg_get_expr`
+        // renders from current catalog state and yields NULL for a relation
+        // dropped since the snapshot was taken.
+        let sibling_bounds = row
+            .try_get::<Vec<Option<String>>, _>("sibling_bounds")?
+            .into_iter()
+            .collect::<Option<Vec<String>>>()
+            .ok_or_else(|| {
+                DbError::PartitionDroppedMidAudit(format!("a sibling of partition {name}"))
+            })?;
         if detach_pending {
             pending_roots.insert(root_child_relation_oid);
         }
         let partition_key_compatible = partition_key_valid
             && bound_partition_key.as_deref() == Some(expected_partition_key)
             && !detach_pending;
-        let expression: String = row.try_get("bound")?;
+        let expression: String = row
+            .try_get::<Option<String>, _>("bound")?
+            .ok_or_else(|| DbError::PartitionDroppedMidAudit(format!("partition {name}")))?;
         let is_default = expression.trim() == "DEFAULT";
         let own_range = parse_range_bounds(&expression);
         let is_catch_all = own_range.as_ref().is_some_and(|(lower, upper)| {
@@ -975,17 +967,7 @@ async fn audit_table_on(
         .map(|leaf| leaf.audit)
         .collect::<Vec<_>>();
 
-    let mut months = Vec::with_capacity(months_ahead as usize + 1);
-    for offset in 0..=months_ahead {
-        let (year, month) = add_months(now.year(), now.month(), offset)?;
-        let start = month_start(year, month)?;
-        let (end_year, end_month) = add_months(year, month, 1)?;
-        let end = month_start(end_year, end_month)?;
-        months.push(MonthCoverage {
-            start,
-            kind: coverage_for_range(&coverage_leaves, &start, &end),
-        });
-    }
+    let months = month_coverage(&coverage_leaves, months_ahead, now)?;
 
     let serving_safe = coverage_leaves
         .iter()
@@ -1001,6 +983,26 @@ async fn audit_table_on(
         months,
         serving_safe,
     })
+}
+
+/// Classify the month containing `now`, then each lookahead month, in order.
+fn month_coverage(
+    coverage_leaves: &[PartitionLeafAudit],
+    months_ahead: i32,
+    now: DateTime<Utc>,
+) -> Result<Vec<MonthCoverage>> {
+    let mut months = Vec::with_capacity(months_ahead as usize + 1);
+    for offset in 0..=months_ahead {
+        let (year, month) = add_months(now.year(), now.month(), offset)?;
+        let start = month_start(year, month)?;
+        let (end_year, end_month) = add_months(year, month, 1)?;
+        let end = month_start(end_year, end_month)?;
+        months.push(MonthCoverage {
+            start,
+            kind: coverage_for_range(coverage_leaves, &start, &end),
+        });
+    }
+    Ok(months)
 }
 
 fn validated_months_ahead(months_ahead: u32) -> Result<i32> {
@@ -1037,6 +1039,35 @@ fn qualified_relation_name(schema: &str, relation: &str) -> String {
         quote_identifier(schema),
         quote_identifier(relation)
     )
+}
+
+/// Export every `buzz_partition_audit_runs_total` series at zero.
+///
+/// Prometheus `increase()` ignores the first sample of a new series, so an
+/// outcome first seen mid-run would otherwise be invisible to rate-based
+/// alerts. Call once at process start, before the first audit.
+pub fn initialize_audit_metric_series() {
+    for &table in PARTITIONED_TABLES {
+        for outcome in ["ok", "degraded", "error"] {
+            metrics::counter!(
+                "buzz_partition_audit_runs_total",
+                "table" => table,
+                "outcome" => outcome
+            )
+            .increment(0);
+        }
+    }
+}
+
+/// Keep a table's last success timestamp exported through failed audits
+/// without changing it, so the exporter's idle timeout cannot evict it. A
+/// table that never succeeded exports 0, which reads as maximally stale.
+fn refresh_last_success_recency(table: &'static str) {
+    metrics::gauge!(
+        "buzz_partition_audit_last_success_timestamp_seconds",
+        "table" => table
+    )
+    .increment(0.0);
 }
 
 fn emit_audit_metrics(audit: &PartitionTableAudit, duration_seconds: f64, now: DateTime<Utc>) {
@@ -1536,84 +1567,7 @@ fn parse_timestamp_literal(literal: &str) -> Option<DateTime<Utc>> {
     Some(Utc.from_utc_datetime(&date.and_hms_opt(0, 0, 0)?))
 }
 
-async fn create_month_partition(
-    pool: &PgPool,
-    table: &str,
-    start: DateTime<Utc>,
-) -> Result<String> {
-    if !PARTITIONED_TABLES.contains(&table) {
-        return Err(DbError::InvalidData(format!(
-            "table not in partition allowlist: {table:?}"
-        )));
-    }
-    let (end_year, end_month) = add_months(start.year(), start.month(), 1)?;
-    let end = month_start(end_year, end_month)?;
-    let partition_name = partition_name(table, start);
-    let start_date = start.format("%Y-%m-%d");
-    let end_date = end.format("%Y-%m-%d");
-    let sql = format!(
-        "CREATE TABLE {} PARTITION OF {} \
-         FOR VALUES FROM ('{start_date}') TO ('{end_date}')",
-        quote_identifier(&partition_name),
-        quote_identifier(table)
-    );
-    let mut connection = crate::observability::acquire_writer(
-        pool,
-        crate::observability::WriterOperation::Bootstrap,
-    )
-    .await?;
-    let mut transaction = connection.begin().await?;
-    pin_catalog_rendering(&mut transaction).await?;
-    sqlx::query(sqlx::AssertSqlSafe(sql))
-        .execute(&mut *transaction)
-        .await?;
-    let row = sqlx::query(
-        r#"
-        SELECT child.relkind::text AS relation_kind,
-               inherited.inhdetachpending AS detach_pending,
-               pg_catalog.pg_get_partkeydef(parent.oid) AS partition_key,
-               pg_catalog.pg_get_expr(child.relpartbound, child.oid) AS bound
-        FROM pg_catalog.pg_inherits inherited
-        JOIN pg_catalog.pg_class parent ON parent.oid = inherited.inhparent
-        JOIN pg_catalog.pg_namespace parent_ns ON parent_ns.oid = parent.relnamespace
-        JOIN pg_catalog.pg_class child ON child.oid = inherited.inhrelid
-        JOIN pg_catalog.pg_namespace child_ns ON child_ns.oid = child.relnamespace
-        WHERE parent_ns.nspname = current_schema()
-          AND child_ns.nspname = current_schema()
-          AND parent.relname = $1
-          AND child.relname = $2
-        "#,
-    )
-    .bind(table)
-    .bind(&partition_name)
-    .fetch_optional(&mut *transaction)
-    .await?;
-    let exact = row.is_some_and(|row| {
-        let relation_kind = row.try_get::<String, _>("relation_kind").ok();
-        let detach_pending = row.try_get::<bool, _>("detach_pending").ok();
-        let partition_key = row
-            .try_get::<Option<String>, _>("partition_key")
-            .ok()
-            .flatten();
-        let bounds = row
-            .try_get::<String, _>("bound")
-            .ok()
-            .and_then(|bound| parse_range_bounds(&bound));
-        relation_kind.as_deref() == Some("r")
-            && detach_pending == Some(false)
-            && partition_key.as_deref() == expected_partition_key(table)
-            && bounds == Some((PartitionBound::Finite(start), PartitionBound::Finite(end)))
-    });
-    if !exact {
-        transaction.rollback().await?;
-        return Err(DbError::InvalidData(format!(
-            "created partition {partition_name} failed exact catalog postcondition"
-        )));
-    }
-    transaction.commit().await?;
-    Ok(partition_name)
-}
-
+#[cfg(test)]
 async fn relation_name_exists(pool: &PgPool, relation: &str) -> Result<bool> {
     Ok(sqlx::query_scalar(
         r#"
@@ -1685,6 +1639,20 @@ mod tests {
             .errors
             .iter()
             .all(|error| error.error.contains("months_ahead must be at most 120")));
+    }
+
+    #[test]
+    fn only_a_mid_audit_drop_is_retried() {
+        assert!(is_concurrent_drop(&DbError::PartitionDroppedMidAudit(
+            "partition events_p2026_09".to_string()
+        )));
+        assert!(!is_concurrent_drop(&DbError::NotFound("row".to_string())));
+        assert!(!is_concurrent_drop(&DbError::InvalidData(
+            "bound".to_string()
+        )));
+        assert!(!is_concurrent_drop(&DbError::Sqlx(
+            sqlx::Error::PoolTimedOut
+        )));
     }
 
     #[test]
@@ -1903,53 +1871,540 @@ mod tests {
         assert_eq!(extra, Some(1.0));
     }
 
-    mod postgres_tests {
+    fn month_bound(year: i32, month: u32) -> PartitionBound {
+        PartitionBound::Finite(Utc.with_ymd_and_hms(year, month, 1, 0, 0, 0).unwrap())
+    }
+
+    fn child_audit(
+        name: &str,
+        kind: PartitionChildKind,
+        lower: PartitionBound,
+        upper: PartitionBound,
+    ) -> PartitionChildAudit {
+        PartitionChildAudit {
+            schema: "public".to_string(),
+            name: name.to_string(),
+            relation_kind: "r".to_string(),
+            catch_all_nonempty: (upper == PartitionBound::MaxValue).then_some(false),
+            lower: Some(lower),
+            upper: Some(upper),
+            kind,
+            pending_detach: false,
+            default_nonempty: None,
+            missing_triggers: Vec::new(),
+            extra_triggers: Vec::new(),
+        }
+    }
+
+    /// The repaired incident catalog, classified and covered by production code at `now`.
+    fn repaired_incident_audit(table: &'static str, now: DateTime<Utc>) -> PartitionTableAudit {
+        let mut bounds = vec![
+            (
+                format!("{table}_p_past"),
+                PartitionBound::MinValue,
+                month_bound(2026, 7),
+            ),
+            (
+                format!("{table}_p2026_07_08_legacy"),
+                month_bound(2026, 7),
+                month_bound(2026, 9),
+            ),
+        ];
+        for month in 9..=12 {
+            let (end_year, end_month) = add_months(2026, month, 1).unwrap();
+            bounds.push((
+                format!("{table}_p2026_{month:02}"),
+                month_bound(2026, month),
+                month_bound(end_year, end_month),
+            ));
+        }
+        bounds.push((
+            format!("{table}_p_future_next"),
+            month_bound(2027, 1),
+            PartitionBound::MaxValue,
+        ));
+        let children = bounds
+            .iter()
+            .map(|(name, lower, upper)| {
+                let kind = classify_child("r", table, name, Some(lower), Some(upper));
+                child_audit(name, kind, lower.clone(), upper.clone())
+            })
+            .collect::<Vec<_>>();
+        let coverage_leaves = bounds
+            .into_iter()
+            .map(|(name, lower, upper)| PartitionLeafAudit {
+                schema: "public".to_string(),
+                root_child_schema: "public".to_string(),
+                root_child: name.clone(),
+                name,
+                catch_all_nonempty: (upper == PartitionBound::MaxValue).then_some(false),
+                lower,
+                upper,
+                nested: false,
+                is_default: false,
+                default_routed: false,
+                routing_exclusions: Vec::new(),
+                default_nonempty: None,
+            })
+            .collect::<Vec<_>>();
+        let months = month_coverage(&coverage_leaves, 3, now).expect("month coverage");
+        let serving_safe = coverage_leaves
+            .iter()
+            .any(|leaf| leaf_covers_timestamp(leaf, &now));
+        PartitionTableAudit {
+            table,
+            partition_key: expected_partition_key(table).map(str::to_string),
+            expected_partition_key: expected_partition_key(table).unwrap(),
+            partition_key_valid: true,
+            children,
+            coverage_leaves,
+            months,
+            serving_safe,
+        }
+    }
+
+    #[test]
+    fn repaired_incident_layout_is_historical_once_its_months_have_passed() {
+        for (now, degraded, outcome) in [
+            (
+                Utc.with_ymd_and_hms(2026, 8, 15, 12, 0, 0).unwrap(),
+                true,
+                PartitionAuditOutcome::Degraded,
+            ),
+            (
+                // The legacy upper bound equals the current month start.
+                Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap(),
+                false,
+                PartitionAuditOutcome::Ok,
+            ),
+            (
+                Utc.with_ymd_and_hms(2026, 9, 15, 12, 0, 0).unwrap(),
+                false,
+                PartitionAuditOutcome::Ok,
+            ),
+        ] {
+            let report = PartitionAuditReport {
+                audited_at: now,
+                tables: PARTITIONED_TABLES
+                    .iter()
+                    .map(|table| repaired_incident_audit(table, now))
+                    .collect(),
+                errors: Vec::new(),
+            };
+            assert!(report.serving_safe(), "{now}");
+            assert_eq!(report.outcome(), outcome, "{now}");
+            for table in &report.tables {
+                assert_eq!(table.degraded(), degraded, "{} at {now}", table.table);
+                assert!(table
+                    .months
+                    .iter()
+                    .all(|month| month.kind == MonthCoverageKind::CoveredByMonthly));
+                // Historical leaves stay visible to operators.
+                assert_eq!(
+                    table
+                        .children
+                        .iter()
+                        .filter(|child| child.kind == PartitionChildKind::LegacyLeaf)
+                        .map(|child| child.name.as_str())
+                        .collect::<Vec<_>>(),
+                    [format!("{}_p2026_07_08_legacy", table.table)]
+                );
+            }
+            let json = serde_json::to_value(&report).expect("serialize report");
+            assert!(json["tables"][0]["children"]
+                .as_array()
+                .expect("children")
+                .iter()
+                .any(|child| child["name"] == "events_p2026_07_08_legacy"
+                    && child["kind"] == "legacy_leaf"));
+
+            let recorder = metrics_util::debugging::DebuggingRecorder::new();
+            let snapshotter = recorder.snapshotter();
+            metrics::with_local_recorder(&recorder, || {
+                emit_audit_metrics(&report.tables[0], 0.01, now)
+            });
+            let run_outcome = snapshotter
+                .snapshot()
+                .into_vec()
+                .into_iter()
+                .find_map(|(key, _, _, _)| {
+                    (key.key().name() == "buzz_partition_audit_runs_total").then(|| {
+                        key.key()
+                            .labels()
+                            .find(|label| label.key() == "outcome")
+                            .map(|label| label.value().to_string())
+                    })
+                })
+                .flatten();
+            let expected = if degraded { "degraded" } else { "ok" };
+            assert_eq!(run_outcome.as_deref(), Some(expected), "{now}");
+        }
+    }
+
+    #[test]
+    fn report_outcome_ranks_errors_then_unsafe_then_degraded() {
+        let august = Utc.with_ymd_and_hms(2026, 8, 15, 12, 0, 0).unwrap();
+        let degraded_tables = || {
+            PARTITIONED_TABLES
+                .iter()
+                .map(|table| repaired_incident_audit(table, august))
+                .collect::<Vec<_>>()
+        };
+        let mut incomplete = degraded_tables();
+        incomplete.pop();
+        let error = PartitionAuditError {
+            table: "delivery_log",
+            error: "statement timeout".to_string(),
+        };
+        for (tables, errors, outcome) in [
+            (
+                degraded_tables(),
+                Vec::new(),
+                PartitionAuditOutcome::Degraded,
+            ),
+            (
+                incomplete.clone(),
+                Vec::new(),
+                PartitionAuditOutcome::Unsafe,
+            ),
+            (incomplete, vec![error], PartitionAuditOutcome::Error),
+        ] {
+            let report = PartitionAuditReport {
+                audited_at: august,
+                tables,
+                errors,
+            };
+            assert_eq!(report.outcome(), outcome);
+        }
+    }
+
+    #[test]
+    fn legacy_leaf_degrades_until_its_upper_bound_reaches_the_current_month() {
+        let now = Utc.with_ymd_and_hms(2026, 9, 15, 12, 0, 0).unwrap();
+        let september = Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap();
+        let historical = || {
+            child_audit(
+                "events_legacy",
+                PartitionChildKind::LegacyLeaf,
+                month_bound(2026, 6),
+                month_bound(2026, 8),
+            )
+        };
+        let with = |child: PartitionChildAudit| vec![child];
+        let mut missing_trigger = historical();
+        missing_trigger.missing_triggers = vec!["partition_probe".to_string()];
+        let mut extra_trigger = historical();
+        extra_trigger.extra_triggers = vec!["child_only_probe".to_string()];
+        let mut anomalous = historical();
+        anomalous.kind = PartitionChildKind::Anomalous;
+        let mut default = historical();
+        default.kind = PartitionChildKind::Default;
+        let cases = [
+            (
+                "ends before the current month",
+                with(historical()),
+                3,
+                false,
+            ),
+            (
+                "ends exactly at the current month start",
+                with(child_audit(
+                    "events_legacy",
+                    PartitionChildKind::LegacyLeaf,
+                    month_bound(2026, 7),
+                    month_bound(2026, 9),
+                )),
+                3,
+                false,
+            ),
+            (
+                "ends one second into the current month",
+                with(child_audit(
+                    "events_legacy",
+                    PartitionChildKind::LegacyLeaf,
+                    month_bound(2026, 7),
+                    PartitionBound::Finite(september + chrono::Duration::seconds(1)),
+                )),
+                3,
+                true,
+            ),
+            (
+                "covers lookahead months",
+                with(child_audit(
+                    "events_legacy",
+                    PartitionChildKind::LegacyLeaf,
+                    month_bound(2026, 10),
+                    month_bound(2026, 12),
+                )),
+                3,
+                true,
+            ),
+            (
+                "starts beyond the lookahead",
+                with(child_audit(
+                    "events_legacy",
+                    PartitionChildKind::LegacyLeaf,
+                    month_bound(2027, 6),
+                    month_bound(2027, 8),
+                )),
+                3,
+                true,
+            ),
+            (
+                "historical but missing a trigger",
+                with(missing_trigger),
+                3,
+                true,
+            ),
+            (
+                "historical but has an extra trigger",
+                with(extra_trigger),
+                3,
+                true,
+            ),
+            (
+                "historical bounds on an anomalous child",
+                with(anomalous),
+                3,
+                true,
+            ),
+            (
+                "historical bounds on a default child",
+                with(default),
+                3,
+                true,
+            ),
+            ("no audited month to compare", with(historical()), -1, true),
+        ];
+        for (case, children, months_ahead, degraded) in cases {
+            let months = (0..=months_ahead)
+                .map(|offset| {
+                    let (year, month) = add_months(2026, 9, offset).unwrap();
+                    MonthCoverage {
+                        start: month_start(year, month).unwrap(),
+                        kind: MonthCoverageKind::CoveredByMonthly,
+                    }
+                })
+                .collect();
+            let audit = PartitionTableAudit {
+                table: "events",
+                partition_key: Some("RANGE (created_at)".to_string()),
+                expected_partition_key: "RANGE (created_at)",
+                partition_key_valid: true,
+                children,
+                coverage_leaves: Vec::new(),
+                months,
+                serving_safe: true,
+            };
+            assert_eq!(audit.degraded(), degraded, "{case} at {now}");
+        }
+    }
+
+    pub(super) mod postgres_tests {
+        use std::sync::{Arc, Mutex};
+
         use sqlx::postgres::PgPoolOptions;
+        use sqlx::Connection;
         use uuid::Uuid;
 
         use super::*;
 
-        async fn scratch_pool() -> (PgPool, PgPool, String) {
+        /// A uniquely named scratch schema that is dropped when the guard goes
+        /// out of scope, including when the test panics.
+        ///
+        /// Cleanup also drops every schema and role named `{name}_*`, so a test
+        /// that needs extra schemas or roles derives their names from `name`.
+        ///
+        /// Bind the guard to a named variable such as `_scratch` for the whole
+        /// test: `let (pool, _) = scratch_pool().await` drops it, and the
+        /// schema with it, immediately.
+        pub(in crate::store::partition) struct ScratchSchema {
+            pub(in crate::store::partition) admin: PgPool,
+            pub(in crate::store::partition) name: String,
+            url: String,
+            backends: Arc<Mutex<Vec<i32>>>,
+        }
+
+        impl Drop for ScratchSchema {
+            fn drop(&mut self) {
+                // Drop runs on the test's runtime thread, which cannot drive the
+                // test's pools while it blocks here, so clean up over a fresh
+                // connection on a thread with its own runtime.
+                let url = std::mem::take(&mut self.url);
+                let name = self.name.clone();
+                let backends = std::mem::take(
+                    &mut *self
+                        .backends
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner),
+                );
+                let cleanup = std::thread::spawn(move || {
+                    tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .map_err(|error| error.to_string())?
+                        .block_on(drop_scratch_objects(&url, &name, &backends))
+                })
+                .join();
+                let error = match cleanup {
+                    Ok(Ok(())) => return,
+                    Ok(Err(error)) => error,
+                    Err(_) => "cleanup thread panicked".to_owned(),
+                };
+                eprintln!(
+                    "warning: failed to drop scratch schema {}: {error}",
+                    self.name
+                );
+            }
+        }
+
+        async fn drop_scratch_objects(
+            url: &str,
+            name: &str,
+            backends: &[i32],
+        ) -> std::result::Result<(), String> {
+            let mut connection = PgConnection::connect(url)
+                .await
+                .map_err(|error| error.to_string())?;
+            // Every step is idempotent, so keep going after a failure and
+            // report all of them rather than skipping the remaining objects.
+            let mut errors = Vec::new();
+            let mut record = |step: &str, result: sqlx::Result<()>| {
+                if let Err(error) = result {
+                    errors.push(format!("{step}: {error}"));
+                }
+            };
+            let result = sqlx::query("SET lock_timeout = '10s'")
+                .execute(&mut connection)
+                .await
+                .map(drop);
+            record("set lock_timeout", result);
+            // A panicking test can leave a transaction holding locks in the
+            // schema; its rollback would only run on the blocked test runtime.
+            let result = sqlx::query(
+                "SELECT pg_terminate_backend(pid, 5000) FROM pg_stat_activity \
+                 WHERE pid = ANY($1) AND datname = current_database()",
+            )
+            .bind(backends)
+            .execute(&mut connection)
+            .await
+            .map(drop);
+            record("terminate test backends", result);
+            let schemas: Vec<String> = sqlx::query_scalar(
+                "SELECT nspname::text FROM pg_namespace \
+                 WHERE nspname = $1 OR starts_with(nspname, $1 || '_')",
+            )
+            .bind(name)
+            .fetch_all(&mut connection)
+            .await
+            .unwrap_or_else(|error| {
+                record("list schemas", Err(error));
+                Vec::new()
+            });
+            for schema in schemas {
+                let result = sqlx::query(sqlx::AssertSqlSafe(format!(
+                    "DROP SCHEMA IF EXISTS {} CASCADE",
+                    quote_identifier(&schema)
+                )))
+                .execute(&mut connection)
+                .await
+                .map(drop);
+                record(&format!("drop schema {schema}"), result);
+            }
+            let roles: Vec<String> = sqlx::query_scalar(
+                "SELECT rolname::text FROM pg_roles WHERE starts_with(rolname, $1 || '_')",
+            )
+            .bind(name)
+            .fetch_all(&mut connection)
+            .await
+            .unwrap_or_else(|error| {
+                record("list roles", Err(error));
+                Vec::new()
+            });
+            for role in roles {
+                let result = sqlx::query(sqlx::AssertSqlSafe(format!(
+                    "DROP ROLE IF EXISTS {}",
+                    quote_identifier(&role)
+                )))
+                .execute(&mut connection)
+                .await
+                .map(drop);
+                record(&format!("drop role {role}"), result);
+            }
+            record("close connection", connection.close().await);
+            if errors.is_empty() {
+                Ok(())
+            } else {
+                Err(errors.join("; "))
+            }
+        }
+
+        /// Pool options that record each connection's backend pid in `backends`
+        /// and point its `search_path` at `search_path`, when given.
+        fn tracked_pool_options(
+            search_path: Option<String>,
+            backends: Arc<Mutex<Vec<i32>>>,
+        ) -> PgPoolOptions {
+            PgPoolOptions::new().after_connect(move |connection, _| {
+                let search_path = search_path.clone();
+                let backends = Arc::clone(&backends);
+                Box::pin(async move {
+                    if let Some(schema) = search_path {
+                        sqlx::query(sqlx::AssertSqlSafe(format!("SET search_path TO {schema}")))
+                            .execute(&mut *connection)
+                            .await?;
+                    }
+                    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                        .fetch_one(&mut *connection)
+                        .await?;
+                    backends
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(pid);
+                    Ok(())
+                })
+            })
+        }
+
+        /// A pool whose `search_path` is a fresh scratch schema, plus the guard
+        /// that drops it. Bind the guard to a named variable, never `_`.
+        pub(in crate::store::partition) async fn scratch_pool() -> (PgPool, ScratchSchema) {
             scratch_pool_with_max_connections(4).await
         }
 
-        async fn scratch_pool_with_max_connections(
+        pub(in crate::store::partition) async fn scratch_pool_with_max_connections(
             max_connections: u32,
-        ) -> (PgPool, PgPool, String) {
+        ) -> (PgPool, ScratchSchema) {
             let url = crate::test_support::database_url();
-            let schema = format!("partition_audit_test_{}", Uuid::new_v4().simple());
-            let admin = PgPool::connect(&url).await.expect("connect admin pool");
-            sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
-                .execute(&admin)
-                .await
-                .expect("create scratch schema");
-            let search_path_schema = schema.clone();
-            let pool = PgPoolOptions::new()
-                .max_connections(max_connections)
-                .after_connect(move |connection, _| {
-                    let schema = search_path_schema.clone();
-                    Box::pin(async move {
-                        sqlx::query(sqlx::AssertSqlSafe(format!("SET search_path TO {schema}")))
-                            .execute(connection)
-                            .await?;
-                        Ok(())
-                    })
-                })
+            let name = format!("partition_audit_test_{}", Uuid::new_v4().simple());
+            let backends = Arc::new(Mutex::new(Vec::new()));
+            let admin = tracked_pool_options(None, Arc::clone(&backends))
                 .connect(&url)
                 .await
-                .expect("connect scratch pool");
-            (pool, admin, schema)
-        }
-
-        async fn drop_schema(admin: &PgPool, schema: &str) {
-            let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
-                "DROP SCHEMA IF EXISTS {schema} CASCADE"
+                .expect("connect admin pool");
+            let scratch = ScratchSchema {
+                admin,
+                name,
+                url,
+                backends,
+            };
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "CREATE SCHEMA {}",
+                scratch.name
             )))
-            .execute(admin)
-            .await;
+            .execute(&scratch.admin)
+            .await
+            .expect("create scratch schema");
+            let pool =
+                tracked_pool_options(Some(scratch.name.clone()), Arc::clone(&scratch.backends))
+                    .max_connections(max_connections)
+                    .connect(&scratch.url)
+                    .await
+                    .expect("connect scratch pool");
+            (pool, scratch)
         }
 
-        async fn seed_parents(pool: &PgPool) {
+        pub(in crate::store::partition) async fn seed_parents(pool: &PgPool) {
             seed_parents_with_keys(pool, "created_at", "delivered_at").await;
         }
 
@@ -1984,7 +2439,13 @@ mod tests {
             }
         }
 
-        async fn create_child(pool: &PgPool, table: &str, name: &str, lower: &str, upper: &str) {
+        pub(in crate::store::partition) async fn create_child(
+            pool: &PgPool,
+            table: &str,
+            name: &str,
+            lower: &str,
+            upper: &str,
+        ) {
             let sql = format!(
                 "CREATE TABLE {name} PARTITION OF {table} FOR VALUES FROM ({lower}) TO ({upper})"
             );
@@ -2032,7 +2493,9 @@ mod tests {
                 .expect("create nested child");
         }
 
-        async fn catalog_snapshot(pool: &PgPool) -> Vec<(String, String, String, i64)> {
+        pub(in crate::store::partition) async fn catalog_snapshot(
+            pool: &PgPool,
+        ) -> Vec<(String, String, String, i64)> {
             let mut transaction = pool.begin().await.expect("begin catalog snapshot");
             sqlx::query("SET TRANSACTION READ ONLY")
                 .execute(&mut *transaction)
@@ -2067,11 +2530,11 @@ mod tests {
             snapshot
         }
 
-        fn fixed_now() -> DateTime<Utc> {
+        pub(in crate::store::partition) fn fixed_now() -> DateTime<Utc> {
             Utc.with_ymd_and_hms(2026, 9, 15, 12, 0, 0).unwrap()
         }
 
-        async fn seed_fresh_layout(pool: &PgPool) {
+        pub(in crate::store::partition) async fn seed_fresh_layout(pool: &PgPool) {
             seed_parents(pool).await;
             for table in PARTITIONED_TABLES {
                 create_child(
@@ -2107,10 +2570,80 @@ mod tests {
             }
         }
 
+        #[test]
+        #[ignore = "requires Postgres"]
+        fn scratch_schema_is_dropped_when_a_test_panics_holding_a_lock() {
+            let runtime = || {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("build test runtime")
+            };
+            let (name_sender, name_receiver) = std::sync::mpsc::channel();
+            let outcome = std::thread::spawn(move || {
+                runtime().block_on(async move {
+                    let (pool, scratch) = scratch_pool().await;
+                    seed_parents(&pool).await;
+                    sqlx::query(sqlx::AssertSqlSafe(format!(
+                        "CREATE SCHEMA {}_children",
+                        scratch.name
+                    )))
+                    .execute(&scratch.admin)
+                    .await
+                    .expect("create sibling schema");
+                    for statement in [
+                        format!("CREATE ROLE {}_reader NOLOGIN", scratch.name),
+                        format!("GRANT USAGE ON SCHEMA {0} TO {0}_reader", scratch.name),
+                    ] {
+                        sqlx::query(sqlx::AssertSqlSafe(statement))
+                            .execute(&scratch.admin)
+                            .await
+                            .expect("create scratch role");
+                    }
+                    let mut holder = pool.begin().await.expect("begin lock holder");
+                    sqlx::query("LOCK TABLE events IN ACCESS EXCLUSIVE MODE")
+                        .execute(&mut *holder)
+                        .await
+                        .expect("lock scratch table");
+                    name_sender
+                        .send(scratch.name.clone())
+                        .expect("send scratch schema name");
+                    panic!("deliberate panic while holding a scratch schema lock");
+                })
+            })
+            .join();
+            assert!(outcome.is_err(), "the scratch test body must panic");
+            let name = name_receiver.recv().expect("scratch schema name");
+
+            let (schemas, roles): (Vec<String>, Vec<String>) = runtime().block_on(async {
+                let mut connection = PgConnection::connect(&crate::test_support::database_url())
+                    .await
+                    .expect("connect leftover check");
+                let schemas = sqlx::query_scalar(
+                    "SELECT nspname::text FROM pg_namespace \
+                     WHERE nspname = $1 OR starts_with(nspname, $1 || '_')",
+                )
+                .bind(&name)
+                .fetch_all(&mut connection)
+                .await
+                .expect("list leftover schemas");
+                let roles = sqlx::query_scalar(
+                    "SELECT rolname::text FROM pg_roles WHERE starts_with(rolname, $1 || '_')",
+                )
+                .bind(&name)
+                .fetch_all(&mut connection)
+                .await
+                .expect("list leftover roles");
+                (schemas, roles)
+            });
+            assert!(schemas.is_empty(), "leaked scratch schemas: {schemas:?}");
+            assert!(roles.is_empty(), "leaked scratch roles: {roles:?}");
+        }
+
         #[tokio::test]
         #[ignore = "requires Postgres"]
         async fn fresh_layout_is_serving_safe_and_audit_is_read_only() {
-            let (pool, admin, schema) = scratch_pool().await;
+            let (pool, _scratch) = scratch_pool().await;
             seed_fresh_layout(&pool).await;
             let before = catalog_snapshot(&pool).await;
             let audit = audit_partition_catalog_at(&pool, 3, fixed_now())
@@ -2126,13 +2659,12 @@ mod tests {
                         .all(|month| month.kind == MonthCoverageKind::CoveredByCatchAll)
             }));
             assert_eq!(catalog_snapshot(&pool).await, before);
-            drop_schema(&admin, &schema).await;
         }
 
         #[tokio::test]
         #[ignore = "requires Postgres"]
         async fn wrong_root_partition_key_never_proves_coverage() {
-            let (pool, admin, schema) = scratch_pool().await;
+            let (pool, _scratch) = scratch_pool().await;
             seed_parents_with_keys(&pool, "alternate_at", "delivered_at").await;
             for table in PARTITIONED_TABLES {
                 create_child(
@@ -2168,13 +2700,13 @@ mod tests {
                 .expect("delivery_log audit");
             assert!(delivery_log.partition_key_valid);
             assert!(delivery_log.serving_safe);
-            drop_schema(&admin, &schema).await;
         }
 
         #[tokio::test]
         #[ignore = "requires Postgres"]
         async fn occupied_catch_all_is_reported_as_degraded() {
-            let (pool, admin, schema) = scratch_pool().await;
+            let (pool, scratch) = scratch_pool().await;
+            let schema = scratch.name.as_str();
             seed_fresh_layout(&pool).await;
             sqlx::query(
                 "INSERT INTO events (created_at, alternate_at) \
@@ -2214,17 +2746,17 @@ mod tests {
             assert!(delivery_log.children.iter().any(|child| {
                 child.name == "delivery_log_p_future" && child.catch_all_nonempty == Some(false)
             }));
-            drop_schema(&admin, &schema).await;
         }
 
         #[tokio::test]
         #[ignore = "requires Postgres"]
         async fn occupied_cross_schema_catch_all_is_reported_as_degraded() {
-            let (pool, admin, schema) = scratch_pool().await;
+            let (pool, scratch) = scratch_pool().await;
+            let schema = scratch.name.as_str();
             seed_fresh_layout(&pool).await;
             let child_schema = format!("{schema}_children");
             sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {child_schema}")))
-                .execute(&admin)
+                .execute(&scratch.admin)
                 .await
                 .expect("create child schema");
             sqlx::query(sqlx::AssertSqlSafe(format!(
@@ -2262,20 +2794,19 @@ mod tests {
                     && leaf.name == "events_p_future"
                     && leaf.root_child_schema == child_schema
             }));
-            drop_schema(&admin, &schema).await;
-            drop_schema(&admin, &child_schema).await;
         }
 
         #[tokio::test]
         #[ignore = "requires Postgres"]
         async fn same_named_cross_schema_children_keep_distinct_trigger_metadata() {
-            let (pool, admin, schema) = scratch_pool().await;
+            let (pool, scratch) = scratch_pool().await;
+            let schema = scratch.name.as_str();
             seed_parents(&pool).await;
             let first_schema = format!("{schema}_first");
             let second_schema = format!("{schema}_second");
             for child_schema in [&first_schema, &second_schema] {
                 sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {child_schema}")))
-                    .execute(&admin)
+                    .execute(&scratch.admin)
                     .await
                     .expect("create child schema");
             }
@@ -2371,19 +2902,17 @@ mod tests {
                 .expect("serialized coverage leaves")
                 .iter()
                 .any(|leaf| leaf["schema"] == second_schema));
-            drop_schema(&admin, &schema).await;
-            drop_schema(&admin, &first_schema).await;
-            drop_schema(&admin, &second_schema).await;
         }
 
         #[tokio::test]
         #[ignore = "requires Postgres"]
         async fn report_retains_successful_table_when_another_table_errors() {
-            let (pool, admin, schema) = scratch_pool().await;
+            let (pool, scratch) = scratch_pool().await;
+            let schema = scratch.name.as_str();
             seed_fresh_layout(&pool).await;
-            let role = format!("partition_audit_reader_{}", Uuid::new_v4().simple());
+            let role = format!("{schema}_reader");
             sqlx::query(sqlx::AssertSqlSafe(format!("CREATE ROLE {role} NOLOGIN")))
-                .execute(&admin)
+                .execute(&scratch.admin)
                 .await
                 .expect("create restricted audit role");
             for statement in [
@@ -2391,12 +2920,12 @@ mod tests {
                 format!("GRANT SELECT ON {schema}.events_p_future TO {role}"),
             ] {
                 sqlx::query(sqlx::AssertSqlSafe(statement))
-                    .execute(&admin)
+                    .execute(&scratch.admin)
                     .await
                     .expect("grant restricted audit access");
             }
             let url = crate::test_support::database_url();
-            let role_schema = schema.clone();
+            let role_schema = schema.to_owned();
             let role_name = role.clone();
             let restricted = PgPoolOptions::new()
                 .max_connections(1)
@@ -2426,17 +2955,12 @@ mod tests {
             assert!(!report.serving_safe());
 
             restricted.close().await;
-            drop_schema(&admin, &schema).await;
-            sqlx::query(sqlx::AssertSqlSafe(format!("DROP ROLE {role}")))
-                .execute(&admin)
-                .await
-                .expect("drop restricted audit role");
         }
 
         #[tokio::test]
         #[ignore = "requires Postgres"]
         async fn pending_detach_never_proves_coverage() {
-            let (pool, admin, schema) = scratch_pool().await;
+            let (pool, _scratch) = scratch_pool().await;
             seed_fresh_layout(&pool).await;
 
             let mut blocker = pool.acquire().await.expect("acquire blocker");
@@ -2519,13 +3043,12 @@ mod tests {
                     && child.pending_detach
                     && child.kind == PartitionChildKind::Anomalous
             }));
-            drop_schema(&admin, &schema).await;
         }
 
         #[tokio::test]
         #[ignore = "requires Postgres"]
         async fn repaired_layout_recognizes_bounds_not_catch_all_name() {
-            let (pool, admin, schema) = scratch_pool().await;
+            let (pool, _scratch) = scratch_pool().await;
             seed_parents(&pool).await;
             for table in PARTITIONED_TABLES {
                 create_child(
@@ -2587,15 +3110,27 @@ mod tests {
                     .months
                     .iter()
                     .all(|month| month.kind == MonthCoverageKind::CoveredByMonthly));
+                assert!(
+                    !table.degraded(),
+                    "{} is historical in September",
+                    table.table
+                );
             }
+
+            let september = audit_partition_catalog_report_at(&pool, 3, fixed_now()).await;
+            assert_eq!(september.outcome(), PartitionAuditOutcome::Ok);
+            let august = Utc.with_ymd_and_hms(2026, 8, 15, 12, 0, 0).unwrap();
+            let august = audit_partition_catalog_report_at(&pool, 3, august).await;
+            assert!(august.serving_safe());
+            assert!(august.tables.iter().all(PartitionTableAudit::degraded));
+            assert_eq!(august.outcome(), PartitionAuditOutcome::Degraded);
             assert_eq!(catalog_snapshot(&pool).await, before);
-            drop_schema(&admin, &schema).await;
         }
 
         #[tokio::test]
         #[ignore = "requires Postgres"]
         async fn uncovered_months_are_created_with_trigger_parity() {
-            let (pool, admin, schema) = scratch_pool().await;
+            let (pool, _scratch) = scratch_pool().await;
             seed_parents(&pool).await;
             for table in PARTITIONED_TABLES {
                 create_child(
@@ -2619,13 +3154,12 @@ mod tests {
                 .iter()
                 .all(|month| month.kind == MonthCoverageKind::CoveredByMonthly)
                 && table.missing_trigger_count() == 0));
-            drop_schema(&admin, &schema).await;
         }
 
         #[tokio::test]
         #[ignore = "requires Postgres"]
         async fn default_partitions_report_occupancy_without_mutation() {
-            let (pool, admin, schema) = scratch_pool().await;
+            let (pool, _scratch) = scratch_pool().await;
             seed_uncovered_layout(&pool).await;
             for table in PARTITIONED_TABLES {
                 sqlx::query(sqlx::AssertSqlSafe(format!(
@@ -2719,13 +3253,12 @@ mod tests {
                     .await
                     .expect("check canonical relation"));
             }
-            drop_schema(&admin, &schema).await;
         }
 
         #[tokio::test]
         #[ignore = "requires Postgres"]
         async fn parent_default_does_not_mask_gap_below_explicit_sibling() {
-            let (pool, admin, schema) = scratch_pool().await;
+            let (pool, _scratch) = scratch_pool().await;
             seed_parents(&pool).await;
             for (table, column) in [("events", "created_at"), ("delivery_log", "delivered_at")] {
                 create_child(
@@ -2798,13 +3331,13 @@ mod tests {
             .execute(&pool)
             .await
             .is_err());
-            drop_schema(&admin, &schema).await;
         }
 
         #[tokio::test]
         #[ignore = "requires Postgres"]
         async fn total_audit_timeout_bounds_blocked_occupancy_probes() {
-            let (pool, admin, schema) = scratch_pool().await;
+            let (pool, scratch) = scratch_pool().await;
+            let schema = scratch.name.as_str();
             seed_uncovered_layout(&pool).await;
             for table in PARTITIONED_TABLES {
                 sqlx::query(sqlx::AssertSqlSafe(format!(
@@ -2814,7 +3347,11 @@ mod tests {
                 .await
                 .expect("create default partition");
             }
-            let mut blocker = admin.begin().await.expect("begin blocking transaction");
+            let mut blocker = scratch
+                .admin
+                .begin()
+                .await
+                .expect("begin blocking transaction");
             sqlx::query(sqlx::AssertSqlSafe(format!(
                 "LOCK TABLE {schema}.events_default IN ACCESS EXCLUSIVE MODE"
             )))
@@ -2839,13 +3376,12 @@ mod tests {
                 .all(|error| error.error.contains("exceeded total timeout of 100ms")));
 
             blocker.rollback().await.expect("release blocking lock");
-            drop_schema(&admin, &schema).await;
         }
 
         #[tokio::test]
         #[ignore = "requires Postgres"]
         async fn create_pins_non_iso_date_style() {
-            let (pool, admin, schema) = scratch_pool_with_max_connections(1).await;
+            let (pool, _scratch) = scratch_pool_with_max_connections(1).await;
             seed_uncovered_layout(&pool).await;
             sqlx::query("SET DateStyle TO 'SQL, DMY'")
                 .execute(&pool)
@@ -2868,13 +3404,12 @@ mod tests {
                 .await
                 .expect("show DateStyle");
             assert_eq!(date_style, "SQL, DMY");
-            drop_schema(&admin, &schema).await;
         }
 
         #[tokio::test]
         #[ignore = "requires Postgres"]
         async fn create_pins_non_utc_time_zone() {
-            let (pool, admin, schema) = scratch_pool_with_max_connections(1).await;
+            let (pool, _scratch) = scratch_pool_with_max_connections(1).await;
             seed_uncovered_layout(&pool).await;
             sqlx::query("SET TimeZone TO 'America/Los_Angeles'")
                 .execute(&pool)
@@ -2897,13 +3432,12 @@ mod tests {
                 .await
                 .expect("show TimeZone");
             assert_eq!(time_zone, "America/Los_Angeles");
-            drop_schema(&admin, &schema).await;
         }
 
         #[tokio::test]
         #[ignore = "requires Postgres"]
         async fn disabled_child_trigger_degrades_parity() {
-            let (pool, admin, schema) = scratch_pool().await;
+            let (pool, _scratch) = scratch_pool().await;
             seed_fresh_layout(&pool).await;
             sqlx::query("ALTER TABLE events_p_future DISABLE TRIGGER partition_probe")
                 .execute(&pool)
@@ -2922,13 +3456,12 @@ mod tests {
             assert!(events.children.iter().any(|child| {
                 child.name == "events_p_future" && child.missing_triggers == ["partition_probe"]
             }));
-            drop_schema(&admin, &schema).await;
         }
 
         #[tokio::test]
         #[ignore = "requires Postgres"]
         async fn always_enabled_parent_trigger_preserves_parity() {
-            let (pool, admin, schema) = scratch_pool().await;
+            let (pool, _scratch) = scratch_pool().await;
             seed_fresh_layout(&pool).await;
             sqlx::query("ALTER TABLE events ENABLE ALWAYS TRIGGER partition_probe")
                 .execute(&pool)
@@ -2948,13 +3481,13 @@ mod tests {
                 .children
                 .iter()
                 .all(|child| child.missing_triggers.is_empty()));
-            drop_schema(&admin, &schema).await;
         }
 
         #[tokio::test]
         #[ignore = "requires Postgres"]
         async fn disabled_nested_leaf_trigger_degrades_parity() {
-            let (pool, admin, schema) = scratch_pool().await;
+            let (pool, scratch) = scratch_pool().await;
+            let schema = scratch.name.as_str();
             seed_parents(&pool).await;
             for (table, column) in [("events", "created_at"), ("delivery_log", "delivered_at")] {
                 let nested = format!("{table}_nested");
@@ -3021,18 +3554,18 @@ mod tests {
             assert_eq!(events.missing_trigger_count(), 1);
             let expected = format!(
                 "{}:partition_probe",
-                qualified_relation_name(&schema, "events_nested_first")
+                qualified_relation_name(schema, "events_nested_first")
             );
             assert!(events.children.iter().any(|child| {
                 child.name == "events_nested" && child.missing_triggers == [expected.as_str()]
             }));
-            drop_schema(&admin, &schema).await;
         }
 
         #[tokio::test]
         #[ignore = "requires Postgres"]
         async fn child_only_nested_leaf_trigger_degrades_parity() {
-            let (pool, admin, schema) = scratch_pool().await;
+            let (pool, scratch) = scratch_pool().await;
+            let schema = scratch.name.as_str();
             seed_parents(&pool).await;
             create_nested_child(
                 &pool,
@@ -3078,31 +3611,29 @@ mod tests {
             assert_eq!(events.extra_trigger_count(), 1);
             let expected = format!(
                 "{}:child_only_probe",
-                qualified_relation_name(&schema, "events_nested_first")
+                qualified_relation_name(schema, "events_nested_first")
             );
             assert!(events.children.iter().any(|child| {
                 child.name == "events_nested" && child.extra_triggers == [expected.as_str()]
             }));
-            drop_schema(&admin, &schema).await;
         }
 
         #[tokio::test]
         #[ignore = "requires Postgres"]
         async fn catch_all_skips_create_without_catalog_mutation() {
-            let (pool, admin, schema) = scratch_pool().await;
+            let (pool, _scratch) = scratch_pool().await;
             seed_fresh_layout(&pool).await;
             let before = catalog_snapshot(&pool).await;
             ensure_future_partitions_at(&pool, 3, true, fixed_now())
                 .await
                 .expect("covered no-op");
             assert_eq!(catalog_snapshot(&pool).await, before);
-            drop_schema(&admin, &schema).await;
         }
 
         #[tokio::test]
         #[ignore = "requires Postgres"]
         async fn kill_switch_audits_but_does_not_create() {
-            let (pool, admin, schema) = scratch_pool().await;
+            let (pool, _scratch) = scratch_pool().await;
             seed_parents(&pool).await;
             for table in PARTITIONED_TABLES {
                 create_child(
@@ -3127,13 +3658,12 @@ mod tests {
                     .months
                     .iter()
                     .all(|month| month.kind == MonthCoverageKind::Uncovered)));
-            drop_schema(&admin, &schema).await;
         }
 
         #[tokio::test]
         #[ignore = "requires Postgres"]
         async fn nested_children_without_leaves_do_not_prove_coverage() {
-            let (pool, admin, schema) = scratch_pool().await;
+            let (pool, _scratch) = scratch_pool().await;
             seed_parents(&pool).await;
             for (table, column) in [("events", "created_at"), ("delivery_log", "delivered_at")] {
                 create_nested_child(
@@ -3159,13 +3689,12 @@ mod tests {
                     && table.months[0].kind == MonthCoverageKind::Uncovered
             }));
             assert_eq!(catalog_snapshot(&pool).await, before);
-            drop_schema(&admin, &schema).await;
         }
 
         #[tokio::test]
         #[ignore = "requires Postgres"]
         async fn nested_descendant_leaves_prove_coverage_but_remain_degraded() {
-            let (pool, admin, schema) = scratch_pool().await;
+            let (pool, _scratch) = scratch_pool().await;
             seed_parents(&pool).await;
             for (table, column) in [("events", "created_at"), ("delivery_log", "delivered_at")] {
                 let nested = format!("{table}_nested");
@@ -3201,13 +3730,12 @@ mod tests {
                     && table.months[0].kind == MonthCoverageKind::CoveredByMonthly
             }));
             assert_eq!(catalog_snapshot(&pool).await, before);
-            drop_schema(&admin, &schema).await;
         }
 
         #[tokio::test]
         #[ignore = "requires Postgres"]
         async fn occupied_nested_catch_all_is_reported_on_leaf_and_root_child() {
-            let (pool, admin, schema) = scratch_pool().await;
+            let (pool, _scratch) = scratch_pool().await;
             seed_parents(&pool).await;
             for (table, column) in [("events", "created_at"), ("delivery_log", "delivered_at")] {
                 let nested = format!("{table}_nested");
@@ -3266,13 +3794,12 @@ mod tests {
             assert!(delivery_log.coverage_leaves.iter().any(|leaf| {
                 leaf.name == "delivery_log_nested_future" && leaf.catch_all_nonempty == Some(false)
             }));
-            drop_schema(&admin, &schema).await;
         }
 
         #[tokio::test]
         #[ignore = "requires Postgres"]
         async fn nested_different_partition_key_does_not_prove_coverage() {
-            let (pool, admin, schema) = scratch_pool().await;
+            let (pool, _scratch) = scratch_pool().await;
             seed_parents(&pool).await;
             for table in PARTITIONED_TABLES {
                 let nested = format!("{table}_nested");
@@ -3305,13 +3832,12 @@ mod tests {
                     && table.coverage_leaves.is_empty()
                     && table.months[0].kind == MonthCoverageKind::Uncovered
             }));
-            drop_schema(&admin, &schema).await;
         }
 
         #[tokio::test]
         #[ignore = "requires Postgres"]
         async fn audit_pins_non_iso_session_rendering() {
-            let (pool, admin, schema) = scratch_pool_with_max_connections(1).await;
+            let (pool, _scratch) = scratch_pool_with_max_connections(1).await;
             seed_fresh_layout(&pool).await;
             sqlx::query("SET DateStyle TO 'SQL, DMY'")
                 .execute(&pool)
@@ -3340,13 +3866,12 @@ mod tests {
                 .expect("show TimeZone");
             assert_eq!(date_style, "SQL, DMY");
             assert_eq!(time_zone, "America/Los_Angeles");
-            drop_schema(&admin, &schema).await;
         }
 
         #[tokio::test]
         #[ignore = "requires Postgres"]
         async fn audit_transaction_applies_and_restores_statement_timeout() {
-            let (pool, admin, schema) = scratch_pool_with_max_connections(1).await;
+            let (pool, _scratch) = scratch_pool_with_max_connections(1).await;
             sqlx::query("SET statement_timeout TO '37s'")
                 .execute(&pool)
                 .await
@@ -3374,13 +3899,12 @@ mod tests {
                 .await
                 .expect("show restored statement timeout");
             assert_eq!(restored, "37s");
-            drop_schema(&admin, &schema).await;
         }
 
         #[tokio::test]
         #[ignore = "requires Postgres"]
         async fn statement_triggers_are_not_part_of_leaf_parity() {
-            let (pool, admin, schema) = scratch_pool().await;
+            let (pool, _scratch) = scratch_pool().await;
             seed_parents(&pool).await;
             for table in PARTITIONED_TABLES {
                 sqlx::query(sqlx::AssertSqlSafe(format!(
@@ -3416,13 +3940,12 @@ mod tests {
                     && table.missing_trigger_count() == 0
                     && table.extra_trigger_count() == 0
             }));
-            drop_schema(&admin, &schema).await;
         }
 
         #[tokio::test]
         #[ignore = "requires Postgres"]
         async fn canonical_name_with_wrong_bounds_is_a_real_creation_error() {
-            let (pool, admin, schema) = scratch_pool().await;
+            let (pool, _scratch) = scratch_pool().await;
             seed_parents(&pool).await;
             for table in PARTITIONED_TABLES {
                 create_child(
@@ -3458,13 +3981,13 @@ mod tests {
                 .find(|table| table.table == "events")
                 .expect("events audit");
             assert_eq!(events.months[0].kind, MonthCoverageKind::Uncovered);
-            drop_schema(&admin, &schema).await;
         }
 
         #[tokio::test]
         #[ignore = "requires Postgres"]
         async fn canonical_name_attached_to_wrong_parent_is_a_real_creation_error() {
-            let (pool, admin, schema) = scratch_pool().await;
+            let (pool, scratch) = scratch_pool().await;
+            let schema = scratch.name.as_str();
             seed_parents(&pool).await;
             for table in PARTITIONED_TABLES {
                 create_child(
@@ -3515,18 +4038,17 @@ mod tests {
                 )
                 "#,
             )
-            .bind(&schema)
+            .bind(schema)
             .fetch_one(&pool)
             .await
             .expect("check attachment");
             assert!(!attached_to_events);
-            drop_schema(&admin, &schema).await;
         }
 
         #[tokio::test]
         #[ignore = "requires Postgres"]
         async fn unrelated_canonical_relation_is_a_real_creation_error() {
-            let (pool, admin, schema) = scratch_pool().await;
+            let (pool, _scratch) = scratch_pool().await;
             seed_parents(&pool).await;
             for table in PARTITIONED_TABLES {
                 create_child(
@@ -3551,13 +4073,12 @@ mod tests {
             assert!(relation_name_exists(&pool, "events_p2026_09")
                 .await
                 .expect("query unrelated relation"));
-            drop_schema(&admin, &schema).await;
         }
 
         #[tokio::test]
         #[ignore = "requires Postgres"]
         async fn anomalous_child_and_trigger_mismatch_degrade_without_aborting() {
-            let (pool, admin, schema) = scratch_pool().await;
+            let (pool, _scratch) = scratch_pool().await;
             seed_parents(&pool).await;
             for table in PARTITIONED_TABLES {
                 create_child(
@@ -3605,7 +4126,6 @@ mod tests {
                         .iter()
                         .any(|child| child.extra_triggers == ["child_only_probe"])
             }));
-            drop_schema(&admin, &schema).await;
         }
     }
 }

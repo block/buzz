@@ -19,12 +19,22 @@ fn agent_keyring_name(pubkey: &str) -> String {
     format!("agent:{pubkey}")
 }
 
+/// Process-wide: a confined child-process test turns this on so agent keys
+/// stay inline, as in a build without a keychain.
+#[cfg(test)]
+pub(crate) static NO_KEYCHAIN_FOR_TEST: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// The agent secret store. `None` when the build has no keyring backend, in
 /// which case agent keys stay inline in the `0o600` JSON file. Uses
 /// `SecretStore::shared` so identity and agent callers share one instance —
 /// and therefore one in-memory cache and one mutex — preventing last-writer-wins
 /// races on concurrent blob writes.
 fn agent_secret_store() -> Option<&'static SecretStore> {
+    #[cfg(test)]
+    if NO_KEYCHAIN_FOR_TEST.load(std::sync::atomic::Ordering::SeqCst) {
+        return None;
+    }
     if cfg!(feature = "system-keyring") {
         Some(SecretStore::shared(keyring_service()))
     } else {

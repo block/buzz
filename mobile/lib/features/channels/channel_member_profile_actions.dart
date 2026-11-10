@@ -1,12 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/app_list.dart';
 import '../../shared/widgets/app_list_card.dart';
-import '../../shared/widgets/modal_presentation.dart';
+import '../../shared/widgets/confirmation_dialog.dart';
 import 'channel.dart';
 import 'channel_identity_names_provider.dart';
 import 'channel_management_provider.dart';
@@ -93,22 +93,11 @@ class ChannelMemberProfileActions extends HookConsumerWidget {
           final label = ref
               .read(channelIdentityNamesProvider(channel.id))
               .labelFor(target);
-          final confirmed = await showBuzzDialog<bool>(
+          final confirmed = await showDestructiveConfirmation(
             context: context,
-            builder: (dialogContext) => AlertDialog(
-              title: const Text('Remove from channel?'),
-              content: Text('Remove $label from ${currentChannel.name}?'),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.of(dialogContext).pop(false),
-                  child: const Text('Cancel'),
-                ),
-                TextButton(
-                  onPressed: () => Navigator.of(dialogContext).pop(true),
-                  child: const Text('Remove'),
-                ),
-              ],
-            ),
+            title: 'Remove from channel?',
+            message: 'Remove $label from ${currentChannel.name}?',
+            confirmLabel: 'Remove',
           );
           if (!context.mounted || confirmed != true || !stillAllowed()) return;
           await ref
@@ -144,13 +133,13 @@ class ChannelMemberProfileActions extends HookConsumerWidget {
             if (!member.isBot) ...[
               if (member.role != 'admin')
                 AppListRow(
-                  icon: LucideIcons.shieldCheck,
+                  icon: BuzzIcons.shieldCheck,
                   title: 'Make channel admin',
                   onTap: busy.value ? null : () => perform(role: 'admin'),
                 ),
               if (member.role == 'admin' || member.role == 'guest')
                 AppListRow(
-                  icon: LucideIcons.user,
+                  icon: BuzzIcons.user,
                   title: member.role == 'guest'
                       ? 'Make member'
                       : 'Change to member',
@@ -158,7 +147,7 @@ class ChannelMemberProfileActions extends HookConsumerWidget {
                 ),
             ],
             AppListRow(
-              icon: LucideIcons.userMinus,
+              icon: BuzzIcons.userMinus,
               title: 'Remove from channel',
               titleColor: context.colors.error,
               onTap: busy.value ? null : () => perform(),

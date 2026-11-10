@@ -9,6 +9,19 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:shared_preferences/shared_preferences.dart';
 
+void _setTheme(ProviderContainer container, String theme) {
+  final current = container.read(communityThemeProvider);
+  container
+      .read(communityThemeProvider.notifier)
+      .setPreference(
+        CommunityThemePreference(
+          theme: theme,
+          accent: current.accent,
+          followSystem: current.followSystem,
+        ),
+      );
+}
+
 void main() {
   test('delayed absence seeds the intervening local edit', () async {
     SharedPreferences.setMockInitialValues({});
@@ -31,7 +44,7 @@ void main() {
     addTearDown(container.dispose);
     container.listen(communityThemeProvider, (_, _) {}, fireImmediately: true);
 
-    container.read(communityThemeProvider.notifier).setTheme('dracula');
+    _setTheme(container, 'dracula');
     history.complete([]);
     await _waitUntil(() => session.published != null);
 
@@ -65,7 +78,7 @@ void main() {
 
     history.complete([]);
     await storage.cacheWriteStarted.future;
-    container.read(communityThemeProvider.notifier).setTheme('dracula');
+    _setTheme(container, 'dracula');
     storage.allowCacheWrite.complete();
     storage.allowOutboxWrite.complete();
     await _waitUntil(() => session.published != null);
@@ -108,8 +121,7 @@ void main() {
       addTearDown(subscription.close);
       await session.subscribed.future;
 
-      final notifier = container.read(communityThemeProvider.notifier);
-      notifier.setTheme('dracula');
+      _setTheme(container, 'dracula');
       const local = CommunityThemePreference(
         theme: 'dracula',
         accent: '#3b82f6',
@@ -160,7 +172,7 @@ void main() {
       addTearDown(subscription.close);
       await session.subscribed.future;
 
-      container.read(communityThemeProvider.notifier).setTheme('dracula');
+      _setTheme(container, 'dracula');
       expect(container.read(communityThemeProvider).theme, 'dracula');
       await storage.cacheWriteStarted.future;
 

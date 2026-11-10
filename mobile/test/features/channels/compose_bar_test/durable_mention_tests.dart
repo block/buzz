@@ -73,7 +73,7 @@ void durableMentionTests() {
         tester.widget<TextField>(find.byType(TextField)).controller!.text,
         draft,
       );
-      await tester.tap(find.byIcon(LucideIcons.arrowUp));
+      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
       await tester.pumpAndSettle();
       expect(sent, [first, second]);
       expect(
@@ -89,7 +89,7 @@ void durableMentionTests() {
       await tester.pumpAndSettle();
       await tester.tap(find.text(draft.trim()));
       await tester.pumpAndSettle();
-      await tester.tap(find.byIcon(LucideIcons.arrowUp));
+      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
       await tester.pumpAndSettle();
       expect(sent, [first, second]);
     },
@@ -183,7 +183,7 @@ void durableMentionTests() {
       await mount();
       await tester.tap(find.text('@Helper Bot'));
       await tester.pumpAndSettle();
-      await tester.tap(find.byIcon(LucideIcons.arrowUp));
+      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
       await tester.pumpAndSettle();
       expect(events.where((e) => e['kind'] == 9000), isEmpty);
       if (fallback == 'human') {

@@ -7,7 +7,7 @@ import 'package:buzz/features/profile/profile_avatar_crop_page.dart';
 import 'package:buzz/features/profile/avatar_background_grid.dart';
 import 'package:buzz/features/profile/avatar_editor_option_button.dart';
 import 'package:buzz/features/profile/animated_avatar_capture.dart';
-import 'package:buzz/features/profile/emoji_avatar_tile.dart';
+import 'package:buzz/shared/widgets/emoji_avatar_tile.dart';
 import 'package:buzz/features/profile/image_avatar_capture.dart';
 import 'package:buzz/shared/widgets/immediate_page_route.dart';
 import 'package:buzz/features/profile/profile_provider.dart';
@@ -426,14 +426,15 @@ void main() {
     await tester.tap(find.text('Photo Library'));
     await _waitForAvatarCropToLoad(tester);
     expect(find.text('Position Photo'), findsOneWidget);
+    expect(tester.getSize(find.text('Position Photo')).width, greaterThan(0));
     final cancelButton = find.ancestor(
-      of: find.text('Cancel'),
+      of: find.text('Back'),
       matching: find.byType(TextButton),
     );
     final saveButton = find.byKey(const ValueKey('avatar-crop-use-photo'));
     expect(tester.getRect(cancelButton).left, Grid.gutter);
     expect(
-      tester.getSize(find.text('Cancel')).width,
+      tester.getSize(find.text('Back')).width,
       lessThan(tester.getSize(cancelButton).width),
     );
     expect(
@@ -1059,7 +1060,6 @@ class _FakeMediaUploadService extends MediaUploadService {
          pickGalleryVideo: () async => null,
        );
 
-  var _camera = false;
   final bool delayGallery;
   final bool failImagePreparation;
   final _gallerySelection = Completer<XFile?>();
@@ -1073,18 +1073,11 @@ class _FakeMediaUploadService extends MediaUploadService {
 
   @override
   Future<XFile?> pickGalleryImage() async {
-    _camera = false;
     if (delayGallery) return _gallerySelection.future;
     return _image();
   }
 
   void completeGallerySelection() => _gallerySelection.complete(_image());
-
-  @override
-  Future<XFile?> captureImage() async {
-    _camera = true;
-    return _image();
-  }
 
   @override
   Future<Uint8List> prepareImageBytes(XFile image) async {
@@ -1101,10 +1094,8 @@ class _FakeMediaUploadService extends MediaUploadService {
   }) async {
     uploadCount++;
     return BlobDescriptor(
-      url: _camera
-          ? 'https://relay.example/camera.png'
-          : 'https://relay.example/profile.png',
-      sha256: _camera ? 'camera-hash' : 'hash',
+      url: 'https://relay.example/profile.png',
+      sha256: 'hash',
       size: bytes.length,
       type: mimeType,
       uploaded: 1,

@@ -1,7 +1,6 @@
 /**
- * The real discovery hook passes the selected runtime to the label code:
- * switching Claude Code -> Codex -> Claude Code relabels the same cached
- * discovery response.
+ * Exercises the real discovery hook: runtime switches relabel the same cached
+ * response, and a failed discovery always settles instead of loading forever.
  */
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
@@ -15,10 +14,11 @@ const discovered = {
   models: [{ id: "claude-sonnet-5", name: "Sonnet", description: null }],
 };
 const calls = [];
+let discover = () => Promise.resolve(discovered);
 const tauriMock = {
   invoke(command) {
     calls.push(command);
-    if (command === "discover_agent_models") return Promise.resolve(discovered);
+    if (command === "discover_agent_models") return discover();
     return Promise.reject(new Error(`unmocked Tauri command: ${command}`));
   },
   transformCallback() {
@@ -48,7 +48,14 @@ let container;
 afterEach(() => {
   act(() => root?.unmount());
   container?.remove();
+  discover = () => Promise.resolve(discovered);
 });
+
+function mountRoot() {
+  container = document.createElement("div");
+  document.body.appendChild(container);
+  root = createRoot(container);
+}
 
 let labels = null;
 function Probe({ selectedRuntime }) {
@@ -71,9 +78,7 @@ async function render(id) {
 }
 
 test("hook relabels discovered models when the runtime switches", async () => {
-  container = document.createElement("div");
-  document.body.appendChild(container);
-  root = createRoot(container);
+  mountRoot();
 
   await render("claude");
   assert.deepEqual(labels, [
@@ -91,4 +96,35 @@ test("hook relabels discovered models when the runtime switches", async () => {
     calls.filter((command) => command === "discover_agent_models").length,
     1,
   );
+});
+
+test("a missing Databricks host settles discovery instead of loading forever", async () => {
+  discover = () =>
+    Promise.reject(
+      "buzz-acp models failed (exit 1): config: DATABRICKS_MODEL required",
+    );
+  let state = null;
+  function DatabricksProbe() {
+    state = usePersonaModelDiscovery({
+      envVars,
+      isCustomProviderEditing: false,
+      modelFieldVisible: true,
+      open: true,
+      provider: "databricks_v2",
+      selectedRuntime: runtime("buzz-agent"),
+    });
+    return null;
+  }
+  mountRoot();
+
+  await act(async () => {
+    root.render(React.createElement(DatabricksProbe));
+  });
+  // databricks_v2 discovery is debounced before the IPC call.
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 400));
+  });
+
+  assert.equal(state.modelDiscoveryLoading, false);
+  assert.match(state.modelDiscoveryStatus?.message ?? "", /DATABRICKS_HOST/);
 });

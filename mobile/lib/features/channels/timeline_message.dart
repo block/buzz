@@ -4,7 +4,10 @@ import 'package:flutter/foundation.dart';
 
 import '../../shared/relay/relay.dart';
 import '../../shared/custom_emoji/custom_emoji.dart';
+import '../../shared/mentions/mention_tags.dart';
 import 'channel_window.dart';
+import 'message_media.dart';
+import 'message_content/bubble_segments.dart';
 
 enum SystemEventType {
   memberJoined,
@@ -86,7 +89,9 @@ class SystemEvent {
     try {
       final content = jsonDecode(event.content);
       if (content is Map) {
-        ephemeralChannelId = _readString(content, 'ephemeral_channel_id');
+        ephemeralChannelId = _canonicalHuddleRoomId(
+          content['ephemeral_channel_id'],
+        );
       }
     } catch (_) {
       // The row still renders, but joining requires the validated room ID.
@@ -110,7 +115,7 @@ class SystemEvent {
           return '$actor joined the channel';
         }
         final target = resolveLabel(targetPubkey);
-        return '$target was added by $actor';
+        return '$actor added $target to the channel';
       }(),
       SystemEventType.memberLeft => '$actor left the channel',
       SystemEventType.memberRemoved => () {
@@ -118,9 +123,9 @@ class SystemEvent {
         return '$actor removed $target from the channel';
       }(),
       SystemEventType.topicChanged =>
-        '$actor ${_describeTextFieldChange('topic', topic)}',
+        '$actor ${describeChannelTextFieldChange('topic', topic)}',
       SystemEventType.purposeChanged =>
-        '$actor ${_describeTextFieldChange('purpose', purpose)}',
+        '$actor ${describeChannelTextFieldChange('purpose', purpose)}',
       SystemEventType.channelCreated => '$actor created this channel',
       SystemEventType.channelArchived => '$actor archived this channel',
       SystemEventType.channelUnarchived => '$actor unarchived this channel',
@@ -141,7 +146,7 @@ class SystemEvent {
 ///
 /// Mirrors `describeChannelTextFieldChange` in
 /// `desktop/src/features/messages/lib/systemEventCopy.ts`.
-String _describeTextFieldChange(String field, String? value) {
+String describeChannelTextFieldChange(String field, String? value) {
   final trimmed = value?.trim();
   if (trimmed == null || trimmed.isEmpty) {
     return 'cleared the $field';
@@ -211,7 +216,11 @@ class TimelineMessage {
   /// Attachment messages stay visually distinct from surrounding messages,
   /// even when several are sent by the same author in quick succession.
   bool get hasAttachments =>
-      tags.any((tag) => tag.isNotEmpty && tag.first == 'imeta');
+      tags.any((tag) => tag.isNotEmpty && tag.first == 'imeta') ||
+      messageBubbleSegments(
+        content,
+        parseImetaTags(tags),
+      ).any((segment) => segment.attachment);
 }
 
 @immutable
@@ -248,55 +257,39 @@ class MainTimelineEntry {
   const MainTimelineEntry({required this.message, this.summary});
 }
 
-const _membershipGroupWindowSeconds = 5 * 60;
-
-@immutable
-class _MembershipChange {
-  final String? actor;
-  final bool isSelfJoin;
-
-  const _MembershipChange({required this.actor, required this.isSelfJoin});
+/// Whether [message] is a self-join or a voluntary leave. Like desktop, the
+/// timeline leaves these out: only additions by someone else and removals
+/// show as membership notices.
+bool isHiddenMembershipNotice(TimelineMessage message) {
+  final event = message.systemEvent;
+  if (!message.isSystem || event == null) return false;
+  if (event.type == SystemEventType.memberLeft) return true;
+  if (event.type != SystemEventType.memberJoined) return false;
+  final actor = event.actorPubkey?.trim().toLowerCase();
+  return actor != null &&
+      actor.isNotEmpty &&
+      actor == event.targetPubkey?.trim().toLowerCase();
 }
 
-_MembershipChange? _membershipChange(MainTimelineEntry entry) {
+bool _isGroupableMembership(MainTimelineEntry entry) {
   final event = entry.message.systemEvent;
-  if (!entry.message.isSystem || event?.type != SystemEventType.memberJoined) {
-    return null;
+  if (!entry.message.isSystem ||
+      (event?.type != SystemEventType.memberJoined &&
+          event?.type != SystemEventType.memberRemoved)) {
+    return false;
   }
-
-  final actor = event?.actorPubkey?.trim().toLowerCase();
-  final target = event?.targetPubkey?.trim().toLowerCase();
-  if (actor == null || actor.isEmpty || target == null || target.isEmpty) {
-    return null;
-  }
-
-  final isSelfJoin = actor == target;
-  return _MembershipChange(
-    actor: isSelfJoin ? null : actor,
-    isSelfJoin: isSelfJoin,
-  );
+  final actor = event?.actorPubkey?.trim();
+  final target = event?.targetPubkey?.trim();
+  return actor != null &&
+      actor.isNotEmpty &&
+      target != null &&
+      target.isNotEmpty;
 }
 
-bool _membershipChangesCanGroup(
-  _MembershipChange first,
-  _MembershipChange second,
-) {
-  return first.isSelfJoin == second.isSelfJoin &&
-      (first.isSelfJoin || first.actor == second.actor);
-}
-
-bool _isSameLocalDay(int firstTimestamp, int secondTimestamp) {
-  final first = DateTime.fromMillisecondsSinceEpoch(firstTimestamp * 1000);
-  final second = DateTime.fromMillisecondsSinceEpoch(secondTimestamp * 1000);
-  return first.year == second.year &&
-      first.month == second.month &&
-      first.day == second.day;
-}
-
-/// Groups consecutive membership arrivals using the same display rule as
-/// desktop: matching additions (or self-joins) within a fixed five-minute
-/// window become one render item. Other events and local day boundaries break
-/// the group.
+/// Groups each uninterrupted run of additions and removals into one render
+/// item, matching the desktop timeline: any other entry breaks a run, but
+/// elapsed time, local day boundaries and different actors do not. Callers
+/// leave out [isHiddenMembershipNotice] entries first.
 ///
 /// Each inner list is one renderable timeline item. Non-grouped entries are
 /// returned as single-item lists.
@@ -306,28 +299,13 @@ List<List<MainTimelineEntry>> groupMembershipTimelineEntries(
   final groupsByStart = <int, int>{};
 
   for (var end = entries.length - 1; end >= 0;) {
-    final newestEntry = entries[end];
-    final newestChange = _membershipChange(newestEntry);
-    if (newestChange == null) {
+    if (!_isGroupableMembership(entries[end])) {
       end -= 1;
       continue;
     }
 
     var start = end;
-    while (start > 0) {
-      final candidate = entries[start - 1];
-      final candidateChange = _membershipChange(candidate);
-      if (candidateChange == null ||
-          !_membershipChangesCanGroup(candidateChange, newestChange) ||
-          !_isSameLocalDay(
-            candidate.message.createdAt,
-            newestEntry.message.createdAt,
-          ) ||
-          newestEntry.message.createdAt < candidate.message.createdAt ||
-          newestEntry.message.createdAt - candidate.message.createdAt >
-              _membershipGroupWindowSeconds) {
-        break;
-      }
+    while (start > 0 && _isGroupableMembership(entries[start - 1])) {
       start -= 1;
     }
 
@@ -349,6 +327,10 @@ List<List<MainTimelineEntry>> groupMembershipTimelineEntries(
   return result;
 }
 
+/// Debug-only instrumentation for actual timeline formatting invocations.
+@visibleForTesting
+VoidCallback? debugOnFormatTimeline;
+
 /// Process a chronologically-sorted list of [NostrEvent]s into a list of
 /// [TimelineMessage]s, applying deletions, edits, reactions, and system event
 /// parsing.
@@ -359,6 +341,10 @@ List<TimelineMessage> formatTimeline(
   List<NostrEvent> events, {
   String? currentPubkey,
 }) {
+  assert(() {
+    debugOnFormatTimeline?.call();
+    return true;
+  }());
   // 1. Collect deletion targets. Both kind:5 (NIP-09) and kind:9005
   // (Buzz-native) are deletion markers; mirror desktop's behavior.
   final deletedIds = <String>{};
@@ -453,6 +439,9 @@ List<TimelineMessage> formatTimeline(
 
     if (event.kind == EventKind.systemMessage) {
       final systemEvent = SystemEvent.fromContent(event.content);
+      // Purpose is legacy metadata with no mobile surface. Omit its activity
+      // before grouping so it cannot leave blank rows or split sender groups.
+      if (systemEvent?.type == SystemEventType.purposeChanged) continue;
       if (systemEvent != null) {
         result.add(
           TimelineMessage(
@@ -498,10 +487,7 @@ List<TimelineMessage> formatTimeline(
       // Include both notify (`p`) and reference-only (`mention`) tags —
       // mirrors desktop's resolveMentionNames, so names in messages sent
       // "without inviting" still render as mentions.
-      final mentions = <String>[
-        for (final tag in effectiveTags)
-          if (tag.length >= 2 && (tag[0] == 'p' || tag[0] == 'mention')) tag[1],
-      ];
+      final mentions = mentionedPubkeysFromTags(effectiveTags).toList();
 
       final threadRef = event.threadReference;
 
@@ -532,7 +518,13 @@ List<TimelineMessage> formatTimeline(
 List<MainTimelineEntry> buildMainTimelineEntries(
   List<TimelineMessage> messages, {
   Map<String, ChannelWindowThreadSummary>? relaySummaries,
+  bool flat = false,
 }) {
+  if (flat) {
+    return [
+      for (final message in messages) MainTimelineEntry(message: message),
+    ];
+  }
   // Index descendant stats by ancestor, so a nested reply updates every summary
   // above it and not only the summary of its direct parent.
   final descendantStats = _buildDescendantStats(messages);
@@ -762,4 +754,25 @@ String? _lastETag(List<List<String>> tags) {
 String? _readString(Map<dynamic, dynamic> json, String key) {
   final value = json[key];
   return value is String ? value : null;
+}
+
+// Match Rust Uuid::parse_str: simple, hyphenated, URN and braced forms.
+String? _canonicalHuddleRoomId(Object? value) {
+  if (value is! String) return null;
+  var text = value;
+  if (text.length == 45 && text.startsWith('urn:uuid:')) {
+    text = text.substring(9);
+  } else if (text.length == 38 && text.startsWith('{') && text.endsWith('}')) {
+    text = text.substring(1, 37);
+  }
+  if (RegExp(r'^[0-9a-fA-F]{32}$').hasMatch(text)) {
+    text =
+        '${text.substring(0, 8)}-${text.substring(8, 12)}-${text.substring(12, 16)}-${text.substring(16, 20)}-${text.substring(20)}';
+  }
+  if (!RegExp(
+    r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$',
+  ).hasMatch(text)) {
+    return null;
+  }
+  return text.toLowerCase();
 }

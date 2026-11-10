@@ -22,10 +22,12 @@ use buzz_audit::{AuditAction, NewAuditEntry};
 use buzz_auth::DenialClass;
 use buzz_core::tenant::TenantContext;
 use buzz_media::auth::BlossomStrictness;
+use buzz_media::thumbnail::{Thumb, JPEG};
 use buzz_media::{
     BlobDescriptor, BlossomDenialKind, MediaError, UploadAttribution, UploadNetworkInfo,
 };
 
+use crate::access::{AccessSlot, AuthMethod, AuthResult};
 use crate::state::AppState;
 
 /// Lightweight pre-auth upload context: tenant + route mode only.
@@ -88,7 +90,7 @@ enum UploadRouteMode {
 ///
 /// Non-Blossom errors (`blossom_denial_kind()` returns `None`) always fall
 /// through to `MediaError::into_response()` regardless of mode.
-pub(crate) struct MediaDenial(MediaError, BlossomStrictness);
+pub(crate) struct MediaDenial(pub(super) MediaError, pub(super) BlossomStrictness);
 
 impl IntoResponse for MediaDenial {
     fn into_response(self) -> Response {
@@ -110,7 +112,8 @@ impl IntoResponse for MediaDenial {
                 );
                 let mut builder = axum::http::Response::builder()
                     .status(class.http_status())
-                    .header(header::CONTENT_TYPE, class.content_type());
+                    .header(header::CONTENT_TYPE, class.content_type())
+                    .header(header::CACHE_CONTROL, "private, no-store");
                 if let Some(challenge) = class.www_authenticate() {
                     builder = builder.header("WWW-Authenticate", challenge);
                 }
@@ -119,7 +122,12 @@ impl IntoResponse for MediaDenial {
                     .expect("NIP-FI denial response is always valid");
             }
         }
-        error.into_response()
+        let mut response = error.into_response();
+        response.headers_mut().insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("private, no-store"),
+        );
+        response
     }
 }
 
@@ -132,10 +140,10 @@ fn media_denial(error: MediaError, strictness: BlossomStrictness) -> MediaDenial
 /// Map a shared membership-step refusal to media's response shape: a failed
 /// lookup stays 503, a real refusal (non-member or banned) is a policy denial.
 fn membership_denial(
-    (status, _): (StatusCode, axum::Json<serde_json::Value>),
+    refusal: crate::api::relay_members::MembershipRefusal,
     strictness: BlossomStrictness,
 ) -> MediaDenial {
-    let error = if status.is_server_error() {
+    let error = if refusal.status().is_server_error() {
         MediaError::AuthorizationUnavailable
     } else {
         MediaError::RelayMembershipRequired
@@ -317,6 +325,7 @@ fn serving_lease_lost(error: anyhow::Error) -> MediaError {
 #[allow(clippy::result_large_err)] // Response is the natural error type for axum closures
 pub(crate) async fn upload_blob(
     State(state): State<Arc<AppState>>,
+    slot: AccessSlot,
     ctx: UploadContext,
     headers: HeaderMap,
     body: axum::body::Body,
@@ -333,25 +342,53 @@ pub(crate) async fn upload_blob(
     // as the read path. [FI-TRACE-AUTHORITY-UNIFORM]
     let strictness = blossom_strictness_from_state(&state);
     let tenant_host = ctx.tenant.host().to_owned();
+    let proof = crate::nip_fi_shadow::EnforcedProof::new(&state, &headers, "blossom");
     crate::nip_fi_shadow::observe_strict_proof(&state, &headers, "blossom", || {
         let event = extract_blossom_auth(&headers).map_err(drop)?;
         let strict = BlossomStrictness::Strict;
         buzz_media::auth::verify_blossom_auth_event(&event, Some(&tenant_host), strict)
             .map_err(drop)
-    });
+    })
+    .await;
     let headers_clone = headers.clone();
-    let admission = match admit_nip_fi_http_on_state(&state, &headers, move || {
-        let auth_event = extract_blossom_auth(&headers_clone).map_err(|e| e.into_response())?;
+    let proof_slot = slot.clone();
+    let admission = match admit_nip_fi_http_on_state(&state, &headers, &slot, move || {
+        let reject = |e: MediaError, claimed: Option<nostr::PublicKey>| {
+            proof_slot.attempt(AuthMethod::Blossom, claimed, false);
+            proof_slot.finish(AuthResult::Failed(blossom_proof_code(&e)));
+            e.into_response()
+        };
         // Pre-body check: freshness, cardinality, and server tag. The x-tag
         // hash binding is checked after body completion.
-        buzz_media::auth::verify_blossom_auth_event(&auth_event, Some(&tenant_host), strictness)
-            .map_err(|e| e.into_response())?;
+        let auth_event = proof
+            .record(
+                extract_blossom_auth(&headers_clone)
+                    .map_err(|e| (e, None))
+                    .and_then(|auth_event| {
+                        let claimed = auth_event.pubkey;
+                        buzz_media::auth::verify_blossom_auth_event(
+                            &auth_event,
+                            Some(&tenant_host),
+                            strictness,
+                        )
+                        .map(|()| auth_event)
+                        .map_err(|e| (e, Some(claimed)))
+                    }),
+            )
+            .map_err(|(e, claimed)| reject(e, claimed))?;
         let pubkey = auth_event.pubkey;
         Ok(Nip98Proof::new(pubkey, auth_event))
-    }) {
+    })
+    .await
+    {
         Ok(a) => a,
         Err(resp) => return resp,
     };
+    // A refusal at any admission step below, or success once the
+    // concurrency permit is held.
+    admission.record(&slot, AuthMethod::Blossom);
+    slot.in_community(ctx.tenant.community());
+    let token_owner = admission.token_owner();
     let auth_event = admission.into_extra();
 
     // Post-admission: validate X-SHA-256 header and hash binding.
@@ -360,44 +397,46 @@ pub(crate) async fn upload_blob(
     let claimed_hash = match headers.get("x-sha-256").and_then(|v| v.to_str().ok()) {
         Some(h) => h.to_owned(),
         None => {
-            return media_denial(MediaError::MissingTag("x-sha-256"), strictness).into_response()
+            slot.finish(AuthResult::Failed("missing_hash"));
+            return media_denial(MediaError::MissingTag("x-sha-256"), strictness).into_response();
         }
     };
-    if claimed_hash.len() != 64
-        || !claimed_hash
+    let hash_bound = claimed_hash.len() == 64
+        && claimed_hash
             .chars()
             .all(|c| matches!(c, '0'..='9' | 'a'..='f'))
-    {
-        return media_denial(MediaError::HashMismatch, strictness).into_response();
-    }
-    let has_matching_x = auth_event
-        .tags
-        .iter()
-        .any(|tag| tag.kind().to_string() == "x" && (tag.content() == Some(&claimed_hash)));
-    if !has_matching_x {
+        && auth_event
+            .tags
+            .iter()
+            .any(|tag| tag.kind().to_string() == "x" && (tag.content() == Some(&claimed_hash)));
+    if !hash_bound {
+        slot.finish(AuthResult::Failed("hash_mismatch"));
         return media_denial(MediaError::HashMismatch, strictness).into_response();
     }
 
     // Post-admission: relay membership gate (NIP-43).
     let auth_tag = crate::api::relay_members::extract_auth_tag_header(&headers);
-    if let Err(e) = crate::api::relay_members::enforce_relay_membership(
+    let membership = crate::api::relay_members::enforce_relay_membership(
         &state,
-        ctx.tenant.community(),
+        &ctx.tenant,
         auth_event.pubkey.as_bytes(),
         auth_tag,
         Some(auth_event.created_at.as_secs()),
+        token_owner,
     )
-    .await
-    .map(|_| ())
-    .map_err(|e| membership_denial(e, strictness))
-    {
-        return e.into_response();
+    .await;
+    if let Err(e) = slot.gate(
+        membership,
+        crate::api::relay_members::MembershipRefusal::auth_result,
+    ) {
+        return membership_denial(e, strictness).into_response();
     }
 
     // Post-admission: rate limit and concurrency permit.
     if upload_rate_limited(&state, ctx.tenant.community(), &auth_event.pubkey) {
         metrics::counter!("buzz_media_upload_rejections_total", "reason" => "rate_limit")
             .increment(1);
+        slot.finish(AuthResult::Denied(crate::access::AuthReason::QuotaExceeded));
         return MediaError::UploadRateLimitExceeded.into_response();
     }
     let upload_permit = match acquire_upload_permit(
@@ -410,8 +449,14 @@ pub(crate) async fn upload_blob(
             .increment(1);
     }) {
         Ok(p) => p,
-        Err(e) => return e.into_response(),
+        Err(e) => {
+            slot.finish(AuthResult::Denied(
+                crate::access::AuthReason::ConcurrencyLimit,
+            ));
+            return e.into_response();
+        }
     };
+    slot.finish(AuthResult::Success);
 
     let auth = AuthenticatedUpload {
         auth_event,
@@ -570,6 +615,69 @@ async fn upload_blob_result(
         // get the same NIP-FI shape as pre-body ones.
         .map_err(|e| media_denial(e, strictness))?;
 
+    if state.config.media_read_mode != super::media_access::MediaReadMode::Off {
+        let mut recording_reason = "lookup_error";
+        let recording: Result<(), MediaDenial> = async {
+            // A reupload of a legacy attachment must remember that it has been
+            // published before recording new preview authority. Otherwise purging
+            // the legacy source later could resurrect uploader preview access.
+            let base = media_base_url_for_tenant(&state.config.relay_url, auth.tenant.host());
+            let ext = descriptor
+                .url
+                .rsplit('.')
+                .next()
+                .ok_or_else(|| media_denial(MediaError::Internal, strictness))?;
+            let existing = state
+                .db
+                .media_access(
+                    auth.tenant.community(),
+                    &descriptor.sha256,
+                    ext,
+                    &base,
+                    auth.auth_event.pubkey.as_bytes(),
+                    false,
+                    crate::handlers::req::event_visible_to_reader,
+                )
+                .await
+                .map_err(|error| {
+                    if matches!(error, buzz_db::DbError::MediaAuthorizationCapacity) {
+                        recording_reason = "capacity";
+                    }
+                    media_denial(MediaError::AuthorizationUnavailable, strictness)
+                })?;
+            if matches!(
+                existing,
+                buzz_db::media::MediaAccess::Allowed | buzz_db::media::MediaAccess::Restricted
+            ) {
+                state
+                    .db
+                    .record_media_publications(
+                        auth.tenant.community(),
+                        vec![descriptor.sha256.clone()],
+                    )
+                    .await
+                    .map_err(|_| media_denial(MediaError::AuthorizationUnavailable, strictness))?;
+            }
+            state
+                .db
+                .record_media_upload(
+                    auth.tenant.community(),
+                    &descriptor.sha256,
+                    auth.auth_event.pubkey.as_bytes(),
+                )
+                .await
+                .map_err(|_| media_denial(MediaError::AuthorizationUnavailable, strictness))?;
+            Ok(())
+        }
+        .await;
+        if let Err(error) = recording {
+            metrics::counter!("buzz_media_upload_access_total", "mode" => state.config.media_read_mode.label(), "reason" => recording_reason).increment(1);
+            if state.config.media_read_mode == super::media_access::MediaReadMode::Enforce {
+                return Err(error);
+            }
+        }
+    }
+
     rewrite_descriptor_urls_for_tenant(
         &mut descriptor,
         &state.config.relay_url,
@@ -640,8 +748,13 @@ fn rewrite_descriptor_urls_for_tenant(
         .filter(|ext| is_safe_ext(ext))
         .unwrap_or("bin");
     descriptor.url = format!("{base}/{}.{ext}", descriptor.sha256);
-    if descriptor.thumb.is_some() {
-        descriptor.thumb = Some(format!("{base}/{}.thumb.jpg", descriptor.sha256));
+    if let Some(thumb) = &descriptor.thumb {
+        let variant = thumb
+            .rsplit('/')
+            .next()
+            .and_then(Thumb::parse)
+            .map_or(JPEG, |(_, t)| t);
+        descriptor.thumb = Some(format!("{base}/{}", variant.key(&descriptor.sha256)));
     }
 }
 
@@ -688,24 +801,32 @@ async fn enforce_blossom_read_membership(
     state: &AppState,
     tenant: &TenantContext,
     auth_event: &nostr::Event,
+    token_owner: Option<nostr::PublicKey>,
     headers: &HeaderMap,
     strictness: BlossomStrictness,
+    slot: &AccessSlot,
 ) -> Result<(), MediaDenial> {
     let auth_tag = crate::api::relay_members::extract_auth_tag_header(headers);
-    crate::api::relay_members::enforce_relay_membership(
+    let membership = crate::api::relay_members::enforce_relay_membership(
         state,
-        tenant.community(),
+        tenant,
         auth_event.pubkey.as_bytes(),
         auth_tag,
         Some(auth_event.created_at.as_secs()),
+        token_owner,
     )
-    .await
-    .map(|_| ())
-    .map_err(|e| membership_denial(e, strictness))
+    .await;
+    slot.gate(
+        membership,
+        crate::api::relay_members::MembershipRefusal::auth_result,
+    )
+    .map_err(|e| membership_denial(e, strictness))?;
+    slot.finish(AuthResult::Success);
+    Ok(())
 }
 
 fn blob_cache_control() -> &'static str {
-    "private, max-age=31536000, immutable"
+    "private, no-store"
 }
 
 /// Whether a path-segment extension is a safe token.
@@ -725,7 +846,7 @@ pub(crate) fn is_safe_ext(ext: &str) -> bool {
 /// Accepted forms (max 3 segments):
 ///   - `{sha256}`                   — bare 64-char lowercase hex
 ///   - `{sha256}.{ext}`             — hash + extension
-///   - `{sha256}.thumb.jpg`          — hash + thumb variant (always JPEG)
+///   - `{sha256}.thumb.{webp,jpg}`   — hash + thumb variant (see [`buzz_media::thumbnail::THUMBS`])
 ///
 /// `{ext}` must be a safe token (see [`is_safe_ext`]); the sidecar comparison
 /// downstream enforces the actual canonical extension.
@@ -754,8 +875,7 @@ fn validate_media_path(sha256_ext: &str) -> Result<(), MediaError> {
             }
         }
         3 => {
-            // {hash}.thumb.jpg — thumbnails are always JPEG
-            if segments[1] != "thumb" || segments[2] != "jpg" {
+            if Thumb::parse(sha256_ext).is_none() {
                 return Err(MediaError::NotFound);
             }
         }
@@ -777,7 +897,7 @@ const MAX_RANGE_CHUNK: u64 = 16 * 1024 * 1024;
 /// `sha256_ext` is either:
 ///   - `<sha256>.<ext>` — direct key (e.g. `abc123.jpg`)
 ///   - `<sha256>` — bare hash; extension resolved from sidecar
-///   - `<sha256>.thumb.jpg` — thumbnail variant
+///   - `<sha256>.thumb.<webp|jpg>` — thumbnail variant
 ///
 /// Range request behaviour (RFC 9110 §14.2):
 ///   - No `Range` header → 200 with full body
@@ -790,6 +910,7 @@ const MAX_RANGE_CHUNK: u64 = 16 * 1024 * 1024;
 #[allow(clippy::result_large_err)] // Response is the natural error type for axum handlers
 pub(crate) async fn get_blob(
     State(state): State<Arc<AppState>>,
+    slot: AccessSlot,
     Path(sha256_ext): Path<String>,
     req_headers: HeaderMap,
 ) -> Result<Response, MediaDenial> {
@@ -810,6 +931,7 @@ pub(crate) async fn get_blob(
     // In Enforce mode: extraction failure → NIP-FI denial bytes (MissingEvidence/
     // EvidenceRejected).  In Off mode: MediaError propagates unchanged [FI-INV-15].
     use crate::nip_fi_http::admit_nip_fi_http_on_state;
+    let proof = crate::nip_fi_shadow::EnforcedProof::new(&state, &req_headers, "blossom");
     crate::nip_fi_shadow::observe_strict_proof(&state, &req_headers, "blossom", || {
         extract_blossom_read_proof(
             &req_headers,
@@ -818,17 +940,51 @@ pub(crate) async fn get_blob(
             BlossomStrictness::Strict,
         )
         .map(drop)
-    });
-    let admission = match admit_nip_fi_http_on_state(&state, &req_headers, move || {
-        extract_blossom_read_proof(&headers_clone, &sha256, &tenant_host, strictness)
-            .map_err(|e| e.into_response())
-    }) {
+    })
+    .await;
+    let proof_slot = slot.clone();
+    let admission = match admit_nip_fi_http_on_state(&state, &req_headers, &slot, move || {
+        proof
+            .record(extract_blossom_read_proof(
+                &headers_clone,
+                &sha256,
+                &tenant_host,
+                strictness,
+            ))
+            .map_err(|e| {
+                proof_slot.method(AuthMethod::Blossom);
+                proof_slot.finish(AuthResult::Failed(blossom_proof_code(&e)));
+                e.into_response()
+            })
+    })
+    .await
+    {
         Ok(a) => a,
         Err(resp) => return Ok(resp),
     };
+    admission.record(&slot, AuthMethod::Blossom);
+    slot.in_community(tenant.community());
+    let token_owner = admission.token_owner();
     let auth_event = admission.into_extra();
     // Post-admission: membership gate.
-    enforce_blossom_read_membership(&state, &tenant, &auth_event, &req_headers, strictness).await?;
+    enforce_blossom_read_membership(
+        &state,
+        &tenant,
+        &auth_event,
+        token_owner,
+        &req_headers,
+        strictness,
+        &slot,
+    )
+    .await?;
+    super::media_access::enforce_read(
+        &state,
+        &tenant,
+        &sha256_ext,
+        auth_event.pubkey.as_bytes(),
+        strictness,
+    )
+    .await?;
     serve_blob_for_tenant(&state, &tenant, &sha256_ext, &req_headers)
         .await
         .map_err(MediaDenial::from)
@@ -849,14 +1005,13 @@ pub(crate) async fn serve_blob_for_tenant(
     let cache_control = blob_cache_control();
 
     // Sidecar gate FIRST — reject before any blob I/O. Storage is not authoritative.
-    let content_type = if sha256_ext.ends_with(".thumb.jpg") {
-        let parent_hash = sha256_ext.strip_suffix(".thumb.jpg").unwrap_or(sha256_ext);
+    let content_type = if let Some((parent_hash, thumb)) = Thumb::parse(sha256_ext) {
         let _ = state
             .media_storage
             .read_sidecar_mime(tenant, parent_hash)
             .await
             .ok_or(MediaError::NotFound)?;
-        "image/jpeg".to_string()
+        thumb.mime.to_string()
     } else {
         // For explicit paths (hash.ext), verify the requested extension matches
         // the sidecar's canonical extension — sidecar is authoritative.
@@ -904,9 +1059,7 @@ pub(crate) async fn serve_blob_for_tenant(
     match single_range {
         None => {
             // Full response — 200 OK. Stream from S3 — never loads full blob into RAM.
-            let total = state
-                .media_storage
-                .head_with_metadata(&key)
+            let total = head_or_regenerate_thumb(state, tenant, sha256_ext, &key)
                 .await?
                 .ok_or(MediaError::NotFound)?
                 .size;
@@ -926,9 +1079,7 @@ pub(crate) async fn serve_blob_for_tenant(
         }
         Some(range_str) => {
             // S3-native single-range response, capped to bound request memory.
-            let total = state
-                .media_storage
-                .head_with_metadata(&key)
+            let total = head_or_regenerate_thumb(state, tenant, sha256_ext, &key)
                 .await?
                 .ok_or(MediaError::NotFound)?
                 .size;
@@ -939,6 +1090,7 @@ pub(crate) async fn serve_blob_for_tenant(
                     if start >= total {
                         return axum::response::Response::builder()
                             .status(StatusCode::RANGE_NOT_SATISFIABLE)
+                            .header(header::CACHE_CONTROL, cache_control)
                             .header(header::CONTENT_RANGE, format!("bytes */{total}"))
                             .body(axum::body::Body::empty())
                             .map_err(|_| MediaError::Internal);
@@ -966,6 +1118,7 @@ pub(crate) async fn serve_blob_for_tenant(
                 }
                 None => Ok(axum::response::Response::builder()
                     .status(StatusCode::RANGE_NOT_SATISFIABLE)
+                    .header(header::CACHE_CONTROL, cache_control)
                     .header(header::CONTENT_RANGE, format!("bytes */{total}"))
                     .body(axum::body::Body::empty())
                     .map_err(|_| MediaError::Internal)?),
@@ -1092,6 +1245,7 @@ fn parse_byte_range(range: &str, total: u64) -> Option<(u64, u64)> {
 #[allow(clippy::result_large_err)] // Response is the natural error type for axum handlers
 pub(crate) async fn head_blob(
     State(state): State<Arc<AppState>>,
+    slot: AccessSlot,
     headers: HeaderMap,
     Path(sha256_ext): Path<String>,
 ) -> Result<Response, MediaDenial> {
@@ -1109,30 +1263,64 @@ pub(crate) async fn head_blob(
     let tenant_host = tenant.host().to_owned();
     let headers_clone = headers.clone();
     use crate::nip_fi_http::admit_nip_fi_http_on_state;
+    let proof = crate::nip_fi_shadow::EnforcedProof::new(&state, &headers, "blossom");
     crate::nip_fi_shadow::observe_strict_proof(&state, &headers, "blossom", || {
         extract_blossom_read_proof(&headers, &sha256, &tenant_host, BlossomStrictness::Strict)
             .map(drop)
-    });
-    let admission = match admit_nip_fi_http_on_state(&state, &headers, move || {
-        extract_blossom_read_proof(&headers_clone, &sha256, &tenant_host, strictness)
-            .map_err(|e| e.into_response())
-    }) {
+    })
+    .await;
+    let proof_slot = slot.clone();
+    let admission = match admit_nip_fi_http_on_state(&state, &headers, &slot, move || {
+        proof
+            .record(extract_blossom_read_proof(
+                &headers_clone,
+                &sha256,
+                &tenant_host,
+                strictness,
+            ))
+            .map_err(|e| {
+                proof_slot.method(AuthMethod::Blossom);
+                proof_slot.finish(AuthResult::Failed(blossom_proof_code(&e)));
+                e.into_response()
+            })
+    })
+    .await
+    {
         Ok(a) => a,
         Err(resp) => return Ok(resp),
     };
+    admission.record(&slot, AuthMethod::Blossom);
+    slot.in_community(tenant.community());
+    let token_owner = admission.token_owner();
     let auth_event = admission.into_extra();
-    enforce_blossom_read_membership(&state, &tenant, &auth_event, &headers, strictness).await?;
+    enforce_blossom_read_membership(
+        &state,
+        &tenant,
+        &auth_event,
+        token_owner,
+        &headers,
+        strictness,
+        &slot,
+    )
+    .await?;
+    super::media_access::enforce_read(
+        &state,
+        &tenant,
+        &sha256_ext,
+        auth_event.pubkey.as_bytes(),
+        strictness,
+    )
+    .await?;
     let cache_control = blob_cache_control();
 
     // Sidecar gate FIRST — reject before any blob I/O.
-    let content_type = if sha256_ext.ends_with(".thumb.jpg") {
-        let parent_hash = sha256_ext.strip_suffix(".thumb.jpg").unwrap_or(&sha256_ext);
+    let content_type = if let Some((parent_hash, thumb)) = Thumb::parse(&sha256_ext) {
         let _ = state
             .media_storage
             .read_sidecar_mime(&tenant, parent_hash)
             .await
             .ok_or(MediaError::NotFound)?;
-        "image/jpeg".to_string()
+        thumb.mime.to_string()
     } else {
         let sidecar_mime = state
             .media_storage
@@ -1154,7 +1342,7 @@ pub(crate) async fn head_blob(
     };
 
     let key = resolve_s3_key(&state.media_storage, &tenant, &sha256_ext).await?;
-    match state.media_storage.head_with_metadata(&key).await? {
+    match head_or_regenerate_thumb(&state, &tenant, &sha256_ext, &key).await? {
         Some(meta) => {
             let size_str = meta.size.to_string();
             Ok((
@@ -1170,6 +1358,73 @@ pub(crate) async fn head_blob(
         }
         None => Ok(StatusCode::NOT_FOUND.into_response()),
     }
+}
+
+/// Concurrent on-demand thumbnail regenerations per relay process. Each holds
+/// a full-size decode in memory, so excess requests get a plain 404 instead of
+/// waiting.
+static THUMB_REGEN: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+
+/// `head_with_metadata`, first regenerating a missing thumbnail variant from
+/// its image original (uploaded before the variant existed, or a failed write).
+///
+/// Callers have already passed the tenant and sidecar gates for `sha256_ext`.
+/// Regeneration failure is logged and reads as absent, never an error.
+async fn head_or_regenerate_thumb(
+    state: &AppState,
+    tenant: &TenantContext,
+    sha256_ext: &str,
+    key: &str,
+) -> Result<Option<buzz_media::BlobHeadMeta>, MediaError> {
+    let head = state.media_storage.head_with_metadata(key).await?;
+    let Some((sha256, _)) = Thumb::parse(sha256_ext).filter(|_| head.is_none()) else {
+        return Ok(head);
+    };
+    match regenerate_thumbs(state, tenant, sha256).await {
+        Ok(true) => state.media_storage.head_with_metadata(key).await,
+        Ok(false) => Ok(None),
+        Err(e) => {
+            tracing::warn!(sha256, error = %e, "thumbnail regeneration failed");
+            Ok(None)
+        }
+    }
+}
+
+/// Rebuild every thumbnail of the tenant's image `sha256`. `Ok(false)` means
+/// there was nothing to do: not an image, no original, too large, or busy.
+async fn regenerate_thumbs(
+    state: &AppState,
+    tenant: &TenantContext,
+    sha256: &str,
+) -> Result<bool, MediaError> {
+    let storage = &state.media_storage;
+    let meta = storage.get_sidecar(tenant, sha256).await?;
+    if !meta.mime_type.starts_with("image/") || !is_safe_ext(&meta.ext) {
+        return Ok(false);
+    }
+    let key = format!("{sha256}.{}", meta.ext);
+    let max = state.config.media.max_image_bytes;
+    if !storage
+        .head_with_metadata(&key)
+        .await?
+        .is_some_and(|h| h.size <= max)
+    {
+        return Ok(false);
+    }
+    let Ok(_permit) = THUMB_REGEN.try_acquire() else {
+        return Ok(false);
+    };
+    let body = bytes::Bytes::from(storage.get(&key).await?);
+    buzz_media::upload::store_image_thumbnails(
+        storage,
+        &state.config.media,
+        sha256,
+        body,
+        &meta.mime_type,
+        &meta.ext,
+    )
+    .await?;
+    Ok(true)
 }
 
 /// Resolve the S3 key from a URL path segment.
@@ -1196,6 +1451,20 @@ async fn resolve_s3_key(
             return Err(MediaError::NotFound);
         }
         Ok(format!("{}.{}", sha256_ext, sidecar.ext))
+    }
+}
+
+/// A fixed access-log code for a rejected Blossom proof.
+fn blossom_proof_code(e: &MediaError) -> &'static str {
+    match e {
+        MediaError::MissingAuth => "missing_auth",
+        MediaError::InvalidAuthScheme
+        | MediaError::InvalidBase64
+        | MediaError::InvalidAuthEvent => "malformed_auth",
+        MediaError::InvalidSignature => "invalid_signature",
+        MediaError::TokenExpired | MediaError::TimestampOutOfWindow => "event_expired",
+        MediaError::ServerMismatch => "server_mismatch",
+        _ => "blossom_invalid",
     }
 }
 
@@ -1245,14 +1514,12 @@ fn blossom_strictness_from_state(state: &AppState) -> BlossomStrictness {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
 
     use axum::{
-        body::{to_bytes, Body},
-        http::{header, Request, StatusCode},
+        body::to_bytes,
+        http::{header, StatusCode},
     };
-    use nostr::{EventBuilder, JsonUtil, Keys, Kind, Tag, Timestamp};
-    use tower::ServiceExt;
+    use nostr::{JsonUtil, Timestamp};
     use uuid::Uuid;
 
     const VALID_HASH: &str = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
@@ -1671,216 +1938,6 @@ mod tests {
         assert!(should_stream_as_video(bytes));
     }
 
-    async fn test_state() -> Arc<AppState> {
-        let mut config = crate::config::Config::for_test(); // [FI-TRACE-ENV-RACE]
-        config.require_relay_membership = false;
-        config.redis_url = "redis://127.0.0.1:1".to_string();
-        config.media_uploads_per_minute = 1;
-        config.media_max_concurrent_uploads = 2;
-        config.media_max_concurrent_uploads_per_pubkey = 1;
-
-        let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
-        let db = buzz_db::Db::from_pool(pool.clone());
-        db.ensure_configured_community("relay.example")
-            .await
-            .expect("seed relay.example community for host-bound media tests");
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("redis pool");
-        let pubsub = Arc::new(
-            buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
-                .await
-                .expect("pubsub manager"),
-        );
-        let audit = buzz_audit::AuditService::new(pool.clone());
-        let auth = buzz_auth::AuthService::new(config.auth.clone());
-        let search = buzz_search::SearchService::new(pool.clone());
-        let workflow_engine = Arc::new(buzz_workflow::WorkflowEngine::new(
-            db.clone(),
-            buzz_workflow::WorkflowConfig::default(),
-        ));
-        let media_storage = buzz_media::MediaStorage::new(&config.media).expect("media storage");
-        let (state, _audit_shutdown) = AppState::new(
-            config,
-            db,
-            redis_pool,
-            audit,
-            pubsub,
-            auth,
-            search,
-            workflow_engine,
-            nostr::Keys::generate(),
-            media_storage,
-        );
-        Arc::new(state)
-    }
-
-    async fn media_get_auth_router() -> axum::Router {
-        let state = test_state().await;
-        axum::Router::new()
-            .route(
-                "/media/{sha256_ext}",
-                axum::routing::get(get_blob).head(head_blob),
-            )
-            .with_state(state)
-    }
-
-    fn media_get_auth_header(keys: &Keys, tags: Vec<Tag>) -> String {
-        let event = EventBuilder::new(Kind::from(24242), "Get media")
-            .tags(tags)
-            .sign_with_keys(keys)
-            .expect("sign get auth");
-        format!(
-            "Nostr {}",
-            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(event.as_json().as_bytes())
-        )
-    }
-
-    fn media_get_tags_for(host: &str, sha256: Option<&str>) -> Vec<Tag> {
-        let now = Timestamp::now().as_secs();
-        let expiration = (now + 55).to_string();
-        let mut tags = vec![
-            Tag::parse(["t", "get"]).expect("t tag"),
-            Tag::parse(["expiration", &expiration]).expect("expiration tag"),
-            Tag::parse(["server", host]).expect("server tag"),
-        ];
-        if let Some(sha256) = sha256 {
-            tags.push(Tag::parse(["x", sha256]).expect("x tag"));
-        }
-        tags
-    }
-
-    fn media_request(method: &str, auth: Option<String>) -> Request<Body> {
-        let mut builder = Request::builder()
-            .method(method)
-            .uri(format!("/media/{VALID_HASH}.jpg"))
-            .header(header::HOST, "relay.example");
-        if let Some(auth) = auth {
-            builder = builder.header(header::AUTHORIZATION, auth);
-        }
-        builder.body(Body::empty()).expect("request")
-    }
-
-    #[tokio::test]
-    async fn media_reads_reject_unauthenticated_get_and_head_before_sidecar_gate() {
-        for method in ["GET", "HEAD"] {
-            let response = media_get_auth_router()
-                .await
-                .oneshot(media_request(method, None))
-                .await
-                .expect("response");
-
-            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{method}");
-        }
-    }
-
-    #[tokio::test]
-    async fn media_read_with_valid_server_scoped_token_reaches_sidecar_gate() {
-        let keys = Keys::generate();
-        let auth = media_get_auth_header(&keys, media_get_tags_for("relay.example", None));
-        let response = media_get_auth_router()
-            .await
-            .oneshot(media_request("GET", Some(auth)))
-            .await
-            .expect("response");
-
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test]
-    async fn media_read_rejects_upload_verb_wrong_server_and_wrong_x() {
-        let keys = Keys::generate();
-        let now = Timestamp::now().as_secs();
-        let expiration = (now + 55).to_string();
-        let cases = [
-            vec![
-                Tag::parse(["t", "upload"]).expect("t tag"),
-                Tag::parse(["expiration", &expiration]).expect("expiration tag"),
-                Tag::parse(["server", "relay.example"]).expect("server tag"),
-            ],
-            vec![
-                Tag::parse(["t", "get"]).expect("t tag"),
-                Tag::parse(["expiration", &expiration]).expect("expiration tag"),
-                Tag::parse(["server", "evil.example"]).expect("server tag"),
-            ],
-            vec![
-                Tag::parse(["t", "get"]).expect("t tag"),
-                Tag::parse(["expiration", &expiration]).expect("expiration tag"),
-                Tag::parse(["x", &"f".repeat(64)]).expect("x tag"),
-            ],
-        ];
-
-        for tags in cases {
-            let auth = media_get_auth_header(&keys, tags);
-            let response = media_get_auth_router()
-                .await
-                .oneshot(media_request("GET", Some(auth)))
-                .await
-                .expect("response");
-
-            assert_ne!(response.status(), StatusCode::NOT_FOUND);
-            assert!(
-                response.status() == StatusCode::UNAUTHORIZED
-                    || response.status() == StatusCode::FORBIDDEN,
-                "unexpected status {}",
-                response.status()
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn media_read_accepts_range_header_only_after_auth() {
-        let keys = Keys::generate();
-        let auth = media_get_auth_header(&keys, media_get_tags_for("relay.example", None));
-        let mut request = media_request("GET", Some(auth));
-        request
-            .headers_mut()
-            .insert(header::RANGE, "bytes=0-0".parse().expect("range header"));
-
-        let response = media_get_auth_router()
-            .await
-            .oneshot(request)
-            .await
-            .expect("response");
-
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test]
-    async fn upload_rate_limiter_is_scoped_by_community() {
-        let state = test_state().await;
-        let pubkey = nostr::Keys::generate().public_key();
-        let community_a = buzz_core::CommunityId::from_uuid(Uuid::from_u128(0xAAAA));
-        let community_b = buzz_core::CommunityId::from_uuid(Uuid::from_u128(0xBBBB));
-
-        assert!(!upload_rate_limited(&state, community_a, &pubkey));
-        assert!(upload_rate_limited(&state, community_a, &pubkey));
-        assert!(
-            !upload_rate_limited(&state, community_b, &pubkey),
-            "A's exhausted upload budget must not rate-limit the same key in B"
-        );
-    }
-
-    #[tokio::test]
-    async fn upload_concurrency_limit_is_scoped_by_community() {
-        let state = test_state().await;
-        let pubkey = nostr::Keys::generate().public_key();
-        let community_a = buzz_core::CommunityId::from_uuid(Uuid::from_u128(0xAAAA));
-        let community_b = buzz_core::CommunityId::from_uuid(Uuid::from_u128(0xBBBB));
-
-        let permit_a =
-            acquire_upload_permit(&state, community_a, &pubkey).expect("first A upload allowed");
-        assert!(matches!(
-            acquire_upload_permit(&state, community_a, &pubkey),
-            Err(MediaError::UploadConcurrencyLimitReached)
-        ));
-        let permit_b = acquire_upload_permit(&state, community_b, &pubkey)
-            .expect("A's in-flight upload must not block B");
-
-        drop(permit_b);
-        drop(permit_a);
-    }
-
     #[test]
     fn test_validate_media_path_bare_hash() {
         assert!(validate_media_path(VALID_HASH).is_ok());
@@ -1894,11 +1951,11 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_media_path_thumb_jpg_only() {
+    fn test_validate_media_path_thumb_variants_only() {
         assert!(validate_media_path(&format!("{VALID_HASH}.thumb.jpg")).is_ok());
-        // Other thumb extensions rejected — thumbnails are always JPEG
+        assert!(validate_media_path(&format!("{VALID_HASH}.thumb.webp")).is_ok());
+        // Other thumb extensions rejected: only stored variants are served
         assert!(validate_media_path(&format!("{VALID_HASH}.thumb.png")).is_err());
-        assert!(validate_media_path(&format!("{VALID_HASH}.thumb.webp")).is_err());
     }
 
     #[test]
@@ -2001,7 +2058,7 @@ mod tests {
             uploaded: 1700000000,
             dim: Some("1x1".to_string()),
             blurhash: None,
-            thumb: Some(format!("https://primary.example/media/{hash}.thumb.jpg")),
+            thumb: Some(format!("https://primary.example/media/{hash}.thumb.webp")),
             duration: None,
         };
 
@@ -2017,7 +2074,8 @@ mod tests {
         );
         assert_eq!(
             descriptor.thumb,
-            Some(format!("https://tenant-b.example/media/{hash}.thumb.jpg"))
+            Some(format!("https://tenant-b.example/media/{hash}.thumb.webp")),
+            "the rewrite keeps the descriptor's thumbnail variant"
         );
     }
 
@@ -2083,7 +2141,7 @@ mod tests {
     // ── NIP-FI media regression tests ────────────────────────────────────────
     //
     // These postgres-backed tests prove the NIP-FI admission gate is wired into
-    // the media upload and read routes at the router level. They all require a
+    // the media upload and read routes at the router level. They require a
     // live Postgres + Redis and are tagged #[ignore = "requires Postgres"].
     //
     // Verified contract rows (NIP-FI.md rejection table):
@@ -2135,11 +2193,7 @@ mod tests {
         const TEST_ISSUER: &str = "https://issuer.example";
         const TEST_AUDIENCE: &str = "https://relay.example";
         const TEST_KID: &str = "test-key-1";
-        const TEST_EC_PKCS8_PEM: &str = "-----BEGIN PRIVATE KEY-----\n\
-            MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgcnxDM4EiirH9dHUE\n\
-            WZc759TX4s5PAn8kO5ovXSnGxCWhRANCAARFb6ZnsfkqOOXyEhj3KBQphGKF4vTa\n\
-            zhebbavbZ1ZoklqkF1cGg+jTO7rONAVEzXvXUWtV6CdDV+rybiVmFP2w\n\
-            -----END PRIVATE KEY-----\n";
+        const TEST_EC_PKCS8_PEM: &str = "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgcnxDM4EiirH9dHUE\nWZc759TX4s5PAn8kO5ovXSnGxCWhRANCAARFb6ZnsfkqOOXyEhj3KBQphGKF4vTa\nzhebbavbZ1ZoklqkF1cGg+jTO7rONAVEzXvXUWtV6CdDV+rybiVmFP2w\n-----END PRIVATE KEY-----\n"; // sadscan:disable np.pem.1 kingfisher.privkey.2 -- public ES256 test fixture
 
         /// Build an AppState with NIP-FI Enforce and a real injected P-256 verifier.
         async fn media_enforce_test_state() -> Option<Arc<AppState>> {
@@ -2164,9 +2218,7 @@ mod tests {
                 .await
                 .ok()?;
             let db = buzz_db::Db::from_pool(pool.clone());
-            let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-                .ok()?;
+            let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).ok()?;
             let pubsub = Arc::new(
                 buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                     .await
@@ -2251,9 +2303,7 @@ mod tests {
                 .await
                 .ok()?;
             let db = buzz_db::Db::from_pool(pool.clone());
-            let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-                .ok()?;
+            let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).ok()?;
             let pubsub = Arc::new(
                 buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                     .await
@@ -2629,6 +2679,170 @@ mod tests {
                     &format!("{route}: same-key admission"),
                 );
             }
+        }
+
+        /// Run an upload with access lines captured; return the response and
+        /// the `event=http` lines.
+        fn upload_auth_lines(
+            rt: &tokio::runtime::Runtime,
+            state: &Arc<AppState>,
+            host: &str,
+            authorization: &str,
+            assertion: Option<&str>,
+        ) -> (StatusCode, Vec<serde_json::Value>) {
+            let ((status, _, _), out) = crate::access::tests::capture(|| {
+                upload_request(rt, state, "/upload", host, &[authorization], assertion)
+            });
+            let lines = out
+                .lines()
+                .into_iter()
+                .filter(|l| l["event"] == "http")
+                .collect();
+            (status, lines)
+        }
+
+        fn assert_one_upload_line(
+            lines: &[serde_json::Value],
+            method: &str,
+            outcome: &str,
+            reason: Option<&str>,
+        ) {
+            assert_eq!(lines.len(), 1, "exactly one access line: {lines:?}");
+            let line = &lines[0];
+            assert_eq!(line["method"], method, "{line}");
+            assert_eq!(line["outcome"], outcome, "{line}");
+            assert_eq!(line["route"], "/upload", "{line}");
+            match reason {
+                Some(reason) => assert_eq!(line["reason"], reason, "{line}"),
+                None => assert!(line.get("reason").is_none(), "{line}"),
+            }
+        }
+
+        /// A banned caller's valid signed upload is refused at the membership
+        /// step: one `denied` line and no `success`.
+        #[test]
+        #[ignore = "requires Postgres"]
+        fn banned_upload_logs_one_denied_line() {
+            let (rt, state, host) = media_fixture(media_off_test_state());
+            let tenant = rt
+                .block_on(crate::tenant::bind_community(&state.db, &host))
+                .expect("bind community");
+            let keys = Keys::generate();
+            rt.block_on(
+                sqlx::query(
+                    "INSERT INTO community_bans (community_id, pubkey, banned, actor_pubkey) \
+                     VALUES ($1, $2, true, $2)",
+                )
+                .bind(tenant.community().as_uuid())
+                .bind(keys.public_key().to_bytes().as_slice())
+                .execute(state.db.pool()),
+            )
+            .expect("ban");
+            let proof = blossom_upload_auth_value(&keys, &host, &sha256_hex(AUDIO_BODY));
+            let (status, lines) = upload_auth_lines(&rt, &state, &host, &proof, None);
+            assert_eq!(status, StatusCode::FORBIDDEN);
+            assert_one_upload_line(&lines, "blossom", "denied", Some("banned"));
+        }
+
+        /// A malformed proof alongside a valid enterprise assertion: the proof
+        /// closure writes one `failed` line and the enterprise helper adds none.
+        /// Off mode, where the helper is bypassed, also writes exactly one.
+        #[test]
+        #[ignore = "requires Postgres"]
+        fn bad_upload_proof_logs_one_failed_line() {
+            let (rt, state, host) = media_fixture(media_enforce_test_state());
+            let assertion = signed_assertion(&Keys::generate().public_key().to_hex());
+            let (status, lines) = upload_auth_lines(
+                &rt,
+                &state,
+                &host,
+                "Nostr !!!not-base64!!!",
+                Some(&assertion),
+            );
+            assert_eq!(status, StatusCode::FORBIDDEN);
+            assert_one_upload_line(&lines, "blossom", "failed", Some("malformed_auth"));
+            assert_eq!(lines[0]["status"], 403, "the remapped status: {}", lines[0]);
+
+            let (rt, state, host) = media_fixture(media_off_test_state());
+            let (status, lines) =
+                upload_auth_lines(&rt, &state, &host, "Nostr !!!not-base64!!!", None);
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+            assert_one_upload_line(&lines, "blossom", "failed", Some("malformed_auth"));
+            assert_eq!(lines[0]["status"], 401, "the legacy status: {}", lines[0]);
+        }
+
+        /// A malformed read proof alongside a valid enterprise assertion: GET
+        /// and HEAD each write one WARN `failed` line carrying the 403 sent.
+        #[test]
+        #[ignore = "requires Postgres"]
+        fn bad_read_proof_logs_the_status_sent() {
+            let (rt, state, host) = media_fixture(media_enforce_test_state());
+            let path = format!("/media/{}.jpg", "d".repeat(64));
+            for method in ["GET", "HEAD"] {
+                let mut headers = axum::http::HeaderMap::new();
+                headers.insert(
+                    axum::http::header::AUTHORIZATION,
+                    "Nostr !!!bad!!!".parse().expect("valid header bytes"),
+                );
+                headers.insert(
+                    buzz_auth::CLIENT_ATTACHED_HEADER,
+                    format!(
+                        "Bearer {}",
+                        signed_assertion(&Keys::generate().public_key().to_hex())
+                    )
+                    .parse()
+                    .expect("valid header"),
+                );
+                let ((status, _, _), out) = crate::access::tests::capture(|| {
+                    rt.block_on(media_oneshot(
+                        Arc::clone(&state),
+                        method,
+                        &path,
+                        &host,
+                        headers,
+                        b"",
+                    ))
+                });
+                assert_eq!(status, StatusCode::FORBIDDEN, "{method}");
+                let lines: Vec<_> = out
+                    .lines()
+                    .into_iter()
+                    .filter(|l| l["event"] == "http")
+                    .collect();
+                assert_eq!(lines.len(), 1, "{method}: {lines:?}");
+                let line = &lines[0];
+                assert_eq!(line["outcome"], "failed", "{method}: {line}");
+                assert_eq!(line["level"], "WARN", "{method}: {line}");
+                assert_eq!(line["status"], 403, "{method}: {line}");
+                assert_eq!(line["route"], "/media/{sha256_ext}", "{method}: {line}");
+                // The hash never reaches any field of the line.
+                assert!(
+                    !out.raw().contains(&"d".repeat(64)),
+                    "{method}: {}",
+                    out.raw()
+                );
+            }
+        }
+
+        /// An admitted upload logs one `success` once the concurrency permit
+        /// is held, in both modes; the later content rejection adds nothing.
+        #[test]
+        #[ignore = "requires Postgres"]
+        fn admitted_upload_logs_one_success_line() {
+            let (rt, state, host) = media_fixture(media_off_test_state());
+            let keys = Keys::generate();
+            let proof = blossom_upload_auth_value(&keys, &host, &sha256_hex(AUDIO_BODY));
+            let (status, lines) = upload_auth_lines(&rt, &state, &host, &proof, None);
+            assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+            assert_one_upload_line(&lines, "blossom", "success", None);
+
+            let (rt, state, host) = media_fixture(media_enforce_test_state());
+            let keys = Keys::generate();
+            let assertion = signed_assertion(&keys.public_key().to_hex());
+            let proof = blossom_upload_auth_value(&keys, &host, &sha256_hex(AUDIO_BODY));
+            let (status, lines) = upload_auth_lines(&rt, &state, &host, &proof, Some(&assertion));
+            assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+            assert_one_upload_line(&lines, "nip_fi", "success", None);
         }
 
         /// Off mode skips the cardinality gate and `HeaderMap::get` takes the
@@ -3277,6 +3491,7 @@ mod tests {
                 .expect("valid header"),
             );
 
+            let (guard, out) = crate::access::tests::capture_scoped();
             let (status, resp_headers, body) = rt.block_on(media_oneshot(
                 Arc::clone(&state),
                 "GET",
@@ -3285,6 +3500,17 @@ mod tests {
                 headers,
                 b"",
             ));
+            drop(guard);
+            // The rejected read proof writes exactly one access line.
+            let auth: Vec<_> = out
+                .lines()
+                .into_iter()
+                .filter(|l| l["event"] == "http")
+                .collect();
+            assert_eq!(auth.len(), 1, "{auth:?}");
+            assert_eq!(auth[0]["method"], "blossom");
+            assert_eq!(auth[0]["outcome"], "failed");
+            assert_eq!(auth[0]["route"], "/media/{sha256_ext}");
 
             assert_eq!(
                 status,
@@ -4298,7 +4524,9 @@ mod tests {
                 &keys.public_key().to_hex(),
                 "member",
                 None,
+                &nostr::Keys::generate(),
             ))
+            .map(|write| write.outcome)
             .expect("add relay member");
             let assertion = signed_assertion(&keys.public_key().to_hex());
             let proof = blossom_get_auth_value(&keys, &host, &"a".repeat(64));
@@ -4380,6 +4608,408 @@ mod tests {
                     sqlx::raw_sql(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
                         .execute(&admin),
                 );
+            }
+        }
+
+        // ── Host-bound media reads and per-community upload limits ─────────────
+        //
+        // `test_state` seeds the relay.example community, so these need Postgres
+        // too. Its Redis URL is unreachable on purpose: none of them use Redis.
+
+        async fn test_state() -> Arc<AppState> {
+            let mut config = crate::config::Config::for_test(); // [FI-TRACE-ENV-RACE]
+            config.database_url = crate::test_support::database_url();
+            config.require_relay_membership = false;
+            config.redis_url = "redis://127.0.0.1:1".to_string();
+            config.media_uploads_per_minute = 1;
+            config.media_max_concurrent_uploads = 2;
+            config.media_max_concurrent_uploads_per_pubkey = 1;
+
+            let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
+            let db = buzz_db::Db::from_pool(pool.clone());
+            db.ensure_configured_community("relay.example")
+                .await
+                .expect("seed relay.example community for host-bound media tests");
+            let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
+            let pubsub = Arc::new(
+                buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
+                    .await
+                    .expect("pubsub manager"),
+            );
+            let audit = buzz_audit::AuditService::new(pool.clone());
+            let auth = buzz_auth::AuthService::new(config.auth.clone());
+            let search = buzz_search::SearchService::new(pool.clone());
+            let workflow_engine = Arc::new(buzz_workflow::WorkflowEngine::new(
+                db.clone(),
+                buzz_workflow::WorkflowConfig::default(),
+            ));
+            let media_storage =
+                buzz_media::MediaStorage::new(&config.media).expect("media storage");
+            let (state, _audit_shutdown) = AppState::new(
+                config,
+                db,
+                redis_pool,
+                audit,
+                pubsub,
+                auth,
+                search,
+                workflow_engine,
+                nostr::Keys::generate(),
+                media_storage,
+            );
+            Arc::new(state)
+        }
+
+        async fn media_get_auth_router() -> axum::Router {
+            let state = test_state().await;
+            axum::Router::new()
+                .route(
+                    "/media/{sha256_ext}",
+                    axum::routing::get(get_blob).head(head_blob),
+                )
+                .with_state(state)
+        }
+
+        fn media_get_auth_header(keys: &Keys, tags: Vec<Tag>) -> String {
+            let event = EventBuilder::new(Kind::from(24242), "Get media")
+                .tags(tags)
+                .sign_with_keys(keys)
+                .expect("sign get auth");
+            format!(
+                "Nostr {}",
+                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(event.as_json().as_bytes())
+            )
+        }
+
+        fn media_get_tags_for(host: &str, sha256: Option<&str>) -> Vec<Tag> {
+            let now = Timestamp::now().as_secs();
+            let expiration = (now + 55).to_string();
+            let mut tags = vec![
+                Tag::parse(["t", "get"]).expect("t tag"),
+                Tag::parse(["expiration", &expiration]).expect("expiration tag"),
+                Tag::parse(["server", host]).expect("server tag"),
+            ];
+            if let Some(sha256) = sha256 {
+                tags.push(Tag::parse(["x", sha256]).expect("x tag"));
+            }
+            tags
+        }
+
+        fn media_request(method: &str, auth: Option<String>) -> Request<Body> {
+            let mut builder = Request::builder()
+                .method(method)
+                .uri(format!("/media/{VALID_HASH}.jpg"))
+                .header(header::HOST, "relay.example");
+            if let Some(auth) = auth {
+                builder = builder.header(header::AUTHORIZATION, auth);
+            }
+            builder.body(Body::empty()).expect("request")
+        }
+
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn media_reads_reject_unauthenticated_get_and_head_before_sidecar_gate() {
+            for method in ["GET", "HEAD"] {
+                let response = media_get_auth_router()
+                    .await
+                    .oneshot(media_request(method, None))
+                    .await
+                    .expect("response");
+
+                assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{method}");
+            }
+        }
+
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn media_read_with_valid_server_scoped_token_reaches_sidecar_gate() {
+            let keys = Keys::generate();
+            let auth = media_get_auth_header(&keys, media_get_tags_for("relay.example", None));
+            let response = media_get_auth_router()
+                .await
+                .oneshot(media_request("GET", Some(auth)))
+                .await
+                .expect("response");
+
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
+
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn media_read_rejects_upload_verb_wrong_server_and_wrong_x() {
+            let keys = Keys::generate();
+            let now = Timestamp::now().as_secs();
+            let expiration = (now + 55).to_string();
+            let cases = [
+                vec![
+                    Tag::parse(["t", "upload"]).expect("t tag"),
+                    Tag::parse(["expiration", &expiration]).expect("expiration tag"),
+                    Tag::parse(["server", "relay.example"]).expect("server tag"),
+                ],
+                vec![
+                    Tag::parse(["t", "get"]).expect("t tag"),
+                    Tag::parse(["expiration", &expiration]).expect("expiration tag"),
+                    Tag::parse(["server", "evil.example"]).expect("server tag"),
+                ],
+                vec![
+                    Tag::parse(["t", "get"]).expect("t tag"),
+                    Tag::parse(["expiration", &expiration]).expect("expiration tag"),
+                    Tag::parse(["x", &"f".repeat(64)]).expect("x tag"),
+                ],
+            ];
+
+            for tags in cases {
+                let auth = media_get_auth_header(&keys, tags);
+                let response = media_get_auth_router()
+                    .await
+                    .oneshot(media_request("GET", Some(auth)))
+                    .await
+                    .expect("response");
+
+                assert_ne!(response.status(), StatusCode::NOT_FOUND);
+                assert!(
+                    response.status() == StatusCode::UNAUTHORIZED
+                        || response.status() == StatusCode::FORBIDDEN,
+                    "unexpected status {}",
+                    response.status()
+                );
+            }
+        }
+
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn media_read_accepts_range_header_only_after_auth() {
+            let keys = Keys::generate();
+            let auth = media_get_auth_header(&keys, media_get_tags_for("relay.example", None));
+            let mut request = media_request("GET", Some(auth));
+            request
+                .headers_mut()
+                .insert(header::RANGE, "bytes=0-0".parse().expect("range header"));
+
+            let response = media_get_auth_router()
+                .await
+                .oneshot(request)
+                .await
+                .expect("response");
+
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
+
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn upload_rate_limiter_is_scoped_by_community() {
+            let state = test_state().await;
+            let pubkey = nostr::Keys::generate().public_key();
+            let community_a = buzz_core::CommunityId::from_uuid(Uuid::from_u128(0xAAAA));
+            let community_b = buzz_core::CommunityId::from_uuid(Uuid::from_u128(0xBBBB));
+
+            assert!(!upload_rate_limited(&state, community_a, &pubkey));
+            assert!(upload_rate_limited(&state, community_a, &pubkey));
+            assert!(
+                !upload_rate_limited(&state, community_b, &pubkey),
+                "A's exhausted upload budget must not rate-limit the same key in B"
+            );
+        }
+
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn upload_concurrency_limit_is_scoped_by_community() {
+            let state = test_state().await;
+            let pubkey = nostr::Keys::generate().public_key();
+            let community_a = buzz_core::CommunityId::from_uuid(Uuid::from_u128(0xAAAA));
+            let community_b = buzz_core::CommunityId::from_uuid(Uuid::from_u128(0xBBBB));
+
+            let permit_a = acquire_upload_permit(&state, community_a, &pubkey)
+                .expect("first A upload allowed");
+            assert!(matches!(
+                acquire_upload_permit(&state, community_a, &pubkey),
+                Err(MediaError::UploadConcurrencyLimitReached)
+            ));
+            let permit_b = acquire_upload_permit(&state, community_b, &pubkey)
+                .expect("A's in-flight upload must not block B");
+
+            drop(permit_b);
+            drop(permit_a);
+        }
+
+        /// Thumbnail regeneration needs real object storage, so these also
+        /// need MinIO. They share one image and the process-wide regeneration
+        /// permits, so they run one at a time.
+        mod external_infra_minio_tests {
+            use super::*;
+
+            static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+            /// A valid 4x4 PNG with no ancillary chunks.
+            const PNG: &[u8] = &[
+                0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48,
+                0x44, 0x52, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x04, 0x08, 0x02, 0x00, 0x00,
+                0x00, 0x26, 0x93, 0x09, 0x29, 0x00, 0x00, 0x00, 0x10, 0x49, 0x44, 0x41, 0x54, 0x78,
+                0x9c, 0x63, 0x38, 0x21, 0x27, 0x07, 0x47, 0x0c, 0xc4, 0x71, 0x00, 0xb1, 0x63, 0x10,
+                0x41, 0x3b, 0x4b, 0x63, 0x82, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae,
+                0x42, 0x60, 0x82,
+            ];
+
+            struct Fixture {
+                rt: tokio::runtime::Runtime,
+                state: Arc<AppState>,
+                host: String,
+                sha: String,
+            }
+
+            impl Fixture {
+                /// Upload [`PNG`] through the real route, apply `configure`, and delete its thumbnails.
+                fn new(configure: impl FnOnce(&mut crate::config::Config)) -> Self {
+                    let (rt, mut state, host) = media_fixture(media_off_test_state());
+                    let sha = sha256_hex(PNG);
+                    let proof = blossom_upload_auth_value(&Keys::generate(), &host, &sha);
+                    let (status, _, body) = upload_request_with(
+                        &rt,
+                        &state,
+                        "/media/upload",
+                        &host,
+                        (Some(&sha), PNG),
+                        &[&proof],
+                        None,
+                    );
+                    assert_eq!(status, StatusCode::OK, "upload: {body:?}");
+                    mutate_state(&mut state, configure);
+                    let fixture = Self {
+                        rt,
+                        state,
+                        host,
+                        sha,
+                    };
+                    fixture.delete_thumbs();
+                    fixture
+                }
+
+                fn thumb_key(&self, ext: &str) -> String {
+                    format!("{}.thumb.{ext}", self.sha)
+                }
+
+                fn delete_thumbs(&self) {
+                    for ext in ["webp", "jpg"] {
+                        self.rt
+                            .block_on(self.state.media_storage.delete(&self.thumb_key(ext)))
+                            .expect("delete thumbnail");
+                    }
+                }
+
+                fn stored(&self, key: &str) -> bool {
+                    self.rt
+                        .block_on(self.state.media_storage.head(key))
+                        .expect("head")
+                }
+
+                fn read(
+                    &self,
+                    method: &str,
+                    ext: &str,
+                ) -> (StatusCode, axum::http::HeaderMap, bytes::Bytes) {
+                    let mut headers = axum::http::HeaderMap::new();
+                    headers.insert(
+                        axum::http::header::AUTHORIZATION,
+                        blossom_get_auth_value(&Keys::generate(), &self.host, &self.sha)
+                            .parse()
+                            .expect("valid header"),
+                    );
+                    self.rt.block_on(media_oneshot(
+                        Arc::clone(&self.state),
+                        method,
+                        &format!("/media/{}", self.thumb_key(ext)),
+                        &self.host,
+                        headers,
+                        b"",
+                    ))
+                }
+            }
+
+            /// A thumbnail variant missing from storage while its image original
+            /// exists is rebuilt and served, by GET and by HEAD, for each variant.
+            #[test]
+            #[ignore = "requires Postgres and MinIO"]
+            fn missing_thumbnail_is_regenerated_from_image_original() {
+                let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+                let f = Fixture::new(|_| {});
+                for (method, ext, mime) in [
+                    ("GET", "webp", "image/webp"),
+                    ("GET", "jpg", "image/jpeg"),
+                    ("HEAD", "webp", "image/webp"),
+                    ("HEAD", "jpg", "image/jpeg"),
+                ] {
+                    f.delete_thumbs();
+                    let (status, headers, body) = f.read(method, ext);
+                    assert_eq!(status, StatusCode::OK, "{method} {ext}: {body:?}");
+                    assert_eq!(headers["content-type"], mime, "{method} {ext}");
+                    if method == "GET" {
+                        assert!(!body.is_empty(), "{ext} body");
+                    }
+                    for ext in ["webp", "jpg"] {
+                        assert!(f.stored(&f.thumb_key(ext)), "{method} {ext}: {ext} stored");
+                    }
+                }
+            }
+
+            /// Regeneration stays a 404 and writes nothing when the sidecar says the
+            /// blob is not an image, the original is gone, the original exceeds
+            /// `max_image_bytes`, or every regeneration permit is taken.
+            #[test]
+            #[ignore = "requires Postgres and MinIO"]
+            fn missing_thumbnail_is_not_regenerated_when_unsafe() {
+                let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+                let assert_absent = |f: &Fixture, case: &str| {
+                    for ext in ["webp", "jpg"] {
+                        let (status, _, body) = f.read("GET", ext);
+                        assert_eq!(status, StatusCode::NOT_FOUND, "{case} {ext}: {body:?}");
+                        assert!(!f.stored(&f.thumb_key(ext)), "{case}: {ext} written");
+                    }
+                };
+
+                // Not an image: a text blob under its own hash.
+                let f = Fixture::new(|_| {});
+                let text = format!("not an image {}", uuid::Uuid::new_v4()).into_bytes();
+                let sha = sha256_hex(&text);
+                let tenant =
+                    f.rt.block_on(crate::tenant::bind_community(&f.state.db, &f.host))
+                        .expect("bind community");
+                f.rt.block_on(async {
+                    let storage = &f.state.media_storage;
+                    storage
+                        .put(&format!("{sha}.txt"), &text, "text/plain")
+                        .await
+                        .expect("put text");
+                    let meta = buzz_media::BlobMeta {
+                        ext: "txt".into(),
+                        mime_type: "text/plain".into(),
+                        size: text.len() as u64,
+                        ..Default::default()
+                    };
+                    storage
+                        .put_sidecar(&tenant, &sha, &meta)
+                        .await
+                        .expect("put sidecar");
+                });
+                let text_fixture = Fixture { sha, ..f };
+                assert_absent(&text_fixture, "non-image");
+
+                // Original missing: sidecar still says image.
+                let f = Fixture::new(|_| {});
+                f.rt.block_on(f.state.media_storage.delete(&format!("{}.png", f.sha)))
+                    .expect("delete original");
+                assert_absent(&f, "missing original");
+
+                // Original over the size cap.
+                let f = Fixture::new(|c| c.media.max_image_bytes = PNG.len() as u64 - 1);
+                assert_absent(&f, "oversize");
+
+                // No free permit, then a free one.
+                let f = Fixture::new(|_| {});
+                let held: Vec<_> = std::iter::from_fn(|| THUMB_REGEN.try_acquire().ok()).collect();
+                assert!(!held.is_empty(), "fixture must hold a regeneration permit");
+                assert_absent(&f, "busy");
+                drop(held);
+                assert_eq!(f.read("GET", "webp").0, StatusCode::OK, "after release");
             }
         }
     }
