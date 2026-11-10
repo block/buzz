@@ -7,6 +7,9 @@ import '../../../shared/theme/theme.dart';
 /// character, removed from authored content, so only the renderer adds it.
 const editedSlot = '';
 
+/// [text] without authored edited slots, so only the renderer places one.
+String withoutEditedSlot(String text) => text.replaceAll(editedSlot, '');
+
 /// The visible text of the edited marker.
 const editedMarkerText = '(edited)';
 
@@ -75,6 +78,47 @@ TextStyle editedMarkerStyle(BuildContext context, {required bool own}) =>
           ? ChatColors.of(context).foreground
           : context.colors.onSurfaceVariant,
     );
+
+/// [markdown] drawn by [render] with the edited marker after its last line:
+/// joined to prose, else on its own line inside the same text bubble.
+Widget markedEditedBody(
+  String markdown,
+  Widget Function(String) render,
+  TextStyle style,
+) {
+  final slotted = withEditedSlot(markdown);
+  if (slotted != null) return render(slotted);
+  return Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      render(markdown),
+      Text(editedMarkerText, style: style),
+    ],
+  );
+}
+
+/// [child], then the edited marker below it, outside every text bubble.
+Widget withEditedMarkerBelow(Widget child, {required bool end}) => Column(
+  crossAxisAlignment: end ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+  mainAxisSize: MainAxisSize.min,
+  children: [child, const EditedMarkerBelow()],
+);
+
+/// The edited marker after trailing media, outside every text bubble.
+class EditedMarkerBelow extends StatelessWidget {
+  /// Creates the marker.
+  const EditedMarkerBelow({super.key});
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.symmetric(horizontal: Grid.xs),
+    child: Text(
+      editedMarkerText,
+      style: editedMarkerStyle(context, own: false),
+    ),
+  );
+}
 
 /// Draws [editedSlot] inside Markdown as the edited marker.
 class EditedMarkerMd extends InlineMd {

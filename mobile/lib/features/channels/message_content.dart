@@ -361,10 +361,7 @@ class MessageContent extends HookConsumerWidget {
       // so the gpt_markdown combined regex can match multi-word names
       // even when caseSensitive is not preserved.
       // Skip content inside backticks to avoid altering inline code.
-      // Only the renderer places the edited slot.
-      final mentionParts = markdownContent
-          .replaceAll(editedSlot, '')
-          .split('`');
+      final mentionParts = withoutEditedSlot(markdownContent).split('`');
       final mentionBuf = StringBuffer();
       for (var i = 0; i < mentionParts.length; i++) {
         if (i.isOdd) {
@@ -483,21 +480,9 @@ class MessageContent extends HookConsumerWidget {
         (bubble
             ? segments.isNotEmpty && !segments.last.attachment
             : finalContent.trim().isNotEmpty);
-    // The last text gets the marker: joined to prose, else on its own line.
-    Widget renderBody(String text, {required bool last}) {
-      if (!editedInBody || !last) return renderMarkdown(text);
-      final slotted = withEditedSlot(text);
-      if (slotted != null) return renderMarkdown(slotted);
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          renderMarkdown(text),
-          Text(editedMarkerText, style: editedStyle),
-        ],
-      );
-    }
-
+    Widget renderBody(String text, {required bool last}) => editedInBody && last
+        ? markedEditedBody(text, renderMarkdown, editedStyle)
+        : renderMarkdown(text);
     final markdown = bubble
         ? Column(
             crossAxisAlignment: ownMessage
@@ -575,78 +560,65 @@ class MessageContent extends HookConsumerWidget {
             ],
           )
         : renderBody(finalContent, last: true);
-    final body = trailingGallery == null
-        ? markdown
-        : Column(
-            crossAxisAlignment: ownMessage
-                ? CrossAxisAlignment.end
-                : CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              if (bubble)
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: Grid.xs),
-                  child: Text(
-                    '${trailingGallery.items.length} photos',
-                    key: const ValueKey('message-media-stack-count'),
-                    style: context.textTheme.labelSmall?.copyWith(
-                      color: context.colors.onSurfaceVariant,
-                    ),
-                  ),
-                ),
-              if (trailingGallery.content.trim().isNotEmpty) markdown,
-              MessageReplyDragTarget(
-                child: MessageAttachmentCorners(
-                  borderRadius: _attachmentCorners(
-                    start:
-                        bubbleStart && trailingGallery.content.trim().isEmpty,
-                    end: bubbleEnd,
-                  ),
-                  child: bubble
-                      ? _MessageImageStack(
-                          key: ValueKey(
-                            trailingGallery.items
-                                .map((item) => item.url)
-                                .join('\u0000'),
-                          ),
-                          items: trailingGallery.items,
-                          mirrored: ownMessage,
-                          nativeActions: nativePhotoActions,
-                          onReply: onMediaReply,
-                          onMore: onMediaMore,
-                        )
-                      : _MessageImageCarousel(
-                          key: ValueKey(
-                            trailingGallery.items
-                                .map((item) => item.url)
-                                .join('\u0000'),
-                          ),
-                          items: trailingGallery.items,
-                          mirrored: ownMessage,
-                          leadingOverflow: mediaCarouselLeadingOverflow,
-                          trailingOverflow: mediaCarouselTrailingOverflow,
-                          onReply: onMediaReply,
-                          onMore: onMediaMore,
-                        ),
-                ),
-              ),
-            ],
-          );
-    if (!edited || editedInBody) return body;
+    if (trailingGallery == null) {
+      return edited && !editedInBody
+          ? withEditedMarkerBelow(markdown, end: ownMessage)
+          : markdown;
+    }
+
     return Column(
       crossAxisAlignment: ownMessage
           ? CrossAxisAlignment.end
           : CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
-        body,
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: Grid.xs),
-          child: Text(
-            editedMarkerText,
-            style: editedMarkerStyle(context, own: false),
+        if (bubble)
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: Grid.xs),
+            child: Text(
+              '${trailingGallery.items.length} photos',
+              key: const ValueKey('message-media-stack-count'),
+              style: context.textTheme.labelSmall?.copyWith(
+                color: context.colors.onSurfaceVariant,
+              ),
+            ),
+          ),
+        if (trailingGallery.content.trim().isNotEmpty) markdown,
+        MessageReplyDragTarget(
+          child: MessageAttachmentCorners(
+            borderRadius: _attachmentCorners(
+              start: bubbleStart && trailingGallery.content.trim().isEmpty,
+              end: bubbleEnd,
+            ),
+            child: bubble
+                ? _MessageImageStack(
+                    key: ValueKey(
+                      trailingGallery.items
+                          .map((item) => item.url)
+                          .join('\u0000'),
+                    ),
+                    items: trailingGallery.items,
+                    mirrored: ownMessage,
+                    nativeActions: nativePhotoActions,
+                    onReply: onMediaReply,
+                    onMore: onMediaMore,
+                  )
+                : _MessageImageCarousel(
+                    key: ValueKey(
+                      trailingGallery.items
+                          .map((item) => item.url)
+                          .join('\u0000'),
+                    ),
+                    items: trailingGallery.items,
+                    mirrored: ownMessage,
+                    leadingOverflow: mediaCarouselLeadingOverflow,
+                    trailingOverflow: mediaCarouselTrailingOverflow,
+                    onReply: onMediaReply,
+                    onMore: onMediaMore,
+                  ),
           ),
         ),
+        if (edited) const EditedMarkerBelow(),
       ],
     );
   }
