@@ -106,25 +106,25 @@ useMeChatAssistant(
     }
   }
   // The owner's inventory name outranks the agent's self-published profile.
-  final names = watchMeAssistantNames(
-    ref,
-    agents,
-    saved: [selected, pending?.agent],
-  );
+  // Only Solo reads these names; other chats must not watch every profile.
+  final names = enabled
+      ? watchMeAssistantNames(ref, agents, saved: [selected, pending?.agent])
+      : null;
   // A known agent outside the inventory, such as an archived one, is labeled
   // against the live agents so it never reads as a live namesake.
   bool named(String pubkey) =>
-      agents.any((agent) => agent.pubkey == pubkey) ||
-      ref.read(userCacheProvider)[pubkey]?.displayName?.trim().isNotEmpty ==
-          true;
+      names != null &&
+      (agents.any((agent) => agent.pubkey == pubkey) ||
+          ref.read(userCacheProvider)[pubkey]?.displayName?.trim().isNotEmpty ==
+              true);
   final name = selected != null && named(selected)
-      ? names.labelFor(selected)
+      ? names!.labelFor(selected)
       : profile?.displayName;
   final avatarInitial = name?.trim().isNotEmpty == true
       ? name!.trim()[0].toUpperCase()
       : profile?.initial ?? '?';
   String agentName(String pubkey) {
-    if (named(pubkey)) return names.labelFor(pubkey);
+    if (named(pubkey)) return names!.labelFor(pubkey);
     return pubkey.length > 12
         ? '${pubkey.substring(0, 8)}…${pubkey.substring(pubkey.length - 4)}'
         : pubkey;
