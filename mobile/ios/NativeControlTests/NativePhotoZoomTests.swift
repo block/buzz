@@ -33,8 +33,6 @@ struct NativePhotoZoomTests {
       precondition(photo.image == nil, "Late old-window responses cannot paint the selected photo")
       let current = requests
       requests.removeAll()
-      for request in current { request.2(FlutterStandardTypedData(bytes: data)) }
-      precondition(photo.image != nil, "Current-window responses must paint the actual page")
       let blueData = UIGraphicsImageRenderer(size: CGSize(width: 2, height: 2)).pngData { context in
         UIColor.blue.setFill(); context.fill(CGRect(x: 0, y: 0, width: 2, height: 2))
       }
@@ -44,6 +42,9 @@ struct NativePhotoZoomTests {
       viewer.updateFrame(blueData, at: 50)
       precondition(photo.image !== previous, "Continuing animation frames must update the selected photo")
       let updated = photo.image
+      precondition(current.contains { $0.0 == "image" && $0.1 == 50 }, "Hold the selected initial-image reply until after a continuing frame")
+      for request in current { request.2(FlutterStandardTypedData(bytes: data)) }
+      precondition(photo.image === updated, "Delayed initial image and preview replies must not rewind a continuing frame")
       viewer.updateFrame(Data([0, 1]), at: 50)
       precondition(photo.image === updated, "Malformed frames must preserve the last displayed image")
       indicator.currentPage = 0; sendValueChanged(indicator)
