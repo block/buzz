@@ -3,6 +3,8 @@ use crate::Db;
 use sqlx::PgPool;
 mod discovery;
 mod inventory;
+/// Read-only, ordered previews of human content cleanup batches.
+pub mod preview;
 mod requests;
 pub use discovery::normalize_user_deletion_pubkey;
 pub use inventory::UserDeletionInventory;
