@@ -1163,7 +1163,7 @@ void main() {
       () async {
         final directory = await Directory.systemTemp.createTemp('attachment-');
         addTearDown(() => directory.delete(recursive: true));
-        final source = File('${directory.path}/Meeting: planning notes.m4a');
+        final source = File('${directory.path}/Meeting: planning notes.txt');
         final contents = [1, 2, 3, 4];
         await source.writeAsBytes(contents);
         final uploads = <List<int>>[];
@@ -1197,7 +1197,7 @@ void main() {
         await source.delete();
         final uploaded = await service.uploadFile(retained);
         expect(uploads.single, contents);
-        expect(uploaded.filename, 'Meeting: planning notes.m4a');
+        expect(uploaded.filename, 'Meeting: planning notes.txt');
 
         await expectLater(
           service.pickAttachmentFile(),

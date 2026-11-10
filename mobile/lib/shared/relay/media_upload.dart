@@ -445,23 +445,42 @@ class MediaUploadService {
     if (!_allowedAudioMimeTypes.contains(mimeType)) {
       throw Exception('unsupported voice note type: $mimeType');
     }
+    return _uploadPackagedAudio(
+      voiceNote,
+      duration: duration,
+      onProgress: onProgress,
+      cancellationToken: cancellationToken,
+    );
+  }
+
+  Future<BlobDescriptor> _uploadPackagedAudio(
+    XFile voiceNote, {
+    Duration? duration,
+    ValueChanged<double>? onProgress,
+    UploadCancellationToken? cancellationToken,
+  }) async {
+    _throwIfCancelled(cancellationToken);
+    final length = await voiceNote.length();
+    if (length == 0) throw Exception('Voice note is empty.');
+    if (length > _maxFileSizeBytes) {
+      throw Exception('Voice note is too large. Maximum is 100MB.');
+    }
     String? packagedPath;
     try {
       packagedPath = await _packageVoiceNoteForUpload(voiceNote.path);
       _throwIfCancelled(cancellationToken);
-      final bytes = await File(packagedPath).readAsBytes();
-      if (bytes.isEmpty) throw Exception('Voice note is empty.');
-      if (bytes.length > _maxFileSizeBytes) {
-        throw Exception('Voice note is too large. Maximum is 100MB.');
-      }
+      final bytes = await _readAttachmentBytes(XFile(packagedPath));
+      _throwIfCancelled(cancellationToken);
       final descriptor = await _uploadPreparedBytes(
         bytes,
         mimeType: 'video/mp4',
         onProgress: onProgress,
         cancellationToken: cancellationToken,
       );
+      final filename = _voiceNoteMp4Filename(voiceNote.name);
+      if (duration == null) return descriptor.withFilename(filename);
       return descriptor.withVoiceNoteMetadata(
-        filename: _voiceNoteMp4Filename(voiceNote.name),
+        filename: filename,
         fallbackDurationSeconds: duration.inMilliseconds / 1000,
       );
     } finally {
@@ -496,6 +515,20 @@ class MediaUploadService {
     UploadCancellationToken? cancellationToken,
   }) async {
     _throwIfCancelled(cancellationToken);
+    // Imported AAC recordings need the same sanitized, fast-start envelope as
+    // in-app recordings. Never fall back to uploading a rejected raw container.
+    final name = pickedFile.name.toLowerCase();
+    final mimeType = pickedFile.mimeType?.split(';').first.trim().toLowerCase();
+    if (name.endsWith('.m4a') ||
+        name.endsWith('.aac') ||
+        _allowedAudioMimeTypes.contains(mimeType) ||
+        mimeType == 'audio/x-m4a') {
+      return _uploadPackagedAudio(
+        pickedFile,
+        onProgress: onProgress,
+        cancellationToken: cancellationToken,
+      );
+    }
     final bytes = await _readAttachmentBytes(pickedFile);
     _throwIfCancelled(cancellationToken);
     final descriptor = await _uploadPreparedBytes(
