@@ -216,11 +216,13 @@ typedef RecipientSearch = ({
 /// own agents offered unprompted, agents shared with the viewer, and people
 /// from the community directory search, with the same debounce and search
 /// cache. Before a name is typed, where `@` lists the channel's members, a
-/// picker lists the named people the viewer shares a channel or DM with.
+/// picker lists its agents and then the people the viewer shares a channel
+/// or DM with, so known people never push an agent off the list.
 final recipientCandidatesProvider = Provider.family
     .autoDispose<List<MentionCandidate>, RecipientSearch>((ref, search) {
       final currentPubkey = ref.watch(currentPubkeyProvider)?.toLowerCase();
-      return [
+      final empty = search.query.trim().isEmpty;
+      final candidates = [
         for (final candidate in _chooserCandidates(
           ref,
           members: const [],
@@ -229,13 +231,37 @@ final recipientCandidatesProvider = Provider.family
           offerOwnedAgents: true,
           offerUnsharedAgents: search.unsharedAgents,
           historyKey: search.historyKey,
-          knownPeople: search.query.trim().isEmpty
+          knownPeople: empty
               ? _knownPeople(ref, excludedChannelId: search.channelId)
               : const [],
         ))
           if (candidate.pubkey != currentPubkey) candidate,
       ];
+      if (!empty) return candidates;
+      return [
+        for (final candidate in candidates)
+          if (candidate.isAgent) candidate,
+        for (final candidate in candidates)
+          if (!candidate.isAgent) candidate,
+      ];
     });
+
+/// Whether both agent lists a recipient picker offers have loaded or
+/// failed; a reload keeps its earlier list. A picker starts its shown rows
+/// over when this turns true, so agents that load after known people fill
+/// the list still take their places ahead of them. The viewer's own agents
+/// stay unknown while offline, and known people show meanwhile.
+final recipientAgentsSettledProvider = Provider.autoDispose<bool>((ref) {
+  bool settled(AsyncValue<Object?> value) => value.hasValue || value.hasError;
+  return settled(ref.watch(agentDirectoryProvider)) &&
+      settled(ref.watch(ownedAgentDirectoryProvider));
+});
+
+/// Unnamed known people whose profiles a picker opening already requested,
+/// so a person with no profile is asked for once, not on every rebuild.
+final _requestedKnownPeopleProvider = Provider.autoDispose<Set<String>>(
+  (ref) => <String>{},
+);
 
 /// Whether a recipient picker's directory search for [query] still runs.
 final recipientSearchPendingProvider = Provider.family
@@ -252,6 +278,9 @@ final recipientSearchFailedProvider = Provider.family.autoDispose<bool, String>(
     return search.hasError && !search.isLoading;
   },
 );
+
+/// Most roster entries one known-people scan reads.
+const _knownPeopleScanLimit = 2000;
 
 /// Named people in the viewer's open channels and DMs, as directory search
 /// results, from the member lists the channel list already loaded. DM
@@ -278,17 +307,18 @@ List<UserProfile> _knownPeople(Ref ref, {String? excludedChannelId}) {
   };
   final people = <UserProfile>[];
   final unnamed = <String>[];
+  // Roster entries read, bounded even when most are already excluded.
+  var visited = 0;
   gather:
   for (final channel in channels) {
     if (!channel.isMember || channel.isArchived) continue;
     if (channel.id == excludedChannelId) continue;
-    final pubkeys = [
-      ...channel.participantPubkeys,
-      for (final member in notifier.cachedMembersForChannel(channel.id))
-        member.pubkey,
-    ];
+    final pubkeys = channel.participantPubkeys.followedBy(
+      notifier.cachedMembersForChannel(channel.id).map((m) => m.pubkey),
+    );
     for (final pubkey in pubkeys) {
-      if (people.length + unnamed.length >= mentionSuggestionLimit) {
+      if (people.length + unnamed.length >= mentionSuggestionLimit ||
+          ++visited > _knownPeopleScanLimit) {
         break gather;
       }
       final key = pubkey.toLowerCase();
@@ -303,9 +333,14 @@ List<UserProfile> _knownPeople(Ref ref, {String? excludedChannelId}) {
       }
     }
   }
-  if (unnamed.isNotEmpty) {
+  final requested = ref.watch(_requestedKnownPeopleProvider);
+  final load = [
+    for (final pubkey in unnamed)
+      if (requested.add(pubkey)) pubkey,
+  ];
+  if (load.isNotEmpty) {
     Future.microtask(() {
-      if (ref.mounted) ref.read(userCacheProvider.notifier).preload(unnamed);
+      if (ref.mounted) ref.read(userCacheProvider.notifier).preload(load);
     });
   }
   return people;

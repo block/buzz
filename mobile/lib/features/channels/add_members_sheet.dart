@@ -103,6 +103,7 @@ class AddChannelMembersSheet extends HookConsumerWidget {
       )),
     );
     final searching = ref.watch(recipientSearchPendingProvider(search));
+    final agentsSettled = ref.watch(recipientAgentsSettledProvider);
     final searchFailed = ref.watch(recipientSearchFailedProvider(search));
     final normalizedExisting = existingPubkeys
         .map((pubkey) => pubkey.toLowerCase())
@@ -123,7 +124,9 @@ class AddChannelMembersSheet extends HookConsumerWidget {
             candidate,
       ],
       query: search,
-      opening: opening.value,
+      // Agents that settle after the rows were shown start them over, so
+      // they keep their places ahead of known people.
+      opening: opening.value * 2 + (agentsSettled ? 1 : 0),
       pending: searching,
     );
     final availableUsers = shown.rows;

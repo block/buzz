@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
@@ -20,6 +22,19 @@ final _nameless = 'b' * 64;
 final _carol = 'c' * 64;
 final _dan = 'd' * 64;
 final _eve = 'e' * 64;
+final _ghost = '9' * 64;
+final _zed = '8' * 64;
+
+/// An agent shared with the viewer in `general`, sorting after every person.
+final _zedAgent = AgentDirectoryEntry(
+  pubkey: _zed,
+  displayName: 'Zed',
+  respondTo: 'anyone',
+  channelIds: const ['general'],
+);
+
+/// Profile requests per person.
+final _requests = <String, int>{};
 
 Channel _channel(
   String id, {
@@ -59,8 +74,18 @@ class _Session extends RelaySessionNotifier {
   Future<List<NostrEvent>> fetchHistory(
     NostrFilter filter, {
     Duration timeout = const Duration(seconds: 8),
-  }) async => const [];
+  }) async {
+    if (filter.kinds.contains(0)) {
+      for (final author in filter.authors ?? const <String>[]) {
+        _profileReads[author] = (_profileReads[author] ?? 0) + 1;
+      }
+    }
+    return const [];
+  }
 }
+
+/// Relay profile reads per person, through the real user cache.
+final _profileReads = <String, int>{};
 
 /// Named people in the `crowd` channel; none unless a test sets it.
 var _crowd = <String>[];
@@ -78,12 +103,20 @@ class _Channels extends ChannelsNotifier {
   @override
   List<ChannelMember> cachedMembersForChannel(String channelId) =>
       switch (channelId) {
-        'general' => [_member(_me), _member(_ada), _member(_nameless)],
+        'general' => [
+          _member(_me),
+          _member(_ada),
+          _member(_nameless),
+          _member(_ghost),
+        ],
         'old' => [_member(_carol)],
         'elsewhere' => [_member(_dan)],
         'crowd' => [for (final pubkey in _crowd) _member(pubkey)],
         _ => const [],
       };
+
+  /// Republishes the same list, as a new message or presence change does.
+  void touch() => state = AsyncData([...state.requireValue]);
 }
 
 class _Cache extends UserCacheNotifier {
@@ -107,6 +140,9 @@ class _Cache extends UserCacheNotifier {
   /// Loads a name for an unnamed person when the picker asks for it.
   @override
   Future<bool> preload(List<String> pubkeys) async {
+    for (final pubkey in pubkeys) {
+      _requests[pubkey] = (_requests[pubkey] ?? 0) + 1;
+    }
     if (pubkeys.contains(_nameless)) {
       state = {
         ...state,
@@ -120,18 +156,34 @@ class _Cache extends UserCacheNotifier {
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  Future<List<String>> pick(String query, {String? channelId}) async {
-    final container = ProviderContainer(
-      retry: (_, _) => null,
-      overrides: [
-        relaySessionProvider.overrideWith(_Session.new),
-        currentPubkeyProvider.overrideWith((ref) => _me),
-        channelsProvider.overrideWith(_Channels.new),
-        userCacheProvider.overrideWith(_Cache.new),
-        agentDirectoryProvider.overrideWith((ref) async => const []),
-        agentOwnersProvider.overrideWith((ref) async => const {}),
-      ],
-    );
+  ProviderContainer container0({
+    List<AgentDirectoryEntry> agents = const [],
+    bool agentsLoading = false,
+    bool realCache = false,
+  }) => ProviderContainer(
+    retry: (_, _) => null,
+    overrides: [
+      relaySessionProvider.overrideWith(_Session.new),
+      currentPubkeyProvider.overrideWith((ref) => _me),
+      channelsProvider.overrideWith(_Channels.new),
+      if (!realCache) userCacheProvider.overrideWith(_Cache.new),
+      agentDirectoryProvider.overrideWith(
+        (ref) => agentsLoading
+            ? Completer<List<AgentDirectoryEntry>>().future
+            : Future.value(agents),
+      ),
+      agentOwnersProvider.overrideWith((ref) async => const {}),
+    ],
+  );
+
+  Future<List<String>> pick(
+    String query, {
+    String? channelId,
+    List<AgentDirectoryEntry> agents = const [],
+    bool agentsLoading = false,
+  }) async {
+    _requests.clear();
+    final container = container0(agents: agents, agentsLoading: agentsLoading);
     addTearDown(container.dispose);
     final search = (
       query: query,
@@ -159,8 +211,43 @@ void main() {
     'an empty query lists people from open channels and DMs, loading names',
     () async {
       expect(await pick(''), ['Ada', 'Bo', 'Eve']);
+      // Someone with no profile is asked for once, not on each rebuild.
+      expect(_requests[_ghost], 1);
     },
   );
+
+  test('agents keep their rows ahead of known people', () async {
+    expect(await pick('', agents: [_zedAgent]), ['Zed', 'Ada', 'Bo', 'Eve']);
+    // Known people do not wait for an agent list that has not loaded, as
+    // the viewer's own agents never do offline.
+    expect(await pick('', agentsLoading: true), ['Ada', 'Bo', 'Eve']);
+  });
+
+  test('the real cache reads each unnamed person once per opening', () async {
+    _profileReads.clear();
+    final container = container0(realCache: true);
+    addTearDown(container.dispose);
+    final search = (
+      query: '',
+      historyKey: addMembersMentionHistoryKey,
+      unsharedAgents: true,
+      channelId: null,
+    );
+    final sub = container.listen(
+      recipientCandidatesProvider(search),
+      (_, _) {},
+    );
+    addTearDown(sub.close);
+    await container.read(channelsProvider.future);
+    for (var i = 0; i < 3; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+      await container.pump();
+      (container.read(channelsProvider.notifier) as _Channels).touch();
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 100));
+    expect(_profileReads.keys, containsAll([_ada, _nameless, _ghost, _eve]));
+    expect(_profileReads.values.toSet(), {1});
+  });
 
   test('Add members skips the channel\'s own members', () async {
     expect(await pick('', channelId: 'general'), ['Eve']);
@@ -172,7 +259,8 @@ void main() {
     ];
     addTearDown(() => _crowd = []);
     final people = await pick('');
-    expect(people, hasLength(mentionSuggestionLimit));
+    // One gathered slot is the person with no profile.
+    expect(people, hasLength(mentionSuggestionLimit - 1));
     expect(people, containsAll(['Ada', 'Bo', 'Eve']));
   });
 
