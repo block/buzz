@@ -15,9 +15,12 @@ class NativePhotoActions {
   final Future<String?> Function(String action, String url) perform;
 }
 
-/// UIKit gallery presentation, enabled in the photo-stack preview.
+/// UIKit gallery presentation with the Flutter viewer as a fallback.
 class NativePhotoZoomPreview {
-  static const enabled = bool.fromEnvironment('BUZZ_NATIVE_PHOTO_ZOOM');
+  static const enabled = bool.fromEnvironment(
+    'BUZZ_NATIVE_PHOTO_ZOOM',
+    defaultValue: true,
+  );
   static const channel = MethodChannel('buzz/native_photo_zoom');
   static bool _presenting = false;
   static int _session = 0;

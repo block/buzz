@@ -37,7 +37,13 @@ void main() {
     ('photo', 'image/heic'),
     ('photo', 'image/heif; charset=binary'),
   ]) {
-    for (final outcome in ['closed', 'reply', 'unavailable']) {
+    for (final outcome in [
+      'closed',
+      'reply',
+      'unavailable',
+      'bridge-error',
+      null,
+    ]) {
       testWidgets(
         'native photo preview handles ${source.$1} ${source.$2} $outcome and selected source bounds',
         (tester) async {
@@ -62,6 +68,9 @@ void main() {
           ) async {
             if (call.method == 'isSupported') return true;
             presented = call.arguments as Map;
+            if (outcome == 'bridge-error') {
+              throw PlatformException(code: 'presentation_failed');
+            }
             return outcome;
           });
           final result = await tester.runAsync(
@@ -88,7 +97,7 @@ void main() {
             ),
           );
           debugDefaultTargetPlatformOverride = null;
-          expect(result, outcome == 'unavailable');
+          expect(result, !['closed', 'reply'].contains(outcome));
           expect(presented?['labels'], ['Selected photo']);
           expect(presented?.containsKey('previews'), isFalse);
           expect(presented?['width'], 200);
