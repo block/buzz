@@ -1853,24 +1853,28 @@ pub async fn cmd_remove_channel_member(
     Ok(())
 }
 
-/// Set the channel addition policy — sign and submit a kind:10100 (agent profile) event.
-pub async fn cmd_set_add_policy(client: &BuzzClient, policy: &str) -> Result<(), CliError> {
+/// Validate a channel_add_policy value and check it against the deployment's
+/// `BUZZ_ACP_ALLOWED_CHANNEL_ADD_POLICIES` allowlist.
+///
+/// NOTE: This gate covers only the CLI paths that publish the policy
+/// (`set-add-policy`, `set-respond-policy --channel-add-policy`). A client that
+/// submits a kind:10100 event directly to the relay bypasses this check. Full
+/// enforcement requires relay-side validation, which is intentionally out of
+/// scope (see team decision: no relay-side enforcement of client behavior).
+fn check_channel_add_policy(
+    policy: &str,
+    flag: &str,
+    allowed_raw: Option<&str>,
+) -> Result<(), CliError> {
     match policy {
         "anyone" | "owner_only" | "nobody" => {}
         _ => {
             return Err(CliError::Usage(format!(
-                "--policy must be 'anyone', 'owner_only', or 'nobody' (got: {policy})"
+                "{flag} must be 'anyone', 'owner_only', or 'nobody' (got: {policy})"
             )))
         }
     }
-
-    // Check if this policy is allowed by the deployment.
-    // NOTE: This gate covers only the `buzz channels set-add-policy` CLI path.
-    // A client that submits a kind:10100 event directly to the relay bypasses
-    // this check. Full enforcement requires relay-side validation, which is
-    // intentionally out of scope for this change (see team decision: no
-    // relay-side enforcement of client behavior).
-    if let Ok(allowed_raw) = std::env::var("BUZZ_ACP_ALLOWED_CHANNEL_ADD_POLICIES") {
+    if let Some(allowed_raw) = allowed_raw {
         let allowed: Vec<&str> = allowed_raw
             .split(',')
             .map(str::trim)
@@ -1883,6 +1887,18 @@ pub async fn cmd_set_add_policy(client: &BuzzClient, policy: &str) -> Result<(),
             )));
         }
     }
+    Ok(())
+}
+
+/// Set the channel addition policy — sign and submit a kind:10100 (agent profile) event.
+pub async fn cmd_set_add_policy(client: &BuzzClient, policy: &str) -> Result<(), CliError> {
+    check_channel_add_policy(
+        policy,
+        "--policy",
+        std::env::var("BUZZ_ACP_ALLOWED_CHANNEL_ADD_POLICIES")
+            .ok()
+            .as_deref(),
+    )?;
 
     let content = serde_json::json!({ "channel_add_policy": policy }).to_string();
     use nostr::{EventBuilder, Kind};
@@ -1896,6 +1912,229 @@ pub async fn cmd_set_add_policy(client: &BuzzClient, policy: &str) -> Result<(),
     let resp = client.submit_event(event).await?;
     println!("{}", normalize_write_response(&resp));
     Ok(())
+}
+
+/// Publish respond_to on a kind:10100 agent profile (agent-signed).
+pub async fn cmd_set_respond_policy(
+    client: &BuzzClient,
+    policy: &str,
+    name: Option<&str>,
+    channel_add_policy: Option<&str>,
+    allow: &[String],
+) -> Result<(), CliError> {
+    match policy {
+        "anyone" | "owner-only" | "allowlist" | "nobody" => {}
+        _ => {
+            return Err(CliError::Usage(format!(
+                "--policy must be 'anyone', 'owner-only', 'allowlist', or 'nobody' (got: {policy})"
+            )))
+        }
+    }
+    if !allow.is_empty() && policy != "allowlist" {
+        return Err(CliError::Usage(
+            "--allow only applies to --policy allowlist".to_string(),
+        ));
+    }
+    for pubkey in allow {
+        crate::validate::validate_hex64(pubkey)?;
+    }
+    let allowed_add_policies = std::env::var("BUZZ_ACP_ALLOWED_CHANNEL_ADD_POLICIES").ok();
+    if let Some(add_policy) = channel_add_policy {
+        check_channel_add_policy(
+            add_policy,
+            "--channel-add-policy",
+            allowed_add_policies.as_deref(),
+        )?;
+    }
+
+    // kind:10100 is replaceable: the new event supersedes the whole profile, so start
+    // from the current one and change only respond_to (and the fields passed here).
+    let self_hex = client.public_key().to_hex();
+    let filter = serde_json::json!({
+        "kinds": [buzz_sdk::kind::KIND_AGENT_PROFILE],
+        "authors": [self_hex],
+        "limit": 1,
+        // Read from the writer pool: a lagging replica would hand back an older
+        // profile, and this one is about to be republished.
+        "consistency": "strong",
+    });
+    let raw = client
+        .query(&filter)
+        .await
+        .map_err(|e| CliError::Other(format!("failed to fetch current agent profile: {e}")))?;
+    let events: Vec<serde_json::Value> = serde_json::from_str(&raw)
+        .map_err(|e| CliError::Other(format!("invalid query response: {e}")))?;
+    let mut existing_created_at = None;
+    let existing = match events.into_iter().next() {
+        None => None,
+        Some(raw_event) => {
+            let event: nostr::Event = serde_json::from_value(raw_event)
+                .map_err(|e| CliError::Other(format!("agent profile event is malformed: {e}")))?;
+            if event.pubkey.to_hex() != self_hex
+                || event.kind.as_u16() as u32 != buzz_sdk::kind::KIND_AGENT_PROFILE
+            {
+                return Err(CliError::Other(
+                    "relay returned an agent profile that is not ours".to_string(),
+                ));
+            }
+            existing_created_at = Some(event.created_at.as_secs());
+            Some(event.content.clone())
+        }
+    };
+
+    let env_name = std::env::var("BUZZ_ACP_SESSION_TITLE").ok();
+    let content = merge_agent_profile(
+        existing.as_deref(),
+        policy,
+        name,
+        env_name.as_deref(),
+        channel_add_policy,
+        allow,
+    )?;
+    // The deployment gate applies to the policy this event republishes, not only to
+    // the flag: an inherited value the deployment no longer permits must not be
+    // re-applied by the relay.
+    check_republished_add_policy(&content, allowed_add_policies.as_deref())?;
+
+    use nostr::{EventBuilder, Kind};
+    let mut builder = EventBuilder::new(
+        Kind::Custom(buzz_sdk::kind::KIND_AGENT_PROFILE as u16),
+        content.to_string(),
+    )
+    .tags([]);
+    // Sort strictly after the profile we read: a same-second replacement would be
+    // ordered by id and could lose to the event it replaces.
+    if let Some(head_created_at) = existing_created_at {
+        let created_at = buzz_sdk::canvas_write_created_at(head_created_at)
+            .map_err(|e| CliError::Other(format!("current agent profile timestamp: {e}")))?;
+        builder = builder.custom_created_at(nostr::Timestamp::from(created_at));
+    }
+    let event = client.sign_event(builder).await?;
+    let our_id = event.id.to_hex();
+
+    let resp = client.submit_event(event).await?;
+    println!("{}", normalize_write_response(&resp));
+
+    // The relay has no precondition for kind:10100 (expected-revision is canvas-only),
+    // so a concurrent publish between the read above and this write is not prevented.
+    // Detect it instead: if our event is not the head, the other writer's profile won
+    // and this change did not take effect.
+    let head_raw = client.query(&filter).await.map_err(|e| {
+        CliError::Other(format!(
+            "published {our_id} but could not re-read the agent profile to confirm it: {e}"
+        ))
+    })?;
+    let head_events: Vec<serde_json::Value> = serde_json::from_str(&head_raw)
+        .map_err(|e| CliError::Other(format!("invalid query response: {e}")))?;
+    let head_id = head_events
+        .first()
+        .and_then(|head| head.get("id"))
+        .and_then(serde_json::Value::as_str);
+    if head_id != Some(our_id.as_str()) {
+        return Err(CliError::Other(format!(
+            "published {our_id}, but the current agent profile is {}: another publish \
+             superseded it; re-run set-respond-policy",
+            head_id.unwrap_or("missing")
+        )));
+    }
+    Ok(())
+}
+
+/// Apply the deployment allowlist to the channel_add_policy a merged profile carries,
+/// whether it came from `--channel-add-policy` or from the current profile.
+fn check_republished_add_policy(
+    content: &serde_json::Value,
+    allowed_raw: Option<&str>,
+) -> Result<(), CliError> {
+    match content
+        .get("channel_add_policy")
+        .and_then(serde_json::Value::as_str)
+    {
+        Some(policy) => check_channel_add_policy(policy, "channel_add_policy", allowed_raw)
+            .map_err(|e| {
+                CliError::Usage(format!(
+                    "{e}; pass --channel-add-policy with a permitted value"
+                ))
+            }),
+        None => Err(CliError::Usage(
+            "the agent profile has no channel_add_policy: pass --channel-add-policy".to_string(),
+        )),
+    }
+}
+
+/// Overlay `respond_to` (and the optional name / channel_add_policy) on the current
+/// kind:10100 content, keeping every other field. An explicit `--name` replaces the
+/// profile name; otherwise the current name is kept, and the BUZZ_ACP_SESSION_TITLE
+/// fallback is used only when the profile has none.
+fn merge_agent_profile(
+    existing: Option<&str>,
+    policy: &str,
+    name: Option<&str>,
+    fallback_name: Option<&str>,
+    channel_add_policy: Option<&str>,
+    allow: &[String],
+) -> Result<serde_json::Value, CliError> {
+    let mut content =
+        match existing {
+            None => serde_json::json!({}),
+            Some(raw) => match serde_json::from_str::<serde_json::Value>(raw) {
+                Ok(value @ serde_json::Value::Object(_)) => value,
+                _ => return Err(CliError::Other(
+                    "current agent profile content is not a JSON object; refusing to overwrite it"
+                        .to_string(),
+                )),
+            },
+        };
+    let has_name = content
+        .get("name")
+        .and_then(|v| v.as_str())
+        .is_some_and(|v| !v.trim().is_empty());
+    let non_empty = |value: &&str| !value.trim().is_empty();
+    let new_name = match name.filter(non_empty) {
+        Some(explicit) => Some(explicit),
+        None if has_name => None,
+        None => Some(fallback_name.filter(non_empty).ok_or_else(|| {
+            CliError::Usage(
+                "agent name required: pass --name or set BUZZ_ACP_SESSION_TITLE".to_string(),
+            )
+        })?),
+    };
+    if let Some(display_name) = new_name {
+        content["name"] = serde_json::json!(display_name);
+        content["display_name"] = serde_json::json!(display_name);
+    }
+    content["respond_to"] = serde_json::json!(policy);
+    if let Some(add_policy) = channel_add_policy {
+        content["channel_add_policy"] = serde_json::json!(add_policy);
+    }
+    // The relay's kind:10100 side effect requires channel_add_policy and fails
+    // after accepting the event when it is missing, so never publish without it.
+    if !content
+        .get("channel_add_policy")
+        .is_some_and(serde_json::Value::is_string)
+    {
+        return Err(CliError::Usage(
+            "the current agent profile has no channel_add_policy: pass --channel-add-policy"
+                .to_string(),
+        ));
+    }
+    // The allowlist is always the one passed now: inheriting it would silently
+    // re-enable an old list when switching back to allowlist, and an empty list
+    // answers no one. --allow replaces the whole list.
+    if policy == "allowlist" {
+        if allow.is_empty() {
+            return Err(CliError::Usage(
+                "--policy allowlist needs at least one --allow <pubkey-hex>; the list is replaced, \
+                 not inherited from the current profile"
+                    .to_string(),
+            ));
+        }
+        let allowlist: Vec<String> = allow.iter().map(|key| key.to_ascii_lowercase()).collect();
+        content["respond_to_allowlist"] = serde_json::json!(allowlist);
+    } else if let Some(fields) = content.as_object_mut() {
+        fields.remove("respond_to_allowlist");
+    }
+    Ok(content)
 }
 
 pub async fn cmd_set_canvas(
@@ -2052,6 +2291,21 @@ pub async fn dispatch(
             cmd_remove_channel_member(client, &channel, &pubkey).await
         }
         ChannelsCmd::SetAddPolicy { policy } => cmd_set_add_policy(client, &policy).await,
+        ChannelsCmd::SetRespondPolicy {
+            policy,
+            name,
+            channel_add_policy,
+            allow,
+        } => {
+            cmd_set_respond_policy(
+                client,
+                &policy,
+                name.as_deref(),
+                channel_add_policy.as_deref(),
+                &allow,
+            )
+            .await
+        }
     }
 }
 
@@ -2071,6 +2325,143 @@ pub async fn dispatch_canvas(cmd: crate::CanvasCmd, client: &BuzzClient) -> Resu
 
 #[cfg(test)]
 mod tests {
+    use super::{check_channel_add_policy, check_republished_add_policy, merge_agent_profile};
+
+    const NO_ALLOW: &[String] = &[];
+
+    #[test]
+    fn merge_agent_profile_keeps_unrelated_fields() {
+        let existing = r#"{"name":"Opus","display_name":"Opus","channel_add_policy":"owner_only","respond_to":"anyone","respond_to_allowlist":["ab"],"about":"x"}"#;
+        let merged = merge_agent_profile(
+            Some(existing),
+            "owner-only",
+            None,
+            Some("Env"),
+            None,
+            NO_ALLOW,
+        )
+        .unwrap();
+        // The allowlist only lives with --policy allowlist; every other field is kept.
+        assert_eq!(
+            merged,
+            serde_json::json!({
+                "name": "Opus",
+                "display_name": "Opus",
+                "channel_add_policy": "owner_only",
+                "respond_to": "owner-only",
+                "about": "x",
+            })
+        );
+    }
+
+    #[test]
+    fn merge_agent_profile_explicit_name_and_add_policy_override() {
+        let existing = r#"{"name":"Old","channel_add_policy":"anyone"}"#;
+        let merged = merge_agent_profile(
+            Some(existing),
+            "nobody",
+            Some("New"),
+            None,
+            Some("nobody"),
+            NO_ALLOW,
+        )
+        .unwrap();
+        assert_eq!(merged["name"], "New");
+        assert_eq!(merged["display_name"], "New");
+        assert_eq!(merged["channel_add_policy"], "nobody");
+        assert_eq!(merged["respond_to"], "nobody");
+    }
+
+    #[test]
+    fn merge_agent_profile_without_profile_needs_a_name_and_add_policy() {
+        assert!(
+            merge_agent_profile(None, "anyone", None, None, Some("owner_only"), NO_ALLOW).is_err()
+        );
+        // The relay's side effect requires channel_add_policy: never publish without it.
+        assert!(merge_agent_profile(None, "anyone", None, Some("Env"), None, NO_ALLOW).is_err());
+        let merged = merge_agent_profile(
+            None,
+            "anyone",
+            None,
+            Some("Env"),
+            Some("owner_only"),
+            NO_ALLOW,
+        )
+        .unwrap();
+        assert_eq!(
+            merged,
+            serde_json::json!({
+                "name": "Env",
+                "display_name": "Env",
+                "respond_to": "anyone",
+                "channel_add_policy": "owner_only",
+            })
+        );
+    }
+
+    #[test]
+    fn merge_agent_profile_refuses_non_object_content() {
+        assert!(
+            merge_agent_profile(Some("not json"), "anyone", Some("A"), None, None, NO_ALLOW)
+                .is_err()
+        );
+        assert!(
+            merge_agent_profile(Some("[1]"), "anyone", Some("A"), None, None, NO_ALLOW).is_err()
+        );
+    }
+
+    #[test]
+    fn merge_agent_profile_allowlist_needs_someone_on_it() {
+        let existing = r#"{"name":"A","channel_add_policy":"owner_only","respond_to":"anyone"}"#;
+        assert!(
+            merge_agent_profile(Some(existing), "allowlist", None, None, None, NO_ALLOW).is_err()
+        );
+        let allow = vec!["AB".repeat(32)];
+        let merged =
+            merge_agent_profile(Some(existing), "allowlist", None, None, None, &allow).unwrap();
+        assert_eq!(
+            merged["respond_to_allowlist"],
+            serde_json::json!(["ab".repeat(32)])
+        );
+    }
+
+    #[test]
+    fn merge_agent_profile_does_not_inherit_the_allowlist() {
+        let existing = r#"{"name":"A","channel_add_policy":"owner_only","respond_to":"owner-only","respond_to_allowlist":["cd"]}"#;
+        assert!(
+            merge_agent_profile(Some(existing), "allowlist", None, None, None, NO_ALLOW).is_err()
+        );
+        let allow = vec!["ab".repeat(32)];
+        let merged =
+            merge_agent_profile(Some(existing), "allowlist", None, None, None, &allow).unwrap();
+        assert_eq!(
+            merged["respond_to_allowlist"],
+            serde_json::json!(["ab".repeat(32)])
+        );
+        let switched =
+            merge_agent_profile(Some(existing), "owner-only", None, None, None, NO_ALLOW).unwrap();
+        assert!(switched.get("respond_to_allowlist").is_none());
+    }
+
+    #[test]
+    fn republished_add_policy_goes_through_the_deployment_allowlist() {
+        let inherited = serde_json::json!({"channel_add_policy": "anyone"});
+        assert!(check_republished_add_policy(&inherited, None).is_ok());
+        assert!(check_republished_add_policy(&inherited, Some("owner_only,nobody")).is_err());
+        let permitted = serde_json::json!({"channel_add_policy": "nobody"});
+        assert!(check_republished_add_policy(&permitted, Some("owner_only,nobody")).is_ok());
+        assert!(check_republished_add_policy(&serde_json::json!({}), None).is_err());
+    }
+
+    #[test]
+    fn check_channel_add_policy_applies_the_deployment_allowlist() {
+        assert!(check_channel_add_policy("anyone", "--x", None).is_ok());
+        assert!(check_channel_add_policy("everyone", "--x", None).is_err());
+        assert!(check_channel_add_policy("anyone", "--x", Some("owner_only")).is_err());
+        assert!(check_channel_add_policy("owner_only", "--x", Some("owner_only, nobody")).is_ok());
+        assert!(check_channel_add_policy("anyone", "--x", Some(" ")).is_ok());
+    }
+
     use super::{
         apply_cardinality_rule, assemble_roster_resolution, build_hint_map, build_template_report,
         cmd_set_add_policy, fetch_candidate_hints, finalize_roster_resolution, format_candidate,
