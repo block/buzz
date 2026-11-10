@@ -1205,7 +1205,12 @@ async fn execute_steps(
                     continue;
                 }
                 Err(e) => {
-                    warn!(run_id = %run_id, step = %step.id, "Condition error: {e}");
+                    warn!(
+                        run_id = %run_id,
+                        step = %step.id,
+                        error_kind = e.code(),
+                        "Condition error"
+                    );
                     let progress = crate::error::PartialProgress {
                         step_index: i,
                         trace,

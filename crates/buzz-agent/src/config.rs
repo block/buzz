@@ -302,6 +302,15 @@ pub fn anthropic_thinking_config(
         }
         ThinkingMode::None | ThinkingMode::OmitFields => {
             // Non-thinking model, or unknown/unverified Anthropic name: omit rather than guess.
+            // A persisted explicit setting can outlive a model switch, so make the
+            // discarded choice observable even though fresh clients advertise no explicit effort.
+            if effort != ThinkingEffort::None {
+                tracing::warn!(
+                    model = effective_model,
+                    requested = effort.openai_effort_str(),
+                    "BUZZ_AGENT_THINKING_EFFORT is unsupported for this unverified Anthropic model; omitting thinking fields"
+                );
+            }
             (None, None)
         }
     }
@@ -709,7 +718,7 @@ impl Config {
             max_output_tokens: parse_env("BUZZ_AGENT_MAX_OUTPUT_TOKENS", 65_536)?,
             max_token_recoveries: parse_env("BUZZ_AGENT_MAX_TOKEN_RECOVERIES", 3u32)?,
             llm_timeout: Duration::from_secs(parse_env("BUZZ_AGENT_LLM_TIMEOUT_SECS", 240)?),
-            tool_timeout: Duration::from_secs(parse_env("BUZZ_AGENT_TOOL_TIMEOUT_SECS", 660)?),
+            tool_timeout: Duration::from_secs(parse_env("BUZZ_AGENT_TOOL_TIMEOUT_SECS", 1_260)?),
             mcp_init_timeout: Duration::from_secs(parse_env(
                 "BUZZ_AGENT_MCP_INIT_TIMEOUT_SECS",
                 30,
@@ -2187,6 +2196,29 @@ mod tests {
         );
     }
 
+    #[test]
+    fn normalize_effort_for_uncurated_claude_fqn_is_a_noop() {
+        let model = "catalog.schema.claude-sonnet-custom";
+        assert!(crate::model_capabilities::resolve("databricks_v2", model)
+            .supported_efforts
+            .is_empty());
+        for effort in [
+            ThinkingEffort::None,
+            ThinkingEffort::Minimal,
+            ThinkingEffort::Low,
+            ThinkingEffort::Medium,
+            ThinkingEffort::High,
+            ThinkingEffort::XHigh,
+            ThinkingEffort::Max,
+        ] {
+            assert_eq!(
+                normalize_effort_for_databricks_v2(effort, model),
+                effort,
+                "Anthropic-routed FQNs must never enter OpenAI effort resolution"
+            );
+        }
+    }
+
     // ---- normalize_effort_for_anthropic_route ----
 
     #[test]
@@ -2461,5 +2493,25 @@ mod tests {
     fn pricing_authority_unknown_host_returns_none() {
         assert_eq!(pricing_authority("https://api.databricks.com/v1"), None);
         assert_eq!(pricing_authority("https://custom.llm.corp/v1"), None);
+    }
+
+    #[test]
+    fn default_tool_timeout_is_1260_seconds() {
+        // Lock the production default so accidental regressions are caught.
+        // This value must remain >= buzz-dev-mcp's MAX_TIMEOUT_MS (1_200s) to
+        // give every shell(timeout_ms=1_200_000) call time to complete before
+        // buzz-agent kills the MCP server. See PR #7185 for the full budget chain.
+        //
+        // 1_260s is the literal default passed to parse_env in Config::from_env().
+        // Update here if and only if you update that literal; the test name makes
+        // "grep for old value" reliable.
+        const DEFAULT_TOOL_TIMEOUT_SECS: u64 = 1_260;
+        const {
+            // Shell cap (1_200_000 ms = 1_200s) must fit inside the agent timeout.
+            assert!(
+                1_200u64 <= DEFAULT_TOOL_TIMEOUT_SECS,
+                "agent tool timeout must be >= dev-mcp shell cap (1200s)"
+            );
+        }
     }
 }

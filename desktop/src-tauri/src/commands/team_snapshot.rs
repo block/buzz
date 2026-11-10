@@ -20,9 +20,12 @@ use crate::{
         load_managed_agents, load_personas, load_teams, load_teams_readonly, save_managed_agents,
         save_personas, save_teams, AgentDefinition, ManagedAgentRecord, TeamRecord,
     },
-    relay::{effective_agent_relay_url, relay_ws_url_with_override, sync_managed_agent_profile},
+    relay::{effective_agent_relay_url, relay_ws_url_with_override},
     util::now_iso,
 };
+
+mod profile;
+pub(crate) use profile::publish_imported_team_member_profile;
 
 /// Team snapshots have a combined 25 MiB JSON / 50 MiB PNG payload cap.
 /// Every member is validated before any persistent write.
@@ -126,6 +129,7 @@ fn definition_from_snapshot(
             member.profile.about.as_deref(),
         ),
         system_prompt: member.definition.system_prompt.clone().unwrap_or_default(),
+        acp_command: member.definition.acp_command.clone(),
         runtime: member.definition.runtime.clone(),
         model: member.definition.model.clone(),
         provider: member.definition.provider.clone(),
@@ -141,6 +145,7 @@ fn definition_from_snapshot(
         respond_to,
         respond_to_allowlist: behavior.respond_to_allowlist,
         parallelism: behavior.parallelism,
+        session_policy: member.definition.session_policy,
         created_at: now.to_string(),
         updated_at: now.to_string(),
     })
@@ -498,7 +503,7 @@ pub async fn preview_team_snapshot_import(
 ///      surfacing rollback failures alongside the original error. This makes
 ///      the store phase all-or-none for ordinary application errors; a process
 ///      crash between atomic file commits is NOT covered.
-///   4. Profile sync — for each member, call `sync_managed_agent_profile`.
+///   4. Profile sync — for each member, call `publish_created_agent_profile`.
 ///      Best-effort; errors are collected per member.
 ///   5. Memory restore — for each member with non-empty snapshot memory,
 ///      publish each entry as a `kind:30174` engram event. Best-effort.
@@ -522,10 +527,9 @@ pub async fn confirm_team_snapshot_import(
 
     // ── Phase 2: mint keys + auth tags (sync, outside lock) ─────────────────
     // All mints must succeed before we enter the store. If any fails, zero writes.
-    let owner_pubkey_hex = {
-        let keys = state.signing_keys()?;
-        keys.public_key().to_hex()
-    };
+    let owner_keys = state.signing_keys()?;
+    let relay_ws = relay_ws_url_with_override(&state);
+    let owner_pubkey_hex = owner_keys.public_key().to_hex();
 
     let mut minted: Vec<MintedMember> = Vec::with_capacity(snapshot.members.len());
     for (member, definition) in snapshot.members.iter().zip(definitions) {
@@ -535,7 +539,6 @@ pub async fn confirm_team_snapshot_import(
         let minted_parallelism = definition.parallelism;
 
         let (agent_keys, private_key_nsec, pubkey, auth_tag) = {
-            let owner_keys = state.signing_keys()?;
             let agent_keys = nostr::Keys::generate();
             let pubkey = agent_keys.public_key().to_hex();
             let private_key_nsec = {
@@ -582,6 +585,7 @@ pub async fn confirm_team_snapshot_import(
             max_turn_duration_seconds: member.definition.max_turn_duration_seconds,
             parallelism: minted_parallelism
                 .unwrap_or(crate::managed_agents::DEFAULT_AGENT_PARALLELISM),
+            session_policy: member.definition.session_policy,
             system_prompt: member.definition.system_prompt.clone(),
             model: member.definition.model.clone(),
             provider: member.definition.provider.clone(),
@@ -771,7 +775,6 @@ pub async fn confirm_team_snapshot_import(
     };
 
     // ── Phase 4 & 5: profile sync + memory restore (async, outside lock) ────
-    let relay_ws = relay_ws_url_with_override(&state);
     let mut member_results: Vec<TeamSnapshotImportMemberResult> = Vec::with_capacity(minted.len());
 
     for (m, snap_member) in minted.iter().zip(snapshot.members.iter()) {
@@ -780,17 +783,17 @@ pub async fn confirm_team_snapshot_import(
         // Phase 4: profile sync (best-effort).
         let profile_about =
             crate::managed_agents::effective_agent_description(m.definition.description.as_deref());
-        let profile_sync_error = sync_managed_agent_profile(
+        let profile_sync_error = publish_imported_team_member_profile(
             &state,
             &relay_url,
+            &owner_keys,
             &m.agent_keys,
             &m.display_name,
             m.effective_avatar.as_deref(),
             profile_about.as_deref(),
             m.auth_tag.as_deref(),
         )
-        .await
-        .err();
+        .await;
 
         // Phase 5: memory restore (best-effort).
         let memory_total = snap_member.memory.entries.len();

@@ -30,6 +30,32 @@ require_literal '- "scripts/create-deployment-eligibility-predicate.jq"'
 require_literal '- "scripts/select-qualified-ci-run.jq"'
 require_literal '- "scripts/test-relay-image-eligibility-workflow.sh"'
 
+# Main pushes may skip only paths Docker never sees. The push filter must be, in
+# order: "**", then directory exclusions that .dockerignore also excludes, then
+# the re-included image workflow. Any other entry, or another order, could stop
+# a change that alters the published image from publishing it.
+push_trigger=$(awk '/^  push:$/{f=1;next} f&&/^  [a-z_]+:/{exit} f' "$workflow")
+push_paths=()
+while IFS= read -r entry; do
+  push_paths+=("$entry")
+done < <(awk '/^    paths:$/{f=1;next} f&&/^[[:space:]]*(#.*)?$/{next} f&&/^      - /{print;next} f{exit}' <<<"$push_trigger")
+fail_push_paths() {
+  echo "main push path filter: $1" >&2
+  exit 1
+}
+(( ${#push_paths[@]} >= 3 )) || fail_push_paths "expected \"**\", directory exclusions, then the workflow"
+[[ "${push_paths[0]}" == '      - "**"' ]] || fail_push_paths 'first entry must be "**"'
+last=$(( ${#push_paths[@]} - 1 ))
+[[ "${push_paths[$last]}" == '      - ".github/workflows/docker.yml"' ]] ||
+  fail_push_paths "last entry must re-include .github/workflows/docker.yml"
+for entry in "${push_paths[@]:1:last-1}"; do
+  [[ "$entry" =~ ^\ {6}-\ \"!([A-Za-z0-9._-]+)/\*\*\"$ ]] ||
+    fail_push_paths "only \"!<dir>/**\" exclusions may sit between \"**\" and the workflow, found: ${entry#      - }"
+  excluded=${BASH_REMATCH[1]}
+  grep -Fxq "$excluded/" "$repo_root/.dockerignore" ||
+    fail_push_paths "skips $excluded/, which .dockerignore keeps in the image build context"
+done
+
 if grep -Fq "buzz-staging-dev" "$workflow"; then
   echo "canonical relay image workflow references the preview-only image package" >&2
   exit 1
@@ -41,6 +67,20 @@ fi
 merge_job=$(awk '/^  merge:/{f=1} f&&/^  [a-z][a-z_-]*:$/&&!/^  merge:/{exit} f' "$workflow")
 grep -Fq "actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10" <<<"$merge_job" || {
   echo "merge job must check out the source before building the eligibility predicate" >&2
+  exit 1
+}
+
+# Staging auto-promotes the newest main-<ts>-<7> gateway image, so the gateway
+# must publish that tag and only from a source the relay CI qualified. Match
+# whole lines (-x) so a commented-out or otherwise inactive copy cannot satisfy
+# the contract after the live line regresses.
+gateway_merge_job=$(awk '/^  push-gateway-merge:/{f=1} f&&/^  [a-z][a-z_-]*:$/&&!/^  push-gateway-merge:/{exit} f' "$workflow")
+grep -Fxq "    needs: [push-gateway-build, qualify]" <<<"$gateway_merge_job" || {
+  echo "push gateway image must publish only after same-SHA CI qualification" >&2
+  exit 1
+}
+grep -Fxq "            type=raw,value=main-{{commit_date 'YYYYMMDDHHmmss'}}-{{sha}},enable=\${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}" <<<"$gateway_merge_job" || {
+  echo "push gateway image must publish the sortable main-<commit UTC>-<7> tag on main pushes" >&2
   exit 1
 }
 

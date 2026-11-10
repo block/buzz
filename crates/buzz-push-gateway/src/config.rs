@@ -8,12 +8,25 @@ pub enum ApnsEnvironment {
     Sandbox,
 }
 
+/// The single server-owned Apple application and APNs connection identity.
 #[derive(Debug, Clone)]
-pub struct AppProfileConfig {
+pub struct ApplicationConfig {
     pub app_attest_app_id: String,
+    /// Exact Apple attestation environment accepted for enrollment.
+    pub app_attest_environment: AppAttestEnvironment,
     pub apns_cert_path: PathBuf,
     pub apns_topic: String,
     pub apns_environment: ApnsEnvironment,
+}
+
+/// Apple App Attest environment, independent of the APNs transport environment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppAttestEnvironment {
+    /// Distributed applications, also the default for personal development builds.
+    Production,
+    /// Development-signed applications in an explicitly opted-in gateway build.
+    #[cfg(feature = "personal-dev-app-attest")]
+    Development,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,13 +39,12 @@ pub struct KeyConfig {
 pub struct Config {
     pub bind_addr: SocketAddr,
     pub health_addr: SocketAddr,
-    pub public_delivery_url: url::Url,
     pub max_grant_lifetime_seconds: i64,
     pub max_installation_lifetime_seconds: i64,
     pub endpoint_quota_window_seconds: i64,
     pub endpoint_quota_max_deliveries: i64,
-    /// Server-owned dogfood application identity and APNs transport.
-    pub profile: AppProfileConfig,
+    /// Server-owned application identity and APNs transport.
+    pub application: ApplicationConfig,
     pub database_url: String,
     pub app_attest_root_cert_path: PathBuf,
     /// Ordered current key first, followed by decrypt-only predecessors.
@@ -41,6 +53,19 @@ pub struct Config {
     /// externally presented delivery capabilities.
     pub token_keys: Vec<KeyConfig>,
 }
+
+// Registered NIP-PL v1 App Attest audiences are protocol constants, not routing URLs.
+/// Fixed NIP-PL v1 App Attest audience for installation enrollment.
+pub const ENROLL_AUDIENCE: &str = "https://push.buzz.xyz/v1/installations";
+/// Fixed NIP-PL v1 App Attest audience for creating a delegation.
+pub const DELEGATE_AUDIENCE: &str = "https://push.buzz.xyz/v1/delegations";
+/// Fixed NIP-PL v1 App Attest audience for rotating an installation endpoint.
+pub const ROTATE_ENDPOINT_AUDIENCE: &str = "https://push.buzz.xyz/v1/installations/endpoint";
+/// Fixed NIP-PL v1 App Attest audience for revoking a delegation.
+pub const REVOKE_DELEGATION_AUDIENCE: &str = "https://push.buzz.xyz/v1/delegations/revoke";
+/// Fixed NIP-PL v1 App Attest audience for revoking an installation.
+pub const REVOKE_INSTALLATION_AUDIENCE: &str = "https://push.buzz.xyz/v1/installations/revoke";
+
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[error("missing required environment variable {0}")]
@@ -82,11 +107,11 @@ fn parse_keyring(
     Ok(keys)
 }
 
-fn parse_profile(e: &HashMap<String, String>) -> Result<AppProfileConfig, ConfigError> {
-    let app_id_key = "BUZZ_PUSH_DOGFOOD_APP_ATTEST_APP_ID";
-    let cert_key = "BUZZ_PUSH_DOGFOOD_APNS_CERT_PATH";
-    let topic_key = "BUZZ_PUSH_DOGFOOD_APNS_TOPIC";
-    let environment_key = "BUZZ_PUSH_DOGFOOD_APNS_ENVIRONMENT";
+fn parse_application(e: &HashMap<String, String>) -> Result<ApplicationConfig, ConfigError> {
+    let app_id_key = "BUZZ_PUSH_APP_ATTEST_APP_ID";
+    let cert_key = "BUZZ_PUSH_APNS_CERT_PATH";
+    let topic_key = "BUZZ_PUSH_APNS_TOPIC";
+    let environment_key = "BUZZ_PUSH_APNS_ENVIRONMENT";
     let required = |key: &'static str| {
         e.get(key)
             .map(String::as_str)
@@ -94,6 +119,15 @@ fn parse_profile(e: &HashMap<String, String>) -> Result<AppProfileConfig, Config
             .ok_or(ConfigError::Missing(key))
     };
     let app_attest_app_id = required(app_id_key)?.to_owned();
+    let app_attest_environment = match e
+        .get("BUZZ_PUSH_APP_ATTEST_ENVIRONMENT")
+        .map(String::as_str)
+    {
+        None | Some("production") => AppAttestEnvironment::Production,
+        #[cfg(feature = "personal-dev-app-attest")]
+        Some("development") => AppAttestEnvironment::Development,
+        Some(_) => return Err(ConfigError::Invalid("BUZZ_PUSH_APP_ATTEST_ENVIRONMENT")),
+    };
     let apns_topic = required(topic_key)?.to_owned();
     let apns_cert_path = PathBuf::from(required(cert_key)?);
     let apns_environment = match e.get(environment_key).map(String::as_str) {
@@ -101,8 +135,9 @@ fn parse_profile(e: &HashMap<String, String>) -> Result<AppProfileConfig, Config
         Some("sandbox") => ApnsEnvironment::Sandbox,
         Some(_) => return Err(ConfigError::Invalid(environment_key)),
     };
-    Ok(AppProfileConfig {
+    Ok(ApplicationConfig {
         app_attest_app_id,
+        app_attest_environment,
         apns_cert_path,
         apns_topic,
         apns_environment,
@@ -131,20 +166,6 @@ impl Config {
                 .any(|token| grant.id == token.id || grant.key == token.key)
         }) {
             return Err(ConfigError::Invalid("BUZZ_PUSH_TOKEN_KEYS"));
-        }
-        let public_delivery_url = req(e, "BUZZ_PUSH_PUBLIC_DELIVERY_URL")?
-            .parse::<url::Url>()
-            .map_err(|_| ConfigError::Invalid("BUZZ_PUSH_PUBLIC_DELIVERY_URL"))?;
-        if public_delivery_url.scheme() != "https"
-            || public_delivery_url.host_str() != Some("push.buzz.xyz")
-            || public_delivery_url.port().is_some()
-            || public_delivery_url.path() != "/v1/deliveries/apns"
-            || public_delivery_url.query().is_some()
-            || public_delivery_url.fragment().is_some()
-            || !public_delivery_url.username().is_empty()
-            || public_delivery_url.password().is_some()
-        {
-            return Err(ConfigError::Invalid("BUZZ_PUSH_PUBLIC_DELIVERY_URL"));
         }
         let max_grant_lifetime_seconds = req(e, "BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS")?
             .parse::<i64>()
@@ -175,7 +196,7 @@ impl Config {
             bounded_positive("BUZZ_PUSH_ENDPOINT_QUOTA_WINDOW_SECONDS", 10, 86_400)?;
         let endpoint_quota_max_deliveries =
             bounded_positive("BUZZ_PUSH_ENDPOINT_QUOTA_MAX_DELIVERIES", 10, 10_000)?;
-        let profile = parse_profile(e)?;
+        let application = parse_application(e)?;
         let bind_addr = e
             .get("BUZZ_PUSH_BIND_ADDR")
             .map(String::as_str)
@@ -191,12 +212,11 @@ impl Config {
         Ok(Self {
             bind_addr,
             health_addr,
-            public_delivery_url,
             max_grant_lifetime_seconds,
             max_installation_lifetime_seconds,
             endpoint_quota_window_seconds,
             endpoint_quota_max_deliveries,
-            profile,
+            application,
             database_url: req(e, "DATABASE_URL")?.to_owned(),
             app_attest_root_cert_path: req(e, "BUZZ_PUSH_APP_ATTEST_ROOT_CERT_PATH")?.into(),
             grant_keys,
@@ -208,6 +228,47 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn attestation_environment_is_explicit_and_build_gated() {
+        let mut env = base();
+        assert_eq!(
+            Config::from_map(&env)
+                .unwrap()
+                .application
+                .app_attest_environment,
+            AppAttestEnvironment::Production
+        );
+        for value in ["", "sandbox", "Production", "unknown"] {
+            env.insert("BUZZ_PUSH_APP_ATTEST_ENVIRONMENT".into(), value.into());
+            assert!(Config::from_map(&env).is_err());
+        }
+        env.insert(
+            "BUZZ_PUSH_APP_ATTEST_ENVIRONMENT".into(),
+            "production".into(),
+        );
+        assert_eq!(
+            Config::from_map(&env)
+                .unwrap()
+                .application
+                .app_attest_environment,
+            AppAttestEnvironment::Production
+        );
+        env.insert(
+            "BUZZ_PUSH_APP_ATTEST_ENVIRONMENT".into(),
+            "development".into(),
+        );
+        #[cfg(feature = "personal-dev-app-attest")]
+        assert_eq!(
+            Config::from_map(&env)
+                .unwrap()
+                .application
+                .app_attest_environment,
+            AppAttestEnvironment::Development
+        );
+        #[cfg(not(feature = "personal-dev-app-attest"))]
+        assert!(Config::from_map(&env).is_err());
+    }
+
     fn base() -> HashMap<String, String> {
         HashMap::from([
             (
@@ -227,10 +288,6 @@ mod tests {
                 ),
             ),
             (
-                "BUZZ_PUSH_PUBLIC_DELIVERY_URL".into(),
-                "https://push.buzz.xyz/v1/deliveries/apns".into(),
-            ),
-            (
                 "BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS".into(),
                 "2592000".into(),
             ),
@@ -239,43 +296,37 @@ mod tests {
                 "postgres://buzz:test@localhost/buzz".into(), // sadscan:disable np.postgres.1
             ),
             (
-                "BUZZ_PUSH_DOGFOOD_APP_ATTEST_APP_ID".into(),
-                "TEAM.xyz.block.buzz.dogfood.mobile".into(),
+                "BUZZ_PUSH_APP_ATTEST_APP_ID".into(),
+                "TEAM.com.example.buzz".into(),
             ),
             (
                 "BUZZ_PUSH_APP_ATTEST_ROOT_CERT_PATH".into(),
                 "/apple-root.pem".into(),
             ),
             (
-                "BUZZ_PUSH_DOGFOOD_APNS_CERT_PATH".into(),
-                "/dogfood-identity.pem".into(),
+                "BUZZ_PUSH_APNS_CERT_PATH".into(),
+                "/apns-identity.pem".into(),
             ),
-            (
-                "BUZZ_PUSH_DOGFOOD_APNS_TOPIC".into(),
-                "xyz.block.buzz.dogfood.mobile".into(),
-            ),
-            (
-                "BUZZ_PUSH_DOGFOOD_APNS_ENVIRONMENT".into(),
-                "production".into(),
-            ),
+            ("BUZZ_PUSH_APNS_TOPIC".into(), "com.example.buzz".into()),
+            ("BUZZ_PUSH_APNS_ENVIRONMENT".into(), "production".into()),
             ("BUZZ_PUSH_BIND_ADDR".into(), "127.0.0.1:8080".into()),
             ("BUZZ_PUSH_HEALTH_ADDR".into(), "127.0.0.1:8081".into()),
         ])
     }
 
     #[test]
-    fn dogfood_profile_requires_server_owned_identity_and_certificate() {
+    fn application_requires_server_owned_identity_and_certificate() {
         let config = Config::from_map(&base()).unwrap();
         assert_eq!(
-            config.profile.apns_cert_path,
-            PathBuf::from("/dogfood-identity.pem")
+            config.application.apns_cert_path,
+            PathBuf::from("/apns-identity.pem")
         );
-        assert_eq!(config.profile.apns_topic, "xyz.block.buzz.dogfood.mobile");
+        assert_eq!(config.application.apns_topic, "com.example.buzz");
 
         for variable in [
-            "BUZZ_PUSH_DOGFOOD_APNS_CERT_PATH",
-            "BUZZ_PUSH_DOGFOOD_APNS_TOPIC",
-            "BUZZ_PUSH_DOGFOOD_APP_ATTEST_APP_ID",
+            "BUZZ_PUSH_APNS_CERT_PATH",
+            "BUZZ_PUSH_APNS_TOPIC",
+            "BUZZ_PUSH_APP_ATTEST_APP_ID",
         ] {
             let mut env = base();
             env.remove(variable);
@@ -283,6 +334,26 @@ mod tests {
                 matches!(Config::from_map(&env), Err(ConfigError::Missing(key)) if key == variable)
             );
         }
+    }
+
+    #[test]
+    fn startup_needs_no_origin_and_transcript_audiences_stay_registered() {
+        assert!(!base().contains_key("BUZZ_PUSH_GATEWAY_ORIGIN"));
+        Config::from_map(&base()).unwrap();
+        assert_eq!(ENROLL_AUDIENCE, "https://push.buzz.xyz/v1/installations");
+        assert_eq!(DELEGATE_AUDIENCE, "https://push.buzz.xyz/v1/delegations");
+        assert_eq!(
+            ROTATE_ENDPOINT_AUDIENCE,
+            "https://push.buzz.xyz/v1/installations/endpoint"
+        );
+        assert_eq!(
+            REVOKE_DELEGATION_AUDIENCE,
+            "https://push.buzz.xyz/v1/delegations/revoke"
+        );
+        assert_eq!(
+            REVOKE_INSTALLATION_AUDIENCE,
+            "https://push.buzz.xyz/v1/installations/revoke"
+        );
     }
 
     #[test]
@@ -298,23 +369,39 @@ mod tests {
     #[test]
     fn malformed_security_configuration_fails_startup() {
         for (key, value) in [
-            (
-                "BUZZ_PUSH_PUBLIC_DELIVERY_URL",
-                "http://push.example/v1/deliveries/apns",
-            ),
-            (
-                "BUZZ_PUSH_PUBLIC_DELIVERY_URL",
-                "https://push.example/v1/deliveries/apns",
-            ),
-            ("BUZZ_PUSH_DOGFOOD_APP_ATTEST_APP_ID", ""),
-            ("BUZZ_PUSH_DOGFOOD_APNS_ENVIRONMENT", "staging"),
+            ("BUZZ_PUSH_APP_ATTEST_APP_ID", ""),
+            ("BUZZ_PUSH_APNS_ENVIRONMENT", "staging"),
             ("BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS", "0"),
             ("BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS", "31536001"),
+            ("BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS", "2.592e+06"),
+            ("BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS", "2592000.5"),
             ("BUZZ_PUSH_MAX_INSTALLATION_LIFETIME_SECONDS", "0"),
         ] {
             let mut env = base();
             env.insert(key.into(), value.into());
             assert!(Config::from_map(&env).is_err(), "accepted {key}={value}");
+        }
+    }
+
+    // The chart test supplies actual Helm-rendered environment values. Keep this
+    // separate from ordinary unit tests, which do not require Helm or fixtures.
+    #[test]
+    #[ignore = "run deploy/charts/buzz-push-gateway/tests/grant-lifetime.sh"]
+    fn helm_rendered_grant_lifetimes() {
+        let path = std::env::var("BUZZ_TEST_HELM_ENV_FILE").unwrap();
+        let cases: Vec<(String, i64, HashMap<String, String>)> =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(cases.len(), 9);
+        for (label, expected, rendered) in cases {
+            let mut env = base();
+            env.extend(rendered);
+            let config = Config::from_map(&env).unwrap_or_else(|error| panic!("{label}: {error}"));
+            assert_eq!(config.max_grant_lifetime_seconds, expected, "{label}");
+            assert_eq!(
+                env["BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS"],
+                expected.to_string(),
+                "{label} must render decimal integer text"
+            );
         }
     }
 

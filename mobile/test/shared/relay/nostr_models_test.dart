@@ -2,6 +2,66 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:buzz/shared/relay/nostr_models.dart';
 
 void main() {
+  group('thread marker validation and normalization', () {
+    final parent = 'a' * 64;
+    final root = 'b' * 64;
+    NostrEvent event(List<List<String>> tags) => NostrEvent(
+      id: 'c' * 64,
+      pubkey: 'd' * 64,
+      createdAt: 1,
+      kind: EventKind.streamMessage,
+      tags: tags,
+      content: 'reply',
+      sig: '',
+    );
+    test('last valid markers win and normalize before thread indexing', () {
+      final result = event([
+        ['e', 'c' * 64, '', 'reply'],
+        ['e', parent.toUpperCase(), '', 'reply'],
+        ['e', root.toUpperCase(), '', 'root'],
+        ['e', 'bad', '', 'reply'],
+        ['e', '', '', 'root'],
+      ]).threadReference;
+      expect(result, (parentId: parent, rootId: root));
+    });
+    test('malformed markers do not create thread links or hide valid ones', () {
+      for (final invalid in [
+        '',
+        'bad',
+        'a' * 63,
+        'a' * 65,
+        'g' * 64,
+        'é' * 64,
+        '${'a' * 63}\n',
+      ]) {
+        expect(
+          event([
+            ['e', invalid, '', 'reply'],
+          ]).threadReference,
+          (parentId: null, rootId: null),
+        );
+        expect(
+          event([
+            ['e', parent, '', 'reply'],
+            ['e', invalid, '', 'reply'],
+            ['e', invalid, '', 'root'],
+          ]).threadReference,
+          (parentId: parent, rootId: parent),
+        );
+      }
+    });
+    test('root-only, unmarked, and non-e tags remain top-level', () {
+      expect(
+        event([
+          ['e', root, '', 'root'],
+          ['e', parent],
+          ['p', parent, '', 'reply'],
+        ]).threadReference,
+        (parentId: null, rootId: null),
+      );
+    });
+  });
+
   test('NostrFilter serializes and preserves authors', () {
     const filter = NostrFilter(
       kinds: [EventKind.readState],

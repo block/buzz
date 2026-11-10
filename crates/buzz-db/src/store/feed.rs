@@ -96,6 +96,7 @@ fn build_mentions_query(
     let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(format!(
         "SELECT {EVENT_COLS} FROM events e \
          INNER JOIN event_mentions m ON e.community_id = m.community_id AND e.id = m.event_id \
+         AND e.created_at = m.event_created_at \
          WHERE e.community_id = "
     ));
     qb.push_bind(*community.as_uuid());
@@ -134,7 +135,11 @@ pub async fn query_mentions(
     since: Option<DateTime<Utc>>,
     limit: i64,
 ) -> Result<Vec<StoredEvent>> {
-    let mut conn = pool.acquire().await?;
+    let mut conn = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::SubscriptionHistory,
+    )
+    .await?;
     query_mentions_on(
         &mut conn,
         community,
@@ -181,6 +186,7 @@ fn build_needs_action_query(
     let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(format!(
         "SELECT {EVENT_COLS} FROM events e \
          INNER JOIN event_mentions m ON e.community_id = m.community_id AND e.id = m.event_id \
+         AND e.created_at = m.event_created_at \
          WHERE e.community_id = "
     ));
     qb.push_bind(*community.as_uuid());
@@ -218,7 +224,11 @@ pub async fn query_needs_action(
     since: Option<DateTime<Utc>>,
     limit: i64,
 ) -> Result<Vec<StoredEvent>> {
-    let mut conn = pool.acquire().await?;
+    let mut conn = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::SubscriptionHistory,
+    )
+    .await?;
     query_needs_action_on(
         &mut conn,
         community,
@@ -287,7 +297,11 @@ pub async fn query_activity(
     since: Option<DateTime<Utc>>,
     limit: i64,
 ) -> Result<Vec<StoredEvent>> {
-    let mut conn = pool.acquire().await?;
+    let mut conn = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::SubscriptionHistory,
+    )
+    .await?;
     query_activity_on(&mut conn, community, accessible_channel_ids, since, limit).await
 }
 
@@ -345,7 +359,14 @@ impl Db {
         since: Option<DateTime<Utc>>,
         limit: i64,
     ) -> Result<Vec<StoredEvent>> {
-        match self.route_read(path, RoutePredicate::Bounded).await {
+        match self
+            .route_read(
+                path,
+                RoutePredicate::Bounded,
+                crate::observability::ReaderOperation::SubscriptionHistory,
+            )
+            .await?
+        {
             RouteDecision::Replica(mut tx, _entry, reason) => match crate::feed::query_mentions_on(
                 &mut tx,
                 community,
@@ -360,9 +381,18 @@ impl Db {
                     Self::record_route(path, "replica", reason);
                     Ok(events)
                 }
+                // Surface a cancel instead of re-running it on the writer; see
+                // `DbError::is_statement_cancelled` for the trade-off.
+                Err(e) if e.is_statement_cancelled() => {
+                    Self::record_route(path, "replica", "statement_cancelled");
+                    Err(e)
+                }
                 Err(e) => {
                     tracing::warn!(path, "replica read failed; re-running on writer: {e}");
                     Self::record_route(path, "writer", "replica_error");
+                    // Release the reader and its history permit before the
+                    // writer re-run, so a replica-error burst can't fill the cap.
+                    drop(tx);
                     crate::feed::query_mentions(
                         &self.pool,
                         community,
@@ -422,7 +452,14 @@ impl Db {
         since: Option<DateTime<Utc>>,
         limit: i64,
     ) -> Result<Vec<StoredEvent>> {
-        match self.route_read(path, RoutePredicate::Bounded).await {
+        match self
+            .route_read(
+                path,
+                RoutePredicate::Bounded,
+                crate::observability::ReaderOperation::SubscriptionHistory,
+            )
+            .await?
+        {
             RouteDecision::Replica(mut tx, _entry, reason) => {
                 match crate::feed::query_needs_action_on(
                     &mut tx,
@@ -438,9 +475,18 @@ impl Db {
                         Self::record_route(path, "replica", reason);
                         Ok(events)
                     }
+                    // Surface a cancel instead of re-running it on the writer; see
+                    // `DbError::is_statement_cancelled` for the trade-off.
+                    Err(e) if e.is_statement_cancelled() => {
+                        Self::record_route(path, "replica", "statement_cancelled");
+                        Err(e)
+                    }
                     Err(e) => {
                         tracing::warn!(path, "replica read failed; re-running on writer: {e}");
                         Self::record_route(path, "writer", "replica_error");
+                        // Release the reader and its history permit before the
+                        // writer re-run, so a replica-error burst can't fill the cap.
+                        drop(tx);
                         crate::feed::query_needs_action(
                             &self.pool,
                             community,
@@ -492,7 +538,14 @@ impl Db {
         since: Option<DateTime<Utc>>,
         limit: i64,
     ) -> Result<Vec<StoredEvent>> {
-        match self.route_read(path, RoutePredicate::Bounded).await {
+        match self
+            .route_read(
+                path,
+                RoutePredicate::Bounded,
+                crate::observability::ReaderOperation::SubscriptionHistory,
+            )
+            .await?
+        {
             RouteDecision::Replica(mut tx, _entry, reason) => match crate::feed::query_activity_on(
                 &mut tx,
                 community,
@@ -506,9 +559,18 @@ impl Db {
                     Self::record_route(path, "replica", reason);
                     Ok(events)
                 }
+                // Surface a cancel instead of re-running it on the writer; see
+                // `DbError::is_statement_cancelled` for the trade-off.
+                Err(e) if e.is_statement_cancelled() => {
+                    Self::record_route(path, "replica", "statement_cancelled");
+                    Err(e)
+                }
                 Err(e) => {
                     tracing::warn!(path, "replica read failed; re-running on writer: {e}");
                     Self::record_route(path, "writer", "replica_error");
+                    // Release the reader and its history permit before the
+                    // writer re-run, so a replica-error burst can't fill the cap.
+                    drop(tx);
                     crate::feed::query_activity(
                         &self.pool,
                         community,
@@ -536,7 +598,7 @@ impl Db {
 // -- Tests --------------------------------------------------------------------
 
 #[cfg(test)]
-mod tests {
+mod postgres_tests {
     use super::*;
     use nostr::{EventBuilder, Keys, Kind, Tag};
     use uuid::Uuid;
@@ -1059,6 +1121,10 @@ mod tests {
             "mentions must join event_mentions on the composite tenant/event key: {sql}"
         );
         assert!(
+            sql.contains("AND e.id = m.event_id AND e.created_at = m.event_created_at"),
+            "mentions must carry the mention's created_at so each probe prunes to one events partition: {sql}"
+        );
+        assert!(
             sql.contains("WHERE e.community_id = "),
             "mentions feed must scope events to the tenant community: {sql}"
         );
@@ -1087,6 +1153,10 @@ mod tests {
         assert!(
             sql.contains("INNER JOIN event_mentions m ON e.community_id = m.community_id AND e.id = m.event_id"),
             "needs_action must join event_mentions on the composite tenant/event key: {sql}"
+        );
+        assert!(
+            sql.contains("AND e.id = m.event_id AND e.created_at = m.event_created_at"),
+            "needs_action must carry the mention's created_at so each probe prunes to one events partition: {sql}"
         );
         assert!(
             sql.contains("WHERE e.community_id = "),
@@ -1120,14 +1190,11 @@ mod tests {
     /// `insert_mentions` must index every p-tag even past Postgres's
     /// bind-parameter statement cap.
     ///
-    /// Relay-signed kind 39002 member snapshots carry one p-tag per channel
-    /// member, and a multi-row INSERT binds 6 parameters per row — a single
-    /// statement tops out at ~10.9k rows against the 65,535-parameter limit.
-    /// Clients discover their channels via `{kinds:[39002], "#p":[me]}`, so a
-    /// failed insert silently breaks discovery for the whole channel.
+    /// A multi-row INSERT binds 6 parameters per p-tag, so a single statement
+    /// tops out at ~10.9k rows against the 65,535-parameter limit.
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn insert_mentions_indexes_rosters_past_bind_parameter_cap() {
+    async fn insert_mentions_indexes_p_tags_past_bind_parameter_cap() {
         let pool = setup_pool().await;
         let community = CommunityId::from_uuid(make_test_community(&pool).await);
         let channel = insert_test_channel(&pool, community).await;
@@ -1148,7 +1215,15 @@ mod tests {
         let tags: Vec<Tag> = (1..=mention_count)
             .map(|n| Tag::parse(["p", &format!("{n:064x}"), "", "member"]).expect("p tag"))
             .collect();
-        let event = store_feed_event(&pool, community, 39002, "", Some(channel), tags).await;
+        let event = store_feed_event(
+            &pool,
+            community,
+            KIND_STREAM_MESSAGE,
+            "",
+            Some(channel),
+            tags,
+        )
+        .await;
 
         let indexed: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM event_mentions WHERE community_id = $1 AND event_id = $2",
@@ -1160,7 +1235,7 @@ mod tests {
         .expect("count indexed mentions");
         assert_eq!(
             indexed as usize, mention_count,
-            "every roster p-tag must land in event_mentions"
+            "every p-tag must land in event_mentions"
         );
     }
 }

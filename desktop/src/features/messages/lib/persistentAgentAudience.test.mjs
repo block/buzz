@@ -219,6 +219,21 @@ test("explicitly excluded agents are not auto-promoted again", async () => {
   assert.deepEqual(currentAudiences(store), { [scope]: [agentA] });
 });
 
+test("initialization preserves exclusions across thread remounts", async () => {
+  const store = await loadStore(14);
+  const scope = `${ownerA}:channel-a:thread-a`;
+
+  store.initializePersistentAgentAudience(scope, [agentA]);
+  assert.deepEqual(currentAudiences(store), { [scope]: [agentA] });
+
+  store.excludePersistentAgentAudienceMember(scope, agentA);
+  store.initializePersistentAgentAudience(scope, [agentA]);
+  assert.deepEqual(currentAudiences(store), { [scope]: [] });
+
+  store.addPersistentAgentAudienceMember(scope, agentA);
+  assert.deepEqual(currentAudiences(store), { [scope]: [agentA] });
+});
+
 test("explicit re-selection reinstates an excluded agent", async () => {
   const store = await loadStore(13);
   const scope = `${ownerA}:channel-a:channel`;

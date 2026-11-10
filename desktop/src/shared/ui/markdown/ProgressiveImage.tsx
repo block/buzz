@@ -2,8 +2,11 @@ import * as React from "react";
 
 import { cn } from "@/shared/lib/cn";
 
+// `object-scale-down` (not `object-contain`) so small dim-less badges don't
+// upscale to fill the reserve box on first view — the decoded size only
+// stabilizes after the cache hits. See #4384 for the full trade-off.
 const IMAGE_CLASS =
-  "absolute inset-0 block h-full w-full rounded-2xl object-contain";
+  "absolute inset-0 block h-full w-full rounded-2xl object-scale-down";
 
 function isSameImageSource(
   left: string | undefined,

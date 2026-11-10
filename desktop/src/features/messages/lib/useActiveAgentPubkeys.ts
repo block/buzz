@@ -16,7 +16,9 @@ export function useActiveAgentPubkeys(
           )
           .map((agent) => normalizePubkey(agent.pubkey)),
         ...(relayAgents ?? [])
-          .filter((agent) => agent.status !== "offline")
+          .filter(
+            (agent) => agent.status === "online" || agent.status === "away",
+          )
           .map((agent) => normalizePubkey(agent.pubkey)),
       ]),
     [managedAgents, relayAgents],

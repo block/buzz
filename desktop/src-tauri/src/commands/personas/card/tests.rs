@@ -1,5 +1,5 @@
 //! Unit tests for `card.rs` — split into a child module file so the parent
-//! stays under the 1000-line gate (same layout as `snapshot/tests.rs`).
+//! stays under the 1500-line gate (same layout as `snapshot/tests.rs`).
 
 use super::*;
 use std::collections::BTreeMap;

@@ -6,6 +6,11 @@ use crate::managed_agents::{AgentDefinition, ManagedAgentRecord, RespondTo};
 
 fn agent(persona_id: &str, name: &str) -> ManagedAgentRecord {
     ManagedAgentRecord {
+        session_policy: Default::default(),
+        description: None,
+        effort_level: None,
+        provider_policy_pending: false,
+        team_catalog_source: None,
         pubkey: format!("pubkey-{name}"),
         name: name.to_string(),
         persona_id: Some(persona_id.to_string()),
@@ -64,6 +69,10 @@ fn agent(persona_id: &str, name: &str) -> ManagedAgentRecord {
 
 fn definition(respond_to: Option<&str>, allowlist: Vec<&str>) -> AgentDefinition {
     AgentDefinition {
+        description: None,
+        acp_command: None,
+        team_catalog_source: None,
+        session_policy: Default::default(),
         id: "persona-1".to_string(),
         display_name: "Scout".to_string(),
         avatar_url: None,
@@ -179,12 +188,9 @@ fn respond_to_unset_on_definition_leaves_instances_alone() {
     let mut records = vec![agent("persona-1", "Scout")];
     records[0].respond_to = RespondTo::Anyone;
 
-    let updated = propagate_persona_respond_to(
-        &mut records,
-        "persona-1",
-        &definition(None, vec![]),
-    )
-    .expect("propagate");
+    let updated =
+        propagate_persona_respond_to(&mut records, "persona-1", &definition(None, vec![]))
+            .expect("propagate");
 
     assert_eq!(updated, 0);
     assert_eq!(records[0].respond_to, RespondTo::Anyone);

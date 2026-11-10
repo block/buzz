@@ -394,12 +394,24 @@ pub(super) fn refresh_shared_team_catalog_heads_for_persona<R: tauri::Runtime>(
     state: &AppState,
     persona_id: &str,
 ) {
+    match crate::managed_agents::retention::active_retention_scope(app, state) {
+        Ok(scope) => {
+            refresh_shared_team_catalog_heads_for_persona_in_scope(app, &scope, persona_id)
+        }
+        Err(e) => eprintln!("buzz-desktop: team-catalog-refresh-for-persona: {e}"),
+    }
+}
+
+pub(super) fn refresh_shared_team_catalog_heads_for_persona_in_scope<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    scope: &RetentionScope,
+    persona_id: &str,
+) {
     let result = (|| -> Result<(), String> {
         use crate::managed_agents::{load_personas, load_teams};
 
         let teams = load_teams(app)?;
         let personas = load_personas(app)?;
-        let scope = crate::managed_agents::retention::active_retention_scope(app, state)?;
 
         for team in &teams {
             if team.is_builtin || !team.persona_ids.iter().any(|id| id == persona_id) {
