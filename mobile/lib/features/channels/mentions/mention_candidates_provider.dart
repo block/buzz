@@ -246,17 +246,6 @@ final recipientCandidatesProvider = Provider.family
       ];
     });
 
-/// Whether both agent lists a recipient picker offers have loaded or
-/// failed; a reload keeps its earlier list. A picker starts its shown rows
-/// over when this turns true, so agents that load after known people fill
-/// the list still take their places ahead of them. The viewer's own agents
-/// stay unknown while offline, and known people show meanwhile.
-final recipientAgentsSettledProvider = Provider.autoDispose<bool>((ref) {
-  bool settled(AsyncValue<Object?> value) => value.hasValue || value.hasError;
-  return settled(ref.watch(agentDirectoryProvider)) &&
-      settled(ref.watch(ownedAgentDirectoryProvider));
-});
-
 /// Unnamed known people whose profiles a picker opening already requested,
 /// so a person with no profile is asked for once, not on every rebuild.
 final _requestedKnownPeopleProvider = Provider.autoDispose<Set<String>>(

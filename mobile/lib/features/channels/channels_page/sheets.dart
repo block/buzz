@@ -328,7 +328,6 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
       )),
     );
     final searching = ref.watch(recipientSearchPendingProvider(search));
-    final agentsSettled = ref.watch(recipientAgentsSettledProvider);
     final searchFailed = ref.watch(recipientSearchFailedProvider(search));
     final selectedPubkeys = {
       for (final user in selectedUsers.value) user.pubkey,
@@ -339,11 +338,11 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
           if (!selectedPubkeys.contains(candidate.pubkey)) candidate,
       ],
       query: search,
-      // Agents that settle after empty-query rows were shown start them
-      // over, so they keep their places ahead of known people. Typed rows
-      // keep their places.
-      opening: opening.value * 2 + (search.isEmpty && agentsSettled ? 1 : 0),
+      opening: opening.value,
       pending: searching,
+      // Agents rank ahead of the known people an empty query lists, even
+      // when they load after them. Typed rows keep their places.
+      restartForNewAgents: search.isEmpty,
     );
     final availableResults = shown.rows;
     // Shown and chosen recipients are named together on every build, so a
