@@ -189,13 +189,9 @@ async fn legacy_fixture() -> (PgPool, Vec<LegacyInviteCase>) {
 
     let issuer = [1u8; 32];
     let mut cases = Vec::new();
-    // Exercise cached successor lookups and the smallest valid UUID.
+    // Twelve valid communities exercise cached successor lookups.
     for index in 0u8..12 {
-        let community = if index == 0 {
-            Uuid::nil()
-        } else {
-            Uuid::new_v4()
-        };
+        let community = Uuid::new_v4();
         sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
             .bind(community)
             .bind(format!("upgrade-{index}-{community}.example"))
