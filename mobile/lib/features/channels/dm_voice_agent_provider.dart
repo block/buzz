@@ -4,7 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/agents/owned_agent_directory.dart';
-import '../../shared/me/me_archived_agents.dart';
+import '../../shared/identity_archives/identity_archives.dart';
 import '../../shared/me/me_sync.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
@@ -19,7 +19,7 @@ import 'channels_provider.dart';
 /// adds no inventory read.
 final ownedCodexVoiceAgentsProvider = FutureProvider<Set<String>>((ref) async {
   ref.watch(_voiceInventoryChangesProvider);
-  final archived = ref.watch(meArchivedAgentsProvider.future);
+  final archived = ref.watch(identityArchivesProvider.future);
   final owned = await ref.watch(ownedAgentDirectoryProvider.future);
   final hidden = await archived;
   return {
@@ -57,7 +57,7 @@ final _voiceInventoryChangesProvider = Provider.autoDispose<void>((ref) {
         NostrFilter(kinds: const [30177], authors: [sync.pubkey], limit: 0),
         (_) {
           if (!disposed) ref.invalidate(ownedAgentDirectoryProvider);
-          ref.invalidate(meArchivedAgentsProvider);
+          ref.invalidate(identityArchivesProvider);
         },
       );
       if (disposed) unsubscribe?.call();
@@ -103,7 +103,7 @@ Future<String?> resolveDmVoiceAgent(Ref ref, String parentChannelId) async {
     return null;
   }
   ref.invalidate(ownedAgentDirectoryProvider);
-  ref.invalidate(meArchivedAgentsProvider);
+  ref.invalidate(identityArchivesProvider);
   final agents = await ref.read(ownedCodexVoiceAgentsProvider.future);
   final agent = dmVoiceAgent(channel, ref.read(currentPubkeyProvider), agents);
   if (agent == null) {

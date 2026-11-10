@@ -112,6 +112,9 @@ bool _searchesOpenChannels(String query) => _channelNeedle(query).isNotEmpty;
 /// Most channel rows one query shows, ranked best first.
 const searchChannelResultLimit = 8;
 
+/// Most people rows one query shows.
+const searchPeopleShown = 8;
+
 /// How long a loaded open-channel directory serves searches before the next
 /// search reads it again, as desktop's `PUBLIC_CHANNEL_PAGE_TTL` does.
 const searchDirectoryMaxAge = Duration(seconds: 30);
@@ -380,12 +383,16 @@ class SearchNotifier extends Notifier<SearchState> {
     }
   }
 
+  /// People asked of the directory search: more than [searchPeopleShown],
+  /// so archived people the page leaves out do not leave it short.
+  static const _peopleSearchLimit = 3 * searchPeopleShown;
+
   Future<void> _searchUsers(String query, int generation) async {
     List<DirectoryUser>? users;
     try {
       users = await ref
           .read(channelActionsProvider)
-          .searchUsers(query, limit: 8);
+          .searchUsers(query, limit: _peopleSearchLimit);
     } catch (_) {
       // User search failure is non-critical — keep existing results.
     }

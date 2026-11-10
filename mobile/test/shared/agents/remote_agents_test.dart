@@ -11,7 +11,7 @@ import 'package:buzz/shared/hosted/account_identity_store.dart';
 import 'package:buzz/shared/hosted/builderlab_account.dart';
 import 'package:buzz/shared/hosted/hosted_environment.dart';
 import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
-import 'package:buzz/shared/me/me_archived_agents.dart';
+import 'package:buzz/shared/identity_archives/identity_archives.dart';
 import 'package:buzz/shared/me/me_assistants.dart';
 import 'package:buzz/shared/me/me_sync.dart';
 import 'package:buzz/shared/relay/relay.dart';
@@ -1020,7 +1020,7 @@ void main() {
               RelayConfig(baseUrl: 'https://relay.test', nsec: fakeOwner.nsec),
             ),
           ),
-          meArchivedAgentsProvider.overrideWith((ref) async => {}),
+          identityArchivesProvider.overrideWith((ref) async => {}),
           remoteAgentControllerProvider.overrideWithValue(controller),
         ],
       );

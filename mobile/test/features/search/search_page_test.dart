@@ -1,3 +1,4 @@
+import 'package:buzz/shared/identity_archives/identity_archives.dart';
 import 'package:buzz/shared/widgets/buzz_agent_icon.dart';
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_detail_page.dart';
@@ -568,13 +569,20 @@ void main() {
   });
 
   testWidgets('same-name people results get distinct labels', (tester) async {
-    final first = 'a' * 64, second = 'b' * 64;
+    final first = 'a' * 64, second = 'b' * 64, archived = 'c' * 64;
+    // Tall enough that every row is built.
+    tester.view.physicalSize = const Size(800, 4000);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
     final state = SearchState(
       query: 'scout',
       channelResults: const [],
       userResults: [
+        DirectoryUser(pubkey: archived, displayName: 'Scout'),
         DirectoryUser(pubkey: first, displayName: 'Scout'),
         DirectoryUser(pubkey: second, displayName: 'Scout'),
+        for (var i = 0; i < 8; i++)
+          DirectoryUser(pubkey: '$i' * 64, displayName: 'Scout fan $i'),
       ],
       messageResults: const [],
     );
@@ -592,6 +600,7 @@ void main() {
               UserProfile(pubkey: first, displayName: 'Scout'),
             ),
           ),
+          identityArchivesProvider.overrideWith((ref) async => {archived}),
         ],
         child: const SearchPage(),
       ),
@@ -603,6 +612,19 @@ void main() {
         .data!;
     expect(title(first), isNot(title(second)));
     expect(title(first), isNot('Scout'));
+    // An archived person is left out, and does not take a live person's
+    // place among the eight rows shown.
+    final rows = find.byWidgetPredicate(
+      (widget) =>
+          widget.key is ValueKey<String> &&
+          (widget.key! as ValueKey<String>).value.startsWith(
+            'search-person-row-',
+          ),
+    );
+    expect(find.byKey(ValueKey('search-person-row-$archived')), findsNothing);
+    expect(rows, findsNWidgets(searchPeopleShown));
+    expect(find.byKey(ValueKey('search-person-row-${'5' * 64}')), findsOne);
+    expect(find.byKey(ValueKey('search-person-row-${'6' * 64}')), findsNothing);
   });
 
   testWidgets('uses compact content styles and keeps message time by author', (
