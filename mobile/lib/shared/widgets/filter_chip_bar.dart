@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'ios_glass_navigation_button.dart';
@@ -18,11 +20,15 @@ class FilterChipItem<T> {
   /// Optional count appended to the label as " (n)".
   final int? count;
 
+  /// Keeps unread activity visible when its inventory is filtered out.
+  final bool hasUnread;
+
   const FilterChipItem({
     required this.id,
     required this.label,
     this.icon,
     this.count,
+    this.hasUnread = false,
   });
 }
 
@@ -42,6 +48,18 @@ class FilterChipBar<T> extends StatelessWidget {
   /// Uses native glass capsules on iOS for navigation-style filters.
   final bool useNativeGlass;
 
+  /// Uses the native iOS label widths for Material capsules too.
+  final bool matchNativeWidths;
+
+  /// Optional outline for Material capsules.
+  final BorderSide side;
+
+  /// Optical adjustment for the visible label within its centered layout box.
+  final Offset labelOffset;
+
+  /// Minimum visible capsule height; the hit target may be larger.
+  final double minControlHeight;
+
   /// Material density applied to each chip.
   final VisualDensity visualDensity;
 
@@ -51,6 +69,9 @@ class FilterChipBar<T> extends StatelessWidget {
   /// Vertical spacing around the chip row.
   final double barVerticalPadding;
 
+  /// Horizontal spacing around the chip row.
+  final double horizontalPadding;
+
   const FilterChipBar({
     super.key,
     required this.items,
@@ -58,31 +79,40 @@ class FilterChipBar<T> extends StatelessWidget {
     required this.onSelected,
     this.expandItems = false,
     this.useNativeGlass = false,
+    this.matchNativeWidths = false,
+    this.side = BorderSide.none,
+    this.labelOffset = Offset.zero,
+    this.minControlHeight = 0,
     this.visualDensity = VisualDensity.compact,
     this.chipVerticalPadding = Grid.quarter,
     this.barVerticalPadding = Grid.xxs,
+    this.horizontalPadding = Grid.gutter,
   });
 
   @override
   Widget build(BuildContext context) {
+    final widths = [
+      for (final item in items)
+        (TextPainter(
+              text: TextSpan(
+                text: item.label,
+                style: filterChipTextStyle.copyWith(
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              textScaler: MediaQuery.textScalerOf(context),
+              textDirection: Directionality.of(context),
+            )..layout()).width +
+            32,
+    ];
     if (useNativeGlass && defaultTargetPlatform == TargetPlatform.iOS) {
-      final textStyle = filterChipTextStyle.copyWith(
-        fontWeight: FontWeight.w600,
+      final height = math.max(
+        MediaQuery.textScalerOf(context).scale(16) * 1.4 + 16,
+        math.max(48.0, minControlHeight),
       );
-      final height = (MediaQuery.textScalerOf(context).scale(16) * 1.4 + 16)
-          .clamp(48.0, double.infinity);
-      final widths = [
-        for (final item in items)
-          (TextPainter(
-                text: TextSpan(text: item.label, style: textStyle),
-                textScaler: MediaQuery.textScalerOf(context),
-                textDirection: Directionality.of(context),
-              )..layout()).width +
-              32,
-      ];
       return LayoutBuilder(
         builder: (context, constraints) {
-          final available = constraints.maxWidth - Grid.gutter * 2;
+          final available = constraints.maxWidth - horizontalPadding * 2;
           final required =
               widths.fold(0.0, (sum, width) => sum + width) +
               Grid.xxs * (items.length - 1);
@@ -93,24 +123,33 @@ class FilterChipBar<T> extends StatelessWidget {
             scrollDirection: Axis.horizontal,
             clipBehavior: Clip.none,
             padding: EdgeInsets.symmetric(
-              horizontal: Grid.gutter,
+              horizontal: horizontalPadding,
               vertical: barVerticalPadding,
             ),
             child: Row(
               children: [
                 for (var index = 0; index < items.length; index++) ...[
                   if (index > 0) const SizedBox(width: Grid.xxs),
-                  IosGlassNavigationButton(
-                    icon: IosGlassNavigationIcon.more,
-                    label: items[index].label,
-                    semanticLabel: items[index].label,
-                    onPressed: () => onSelected(items[index].id),
-                    isSelected: selected == items[index].id,
-                    width: widths[index] + extra,
-                    height: height,
-                    controlSize: height - 8,
-                    fillWidth: true,
-                    foregroundColor: context.colors.primary,
+                  Badge(
+                    isLabelVisible: items[index].hasUnread,
+                    alignment: Alignment.topRight,
+                    offset: const Offset(-6, 6),
+                    child: IosGlassNavigationButton(
+                      icon: IosGlassNavigationIcon.more,
+                      label: items[index].label,
+                      semanticLabel: items[index].hasUnread
+                          ? '${items[index].label}, unread'
+                          : items[index].label,
+                      onPressed: () => onSelected(items[index].id),
+                      isSelected: selected == items[index].id,
+                      width: widths[index] + extra,
+                      height: height,
+                      controlSize: math
+                          .max(height - 8, minControlHeight)
+                          .toDouble(),
+                      fillWidth: true,
+                      foregroundColor: context.colors.primary,
+                    ),
                   ),
                 ],
               ],
@@ -124,6 +163,11 @@ class FilterChipBar<T> extends StatelessWidget {
         if (index > 0) const SizedBox(width: Grid.xxs),
         if (expandItems)
           Expanded(child: _chip(context, items[index], fillWidth: true))
+        else if (matchNativeWidths)
+          SizedBox(
+            width: widths[index],
+            child: _chip(context, items[index], fillWidth: true),
+          )
         else
           _chip(context, items[index]),
       ],
@@ -132,7 +176,7 @@ class FilterChipBar<T> extends StatelessWidget {
     if (expandItems) {
       return Padding(
         padding: EdgeInsets.symmetric(
-          horizontal: Grid.gutter,
+          horizontal: horizontalPadding,
           vertical: barVerticalPadding,
         ),
         child: Row(children: chips),
@@ -142,7 +186,7 @@ class FilterChipBar<T> extends StatelessWidget {
     return SingleChildScrollView(
       scrollDirection: Axis.horizontal,
       padding: EdgeInsets.symmetric(
-        horizontal: Grid.gutter,
+        horizontal: horizontalPadding,
         vertical: barVerticalPadding,
       ),
       child: Row(children: chips),
@@ -163,6 +207,9 @@ class FilterChipBar<T> extends StatelessWidget {
         : context.colors.onSurfaceVariant;
     final labelStyle = filterChipTextStyle.copyWith(
       color: fg,
+      leadingDistribution: defaultTargetPlatform == TargetPlatform.android
+          ? TextLeadingDistribution.even
+          : null,
       fontWeight: isSelected ? FontWeight.w500 : FontWeight.w400,
     );
     final label = item.icon != null
@@ -189,19 +236,36 @@ class FilterChipBar<T> extends StatelessWidget {
             textAlign: fillWidth ? TextAlign.center : TextAlign.start,
             style: labelStyle,
           );
+    final sizedLabel = minControlHeight > 0
+        ? ConstrainedBox(
+            constraints: BoxConstraints(
+              minHeight: math.max(
+                0,
+                minControlHeight - chipVerticalPadding * 2,
+              ),
+            ),
+            child: Center(
+              widthFactor: 1,
+              heightFactor: 1,
+              child: Transform.translate(offset: labelOffset, child: label),
+            ),
+          )
+        : label;
     final centeredLabel = Align(
       alignment: Alignment.center,
       widthFactor: fillWidth ? null : 1,
       heightFactor: 1,
-      child: label,
+      child: sizedLabel,
     );
     final chip = FilterChip(
       selected: isSelected,
       showCheckmark: false,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(Radii.lg),
-      ),
-      side: BorderSide.none,
+      shape: useNativeGlass || defaultTargetPlatform == TargetPlatform.android
+          ? const StadiumBorder()
+          : RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(Radii.lg),
+            ),
+      side: side,
       label: fillWidth
           ? SizedBox(width: double.infinity, child: centeredLabel)
           : centeredLabel,
@@ -211,10 +275,29 @@ class FilterChipBar<T> extends StatelessWidget {
         horizontal: fillWidth ? Grid.quarter : Grid.twelve,
         vertical: chipVerticalPadding,
       ),
-      visualDensity: visualDensity,
+      visualDensity: minControlHeight > 0
+          ? VisualDensity.standard
+          : visualDensity,
       materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
     );
 
-    return fillWidth ? SizedBox(width: double.infinity, child: chip) : chip;
+    final sizedChip = minControlHeight > 0
+        ? ConstrainedBox(
+            constraints: BoxConstraints(minHeight: minControlHeight),
+            child: chip,
+          )
+        : chip;
+    final control = fillWidth
+        ? SizedBox(width: double.infinity, child: sizedChip)
+        : sizedChip;
+    if (!item.hasUnread) return control;
+    return Semantics(
+      label: '$text, unread',
+      button: true,
+      selected: isSelected,
+      onTap: () => onSelected(item.id),
+      excludeSemantics: true,
+      child: Badge(child: control),
+    );
   }
 }

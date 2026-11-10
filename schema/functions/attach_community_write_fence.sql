@@ -1,6 +1,6 @@
--- Attach the universal fence to one community-scoped relation. Future
--- migrations must invoke this helper explicitly after CREATE/ALTER introduces
--- community_id; the migration lint enforces that contract.
+-- Attach the legacy universal fence to one community-scoped relation. Only
+-- tables fenced before fence retirement use it; new tenant tables rely on
+-- application admission and must not call it (docs/database.md Rule 1).
 CREATE FUNCTION attach_community_write_fence(target REGCLASS) RETURNS VOID
 LANGUAGE plpgsql AS $$
 DECLARE

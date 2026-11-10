@@ -1,8 +1,9 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:buzz/shared/crypto/event_signing.dart';
 import 'package:flutter/services.dart';
-import 'package:nostr/nostr.dart' as nostr;
+import 'package:flutter/foundation.dart';
 
 /// Never include input, plaintext, or native exception details in this error.
 enum HpkeBackupFailure { invalidEnrollment, identityMismatch, unavailable }
@@ -14,12 +15,18 @@ enum HpkeBackupFailure { invalidEnrollment, identityMismatch, unavailable }
 class HpkeBackup {
   static const _channel = MethodChannel('buzz/hosted_hpke');
 
+  /// Existing backups can be recovered on iOS 16, but new ones require iOS 17.
+  static Future<bool> supportsSealing() async {
+    if (defaultTargetPlatform != TargetPlatform.iOS) return true;
+    return await _channel.invokeMethod<bool>('isSupported') == true;
+  }
+
   Future<Map<String, dynamic>> seal({
     required Map<String, dynamic> enrollment,
     required String secretHex,
   }) async {
     try {
-      final pubkey = nostr.Keys(secretHex).public;
+      final pubkey = derivePublicKeyHex(secretHex);
       if (enrollment['nostr_pubkey'] != pubkey) {
         throw HpkeBackupFailure.identityMismatch;
       }

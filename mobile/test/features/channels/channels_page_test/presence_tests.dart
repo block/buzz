@@ -16,7 +16,7 @@ void presenceListTests(
     );
     await tester.pumpAndSettle();
     final avatar = find.byWidgetPredicate(
-      (widget) => widget is AvatarImage && widget.radius == 9,
+      (widget) => widget is AvatarImage && widget.radius == 10,
     );
     final dots = find.byWidgetPredicate(
       (widget) =>

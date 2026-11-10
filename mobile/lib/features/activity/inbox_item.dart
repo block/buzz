@@ -8,6 +8,7 @@ import 'feed_item.dart';
 enum InboxFilter {
   all,
   mention,
+  dm,
   thread,
   needsAction,
   activity,
@@ -56,8 +57,8 @@ String inboxConversationId(
 }) {
   final thread = threadReferenceOf(tags);
   final threadId = thread.rootId ?? thread.parentId;
-  if (threadId != null) return threadId;
   if (dmChannelId != null) return 'dm:$dmChannelId';
+  if (threadId != null) return threadId;
   return eventId;
 }
 
@@ -133,7 +134,10 @@ class InboxItem {
     );
   }
 
-  final category = item.categories.firstOrNull ?? item.item.category;
+  // Label the event the row displays. A group can hold an older mention and
+  // a newer plain reply; the row shows the reply, so it must not say
+  // "Mentioned in". [InboxItem.categories] still drives filtering.
+  final category = item.item.category;
   if (category == 'mention') {
     return (
       text: channelName != null ? 'Mentioned in' : 'Mentioned',
@@ -165,6 +169,7 @@ class InboxItem {
 bool matchesInboxFilter(InboxItem item, InboxFilter filter) {
   return switch (filter) {
     InboxFilter.all => true,
+    InboxFilter.dm => item.conversationId.startsWith('dm:'),
     InboxFilter.thread => [
       item.item,
       ...item.groupItems,
@@ -227,45 +232,4 @@ List<InboxItem> buildInboxItems(
 
   rows.sort((a, b) => b.latestActivityAt.compareTo(a.latestActivityAt));
   return rows;
-}
-
-/// Date-bucket label for section headers — desktop's `groupInboxItems`:
-/// Today / Yesterday / weekday (within 7 days) / short date.
-String inboxDayLabel(int unixSeconds, {DateTime? now}) {
-  final current = now ?? DateTime.now();
-  final date = DateTime.fromMillisecondsSinceEpoch(unixSeconds * 1000);
-  final today = DateTime(current.year, current.month, current.day);
-  final day = DateTime(date.year, date.month, date.day);
-  final dayDiff = today.difference(day).inDays;
-
-  if (dayDiff == 0) return 'Today';
-  if (dayDiff == 1) return 'Yesterday';
-  if (dayDiff < 7 && dayDiff > 0) {
-    const weekdays = [
-      'Monday',
-      'Tuesday',
-      'Wednesday',
-      'Thursday',
-      'Friday',
-      'Saturday',
-      'Sunday',
-    ];
-    return weekdays[date.weekday - 1];
-  }
-  const months = [
-    'Jan',
-    'Feb',
-    'Mar',
-    'Apr',
-    'May',
-    'Jun',
-    'Jul',
-    'Aug',
-    'Sep',
-    'Oct',
-    'Nov',
-    'Dec',
-  ];
-  final label = '${months[date.month - 1]} ${date.day}';
-  return date.year == current.year ? label : '$label, ${date.year}';
 }

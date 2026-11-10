@@ -11,6 +11,8 @@ CREATE TABLE relay_invites (
     max_uses     INTEGER     CHECK (max_uses BETWEEN 1 AND 10000),
     use_count    INTEGER     NOT NULL DEFAULT 0 CHECK (use_count >= 0),
     expires_at   TIMESTAMPTZ NOT NULL,
+    revoked_at   TIMESTAMPTZ,
+    legacy_admission BOOLEAN NOT NULL DEFAULT true,
     created_by   TEXT        NOT NULL,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (community_id, id),

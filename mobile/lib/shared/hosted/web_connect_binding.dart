@@ -4,6 +4,7 @@ import 'package:nostr/nostr.dart' as nostr;
 
 import '../deeplink/deep_link.dart';
 import 'hosted_environment.dart';
+import 'package:buzz/shared/crypto/event_signing.dart';
 
 /// The owner supplies keys only inside this callback, after authenticating and
 /// resolving identity. Neither this service nor its result retains a secret.
@@ -51,7 +52,7 @@ class WebConnectBindingService {
       if (keys.public.toLowerCase() != expectedPubkey.toLowerCase()) {
         throw const FormatException('Identity does not match');
       }
-      final event = nostr.Event.from(
+      final event = signNostrEvent(
         kind: 24243,
         content: '',
         tags: [
@@ -69,7 +70,6 @@ class WebConnectBindingService {
             [field, request.fields[field]!],
         ],
         secretKey: keys.secret,
-        verify: false,
       );
       // Encode through the library's canonical event representation.
       final payload = event.toJson();

@@ -1,3 +1,4 @@
+import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -15,6 +16,7 @@ import '../../../shared/widgets/modal_presentation.dart';
 import '../channel_management_provider.dart';
 import '../channel_event_order.dart';
 import 'me_assistant_picker_sheet.dart';
+import 'me_settings_sheet.dart';
 
 /// Resolves a remembered choice or the assistant already used in a synced chat.
 /// Ambiguous chats require a choice instead of silently picking another agent.
@@ -50,6 +52,8 @@ String? resolveMeAssistant({
 /// Header avatar and persistent mobile selection for a personal chat.
 ({
   String? selected,
+  String name,
+  Future<void> Function({MeSettingsPresenter? present})? openPicker,
   IosNavigationAction nativeAction,
   Widget action,
   Widget? pendingNotice,
@@ -89,16 +93,20 @@ useMeChatAssistant(
       ? ref.watch(userCacheProvider)[selected] ??
             ref.read(userCacheProvider.notifier).get(selected)
       : null;
+  // The owner's inventory name outranks the agent's self-published profile.
   final name =
-      profile?.displayName ??
       agents
           .where((agent) => agent.pubkey == selected)
           .firstOrNull
-          ?.displayName;
+          ?.displayName ??
+      profile?.displayName;
+  final avatarInitial = name?.trim().isNotEmpty == true
+      ? name!.trim()[0].toUpperCase()
+      : profile?.initial ?? '?';
   String agentName(String pubkey) {
     final names = [
-      ref.read(userCacheProvider)[pubkey]?.displayName,
       agents.where((a) => a.pubkey == pubkey).firstOrNull?.displayName,
+      ref.read(userCacheProvider)[pubkey]?.displayName,
     ];
     return names
             .whereType<String>()
@@ -123,7 +131,7 @@ useMeChatAssistant(
       : selected == null
       ? 'Choose an agent'
       : 'Change agent: ${name ?? 'Agent'}';
-  Future<void> choose() async {
+  Future<void> choose({MeSettingsPresenter? present}) async {
     if (busy.value || sync == null) return;
     busy.value = true;
     try {
@@ -160,13 +168,21 @@ useMeChatAssistant(
         }
         if (resume != 'resume') return;
       } else {
-        final picked = await showBuzzModalBottomSheet<String>(
-          context: context,
-          title: 'Agent',
-          isScrollControlled: true,
-          showDragHandle: true,
-          builder: (_) => MeAssistantPickerSheet(selected: selected),
-        );
+        final picked = present != null
+            ? await present(
+                'Agent',
+                (onSelected) => MeAssistantPickerSheet(
+                  selected: selected,
+                  onSelected: onSelected,
+                ),
+              )
+            : await showBuzzModalBottomSheet<String>(
+                context: context,
+                title: 'Agent',
+                isScrollControlled: true,
+                showDragHandle: true,
+                builder: (_) => MeAssistantPickerSheet(selected: selected),
+              );
         if (picked == null || !context.mounted) return;
         intent = MeAgentChange.create(sync, channelId, picked);
       }
@@ -197,10 +213,11 @@ useMeChatAssistant(
       if (context.mounted) selection.value = (key, picked);
     } catch (error) {
       if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showFeedbackSnackBar(
           SnackBar(
             content: Text(error.toString().replaceFirst('Bad state: ', '')),
           ),
+          kind: ToastKind.error,
         );
       }
     } finally {
@@ -210,6 +227,8 @@ useMeChatAssistant(
 
   return (
     selected: selected,
+    openPicker: busy.value ? null : choose,
+    name: pendingName ?? name ?? 'Choose an agent',
     pendingNotice: pendingName == null
         ? null
         : Semantics(
@@ -223,11 +242,11 @@ useMeChatAssistant(
     nativeAction: IosNavigationAction(
       label: label,
       symbol: 'person.crop.circle',
+      sharesBackground: false,
       avatarIdentity: selected,
       avatarIsAgent: selected != null,
       imageUrl: profile?.avatarUrl,
-      avatarInitial:
-          profile?.initial ?? (name?.isNotEmpty == true ? name![0] : '?'),
+      avatarInitial: avatarInitial,
       onPressed: busy.value ? null : choose,
     ),
     action: IconButton(
@@ -241,9 +260,7 @@ useMeChatAssistant(
         backgroundColor: context.controlSurface,
         fallback: selected == null
             ? const Icon(BuzzIcons.plus, size: 20)
-            : Text(
-                profile?.initial ?? (name?.isNotEmpty == true ? name![0] : '?'),
-              ),
+            : Text(avatarInitial),
       ),
     ),
   );

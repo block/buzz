@@ -1,7 +1,7 @@
 //! Event publishing — PUBLISH to Redis via pool connection.
 
+use crate::RedisConnection;
 use buzz_core::TenantContext;
-use deadpool_redis::Pool;
 use nostr::JsonUtil;
 use uuid::Uuid;
 
@@ -20,12 +20,12 @@ pub fn global_key(ctx: &TenantContext) -> String {
 
 /// Returns the number of subscribers that received the message.
 pub async fn publish_event(
-    pool: &Pool,
+    pool: &RedisConnection,
     ctx: &TenantContext,
     topic: EventTopic,
     event: &nostr::Event,
 ) -> Result<i64, PubSubError> {
-    let mut conn = pool.get().await?;
+    let mut conn = pool.clone();
     let key = crate::topic::EventTopicKey::from_context(ctx, topic).redis_channel();
     let payload = event.as_json();
     let subscriber_count: i64 = redis::cmd("PUBLISH")

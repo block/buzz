@@ -15,8 +15,10 @@ const buzzPushHellthreadParticipantLimit = 20;
 const _supportedNotificationClasses = {'default'};
 const _filterKeys = {'kinds', 'authors', '#p', '#h', '#e'};
 final _exactHexPattern = RegExp(r'^[0-9a-f]{64}$');
+// Channel IDs use canonical UUID text; starter channels are UUIDv5.
+// Match the relay's UUID parser without imposing a version or variant.
 final _channelIdPattern = RegExp(
-  r'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$',
+  r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
 );
 
 enum BuzzPushLeaseSubscriptionAuthority { desired, accepted }
@@ -456,9 +458,12 @@ List<BuzzPushSubscription> buildDesiredBuzzPushSubscriptions({
   }
 
   final normalizedChannelIds = channelIds.map(_normalizeChannelID).toSet();
-  final normalizedMuted = mutedChannelIds.map(_normalizeChannelID).toSet();
-  final activeMuted =
-      normalizedMuted.intersection(normalizedChannelIds).toList()..sort();
+  // Mutes sync across every community and channel type, so only mutes of
+  // subscribed channels matter here; others need not fit the push grammar.
+  final activeMuted = {
+    for (final id in mutedChannelIds)
+      if (normalizedChannelIds.contains(id.toLowerCase())) id.toLowerCase(),
+  }.toList()..sort();
   final mutedIgnoreFilters = <BuzzPushFilter>[];
   for (final chunk in _chunks(activeMuted, buzzPushChannelChunkSize)) {
     mutedIgnoreFilters.add(
@@ -489,7 +494,7 @@ List<BuzzPushSubscription> buildDesiredBuzzPushSubscriptions({
     ),
   ];
 
-  final channels = normalizedChannelIds.difference(normalizedMuted).toList()
+  final channels = normalizedChannelIds.difference(activeMuted.toSet()).toList()
     ..sort();
   for (final chunk in _chunks(channels, buzzPushChannelChunkSize)) {
     subscriptions.add(

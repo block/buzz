@@ -1,15 +1,25 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
 
 import 'package:buzz/shared/community/community.dart';
+import 'package:buzz/shared/community/community_provider.dart';
+import 'package:buzz/shared/hosted/builderlab_account.dart';
+import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
 import 'package:buzz/shared/push/push_bridge.dart';
 import 'package:buzz/shared/push/push_lease_revocation_outbox.dart';
 import 'package:buzz/shared/push/push_subscription.dart';
+import 'package:buzz/shared/relay/relay_provider.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
 import '../community/community_storage_test.dart';
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
   late FakeSecureStorage secure;
   late BuzzPushLeaseRevocationStorage storage;
   late _Clock clock;
@@ -23,6 +33,127 @@ void main() {
     scheduler = _WakeScheduler();
     keys = nostr.Keys.generate();
   });
+
+  test(
+    'revocation and tombstone sockets carry the hosted relay assertion',
+    () async {
+      // A hosted relay refuses the WebSocket upgrade without the assertion, so a
+      // queued revocation or a removal tombstone would retry forever.
+      // The test binding answers every HttpClient request with a 400, but this
+      // test runs a real local relay.
+      final overrides = HttpOverrides.current;
+      HttpOverrides.global = null;
+      addTearDown(() => HttpOverrides.global = overrides);
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() => server.close(force: true));
+      final origin = 'ws://127.0.0.1:${server.port}';
+      final upgrades = <HttpHeaders>[];
+      server.listen((request) async {
+        if (WebSocketTransformer.isUpgradeRequest(request)) {
+          upgrades.add(request.headers);
+          final socket = await WebSocketTransformer.upgrade(request);
+          socket.add(jsonEncode(['AUTH', 'challenge']));
+          socket.listen((message) {
+            final frame = jsonDecode(message as String) as List<dynamic>;
+            if (frame.first == 'AUTH' || frame.first == 'EVENT') {
+              final event = frame[1] as Map<String, dynamic>;
+              socket.add(jsonEncode(['OK', event['id'], true, '']));
+            }
+          });
+          return;
+        }
+        request.response
+          ..headers.contentType = ContentType('application', 'nostr+json')
+          ..write(
+            jsonEncode(_descriptorJson(origin, nostr.Keys.generate().public)),
+          )
+          ..close();
+      });
+      final auth = _AssertingRelayAuth();
+      addTearDown(auth.dispose);
+
+      await publishBuzzPushLeaseRevocation(
+        BuzzPushLeaseRevocationRecord(
+          relayUrl: 'http://127.0.0.1:${server.port}',
+          relayOrigin: origin,
+          memberPubkey: keys.public,
+          nsec: keys.nsec,
+          installationId: 'c' * 32,
+          generation: 7,
+          expiresAt: null,
+          attemptCount: 0,
+          nextAttemptAt: 0,
+        ),
+        relayAuth: auth,
+      );
+
+      expect(
+        upgrades.single.value('nostr-federated-identity'),
+        'Bearer hosted-token',
+      );
+      expect(auth.configs.single.baseUrl, 'http://127.0.0.1:${server.port}');
+      expect(auth.configs.single.nsec, keys.nsec);
+      // A removed community's failure must not hide the active one's recovery.
+      expect(auth.backgrounds.single, isTrue);
+      // A new socket rereads NIP-FI discovery, so a community that started
+      // enforcing since its last read still gets the assertion.
+      expect(auth.freshes.single, isTrue);
+
+      // Removing the community publishes its tombstone the same way.
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      messenger.setMockMethodCallHandler(const MethodChannel('buzz/push'), (
+        call,
+      ) async {
+        expect(call.method, 'endpointGrants');
+        return [
+          {
+            'relayOrigin': origin,
+            'relayPubkey': 'a' * 64,
+            'installationId': 'c' * 32,
+            'endpointGrant': 'grant',
+            'endpointHash': 'b' * 64,
+            'endpointEpoch': 1,
+            'generation': 1,
+            'expiresAt': 1752624000,
+          },
+        ];
+      });
+      addTearDown(
+        () => messenger.setMockMethodCallHandler(
+          const MethodChannel('buzz/push'),
+          null,
+        ),
+      );
+      final container = ProviderContainer(
+        overrides: [hostedRelayAuthProvider.overrideWithValue(auth)],
+      );
+      addTearDown(container.dispose);
+
+      await container.read(communityPushLeaseDeactivatorProvider)(
+        Community(
+          id: 'removed',
+          name: 'Removed',
+          addedAt: DateTime.utc(2026),
+          relayUrl: origin,
+          pubkey: keys.public,
+          nsec: keys.nsec,
+        ),
+        generation: 9,
+      );
+
+      expect(upgrades, hasLength(2));
+      expect(
+        upgrades.last.value('nostr-federated-identity'),
+        'Bearer hosted-token',
+      );
+      expect(auth.configs.last.baseUrl, 'http://127.0.0.1:${server.port}');
+      expect(auth.configs.last.nsec, keys.nsec);
+      expect(auth.backgrounds.last, isTrue);
+    },
+  );
 
   test('community removal journals one precise lease address', () async {
     final outbox = _outbox(
@@ -56,6 +187,48 @@ void main() {
     expect(records.single.generation, 6);
     expect(records.single.expiresAt, grant.expiresAt);
     expect(records.single.relayUrl, 'https://relay.example/');
+  });
+
+  test('removal without a grant retains cleanup through restart', () async {
+    final community =
+        Community.create(
+          name: 'Test',
+          relayUrl: 'wss://relay.example',
+          nsec: keys.nsec,
+        ).copyWith(
+          pubkey: keys.public,
+          pushNotificationsEnabled: true,
+          pushSubscriptionState: const BuzzPushLeaseSubscriptionState.desired()
+              .withReservedGeneration(4),
+        );
+    final first = _outbox(
+      storage: storage,
+      clock: clock,
+      scheduler: scheduler,
+      publisher: (_) async => throw StateError('offline'),
+    );
+    expect(
+      await first.enqueueCommunity(community, readGrants: () async => []),
+      isTrue,
+    );
+    await first.trigger();
+    first.dispose();
+    final pending = (await storage.loadAll()).single;
+    expect(pending.installationId, community.pushLeaseInstallationId);
+    expect(pending.expiresAt, isNull);
+    clock.seconds = pending.nextAttemptAt;
+    final published = <BuzzPushLeaseRevocationRecord>[];
+    final restarted = _outbox(
+      storage: storage,
+      clock: clock,
+      scheduler: scheduler,
+      publisher: (record) async => published.add(record),
+    );
+    await restarted.trigger();
+    expect(published.single.installationId, community.pushLeaseInstallationId);
+    expect(published.single.generation, 7);
+    expect(await storage.loadAll(), isEmpty);
+    restarted.dispose();
   });
 
   test('legacy community revokes its grant-addressed lease', () async {
@@ -328,3 +501,52 @@ class _WakeScheduler {
 class _ScheduledWake {
   bool cancelled = false;
 }
+
+class _AssertingRelayAuth extends HostedRelayAuth {
+  _AssertingRelayAuth() : super(BuilderlabAccountClient(), enabled: false);
+
+  final configs = <RelayConfig>[];
+  final backgrounds = <bool>[];
+  final freshes = <bool>[];
+
+  @override
+  Future<Map<String, String>> headers(
+    RelayConfig config, {
+    bool background = false,
+    bool fresh = false,
+  }) async {
+    configs.add(config);
+    backgrounds.add(background);
+    freshes.add(fresh);
+    return {'Nostr-Federated-Identity': 'Bearer hosted-token'};
+  }
+}
+
+Map<String, dynamic> _descriptorJson(String origin, String relayPubkey) => {
+  'supported_extensions': ['nip-er', 'buzz-push-v1'],
+  'push': {
+    'origin': origin,
+    'keys': [
+      {'id': 'relay-v1', 'pubkey': relayPubkey, 'current': true},
+    ],
+    'push_kinds': [9, 40002, 45001, 45003],
+    'h_grammar': 'uuid-lowercase',
+    'class_support': {
+      'apns': ['default'],
+    },
+    'limitation': {
+      'max_lease_ttl': 2592000,
+      'max_leases_per_pubkey': 16,
+      'max_subscriptions_per_lease': 16,
+      'max_kinds': 16,
+      'max_authors': 20,
+      'max_h': 50,
+      'max_tag_values': 20,
+      'max_ignore': 8,
+      'max_content_len': 65536,
+      'max_plaintext_len': 32768,
+      'max_endpoint_len': 4096,
+      'max_string_len': 512,
+    },
+  },
+};

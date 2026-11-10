@@ -10,13 +10,19 @@ import 'features/onboarding/hosted_connect_page.dart';
 import 'features/onboarding/self_hosted_entry_sheet.dart';
 import 'shared/auth/auth.dart';
 import 'shared/theme/grid.dart';
+import 'shared/theme/theme_extensions.dart';
+import 'shared/widgets/mobile_tab_footer_backdrop.dart';
 import 'shared/deeplink/deep_link.dart';
 import 'shared/hosted/hosted_community_connection.dart';
 import 'shared/hosted/hosted_flow.dart';
 import 'shared/hosted/hosted_environment.dart';
+import 'shared/hosted/hosted_relay_auth.dart';
+import 'shared/hosted/organization_environment.dart';
 import 'features/onboarding/hosted_reconnect_banner.dart';
+import 'features/onboarding/organization_sign_in_banner.dart';
 
 import 'shared/hosted/hosted_flow_provider.dart';
+import 'shared/hosted/organization_sign_in.dart';
 
 /// Composition seam shared by signed-in and signed-out application states.
 class HostedAppGate extends HookConsumerWidget {
@@ -47,6 +53,23 @@ class HostedAppGate extends HookConsumerWidget {
       return () => flow.removeListener(onFlowChanged);
     }, [flow]);
     final inlineEntry = ref.watch(hostedInlineEntryProvider);
+    // Create the organization's browser owner before any callback is handled.
+    ref.watch(organizationSignInProvider);
+    useEffect(() {
+      // An internal build keeps one Builderlab session: drop any public
+      // session a previous build saved. Its communities stay stored, hidden.
+      if (OrganizationEnvironment.enabled) {
+        unawaited(
+          ref
+              .read(builderlabAccountProvider)
+              .clearLocalSession()
+              .catchError(
+                (Object error) => debugPrint('Public session cleanup: $error'),
+              ),
+        );
+      }
+      return null;
+    }, const []);
     final visible =
         flow != null &&
         flow.stage != HostedFlowStage.idle &&
@@ -59,17 +82,33 @@ class HostedAppGate extends HookConsumerWidget {
             (flow.accountOnly &&
                 flow.stage == HostedFlowStage.working &&
                 flow.account.account == null));
-    final inlineAccountStatus =
-        flow != null &&
-        (!authenticated || inlineEntry) &&
-        flow.accountOnly &&
-        (flow.stage == HostedFlowStage.working ||
-            (flow.stage == HostedFlowStage.blocked &&
-                !flow.canChangeCommunities));
+    final fullScreenSetup = visible && !openingSignIn;
     return DeepLinkDispatcher(
       dispatchMessageLinks: authenticated && !visible,
       onboardingHandler: (routeContext, link) async {
         final relay = link.relayUrl;
+        if (relay != null &&
+            OrganizationEnvironment.enabled &&
+            !OrganizationEnvironment.protects(Uri.parse(relay))) {
+          if (routeContext.mounted) {
+            await showDialog<void>(
+              context: routeContext,
+              builder: (context) => AlertDialog(
+                title: const Text('Community unavailable'),
+                content: const Text(
+                  'This app connects only to your organization’s community.',
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.pop(context),
+                    child: const Text('Close'),
+                  ),
+                ],
+              ),
+            );
+          }
+          return true;
+        }
         if (relay != null) {
           final host = Uri.parse(relay).host.toLowerCase();
           final requiresAuth = HostedEnvironment.requiresAuth(host);
@@ -98,6 +137,7 @@ class HostedAppGate extends HookConsumerWidget {
                 routeContext,
                 relay: link.relayUrl,
                 name: link.name,
+                fullScreen: inlineEntry,
               );
               if (joined && context.mounted) {
                 ref.read(communityEntryCompletionProvider.notifier).complete();
@@ -134,53 +174,73 @@ class HostedAppGate extends HookConsumerWidget {
       child: Stack(
         fit: StackFit.expand,
         children: [
-          child,
-          if (flow != null) ...[
-            if (authenticated && !visible) HostedReconnectBanner(flow: flow),
-            if (flow.stage == HostedFlowStage.signIn &&
-                authenticated &&
-                !inlineEntry)
-              Positioned(
-                left: Grid.sm,
-                right: Grid.sm,
-                bottom: 0,
-                child: SafeArea(
-                  child: Material(
-                    color: Colors.transparent,
-                    child: Wrap(
-                      alignment: WrapAlignment.center,
-                      children: [
-                        TextButton(
-                          onPressed: flow.retry,
-                          child: const Text('Start login again'),
-                        ),
-                        TextButton(
-                          onPressed: flow.leave,
-                          child: Text(
-                            flow.reconnecting
-                                ? 'Cancel sign-in'
-                                : 'Leave setup',
+          ExcludeFocus(
+            excluding: fullScreenSetup,
+            child: ExcludeSemantics(
+              excluding: fullScreenSetup,
+              child: Offstage(offstage: fullScreenSetup, child: child),
+            ),
+          ),
+          if (fullScreenSetup) ColoredBox(color: context.colors.surface),
+          // These overlays only show over Home, so keep them above its
+          // floating tab bar.
+          Positioned.fill(
+            child: MediaQuery(
+              data: MediaQuery.of(context).copyWith(
+                padding: MediaQuery.paddingOf(
+                  context,
+                ).copyWith(bottom: mobileTabBarTop(context) + Grid.xxs),
+              ),
+              child: Stack(
+                // Banners with their own Stack need the full layer to place
+                // bottom-anchored content inside hit-testable bounds.
+                fit: StackFit.expand,
+                children: [
+                  if (authenticated && !visible)
+                    const OrganizationSignInBanner(),
+                  if (flow != null && authenticated && !visible)
+                    HostedReconnectBanner(flow: flow),
+                  if (flow != null &&
+                      flow.stage == HostedFlowStage.signIn &&
+                      authenticated &&
+                      !inlineEntry)
+                    Positioned(
+                      left: Grid.sm,
+                      right: Grid.sm,
+                      bottom: 0,
+                      child: SafeArea(
+                        child: Material(
+                          color: Colors.transparent,
+                          child: Wrap(
+                            alignment: WrapAlignment.center,
+                            children: [
+                              TextButton(
+                                onPressed: flow.retry,
+                                child: const Text('Start login again'),
+                              ),
+                              TextButton(
+                                onPressed: flow.leave,
+                                child: Text(
+                                  flow.reconnecting
+                                      ? 'Cancel sign-in'
+                                      : 'Leave setup',
+                                ),
+                              ),
+                            ],
                           ),
                         ),
-                      ],
+                      ),
                     ),
-                  ),
-                ),
+                ],
               ),
-            if (flow.stage == HostedFlowStage.profile)
-              ProfileSetupPage(flow: flow),
-            if (visible &&
-                flow.stage != HostedFlowStage.profile &&
-                !openingSignIn &&
-                !inlineAccountStatus &&
-                (!inlineEntry ||
-                    flow.stage == HostedFlowStage.chooseIdentity ||
-                    flow.stage == HostedFlowStage.chooseCommunities ||
-                    flow.stage == HostedFlowStage.communityConflict ||
-                    flow.canChangeCommunities))
+            ),
+          ),
+          if (flow != null) ...[
+            if (fullScreenSetup)
               HostedConnectPage(
                 flow: flow,
                 onClose: () => unawaited(flow.leave()),
+                profileBuilder: (_) => ProfileSetupPage(flow: flow),
               ),
           ],
         ],

@@ -49,6 +49,23 @@ async fn query_relay_all(
     }
 }
 
+/// Every open channel's metadata, read from the writer so a lagging replica
+/// cannot hide a channel the relay already holds. Membership is not resolved:
+/// each channel is reported as not joined.
+pub(super) async fn fetch_open_directory_from_writer(
+    state: &AppState,
+) -> Result<Vec<ChannelInfo>, String> {
+    let events = query_relay_all(
+        state,
+        serde_json::json!({"kinds": [39000], "consistency": "strong"}),
+    )
+    .await?;
+    Ok(events
+        .iter()
+        .filter_map(|ev| nostr_convert::channel_info_from_event(ev, None, Some(false)).ok())
+        .collect())
+}
+
 /// Whether an open channel not yet in the real member set should still be
 /// classified `is_member=true` via the pending-owner overlay. Pulled out of
 /// `get_channels`'s open-channel branch so the exact `(d_tag, my_pubkey,

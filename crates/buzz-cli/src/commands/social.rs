@@ -63,7 +63,7 @@ pub async fn cmd_publish_note(
     let builder = buzz_sdk::build_note(content, reply_id)
         .map_err(|e| CliError::Other(format!("build error: {e}")))?;
 
-    let event = client.sign_event(builder)?;
+    let event = client.sign_event(builder).await?;
 
     let resp = client.submit_event(event).await?;
     println!("{}", normalize_write_response(&resp));
@@ -91,7 +91,7 @@ pub async fn cmd_set_contact_list(
     let builder = buzz_sdk::build_contact_list(&contacts)
         .map_err(|e| CliError::Other(format!("build error: {e}")))?;
 
-    let event = client.sign_event(builder)?;
+    let event = client.sign_event(builder).await?;
 
     let resp = client.submit_event(event).await?;
     println!("{}", normalize_write_response(&resp));
@@ -214,7 +214,7 @@ pub async fn cmd_set_list(
     }
 
     let builder = EventBuilder::new(Kind::Custom(kind), content).tags(tags);
-    let event = client.sign_event(builder)?;
+    let event = client.sign_event(builder).await?;
     let resp = client.submit_event(event).await?;
     println!("{resp}");
     Ok(())

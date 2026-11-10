@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use buzz_core::CommunityId;
+use chrono::{DateTime, Utc};
 use sqlx::{postgres::PgPoolOptions, PgPool};
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
@@ -11,6 +12,17 @@ use tokio_util::sync::CancellationToken;
 
 pub(crate) const CAPACITY: usize = 256;
 const ENQUEUE_TIMEOUT: Duration = Duration::from_secs(2);
+
+// Bind the signed event timestamp, never receipt time: only its monthly partition
+// can contain the admitted row. Durable queue records intentionally stay ID-only.
+const ENQUEUE_SQL: &str = "INSERT INTO push_match_queue (community_id, event_id) \
+         SELECT $1, $2 FROM events e \
+         WHERE e.community_id = $1 AND e.id = $2 AND e.created_at = $3 AND e.deleted_at IS NULL \
+           AND EXISTS (SELECT 1 FROM push_leases l \
+             WHERE l.community_id = $1 AND l.active AND l.endpoint_enabled \
+               AND l.updated_at <= e.received_at \
+               AND l.expires_at > EXTRACT(EPOCH FROM now())::bigint) \
+         ON CONFLICT DO NOTHING";
 
 #[derive(Clone, Debug)]
 pub(crate) struct PushEnqueue {
@@ -23,6 +35,7 @@ pub(crate) struct PushEnqueue {
 struct Job {
     community: CommunityId,
     event_id: Vec<u8>,
+    created_at: DateTime<Utc>,
     #[cfg(test)]
     barrier: Option<tokio::sync::oneshot::Sender<()>>,
 }
@@ -96,7 +109,12 @@ impl PushEnqueue {
         }
     }
 
-    pub(crate) fn submit(&self, community: CommunityId, event_id: Vec<u8>) {
+    pub(crate) fn submit(
+        &self,
+        community: CommunityId,
+        event_id: Vec<u8>,
+        created_at: DateTime<Utc>,
+    ) {
         if self.cancel.is_cancelled() {
             record_drop("shutdown");
             return;
@@ -104,6 +122,7 @@ impl PushEnqueue {
         if let Err(error) = self.sender.try_send(Job {
             community,
             event_id,
+            created_at,
             #[cfg(test)]
             barrier: None,
         }) {
@@ -121,6 +140,7 @@ impl PushEnqueue {
             .send(Job {
                 community: CommunityId::from_uuid(uuid::Uuid::nil()),
                 event_id: Vec::new(),
+                created_at: DateTime::UNIX_EPOCH,
                 barrier: Some(sender),
             })
             .await
@@ -157,6 +177,7 @@ pub(crate) async fn enqueue_with_gate_barrier(
     pool: &PgPool,
     community: CommunityId,
     event_id: Vec<u8>,
+    created_at: DateTime<Utc>,
     barrier: GateBarrier,
 ) -> crate::Result<()> {
     enqueue(
@@ -164,6 +185,7 @@ pub(crate) async fn enqueue_with_gate_barrier(
         &Job {
             community,
             event_id,
+            created_at,
             barrier: None,
         },
         Some(barrier),
@@ -202,21 +224,27 @@ async fn enqueue(
     // Compare recorded receipt/update times without imposing commit ordering.
     // Registration overlapping message arrival may send or suppress a wake.
     // This bounded job never scans historical messages on lease activation.
-    sqlx::query(
-        "INSERT INTO push_match_queue (community_id, event_id) \
-         SELECT $1, $2 FROM events e \
-         WHERE e.community_id = $1 AND e.id = $2 AND e.deleted_at IS NULL \
-           AND EXISTS (SELECT 1 FROM push_leases l \
-             WHERE l.community_id = $1 AND l.active AND l.endpoint_enabled \
-               AND l.updated_at <= e.received_at \
-               AND l.expires_at > EXTRACT(EPOCH FROM now())::bigint) \
-         ON CONFLICT DO NOTHING",
-    )
-    .bind(job.community.as_uuid())
-    .bind(&job.event_id)
-    .execute(&mut *tx)
-    .await?;
+    insert_queue_row(&mut tx, job).await?;
     tx.commit().await?;
+    Ok(())
+}
+
+async fn insert_queue_row(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    job: &Job,
+) -> crate::Result<()> {
+    // Not a cached prepared statement: this worker connection is long-lived, so
+    // after five runs Postgres could switch a cached statement to a generic
+    // plan. A generic plan prunes `events` partitions only at executor startup,
+    // after locking every partition and its indexes; a custom plan prunes at
+    // plan time and locks only the signed timestamp's month.
+    sqlx::query(ENQUEUE_SQL)
+        .persistent(false)
+        .bind(job.community.as_uuid())
+        .bind(&job.event_id)
+        .bind(job.created_at)
+        .execute(&mut **tx)
+        .await?;
     Ok(())
 }
 
@@ -234,12 +262,12 @@ mod tests {
         };
         let community = CommunityId::from_uuid(uuid::Uuid::new_v4());
         for _ in 0..CAPACITY + 1 {
-            producer.submit(community, vec![1; 32]);
+            producer.submit(community, vec![1; 32], DateTime::UNIX_EPOCH);
         }
         assert_eq!(receiver.len(), CAPACITY);
         receiver.try_recv().unwrap();
         producer.cancel();
-        producer.submit(community, vec![2; 32]);
+        producer.submit(community, vec![2; 32], DateTime::UNIX_EPOCH);
         assert_eq!(receiver.len(), CAPACITY - 1);
         producer.join().await;
     }
@@ -283,11 +311,13 @@ mod tests {
             let active = Job {
                 community: communities[0],
                 event_id: vec![0_u8; 32],
+                created_at: DateTime::from_timestamp(1, 0).unwrap(),
                 barrier: None,
             };
             let quiescing = Job {
                 community: communities[1],
                 event_id: vec![1_u8; 32],
+                created_at: DateTime::from_timestamp(1, 0).unwrap(),
                 barrier: None,
             };
             let err = enqueue(&db.pool, &quiescing, None)
@@ -310,3 +340,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "push_enqueue/postgres_tests.rs"]
+mod postgres_tests;

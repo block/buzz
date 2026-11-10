@@ -117,7 +117,7 @@ pub async fn cmd_create_workflow(
     let workflow_id = uuid::Uuid::new_v4();
     let builder = buzz_sdk::build_workflow_def(channel_uuid, workflow_id, &yaml_definition)
         .map_err(sdk_err)?;
-    let event = client.sign_event(builder)?;
+    let event = client.sign_event(builder).await?;
 
     let resp = client.submit_event(event).await?;
     let final_workflow_id = extract_relay_response_field(&resp, "workflow_id")
@@ -152,7 +152,7 @@ pub async fn cmd_update_workflow(
     let builder =
         buzz_sdk::build_workflow_update(channel_uuid, wf_uuid, &yaml_definition, expected_revision)
             .map_err(sdk_err)?;
-    let event = client.sign_event(builder)?;
+    let event = client.sign_event(builder).await?;
 
     let resp = client.submit_event(event).await?;
     println!("{}", normalize_write_response(&resp));
@@ -162,11 +162,9 @@ pub async fn cmd_update_workflow(
 /// Delete a workflow — sign and submit a kind:5 deletion event.
 pub async fn cmd_delete_workflow(client: &BuzzClient, workflow_id: &str) -> Result<(), CliError> {
     let wf_uuid = parse_uuid(workflow_id)?;
-    let keys = client.keys();
-
     let builder =
-        buzz_sdk::build_workflow_delete(&keys.public_key().to_hex(), wf_uuid).map_err(sdk_err)?;
-    let event = client.sign_event(builder)?;
+        buzz_sdk::build_workflow_delete(&client.public_key().to_hex(), wf_uuid).map_err(sdk_err)?;
+    let event = client.sign_event(builder).await?;
 
     let resp = client.submit_event(event).await?;
     println!("{}", normalize_write_response(&resp));
@@ -201,12 +199,12 @@ pub async fn cmd_trigger_workflow(
             &content,
         )
         .tags(tags);
-        let event = client.sign_event(builder)?;
+        let event = client.sign_event(builder).await?;
         let resp = client.submit_event(event).await?;
         println!("{}", normalize_write_response(&resp));
     } else {
         let builder = buzz_sdk::build_workflow_trigger(wf_uuid).map_err(sdk_err)?;
-        let event = client.sign_event(builder)?;
+        let event = client.sign_event(builder).await?;
         let resp = client.submit_event(event).await?;
         println!("{}", normalize_write_response(&resp));
     }
@@ -228,7 +226,7 @@ pub async fn cmd_approve_step(
     let token_hash = hex::encode(Sha256::digest(approval_token.as_bytes()));
     let builder =
         buzz_sdk::build_workflow_approval(&token_hash, approved, content).map_err(sdk_err)?;
-    let event = client.sign_event(builder)?;
+    let event = client.sign_event(builder).await?;
 
     let resp = client.submit_event(event).await?;
     println!("{}", normalize_write_response(&resp));

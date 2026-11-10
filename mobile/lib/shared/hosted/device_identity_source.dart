@@ -5,6 +5,9 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import '../storage/secure_storage.dart';
 
 import 'account_identity_store.dart';
+import 'organization_environment.dart';
+import '../profile/user_profile.dart';
+import '../relay/relay_provider.dart';
 
 /// Public identity choices; never contains private signing material.
 class DeviceIdentityChoice {
@@ -25,6 +28,48 @@ class DeviceIdentitySource {
     for (final entry in (await _read()).entries)
       DeviceIdentityChoice(entry.key, entry.value.label),
   ];
+
+  /// Read profile metadata only from communities already saved for this key,
+  /// and in an internal build only from its organization's relay. A
+  /// failed/offline community does not prevent trying another saved source.
+  Future<UserProfile?> loadProfile(
+    String pubkey,
+    Future<UserProfile?> Function(RelayConfig config) fetch,
+  ) async {
+    final seen = <String>{};
+    for (final key in ['buzz_communities', 'buzz_workspaces']) {
+      final raw = await _storage.read(key: key);
+      if (raw == null) continue;
+      for (final record in jsonDecode(raw) as List) {
+        try {
+          final value = record as Map<String, dynamic>;
+          final nsec = value['nsec'] as String?;
+          final relay = value['relayUrl'] as String?;
+          if (nsec == null ||
+              relay == null ||
+              (OrganizationEnvironment.enabled &&
+                  !OrganizationEnvironment.protects(Uri.parse(relay))) ||
+              AccountIdentityStore.publicKeyForNsec(nsec) != pubkey ||
+              (value['pubkey'] != null && value['pubkey'] != pubkey)) {
+            continue;
+          }
+          final config = RelayConfig(baseUrl: relay, nsec: nsec);
+          if (!seen.add(config.baseUrl)) continue;
+          if (seen.length > 3) return null;
+          final profile = await fetch(config);
+          if (profile != null) return profile;
+        } catch (_) {
+          // Metadata is optional; never alter keys or block identity selection.
+        }
+      }
+    }
+    return null;
+  }
+
+  /// Whether a saved community or previous device record holds exactly [nsec].
+  Future<bool> holds(String nsec) async =>
+      (await _read())[AccountIdentityStore.publicKeyForNsec(nsec)]?.nsec ==
+      nsec;
 
   /// Reread and validate the chosen key immediately before create-only adoption.
   Future<AccountIdentitySnapshot> adopt(

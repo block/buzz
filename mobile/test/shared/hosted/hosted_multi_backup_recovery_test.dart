@@ -144,6 +144,15 @@ void main() {
     'unbound distinct keys expose public choices and persist only selection',
     () async {
       final resolver = await service(includeDevice: true);
+      // Setup can become stale when another device uploads a backup. Even an
+      // imported key in that list must go through recovery to gain its receipt.
+      for (final key in keys) {
+        await expectLater(
+          resolver.resolve(importNsec: key.nsec),
+          throwsA(AccountFailure.unavailable),
+        );
+        expect(await store.read(), isNull);
+      }
       final pending = await resolver.resolve();
       expect(pending.state, HostedIdentityState.needsSelection);
       expect(pending.choices.map((choice) => choice.pubkey), [
@@ -378,12 +387,14 @@ void main() {
             : [DeviceIdentityChoice(keys[2].public, 'Newly saved')],
       );
       expect(
-        (await blocked.resolve()).state,
+        (await blocked.resolve(createNew: true)).state,
         HostedIdentityState.needsAuthoritativeAbsence,
       );
       expect(await store.read(), isNull);
       final resolver = await service();
-      final first = await resolver.resolve();
+      expect((await resolver.resolve()).state, HostedIdentityState.needsSetup);
+      expect(await store.read(), isNull);
+      final first = await resolver.resolve(createNew: true);
       expect(first.state, HostedIdentityState.needsBinding);
       expect((await resolver.resolve()).pubkey, first.pubkey);
       expect(recoveryCalls, 0);
