@@ -3,9 +3,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../../../shared/me/me_assistant_names.dart';
 import '../../../shared/me/me_assistants.dart';
 import '../../../shared/me/me_agent_change.dart';
 import '../../../shared/me/me_sync.dart';
+import '../../../shared/mentions/agent_identity_provider.dart';
 import '../../../shared/profile/user_cache_provider.dart';
 import '../../../shared/relay/relay.dart';
 import '../../../shared/theme/theme.dart';
@@ -73,7 +75,9 @@ useMeChatAssistant(
   final prefs = sync?.prefs;
   final selection = useState((key, initial ?? prefs?.getString(key)));
   final busy = useState(false);
-  final agents = enabled ? ref.watch(meAssistantsProvider).value ?? [] : [];
+  final List<AgentDirectoryEntry> agents = enabled
+      ? ref.watch(meAssistantsProvider).value ?? []
+      : [];
   final members = enabled
       ? ref.watch(channelMembersProvider(channelId)).value ?? []
       : [];
@@ -94,21 +98,19 @@ useMeChatAssistant(
             ref.read(userCacheProvider.notifier).get(selected)
       : null;
   // The owner's inventory name outranks the agent's self-published profile.
-  final name =
-      agents
-          .where((agent) => agent.pubkey == selected)
-          .firstOrNull
-          ?.displayName ??
-      profile?.displayName;
+  final names = watchMeAssistantNames(ref, agents);
+  final name = agents.any((agent) => agent.pubkey == selected)
+      ? names.labelFor(selected!)
+      : profile?.displayName;
   final avatarInitial = name?.trim().isNotEmpty == true
       ? name!.trim()[0].toUpperCase()
       : profile?.initial ?? '?';
   String agentName(String pubkey) {
-    final names = [
-      agents.where((a) => a.pubkey == pubkey).firstOrNull?.displayName,
+    final candidates = [
+      agents.any((a) => a.pubkey == pubkey) ? names.labelFor(pubkey) : null,
       ref.read(userCacheProvider)[pubkey]?.displayName,
     ];
-    return names
+    return candidates
             .whereType<String>()
             .where((name) => name.trim().isNotEmpty)
             .firstOrNull ??
