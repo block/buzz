@@ -4657,6 +4657,7 @@ void main() {
             for (final (key, role, name) in [
               ('self', 'owner', 'Self'),
               ('alice', 'member', 'Alice'),
+              ('agent', 'bot', 'Agent'),
               ('bob', 'member', 'Bob'),
             ])
               ChannelMember(
@@ -4675,14 +4676,15 @@ void main() {
       await tester.pumpAndSettle();
 
       final rows = [
-        for (final key in ['self', 'bob', 'alice'])
+        // People, then agents; archived Alice last among the people.
+        for (final key in ['self', 'bob', 'alice', 'agent'])
           find.byKey(ValueKey('channel-details-member-$key')),
       ];
       final tops = [for (final row in rows) tester.getTopLeft(row).dy];
       expect(tops, orderedEquals([...tops]..sort()));
       expect(
         find.descendant(
-          of: rows.last,
+          of: rows[2],
           matching: find.textContaining(
             'Archived \u00b7 Member',
             findRichText: true,
