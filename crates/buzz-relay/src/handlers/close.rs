@@ -43,6 +43,11 @@ pub(crate) async fn refuse(sub_id: &str, reason: &str, conn: &ConnectionState, s
 /// owns the ID. A request that a newer same-ID REQ replaced sends nothing:
 /// its late `EOSE` would otherwise tell a replacing sync that a set it never
 /// sent is complete. Returns whether the frame was queued.
+///
+/// If the request still owns the ID but the frame cannot be queued (outbound
+/// buffer full or closed), the connection is cancelled, as in [`refuse`] and
+/// [`close_if_owner`]: the subscription would otherwise stay registered with
+/// no `EOSE` or `CLOSED`, and the client would wait on it forever.
 pub(crate) async fn send_if_owner(
     sub_id: &str,
     owner: u64,
@@ -52,7 +57,14 @@ pub(crate) async fn send_if_owner(
     #[cfg(test)]
     test_seam::pause_at(&test_seam::SEND_PAUSE).await;
     let subs = conn.subscriptions.lock().await;
-    subs.get(sub_id) == Some(&owner) && conn.send(frame)
+    if subs.get(sub_id) != Some(&owner) {
+        return false;
+    }
+    if conn.send(frame) {
+        return true;
+    }
+    conn.cancel.cancel();
+    false
 }
 
 /// Monotonic source of subscription owner tokens. Each REQ claims its sub ID

@@ -2396,8 +2396,12 @@ mod tests {
     /// A REQ whose `EOSE` is not queued did not complete, so it must log
     /// `aborted`, not `served`: once when a same-ID replacement takes the ID
     /// while the empty search waits to send its `EOSE`, and once when the
-    /// outbound queue rejects the frame. Mutation: ignore `send_if_owner`'s
-    /// result before `access.served()` → `served` → RED.
+    /// outbound queue rejects the frame. A replaced request stays silent and
+    /// leaves the connection alone; a request that still owns the ID but
+    /// cannot queue its frame cancels the connection, so the client is never
+    /// left waiting on a subscription that will not finish. Mutation: ignore
+    /// `send_if_owner`'s result before `access.served()` → `served` → RED;
+    /// drop the cancel in `send_if_owner` → `queue_rejected` RED.
     #[tokio::test]
     async fn unqueued_eose_logs_aborted_not_served() {
         use super::super::close::test_seam::{Pause, SEND_PAUSE};
@@ -2456,7 +2460,55 @@ mod tests {
             if let Some(rx) = send_rx.as_mut() {
                 assert!(closed_frames(rx).is_empty(), "{case}: no stale EOSE");
             }
+            assert_eq!(
+                conn.cancel.is_cancelled(),
+                case == "queue_rejected",
+                "{case}: only an owner that cannot queue its frame cancels"
+            );
         }
+    }
+
+    /// A backfill that overflows a full send buffer must not end in silence
+    /// with the subscription still registered: the owner cannot deliver
+    /// `EOSE`, so the connection is cancelled and the client resubscribes.
+    /// Mutation: drop the cancel in `send_if_owner` → RED.
+    #[tokio::test]
+    async fn backfill_into_full_buffer_cancels_connection() {
+        let state = crate::state::tests::test_state().await;
+        let filters = vec![Filter::new().search("needle")];
+        let (conn, _send_rx) = lifecycle_conn();
+        let owner = claim_search_subscription("s", &conn, &state)
+            .await
+            .expect("claim");
+        while conn.send(RelayMessage::notice("filler")) {}
+        assert!(!conn.cancel.is_cancelled(), "filling alone must not cancel");
+        let (guard, out) = crate::access::tests::capture_scoped();
+        let mut access = crate::access::ReadLog::req(&conn, "s", &filters);
+        let named_only = super::super::system_channels::NamedOnlyChannels::default();
+        handle_search_req(
+            "s",
+            owner,
+            &filters,
+            &[],
+            &named_only,
+            false,
+            &conn.tenant,
+            &[0; 32],
+            &conn,
+            &state,
+            None,
+            &mut access,
+        )
+        .await;
+        drop(access);
+        drop(guard);
+        assert!(
+            conn.cancel.is_cancelled(),
+            "an undeliverable EOSE must cancel the connection, not go silent"
+        );
+        let lines = out.lines();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!(lines[0]["outcome"], "aborted", "{}", lines[0]);
     }
 
     /// Concurrent same-ID claims and stale teardowns: whichever claim lands
