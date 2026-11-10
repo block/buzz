@@ -82,6 +82,7 @@ import 'package:buzz/shared/agents/owned_agent_directory.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/features/profile/user_profile_sheet.dart';
+import 'package:buzz/shared/identity_archives/identity_archives.dart';
 import 'package:buzz/shared/identity_names/identity_names.dart';
 import 'package:buzz/shared/community/community_provider.dart';
 import 'package:buzz/shared/emoji/emoji_burst.dart';
@@ -270,6 +271,7 @@ Widget _buildTestable({
   Future<Map<String, String>> Function()? loadAgentOwners,
   UserCacheNotifier? userCacheNotifier,
   List<ChannelMember> members = const [],
+  Set<String>? archived,
   List<ChannelMember> huddleMembers = const [],
   _MutableHuddleMembersNotifier? huddleMembersNotifier,
   Channel? channel,
@@ -326,6 +328,8 @@ Widget _buildTestable({
     retry: providerRetry ?? (disableRetries ? (_, _) => null : null),
     overrides: [
       ownedCodexVoiceAgentsProvider.overrideWith((ref) async => voiceAgents),
+      if (archived != null)
+        identityArchivesProvider.overrideWith((ref) async => archived),
       if (bestie != null)
         defaultAgentProvider.overrideWith((ref) => Stream.value(bestie)),
       if (sender != null) sendMessageProvider.overrideWithValue(sender),
@@ -4640,6 +4644,59 @@ void main() {
         tester.getSize(starAction).height,
       );
       expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('previews archived members after live ones, marked', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          archived: {'alice'},
+          members: [
+            for (final (key, role, name) in [
+              ('self', 'owner', 'Self'),
+              ('alice', 'member', 'Alice'),
+              ('bob', 'member', 'Bob'),
+            ])
+              ChannelMember(
+                pubkey: key,
+                role: role,
+                joinedAt: DateTime(2025),
+                displayName: name,
+              ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.byKey(const ValueKey('channel-header-settings-trigger')),
+      );
+      await tester.pumpAndSettle();
+
+      final rows = [
+        for (final key in ['self', 'bob', 'alice'])
+          find.byKey(ValueKey('channel-details-member-$key')),
+      ];
+      final tops = [for (final row in rows) tester.getTopLeft(row).dy];
+      expect(tops, orderedEquals([...tops]..sort()));
+      expect(
+        find.descendant(
+          of: rows.last,
+          matching: find.textContaining(
+            'Archived \u00b7 Member',
+            findRichText: true,
+          ),
+        ),
+        findsOne,
+      );
+      expect(
+        find.descendant(
+          of: rows[1],
+          matching: find.textContaining('Archived', findRichText: true),
+        ),
+        findsNothing,
+      );
     });
 
     testWidgets('previews five members before an icon-free See all row', (
