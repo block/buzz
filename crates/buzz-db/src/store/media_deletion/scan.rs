@@ -191,6 +191,21 @@ impl Db {
                     }
                     refs.insert((hash.clone(), "direct_hash".into()));
                 }
+                if row.upload_claim {
+                    let actor = row
+                        .subject
+                        .as_deref()
+                        .ok_or_else(|| invalid("upload claim has no actor"))?;
+                    crate::user_deletion::normalize_user_deletion_pubkey(actor)?;
+                    if row.community_id.is_none() || row.direct_hash.is_none() {
+                        return Err(invalid("upload claim has no community or hash"));
+                    }
+                    if !row.payload["sha256"].is_null()
+                        && row.payload["sha256"].as_str() != row.direct_hash.as_deref()
+                    {
+                        return Err(invalid("upload claim has an invalid or contradictory hash"));
+                    }
+                }
                 let selected = scope.contains(row.community_id, row.subject.as_deref());
                 let fingerprint = hex::encode(Sha256::digest(serde_json::to_vec(
                     &json!({"key":row.source_key,"community":row.community_id,"subject":row.subject,"payload":row.payload,"direct_hash":row.direct_hash,"upload_claim":row.upload_claim,"subject_owned":row.subject_owned}),
@@ -204,7 +219,8 @@ impl Db {
                         field,
                         selected_subject: selected,
                         upload_claim: row.upload_claim,
-                        surviving: !selected || !row.subject_owned,
+                        surviving: row.source_table != "workflow_trigger_runs"
+                            && (!selected || !row.subject_owned),
                     };
                     total_bytes += serde_json::to_vec(&evidence)?.len();
                     if total_bytes > 128 * 1024 * 1024 {
@@ -264,8 +280,6 @@ impl Db {
         }
         Ok(MediaScan {database_snapshot_at,scope,files,scanned,unresolved:vec![
             "historical unreferenced uploads without attribution cannot be assigned to a subject".into(),
-            "exact downstream source-removal approval is not available in a standalone preview".into(),
-            "all-writer file reservations are not installed".into(),
         ]})
     }
 }

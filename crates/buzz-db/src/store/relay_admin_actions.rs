@@ -149,6 +149,7 @@ pub async fn resolve_report_decision_atomic(
         crate::observability::WriterOperation::Authorization,
     )
     .await?;
+    tx.guard_media(&serde_json::json!(reason)).await?;
 
     // CAS: open → terminal. The update count tells us whether the report was open.
     let updated = sqlx::query(
@@ -232,6 +233,7 @@ pub async fn claim_report(
         crate::observability::WriterOperation::Authorization,
     )
     .await?;
+    tx.guard_media(&serde_json::json!(reason)).await?;
 
     // Lock the report row to serialize concurrent claims on the same report.
     let report_row = sqlx::query(
@@ -919,6 +921,7 @@ pub async fn finalize_success(
         crate::observability::WriterOperation::Authorization,
     )
     .await?;
+    tx.guard_media(&serde_json::json!(reason)).await?;
 
     // Require step_marker = 'mutation_committed' to prevent premature finalization.
     let updated_action = sqlx::query(
@@ -1293,6 +1296,7 @@ pub async fn reopen_report(
         crate::observability::WriterOperation::Authorization,
     )
     .await?;
+    tx.guard_media(&serde_json::json!(reason)).await?;
 
     // Lock the report row to serialize concurrent reopen/resolve on it.
     let report_row = sqlx::query(
@@ -1431,6 +1435,8 @@ pub async fn enqueue_outbox(
     payload: serde_json::Value,
     dedup_key: &str,
 ) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    crate::media_deletion::guard_payload(&mut tx, &payload).await?;
     sqlx::query(
         r#"
         INSERT INTO relay_admin_outbox (action_id, task_type, payload, dedup_key)
@@ -1442,8 +1448,9 @@ pub async fn enqueue_outbox(
     .bind(task_type)
     .bind(payload)
     .bind(dedup_key)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -1856,6 +1863,7 @@ pub async fn claim_direct_action(
         crate::observability::WriterOperation::Authorization,
     )
     .await?;
+    tx.guard_media(&serde_json::json!(input.reason)).await?;
     let inserted = sqlx::query(
         r#"
         INSERT INTO relay_admin_actions (

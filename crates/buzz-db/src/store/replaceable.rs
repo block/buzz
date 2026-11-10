@@ -109,6 +109,8 @@ async fn replace_parameterized_event_in_transaction_impl(
     channel_id: Option<Uuid>,
     precondition: ParameterizedReplacePrecondition<'_>,
 ) -> Result<ParameterizedReplaceResult> {
+    tx.guard_media(&serde_json::json!({"content":event.content,"tags":event.tags}))
+        .await?;
     let community_id = tx.community();
     let kind_i32 = buzz_core::kind::event_kind_i32(event);
     let pubkey_bytes = event.pubkey.to_bytes();
@@ -435,6 +437,8 @@ pub(crate) async fn replace_addressable_event_under_lock(
     event: &nostr::Event,
     channel_id: Option<Uuid>,
 ) -> Result<(StoredEvent, bool)> {
+    tx.guard_media(&serde_json::json!({"content":event.content,"tags":event.tags}))
+        .await?;
     let community_id = tx.community();
     let kind_i32 = buzz_core::kind::event_kind_i32(event);
     let pubkey_bytes = event.pubkey.to_bytes();

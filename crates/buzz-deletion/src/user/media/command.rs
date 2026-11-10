@@ -15,7 +15,7 @@ pub struct Options {
     /// Include agents currently owned by this person, separately in each community.
     #[arg(long)]
     pub include_owned_agents: bool,
-    /// Current direct execution supports print-only. Other modes require a protected workflow caller.
+    /// Direct execution supports print-only; deletion runs through an approved workflow stage.
     #[arg(long, value_enum, default_value = "print-only")]
     pub mode: Mode,
     /// Additional canonical media base URLs (including /media) for deployment aliases.
@@ -33,7 +33,7 @@ pub struct Options {
 /// source tables, removes uploader proofs, or calls storage deletion.
 pub async fn run(options: Options) -> Result<i32> {
     if options.mode != Mode::PrintOnly {
-        bail!("direct execution requires print-only; destructive modes require a workflow ProtectedMedia provider with durable writer reservations");
+        bail!("direct execution requires print-only; use run_stage on an approved workflow stage for deletion");
     }
     if options.max_source_rows == 0 || options.scan_timeout_secs == 0 {
         bail!("media scan budgets must be positive");
@@ -60,8 +60,28 @@ pub async fn run(options: Options) -> Result<i32> {
     )
     .await?;
     let store = journal.media_deletion_store();
-    let binding = json!({"version":1,"mode":"print-only","human":options.pubkey,"include_owned_agents":options.include_owned_agents,"source":source_identity,"namespace":namespace,"media_bases":options.media_base,"scan_budget":budget});
+    let binding = json!({"version":2,"mode":"print-only","human":options.pubkey,"include_owned_agents":options.include_owned_agents,"source":source_identity,"namespace":namespace,"media_bases":options.media_base,"scan_budget":budget});
     let run = store.open_preview(run_id, binding).await?;
+    let (s3_access_key, s3_secret_key) = crate::s3_key_pair_from_env();
+    let media = MediaStorage::new(&buzz_media::MediaConfig {
+        s3_endpoint: endpoint,
+        s3_bucket: bucket,
+        s3_access_key,
+        s3_secret_key,
+        s3_region: crate::s3_region_from_env(),
+        s3_addressing_style: std::env::var("BUZZ_S3_ADDRESSING_STYLE")
+            .unwrap_or_else(|_| "path".into())
+            .parse()
+            .map_err(anyhow::Error::msg)?,
+        max_image_bytes: 1,
+        max_gif_bytes: 1,
+        max_video_bytes: 1,
+        max_file_bytes: 1,
+        public_base_url: "https://example.org/media".into(),
+        upload_records_enabled: false,
+        upload_ip_header: None,
+        upload_port_header: None,
+    })?;
     if store.load(&run).await?.is_none() {
         let source = Db::connect_cold_start(
             DbConfig {
@@ -83,26 +103,6 @@ pub async fn run(options: Options) -> Result<i32> {
                 budget,
             )
             .await?;
-        let (s3_access_key, s3_secret_key) = crate::s3_key_pair_from_env();
-        let media = MediaStorage::new(&buzz_media::MediaConfig {
-            s3_endpoint: endpoint,
-            s3_bucket: bucket,
-            s3_access_key,
-            s3_secret_key,
-            s3_region: crate::s3_region_from_env(),
-            s3_addressing_style: std::env::var("BUZZ_S3_ADDRESSING_STYLE")
-                .unwrap_or_else(|_| "path".into())
-                .parse()
-                .map_err(anyhow::Error::msg)?,
-            max_image_bytes: 1,
-            max_gif_bytes: 1,
-            max_video_bytes: 1,
-            max_file_bytes: 1,
-            public_base_url: "https://example.org/media".into(),
-            upload_records_enabled: false,
-            upload_ip_header: None,
-            upload_port_header: None,
-        })?;
         storage::supplement(&mut scan, &media, &namespace).await?;
         store
             .publish(
@@ -117,9 +117,15 @@ pub async fn run(options: Options) -> Result<i32> {
         .await?
         .context("discovery did not publish")?;
     for file in files.into_iter().filter(|f| f.status == "unknown") {
-        store
-            .save_preview_decision(&run, &classify_preview(file)?)
-            .await?;
+        let decided = match decision::decide(&media, file.clone()).await {
+            Ok(decided) => decided,
+            Err(error) => {
+                let mut pending = file;
+                pending.last_error = Some(format!("{error:#}"));
+                pending
+            }
+        };
+        store.save_preview_decision(&run, &decided).await?;
     }
     let files = store.load(&run).await?.context("discovery missing")?;
     let unknown = files.iter().filter(|f| f.status == "unknown").count();

@@ -3,6 +3,42 @@ use super::*;
 use crate::entity_deletion::EntityLease;
 
 impl MediaDeletionStore {
+    /// Check every proposed departing source against the approved community
+    /// inventory. Discovery may find departed communities that intake omitted;
+    /// discovering them does not silently extend an existing approval.
+    pub async fn validate_removal_scope(&self, run: &MediaRun) -> Result<()> {
+        let lease = run
+            .lease
+            .as_ref()
+            .ok_or_else(|| invalid("preview cannot authorize removal"))?;
+        let mut tx = self.pool.begin().await?;
+        let request = super::super::entity_deletion::lock_owned(&mut tx, lease).await?;
+        self.lock(&mut tx, run).await?;
+        let inventory = crate::user_deletion::UserDeletionInventory::read(&request)?;
+        let approved: std::collections::BTreeSet<_> =
+            inventory.communities.iter().map(|(id, _)| *id).collect();
+        let evidence: Vec<Value> = sqlx::query_scalar(
+            "SELECT evidence_json FROM entity_deletion_media_files WHERE stage_id=$1",
+        )
+        .bind(run.id)
+        .fetch_all(&mut *tx)
+        .await?;
+        for file in evidence {
+            let sources: Vec<MediaSource> = serde_json::from_value(file["sources"].clone())?;
+            for source in sources.iter().filter(|s| {
+                s.selected_subject && !s.surviving && s.table != "workflow_trigger_runs"
+            }) {
+                if !source.community.is_some_and(|id| approved.contains(&id)) {
+                    return Err(invalid(
+                        "discovered source is outside the approved community inventory",
+                    ));
+                }
+            }
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
     /// Bind a caller-started, approved purge_media stage to a protected inventory.
     /// The workflow supplies and maintains serving/media protections separately
     /// from its request lease; a request lease alone never fences uploads.
@@ -37,6 +73,10 @@ impl MediaDeletionStore {
         if run.lease.is_none() {
             return Err(invalid("preview is not executable"));
         }
+        self.save_decision(run, file).await
+    }
+
+    pub(super) async fn save_decision(&self, run: &MediaRun, file: &MediaFile) -> Result<()> {
         if !matches!(
             file.status.as_str(),
             "unknown" | "dont_delete" | "to_be_deleted"
@@ -59,7 +99,7 @@ impl MediaDeletionStore {
         if metadata["media_discovery"]["complete"] != true {
             return Err(invalid("discovery unfinished"));
         }
-        let changed=sqlx::query("UPDATE entity_deletion_media_files SET status=$4,evidence_json=$5,delete_targets_json=$6,reason=$7,last_error=$8,updated_at=now() WHERE stage_id=$1 AND storage_namespace=$2 AND file_hash=$3 AND status='unknown'")
+        let changed=sqlx::query("UPDATE entity_deletion_media_files SET status=$4,reserved=CASE WHEN $4='dont_delete' THEN false ELSE reserved END,evidence_json=$5,delete_targets_json=$6,reason=$7,last_error=$8,updated_at=now() WHERE stage_id=$1 AND storage_namespace=$2 AND file_hash=$3 AND status='unknown'")
             .bind(run.id).bind(&file.storage_namespace).bind(&file.file_hash).bind(&file.status).bind(&file.evidence_json).bind(&file.delete_targets_json).bind(&file.reason).bind(&file.last_error).execute(&mut *tx).await?;
         if changed.rows_affected() != 1 {
             return Err(invalid("decision row is no longer unknown"));
