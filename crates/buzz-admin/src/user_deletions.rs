@@ -12,6 +12,33 @@ mod tests {
     use clap::Parser;
 
     #[test]
+    fn batch_preview_requires_read_only_scope_and_valid_keys() {
+        let args = [
+            "buzz-admin",
+            "user-deletions",
+            "preview-batches",
+            "--pubkey",
+            "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+            "--community",
+            "00000000-0000-0000-0000-000000000001",
+            "--read-only",
+        ];
+        assert!(crate::Cli::try_parse_from(args).is_ok());
+        assert!(crate::Cli::try_parse_from(&args[..7]).is_err());
+        for extra in [
+            ["--batch-size", "0"],
+            ["--batch-size", "101"],
+            ["--pubkey", "demo"],
+            ["--max-items", "0"],
+            ["--max-items", "1000001"],
+            ["--relay-pubkey", "invalid"],
+        ] {
+            assert!(crate::Cli::try_parse_from(args.into_iter().chain(extra)).is_err());
+        }
+        assert!(crate::Cli::try_parse_from(args.into_iter().chain(["--execute"])).is_err());
+    }
+
+    #[test]
     fn user_workflow_commands_are_registered() {
         for args in [
             vec![
