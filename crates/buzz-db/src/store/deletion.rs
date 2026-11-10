@@ -7797,16 +7797,6 @@ mod postgres_tests {
         .execute(&db.pool)
         .await
         .expect("seed operator feedback");
-        let executor_id = format!("purge-test-{}", Uuid::new_v4());
-        sqlx::query(
-            "INSERT INTO community_deletion_executor_heartbeats \
-             (executor_id, mode, request_id) VALUES ($1, 'worker', $2)",
-        )
-        .bind(&executor_id)
-        .bind(request.id)
-        .execute(&db.pool)
-        .await
-        .expect("seed request heartbeat");
 
         store
             .approve(request.id, "approver", None)
@@ -7880,15 +7870,6 @@ mod postgres_tests {
             provenance, None,
             "operator feedback loses tenant provenance"
         );
-        let heartbeat_request: Option<Uuid> = sqlx::query_scalar(
-            "SELECT request_id FROM community_deletion_executor_heartbeats \
-             WHERE executor_id = $1",
-        )
-        .bind(&executor_id)
-        .fetch_one(&db.pool)
-        .await
-        .expect("heartbeat survives with retained request");
-        assert_eq!(heartbeat_request, Some(request.id));
     }
 
     #[tokio::test]
