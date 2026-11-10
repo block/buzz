@@ -201,12 +201,14 @@ const newDmMentionHistoryKey = 'new-dm';
 const addMembersMentionHistoryKey = 'add-members';
 
 /// One recipient picker search: its [query], the [historyKey] its choices
-/// are remembered under, and whether agents that do not answer the viewer
-/// are offered too ([unsharedAgents]), as a channel can hold them.
+/// are remembered under, whether agents that do not answer the viewer
+/// are offered too ([unsharedAgents]), as a channel can hold them, and the
+/// channel whose members the picker hides ([channelId]), if any.
 typedef RecipientSearch = ({
   String query,
   String historyKey,
   bool unsharedAgents,
+  String? channelId,
 });
 
 /// Ranked recipients for a picker (New DM, Add members), chosen exactly like
@@ -228,7 +230,7 @@ final recipientCandidatesProvider = Provider.family
           offerUnsharedAgents: search.unsharedAgents,
           historyKey: search.historyKey,
           knownPeople: search.query.trim().isEmpty
-              ? _knownPeople(ref)
+              ? _knownPeople(ref, excludedChannelId: search.channelId)
               : const [],
         ))
           if (candidate.pubkey != currentPubkey) candidate,
@@ -253,26 +255,42 @@ final recipientSearchFailedProvider = Provider.family.autoDispose<bool, String>(
 
 /// Named people in the viewer's open channels and DMs, as directory search
 /// results, from the member lists the channel list already loaded. DM
-/// partners come first. Profiles are loaded for unnamed people only until
-/// a full picker list of [mentionSuggestionLimit] people has names.
-List<UserProfile> _knownPeople(Ref ref) {
-  final channels = [...?ref.watch(channelsProvider).asData?.value]
-    ..sort((a, b) => (a.isDm ? 0 : 1) - (b.isDm ? 0 : 1));
+/// partners come first, and members of [excludedChannelId] are skipped. At
+/// most [mentionSuggestionLimit] people are gathered, a full picker list;
+/// profiles are loaded for the unnamed ones among them.
+List<UserProfile> _knownPeople(Ref ref, {String? excludedChannelId}) {
+  final listed = ref.watch(channelsProvider).asData?.value ?? const [];
+  final channels = [
+    for (final channel in listed)
+      if (channel.isDm) channel,
+    for (final channel in listed)
+      if (!channel.isDm) channel,
+  ];
   final notifier = ref.read(channelsProvider.notifier);
   final userCache = ref.watch(userCacheProvider);
   final verified = ref.watch(verifiedProfilesProvider);
   final viewer = ref.watch(currentPubkeyProvider)?.toLowerCase();
-  final seen = <String>{?viewer};
+  final seen = <String>{
+    ?viewer,
+    if (excludedChannelId != null)
+      for (final member in notifier.cachedMembersForChannel(excludedChannelId))
+        member.pubkey.toLowerCase(),
+  };
   final people = <UserProfile>[];
   final unnamed = <String>[];
+  gather:
   for (final channel in channels) {
     if (!channel.isMember || channel.isArchived) continue;
+    if (channel.id == excludedChannelId) continue;
     final pubkeys = [
       ...channel.participantPubkeys,
       for (final member in notifier.cachedMembersForChannel(channel.id))
         member.pubkey,
     ];
     for (final pubkey in pubkeys) {
+      if (people.length + unnamed.length >= mentionSuggestionLimit) {
+        break gather;
+      }
       final key = pubkey.toLowerCase();
       if (!seen.add(key)) continue;
       final profile = userCache[key];
@@ -280,7 +298,7 @@ List<UserProfile> _knownPeople(Ref ref) {
         people.add(profile!);
       } else if (verified[key] case final name?) {
         people.add(UserProfile(pubkey: key, displayName: name.displayName));
-      } else if (people.length + unnamed.length < mentionSuggestionLimit) {
+      } else {
         unnamed.add(key);
       }
     }

@@ -324,6 +324,7 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
         query: search,
         historyKey: newDmMentionHistoryKey,
         unsharedAgents: false,
+        channelId: null,
       )),
     );
     final searching = ref.watch(recipientSearchPendingProvider(search));

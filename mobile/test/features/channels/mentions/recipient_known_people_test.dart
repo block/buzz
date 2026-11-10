@@ -2,6 +2,7 @@ import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/mentions/mention_candidates_provider.dart';
+import 'package:buzz/features/channels/mentions/mention_ranking.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
@@ -61,10 +62,14 @@ class _Session extends RelaySessionNotifier {
   }) async => const [];
 }
 
+/// Named people in the `crowd` channel; none unless a test sets it.
+var _crowd = <String>[];
+
 class _Channels extends ChannelsNotifier {
   @override
   Future<List<Channel>> build() async => [
     _channel('general'),
+    _channel('crowd'),
     _channel('old', archivedAt: DateTime.utc(2026)),
     _channel('elsewhere', member: false),
     _channel('dm', type: 'dm', participants: [_me, _eve]),
@@ -76,6 +81,7 @@ class _Channels extends ChannelsNotifier {
         'general' => [_member(_me), _member(_ada), _member(_nameless)],
         'old' => [_member(_carol)],
         'elsewhere' => [_member(_dan)],
+        'crowd' => [for (final pubkey in _crowd) _member(pubkey)],
         _ => const [],
       };
 }
@@ -91,6 +97,11 @@ class _Cache extends UserCacheNotifier {
       (_eve, 'Eve'),
     ])
       pubkey: UserProfile(pubkey: pubkey, displayName: name),
+    for (final (i, pubkey) in _crowd.indexed)
+      pubkey: UserProfile(
+        pubkey: pubkey,
+        displayName: 'Crowd ${i.toString().padLeft(2, '0')}',
+      ),
   };
 
   /// Loads a name for an unnamed person when the picker asks for it.
@@ -109,7 +120,7 @@ class _Cache extends UserCacheNotifier {
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  Future<List<String>> pick(String query) async {
+  Future<List<String>> pick(String query, {String? channelId}) async {
     final container = ProviderContainer(
       retry: (_, _) => null,
       overrides: [
@@ -126,6 +137,7 @@ void main() {
       query: query,
       historyKey: addMembersMentionHistoryKey,
       unsharedAgents: true,
+      channelId: channelId,
     );
     final sub = container.listen(
       recipientCandidatesProvider(search),
@@ -149,6 +161,20 @@ void main() {
       expect(await pick(''), ['Ada', 'Bo', 'Eve']);
     },
   );
+
+  test('Add members skips the channel\'s own members', () async {
+    expect(await pick('', channelId: 'general'), ['Eve']);
+  });
+
+  test('at most one picker list of people is gathered', () async {
+    _crowd = [
+      for (var i = 0; i < 80; i++) i.toRadixString(16).padLeft(64, '1'),
+    ];
+    addTearDown(() => _crowd = []);
+    final people = await pick('');
+    expect(people, hasLength(mentionSuggestionLimit));
+    expect(people, containsAll(['Ada', 'Bo', 'Eve']));
+  });
 
   test('a typed query finds people by the directory search', () async {
     expect(await pick('Ad'), isEmpty);

@@ -99,6 +99,7 @@ class AddChannelMembersSheet extends HookConsumerWidget {
         query: search,
         historyKey: addMembersMentionHistoryKey,
         unsharedAgents: true,
+        channelId: channelId,
       )),
     );
     final searching = ref.watch(recipientSearchPendingProvider(search));
