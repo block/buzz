@@ -650,12 +650,13 @@ void main() {
     expect(uploadService.uploadedMimeType, 'image/jpeg');
   });
 
-  testWidgets('uploads a transparent photo crop as PNG', (tester) async {
+  Future<_FakeMediaUploadService> cropAndUpload(
+    WidgetTester tester,
+    image.Image photo,
+  ) async {
     final notifier = _FakeProfileNotifier();
     final uploadService = _FakeMediaUploadService(
-      galleryBytes: image.encodePng(
-        image.Image(width: 8, height: 8, numChannels: 4),
-      ),
+      galleryBytes: image.encodePng(photo),
     );
     addTearDown(uploadService.dispose);
     await tester.pumpWidget(
@@ -676,10 +677,27 @@ void main() {
     await _waitForAvatarCropToClose(tester);
     await tester.tap(find.byKey(const ValueKey('avatar-save')));
     await tester.pumpAndSettle();
+    return uploadService;
+  }
+
+  testWidgets('uploads a transparent photo crop as PNG', (tester) async {
+    final uploadService = await cropAndUpload(
+      tester,
+      image.Image(width: 8, height: 8, numChannels: 4),
+    );
 
     expect(uploadService.uploadedMimeType, 'image/png');
     final uploaded = image.decodePng(uploadService.uploadedBytes!)!;
     expect(uploaded.getPixel(0, 0).a, 0);
+  });
+
+  testWidgets('uploads an opaque 16-bit photo crop as JPEG', (tester) async {
+    final uploadService = await cropAndUpload(
+      tester,
+      image.Image(width: 8, height: 8, format: image.Format.uint16),
+    );
+
+    expect(uploadService.uploadedMimeType, 'image/jpeg');
   });
 
   testWidgets('keeps a failed avatar draft visible and retries publish', (

@@ -171,7 +171,7 @@ class AgentAvatarPicker extends HookConsumerWidget {
     }
 
     Future<void> applyImage(Uint8List bytes) async {
-      // Crop exports JPEG; convert to PNG so all local drafts share one MIME.
+      // Crop exports JPEG or PNG; convert to PNG so all local drafts share one MIME.
       final codec = await ui.instantiateImageCodec(bytes);
       final frame = await codec.getNextFrame();
       final data = await frame.image.toByteData(format: ui.ImageByteFormat.png);
