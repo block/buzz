@@ -692,14 +692,14 @@ pub async fn dispatch_action(
                             ));
                         }
                     };
-                    let authorized_text = withheld_reasons.is_empty().then_some(authored_text);
-                    let event_id = engine
+                    let sent = engine
                         .action_sink()?
                         .send_message(
                             community_id,
                             &channel_id,
                             text,
-                            authorized_text,
+                            authored_text,
+                            withheld_reasons.is_empty(),
                             &owner_pubkey_hex,
                             reply_to,
                         )
@@ -708,9 +708,9 @@ pub async fn dispatch_action(
 
                     let mut output = serde_json::json!({
                         "sent": true,
-                        "event_id": event_id,
+                        "event_id": sent.event_id,
                     });
-                    if !withheld_reasons.is_empty() {
+                    if sent.agent_mentions_withheld {
                         info!(
                             community = %community_id,
                             workflow = %wf_run.workflow_id,

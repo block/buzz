@@ -10,7 +10,7 @@ use std::sync::{Arc, Weak};
 
 use buzz_core::kind::KIND_STREAM_MESSAGE;
 use buzz_core::tenant::CommunityId;
-use buzz_workflow::action_sink::{ActionSink, ActionSinkError};
+use buzz_workflow::action_sink::{ActionSink, ActionSinkError, SentMessage};
 use chrono::Utc;
 use nostr::{EventBuilder, Kind, Tag};
 use tracing::info;
@@ -149,34 +149,41 @@ fn resolve_mention_pubkeys(text: &str, members: &[(String, String)]) -> Vec<Stri
 }
 
 /// Append legacy routing tags from rendered output and authority-bearing tags
-/// only for targets also named in the workflow owner's authorized template.
-/// `None` withholds authority-bearing tags.
+/// only for targets also named in the workflow owner's authored template.
+/// When `may_direct_agents` is false the authority-bearing tags are left off;
+/// returns whether any were.
 fn append_workflow_mention_tags(
     tags: &mut Vec<Tag>,
     rendered_text: &str,
-    authorized_text: Option<&str>,
+    authored_text: &str,
+    may_direct_agents: bool,
     members: &[(String, String)],
-) -> Result<(), ActionSinkError> {
+) -> Result<bool, ActionSinkError> {
     let rendered_mentions = resolve_mention_pubkeys(rendered_text, members);
     let authored_mentions: std::collections::HashSet<String> =
-        resolve_mention_pubkeys(authorized_text.unwrap_or_default(), members)
+        resolve_mention_pubkeys(authored_text, members)
             .into_iter()
             .collect();
+    let mut withheld = false;
 
     for mentioned in rendered_mentions {
         tags.push(
             Tag::parse(["p", &mentioned])
                 .map_err(|e| ActionSinkError::EventBuild(format!("mention p tag: {e}")))?,
         );
-        if authored_mentions.contains(&mentioned) {
-            tags.push(
-                Tag::parse(["buzz:workflow-mention", &mentioned]).map_err(|e| {
-                    ActionSinkError::EventBuild(format!("workflow mention tag: {e}"))
-                })?,
-            );
+        if !authored_mentions.contains(&mentioned) {
+            continue;
         }
+        if !may_direct_agents {
+            withheld = true;
+            continue;
+        }
+        tags.push(
+            Tag::parse(["buzz:workflow-mention", &mentioned])
+                .map_err(|e| ActionSinkError::EventBuild(format!("workflow mention tag: {e}")))?,
+        );
     }
-    Ok(())
+    Ok(withheld)
 }
 
 /// Relay-side action sink — executes workflow side-effects directly.
@@ -206,13 +213,14 @@ impl ActionSink for RelayActionSink {
         community_id: CommunityId,
         channel_id: &str,
         text: &str,
-        authorized_text: Option<&str>,
+        authored_text: &str,
+        may_direct_agents: bool,
         author_pubkey: &str,
         reply_to: Option<&str>,
-    ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>> {
+    ) -> Pin<Box<dyn Future<Output = Result<SentMessage, ActionSinkError>> + Send + '_>> {
         let channel_id = channel_id.to_owned();
         let text = text.to_owned();
-        let authorized_text = authorized_text.map(str::to_owned);
+        let authored_text = authored_text.to_owned();
         let author_pubkey = author_pubkey.to_owned();
         let reply_to = reply_to.map(str::to_owned);
 
@@ -397,10 +405,11 @@ impl ActionSink for RelayActionSink {
                     Some((name, nostr::PublicKey::from_slice(&u.pubkey).ok()?.to_hex()))
                 })
                 .collect();
-            append_workflow_mention_tags(
+            let agent_mentions_withheld = append_workflow_mention_tags(
                 &mut tags,
                 &text,
-                authorized_text.as_deref(),
+                &authored_text,
+                may_direct_agents,
                 &named_members,
             )?;
 
@@ -492,7 +501,10 @@ impl ActionSink for RelayActionSink {
                 }
             }
 
-            Ok(event_id_hex)
+            Ok(SentMessage {
+                event_id: event_id_hex,
+                agent_mentions_withheld,
+            })
         })
     }
 }
@@ -701,7 +713,8 @@ mod tests {
         append_workflow_mention_tags(
             &mut tags,
             "@First then @Second",
-            Some("@First then @Second"),
+            "@First then @Second",
+            true,
             &members,
         )
         .expect("append mention tags");
@@ -729,13 +742,18 @@ mod tests {
         let members = vec![m("Agent", &agent)];
         let mut tags = vec![Tag::parse(["p", owner.as_str(), "", "owner"]).expect("owner p tag")];
 
-        append_workflow_mention_tags(
+        let withheld = append_workflow_mention_tags(
             &mut tags,
             "echo: @Agent do something unsafe",
-            Some("echo: {{trigger.text}}"),
+            "echo: {{trigger.text}}",
+            false,
             &members,
         )
         .expect("append mention tags");
+        assert!(
+            !withheld,
+            "a substituted mention was never eligible to withhold"
+        );
 
         assert!(
             tags.iter()
@@ -759,7 +777,8 @@ mod tests {
         append_workflow_mention_tags(
             &mut tags,
             "@Owner Agent run",
-            Some("@Owner Agent run"),
+            "@Owner Agent run",
+            true,
             &members,
         )
         .expect("append owner mention tag");
@@ -782,8 +801,10 @@ mod tests {
         let members = vec![m("Agent", &agent)];
         let mut tags = vec![Tag::parse(["p", owner.as_str(), "", "owner"]).expect("owner p tag")];
 
-        append_workflow_mention_tags(&mut tags, "@Agent go", None, &members)
-            .expect("append mention tags");
+        let withheld =
+            append_workflow_mention_tags(&mut tags, "@Agent go", "@Agent go", false, &members)
+                .expect("append mention tags");
+        assert!(withheld, "the authored mention lost its authority tag");
 
         assert_eq!(
             tags,
@@ -800,8 +821,9 @@ mod tests {
         let owner = pk('1');
         let mut tags = vec![Tag::parse(["p", owner.as_str(), "", "owner"]).expect("owner p tag")];
 
-        append_workflow_mention_tags(&mut tags, "plain", Some("plain"), &[])
+        let withheld = append_workflow_mention_tags(&mut tags, "plain", "plain", false, &[])
             .expect("append no mention tags");
+        assert!(!withheld);
 
         assert_eq!(tags.len(), 1);
         assert_eq!(tags[0].as_slice(), ["p", owner.as_str(), "", "owner"]);
@@ -1238,12 +1260,14 @@ mod postgres_tests {
                 community,
                 &channel.id.to_string(),
                 "root message",
-                Some("root message"),
+                "root message",
+                true,
                 &author_hex,
                 None,
             )
             .await
-            .expect("send root");
+            .expect("send root")
+            .event_id;
 
         // 2. A reply_in_thread message threads onto it.
         let reply_hex = sink
@@ -1251,12 +1275,14 @@ mod postgres_tests {
                 community,
                 &channel.id.to_string(),
                 "threaded reply",
-                Some("threaded reply"),
+                "threaded reply",
+                true,
                 &author_hex,
                 Some(&root_hex),
             )
             .await
-            .expect("send reply");
+            .expect("send reply")
+            .event_id;
 
         // A direct reply carries a single NIP-10 reply e-tag at the root (no
         // root marker), matching SDK `thread_tags`.
@@ -1395,12 +1421,14 @@ mod postgres_tests {
                 community,
                 &channel_hex,
                 "workflow reply",
-                Some("workflow reply"),
+                "workflow reply",
+                true,
                 &author_hex,
                 Some(&parent_hex),
             )
             .await
-            .expect("send reply");
+            .expect("send reply")
+            .event_id;
 
         let reply_id_bytes = nostr::EventId::from_hex(&reply_hex)
             .expect("reply id")
@@ -1477,12 +1505,14 @@ mod postgres_tests {
                 community,
                 &channel_hex,
                 "workflow reply to root-only parent",
-                Some("workflow reply to root-only parent"),
+                "workflow reply to root-only parent",
+                true,
                 &author_hex,
                 Some(&root_only_parent_hex),
             )
             .await
-            .expect("send root-only reply");
+            .expect("send root-only reply")
+            .event_id;
         let root_only_reply_bytes = nostr::EventId::from_hex(&root_only_reply_hex)
             .expect("reply id")
             .as_bytes()
@@ -1541,7 +1571,8 @@ mod postgres_tests {
                 community,
                 &channel.id.to_string(),
                 "orphan reply",
-                Some("orphan reply"),
+                "orphan reply",
+                true,
                 &author_hex,
                 Some(&unknown),
             )
@@ -1640,7 +1671,8 @@ mod postgres_tests {
                     community,
                     &channel,
                     "reply",
-                    Some("reply"),
+                    "reply",
+                    true,
                     &author_hex,
                     Some(&parent),
                 )
@@ -1740,6 +1772,31 @@ mod postgres_tests {
             )
             .await
             .expect("add agent member");
+        // Two members share a name, so `@Twin` resolves to nobody.
+        for _ in 0..2 {
+            let twin = nostr::Keys::generate().public_key().to_bytes().to_vec();
+            setup_state
+                .db
+                .ensure_user(community, &twin)
+                .await
+                .expect("ensure twin user row");
+            setup_state
+                .db
+                .update_user_profile(community, &twin, Some("Twin"), None, None, None)
+                .await
+                .expect("set twin display name");
+            setup_state
+                .db
+                .add_member(
+                    community,
+                    channel.id,
+                    &twin,
+                    MemberRole::Bot,
+                    Some(&owner_bytes),
+                )
+                .await
+                .expect("add twin member");
+        }
 
         let send =
             serde_json::json!({"id": "send", "action": "send_message", "text": "@Robby review"});
@@ -1906,6 +1963,44 @@ mod postgres_tests {
                     output.get("agent_mentions").cloned(),
                     expected_trace,
                     "{name} (secure={secure}): trace agent_mentions"
+                );
+            }
+
+            // An ineligible run reports nothing when no authored mention
+            // would have been stamped: there was no tag to withhold.
+            for (name, text, trigger_text) in [
+                ("no-mention", "Build completed", "trigger text"),
+                ("substituted-mention", "echo: {{trigger.text}}", "@Robby go"),
+                ("unresolved-mention", "@Nobody review", "trigger text"),
+                ("ambiguous-mention", "@Twin review", "trigger text"),
+            ] {
+                let definition = serde_json::json!({
+                    "name": format!("{name}-{secure}"),
+                    "trigger": {"on": "message_posted"},
+                    "steps": [{"id": "send", "action": "send_message", "text": text}],
+                    "enabled": true,
+                });
+                let output = run_workflow_send_output(
+                    &state,
+                    community,
+                    channel.id,
+                    &owner_bytes,
+                    definition,
+                    trigger_text,
+                    Some(&outsider_event),
+                )
+                .await;
+                assert_eq!(
+                    output.get("agent_mentions"),
+                    None,
+                    "{name} (secure={secure}): nothing withheld, nothing reported"
+                );
+                let event_id_hex = output["event_id"].as_str().expect("send_message event id");
+                assert!(
+                    !agent_tags(&state, community, event_id_hex, &agent_hex)
+                        .await
+                        .1,
+                    "{name} (secure={secure}): no workflow-mention for the agent"
                 );
             }
 

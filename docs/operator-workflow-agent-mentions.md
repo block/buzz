@@ -42,8 +42,10 @@ resumes after an approval is ineligible too.
 An ineligible run's messages still post, with their `p` tags, so mentioned
 people are still notified. No agent acts on them.
 
-The step's output in the run's trace, which the owner sees in the app's run
-history, records why:
+When an ineligible run's message names a channel member in the workflow's
+stored text, and that name is also in the posted text, the relay leaves off
+that member's `buzz:workflow-mention` tag. The step's output in the run's
+trace, which the owner sees in the app's run history, then records why:
 
 ```json
 {"sent": true, "event_id": "…", "agent_mentions": {"withheld": true, "reasons": ["cause", "steps"]}}
@@ -57,7 +59,9 @@ history, records why:
 | `steps` | The definition has a step other than `send_message` or `delay`. |
 | `resumed` | The run resumed after an approval. |
 
-The key is absent when the step withheld nothing, and always absent with `any`.
+The key is absent when no tag was left off: on eligible runs, with `any`, and
+for messages with no such mention, such as plain text, a mention that comes
+only from substituted text, or a name that matches no member or more than one.
 
 ## Logs and metrics
 
