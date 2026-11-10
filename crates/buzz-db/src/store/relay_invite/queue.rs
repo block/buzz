@@ -14,7 +14,7 @@ use super::{ClaimCredential, ClaimRequest, ClaimResult, MAX_CLAIM_BATCH_SIZE};
 use crate::relay_members::MembershipWrite;
 use crate::{AdmittedTx, CommunityId, Db, DbError, Result};
 
-const MAX_QUEUED_ROWS: i64 = 2048;
+pub(super) const MAX_QUEUED_ROWS: i64 = 2048;
 const CLEANUP_BATCH_SIZE: i64 = 64;
 const REAP_CANDIDATES: i64 = 64;
 
@@ -397,6 +397,38 @@ impl Db {
             });
         }
         Ok(completed)
+    }
+
+    /// Release receipts after the origin has consumed their readable outcomes.
+    /// Live pending or admitted-but-unready claims remain available to processors.
+    #[datastore_span(name = "acknowledge_invite_claim_results", system = "postgresql")]
+    pub async fn acknowledge_invite_claim_results(
+        &self,
+        community: CommunityId,
+        ids: &[Uuid],
+    ) -> Result<u64> {
+        if ids.len() > MAX_QUEUED_ROWS as usize {
+            return Err(DbError::InvalidData(
+                "too many invite claim result IDs".into(),
+            ));
+        }
+        let mut tx = crate::begin_community_write_transaction(
+            &self.pool,
+            community,
+            crate::observability::WriterOperation::Authorization,
+        )
+        .await?;
+        let deleted = sqlx::query(
+            "DELETE FROM relay_invite_claims WHERE community_id=$1 AND id=ANY($2) \
+             AND (completed_at IS NOT NULL OR expires_at<=clock_timestamp())",
+        )
+        .bind(community.as_uuid())
+        .bind(ids)
+        .execute(tx.conn())
+        .await?
+        .rows_affected();
+        tx.commit().await?;
+        Ok(deleted)
     }
 
     /// Remove bounded batches of expired queue/result rows from active tenants.

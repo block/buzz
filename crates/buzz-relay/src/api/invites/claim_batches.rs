@@ -145,14 +145,27 @@ impl ClaimBatches {
                         .map(|claim| (claim.id, claim.result))
                         .collect();
                     let mut waiting = Vec::new();
+                    let mut consumed = Vec::new();
                     for job in active.drain(..) {
                         if let Some(result) = results.remove(&job.id) {
                             let _ = job.reply.send(claim_result(result));
+                            consumed.push(job.id);
                         } else {
                             waiting.push(job);
                         }
                     }
                     active = waiting;
+                    if !consumed.is_empty() {
+                        // Cleanup is best effort; retained receipts remain bounded
+                        // by the normal expiry sweep after errors or cancellation.
+                        let _ = tokio::time::timeout(
+                            RESULT_POLL_INTERVAL,
+                            state
+                                .db
+                                .acknowledge_invite_claim_results(tenant.community(), &consumed),
+                        )
+                        .await;
+                    }
                 }
                 Ok(Err(error)) => {
                     tracing::warn!(error_kind = %error.kind(), "invite result read failed");
@@ -168,8 +181,7 @@ impl ClaimBatches {
             }
             if !active.is_empty() && processor.is_none() {
                 if let Ok(permit) = Arc::clone(&self.database_workers).try_acquire_owned() {
-                    let (state, tenant, wake) =
-                        (Arc::clone(&state), tenant.clone(), Arc::clone(&wake));
+                    let (state, tenant) = (Arc::clone(&state), tenant.clone());
                     processor = Some(tokio::spawn(async move {
                         let _permit = permit;
                         // Includes pool acquisition before the selected batch supplies its deadline.
@@ -185,7 +197,6 @@ impl ClaimBatches {
                                 "invite processor timed out; committed work remains retryable"
                             ),
                         }
-                        wake.notify_one();
                     }));
                 }
             }

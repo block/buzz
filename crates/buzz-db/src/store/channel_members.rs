@@ -806,6 +806,20 @@ async fn put_first_member_with_pending(
         .ok_or_else(|| DbError::InvalidData("membership put returned no result".to_string()))?;
     match put {
         Ok(put) => {
+            if let Some(pending) = pending {
+                // Recovery must recognize this default join without attributing
+                // a later manual removal/rejoin to the older pending admission.
+                sqlx::query(
+                    "UPDATE channel_members SET auto_join_token=$4, auto_join_version=sync_modified_at \
+                     WHERE community_id=$1 AND channel_id=$2 AND pubkey=$3",
+                )
+                .bind(community_id.as_uuid())
+                .bind(channel_id)
+                .bind(pubkey)
+                .bind(pending)
+                .execute(tx.conn())
+                .await?;
+            }
             tx.commit().await?;
             Ok(Some(put.member))
         }
@@ -2386,6 +2400,39 @@ impl Db {
         pending: Uuid,
     ) -> Result<Option<MemberRecord>> {
         put_first_member_with_pending(&self.pool, community, channel, pubkey, Some(pending)).await
+    }
+
+    /// Return the default join's stable notice time while that admission is pending.
+    /// A membership changed since the default join no longer owns its notice.
+    #[datastore_span(
+        name = "pending_default_channel_announcement_at",
+        system = "postgresql"
+    )]
+    pub async fn pending_default_channel_announcement_at(
+        &self,
+        community: CommunityId,
+        channel: Uuid,
+        pubkey: &[u8],
+        pending: Uuid,
+    ) -> Result<Option<DateTime<Utc>>> {
+        let mut conn = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::Authorization,
+        )
+        .await?;
+        Ok(sqlx::query_scalar(
+            "SELECT cm.auto_join_version FROM channel_members cm \
+             JOIN relay_members rm ON rm.community_id=cm.community_id AND rm.pubkey=encode(cm.pubkey,'hex') \
+             WHERE cm.community_id=$1 AND cm.channel_id=$2 AND cm.pubkey=$3 \
+             AND cm.removed_at IS NULL AND rm.auto_join_pending=$4 \
+             AND cm.auto_join_token=$4 AND cm.auto_join_version=cm.sync_modified_at",
+        )
+        .bind(community.as_uuid())
+        .bind(channel)
+        .bind(pubkey)
+        .bind(pending)
+        .fetch_optional(&mut *conn)
+        .await?)
     }
 
     /// Self-joins `pubkey` with the channel's `join_role` only if they have
@@ -6034,5 +6081,182 @@ mod postgres_tests {
                 .await
                 .expect("count rejected stale roster");
         assert_eq!(stale_rows, 0, "legacy stale insert must roll back");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn pending_default_announcements_require_unchanged_default_membership_provenance() {
+        let pool = setup_pool().await;
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let db = Db::from_pool(pool.clone());
+        let owner = random_pubkey();
+        let channel = create_test_channel(
+            &pool,
+            *community.as_uuid(),
+            "default-notice-provenance",
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            &owner,
+            None,
+        )
+        .await
+        .unwrap();
+        let (default, manual, restored) = (random_pubkey(), random_pubkey(), random_pubkey());
+        let old_membership = put_first_member(&pool, community, channel.id, &restored)
+            .await
+            .unwrap()
+            .unwrap();
+        remove_member(&pool, community, channel.id, &restored, &restored)
+            .await
+            .unwrap();
+        let token = Uuid::new_v4();
+        for person in [&default, &manual, &restored] {
+            sqlx::query("INSERT INTO relay_members(community_id,pubkey,role,added_by,auto_join_pending) VALUES($1,$2,'member','invite',$3)")
+                .bind(community.as_uuid()).bind(hex::encode(person)).bind(token).execute(&pool).await.unwrap();
+        }
+        assert!(db
+            .put_pending_default_member(community, channel.id, &default, token)
+            .await
+            .unwrap()
+            .is_some());
+        let notice_at = db
+            .pending_default_channel_announcement_at(community, channel.id, &default, token)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(db
+            .put_pending_default_member(community, channel.id, &default, token)
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            db.pending_default_channel_announcement_at(community, channel.id, &default, token)
+                .await
+                .unwrap(),
+            Some(notice_at),
+            "an interrupted default publication keeps the same notice timestamp"
+        );
+        assert!(put_first_member(&pool, community, channel.id, &manual)
+            .await
+            .unwrap()
+            .is_some());
+        assert!(db
+            .put_pending_default_member(community, channel.id, &manual, token)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(
+            db.pending_default_channel_announcement_at(community, channel.id, &manual, token)
+                .await
+                .unwrap()
+                .is_none(),
+            "a manual first join cannot become a default-join announcement"
+        );
+
+        remove_member(&pool, community, channel.id, &default, &default)
+            .await
+            .unwrap();
+        assert!(
+            db.pending_default_channel_announcement_at(community, channel.id, &default, token)
+                .await
+                .unwrap()
+                .is_none(),
+            "inactive membership has no recoverable join notice"
+        );
+        assert!(
+            db.put_pending_default_member(community, channel.id, &default, token)
+                .await
+                .unwrap()
+                .is_none(),
+            "recovery preserves a leave from this admission"
+        );
+        put_member(&pool, community, channel.id, &default, None, None)
+            .await
+            .unwrap();
+        let marker: (Option<Uuid>, Option<DateTime<Utc>>, DateTime<Utc>) = sqlx::query_as(
+            "SELECT auto_join_token,auto_join_version,sync_modified_at FROM channel_members WHERE community_id=$1 AND channel_id=$2 AND pubkey=$3",
+        ).bind(community.as_uuid()).bind(channel.id).bind(&default).fetch_one(&pool).await.unwrap();
+        assert_eq!(
+            marker.0,
+            Some(token),
+            "ordinary writers need not clear the marker"
+        );
+        assert_ne!(
+            marker.1,
+            Some(marker.2),
+            "manual rejoin advances the membership version"
+        );
+        assert!(
+            db.pending_default_channel_announcement_at(community, channel.id, &default, token)
+                .await
+                .unwrap()
+                .is_none(),
+            "a stale marker cannot attribute a manual rejoin to the default worker"
+        );
+
+        let reactivated = db
+            .put_pending_default_member(community, channel.id, &restored, token)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            reactivated.joined_at, old_membership.joined_at,
+            "restoring an earlier membership preserves joined_at"
+        );
+        let restored_at = db
+            .pending_default_channel_announcement_at(community, channel.id, &restored, token)
+            .await
+            .unwrap();
+        assert!(
+            restored_at.is_some(),
+            "a default restoration records its own notice provenance"
+        );
+        let next_token = Uuid::new_v4();
+        sqlx::query(
+            "UPDATE relay_members SET auto_join_pending=$3 WHERE community_id=$1 AND pubkey=$2",
+        )
+        .bind(community.as_uuid())
+        .bind(hex::encode(&restored))
+        .bind(next_token)
+        .execute(&pool)
+        .await
+        .unwrap();
+        for candidate in [token, next_token] {
+            assert!(
+                db.pending_default_channel_announcement_at(
+                    community, channel.id, &restored, candidate
+                )
+                .await
+                .unwrap()
+                .is_none(),
+                "the relay admission and membership marker must name the same generation"
+            );
+        }
+        sqlx::query(
+            "UPDATE relay_members SET auto_join_pending=$3 WHERE community_id=$1 AND pubkey=$2",
+        )
+        .bind(community.as_uuid())
+        .bind(hex::encode(&restored))
+        .bind(token)
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            db.pending_default_channel_announcement_at(community, channel.id, &restored, token)
+                .await
+                .unwrap(),
+            restored_at
+        );
+        db.finish_default_channel_join(community, &hex::encode(&restored), token)
+            .await
+            .unwrap();
+        assert!(
+            db.pending_default_channel_announcement_at(community, channel.id, &restored, token)
+                .await
+                .unwrap()
+                .is_none(),
+            "completed admissions no longer expose recovery notices"
+        );
     }
 }

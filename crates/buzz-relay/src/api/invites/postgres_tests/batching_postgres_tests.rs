@@ -3,6 +3,88 @@ mod postgres_tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
+    async fn busy_claim_processors_wait_for_the_polling_backstop() {
+        use buzz_db::relay_invite::{ClaimCredential, ClaimRequest};
+        use tracing_subscriber::{layer::Context, prelude::*, Layer};
+
+        struct Attempts(tokio::sync::mpsc::UnboundedSender<std::time::Instant>);
+        impl<S: tracing::Subscriber> Layer<S> for Attempts {
+            fn on_new_span(
+                &self,
+                attrs: &tracing::span::Attributes<'_>,
+                _: &tracing::Id,
+                _: Context<'_, S>,
+            ) {
+                if attrs.metadata().name() == "try_admit_invite_claims" {
+                    let _ = self.0.send(std::time::Instant::now());
+                }
+            }
+        }
+
+        let host = format!("invite-busy-{}.example", Uuid::new_v4().simple());
+        let state = invite_test_state(&host).await.expect("isolated Postgres");
+        let community = state
+            .db
+            .lookup_community_by_host(&host)
+            .await
+            .unwrap()
+            .unwrap()
+            .id;
+        let tenant = buzz_core::TenantContext::resolved(community, &host);
+        let mut blocker = state.db.pool().begin().await.unwrap();
+        sqlx::query(
+            "SELECT pg_advisory_xact_lock(hashtextextended('invite-admission:' || $1::text, 0))",
+        )
+        .bind(community.as_uuid())
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+        let (starts, mut observed) = tokio::sync::mpsc::unbounded_channel();
+        let _capture =
+            tracing::subscriber::set_default(tracing_subscriber::registry().with(Attempts(starts)));
+        let claimant = tokio::spawn({
+            let state = state.clone();
+            async move {
+                state
+                    .invite_claim_batches
+                    .submit(
+                        &state,
+                        &tenant,
+                        ClaimRequest {
+                            pubkey: Keys::generate().public_key().to_hex(),
+                            policy_version: None,
+                            verified_owner: None,
+                            credential: ClaimCredential::Legacy {
+                                role: "member".into(),
+                            },
+                        },
+                    )
+                    .await
+            }
+        });
+        let attempts = tokio::time::timeout(Duration::from_secs(5), async {
+            let first = observed.recv().await.unwrap();
+            observed.recv().await.unwrap();
+            let third = observed.recv().await.unwrap();
+            third.duration_since(first)
+        })
+        .await;
+        blocker.commit().await.unwrap();
+        assert!(tokio::time::timeout(Duration::from_secs(5), claimant)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_ok());
+        // The submit wake may allow one immediate extra pass. Further attempts
+        // must wait for the 50 ms backstop instead of self-waking on contention.
+        assert!(
+            attempts.expect("three processor attempts must be observed")
+                >= Duration::from_millis(50)
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
     async fn relay_instances_share_batches_and_finish_a_lone_final_claim() {
         use crate::handlers::group_state_postgres_tests::{create_channel, edit_channel};
         let host = format!("invite-batches-{}.example", Uuid::new_v4().simple());
@@ -256,6 +338,121 @@ mod postgres_tests {
                 .unwrap());
         }
 
+        for scenario in ["cancel", "publication_failure", "manual_rejoin"] {
+            let member = Keys::generate().public_key().to_hex();
+            let _ = state
+                .db
+                .add_relay_member_with_default_channels(
+                    community,
+                    &member,
+                    "member",
+                    &member,
+                    &state.relay_keypair,
+                )
+                .await
+                .unwrap();
+            let mut blocker = state.db.pool().begin().await.unwrap();
+            sqlx::query("LOCK TABLE events IN SHARE MODE")
+                .execute(&mut *blocker)
+                .await
+                .unwrap();
+            let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut *blocker)
+                .await
+                .unwrap();
+            let task = tokio::spawn({
+                let (state, tenant, member) = (state.clone(), tenant.clone(), member.clone());
+                async move { auto_join_default_channels_batch(&tenant, &state, &[member]).await }
+            });
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if state
+                        .db
+                        .is_member(community, channel, &hex::decode(&member).unwrap())
+                        .await
+                        .unwrap()
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("membership must commit before the held roster publication");
+            if scenario == "publication_failure" {
+                tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let cancelled: Vec<bool> = sqlx::query_scalar(
+                        "SELECT pg_cancel_backend(pid) FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND $1=ANY(pg_blocking_pids(pid))",
+                    ).bind(blocker_pid).fetch_all(state.db.pool()).await.unwrap();
+                    if !cancelled.is_empty() {
+                        assert_eq!(cancelled, [true]);
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            }).await.expect("publication must reach the held events lock");
+                task.await.unwrap();
+            } else {
+                task.abort();
+                assert!(task.await.unwrap_err().is_cancelled());
+            }
+            assert!(state
+                .db
+                .pending_default_channel_join(community, &member)
+                .await
+                .unwrap()
+                .is_some());
+            blocker.rollback().await.unwrap();
+            if scenario == "manual_rejoin" {
+                let pubkey = hex::decode(&member).unwrap();
+                state
+                    .db
+                    .remove_member(community, channel, &pubkey, &pubkey)
+                    .await
+                    .unwrap();
+                state
+                    .db
+                    .put_member(community, channel, &pubkey, None, None)
+                    .await
+                    .unwrap();
+            }
+            auto_join_default_channels(&tenant, &state, &member, None).await;
+            assert!(state
+                .db
+                .pending_default_channel_join(community, &member)
+                .await
+                .unwrap()
+                .is_none());
+            let tags: Value = sqlx::query_scalar(
+        "SELECT tags FROM events WHERE community_id=$1 AND kind=39002 AND channel_id=$2 AND deleted_at IS NULL",
+    ).bind(community.as_uuid()).bind(channel).fetch_one(state.db.pool()).await.unwrap();
+            assert!(tags
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tag| tag[0] == "p" && tag[1] == member));
+            let expected = if scenario == "manual_rejoin" { 0 } else { 1 };
+            assert_eq!(
+                member_joined_notice_count(&state, community, channel, &member).await,
+                expected,
+                "{scenario}: recover only the admission's original default join"
+            );
+            assert_eq!(
+                added_notification_count(&state, community, &member).await,
+                i64::try_from(expected).unwrap()
+            );
+            auto_join_default_channels(&tenant, &state, &member, None).await;
+            assert_eq!(
+                member_joined_notice_count(&state, community, channel, &member).await,
+                expected
+            );
+            assert_eq!(
+                added_notification_count(&state, community, &member).await,
+                i64::try_from(expected).unwrap()
+            );
+        }
+
         let member = Keys::generate().public_key().to_hex();
         let _ = state
             .db
@@ -268,54 +465,42 @@ mod postgres_tests {
             )
             .await
             .unwrap();
-        let mut blocker = state.db.pool().begin().await.unwrap();
-        sqlx::query("LOCK TABLE events IN SHARE MODE")
-            .execute(&mut *blocker)
-            .await
-            .unwrap();
-        let task = tokio::spawn({
-            let (state, tenant, member) = (state.clone(), tenant.clone(), member.clone());
-            async move { auto_join_default_channels_batch(&tenant, &state, &[member]).await }
-        });
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                if state
-                    .db
-                    .is_member(community, channel, &hex::decode(&member).unwrap())
-                    .await
-                    .unwrap()
-                {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("membership must commit before the held announcement write");
-        task.abort();
-        assert!(task.await.unwrap_err().is_cancelled());
-        assert!(state
+        sqlx::query("ALTER TABLE events ADD CONSTRAINT test_default_notice_failure CHECK (kind <> 44100) NOT VALID")
+            .execute(state.db.pool()).await.unwrap();
+        auto_join_default_channels_batch(&tenant, &state, std::slice::from_ref(&member)).await;
+        let pending = state
             .db
             .pending_default_channel_join(community, &member)
             .await
-            .unwrap()
-            .is_some());
-        blocker.rollback().await.unwrap();
+            .unwrap();
+        let messages = member_joined_notice_count(&state, community, channel, &member).await;
+        let notices = added_notification_count(&state, community, &member).await;
+        sqlx::query("ALTER TABLE events DROP CONSTRAINT test_default_notice_failure")
+            .execute(state.db.pool())
+            .await
+            .unwrap();
+        assert!(
+            pending.is_some(),
+            "failed notification must retain retry work"
+        );
+        assert_eq!(messages, 1, "the preceding system message committed");
+        assert_eq!(notices, 0);
         auto_join_default_channels(&tenant, &state, &member, None).await;
+        assert_eq!(
+            member_joined_notice_count(&state, community, channel, &member).await,
+            1,
+            "recovery must reuse the stored system message's event ID"
+        );
+        assert_eq!(
+            added_notification_count(&state, community, &member).await,
+            1
+        );
         assert!(state
             .db
             .pending_default_channel_join(community, &member)
             .await
             .unwrap()
             .is_none());
-        let tags: Value = sqlx::query_scalar(
-        "SELECT tags FROM events WHERE community_id=$1 AND kind=39002 AND channel_id=$2 AND deleted_at IS NULL",
-    ).bind(community.as_uuid()).bind(channel).fetch_one(state.db.pool()).await.unwrap();
-        assert!(tags
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|tag| tag[0] == "p" && tag[1] == member));
     }
 
     #[tokio::test]

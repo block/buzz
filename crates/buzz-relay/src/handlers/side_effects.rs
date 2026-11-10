@@ -2996,7 +2996,7 @@ async fn announce_self_join(
     pubkey: &[u8],
 ) -> anyhow::Result<()> {
     state.invalidate_membership(tenant, channel_id, pubkey);
-    announce_self_join_with_discovery(tenant, state, channel_id, pubkey, true).await
+    announce_self_join_with_discovery(tenant, state, channel_id, pubkey, None).await
 }
 
 async fn announce_self_join_with_discovery(
@@ -3004,38 +3004,47 @@ async fn announce_self_join_with_discovery(
     state: &Arc<AppState>,
     channel_id: Uuid,
     pubkey: &[u8],
-    publish_discovery: bool,
+    admission: Option<(Uuid, chrono::DateTime<chrono::Utc>)>,
 ) -> anyhow::Result<()> {
     let actor_hex = hex::encode(pubkey);
-    emit_system_message(
-        tenant,
-        state,
-        channel_id,
-        serde_json::json!({
-            "type": "member_joined",
-            "actor": actor_hex,
-            "target": actor_hex,
-        }),
-        chrono::Utc::now(),
-    )
-    .await?;
+    let mut content = serde_json::json!({
+        "type": "member_joined",
+        "actor": actor_hex,
+        "target": actor_hex,
+    });
+    let mut notice_tags = Vec::new();
+    // Durable provenance gives retried system messages the same event ID.
+    // The membership hint below keeps the current time for live since filters.
+    let idempotency_ts = match admission {
+        Some((token, version)) => {
+            content["admission"] = serde_json::json!(token);
+            notice_tags.push(Tag::parse(["admission", &token.to_string()])?);
+            version
+        }
+        None => chrono::Utc::now(),
+    };
+    emit_system_message(tenant, state, channel_id, content, idempotency_ts).await?;
 
-    if publish_discovery {
+    if admission.is_none() {
         if let Err(e) = emit_group_discovery_events(tenant, state, channel_id).await {
             warn!(channel = %channel_id, error = %e, "NIP-29 group discovery emission failed");
         }
     }
 
-    if let Err(e) = emit_membership_notification(
+    if let Err(e) = emit_membership_notification_tagged(
         tenant,
         state,
         channel_id,
         pubkey,
         pubkey,
         buzz_core::kind::KIND_MEMBER_ADDED_NOTIFICATION,
+        &notice_tags,
     )
     .await
     {
+        if admission.is_some() {
+            return Err(e);
+        }
         warn!("membership notification for join failed: {e}");
     }
 
@@ -3072,6 +3081,13 @@ pub(crate) async fn auto_join_default_channels_batch(
 
 pub(crate) fn join_effect_concurrency(state: &AppState) -> usize {
     state.db.pool().options().get_max_connections().clamp(1, 4) as usize
+}
+
+struct DefaultChannelAnnouncement {
+    channel: Uuid,
+    pubkey: Vec<u8>,
+    token: Uuid,
+    version: chrono::DateTime<chrono::Utc>,
 }
 
 async fn finish_default_channel_joins(
@@ -3150,7 +3166,7 @@ async fn finish_default_channel_joins(
     // roster before announcing any of the newly committed memberships.
     let (task_state, task_tenant, task_gate) = (Arc::clone(state), tenant.clone(), gate.cloned());
     let announced = stream::iter(announcements)
-        .map(move |(channel, pubkey)| {
+        .map(move |announcement| {
             let (state, tenant, gate) = (
                 Arc::clone(&task_state),
                 task_tenant.clone(),
@@ -3158,24 +3174,34 @@ async fn finish_default_channel_joins(
             );
             async move {
                 let _permit = match gate {
-                    Some(gate) => Some(gate.acquire_effect().await?),
+                    Some(gate) => match gate.acquire_effect().await {
+                        Ok(permit) => Some(permit),
+                        Err(_) => return None,
+                    },
                     None => None,
                 };
-                if let Err(error) =
-                    announce_self_join_with_discovery(&tenant, &state, channel, &pubkey, false)
-                        .await
-                {
-                    warn!(channel = %channel, error = %error, "default-channel announcement failed");
+                let result = announce_self_join_with_discovery(
+                    &tenant,
+                    &state,
+                    announcement.channel,
+                    &announcement.pubkey,
+                    Some((announcement.token, announcement.version)),
+                ).await;
+                if let Err(error) = &result {
+                    warn!(channel = %announcement.channel, error = %error, "default-channel announcement failed");
                     metrics::counter!("buzz_auto_join_failures_total").increment(1);
                 }
-                Ok::<_, crate::nip_fi_gate::SessionExpired>(())
+                Some(result)
             }
         })
         .buffer_unordered(join_effect_concurrency(state))
         .collect::<Vec<_>>()
         .await;
-    if announced.iter().any(Result::is_err) {
+    if announced.iter().any(Option::is_none) {
         return Ok(()); // Pending work belongs to the next admission.
+    }
+    for result in announced.into_iter().flatten() {
+        result?;
     }
     let (task_state, community) = (Arc::clone(state), tenant.community());
     let completions = stream::iter(finished)
@@ -3206,7 +3232,7 @@ async fn join_pending_default_channels(
     pubkey_hex: &str,
     gate: Option<&Arc<crate::nip_fi_gate::SessionAdmissionGate>>,
     discovery_channels: &mut std::collections::BTreeSet<Uuid>,
-    announcements: &mut Vec<(Uuid, Vec<u8>)>,
+    announcements: &mut Vec<DefaultChannelAnnouncement>,
 ) -> anyhow::Result<Option<Uuid>> {
     // A socket's AUTH retry runs on every admission, so it reads the replica
     // and keeps the writer pool free. A roster write (no gate) reads the
@@ -3270,8 +3296,13 @@ async fn join_pending_default_channels(
         };
         discovery_channels.insert(channel.id);
         match finish_default_channel_join(tenant, state, channel.id, &pubkey, &admission).await {
-            Ok(true) => announcements.push((channel.id, pubkey.clone())),
-            Ok(false) => {}
+            Ok(Some(version)) => announcements.push(DefaultChannelAnnouncement {
+                channel: channel.id,
+                pubkey: pubkey.clone(),
+                token: admission.token,
+                version,
+            }),
+            Ok(None) => {}
             Err(error) => {
                 warn!(channel = %channel.id, member = %pubkey_hex, error = %error,
                     "default-channel join remains pending; continuing other channels");
@@ -3291,7 +3322,7 @@ async fn finish_default_channel_join(
     channel: Uuid,
     pubkey: &[u8],
     admission: &buzz_db::relay_members::PendingDefaultChannelJoin,
-) -> anyhow::Result<bool> {
+) -> anyhow::Result<Option<chrono::DateTime<chrono::Utc>>> {
     match state
         .db
         .put_pending_default_member(tenant.community(), channel, pubkey, admission.token)
@@ -3300,11 +3331,20 @@ async fn finish_default_channel_join(
         Ok(Some(_)) => {
             state.invalidate_membership(tenant, channel, pubkey);
             metrics::counter!("buzz_auto_join_channels_total").increment(1);
-            Ok(true)
         }
-        Ok(None) | Err(buzz_db::DbError::ChannelNotFound(_)) => Ok(false),
-        Err(error) => Err(error.into()),
+        Ok(None) => {}
+        Err(buzz_db::DbError::ChannelNotFound(_)) => return Ok(None),
+        Err(error) => return Err(error.into()),
     }
+    Ok(state
+        .db
+        .pending_default_channel_announcement_at(
+            tenant.community(),
+            channel,
+            pubkey,
+            admission.token,
+        )
+        .await?)
 }
 
 /// Join a person admitted to a community that keeps no membership roster

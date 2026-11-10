@@ -1,3 +1,4 @@
+use super::queue::MAX_QUEUED_ROWS;
 use super::*;
 use crate::relay_members::{assert_membership_list_matches, is_relay_member};
 use std::time::Duration;
@@ -635,4 +636,137 @@ async fn expired_unready_receipt_survives_for_recovery_and_never_becomes_a_fake_
             .is_some(),
         "queue cleanup must not erase durable channel recovery work"
     );
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn consumed_denial_receipts_release_capacity_without_discarding_unconsumed_receipts() {
+    let (db, community, _) = fixture().await;
+    let capacity = MAX_QUEUED_ROWS as usize;
+    let mut tx = crate::begin_community_write_transaction(
+        &db.pool,
+        community,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await
+    .unwrap();
+    let ids: Vec<Uuid> = sqlx::query_scalar(
+        "INSERT INTO relay_invite_claims(community_id,request,result,completed_at) \
+         SELECT $1,$2,$3,clock_timestamp() FROM generate_series(1,$4) RETURNING id",
+    )
+    .bind(community.as_uuid())
+    .bind(serde_json::to_value(request()).unwrap())
+    .bind(
+        serde_json::to_value(StoredClaimResult::Success(ClaimResult::V2(
+            ClaimOutcome::Revoked.into(),
+        )))
+        .unwrap(),
+    )
+    .bind(MAX_QUEUED_ROWS)
+    .fetch_all(tx.conn())
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(
+        db.enqueue_invite_claim(community, &request())
+            .await
+            .unwrap(),
+        EnqueuedClaim::Full
+    );
+    let consumed = db
+        .invite_claim_results(community, &ids[..capacity - 1])
+        .await
+        .unwrap();
+    assert_eq!(consumed.len(), capacity - 1);
+    assert!(consumed.iter().all(|claim| matches!(&claim.result,
+        StoredClaimResult::Success(ClaimResult::V2(result)) if matches!(result.outcome, ClaimOutcome::Revoked))));
+    let consumed_ids: Vec<_> = consumed.iter().map(|claim| claim.id).collect();
+    assert_eq!(
+        db.acknowledge_invite_claim_results(community, &consumed_ids)
+            .await
+            .unwrap(),
+        (capacity - 1) as u64
+    );
+    assert!(matches!(
+        db.enqueue_invite_claim(community, &request())
+            .await
+            .unwrap(),
+        EnqueuedClaim::Queued(_)
+    ));
+    assert_eq!(
+        db.invite_claim_results(community, &ids)
+            .await
+            .unwrap()
+            .len(),
+        1,
+        "the unconsumed receipt remains available for node recovery"
+    );
+    let remaining: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM relay_invite_claims WHERE community_id=$1")
+            .bind(community.as_uuid())
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        remaining, 2,
+        "only the unconsumed receipt and new pending request remain"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn acknowledgment_only_removes_readable_receipts_in_its_community() {
+    let (db, community, keys) = fixture().await;
+    let ready = enqueue(&db, community, &request()).await;
+    db.try_admit_invite_claims(community, &keys)
+        .await
+        .unwrap()
+        .unwrap();
+    finish(&db, community).await.complete().await.unwrap();
+    let unready = enqueue(&db, community, &request()).await;
+    let expired_admitted = enqueue(&db, community, &request()).await;
+    db.try_admit_invite_claims(community, &keys)
+        .await
+        .unwrap()
+        .unwrap();
+    let pending = enqueue(&db, community, &request()).await;
+    let expired_pending = enqueue(&db, community, &request()).await;
+    sqlx::query("UPDATE relay_invite_claims SET expires_at=clock_timestamp()-interval '1 second' WHERE community_id=$1 AND id=ANY($2)")
+        .bind(community.as_uuid()).bind([expired_admitted, expired_pending].as_slice())
+        .execute(&db.pool).await.unwrap();
+    let all = [ready, unready, pending, expired_admitted, expired_pending];
+    let other = postgres_tests::make_test_community(&db.pool).await;
+    assert_eq!(
+        db.acknowledge_invite_claim_results(other, &all)
+            .await
+            .unwrap(),
+        0
+    );
+    let readable = db.invite_claim_results(community, &all).await.unwrap();
+    assert_eq!(readable.len(), 3);
+    assert_eq!(
+        db.acknowledge_invite_claim_results(community, &all)
+            .await
+            .unwrap(),
+        3
+    );
+    let remaining: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM relay_invite_claims WHERE community_id=$1 ORDER BY queue_order",
+    )
+    .bind(community.as_uuid())
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        remaining,
+        vec![unready, pending],
+        "active unready and unprocessed claims cannot be acknowledged"
+    );
+    assert!(db
+        .acknowledge_invite_claim_results(
+            community,
+            &vec![Uuid::nil(); MAX_QUEUED_ROWS as usize + 1]
+        )
+        .await
+        .is_err());
 }

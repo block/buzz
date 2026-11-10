@@ -1,6 +1,10 @@
 SET LOCAL lock_timeout = '1s';
 SET LOCAL statement_timeout = '5s';
 
+ALTER TABLE channel_members
+    ADD COLUMN auto_join_token UUID,
+    ADD COLUMN auto_join_version TIMESTAMPTZ;
+
 CREATE TABLE relay_invite_claims (
     community_id UUID NOT NULL,
     id UUID NOT NULL DEFAULT gen_random_uuid(),

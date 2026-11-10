@@ -3740,6 +3740,15 @@ mod postgres_tests {
                        ON d.adrelid=a.attrelid AND d.adnum=a.attnum \
                      WHERE a.attrelid='relay_invite_claims'::regclass \
                        AND a.attnum>0 AND NOT a.attisdropped), \
+                   'default_join_columns', (SELECT jsonb_agg(jsonb_build_array( \
+                     a.attname, format_type(a.atttypid, a.atttypmod), a.attnotnull, \
+                     pg_get_expr(d.adbin, d.adrelid), a.attidentity::text, \
+                     a.attgenerated::text) ORDER BY a.attname) \
+                     FROM pg_attribute a LEFT JOIN pg_attrdef d \
+                       ON d.adrelid=a.attrelid AND d.adnum=a.attnum \
+                     WHERE a.attrelid='channel_members'::regclass \
+                       AND a.attname IN ('auto_join_token', 'auto_join_version') \
+                       AND a.attnum>0 AND NOT a.attisdropped), \
                    'constraints', (SELECT jsonb_agg(jsonb_build_array( \
                      conname, contype::text, pg_get_constraintdef(oid), convalidated) ORDER BY conname) \
                      FROM pg_constraint WHERE conrelid='relay_invite_claims'::regclass), \
@@ -3791,6 +3800,26 @@ mod postgres_tests {
             "invitation queue schema parity"
         );
         for catalog in [&desired_catalog, &migrated_catalog] {
+            assert_eq!(
+                catalog["default_join_columns"].as_array().map(Vec::len),
+                Some(2),
+                "both default-join marker columns must exist"
+            );
+            assert_eq!(
+                catalog["default_join_columns"],
+                serde_json::json!([
+                    ["auto_join_token", "uuid", false, null, "", ""],
+                    [
+                        "auto_join_version",
+                        "timestamp with time zone",
+                        false,
+                        null,
+                        "",
+                        ""
+                    ]
+                ]),
+                "default-join markers are nullable plain columns without defaults"
+            );
             for absent in ["foreign_keys", "triggers", "invalid_indexes"] {
                 assert_eq!(catalog[absent], serde_json::json!(0), "{absent}");
             }

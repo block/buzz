@@ -4807,6 +4807,11 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
             db.try_finish_invite_claims(request.community_id).await,
             Err(DbError::AccessDenied(_))
         ));
+        assert!(matches!(
+            db.acknowledge_invite_claim_results(request.community_id, &[])
+                .await,
+            Err(DbError::AccessDenied(_))
+        ));
         db.reap_expired_invite_claims().await.unwrap();
         let retained: i64 =
             sqlx::query_scalar("SELECT count(*) FROM relay_invite_claims WHERE community_id=$1")
