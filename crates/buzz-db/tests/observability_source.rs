@@ -890,9 +890,6 @@ fn has_any_tenant_local_chokepoint(source: &str) -> bool {
 
 const ADMITTED_TX_SIGNATURE_MARKERS: [&str; 2] = ["&mut AdmittedTx", "&mut crate::AdmittedTx"];
 
-// Narrow reviewed exceptions for non-serving verification probes only.
-const GUARDED_WRITE_FUNCTION_EXCEPTIONS: [&str; 1] = ["pub async fn verify_floor_guard_behavior("];
-
 const GUARDED_TX_ADAPTER_METHOD_PINS: [(&str, &str); 1] = [(
     "pub async fn replace_member_event(",
     "pub async fn lock_member_snapshot(",
@@ -971,12 +968,6 @@ fn function_header(function_source: &str) -> &str {
         .trim()
 }
 
-fn function_is_guarded_write_exception(function_header: &str) -> bool {
-    GUARDED_WRITE_FUNCTION_EXCEPTIONS
-        .iter()
-        .any(|exception| function_header.starts_with(exception))
-}
-
 fn function_accepts_admitted_transaction(function_source: &str) -> bool {
     let signature = function_source.split('{').next().unwrap_or(function_source);
     ADMITTED_TX_SIGNATURE_MARKERS
@@ -1019,9 +1010,7 @@ fn syntactic_guarded_write_route_violations(production_source: &str) -> Vec<Stri
     function_slices(production_source)
         .into_iter()
         .filter(|function_source| {
-            let header = function_header(function_source);
             production_contains_guarded_write(function_source)
-                && !function_is_guarded_write_exception(header)
                 && !function_has_syntactic_guarded_write_route(function_source, production_source)
         })
         .map(|function_source| function_header(function_source).to_owned())
@@ -1392,10 +1381,6 @@ fn serving_table_writes_expose_syntactic_chokepoint_or_guarded_tx_routes() {
     );
 }
 
-// Rolled-back verification probes write `events` rows that never commit, so
-// they owe no push job or TTL refresh.
-const EVENT_INSERT_FOLLOW_UP_EXCEPTIONS: [&str; 1] = ["pub async fn verify_floor_guard_behavior("];
-
 /// `source` with every `#[cfg(test)]` item removed, wherever it sits in the
 /// file. Each item runs to the `;` that ends it or to the brace that closes
 /// its body. Braces inside comments and literals are not counted (see
@@ -1713,12 +1698,7 @@ fn event_insert_follow_up_violations(production_source: &str) -> Vec<String> {
     function_slices(production_source)
         .into_iter()
         .filter(|function_source| {
-            let header = function_header(function_source);
-            inserts_events_row(function_source)
-                && !EVENT_INSERT_FOLLOW_UP_EXCEPTIONS
-                    .iter()
-                    .any(|exception| header.starts_with(exception))
-                && !runs_event_follow_ups(function_source)
+            inserts_events_row(function_source) && !runs_event_follow_ups(function_source)
         })
         .map(|function_source| function_header(function_source).to_owned())
         .collect()
@@ -1770,12 +1750,6 @@ pub(crate) async fn mention_writer(tx: &mut AdmittedTx) {
         .execute(tx.conn())
         .await
         .expect("write");
-}
-pub async fn verify_channel_roster_fence_behavior(pool: &PgPool) {
-    sqlx::query("INSERT INTO events (community_id, id) VALUES ($1, $2)")
-        .execute(pool)
-        .await
-        .expect("probe");
 }
 pub(crate) async fn lowercase_writer(tx: &mut AdmittedTx) {
     sqlx::query("insert into
@@ -2038,17 +2012,14 @@ fn event_insert_hook_inventory_carries_the_insert_timestamp() {
     assert_eq!(actual, expected);
 }
 
-// Fixed channel-less kinds cannot be channel rosters, and the replica-floor
-// startup probe rolls back all its writes.
+// Fixed channel-less kinds cannot be channel rosters.
 // Exemptions match by function header, so a kind 39002 insert added inside one
 // of these functions would pass the policy; keep them single-purpose.
-const EVENT_INSERT_ROSTER_GUARD_EXCEPTIONS: [&str; 3] = [
+const EVENT_INSERT_ROSTER_GUARD_EXCEPTIONS: [&str; 2] = [
     // NIP-43 membership is kind 13534 with channel_id NULL.
     "pub(crate) async fn write_nip43_membership_snapshot(",
     // Push leases are kind 30350 with channel_id NULL.
     "pub async fn accept_lease_event(",
-    // Rolled-back replica-floor startup probe.
-    "pub async fn verify_floor_guard_behavior(",
 ];
 
 fn event_insert_roster_guard_violations(production_source: &str) -> Vec<String> {
@@ -2098,9 +2069,6 @@ pub(crate) async fn write_nip43_membership_snapshot(tx: &mut AdmittedTx) {
     sqlx::query("INSERT INTO events (community_id, id) VALUES ($1, $2)");
 }
 pub async fn accept_lease_event(tx: &mut AdmittedTx) {
-    sqlx::query("INSERT INTO events (community_id, id) VALUES ($1, $2)");
-}
-pub async fn verify_floor_guard_behavior(pool: &PgPool) {
     sqlx::query("INSERT INTO events (community_id, id) VALUES ($1, $2)");
 }
 #[cfg(test)]
@@ -2153,9 +2121,6 @@ fn every_production_event_insert_runs_the_roster_guard() {
     );
 }
 
-// The rolled-back replica-floor probe writes a kind 9 row, which has no `d`.
-const EVENT_INSERT_D_TAG_EXCEPTIONS: [&str; 1] = ["pub async fn verify_floor_guard_behavior("];
-
 /// Whether an `INSERT INTO events` tail names `d_tag` in an explicit column
 /// list. An insert without a column list does not count.
 fn events_insert_names_d_tag(tail: &str) -> bool {
@@ -2169,13 +2134,9 @@ fn event_insert_d_tag_violations(production_source: &str) -> Vec<String> {
     function_slices(production_source)
         .into_iter()
         .filter(|function_source| {
-            let header = function_header(function_source);
-            !EVENT_INSERT_D_TAG_EXCEPTIONS
+            !events_insert_tails(function_source)
                 .iter()
-                .any(|exception| header.starts_with(exception))
-                && !events_insert_tails(function_source)
-                    .iter()
-                    .all(|tail| events_insert_names_d_tag(tail))
+                .all(|tail| events_insert_names_d_tag(tail))
         })
         .map(|function_source| function_header(function_source).to_owned())
         .collect()
@@ -2209,9 +2170,6 @@ pub(crate) async fn second_insert_without_d_tag(tx: &mut AdmittedTx) {
 }
 pub(crate) async fn mention_writer(tx: &mut AdmittedTx) {
     sqlx::query("INSERT INTO event_mentions (community_id, event_id) VALUES ($1, $2)");
-}
-pub async fn verify_floor_guard_behavior(pool: &PgPool) {
-    sqlx::query("INSERT INTO events (community_id, id, kind) VALUES ($1, $2, 9)");
 }
 #[cfg(test)]
 mod tests {
@@ -2306,11 +2264,8 @@ fn every_search_hydrator_preserves_the_exact_hit_timestamp() {
     }
 }
 
-// This startup probe always rolls back; it deliberately exercises the roster
-// DB backstop rather than the app check. The two serving writers are exempt only
-// while their INSERT remains structurally channel-NULL (checked below).
-const EVENT_FLOOR_PROBE_EXCEPTIONS: [&str; 1] =
-    ["pub async fn verify_channel_roster_fence_behavior("];
+// The two serving channel-NULL writers are exempt only while their INSERT
+// remains structurally channel-NULL (checked below).
 
 fn is_channel_null_event_writer(function: &str) -> bool {
     let header = function_header(function);
@@ -2735,13 +2690,6 @@ fn event_floor_policy_violations(production: &str) -> Vec<String> {
     function_items(production)
         .into_iter()
         .filter(|function| {
-            let header = function_header(function);
-            if EVENT_FLOOR_PROBE_EXCEPTIONS
-                .iter()
-                .any(|exception| header.starts_with(exception))
-            {
-                return false;
-            }
             updates_event_floor_columns(function)
                 || (inserts_events_row(function)
                     && !is_channel_null_event_writer(function)
