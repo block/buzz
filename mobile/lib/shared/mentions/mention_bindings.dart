@@ -1,4 +1,51 @@
-/// Reserve an exact label without retargeting an earlier selection.
+final _selectionQualifier = RegExp(
+  r' \([0-9a-f]{64}\)(?: (?:[2-9]|[1-9][0-9]+))?$',
+  caseSensitive: false,
+);
+
+String _plainName(String label) =>
+    label.replaceFirst(_selectionQualifier, '').toLowerCase();
+
+/// Earlier plain selections of other identities sharing [name], with the
+/// qualified keys they must be rewritten to once a namesake is selected.
+Map<String, String> namesakeRequalifications(
+  String name,
+  String pubkey,
+  Map<String, String> bindings,
+) {
+  final taken = bindings.keys.map((key) => key.toLowerCase()).toSet();
+  return {
+    for (final e in bindings.entries)
+      if (e.key.toLowerCase() == name.toLowerCase() &&
+          e.value.toLowerCase() != pubkey.toLowerCase() &&
+          !taken.contains('${e.key} (${e.value})'.toLowerCase()))
+        e.key: '${e.key} (${e.value.toLowerCase()})',
+  };
+}
+
+/// Rewrite plain mentions of [renames] keys, shifting [offset] with the text.
+({String text, int offset}) renameMentions(
+  String text,
+  Iterable<String> labels,
+  Map<String, String> renames,
+  int offset,
+) {
+  var result = text;
+  var shifted = offset;
+  for (final range in mentionOccurrences(text, labels).reversed) {
+    final to = renames[range.label];
+    // The query being replaced starts at [offset].
+    if (to == null || range.start == offset) continue;
+    result = result.replaceRange(range.start, range.end, '@$to');
+    if (range.end <= offset) {
+      shifted += to.length - (range.end - range.start - 1);
+    }
+  }
+  return (text: result, offset: shifted);
+}
+
+/// Reserve an exact label without retargeting an earlier selection. Every
+/// namesake is qualified: a qualified occurrence denies the plain name on render.
 String selectedMentionLabel(
   String name,
   String pubkey,
@@ -11,7 +58,12 @@ String selectedMentionLabel(
   bool conflicts(String label) =>
       normalized.containsKey(label.toLowerCase()) &&
       normalized[label.toLowerCase()] != pubkey.toLowerCase();
-  if (!conflicts(name)) return name;
+  final namesake = bindings.entries.any(
+    (e) =>
+        _plainName(e.key) == name.toLowerCase() &&
+        e.value.toLowerCase() != pubkey.toLowerCase(),
+  );
+  if (!namesake && !conflicts(name)) return name;
   final qualified = '$name (${pubkey.toLowerCase()})';
   var label = qualified;
   for (var suffix = 2; conflicts(label); suffix++) {

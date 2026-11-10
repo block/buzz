@@ -385,7 +385,7 @@ class MessageContent extends HookConsumerWidget {
             segment = segment.replaceRange(
               range.start,
               range.end,
-              '@${_markdownMentionName(range.label)}',
+              '@${_markdownMentionName(segment.substring(range.start + 1, range.end))}',
             );
           }
           mentionBuf.write(segment);
