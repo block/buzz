@@ -97,28 +97,6 @@ useMeChatAssistant(
       ? ref.watch(userCacheProvider)[selected] ??
             ref.read(userCacheProvider.notifier).get(selected)
       : null;
-  // The owner's inventory name outranks the agent's self-published profile.
-  final names = watchMeAssistantNames(ref, agents);
-  final name = agents.any((agent) => agent.pubkey == selected)
-      ? names.labelFor(selected!)
-      : profile?.displayName;
-  final avatarInitial = name?.trim().isNotEmpty == true
-      ? name!.trim()[0].toUpperCase()
-      : profile?.initial ?? '?';
-  String agentName(String pubkey) {
-    final candidates = [
-      agents.any((a) => a.pubkey == pubkey) ? names.labelFor(pubkey) : null,
-      ref.read(userCacheProvider)[pubkey]?.displayName,
-    ];
-    return candidates
-            .whereType<String>()
-            .where((name) => name.trim().isNotEmpty)
-            .firstOrNull ??
-        (pubkey.length > 12
-            ? '${pubkey.substring(0, 8)}…${pubkey.substring(pubkey.length - 4)}'
-            : pubkey);
-  }
-
   MeAgentChange? pending;
   if (sync != null) {
     try {
@@ -127,6 +105,31 @@ useMeChatAssistant(
       // The action surfaces an unreadable journal without crashing the chat.
     }
   }
+  // The owner's inventory name outranks the agent's self-published profile.
+  final names = watchMeAssistantNames(
+    ref,
+    agents,
+    saved: [selected, pending?.agent],
+  );
+  // A known agent outside the inventory, such as an archived one, is labeled
+  // against the live agents so it never reads as a live namesake.
+  bool named(String pubkey) =>
+      agents.any((agent) => agent.pubkey == pubkey) ||
+      ref.read(userCacheProvider)[pubkey]?.displayName?.trim().isNotEmpty ==
+          true;
+  final name = selected != null && named(selected)
+      ? names.labelFor(selected)
+      : profile?.displayName;
+  final avatarInitial = name?.trim().isNotEmpty == true
+      ? name!.trim()[0].toUpperCase()
+      : profile?.initial ?? '?';
+  String agentName(String pubkey) {
+    if (named(pubkey)) return names.labelFor(pubkey);
+    return pubkey.length > 12
+        ? '${pubkey.substring(0, 8)}…${pubkey.substring(pubkey.length - 4)}'
+        : pubkey;
+  }
+
   final pendingName = pending == null ? null : agentName(pending.agent);
   final label = pendingName != null
       ? 'Pending agent change: $pendingName'

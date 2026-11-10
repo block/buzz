@@ -4,6 +4,7 @@ import '../identity_names/identity_names.dart';
 import '../identity_names/identity_names_provider.dart';
 import '../mentions/agent_identity_provider.dart';
 import '../profile/user_profile.dart';
+import 'me_assistants.dart';
 
 /// [base] with the owner's inventory name ahead of each agent's self-published
 /// profile name, as Solo has always shown it. Verified names still win, and
@@ -55,16 +56,28 @@ IdentityNames meAssistantNames(
   ).scope(keys, agentPubkeys: keys.toSet());
 }
 
+/// [meAssistantNames] for the live inventory, built once for every reader so
+/// each Solo row does not copy the profile cache again.
+final meAssistantNamesProvider = Provider.autoDispose<IdentityNames>(
+  (ref) => meAssistantNames(
+    ref.watch(identityNameSourcesProvider),
+    ref.watch(meAssistantsProvider).value ?? const [],
+  ),
+);
+
 /// [meAssistantNames] for a widget, loading the profiles it still lacks.
+/// [saved] are agents a saved choice still names that Solo no longer offers,
+/// such as an archived agent: they are labeled as agents against [agents].
 IdentityNames watchMeAssistantNames(
   WidgetRef ref,
-  List<AgentDirectoryEntry> agents,
-) {
+  List<AgentDirectoryEntry> agents, {
+  Iterable<String?> saved = const [],
+}) {
   final keys = [for (final agent in agents) agent.pubkey];
   return watchIdentityNames(
     ref,
     keys,
-    agentPubkeys: keys.toSet(),
+    agentPubkeys: {...keys, ...saved.nonNulls},
     sources: meAssistantNameSources(
       ref.watch(identityNameSourcesProvider),
       agents,

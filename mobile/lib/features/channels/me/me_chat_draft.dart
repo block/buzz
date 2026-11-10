@@ -27,13 +27,18 @@ class _MeChatDraft extends HookConsumerWidget {
     final agent = choices
         .where((agent) => agent.pubkey == selected)
         .firstOrNull;
-    final names = watchMeAssistantNames(ref, choices);
+    final names = watchMeAssistantNames(ref, choices, saved: [selected]);
     // The composer keeps the plain name; only what the owner reads is labeled.
     final plainName =
         agent?.displayName ??
         profile?.label ??
         (selected == null ? 'Choose an agent' : 'Agent');
-    final name = agent == null ? plainName : names.labelFor(agent.pubkey);
+    // A saved choice that is no longer offered, such as an archived agent, is
+    // labeled against the live agents so it never reads as a live namesake.
+    final name =
+        agent != null || profile?.displayName?.trim().isNotEmpty == true
+        ? names.labelFor(selected!)
+        : plainName;
     final avatarInitial = name.isEmpty ? 'A' : name.characters.first;
     final scopeChanged = originalScope != (sync.community, sync.pubkey);
     final frozen =

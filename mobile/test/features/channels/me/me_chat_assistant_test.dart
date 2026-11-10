@@ -525,5 +525,26 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('me-assistant-button')));
     await tester.pumpAndSettle();
     expect(pickerLabels(), ['Atlas']);
+    await tester.tapAt(Offset.zero);
+    await tester.pumpAndSettle();
+
+    // A saved switch to the archived agent still names it apart from its live
+    // namesake, where the owner decides whether to finish it.
+    await MeAgentChange.create(sync, 'chat', first).save(sync, 'chat');
+    ProviderScope.containerOf(
+      tester.element(find.byType(_Harness)),
+    ).invalidate(meAssistantsProvider);
+    await tester.pumpAndSettle();
+    final pending = find.textContaining('Finish choosing ');
+    final archivedName = tester
+        .widget<Text>(pending)
+        .data!
+        .substring('Finish choosing '.length);
+    expect(archivedName, startsWith('Atlas'));
+    expect(archivedName, isNot('Atlas'));
+    expect(headerLabel(), 'Pending agent change: $archivedName');
+    await tester.tap(pending);
+    await tester.pumpAndSettle();
+    expect(find.textContaining('Your choice of $archivedName'), findsOneWidget);
   });
 }

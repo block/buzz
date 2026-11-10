@@ -23,6 +23,15 @@ import 'package:buzz/shared/me/me_groups.dart';
 import 'package:buzz/shared/me/me_sync.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/app_list.dart';
+import 'package:buzz/shared/profile/user_cache_provider.dart';
+import 'package:buzz/shared/profile/user_profile.dart';
+
+class _CachedProfiles extends UserCacheNotifier {
+  _CachedProfiles(this.profiles);
+  final Map<String, UserProfile> profiles;
+  @override
+  Map<String, UserProfile> build() => profiles;
+}
 
 class _UnavailableRelay extends RelaySessionNotifier {
   @override
@@ -499,6 +508,69 @@ void main() {
     await tester.tap(find.byTooltip('Change agent: Atlas'));
     await tester.pumpAndSettle();
     expect(pickerLabels(), ['Atlas']);
+  });
+
+  testWidgets('a resumed chat for an archived agent names it apart', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final action = ValueNotifier<VoidCallback?>(null);
+    addTearDown(action.dispose);
+    final sync = MeSync(
+      _UnavailableRelay(),
+      RelayConfig(
+        baseUrl: 'https://relay.test',
+        nsec: nostr.Keys.generate().nsec,
+      ),
+      prefs: prefs,
+    );
+    final archived = 'a1' * 32;
+    final live = 'b2' * 32;
+    await MeChatCreation('same-id', 'Unfinished chat', archived).save(sync);
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          savedPrefsProvider.overrideWithValue(prefs),
+          defaultAgentProvider.overrideWith((ref) => Stream.value(null)),
+          meSyncProvider.overrideWithValue(sync),
+          meGroupsProvider.overrideWith(
+            (ref) => Stream.value(const MeGroups()),
+          ),
+          channelsProvider.overrideWith(FakeChannels.new),
+          meAssistantsProvider.overrideWith(
+            (ref) async => [
+              AgentDirectoryEntry(pubkey: live, displayName: 'Atlas'),
+            ],
+          ),
+          // The archived agent's profile stays in the client's cache.
+          userCacheProvider.overrideWith(
+            () => _CachedProfiles({
+              archived: UserProfile(pubkey: archived, displayName: 'Atlas'),
+            }),
+          ),
+          agentDirectoryProvider.overrideWith((ref) async => []),
+          agentOwnersProvider.overrideWith((ref) async => {}),
+          customEmojiListProvider.overrideWithValue([]),
+        ],
+        child: MaterialApp(
+          theme: AppTheme.light(),
+          home: MePage(newChatAction: action),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    action.value!();
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Resume'));
+    await tester.pumpAndSettle();
+    final tooltip = tester
+        .widgetList<IconButton>(find.byType(IconButton))
+        .map((button) => button.tooltip)
+        .whereType<String>()
+        .singleWhere((label) => label.startsWith('Change agent: '));
+    expect(tooltip, startsWith('Change agent: Atlas'));
+    expect(tooltip, isNot('Change agent: Atlas'));
   });
 
   for (final resume in [true, false]) {
