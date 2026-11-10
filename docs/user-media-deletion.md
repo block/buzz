@@ -158,3 +158,8 @@ source/file document and 64 KiB per upload record. Exceeding a limit reports an
 error without publishing partial discovery. Scale measurements may justify a
 later unpublished-generation design; this implementation never quietly commits
 individual discovery pages.
+
+For a larger database, set `--max-source-rows 10000000 --scan-timeout-secs 900`
+on a new run. These positive limits are bound to that run and do not relax the
+memory, per-file or storage limits. Choose a reader endpoint and a budget suited
+to the deployment; increasing the budget allows more work, not partial success.

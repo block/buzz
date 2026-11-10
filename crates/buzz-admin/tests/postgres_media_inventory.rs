@@ -89,7 +89,7 @@ async fn preview_cli_saves_inventory_resumes_and_never_calls_delete() {
         .fallback(any(storage))
         .with_state(state.clone());
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    let invoke = || {
+    let invoke = |run_id: Uuid, max_source_rows: usize| {
         let mut command = Command::new(binary());
         command
             .args([
@@ -98,9 +98,13 @@ async fn preview_cli_saves_inventory_resumes_and_never_calls_delete() {
                 "--pubkey",
                 &human,
                 "--run-id",
-                &run.to_string(),
+                &run_id.to_string(),
                 "--mode",
                 "print-only",
+                "--max-source-rows",
+                &max_source_rows.to_string(),
+                "--scan-timeout-secs",
+                "900",
             ])
             .env("DATABASE_URL", &url)
             .env("BUZZ_MEDIA_SOURCE_DATABASE_URL", &url)
@@ -111,7 +115,15 @@ async fn preview_cli_saves_inventory_resumes_and_never_calls_delete() {
             .env("BUZZ_S3_ADDRESSING_STYLE", "path");
         command
     };
-    let first = invoke().output().await.unwrap();
+    let capped_run = Uuid::new_v4();
+    let capped = invoke(capped_run, 1).output().await.unwrap();
+    assert!(!capped.status.success());
+    assert!(String::from_utf8_lossy(&capped.stderr).contains("max-source-rows"));
+    assert!(state.methods.lock().unwrap().is_empty());
+    let unpublished: bool = sqlx::query_scalar("SELECT NOT (metadata_json ? 'media_discovery') AND NOT EXISTS (SELECT 1 FROM entity_deletion_media_files WHERE stage_id=$1) FROM entity_deletion_stage_history WHERE id=$1")
+        .bind(capped_run).fetch_one(&pool).await.unwrap();
+    assert!(unpublished);
+    let first = invoke(run, 10_000_000).output().await.unwrap();
     assert_eq!(
         first.status.code(),
         Some(2),
@@ -139,7 +151,7 @@ async fn preview_cli_saves_inventory_resumes_and_never_calls_delete() {
     assert!(!methods.is_empty());
     assert!(methods.iter().all(|m| *m == Method::GET));
     server.abort(); // Recovery must use the saved inventory even with S3 offline.
-    let second = invoke().output().await.unwrap();
+    let second = invoke(run, 10_000_000).output().await.unwrap();
     assert_eq!(
         second.status.code(),
         Some(2),

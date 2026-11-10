@@ -21,6 +21,12 @@ pub struct Options {
     /// Additional canonical media base URLs (including /media) for deployment aliases.
     #[arg(long)]
     pub media_base: Vec<String>,
+    /// Maximum source records to inspect; exceeding it publishes no inventory.
+    #[arg(long, default_value_t = 1_000_000)]
+    pub max_source_rows: usize,
+    /// Per-statement timeout for the read-only source scan.
+    #[arg(long, default_value_t = 120)]
+    pub scan_timeout_secs: u64,
 }
 
 /// Run the direct command. It never migrates either DB, fences subjects, mutates
@@ -29,6 +35,13 @@ pub async fn run(options: Options) -> Result<i32> {
     if options.mode != Mode::PrintOnly {
         bail!("direct execution requires print-only; destructive modes require a workflow ProtectedMedia provider with durable writer reservations");
     }
+    if options.max_source_rows == 0 || options.scan_timeout_secs == 0 {
+        bail!("media scan budgets must be positive");
+    }
+    let budget = buzz_db::media_deletion::MediaScanBudget {
+        max_source_rows: options.max_source_rows,
+        statement_timeout_secs: options.scan_timeout_secs,
+    };
     let source_url = crate::required_env("BUZZ_MEDIA_SOURCE_DATABASE_URL")?;
     let journal_url = crate::required_env("DATABASE_URL")?;
     let endpoint = crate::required_env("BUZZ_S3_ENDPOINT")?;
@@ -47,7 +60,7 @@ pub async fn run(options: Options) -> Result<i32> {
     )
     .await?;
     let store = journal.media_deletion_store();
-    let binding = json!({"version":1,"mode":"print-only","human":options.pubkey,"include_owned_agents":options.include_owned_agents,"source":source_identity,"namespace":namespace,"media_bases":options.media_base});
+    let binding = json!({"version":1,"mode":"print-only","human":options.pubkey,"include_owned_agents":options.include_owned_agents,"source":source_identity,"namespace":namespace,"media_bases":options.media_base,"scan_budget":budget});
     let run = store.open_preview(run_id, binding).await?;
     if store.load(&run).await?.is_none() {
         let source = Db::connect_cold_start(
@@ -62,11 +75,12 @@ pub async fn run(options: Options) -> Result<i32> {
         )
         .await?;
         let mut scan = source
-            .scan_user_media(
+            .scan_user_media_with_budget(
                 &options.pubkey,
                 options.include_owned_agents,
                 &namespace,
                 &options.media_base,
+                budget,
             )
             .await?;
         let (s3_access_key, s3_secret_key) = crate::s3_key_pair_from_env();

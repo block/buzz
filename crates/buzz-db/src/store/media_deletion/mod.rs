@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 mod execution;
 mod scan;
-pub use scan::{MediaScan, MediaSource, SubjectScope};
+pub use scan::{MediaScan, MediaScanBudget, MediaSource, SubjectScope};
 
 /// Maximum journal payload per file; exceeding it fails rather than truncates.
 pub const MAX_FILE_BYTES: usize = 1_048_576;
