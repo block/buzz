@@ -47,6 +47,7 @@ import 'message_content/markdown_escapes.dart';
 import 'message_content/preview_text.dart';
 import 'message_media.dart';
 import 'message_content/bubble_segments.dart';
+import 'message_content/edited_marker.dart';
 import 'message_content/buzz_link_label.dart';
 import 'message_content/channel_token_pattern.dart';
 import 'message_mention_pill.dart';
@@ -179,6 +180,10 @@ class MessageContent extends HookConsumerWidget {
   /// it contains.
   final bool scaleEmojiOnly;
 
+  /// Marks the body as replaced by an edit, after its last line: inline after
+  /// prose, else on its own line after a closing block or trailing media.
+  final bool edited;
+
   /// Allows a multi-image carousel to reclaim leading space reserved by the
   /// surrounding message layout, while keeping its image count aligned with
   /// the message body.
@@ -211,6 +216,7 @@ class MessageContent extends HookConsumerWidget {
     this.textAlign,
     this.maxLines,
     this.scaleEmojiOnly = false,
+    this.edited = false,
     this.mediaCarouselLeadingOverflow = 0,
     this.mediaCarouselTrailingOverflow = 0,
   });
@@ -406,6 +412,13 @@ class MessageContent extends HookConsumerWidget {
       onMentionTap: onMentionTap,
       onChannelTap: resolvedChannelTap,
     );
+    final editedStyle = editedMarkerStyle(context, own: bubble && ownMessage);
+    // An authored slot is drawn as written; the marker takes its own line.
+    final markerSlot = edited && !finalContent.contains(editedSlot);
+    final components = useMemoized(
+      () => [if (markerSlot) EditedMarkerMd(editedStyle), ...inlineComponents],
+      [inlineComponents, editedStyle, markerSlot],
+    );
 
     Widget renderMarkdown(String text) => KeyedSubtree(
       key: ValueKey(
@@ -461,12 +474,22 @@ class MessageContent extends HookConsumerWidget {
         },
         textAlign: textAlign ?? (bubble ? TextAlign.start : null),
         maxLines: maxLines,
-        inlineComponents: inlineComponents,
+        inlineComponents: components,
       ),
     );
     final segments = bubble
         ? messageBubbleSegments(finalContent, imetaByUrl)
         : const <({String text, bool attachment})>[];
+    // Media that closes the body takes the marker after it instead.
+    final editedInBody =
+        edited &&
+        trailingGallery == null &&
+        (bubble
+            ? segments.isNotEmpty && !segments.last.attachment
+            : finalContent.trim().isNotEmpty);
+    Widget renderBody(String text, {required bool last}) => editedInBody && last
+        ? markedEditedBody(text, renderMarkdown, editedStyle, slot: markerSlot)
+        : renderMarkdown(text);
     final markdown = bubble
         ? Column(
             crossAxisAlignment: ownMessage
@@ -530,7 +553,10 @@ class MessageContent extends HookConsumerWidget {
                               ),
                               child: GptMarkdownTheme(
                                 gptThemeData: bubbleMarkdownTheme,
-                                child: renderMarkdown(segment.text),
+                                child: renderBody(
+                                  segment.text,
+                                  last: index == segments.length - 1,
+                                ),
                               ),
                             ),
                           ),
@@ -540,8 +566,12 @@ class MessageContent extends HookConsumerWidget {
                   ),
             ],
           )
-        : renderMarkdown(finalContent);
-    if (trailingGallery == null) return markdown;
+        : renderBody(finalContent, last: true);
+    if (trailingGallery == null) {
+      return edited && !editedInBody
+          ? withEditedMarkerBelow(markdown, end: ownMessage)
+          : markdown;
+    }
 
     return Column(
       crossAxisAlignment: ownMessage
@@ -595,6 +625,7 @@ class MessageContent extends HookConsumerWidget {
                   ),
           ),
         ),
+        if (edited) const EditedMarkerBelow(),
       ],
     );
   }
