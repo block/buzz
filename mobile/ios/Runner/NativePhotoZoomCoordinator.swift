@@ -336,7 +336,9 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
       guard let self, !self.finishing, self.isNearby(value), self.pending[key] == token else { return }
       self.pending.removeValue(forKey: key)
       let image = (result as? FlutterStandardTypedData).flatMap { UIImage(data: $0.data) }
-      if let image {
+      // A continuing frame can arrive before this initial reply. Keep the
+      // newer full image authoritative over both delayed image and preview data.
+      if let image, self.images[value] == nil {
         if method == "preview" { self.previews[value] = image }
         else { self.images[value] = image }
       }
