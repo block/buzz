@@ -269,7 +269,13 @@ async fn addressable_event_floor_rejects_old_and_accepts_fresh() {
 }
 
 /// Seed an aged, stored and then soft-deleted event, as NIP-09 leaves it.
-async fn soft_deleted_aged(db: &Db, community: CommunityId, channel: Uuid, keys: &Keys, kind: u16) -> Event {
+async fn soft_deleted_aged(
+    db: &Db,
+    community: CommunityId,
+    channel: Uuid,
+    keys: &Keys,
+    kind: u16,
+) -> Event {
     let now = database_clock(db).await;
     let aged = signed(
         keys,
