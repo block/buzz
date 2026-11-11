@@ -21,6 +21,7 @@ import 'hosted_community_connection.dart';
 import 'web_connect_binding.dart';
 import 'hosted_join_policy.dart';
 
+part 'hosted_flow_creation.dart';
 part 'hosted_flow_identity_recovery.dart';
 part 'hosted_flow_account_entry.dart';
 part 'hosted_flow_backup_consent.dart';
@@ -64,9 +65,6 @@ enum HostedFlowProblem {
   inviteRestricted,
   inviteOwnerMismatch,
   communityCreationRejected,
-
-  /// Shown on the create form after setup ends, so another address can be
-  /// chosen directly.
   communityNameTaken,
 }
 
@@ -753,22 +751,8 @@ class HostedFlow extends ChangeNotifier {
       await _continueCommunities(generation, session.subject, pubkey);
       return;
     }
-    final BuzzDeepLink destination;
-    try {
-      destination = target is HostedCreateCommunity
-          ? await target.provision(account, pubkey, _isCurrent(generation))
-          : target;
-    } on HostedCreationFailure catch (failure) {
-      if (failure != HostedCreationFailure.taken) rethrow;
-      // Nothing was created: end setup and return to the create form.
-      final leaving = leave();
-      final left = _generation;
-      await leaving;
-      if (!_disposed && left == _generation && stage == HostedFlowStage.idle) {
-        _set(HostedFlowStage.idle, HostedFlowProblem.communityNameTaken);
-      }
-      return;
-    }
+    final destination = await _destinationFor(target, pubkey, generation);
+    if (destination == null) return;
     if (_disposed || generation != _generation) return;
     await enterCommunity(
       destination,
