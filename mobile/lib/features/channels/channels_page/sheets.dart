@@ -324,6 +324,7 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
         query: search,
         historyKey: newDmMentionHistoryKey,
         unsharedAgents: false,
+        channelId: null,
       )),
     );
     final searching = ref.watch(recipientSearchPendingProvider(search));
@@ -339,6 +340,9 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
       query: search,
       opening: opening.value,
       pending: searching,
+      // Agents rank ahead of the known people an empty query lists, even
+      // when they load after them. Typed rows keep their places.
+      restartForNewAgents: search.isEmpty,
     );
     final availableResults = shown.rows;
     // Shown and chosen recipients are named together on every build, so a

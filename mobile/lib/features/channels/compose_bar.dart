@@ -46,6 +46,7 @@ import 'camera_capture_cleanup.dart';
 import 'channel.dart';
 import 'channel_management_provider.dart';
 import 'channels_provider.dart';
+import 'timeline_message.dart';
 import '../../shared/emoji/emoji_picker.dart';
 import 'mentions/mention_candidates.dart';
 import 'mentions/mention_candidates_provider.dart';
@@ -59,6 +60,7 @@ import 'package:buzz/shared/crypto/event_signing.dart';
 
 part 'compose_bar/helpers.dart';
 part 'compose_bar/agent_mention_labels.dart';
+part 'compose_bar/agent_mention_prefill.dart';
 part 'compose_bar/markdown_editing_controller.dart';
 part 'compose_bar/draft_lifecycle.dart';
 part 'compose_bar/suggestions.dart';

@@ -97,6 +97,7 @@ Future<List<NostrEvent>> _fetchChannelMemberships(
   RelaySessionNotifier session,
   String pubkey, {
   void Function()? ensureCurrent,
+  bool strong = false,
 }) => _fetchPaginatedChannelEvents(
   session,
   kind: 39002,
@@ -105,6 +106,7 @@ Future<List<NostrEvent>> _fetchChannelMemberships(
   },
   operation: 'Channel memberships',
   ensureCurrent: ensureCurrent,
+  strong: strong,
 );
 
 Future<List<NostrEvent>> _fetchChannelDirectoryMetas(
@@ -485,6 +487,7 @@ Future<List<NostrEvent>> _fetchPaginatedChannelEvents(
   required String operation,
   Map<String, List<String>> tags = const {},
   void Function()? ensureCurrent,
+  bool strong = false,
 }) async {
   final events = <NostrEvent>[];
   final seenEventIds = <String>{};
@@ -498,7 +501,12 @@ Future<List<NostrEvent>> _fetchPaginatedChannelEvents(
         tags: tags,
         limit: _channelDirectoryPageSize,
         until: until,
-        extensions: {'before_id': ?beforeId},
+        extensions: {
+          'before_id': ?beforeId,
+          // Reads the relay's writer pool, so it sees this client's own
+          // just-accepted writes that replicas may not have yet.
+          if (strong) 'consistency': 'strong',
+        },
       ),
     ]);
     ensureCurrent?.call();
