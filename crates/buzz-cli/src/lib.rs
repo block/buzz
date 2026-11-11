@@ -1021,41 +1021,6 @@ buzz import slack --export-dir ./export --team-id T0266FRGM --identity-map U060=
         #[arg(long)]
         identity_map: Option<String>,
     },
-    /// Attest that a Slack id maps to a person's public key (owner/admin half)
-    #[command(
-        after_help = "The owner/admin half of a two-party identity binding. The pubkey is \
-PUBLIC (npub or hex) — never an nsec. Requires the CLI identity to be a \
-community owner or admin. History is attributed only once the person also runs \
-`buzz import claim` with their own key.\n\nExample:\n  \
-buzz import bind --slack-id U060976D0QN --pubkey npub1abc..."
-    )]
-    Bind {
-        /// Slack workspace id (team id, e.g. T0266FRGM)
-        #[arg(long)]
-        team_id: String,
-        /// Slack user id (e.g. U060976D0QN)
-        #[arg(long)]
-        slack_id: String,
-        /// The person's PUBLIC key: npub1… or 64-char hex
-        #[arg(long)]
-        pubkey: String,
-    },
-    /// Consent to being attributed a Slack id — the subject half of a binding
-    #[command(
-        after_help = "The subject half of a two-party identity binding. Run this yourself, \
-with your own key: it self-signs your consent that the Slack id is you. It \
-attributes history only once a community owner/admin has published the \
-matching `buzz import bind` attestation for your pubkey.\n\nExample:\n  \
-buzz import claim --slack-id U060976D0QN"
-    )]
-    Claim {
-        /// Slack workspace id (team id, e.g. T0266FRGM)
-        #[arg(long)]
-        team_id: String,
-        /// Your Slack user id (e.g. U060976D0QN)
-        #[arg(long)]
-        slack_id: String,
-    },
 }
 
 #[derive(Subcommand)]
@@ -2371,7 +2336,7 @@ mod tests {
             vec!["approve", "create", "delete", "get", "list", "runs", "trigger", "update"]
         );
         assert_eq!(names(&cmd, "feed"), vec!["get"]);
-        assert_eq!(names(&cmd, "import"), vec!["bind", "claim", "slack"]);
+        assert_eq!(names(&cmd, "import"), vec!["slack"]);
         assert_eq!(
             names(&cmd, "social"),
             vec![
@@ -2454,7 +2419,7 @@ mod tests {
             ("dms", 4),
             ("emoji", 5),
             ("feed", 1),
-            ("import", 3),
+            ("import", 1),
             ("issues", 6),
             ("media", 1),
             ("messages", 8),

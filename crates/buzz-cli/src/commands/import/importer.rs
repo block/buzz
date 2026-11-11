@@ -44,7 +44,6 @@ struct Summary {
     channels_created: u64,
     messages_imported: u64,
     reactions_imported: u64,
-    bindings_published: u64,
     private_members_added: u64,
     private_members_unmapped: u64,
     skipped: u64,
@@ -675,22 +674,6 @@ impl<'a> Importer<'a> {
         Ok(())
     }
 
-    /// Publish owner/admin-signed identity bindings (public keys only).
-    pub(super) async fn publish_bindings(
-        &mut self,
-        bindings: &[(String, String)],
-    ) -> Result<(), CliError> {
-        for (slack_id, pubkey_hex) in bindings {
-            match publish_binding(self.client, self.team_id, slack_id, pubkey_hex).await {
-                Ok(_) => self.summary.bindings_published += 1,
-                Err(e) => self
-                    .summary
-                    .warn(format!("identity binding for {slack_id} failed: {e}")),
-            }
-        }
-        Ok(())
-    }
-
     /// Flush the final state and print the run summary as JSON.
     pub(super) fn finish(&self) -> Result<(), CliError> {
         self.save()?;
@@ -698,7 +681,6 @@ impl<'a> Importer<'a> {
             "channels_created": self.summary.channels_created,
             "messages_imported": self.summary.messages_imported,
             "reactions_imported": self.summary.reactions_imported,
-            "bindings_published": self.summary.bindings_published,
             "private_members_added": self.summary.private_members_added,
             "private_members_unmapped": self.summary.private_members_unmapped,
             "skipped": self.summary.skipped,
@@ -855,19 +837,6 @@ async fn submit_with_response(
 pub(super) fn channel_uuid(team_id: &str, channel_id: &str) -> Uuid {
     let name = format!("buzz:slack-import:{team_id}:{channel_id}");
     Uuid::new_v5(&Uuid::NAMESPACE_URL, name.as_bytes())
-}
-
-/// Build and submit an owner/admin-signed Slack identity binding.
-pub(super) async fn publish_binding(
-    client: &BuzzClient,
-    team_id: &str,
-    slack_id: &str,
-    pubkey_hex: &str,
-) -> Result<String, CliError> {
-    let d_tag = buzz_sdk::slack_identity_binding_d_tag(team_id, slack_id);
-    let builder = buzz_sdk::build_import_identity_binding(&d_tag, pubkey_hex)
-        .map_err(|e| CliError::Other(format!("build_import_identity_binding failed: {e}")))?;
-    submit(client, builder).await
 }
 
 /// Provenance tags carried by every imported event.

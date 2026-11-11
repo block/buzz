@@ -12,16 +12,9 @@ export type CommunityOnboardingSource =
   | "add-community"
   | "membership-recovery"
   | "deep-link-connect"
-  | "deep-link-join"
-  | "deep-link-join-slack";
+  | "deep-link-join";
 
 export type CommunityOnboardingStage =
-  /**
-   * Slack-migration join: the person signs in with Slack in their browser,
-   * which registers them and attests their imported identity. We wait here
-   * until the `buzz://import-claim` return advances the transaction.
-   */
-  | "slack-auth"
   | "claiming"
   | "connecting"
   | "profile"
@@ -56,15 +49,6 @@ export type CommunityOnboardingTransaction = {
   communityId?: string;
   previousCommunityId?: string;
   addedCommunity?: boolean;
-  /** Claim-service base URL for the Slack-migration join (`deep-link-join-slack`). */
-  slackService?: string;
-  /** Device-held verifier that binds the Slack callback to this transaction. */
-  slackOidcVerifier?: string;
-  /**
-   * Verified imported identity waiting to be self-claimed after the target
-   * community connection is active.
-   */
-  slackSubject?: string;
   createdAt: string;
   updatedAt: string;
   error?: string;
@@ -84,8 +68,6 @@ export type CommunityOnboardingTransactionPatch = Partial<
     | "communityName"
     | "error"
     | "acknowledged"
-    | "slackSubject"
-    | "slackOidcVerifier"
   >
 >;
 
@@ -98,7 +80,6 @@ export type StartCommunityOnboardingInput = {
   token?: string;
   reposDir?: string;
   policyReceipt?: string;
-  slackService?: string;
 };
 
 function canonicalRelayUrl(rawRelayUrl: string) {
@@ -118,26 +99,20 @@ function isTransaction(
 ): value is CommunityOnboardingTransaction {
   if (!value || typeof value !== "object") return false;
   const transaction = value as Partial<CommunityOnboardingTransaction>;
-  const validStage = [
-    "claiming",
-    "slack-auth",
-    "connecting",
-    "profile",
-    "team-intro",
-    "finalizing",
-    "entering",
-  ].includes(transaction.stage ?? "");
   return (
     typeof transaction.id === "string" &&
     typeof transaction.relayUrl === "string" &&
     typeof transaction.communityName === "string" &&
     typeof transaction.createdAt === "string" &&
     typeof transaction.updatedAt === "string" &&
-    validStage &&
-    (transaction.stage !== "slack-auth" ||
-      (transaction.source === "deep-link-join-slack" &&
-        typeof transaction.slackService === "string" &&
-        transaction.slackService.length > 0))
+    [
+      "claiming",
+      "connecting",
+      "profile",
+      "team-intro",
+      "finalizing",
+      "entering",
+    ].includes(transaction.stage ?? "")
   );
 }
 
@@ -188,14 +163,6 @@ export function startCommunityOnboarding(
       token: input.token?.trim() || existing.token,
       reposDir: input.reposDir ?? existing.reposDir,
       policyReceipt: input.policyReceipt ?? existing.policyReceipt,
-      slackService: input.slackService ?? existing.slackService,
-      slackSubject: input.slackService ? undefined : existing.slackSubject,
-      slackOidcVerifier: input.slackService
-        ? undefined
-        : existing.slackOidcVerifier,
-      source: input.slackService ? input.source : existing.source,
-      // A re-opened Slack-join link restarts the browser sign-in.
-      stage: input.slackService ? "slack-auth" : existing.stage,
       updatedAt: now.toISOString(),
       error: undefined,
       // A freshly opened link deserves fresh feedback — re-present the gate
@@ -211,18 +178,13 @@ export function startCommunityOnboarding(
     id: crypto.randomUUID(),
     source: input.source,
     firstCommunityPage: input.firstCommunityPage,
-    stage: input.slackService
-      ? "slack-auth"
-      : input.inviteCode?.trim()
-        ? "claiming"
-        : "connecting",
+    stage: input.inviteCode?.trim() ? "claiming" : "connecting",
     relayUrl,
     inviteCode: input.inviteCode?.trim() || undefined,
     communityName: input.communityName?.trim() || deriveCommunityName(relayUrl),
     token: input.token?.trim() || undefined,
     reposDir: input.reposDir,
     policyReceipt: input.policyReceipt,
-    slackService: input.slackService,
     createdAt: timestamp,
     updatedAt: timestamp,
   };

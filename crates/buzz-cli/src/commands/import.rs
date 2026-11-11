@@ -43,7 +43,7 @@ use crate::client::BuzzClient;
 use crate::error::CliError;
 use dm::dm_import_blockers;
 use export::{SlackChannel, SlackConversationKind, SlackExport};
-use importer::{publish_binding, submit, Importer, ImporterOptions};
+use importer::{Importer, ImporterOptions};
 use mapping::load_channel_map;
 use report::dry_run_report;
 use state::{ChannelState, ImportState};
@@ -154,58 +154,7 @@ pub async fn cmd_import_slack(client: &BuzzClient, p: ImportSlackParams) -> Resu
         importer.import_channel(channel).await?;
     }
 
-    // Publish owner/admin-signed identity bindings last, so the history they
-    // attribute is already in place.
-    importer.publish_bindings(&bindings).await?;
-
     importer.finish()
-}
-
-/// Publish the owner/admin half of a two-party binding: an attestation that
-/// `slack_id` maps to `pubkey`. Inert until the subject also runs
-/// `cmd_import_claim` with their own key.
-pub async fn cmd_import_bind(
-    client: &BuzzClient,
-    team_id: &str,
-    slack_id: &str,
-    pubkey: &str,
-) -> Result<(), CliError> {
-    let team_id = validate_team_id(team_id)?;
-    let slack_id = validate_slack_id(slack_id)?;
-    let pubkey_hex = parse_pubkey(pubkey)?;
-    let event_id = publish_binding(client, team_id, slack_id, &pubkey_hex).await?;
-    print_json(&serde_json::json!({
-        "event_id": event_id,
-        "team_id": team_id,
-        "slack_id": slack_id,
-        "pubkey": pubkey_hex,
-        "accepted": true,
-    }))
-}
-
-/// Publish the subject half of a two-party binding: the caller's self-signed
-/// consent to being attributed `slack_id`. Signed by the CLI identity, so the
-/// person whose history it is runs this with their own key. Inert until a
-/// community owner/admin has published the matching attestation for this
-/// pubkey.
-pub async fn cmd_import_claim(
-    client: &BuzzClient,
-    team_id: &str,
-    slack_id: &str,
-) -> Result<(), CliError> {
-    let team_id = validate_team_id(team_id)?;
-    let slack_id = validate_slack_id(slack_id)?;
-    let d_tag = buzz_sdk::slack_identity_binding_d_tag(team_id, slack_id);
-    let builder = buzz_sdk::build_import_identity_claim(&d_tag)
-        .map_err(|e| CliError::Other(format!("build_import_identity_claim failed: {e}")))?;
-    let event_id = submit(client, builder).await?;
-    print_json(&serde_json::json!({
-        "event_id": event_id,
-        "team_id": team_id,
-        "slack_id": slack_id,
-        "pubkey": client.keys().public_key().to_hex(),
-        "accepted": true,
-    }))
 }
 
 /// Parse a `SLACKID=key,SLACKID=key` list into `(slack_id, pubkey_hex)` pairs.
@@ -415,14 +364,6 @@ pub async fn dispatch(cmd: crate::ImportCmd, client: &BuzzClient) -> Result<(), 
                 },
             )
             .await
-        }
-        crate::ImportCmd::Bind {
-            team_id,
-            slack_id,
-            pubkey,
-        } => cmd_import_bind(client, &team_id, &slack_id, &pubkey).await,
-        crate::ImportCmd::Claim { team_id, slack_id } => {
-            cmd_import_claim(client, &team_id, &slack_id).await
         }
     }
 }
