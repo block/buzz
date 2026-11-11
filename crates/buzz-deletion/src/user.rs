@@ -1,6 +1,7 @@
 //! User inventory, offline account cleanup and persisted deletion workflows.
 
 use anyhow::Result;
+use buzz_db::user_deletion::{account_batches::AccountBatchOptions, ExecutionMode};
 use clap::Subcommand;
 use uuid::Uuid;
 
@@ -86,7 +87,41 @@ pub enum Command {
 /// Run the selected user-deletion command against PostgreSQL.
 pub async fn run(command: Command) -> Result<i32> {
     if let Command::AccountBatches(args) = command {
-        return account_batches::run(args).await;
+        let mode = if args.delete {
+            ExecutionMode::Delete
+        } else {
+            ExecutionMode::ReadOnly
+        };
+        // Command setup stays outside the handler. Neither mode runs startup
+        // migrations or connects to Redis; preview defaults to read-only SQL.
+        let db = buzz_db::Db::connect_cold_start(
+            buzz_db::DbConfig {
+                database_url: crate::required_env("DATABASE_URL")?,
+                max_connections: 1,
+                min_connections: 0,
+                default_transaction_read_only: mode == ExecutionMode::ReadOnly,
+                ..buzz_db::DbConfig::default()
+            },
+            "user_account_batches",
+        )
+        .await?;
+        let summary = account_batches::run(
+            &db,
+            &AccountBatchOptions {
+                community: args.community,
+                pubkey: args.pubkey,
+                batch_size: args.batch_size,
+                max_items: args.max_items,
+            },
+            mode,
+            None,
+        )
+        .await?;
+        return Ok(if summary.supported_scope_exhausted {
+            0
+        } else {
+            2
+        });
     }
     let db = if matches!(command, Command::Inventory { .. }) {
         buzz_db::Db::connect_cold_start(

@@ -2,8 +2,9 @@
 
 use super::worker::RunOptions;
 use crate::RETRY_DELAY;
-use anyhow::{bail, Result};
+use anyhow::{bail, ensure, Context, Result};
 use buzz_db::entity_deletion::{EntityDeletionStore, EntityLease, EntityStage};
+use buzz_db::user_deletion::{account_batches::AccountBatchOptions, ExecutionMode};
 use uuid::Uuid;
 
 pub(super) async fn dispatch(
@@ -17,7 +18,45 @@ pub(super) async fn dispatch(
         .ok_or_else(|| anyhow::anyhow!("missing target input"))?;
     if !target.starts_with("demo:") {
         if row.stage == "purge_account" {
-            return super::account_batches::dispatch(store, lease, row, options).await;
+            ensure!(options.delete, "real workflow execution requires --delete");
+            let db = options.db.as_ref().context("missing account database")?;
+            let row = store.start_stage(lease, row.id).await?;
+            let result = async {
+                let target = row.metadata_json["inputs"]["target"]
+                    .as_str()
+                    .context("missing target")?;
+                let community = row
+                    .target_community_id
+                    .context("missing account community")?;
+                let summary = super::account_batches::run(
+                    db,
+                    &AccountBatchOptions {
+                        community,
+                        pubkey: target.to_owned(),
+                        batch_size: options.batch_size,
+                        max_items: options.max_items,
+                    },
+                    ExecutionMode::Delete,
+                    Some((lease, row.id)),
+                )
+                .await?;
+                ensure!(
+                    summary.supported_scope_exhausted,
+                    "account batch limit reached; rerun to continue"
+                );
+                Ok::<_, anyhow::Error>(serde_json::to_value(summary)?)
+            }
+            .await;
+            match result {
+                Ok(value) => store.save_stage_success(lease, row.id, value).await?,
+                Err(error) => {
+                    store
+                        .fail_stage(lease, row.id, &format!("{error:#}"), RETRY_DELAY)
+                        .await?;
+                    return Err(error);
+                }
+            }
+            return Ok(());
         }
         bail!(
             "real handler {} is not implemented in this account-cleanup PR",

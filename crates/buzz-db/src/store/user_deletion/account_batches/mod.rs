@@ -41,39 +41,13 @@ pub struct AccountBatchSummary {
 }
 
 impl UserDeletionStore {
-    /// Run the same bounded account planner in either standalone mode.
+    /// Print or apply bounded account batches. Workflow callers supply their
+    /// current lease and stage so delete transactions validate that authority.
     pub async fn run_account_batches(
         &self,
         options: &AccountBatchOptions,
         mode: ExecutionMode,
         writer: &mut impl Write,
-    ) -> Result<AccountBatchSummary> {
-        self.account_batches(options, writer, mode, None).await
-    }
-
-    /// Execute a started account stage under the existing parent lease.
-    /// Retries select remaining rows; the worker saves the stage outcome.
-    pub async fn run_account_stage(
-        &self,
-        lease: &crate::entity_deletion::EntityLease,
-        stage_id: Uuid,
-        options: &AccountBatchOptions,
-        writer: &mut impl Write,
-    ) -> Result<AccountBatchSummary> {
-        self.account_batches(
-            options,
-            writer,
-            ExecutionMode::Delete,
-            Some((lease, stage_id)),
-        )
-        .await
-    }
-
-    async fn account_batches(
-        &self,
-        options: &AccountBatchOptions,
-        writer: &mut impl Write,
-        mode: ExecutionMode,
         stage: Option<(&crate::entity_deletion::EntityLease, Uuid)>,
     ) -> Result<AccountBatchSummary> {
         let options = validated(options)?;
