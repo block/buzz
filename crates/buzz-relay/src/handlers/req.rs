@@ -1342,6 +1342,13 @@ fn filter_to_query_params(
             ks.iter().map(|k| k.as_u16() as i32).collect()
         }
     });
+    // An empty `authors`, `ids` or tag set also matches nothing (NIP-01), but
+    // the conversions below drop or ignore it, so COUNT would count without
+    // it. Use the same sentinel, so every read answers it without a query.
+    let matches_nothing = filter.authors.as_ref().is_some_and(|a| a.is_empty())
+        || filter.ids.as_ref().is_some_and(|i| i.is_empty())
+        || filter.generic_tags.values().any(|values| values.is_empty());
+    let kinds = if matches_nothing { Some(vec![]) } else { kinds };
 
     let since = filter
         .since
