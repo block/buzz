@@ -39,7 +39,8 @@ void stackJourneyTests() {
     await tester.pumpAndSettle();
     expect(requested, contains(photo));
     expect(requested, contains(poster));
-    expect(requested, isNot(contains(clip)));
+    // Only the legacy video without poster metadata needs a background fetch.
+    expect(requested, contains(clip));
     expect(requested, isNot(contains('https://example.com/second.mov')));
     final stack = find.byKey(const ValueKey('message-media-stack'));
     final spoken = find.byKey(const ValueKey('message-media-stack-semantics'));

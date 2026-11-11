@@ -271,7 +271,7 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
     closeCenterConstraint?.constant = navigationSizingBar.sizeThatFits(view.bounds.size).height / 2
   }
   func shouldBeginDismissal(location: CGPoint, velocity: CGVector) -> Bool {
-    !paging && !finishing && !videoIndices.contains(index) && pager.view.frame.contains(location)
+    !paging && !finishing && pager.view.frame.contains(location)
       && velocity.dy > abs(velocity.dx) * 1.5
       && ((pager.viewControllers?.first as? NativePhotoPage)?.isAtRestingZoom ?? false)
   }
@@ -507,7 +507,7 @@ private final class NativePhotoPage: UIViewController, UIScrollViewDelegate {
   private let status = UILabel()
   private var previousSize = CGSize.zero
   var image: UIImage? { imageView.image }
-  var isAtRestingZoom: Bool { !isVideo && scroll.zoomScale <= scroll.minimumZoomScale + 0.01 }
+  var isAtRestingZoom: Bool { isVideo || scroll.zoomScale <= scroll.minimumZoomScale + 0.01 }
   func photoFrame(in target: UIView) -> CGRect? {
     if isVideo, video.player != nil, !video.videoBounds.isEmpty { return video.view.convert(video.videoBounds, to: target) }
     guard let image, image.size.width > 0, image.size.height > 0 else { return nil }

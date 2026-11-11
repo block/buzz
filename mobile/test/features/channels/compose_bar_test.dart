@@ -43,6 +43,7 @@ import 'package:buzz/shared/widgets/mobile_tab_footer_backdrop.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 part 'compose_bar_test/exact_mention_tests.dart';
+part 'compose_bar_test/mixed_gallery_tests.dart';
 part 'compose_bar_test/solo_draft_tests.dart';
 part 'compose_bar_test/durable_mention_tests.dart';
 part 'compose_bar_test/agent_prefill_tests.dart';
@@ -735,6 +736,7 @@ class _IterationCountingChannels extends ListBase<Channel> {
 }
 
 void main() {
+  _mixedGalleryTests();
   soloDraftTests();
   exactMentionTests();
   durableMentionTests();

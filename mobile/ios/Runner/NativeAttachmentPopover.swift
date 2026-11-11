@@ -180,7 +180,7 @@ final class NativeAttachmentPopoverViewController:
     stopCamera()
 
     var configuration = PHPickerConfiguration(photoLibrary: .shared())
-    configuration.filter = .images
+    configuration.filter = .any(of: [.images, .videos])
     configuration.selectionLimit = 0
     configuration.selection = .continuousAndOrdered
     configuration.preferredAssetRepresentationMode = .compatible
@@ -541,7 +541,7 @@ final class NativeAttachmentPopoverViewController:
     } else if count == 0 {
       title = "All Photos"
     } else {
-      title = "Add \(count) \(count == 1 ? "photo" : "photos")"
+      title = "Add \(count) \(count == 1 ? "item" : "items")"
     }
     guard let button = photoActionButton else { return }
     let canInteract = !preparing
@@ -576,7 +576,7 @@ final class NativeAttachmentPopoverViewController:
     guard
       let typeIdentifier = provider.registeredTypeIdentifiers.first(where: {
         guard let type = UTType($0) else { return false }
-        return type.conforms(to: .image)
+        return type.conforms(to: .image) || type.conforms(to: .movie)
       })
     else {
       throw NativeAttachmentPopoverError.unsupportedImage

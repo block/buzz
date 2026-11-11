@@ -30,7 +30,7 @@ class NativePhotoZoomPreview {
   /// JPEG, PNG and HEIC/HEIF photos use the native gallery. Continuing frames
   /// are forwarded for animated PNGs; other formats keep the Flutter renderer.
   /// [mimeTypes], when provided, contains one declared type per [urls] entry.
-  /// [videoIndices] use rendered source snapshots and [loadVideo] local files;
+  /// [videoIndices] use posters (or source snapshots) and [loadVideo] local files;
   /// their URLs never enter the image decoder.
   static Future<bool> open({
     required BuildContext context,
@@ -94,8 +94,16 @@ class NativePhotoZoomPreview {
         });
       });
       window = loads;
+      final initialPoster = previewProvider ?? previewProviders?[initialIndex];
       final bytes = videoIndices.contains(initialIndex)
-          ? await _snapshot(sourceKeys[initialIndex])
+          ? (initialPoster == null
+                    ? null
+                    : await loads.load(
+                        initialIndex,
+                        initialPoster,
+                        preview: true,
+                      )) ??
+                await _snapshot(sourceKeys[initialIndex])
           : await loads.load(
               initialIndex,
               previewProvider ??
@@ -123,10 +131,13 @@ class NativePhotoZoomPreview {
             }
             return loadVideo?.call(index);
           case 'preview':
-            if (videoIndices.contains(index)) {
-              return _snapshot(sourceKeys[index]);
-            }
             final provider = previewProviders?[index];
+            if (videoIndices.contains(index)) {
+              return (provider == null
+                      ? null
+                      : await loads.load(index, provider, preview: true)) ??
+                  await _snapshot(sourceKeys[index]);
+            }
             return provider == null
                 ? null
                 : loads.load(index, provider, preview: true);

@@ -90,7 +90,7 @@ final class InlinePhotoPickerPlatformView: NSObject, FlutterPlatformView {
   @available(iOS 17.0, *)
   private func installPicker() {
     var configuration = PHPickerConfiguration(photoLibrary: .shared())
-    configuration.filter = .images
+    configuration.filter = .any(of: [.images, .videos])
     configuration.selectionLimit = 0
     configuration.selection = .continuousAndOrdered
     configuration.preferredAssetRepresentationMode = .compatible
@@ -129,7 +129,7 @@ final class InlinePhotoPickerPlatformView: NSObject, FlutterPlatformView {
     guard
       let typeIdentifier = provider.registeredTypeIdentifiers.first(where: {
         guard let type = UTType($0) else { return false }
-        return type.conforms(to: .image)
+        return type.conforms(to: .image) || type.conforms(to: .movie)
       })
     else {
       throw InlinePhotoPickerError.unsupportedImage

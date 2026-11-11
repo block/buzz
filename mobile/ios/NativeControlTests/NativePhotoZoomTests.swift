@@ -21,6 +21,14 @@ struct NativePhotoZoomTests {
       viewer.view.layoutIfNeeded()
       precondition(!requests.isEmpty && requests.allSatisfy { $0.1 <= 2 }, "Initial requests must stay adjacent")
       let pager = viewer.children.compactMap { $0 as? UIPageViewController }.first!
+      let location = CGPoint(x: 195, y: 400)
+      precondition(viewer.shouldBeginDismissal(location: location, velocity: CGVector(dx: 0, dy: 300)), "Resting photos dismiss downward")
+      precondition(!viewer.shouldBeginDismissal(location: location, velocity: CGVector(dx: 300, dy: 10)), "Horizontal swipes must page")
+      let scroll = descendants(pager.viewControllers!.first!.view).compactMap { $0 as? UIScrollView }.first!
+      scroll.zoomScale = 2
+      precondition(!viewer.shouldBeginDismissal(location: location, velocity: CGVector(dx: 0, dy: 300)), "Zoomed photos must pan instead of dismiss")
+      scroll.zoomScale = 1
+
       let indicator = descendants(viewer.view).compactMap { $0 as? UIPageControl }.first!
       let stale = requests
       requests.removeAll()
@@ -87,6 +95,8 @@ struct NativePhotoZoomTests {
     viewer.viewDidAppear(false)
     let pager = viewer.children.compactMap { $0 as? UIPageViewController }.first!
     let indicator = descendants(viewer.view).compactMap { $0 as? UIPageControl }.first!
+    precondition(viewer.shouldBeginDismissal(location: CGPoint(x: 195, y: 400), velocity: CGVector(dx: 0, dy: 300)), "Videos must dismiss downward too")
+    precondition(!viewer.shouldBeginDismissal(location: CGPoint(x: 195, y: 400), velocity: CGVector(dx: 300, dy: 0)), "Video horizontal scrubbing must not dismiss")
     let first = pager.viewControllers!.first!
     first.loadViewIfNeeded()
     let playerController = first.children.compactMap { $0 as? AVPlayerViewController }.first!
