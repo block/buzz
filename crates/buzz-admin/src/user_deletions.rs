@@ -12,7 +12,7 @@ mod tests {
     use clap::Parser;
 
     #[test]
-    fn batch_preview_requires_explicit_mode_scope_and_valid_keys() {
+    fn batch_preview_defaults_to_print_only_and_requires_scope_and_valid_keys() {
         let args = [
             "buzz-admin",
             "user-deletions",
@@ -21,12 +21,30 @@ mod tests {
             "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
             "--community",
             "00000000-0000-0000-0000-000000000001",
-            "--read-only",
+            "--print-only",
         ];
-        assert!(crate::Cli::try_parse_from(args).is_ok());
-        assert!(crate::Cli::try_parse_from(&args[..7]).is_err());
-        assert!(crate::Cli::try_parse_from(args[..7].iter().copied().chain(["--delete"])).is_ok());
+        for (mode, expected_delete) in [
+            (None, false),
+            (Some("--print-only"), false),
+            (Some("--read-only"), false),
+            (Some("--delete"), true),
+        ] {
+            let parsed = crate::Cli::try_parse_from(args[..7].iter().copied().chain(mode))
+                .expect("valid batch mode");
+            let crate::Command::UserDeletions {
+                command: super::UserDeletionsCommand::PreviewBatches { delete, .. },
+            } = parsed.command
+            else {
+                panic!("expected batch command");
+            };
+            assert_eq!(delete, expected_delete);
+        }
+        assert!(crate::Cli::try_parse_from(&args[..5]).is_err());
         assert!(crate::Cli::try_parse_from(args.into_iter().chain(["--delete"])).is_err());
+        assert!(crate::Cli::try_parse_from(
+            args[..7].iter().copied().chain(["--read-only", "--delete"])
+        )
+        .is_err());
         for extra in [
             ["--batch-size", "0"],
             ["--batch-size", "101"],

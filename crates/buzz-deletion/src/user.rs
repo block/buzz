@@ -15,9 +15,9 @@ pub enum Command {
         /// Explicit community UUID; includes historical content after leaving.
         #[arg(long)]
         community: Uuid,
-        /// Print batches without changing data.
-        #[arg(long, required_unless_present = "delete", conflicts_with = "delete")]
-        read_only: bool,
+        /// Print batches without changing data (default when no mode is supplied).
+        #[arg(long, alias = "read-only", conflicts_with = "delete")]
+        print_only: bool,
         /// Print and commit each batch. Stop relay/workers before using this mode.
         #[arg(long)]
         delete: bool,
@@ -101,14 +101,17 @@ pub async fn run(command: Command) -> Result<i32> {
     if let Command::PreviewBatches {
         pubkey,
         community,
-        read_only,
+        print_only,
         delete,
         relay_pubkey,
         batch_size,
         max_items,
     } = command
     {
-        anyhow::ensure!(read_only != delete, "choose --read-only or --delete");
+        anyhow::ensure!(
+            !(print_only && delete),
+            "--print-only conflicts with --delete"
+        );
         return preview::run(
             buzz_db::user_deletion::preview::PreviewOptions {
                 community,

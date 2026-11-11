@@ -1,15 +1,17 @@
 # Print or delete human-content batches
 
 This operator command selects one human's supported records in one community.
-Choose exactly one mode: `--read-only` prints batches; `--delete` prints each batch
-and commits its operations. Neither mode starts the durable account-deletion
+By default it only prints the inventory in batches and changes no data. Explicit
+`--print-only` does the same; `--delete` prints each batch and commits its operations.
+The two flags cannot be combined. `--read-only` remains an alias for `--print-only`.
+Neither mode starts the durable account-deletion
 workflow, runs migrations, or marks an account erased.
 
 ```sh
 # DATABASE_URL identifies the database. Only public keys are needed.
 cargo run -p buzz-admin -- user-deletions preview-batches \
   --pubkey '<npub-or-hex>' --community '<community-uuid>' \
-  --read-only > batches.jsonl
+  --print-only > batches.jsonl
 
 # Stop the relay and external workers first. This permanently removes rows.
 cargo run -p buzz-admin -- user-deletions preview-batches \
