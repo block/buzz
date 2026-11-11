@@ -491,7 +491,7 @@ async fn dm_writers_require_application_admission() {
     let participants: [&[u8]; 2] = [&[1; 32], &[2; 32]];
     for community in &communities[1..] {
         assert_fenced(
-            super::dm::create_dm(&db.pool, *community, &participants, participants[0])
+            super::dm::create_dm(&db.pool, *community, &participants, participants[0], false)
                 .await
                 .expect_err("DM create must reject"),
         );
@@ -501,9 +501,15 @@ async fn dm_writers_require_application_admission() {
                 .expect_err("DM hide must reject"),
         );
     }
-    super::dm::create_dm(&db.pool, communities[0], &participants, participants[0])
-        .await
-        .expect("active DM create succeeds");
+    super::dm::create_dm(
+        &db.pool,
+        communities[0],
+        &participants,
+        participants[0],
+        false,
+    )
+    .await
+    .expect("active DM create succeeds");
 }
 
 #[tokio::test]
