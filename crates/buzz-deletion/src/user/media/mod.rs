@@ -13,11 +13,9 @@ mod pipeline;
 mod preview;
 mod stage;
 mod storage;
-mod upload;
 pub use command::{configured_storage, run, Options};
 pub use preview::preview;
 pub use stage::{run_stage, StageOptions};
-pub use upload::UploadClaims;
 
 /// Output/execution policy for the media stage.
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -26,18 +24,16 @@ pub enum Mode {
     /// Print saved step-2 inventory and stop before any deletion.
     #[default]
     PrintOnly,
-    /// Print saved step-2 inventory, then execute its protected targets.
+    /// Print saved step-2 inventory, then execute its exact targets.
     Delete,
 }
 
-/// The workflow's safety boundary, distinct from its worker lease. The provider
-/// must verify approved scope/removal fingerprints, storage retention/holds,
-/// upload evidence and crash-persistent hash reservations.
-/// The concrete implementation is used by run_stage. The standalone preview
-/// cannot grant execution authority.
+/// Storage execution with request ownership, upload evidence and retention checks.
+/// The concrete implementation is used by run_stage under offline operation.
+/// The standalone preview cannot grant execution authority.
 #[allow(async_fn_in_trait)]
-pub trait ProtectedMedia {
-    /// Validate the same durable protection and scope before each external action.
+pub trait MediaBackend {
+    /// Validate execution-stage ownership before each external action.
     async fn verify(&self, run: &MediaRun) -> Result<()>;
     /// Validate the completed decisions once before the first storage deletion.
     async fn ready(&self, run: &MediaRun) -> Result<()> {
@@ -55,11 +51,11 @@ pub trait ProtectedMedia {
 /// Apply the classified inventory saved by the shared pipeline.
 /// The caller owns workflow claim, heartbeat and routing.
 /// PrintOnly always returns after printing, including when checks are unresolved.
-pub async fn handle<P: ProtectedMedia>(
+pub async fn handle<P: MediaBackend>(
     store: &MediaDeletionStore,
     run: &MediaRun,
     mode: Mode,
-    protected: &P,
+    backend: &P,
 ) -> Result<()> {
     let files = store
         .load(run)
@@ -72,10 +68,10 @@ pub async fn handle<P: ProtectedMedia>(
     if files.iter().any(|f| f.status == "unknown") {
         bail!("media decisions unresolved; step 3 cannot start");
     }
-    protected.ready(run).await?;
+    backend.ready(run).await?;
     for file in files.iter().filter(|f| f.status == "to_be_deleted") {
         let targets: Vec<MediaTarget> = serde_json::from_value(file.delete_targets_json.clone())?;
-        let result = delete_targets(run, &targets, protected).await;
+        let result = delete_targets(run, &targets, backend).await;
         match result {
             Ok(()) => store.save_execution_outcome(run, file, None).await?,
             Err(error) => {
@@ -86,15 +82,15 @@ pub async fn handle<P: ProtectedMedia>(
             }
         }
     }
-    protected.verify(run).await?;
-    protected.cleanup(run).await?;
+    backend.verify(run).await?;
+    backend.cleanup(run).await?;
     Ok(())
 }
 
-async fn delete_targets<P: ProtectedMedia>(
+async fn delete_targets<P: MediaBackend>(
     run: &MediaRun,
     targets: &[MediaTarget],
-    protected: &P,
+    backend: &P,
 ) -> Result<()> {
     if targets.is_empty() {
         bail!("delete decision has no targets");
@@ -103,20 +99,20 @@ async fn delete_targets<P: ProtectedMedia>(
         if target.version_id.is_empty() || target.version_id == "null" {
             bail!("unversioned deletion target");
         }
-        protected.verify(run).await?;
-        if protected.present(target).await? {
-            protected.verify(run).await?;
-            protected.delete(target).await?;
-            if protected.present(target).await? {
+        backend.verify(run).await?;
+        if backend.present(target).await? {
+            backend.verify(run).await?;
+            backend.delete(target).await?;
+            if backend.present(target).await? {
                 bail!("storage version still present after deletion");
             }
         }
     }
-    protected.verify(run).await?;
+    backend.verify(run).await?;
     Ok(())
 }
 
-/// Exact-version storage operations for a workflow's protected adapter.
+/// Exact-version storage operations for the workflow's media backend.
 /// Listing proves absence of object versions and delete markers alike; a 403,
 /// missing continuation or repeated page is an error, never an absent version.
 pub async fn version_present(media: &MediaStorage, target: &MediaTarget) -> Result<bool> {

@@ -1,8 +1,8 @@
 //! Consistent read-only PostgreSQL inventory. No membership-only filter: departed
 //! users can still have uploads after leaving every channel.
+use super::valid_hash;
 use super::{invalid, MediaFile, MAX_FILES, MAX_FILE_BYTES};
 use crate::{Db, Result};
-use buzz_core::media_inventory::valid_hash;
 use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};

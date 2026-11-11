@@ -473,8 +473,6 @@ async fn insert_event_on(
     event: &Event,
     channel_id: Option<Uuid>,
 ) -> Result<(StoredEvent, bool)> {
-    tx.guard_media(&serde_json::json!({"content":event.content,"tags":event.tags}))
-        .await?;
     let community_id = tx.community();
     let kind_u16 = event.kind.as_u16();
     let kind_u32 = u32::from(kind_u16);
@@ -1940,8 +1938,6 @@ pub(crate) async fn insert_event_with_thread_metadata_tx(
     channel_id: Option<Uuid>,
     thread_meta: Option<ThreadMetadataParams<'_>>,
 ) -> Result<(StoredEvent, bool)> {
-    tx.guard_media(&serde_json::json!({"content":event.content,"tags":event.tags}))
-        .await?;
     let community_id = tx.community();
     let kind_u16 = event.kind.as_u16();
     let kind_u32 = u32::from(kind_u16);

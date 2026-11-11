@@ -116,39 +116,14 @@ impl Db {
         sha256: &str,
         pubkey: &[u8],
     ) -> Result<()> {
-        self.save_media_upload_claim(community, sha256, pubkey, false)
-            .await
-    }
-
-    /// Record verified possession before storage writes without granting uploader
-    /// preview access. Confirmation still follows the existing publication check.
-    pub async fn begin_media_upload(
-        &self,
-        community: CommunityId,
-        sha256: &str,
-        pubkey: &[u8],
-    ) -> Result<()> {
-        self.save_media_upload_claim(community, sha256, pubkey, true)
-            .await
-    }
-
-    async fn save_media_upload_claim(
-        &self,
-        community: CommunityId,
-        sha256: &str,
-        pubkey: &[u8],
-        pending: bool,
-    ) -> Result<()> {
         let mut tx = crate::begin_community_write_transaction(
             &self.pool,
             community,
             crate::observability::WriterOperation::EventWrite,
         )
         .await?;
-        tx.guard_media_uploader(pubkey).await?;
-        crate::media_deletion::guard_hashes(tx.conn(), &[sha256.to_owned()]).await?;
-        sqlx::query("INSERT INTO media_uploaders (community_id, sha256, pubkey, pending) VALUES ($1, $2, $3, $4) ON CONFLICT (community_id, sha256, pubkey) DO UPDATE SET pending=false WHERE media_uploaders.pending AND NOT EXCLUDED.pending")
-            .bind(community.as_uuid()).bind(sha256).bind(pubkey).bind(pending).execute(tx.conn()).await?;
+        sqlx::query("INSERT INTO media_uploaders (community_id, sha256, pubkey) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING")
+            .bind(community.as_uuid()).bind(sha256).bind(pubkey).execute(tx.conn()).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -208,7 +183,7 @@ impl Db {
         sqlx::raw_sql(MEDIA_LOOKUP_SETTINGS_SQL)
             .execute(&mut *tx)
             .await?;
-        let uploaded: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM media_uploaders WHERE community_id=$1 AND sha256=$2 AND pubkey=$3 AND NOT pending)")
+        let uploaded: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM media_uploaders WHERE community_id=$1 AND sha256=$2 AND pubkey=$3)")
             .bind(community.as_uuid()).bind(sha256).bind(pubkey).fetch_one(&mut *tx).await?;
         if uploaded && for_publication {
             return Ok(MediaAccess::Allowed);

@@ -15,14 +15,14 @@ use std::{
 struct Backend {
     present: Mutex<BTreeSet<String>>,
     fail_after_delete: AtomicBool,
-    protected: AtomicBool,
+    owns_stage: AtomicBool,
     deletes: AtomicUsize,
     cleanups: AtomicUsize,
 }
-impl ProtectedMedia for Backend {
+impl MediaBackend for Backend {
     async fn verify(&self, _: &MediaRun) -> Result<()> {
-        if !self.protected.load(Ordering::SeqCst) {
-            bail!("protection lost");
+        if !self.owns_stage.load(Ordering::SeqCst) {
+            bail!("execution ownership lost");
         }
         Ok(())
     }
@@ -118,7 +118,7 @@ async fn print_only_skips_deletion_and_crash_recovery_uses_saved_versions() {
     let backend = Backend {
         present: Mutex::new(BTreeSet::from(["v1".into(), "v2".into()])),
         fail_after_delete: AtomicBool::new(true),
-        protected: AtomicBool::new(true),
+        owns_stage: AtomicBool::new(true),
         deletes: AtomicUsize::new(0),
         cleanups: AtomicUsize::new(0),
     };
@@ -127,10 +127,10 @@ async fn print_only_skips_deletion_and_crash_recovery_uses_saved_versions() {
         .unwrap();
     assert_eq!(backend.deletes.load(Ordering::SeqCst), 0);
     assert_eq!(backend.cleanups.load(Ordering::SeqCst), 0);
-    backend.protected.store(false, Ordering::SeqCst);
+    backend.owns_stage.store(false, Ordering::SeqCst);
     assert!(handle(&store, &run, Mode::Delete, &backend).await.is_err());
     assert_eq!(backend.deletes.load(Ordering::SeqCst), 0);
-    backend.protected.store(true, Ordering::SeqCst);
+    backend.owns_stage.store(true, Ordering::SeqCst);
     assert!(handle(&store, &run, Mode::Delete, &backend).await.is_err());
     let pending = store.load(&run).await.unwrap().unwrap().remove(0);
     assert_eq!(pending.status, "to_be_deleted");

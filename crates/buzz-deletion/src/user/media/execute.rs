@@ -39,7 +39,7 @@ pub(super) async fn run(
         error = renewal => Err(error.into()),
     };
     // No detached heartbeat remains. Failed runs retain their saved targets and
-    // reservations; the next invocation claims a new generation and resumes.
+    // progress; the next invocation claims a new generation and resumes.
     let released = store.release(&lease).await;
     match (result, released) {
         (Err(error), Err(release)) => {
@@ -71,12 +71,6 @@ async fn execute(
             stage.stage
         );
     }
-    let scope = db
-        .user_media_scope(&options.human, options.include_owned_agents)
-        .await?;
-    db.user_deletion_store()
-        .verify_user_gate(lease, &scope)
-        .await?;
     if stage.status == "completed" {
         if stage.metadata_json["binding"] != options.binding()?
             || stage.metadata_json["result"]["media_deleted"] != true

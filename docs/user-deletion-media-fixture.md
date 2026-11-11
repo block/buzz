@@ -25,7 +25,7 @@ fresh disposable database/bucket and manifest rather than treating a partial
 seed as complete. It never starts, stops, resets or deletes services.
 
 Six cases cover exclusive media, same-community sharing, cross-community
-sharing, preservation by other-community metadata, an unrelated survivor file,
+sharing, other-community metadata without another uploader, an unrelated survivor file,
 and an unposted target upload attributed only by its storage upload record.
 The exclusive file has two original versions, a thumbnail, metadata and an
 upload record. Target and survivor uploader rows and sticky publication markers

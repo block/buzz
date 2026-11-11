@@ -33,8 +33,8 @@ impl StageOptions {
 /// Run all three steps against real PostgreSQL and storage. The workflow owns
 /// the approved request lease and heartbeat, and starts the purge_media stage.
 /// PrintOnly observes without writing source data or media journal records and
-/// fails if any decision is unresolved. Delete verifies the completed user gate,
-/// reserves hashes, revalidates upload claims, and deletes exact versions.
+/// fails if any decision is unresolved. Delete validates execution ownership,
+/// revalidates upload claims, and deletes exact versions with all writers stopped.
 /// The caller persists the returned summary in its own workflow journal.
 pub async fn run_stage(
     db: &Db,
@@ -61,9 +61,6 @@ pub async fn run_stage(
     let scope = db
         .user_media_scope(&options.human, options.include_owned_agents)
         .await?;
-    db.user_deletion_store()
-        .verify_user_gate(lease, &scope)
-        .await?;
     let store = db.media_deletion_store();
     let run = store
         .execution_run(lease, stage, options.binding()?)
@@ -75,9 +72,6 @@ pub async fn run_stage(
         pipeline::Journal::Execution(&store, &run, &scope),
     )
     .await?;
-    db.user_deletion_store()
-        .verify_user_gate(lease, &scan.scope)
-        .await?;
     let markers = scan
         .files
         .iter()
@@ -100,7 +94,6 @@ pub async fn run_stage(
         store: &store,
         scope,
         db,
-        lease,
         options: &options,
         markers,
     };
@@ -146,18 +139,13 @@ struct StorageDeletion<'a> {
     store: &'a MediaDeletionStore,
     scope: SubjectScope,
     db: &'a Db,
-    lease: &'a buzz_db::entity_deletion::EntityLease,
     options: &'a StageOptions,
     markers: BTreeSet<(String, String)>,
 }
 
-impl ProtectedMedia for StorageDeletion<'_> {
+impl MediaBackend for StorageDeletion<'_> {
     async fn verify(&self, run: &MediaRun) -> Result<()> {
-        self.db
-            .user_deletion_store()
-            .verify_user_gate(self.lease, &self.scope)
-            .await?;
-        self.store.verify_reserved(run).await?;
+        self.store.verify_execution(run).await?;
         Ok(())
     }
     async fn ready(&self, run: &MediaRun) -> Result<()> {
@@ -173,10 +161,8 @@ impl ProtectedMedia for StorageDeletion<'_> {
             return Ok(());
         }
         // Separate from classification: only candidate DB upload evidence is
-        // reread. Admission persists a claim before storage writes. The offline
-        // prerequisite and completed drain exclude in-flight storage writers;
-        // reservations exclude subsequent claims. Saved exact versions remain
-        // immutable, including across interrupted deletions.
+        // reread. The caller must keep all source and storage writers stopped.
+        // Saved exact versions remain immutable across interrupted deletions.
         let live = self
             .db
             .scan_media_uploads(
@@ -215,7 +201,6 @@ impl ProtectedMedia for StorageDeletion<'_> {
     }
     async fn cleanup(&self, run: &MediaRun) -> Result<()> {
         self.store.cleanup_uploaders(run).await?;
-        self.store.release_reserved(run).await?;
         Ok(())
     }
 }

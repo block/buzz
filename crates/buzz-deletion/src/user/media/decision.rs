@@ -1,6 +1,6 @@
 //! The same decision procedure is used by previews and execution. A preview
-//! records what the current observation permits; execution additionally reserves
-//! the files and revalidates candidate upload claims before deletion.
+//! records what the current observation permits; execution additionally
+//! revalidates candidate upload claims before deletion.
 use super::*;
 use buzz_db::media_deletion::MediaSource;
 use buzz_media::{ObjectVersionEntry, ObjectVersionKind};

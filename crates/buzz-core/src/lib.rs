@@ -89,6 +89,3 @@ pub mod artifact_sync;
 
 /// Local media reference extraction.
 pub mod media;
-
-/// Media inventory extraction (does not grant read access).
-pub mod media_inventory;

@@ -1727,9 +1727,6 @@ impl AppState {
         media_storage: MediaStorage,
     ) -> (Self, AuditShutdownHandle) {
         let nip_fi_policy = Arc::new(db.clone());
-        let media_storage = media_storage.with_upload_admission(Arc::new(
-            buzz_deletion::user::media::UploadClaims(db.clone()),
-        ));
         let max_connections = config.max_connections;
         let max_concurrent_handlers = config.max_concurrent_handlers;
         let search_arc = Arc::new(search);

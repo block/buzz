@@ -481,13 +481,11 @@ impl Db {
         community_id: CommunityId,
         icon: Option<&str>,
     ) -> Result<()> {
-        let connection = crate::observability::acquire_writer(
+        let mut connection = crate::observability::acquire_writer(
             &self.pool,
             crate::observability::WriterOperation::EventWrite,
         )
         .await?;
-        let mut tx = sqlx::Transaction::begin(connection, None).await?;
-        crate::media_deletion::guard_payload(&mut tx, &serde_json::json!(icon)).await?;
         sqlx::query(
             r#"
             UPDATE communities
@@ -497,9 +495,8 @@ impl Db {
         )
         .bind(community_id.as_uuid())
         .bind(icon)
-        .execute(&mut *tx)
+        .execute(&mut *connection)
         .await?;
-        tx.commit().await?;
         Ok(())
     }
 

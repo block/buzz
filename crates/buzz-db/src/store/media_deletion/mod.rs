@@ -6,10 +6,16 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 mod execution;
-mod reservation;
-pub use reservation::{guard_hashes, guard_payload};
 mod scan;
 pub use scan::{MediaScan, MediaScanBudget, MediaSource, SubjectScope};
+
+/// Whether a value is a canonical file hash.
+pub fn valid_hash(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
 
 /// Maximum journal payload per file; exceeding it fails rather than truncates.
 pub const MAX_FILE_BYTES: usize = 1_048_576;

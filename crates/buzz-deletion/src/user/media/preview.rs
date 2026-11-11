@@ -3,10 +3,10 @@ use super::*;
 use buzz_db::Db;
 use serde_json::Value;
 
-/// Observe and classify media without writing source data, a journal, fences,
-/// reservations, or workflow progress. The caller prints the returned inventory
+/// Observe and classify media without writing source data, a journal or
+/// workflow progress. The caller prints the returned inventory
 /// and treats `decision_complete=false` as unresolved, never as authorization.
-/// Execution must independently discover and protect its own inventory.
+/// Execution must independently discover and journal its own inventory.
 pub async fn preview(db: &Db, media: &MediaStorage, options: &StageOptions) -> Result<Value> {
     if options.mode != Mode::PrintOnly {
         bail!("media preview requires print-only mode");

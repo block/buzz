@@ -12,7 +12,7 @@ pub(super) enum Journal<'a> {
 }
 
 /// Resume collected evidence or collect it once, then classify that inventory.
-/// Only journal/checkpoint and reservation operations depend on execution mode.
+/// Only journal/checkpoint operations depend on execution mode.
 pub(super) async fn prepare(
     db: Option<&Db>,
     media: &MediaStorage,
@@ -68,9 +68,6 @@ pub(super) async fn prepare(
             bail!("saved subject scope changed");
         }
         store.validate_removal_scope(run).await?;
-        // Hash-level coordination with other uploaders/deletion workers. The
-        // request-wide user gate must already have completed before this flow.
-        store.reserve(run).await?;
     }
     for file in scan.files.iter_mut().filter(|f| f.status == "unknown") {
         let decided = match decision::decide(media, file.clone()).await {

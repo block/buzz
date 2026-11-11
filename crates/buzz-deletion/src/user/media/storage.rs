@@ -49,7 +49,7 @@ pub(super) async fn supplement(
                 None
             };
             let Some(hash) = hash
-                .filter(|h| buzz_core::media_inventory::valid_hash(h))
+                .filter(|h| buzz_db::media_deletion::valid_hash(h))
                 .map(str::to_owned)
             else {
                 continue;

@@ -140,7 +140,6 @@ pub async fn create_channel(
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
-    tx.guard_media(&serde_json::json!(description)).await?;
 
     sqlx::query(
         r#"
@@ -368,7 +367,6 @@ async fn insert_channel_rows(
         unlisted,
         members,
     } = channel;
-    tx.guard_media(&serde_json::json!(description)).await?;
     let community_id = tx.community();
     if created_by.len() != 32 {
         return Err(DbError::InvalidData(format!(
@@ -586,7 +584,6 @@ pub async fn set_canvas(
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
-    tx.guard_media(&serde_json::json!(canvas)).await?;
     let rows = sqlx::query(
         "UPDATE channels SET canvas = $1 WHERE community_id = $2 AND id = $3 AND deleted_at IS NULL",
     )
@@ -1311,8 +1308,6 @@ async fn update_channel_on(
     w.check_covers(&updates)?;
     let channel_id = w.channel_id;
     let tx = &mut *w.tx;
-    tx.guard_media(&serde_json::json!(updates.description))
-        .await?;
     let community_id = tx.community();
     if let Some(name) = updates.name.as_mut() {
         *name = buzz_core::channel::canonical_channel_name(name).to_owned();
@@ -1455,7 +1450,6 @@ pub async fn set_topic(
 async fn set_topic_on(w: &mut ChannelSettingsWriter<'_>, topic: &str, set_by: &[u8]) -> Result<()> {
     let channel_id = w.channel_id;
     let tx = &mut *w.tx;
-    tx.guard_media(&serde_json::json!(topic)).await?;
     let result = sqlx::query(
         "UPDATE channels SET topic = $1, topic_set_by = $2, topic_set_at = NOW() \
          WHERE community_id = $3 AND id = $4 AND deleted_at IS NULL",
@@ -1500,7 +1494,6 @@ async fn set_purpose_on(
 ) -> Result<()> {
     let channel_id = w.channel_id;
     let tx = &mut *w.tx;
-    tx.guard_media(&serde_json::json!(purpose)).await?;
     let result = sqlx::query(
         "UPDATE channels SET purpose = $1, purpose_set_by = $2, purpose_set_at = NOW() \
          WHERE community_id = $3 AND id = $4 AND deleted_at IS NULL",

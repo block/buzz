@@ -55,7 +55,7 @@ pub async fn run(options: Options) -> Result<i32> {
     };
     let journal_url = crate::required_env("DATABASE_URL")?;
     let source_url = if options.delete {
-        // Execution reads and reserves through the same writable database. Never
+        // Execution reads and journals through the same writable database. Never
         // silently ignore a preview's separately configured source connection.
         if std::env::var("BUZZ_MEDIA_SOURCE_DATABASE_URL").is_ok_and(|source| source != journal_url)
         {

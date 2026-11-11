@@ -200,21 +200,6 @@ pub async fn insert_report(
         ReportTarget::Blob(sha256) => ("blob", None, None, Some(sha256.as_slice())),
     };
 
-    tx.guard_media(&serde_json::json!([
-        report.note,
-        target_blob_sha256.map(hex::encode)
-    ]))
-    .await?;
-    if let Some(id) = target_event_id {
-        let payload: Option<serde_json::Value> = sqlx::query_scalar("SELECT jsonb_build_object('content',content,'tags',tags) FROM events WHERE community_id=$1 AND id=$2 LIMIT 1")
-            .bind(community.as_uuid()).bind(id).fetch_optional(tx.conn()).await?;
-        if let Some(payload) = payload {
-            tx.guard_media(&payload).await?;
-        }
-    }
-    if let Some(hash) = target_blob_sha256 {
-        crate::media_deletion::guard_hashes(tx.conn(), &[hex::encode(hash)]).await?;
-    }
     let initial_status = if report.report_type == "illegal" {
         "escalated"
     } else {
@@ -798,11 +783,6 @@ pub async fn insert_action(
         community,
         crate::observability::WriterOperation::Authorization,
     )
-    .await?;
-    tx.guard_media(&serde_json::json!([
-        action.public_reason,
-        action.private_reason
-    ]))
     .await?;
     let row = sqlx::query(
         r#"

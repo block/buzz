@@ -25,9 +25,10 @@ impl MediaDeletionStore {
         .await?;
         for file in evidence {
             let sources: Vec<MediaSource> = serde_json::from_value(file["sources"].clone())?;
-            for source in sources.iter().filter(|s| {
-                s.selected_subject && !s.surviving && s.table != "workflow_trigger_runs"
-            }) {
+            for source in sources
+                .iter()
+                .filter(|s| s.selected_subject && !s.surviving)
+            {
                 if !source.community.is_some_and(|id| approved.contains(&id)) {
                     return Err(invalid(
                         "discovered source is outside the approved community inventory",
@@ -39,9 +40,20 @@ impl MediaDeletionStore {
         Ok(())
     }
 
-    /// Bind a caller-started, approved purge_media stage to a protected inventory.
-    /// The workflow supplies and maintains serving/media protections separately
-    /// from its request lease; a request lease alone never fences uploads.
+    /// Verify the approved request lease and current execution-stage ownership.
+    pub async fn verify_execution(&self, run: &MediaRun) -> Result<()> {
+        if run.lease.is_none() {
+            return Err(invalid("preview is not executable"));
+        }
+        let mut tx = self.pool.begin().await?;
+        self.lock(&mut tx, run).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Bind a caller-started, approved purge_media stage to its saved inventory.
+    /// The caller must keep all source and storage writers stopped throughout
+    /// execution; the request lease only coordinates this deletion request.
     pub async fn execution_run(
         &self,
         lease: &EntityLease,
@@ -99,7 +111,7 @@ impl MediaDeletionStore {
         if metadata["media_discovery"]["complete"] != true {
             return Err(invalid("discovery unfinished"));
         }
-        let changed=sqlx::query("UPDATE entity_deletion_media_files SET status=$4,reserved=CASE WHEN $4='dont_delete' THEN false ELSE reserved END,evidence_json=$5,delete_targets_json=$6,reason=$7,last_error=$8,updated_at=now() WHERE stage_id=$1 AND storage_namespace=$2 AND file_hash=$3 AND status='unknown'")
+        let changed=sqlx::query("UPDATE entity_deletion_media_files SET status=$4,evidence_json=$5,delete_targets_json=$6,reason=$7,last_error=$8,updated_at=now() WHERE stage_id=$1 AND storage_namespace=$2 AND file_hash=$3 AND status='unknown'")
             .bind(run.id).bind(&file.storage_namespace).bind(&file.file_hash).bind(&file.status).bind(&file.evidence_json).bind(&file.delete_targets_json).bind(&file.reason).bind(&file.last_error).execute(&mut *tx).await?;
         if changed.rows_affected() != 1 {
             return Err(invalid("decision row is no longer unknown"));
@@ -125,6 +137,39 @@ impl MediaDeletionStore {
             .bind(run.id).bind(&file.storage_namespace).bind(&file.file_hash).bind(&file.delete_targets_json).bind(error).execute(&mut *tx).await?;
         if changed.rows_affected() != 1 {
             return Err(invalid("execution row or targets changed"));
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Remove only captured, departing SQL uploader claims. Audit history and
+    /// sticky publication records remain intact, including for retained files.
+    pub async fn cleanup_uploaders(&self, run: &MediaRun) -> Result<()> {
+        if run.lease.is_none() {
+            return Err(invalid("preview cannot remove uploader proofs"));
+        }
+        let mut tx = self.pool.begin().await?;
+        self.lock(&mut tx, run).await?;
+        let rows: Vec<(String, String, Value)> = sqlx::query_as("SELECT file_hash,status,evidence_json FROM entity_deletion_media_files WHERE stage_id=$1 FOR UPDATE")
+            .bind(run.id).fetch_all(&mut *tx).await?;
+        for (hash, status, evidence) in rows {
+            if !matches!(status.as_str(), "dont_delete" | "deleted") {
+                return Err(invalid("media work unfinished"));
+            }
+            let sources: Vec<MediaSource> = serde_json::from_value(evidence["sources"].clone())?;
+            for source in sources
+                .iter()
+                .filter(|s| s.table == "media_uploaders" && s.selected_subject && !s.surviving)
+            {
+                if source.key[0] != hash {
+                    return Err(invalid("uploader proof hash mismatch"));
+                }
+                let actor = source.key[1]
+                    .as_str()
+                    .ok_or_else(|| invalid("invalid uploader proof key"))?;
+                sqlx::query("DELETE FROM media_uploaders WHERE community_id=$1 AND sha256=$2 AND pubkey=decode($3,'hex')")
+                    .bind(source.community).bind(&hash).bind(actor).execute(&mut *tx).await?;
+            }
         }
         tx.commit().await?;
         Ok(())

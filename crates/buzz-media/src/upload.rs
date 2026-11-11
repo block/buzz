@@ -88,9 +88,6 @@ where
     .await
     .map_err(|_| MediaError::Internal)??;
 
-    storage
-        .admit_upload(ctx.community(), &sha256, auth_event.pubkey.as_bytes())
-        .await?;
     let key = format!("{sha256}.{ext}");
     let meta_key = MediaStorage::ctx_sidecar_key(ctx, &sha256);
 
@@ -426,9 +423,6 @@ pub async fn process_video_upload(
             .await
             .map_err(|_| MediaError::Internal)??;
 
-    storage
-        .admit_upload(ctx.community(), &sha256_hex, auth_event.pubkey.as_bytes())
-        .await?;
     let ext = "mp4";
     let key = format!("{sha256_hex}.{ext}");
     let meta_key = MediaStorage::ctx_sidecar_key(ctx, &sha256_hex);
@@ -609,46 +603,6 @@ mod tests {
             upload_ip_header: None,
             upload_port_header: None,
         }
-    }
-
-    #[tokio::test]
-    async fn upload_admission_rejects_verified_bytes_before_storage_access() {
-        use crate::storage::UploadAdmission;
-        use std::{future::Future, pin::Pin, sync::Arc};
-        struct Deny;
-        impl UploadAdmission for Deny {
-            fn admit<'a>(
-                &'a self,
-                _: buzz_core::CommunityId,
-                _: &'a str,
-                _: &'a [u8],
-            ) -> Pin<Box<dyn Future<Output = Result<(), MediaError>> + Send + 'a>> {
-                Box::pin(async { Err(MediaError::AuthorizationUnavailable) })
-            }
-        }
-        let mut config = test_config();
-        config.s3_endpoint = "http://127.0.0.1:1".into();
-        config.s3_bucket = "fixture".into();
-        config.s3_access_key = "fixture".into();
-        config.s3_secret_key = "fixture".into();
-        let storage = MediaStorage::new(&config)
-            .unwrap()
-            .with_upload_admission(Arc::new(Deny));
-        let ctx = TenantContext::resolved(
-            buzz_core::CommunityId::from_uuid(uuid::Uuid::nil()),
-            "example.org",
-        );
-        let body = Bytes::from_static(b"test attachment");
-        let hash = hex::encode(Sha256::digest(&body));
-        let event = nostr::EventBuilder::new(nostr::Kind::from(24242), "upload")
-            .tags([nostr::Tag::parse(["x", hash.as_str()]).unwrap()])
-            .sign_with_keys(&nostr::Keys::generate())
-            .unwrap();
-        let result = process_file_upload(&storage, &config, &ctx, &event, body, None).await;
-        assert!(
-            matches!(result, Err(MediaError::AuthorizationUnavailable)),
-            "{result:?}"
-        );
     }
 
     /// A 640x640 image, so its thumbnail is 320x320, whose left half has the

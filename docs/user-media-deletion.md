@@ -5,11 +5,11 @@ only copied its URL, deleting Alice deletes eligible stored versions and Bob's
 link stops working. If Bob also uploaded identical bytes, his upload record keeps
 the file. The decision considers uploaders across communities sharing storage.
 
-The workflow runs `gate_user(None)` first, then `purge_media(None)` once for the
-request, then community content/account stages. Media verifies the completed
-gate; it never installs a user fence or writes a gate receipt. Relay and external
-workers must remain stopped throughout destructive execution. Uploader fences
-and hash reservations do not provide complete online user-write blocking.
+The workflow reserves `gate_user(None)` as the first slot, then
+`purge_media(None)` once for the request, then community content/account stages.
+The gate implementation is separate work: the current destructive workflow
+stops at that unimplemented slot. Media implements no gating or serving-write
+guards. Relay and external writers must remain stopped throughout deletion.
 
 ## Preview and connections
 
@@ -52,7 +52,7 @@ The [source query](../crates/buzz-db/src/store/media_deletion/sources.sql) reads
 
 | Source | Evidence |
 |---|---|
-| `media_uploaders` | Community, file hash and uploader, including pending/unposted claims |
+| `media_uploaders` | Community, file hash and uploader, including uploads not posted in messages |
 | `audit_log`, action `media_uploaded` | Community, actor and matching object/detail hash |
 | Storage `_uploads/<community>/<hash>/<event>.json` | Validated uploader and hash at an exact object version |
 
@@ -90,12 +90,12 @@ cargo run -p buzz-admin -- user-deletions media \
   --pubkey <npub> --delete --offline --request-id <approved-request-uuid>
 ```
 
-The approved request must already have completed its separate request-wide gate
-and reached `purge_media`. The command verifies that gate, subject and scope,
-claims/renews the request lease, runs media, records success and releases the
-lease. It does not advance the workflow. `--offline` asserts that relay and
-external workers remain stopped; checking drained leases alone cannot enforce
-that operator obligation. A completed-stage retry also verifies the gate.
+The approved request must already be at `purge_media`. The command verifies the
+subject and approved scope, claims/renews the request lease, runs media, records
+success and releases the lease. It does not advance the workflow or implement
+its missing gate. `--offline` asserts that relay and external writers have stopped
+and their in-flight work has finished. They must stay stopped through retries.
+The command does not enforce this operator obligation.
 
 Execution uses the serving writable `DATABASE_URL`; the source URL must be unset
 or identical. The stage binding includes `policy="upload-ownership-v1"` and
@@ -108,9 +108,7 @@ Zero candidates still gets a receipt. Preview's parent request is terminal and
 its stage is never current, so it cannot authorize execution. File statuses are
 `unknown`, `dont_delete`, `to_be_deleted` and `deleted`.
 
-Delete validates approved source communities and reserves candidate hashes
-against competing upload/deletion workers. These reservations coordinate files;
-they do not install another user gate. Classification uses saved evidence.
+Delete validates approved source communities. Classification uses saved evidence.
 Immediately before applying saved targets, a separate bounded query revalidates
 only the candidate hashes' database upload claims. New other-uploader or changed
 source evidence stops execution; it never replaces already-frozen targets.
@@ -118,24 +116,23 @@ Retries reuse the discovery and targets, and repeat this candidate revalidation.
 The audit schema currently has no action/actor/object-hash lookup index, so a
 hash predicate bounds returned evidence without guaranteeing an indexed read.
 
-Every relay upload records its claim before storage reads/writes. Reservations
-exclude new claims after acquisition; the offline prerequisite and completed
-drain exclude in-flight storage writers. Storage attribution from discovery is
-retained, and execution checks presence and retention for each exact target
-version. No second bucket-wide discovery is performed. External SQL/storage
-writers must also remain stopped.
+Storage attribution from discovery is retained, and execution checks presence
+and retention for each exact target version. No second bucket-wide discovery is
+performed. The caller must exclude concurrent source/storage writes and other
+deletion jobs operating on the same storage. A request lease coordinates only
+workers for that request; it does not block other requests or normal writers.
 
 Byte-bearing versions are deleted before markers. After deletion, listing must
 prove each exact version absent; permission errors/timeouts are not absence.
 Only then is the file marked `deleted`. A lost acknowledgement or interrupted
 multi-version deletion retries those same versions without deleting replacements.
 After all selected work succeeds, cleanup removes captured departing
-`media_uploaders` rows, including for kept files, and releases reservations.
+`media_uploaders` rows, including for kept files.
 Audit history and `media_publications` remain. The media handler does not delete
 messages, profiles or automations.
 
 Every journal write verifies generation and execution lease. Unfinished work
-retains reservations and immutable targets. A `deleted` result means the selected
+retains immutable targets and progress. A `deleted` result means the selected
 versions are absent, not that intentionally kept files or future reuploads have
 been erased. This is a media stage, not proof of complete account erasure.
 

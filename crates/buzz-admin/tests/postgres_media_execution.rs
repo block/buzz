@@ -1,5 +1,5 @@
 //! Concrete handler through PostgreSQL and the S3 HTTP protocol, including lost
-//! acknowledgements. No fake ProtectedMedia implementation is used here.
+//! acknowledgements. No fake MediaBackend implementation is used here.
 use axum::{
     extract::{Query, State},
     http::{Method, StatusCode},
@@ -96,7 +96,7 @@ async fn s3(
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn actual_handler_checks_retention_blocks_writers_and_recovers_deleted_versions() {
+async fn actual_handler_checks_retention_and_recovers_deleted_versions() {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let url = std::env::var("BUZZ_TEST_DATABASE_URL")
         .or_else(|_| std::env::var("DATABASE_URL"))
@@ -323,37 +323,13 @@ async fn actual_handler_checks_retention_blocks_writers_and_recovers_deleted_ver
         "denied retention must not authorize deletion"
     );
     assert!(state.deletes.lock().unwrap().is_empty());
-    let saved: (String, bool) =
-        sqlx::query_as("SELECT status,reserved FROM entity_deletion_media_files WHERE stage_id=$1")
+    let saved: String =
+        sqlx::query_scalar("SELECT status FROM entity_deletion_media_files WHERE stage_id=$1")
             .bind(stage.id)
             .fetch_one(db.pool())
             .await
             .unwrap();
-    assert_eq!(saved, ("unknown".into(), true));
-    // Reservation persists after the first handler has returned. Both an upload
-    // claim and an actual signed event in a different community must be refused.
-    let outsider = nostr::Keys::generate();
-    let other = buzz_core::CommunityId::from_uuid(other);
-    assert!(db
-        .record_media_upload(other, &hash, outsider.public_key().as_bytes())
-        .await
-        .is_err());
-    let event = nostr::EventBuilder::new(nostr::Kind::TextNote, format!("/media/{hash}.jpg"))
-        .sign_with_keys(&outsider)
-        .unwrap();
-    assert!(db.insert_event(other, &event, None).await.is_err());
-    // Existing serving reservations still reject conflicting writes even when
-    // a URL encodes each hash character. Inventory does not scan these links.
-    let embedded = format!(
-        r#"{{"url":"/media/{}.jpg"}}"#,
-        hash.chars()
-            .map(|c| format!("\\u{:04x}", c as u32))
-            .collect::<String>()
-    );
-    let encoded = nostr::EventBuilder::new(nostr::Kind::TextNote, embedded)
-        .sign_with_keys(&outsider)
-        .unwrap();
-    assert!(db.insert_event(other, &encoded, None).await.is_err());
+    assert_eq!(saved, "unknown");
     state.denied_retention.store(false, Ordering::SeqCst);
     let second = invoke(&human).output().await.unwrap();
     assert!(
@@ -393,9 +369,14 @@ async fn actual_handler_checks_retention_blocks_writers_and_recovers_deleted_ver
         2,
         "already removed version is not deleted again"
     );
-    let finished: (String,bool,serde_json::Value) = sqlx::query_as("SELECT status,reserved,delete_targets_json FROM entity_deletion_media_files WHERE stage_id=$1")
-        .bind(stage.id).fetch_one(db.pool()).await.unwrap();
-    assert_eq!(finished, ("deleted".into(), false, saved.1));
+    let finished: (String, serde_json::Value) = sqlx::query_as(
+        "SELECT status,delete_targets_json FROM entity_deletion_media_files WHERE stage_id=$1",
+    )
+    .bind(stage.id)
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(finished, ("deleted".into(), saved.1));
     let proofs: i64 =
         sqlx::query_scalar("SELECT count(*) FROM media_uploaders WHERE community_id=$1")
             .bind(community)
@@ -403,6 +384,8 @@ async fn actual_handler_checks_retention_blocks_writers_and_recovers_deleted_ver
             .await
             .unwrap();
     assert_eq!(proofs, 0);
+    let outsider = nostr::Keys::generate();
+    let other = buzz_core::CommunityId::from_uuid(other);
     db.record_media_upload(other, &hash, outsider.public_key().as_bytes())
         .await
         .unwrap();

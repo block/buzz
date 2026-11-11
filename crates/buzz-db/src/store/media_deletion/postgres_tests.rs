@@ -139,29 +139,7 @@ async fn exact_execution_plan_survives_failure_and_cannot_be_replaced() {
         .publish(&run, &[file.clone()], json!({}))
         .await
         .unwrap();
-    // A writer admitted before reservation holds its shared lock until commit.
-    // Reservation must wait, then reject later writers using its durable flag.
-    let mut writer = db.pool().begin().await.unwrap();
-    guard_hashes(&mut writer, std::slice::from_ref(&file.file_hash))
-        .await
-        .unwrap();
-    let reserve = store.reserve(&run);
-    tokio::pin!(reserve);
-    assert!(
-        tokio::time::timeout(Duration::from_millis(100), &mut reserve)
-            .await
-            .is_err()
-    );
-    writer.commit().await.unwrap();
-    reserve.await.unwrap();
-    store.verify_reserved(&run).await.unwrap();
-    let mut later = db.pool().begin().await.unwrap();
-    assert!(
-        guard_hashes(&mut later, std::slice::from_ref(&file.file_hash))
-            .await
-            .is_err()
-    );
-    later.rollback().await.unwrap();
+    store.verify_execution(&run).await.unwrap();
     file.status = "to_be_deleted".into();
     file.delete_targets_json = json!([{"key":format!("{}.jpg",file.file_hash),"version_id":"v1"}]);
     store.save_execution_decision(&run, &file).await.unwrap();
@@ -187,8 +165,8 @@ async fn exact_execution_plan_survives_failure_and_cannot_be_replaced() {
         store.load(&run).await.unwrap().unwrap()[0].status,
         "deleted"
     );
-    store.release_reserved(&run).await.unwrap();
-    assert!(store.verify_reserved(&run).await.is_err());
+    requests.release(&lease).await.unwrap();
+    assert!(store.verify_execution(&run).await.is_err());
 }
 
 #[tokio::test]
