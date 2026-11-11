@@ -10549,103 +10549,120 @@ void main() {
       },
     );
 
-    testWidgets(
-      'Codex DM hangup leaves cleanup to relay with a one-owner snapshot',
-      (tester) async {
-        final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-        final media = _HuddleTestMedia();
-        final transport = _HuddleTestTransport(
-          peers: const {2: HuddlePeer(pubkey: 'self', peerIndex: 2, epoch: 0)},
-        );
-        final relaySession = _ReconnectingRelaySession();
-        String? leftChannelId;
-        String? archivedChannelId;
-
-        await tester.pumpWidget(
-          _buildTestable(
-            channel: Channel(
-              id: _channelId,
-              name: 'Codex',
-              description: '',
-              channelType: 'dm',
-              visibility: 'private',
-              createdBy: 'self',
-              createdAt: DateTime(2025),
-              memberCount: 2,
-              participants: const ['Self', 'Agent'],
-              participantPubkeys: const ['self', 'agent'],
-              isMember: true,
-            ),
-            voiceAgents: const {'agent'},
-            huddleHumanCountLoader: (_) async => 1,
-            messages: [
-              _huddleMsg(
-                id: 'last-human-call-leave',
-                kind: EventKind.huddleStarted,
-                pubkey: 'desktop',
-                createdAt: now,
-              ),
-            ],
-            users: const {
-              'desktop': UserProfile(pubkey: 'desktop'),
-              'agent': UserProfile(pubkey: 'agent', displayName: 'Pollen'),
-              'self': UserProfile(pubkey: 'self'),
+    for (final scenario in [
+      (anotherDevice: false, otherHuman: false),
+      (anotherDevice: true, otherHuman: false),
+      (anotherDevice: false, otherHuman: true),
+    ]) {
+      final anotherDevice = scenario.anotherDevice;
+      final shouldEnd = !anotherDevice && !scenario.otherHuman;
+      testWidgets(
+        'Codex DM hangup ends only after the last human device: $scenario',
+        (tester) async {
+          final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+          final media = _HuddleTestMedia();
+          final transport = _HuddleTestTransport(
+            peers: {
+              2: const HuddlePeer(pubkey: 'self', peerIndex: 2, epoch: 0),
+              if (anotherDevice)
+                3: const HuddlePeer(pubkey: 'self', peerIndex: 3, epoch: 0),
             },
-            relayConfigNotifier: _HuddleRelayConfigNotifier(),
-            relaySessionNotifier: relaySession,
-            huddleCurrentPubkey: 'self',
-            huddleMembers: [
-              ChannelMember(
-                pubkey: 'self',
-                role: 'member',
-                joinedAt: DateTime(2025),
+          );
+          final relaySession = _ReconnectingRelaySession();
+          String? leftChannelId;
+          String? archivedChannelId;
+
+          await tester.pumpWidget(
+            _buildTestable(
+              channel: Channel(
+                id: _channelId,
+                name: 'Codex',
+                description: '',
+                channelType: 'dm',
+                visibility: 'private',
+                createdBy: 'self',
+                createdAt: DateTime(2025),
+                memberCount: 2,
+                participants: const ['Self', 'Agent'],
+                participantPubkeys: const ['self', 'agent'],
+                isMember: true,
               ),
-              ChannelMember(
-                pubkey: 'agent',
-                role: 'bot',
-                joinedAt: DateTime(2025),
+              voiceAgents: scenario.otherHuman ? const {} : const {'agent'},
+              huddleHumanCountLoader: (_) async => scenario.otherHuman ? 2 : 1,
+              messages: [
+                _huddleMsg(
+                  id: 'last-human-call-leave',
+                  kind: EventKind.huddleStarted,
+                  pubkey: 'desktop',
+                  createdAt: now,
+                ),
+              ],
+              users: const {
+                'desktop': UserProfile(pubkey: 'desktop'),
+                'agent': UserProfile(pubkey: 'agent', displayName: 'Pollen'),
+                'self': UserProfile(pubkey: 'self'),
+              },
+              relayConfigNotifier: _HuddleRelayConfigNotifier(),
+              relaySessionNotifier: relaySession,
+              huddleCurrentPubkey: 'self',
+              huddleMembers: [
+                ChannelMember(
+                  pubkey: 'self',
+                  role: 'member',
+                  joinedAt: DateTime(2025),
+                ),
+                ChannelMember(
+                  pubkey: 'agent',
+                  role: scenario.otherHuman ? 'member' : 'bot',
+                  joinedAt: DateTime(2025),
+                ),
+              ],
+              huddleMediaFactory: () => media,
+              huddleTransportFactory: (_) => transport,
+              createChannelActions: (ref) => _FakeChannelActions(
+                ref,
+                onLeaveChannel: (channelId) async => leftChannelId = channelId,
+                onArchiveChannel: (channelId) async =>
+                    archivedChannelId = channelId,
               ),
-            ],
-            huddleMediaFactory: () => media,
-            huddleTransportFactory: (_) => transport,
-            createChannelActions: (ref) => _FakeChannelActions(
-              ref,
-              onLeaveChannel: (channelId) async => leftChannelId = channelId,
-              onArchiveChannel: (channelId) async =>
-                  archivedChannelId = channelId,
             ),
-          ),
-        );
-        await tester.pumpAndSettle();
+          );
+          await tester.pumpAndSettle();
 
-        await tester.tap(find.widgetWithText(FilledButton, 'Join'));
-        await tester.pumpAndSettle();
-        relaySession.connect();
-        await tester.pump();
-        await tester.tap(find.byKey(const ValueKey('huddle-leave')));
-        await tester.pump();
-        for (
-          var attempt = 0;
-          attempt < 100 && archivedChannelId == null;
-          attempt++
-        ) {
+          await tester.tap(find.widgetWithText(FilledButton, 'Join'));
+          await tester.pumpAndSettle();
+          relaySession.connect();
           await tester.pump();
-        }
-        for (var attempt = 0; attempt < 20; attempt++) {
+          await tester.tap(find.byKey(const ValueKey('huddle-leave')));
           await tester.pump();
-        }
-        await tester.pump(const Duration(milliseconds: 300));
-        await tester.pump(const Duration(milliseconds: 300));
-        await tester.pump();
+          for (
+            var attempt = 0;
+            attempt < 100 && archivedChannelId == null;
+            attempt++
+          ) {
+            await tester.pump();
+          }
+          for (var attempt = 0; attempt < 20; attempt++) {
+            await tester.pump();
+          }
+          await tester.pump(const Duration(milliseconds: 300));
+          await tester.pump(const Duration(milliseconds: 300));
+          await tester.pump();
 
-        expect(leftChannelId, isNull);
-        expect(archivedChannelId, isNull);
-        expect(
-          relaySession.publishedKinds,
-          isNot(contains(EventKind.huddleEnded)),
-        );
-      },
-    );
+          expect(leftChannelId, isNull);
+          expect(
+            archivedChannelId,
+            shouldEnd ? '8d764100-fd8f-44cf-9c98-6d8fbd739b8c' : isNull,
+          );
+          expect(
+            relaySession.publishedKinds,
+            shouldEnd
+                ? contains(EventKind.huddleEnded)
+                : isNot(contains(EventKind.huddleEnded)),
+          );
+        },
+      );
+    }
 
     testWidgets('top-right call end auto-ends for the last human', (
       tester,

@@ -92,15 +92,13 @@ final class _HuddleAdmissionToken {
   final int epoch;
   final String backingChannelId;
 
-  /// Membership is shared by all of an owner's devices. A snapshot cannot
-  /// prove that another admission did not arrive during teardown. In DMs,
-  /// leave audio only; the relay ends the room after its last peer leaves.
-  final bool relayOwnsCleanup;
+  /// DM membership also grants access to the saved transcript after hanging up.
+  final bool preserveMembership;
 
   const _HuddleAdmissionToken(
     this.epoch,
     this.backingChannelId, {
-    this.relayOwnsCleanup = false,
+    this.preserveMembership = false,
   });
 }
 
@@ -212,7 +210,7 @@ final class MobileHuddleController extends Notifier<bool> {
       _admissionToken = _HuddleAdmissionToken(
         admissionEpoch,
         backingChannelId,
-        relayOwnsCleanup: _isDirectCall(parentChannelId),
+        preserveMembership: _isDirectCall(parentChannelId),
       );
     } catch (_) {
       if (admissionEpoch == _admissionEpoch) {
@@ -251,7 +249,7 @@ final class MobileHuddleController extends Notifier<bool> {
     final admissionEpoch = ++_admissionEpoch;
     _latestAdmissionTargetBackingChannelId = ephemeralChannelId;
     final currentPubkey = ref.read(currentPubkeyProvider);
-    final relayOwnsCleanup = _isDirectCall(parentChannelId);
+    final preserveMembership = _isDirectCall(parentChannelId);
     try {
       await ref
           .read(huddleSessionProvider.notifier)
@@ -277,7 +275,7 @@ final class MobileHuddleController extends Notifier<bool> {
       _admissionToken = _HuddleAdmissionToken(
         admissionEpoch,
         ephemeralChannelId,
-        relayOwnsCleanup: relayOwnsCleanup,
+        preserveMembership: preserveMembership,
       );
     }
   }
@@ -365,7 +363,6 @@ final class MobileHuddleController extends Notifier<bool> {
     final humanCount =
         !session.wasAdmitted ||
             backingChannelId == null ||
-            admissionToken?.relayOwnsCleanup == true ||
             _hasOtherOwnerAdmission(session)
         ? null
         : ref
@@ -406,7 +403,7 @@ final class MobileHuddleController extends Notifier<bool> {
     final backingChannelId = session.ephemeralChannelId;
     final admissionToken = session.wasAdmitted ? _admissionToken : null;
     if (admissionToken == null || backingChannelId == null) return;
-    if (admissionToken.relayOwnsCleanup || _hasOtherOwnerAdmission(session)) {
+    if (_hasOtherOwnerAdmission(session)) {
       _admissionToken = null;
       return;
     }
@@ -469,6 +466,7 @@ final class MobileHuddleController extends Notifier<bool> {
       return;
     }
 
+    if (admissionToken.preserveMembership) return;
     try {
       await actions.leaveChannel(backingChannelId);
     } catch (_) {
