@@ -20,10 +20,11 @@ hex = { workspace = true }
 redis = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sqlx = { workspace = true, features = ["sqlite"] }
+tempfile = "3"
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
 nostr = { workspace = true }
-sqlx = { workspace = true }

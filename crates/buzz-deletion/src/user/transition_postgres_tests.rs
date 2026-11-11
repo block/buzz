@@ -478,3 +478,88 @@ async fn corrupt_inventory_history_and_results_fail_without_inventing_progress()
         .unwrap();
     assert!(store.get_next_stage(&lease, None).await.is_err());
 }
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn real_user_requires_gate_then_global_media_before_community_cleanup() {
+    let (store, _) = fixture().await;
+    let target = nostr::Keys::generate().public_key().to_hex();
+    let community = Uuid::new_v4();
+    sqlx::query("INSERT INTO communities(id, host) VALUES ($1, $2)")
+        .bind(community)
+        .bind(format!("{community}.gate.example"))
+        .execute(&store.pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO relay_members(community_id, pubkey, role) VALUES ($1, $2, 'member')")
+        .bind(community)
+        .bind(&target)
+        .execute(&store.pool)
+        .await
+        .unwrap();
+    let request = store.submit(&target, "operator", None).await.unwrap();
+    store
+        .approve(
+            request.id,
+            "operator",
+            request.inventory_digest.as_deref().unwrap(),
+        )
+        .await
+        .unwrap();
+    let lease = claim(&store, request.id, "worker").await;
+    let NextStage::Stage(gate) = store.get_next_stage(&lease, None).await.unwrap() else {
+        panic!("expected gate");
+    };
+    assert_eq!(gate.stage, "gate_user");
+    assert_eq!(gate.target_community_id, None);
+    let options = super::super::worker::RunOptions {
+        db: None,
+        delete: true,
+        next_step: true,
+        fail_stage: None,
+        stage_delay: Duration::ZERO,
+        no_agents_in: vec![],
+    };
+    // The real gate is intentionally unimplemented; it must never run the dummy
+    // gate or start media. This error occurs before DB/storage configuration.
+    let error = super::super::handlers::dispatch(&store, &lease, &gate, &options)
+        .await
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("real handler for gate_user is not implemented"));
+    let NextStage::Stage(pending) = store.get_next_stage(&lease, None).await.unwrap() else {
+        panic!("expected pending gate");
+    };
+    assert_eq!(pending.id, gate.id);
+    assert_eq!(pending.status, "pending");
+    // Simulate a future real gate's successful outcome through the production store.
+    store.start_stage(&lease, gate.id).await.unwrap();
+    store
+        .save_stage_success(&lease, gate.id, serde_json::json!({"gated": true}))
+        .await
+        .unwrap();
+    let NextStage::Stage(media) = store.get_next_stage(&lease, Some(gate.id)).await.unwrap() else {
+        panic!("expected media");
+    };
+    assert_eq!(media.stage, "purge_media");
+    assert_eq!(media.target_community_id, None);
+    let NextStage::Stage(resumed) = store.get_next_stage(&lease, None).await.unwrap() else {
+        panic!("expected resumed media");
+    };
+    assert_eq!(resumed.id, media.id);
+    store.start_stage(&lease, media.id).await.unwrap();
+    store
+        .save_stage_success(
+            &lease,
+            media.id,
+            serde_json::json!({"account_erasure_complete": false}),
+        )
+        .await
+        .unwrap();
+    let NextStage::Stage(next) = store.get_next_stage(&lease, Some(media.id)).await.unwrap() else {
+        panic!("expected community cleanup");
+    };
+    assert_eq!(next.stage, "purge_db");
+    assert_eq!(next.target_community_id, Some(community));
+}
