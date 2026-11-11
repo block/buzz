@@ -24,7 +24,8 @@ final mediaUploadServiceProvider = Provider<MediaUploadService>((ref) {
       source: ImageSource.gallery,
       requestFullMetadata: false,
     ),
-    pickGalleryImages: () => picker.pickMultiImage(requestFullMetadata: false),
+    pickGalleryImages: () =>
+        picker.pickMultipleMedia(requestFullMetadata: false),
     pickGalleryVideo: () => picker.pickVideo(source: ImageSource.gallery),
     pickAttachmentFile: file_selector.openFile,
   );

@@ -1,7 +1,7 @@
 part of '../message_content.dart';
 
 /// A video bubble. It shows the NIP-71 poster when the event has one;
-/// otherwise a static placeholder, so scrolling never starts a video decoder.
+/// older attachments generate a still without creating a playback controller.
 class _MessageVideoPreview extends HookConsumerWidget {
   final String url;
   final ImetaEntry? imeta;
@@ -19,6 +19,9 @@ class _MessageVideoPreview extends HookConsumerWidget {
     final opening = useRef(false);
     final aspectRatio = messageVideoAspectRatio(imeta?.aspectRatio);
     final posterUrl = imeta?.posterUrl;
+    final generatedPoster = posterUrl == null
+        ? ref.watch(videoPosterProvider(url)).asData?.value
+        : null;
 
     return Padding(
       padding: const EdgeInsets.only(top: Grid.half),
@@ -37,12 +40,27 @@ class _MessageVideoPreview extends HookConsumerWidget {
               final fallback = await NativePhotoZoomPreview.open(
                 context: context,
                 sourceKeys: [sourceKey],
+                previewProviders: [
+                  if (generatedPoster != null)
+                    MemoryImage(generatedPoster)
+                  else if (posterUrl != null)
+                    MediaImageProvider(
+                      url: posterUrl,
+                      auth: auth,
+                      client: client,
+                    )
+                  else
+                    null,
+                ],
                 providers: [
-                  MediaImageProvider(
-                    url: posterUrl ?? url,
-                    auth: auth,
-                    client: client,
-                  ),
+                  if (generatedPoster != null)
+                    MemoryImage(generatedPoster)
+                  else
+                    MediaImageProvider(
+                      url: posterUrl ?? url,
+                      auth: auth,
+                      client: client,
+                    ),
                 ],
                 urls: [url],
                 labels: [imeta?.alt ?? 'Video'],
@@ -89,6 +107,12 @@ class _MessageVideoPreview extends HookConsumerWidget {
                         icon: BuzzIcons.video,
                         label: 'Video preview unavailable',
                       ),
+                    )
+                  else if (generatedPoster != null)
+                    Image.memory(
+                      generatedPoster,
+                      fit: BoxFit.cover,
+                      excludeFromSemantics: true,
                     )
                   else
                     const _MediaPreviewFallback(
