@@ -11,15 +11,7 @@ pub async fn preview(db: &Db, media: &MediaStorage, options: &StageOptions) -> R
     if options.mode != Mode::PrintOnly {
         bail!("media preview requires print-only mode");
     }
-    let mut scan = db
-        .scan_user_media_with_budget(
-            &options.human,
-            options.include_owned_agents,
-            &options.storage_namespace,
-            &options.media_bases,
-            options.scan_budget,
-        )
-        .await?;
+    let mut scan = stage::scan(db, options).await?;
     storage::supplement(&mut scan, media, &options.storage_namespace).await?;
     let mut files = Vec::with_capacity(scan.files.len());
     for file in scan.files {

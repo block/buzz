@@ -25,15 +25,28 @@ pub struct StageOptions {
 
 /// Run all three steps against real PostgreSQL and storage. The workflow owns
 /// the approved request lease and heartbeat, and starts the purge_media stage.
-/// PrintOnly leaves sources and storage intact. Destructive modes gate uploads,
-/// drain earlier requests, reserve files, recheck live uses, and delete versions.
+/// PrintOnly observes without writing source data or media journal records and
+/// fails if any decision is unresolved. Delete gates uploads, drains earlier
+/// requests, reserves files, rechecks live uses, and deletes exact versions.
+/// The caller persists the returned summary in its own workflow journal.
 pub async fn run_stage(
     db: &Db,
     media: &MediaStorage,
     lease: &buzz_db::entity_deletion::EntityLease,
     stage: Uuid,
     options: StageOptions,
-) -> Result<()> {
+) -> Result<serde_json::Value> {
+    if options.mode == Mode::PrintOnly {
+        let proposal = preview(db, media, &options).await?;
+        crate::print_json(&proposal)?;
+        if proposal["decision_complete"] != true {
+            bail!("media read-only scan has unresolved decisions; stage has not completed");
+        }
+        // Detailed evidence is printed; do not duplicate it in workflow metadata.
+        return Ok(json!({"candidate_count":proposal["candidate_count"],
+            "unknown_count":proposal["unknown_count"], "supported_scope_exhausted":true,
+            "account_erasure_complete":false}));
+    }
     let request = db.entity_deletion_store().get(lease.request_id).await?;
     if request.entity_type != "user" || request.target != options.human {
         bail!("media subject must match the approved user request");
@@ -124,10 +137,11 @@ pub async fn run_stage(
         executing,
         markers,
     };
-    handle(&store, &run, options.mode, &concrete).await
+    handle(&store, &run, options.mode, &concrete).await?;
+    Ok(json!({"supported_scope_exhausted":true,"account_erasure_complete":false}))
 }
 
-async fn scan(db: &Db, options: &StageOptions) -> Result<buzz_db::media_deletion::MediaScan> {
+pub(super) async fn scan(db: &Db, options: &StageOptions) -> Result<buzz_db::media_deletion::MediaScan> {
     Ok(db
         .scan_user_media_with_budget(
             &options.human,
