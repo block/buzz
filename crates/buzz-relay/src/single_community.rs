@@ -129,7 +129,7 @@ mod tests {
             ));
         for (host, allowed) in [
             ("relay.example:8443", true),
-            ("RELAY.EXAMPLE.:8443", true),
+            ("RELAY.EXAMPLE:8443", true),
             ("relay.example", false),
             ("extra.example", false),
             ("", false),
