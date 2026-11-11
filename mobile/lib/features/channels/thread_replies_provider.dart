@@ -348,6 +348,11 @@ final publisherThreadRootProvider = FutureProvider.autoDispose
         }
       });
       final session = ref.read(relaySessionProvider.notifier);
+      final publisher = ref.watch(
+        channelByIdProvider(
+          args.channelId,
+        ).select((channel) => channel?.messagePublisher),
+      );
       final events = await session.fetchHistory(
         NostrFilter(
           ids: [args.rootId],
@@ -369,9 +374,6 @@ final publisherThreadRootProvider = FutureProvider.autoDispose
       final hasAttribution = event.tags.any(
         (tag) => tag.isNotEmpty && (tag[0] == 'actor' || tag[0] == 'p'),
       );
-      final publisher = ref
-          .watch(channelByIdProvider(args.channelId))
-          ?.messagePublisher;
       final authority = hasAttribution && event.pubkey != publisher
           ? await ref.watch(
               relayAuthorProvider(

@@ -5,9 +5,11 @@ void publisherThreadTests() {
       'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc';
   const relay =
       'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
-  for (final workflow in [false, true]) {
+  for (final variant in ['direct', 'workflow', 'other-author']) {
+    final workflow = variant == 'workflow';
+    final allowed = variant != 'other-author';
     testWidgets(
-      'publisher channel keeps main composer closed and enables non-member thread replies workflow=$workflow',
+      'publisher channel keeps main composer closed and enables non-member thread replies variant=$variant',
       (tester) async {
         final sender = _RecordingOrdinarySender();
         final channel = Channel(
@@ -24,7 +26,11 @@ void publisherThreadTests() {
         );
         final root = _textMsg(
           id: threadIdRoot,
-          pubkey: workflow ? relay : publisher,
+          pubkey: !allowed
+              ? 'other-author'
+              : workflow
+              ? relay
+              : publisher,
           content: 'Publisher update',
           extraTags: workflow
               ? [
@@ -67,6 +73,10 @@ void publisherThreadTests() {
           ),
         );
         await tester.pumpAndSettle();
+        if (!allowed) {
+          expect(find.byType(ComposeBar), findsNothing);
+          return;
+        }
         expect(find.byType(ComposeBar), findsOneWidget);
         await tester
             .widget<ComposeBar>(find.byType(ComposeBar))
