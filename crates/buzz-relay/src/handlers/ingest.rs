@@ -940,6 +940,70 @@ impl ChannelWrite {
 
 const NOT_A_CHANNEL_MEMBER: &str = "restricted: not a channel member";
 const MEMBERS_ONLY_POSTING: &str = "restricted: only members can post in this channel";
+pub(crate) const AGENT_DM_REFUSED: &str =
+    "restricted: agents cannot post in direct messages; start a Solo chat that includes your owner instead";
+
+/// The stored owner of `pubkey` when it is an agent (`users.agent_owner_pubkey`),
+/// or `None` for a human or unknown key. The link is first-write-wins and set
+/// during auth before an agent's first event, so the answer is cached.
+pub(crate) async fn agent_owner_cached(
+    state: &AppState,
+    community_id: CommunityId,
+    pubkey_bytes: &[u8],
+) -> Result<Option<Vec<u8>>, buzz_db::DbError> {
+    let key = (community_id, pubkey_bytes.to_vec());
+    if let Some(owner) = state.agent_owner_cache.get(&key) {
+        return Ok(owner);
+    }
+    let owner = state
+        .db
+        .get_agent_channel_policy(community_id, pubkey_bytes)
+        .await?
+        .and_then(|(_, owner)| owner);
+    state.agent_owner_cache.insert(key, owner.clone());
+    Ok(owner)
+}
+
+/// Whether `participants` may be a DM that includes the agent `agent`: only
+/// when it is exactly the agent and `owner`.
+pub(crate) fn agent_dm_allowed(agent: &[u8], owner: &[u8], participants: &[Vec<u8>]) -> bool {
+    participants.len() == 2
+        && participants.iter().any(|p| p == agent)
+        && participants.iter().any(|p| p == owner)
+}
+
+/// Agents never write in a DM, except one whose members are exactly the agent
+/// and its owner. Humans and non-DM channels pass untouched.
+async fn check_agent_dm_write(
+    community_id: CommunityId,
+    state: &AppState,
+    ch_id: Uuid,
+    pubkey_bytes: &[u8],
+    channel: &buzz_db::channel::ChannelRecord,
+) -> Result<(), String> {
+    if channel.channel_type != buzz_core::channel::ChannelType::Dm.as_str() {
+        return Ok(());
+    }
+    let Some(owner) = agent_owner_cached(state, community_id, pubkey_bytes)
+        .await
+        .map_err(|e| format!("error: database error: {e}"))?
+    else {
+        return Ok(());
+    };
+    let members: Vec<Vec<u8>> = state
+        .db
+        .get_members_for_event_write(community_id, ch_id)
+        .await
+        .map_err(|e| format!("error: database error: {e}"))?
+        .into_iter()
+        .map(|m| m.pubkey)
+        .collect();
+    if agent_dm_allowed(pubkey_bytes, &owner, &members) {
+        Ok(())
+    } else {
+        Err(AGENT_DM_REFUSED.to_string())
+    }
+}
 
 /// The channel write gate: member OR open-visibility channel, plus, for
 /// [`ChannelWrite::Post`], the role-table write rule ([`may_post`]).
@@ -989,6 +1053,9 @@ pub(crate) async fn check_channel_membership(
             .map_err(|e| format!("error: database error: {e}"))?
     {
         return Err(MEMBERS_ONLY_POSTING.to_string());
+    }
+    if write == ChannelWrite::Post {
+        check_agent_dm_write(community_id, state, ch_id, pubkey_bytes, channel).await?;
     }
     Ok(())
 }
@@ -6980,6 +7047,184 @@ mod postgres_tests {
             .execute(admin)
             .await
             .map(|_| ())
+    }
+
+    struct AgentDmFixture {
+        state: Arc<crate::state::AppState>,
+        tenant: TenantContext,
+        owner: nostr::Keys,
+        agent: nostr::Keys,
+        stranger: nostr::Keys,
+    }
+
+    async fn agent_dm_fixture() -> AgentDmFixture {
+        let db_url = std::env::var("BUZZ_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string()); // sadscan:disable np.postgres.1
+        let pool = sqlx::PgPool::connect(&db_url)
+            .await
+            .expect("connect test Postgres");
+        let state = build_canvas_ingest_state(&db_url, &pool).await;
+        let host = format!("agent-dm-{}.test", Uuid::new_v4().simple());
+        let community = state
+            .db
+            .ensure_configured_community(&host)
+            .await
+            .expect("community")
+            .id;
+        let tenant = TenantContext::resolved(community, &host);
+        let (owner, agent, stranger) = (
+            nostr::Keys::generate(),
+            nostr::Keys::generate(),
+            nostr::Keys::generate(),
+        );
+        for keys in [&owner, &agent, &stranger] {
+            state
+                .db
+                .ensure_user(community, keys.public_key().as_bytes())
+                .await
+                .expect("ensure user");
+        }
+        assert!(state
+            .db
+            .set_agent_owner_for_authorization(
+                community,
+                agent.public_key().as_bytes(),
+                owner.public_key().as_bytes(),
+            )
+            .await
+            .expect("link agent owner"));
+        AgentDmFixture {
+            state,
+            tenant,
+            owner,
+            agent,
+            stranger,
+        }
+    }
+
+    impl AgentDmFixture {
+        async fn open_dm(&self, members: &[&nostr::Keys]) -> Uuid {
+            let owned: Vec<[u8; 32]> = members.iter().map(|k| k.public_key().to_bytes()).collect();
+            let pubkeys: Vec<&[u8]> = owned.iter().map(|b| b.as_slice()).collect();
+            self.state
+                .db
+                .open_dm(self.tenant.community(), &pubkeys, pubkeys[0])
+                .await
+                .expect("open dm")
+                .0
+                .id
+        }
+
+        async fn ingest(
+            &self,
+            author: &nostr::Keys,
+            kind: u16,
+            tags: Vec<nostr::Tag>,
+        ) -> Result<(), IngestError> {
+            let event = EventBuilder::new(Kind::Custom(kind), "hi")
+                .tags(tags)
+                .sign_with_keys(author)
+                .expect("sign");
+            let auth = IngestAuth::Http {
+                pubkey: author.public_key(),
+                scopes: vec![Scope::MessagesWrite],
+                auth_method: HttpAuthMethod::Nip98,
+            };
+            let tracer: Arc<dyn buzz_conformance::Tracer> = Arc::new(VecTracer::default());
+            ingest_event_inner(&self.state, &tracer, &self.tenant, event, auth)
+                .await
+                .map(|_| ())
+        }
+
+        async fn post(&self, author: &nostr::Keys, channel_id: Uuid) -> Result<(), IngestError> {
+            self.ingest(
+                author,
+                9,
+                vec![nostr::Tag::parse(["h", &channel_id.to_string()]).unwrap()],
+            )
+            .await
+        }
+    }
+
+    fn assert_agent_dm_refused(result: Result<(), IngestError>) {
+        match result {
+            Err(IngestError::Rejected(reason)) => assert_eq!(reason, AGENT_DM_REFUSED),
+            other => panic!("agent DM write must be refused, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn agent_cannot_post_in_a_dm_with_someone_other_than_its_owner() {
+        let f = agent_dm_fixture().await;
+        let with_stranger = f.open_dm(&[&f.agent, &f.stranger]).await;
+        let group = f.open_dm(&[&f.agent, &f.owner, &f.stranger]).await;
+
+        assert_agent_dm_refused(f.post(&f.agent, with_stranger).await);
+        assert_agent_dm_refused(f.post(&f.agent, group).await);
+        f.post(&f.stranger, with_stranger)
+            .await
+            .expect("a human still posts in the same DM");
+        f.post(&f.owner, group)
+            .await
+            .expect("the owner still posts in the group DM");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn agent_can_post_in_a_dm_with_only_its_owner() {
+        let f = agent_dm_fixture().await;
+        let owner_dm = f.open_dm(&[&f.owner, &f.agent]).await;
+
+        f.post(&f.agent, owner_dm)
+            .await
+            .expect("an owner-only DM stays open to the agent");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn agent_dm_open_is_limited_to_its_owner() {
+        let f = agent_dm_fixture().await;
+        let p = |keys: &nostr::Keys| nostr::Tag::parse(["p", &keys.public_key().to_hex()]).unwrap();
+
+        assert_agent_dm_refused(
+            f.ingest(&f.agent, KIND_DM_OPEN as u16, vec![p(&f.stranger)])
+                .await,
+        );
+        assert_agent_dm_refused(
+            f.ingest(
+                &f.agent,
+                KIND_DM_OPEN as u16,
+                vec![p(&f.owner), p(&f.stranger)],
+            )
+            .await,
+        );
+        f.ingest(&f.agent, KIND_DM_OPEN as u16, vec![p(&f.owner)])
+            .await
+            .expect("an agent may open a DM with only its owner");
+        f.ingest(&f.stranger, KIND_DM_OPEN as u16, vec![p(&f.agent)])
+            .await
+            .expect("a human may still open a DM that includes an agent");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn agent_cannot_add_members_to_its_owner_dm() {
+        let f = agent_dm_fixture().await;
+        let owner_dm = f.open_dm(&[&f.owner, &f.agent]).await;
+
+        assert_agent_dm_refused(
+            f.ingest(
+                &f.agent,
+                KIND_DM_ADD_MEMBER as u16,
+                vec![
+                    nostr::Tag::parse(["h", &owner_dm.to_string()]).unwrap(),
+                    nostr::Tag::parse(["p", &f.stranger.public_key().to_hex()]).unwrap(),
+                ],
+            )
+            .await,
+        );
     }
 
     async fn create_role(admin: &sqlx::PgPool, role: &str) -> Result<(), sqlx::Error> {
