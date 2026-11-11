@@ -85,8 +85,8 @@ struct NativePhotoZoomTests {
       viewer.layoutGallery(insets: UIEdgeInsets(top: 0, left: left ? 76 : 0, bottom: 0, right: left ? 0 : 76))
       precondition(pager.view.frame == viewer.view.bounds, "Native gallery must span the full Duo window")
       for (slot, button) in buttons.enumerated() {
-        precondition(left ? button.frame.maxX <= 76 : button.frame.minX >= 875, "Every action belongs inside the rail")
-        precondition(button.center.x == centerX, "Native actions must share the app rail centerline")
+        precondition(left ? button.center.x <= 76 : button.center.x >= 875, "Every action is centered inside the rail")
+        precondition(button.center.x == (left ? 54 : 897), "Native actions must match the channel rail's inward-aligned centerline")
         precondition(button.bounds.width >= 44 && button.bounds.height >= 44, "Retain accessible hit targets")
         if slot > 0 { precondition(button.frame.minY > buttons[slot - 1].frame.maxY, "Close, Reply, More must not overlap") }
       }

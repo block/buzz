@@ -297,6 +297,8 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
          (right && (bounds.maxX - width...bounds.maxX).contains(source.centerX)) {
         centerX = source.centerX
       }
+      // Match IosNavigationMetrics.railCenter's inward optical alignment.
+      centerX += left ? 6 : -6
       close.frame = CGRect(x: centerX - 24, y: top + 6, width: 48, height: 48)
       reply.frame = CGRect(x: centerX - 24, y: railBottom - 108, width: 48, height: 48)
       more.frame = CGRect(x: centerX - 24, y: railBottom - 48, width: 48, height: 48)
