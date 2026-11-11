@@ -348,9 +348,11 @@ class IosNavigationBar extends HookConsumerWidget {
       };
     }
 
+    final portraitTopPadding = centerTitleInPane ? 12.0 : 0.0;
     final payload = <String, Object?>{
       'title': title,
       'titleMaxWidth': titleMaxWidth,
+      'portraitTopPadding': portraitTopPadding,
       'titleHasAnimatedPortrait':
           titleAvatars.length == 1 &&
           DmHeaderPortrait.playsAnimation(
@@ -567,7 +569,8 @@ class IosNavigationBar extends HookConsumerWidget {
         if (titleAvatars.isNotEmpty)
           Positioned(
             top:
-                MediaQuery.viewPaddingOf(context).top -
+                MediaQuery.viewPaddingOf(context).top +
+                portraitTopPadding -
                 (payload['titleHasAnimatedPortrait'] == true ? 4 : 0),
             left: 0,
             right: 0,

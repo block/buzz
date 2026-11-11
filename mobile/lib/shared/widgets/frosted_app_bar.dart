@@ -69,11 +69,13 @@ double frostedAppBarLowerTitleHeight(
 
 // Duo has no top status inset in the content panes. Reserve breathing room
 // around the native 44-point controls instead of collapsing the header to them.
-double _nativeCompactHeight(BuildContext context) {
+double _nativeCompactHeight(BuildContext context, [double titleHeight = 0]) {
   final scope = DuoToolbarScope.maybeOf(context);
   final strip = scope == null ? FoldGeometry.of(context).strip : scope.strip;
   final height = IosNavigationMetrics.of(context).compactHeight;
-  return strip == null ? height : height.clamp(44.0, double.infinity) + 24;
+  return strip == null
+      ? max(height, titleHeight)
+      : max(height.clamp(44.0, double.infinity), titleHeight) + 24;
 }
 
 /// Returns the total height of the [FrostedAppBar] including safe area padding.
@@ -91,7 +93,7 @@ double frostedAppBarHeight(
 }) {
   if (useNativeNavigation && defaultTargetPlatform == TargetPlatform.iOS) {
     return MediaQuery.paddingOf(context).top +
-        max(_nativeCompactHeight(context), titleContentHeight) +
+        _nativeCompactHeight(context, titleContentHeight) +
         (nativeLargeTitle
             ? IosNavigationMetrics.of(context).largeTitleHeight
             : 0) +
@@ -322,7 +324,7 @@ class FrostedAppBar extends StatelessWidget {
             : 0.0;
         final barHeight =
             MediaQuery.paddingOf(context).top +
-            max(_nativeCompactHeight(context), titleContentHeight) +
+            _nativeCompactHeight(context, titleContentHeight) +
             extra;
         return AnimatedPositioned(
           duration: layoutDuration,

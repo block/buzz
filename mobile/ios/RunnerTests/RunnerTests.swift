@@ -481,6 +481,17 @@ class RunnerTests: XCTestCase {
         XCTAssertEqual(label.traitCollection.userInterfaceStyle, dark ? .dark : .light)
       }
     }
+    var paneArguments = arguments
+    paneArguments["safeTop"] = 0
+    paneArguments["centerTitleInPane"] = true
+    paneArguments["portraitTopPadding"] = 12
+    paneArguments["alwaysFrosted"] = true
+    messenger.configure(paneArguments)
+    bar.view().layoutIfNeeded()
+    let paneTitle = try XCTUnwrap(bar.view().subviews.compactMap { $0 as? NavigationTitleView }.first)
+    XCTAssertEqual(paneTitle.frame.minY, 12 + 56)
+    let paneMaterial = try XCTUnwrap(bar.view().subviews.first as? UIVisualEffectView)
+    XCTAssertEqual(paneMaterial.frame, bar.view().bounds, "Portrait panes retain the full native navigation backdrop")
     var animatedArguments = arguments
     animatedArguments["titleHasAnimatedPortrait"] = true
     messenger.configure(animatedArguments)

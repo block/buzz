@@ -376,6 +376,8 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
   private var floatingTitle: NavigationTitleView?
   private var titleMaxWidth: CGFloat?
   private var floatingTitleLift: CGFloat = 0
+  private var portraitTopPadding: CGFloat = 0
+  private var centerTitleInPane = false
 
   init(frame: CGRect, id: Int64, args: Any?, messenger: FlutterBinaryMessenger, parent: UIViewController?) {
     container = NavigationClipView(frame: frame)
@@ -499,7 +501,7 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     } else {
       glassBackedControls = false
     }
-    let statusOnly = alwaysFrosted && paneTitle == nil && !horizontalControls
+    let statusOnly = alwaysFrosted && !centerTitleInPane && paneTitle == nil && !horizontalControls
       && !navigation.navigationBar.prefersLargeTitles && glassBackedControls
     let height = statusOnly
       ? min(container.bounds.height, statusHeight > 0 ? statusHeight + 6 : 0)
@@ -551,7 +553,7 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
       let available = max(0, container.bounds.width - 48)
       let width = min(title.intrinsicContentSize.width, min(available, titleMaxWidth ?? available))
       title.frame = CGRect(x: (container.bounds.width - width) / 2,
-                           y: flutterSafeTop + 56 - floatingTitleLift, width: width, height: 44)
+                           y: flutterSafeTop + portraitTopPadding + 56 - floatingTitleLift, width: width, height: 44)
       // This overlay is outside UINavigationBar, which normally lays out the
       // effect content after constraining its title. Apply that pass here too.
       title.layoutIfNeeded()
@@ -635,6 +637,8 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     standaloneSurface?.removeFromSuperview()
     standaloneSurface = nil
     horizontalControls = args["horizontalControls"] as? Bool == true
+    centerTitleInPane = args["centerTitleInPane"] as? Bool == true
+    portraitTopPadding = CGFloat((args["portraitTopPadding"] as? NSNumber)?.doubleValue ?? 0)
     paneTitle?.removeFromSuperview()
     paneTitle = nil
     alignCollapsedTitleToLeading = args["alignCollapsedTitleToLeading"] as? Bool == true
