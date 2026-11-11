@@ -19,6 +19,7 @@ pub(super) async fn inspect(
     predicate: &str,
     key: &Value,
     preflight: bool,
+    evidence: Option<&media::Evidence>,
 ) -> Result<String> {
     if table == "workflow_approvals" {
         let inconsistent: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM workflow_approvals a JOIN workflow_runs r ON r.community_id=a.community_id AND r.id=a.run_id WHERE a.community_id=$1 AND a.token=decode($2->>'token_hash','hex') AND a.workflow_id<>r.workflow_id)").bind(community).bind(key).fetch_one(&mut *conn).await?;
@@ -60,7 +61,7 @@ pub(super) async fn inspect(
             .fetch_optional(&mut *conn)
             .await?
             .ok_or_else(|| invalid(format!("selected {table} row is missing")))?;
-    if media || opaque {
+    if opaque || (media && evidence.is_none()) {
         return Err(invalid(format!(
             "selected {table} payload requires media evidence; nothing further deleted"
         )));
@@ -69,6 +70,11 @@ pub(super) async fn inspect(
         return Err(invalid(format!(
             "selected {table} has active work; nothing further deleted"
         )));
+    }
+    if let Some(evidence) = evidence {
+        evidence
+            .verify_source(conn, community, table, predicate, key)
+            .await?;
     }
     Ok(hash)
 }

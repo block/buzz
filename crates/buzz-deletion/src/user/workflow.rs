@@ -26,8 +26,40 @@ pub(super) struct Rule {
 }
 
 pub(super) const INITIAL_STAGE: &str = "gate_user";
+pub(super) fn initial_stage(request: &EntityRequest) -> &'static str {
+    if request.target.starts_with("demo:") {
+        INITIAL_STAGE
+    } else {
+        "purge_media"
+    }
+}
 const COMMUNITY_INITIAL_STAGE: &str = "purge_db";
 const RULES: &[Rule] = &[
+    Rule {
+        name: "purge_media",
+        community_scope: false,
+        allowed: &[Decision::EnterCommunities],
+        decide: |_| Ok(Decision::EnterCommunities),
+    },
+    Rule {
+        name: "purge_content",
+        community_scope: true,
+        allowed: &[Decision::Stage("purge_account")],
+        decide: |_| Ok(Decision::Stage("purge_account")),
+    },
+    Rule {
+        name: "purge_account",
+        community_scope: true,
+        allowed: &[Decision::CommunityComplete],
+        decide: |_| Ok(Decision::CommunityComplete),
+    },
+    // This boundary remains pending until the uncovered erasure handlers exist.
+    Rule {
+        name: "remaining_cleanup",
+        community_scope: false,
+        allowed: &[],
+        decide: |_| Err(invalid("remaining account erasure is not implemented")),
+    },
     Rule {
         name: "gate_user",
         community_scope: false,
@@ -93,6 +125,7 @@ pub(super) struct Progress {
     pub current: Option<EntityStage>,
     pub completed_communities: HashSet<Uuid>,
     pub terminal: bool,
+    real: bool,
 }
 
 impl Progress {
@@ -107,6 +140,7 @@ impl Progress {
             current: None,
             completed_communities: HashSet::new(),
             terminal: false,
+            real: !request.target.starts_with("demo:"),
         };
         let mut successors = HashMap::new();
         for row in history {
@@ -125,7 +159,7 @@ impl Progress {
         }
         let mut previous = None;
         let mut expected = Some(Step {
-            name: INITIAL_STAGE,
+            name: initial_stage(request),
             community: None,
         });
         let mut visited = HashSet::new();
@@ -203,8 +237,16 @@ impl Progress {
                     .find(|(id, _)| !self.completed_communities.contains(id))
                 {
                     Some((id, _)) => Ok(Some(Step {
-                        name: COMMUNITY_INITIAL_STAGE,
+                        name: if self.real {
+                            "purge_content"
+                        } else {
+                            COMMUNITY_INITIAL_STAGE
+                        },
                         community: Some(*id),
+                    })),
+                    None if self.real => Ok(Some(Step {
+                        name: "remaining_cleanup",
+                        community: None,
                     })),
                     None => self.apply(inventory, row, Decision::RequestComplete),
                 }

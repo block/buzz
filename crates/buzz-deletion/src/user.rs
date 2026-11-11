@@ -67,10 +67,13 @@ pub enum Command {
         #[arg(long)]
         inventory_digest: String,
     },
-    /// Run dummy stages for an approved request; no real user data is changed.
+    /// Preview real stages by default; --delete runs approved offline cleanup.
     Run {
         /// Approved request UUID.
         id: Uuid,
+        /// Preview or explicit offline execution controls.
+        #[command(flatten)]
+        execution: real::Args,
         /// Worker identity; defaults to hostname and process id.
         #[arg(long)]
         executor_id: Option<String>,
@@ -135,7 +138,14 @@ pub async fn run(command: Command) -> Result<i32> {
     if let Command::AccountBatches(args) = command {
         return account_batches::run(args).await;
     }
-    let db = if matches!(command, Command::Inventory { .. }) {
+    let db = if matches!(
+        &command,
+        Command::Inventory { .. }
+            | Command::Run {
+                execution: real::Args { delete: false, .. },
+                ..
+            }
+    ) {
         buzz_db::Db::connect_cold_start(
             buzz_db::DbConfig {
                 database_url: crate::required_env("DATABASE_URL")?,
@@ -189,6 +199,7 @@ pub async fn run(command: Command) -> Result<i32> {
             crate::print_json(&store.inspect(id).await?)?;
         }
         Command::Run {
+            execution,
             id,
             executor_id,
             next_step,
@@ -196,12 +207,31 @@ pub async fn run(command: Command) -> Result<i32> {
             stage_delay_ms,
             demo_no_agents_in,
         } => {
+            let request = store.get(id).await?;
+            if !execution.delete {
+                return real::preview(&db, &request, &execution, next_step).await;
+            }
+            let is_real = !request.target.starts_with("demo:");
+            if is_real
+                && (fail_stage.is_some() || stage_delay_ms != 0 || !demo_no_agents_in.is_empty())
+            {
+                anyhow::bail!("dummy controls cannot be used for real deletion");
+            }
+            if is_real && !execution.offline {
+                anyhow::bail!(
+                    "stop relay and external workers, then supply --offline with --delete"
+                );
+            }
             let code = worker::run(
                 &store,
                 id,
                 &executor_id.unwrap_or_else(crate::default_executor_id),
                 &worker::RunOptions {
                     next_step,
+                    real: is_real.then(|| real::Execution {
+                        db: buzz_db::Db::from_pool(db.pool().clone()),
+                        args: execution,
+                    }),
                     fail_stage,
                     stage_delay: std::time::Duration::from_millis(stage_delay_ms),
                     no_agents_in: demo_no_agents_in,
@@ -224,6 +254,7 @@ mod inventory;
 /// Standalone delegation of an owned community to community deletion.
 pub mod owned_community;
 mod preview;
+mod real;
 /// Read-only summaries of locally saved request progress and external waits.
 pub mod summary;
 mod transition;

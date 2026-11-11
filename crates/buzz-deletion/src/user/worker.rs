@@ -13,6 +13,7 @@ use crate::{StageOutcome, DEFAULT_LEASE_DURATION, HEARTBEAT_INTERVAL};
 /// Controls for a synthetic run. Delays and failures never invoke real deletion.
 pub(super) struct RunOptions {
     pub next_step: bool,
+    pub real: Option<super::real::Execution>,
     pub fail_stage: Option<String>,
     pub stage_delay: Duration,
     pub no_agents_in: Vec<Uuid>,
@@ -32,6 +33,9 @@ pub(super) async fn run(
             "user-deletions run does not support entity type {}",
             request.entity_type
         );
+    }
+    if !request.target.starts_with("demo:") && options.real.is_none() {
+        bail!("real user requests require the explicit offline deletion mode");
     }
     let Some(lease) = store.claim(id, owner, DEFAULT_LEASE_DURATION).await? else {
         if store.get(id).await?.status == "completed" {
@@ -98,6 +102,9 @@ async fn execute_claim(
                     StageOutcome::Completed => {}
                     StageOutcome::Shutdown => return Ok(0),
                     StageOutcome::Failed(error) => return Err(error),
+                }
+                if row.stage == "remaining_cleanup" {
+                    return Ok(2);
                 }
                 previous_stage_id = Some(row.id);
                 executed += 1;

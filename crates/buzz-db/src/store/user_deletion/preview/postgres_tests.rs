@@ -456,3 +456,5 @@ async fn cycles_limits_empty_scope_and_output_failures_never_report_false_comple
 }
 
 mod deletion_postgres_tests;
+
+mod stage_postgres_tests;

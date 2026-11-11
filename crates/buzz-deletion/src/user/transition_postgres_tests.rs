@@ -478,3 +478,92 @@ async fn corrupt_inventory_history_and_results_fail_without_inventing_progress()
         .unwrap();
     assert!(store.get_next_stage(&lease, None).await.is_err());
 }
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn real_workflow_orders_three_handlers_and_never_claims_full_erasure() {
+    let pool = PgPool::connect(
+        &std::env::var("BUZZ_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    let db = Db::from_pool(pool.clone());
+    let target = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+    let communities = [Uuid::new_v4(), Uuid::new_v4()];
+    for id in communities {
+        sqlx::query("INSERT INTO communities(id,host) VALUES($1,$2)")
+            .bind(id)
+            .bind(format!("{id}.example.org"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO relay_members(community_id,pubkey,role) VALUES($1,$2,'member')")
+            .bind(id)
+            .bind(target)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let request = db
+        .user_deletion_store()
+        .submit(target, "test", None)
+        .await
+        .unwrap();
+    db.user_deletion_store()
+        .approve(
+            request.id,
+            "test",
+            request.inventory_digest.as_deref().unwrap(),
+        )
+        .await
+        .unwrap();
+    let store = db.entity_deletion_store();
+    let lease = store
+        .claim(request.id, "test", Duration::from_secs(60))
+        .await
+        .unwrap()
+        .unwrap();
+    let transition = UserDeletionTransition::new(&store);
+    let inventory = Inventory::read(&request).unwrap();
+    let mut previous = None;
+    let expected = vec![
+        ("purge_media", None),
+        ("purge_content", Some(inventory.communities[0].0)),
+        ("purge_account", Some(inventory.communities[0].0)),
+        ("purge_content", Some(inventory.communities[1].0)),
+        ("purge_account", Some(inventory.communities[1].0)),
+    ];
+    for (name, community) in expected {
+        let NextStage::Stage(row) = transition.get_next_stage(&lease, previous).await.unwrap()
+        else {
+            panic!("expected handler")
+        };
+        assert_eq!(
+            (row.stage.as_str(), row.target_community_id),
+            (name, community)
+        );
+        store.start_stage(&lease, row.id).await.unwrap();
+        store.save_stage_success(&lease,row.id,serde_json::json!({"supported_scope_exhausted":true,"account_erasure_complete":false})).await.unwrap();
+        previous = Some(row.id);
+    }
+    let NextStage::Stage(row) = transition.get_next_stage(&lease, previous).await.unwrap() else {
+        panic!("must stop before completion")
+    };
+    assert_eq!(row.stage, "remaining_cleanup");
+    assert!(row.target_community_id.is_none());
+    assert_eq!(store.get(request.id).await.unwrap().status, "running");
+    // Recovery preserves the exact pending position and cannot re-run media.
+    let NextStage::Stage(recovered) = transition.get_next_stage(&lease, None).await.unwrap() else {
+        panic!("must resume")
+    };
+    assert_eq!(recovered.id, row.id);
+    assert!(store
+        .inspect(request.id)
+        .await
+        .unwrap()
+        .execution
+        .completed_at
+        .is_none());
+}

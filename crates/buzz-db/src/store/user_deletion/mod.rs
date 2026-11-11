@@ -33,3 +33,19 @@ mod postgres_tests;
 
 #[cfg(test)]
 mod discovery_postgres_tests;
+
+impl UserDeletionStore {
+    /// Refuse offline execution while a serving worker owns external work.
+    /// This is a point-in-time check, not an online traffic fence. Operators
+    /// must keep the relay and external workers stopped throughout execution.
+    pub async fn verify_offline_work_stopped(&self) -> crate::Result<()> {
+        let active: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM community_serving_write_leases WHERE lease_until>clock_timestamp())")
+            .fetch_one(&self.pool).await?;
+        if active {
+            return Err(crate::DbError::DeletionSafety(
+                "stop external serving work before offline deletion".into(),
+            ));
+        }
+        Ok(())
+    }
+}

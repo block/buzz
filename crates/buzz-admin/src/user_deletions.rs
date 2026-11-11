@@ -59,6 +59,39 @@ mod tests {
     }
 
     #[test]
+    fn real_workflow_requires_explicit_delete_and_rejects_conflicting_preview_flags() {
+        let base = [
+            "buzz-admin",
+            "user-deletions",
+            "run",
+            "00000000-0000-0000-0000-000000000001",
+        ];
+        for flags in [
+            vec![],
+            vec!["--read-only"],
+            vec!["--print-only"],
+            vec!["--delete", "--offline"],
+        ] {
+            let parsed = crate::Cli::try_parse_from(base.into_iter().chain(flags.clone())).unwrap();
+            let crate::Command::UserDeletions {
+                command: super::UserDeletionsCommand::Run { execution, .. },
+            } = parsed.command
+            else {
+                panic!("expected run command");
+            };
+            assert_eq!(execution.delete, flags.contains(&"--delete"));
+        }
+        for flags in [
+            vec!["--read-only", "--delete"],
+            vec!["--offline"],
+            vec!["--community", "00000000-0000-0000-0000-000000000001"],
+            vec!["--delete", "--stage", "purge_media"],
+        ] {
+            assert!(crate::Cli::try_parse_from(base.into_iter().chain(flags)).is_err());
+        }
+    }
+
+    #[test]
     fn user_workflow_commands_are_registered() {
         for args in [
             vec![
