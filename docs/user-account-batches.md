@@ -85,6 +85,23 @@ start record. Profile and agent data remain for their separate cleanup steps.
 Events, workflows, deliveries and media belong to the separate content/media
 commands and are not selected here.
 
+### Workflow adapter
+
+`UserDeletionStore::delete_account_stage(lease, stage_id, options, writer)` is
+the lease-aware entry point for an already started `purge_account` stage.
+It verifies the current stage, target and community against the approved
+inventory in every batch transaction. It locks the parent request, checks the
+generation and database-clock expiry before work and again before commit, and
+saves cumulative item/batch counts under `metadata_json.account_batches` in
+the same transaction as the account changes. No per-row journal is needed:
+retry selects the remaining rows, including after a lost output receipt.
+
+The caller owns heartbeats and stage completion. A successful invocation means
+only the supported operations are exhausted; `account_erasure_complete` remains
+false. The stopped-worker/community guards still apply. Preview uses the existing
+`preview_account_batches` entry point and never changes workflow state. Neither
+the standalone command nor this adapter changes workflow routing by itself.
+
 For testing, compare database snapshots before and after each preview mode,
 then execute with a small `--max-items`, inspect the partial result, rerun, and
 verify only the listed rows and fields changed. Restart live services only as

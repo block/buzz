@@ -5,7 +5,7 @@ use sqlx::PgPool;
 const HUMAN: &str = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
 const OTHER: &str = "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5";
 
-async fn fixture() -> (PgPool, UserDeletionStore, AccountBatchOptions) {
+pub(super) async fn fixture() -> (PgPool, UserDeletionStore, AccountBatchOptions) {
     let pool = PgPool::connect(&crate::test_support::database_url())
         .await
         .unwrap();
@@ -56,7 +56,7 @@ async fn fixture() -> (PgPool, UserDeletionStore, AccountBatchOptions) {
     )
 }
 
-async fn snapshot(pool: &PgPool) -> Value {
+pub(super) async fn snapshot(pool: &PgPool) -> Value {
     let mut result = serde_json::Map::new();
     for table in [
         "api_tokens",

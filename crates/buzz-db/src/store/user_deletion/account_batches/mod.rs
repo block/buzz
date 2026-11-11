@@ -1,5 +1,5 @@
-//! Offline account-table batches for one community. This is not a workflow
-//! completion API: it never starts stages, updates progress, or touches caches.
+//! Account-table batches for one community. Workflow execution records progress
+//! under its parent lease but never completes a stage or invalidates caches.
 
 use super::{normalize_user_deletion_pubkey, UserDeletionStore};
 use crate::{DbError, Result};
@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 mod guards;
 mod operations;
+mod workflow;
 use operations::{Operation, OPERATIONS};
 
 /// Scope and output bounds for the offline account command.
@@ -49,7 +50,7 @@ impl UserDeletionStore {
         options: &AccountBatchOptions,
         writer: &mut impl Write,
     ) -> Result<AccountBatchSummary> {
-        self.account_batches(options, writer, false).await
+        self.account_batches(options, writer, false, None).await
     }
 
     /// Print and commit bounded offline account operations. Stop the relay and
@@ -61,7 +62,23 @@ impl UserDeletionStore {
         options: &AccountBatchOptions,
         writer: &mut impl Write,
     ) -> Result<AccountBatchSummary> {
-        self.account_batches(options, writer, true).await
+        self.account_batches(options, writer, true, None).await
+    }
+
+    /// Execute the supported account operations for a started `purge_account`
+    /// stage. Every batch validates the approved scope and current parent lease,
+    /// then commits row changes and cumulative progress together. Earlier commits
+    /// survive interruption; retries select remaining rows. The caller owns
+    /// heartbeat, stage completion, and the unsupported cleanup categories.
+    pub async fn delete_account_stage(
+        &self,
+        lease: &crate::entity_deletion::EntityLease,
+        stage_id: Uuid,
+        options: &AccountBatchOptions,
+        writer: &mut impl Write,
+    ) -> Result<AccountBatchSummary> {
+        self.account_batches(options, writer, true, Some((lease, stage_id)))
+            .await
     }
 
     async fn account_batches(
@@ -69,6 +86,7 @@ impl UserDeletionStore {
         options: &AccountBatchOptions,
         writer: &mut impl Write,
         delete: bool,
+        stage: Option<(&crate::entity_deletion::EntityLease, Uuid)>,
     ) -> Result<AccountBatchSummary> {
         let options = validated(options)?;
         // A session lock must never be returned to the pool on error/cancellation.
@@ -100,10 +118,13 @@ impl UserDeletionStore {
             account_erasure_complete: false,
         };
         if delete {
-            start(&mut conn, &options, writer, true).await?;
+            start(&mut conn, &options, writer, true, stage.is_some()).await?;
             for op in OPERATIONS {
                 loop {
                     let mut tx = conn.begin().await?;
+                    if let Some((lease, id)) = stage {
+                        workflow::guard(&mut tx, lease, id, &options).await?;
+                    }
                     guards::community(&mut tx, &options).await?;
                     guards::parent(&mut tx, &options, op).await?;
                     let keys = select(&mut tx, &options, op, None, true, &summary).await?;
@@ -119,6 +140,12 @@ impl UserDeletionStore {
                     batch(writer, &options, op, &keys, &summary)?;
                     mutate(&mut tx, &options, op, &keys).await?;
                     guards::community(&mut tx, &options).await?;
+                    if let Some((lease, id)) = stage {
+                        workflow::progress(&mut tx, id, op, keys.len()).await?;
+                        // Output and SQL may have outlived the lease. Check the
+                        // database clock again immediately before committing.
+                        workflow::guard(&mut tx, lease, id, &options).await?;
+                    }
                     tx.commit().await?;
                     summary.items += keys.len() as u32;
                     summary.batches += 1;
@@ -134,21 +161,29 @@ impl UserDeletionStore {
             }
             // Independent absence checks; never infer completion from counters.
             if summary.supported_scope_exhausted {
+                let mut tx = conn.begin().await?;
+                if let Some((lease, id)) = stage {
+                    workflow::guard(&mut tx, lease, id, &options).await?;
+                }
                 for op in OPERATIONS {
-                    if !select(&mut conn, &options, op, None, false, &summary)
+                    if !select(&mut tx, &options, op, None, false, &summary)
                         .await?
                         .is_empty()
                     {
                         return Err(invalid("supported rows remain; rerun to resume"));
                     }
                 }
+                if let Some((lease, id)) = stage {
+                    workflow::guard(&mut tx, lease, id, &options).await?;
+                }
+                tx.commit().await?;
             }
         } else {
             let mut tx = conn.begin().await?;
             sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
                 .execute(&mut *tx)
                 .await?;
-            start(&mut tx, &options, writer, false).await?;
+            start(&mut tx, &options, writer, false, false).await?;
             for op in OPERATIONS {
                 let mut cursor = None;
                 loop {
@@ -197,6 +232,7 @@ async fn start(
     options: &AccountBatchOptions,
     writer: &mut impl Write,
     delete: bool,
+    workflow: bool,
 ) -> Result<()> {
     let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM communities WHERE id=$1)")
         .bind(options.community)
@@ -209,14 +245,22 @@ async fn start(
         "SELECT (SELECT count(*) FROM archived_identities WHERE community_id=$1 AND (pubkey=$2 OR actor=$2)),
                 (SELECT count(*) FROM parameterized_event_watermarks WHERE community_id=$1 AND pubkey=decode($2,'hex'))")
         .bind(options.community).bind(&options.pubkey).fetch_one(conn).await?;
+    let mut unsupported = vec![
+        "archive visibility and required actor erasure",
+        "replay watermark removal",
+        "moderation and audit erasure",
+        "global account records and device attribution",
+        "cache and live-session invalidation",
+    ];
+    if !workflow {
+        unsupported.push("durable workflow integration");
+    }
     line(
         writer,
         &json!({"record":"account_batches_start","read_only":!delete,"community":options.community,
         "pubkey":options.pubkey,"batch_size":options.batch_size,"max_items":options.max_items,
         "deferred":{"archived_identities":archives,"parameterized_event_watermarks":watermarks},
-        "unsupported":["archive visibility and required actor erasure","replay watermark removal",
-            "moderation and audit erasure","global account records and device attribution",
-            "cache and live-session invalidation","durable workflow integration"],
+        "unsupported":unsupported,"workflow_progress_recorded":workflow,
         "account_erasure_complete":false}),
     )
 }
@@ -305,3 +349,6 @@ fn line(writer: &mut impl Write, value: &impl Serialize) -> Result<()> {
 
 #[cfg(test)]
 mod postgres_tests;
+
+#[cfg(test)]
+mod workflow_postgres_tests;
