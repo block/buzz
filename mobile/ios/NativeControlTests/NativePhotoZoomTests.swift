@@ -73,6 +73,7 @@ struct NativePhotoZoomTests {
       print("PASS: native photo window, stale responses, eviction and teardown")
       videoJourney(data: data)
       loaderJourney()
+      zoomJourney(data: data)
 
     }
   }
@@ -153,6 +154,33 @@ struct NativePhotoZoomTests {
     precondition(active.player == nil, "Closing releases the player before returning to Flutter")
     print("PASS: native video decoding, selected-only loading, paging and teardown")
   }
+  @available(iOS 18.0, *)
+  @MainActor static func zoomJourney(data: Data) {
+    let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+    let source = UIViewController(); window.rootViewController = source; window.isHidden = false
+    let anchor = UIImageView(image: UIImage(data: data))
+    anchor.bounds = CGRect(x: 0, y: 0, width: 120, height: 140)
+    anchor.center = CGPoint(x: 100, y: 600); anchor.transform = CGAffineTransform(rotationAngle: 0.1)
+    source.view.addSubview(anchor)
+    let viewer = NativePhotoZoomViewController(image: UIImage(data: data)!, labels: ["Photo"], initialIndex: 0, canReply: false, canMore: false, canDelete: false)
+    viewer.request = { _, _, _, completion in completion(nil) }
+    let owner = NativeGalleryZoomTransition(controller: viewer, anchor: anchor)
+    for presenting in [true, false] {
+      let context = GalleryTransitionContext(container: source.view, from: presenting ? source : viewer, to: presenting ? viewer : source)
+      let animator = NativeGalleryZoomAnimator(owner: owner, presenting: presenting)
+      if !UIAccessibility.isReduceMotionEnabled { precondition(animator.transitionDuration(using: context) == 0.28) }
+      animator.animateTransition(using: context)
+      let deadline = Date().addingTimeInterval(2)
+      while !context.completed && Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
+      precondition(context.completed && context.succeeded, "Zoom must complete")
+      precondition(viewer.view.alpha == 1, "Transition restores opacity")
+      let pager = viewer.children.compactMap { $0 as? UIPageViewController }.first!
+      precondition(pager.view.alpha == 1, "Transition restores media visibility")
+      precondition(source.view.subviews.count == (presenting ? 2 : 1), "Temporary zoom snapshots must be removed")
+    }
+    window.isHidden = true
+    print("PASS: short zoom presentation, dismissal and snapshot cleanup")
+  }
   @MainActor static func loaderJourney() {
     let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 100, height: 100))
     let root = UIViewController(); window.rootViewController = root
@@ -185,4 +213,30 @@ struct NativePhotoZoomTests {
 private final class GalleryFeedbackSpy: UISelectionFeedbackGenerator {
   var clicks = 0
   override func selectionChanged() { clicks += 1 }
+}
+
+@MainActor
+private final class GalleryTransitionContext: NSObject, UIViewControllerContextTransitioning {
+  let containerView: UIView
+  let from: UIViewController
+  let to: UIViewController
+  var completed = false
+  var succeeded = false
+  let isAnimated = true
+  let isInteractive = false
+  let transitionWasCancelled = false
+  let presentationStyle = UIModalPresentationStyle.overFullScreen
+  let targetTransform = CGAffineTransform.identity
+  init(container: UIView, from: UIViewController, to: UIViewController) {
+    containerView = container; self.from = from; self.to = to
+  }
+  func viewController(forKey key: UITransitionContextViewControllerKey) -> UIViewController? { key == .from ? from : to }
+  func view(forKey key: UITransitionContextViewKey) -> UIView? { key == .from ? from.view : to.view }
+  func initialFrame(for vc: UIViewController) -> CGRect { containerView.bounds }
+  func finalFrame(for vc: UIViewController) -> CGRect { containerView.bounds }
+  func completeTransition(_ didComplete: Bool) { completed = true; succeeded = didComplete }
+  func updateInteractiveTransition(_ percentComplete: CGFloat) {}
+  func finishInteractiveTransition() {}
+  func cancelInteractiveTransition() {}
+  func pauseInteractiveTransition() {}
 }

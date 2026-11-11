@@ -91,15 +91,11 @@ final class NativePhotoZoomCoordinator {
       // Keep Flutter rendering underneath so page changes can update the return card.
       controller.modalPresentationStyle = .overFullScreen
       let animate = !(args["reduceMotion"] as? Bool ?? false) && !UIAccessibility.isReduceMotionEnabled
+      controller.allowsZoomAnimation = animate
       if animate {
-        let options = UIViewController.Transition.ZoomOptions()
-        options.interactiveDismissShouldBegin = { [weak controller] context in
-          controller?.shouldBeginDismissal(location: context.location, velocity: context.velocity) ?? false
-        }
-        options.alignmentRectProvider = { [weak controller] _ in controller?.photoAlignmentRect() }
-        controller.preferredTransition = .zoom(options: options) { [weak anchor] _ in
-          guard let anchor, !anchor.isHidden else { return nil }; return anchor
-        }
+        let transition = NativeGalleryZoomTransition(controller: controller, anchor: anchor)
+        controller.zoomTransition = transition
+        controller.transitioningDelegate = transition
       }
       let previousAccessibilityHidden = presenter.view.accessibilityElementsHidden
       presenter.view.accessibilityElementsHidden = true
@@ -164,6 +160,8 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
   private var action = "closed"
   private var finishing = false
   private lazy var downwardDismiss = UIPanGestureRecognizer(target: self, action: #selector(dragToDismiss(_:)))
+  var allowsZoomAnimation = true
+  var zoomTransition: NativeGalleryZoomTransition?
   var selectionFeedback = UISelectionFeedbackGenerator()
   private var paging = false
   private var acting = false
@@ -285,14 +283,14 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
     gestureRecognizer === downwardDismiss || otherGestureRecognizer === downwardDismiss
   }
   @objc private func dragToDismiss(_ gesture: UIPanGestureRecognizer) {
-    // Nested paging/zoom scroll views can consume UIKit's content-dismiss drag.
-    // Once an intentional downward drag is established, use the same native
-    // zoom dismissal as Close. Horizontal drags never begin this recognizer.
+    // Use the same short zoom as Close once the downward drag is intentional.
+    // Horizontal drags and zoomed-photo panning remain owned by their views.
     guard !isBeingDismissed, !finishing,
       gesture.state == .changed || gesture.state == .ended else { return }
     let translation = gesture.translation(in: view)
     if translation.y > 60 && translation.y > abs(translation.x) * 1.5 { closePhoto() }
   }
+  func setTransitionMediaHidden(_ hidden: Bool) { pager.view.alpha = hidden ? 0 : 1 }
   func photoAlignmentRect() -> CGRect? {
     view.layoutIfNeeded()
     guard let page = pager.viewControllers?.first as? NativePhotoPage else { return nil }
@@ -463,7 +461,7 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
   private func finish(_ result: String) {
     guard !finishing else { return }; finishing = true; action = result
     stopVideos()
-    syncSelection { [weak self] in self?.dismiss(animated: !UIAccessibility.isReduceMotionEnabled) }
+    syncSelection { [weak self] in self?.dismiss(animated: self?.allowsZoomAnimation == true && !UIAccessibility.isReduceMotionEnabled) }
   }
   private func confirmDelete() {
     guard canDelete, !acting else { return }
@@ -652,5 +650,90 @@ private final class NativeGalleryLoadingIndicator: UIView {
     rotation.duration = 0.5; rotation.repeatCount = .infinity
     rotation.timingFunction = CAMediaTimingFunction(name: .linear)
     layer.add(rotation, forKey: "loading")
+  }
+}
+
+/// A short, public-API zoom animator; UIKit's built-in zoom has fixed timing.
+@available(iOS 18.0, *)
+private final class NativeGalleryZoomTransition: NSObject, UIViewControllerTransitioningDelegate {
+  weak var controller: NativePhotoZoomViewController?
+  weak var anchor: UIImageView?
+  init(controller: NativePhotoZoomViewController, anchor: UIImageView) {
+    self.controller = controller; self.anchor = anchor
+  }
+  func animationController(forPresented presented: UIViewController, presenting: UIViewController, source: UIViewController) -> UIViewControllerAnimatedTransitioning? {
+    NativeGalleryZoomAnimator(owner: self, presenting: true)
+  }
+  func animationController(forDismissed dismissed: UIViewController) -> UIViewControllerAnimatedTransitioning? {
+    NativeGalleryZoomAnimator(owner: self, presenting: false)
+  }
+}
+
+@available(iOS 18.0, *)
+private final class NativeGalleryZoomAnimator: NSObject, UIViewControllerAnimatedTransitioning {
+  let owner: NativeGalleryZoomTransition
+  let presenting: Bool
+  init(owner: NativeGalleryZoomTransition, presenting: Bool) {
+    self.owner = owner; self.presenting = presenting
+  }
+  func transitionDuration(using context: UIViewControllerContextTransitioning?) -> TimeInterval {
+    UIAccessibility.isReduceMotionEnabled ? 0 : 0.28
+  }
+  func animateTransition(using context: UIViewControllerContextTransitioning) {
+    let container = context.containerView
+    let key: UITransitionContextViewControllerKey = presenting ? .to : .from
+    guard let controller = context.viewController(forKey: key), let view = context.view(forKey: presenting ? .to : .from) else {
+      context.completeTransition(false); return
+    }
+    if presenting {
+      view.frame = context.finalFrame(for: controller)
+      container.addSubview(view)
+    }
+    view.layoutIfNeeded()
+    let duration = transitionDuration(using: context)
+    let anchor = owner.anchor
+    let image = anchor?.image
+    let target = owner.controller?.photoAlignmentRect().map { container.convert($0, from: view) }
+    let canZoom = duration > 0 && anchor?.isHidden == false && anchor?.superview != nil && image != nil && target != nil
+    var snapshot: UIView?
+    var sourceCenter = CGPoint.zero
+    var sourceBounds = CGRect.zero
+    var sourceTransform = CGAffineTransform.identity
+    if canZoom, let anchor, let image, let target {
+      sourceCenter = container.convert(anchor.center, from: anchor.superview)
+      sourceBounds = CGRect(origin: .zero, size: anchor.bounds.size)
+      sourceTransform = anchor.transform
+      let moving: UIView
+      if !presenting, let mediaRect = owner.controller?.photoAlignmentRect(),
+        let captured = view.resizableSnapshotView(from: mediaRect, afterScreenUpdates: false, withCapInsets: .zero) {
+        moving = captured
+      } else { moving = UIImageView(image: image) }
+      moving.contentMode = .scaleAspectFill; moving.clipsToBounds = true
+      moving.layer.cornerCurve = .continuous
+      moving.isAccessibilityElement = false; moving.isUserInteractionEnabled = false
+      moving.bounds = presenting ? sourceBounds : CGRect(origin: .zero, size: target.size)
+      moving.center = presenting ? sourceCenter : CGPoint(x: target.midX, y: target.midY)
+      moving.transform = presenting ? sourceTransform : .identity
+      moving.layer.cornerRadius = presenting ? anchor.layer.cornerRadius : 0
+      container.addSubview(moving); snapshot = moving
+      owner.controller?.setTransitionMediaHidden(true)
+    }
+    view.alpha = presenting ? 0 : 1
+    UIView.animate(withDuration: duration, delay: 0, options: [.curveEaseOut, .beginFromCurrentState]) {
+      view.alpha = self.presenting ? 1 : 0
+      if let snapshot, let target {
+        snapshot.transform = self.presenting ? .identity : sourceTransform
+        snapshot.bounds = self.presenting ? CGRect(origin: .zero, size: target.size) : sourceBounds
+        snapshot.center = self.presenting ? CGPoint(x: target.midX, y: target.midY) : sourceCenter
+        snapshot.layer.cornerRadius = self.presenting ? 0 : (anchor?.layer.cornerRadius ?? 26)
+      }
+    } completion: { _ in
+      let completed = !context.transitionWasCancelled
+      self.owner.controller?.setTransitionMediaHidden(false)
+      view.alpha = 1
+      snapshot?.removeFromSuperview()
+      if !self.presenting && completed { view.removeFromSuperview() }
+      context.completeTransition(completed)
+    }
   }
 }
