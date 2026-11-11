@@ -6,10 +6,9 @@ Federated identity authorization — stateless core
 
 `draft` `optional` `relay`
 
-> **Proposed amendment — not implemented:** the optional
-> [Agent authorization withdrawal](#agent-authorization-withdrawal-proposed)
-> profile below adds authorization withdrawal without retiring an agent key.
-> The stateless core remains unchanged for deployments not selecting it.
+The optional [Agent authorization withdrawal](#agent-authorization-withdrawal)
+profile adds authorization withdrawal without retiring an agent key.
+The stateless core remains unchanged for deployments not selecting it.
 
 **Protocol dependencies**: NIP-01, NIP-42, NIP-98.
 
@@ -1031,11 +1030,10 @@ proof remains an independent control.
 `alg=none` and symmetric algorithms deny.  The exact `kid`-based key selection
 is bounded before any attacker-controlled lookup.
 
-## Agent authorization withdrawal (proposed)
+## Agent authorization withdrawal
 
-**Status: proposed normative amendment, not implemented.** This optional
-profile, `agent-authorization-withdrawal-v1`, adds withdrawal of earlier agent
-assertions while preserving the asserted key. It does not authorize a workspace
+This optional profile, `agent-authorization-withdrawal-v1`, adds withdrawal of
+earlier agent assertions while preserving the asserted key. It does not authorize a workspace
 transfer, restore grants, or reverse key retirement. Core deployments retain
 the semantics above; where this profile is selected, the rules below supplement
 Verification, Session policy, Admin disconnect API, HTTP ingress, Discovery,
@@ -1160,7 +1158,7 @@ rule. This deliberately strengthens core restart handling for participating
 deployments. An active key-wide deny of the agent or owner always wins,
 regardless of `iat` or cutoff; a withdrawal MUST NOT shorten or clear it.
 Permanent retirement remains an issuer decision: the issuer MUST NOT issue
-fresh assertions for a retired key. This amendment defines no unretirement.
+fresh assertions for a retired key. This profile defines no unretirement.
 
 Cutoff storage MUST be bounded per issuer. At capacity, new entries MUST fail
 `503`, without evicting enforcement state or consuming a replay identity.
@@ -1293,7 +1291,7 @@ retry the new operation as core `disconnect` and then treat its response as
 equivalent scoped completion. Core-only deployments retain their existing
 bounded-expiry behavior and make no new durability promise.
 
-### Behavioral oracles for the proposed profile
+### Behavioral oracles for the profile
 
 | ID | Required outcome |
 |---|---|
