@@ -724,7 +724,7 @@ pub(crate) fn is_document_request(state: &AppState, req: &Request<Body>) -> bool
         && (path.starts_with("/assets/") || should_serve_spa(path, state.config.serve_git_web_gui))
 }
 
-fn is_admin_spa_path(path: &str) -> bool {
+pub(crate) fn is_admin_spa_path(path: &str) -> bool {
     path == "/"
         || path == "/reports"
         || path.starts_with("/reports/")
@@ -736,7 +736,7 @@ fn is_admin_spa_path(path: &str) -> bool {
 /// hashed Vite output; `/favicon.svg` is the one root-level file the bundle
 /// emits and the document links. Everything else on the admin host is a 404 —
 /// the directory is not browsable.
-fn is_admin_static_path(path: &str) -> bool {
+pub(crate) fn is_admin_static_path(path: &str) -> bool {
     path.starts_with("/assets/") || path == "/favicon.svg"
 }
 
@@ -1290,6 +1290,10 @@ fn build_cors_layer(cors_origins: &[String]) -> CorsLayer {
 
 #[cfg(test)]
 mod tests {
+    mod single_community_tests {
+        include!("single_community_tests.rs");
+    }
+
     use std::collections::VecDeque;
     use std::sync::{Mutex, PoisonError};
     use std::time::Duration;
