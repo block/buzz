@@ -26,6 +26,7 @@ installDOMShim();
 installFreshStorage();
 
 import { act } from "react";
+import { OBSERVED_UNREAD_COALESCE_MS } from "./useObservedUnreadPersistence.ts";
 import {
   readObservedUnreadFromStorage,
   writeObservedUnreadToStorage,
@@ -49,10 +50,15 @@ function makeRefs() {
   };
 }
 
-/** Let the hook's promise chain settle (open/ingest are async). */
+/**
+ * Let the hook's promise chain settle (open/ingest are async), including the
+ * mutation-coalescing window that delays membership/latest/marker ingests.
+ */
 async function settle() {
   await act(async () => {
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) =>
+      setTimeout(resolve, OBSERVED_UNREAD_COALESCE_MS + 25),
+    );
   });
 }
 
@@ -909,6 +915,104 @@ test("native: an ingested event reaches the hook's unread counts, not just the p
   } finally {
     await first?.unmount();
     await second?.unmount();
+    rig.restore();
+  }
+});
+
+// ── Coalescing: one ingest per burst, order-preserving, clears not merged ─────
+
+test("coalesce: a burst of membership/latest/marker mutations is ONE ingest", async () => {
+  installFreshStorage();
+  let harness;
+  const rig = installNativeRig();
+  const scope = { pubkey: "pk-coalesce-burst", relayUrl: RELAY };
+  try {
+    harness = await mountHook(
+      { ...DEFAULT_PROPS, pubkey: scope.pubkey, getTs: () => NOW_S },
+      makeRefs(),
+    );
+    await settle();
+    const before = rig.requests("observed_unread_ingest").length;
+
+    for (let i = 0; i < 20; i += 1)
+      harness.api.updateMembership("participated", `root-${i}`, true);
+    harness.api.advanceLatest("channel-burst", NOW_S - 5);
+    harness.api.syncMarkers(["channel-burst"]);
+    assert.equal(
+      rig.requests("observed_unread_ingest").length,
+      before,
+      "nothing is sent inside the coalescing window",
+    );
+    await settle();
+
+    const sent = rig.requests("observed_unread_ingest").slice(before);
+    assert.equal(sent.length, 1, "the whole burst must be a single ingest");
+    assert.equal(sent[0].membership.length, 20);
+    assert.equal(rig.scope(scope).membership.size, 20);
+    assert.equal(rig.scope(scope).channelLatest.get("channel-burst"), NOW_S - 5);
+    assert.equal(rig.scope(scope).markers.get("channel-burst"), NOW_S);
+  } finally {
+    await harness?.unmount();
+    rig.restore();
+  }
+});
+
+test("coalesce: a clear flushes earlier buffered mutations first and is not merged", async () => {
+  installFreshStorage();
+  let harness;
+  const rig = installNativeRig();
+  const scope = { pubkey: "pk-coalesce-clear", relayUrl: RELAY };
+  try {
+    harness = await mountHook(
+      { ...DEFAULT_PROPS, pubkey: scope.pubkey },
+      makeRefs(),
+    );
+    await settle();
+    const before = rig.requests("observed_unread_ingest").length;
+
+    harness.api.advanceLatest("channel-c", NOW_S);
+    harness.api.removeChannel("channel-c");
+    await settle();
+
+    const sent = rig.requests("observed_unread_ingest").slice(before);
+    assert.equal(sent.length, 2, "buffer flush + clear are separate ingests");
+    assert.equal(sent[0].channelLatest.length, 1);
+    assert.deepEqual(sent[1].clearChannels, ["channel-c"]);
+    assert.equal(
+      rig.scope(scope).channelLatest.has("channel-c"),
+      false,
+      "the clear must apply AFTER the buffered latest, as when sent one by one",
+    );
+  } finally {
+    await harness?.unmount();
+    rig.restore();
+  }
+});
+
+test("coalesce: pagehide and unmount flush the buffer without waiting for the timer", async () => {
+  installFreshStorage();
+  let harness;
+  const rig = installNativeRig();
+  const scope = { pubkey: "pk-coalesce-flush", relayUrl: RELAY };
+  try {
+    harness = await mountHook(
+      { ...DEFAULT_PROPS, pubkey: scope.pubkey },
+      makeRefs(),
+    );
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    harness.api.updateMembership("followed", "root-pagehide", true);
+    await act(async () => {
+      globalThis.dispatchEvent({ type: "pagehide" });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    assert.ok(
+      rig.scope(scope).membership.has("followed\u0000root-pagehide"),
+      "pagehide must flush the coalesced mutation immediately",
+    );
+  } finally {
+    await harness?.unmount();
     rig.restore();
   }
 });
