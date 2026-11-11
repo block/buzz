@@ -13,6 +13,51 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  testWidgets('reopening a deep link resets its route after thread Back', (
+    tester,
+  ) async {
+    final controller = ConversationPaneController();
+    addTearDown(controller.dispose);
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(1000, 800);
+    addTearDown(tester.view.reset);
+    await tester.pumpWidget(
+      ProviderScope(
+        child: MaterialApp(
+          home: AdaptiveConversationPane(
+            controller: controller,
+            list: Builder(
+              builder: (context) => TextButton(
+                onPressed: () => openConversationPane(
+                  context,
+                  'activity-item',
+                  (_) => const _DeepLink(),
+                  reopen: true,
+                ),
+                child: const Text('Open activity'),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    for (var attempt = 0; attempt < 2; attempt++) {
+      await tester.tap(find.text('Open activity'));
+      await tester.pumpAndSettle();
+      expect(find.text('Deep-linked thread'), findsOneWidget);
+      await tester.tap(find.byType(BackButton));
+      await tester.pumpAndSettle();
+      expect(find.text('Selected channel'), findsOneWidget);
+      expect(controller.selectedId, 'activity-item');
+      expect(
+        ConversationPaneScope.isBaseRouteOf(
+          tester.element(find.text('Selected channel')),
+        ),
+        isTrue,
+      );
+    }
+  });
+
   testWidgets('phones stay compact while tablets and Duo retain panes', (
     tester,
   ) async {
@@ -505,4 +550,32 @@ class _Conversation extends StatelessWidget {
       ],
     ),
   );
+}
+
+class _DeepLink extends StatefulWidget {
+  const _DeepLink();
+  @override
+  State<_DeepLink> createState() => _DeepLinkState();
+}
+
+class _DeepLinkState extends State<_DeepLink> {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      Navigator.of(context).push(
+        MaterialPageRoute<void>(
+          builder: (_) => Scaffold(
+            appBar: AppBar(),
+            body: const Text('Deep-linked thread'),
+          ),
+        ),
+      );
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) =>
+      const Scaffold(body: Text('Selected channel'));
 }

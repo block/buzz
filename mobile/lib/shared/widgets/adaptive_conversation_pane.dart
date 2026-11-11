@@ -55,9 +55,20 @@ class ConversationPaneController extends ChangeNotifier {
   String? selectedId;
   WidgetBuilder? detailBuilder;
   bool animateSelection = true;
+  int _request = 0;
+  // Deep-link requests may target the same item after its nested route popped.
+  // A fresh page identity reruns initialization without clearing the selection
+  // when Navigator removes the previous page.
+  LocalKey get selectionKey => ValueKey((selectedId, _request));
 
-  void open(String id, WidgetBuilder builder, {bool animate = true}) {
-    if (id == selectedId) return;
+  void open(
+    String id,
+    WidgetBuilder builder, {
+    bool animate = true,
+    bool reopen = false,
+  }) {
+    if (id == selectedId && !reopen) return;
+    if (reopen) _request++;
     selectedId = id;
     detailBuilder = builder;
     animateSelection = animate;
@@ -90,7 +101,7 @@ class ConversationPaneScope
     final settings = ModalRoute.of(context)?.settings;
     return controller?.selectedId != null &&
         settings is Page &&
-        settings.key == ValueKey<String?>(controller!.selectedId);
+        settings.key == controller!.selectionKey;
   }
 
   static bool isActiveOf(BuildContext context) =>
@@ -330,9 +341,7 @@ class AdaptiveConversationPane extends HookConsumerWidget {
                                           if (selected != null)
                                             if (controller.animateSelection)
                                               MaterialPage<void>(
-                                                key: ValueKey<String?>(
-                                                  selected,
-                                                ),
+                                                key: controller.selectionKey,
                                                 child: _CoveringDetail(
                                                   covering: coveringDetail,
                                                   builder:
@@ -341,9 +350,7 @@ class AdaptiveConversationPane extends HookConsumerWidget {
                                               )
                                             else
                                               _ImmediateDetailPage(
-                                                key: ValueKey<String?>(
-                                                  selected,
-                                                ),
+                                                key: controller.selectionKey,
                                                 builder: (_) => _CoveringDetail(
                                                   covering: coveringDetail,
                                                   builder:
@@ -353,7 +360,7 @@ class AdaptiveConversationPane extends HookConsumerWidget {
                                         ],
                                         onDidRemovePage: (page) {
                                           if (page.key ==
-                                              ValueKey(controller.selectedId)) {
+                                              controller.selectionKey) {
                                             controller.clear();
                                           }
                                         },
@@ -471,11 +478,12 @@ class _ImmediateDetailPage extends Page<void> {
 Future<void> openConversationPane(
   BuildContext context,
   String selectionId,
-  WidgetBuilder builder,
-) async {
+  WidgetBuilder builder, {
+  bool reopen = false,
+}) async {
   final pane = ConversationPaneScope.maybeOf(context);
   if (pane != null) {
-    pane.open(selectionId, builder);
+    pane.open(selectionId, builder, reopen: reopen);
   } else {
     await Navigator.of(context).push(MaterialPageRoute<void>(builder: builder));
   }

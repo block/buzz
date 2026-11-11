@@ -305,7 +305,10 @@ class HomePage extends HookConsumerWidget {
     Widget navigationBar(Axis axis) => MessagesNavigationBar(
       axis: axis,
       onSearch: openSearch,
-      agent: defaultAgentBuilder(context),
+      agent: ConversationPaneScope(
+        controller: conversations,
+        child: Builder(builder: defaultAgentBuilder),
+      ),
       creationActions: [
         (
           label: 'New chat',

@@ -85,6 +85,32 @@ void main() {
     );
   }
 
+  testWidgets('every Home shortcut inherits the conversation controller', (
+    tester,
+  ) async {
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    for (final scenario in [
+      (size: const Size(1024, 768), rail: 0.0),
+      (size: const Size(466, 678), rail: 76.0),
+      (size: const Size(951, 669), rail: 76.0),
+    ]) {
+      tester.view.physicalSize = scenario.size;
+      tester.view.viewPadding = FakeViewPadding(right: scenario.rail);
+      tester.view.padding = tester.view.viewPadding;
+      await tester.pumpWidget(await buildHome());
+      await tester.pumpAndSettle();
+      final launcherContext = tester.element(find.byType(DefaultAgentLauncher));
+      final controller = tester
+          .widget<AdaptiveConversationPane>(
+            find.byType(AdaptiveConversationPane),
+          )
+          .controller;
+      expect(ConversationPaneScope.maybeOf(launcherContext), same(controller));
+      await tester.pumpWidget(const SizedBox.shrink());
+    }
+  });
+
   testWidgets('feedback clears floating navigation and wraps large text', (
     tester,
   ) async {
