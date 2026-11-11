@@ -327,12 +327,25 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
   private let material = UIVisualEffectView(effect: UIBlurEffect(style: .systemUltraThinMaterial))
   private let materialFade = CAGradientLayer()
   private let content = NavigationContentController()
+  private let edgeBackdrop = NavigationEdgeBackdrop()
   private let navigation: UINavigationController
   private let channel: FlutterMethodChannel
   private var offset: CGFloat = 0
   private var controlBackground = UIColor.secondarySystemBackground
+  private var horizontalControls = false
+  private var headerLeading: UIView?
+  private var headerTrailing: UIView?
+  private var paneTitle: UIView?
+  private var titleInsetLeft: CGFloat = 0
+  private var titleInsetRight: CGFloat = 0
+  private var alignCollapsedTitleToLeading = false
+  private var edgeClearance: CGFloat = 8
+  private var topSpacing: CGFloat = 0
+  private var controlCenterY: CGFloat?
+  private var centerInVisibleHeight = false
   private var alwaysFrosted = false
   private var backdropOnly = false
+  private var hardEdge = false
   private var usesSystemScrollEdge = false
   private var expandedBarHeight: CGFloat = 0
   private var titleIsCollapsed: Bool?
@@ -372,6 +385,9 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     parent?.addChild(navigation)
     container.addSubview(navigation.view)
     navigation.didMove(toParent: parent)
+    parent?.addChild(edgeBackdrop)
+    container.insertSubview(edgeBackdrop.view, belowSubview: navigation.view)
+    edgeBackdrop.didMove(toParent: parent)
     container.onLayout = { [weak self] in self?.layout() }
     channel.setMethodCallHandler { [weak self] call, result in
       switch call.method {
@@ -400,6 +416,10 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     guard !measuring else { return }
     let viewportHeight = container.window?.bounds.height ?? container.bounds.height
     navigation.view.frame = CGRect(x: 0, y: 0, width: container.bounds.width, height: viewportHeight)
+    if hardEdge && usesSystemScrollEdge {
+      edgeBackdrop.layout(in: navigation.view.frame, headerHeight: container.bounds.height,
+                          automaticTop: container.safeAreaInsets.top, lowerClearance: edgeClearance)
+    }
     // Flutter's route can begin offscreen, where UIKit infers a zero safe area.
     // Keep the toolbar below the status region throughout that transition.
     // Read the unmodified host inset, never the inset we are adjusting.
@@ -411,7 +431,10 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     let protectedTop = backdropOnly
       ? max(flutterSafeTop, container.bounds.height - max(44, navigation.navigationBar.bounds.height))
       : flutterSafeTop
-    let requiredTop = max(0, protectedTop - automaticTop)
+    let compact = (metrics?["compactHeight"] as? CGFloat) ?? 44
+    let paneTitleClearance = alignCollapsedTitleToLeading
+      ? max(44, compact) + topSpacing - compact : 0
+    let requiredTop = max(0, protectedTop + paneTitleClearance - automaticTop)
     if abs(navigation.additionalSafeAreaInsets.top - requiredTop) > 0.5 {
       navigation.additionalSafeAreaInsets.top = requiredTop
     }
@@ -427,11 +450,12 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     // beneath the entire control area, not just the status indicators.
     let glassBackedControls: Bool
     if #available(iOS 26.0, *) {
-      glassBackedControls = content.navigationItem.titleView is NavigationTitleView
+      glassBackedControls = content.navigationItem.titleView is NavigationTitleView || paneTitle is NavigationTitleView
     } else {
       glassBackedControls = false
     }
-    let statusOnly = alwaysFrosted && !navigation.navigationBar.prefersLargeTitles && glassBackedControls
+    let statusOnly = alwaysFrosted && paneTitle == nil && !horizontalControls
+      && !navigation.navigationBar.prefersLargeTitles && glassBackedControls
     let height = statusOnly
       ? min(container.bounds.height, statusHeight > 0 ? statusHeight + 6 : 0)
       : container.bounds.height
@@ -443,6 +467,49 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
       ? [0, NSNumber(value: Double(max(0, height - 12) / max(1, height))), 1]
       : (navigation.navigationBar.prefersLargeTitles ? [0, 0.55, 1] : [0, 0.85, 1])
     CATransaction.commit()
+    let centersInHardEdge = hardEdge && centerInVisibleHeight
+    // Match Flutter: the automatic row starts below the protected top inset.
+    // Header height includes that inset; it is not part of the usable row.
+    let contentMidpoint = (flutterSafeTop + container.bounds.height) / 2
+    let visibleCenter = contentMidpoint + edgeClearance / 2
+    let rowCenter = flutterSafeTop + topSpacing + 22
+    let requestedCenter = controlCenterY ?? (centersInHardEdge
+      ? (alignCollapsedTitleToLeading && titleIsCollapsed != true ? min(rowCenter, visibleCenter) : visibleCenter)
+      : (alignCollapsedTitleToLeading ? rowCenter : contentMidpoint))
+    // Flutter reserves the shared row; also defend direct native configurations.
+    let contentCenter = min(max(requestedCenter, flutterSafeTop + 22),
+                            max(flutterSafeTop + 22, container.bounds.height - 22))
+    if let title = paneTitle {
+      let titleWidth = max(0, container.bounds.width - titleInsetLeft - titleInsetRight)
+      let center = titleInsetLeft + titleWidth / 2
+      var availableWidth = max(0, titleWidth - 32)
+      if horizontalControls && !alignCollapsedTitleToLeading {
+        let leadingWidth = headerLeading?.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize).width ?? 0
+        let trailingWidth = headerTrailing?.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize).width ?? 0
+        let leftEdge = titleInsetLeft + 16 + leadingWidth
+        let rightEdge = container.bounds.width - titleInsetRight - 20 - trailingWidth
+        availableWidth = max(0, min(center - leftEdge, rightEdge - center) * 2 - 16)
+      }
+      let size = title.sizeThatFits(CGSize(width: availableWidth, height: 44))
+      title.frame = CGRect(x: alignCollapsedTitleToLeading
+                           ? titleInsetLeft + navigation.navigationBar.layoutMargins.left
+                           : titleInsetLeft + (titleWidth - size.width) / 2,
+                           y: contentCenter - size.height / 2,
+                           width: size.width, height: size.height)
+      title.layoutIfNeeded()
+    }
+    if horizontalControls {
+      // These native glass groups belong to the Flutter pane, whose bounds
+      // already exclude the rail. Avoid UINavigationBar reserving it again.
+      for (surface, trailing) in [(headerLeading, false), (headerTrailing, true)] {
+        guard let surface else { continue }
+        let size = surface.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize)
+        surface.frame = CGRect(x: trailing ? container.bounds.width - titleInsetRight - 20 - size.width : titleInsetLeft + 16,
+                               y: contentCenter - size.height / 2,
+                               width: size.width, height: size.height)
+        surface.layoutIfNeeded()
+      }
+    }
     reportAvatarBounds()
   }
 
@@ -462,6 +529,22 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
   }
 
   private func configure(_ args: [String: Any]) {
+    titleInsetLeft = max(0, (args["titleInsetLeft"] as? NSNumber)?.doubleValue ?? 0)
+    titleInsetRight = max(0, (args["titleInsetRight"] as? NSNumber)?.doubleValue ?? 0)
+    topSpacing = max(0, (args["topSpacing"] as? NSNumber)?.doubleValue ?? 0)
+    edgeClearance = max(0, (args["edgeClearance"] as? NSNumber)?.doubleValue ?? 8)
+    controlCenterY = (args["controlCenterY"] as? NSNumber).map { CGFloat($0.doubleValue) }
+    centerInVisibleHeight = args["centerInVisibleHeight"] as? Bool == true
+    horizontalControls = args["horizontalControls"] as? Bool == true
+    alignCollapsedTitleToLeading = args["alignCollapsedTitleToLeading"] as? Bool == true
+    compactTitleContainer.accessibilityElementsHidden = false
+    paneTitle?.removeFromSuperview()
+    paneTitle = nil
+    headerLeading?.removeFromSuperview()
+    headerTrailing?.removeFromSuperview()
+    headerLeading = nil
+    headerTrailing = nil
+    navigation.view.isHidden = horizontalControls && args["largeTitle"] as? Bool != true
     controlBackground = Self.color(args["controlBackground"])
     flutterSafeTop = (args["safeTop"] as? NSNumber)?.doubleValue ?? 0
     navigation.overrideUserInterfaceStyle = args["dark"] as? Bool == true ? .dark : .light
@@ -474,6 +557,7 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     titleColor = color
     largeTitleOpacity = -1
     backdropOnly = args["backdropOnly"] as? Bool == true
+    hardEdge = args["hardEdge"] as? Bool == true
     container.isUserInteractionEnabled = !backdropOnly
     navigation.view.isUserInteractionEnabled = !backdropOnly
     navigation.view.accessibilityElementsHidden = backdropOnly
@@ -481,20 +565,24 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     alwaysFrosted = args["alwaysFrosted"] as? Bool == true
     if #available(iOS 26.0, *) {
       if #available(iOS 27.0, *) { usesSystemScrollEdge = true }
-      content.scrollView.topEdgeEffect.style = .soft
-      content.scrollView.topEdgeEffect.isHidden = !usesSystemScrollEdge
+      content.scrollView.topEdgeEffect.style = hardEdge ? .hard : .soft
+      content.scrollView.topEdgeEffect.isHidden = !usesSystemScrollEdge || hardEdge
     }
+    edgeBackdrop.view.isHidden = !(hardEdge && usesSystemScrollEdge)
+    edgeBackdrop.overrideUserInterfaceStyle = navigation.overrideUserInterfaceStyle
+    navigation.view.alpha = hardEdge && backdropOnly && usesSystemScrollEdge ? 0 : 1
     // Older embedded views retain material because their native edge cannot
     // sample Flutter content. On iOS 27, UIKit also suppresses its native
     // edge while the large-title inset is collapsing.
     // Keep the graduated material throughout that transition so partial
     // scrolling never leaves the title and status area unprotected.
-    material.isHidden = usesSystemScrollEdge && !largeTitle
+    material.isHidden = usesSystemScrollEdge && (hardEdge || (!largeTitle
+      && (backdropOnly || args["centerTitleInPane"] as? Bool != true)))
     // Let the native fade extend past the bar without enlarging its hit area.
     // The mirrored content is transparent and the bottom edge is hidden.
     container.clipsToBounds = !usesSystemScrollEdge
     let appearance = UINavigationBarAppearance()
-    if usesSystemScrollEdge {
+    if usesSystemScrollEdge && !hardEdge {
       appearance.configureWithDefaultBackground()
     } else {
       appearance.configureWithTransparentBackground()
@@ -552,9 +640,37 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
       compactTitle.layer.mask = compactTitleMask
       if compactTitle.superview == nil { compactTitleContainer.addArrangedSubview(compactTitle) }
       compactTitleContainer.frame.size = compactTitle.intrinsicContentSize
-      item.titleView = compactTitleContainer
+      if alignCollapsedTitleToLeading {
+        // A pane's list title fades in place: the compact label uses the same
+        // leading margin as UIKit's expanded title, rather than recentering.
+        item.titleView = UIView()
+        compactTitleContainer.translatesAutoresizingMaskIntoConstraints = true
+        paneTitle = compactTitleContainer
+        container.addSubview(compactTitleContainer)
+      } else {
+        item.titleView = compactTitleContainer
+      }
     } else {
       item.titleView = nil
+    }
+    if args["centerTitleInPane"] as? Bool == true, !largeTitle {
+      if let titleView = item.titleView {
+        item.titleView = nil
+        titleView.translatesAutoresizingMaskIntoConstraints = true
+        paneTitle = titleView
+      } else if let text = item.title, !text.isEmpty {
+        let label = UILabel()
+        label.text = text
+        label.font = .preferredFont(forTextStyle: .headline)
+        label.adjustsFontForContentSizeCategory = true
+        label.textColor = color
+        label.textAlignment = .center
+        label.lineBreakMode = .byTruncatingTail
+        label.accessibilityTraits = .header
+        paneTitle = label
+      }
+      item.title = nil
+      if let paneTitle { container.addSubview(paneTitle) }
     }
     item.largeTitleDisplayMode = bar.prefersLargeTitles ? .always : .never
     trackedAvatar = nil
@@ -577,7 +693,27 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
         groups.append([action])
       }
     }
-    item.rightBarButtonItems = groups.reversed().map(makeControlGroup)
+    if horizontalControls {
+      item.leftBarButtonItems = nil
+      item.rightBarButtonItems = nil
+      if let leading = args["leading"] as? [String: Any] {
+        headerLeading = makePaneControlGroup([leading])
+      } else if args["back"] as? Bool == true {
+        headerLeading = makePaneControlGroup([["id": "back", "label": "Back", "symbol": "chevron.backward", "enabled": true]])
+      }
+      if !groups.isEmpty {
+        let stack = UIStackView(arrangedSubviews: groups.map(makePaneControlGroup))
+        stack.axis = .horizontal
+        stack.alignment = .center
+        stack.spacing = 8
+        headerTrailing = stack
+      }
+      for surface in [headerLeading, headerTrailing].compactMap({ $0 }) {
+        container.addSubview(surface)
+      }
+    } else {
+      item.rightBarButtonItems = groups.reversed().map(makeControlGroup)
+    }
     if let metrics {
       channel.invokeMethod("metrics", arguments: metrics)
     }
@@ -682,6 +818,9 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
       CATransaction.setDisableActions(true)
       compactTitleMask.frame = compactTitle.bounds
       compactTitleMask.opacity = collapsed ? 1 : 0
+      // A manually hosted compact heading must disappear from VoiceOver along
+      // with its mask while UIKit presents the expanded heading.
+      compactTitleContainer.accessibilityElementsHidden = paneTitle === compactTitleContainer && !collapsed
       CATransaction.commit()
       if wasCollapsed != collapsed {
         compactTitleMask.removeAllAnimations()
@@ -706,6 +845,28 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
                     state: data["selected"] as? Bool == true ? .on : .off) { [weak self] _ in
       self?.channel.invokeMethod("action", arguments: id)
     }
+  }
+
+  private func makePaneControlGroup(_ actions: [[String: Any]]) -> UIView {
+    let item = makeControlGroup(actions)
+    if let view = item.customView { return view }
+    // Plain and text-only UIBarButtonItems have no customView. Preserve their
+    // action/menu semantics when the pane, rather than UINavigationBar, hosts them.
+    let button = UIButton(type: .system)
+    button.setImage(item.image, for: .normal)
+    button.setTitle(item.title, for: .normal)
+    button.titleLabel?.font = .preferredFont(forTextStyle: .body)
+    button.titleLabel?.adjustsFontForContentSizeCategory = true
+    if let action = item.primaryAction { button.addAction(action, for: .touchUpInside) }
+    button.menu = item.menu
+    button.showsMenuAsPrimaryAction = item.menu != nil
+    button.isEnabled = item.isEnabled
+    button.accessibilityLabel = item.accessibilityLabel
+    button.accessibilityValue = item.accessibilityValue
+    button.tintColor = navigation.navigationBar.tintColor
+    button.heightAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
+    button.widthAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
+    return button
   }
 
   private func makeControlGroup(_ actions: [[String: Any]]) -> UIBarButtonItem {
@@ -898,6 +1059,9 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
   }
 
   deinit {
+    edgeBackdrop.willMove(toParent: nil)
+    edgeBackdrop.view.removeFromSuperview()
+    edgeBackdrop.removeFromParent()
     channel.setMethodCallHandler(nil)
     navigation.willMove(toParent: nil)
     navigation.view.removeFromSuperview()

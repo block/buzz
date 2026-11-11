@@ -10,6 +10,8 @@ import 'ios_glass_navigation_button.dart';
 import 'ios_glass_navigation_action.dart';
 import 'ios_navigation_bar.dart';
 import 'navigation_backdrop.dart';
+import 'navigation_header_layout.dart';
+export 'navigation_header_layout.dart';
 export 'ios_navigation_bar.dart' show IosNavigationAction;
 
 /// Minimum height of the frosted app bar content area below the safe area.
@@ -22,11 +24,13 @@ TextStyle _effectiveTitleStyle(BuildContext context, TextStyle? titleStyle) {
   return baseStyle.copyWith(fontWeight: FontWeight.w600).merge(titleStyle);
 }
 
-double _barContentHeight(
+double _barRowHeight(
   BuildContext context,
   TextStyle? titleStyle,
   double titleContentHeight,
-) {
+  double bottomExtent, {
+  bool includeTopSpacing = true,
+}) {
   final style = _effectiveTitleStyle(context, titleStyle);
   final scaledFontSize = MediaQuery.textScalerOf(
     context,
@@ -36,19 +40,94 @@ double _barContentHeight(
       ? titleContentHeight
       : scaledTitleHeight;
   final accessibleHeight = Grid.xxs + effectiveTitleHeight + Grid.xxs;
-  return accessibleHeight > _kBarContentMinHeight
-      ? accessibleHeight
+  final layout = NavigationHeaderScope.of(context);
+  final customGeometry = defaultTargetPlatform == TargetPlatform.iOS;
+  final minimumHeight = customGeometry && layout.paneControls
+      ? (includeTopSpacing
+            ? layout.paneRowHeight(
+                IosNavigationMetrics.of(context).compactHeight,
+              )
+            : IosNavigationMetrics.of(
+                context,
+              ).compactHeight.clamp(buzzNavigationRowHeight, double.infinity))
       : _kBarContentMinHeight;
+  final height = accessibleHeight > minimumHeight
+      ? accessibleHeight
+      : minimumHeight;
+  return customGeometry && layout.alignCollapsedBottom && bottomExtent > height
+      ? bottomExtent
+      : height;
+}
+
+// Reserve enough real layout space for the row after moving its center.
+// The decorative edge itself cannot receive taps outside the platform view.
+double _reservedContentHeight(
+  BuildContext context,
+  double rowHeight,
+  double clearance,
+  double minimumControlHeight,
+) {
+  final layout = NavigationHeaderScope.of(context);
+  if (defaultTargetPlatform != TargetPlatform.iOS) return rowHeight;
+  final safeTop = MediaQuery.paddingOf(context).top;
+  final axis = layout.resolvedControlCenter(safeTop, rowHeight);
+  if (axis != null) {
+    return (axis - safeTop + rowHeight / 2).clamp(rowHeight, double.infinity);
+  }
+  return layout.hardEdge && layout.centerInVisibleHeight
+      ? rowHeight.clamp(minimumControlHeight + clearance, double.infinity)
+      : rowHeight;
+}
+
+double _barContentHeight(
+  BuildContext context,
+  TextStyle? titleStyle,
+  double titleContentHeight,
+  double bottomExtent,
+) {
+  final row = _barRowHeight(
+    context,
+    titleStyle,
+    titleContentHeight,
+    bottomExtent,
+  );
+  final layout = NavigationHeaderScope.of(context);
+  return _reservedContentHeight(
+    context,
+    row,
+    layout.customEdgeClearance,
+    _barRowHeight(
+      context,
+      titleStyle,
+      titleContentHeight,
+      bottomExtent,
+      includeTopSpacing: false,
+    ),
+  );
+}
+
+double _nativeBarContentHeight(BuildContext context) {
+  final layout = NavigationHeaderScope.of(context);
+  final compact = IosNavigationMetrics.of(context).compactHeight;
+  if (!layout.paneControls) return compact;
+  return _reservedContentHeight(
+    context,
+    layout.paneRowHeight(compact),
+    layout.nativeEdgeClearance,
+    compact.clamp(buzzNavigationRowHeight, double.infinity),
+  );
 }
 
 /// Returns the total height of the [FrostedAppBar] including safe area padding.
 ///
 /// Use this to add top spacing to body content so it starts below the bar.
 /// Pass the same [titleStyle] and [titleContentHeight] to the bar and this
-/// helper when customizing them.
+/// helper when customizing them. For an overlapping bottom row, also pass
+/// [bottomOverlap] so its full target extent matches the rendered header.
 double frostedAppBarHeight(
   BuildContext context, {
   double bottomHeight = 0,
+  double bottomOverlap = 0,
   TextStyle? titleStyle,
   double titleContentHeight = 0,
   bool nativeLargeTitle = false,
@@ -56,15 +135,29 @@ double frostedAppBarHeight(
 }) {
   if (useNativeNavigation && defaultTargetPlatform == TargetPlatform.iOS) {
     return MediaQuery.paddingOf(context).top +
-        IosNavigationMetrics.of(context).compactHeight +
+        _nativeBarContentHeight(context) +
         (nativeLargeTitle
             ? IosNavigationMetrics.of(context).largeTitleHeight
             : 0) +
         bottomHeight;
   }
   return MediaQuery.paddingOf(context).top +
-      _barContentHeight(context, titleStyle, titleContentHeight) +
+      _barContentHeight(
+        context,
+        titleStyle,
+        titleContentHeight,
+        bottomHeight + bottomOverlap,
+      ) +
       bottomHeight;
+}
+
+/// Decorative clearance below the native header, shared by sticky overlays and
+/// their scroll/push-off thresholds. Ordinary phone routes retain zero clearance.
+double frostedAppBarEdgeClearance(BuildContext context) {
+  final layout = NavigationHeaderScope.of(context);
+  return defaultTargetPlatform == TargetPlatform.iOS && layout.hardEdge
+      ? layout.nativeEdgeClearance
+      : 0;
 }
 
 /// A frosted-glass floating app bar designed to sit inside a [Stack].
@@ -211,6 +304,7 @@ class FrostedAppBar extends StatelessWidget {
   }
 
   Widget _build(BuildContext context, bool nativeSuppressed) {
+    final layout = NavigationHeaderScope.of(context);
     if (useNativeNavigation &&
         defaultTargetPlatform == TargetPlatform.iOS &&
         !nativeSuppressed) {
@@ -227,7 +321,7 @@ class FrostedAppBar extends StatelessWidget {
             : 0.0;
         final barHeight =
             MediaQuery.paddingOf(context).top +
-            IosNavigationMetrics.of(context).compactHeight +
+            _nativeBarContentHeight(context) +
             extra;
         return AnimatedPositioned(
           duration: layoutDuration,
@@ -310,6 +404,7 @@ class FrostedAppBar extends StatelessWidget {
       context,
       titleStyle,
       titleContentHeight,
+      bottomHeight + bottomOverlap,
     );
     final usesAutomaticIosGlassBackButton =
         !nativeSuppressed &&
@@ -343,49 +438,86 @@ class FrostedAppBar extends StatelessWidget {
                     )
             : null);
 
-    final titleRow = SizedBox(
-      height: barContentHeight,
-      child: Padding(
-        padding: EdgeInsets.symmetric(horizontal: horizontalInset),
-        child: IconTheme.merge(
-          data: IconThemeData(color: effectiveIconColor),
-          child: _CenteredNavigationLayout(
-            leading: effectiveLeading,
-            title: title == null
-                ? null
-                : DefaultTextStyle.merge(
-                    style: effectiveTitleStyle,
-                    overflow: TextOverflow.ellipsis,
-                    maxLines: 1,
-                    textAlign: centerTitle ? TextAlign.center : TextAlign.start,
-                    child: centerTitle
-                        ? title!
-                        : Padding(
-                            padding: EdgeInsets.only(
-                              left: effectiveLeading != null
-                                  ? usesAutomaticIosGlassBackButton
-                                        ? iosGlassChannelHeaderTitleSpacing
-                                        : 0
-                                  : horizontalInset < Grid.gutter
-                                  ? Grid.gutter - horizontalInset
-                                  : 0,
-                              right:
-                                  actions.isEmpty &&
-                                      horizontalInset < Grid.gutter
-                                  ? Grid.gutter - horizontalInset
-                                  : 0,
+    final bottomExtent = bottomHeight + bottomOverlap;
+    final collapseProgress = bottomExtent > 0
+        ? (bottomOverlap / bottomExtent).clamp(0.0, 1.0)
+        : 0.0;
+    final customGeometry = defaultTargetPlatform == TargetPlatform.iOS;
+    final visibleCenterOffset =
+        customGeometry &&
+            layout.hardEdge &&
+            layout.controlCenterY == null &&
+            layout.centerInVisibleHeight
+        ? layout.customEdgeClearance / 2 * collapseProgress
+        : 0.0;
+    final axis = customGeometry
+        ? layout.resolvedControlCenter(
+            topPadding,
+            _barRowHeight(
+              context,
+              titleStyle,
+              titleContentHeight,
+              bottomExtent,
+            ),
+          )
+        : null;
+    final titleOffset = axis == null
+        ? 0.0
+        : axis - topPadding - barContentHeight / 2;
+    final titleRow = Transform.translate(
+      offset: Offset(0, titleOffset + visibleCenterOffset),
+      child: SizedBox(
+        height: barContentHeight,
+        child: Padding(
+          padding: EdgeInsets.symmetric(horizontal: horizontalInset),
+          child: IconTheme.merge(
+            data: IconThemeData(color: effectiveIconColor),
+            child: _CenteredNavigationLayout(
+              leading: effectiveLeading,
+              title: title == null
+                  ? null
+                  : DefaultTextStyle.merge(
+                      style: effectiveTitleStyle,
+                      overflow: TextOverflow.ellipsis,
+                      maxLines: 1,
+                      textAlign: centerTitle
+                          ? TextAlign.center
+                          : TextAlign.start,
+                      child: centerTitle
+                          ? title!
+                          : Padding(
+                              padding: EdgeInsets.only(
+                                left: effectiveLeading != null
+                                    ? usesAutomaticIosGlassBackButton
+                                          ? iosGlassChannelHeaderTitleSpacing
+                                          : 0
+                                    : horizontalInset < Grid.gutter
+                                    ? Grid.gutter - horizontalInset
+                                    : 0,
+                                right:
+                                    actions.isEmpty &&
+                                        horizontalInset < Grid.gutter
+                                    ? Grid.gutter - horizontalInset
+                                    : 0,
+                              ),
+                              child: title!,
                             ),
-                            child: title!,
-                          ),
-                  ),
-            actions: actions.isEmpty
-                ? null
-                : Row(mainAxisSize: MainAxisSize.min, children: actions),
-            centered: centerTitle,
+                    ),
+              actions: actions.isEmpty
+                  ? null
+                  : Row(mainAxisSize: MainAxisSize.min, children: actions),
+              centered: centerTitle,
+            ),
           ),
         ),
       ),
     );
+    final collapsedBottomOffset =
+        customGeometry && layout.alignCollapsedBottom && bottomExtent > 0
+        ? ((bottomExtent - barContentHeight) / 2 + titleOffset) *
+                  collapseProgress +
+              visibleCenterOffset
+        : 0.0;
     final contentBody = bottom != null
         ? SizedBox(
             height: barContentHeight + bottomHeight,
@@ -393,7 +525,7 @@ class FrostedAppBar extends StatelessWidget {
               children: [
                 Positioned(top: 0, left: 0, right: 0, child: titleRow),
                 Positioned(
-                  top: barContentHeight - bottomOverlap,
+                  top: barContentHeight - bottomOverlap + collapsedBottomOffset,
                   left: 0,
                   right: 0,
                   height: bottomHeight + bottomOverlap,

@@ -78,6 +78,185 @@ class RunnerTests: XCTestCase {
     }
   }
 
+
+  @MainActor
+  func testPaneNavigationAlignmentChangesAndRestoresPhoneLayout() throws {
+    for (leading, safeTop) in [(false, 0.0), (true, 0.0), (false, 59.0), (true, 59.0)] {
+      let parent = UIViewController()
+      let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 950, height: 669))
+      window.rootViewController = parent
+      window.makeKeyAndVisible()
+      defer { window.isHidden = true }
+      let messenger = NavigationTestMessenger()
+      let bar = IosNavigationBarFactory(messenger: messenger, parent: parent).create(
+        withFrame: CGRect(x: 0, y: 0, width: 375, height: safeTop + 68),
+        viewIdentifier: 999985, arguments: ["title": "general"])
+      parent.view.addSubview(bar.view())
+      let base: [String: Any] = [
+        "title": "general", "largeTitle": leading, "hardEdge": true,
+        "alignCollapsedTitleToLeading": leading, "centerTitleInPane": !leading,
+        "horizontalControls": true, "topSpacing": 24, "safeTop": safeTop,
+        "actions": [["id": "options", "label": "Options", "symbol": "ellipsis", "enabled": true],
+                    ["id": "edit", "label": "Edit", "plain": true, "sharesBackground": false, "enabled": true]]]
+      // Geometry is supplied explicitly; it works regardless of window width.
+      for (height, camera, clearance, spacing) in [
+        (64.0, nil as Double?, 8.0, 0.0), (88.0, nil, 32.0, 0.0),
+        (56.0, -49.0, 8.0, 0.0),
+        (68.0, nil, 8.0, 24.0), (120.0, nil, 8.0, 24.0),
+        (79.0, 45.0, 16.0, 24.0), (94.0, 60.0, 16.0, 24.0),
+        (154.0, 120.0, 16.0, 24.0), (68.0, nil, 8.0, 24.0)] {
+        var args = base
+        args["topSpacing"] = spacing
+        args["centerInVisibleHeight"] = camera == nil
+        args["edgeClearance"] = clearance
+        args["controlCenterY"] = camera.map { safeTop + $0 }
+        messenger.configure(args)
+        bar.view().frame.size.height = safeTop + height
+        messenger.scroll(to: height == 120 ? 0 : 200)
+        bar.view().setNeedsLayout()
+        bar.view().layoutIfNeeded()
+        let navigation = try XCTUnwrap(parent.children.compactMap { $0 as? UINavigationController }.first)
+        let label = try XCTUnwrap(descendants(of: bar.view()).compactMap { $0 as? UILabel }
+          .first { $0.text == "general" && !$0.isDescendant(of: navigation.view) })
+        if leading {
+          XCTAssertEqual(label.superview?.accessibilityElementsHidden, height == 120)
+        }
+        let requested = camera ?? (leading && height == 120
+          ? min(spacing + 22, (height + clearance) / 2) : (height + clearance) / 2)
+        let center = safeTop + min(max(requested, 22), height - 22)
+        XCTAssertEqual(label.convert(label.bounds, to: bar.view()).midY, center, accuracy: 0.5)
+        let button = try XCTUnwrap(descendants(of: bar.view()).compactMap { $0 as? UIButton }
+          .first { $0.accessibilityLabel == "Options" })
+        let buttonFrame = button.convert(button.bounds, to: bar.view())
+        XCTAssertEqual(buttonFrame.midY, center, accuracy: 0.5)
+        XCTAssertGreaterThanOrEqual(buttonFrame.minY, safeTop)
+        XCTAssertLessThanOrEqual(buttonFrame.maxY, bar.view().bounds.maxY)
+        if height != 120 {
+          // This lower portion was outside the old safeTop + 68 platform bounds.
+          let point = CGPoint(x: buttonFrame.midX, y: buttonFrame.maxY - 1)
+          let hit = bar.view().hitTest(point, with: nil)
+          XCTAssertTrue(hit === button || hit?.isDescendant(of: button) == true)
+        }
+        if safeTop == 59 && height == 68 && camera == nil {
+          XCTAssertEqual(buttonFrame.midY, 97, accuracy: 0.5)
+        }
+        let edit = try XCTUnwrap(descendants(of: bar.view()).compactMap { $0 as? UIButton }
+          .first { $0.accessibilityLabel == "Edit" })
+        XCTAssertEqual(edit.convert(edit.bounds, to: bar.view()).midY, center, accuracy: 0.5)
+        XCTAssertFalse(edit.superview is UIVisualEffectView)
+        if height == 68 && camera == nil && !leading {
+          let image = UIGraphicsImageRenderer(bounds: bar.view().bounds).image { _ in
+            bar.view().drawHierarchy(in: bar.view().bounds, afterScreenUpdates: true)
+          }
+          let attachment = XCTAttachment(image: image)
+          attachment.name = "Standalone native pane header with centered title and action"
+          attachment.lifetime = .keepAlways
+          add(attachment)
+        }
+      }
+      messenger.configure(["title": "Phone", "largeTitle": leading])
+      bar.view().setNeedsLayout()
+      bar.view().layoutIfNeeded()
+      let navigation = try XCTUnwrap(parent.children.compactMap { $0 as? UINavigationController }.first)
+      XCTAssertFalse(navigation.view.isHidden)
+      XCTAssertEqual(navigation.additionalSafeAreaInsets.top, 0, accuracy: 0.5)
+      let scroll = try XCTUnwrap(navigation.topViewController?.view as? UIScrollView)
+      if #available(iOS 27.0, *) {
+        XCTAssertEqual(scroll.topEdgeEffect.style, .soft)
+      }
+      XCTAssertFalse(descendants(of: bar.view()).compactMap { $0 as? UILabel }
+        .contains { $0.text == "general" && !$0.isDescendant(of: navigation.view) })
+    }
+  }
+
+  @MainActor
+  func testCustomFlutterHeaderUsesDecorativeHardEdge() throws {
+    guard #available(iOS 27.0, *) else { return }
+    let messenger = NavigationTestMessenger()
+    let parent = UIViewController()
+    let window = UIWindow(frame: UIScreen.main.bounds)
+    window.rootViewController = parent
+    window.makeKeyAndVisible()
+    defer { window.isHidden = true }
+    let bar = IosNavigationBarFactory(messenger: messenger, parent: parent).create(
+      withFrame: CGRect(x: 0, y: 0, width: window.bounds.width, height: 150),
+      viewIdentifier: 999998,
+      arguments: ["title": "", "backdropOnly": true, "alwaysFrosted": true, "hardEdge": true]
+    )
+    parent.view.addSubview(bar.view())
+    parent.view.layoutIfNeeded()
+    let navigation = try XCTUnwrap(parent.children.first as? UINavigationController)
+    XCTAssertFalse(bar.view().isUserInteractionEnabled)
+    XCTAssertFalse(navigation.view.isUserInteractionEnabled)
+    XCTAssertTrue(navigation.view.accessibilityElementsHidden)
+    let backdrop = try XCTUnwrap(parent.children.compactMap { $0 as? NavigationEdgeBackdrop }.first)
+    XCTAssertTrue(backdrop.view.accessibilityElementsHidden)
+    XCTAssertFalse(backdrop.view.isHidden)
+    XCTAssertEqual(navigation.view.alpha, 0)
+    let scroll = try XCTUnwrap(backdrop.view.subviews.compactMap { $0 as? UIScrollView }.first)
+    XCTAssertEqual(scroll.topEdgeEffect.style, .hard)
+    XCTAssertFalse(scroll.topEdgeEffect.isHidden)
+    XCTAssertTrue(scroll.bottomEdgeEffect.isHidden)
+    let material = try XCTUnwrap(bar.view().subviews.first as? UIVisualEffectView)
+    XCTAssertTrue(material.isHidden)
+    // Expanded and collapsed headers keep the native separator at the actual
+    // Flutter boundary, without intercepting taps or adding VoiceOver stops.
+    let header = try XCTUnwrap(backdrop.view.subviews.last)
+    let divider = try XCTUnwrap(header.subviews.first as? UIImageView)
+    XCTAssertNotNil(divider.image)
+    let interaction = try XCTUnwrap(header.interactions.first as? UIScrollEdgeElementContainerInteraction)
+    XCTAssertTrue(interaction.scrollView === scroll)
+    XCTAssertEqual(interaction.edge, .top)
+    for height: CGFloat in [150, 110, 150] {
+      bar.view().frame.size.height = height
+      bar.view().setNeedsLayout()
+      bar.view().layoutIfNeeded()
+      XCTAssertEqual(divider.frame.maxY, height + 8, accuracy: 0.5)
+      XCTAssertEqual(header.bounds.height, height + 8, accuracy: 0.5)
+      XCTAssertEqual(scroll.adjustedContentInset.top, height + 8, accuracy: 1)
+    }
+  }
+
+  @MainActor
+  func testNativeHardHeaderKeepsControlsAboveDecorativeBackdrop() throws {
+    guard #available(iOS 27.0, *) else { return }
+    let parent = UIViewController()
+    let window = UIWindow(frame: UIScreen.main.bounds)
+    window.rootViewController = parent
+    window.makeKeyAndVisible()
+    defer { window.isHidden = true }
+    let bar = IosNavigationBarFactory(messenger: NavigationTestMessenger(), parent: parent).create(
+      withFrame: CGRect(x: 0, y: 0, width: window.bounds.width, height: 150),
+      viewIdentifier: 999997,
+      arguments: ["title": "Conversation", "largeTitle": true, "hardEdge": true,
+                  "alwaysFrosted": true]
+    )
+    parent.view.addSubview(bar.view())
+    parent.view.layoutIfNeeded()
+    let navigation = try XCTUnwrap(parent.children.compactMap { $0 as? UINavigationController }.first)
+    let backdrop = try XCTUnwrap(parent.children.compactMap { $0 as? NavigationEdgeBackdrop }.first)
+    XCTAssertFalse(backdrop.view.isHidden)
+    XCTAssertFalse(backdrop.view.isUserInteractionEnabled)
+    XCTAssertTrue(backdrop.view.accessibilityElementsHidden)
+    XCTAssertEqual(navigation.view.alpha, 1)
+    XCTAssertTrue(navigation.view.isUserInteractionEnabled)
+    XCTAssertFalse(navigation.view.accessibilityElementsHidden)
+    let views = bar.view().subviews
+    XCTAssertLessThan(try XCTUnwrap(views.firstIndex(of: backdrop.view)),
+                      try XCTUnwrap(views.firstIndex(of: navigation.view)))
+    let material = try XCTUnwrap(views.first as? UIVisualEffectView)
+    XCTAssertTrue(material.isHidden)
+    let scroll = try XCTUnwrap(navigation.topViewController?.view as? UIScrollView)
+    XCTAssertTrue(scroll.topEdgeEffect.isHidden)
+    let header = try XCTUnwrap(backdrop.view.subviews.last)
+    for height: CGFloat in [150, 90, 150] {
+      bar.view().frame.size.height = height
+      bar.view().setNeedsLayout()
+      bar.view().layoutIfNeeded()
+      XCTAssertEqual(header.frame.maxY, height + 8, accuracy: 0.5)
+    }
+  }
+
   @MainActor
   func testNativeSheetTopEdgeIsSoftWithoutAnOpaqueNavigationFill() throws {
     guard #available(iOS 26.0, *) else { return }

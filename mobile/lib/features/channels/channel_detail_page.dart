@@ -788,6 +788,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                         context,
                         titleContentHeight: appBarTitleContentHeight,
                       ) +
+                      frostedAppBarEdgeClearance(context) +
                       Grid.twelve,
                   child: StickyDateHeader(
                     key: const ValueKey('channel-sticky-date-header'),

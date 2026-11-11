@@ -16,10 +16,14 @@ class NavigationBackdrop extends StatelessWidget {
     super.key,
     required this.child,
     this.active = true,
+    this.hardEdge = false,
     this.suppressNativeView = false,
   });
 
   final Widget child;
+
+  /// Opts into a native hard edge for layouts that need full header coverage.
+  final bool hardEdge;
 
   /// Activates the Flutter blur; UIKit owns native scroll-edge visibility.
   final bool active;
@@ -38,6 +42,7 @@ class NavigationBackdrop extends StatelessWidget {
                 child: IosNavigationBar(
                   title: '',
                   backdropOnly: true,
+                  hardEdge: hardEdge,
                   alwaysFrosted: true,
                 ),
               ),

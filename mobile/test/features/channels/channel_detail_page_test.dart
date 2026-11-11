@@ -70,6 +70,7 @@ import 'package:buzz/features/channels/reaction_row.dart';
 import 'package:buzz/features/channels/mentions/mention_candidates_provider.dart';
 import 'package:buzz/features/channels/message_mention_pill.dart';
 import 'package:buzz/features/channels/thread_detail_page.dart';
+import 'package:buzz/features/channels/sticky_date_header.dart';
 import 'package:buzz/features/channels/thread_replies_provider.dart';
 import 'package:buzz/features/channels/timeline_message.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
@@ -7784,6 +7785,10 @@ void main() {
     testWidgets(
       'pins the current day below the app bar after its divider scrolls away',
       (tester) async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+        addTearDown(() => debugDefaultTargetPlatformOverride = null);
+        final headerLayout = ValueNotifier(const NavigationHeaderLayout());
+        addTearDown(headerLayout.dispose);
         tester.view.physicalSize = const Size(400, 600);
         tester.view.devicePixelRatio = 1;
         addTearDown(tester.view.resetPhysicalSize);
@@ -7803,11 +7808,16 @@ void main() {
         ];
 
         await tester.pumpWidget(
-          _buildTestable(
-            messages: messages,
-            users: const {
-              'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
-            },
+          ValueListenableBuilder<NavigationHeaderLayout>(
+            valueListenable: headerLayout,
+            builder: (_, layout, child) =>
+                NavigationHeaderScope(layout: layout, child: child!),
+            child: _buildTestable(
+              messages: messages,
+              users: const {
+                'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+              },
+            ),
           ),
         );
         await tester.pumpAndSettle();
@@ -7852,7 +7862,11 @@ void main() {
         expect(
           find.descendant(
             of: stickyHeader,
-            matching: find.text(formatDayHeading(firstDay + 86400)),
+            matching: find.byWidgetPredicate(
+              (widget) =>
+                  widget is Semantics &&
+                  widget.properties.label == formatDayHeading(firstDay + 86400),
+            ),
           ),
           findsOneWidget,
         );
@@ -7870,12 +7884,40 @@ void main() {
           ),
         );
         expect(
-          find.descendant(
-            of: stickyHeader,
-            matching: find.byType(BackdropFilter),
-          ),
+          find.descendant(of: stickyHeader, matching: find.byType(UiKitView)),
           findsOneWidget,
         );
+        for (final layout in [
+          const NavigationHeaderLayout(hardEdge: true, nativeEdgeClearance: 8),
+          const NavigationHeaderLayout(
+            hardEdge: true,
+            paneControls: true,
+            topSpacing: 24,
+            nativeEdgeClearance: 8,
+          ),
+          const NavigationHeaderLayout(hardEdge: true, nativeEdgeClearance: 16),
+          const NavigationHeaderLayout(),
+        ]) {
+          headerLayout.value = layout;
+          await tester.pumpAndSettle();
+          final headerContext = tester.element(stickyHeader);
+          final header = tester.widget<FrostedAppBar>(
+            find.byType(FrostedAppBar).last,
+          );
+          expect(
+            tester.getTopLeft(stickyHeader).dy,
+            closeTo(
+              frostedAppBarHeight(
+                    headerContext,
+                    titleContentHeight: header.titleContentHeight,
+                  ) +
+                  frostedAppBarEdgeClearance(headerContext) +
+                  Grid.twelve,
+              1,
+            ),
+          );
+        }
+
         final floatingOpacity = find
             .descendant(
               of: stickyHeader,
@@ -7889,6 +7931,8 @@ void main() {
         await tester.pumpAndSettle();
         await tester.pump(const Duration(seconds: 1));
         expect(tester.widget<AnimatedOpacity>(floatingOpacity).opacity, 0);
+        await tester.pumpWidget(const SizedBox());
+        debugDefaultTargetPlatformOverride = null;
       },
     );
 
@@ -16584,6 +16628,10 @@ void main() {
     testWidgets('thread pins and updates the active date while scrolling', (
       tester,
     ) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      final headerLayout = ValueNotifier(const NavigationHeaderLayout());
+      addTearDown(headerLayout.dispose);
       tester.view.physicalSize = const Size(400, 800);
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.resetPhysicalSize);
@@ -16612,13 +16660,18 @@ void main() {
       ];
 
       await tester.pumpWidget(
-        _buildTestable(
-          messages: [rootEvent],
-          threadReplies: {threadIdStickyDashThreadDashRoot: replies},
-          users: const {
-            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
-            'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
-          },
+        ValueListenableBuilder<NavigationHeaderLayout>(
+          valueListenable: headerLayout,
+          builder: (_, layout, child) =>
+              NavigationHeaderScope(layout: layout, child: child!),
+          child: _buildTestable(
+            messages: [rootEvent],
+            threadReplies: {threadIdStickyDashThreadDashRoot: replies},
+            users: const {
+              'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+              'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+            },
+          ),
         ),
       );
       await tester.pumpAndSettle();
@@ -16670,17 +16723,83 @@ void main() {
       expect(
         find.descendant(
           of: stickyHeader,
-          matching: find.text(formatDayHeading(timestampForDay(2, 0))),
+          matching: find.byWidgetPredicate(
+            (widget) =>
+                widget is Semantics &&
+                widget.properties.label ==
+                    formatDayHeading(timestampForDay(2, 0)),
+          ),
         ),
         findsOneWidget,
       );
       expect(
-        find.descendant(
-          of: stickyHeader,
-          matching: find.byType(BackdropFilter),
-        ),
+        find.descendant(of: stickyHeader, matching: find.byType(UiKitView)),
         findsOneWidget,
       );
+
+      for (final layout in [
+        const NavigationHeaderLayout(hardEdge: true, nativeEdgeClearance: 8),
+        const NavigationHeaderLayout(
+          hardEdge: true,
+          paneControls: true,
+          topSpacing: 24,
+          nativeEdgeClearance: 8,
+        ),
+        const NavigationHeaderLayout(hardEdge: true, nativeEdgeClearance: 16),
+        const NavigationHeaderLayout(),
+      ]) {
+        headerLayout.value = layout;
+        await tester.pumpAndSettle();
+        final headerContext = tester.element(stickyHeader);
+        final header = tester.widget<FrostedAppBar>(
+          find.byType(FrostedAppBar).last,
+        );
+        expect(
+          tester.getTopLeft(stickyHeader).dy,
+          closeTo(
+            frostedAppBarHeight(
+                  headerContext,
+                  titleContentHeight: header.titleContentHeight,
+                ) +
+                frostedAppBarEdgeClearance(headerContext) +
+                Grid.twelve,
+            1,
+          ),
+        );
+      }
+
+      // Move the next day's divider just below the sticky boundary. Increasing
+      // navigation row spacing must select that day without another scroll.
+      headerLayout.value = const NavigationHeaderLayout(hardEdge: true);
+      await tester.pumpAndSettle();
+      final stickyContext = tester.element(stickyHeader);
+      final boundary =
+          frostedAppBarHeight(stickyContext) +
+          frostedAppBarEdgeClearance(stickyContext) +
+          Grid.twelve;
+      list.itemScrollController!.jumpTo(
+        index: 31,
+        alignment: (boundary + 12) / tester.getSize(listFinder).height,
+      );
+      await tester.pumpAndSettle();
+      expect(
+        tester.widget<StickyDateHeader>(stickyHeader).state.value.label,
+        formatDayHeading(timestampForDay(1, 0)),
+      );
+      headerLayout.value = const NavigationHeaderLayout(
+        hardEdge: true,
+        paneControls: true,
+        topSpacing: 24,
+      );
+      await tester.pumpAndSettle();
+      expect(
+        tester.widget<StickyDateHeader>(stickyHeader).state.value.label,
+        formatDayHeading(timestampForDay(2, 0)),
+      );
+      headerLayout.value = const NavigationHeaderLayout();
+      await tester.pumpAndSettle();
+      list.itemScrollController!.jumpTo(index: 40);
+      await tester.pumpAndSettle();
 
       final floatingOpacity = find
           .descendant(of: stickyHeader, matching: find.byType(AnimatedOpacity))
@@ -16717,10 +16836,17 @@ void main() {
       expect(
         find.descendant(
           of: stickyHeader,
-          matching: find.text(formatDayHeading(timestampForDay(3, 0))),
+          matching: find.byWidgetPredicate(
+            (widget) =>
+                widget is Semantics &&
+                widget.properties.label ==
+                    formatDayHeading(timestampForDay(3, 0)),
+          ),
         ),
         findsOneWidget,
       );
+      await tester.pumpWidget(const SizedBox());
+      debugDefaultTargetPlatformOverride = null;
     });
 
     testWidgets('thread keeps its tail above a growing composer dock', (

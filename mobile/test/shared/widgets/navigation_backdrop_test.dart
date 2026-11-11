@@ -75,6 +75,7 @@ void main() {
       final native = find.byType(UiKitView);
       final view = tester.widget<UiKitView>(native);
       expect(view.creationParams, containsPair('backdropOnly', true));
+      expect(view.creationParams, containsPair('hardEdge', false));
       expect(view.creationParams, containsPair('alwaysFrosted', true));
       expect(
         find.ancestor(of: native, matching: find.byType(ExcludeSemantics)),

@@ -1,15 +1,298 @@
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/frosted_app_bar.dart';
+import 'package:buzz/shared/widgets/filter_chip_bar.dart';
 import 'package:buzz/shared/widgets/frosted_scroll_under_scope.dart';
 import 'package:buzz/shared/widgets/ios_glass_navigation_button.dart';
 import 'package:buzz/shared/widgets/ios_navigation_bar.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/rendering.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 void main() {
+  testWidgets(
+    'opt-in headers align collapsed filters and restore phone geometry',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      const titleKey = ValueKey('layout-title');
+      const filtersKey = ValueKey('layout-filters');
+      const open = NavigationHeaderLayout(
+        hardEdge: true,
+        paneControls: true,
+        topSpacing: 24,
+        centerInVisibleHeight: true,
+        alignCollapsedBottom: true,
+      );
+      for (final safeTop in [0.0, 59.0]) {
+        final cover = NavigationHeaderLayout(
+          hardEdge: true,
+          paneControls: true,
+          topSpacing: 24,
+          controlCenterY: safeTop + 45,
+          centerInVisibleHeight: true,
+          alignCollapsedBottom: true,
+          nativeEdgeClearance: 16,
+        );
+        for (final layout in [
+          const NavigationHeaderLayout(),
+          open,
+          cover,
+          open,
+          const NavigationHeaderLayout(),
+        ]) {
+          for (final collapsed in [false, true]) {
+            late double clearance;
+            await tester.pumpWidget(
+              ProviderScope(
+                child: MaterialApp(
+                  theme: AppTheme.light(),
+                  home: MediaQuery(
+                    data: MediaQueryData(
+                      padding: EdgeInsets.only(top: safeTop),
+                      viewPadding: EdgeInsets.only(top: safeTop),
+                    ),
+                    child: NavigationHeaderScope(
+                      layout: layout,
+                      child: Builder(
+                        builder: (context) {
+                          clearance = frostedAppBarEdgeClearance(context);
+                          return Stack(
+                            children: [
+                              FrostedAppBar(
+                                useNativeNavigation: false,
+                                title: const SizedBox(
+                                  key: titleKey,
+                                  height: 44,
+                                  child: Text('Messages'),
+                                ),
+                                bottom: const SizedBox(
+                                  key: filtersKey,
+                                  height: 72,
+                                  child: Text('All   Solo   Team'),
+                                ),
+                                bottomHeight: collapsed ? 0 : 72,
+                                bottomOverlap: collapsed ? 72 : 0,
+                              ),
+                            ],
+                          );
+                        },
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            );
+            await tester.pump();
+            final title = tester.getRect(find.byKey(titleKey));
+            final filters = tester.getRect(find.byKey(filtersKey));
+            expect(filters.height, 72);
+            expect(title.height, 44);
+            expect(clearance, layout.hardEdge ? layout.nativeEdgeClearance : 0);
+            if (layout.alignCollapsedBottom && collapsed) {
+              expect(filters.center.dy, closeTo(title.center.dy, 0.01));
+              expect(
+                title.center.dy,
+                closeTo(layout.controlCenterY ?? safeTop + 44, 0.01),
+              );
+            } else if (!layout.hardEdge) {
+              expect(title.center.dy, safeTop + 28);
+              expect(filters.center.dy, safeTop + (collapsed ? 20 : 92));
+            }
+            if (layout.alignCollapsedBottom && collapsed) {
+              expect(title.top, greaterThanOrEqualTo(safeTop));
+            }
+            expect(tester.takeException(), isNull);
+          }
+        }
+      }
+      await tester.pumpWidget(const SizedBox());
+      debugDefaultTargetPlatformOverride = null;
+    },
+  );
+
+  testWidgets(
+    'automatic and explicit axes contain native and Messages filter targets',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      final messenger = tester.binding.defaultBinaryMessenger;
+      final channels = <MethodChannel>[];
+      messenger.setMockMethodCallHandler(SystemChannels.platform_views, (
+        call,
+      ) async {
+        if (call.method == 'create') {
+          final id = (call.arguments as Map)['id'];
+          final channel = MethodChannel('${IosNavigationBar.viewType}/$id');
+          channels.add(channel);
+          messenger.setMockMethodCallHandler(channel, (_) async => null);
+        }
+        return null;
+      });
+      addTearDown(() {
+        messenger.setMockMethodCallHandler(SystemChannels.platform_views, null);
+        for (final channel in channels) {
+          messenger.setMockMethodCallHandler(channel, null);
+        }
+      });
+      for (final (axis, spacing, clearance, expectedCenter, expectedBottom) in [
+        (null, 0.0, 8.0, 95.0, 123.0),
+        (null, 0.0, 32.0, 119.0, 147.0),
+        (10.0, 24.0, 16.0, 93.0, 127.0),
+        (119.0, 24.0, 16.0, 119.0, 153.0),
+        (179.0, 24.0, 16.0, 179.0, 213.0),
+      ]) {
+        for (final native in [false, true]) {
+          var selected = 0;
+          late double bodyTop;
+          late double stickyTop;
+          await tester.pumpWidget(
+            ProviderScope(
+              child: MaterialApp(
+                theme: AppTheme.light(),
+                home: MediaQuery(
+                  data: const MediaQueryData(
+                    padding: EdgeInsets.only(top: 59),
+                    viewPadding: EdgeInsets.only(top: 59),
+                  ),
+                  child: NavigationHeaderScope(
+                    layout: NavigationHeaderLayout(
+                      hardEdge: true,
+                      paneControls: true,
+                      topSpacing: spacing,
+                      centerInVisibleHeight: true,
+                      controlCenterY: axis,
+                      nativeEdgeClearance: clearance,
+                      customEdgeClearance: clearance,
+                      alignCollapsedBottom: true,
+                    ),
+                    child: Builder(
+                      builder: (context) {
+                        bodyTop = frostedAppBarHeight(
+                          context,
+                          useNativeNavigation: native,
+                          bottomOverlap: native ? 0 : 56,
+                        );
+                        stickyTop =
+                            bodyTop + frostedAppBarEdgeClearance(context);
+                        return Stack(
+                          children: [
+                            FrostedAppBar(
+                              useNativeNavigation: native,
+                              bottomOverlap: native ? 0 : 56,
+                              bottom: native
+                                  ? null
+                                  : FilterChipBar<int>(
+                                      items: const [
+                                        FilterChipItem(id: 0, label: 'All'),
+                                        FilterChipItem(id: 1, label: 'Solo'),
+                                      ],
+                                      selected: 0,
+                                      useNativeGlass: true,
+                                      onSelected: (value) => selected = value,
+                                    ),
+                              title: const SizedBox(
+                                key: ValueKey('axis-title'),
+                                height: 44,
+                                child: Text('Messages'),
+                              ),
+                            ),
+                          ],
+                        );
+                      },
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          );
+          await tester.pump();
+          await tester.pump();
+          expect(bodyTop, expectedBottom);
+          expect(stickyTop, expectedBottom + clearance);
+          final bounds = native
+              ? tester.getRect(find.byType(UiKitView))
+              : tester.getRect(find.byType(FrostedAppBar));
+          expect(bounds.bottom, bodyTop);
+          final lowerControlPoint = Offset(
+            bounds.center.dx,
+            expectedCenter + 21,
+          );
+          expect(bounds.contains(lowerControlPoint), isTrue);
+          if (native) {
+            final payload =
+                tester.widget<UiKitView>(find.byType(UiKitView)).creationParams
+                    as Map;
+            expect(
+              payload['controlCenterY'],
+              axis == null ? null : expectedCenter,
+            );
+            final view = tester.renderObject<RenderBox>(find.byType(UiKitView));
+            final hit = BoxHitTestResult();
+            expect(
+              view.hitTest(
+                hit,
+                position: view.globalToLocal(lowerControlPoint),
+              ),
+              isTrue,
+            );
+          } else {
+            final title = tester.getRect(
+              find.byKey(const ValueKey('axis-title')),
+            );
+            expect(title.center.dy, expectedCenter);
+            final filter = find.byWidgetPredicate(
+              (widget) =>
+                  widget is IosGlassNavigationButton && widget.label == 'Solo',
+            );
+            final target = tester.getRect(filter);
+            expect(target.top, greaterThanOrEqualTo(59));
+            expect(target.bottom, lessThanOrEqualTo(bounds.bottom));
+            final filterView = find.descendant(
+              of: filter,
+              matching: find.byType(UiKitView),
+            );
+            final platformTarget = tester.renderObject<RenderBox>(filterView);
+            final lowerHit = tester.hitTestOnBinding(
+              Offset(target.center.dx, target.bottom - 1),
+            );
+            expect(
+              lowerHit.path.any((entry) => entry.target == platformTarget),
+              isTrue,
+            );
+            // UIKit owns the tap; exercise the real callback after proving the
+            // lower edge reaches its platform view through the Flutter header.
+            final viewWidget = tester.widget<UiKitView>(filterView);
+            final callbackChannel = MethodChannel(
+              '${viewWidget.viewType}/999991',
+            );
+            channels.add(callbackChannel);
+            messenger.setMockMethodCallHandler(
+              callbackChannel,
+              (_) async => null,
+            );
+            viewWidget.onPlatformViewCreated!(999991);
+            await tester.pump();
+            await messenger.handlePlatformMessage(
+              callbackChannel.name,
+              const StandardMethodCodec().encodeMethodCall(
+                const MethodCall('pressed'),
+              ),
+              (_) {},
+            );
+            expect(selected, 1);
+            expect(title.bottom, lessThanOrEqualTo(bounds.bottom));
+          }
+          expect(tester.takeException(), isNull);
+        }
+      }
+      await tester.pumpWidget(const SizedBox());
+      debugDefaultTargetPlatformOverride = null;
+    },
+  );
+
   testWidgets('iOS conversations request a backdrop before scrolling', (
     tester,
   ) async {
