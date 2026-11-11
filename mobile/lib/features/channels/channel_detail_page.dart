@@ -64,6 +64,7 @@ import '../forum/forum_posts_view.dart';
 import '../forum/forum_provider.dart';
 import 'android_ime_lift.dart';
 import 'channel.dart';
+import 'channel_unread.dart';
 import 'channel_actions_sheet.dart';
 import 'channel_identity_names_provider.dart';
 import 'channel_member_profile_actions.dart';
@@ -664,6 +665,42 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
             .clearObservedUnreadCoveredByRead(channel.id, openReadTimestamp);
       });
     }, [channel.id, readState.isReady, openReadActive, openReadTimestamp]);
+
+    // While it is open and in front, the channel's row in the list and the
+    // app badge stay quiet: the page saves `seen:` row hints for what the row
+    // shows, reading nothing (`buzz-app`'s `docs/unread.md`). An arrival
+    // while the page is covered or the app is in the background still
+    // lights the row.
+    final observedRevision = ref.watch(
+      channelsProvider.select(
+        (_) => Object.hashAllUnordered(
+          channelsNotifier.observedUnreadEventsFor(channel.id).keys,
+        ),
+      ),
+    );
+    useEffect(
+      () {
+        if (!readState.isReady || !openReadActive) return null;
+        return deferReadStateUpdate(context, () {
+          final marks = channelRowSeenMarks(
+            channelId: channel.id,
+            events: ref
+                .read(channelsProvider.notifier)
+                .observedUnreadEventsFor(channel.id),
+            readState: ref.read(readStateProvider),
+          );
+          if (marks.isEmpty) return;
+          ref.read(readStateProvider.notifier).markContextsRead(marks);
+        });
+      },
+      [
+        channel.id,
+        readState.isReady,
+        readState.version,
+        openReadActive,
+        observedRevision,
+      ],
+    );
 
     final dmHeader = resolvedChannel.isDm
         ? _watchDmHeader(ref, resolvedChannel, currentPubkey)

@@ -22,6 +22,22 @@ String threadContextKey(String rootId) => '$threadContextPrefix$rootId';
 String activityContextKey(String channelId) => 'activity:$channelId';
 String threadActivityContextKey(String rootId) => 'thread-activity:$rootId';
 
+/// Row hints, written by this app and `buzz-app` when the reader opens a
+/// channel (`buzz-app`'s `docs/unread.md`). They quiet the channel's row in
+/// the channel list and the app badge, and read nothing. `seen:<channel>` is
+/// the newest ordinary message the row has seen, and syncs.
+/// `seen:msg:<id>` is the receipt for one attention message (a mention,
+/// broadcast, DM or reply), and stays on this device like `msg:`.
+String seenContextKey(String channelId) => 'seen:$channelId';
+const _seenMessagePrefix = 'seen:msg:';
+String seenMessageContextKey(String messageId) =>
+    '$_seenMessagePrefix$messageId';
+
+/// Whether [contextId] stays on this device and is never published.
+bool isLocalOnlyContext(String contextId) =>
+    contextId.startsWith(msgContextPrefix) ||
+    contextId.startsWith(_seenMessagePrefix);
+
 /// Whether `activity:<channel>` reads a message: an ordinary top-level
 /// message, not a reply, mention, broadcast or DM.
 bool readByChannelCatchUp({

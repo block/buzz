@@ -186,6 +186,13 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
     }
   }
 
+  /// Advance several contexts together, saving once. Clears no forced-unread
+  /// flag: the channel page writes row hints (`seen:`) this way, which read
+  /// nothing.
+  void markContextsRead(Map<String, int> contexts) {
+    _manager?.markContextsRead(contexts);
+  }
+
   /// Force a context unread for the rest of the session. [contextId] is a
   /// channel id (channel-tile action) or a `msg:` key (message actions
   /// sheet); [channelId] is the channel the context belongs to, so tiles and

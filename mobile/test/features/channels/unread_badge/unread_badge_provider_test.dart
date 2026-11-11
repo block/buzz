@@ -189,6 +189,35 @@ void main() {
       expect(result.highPriorityCount, 1);
     });
 
+    test('seen: row hints quiet the badge without reading', () async {
+      final ordinary = await badge(stream, event('m'), {'seen:ch-a': t20});
+      expect(ordinary.generalUnreadCount, 0);
+      final reply = await badge(stream, event('r', rootId: threadIdRoot), {
+        'seen:msg:r': t20,
+      });
+      expect(reply.generalUnreadCount, 0);
+      // The channel hint never quiets attention; only its own receipt does.
+      final mention = await badge(stream, event('p', highPriority: true), {
+        'seen:ch-a': t30,
+        'seen:msg:other': t30,
+      });
+      expect(mention.highPriorityCount, 1);
+    });
+
+    test('seen: hints yield to a manual unread', () async {
+      final container = buildContainer(
+        channels: [stream],
+        readContexts: {'seen:ch-a': t20},
+        forcedUnreadContexts: {'ch-a': 'ch-a'},
+        observedEventsByChannel: {
+          'ch-a': [event('m')],
+        },
+      );
+      addTearDown(container.dispose);
+      await container.read(channelsProvider.future);
+      expect(container.read(unreadBadgeProvider).generalUnreadCount, 1);
+    });
+
     test('thread-activity: reads replies in its thread only', () async {
       final read = await badge(stream, event('m', rootId: threadIdRoot), {
         'thread-activity:$threadIdRoot': t20,

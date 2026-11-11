@@ -197,6 +197,11 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     previous.complete();
   }
 
+  /// [channelId]'s entry of [observedUnreadEventsByChannel], without copying
+  /// every other channel's.
+  Map<String, ObservedUnreadEvent> observedUnreadEventsFor(String channelId) =>
+      Map.unmodifiable(_observedUnreadEventsByChannel[channelId] ?? const {});
+
   Map<String, Map<String, ObservedUnreadEvent>>
   get observedUnreadEventsByChannel =>
       Map<String, Map<String, ObservedUnreadEvent>>.unmodifiable({
