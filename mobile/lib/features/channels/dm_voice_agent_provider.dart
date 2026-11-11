@@ -13,24 +13,24 @@ import 'channel.dart';
 import 'channel_management_provider.dart';
 import 'channels_provider.dart';
 
-/// Runtime is owner-signed discovery evidence, not permission to run an agent.
+/// Voice capability is owner-signed discovery evidence, not execution permission.
 /// The hosting desktop rechecks its live runtime, protection and room access.
 /// Derived from the owned-agent directory an agent DM already loads, so voice
 /// adds no inventory read.
-final ownedCodexVoiceAgentsProvider = FutureProvider<Set<String>>((ref) async {
+final ownedVoiceAgentsProvider = FutureProvider<Set<String>>((ref) async {
   ref.watch(_voiceInventoryChangesProvider);
   final archived = ref.watch(identityArchivesProvider.future);
   final owned = await ref.watch(ownedAgentDirectoryProvider.future);
   final hidden = await archived;
   return {
     for (final agent in owned)
-      if (agent.runtime == 'buzz.codex/codex' && !hidden.contains(agent.pubkey))
+      if (agent.supportsHuddleVoice && !hidden.contains(agent.pubkey))
         agent.pubkey,
   };
 });
 
-/// Only the viewer's Codex peer in a writable one-to-one DM is offered voice.
-String? dmVoiceAgent(Channel channel, String? viewer, Set<String> ownedCodex) {
+/// Offers voice only for the viewer's eligible peer in a writable one-to-one DM.
+String? dmVoiceAgent(Channel channel, String? viewer, Set<String> ownedVoice) {
   final members = channel.participantPubkeys.toSet();
   if (!channel.isDm ||
       channel.isArchived ||
@@ -40,7 +40,7 @@ String? dmVoiceAgent(Channel channel, String? viewer, Set<String> ownedCodex) {
     return null;
   }
   final peer = members.firstWhere((key) => key != viewer);
-  return ownedCodex.contains(peer) ? peer : null;
+  return ownedVoice.contains(peer) ? peer : null;
 }
 
 // Subscribe separately from the snapshot so refreshing it does not replay the
@@ -85,8 +85,7 @@ final dmVoiceCandidateProvider = Provider.autoDispose.family<String?, String>((
   if (channel == null) return null;
   final known = ref.watch(agentMentionPubkeysProvider(channelId));
   final profiles = ref.watch(userCacheProvider);
-  final owned =
-      ref.watch(ownedCodexVoiceAgentsProvider).value ?? const <String>{};
+  final owned = ref.watch(ownedVoiceAgentsProvider).value ?? const <String>{};
   return dmVoiceAgent(channel, ref.watch(currentPubkeyProvider), {
     ...known,
     ...owned,
@@ -104,7 +103,7 @@ Future<String?> resolveDmVoiceAgent(Ref ref, String parentChannelId) async {
   }
   ref.invalidate(ownedAgentDirectoryProvider);
   ref.invalidate(identityArchivesProvider);
-  final agents = await ref.read(ownedCodexVoiceAgentsProvider.future);
+  final agents = await ref.read(ownedVoiceAgentsProvider.future);
   final agent = dmVoiceAgent(channel, ref.read(currentPubkeyProvider), agents);
   if (agent == null) {
     throw StateError('This agent is no longer available for voice.');

@@ -16,11 +16,22 @@ class OwnedAgentDirectoryEntry extends AgentDirectoryEntry {
     super.avatarUrl,
     this.model,
     this.runtime,
+    this.capabilities,
   });
   final String? model;
 
   /// Runtime from the verified owner-signed registration in this community.
   final String? runtime;
+
+  /// Owner-signed capability tokens. Null means an older registration omitted
+  /// the field; an explicit empty or malformed declaration grants nothing.
+  final Set<String>? capabilities;
+
+  /// Discovery only: the hosting desktop still checks its live voice hook,
+  /// protection and room access before connecting.
+  bool get supportsHuddleVoice => capabilities == null
+      ? runtime == 'buzz.codex/codex'
+      : capabilities!.contains('huddle-voice-v1');
 }
 
 /// The owner's agents in the active community, as desktop's Agents tab lists
@@ -110,6 +121,7 @@ Future<List<OwnedAgentDirectoryEntry>> loadOwnedAgentDirectory(
         final profile = AgentDirectoryEntry.fromEvent(event);
         String? model;
         String? runtime;
+        Set<String>? capabilities;
         try {
           final registration = registrations[event.pubkey]!;
           // Native libsecp256k1 verification; the pure-Dart codec took
@@ -117,6 +129,13 @@ Future<List<OwnedAgentDirectoryEntry>> loadOwnedAgentDirectory(
           verifiedNostrEventFromJson(jsonEncode(registration.toJson()));
           runtime = _tagValue(registration, 'runtime');
           final data = jsonDecode(registration.content);
+          if (data is Map && data.containsKey('capabilities')) {
+            final declared = data['capabilities'];
+            capabilities =
+                declared is List && declared.every((v) => v is String)
+                ? Set.unmodifiable(declared.cast<String>())
+                : const {};
+          }
           if (data is Map && data['model'] is String) {
             final value = (data['model'] as String).trim();
             if (value.isNotEmpty) model = value;
@@ -131,6 +150,7 @@ Future<List<OwnedAgentDirectoryEntry>> loadOwnedAgentDirectory(
             avatarUrl: profile.avatarUrl,
             model: model,
             runtime: runtime,
+            capabilities: capabilities,
           ),
         );
       }

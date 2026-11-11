@@ -264,7 +264,7 @@ Widget _buildTestable({
   Map<String, UserProfile> users = const {},
   Set<String>? knownAgentPubkeys,
   Set<String> inventoryAgents = const {},
-  Set<String> voiceAgents = const {},
+  Set<String>? voiceAgents = const {},
   Future<Set<String>> Function()? loadChannelBotPubkeys,
   bool watchChannelMembershipUpdates = false,
   Future<List<AgentDirectoryEntry>> Function()? loadAgentDirectory,
@@ -327,7 +327,8 @@ Widget _buildTestable({
   return ProviderScope(
     retry: providerRetry ?? (disableRetries ? (_, _) => null : null),
     overrides: [
-      ownedCodexVoiceAgentsProvider.overrideWith((ref) async => voiceAgents),
+      if (voiceAgents != null)
+        ownedVoiceAgentsProvider.overrideWith((ref) async => voiceAgents),
       if (archived != null)
         identityArchivesProvider.overrideWith((ref) async => archived),
       if (bestie != null)
@@ -1587,96 +1588,105 @@ void main() {
       expect(find.byTooltip('Start Huddle'), findsNothing);
     });
 
-    testWidgets('starts a Codex DM huddle and invites the agent before audio', (
-      tester,
-    ) async {
-      final dm = Channel(
-        id: _channelId,
-        name: 'Codex',
-        description: '',
-        channelType: 'dm',
-        visibility: 'private',
-        createdBy: 'self',
-        createdAt: DateTime(2025),
-        memberCount: 2,
-        participants: const ['Self', 'Agent'],
-        participantPubkeys: const ['self', 'agent'],
-        isMember: true,
-      );
-      final relay = _VoiceDmRelaySession();
-      final transport = _HuddleTestTransport();
-      List<String>? invited;
-      await tester.pumpWidget(
-        _buildTestable(
-          messages: const [],
-          channel: dm,
-          signingPubkey: 'self',
-          voiceAgents: const {'agent'},
-          users: const {
-            'agent': UserProfile(
-              pubkey: 'agent',
-              displayName: 'Codex',
-              ownerPubkey: 'self',
+    testWidgets(
+      'starts a voice-capable agent DM huddle and invites the agent before audio',
+      (tester) async {
+        final dm = Channel(
+          id: _channelId,
+          name: 'Codex',
+          description: '',
+          channelType: 'dm',
+          visibility: 'private',
+          createdBy: 'self',
+          createdAt: DateTime(2025),
+          memberCount: 2,
+          participants: const ['Self', 'Agent'],
+          participantPubkeys: const ['self', 'agent'],
+          isMember: true,
+        );
+        final relay = _VoiceDmRelaySession();
+        final transport = _HuddleTestTransport();
+        List<String>? invited;
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: const [],
+            channel: dm,
+            signingPubkey: 'self',
+            voiceAgents: null,
+            archived: const {},
+            ownedAgents: const [
+              OwnedAgentDirectoryEntry(
+                pubkey: 'agent',
+                runtime: 'example.agent/custom',
+                capabilities: {'huddle-voice-v1'},
+              ),
+            ],
+            users: const {
+              'agent': UserProfile(
+                pubkey: 'agent',
+                displayName: 'Codex',
+                ownerPubkey: 'self',
+              ),
+            },
+            relayConfigNotifier: _HuddleRelayConfigNotifier(),
+            relaySessionNotifier: relay,
+            huddleCurrentPubkey: 'self',
+            huddleMediaFactory: _HuddleTestMedia.new,
+            huddleTransportFactory: (_) {
+              expect(invited, ['agent']);
+              return transport;
+            },
+            createChannelActions: (ref) => _FakeChannelActions(
+              ref,
+              onAddMembers: (_, pubkeys) async => invited = pubkeys,
             ),
-          },
-          relayConfigNotifier: _HuddleRelayConfigNotifier(),
-          relaySessionNotifier: relay,
-          huddleCurrentPubkey: 'self',
-          huddleMediaFactory: _HuddleTestMedia.new,
-          huddleTransportFactory: (_) {
-            expect(invited, ['agent']);
-            return transport;
-          },
-          createChannelActions: (ref) => _FakeChannelActions(
-            ref,
-            onAddMembers: (_, pubkeys) async => invited = pubkeys,
           ),
-        ),
-      );
-      await tester.pumpAndSettle();
-      expect(find.byTooltip('Start Huddle'), findsOneWidget);
-      await tester.tap(find.byKey(const ValueKey('channel-huddle-button')));
-      await tester.pumpAndSettle();
-      expect(
-        find.textContaining('Keep Buzz open on the desktop'),
-        findsOneWidget,
-      );
-      await tester.tap(find.widgetWithText(FilledButton, 'Start Huddle'));
-      await tester.pumpAndSettle();
-      expect(invited, ['agent']);
-      expect(relay.publishedKinds, contains(EventKind.huddleStarted));
-      expect(
-        find.byKey(const ValueKey('huddle-local-participant')),
-        findsOneWidget,
-      );
-      expect(find.text('Connecting to your agent…'), findsOneWidget);
-      expect(
-        find.byKey(const ValueKey('huddle-participant-avatar-agent')),
-        findsNothing,
-      );
-      await tester.pump(const Duration(seconds: 16));
-      expect(
-        find.textContaining('Your agent has not connected.'),
-        findsOneWidget,
-      );
-      transport.emitPeerJoin(
-        const HuddlePeer(pubkey: 'agent', peerIndex: 3, epoch: 0),
-      );
-      await tester.pumpAndSettle();
-      expect(
-        find.byKey(const ValueKey('huddle-participant-avatar-agent')),
-        findsOneWidget,
-      );
-      expect(
-        find.textContaining('Your agent has not connected.'),
-        findsNothing,
-      );
-      expect(find.text('Connecting to your agent…'), findsNothing);
-      await tester.pumpWidget(const SizedBox.shrink());
-      await tester.pump(const Duration(milliseconds: 100));
-    });
+        );
+        await tester.pumpAndSettle();
+        expect(find.byTooltip('Start Huddle'), findsOneWidget);
+        await tester.tap(find.byKey(const ValueKey('channel-huddle-button')));
+        await tester.pumpAndSettle();
+        expect(
+          find.textContaining('Keep Buzz open on the desktop'),
+          findsOneWidget,
+        );
+        await tester.tap(find.widgetWithText(FilledButton, 'Start Huddle'));
+        await tester.pumpAndSettle();
+        expect(invited, ['agent']);
+        expect(relay.publishedKinds, contains(EventKind.huddleStarted));
+        expect(
+          find.byKey(const ValueKey('huddle-local-participant')),
+          findsOneWidget,
+        );
+        expect(find.text('Connecting to your agent…'), findsOneWidget);
+        expect(
+          find.byKey(const ValueKey('huddle-participant-avatar-agent')),
+          findsNothing,
+        );
+        await tester.pump(const Duration(seconds: 16));
+        expect(
+          find.textContaining('Your agent has not connected.'),
+          findsOneWidget,
+        );
+        transport.emitPeerJoin(
+          const HuddlePeer(pubkey: 'agent', peerIndex: 3, epoch: 0),
+        );
+        await tester.pumpAndSettle();
+        expect(
+          find.byKey(const ValueKey('huddle-participant-avatar-agent')),
+          findsOneWidget,
+        );
+        expect(
+          find.textContaining('Your agent has not connected.'),
+          findsNothing,
+        );
+        expect(find.text('Connecting to your agent…'), findsNothing);
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump(const Duration(milliseconds: 100));
+      },
+    );
 
-    testWidgets('revalidates Codex eligibility after the confirmation opens', (
+    testWidgets('revalidates voice eligibility after the confirmation opens', (
       tester,
     ) async {
       final dm = Channel(
@@ -1693,14 +1703,22 @@ void main() {
         isMember: true,
       );
       final relay = _VoiceDmRelaySession();
-      final eligible = <String>{'agent'};
+      final eligible = [
+        const OwnedAgentDirectoryEntry(
+          pubkey: 'agent',
+          runtime: 'example.agent/custom',
+          capabilities: {'huddle-voice-v1'},
+        ),
+      ];
       List<String>? invited;
       await tester.pumpWidget(
         _buildTestable(
           messages: const [],
           channel: dm,
           signingPubkey: 'self',
-          voiceAgents: eligible,
+          voiceAgents: null,
+          archived: const {},
+          ownedAgents: eligible,
           users: const {
             'agent': UserProfile(
               pubkey: 'agent',
@@ -1729,7 +1747,11 @@ void main() {
         find.textContaining('Keep Buzz open on the desktop'),
         findsOneWidget,
       );
-      eligible.clear();
+      eligible[0] = const OwnedAgentDirectoryEntry(
+        pubkey: 'agent',
+        runtime: 'example.agent/custom',
+        capabilities: {},
+      );
       await tester.tap(find.widgetWithText(FilledButton, 'Start Huddle'));
       await tester.pumpAndSettle();
       expect(invited, isNull);
@@ -1743,7 +1765,7 @@ void main() {
     });
 
     for (final recovery in ['timeline', 'call page']) {
-      testWidgets('Codex DM $recovery recovery reinvites agent', (
+      testWidgets('Agent DM $recovery recovery reinvites agent', (
         tester,
       ) async {
         final dm = Channel(
@@ -1774,7 +1796,15 @@ void main() {
             ],
             channel: dm,
             signingPubkey: 'self',
-            voiceAgents: const {'agent'},
+            voiceAgents: null,
+            archived: const {},
+            ownedAgents: const [
+              OwnedAgentDirectoryEntry(
+                pubkey: 'agent',
+                runtime: 'example.agent/custom',
+                capabilities: {'huddle-voice-v1'},
+              ),
+            ],
             huddleMembers: [
               ChannelMember(
                 pubkey: 'agent',
@@ -1833,7 +1863,7 @@ void main() {
       });
     }
 
-    testWidgets('existing Codex DM call asks before inviting the agent', (
+    testWidgets('existing agent DM call asks before inviting the agent', (
       tester,
     ) async {
       final dm = Channel(
@@ -1865,7 +1895,15 @@ void main() {
           ],
           channel: dm,
           signingPubkey: 'self',
-          voiceAgents: const {'agent'},
+          voiceAgents: null,
+          archived: const {},
+          ownedAgents: const [
+            OwnedAgentDirectoryEntry(
+              pubkey: 'agent',
+              runtime: 'example.agent/custom',
+              capabilities: {'huddle-voice-v1'},
+            ),
+          ],
           huddleMembers: roomMembers,
           users: const {
             'agent': UserProfile(
