@@ -16,7 +16,7 @@ bool showMessageAuthorName(
           value.value?.where((channel) => channel.id == channelId).firstOrNull,
     ),
   );
-  if (channel == null || (!channel.isDm && !channel.isSolo)) return true;
+  if (channel == null) return true;
   final members = ref.watch(channelMembersProvider(channelId)).value;
   final participants =
       (members?.map((member) => member.pubkey) ??

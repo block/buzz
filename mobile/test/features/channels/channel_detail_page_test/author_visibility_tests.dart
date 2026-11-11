@@ -7,17 +7,25 @@ void messageAuthorVisibilityTests() {
       'solo',
       'group',
       'channel',
+      'pair-channel',
       'unknown',
       'outsider',
     ]) {
       testWidgets('message identity: $kind dark=$dark', (tester) async {
         final participants = kind == 'unknown'
             ? <String>[]
-            : ['self', 'alice', if (kind == 'group') 'bob'];
+            : [
+                'self',
+                'alice',
+                if (kind == 'group' || kind == 'channel') 'bob',
+              ];
         final channel = Channel(
           id: _channelId,
           name: 'Conversation',
-          channelType: kind == 'channel' || kind == 'solo' ? 'stream' : 'dm',
+          channelType:
+              kind == 'channel' || kind == 'pair-channel' || kind == 'solo'
+              ? 'stream'
+              : 'dm',
           labels: kind == 'solo' ? const ['buzz.solo'] : const [],
           visibility: 'private',
           description: '',
@@ -50,12 +58,18 @@ void messageAuthorVisibilityTests() {
               _textMsg(
                 id: 'incoming',
                 pubkey: kind == 'outsider' ? 'bob' : 'alice',
-                content: 'Hello',
+                content: List.filled(
+                  6,
+                  'A message that fills the available width.',
+                ).join(' '),
               ),
               _textMsg(
                 id: 'outgoing',
                 pubkey: 'self',
-                content: 'Hi',
+                content: List.filled(
+                  6,
+                  'An outgoing message filling its width.',
+                ).join(' '),
                 createdAt: 1100,
               ),
             ],
@@ -63,7 +77,8 @@ void messageAuthorVisibilityTests() {
         );
         await tester.pumpAndSettle();
         final name = find.byKey(const ValueKey('message-author-incoming'));
-        final hidesName = kind == 'dm' || kind == 'solo';
+        final hidesName =
+            kind == 'dm' || kind == 'solo' || kind == 'pair-channel';
         expect(name, hidesName ? findsNothing : findsOneWidget);
         final incomingRow = find.byKey(const ValueKey('message-row-incoming'));
         final outgoingRow = find.byKey(const ValueKey('message-row-outgoing'));
@@ -72,6 +87,26 @@ void messageAuthorVisibilityTests() {
           matching: find.byType(AvatarImage),
         );
         expect(incomingAvatars, hidesName ? findsNothing : findsOneWidget);
+        double bubbleWidth(Finder row) => tester
+            .getSize(
+              find
+                  .descendant(
+                    of: row,
+                    matching: find.byKey(
+                      const ValueKey('message-text-bubble-0'),
+                    ),
+                  )
+                  .first,
+            )
+            .width;
+        final productionCap =
+            MediaQuery.sizeOf(tester.element(incomingRow)).width * 2 / 3;
+        expect(
+          bubbleWidth(incomingRow),
+          closeTo(productionCap + (hidesName ? 48 : 0), 0.1),
+        );
+        expect(bubbleWidth(outgoingRow), closeTo(productionCap, 0.1));
+
         expect(
           find.descendant(of: outgoingRow, matching: find.byType(AvatarImage)),
           findsNothing,
@@ -101,7 +136,10 @@ void messageAuthorVisibilityTests() {
         final root = _textMsg(
           id: 'incoming',
           pubkey: kind == 'outsider' ? 'bob' : 'alice',
-          content: 'Hello',
+          content: List.filled(
+            6,
+            'A message that fills the available width.',
+          ).join(' '),
         );
         unawaited(
           Navigator.of(tester.element(incomingRow)).push(
@@ -122,6 +160,10 @@ void messageAuthorVisibilityTests() {
           const ValueKey('thread-message-row-incoming'),
         );
         expect(threadRow, findsOneWidget);
+        expect(
+          bubbleWidth(threadRow),
+          closeTo(productionCap + (hidesName ? 48 : 0), 0.1),
+        );
         expect(
           find.descendant(of: threadRow, matching: find.byType(AvatarImage)),
           hidesName ? findsNothing : findsOneWidget,

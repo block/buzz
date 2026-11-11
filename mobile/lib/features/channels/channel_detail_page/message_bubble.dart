@@ -194,7 +194,7 @@ class _MessageBubble extends HookConsumerWidget {
                             : Alignment.centerLeft,
                         child: Padding(
                           padding: EdgeInsets.only(
-                            left: ownMessage
+                            left: ownMessage || !showSenderIdentity
                                 ? 0
                                 : messageAvatarSize + messageAvatarContentGap,
                           ),
@@ -351,6 +351,11 @@ class _MessageBubble extends HookConsumerWidget {
                                       content: message.content,
                                       edited: message.edited,
                                       bubble: true,
+                                      additionalTextWidth:
+                                          !ownMessage && !showSenderIdentity
+                                          ? messageAvatarSize +
+                                                messageAvatarContentGap
+                                          : 0,
                                       hasReactions:
                                           message.reactions.isNotEmpty,
                                       bubbleEnd: showAvatar,

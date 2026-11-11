@@ -184,7 +184,7 @@ class _ThreadMessage extends HookConsumerWidget {
                           child: Padding(
                             padding: EdgeInsets.only(
                               right: ownMessage ? Grid.xxs : 0,
-                              left: ownMessage
+                              left: ownMessage || !showSenderIdentity
                                   ? 0
                                   : messageAvatarSize +
                                         messageAvatarContentGap +
@@ -314,6 +314,11 @@ class _ThreadMessage extends HookConsumerWidget {
                                       content: message.content,
                                       edited: message.edited,
                                       bubble: true,
+                                      additionalTextWidth:
+                                          !ownMessage && !showSenderIdentity
+                                          ? messageAvatarSize +
+                                                messageAvatarContentGap
+                                          : 0,
                                       hasReactions:
                                           message.reactions.isNotEmpty,
                                       bubbleEnd: showAvatar,
