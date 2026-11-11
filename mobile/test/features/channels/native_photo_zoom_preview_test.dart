@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:async';
 import 'dart:io';
 import 'dart:ui' as ui;
+
 import 'package:flutter/services.dart';
 
 import 'package:buzz/features/channels/native_photo_zoom_preview.dart';
@@ -483,118 +484,138 @@ void main() {
     debugDefaultTargetPlatformOverride = null;
   }, skip: !NativePhotoZoomPreview.enabled);
 
-  for (final usePoster in [false, true]) {
-    testWidgets(
-      'video uses ${usePoster ? 'poster' : 'snapshot'} and only loads the selected video',
-      (tester) async {
-        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
-        final key = GlobalKey();
-        late BuildContext context;
-        await tester.pumpWidget(
-          MaterialApp(
-            home: Builder(
-              builder: (value) {
-                context = value;
-                return Center(
-                  child: RepaintBoundary(
-                    key: key,
-                    child: const SizedBox(
-                      width: 100,
-                      height: 100,
-                      child: ColoredBox(color: Colors.black),
-                    ),
+  for (final posterMode in ['none', 'cached', 'pending']) {
+    final usePoster = posterMode != 'none';
+    testWidgets('video uses $posterMode poster without delaying presentation', (
+      tester,
+    ) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      final key = GlobalKey();
+      late BuildContext context;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Builder(
+            builder: (value) {
+              context = value;
+              return Center(
+                child: RepaintBoundary(
+                  key: key,
+                  child: const SizedBox(
+                    width: 100,
+                    height: 100,
+                    child: ColoredBox(color: Colors.black),
                   ),
-                );
-              },
-            ),
+                ),
+              );
+            },
           ),
+        ),
+      );
+      final image = _PendingPreview();
+      final pendingPoster = _PendingPreview();
+      late Completer<void> posterUpdated;
+      final videos = <int>[];
+      const codec = StandardMethodCodec();
+      Future<Object?> nativeCall(String method, int session, int index) async {
+        final reply = Completer<Object?>();
+        await messenger.handlePlatformMessage(
+          NativePhotoZoomPreview.channel.name,
+          codec.encodeMethodCall(
+            MethodCall(method, {'session': session, 'index': index}),
+          ),
+          (data) => reply.complete(codec.decodeEnvelope(data!)),
         );
-        final image = _PendingPreview();
-        final videos = <int>[];
-        const codec = StandardMethodCodec();
-        Future<Object?> nativeCall(
-          String method,
-          int session,
-          int index,
-        ) async {
-          final reply = Completer<Object?>();
-          await messenger.handlePlatformMessage(
-            NativePhotoZoomPreview.channel.name,
-            codec.encodeMethodCall(
-              MethodCall(method, {'session': session, 'index': index}),
-            ),
-            (data) => reply.complete(codec.decodeEnvelope(data!)),
-          );
-          return reply.future;
-        }
+        return reply.future;
+      }
 
-        messenger.setMockMethodCallHandler(NativePhotoZoomPreview.channel, (
-          call,
-        ) async {
-          if (call.method == 'isSupported') return true;
-          final args = call.arguments as Map;
-          expect(args['videoIndices'], [0, 2]);
-          expect(args['bytes'], isA<Uint8List>());
-          if (usePoster) {
-            final codec = await ui.instantiateImageCodec(
-              args['bytes'] as Uint8List,
-            );
-            final frame = await codec.getNextFrame();
-            expect(
-              frame.image.width,
-              2,
-              reason: 'Use the poster, not the 100-pixel source snapshot',
-            );
-            frame.image.dispose();
-            codec.dispose();
-          }
-          final session = args['session'] as int;
-          expect(await nativeCall('image', session, 0), isNull);
-          expect(await nativeCall('video', session, 1), isNull);
-          expect(await nativeCall('video', session, 2), isNull);
-          expect(await nativeCall('video', session - 1, 0), isNull);
-          expect(await nativeCall('video', session, 0), '/temporary/clip.mp4');
-          await nativeCall('select', session, 2);
-          expect(await nativeCall('video', session, 0), isNull);
-          expect(await nativeCall('video', session, 2), '/temporary/clip.mp4');
-          return 'closed';
-        });
-        await tester.runAsync(() async {
+      messenger.setMockMethodCallHandler(NativePhotoZoomPreview.channel, (
+        call,
+      ) async {
+        if (call.method == 'isSupported') return true;
+        if (call.method == 'imageFrame') {
+          posterUpdated.complete();
+          return null;
+        }
+        final args = call.arguments as Map;
+        if (posterMode == 'pending') {
           expect(
-            await NativePhotoZoomPreview.open(
-              context: context,
-              sourceKeys: [key, key, key],
-              providers: [image, provider, image],
-              previewProviders: usePoster
-                  ? [provider, provider, provider]
-                  : null,
-              urls: [
-                'https://example.org/clip.mp4',
-                'https://example.org/photo.jpg',
-                'https://example.org/second.mov',
-              ],
-              labels: ['Clip', 'Photo', 'Second'],
-              initialIndex: 0,
-              videoIndices: {0, 2},
-              loadVideo: (index) async {
-                videos.add(index);
-                return '/temporary/clip.mp4';
-              },
-              onSelect: (_) async {},
-            ),
+            pendingPoster.frame.isCompleted,
             isFalse,
+            reason: 'Presentation must not wait for the remote poster',
           );
-        });
-        expect(videos, [0, 2]);
+          final decoder = await ui.instantiateImageCodec(provider.bytes);
+          pendingPoster.frame.complete(
+            ImageInfo(image: (await decoder.getNextFrame()).image),
+          );
+          decoder.dispose();
+          await posterUpdated.future.timeout(const Duration(seconds: 5));
+        }
+        expect(args['videoIndices'], [0, 2]);
+        expect(args['bytes'], isA<Uint8List>());
+        if (posterMode == 'cached') {
+          final codec = await ui.instantiateImageCodec(
+            args['bytes'] as Uint8List,
+          );
+          final frame = await codec.getNextFrame();
+          expect(
+            frame.image.width,
+            2,
+            reason: 'Use the poster, not the 100-pixel source snapshot',
+          );
+          frame.image.dispose();
+          codec.dispose();
+        }
+        final session = args['session'] as int;
+        expect(await nativeCall('image', session, 0), isNull);
+        expect(await nativeCall('video', session, 1), isNull);
+        expect(await nativeCall('video', session, 2), isNull);
+        expect(await nativeCall('video', session - 1, 0), isNull);
+        expect(await nativeCall('video', session, 0), '/temporary/clip.mp4');
+        await nativeCall('select', session, 2);
+        expect(await nativeCall('video', session, 0), isNull);
+        expect(await nativeCall('video', session, 2), '/temporary/clip.mp4');
+        return 'closed';
+      });
+      await tester.runAsync(() async {
+        posterUpdated = Completer<void>();
+        if (posterMode == 'cached') await precacheImage(provider, context);
         expect(
-          image.started,
+          await NativePhotoZoomPreview.open(
+            context: context,
+            sourceKeys: [key, key, key],
+            providers: [image, provider, image],
+            previewProviders: usePoster
+                ? [
+                    posterMode == 'pending' ? pendingPoster : provider,
+                    provider,
+                    provider,
+                  ]
+                : null,
+            urls: [
+              'https://example.org/clip.mp4',
+              'https://example.org/photo.jpg',
+              'https://example.org/second.mov',
+            ],
+            labels: ['Clip', 'Photo', 'Second'],
+            initialIndex: 0,
+            videoIndices: {0, 2},
+            loadVideo: (index) async {
+              videos.add(index);
+              return '/temporary/clip.mp4';
+            },
+            onSelect: (_) async {},
+          ),
           isFalse,
-          reason: 'A video URL must never enter the image decoder',
         );
-        debugDefaultTargetPlatformOverride = null;
-      },
-      skip: !NativePhotoZoomPreview.enabled,
-    );
+      });
+      expect(videos, [0, 2]);
+      expect(
+        image.started,
+        isFalse,
+        reason: 'A video URL must never enter the image decoder',
+      );
+      debugDefaultTargetPlatformOverride = null;
+    }, skip: !NativePhotoZoomPreview.enabled);
   }
 
   testWidgets(

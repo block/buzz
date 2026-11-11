@@ -360,8 +360,9 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
   // Flutter decodes authenticated originals and forwards continuing frames.
   // Ignore old pages and closed presentations before allocating a UIImage.
   func updateFrame(_ data: Data, at value: Int) {
-    guard !finishing, !videoIndices.contains(value), value == index, let image = UIImage(data: data) else { return }
-    images[value] = image
+    guard !finishing, value == index, let image = UIImage(data: data) else { return }
+    if videoIndices.contains(value) { previews[value] = image }
+    else { images[value] = image }
     for page in pager.children.compactMap({ $0 as? NativePhotoPage }) where page.index == value {
       page.setImage(image)
     }

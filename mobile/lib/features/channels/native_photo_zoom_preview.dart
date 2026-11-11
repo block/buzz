@@ -95,20 +95,20 @@ class NativePhotoZoomPreview {
       });
       window = loads;
       final initialPoster = previewProvider ?? previewProviders?[initialIndex];
-      final bytes = videoIndices.contains(initialIndex)
-          ? (initialPoster == null
-                    ? null
-                    : await loads.load(
-                        initialIndex,
-                        initialPoster,
-                        preview: true,
-                      )) ??
+      final isVideo = videoIndices.contains(initialIndex);
+      final posterLoad = isVideo && initialPoster != null
+          ? loads.load(initialIndex, initialPoster, preview: true)
+          : null;
+      // Only wait for PNG encoding when the poster was already decoded.
+      // Network-backed posters must never delay opening playable video.
+      final cachedPoster =
+          loads.loads[(initialIndex, true)]?.receivedFrame == true;
+      final bytes = isVideo
+          ? (cachedPoster ? await posterLoad : null) ??
                 await _snapshot(sourceKeys[initialIndex])
           : await loads.load(
               initialIndex,
-              previewProvider ??
-                  previewProviders?[initialIndex] ??
-                  providers[initialIndex],
+              initialPoster ?? providers[initialIndex],
               preview: true,
             );
       if (bytes == null) return true;
@@ -161,7 +161,7 @@ class NativePhotoZoomPreview {
         }
         return null;
       });
-      final result = await channel.invokeMethod<String>('present', {
+      final presentation = channel.invokeMethod<String>('present', {
         ...geometry,
         'bytes': bytes,
         'session': session,
@@ -173,6 +173,20 @@ class NativePhotoZoomPreview {
         'canDelete': actions?.canDelete ?? false,
         'reduceMotion': reduceMotion,
       });
+      if (posterLoad != null && !cachedPoster) {
+        unawaited(
+          posterLoad
+              .then((poster) async {
+                if (poster != null &&
+                    !loads.disposed &&
+                    loads.index == initialIndex) {
+                  await loads.onFrame(initialIndex, poster);
+                }
+              })
+              .catchError((Object _) {}),
+        );
+      }
+      final result = await presentation;
       if (result == 'reply' && context.mounted) onReply?.call();
       return result == null || result == 'unavailable';
     } catch (_) {

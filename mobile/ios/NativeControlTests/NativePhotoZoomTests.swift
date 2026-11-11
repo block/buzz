@@ -102,6 +102,13 @@ struct NativePhotoZoomTests {
     precondition(!viewer.shouldBeginDismissal(location: CGPoint(x: 195, y: 400), velocity: CGVector(dx: 300, dy: 0)), "Video horizontal scrubbing must not dismiss")
     let first = pager.viewControllers!.first!
     first.loadViewIfNeeded()
+    let posterView = descendants(first.view).compactMap { $0 as? UIImageView }.first!
+    let oldPoster = posterView.image
+    viewer.updateFrame(data, at: 0)
+    precondition(posterView.image !== oldPoster, "A late poster updates the selected video")
+    let selectedPoster = posterView.image
+    viewer.updateFrame(data, at: 2)
+    precondition(posterView.image === selectedPoster, "A stale poster cannot replace the selected video")
     let playerController = first.children.compactMap { $0 as? AVPlayerViewController }.first!
     let player = playerController.player!
     let item = player.currentItem!
