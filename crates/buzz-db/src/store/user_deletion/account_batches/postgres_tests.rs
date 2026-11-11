@@ -5,7 +5,7 @@ use sqlx::PgPool;
 const HUMAN: &str = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
 const OTHER: &str = "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5";
 
-async fn fixture() -> (PgPool, UserDeletionStore, AccountBatchOptions) {
+pub(super) async fn fixture() -> (PgPool, UserDeletionStore, AccountBatchOptions) {
     let pool = PgPool::connect(&crate::test_support::database_url())
         .await
         .unwrap();
@@ -56,7 +56,7 @@ async fn fixture() -> (PgPool, UserDeletionStore, AccountBatchOptions) {
     )
 }
 
-async fn snapshot(pool: &PgPool) -> Value {
+pub(super) async fn snapshot(pool: &PgPool) -> Value {
     let mut result = serde_json::Map::new();
     for table in [
         "api_tokens",
@@ -99,7 +99,7 @@ async fn preview_delete_preserve_other_people_and_tenants_and_resume_in_bounded_
     let before = snapshot(&pool).await;
     let mut preview = Vec::new();
     let summary = store
-        .preview_account_batches(&options, &mut preview)
+        .run_account_batches(&options, ExecutionMode::ReadOnly, &mut preview)
         .await
         .unwrap();
     assert_eq!(snapshot(&pool).await, before);
@@ -128,7 +128,7 @@ async fn preview_delete_preserve_other_people_and_tenants_and_resume_in_bounded_
     options.max_items = 108;
     let mut first = Vec::new();
     let partial = store
-        .delete_account_batches(&options, &mut first)
+        .run_account_batches(&options, ExecutionMode::Delete, &mut first)
         .await
         .unwrap();
     assert_eq!(partial.items, 108);
@@ -138,12 +138,31 @@ async fn preview_delete_preserve_other_people_and_tenants_and_resume_in_bounded_
     let parent:bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM personal_read_accounts WHERE community_id=$1 AND actor=decode($2,'hex'))").bind(options.community).bind(HUMAN).fetch_one(&pool).await.unwrap();
     assert!(parent);
     options.max_items = 100_000;
+    let mut resumed = Vec::new();
     let completed = store
-        .delete_account_batches(&options, &mut Vec::new())
+        .run_account_batches(&options, ExecutionMode::Delete, &mut resumed)
         .await
         .unwrap();
     assert!(completed.supported_scope_exhausted && !completed.account_erasure_complete);
     assert_eq!(partial.items + completed.items, summary.items);
+    assert!(!partial.read_only && !completed.read_only);
+    // Compare exact row operations across both passes, independent of batch
+    // boundaries. Matching totals alone could hide selection drift.
+    let row_operations = |batches: Vec<Value>| {
+        let mut rows: Vec<String> = batches
+            .iter()
+            .flat_map(|batch| {
+                batch["keys"].as_array().unwrap().iter().map(move |key| {
+                    json!([batch["community"], batch["table"], batch["action"], key]).to_string()
+                })
+            })
+            .collect();
+        rows.sort();
+        rows
+    };
+    let mut applied = proposals(&first);
+    applied.extend(proposals(&resumed));
+    assert_eq!(row_operations(planned), row_operations(applied));
     assert_eq!(
         store
             .delete_account_batches(&options, &mut Vec::new())

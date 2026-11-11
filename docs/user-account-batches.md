@@ -18,6 +18,12 @@ Omitting the mode means print-only. `--delete` conflicts with either preview
 flag. Public keys accept hex or npub. `--batch-size` defaults to 100 and accepts
 1–100. `--max-items` defaults to 100,000 and accepts 1–1,000,000.
 
+The command passes `ExecutionMode::ReadOnly | Delete` to one entry point:
+`run_account_batches(options, mode, writer)`. Both modes share the operation
+catalog, selectors, keyset ordering and proposal output. The handler owns
+mutation, transaction and deletion-safety decisions. The older preview/delete
+functions remain as delegating compatibility wrappers.
+
 Both modes emit newline-delimited JSON. Each `proposed_batch` identifies the
 community, table, action and complete row keys within that community. It prints
 no credential hashes, token names, or stored payloads. Delete mode flushes the

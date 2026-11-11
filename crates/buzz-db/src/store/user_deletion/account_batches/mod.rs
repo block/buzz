@@ -1,7 +1,7 @@
 //! Offline account-table batches for one community. This is not a workflow
 //! completion API: it never starts stages, updates progress, or touches caches.
 
-use super::{normalize_user_deletion_pubkey, UserDeletionStore};
+use super::{normalize_user_deletion_pubkey, ExecutionMode, UserDeletionStore};
 use crate::{DbError, Result};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -49,7 +49,8 @@ impl UserDeletionStore {
         options: &AccountBatchOptions,
         writer: &mut impl Write,
     ) -> Result<AccountBatchSummary> {
-        self.account_batches(options, writer, false).await
+        self.run_account_batches(options, ExecutionMode::ReadOnly, writer)
+            .await
     }
 
     /// Print and commit bounded offline account operations. Stop the relay and
@@ -61,16 +62,28 @@ impl UserDeletionStore {
         options: &AccountBatchOptions,
         writer: &mut impl Write,
     ) -> Result<AccountBatchSummary> {
-        self.account_batches(options, writer, true).await
+        self.run_account_batches(options, ExecutionMode::Delete, writer)
+            .await
+    }
+
+    /// Run the same bounded account planner in either standalone mode.
+    pub async fn run_account_batches(
+        &self,
+        options: &AccountBatchOptions,
+        mode: ExecutionMode,
+        writer: &mut impl Write,
+    ) -> Result<AccountBatchSummary> {
+        self.account_batches(options, writer, mode).await
     }
 
     async fn account_batches(
         &self,
         options: &AccountBatchOptions,
         writer: &mut impl Write,
-        delete: bool,
+        mode: ExecutionMode,
     ) -> Result<AccountBatchSummary> {
         let options = validated(options)?;
+        let delete = mode == ExecutionMode::Delete;
         // A session lock must never be returned to the pool on error/cancellation.
         let mut conn = self.pool.acquire().await?.detach();
         sqlx::query("SET statement_timeout='30s'")
