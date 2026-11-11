@@ -388,13 +388,17 @@ void main() {
 
     final bestie = 'b' * 64;
     ValueNotifier<VoidCallback?>? chat;
+    var homeBuilds = 0;
     var created = 0;
     final opened = <String>[];
     await tester.pumpWidget(
       await buildHome(
         bestie: bestie,
         onOpenBestie: opened.add,
-        onNewChatAction: (value) => chat = value,
+        onNewChatAction: (value) {
+          chat = value;
+          homeBuilds++;
+        },
       ),
     );
     await tester.pumpAndSettle();
@@ -424,6 +428,29 @@ void main() {
     expect(opened, [bestie]);
     await tap('new-chat');
     expect(created, 2);
+
+    // With a New chat draft open, the tap leaves the draft and starts one.
+    final startChat = chat!.value;
+    Navigator.of(
+      tester.element(find.byType(HomePage)),
+    ).push(MaterialPageRoute<void>(builder: (_) => const Text('Draft')));
+    chat!.value = null;
+    await tester.pumpAndSettle();
+    await tap('new-chat');
+    expect(find.text('Draft'), findsNothing);
+    expect(created, 2);
+    chat!.value = startChat;
+    await tester.pumpAndSettle();
+    expect(created, 3);
+    expect(pendingHomeScreenShortcut.value, isNull);
+
+    // Shortcut state rebuilds only its own leaf, never Home.
+    final builds = homeBuilds;
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    await tester.pumpAndSettle();
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pumpAndSettle();
+    expect(homeBuilds, builds);
 
     await tester.pumpWidget(const SizedBox());
     expect(published.last, isEmpty);

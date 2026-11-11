@@ -1,5 +1,3 @@
-import 'dart:async';
-
 import '../../shared/widgets/android_expanding_menu_button.dart';
 
 import 'package:flutter/material.dart';
@@ -8,9 +6,6 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/hosted/organization_environment.dart';
-import '../../shared/me/default_agent.dart';
-import '../../shared/profile/user_cache_provider.dart';
-import '../../shared/shortcuts/home_screen_shortcuts.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/theme/buzz_icons.dart';
 import '../../shared/community/community_membership_provider.dart';
@@ -25,6 +20,7 @@ import '../activity/activity_page.dart';
 import '../activity/inbox_unread_provider.dart';
 import '../channels/channels_page.dart';
 import '../search/search_page.dart';
+import 'home_screen_shortcut_host.dart';
 import 'messages_filters.dart';
 import 'messages_navigation_bar.dart';
 import '../../shared/widgets/covered_route_keyboard_insets.dart';
@@ -81,87 +77,6 @@ class HomePage extends HookConsumerWidget {
     useListenable(newWorkspace);
     useListenable(newChannel);
     useListenable(newDm);
-    final bestie = ref.watch(defaultAgentProvider);
-    final bestiePubkey = bestie.isLoading || bestie.hasError
-        ? null
-        : bestie.value;
-    final bestieName = ref.watch(
-      userCacheProvider.select((profiles) => profiles[bestiePubkey]?.label),
-    );
-    useEffect(() {
-      unawaited(listenForHomeScreenShortcuts());
-      // Signing out removes Home, and its shortcuts with it.
-      return () => unawaited(publishHomeScreenShortcuts(const []));
-    }, const []);
-    useEffect(() {
-      if (bestie.isLoading) return null;
-      // New chat and New DM stay listed while their actions are briefly
-      // unavailable (loading, or a New chat already open); a tap waits.
-      unawaited(
-        publishHomeScreenShortcuts([
-          (shortcut: HomeScreenShortcut.newChat, title: 'New chat'),
-          (shortcut: HomeScreenShortcut.newDm, title: 'New DM'),
-          if (bestiePubkey != null)
-            (
-              shortcut: HomeScreenShortcut.messageBestie,
-              title: 'Message ${bestieName ?? 'your Bestie'}',
-            ),
-        ]),
-      );
-      return null;
-    }, [bestie.isLoading, bestiePubkey, bestieName]);
-    final pendingShortcut = useValueListenable(pendingHomeScreenShortcut);
-    // A tap arrives while iOS is still bringing the app forward, before
-    // native sheets such as New DM can present.
-    final resumed =
-        (useAppLifecycleState() ?? WidgetsBinding.instance.lifecycleState) ==
-        AppLifecycleState.resumed;
-    useEffect(
-      () {
-        final VoidCallback? run = switch (pendingShortcut) {
-          _ when !resumed => null,
-          null => null,
-          HomeScreenShortcut.newChat => newChat.value,
-          HomeScreenShortcut.newDm => newDm.value,
-          // Wait for this community's Bestie before choosing a destination.
-          HomeScreenShortcut.messageBestie
-              when bestie.isLoading || bestie.hasError =>
-            null,
-          HomeScreenShortcut.messageBestie => switch (bestiePubkey) {
-            // A shortcut published for another community's Bestie.
-            null => () => onAgents(context),
-            final pubkey => () => unawaited(
-              openBestieConversation(context, ref, pubkey),
-            ),
-          },
-        };
-        if (run == null) return null;
-        // Navigation and notifier writes must wait until this build finishes.
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (!context.mounted ||
-              WidgetsBinding.instance.lifecycleState !=
-                  AppLifecycleState.resumed ||
-              pendingHomeScreenShortcut.value != pendingShortcut) {
-            return;
-          }
-          pendingHomeScreenShortcut.value = null;
-          // Each shortcut starts from Home, so it never opens beneath a
-          // sheet or a conversation left open earlier.
-          Navigator.of(context).popUntil((route) => route.isFirst);
-          run();
-        });
-        return null;
-      },
-      [
-        pendingShortcut,
-        resumed,
-        newChat.value,
-        newDm.value,
-        bestie.isLoading,
-        bestie.hasError,
-        bestiePubkey,
-      ],
-    );
     final reducedMotion = MediaQuery.disableAnimationsOf(context);
     void openSearch() => Navigator.of(context).push(
       BottomUpPageRoute<void>(
@@ -406,6 +321,13 @@ class HomePage extends HookConsumerWidget {
       ),
       body: Stack(
         children: [
+          if (defaultTargetPlatform == TargetPlatform.iOS)
+            HomeScreenShortcutHost(
+              newChat: newChat,
+              newDm: newDm,
+              onAgents: onAgents,
+              openBestieConversation: openBestieConversation,
+            ),
           MediaQuery(
             data: MediaQuery.of(context).copyWith(
               padding: MediaQuery.paddingOf(context).copyWith(
