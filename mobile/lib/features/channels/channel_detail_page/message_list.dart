@@ -874,29 +874,20 @@ class _MessageList extends HookConsumerWidget {
     }
     if (entries.isEmpty) {
       if (welcomeAgent != null) {
-        return SingleChildScrollView(
-          padding: EdgeInsets.fromLTRB(
-            Grid.gutter,
-            _conversationHeaderHeight(
-                  context,
-                  titleContentHeight: appBarTitleContentHeight,
-                ) +
-                Grid.md,
-            Grid.gutter,
-            composerBottomInset + Grid.md,
-          ),
-          child: Column(
-            children: [
-              BestieWelcome(agent: welcomeAgent!),
-              ?hiddenHistory,
-              if (displayedTyping.isNotEmpty)
-                InlineAgentTyping(
-                  channelId: channelId,
-                  entries: displayedTyping,
-                  knownAgents: workingAgents,
-                ),
-            ],
-          ),
+        return _welcomeMessages(
+          context,
+          appBarTitleContentHeight: appBarTitleContentHeight,
+          composerBottomInset: composerBottomInset,
+          children: [
+            BestieWelcome(agent: welcomeAgent!),
+            ?hiddenHistory,
+            if (displayedTyping.isNotEmpty)
+              InlineAgentTyping(
+                channelId: channelId,
+                entries: displayedTyping,
+                knownAgents: workingAgents,
+              ),
+          ],
         );
       }
       return hiddenHistory ?? const _EmptyMessages();
