@@ -137,7 +137,7 @@ class SearchPage extends HookConsumerWidget {
 
     void closeSearch() {
       focusNode.unfocus();
-      Navigator.of(context).maybePop();
+      Navigator.of(context).pop();
     }
 
     void runRecentSearch(String query) {

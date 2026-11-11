@@ -812,7 +812,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
       appBar: FrostedAppBar(
         nativeTitleInsets: duoContentInsetsOf(context),
         automaticallyImplyLeading:
-            ConversationPaneScope.maybeOf(context) == null ||
+            !ConversationPaneScope.isBaseRouteOf(context) ||
             !usesConversationPanes(
               context,
               windowSize:

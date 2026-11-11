@@ -20,17 +20,18 @@ bool usesConversationPanes(
 }) {
   final size = windowSize ?? MediaQuery.sizeOf(context);
   final rail = strip ?? FoldGeometry.of(context).strip;
+  // The portrait Duo status cluster becomes a tall top inset, not a side
+  // strip. Keep that phone layout compact without excluding ordinary iPads.
+  final phoneStatusCluster = MediaQuery.viewPaddingOf(context).top > 50;
   if (defaultTargetPlatform == TargetPlatform.iOS &&
-      size.height >= size.width) {
+      size.height >= size.width &&
+      (rail != null || phoneStatusCluster || size.shortestSide < 600)) {
     return false;
   }
   final bookDivision = bookDivisionOf(context);
   // A landscape phone is wide enough for the breakpoint, but not for two
   // usable panes. Fold geometry keeps Duo eligible in its supported poses.
-  if (defaultTargetPlatform == TargetPlatform.iOS &&
-      size.shortestSide < 600 &&
-      rail == null &&
-      bookDivision == null) {
+  if (size.shortestSide < 600 && rail == null && bookDivision == null) {
     return false;
   }
   return bookDivision != null || size.width - (rail?.width ?? 0) >= 640;
@@ -82,6 +83,16 @@ class ConversationPaneScope
 
   final bool active;
 
+  /// Only the selected page owns the pane's implicit root navigation.
+  /// Imperatively pushed pages retain ordinary Back navigation.
+  static bool isBaseRouteOf(BuildContext context) {
+    final controller = maybeOf(context);
+    final settings = ModalRoute.of(context)?.settings;
+    return controller?.selectedId != null &&
+        settings is Page &&
+        settings.key == ValueKey<String?>(controller!.selectedId);
+  }
+
   static bool isActiveOf(BuildContext context) =>
       context
           .dependOnInheritedWidgetOfExactType<ConversationPaneScope>()
@@ -110,10 +121,14 @@ class AdaptiveConversationPane extends HookConsumerWidget {
     this.listWidthFraction,
     this.preferredListWidth,
     this.persistentSelection = false,
+    this.listToolbarSlots = 0,
     super.key,
   });
 
   final bool persistentSelection;
+
+  /// Rail slots reserved for workspace controls that stay active in wide mode.
+  final int listToolbarSlots;
 
   /// Optional list share of the usable width; defaults to the compact sidebar.
   final double? listWidthFraction;
@@ -208,7 +223,9 @@ class AdaptiveConversationPane extends HookConsumerWidget {
                               active:
                                   active &&
                                   (selected == null ||
-                                      (wide && persistentSelection)) &&
+                                      (wide &&
+                                          (persistentSelection ||
+                                              listToolbarSlots > 0))) &&
                                   (ModalRoute.isCurrentOf(context) ?? true),
                               child: list,
                             ),
@@ -231,6 +248,7 @@ class AdaptiveConversationPane extends HookConsumerWidget {
                             ),
                             child: DuoToolbarScope(
                               strip: strip,
+                              leadingSlots: wide ? listToolbarSlots : 0,
                               contentInsets: EdgeInsets.only(
                                 left: wide ? 0 : leftInset,
                                 right: rightInset,
@@ -467,6 +485,7 @@ class AdaptiveConversationDestination extends HookConsumerWidget {
     this.listWidthFraction,
     this.controller,
     this.persistentSelection = false,
+    this.listToolbarSlots = 0,
     this.preferredListWidth,
     super.key,
   });
@@ -474,6 +493,9 @@ class AdaptiveConversationDestination extends HookConsumerWidget {
   /// Optional list share of the usable width; defaults to the compact sidebar.
   final ConversationPaneController? controller;
   final bool persistentSelection;
+
+  /// Rail slots reserved for workspace controls that stay active in wide mode.
+  final int listToolbarSlots;
 
   /// Preferred sidebar width, capped to preserve room for its detail pane.
   final double? preferredListWidth;
@@ -501,6 +523,7 @@ class AdaptiveConversationDestination extends HookConsumerWidget {
             active: DuoToolbarScope.maybeOf(context)?.active ?? true,
             controller: controller,
             persistentSelection: persistentSelection,
+            listToolbarSlots: listToolbarSlots,
             emptyLabel: emptyLabel,
             listWidthFraction: listWidthFraction,
             preferredListWidth: preferredListWidth,

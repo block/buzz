@@ -99,6 +99,7 @@ class HomePage extends HookConsumerWidget {
         builder: (_) => CoveredRouteKeyboardInsets(
           child: AdaptiveConversationDestination(
             preferredListWidth: sidebarWidth,
+            listToolbarSlots: 1,
             child: const SearchPage(),
           ),
         ),

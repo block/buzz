@@ -13,45 +13,56 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
-  testWidgets('iPhone stays compact while tablet and Duo retain panes', (
+  testWidgets('phones stay compact while tablets and Duo retain panes', (
     tester,
   ) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
     addTearDown(() => debugDefaultTargetPlatformOverride = null);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.reset);
-    for (final scenario in [
-      (size: const Size(402, 874), duo: false, wide: false),
-      (size: const Size(874, 402), duo: false, wide: false),
-      (size: const Size(1024, 768), duo: false, wide: true),
-      (size: const Size(874, 402), duo: true, wide: true),
-    ]) {
-      tester.view.physicalSize = scenario.size;
-      await tester.pumpWidget(
-        MaterialApp(
-          home: Builder(
-            builder: (context) {
-              final wide = usesConversationPanes(
-                context,
-                strip: scenario.duo
-                    ? const FoldStrip(
-                        side: FoldStripSide.right,
-                        rect: Rect.fromLTWH(798, 0, 76, 402),
-                        topClearance: 0,
-                        bottomClearance: 0,
-                        isClearanceEstimated: true,
-                      )
-                    : null,
-              );
-              return Text(wide ? 'Split panes' : 'Single pane');
-            },
-          ),
+    for (final platform in [TargetPlatform.iOS, TargetPlatform.android]) {
+      debugDefaultTargetPlatformOverride = platform;
+      for (final scenario in [
+        (size: const Size(402, 874), duo: false, top: 24.0, wide: false),
+        (size: const Size(874, 402), duo: false, top: 24.0, wide: false),
+        (size: const Size(1024, 768), duo: false, top: 24.0, wide: true),
+        (size: const Size(768, 1024), duo: false, top: 24.0, wide: true),
+        (size: const Size(874, 402), duo: true, top: 0.0, wide: true),
+        (
+          size: const Size(669, 951),
+          duo: false,
+          top: 82.0,
+          wide: platform != TargetPlatform.iOS,
         ),
-      );
-      expect(
-        find.text(scenario.wide ? 'Split panes' : 'Single pane'),
-        findsOneWidget,
-      );
+      ]) {
+        tester.view.physicalSize = scenario.size;
+        tester.view.viewPadding = FakeViewPadding(top: scenario.top);
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Builder(
+              builder: (context) {
+                final wide = usesConversationPanes(
+                  context,
+                  strip: scenario.duo
+                      ? const FoldStrip(
+                          side: FoldStripSide.right,
+                          rect: Rect.fromLTWH(798, 0, 76, 402),
+                          topClearance: 0,
+                          bottomClearance: 0,
+                          isClearanceEstimated: true,
+                        )
+                      : null,
+                );
+                return Text(wide ? 'Split panes' : 'Single pane');
+              },
+            ),
+          ),
+        );
+        expect(
+          find.text(scenario.wide ? 'Split panes' : 'Single pane'),
+          findsOneWidget,
+        );
+      }
     }
     debugDefaultTargetPlatformOverride = null;
   });

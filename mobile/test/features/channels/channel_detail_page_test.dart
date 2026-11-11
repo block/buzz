@@ -692,6 +692,22 @@ void main() {
     tester.view.physicalSize = const Size(951, 669);
     await tester.pumpAndSettle();
     expect(header().automaticallyImplyLeading, isFalse);
+    // A linked channel pushed over the pane root must keep a visible Back.
+    final detailNavigator = Navigator.of(
+      tester.element(find.byType(ChannelDetailPage)),
+    );
+    unawaited(
+      detailNavigator.push(
+        MaterialPageRoute<void>(
+          builder: (_) => ChannelDetailPage(channel: _testChannel),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(header().automaticallyImplyLeading, isTrue);
+    await tester.binding.handlePopRoute();
+    await tester.pumpAndSettle();
+    expect(header().automaticallyImplyLeading, isFalse);
     final head = formatTimeline([
       _textMsg(
         id: threadIdRoot,

@@ -23,6 +23,7 @@ class DuoToolbarScope extends InheritedWidget {
     required this.strip,
     required this.active,
     this.contentInsets = EdgeInsets.zero,
+    this.leadingSlots = 0,
     required super.child,
     super.key,
   });
@@ -31,6 +32,9 @@ class DuoToolbarScope extends InheritedWidget {
   final bool active;
   final EdgeInsets contentInsets;
 
+  /// Space above detail actions for the workspace's persistent rail controls.
+  final int leadingSlots;
+
   static DuoToolbarScope? maybeOf(BuildContext context) =>
       context.dependOnInheritedWidgetOfExactType<DuoToolbarScope>();
 
@@ -38,7 +42,8 @@ class DuoToolbarScope extends InheritedWidget {
   bool updateShouldNotify(DuoToolbarScope oldWidget) =>
       strip != oldWidget.strip ||
       active != oldWidget.active ||
-      contentInsets != oldWidget.contentInsets;
+      contentInsets != oldWidget.contentInsets ||
+      leadingSlots != oldWidget.leadingSlots;
 }
 
 /// Content clearance for a pane, or a full-window route outside a pane.
@@ -87,11 +92,15 @@ class DuoToolbarPortal extends HookConsumerWidget {
         final measuredTop = metrics.windowSize == windowSize
             ? metrics.railTopClearance
             : null;
-        final topClearance = measuredTop != null
-            ? measuredTop + 12
-            : strip.isClearanceEstimated && windowSize.shortestSide >= 600
-            ? duoInnerDisplayEstimatedRailClearance
-            : strip.topClearance;
+        final actionOffset =
+            (DuoToolbarScope.maybeOf(context)?.leadingSlots ?? 0) * 60.0;
+        final topClearance =
+            (measuredTop != null
+                ? measuredTop + 12
+                : strip.isClearanceEstimated && windowSize.shortestSide >= 600
+                ? duoInnerDisplayEstimatedRailClearance
+                : strip.topClearance) +
+            actionOffset;
         return Positioned(
           left:
               IosNavigationMetrics.of(context).railCenter(

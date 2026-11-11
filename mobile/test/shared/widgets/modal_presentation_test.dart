@@ -1,3 +1,6 @@
+import 'package:buzz/shared/widgets/ios_glass_navigation_button.dart';
+import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:buzz/shared/widgets/ios_navigation_bar.dart';
 import 'package:buzz/shared/widgets/concentric_sheet_surface.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/modal_presentation.dart';
@@ -8,6 +11,105 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  testWidgets('open sheet follows folding without losing its draft or Close', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    for (final startWide in [true, false]) {
+      void posture(bool wide) {
+        tester.view.physicalSize = wide
+            ? const Size(951, 669)
+            : const Size(390, 844);
+        tester.view.padding = wide
+            ? const FakeViewPadding(right: 76)
+            : const FakeViewPadding(bottom: 34);
+        tester.view.viewPadding = tester.view.padding;
+      }
+
+      posture(startWide);
+      await tester.pumpWidget(
+        ProviderScope(
+          child: MaterialApp(
+            theme: AppTheme.light(),
+            home: Builder(
+              builder: (context) => Scaffold(
+                body: TextButton(
+                  onPressed: () => showBuzzModalBottomSheet<void>(
+                    context: context,
+                    title: 'Draft',
+                    useSafeArea: true,
+                    isDismissible: false,
+                    enableDrag: false,
+                    builder: (_) => const SizedBox(
+                      height: 200,
+                      child: TextField(key: ValueKey('fold-draft')),
+                    ),
+                  ),
+                  child: const Text('Open'),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('Open'));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(const ValueKey('fold-draft')),
+        'Keep this edit',
+      );
+      for (final wide in [!startWide, startWide]) {
+        posture(wide);
+        await tester.pumpAndSettle();
+        expect(find.text('Keep this edit'), findsOneWidget);
+        expect(
+          find.byKey(const ValueKey('duo-toolbar-Close Draft')),
+          wide ? findsOneWidget : findsNothing,
+        );
+        expect(
+          find.byKey(const ValueKey('buzz-sheet-ios-glass-close')),
+          wide ? findsNothing : findsOneWidget,
+        );
+        if (wide) {
+          expect(
+            tester.getSize(find.byKey(const ValueKey('fold-draft'))).width,
+            greaterThan(800),
+          );
+        }
+      }
+      FocusManager.instance.primaryFocus?.unfocus();
+      await tester.pumpAndSettle();
+      if (startWide) {
+        tester
+            .widget<IosNavigationBar>(
+              find.descendant(
+                of: find.byKey(const ValueKey('duo-toolbar-Close Draft')),
+                matching: find.byType(IosNavigationBar),
+              ),
+            )
+            .leading!
+            .onPressed!();
+      } else {
+        tester
+            .widget<IosGlassNavigationButton>(
+              find.byKey(const ValueKey('buzz-sheet-ios-glass-close')),
+            )
+            .onPressed!();
+      }
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('fold-draft')),
+        findsNothing,
+        reason: 'startWide=$startWide',
+      );
+      await tester.pumpWidget(const SizedBox());
+    }
+    debugDefaultTargetPlatformOverride = null;
+  });
+
   for (final platform in [TargetPlatform.android, TargetPlatform.iOS]) {
     for (final titled in [false, true]) {
       for (final ownSafeArea in [false, true]) {

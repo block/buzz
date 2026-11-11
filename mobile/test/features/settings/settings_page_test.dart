@@ -162,6 +162,25 @@ void main() {
       findsOneWidget,
     );
     expect(find.text('Settings'), findsNothing);
+    // Book-mode Duo keeps Profile underneath the pushed photo editor.
+    tester.view.physicalSize = const Size(874, 402);
+    tester.view.viewPadding = const FakeViewPadding(right: 76);
+    tester.view.padding = tester.view.viewPadding;
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Profile'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Edit photo'));
+    await tester.pumpAndSettle();
+    expect(find.text('Photo editor'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('duo-toolbar-Close settings')),
+      findsOneWidget,
+    );
+    await tester.binding.handlePopRoute();
+    await tester.pumpAndSettle();
+    expect(find.text('Edit photo'), findsOneWidget);
+    expect(find.text('Set status'), findsNothing);
+
     await tester.pumpWidget(const SizedBox.shrink());
     debugDefaultTargetPlatformOverride = null;
   });

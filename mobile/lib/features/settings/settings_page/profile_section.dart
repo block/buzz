@@ -52,7 +52,11 @@ class _ProfileSection extends StatelessWidget {
           final windowSize =
               View.of(context).physicalSize / View.of(context).devicePixelRatio;
           final pane = ConversationPaneScope.maybeOf(context);
-          if (windowSize.shortestSide < 600 && pane != null) {
+          // From the compact all-settings list, the editor is the initial
+          // detail. An existing Profile detail must remain beneath the editor.
+          if (windowSize.shortestSide < 600 &&
+              pane != null &&
+              pane.selectedId == null) {
             pane.open('settings-photo', profileEditPageBuilder, animate: false);
             return;
           }
