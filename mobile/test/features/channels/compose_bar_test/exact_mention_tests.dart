@@ -323,6 +323,52 @@ void exactMentionTests() {
     },
   );
 
+  testWidgets(
+    'qualifying a namesake keeps code and authored spelling as typed',
+    (tester) async {
+      List<String>? sent;
+      await mountComposer(
+        tester,
+        members(),
+        (_, keys, {mediaTags = const []}) async => sent = keys,
+      );
+      final controller = tester
+          .widget<TextField>(find.byType(TextField))
+          .controller!;
+      // Prose is qualified in its own spelling; code stays as typed.
+      await pick(tester, '@');
+      await pick(tester, '`ping @Scout now` @SCOUT @', last: true);
+      expect(
+        controller.text,
+        '`ping @Scout now` @SCOUT ($first) @Scout ($second) ',
+      );
+      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+      await tester.pumpAndSettle();
+      expect(sent, [first, second]);
+    },
+  );
+
+  testWidgets(
+    'a namesake selection left only in code keeps its label and recipient',
+    (tester) async {
+      List<String>? sent;
+      await mountComposer(
+        tester,
+        members(),
+        (_, keys, {mediaTags = const []}) async => sent = keys,
+      );
+      final controller = tester
+          .widget<TextField>(find.byType(TextField))
+          .controller!;
+      await pick(tester, '@');
+      await pick(tester, '`ping @Scout now` @', last: true);
+      expect(controller.text, '`ping @Scout now` @Scout ($second) ');
+      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+      await tester.pumpAndSettle();
+      expect(sent, [first, second]);
+    },
+  );
+
   testWidgets('unbound qualified text cannot notify a shorter member alias', (
     tester,
   ) async {

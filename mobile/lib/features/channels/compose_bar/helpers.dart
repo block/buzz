@@ -376,24 +376,39 @@ void spliceAndMoveCursor(
   focusNode.requestFocus();
 }
 
-/// Rewrite earlier namesake mentions to their qualified labels, keeping the
-/// cursor in place. Returns [start] shifted by the edits before it.
+/// Qualify earlier namesake mentions outside code, keeping the cursor in
+/// place, and rebind [mentions] before the text changes. A key with an
+/// occurrence left in code stays bound beside its qualified label. Returns
+/// [start] shifted by the edits before it.
 int _requalifyNamesakes(
   TextEditingController controller,
-  Iterable<String> labels,
+  Map<String, MentionCandidate> mentions,
   Map<String, String> renames,
   int start,
 ) {
   if (renames.isEmpty) return start;
+  final text = controller.text;
   final cursor = controller.selection.isValid
       ? controller.selection.baseOffset
-      : controller.text.length;
-  final renamed = renameMentions(controller.text, labels, renames, start);
-  controller.value = TextEditingValue(
-    text: renamed.text,
-    selection: TextSelection.collapsed(offset: cursor + renamed.offset - start),
+      : text.length;
+  final result = renameMentions(
+    text,
+    mentions.keys,
+    renames,
+    start,
+    excluded: (from, to) =>
+        _MarkdownEditingController._isInCode(text, from, to),
   );
-  return renamed.offset;
+  for (final key in result.renamed) {
+    mentions[renames[key]!] = result.kept.contains(key)
+        ? mentions[key]!
+        : mentions.remove(key)!;
+  }
+  controller.value = TextEditingValue(
+    text: result.text,
+    selection: TextSelection.collapsed(offset: cursor + result.offset - start),
+  );
+  return result.offset;
 }
 
 /// Insert [trigger] (e.g. `@` or `#`) at the cursor position, prefixed with

@@ -33,6 +33,18 @@ void main() {
     final renamed = renameMentions(text, ['Scout'], renames, 18);
     expect(renamed.text, '@Scout ($first) and @Scout ($first) @Scout');
     expect(renamed.offset, 18 + 2 * ' ($first)'.length);
+    expect(renamed.renamed, {'Scout'});
+    // Authored spelling stays; an excluded occurrence is left as typed.
+    final kept = renameMentions(
+      '@SCOUT `x @Scout y` @',
+      ['Scout'],
+      renames,
+      20,
+      excluded: (start, end) => start == 10,
+    );
+    expect(kept.text, '@SCOUT ($first) `x @Scout y` @');
+    expect(kept.offset, 20 + ' ($first)'.length);
+    expect(kept.kept, {'Scout'});
   });
   test('longest occurrences block shorter and interior recipients', () {
     expect(

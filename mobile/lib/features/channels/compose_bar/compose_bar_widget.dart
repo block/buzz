@@ -336,9 +336,6 @@ class ComposeBar extends HookConsumerWidget {
       final name = selectedMentionLabel(label, pk, selected);
       // A namesake qualifies every same-name mention, earlier ones included.
       final renames = namesakeRequalifications(label, pk, selected);
-      for (final entry in renames.entries) {
-        mentionMap.value[entry.value] = mentionMap.value.remove(entry.key)!;
-      }
       ref
           .read(mentionHistoryProvider.notifier)
           .remember(channelId, candidate.pubkey);
@@ -346,7 +343,12 @@ class ComposeBar extends HookConsumerWidget {
       var start = mentionStartIdx.value.clamp(0, controller.text.length);
       isModifyingText.value = true;
       try {
-        start = _requalifyNamesakes(controller, selected.keys, renames, start);
+        start = _requalifyNamesakes(
+          controller,
+          mentionMap.value,
+          renames,
+          start,
+        );
         // After the rename: persistence prunes keys absent from the text.
         mentionMap.value[name] = candidate;
         spliceAndMoveCursor(
