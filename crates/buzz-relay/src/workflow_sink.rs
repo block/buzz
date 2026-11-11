@@ -178,6 +178,168 @@ fn append_workflow_mention_tags(
     Ok(())
 }
 
+/// `users.display_name` is `VARCHAR(255)`, so no stored name is longer than
+/// 255 characters, and an ASCII name folds to at most 255 characters.
+const MAX_DISPLAY_NAME_CHARS: usize = 255;
+
+/// Most distinct `@` tails one message sends to the candidate query. Past
+/// this the sink reads every named member, as it always did before.
+const MAX_MENTION_TAILS: usize = 32;
+
+/// What [`load_mention_candidates`] reads for one message.
+#[derive(Debug, PartialEq, Eq)]
+enum MentionCandidateQuery {
+    /// The rendered text has no mention anchor, so it can resolve no mention
+    /// and no tag is emitted whatever the members are: no read at all.
+    NoAnchor,
+    /// Read only the members this filter admits.
+    Names(buzz_db::channel_members::MentionNameFilter),
+    /// More tails than [`MAX_MENTION_TAILS`]: read every named member.
+    AllMembers,
+}
+
+/// Build the candidate query for the rendered and authored texts.
+///
+/// [`resolve_mention_pubkeys`] matches a name only right after an `@` at a
+/// left boundary (start, whitespace or `(`): the folded name must equal the
+/// folded text that follows. For every such anchor in either text this
+/// collects the *tail*, the text after the `@` folded per char with
+/// `char::to_lowercase` exactly as the resolver folds it, cut to
+/// [`MAX_DISPLAY_NAME_CHARS`]. The filter then admits a superset of every
+/// name the resolver can match at any anchor:
+///
+/// - An ASCII name folds to its ASCII lowercase, so it can only match if that
+///   is a prefix of some tail. The database lowercases with `translate` over
+///   `A`–`Z`, which is the same fold with no locale involved.
+/// - Any other name can only match if the lowercase of its first char starts
+///   with the first char of some tail (`str::to_lowercase` folds a first char
+///   like `char::to_lowercase` does: the final-sigma rule needs a cased letter
+///   before it). So the filter sends every char whose lowercase starts with
+///   that char ([`lowercase_first_preimage`]) and the database compares only
+///   the name's first code point. Postgres `lower()` can disagree with Rust
+///   (`İ`, `ẞ`, final `Σ`, locale rules), so it is never used.
+///
+/// Names the resolver can't match at any anchor neither bind nor consume a
+/// span, so dropping them changes nothing; every member sharing a matched
+/// folded name matches at the same anchor, so the ambiguity rule still sees
+/// all of them. Authored tails are included because authority is resolved
+/// against the authored text with the same candidates.
+fn mention_candidate_query(rendered_text: &str, authored_text: &str) -> MentionCandidateQuery {
+    let mut tails: Vec<String> = Vec::new();
+    if !push_mention_tails(rendered_text, &mut tails) {
+        return MentionCandidateQuery::AllMembers;
+    }
+    if tails.is_empty() {
+        return MentionCandidateQuery::NoAnchor;
+    }
+    if !push_mention_tails(authored_text, &mut tails) {
+        return MentionCandidateQuery::AllMembers;
+    }
+
+    let mut first_chars: Vec<String> = Vec::new();
+    for first in tails.iter().filter_map(|tail| tail.chars().next()) {
+        for c in lowercase_first_preimage(first) {
+            let c = c.to_string();
+            if !first_chars.contains(&c) {
+                first_chars.push(c);
+            }
+        }
+    }
+    MentionCandidateQuery::Names(buzz_db::channel_members::MentionNameFilter {
+        lowercase_tails: tails,
+        first_chars,
+    })
+}
+
+/// Add the folded tail after every left-boundary `@` in `text` to `tails`.
+/// A tail that is a prefix of another admits no name the longer one doesn't
+/// (same first char, and a name prefixing it prefixes the longer one), so
+/// only the longest of such tails is kept; repeated mentions of one name
+/// then cost one tail. Returns `false`, and stops, once there are more than
+/// [`MAX_MENTION_TAILS`].
+fn push_mention_tails(text: &str, tails: &mut Vec<String>) -> bool {
+    let mut previous: Option<char> = None;
+    for (index, c) in text.char_indices() {
+        let at_boundary = previous.is_none_or(|p| p.is_whitespace() || p == '(');
+        previous = Some(c);
+        if c != '@' || !at_boundary {
+            continue;
+        }
+        let tail: String = text[index + '@'.len_utf8()..]
+            .chars()
+            .flat_map(char::to_lowercase)
+            .take(MAX_DISPLAY_NAME_CHARS)
+            .collect();
+        // A bare trailing `@` names no one: empty names never match.
+        if tail.is_empty() || tails.iter().any(|kept| kept.starts_with(&tail)) {
+            continue;
+        }
+        tails.retain(|kept| !tail.starts_with(kept.as_str()));
+        if tails.len() == MAX_MENTION_TAILS {
+            return false;
+        }
+        tails.push(tail);
+    }
+    true
+}
+
+/// Every char whose `char::to_lowercase` starts with `first`.
+///
+/// The table of chars that lowercase to something else is built once by
+/// scanning all of Unicode, so it is exact for this Rust version's case
+/// tables (for example `i` yields `i`, `I` and `İ`; `k` yields `k`, `K` and
+/// the Kelvin sign).
+fn lowercase_first_preimage(first: char) -> impl Iterator<Item = char> {
+    static CHANGED_BY_LOWERCASE: std::sync::LazyLock<std::collections::HashMap<char, Vec<char>>> =
+        std::sync::LazyLock::new(|| {
+            let mut preimage: std::collections::HashMap<char, Vec<char>> =
+                std::collections::HashMap::new();
+            for c in '\0'..=char::MAX {
+                if let Some(lower) = c.to_lowercase().next().filter(|&lower| lower != c) {
+                    preimage.entry(lower).or_default().push(c);
+                }
+            }
+            preimage
+        });
+    let itself = (first.to_lowercase().next() == Some(first)).then_some(first);
+    itself.into_iter().chain(
+        CHANGED_BY_LOWERCASE
+            .get(&first)
+            .into_iter()
+            .flatten()
+            .copied(),
+    )
+}
+
+/// Load `(display_name, pubkey_hex)` for the channel members that `@`
+/// mentions in `rendered_text` (and, for authority, `authored_text`) could
+/// resolve to. See [`mention_candidate_query`] for why the result resolves
+/// exactly as the full roster would.
+async fn load_mention_candidates(
+    state: &AppState,
+    community: CommunityId,
+    channel_uuid: Uuid,
+    rendered_text: &str,
+    authored_text: &str,
+) -> Result<Vec<(String, String)>, ActionSinkError> {
+    let filter = match mention_candidate_query(rendered_text, authored_text) {
+        MentionCandidateQuery::NoAnchor => return Ok(Vec::new()),
+        MentionCandidateQuery::Names(filter) => Some(filter),
+        MentionCandidateQuery::AllMembers => None,
+    };
+    let members = state
+        .db
+        .get_named_members_for_event_write(community, channel_uuid, filter.as_ref())
+        .await
+        .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+    Ok(members
+        .into_iter()
+        .filter_map(|(pubkey, name)| {
+            Some((name, nostr::PublicKey::from_slice(&pubkey).ok()?.to_hex()))
+        })
+        .collect())
+}
+
 /// Relay-side action sink — executes workflow side-effects directly.
 ///
 /// Holds a **weak** reference to `AppState` to avoid an `Arc` reference cycle:
@@ -374,26 +536,16 @@ impl ActionSink for RelayActionSink {
             // The stored author-written template independently supplies the
             // authority-bearing workflow-mention tags. A trigger may therefore
             // render an `@Name` into visible output, but it cannot borrow the
-            // workflow owner's authority to wake that agent. A resolution failure
-            // must not drop the message, so log and proceed with the base tags.
-            let members = state
-                .db
-                .get_members_for_event_write(tenant.community(), channel_uuid)
-                .await
-                .map_err(|e| ActionSinkError::Database(e.to_string()))?;
-            let member_pubkeys: Vec<Vec<u8>> = members.iter().map(|m| m.pubkey.clone()).collect();
-            let users = state
-                .db
-                .get_users_bulk_for_event_write(tenant.community(), &member_pubkeys)
-                .await
-                .map_err(|e| ActionSinkError::Database(e.to_string()))?;
-            let named_members: Vec<(String, String)> = users
-                .into_iter()
-                .filter_map(|u| {
-                    let name = u.display_name?;
-                    Some((name, nostr::PublicKey::from_slice(&u.pubkey).ok()?.to_hex()))
-                })
-                .collect();
+            // workflow owner's authority to wake that agent. A member read
+            // failure fails the action.
+            let named_members = load_mention_candidates(
+                &state,
+                tenant.community(),
+                channel_uuid,
+                &text,
+                &authored_text,
+            )
+            .await?;
             append_workflow_mention_tags(&mut tags, &text, &authored_text, &named_members)?;
 
             let kind = Kind::from(KIND_STREAM_MESSAGE as u16);
@@ -773,6 +925,315 @@ mod tests {
         assert_eq!(tags.len(), 1);
         assert_eq!(tags[0].as_slice(), ["p", owner.as_str(), "", "owner"]);
     }
+
+    /// Display names covering the resolver's rules: spaces and punctuation,
+    /// `İ` and other expanding or context-sensitive folds, `ß`/`ẞ`, emoji,
+    /// same-name members (ambiguous), names that prefix other names, and
+    /// unrelated members. Each entry is a distinct person.
+    pub(super) const MENTION_ROSTER: &[&str] = &[
+        "Will",
+        "Will Pfleger",
+        "Lep (Subagent)",
+        "İ",
+        "İlker",
+        "i\u{307}lker",
+        "ilker",
+        "ß",
+        "ẞ Team",
+        "Straße",
+        "STRASSE",
+        "🤖 Bot",
+        "🤖",
+        "Fizz",
+        "Fizz",
+        "fizz",
+        "Robby",
+        "Rob",
+        "Robby Jr.",
+        "Σοφία",
+        "ΟΔΥΣΣΕΥΣ",
+        "οδυσσευς",
+        "Zoë",
+        "Jos\u{65}\u{301}",
+        "\u{212A}ate",
+        "Kate",
+        "Max",
+        "Sam",
+        " Spacey",
+        "Alice",
+        "Bob",
+        "Ómar",
+        "Øystein",
+        "Member 1",
+        "Member 7",
+        "Member 12",
+        "member 70",
+    ];
+
+    /// `(rendered, authored)` texts run against [`MENTION_ROSTER`].
+    pub(super) const MENTION_CASES: &[(&str, &str)] = &[
+        ("cc @Will Pfleger on this", "cc @Will Pfleger on this"),
+        ("cc @Will on this", "cc @Will on this"),
+        ("cc @Will", "cc @Will Pfleger"),
+        ("@Will{{x}}", "@Will Pfleger"),
+        ("@Lep (Subagent) take it", "@Lep (Subagent) take it"),
+        ("@İ @Robby", "@İ @Robby"),
+        ("@İlker hi", "@İlker hi"),
+        ("@i\u{307}lker hi", "@ilker hi"),
+        ("@ILKER and @ilker", "@ILKER"),
+        ("@ß and @Max", "@ß and @Max"),
+        ("@ẞ Team ship it", "@ß team ship it"),
+        ("@STRASSE vs @straße", "@STRASSE vs @straße"),
+        ("@🤖 Bot go", "@🤖 Bot go"),
+        ("@🤖 go", "@🤖 go"),
+        ("@Fizz status?", "@Fizz status?"),
+        ("@fizz", "@fizz"),
+        (
+            "@Rob then @Robby then @Robby Jr. done",
+            "@Rob then @Robby Jr. done",
+        ),
+        ("@σοφία", "@ΣΟΦΊΑ"),
+        ("@ΟΔΥΣΣΕΥΣ", "@οδυσσευς"),
+        ("@οδυσσευς", "@οδυσσευς"),
+        ("welcome @Zoë!", "welcome @ZOË!"),
+        ("hi @Jos\u{65}\u{301}!", "hi @Jos\u{65}\u{301}!"),
+        ("@kate and @\u{212A}ATE", "@KATE"),
+        ("(@Sam) and @ Spacey", "(@Sam) and @ Spacey"),
+        ("@Member 7 and @Member 12", "@member 7"),
+        ("@Max @Sam @Bob", "@Max"),
+        ("alice@Robby", "@Robby"),
+        ("@@Robby", "@Robby"),
+        ("@", "@Robby"),
+        ("no mention here", "@Robby"),
+        ("＠Robby", "＠Robby"),
+    ];
+
+    pub(super) fn mention_roster(pubkey_for: impl Fn(usize) -> String) -> Vec<(String, String)> {
+        MENTION_ROSTER
+            .iter()
+            .enumerate()
+            .map(|(i, name)| (name.to_string(), pubkey_for(i)))
+            .collect()
+    }
+
+    pub(super) fn mention_tags(
+        rendered: &str,
+        authored: &str,
+        members: &[(String, String)],
+    ) -> Vec<Vec<String>> {
+        let mut tags = Vec::new();
+        append_workflow_mention_tags(&mut tags, rendered, authored, members)
+            .expect("append mention tags");
+        tags.into_iter()
+            .map(|tag| tag.as_slice().to_vec())
+            .collect()
+    }
+
+    /// The SQL filter in `buzz_db::channel_members::get_named_members_for_event_write`,
+    /// restated: ASCII names by ASCII-lowercased prefix, others by first char.
+    fn admitted(filter: &buzz_db::channel_members::MentionNameFilter, name: &str) -> bool {
+        if name.is_ascii() {
+            let folded = name.to_ascii_lowercase();
+            filter
+                .lowercase_tails
+                .iter()
+                .any(|tail| tail.starts_with(&folded))
+        } else {
+            name.chars()
+                .next()
+                .is_some_and(|first| filter.first_chars.contains(&first.to_string()))
+        }
+    }
+
+    /// Resolving against only the members the filter admits gives the same
+    /// `p` and `buzz:workflow-mention` tags as resolving against the whole
+    /// roster, for every case, while reading fewer members.
+    #[test]
+    fn candidate_filter_resolves_like_the_full_roster() {
+        let mut roster = mention_roster(|i| format!("{:064x}", i + 1));
+        // The same person listed twice is not ambiguous.
+        let max = roster
+            .iter()
+            .find(|(name, _)| name == "Max")
+            .cloned()
+            .expect("Max in roster");
+        roster.push(max);
+        let mut resolved_any = 0;
+        for &(rendered, authored) in MENTION_CASES {
+            let expected = mention_tags(rendered, authored, &roster);
+            resolved_any += usize::from(!expected.is_empty());
+            let candidates: Vec<(String, String)> =
+                match mention_candidate_query(rendered, authored) {
+                    MentionCandidateQuery::NoAnchor => {
+                        assert!(
+                            expected.is_empty(),
+                            "{rendered:?} has no anchor but resolves {expected:?}"
+                        );
+                        Vec::new()
+                    }
+                    MentionCandidateQuery::Names(filter) => {
+                        let candidates: Vec<_> = roster
+                            .iter()
+                            .filter(|(name, _)| admitted(&filter, name))
+                            .cloned()
+                            .collect();
+                        assert!(
+                            candidates.len() < roster.len() / 2,
+                            "{rendered:?} admits {} of {} members: {filter:?}",
+                            candidates.len(),
+                            roster.len()
+                        );
+                        candidates
+                    }
+                    MentionCandidateQuery::AllMembers => {
+                        panic!("{rendered:?} is under the tail cap")
+                    }
+                };
+            assert_eq!(
+                mention_tags(rendered, authored, &candidates),
+                expected,
+                "{rendered:?} / {authored:?} resolves differently from candidates {candidates:?}"
+            );
+        }
+        assert!(
+            resolved_any >= 15,
+            "the table must exercise real matches: {resolved_any}"
+        );
+    }
+
+    /// `mention_candidate_query` finds an anchor exactly where the resolver
+    /// may start a match, for every char that can precede the `@`.
+    #[test]
+    fn anchor_rule_matches_the_resolver() {
+        let members = vec![m("Robby", &pk('a'))];
+        for before in ('\0'..='\u{FFFF}').chain(['\u{1F916}', '\u{E0020}']) {
+            let text = format!("{before}@Robby");
+            let resolves = !resolve_mention_pubkeys(&text, &members).is_empty();
+            let anchored = match mention_candidate_query(&text, "") {
+                MentionCandidateQuery::Names(filter) => {
+                    filter.lowercase_tails.iter().any(|tail| tail == "robby")
+                }
+                MentionCandidateQuery::NoAnchor => false,
+                MentionCandidateQuery::AllMembers => unreachable!("one or two anchors"),
+            };
+            assert_eq!(resolves, anchored, "{before:?} before '@'");
+        }
+    }
+
+    #[test]
+    fn lowercase_first_preimage_covers_expanding_and_special_folds() {
+        let preimage = |c: char| {
+            let mut chars: Vec<char> = lowercase_first_preimage(c).collect();
+            chars.sort_unstable();
+            chars
+        };
+        assert_eq!(preimage('i'), vec!['I', 'i', 'İ']);
+        assert_eq!(preimage('k'), vec!['K', 'k', '\u{212A}']);
+        assert_eq!(preimage('ß'), vec!['ß', 'ẞ']);
+        assert_eq!(preimage('σ'), vec!['Σ', 'σ']);
+        assert_eq!(preimage('ς'), vec!['ς']);
+        assert_eq!(preimage('🤖'), vec!['🤖']);
+        assert!(preimage('\u{307}').contains(&'\u{307}'));
+    }
+
+    /// Tails are deduplicated; past [`MAX_MENTION_TAILS`] distinct ones the
+    /// query falls back to the whole roster rather than drop an anchor.
+    #[test]
+    fn too_many_distinct_tails_read_every_member() {
+        let names = |n: usize| (0..n).map(|i| format!("@name{i:02} ")).collect::<String>();
+        let MentionCandidateQuery::Names(filter) =
+            mention_candidate_query(&names(MAX_MENTION_TAILS), "")
+        else {
+            panic!("{MAX_MENTION_TAILS} tails fit");
+        };
+        assert_eq!(filter.lowercase_tails.len(), MAX_MENTION_TAILS);
+        assert_eq!(
+            mention_candidate_query(&names(MAX_MENTION_TAILS + 1), ""),
+            MentionCandidateQuery::AllMembers
+        );
+        assert_eq!(
+            mention_candidate_query(&names(MAX_MENTION_TAILS), &names(MAX_MENTION_TAILS + 1)),
+            MentionCandidateQuery::AllMembers,
+            "authored tails count toward the cap"
+        );
+        let repeated = "@Robby ".repeat(10 * MAX_MENTION_TAILS);
+        let MentionCandidateQuery::Names(filter) = mention_candidate_query(&repeated, "") else {
+            panic!("repeated mentions are one tail each");
+        };
+        assert!(filter.lowercase_tails.len() <= 2, "{filter:?}");
+    }
+
+    /// A tail is cut at the longest display name a `VARCHAR(255)` column can
+    /// hold, counted in folded chars.
+    #[test]
+    fn tails_are_cut_at_the_display_name_limit() {
+        let text = format!("@{}", "İ".repeat(300));
+        let MentionCandidateQuery::Names(filter) = mention_candidate_query(&text, "") else {
+            panic!("anchored");
+        };
+        assert_eq!(filter.lowercase_tails.len(), 1);
+        assert_eq!(
+            filter.lowercase_tails[0].chars().count(),
+            MAX_DISPLAY_NAME_CHARS
+        );
+    }
+
+    /// Rendered text with no left-boundary `@` resolves to no candidates
+    /// without reading the database (unreachable here); an anchored mention
+    /// still reads and fails.
+    #[tokio::test]
+    async fn mention_candidates_skip_the_database_without_an_anchor() {
+        let state = crate::state::tests::test_state_with_unreachable_database_url(
+            "postgres://buzz@127.0.0.1:1/buzz",
+        )
+        .await;
+        let community = CommunityId::from_uuid(Uuid::nil());
+        let channel = Uuid::new_v4();
+        for rendered in ["build passed", "mail alice@Robby", "trailing @"] {
+            let none = load_mention_candidates(&state, community, channel, rendered, "@Robby")
+                .await
+                .expect("no anchor must not touch the database");
+            assert!(none.is_empty(), "{rendered:?}");
+        }
+        assert!(matches!(
+            load_mention_candidates(&state, community, channel, "ping @Robby", "").await,
+            Err(ActionSinkError::Database(_))
+        ));
+    }
+
+    /// `load_mention_candidates` skips the member read when the rendered text
+    /// has no `@`. That is only sound while no mention syntax resolves
+    /// without one: if this fails because a new form (say `nostr:npub…`)
+    /// now produces tags, update `mention_candidate_query` in the same change.
+    #[test]
+    fn text_without_at_never_resolves_a_mention() {
+        use nostr::nips::nip19::ToBech32;
+
+        let robby = pk('2');
+        let npub = nostr::PublicKey::from_hex(&robby)
+            .expect("member pubkey")
+            .to_bech32()
+            .expect("npub");
+        let members = vec![("Robby".to_string(), robby.clone())];
+        for text in [
+            "Robby".to_string(),
+            "hi Robby, build passed".to_string(),
+            "＠Robby".to_string(),
+            "&#64;Robby".to_string(),
+            format!("nostr:{npub}"),
+            robby.clone(),
+        ] {
+            assert!(!text.contains('@'), "case must not contain '@': {text}");
+            assert_eq!(
+                mention_candidate_query(&text, &text),
+                MentionCandidateQuery::NoAnchor
+            );
+            let mut tags = Vec::new();
+            append_workflow_mention_tags(&mut tags, &text, &text, &members)
+                .expect("append mention tags");
+            assert!(tags.is_empty(), "{text:?} produced {tags:?}");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1062,6 +1523,110 @@ mod postgres_tests {
             tag_values(&injected, "buzz:workflow-mention").is_empty(),
             "a mention introduced solely by trigger data must not receive owner-delegated authority"
         );
+    }
+
+    /// In a large channel the sink reads only the members a mention could
+    /// name, and every mention case resolves to the same tags as against the
+    /// full roster. Before this change the read returned every named member.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn mention_candidates_read_only_names_a_mention_can_match() {
+        use super::tests::{mention_roster, mention_tags, MENTION_CASES};
+
+        let state = test_state().await;
+        let owner = nostr::Keys::generate();
+        let owner_hex = owner.public_key().to_hex();
+        let host = format!("wf-candidates-{}.example", uuid::Uuid::new_v4().simple());
+        let community = match state
+            .db
+            .create_community_with_owner(&host, &owner_hex, &nostr::Keys::generate())
+            .await
+            .map(|write| write.outcome)
+            .expect("create community")
+        {
+            CreateCommunityWithOwnerResult::Created(rec) => rec.id,
+            other => panic!("expected fresh community, got {other:?}"),
+        };
+        let channel = state
+            .db
+            .create_channel(
+                community,
+                "wf-candidates",
+                ChannelType::Stream,
+                ChannelVisibility::Open,
+                None,
+                &owner.public_key().to_bytes(),
+                None,
+            )
+            .await
+            .expect("create channel");
+
+        let noise = 500;
+        let mut full_roster: Vec<(String, String)> = (1..=noise)
+            .map(|n| {
+                (
+                    format!("Member {n}"),
+                    nostr::Keys::generate().public_key().to_hex(),
+                )
+            })
+            .collect();
+        full_roster.extend(mention_roster(|_| {
+            nostr::Keys::generate().public_key().to_hex()
+        }));
+        let pubkeys: Vec<Vec<u8>> = full_roster
+            .iter()
+            .map(|(_, hex)| hex::decode(hex).expect("pubkey hex"))
+            .collect();
+        let names: Vec<&str> = full_roster.iter().map(|(name, _)| name.as_str()).collect();
+        sqlx::query(
+            "INSERT INTO users (community_id, pubkey, display_name) \
+             SELECT $1, * FROM unnest($2::bytea[], $3::text[])",
+        )
+        .bind(community.as_uuid())
+        .bind(&pubkeys)
+        .bind(&names)
+        .execute(state.db.pool())
+        .await
+        .expect("insert users");
+        sqlx::query(
+            "INSERT INTO channel_members (community_id, channel_id, pubkey) \
+             SELECT $1, $2, * FROM unnest($3::bytea[])",
+        )
+        .bind(community.as_uuid())
+        .bind(channel.id)
+        .bind(&pubkeys)
+        .execute(state.db.pool())
+        .await
+        .expect("insert members");
+
+        let robby = load_mention_candidates(&state, community, channel.id, "ping @Robby", "")
+            .await
+            .expect("load candidates");
+        let mut robby_names: Vec<&str> = robby.iter().map(|(name, _)| name.as_str()).collect();
+        robby_names.sort_unstable();
+        assert_eq!(
+            robby_names,
+            vec!["Rob", "Robby"],
+            "only names that prefix the mention, out of {} members",
+            full_roster.len()
+        );
+
+        for &(rendered, authored) in MENTION_CASES {
+            let candidates =
+                load_mention_candidates(&state, community, channel.id, rendered, authored)
+                    .await
+                    .expect("load candidates");
+            assert!(
+                candidates.len() <= 20,
+                "{rendered:?} read {} members",
+                candidates.len()
+            );
+            assert_eq!(
+                mention_tags(rendered, authored, &candidates),
+                mention_tags(rendered, authored, &full_roster),
+                "{rendered:?} / {authored:?} resolves differently from candidates {candidates:?}"
+            );
+        }
     }
 
     #[tokio::test]
