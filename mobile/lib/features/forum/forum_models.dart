@@ -6,6 +6,7 @@ import '../channels/channel_window.dart';
 import '../channels/thread_window.dart';
 import '../channels/timeline_message.dart';
 import 'forum_window.dart';
+import 'forum_auxiliary.dart';
 
 /// A top-level forum post with an optional thread summary.
 @immutable
@@ -184,6 +185,7 @@ class ThreadReply {
 /// Shared loading and completeness signals for forum readers.
 abstract interface class ForumReadResponse {
   bool get hasMore;
+  Object? get loadMoreError;
   Object? get refreshError;
 }
 
@@ -198,6 +200,7 @@ class ForumPostsResponse implements ForumReadResponse {
   final List<ForumPost> posts;
   final ChannelPageCursor? nextCursor;
   final bool isLoadingMore;
+  @override
   final Object? loadMoreError;
   @override
   final Object? refreshError;
@@ -205,6 +208,9 @@ class ForumPostsResponse implements ForumReadResponse {
   /// A loaded page has unconfirmed fallback history or auxiliary authority.
   /// This is independent of a failed refresh and has no retry affordance.
   final bool hasUnconfirmedHistory;
+
+  /// A fallback cursor preserves uncertainty rather than proving older posts.
+  final bool hasUnconfirmedContinuation;
 
   /// More rows remain, or a bounded legacy scan has not established exhaustion.
   @override
@@ -217,6 +223,7 @@ class ForumPostsResponse implements ForumReadResponse {
     this.loadMoreError,
     this.refreshError,
     this.hasUnconfirmedHistory = false,
+    this.hasUnconfirmedContinuation = false,
   });
 
   factory ForumPostsResponse.fromJson(Map<String, dynamic> json) {
@@ -236,11 +243,12 @@ class ForumPostsResponse implements ForumReadResponse {
     bool isLoadingMore = false,
     Object? loadMoreError,
     Object? refreshError,
+    bool hasUnconfirmedContinuation = false,
   }) {
-    final events = _forumDisplayEvents(store);
+    final effects = _forumDisplayEvents(store);
     final display = {
       for (final message in formatTimeline(
-        events,
+        effects.events,
         contentKinds: NostrFilters.forumRootKinds,
       ))
         message.id: message,
@@ -270,24 +278,41 @@ class ForumPostsResponse implements ForumReadResponse {
       isLoadingMore: isLoadingMore,
       loadMoreError: loadMoreError,
       refreshError: refreshError,
-      hasUnconfirmedHistory: store.pages.whereType<ForumWindowPage>().any(
-        (page) => page.incompletePostIds.isNotEmpty,
-      ),
+      hasUnconfirmedHistory:
+          effects.hasUnconfirmedEffects ||
+          store.pages.whereType<ForumWindowPage>().any(
+            (page) =>
+                page.incompletePostIds.isNotEmpty ||
+                page.hasUnconfirmedRootEffects,
+          ),
+      hasUnconfirmedContinuation:
+          hasUnconfirmedContinuation && channelWindowNextCursor(store) != null,
     );
   }
 }
 
-List<NostrEvent> _forumDisplayEvents(ChannelWindowStore store) {
+({List<NostrEvent> events, bool hasUnconfirmedEffects}) _forumDisplayEvents(
+  ChannelWindowStore store, {
+  NostrEvent? root,
+}) {
   final auxiliaryTargets = {
     for (final page in store.pages)
       if (page is ForumWindowPage) ...page.auxiliaryTargets,
   };
-  return [
-    for (final event in flattenChannelWindowEvents(store))
-      if (auxiliaryTargets[event.id] case final targets?)
-        // Display-only projection: ignored references must not affect other
-        // retained or subsequently loaded posts. The signed event in the store
-        // stays untouched; this projection is never verified or sent.
+  final canonical = [?root, ...flattenChannelWindowEvents(store)];
+  final events = <NostrEvent>[];
+  var unconfirmed = false;
+  for (final event in canonical) {
+    if (!forumEditTargetsAgree(event)) {
+      unconfirmed = true;
+      continue;
+    }
+    final targets = auxiliaryTargets[event.id];
+    if (targets != null) {
+      // Display-only projection: ignored references must not affect other
+      // retained or subsequently loaded posts. The signed event in the store
+      // stays untouched; this projection is never verified or sent.
+      events.add(
         NostrEvent(
           id: event.id,
           pubkey: event.pubkey,
@@ -301,10 +326,13 @@ List<NostrEvent> _forumDisplayEvents(ChannelWindowStore store) {
                     tag.length < 2 || tag[0] != 'e' || targets.contains(tag[1]),
               )
               .toList(),
-        )
-      else
-        event,
-  ];
+        ),
+      );
+    } else {
+      events.add(event);
+    }
+  }
+  return (events: events, hasUnconfirmedEffects: unconfirmed);
 }
 
 /// Response for a single forum thread with replies.
@@ -320,12 +348,17 @@ class ForumThreadResponse implements ForumReadResponse {
       hasMore ||
       unresolvedReplies > 0 ||
       loadMoreError != null ||
-      refreshError != null;
+      refreshError != null ||
+      hasUnconfirmedHistory;
   final ChannelPageCursor? nextCursor;
   final bool isLoadingMore;
+  @override
   final Object? loadMoreError;
   @override
   final Object? refreshError;
+
+  /// Auxiliary effects without verified authority were excluded from display.
+  final bool hasUnconfirmedHistory;
 
   /// True when older replies remain outside the loaded thread window.
   @override
@@ -340,6 +373,7 @@ class ForumThreadResponse implements ForumReadResponse {
     this.isLoadingMore = false,
     this.loadMoreError,
     this.refreshError,
+    this.hasUnconfirmedHistory = false,
   });
 
   factory ForumThreadResponse.fromJson(Map<String, dynamic> json) {
@@ -364,7 +398,8 @@ class ForumThreadResponse implements ForumReadResponse {
     Object? loadMoreError,
     Object? refreshError,
   }) {
-    final events = [root, ...flattenChannelWindowEvents(store)]
+    final effects = _forumDisplayEvents(store, root: root);
+    final events = effects.events
       ..sort(compareChannelTimelineEventsChronologically);
     final display = {
       for (final message in formatTimeline(
@@ -406,6 +441,13 @@ class ForumThreadResponse implements ForumReadResponse {
       isLoadingMore: isLoadingMore,
       loadMoreError: loadMoreError,
       refreshError: refreshError,
+      hasUnconfirmedHistory:
+          effects.hasUnconfirmedEffects ||
+          store.pages.whereType<ForumWindowPage>().any(
+            (page) =>
+                page.incompletePostIds.isNotEmpty ||
+                page.hasUnconfirmedRootEffects,
+          ),
     );
   }
 }

@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/features/channels/channel.dart';
+import 'package:buzz/features/channels/channel_window.dart';
 import 'package:buzz/features/forum/forum_models.dart';
 import 'package:buzz/features/forum/forum_post_card.dart';
 import 'package:buzz/features/forum/forum_posts_view.dart';
@@ -766,6 +767,66 @@ void main() {
 
   group('ForumPostsView', () {
     testWidgets(
+      'distinguishes an unproven fallback continuation from known older posts',
+      (tester) async {
+        for (final uncertain in [true, false]) {
+          for (final failed in [false, true]) {
+            await tester.pumpWidget(
+              _buildPostsView(
+                postsResponse: ForumPostsResponse(
+                  posts: [_makePost(content: 'Readable post')],
+                  nextCursor: ChannelPageCursor(
+                    createdAt: 1,
+                    eventId: 'a' * 64,
+                  ),
+                  hasUnconfirmedContinuation: uncertain,
+                  loadMoreError: failed
+                      ? Exception('history check failed')
+                      : null,
+                ),
+              ),
+            );
+            await tester.pumpAndSettle();
+            expect(find.text('Readable post'), findsOneWidget);
+            if (uncertain) {
+              expect(find.text('Older posts are available.'), findsNothing);
+              expect(find.text('Retry older posts'), findsNothing);
+              expect(
+                find.text(
+                  failed
+                      ? 'History may be incomplete. The relay could not continue this history check.'
+                      : 'There may be older posts',
+                ),
+                findsOneWidget,
+              );
+              expect(
+                find.text(
+                  failed ? 'Check history again' : 'Check for older posts',
+                ),
+                findsOneWidget,
+              );
+            } else {
+              expect(
+                find.text(
+                  failed
+                      ? 'Could not load older posts. History is incomplete.'
+                      : 'Older posts are available.',
+                ),
+                findsOneWidget,
+              );
+              expect(
+                find.text(failed ? 'Retry older posts' : 'Load older posts'),
+                findsOneWidget,
+              );
+            }
+            await tester.pumpWidget(const SizedBox());
+            await tester.pumpAndSettle();
+          }
+        }
+      },
+    );
+
+    testWidgets(
       'loads older mixed-kind posts and keeps them through the next poll',
       (tester) async {
         final session = _PagedForumSession();
@@ -956,6 +1017,32 @@ void main() {
   });
 
   group('ForumThreadPage', () {
+    testWidgets('shows unverified thread effects without a refresh retry', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildThreadPage(
+          threadResponse: ForumThreadResponse(
+            post: _makePost(content: 'Readable root'),
+            replies: const [],
+            totalReplies: 0,
+            hasUnconfirmedHistory: true,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Readable root'), findsOneWidget);
+      expect(
+        find.text("This relay can't confirm that history is complete."),
+        findsOneWidget,
+      );
+      expect(find.text('Retry refresh'), findsNothing);
+      expect(
+        find.text('No replies yet. Be the first to respond.'),
+        findsNothing,
+      );
+    });
+
     AvatarImage avatarIn(WidgetTester tester, Key key) =>
         tester.widget<AvatarImage>(
           find.descendant(

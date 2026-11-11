@@ -4,6 +4,7 @@ import '../../shared/relay/relay.dart';
 import '../channels/channel_window.dart';
 import '../channels/thread_window.dart';
 import 'forum_ancestry.dart';
+import 'forum_auxiliary.dart';
 import 'forum_window.dart';
 
 /// Pages forum posts using the channel window protocol (NIP-CW `top_level`).
@@ -17,6 +18,9 @@ class ForumRootReader {
   final void Function() checkActive;
   bool _legacy = false;
   bool _incomplete = false;
+
+  /// Standard-filter continuations cannot prove that older roots exist.
+  bool get usesLegacyFilters => _legacy;
 
   ForumRootReader(
     this.session,
@@ -167,7 +171,10 @@ class ForumRootReader {
       final rootIds = roots.map((event) => event.id).toSet();
       for (final event in first) {
         if (_isDeletion(event)) {
-          auxiliaryTargets[event.id] = _knownDeletionTargets(event, rootIds);
+          auxiliaryTargets[event.id] = forumKnownDeletionTargets(
+            event,
+            rootIds,
+          );
         }
       }
       if (first.isNotEmpty) {
@@ -181,7 +188,10 @@ class ForumRootReader {
         aux.addAll(second);
         final knownIds = {...rootIds, ...first.map((event) => event.id)};
         for (final event in second) {
-          auxiliaryTargets[event.id] = _knownDeletionTargets(event, knownIds);
+          auxiliaryTargets[event.id] = forumKnownDeletionTargets(
+            event,
+            knownIds,
+          );
         }
       }
     }
@@ -253,19 +263,10 @@ class ForumRootReader {
     List<NostrEvent> events,
     Map<String, NostrEvent> targets,
   ) => events.where((event) {
-    final edit = event.kind == EventKind.streamMessageEdit;
-    if (!edit && !_isDeletion(event)) return true;
-    final references = event.tags
-        .where((tag) => tag.length >= 2 && tag[0] == 'e')
-        .map((tag) => tag[1]);
-    for (final id in edit ? references.toList().reversed.take(1) : references) {
-      // Deletions can name unloaded events. Their ignored references are
-      // scoped away for display; only loaded targets need author checks.
-      if (!edit && !targets.containsKey(id)) continue;
-      if (targets[id]?.pubkey != event.pubkey) {
-        _incomplete = true;
-        return false;
-      }
+    if (!forumEditTargetsAgree(event) ||
+        !forumAuxiliaryAuthorMatches(event, targets)) {
+      _incomplete = true;
+      return false;
     }
     return true;
   }).toList();
@@ -274,11 +275,6 @@ class ForumRootReader {
 bool _isDeletion(NostrEvent event) =>
     event.kind == EventKind.deletion ||
     event.kind == EventKind.nip29DeleteEvent;
-
-Set<String> _knownDeletionTargets(NostrEvent event, Set<String> knownIds) => {
-  for (final tag in event.tags)
-    if (tag.length >= 2 && tag[0] == 'e' && knownIds.contains(tag[1])) tag[1],
-};
 
 int _order(NostrEvent a, NostrEvent b) {
   final time = b.createdAt.compareTo(a.createdAt);

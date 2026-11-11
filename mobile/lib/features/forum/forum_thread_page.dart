@@ -266,6 +266,13 @@ class _ThreadContent extends HookConsumerWidget {
               bottom: Grid.xs,
             ),
             children: [
+              if (thread.hasUnconfirmedHistory)
+                const Padding(
+                  padding: EdgeInsets.all(Grid.xs),
+                  child: Text(
+                    "This relay can't confirm that history is complete.",
+                  ),
+                ),
               ForumRefreshError(
                 error: thread.refreshError,
                 onRetry: () => ref

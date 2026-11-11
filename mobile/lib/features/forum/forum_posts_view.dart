@@ -150,6 +150,7 @@ class ForumPostsView extends HookConsumerWidget {
                       if (index == posts.length) {
                         return ForumPagination(
                           hasMore: response.hasMore,
+                          isUnconfirmed: response.hasUnconfirmedContinuation,
                           isLoading: response.isLoadingMore,
                           error: response.loadMoreError,
                           subject: 'posts',

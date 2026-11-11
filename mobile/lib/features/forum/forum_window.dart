@@ -6,14 +6,17 @@ const forumPageLimit = 200;
 const _maxRows = forumPageLimit * 50;
 const _maxAux = forumPageLimit * 2000;
 
-/// Forum-only completeness and fallback effect scopes for a fetched page.
+/// Forum-only completeness and effect scopes for a fetched page.
 class ForumWindowPage extends ChannelWindowPage {
-  /// Posts whose page had unconfirmed history or auxiliary authority/closure.
+  /// Rows whose page had unconfirmed history or auxiliary authority/closure.
   final Set<String> incompletePostIds;
 
-  /// Deletion effects checked against these targets on the fallback path.
+  /// Deletion effects checked against these targets without relay authority.
   /// Missing entries represent relay-authorized served-window events.
   final Map<String, Set<String>> auxiliaryTargets;
+
+  /// Unconfirmed effects on a thread page that had no reply rows to mark.
+  final bool hasUnconfirmedRootEffects;
 
   const ForumWindowPage({
     required super.startCursor,
@@ -23,6 +26,7 @@ class ForumWindowPage extends ChannelWindowPage {
     required super.hasMore,
     this.incompletePostIds = const {},
     this.auxiliaryTargets = const {},
+    this.hasUnconfirmedRootEffects = false,
   });
 }
 
@@ -126,6 +130,12 @@ ChannelWindowStore mergeForumWindow(
         hasMore: (next == null && refresh ? null : cursor) != null,
         incompletePostIds: incompletePostIds,
         auxiliaryTargets: auxiliaryTargets,
+        hasUnconfirmedRootEffects:
+            (page is ForumWindowPage && page.hasUnconfirmedRootEffects) ||
+            (!refresh &&
+                current.pages.whereType<ForumWindowPage>().any(
+                  (p) => p.hasUnconfirmedRootEffects,
+                )),
       ),
     ],
     liveOverlay: const [],

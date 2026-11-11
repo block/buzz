@@ -69,12 +69,23 @@ abstract class ForumReader<T extends ForumReadResponse>
     }
     final generation = _generation;
     final source = _source!;
+    final continuation = channelWindowNextCursor(_store);
+    final loadMoreError = state.value?.loadMoreError;
     _busy = true;
     try {
       final page = await source.fetch(null);
       if (!ref.mounted || generation != _generation) return;
       final store = mergeForumWindow(_store, page, refresh: true);
-      final response = source.render(store);
+      final next = channelWindowNextCursor(store);
+      final sameContinuation =
+          continuation != null &&
+          next != null &&
+          continuation.createdAt == next.createdAt &&
+          continuation.eventId == next.eventId;
+      final response = source.render(
+        store,
+        loadMoreError: sameContinuation ? loadMoreError : null,
+      );
       _store = store;
       state = AsyncData(response);
     } catch (error, stack) {
@@ -82,7 +93,13 @@ abstract class ForumReader<T extends ForumReadResponse>
       if (error is ForumPostDeleted) {
         state = AsyncError(error, stack);
       } else {
-        state = AsyncData(source.render(_store, refreshError: error));
+        state = AsyncData(
+          source.render(
+            _store,
+            loadMoreError: loadMoreError,
+            refreshError: error,
+          ),
+        );
       }
     } finally {
       if (generation == _generation) _busy = false;

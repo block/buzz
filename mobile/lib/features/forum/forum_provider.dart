@@ -9,8 +9,10 @@ import '../../shared/custom_emoji/custom_emoji.dart';
 import '../../shared/custom_emoji/custom_emoji_provider.dart';
 import 'forum_models.dart';
 import 'forum_ancestry.dart';
+import 'forum_auxiliary.dart';
 import 'forum_reader.dart';
 import 'forum_root_reader.dart';
+import 'forum_window.dart';
 
 /// Pages forum roots without letting reply volume consume the row budget.
 final forumPostsProvider =
@@ -132,6 +134,7 @@ class _PostsSource implements ForumSource<ForumPostsResponse> {
     isLoadingMore: loadingMore,
     loadMoreError: loadMoreError,
     refreshError: refreshError,
+    hasUnconfirmedContinuation: reader.usesLegacyFilters,
   );
 }
 
@@ -185,7 +188,39 @@ class _ThreadSource implements ForumSource<ForumThreadResponse> {
     );
     checkActive();
     ancestry = next;
-    return page;
+    if (Uri.parse(relayUrl).scheme == 'https') return page;
+    // Signed bounds authenticate pagination, not HTTP response provenance.
+    var unconfirmed = false;
+    final targets = {
+      root.id: root,
+      for (final row in page.rows) row.event.id: row.event,
+      for (final event in page.aux) event.id: event,
+    };
+    final targetIds = targets.keys.toSet();
+    final aux = page.aux.where((event) {
+      if (!forumAuxiliaryAuthorMatches(event, targets)) {
+        unconfirmed = true;
+        return false;
+      }
+      return true;
+    }).toList();
+    return ForumWindowPage(
+      startCursor: page.startCursor,
+      rows: page.rows,
+      aux: aux,
+      nextCursor: page.nextCursor,
+      hasMore: page.hasMore,
+      incompletePostIds: unconfirmed
+          ? page.rows.map((row) => row.event.id).toSet()
+          : const {},
+      hasUnconfirmedRootEffects: unconfirmed && page.rows.isEmpty,
+      auxiliaryTargets: {
+        for (final event in aux)
+          if (event.kind == EventKind.deletion ||
+              event.kind == EventKind.nip29DeleteEvent)
+            event.id: forumKnownDeletionTargets(event, targetIds),
+      },
+    );
   }
 
   @override

@@ -9,6 +9,7 @@ class ForumPagination extends StatelessWidget {
   final Object? error;
   final String subject;
   final VoidCallback onLoadMore;
+  final bool isUnconfirmed;
 
   const ForumPagination({
     super.key,
@@ -17,6 +18,7 @@ class ForumPagination extends StatelessWidget {
     required this.error,
     required this.subject,
     required this.onLoadMore,
+    this.isUnconfirmed = false,
   });
 
   @override
@@ -27,7 +29,11 @@ class ForumPagination extends StatelessWidget {
       child: Column(
         children: [
           Text(
-            error == null
+            isUnconfirmed
+                ? error == null
+                      ? 'There may be older $subject'
+                      : 'History may be incomplete. The relay could not continue this history check.'
+                : error == null
                 ? 'Older $subject are available.'
                 : 'Could not load older $subject. History is incomplete.',
             textAlign: TextAlign.center,
@@ -35,7 +41,13 @@ class ForumPagination extends StatelessWidget {
           TextButton(
             onPressed: isLoading ? null : onLoadMore,
             child: Text(
-              isLoading
+              isUnconfirmed
+                  ? isLoading
+                        ? 'Checking history…'
+                        : error == null
+                        ? 'Check for older $subject'
+                        : 'Check history again'
+                  : isLoading
                   ? 'Loading $subject…'
                   : error == null
                   ? 'Load older $subject'
