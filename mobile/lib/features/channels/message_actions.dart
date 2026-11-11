@@ -26,6 +26,7 @@ import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/reminders/remind_me_later_sheet.dart';
 import '../../shared/reminders/reminder_service.dart';
 import 'channel_management_provider.dart';
+import 'me/me_page.dart';
 import 'channels_provider.dart';
 import '../../shared/emoji/emoji_picker.dart';
 import 'reaction_row.dart';
@@ -161,6 +162,26 @@ Future<void> showMessageActions({
                             // Copy to clipboard
                             final data = ClipboardData(text: message.content);
                             Clipboard.setData(data);
+                          },
+                        ),
+                        ListTile(
+                          leading: const Icon(BuzzIcons.messageCircle),
+                          title: const Text('Start Solo chat'),
+                          onTap: () {
+                            if (!_selectMessageAction(sheetContext)) return;
+                            unawaited(
+                              openSoloChatFromMessage(
+                                context,
+                                ref,
+                                channel: ref.read(
+                                  channelByIdProvider(channelId),
+                                ),
+                                channelId: channelId,
+                                messageId: message.id,
+                                threadRootId: message.rootId,
+                                content: message.content,
+                              ),
+                            );
                           },
                         ),
                       ],
