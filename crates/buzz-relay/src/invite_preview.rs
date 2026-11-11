@@ -4,8 +4,11 @@ use axum::{
     http::StatusCode,
     response::{Html, IntoResponse, Response},
 };
-use std::path::Path;
+use std::{path::Path, time::Duration};
 use url::Url;
+
+/// The lookup only serves link-preview metadata; never hold the page for it.
+const HOST_LOOKUP_DEADLINE: Duration = Duration::from_millis(250);
 
 pub(crate) async fn response<R: crate::tenant::HostResolver>(
     index: &Path,
@@ -15,7 +18,13 @@ pub(crate) async fn response<R: crate::tenant::HostResolver>(
 ) -> Response {
     match tokio::fs::read_to_string(index).await {
         Ok(html) => {
-            let tenant = crate::tenant::bind_community(resolver, raw_host).await.ok();
+            let tenant = tokio::time::timeout(
+                HOST_LOOKUP_DEADLINE,
+                crate::tenant::bind_community(resolver, raw_host),
+            )
+            .await
+            .ok()
+            .and_then(Result::ok);
             Html(with_metadata(html, relay_url, tenant.as_ref())).into_response()
         }
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
@@ -90,6 +99,7 @@ mod tests {
                     )))
                 }
                 "error.example" => Err(()),
+                "slow.example" => std::future::pending().await,
                 _ => Ok(None),
             }
         }
@@ -111,6 +121,7 @@ mod tests {
                 "beta.example:8443",
                 "unknown.example",
                 "error.example",
+                "slow.example",
                 "",
             ] {
                 let response = response(&index, relay, &Resolver, host).await;
