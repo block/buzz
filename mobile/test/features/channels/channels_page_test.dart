@@ -438,17 +438,35 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('general'), findsOneWidget);
-    expect(find.text('design-forum'), findsNothing);
+    expect(find.text('design-forum'), findsOneWidget);
     expect(find.text('Alice'), findsOneWidget);
     expect(find.text('Channels'), findsOneWidget);
-    expect(find.text('FORUMS'), findsNothing);
+    expect(find.text('Forums'), findsOneWidget);
     expect(find.text('DMs'), findsOneWidget);
     expect(find.text('Community'), findsNothing);
     expect(find.byTooltip('Create'), findsOneWidget);
     expect(find.byTooltip('Channels options'), findsOneWidget);
+    expect(find.byTooltip('Forums options'), findsOneWidget);
     expect(find.byIcon(BuzzIcons.ellipsis), findsWidgets);
     expect(find.byIcon(BuzzIcons.arrowUpDown), findsNothing);
     expect(find.byTooltip('DMs options'), findsOneWidget);
+
+    // Joined forums get their own collapsible section between Channels and
+    // DMs, so they stay reachable from Home (not only through search).
+    expect(
+      tester.getTopLeft(find.text('Forums')).dy,
+      greaterThan(tester.getTopLeft(find.text('Channels')).dy),
+    );
+    expect(
+      tester.getTopLeft(find.text('Forums')).dy,
+      lessThan(tester.getTopLeft(find.text('DMs')).dy),
+    );
+    await tester.tap(find.text('Forums'));
+    await tester.pumpAndSettle();
+    expect(find.text('design-forum'), findsNothing);
+    await tester.tap(find.text('Forums'));
+    await tester.pumpAndSettle();
+    expect(find.text('design-forum'), findsOneWidget);
 
     // DM identity display: the unnamed counterpart tile renders its
     // compact npub label, but its avatar initial stays keyed to the hex
