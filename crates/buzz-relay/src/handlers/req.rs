@@ -3483,6 +3483,34 @@ mod tests {
     }
 
     #[test]
+    fn empty_filter_sets_match_nothing_in_sql() {
+        let community = buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::nil());
+        let addr = format!("30175:{}:persona", "ab".repeat(32));
+        for key in ["authors", "ids", "#e", "#p", "#d", "#h", "#k", "#t"] {
+            for with_a in [false, true] {
+                let mut json = serde_json::json!({"kinds": [7], key: []});
+                if with_a {
+                    json["#a"] = serde_json::json!([addr]);
+                }
+                let filter: Filter = serde_json::from_value(json).unwrap();
+                assert_eq!(
+                    filter_to_query_params(&filter, None, community).kinds,
+                    Some(vec![]),
+                    "empty {key} (with #a: {with_a}) must match nothing"
+                );
+            }
+        }
+
+        let empty_d_value: Filter =
+            serde_json::from_value(serde_json::json!({"kinds": [30175], "#d": [""]})).unwrap();
+        assert_eq!(
+            filter_to_query_params(&empty_d_value, None, community).kinds,
+            Some(vec![30175]),
+            "an empty string is a real #d value, not an empty set"
+        );
+    }
+
+    #[test]
     fn test_extract_channel_id_single_channel() {
         let channel_id = uuid::Uuid::new_v4();
         let filters = vec![filter_with_channel(channel_id)];
