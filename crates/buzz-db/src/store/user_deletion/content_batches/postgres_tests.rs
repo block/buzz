@@ -149,7 +149,7 @@ async fn preview_delete_and_retry_preserve_other_users_contributions() {
             .bind(bob.public_key().as_bytes().as_slice()).execute(&pool).await.unwrap();
     }
     let options = ContentBatchOptions {
-        community: community.as_uuid(),
+        community: *community.as_uuid(),
         pubkey: alice.public_key().to_hex(),
         relay_pubkey: None,
         batch_size: 1,
