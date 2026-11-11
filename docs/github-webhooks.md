@@ -7,14 +7,14 @@ without calling GitHub itself.
 
 ## Following a repository
 
-A channel member publishes a `buzz.github.hook` artifact in the channel:
+A channel member publishes a `github.hook` artifact in the channel:
 
 ```json
 {
   "kind": 45010,
   "tags": [
     ["ar", "1"], ["d", "<uuid>"], ["h", "<channel>"],
-    ["type", "buzz.github.hook"], ["title", "owner/repo"], ["op", "create"],
+    ["type", "github.hook"], ["title", "owner/repo"], ["op", "create"],
     ["repo", "owner/repo"]
   ],
   "content": "{\"version\":1,\"repo\":\"owner/repo\",\"secret\":\"<NIP-44 v2 ciphertext>\"}"
@@ -41,7 +41,7 @@ organization webhook sends, answers `202` and changes nothing.
 ## Pull request artifacts
 
 The first `pull_request` delivery for a pull request, of any action except
-`closed`, creates a `buzz.github.pull` artifact, then posts `#<number> ·
+`closed`, creates a `github.pull` artifact, then posts `#<number> ·
 <title>` and the pull request URL, and roots the artifact on that message.
 Pull requests opened before the hook appear on their next activity. Only the
 relay signs these; clients trust a revision only when its `pubkey` is the
@@ -61,6 +61,11 @@ handles one delivery at a time per pull request.
 | `hook` | The hook's `d` |
 | `sha` | Head commit SHA |
 | `state` | `open`, `draft`, `merged` or `closed` |
+| `source` | `github` |
+| `status` | Same as `state` |
+
+`source` and `status` are shared with other integrations' records, so one watch
+can match records from any source. Readers don't require them.
 
 Content (version 1):
 

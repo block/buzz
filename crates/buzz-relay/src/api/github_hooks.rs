@@ -1,9 +1,9 @@
 //! GitHub webhooks for channels that follow a repository.
 //!
-//! A channel member follows a repository with a `buzz.github.hook` artifact
+//! A channel member follows a repository with a `github.hook` artifact
 //! whose content carries the webhook secret, NIP-44 encrypted from the
 //! member's key to the relay. GitHub delivers to `/hooks/github/{hook}`; the
-//! relay keeps one relay-signed `buzz.github.pull` artifact per pull request in
+//! relay keeps one relay-signed `github.pull` artifact per pull request in
 //! that channel, rooted on a relay-signed announcement, and posts merges,
 //! closes and reviews in its thread. Every delivery acts with the hook
 //! author's current authority in the channel.
@@ -27,8 +27,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
 
-pub(crate) const HOOK_TYPE: &str = "buzz.github.hook";
-pub(crate) const PULL_TYPE: &str = "buzz.github.pull";
+pub(crate) const HOOK_TYPE: &str = "github.hook";
+pub(crate) const PULL_TYPE: &str = "github.pull";
 const WRITE_ATTEMPTS: usize = 3;
 const STATUS_MATCHES: i64 = 20;
 const LOCK_WAIT: Duration = Duration::from_secs(8);
@@ -233,7 +233,7 @@ fn tag_value<'a>(stored: &'a StoredEvent, name: &str) -> Option<&'a str> {
         .map(|t| t[1].as_str())
 }
 
-/// A pull request as the card shows it: `buzz.github.pull` content v1.
+/// A pull request as the card shows it: `github.pull` content v1.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 #[serde(default)]
 pub(crate) struct Pull {
@@ -584,6 +584,8 @@ impl Writer<'_> {
             vec!["hook", &hook],
             vec!["sha", &pull.head_sha],
             vec!["state", &pull.state],
+            vec!["source", "github"],
+            vec!["status", &pull.state],
         ];
         if let Some(root) = root {
             tags.push(vec!["root", root]);

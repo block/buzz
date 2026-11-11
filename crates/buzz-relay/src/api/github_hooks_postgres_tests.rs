@@ -366,6 +366,8 @@ async fn a_followed_repository_keeps_one_card_per_pull_request() {
         ("merged", "Ping @owner")
     );
     assert_eq!(tag_value(&head, "state"), Some("merged"));
+    assert_eq!(tag_value(&head, "status"), Some("merged"));
+    assert_eq!(tag_value(&head, "source"), Some("github"));
     assert_eq!(tag_value(&head, "root"), Some(root.as_str()));
     assert_eq!(
         &f.messages().await[1..],
@@ -544,7 +546,7 @@ async fn a_timed_out_author_or_another_community_cannot_use_the_hook() {
         )
         .await
         .unwrap();
-    f.state.invalidate_restriction_cache(f.community, &owner);
+    f.state.invalidate_restrictions_local(f.community);
     assert_eq!(
         f.deliver("pull_request", &opened).await,
         StatusCode::FORBIDDEN
