@@ -3,6 +3,7 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 
 import '../../shared/relay/media_image.dart';
@@ -14,18 +15,23 @@ class NativePhotoActions {
   final Future<String?> Function(String action, String url) perform;
 }
 
-/// UIKit gallery presentation, enabled in the photo-stack preview.
+/// UIKit gallery presentation with the Flutter viewer as a fallback.
 class NativePhotoZoomPreview {
-  static const enabled = bool.fromEnvironment('BUZZ_NATIVE_PHOTO_ZOOM');
+  static const enabled = bool.fromEnvironment(
+    'BUZZ_NATIVE_PHOTO_ZOOM',
+    defaultValue: true,
+  );
   static const channel = MethodChannel('buzz/native_photo_zoom');
   static bool _presenting = false;
   static int _session = 0;
 
   /// Returns true only when the existing Flutter gallery is needed as fallback.
   ///
-  /// Only JPEG galleries use the static PNG bridge. Animation-capable formats
-  /// (including ordinary PNGs) and unknown types keep the Flutter renderer.
+  /// JPEG, PNG and HEIC/HEIF photos use the native gallery. Continuing frames
+  /// are forwarded for animated PNGs; other formats keep the Flutter renderer.
   /// [mimeTypes], when provided, contains one declared type per [urls] entry.
+  /// [videoIndices] use rendered source snapshots and [loadVideo] local files;
+  /// their URLs never enter the image decoder.
   static Future<bool> open({
     required BuildContext context,
     required List<GlobalKey> sourceKeys,
@@ -34,22 +40,36 @@ class NativePhotoZoomPreview {
     List<String?>? mimeTypes,
     required List<String> labels,
     ImageProvider<Object>? previewProvider,
-    List<ImageProvider<Object>>? previewProviders,
+    List<ImageProvider<Object>?>? previewProviders,
     required int initialIndex,
     required Future<void> Function(int) onSelect,
     VoidCallback? onReply,
     NativePhotoActions? actions,
+    Set<int> videoIndices = const {},
+    Future<String?> Function(int)? loadVideo,
   }) async {
     if (!enabled || defaultTargetPlatform != TargetPlatform.iOS) return true;
-    // PNG/APNG, WebP, GIF and unknown formats may animate. The PNG bridge
-    // cannot preserve their frames, so keep the whole gallery in Flutter.
     // Metadata wins over the extension (e.g. a GIF served at a .jpg URL).
     for (var i = 0; i < urls.length; i++) {
+      if (videoIndices.contains(i)) continue;
       final mime = mimeTypes?[i]?.split(';').first.trim().toLowerCase();
       final path = Uri.tryParse(urls[i])?.path.toLowerCase() ?? '';
       if (mime != null
-          ? mime != 'image/jpeg'
-          : !(path.endsWith('.jpg') || path.endsWith('.jpeg'))) {
+          ? !const {
+              'image/jpeg',
+              'image/png',
+              'image/apng',
+              'image/heic',
+              'image/heif',
+            }.contains(mime)
+          : !const [
+              '.jpg',
+              '.jpeg',
+              '.png',
+              '.apng',
+              '.heic',
+              '.heif',
+            ].any(path.endsWith)) {
         return true;
       }
     }
@@ -62,15 +82,27 @@ class NativePhotoZoomPreview {
       if (!context.mounted) return false;
       final configuration = createLocalImageConfiguration(context);
       final reduceMotion = MediaQuery.disableAnimationsOf(context);
-      final loads = _PhotoWindow(configuration, initialIndex);
+      final loads = _PhotoWindow(configuration, initialIndex, (
+        index,
+        bytes,
+      ) async {
+        if (!context.mounted) return;
+        await channel.invokeMethod<void>('imageFrame', {
+          'session': session,
+          'index': index,
+          'bytes': bytes,
+        });
+      });
       window = loads;
-      final bytes = await loads.load(
-        initialIndex,
-        previewProvider ??
-            previewProviders?[initialIndex] ??
-            providers[initialIndex],
-        preview: true,
-      );
+      final bytes = videoIndices.contains(initialIndex)
+          ? await _snapshot(sourceKeys[initialIndex])
+          : await loads.load(
+              initialIndex,
+              previewProvider ??
+                  previewProviders?[initialIndex] ??
+                  providers[initialIndex],
+              preview: true,
+            );
       if (bytes == null) return true;
       if (!context.mounted) return false;
       final geometry = _geometry(sourceKeys[initialIndex]);
@@ -85,12 +117,21 @@ class NativePhotoZoomPreview {
           return null;
         }
         switch (call.method) {
+          case 'video':
+            if (!videoIndices.contains(index) || index != loads.index) {
+              return null;
+            }
+            return loadVideo?.call(index);
           case 'preview':
+            if (videoIndices.contains(index)) {
+              return _snapshot(sourceKeys[index]);
+            }
             final provider = previewProviders?[index];
             return provider == null
                 ? null
                 : loads.load(index, provider, preview: true);
           case 'image':
+            if (videoIndices.contains(index)) return null;
             return loads.load(index, providers[index]);
           case 'select':
             loads.select(index);
@@ -99,7 +140,8 @@ class NativePhotoZoomPreview {
             return _geometry(sourceKeys[index]);
           case 'action':
             final action = args['action'];
-            if (actions == null ||
+            if (videoIndices.contains(index) ||
+                actions == null ||
                 !['save', 'share', 'copy', 'delete'].contains(action)) {
               return null;
             }
@@ -113,6 +155,7 @@ class NativePhotoZoomPreview {
         'bytes': bytes,
         'session': session,
         'labels': labels,
+        'videoIndices': videoIndices.toList(),
         'initialIndex': initialIndex,
         'canReply': onReply != null,
         'canMore': actions != null,
@@ -128,6 +171,20 @@ class NativePhotoZoomPreview {
       window?.dispose();
       channel.setMethodCallHandler(null);
       _presenting = false;
+    }
+  }
+
+  static Future<Uint8List?> _snapshot(GlobalKey key) async {
+    final boundary = key.currentContext?.findRenderObject();
+    if (boundary is! RenderRepaintBoundary || boundary.debugNeedsPaint) {
+      return null;
+    }
+    final image = await boundary.toImage(pixelRatio: 1);
+    try {
+      final data = await image.toByteData(format: ui.ImageByteFormat.png);
+      return data?.buffer.asUint8List();
+    } finally {
+      image.dispose();
     }
   }
 
@@ -156,7 +213,8 @@ class NativePhotoZoomPreview {
 // At most five nearby photos, at preview and full resolution. Moving the window
 // abandons stale downloads; closing also releases all listeners and PNG bytes.
 class _PhotoWindow {
-  _PhotoWindow(this.configuration, this.index);
+  _PhotoWindow(this.configuration, this.index, this.onFrame);
+  final Future<void> Function(int, Uint8List) onFrame;
   final ImageConfiguration configuration;
   int index;
   bool disposed = false;
@@ -171,6 +229,12 @@ class _PhotoWindow {
     return (loads[(value, preview)] ??= _PhotoLoad(
       provider,
       configuration,
+      shouldForwardFrame: () => !disposed && value == index,
+      onFrame: preview
+          ? null
+          : (bytes) async {
+              if (!disposed && value == index) await onFrame(value, bytes);
+            },
     )).result;
   }
 
@@ -191,50 +255,80 @@ class _PhotoWindow {
 }
 
 class _PhotoLoad {
-  _PhotoLoad(this.provider, this.configuration) {
+  _PhotoLoad(
+    this.provider,
+    this.configuration, {
+    this.onFrame,
+    required this.shouldForwardFrame,
+  }) {
     stream = provider.resolve(configuration);
-    listener = ImageStreamListener(
-      (info, _) {
-        receivedFrame = true;
-        if (!frame.isCompleted) {
-          frame.complete(info);
-        } else {
-          info.dispose();
-        }
-      },
-      onError: (Object _, StackTrace? _) {
-        if (!frame.isCompleted) frame.complete(null);
-      },
-    );
-    stream.addListener(listener);
+    listener = ImageStreamListener((info, _) {
+      receivedFrame = true;
+      if (disposed || (first.isCompleted && !shouldForwardFrame())) {
+        info.dispose();
+        return;
+      }
+      nextFrame?.dispose();
+      nextFrame = info;
+      if (!encoding) unawaited(encode());
+    }, onError: (Object _, StackTrace? _) => dispose());
     timer = Timer(const Duration(seconds: 10), dispose);
-    result = encode();
+    stream.addListener(listener);
   }
 
   final ImageProvider<Object> provider;
   final ImageConfiguration configuration;
-  final frame = Completer<ImageInfo?>();
+  final Future<void> Function(Uint8List)? onFrame;
+  final bool Function() shouldForwardFrame;
+  final first = Completer<Uint8List?>();
+  Future<Uint8List?> get result => first.future;
   late final ImageStream stream;
   late final ImageStreamListener listener;
   late final Timer timer;
-  late final Future<Uint8List?> result;
+  ImageInfo? nextFrame;
+  bool encoding = false;
   bool disposed = false;
   bool detached = false;
   bool receivedFrame = false;
 
-  Future<Uint8List?> encode() async {
-    final info = await frame.future;
-    detach();
+  // One encoding and one latest frame per load, including while the platform
+  // channel is busy. Never queue an animation's entire decoded frame history.
+  Future<void> encode() async {
+    encoding = true;
     try {
-      if (info == null || disposed) return null;
-      final data = await info.image.toByteData(format: ui.ImageByteFormat.png);
-      if (disposed || data == null) return null;
-      return data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes);
+      while (!disposed && nextFrame != null) {
+        final info = nextFrame!;
+        nextFrame = null;
+        try {
+          final data = await info.image.toByteData(
+            format: ui.ImageByteFormat.png,
+          );
+          if (disposed || data == null) {
+            dispose();
+            return;
+          }
+          final bytes = data.buffer.asUint8List(
+            data.offsetInBytes,
+            data.lengthInBytes,
+          );
+          if (!first.isCompleted) {
+            first.complete(bytes);
+            timer.cancel();
+            if (onFrame == null) {
+              dispose();
+              return;
+            }
+          } else {
+            await onFrame?.call(bytes);
+          }
+        } finally {
+          info.dispose();
+        }
+      }
     } catch (_) {
-      return null;
+      dispose();
     } finally {
-      info?.dispose();
-      timer.cancel();
+      encoding = false;
     }
   }
 
@@ -246,9 +340,12 @@ class _PhotoLoad {
   }
 
   void dispose() {
+    if (disposed) return;
     disposed = true;
     timer.cancel();
-    if (!frame.isCompleted) frame.complete(null);
+    if (!first.isCompleted) first.complete(null);
+    nextFrame?.dispose();
+    nextFrame = null;
     detach();
   }
 }

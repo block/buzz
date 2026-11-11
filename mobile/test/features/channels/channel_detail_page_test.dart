@@ -82,6 +82,7 @@ import 'package:buzz/shared/agents/owned_agent_directory.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/features/profile/user_profile_sheet.dart';
+import 'package:buzz/shared/identity_archives/identity_archives.dart';
 import 'package:buzz/shared/identity_names/identity_names.dart';
 import 'package:buzz/shared/community/community_provider.dart';
 import 'package:buzz/shared/emoji/emoji_burst.dart';
@@ -270,6 +271,7 @@ Widget _buildTestable({
   Future<Map<String, String>> Function()? loadAgentOwners,
   UserCacheNotifier? userCacheNotifier,
   List<ChannelMember> members = const [],
+  Set<String>? archived,
   List<ChannelMember> huddleMembers = const [],
   _MutableHuddleMembersNotifier? huddleMembersNotifier,
   Channel? channel,
@@ -326,6 +328,8 @@ Widget _buildTestable({
     retry: providerRetry ?? (disableRetries ? (_, _) => null : null),
     overrides: [
       ownedCodexVoiceAgentsProvider.overrideWith((ref) async => voiceAgents),
+      if (archived != null)
+        identityArchivesProvider.overrideWith((ref) async => archived),
       if (bestie != null)
         defaultAgentProvider.overrideWith((ref) => Stream.value(bestie)),
       if (sender != null) sendMessageProvider.overrideWithValue(sender),
@@ -4642,6 +4646,61 @@ void main() {
       expect(tester.takeException(), isNull);
     });
 
+    testWidgets('previews archived members after live ones, marked', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          archived: {'alice'},
+          members: [
+            for (final (key, role, name) in [
+              ('self', 'owner', 'Self'),
+              ('alice', 'member', 'Alice'),
+              ('agent', 'bot', 'Agent'),
+              ('bob', 'member', 'Bob'),
+            ])
+              ChannelMember(
+                pubkey: key,
+                role: role,
+                joinedAt: DateTime(2025),
+                displayName: name,
+              ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.byKey(const ValueKey('channel-header-settings-trigger')),
+      );
+      await tester.pumpAndSettle();
+
+      final rows = [
+        // People, agents, then archived Alice, as in the members sheet.
+        for (final key in ['self', 'bob', 'agent', 'alice'])
+          find.byKey(ValueKey('channel-details-member-$key')),
+      ];
+      final tops = [for (final row in rows) tester.getTopLeft(row).dy];
+      expect(tops, orderedEquals([...tops]..sort()));
+      expect(
+        find.descendant(
+          of: rows[3],
+          matching: find.textContaining(
+            'Archived \u00b7 Member',
+            findRichText: true,
+          ),
+        ),
+        findsOne,
+      );
+      expect(
+        find.descendant(
+          of: rows[1],
+          matching: find.textContaining('Archived', findRichText: true),
+        ),
+        findsNothing,
+      );
+    });
+
     testWidgets('previews five members before an icon-free See all row', (
       tester,
     ) async {
@@ -5033,8 +5092,10 @@ void main() {
         _testChannel,
         otherChannel,
       ]);
+      final profiles = _FakeUserCacheNotifier({});
       await tester.pumpWidget(
         _buildTestable(
+          userCacheNotifier: profiles,
           messages: [
             for (var i = 0; i < 5; i++)
               _textMsg(
@@ -5062,6 +5123,22 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(rebuilt.whereType<MessageContent>(), isEmpty);
+
+      // A profile learned in another surface must not rebuild this ordinary
+      // channel: the Solo naming hook is disabled here.
+      rebuilt.clear();
+      profiles.replace(
+        UserProfile(pubkey: 'f' * 64, displayName: 'Unrelated profile'),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        rebuilt.where(
+          (widget) =>
+              widget.runtimeType.toString() == '_ResolvedChannelDetailPage',
+        ),
+        isEmpty,
+        reason: 'an unrelated profile must not rebuild the open channel page',
+      );
     });
 
     testWidgets('clears the composer inset when membership is revoked', (
@@ -5134,10 +5211,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(
-        find.text('Join this channel from Manage to participate.'),
-        findsOneWidget,
-      );
+      expect(find.text('Join channel to send messages'), findsOneWidget);
       expect(find.text('Message…'), findsNothing);
 
       await tester.tap(
@@ -5153,12 +5227,151 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('Join channel'), findsNothing);
-      expect(
-        find.text('Join this channel from Manage to participate.'),
-        findsNothing,
-      );
+      expect(find.text('Join channel to send messages'), findsNothing);
 
       expect(find.text('Message #general'), findsOneWidget);
+    });
+
+    testWidgets('joins an open channel from the footer Join button', (
+      tester,
+    ) async {
+      final openChannel = _testChannel.copyWith(isMember: false);
+      final channelsNotifier = _FakeChannelsNotifier([openChannel]);
+      final joined = <String>[];
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          channel: openChannel,
+          channelsNotifier: channelsNotifier,
+          createChannelActions: (ref) => _FakeChannelActions(
+            ref,
+            onJoinChannel: (channelId) async {
+              joined.add(channelId);
+              channelsNotifier.setChannels([
+                openChannel.copyWith(isMember: true),
+              ]);
+            },
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Message #general'), findsNothing);
+      await tester.tap(find.byKey(const ValueKey('channel-join-button')));
+      await tester.pumpAndSettle();
+
+      expect(joined, [openChannel.id]);
+      expect(find.byKey(const ValueKey('channel-join-button')), findsNothing);
+      expect(find.text('Message #general'), findsOneWidget);
+    });
+
+    testWidgets(
+      'a refused join keeps Join; an unconfirmed one offers a check',
+      (tester) async {
+        final openChannel = _testChannel.copyWith(isMember: false);
+        final channelsNotifier = _FakeChannelsNotifier([openChannel]);
+        final outcomes = <Object>[
+          StateError('rejected'),
+          const ChannelJoinUnconfirmed(),
+        ];
+        final rechecks = <String>[];
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: const [],
+            channel: openChannel,
+            channelsNotifier: channelsNotifier,
+            createChannelActions: (ref) => _FakeChannelActions(
+              ref,
+              onJoinChannel: (_) async => throw outcomes.removeAt(0),
+              onRecheckJoin: (channelId) async {
+                rechecks.add(channelId);
+                channelsNotifier.setChannels([
+                  openChannel.copyWith(isMember: true),
+                ]);
+              },
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        final joinButton = find.byKey(const ValueKey('channel-join-button'));
+
+        await tester.tap(joinButton);
+        await tester.pumpAndSettle();
+        expect(find.text('Couldn’t join channel. Try again.'), findsOneWidget);
+        expect(find.widgetWithText(FilledButton, 'Join'), findsOneWidget);
+        expect(tester.widget<FilledButton>(joinButton).onPressed, isNotNull);
+        // The toast sits over the footer until it goes away.
+        ScaffoldMessenger.of(tester.element(joinButton)).hideCurrentSnackBar();
+        await tester.pumpAndSettle();
+
+        await tester.tap(joinButton);
+        await tester.pumpAndSettle();
+        expect(find.text('Join sent, but not confirmed yet'), findsOneWidget);
+        expect(
+          find.widgetWithText(FilledButton, 'Check again'),
+          findsOneWidget,
+        );
+        expect(find.text('Message #general'), findsNothing);
+
+        await tester.tap(joinButton);
+        await tester.pumpAndSettle();
+        expect(rechecks, [openChannel.id]);
+        expect(outcomes, isEmpty);
+        expect(joinButton, findsNothing);
+        expect(find.text('Message #general'), findsOneWidget);
+      },
+    );
+
+    testWidgets('a guest-join channel reads as read-only with no Join', (
+      tester,
+    ) async {
+      final guestChannel = _testChannel.copyWith(
+        isMember: false,
+        joinsAsGuest: true,
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          channel: guestChannel,
+          channelsNotifier: _FakeChannelsNotifier([guestChannel]),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('This channel is read-only'), findsOneWidget);
+      expect(find.byKey(const ValueKey('channel-join-button')), findsNothing);
+      expect(find.text('Message #general'), findsNothing);
+    });
+
+    testWidgets('offers no Join button for a private channel preview', (
+      tester,
+    ) async {
+      final privateChannel = Channel(
+        id: _channelId,
+        name: 'general',
+        channelType: 'stream',
+        visibility: 'private',
+        description: '',
+        createdBy: 'abc123',
+        createdAt: DateTime(2025),
+        memberCount: 5,
+        isMember: false,
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          channel: privateChannel,
+          channelsNotifier: _FakeChannelsNotifier([privateChannel]),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('You’re previewing this channel'), findsOneWidget);
+      expect(find.byKey(const ValueKey('channel-join-button')), findsNothing);
     });
 
     testWidgets('Leave lives on the detail page instead of Manage', (
@@ -12694,37 +12907,104 @@ void main() {
   });
 
   group('Edits', () {
-    testWidgets('edited message shows updated content and (edited) label', (
+    testWidgets('edited messages show updated content and (edited) label', (
       tester,
     ) async {
       final messages = [
         _textMsg(
-          id: 'msg1',
+          id: threadIdRoot,
           pubkey: 'alice',
           content: 'Original text',
           createdAt: 1000,
         ),
+        // A grouped follow-up draws no author header, so the marker must
+        // follow the body, not the header.
+        _textMsg(
+          id: 'msg2',
+          pubkey: 'alice',
+          content: 'Draft',
+          createdAt: 1010,
+        ),
+        _textMsg(
+          id: 'msg3',
+          pubkey: 'alice',
+          content: 'Plain',
+          createdAt: 1020,
+        ),
         _edit(
           id: 'edit1',
-          targetId: 'msg1',
+          targetId: threadIdRoot,
           content: 'Edited text',
           createdAt: 1100,
         ),
+        _edit(id: 'edit2', targetId: 'msg2', content: 'Final', createdAt: 1110),
+        _textMsg(
+          id: 'reply1',
+          pubkey: 'bob',
+          content: 'Typo',
+          createdAt: 1030,
+          extraTags: const [
+            ['e', threadIdRoot, '', 'reply'],
+          ],
+        ),
+        _edit(
+          id: 'edit3',
+          targetId: 'reply1',
+          content: 'Fixed',
+          createdAt: 1120,
+        ),
       ];
+      final clipboardTexts = <String>[];
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(SystemChannels.platform, (call) async {
+            if (call.method == 'Clipboard.setData') {
+              clipboardTexts.add((call.arguments as Map)['text'] as String);
+            }
+            return null;
+          });
+      addTearDown(
+        () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(SystemChannels.platform, null),
+      );
 
       await tester.pumpWidget(
         _buildTestable(
           messages: messages,
           users: {
             'alice': const UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            'bob': const UserProfile(pubkey: 'bob', displayName: 'Bob'),
           },
         ),
       );
       await tester.pumpAndSettle();
 
-      expect(findRichText('Edited text'), findsOneWidget);
+      expect(findRichText('Edited text (edited)'), findsOneWidget);
       expect(findRichText('Original text'), findsNothing);
-      expect(find.text('(edited)'), findsOneWidget);
+      expect(findRichText('Final (edited)'), findsOneWidget);
+      expect(findRichText('Plain'), findsOneWidget);
+      expect(findRichText('Plain (edited)'), findsNothing);
+
+      // Copy takes the edited text, never the marker.
+      await tester.longPress(findRichText('Edited text (edited)'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Copy text'));
+      await tester.pumpAndSettle();
+      expect(clipboardTexts, ['Edited text']);
+
+      // The thread marks its edited head and its edited reply.
+      await tester.tap(
+        find.byKey(const ValueKey('thread-summary-$threadIdRoot')),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byType(ThreadDetailPage), findsOneWidget);
+      final thread = find.byType(ThreadDetailPage);
+      for (final text in ['Edited text (edited)', 'Fixed (edited)']) {
+        expect(
+          find.descendant(of: thread, matching: findRichText(text)),
+          findsOneWidget,
+          reason: text,
+        );
+      }
     });
 
     testWidgets('latest edit wins when multiple edits exist', (tester) async {
@@ -20496,6 +20776,7 @@ class _FakeChannelsNotifier extends ChannelsNotifier {
 
 class _FakeChannelActions extends ChannelActions {
   final Future<void> Function(String channelId)? onJoinChannel;
+  final Future<void> Function(String channelId)? onRecheckJoin;
   final Future<void> Function(String channelId)? onLeaveChannel;
   final Future<void> Function(String channelId)? onArchiveChannel;
   final Future<void> Function(String channelId, List<String> pubkeys)?
@@ -20510,6 +20791,7 @@ class _FakeChannelActions extends ChannelActions {
   _FakeChannelActions(
     Ref ref, {
     this.onJoinChannel,
+    this.onRecheckJoin,
     this.onLeaveChannel,
     this.onArchiveChannel,
     this.onAddMembers,
@@ -20527,6 +20809,11 @@ class _FakeChannelActions extends ChannelActions {
   @override
   Future<void> joinChannel(String channelId) async {
     await onJoinChannel?.call(channelId);
+  }
+
+  @override
+  Future<void> recheckJoin(String channelId) async {
+    await onRecheckJoin?.call(channelId);
   }
 
   @override

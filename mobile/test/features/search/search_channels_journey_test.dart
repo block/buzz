@@ -7,6 +7,7 @@ import 'package:buzz/features/profile/profile_provider.dart';
 import 'package:buzz/features/search/recent_searches_provider.dart';
 import 'package:buzz/features/search/search_page.dart';
 import 'package:buzz/features/search/search_provider.dart';
+import 'package:buzz/shared/identity_archives/identity_archives.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/widgets/buzz_loading_indicator.dart';
@@ -602,6 +603,56 @@ void main() {
       expect(find.text('ops-room'), findsOneWidget);
     },
   );
+
+  testWidgets('archived people do not crowd live people out of People', (
+    tester,
+  ) async {
+    // Tall enough that every row is built.
+    tester.view.physicalSize = const Size(800, 4000);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    final session = _HeldSession();
+    final actions = _HeldUserSearch();
+    // The relay ranks more archived matches first than the page shows.
+    final archived = [
+      for (var i = 0; i <= searchPeopleShown; i++) i.toRadixString(16) * 64,
+    ];
+    final live = [for (var i = 0; i < searchPeopleShown; i++) 'f$i' * 32];
+
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [
+          relayConfigProvider.overrideWith(_Community.new),
+          relaySessionProvider.overrideWith(() => session),
+          channelActionsProvider.overrideWith((ref) => actions),
+          channelsProvider.overrideWith(_NoMemberChannels.new),
+          recentSearchesProvider.overrideWith(_NoRecentSearches.new),
+          profileProvider.overrideWith(_Profile.new),
+          identityArchivesProvider.overrideWith((ref) async => {...archived}),
+        ],
+        child: const SearchPage(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byType(TextField), 'scout');
+    await tester.pump(const Duration(milliseconds: 300));
+    for (final search in session.searches) {
+      search.complete(const []);
+    }
+    actions.searches.removeAt(0).complete([
+      for (final key in [...archived, ...live])
+        DirectoryUser(pubkey: key, displayName: 'Scout ${key.substring(0, 2)}'),
+    ]);
+    await tester.pumpAndSettle();
+
+    for (final key in archived) {
+      expect(find.byKey(ValueKey('search-person-row-$key')), findsNothing);
+    }
+    for (final key in live) {
+      expect(find.byKey(ValueKey('search-person-row-$key')), findsOneWidget);
+    }
+  });
 }
 
 Channel _channel(String name, {required bool isMember}) => Channel(
@@ -645,11 +696,12 @@ class _HeldSession extends RelaySessionNotifier {
 class _HeldUserSearch implements ChannelActions {
   final searches = <Completer<List<DirectoryUser>>>[];
 
+  /// Answers with at most [limit] people, as the relay does.
   @override
   Future<List<DirectoryUser>> searchUsers(String query, {int limit = 8}) {
     final search = Completer<List<DirectoryUser>>();
     searches.add(search);
-    return search.future;
+    return search.future.then((users) => users.take(limit).toList());
   }
 
   @override

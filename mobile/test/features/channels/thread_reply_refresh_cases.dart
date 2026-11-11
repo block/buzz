@@ -221,16 +221,15 @@ void threadReplyRefreshTests() {
     await tester.pumpAndSettle();
     final thread = find.byType(ThreadDetailPage);
     expect(
-      find.descendant(of: thread, matching: find.text('Fixed reply')),
+      find.descendant(
+        of: thread,
+        matching: findRichText('Fixed reply (edited)'),
+      ),
       findsOneWidget,
     );
     expect(
-      find.descendant(of: thread, matching: find.text('Cached reply')),
+      find.descendant(of: thread, matching: findRichText('Cached reply')),
       findsNothing,
-    );
-    expect(
-      find.descendant(of: thread, matching: find.text('(edited)')),
-      findsOneWidget,
     );
   });
 }

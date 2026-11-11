@@ -268,7 +268,8 @@ async fn disable_departed_member_workflows(
 }
 
 /// Close every live channel-scoped subscription on `conn_id`, removing them from
-/// the connection's local map and sending `CLOSED restricted` for each. Runs
+/// the connection's local map and sending `CLOSED restricted` for each; a
+/// holder that a pending same-ID REQ is replacing is only retired. Runs
 /// under the connection's lifecycle lock so a concurrent same-ID claim is
 /// either fully before (and revoked) or fully after (and untouched).
 pub(crate) async fn evict_conn_channel_subscriptions(
@@ -289,6 +290,13 @@ pub(crate) async fn evict_conn_channel_subscriptions(
         channel_id,
     );
     for update in removed {
+        // A newer same-ID REQ that has not claimed yet owns the ID and is
+        // replacing this holder, so the client already treats the holder as
+        // gone (NIP-01): retire it without touching the newer request's token
+        // or sending a frame for the ID.
+        let replaced = conn_subscriptions
+            .get(&update.sub_id)
+            .is_some_and(|held| !held.claimed);
         // A multi-channel sub keeps its other channels (and its map token).
         state
             .pubsub
@@ -305,7 +313,7 @@ pub(crate) async fn evict_conn_channel_subscriptions(
                 super::close::release_scope_topics(state, tenant, &rest.scope).await;
             }
         }
-        if update.removed || sync {
+        if (update.removed || sync) && !replaced {
             conn_subscriptions.remove(&update.sub_id);
             let reason = if sync {
                 "resync: channel access changed"

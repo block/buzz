@@ -712,7 +712,7 @@ fn extract_channel_from_filter(filter: &nostr::Filter) -> Option<uuid::Uuid> {
 // Nostr filter JSON. nostr::Filter silently drops unknown fields during
 // deserialization, so we extract them from the raw JSON Value first.
 
-const BRIDGE_FEED_MAX_LIMIT: i64 = 100;
+const BRIDGE_FEED_MAX_LIMIT: u32 = 100;
 const BRIDGE_THREAD_MAX_LIMIT: u32 = 500;
 
 /// The `before_id` extension field, with "present but malformed" kept distinct
@@ -1065,11 +1065,12 @@ async fn handle_channel_window_filter(
         }
     };
 
-    let limit = filter
-        .limit
-        .map(|l| (l as u32).min(BRIDGE_WINDOW_MAX_LIMIT))
-        .unwrap_or(BRIDGE_WINDOW_DEFAULT_LIMIT)
-        .max(1);
+    let limit = buzz_core::filter::clamp_limit(
+        filter.limit,
+        BRIDGE_WINDOW_DEFAULT_LIMIT,
+        BRIDGE_WINDOW_MAX_LIMIT,
+    )
+    .max(1);
     let kind_filter: Option<Vec<u32>> = filter
         .kinds
         .as_ref()
@@ -1915,10 +1916,11 @@ async fn query_member_events(
             None => continue,
         };
 
-        let limit = filter
-            .limit
-            .map(|l| (l as i64).min(BRIDGE_FEED_MAX_LIMIT))
-            .unwrap_or(20);
+        let limit = i64::from(buzz_core::filter::clamp_limit(
+            filter.limit,
+            20,
+            BRIDGE_FEED_MAX_LIMIT,
+        ));
         let since = filter
             .since
             .and_then(|s| chrono::DateTime::from_timestamp(s.as_secs() as i64, 0));
@@ -2033,10 +2035,7 @@ async fn query_member_events(
             }
         }
 
-        let limit = filter
-            .limit
-            .unwrap_or(100)
-            .min(BRIDGE_THREAD_MAX_LIMIT as usize) as u32;
+        let limit = buzz_core::filter::clamp_limit(filter.limit, 100, BRIDGE_THREAD_MAX_LIMIT);
         let thread_cursor = extract_thread_cursor(raw);
         let thread_replies = state
             .db
@@ -2732,7 +2731,7 @@ async fn handle_bridge_search(
             _ => continue,
         };
 
-        let limit = filter.limit.unwrap_or(100).min(500) as u32;
+        let limit = buzz_core::filter::clamp_limit(filter.limit, 100, 500);
         if limit == 0 {
             continue;
         }
@@ -10831,7 +10830,10 @@ pub(crate) mod postgres_tests {
             .expect("lock replica events");
         let search: nostr::Filter =
             serde_json::from_value(fx.search_filter()).expect("search filter");
-        let live_owner = *conn.subscriptions.lock().await.get("x").expect("x owned");
+        // `before_search_query` runs after the claim and before the query, so
+        // the live entry must already be gone there: the timeout CLOSED,
+        // which also retires it, has not happened yet.
+        let (arrived, release) = crate::nip_fi_test_hooks::search_query_hook::arm(fx.community);
         let task = tokio::spawn(handle_req(
             "x".into(),
             vec![search],
@@ -10839,11 +10841,10 @@ pub(crate) mod postgres_tests {
             conn.clone(),
             fx.state.clone(),
         ));
-        // Once search has claimed `x` its hydrate blocks on the lock. The old
-        // live fan-out must already be retired then, not only at final cleanup.
-        while conn.subscriptions.lock().await.get("x") == Some(&live_owner) {
-            tokio::task::yield_now().await;
-        }
+        tokio::time::timeout(std::time::Duration::from_secs(10), arrived)
+            .await
+            .expect("search reaches its query")
+            .expect("hook armed");
         assert!(
             fx.state
                 .sub_registry
@@ -10852,6 +10853,8 @@ pub(crate) mod postgres_tests {
             "accepting search must retire live fan-out"
         );
         assert_eq!(fx.state.pubsub.topic_refcount(&tenant, topic).await, 0);
+        assert!(rx.is_empty(), "nothing sent before the query");
+        release.notify_one();
         task.await.expect("search task");
         locker.rollback().await.expect("unlock");
 

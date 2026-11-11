@@ -99,6 +99,7 @@ class AddChannelMembersSheet extends HookConsumerWidget {
         query: search,
         historyKey: addMembersMentionHistoryKey,
         unsharedAgents: true,
+        channelId: channelId,
       )),
     );
     final searching = ref.watch(recipientSearchPendingProvider(search));
@@ -124,6 +125,9 @@ class AddChannelMembersSheet extends HookConsumerWidget {
       query: search,
       opening: opening.value,
       pending: searching,
+      // Agents rank ahead of the known people an empty query lists, even
+      // when they load after them. Typed rows keep their places.
+      restartForNewAgents: search.isEmpty,
     );
     final availableUsers = shown.rows;
     final userCache = ref.watch(userCacheProvider);

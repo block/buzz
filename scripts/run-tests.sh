@@ -103,6 +103,12 @@ run_unit_tests() {
   run_test_step "buzz-pubsub connection tests" \
     cargo test -p buzz-pubsub --lib connection::tests:: -- --nocapture
 
+  # A retain past a full subscriber command queue (no Redis dialed;
+  # infra-free). Mirrors `just test-unit`.
+  run_test_step "buzz-pubsub full-queue retain test" \
+    cargo test -p buzz-pubsub --lib -- --exact --nocapture \
+      tests::queue_full_retain_does_not_wait_and_schedules_reconciliation
+
   run_test_step "buzz-voice tests" \
     cargo test -p buzz-voice --lib -- --nocapture
 
@@ -304,6 +310,10 @@ run_unit_tests() {
       handlers::req::tests::concurrent_claims_and_stale_teardowns_keep_the_last_owner \
       handlers::req::tests::timeout_closed_is_emitted_before_a_replacement_can_claim \
       handlers::req::tests::revoke_then_replacement_keeps_replacement_whole \
+      handlers::req::tests::revoke_of_a_replaced_holder_spares_the_pending_replacement \
+      handlers::req::tests::superseded_or_closed_requests_cannot_claim \
+      connection::tests::close_fences_a_req_whose_handler_has_not_run \
+      connection::tests::only_the_newest_same_id_req_answers \
       handlers::req::tests::claims_after_connection_cleanup_are_refused \
       handlers::req::tests::dropped_terminal_frame_cancels_connection \
       handlers::req::tests::revoke_dropped_terminal_frame_cancels_connection \

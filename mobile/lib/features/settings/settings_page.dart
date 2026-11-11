@@ -10,10 +10,12 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:package_info_plus/package_info_plus.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../../shared/auth/auth.dart';
 import '../../shared/identity_transfer/nsec_export_sheet.dart';
 import '../../shared/clipboard_utils.dart';
+import '../../shared/hosted/hosted_environment.dart';
 import '../../shared/hosted/organization_environment.dart';
 import '../../shared/hosted/organization_sign_out.dart';
 import '../../shared/push/push_relay_capability_provider.dart';
@@ -33,6 +35,7 @@ part 'settings_page/profile_section.dart';
 part 'settings_page/status_section.dart';
 part 'settings_page/connection_section.dart';
 part 'settings_page/notifications_section.dart';
+part 'settings_page/builderlab_account_section.dart';
 
 Widget _emptyProfileEditPage(BuildContext context) => const SizedBox.shrink();
 
@@ -132,6 +135,7 @@ class SettingsPage extends HookConsumerWidget {
             _ConnectionSection(
               identityRecoveryPageBuilder: identityRecoveryPageBuilder,
             ),
+            if (HostedEnvironment.enabled) const _BuilderlabAccountSection(),
             // An internal build's only way out of its organization, rarely
             // needed, so it sits last.
             if (OrganizationEnvironment.enabled)

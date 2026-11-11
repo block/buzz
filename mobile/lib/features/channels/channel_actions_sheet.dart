@@ -8,6 +8,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import '../../shared/clipboard_utils.dart';
+import '../../shared/identity_archives/identity_archives.dart';
 import '../../shared/identity_names/identity_names_provider.dart';
 import 'dm_channel_labels.dart';
 import '../../shared/mentions/agent_identity_provider.dart';

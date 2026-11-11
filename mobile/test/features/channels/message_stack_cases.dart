@@ -1,6 +1,90 @@
 part of 'message_content_test.dart';
 
 void stackJourneyTests() {
+  testWidgets('mixed stacks keep video order and return from the fallback player', (
+    tester,
+  ) async {
+    const clip = 'https://example.com/clip.mp4';
+    const photo = 'https://example.com/photo.png';
+    const poster = 'https://example.com/second-poster.png';
+    final requested = <String>[];
+    final client = MockClient((request) async {
+      requested.add(request.url.toString());
+      return http.Response.bytes(
+        base64Decode(
+          'iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEElEQVR4nGNgaPj/H4xhDABS0gn5PEa22gAAAABJRU5ErkJggg==',
+        ),
+        200,
+      );
+    });
+    await tester.pumpWidget(
+      _testable(
+        const MessageContent(
+          bubble: true,
+          content:
+              '![Clip]($clip)\n![Photo]($photo)\n![Second](https://example.com/second.mov)',
+          tags: [
+            [
+              'imeta',
+              'url https://example.com/second.mov',
+              'm video/quicktime',
+              'image $poster',
+            ],
+          ],
+        ),
+        disableAnimations: true,
+        overrides: [mediaHttpClientProvider.overrideWithValue(client)],
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(requested, contains(photo));
+    expect(requested, contains(poster));
+    expect(requested, isNot(contains(clip)));
+    expect(requested, isNot(contains('https://example.com/second.mov')));
+    final stack = find.byKey(const ValueKey('message-media-stack'));
+    final spoken = find.byKey(const ValueKey('message-media-stack-semantics'));
+    expect(find.text('3 attachments'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('message-media-stack-video:$clip')),
+      findsOneWidget,
+    );
+    expect(tester.widget<Semantics>(spoken).properties.label, 'Clip');
+    expect(
+      tester.widget<Semantics>(spoken).properties.value,
+      'Attachment 1 of 3',
+    );
+    await tester.tap(stack);
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('message-media-video-viewer')),
+      findsOneWidget,
+    );
+    await tester.tap(
+      find.byKey(const ValueKey('message-media-video-viewer-close')),
+    );
+    await tester.pumpAndSettle();
+    expect(tester.widget<Semantics>(spoken).properties.label, 'Clip');
+    await tester.drag(stack, const Offset(-160, 0));
+    await tester.pumpAndSettle();
+    expect(tester.widget<Semantics>(spoken).properties.label, 'Photo');
+    await tester.tap(stack);
+    await tester.pumpAndSettle();
+    expect(find.byType(MediaImageViewerPage), findsOneWidget);
+    expect(
+      tester
+          .widget<MediaImageViewerPage>(find.byType(MediaImageViewerPage))
+          .galleryItems!
+          .map((item) => item.url),
+      [photo],
+    );
+    Navigator.of(tester.element(find.byType(MediaImageViewerPage))).pop();
+    await tester.pumpAndSettle();
+    expect(
+      tester.widget<Semantics>(spoken).properties.value,
+      'Attachment 2 of 3',
+    );
+  });
+
   testWidgets(
     'sent and received stacks browse whole cards and open the selected gallery photo',
     (tester) async {
