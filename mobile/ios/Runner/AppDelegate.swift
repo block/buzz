@@ -53,6 +53,7 @@ import os.log
   private var nativeCommunityEntryCoordinator: NativeCommunityEntryCoordinator?
   private var nativeProfileTextEditorCoordinator: NativeProfileTextEditorCoordinator?
   private var identityFilePlugin: IdentityFilePlugin?
+  private var composerDropPlugin: ComposerDropPlugin?
   private var hostedHpkeChannel: FlutterMethodChannel?
   private var browserAuthBridge: BuzzBrowserAuthBridge?
   private var huddleMediaPlugin: HuddleMediaPlugin?
@@ -91,6 +92,7 @@ import os.log
       }
     }
     identityFilePlugin = IdentityFilePlugin(messenger: messenger)
+    composerDropPlugin = ComposerDropPlugin(messenger: messenger)
     browserAuthBridge = BuzzBrowserAuthBridge(messenger: messenger)
     hostedHpkeChannel = FlutterMethodChannel(name: "buzz/hosted_hpke", binaryMessenger: messenger)
     hostedHpkeChannel?.setMethodCallHandler { call, result in
