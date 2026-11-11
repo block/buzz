@@ -57,3 +57,36 @@ delete marker does not count as erasing it. Assertions cover this script's
 fixture keys/rows; the enclosing harness should compare the rest of its seeded
 database, workflow control state and storage separately. Snapshot/verify perform
 only reads and never repair or rebaseline a mismatch.
+
+## Signed live relay fixture
+
+The Rust example adds actual signed events and Blossom uploads through an
+already-running isolated relay. It uses existing harness identities, supplied
+only as `TARGET_SECRET_KEY` and `SURVIVOR_SECRET_KEY`; both must already be relay
+members. No private keys are stored in its manifest. Use a different manifest
+from the synthetic fixture:
+
+```sh
+cargo run -p buzz-test-client --example user_deletion_live_seed -- seed \
+  --relay-url http://localhost:58300 --manifest .scratch/live-media.json
+cargo run -p buzz-test-client --example user_deletion_live_seed -- verify \
+  --relay-url http://localhost:58300 --manifest .scratch/live-media.json \
+  --phase preview
+```
+
+The example creates a survivor-owned channel, adds the target, publishes four
+messages and two reactions, and uploads three unique PNGs. One file is uploaded
+by both people. It reads back signed events through authenticated `/query` and
+checks downloaded bytes against their hashes. It accepts only loopback origins
+and disables redirects; it never starts or stops services.
+
+`verify --phase after-media` checks that source events and retained media still
+read back, and requires an authenticated 404 for the exclusive target upload.
+`verify --phase after-content` additionally expects target messages
+and reactions, including the survivor's reaction to a removed target message,
+to be absent while survivor messages remain. A 401/403 or service failure fails
+verification, rather than counting as media absence. HTTP 404 proves only the
+relay read result: use the workflow's saved targets and S3 exact-version
+verification to establish removal of every historical storage version.
+If a seed fails, its manifest remains incomplete; use a fresh manifest and
+disposable fixture environment. It never silently resumes a partially seeded run.
