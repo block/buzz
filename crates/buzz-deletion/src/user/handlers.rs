@@ -12,6 +12,15 @@ pub(super) async fn dispatch(
     row: &EntityStage,
     options: &RunOptions,
 ) -> Result<()> {
+    let target = row.metadata_json["inputs"]["target"]
+        .as_str()
+        .unwrap_or_default();
+    if !target.starts_with("demo:") {
+        return match row.stage.as_str() {
+            "purge_content" => super::content_batches::dispatch(store, lease, row, options).await,
+            name => bail!("real handler {name} is not implemented"),
+        };
+    }
     match row.stage.as_str() {
         "gate_user" => gate_user(store, lease, row, options).await,
         "purge_db" => purge_db(store, lease, row, options).await,
