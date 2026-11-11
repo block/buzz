@@ -1,8 +1,7 @@
-//! Direct content cleanup and its workflow adapter share the database handler.
-use anyhow::{ensure, Context, Result};
+//! CLI arguments and connection setup for the shared content handler.
+use anyhow::{ensure, Result};
 use buzz_db::{
-    entity_deletion::{EntityDeletionStore, EntityLease, EntityStage},
-    user_deletion::{content_batches::ContentBatchOptions, ExecutionMode, UserDeletionInventory},
+    user_deletion::{content_batches::ContentBatchOptions, ExecutionMode},
     Db,
 };
 use uuid::Uuid;
@@ -37,7 +36,7 @@ pub(super) fn parse_pubkey(input: &str) -> std::result::Result<String, String> {
     buzz_db::user_deletion::normalize_user_deletion_pubkey(input).map_err(|error| error.to_string())
 }
 
-pub(super) async fn run(args: Args) -> Result<i32> {
+pub(super) async fn run_command(args: Args) -> Result<i32> {
     ensure!(
         !(args.read_only && args.delete),
         "select one execution mode"
@@ -67,64 +66,9 @@ pub(super) async fn run(args: Args) -> Result<i32> {
             } else {
                 ExecutionMode::ReadOnly
             },
+            None,
             &mut std::io::stdout(),
         )
         .await?;
     Ok(0)
-}
-
-pub(super) async fn dispatch(
-    store: &EntityDeletionStore,
-    lease: &EntityLease,
-    row: &EntityStage,
-    options: &super::worker::RunOptions,
-) -> Result<()> {
-    ensure!(
-        options.delete,
-        "real workflow execution requires --delete; use content-batches --read-only to inspect"
-    );
-    let db = options.db.as_ref().context("missing content database")?;
-    let request = store.get(lease.request_id).await?;
-    let inventory = UserDeletionInventory::read(&request)?;
-    let community = row
-        .target_community_id
-        .context("missing content community")?;
-    ensure!(
-        row.request_id == request.id
-            && row.metadata_json["inputs"] == inventory.inputs(&request.target, Some(community))?,
-        "content stage differs from approved inventory"
-    );
-    store.start_stage(lease, row.id).await?;
-    let result = async {
-        let summary = db
-            .user_deletion_store()
-            .delete_message_stage(
-                &ContentBatchOptions {
-                    community,
-                    pubkey: request.target.clone(),
-                    relay_pubkey: options.relay_pubkey.clone(),
-                    batch_size: options.batch_size,
-                    max_items: options.max_items,
-                },
-                lease,
-                row.id,
-                &mut std::io::stdout(),
-            )
-            .await?;
-        // Agent cleanup is a separate handler; do not claim it is unnecessary.
-        Ok::<_, anyhow::Error>(
-            serde_json::json!({"content": summary, "account_erasure_complete": false}),
-        )
-    }
-    .await;
-    match result {
-        Ok(result) => store.save_stage_success(lease, row.id, result).await?,
-        Err(error) => {
-            store
-                .fail_stage(lease, row.id, &format!("{error:#}"), crate::RETRY_DELAY)
-                .await?;
-            return Err(error);
-        }
-    }
-    Ok(())
 }

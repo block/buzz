@@ -89,7 +89,7 @@ pub enum Command {
 /// Run the selected inventory, cleanup or workflow command against PostgreSQL.
 pub async fn run(command: Command) -> Result<i32> {
     let command = match command {
-        Command::ContentBatches(args) => return content_batches::run(args).await,
+        Command::ContentBatches(args) => return content_batches::run_command(args).await,
         other => other,
     };
     let db = if matches!(command, Command::Inventory { .. }) {

@@ -5,11 +5,16 @@ use sqlx::Connection;
 use std::collections::HashMap;
 
 impl UserDeletionStore {
-    /// Run the shared message planner and apply its batches only in delete mode.
+    /// Shared entry point for direct commands and workflow content cleanup.
+    ///
+    /// Read-only mode prints the plan. Delete mode commits bounded batches;
+    /// when a workflow lease and stage ID are supplied, each batch also checks
+    /// the existing request ownership and approved scope. Reruns select remaining rows.
     pub async fn run_message_batches(
         &self,
         options: &ContentBatchOptions,
         mode: crate::user_deletion::ExecutionMode,
+        stage: Option<(&EntityLease, Uuid)>,
         writer: &mut impl Write,
     ) -> Result<ContentBatchSummary> {
         match mode {
@@ -17,32 +22,9 @@ impl UserDeletionStore {
                 self.preview_message_batches(options, writer).await
             }
             crate::user_deletion::ExecutionMode::Delete => {
-                self.delete_message_batches(options, writer).await
+                self.execute_message_batches(options, writer, stage).await
             }
         }
-    }
-
-    /// Print and execute bounded batches while relay and external workers are stopped.
-    /// Committed batches survive interruption; rerunning selects remaining rows.
-    pub async fn delete_message_batches(
-        &self,
-        options: &ContentBatchOptions,
-        writer: &mut impl Write,
-    ) -> Result<ContentBatchSummary> {
-        self.execute_message_batches(options, writer, None).await
-    }
-
-    /// Delete content for a running workflow stage under its existing request lease.
-    /// Each batch checks the saved scope; retries select remaining rows.
-    pub async fn delete_message_stage(
-        &self,
-        options: &ContentBatchOptions,
-        lease: &EntityLease,
-        stage_id: Uuid,
-        writer: &mut impl Write,
-    ) -> Result<ContentBatchSummary> {
-        self.execute_message_batches(options, writer, Some((lease, stage_id)))
-            .await
     }
 
     async fn execute_message_batches(
