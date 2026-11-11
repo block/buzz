@@ -18,6 +18,12 @@ Omitting the mode means print-only. `--delete` conflicts with either preview
 flag. Public keys accept hex or npub. `--batch-size` defaults to 100 and accepts
 1–100. `--max-items` defaults to 100,000 and accepts 1–1,000,000.
 
+The command passes `ExecutionMode::ReadOnly | Delete` to one entry point:
+`run_account_batches(options, mode, writer)`. Both modes share the operation
+catalog, selectors, keyset ordering and proposal output. The handler owns
+mutation, transaction and deletion-safety decisions. The older preview/delete
+functions remain as delegating compatibility wrappers.
+
 Both modes emit newline-delimited JSON. Each `proposed_batch` identifies the
 community, table, action and complete row keys within that community. It prints
 no credential hashes, token names, or stored payloads. Delete mode flushes the
@@ -87,9 +93,9 @@ commands and are not selected here.
 
 ### Workflow adapter
 
-`UserDeletionStore::delete_account_stage(lease, stage_id, options, writer)` is
+`UserDeletionStore::run_account_stage(lease, stage_id, options, mode, writer)` is
 the lease-aware entry point for an already started `purge_account` stage.
-It verifies the current stage, target and community against the approved
+In delete mode it verifies the current stage, target and community against the approved
 inventory in every batch transaction. It locks the parent request, checks the
 generation and database-clock expiry before work and again before commit, and
 saves cumulative item/batch counts under `metadata_json.account_batches` in
@@ -98,8 +104,10 @@ retry selects the remaining rows, including after a lost output receipt.
 
 The caller owns heartbeats and stage completion. A successful invocation means
 only the supported operations are exhausted; `account_erasure_complete` remains
-false. The stopped-worker/community guards still apply. Preview uses the existing
-`preview_account_batches` entry point and never changes workflow state. Neither
+false. The stopped-worker/community guards still apply in delete mode. Read-only
+uses the same entry point and selectors in a repeatable read-only transaction;
+it writes no source rows or batch progress. The worker validates the read-only
+scope and saves its separate workflow journal. Neither
 the standalone command nor this adapter changes workflow routing by itself.
 
 For testing, compare database snapshots before and after each preview mode,

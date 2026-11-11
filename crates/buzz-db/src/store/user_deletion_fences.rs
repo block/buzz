@@ -191,7 +191,7 @@ async fn read(
 /// verify that the identities and agent ownership belong to this request.
 pub async fn lock_request(tx: &mut Transaction<'_, Postgres>, lease: &EntityLease) -> Result<()> {
     let request = lock_owned(tx, lease).await?;
-    if request.entity_type != "user" {
+    if request.entity_type != "user" || request.target.starts_with("rehearsal:") {
         return Err(DbError::DeletionSafety(
             "fences require a user deletion request".into(),
         ));

@@ -1,7 +1,7 @@
 //! Account-table batches for one community. Workflow execution records progress
 //! under its parent lease but never completes a stage or invalidates caches.
 
-use super::{normalize_user_deletion_pubkey, UserDeletionStore};
+use super::{normalize_user_deletion_pubkey, ExecutionMode, UserDeletionStore};
 use crate::{DbError, Result};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -50,7 +50,8 @@ impl UserDeletionStore {
         options: &AccountBatchOptions,
         writer: &mut impl Write,
     ) -> Result<AccountBatchSummary> {
-        self.account_batches(options, writer, false, None).await
+        self.run_account_batches(options, ExecutionMode::ReadOnly, writer)
+            .await
     }
 
     /// Print and commit bounded offline account operations. Stop the relay and
@@ -62,7 +63,18 @@ impl UserDeletionStore {
         options: &AccountBatchOptions,
         writer: &mut impl Write,
     ) -> Result<AccountBatchSummary> {
-        self.account_batches(options, writer, true, None).await
+        self.run_account_batches(options, ExecutionMode::Delete, writer)
+            .await
+    }
+
+    /// Run the same bounded account planner in either standalone mode.
+    pub async fn run_account_batches(
+        &self,
+        options: &AccountBatchOptions,
+        mode: ExecutionMode,
+        writer: &mut impl Write,
+    ) -> Result<AccountBatchSummary> {
+        self.account_batches(options, writer, mode, None).await
     }
 
     /// Execute the supported account operations for a started `purge_account`
@@ -77,7 +89,22 @@ impl UserDeletionStore {
         options: &AccountBatchOptions,
         writer: &mut impl Write,
     ) -> Result<AccountBatchSummary> {
-        self.account_batches(options, writer, true, Some((lease, stage_id)))
+        self.run_account_stage(lease, stage_id, options, ExecutionMode::Delete, writer)
+            .await
+    }
+
+    /// Mode-aware workflow entry point. Read-only shares selection and output
+    /// with deletion but writes no source rows or batch progress. The worker
+    /// owns read-only scope validation and its separate stage journal.
+    pub async fn run_account_stage(
+        &self,
+        lease: &crate::entity_deletion::EntityLease,
+        stage_id: Uuid,
+        options: &AccountBatchOptions,
+        mode: ExecutionMode,
+        writer: &mut impl Write,
+    ) -> Result<AccountBatchSummary> {
+        self.account_batches(options, writer, mode, Some((lease, stage_id)))
             .await
     }
 
@@ -85,10 +112,11 @@ impl UserDeletionStore {
         &self,
         options: &AccountBatchOptions,
         writer: &mut impl Write,
-        delete: bool,
+        mode: ExecutionMode,
         stage: Option<(&crate::entity_deletion::EntityLease, Uuid)>,
     ) -> Result<AccountBatchSummary> {
         let options = validated(options)?;
+        let delete = mode == ExecutionMode::Delete;
         // A session lock must never be returned to the pool on error/cancellation.
         let mut conn = self.pool.acquire().await?.detach();
         sqlx::query("SET statement_timeout='30s'")

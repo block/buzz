@@ -138,7 +138,13 @@ async fn content_stage_requires_exact_media_evidence_and_resumes_atomic_progress
     )
     .unwrap();
     users
-        .preview_message_batches(&options, &mut Vec::new())
+        .run_message_stage(
+            &lease,
+            stage.id,
+            &options,
+            crate::user_deletion::ExecutionMode::ReadOnly,
+            &mut Vec::new(),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -154,7 +160,13 @@ async fn content_stage_requires_exact_media_evidence_and_resumes_atomic_progress
     // A changed caption with the same media hash must not reuse old evidence.
     set_media(&pool, options.community, 1, "changed").await;
     let error = users
-        .delete_message_stage(&lease, stage.id, &options, &mut Vec::new())
+        .run_message_stage(
+            &lease,
+            stage.id,
+            &options,
+            crate::user_deletion::ExecutionMode::Delete,
+            &mut Vec::new(),
+        )
         .await
         .unwrap_err();
     assert!(error.to_string().contains("source changed"), "{error}");
@@ -164,7 +176,13 @@ async fn content_stage_requires_exact_media_evidence_and_resumes_atomic_progress
     sqlx::query("UPDATE entity_deletion_stage_history SET metadata_json=jsonb_set(metadata_json,'{media_discovery,candidate_count}','2') WHERE id=$1")
         .bind(media).execute(&pool).await.unwrap();
     assert!(users
-        .delete_message_stage(&lease, stage.id, &options, &mut Vec::new())
+        .run_message_stage(
+            &lease,
+            stage.id,
+            &options,
+            crate::user_deletion::ExecutionMode::Delete,
+            &mut Vec::new()
+        )
         .await
         .unwrap_err()
         .to_string()
@@ -195,7 +213,13 @@ async fn content_stage_requires_exact_media_evidence_and_resumes_atomic_progress
         stopped: false,
     };
     assert!(users
-        .delete_message_stage(&lease, stage.id, &options, &mut output)
+        .run_message_stage(
+            &lease,
+            stage.id,
+            &options,
+            crate::user_deletion::ExecutionMode::Delete,
+            &mut output
+        )
         .await
         .is_err());
     let progress: Value = sqlx::query_scalar(
@@ -209,7 +233,13 @@ async fn content_stage_requires_exact_media_evidence_and_resumes_atomic_progress
     assert_eq!(progress["batches"], 1);
     options.relay_pubkey = Some(RELAY.into());
     assert!(users
-        .delete_message_stage(&lease, stage.id, &options, &mut Vec::new())
+        .run_message_stage(
+            &lease,
+            stage.id,
+            &options,
+            crate::user_deletion::ExecutionMode::Delete,
+            &mut Vec::new()
+        )
         .await
         .unwrap_err()
         .to_string()
@@ -225,7 +255,13 @@ async fn content_stage_requires_exact_media_evidence_and_resumes_atomic_progress
         .unwrap()
         .unwrap();
     assert!(users
-        .delete_message_stage(&lease, stage.id, &options, &mut Vec::new())
+        .run_message_stage(
+            &lease,
+            stage.id,
+            &options,
+            crate::user_deletion::ExecutionMode::Delete,
+            &mut Vec::new()
+        )
         .await
         .is_err());
     assert_eq!(

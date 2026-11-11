@@ -19,6 +19,7 @@ ACCOUNT_TABLES = (
 )
 CONTROL_TABLES = (
     "entity_deletion_requests", "entity_deletion_stage_history", "entity_deletion_approvals",
+    "user_deletion_fences", "entity_deletion_media_files",
 )
 
 
@@ -129,11 +130,35 @@ def expected_rows(table, rows, target, communities):
     return result
 
 
-def verify(manifest, phase, completed):
+def verify(manifest, phase, completed, rehearsal_request=None):
     before = manifest.get("before")
     check(before is not None, "take snapshot after all seeders and request preparation")
     after = snapshot()
-    if phase == "preview":
+    if phase == "rehearsal":
+        check(rehearsal_request is not None, "rehearsal requires --rehearsal-request")
+        # Allow progress only for the explicitly selected, pre-existing rehearsal.
+        # Approval evidence and every other request remain part of the comparison.
+        before = copy.deepcopy(before)
+        mutable = {"status", "updated_at", "lease_owner", "lease_generation",
+                   "lease_expires_at", "heartbeat_at", "retry_count",
+                   "next_attempt_at", "last_error", "completed_at"}
+        for state in (before, after):
+            requests = [r for r in state["entity_deletion_requests"] if r["id"] == rehearsal_request]
+            check(len(requests) == 1, "rehearsal request must exist in baseline and current state")
+            request = requests[0]
+            check(request["target"] == "rehearsal:" + manifest["target"] and
+                  request["inventory_manifest"].get("execution_mode") == "rehearsal",
+                  "request is not this fixture's print rehearsal")
+            check(request["status"] != "completed" and request["completed_at"] is None,
+                  "rehearsal must not claim full account erasure")
+            for key in mutable:
+                request.pop(key)
+            state["entity_deletion_stage_history"] = [
+                r for r in state["entity_deletion_stage_history"] if r["request_id"] != rehearsal_request]
+            # Snapshot SQL orders complete JSON rows; normalize after removing fields.
+            state["entity_deletion_requests"].sort(key=lambda r: r["id"])
+        check(before == after, "rehearsal changed source data, approvals, or another request")
+    elif phase == "preview":
         check(before == after, "preview changed account or deletion-control rows")
     else:
         communities = set(completed or [manifest["community"]])
@@ -166,7 +191,8 @@ def main():
     parser.add_argument("--manifest", type=Path, required=True)
     for flag in ("target", "survivor", "community", "other-community"):
         parser.add_argument("--" + flag)
-    parser.add_argument("--phase", choices=("preview", "after-account"), default="preview")
+    parser.add_argument("--phase", choices=("preview", "rehearsal", "after-account"), default="preview")
+    parser.add_argument("--rehearsal-request", type=lambda v: str(uuid.UUID(v)))
     parser.add_argument("--completed-community", type=lambda v: str(uuid.UUID(v)), action="append",
                         help="repeat for each account stage executed since snapshot")
     args = parser.parse_args()
@@ -181,7 +207,7 @@ def main():
             args.manifest.write_text(json.dumps(manifest, indent=2) + "\n")
             result = {"snapshot": str(args.manifest)}
         else:
-            result = verify(manifest, args.phase, args.completed_community)
+            result = verify(manifest, args.phase, args.completed_community, args.rehearsal_request)
     print(json.dumps(result))
 
 

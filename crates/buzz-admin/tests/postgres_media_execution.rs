@@ -221,6 +221,19 @@ async fn actual_handler_checks_retention_blocks_writers_and_recovers_deleted_ver
     assert_eq!(unresolved["decision_complete"], false);
     assert_eq!(unresolved["unknown_count"], 1);
     assert_eq!(unresolved["execution_authorized"], false);
+    let incomplete = buzz_deletion::user::media::run_stage(
+        &db,
+        &preview_media,
+        &lease,
+        stage.id,
+        preview_options.clone(),
+    )
+    .await
+    .unwrap_err();
+    assert!(incomplete.to_string().contains("unresolved decisions"));
+    assert_eq!(snapshot().await, before);
+    assert_eq!(state.versions.lock().unwrap().len(), 2);
+    assert!(state.deletes.lock().unwrap().is_empty());
     state.denied_retention.store(false, Ordering::SeqCst);
     let planned = buzz_deletion::user::media::preview(&db, &preview_media, &preview_options)
         .await
@@ -233,6 +246,18 @@ async fn actual_handler_checks_retention_blocks_writers_and_recovers_deleted_ver
             .len(),
         2
     );
+    let summary = buzz_deletion::user::media::run_stage(
+        &db,
+        &preview_media,
+        &lease,
+        stage.id,
+        preview_options,
+    )
+    .await
+    .unwrap();
+    assert_eq!(summary["candidate_count"], 1);
+    assert_eq!(summary["unknown_count"], 0);
+    assert_eq!(summary["supported_scope_exhausted"], true);
     assert_eq!(snapshot().await, before);
     assert_eq!(state.versions.lock().unwrap().len(), 2);
     assert!(state.deletes.lock().unwrap().is_empty());

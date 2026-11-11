@@ -63,21 +63,70 @@ Existing manifests or populated services cause setup to refuse reuse; partial
 setup stays marked incomplete. Inspect failures before recreating a disposable
 lab. There is no automatic reset or volume deletion.
 
-## Save the request and preview
+## Save independent requests and run the read-only workflow
 
 After setup and approval to proceed:
 
 ```sh
 python3 scripts/user-deletion-lab.py prepare
-python3 scripts/user-deletion-lab.py preview
 ```
 
-`prepare` submits and approves only the synthetic target through the real admin
-CLI, then saves baselines. `preview` calls each real workflow handler with
-`--read-only` and compares fixture state after each call. Its output is recorded
-in separate logs. Default `run` and `--print-only` also select read-only behavior.
-Incomplete media decisions or capped account output return exit code 2, rather
-than announcing a complete preview. Content limit exhaustion returns an error.
+`prepare` submits and approves two requests for the synthetic target through
+the real admin CLI, then saves baselines. `request.json` identifies deletion;
+`rehearsal.json` identifies the separately approved print run. Rehearsal intake
+uses `submit --pubkey <key> --read-only`. Its opaque target is `rehearsal:<key>`
+and its inventory binds `execution_mode: rehearsal`; it cannot be switched to
+deletion. A destructive request always starts independently at media.
+
+After approval, invoke the worker directly for each step:
+
+```sh
+. .local/user-deletion/env
+REHEARSAL_ID=$(python3 -c 'import json; print(json.load(open(".local/user-deletion/rehearsal.json"))["id"])')
+RELAY_PUBKEY=f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9
+target/debug/buzz-admin user-deletions run "$REHEARSAL_ID" \
+  --read-only --next-step \
+  --media-base http://localhost:58300/media --relay-pubkey "$RELAY_PUBKEY"
+target/debug/buzz-admin user-deletions inspect "$REHEARSAL_ID"
+```
+
+The ordinary worker claims and heartbeats the request, loads its saved stage,
+runs the real handler in print mode, persists its result, transitions to the
+next stage, and releases its lease. No script chooses the next handler. Invoke
+the same command again only after inspecting the saved result and successor.
+The sequence is media, content/account for the first community, then
+content/account for the second. The next invocation reports `remaining_cleanup`
+with exit code 2 and `account_erasure_complete: false`.
+
+Only the rehearsal's journal changes. Handler database reads use a separate
+read-only connection; media uses storage reads. After every step:
+
+```sh
+python3 scripts/user-deletion-content-fixture.py verify --manifest .local/user-deletion/content.json --phase preview
+python3 scripts/user-deletion-media-fixture.py verify --manifest .local/user-deletion/media.json --phase preview
+python3 scripts/user-deletion-account-fixture.py verify --manifest .local/user-deletion/account.json --phase rehearsal --rehearsal-request "$REHEARSAL_ID"
+```
+
+The account verifier permits journal progress for only that request, while
+checking source data, approvals and every other request against the baseline.
+Incomplete media decisions or capped account output fail the current stage
+without advancing. Content limit exhaustion also fails. Correct the cause and
+resume after the saved retry deadline. A completed current stage is transitioned
+on restart without running its handler again.
+
+Rehearsal observations do not simulate the mutations of earlier stages and
+are not deletion evidence. The destructive run rescans and establishes its own
+media prerequisites. Keep the lab quiet for reproducible proposal comparisons.
+
+### Optional strictly read-only preview
+
+Default `run`, `--read-only` and `--print-only` retain their no-write behavior:
+they neither claim a request nor advance it. `user-deletion-lab.py preview`
+remains a convenience for those observations, not the worker rehearsal above.
+Incomplete media/account observations return exit code 2.
+Run that convenience check before starting rehearsal: its strict comparison
+includes the original workflow baseline and will correctly flag later journal
+changes, even when the preview itself made none.
 
 Before deletion, also check capped account preview (`--stage purge_account
 --max-items 1`) returns 2 and does not change baselines. Verify default and
@@ -86,10 +135,13 @@ in the combined journey.
 
 ## Delete one handler at a time
 
-Deletion needs separate explicit operator approval after inspecting preview.
+Deletion needs separate explicit operator approval after inspecting rehearsal.
 The setup script has no delete action. Stop the relay and every worker using
 this database before invoking `--offline`; this flag is the operator's assertion
-that they have stopped. Live serving-write leases also cause refusal.
+that they have stopped. It does not stop processes or disable networking.
+The deletion worker still connects to Postgres and object storage. Live
+serving-write leases also cause refusal; this point-in-time check is not an
+online write fence. Rehearsal does not require `--offline`.
 
 ```sh
 . .local/user-deletion/env
@@ -133,3 +185,19 @@ devices, global records, cache/session invalidation, profiles and owned agents.
 A retained target profile may still reference media removed by the media stage.
 `account_erasure_complete` stays false. This is a supported-scope cleanup lab,
 not evidence that the person's entire account has been erased.
+
+## Handler contract
+
+The worker supplies `ExecutionMode::ReadOnly` or `ExecutionMode::Delete` through
+one dispatcher call. Stage routing selects `media_handler::run`, `content::run`
+or `account::run`; each receives the same `HandlerContext` containing source DB,
+options, request, lease, stage, subject and mode. The handlers own mode decisions
+and reuse their existing scanners, selectors and planners. Delete-specific
+ownership checks and mutations remain inside the handlers.
+
+For `run`, `--read-only` selects the persisted print workflow (`--rehearse` is
+an alias). `--print-only` or omitted mode retains the stateless inspection path.
+Both worker modes persist claims, results and transitions; only delete changes
+source data. Separate request identities prevent printed stages from counting
+as completed deletion. Each read-only stage observes original data, so its
+proposal is not a simulation of earlier stages' deletions.

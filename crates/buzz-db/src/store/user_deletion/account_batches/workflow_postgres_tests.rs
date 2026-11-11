@@ -69,20 +69,59 @@ async fn account_workflow_fences_scope_expiry_and_resumes_atomic_progress() {
     };
     entity.start_stage(&lease, row.id).await.unwrap();
     let before = super::postgres_tests::snapshot(&pool).await;
-    store
-        .preview_account_batches(&options, &mut Vec::new())
+    let preview = store
+        .run_account_stage(
+            &lease,
+            row.id,
+            &options,
+            ExecutionMode::ReadOnly,
+            &mut Vec::new(),
+        )
         .await
         .unwrap();
+    assert!(preview.read_only && preview.supported_scope_exhausted);
+    let limited = AccountBatchOptions {
+        max_items: 1,
+        ..options
+    };
+    let partial = store
+        .run_account_stage(
+            &lease,
+            row.id,
+            &limited,
+            ExecutionMode::ReadOnly,
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap();
+    assert!(partial.read_only && !partial.supported_scope_exhausted);
+    assert_eq!(partial.items, 1);
+    let options = AccountBatchOptions {
+        max_items: 100_000,
+        ..limited
+    };
     assert_eq!(before, super::postgres_tests::snapshot(&pool).await);
 
     let mut stale = lease.clone();
     stale.generation -= 1;
     assert!(store
-        .delete_account_stage(&stale, row.id, &options, &mut Vec::new())
+        .run_account_stage(
+            &stale,
+            row.id,
+            &options,
+            ExecutionMode::Delete,
+            &mut Vec::new()
+        )
         .await
         .is_err());
     assert!(store
-        .delete_account_stage(&lease, Uuid::new_v4(), &options, &mut Vec::new())
+        .run_account_stage(
+            &lease,
+            Uuid::new_v4(),
+            &options,
+            ExecutionMode::Delete,
+            &mut Vec::new()
+        )
         .await
         .is_err());
     let wrong = AccountBatchOptions {
@@ -92,7 +131,13 @@ async fn account_workflow_fences_scope_expiry_and_resumes_atomic_progress() {
         max_items: 100_000,
     };
     assert!(store
-        .delete_account_stage(&lease, row.id, &wrong, &mut Vec::new())
+        .run_account_stage(
+            &lease,
+            row.id,
+            &wrong,
+            ExecutionMode::Delete,
+            &mut Vec::new()
+        )
         .await
         .is_err());
     assert_eq!(before, super::postgres_tests::snapshot(&pool).await);
@@ -106,7 +151,7 @@ async fn account_workflow_fences_scope_expiry_and_resumes_atomic_progress() {
         reached_proposal: false,
     };
     let error = store
-        .delete_account_stage(&lease, row.id, &options, &mut expiry)
+        .run_account_stage(&lease, row.id, &options, ExecutionMode::Delete, &mut expiry)
         .await
         .unwrap_err();
     assert!(
@@ -131,7 +176,7 @@ async fn account_workflow_fences_scope_expiry_and_resumes_atomic_progress() {
         reached_proposal: false,
     };
     assert!(store
-        .delete_account_stage(&next, row.id, &options, &mut lost)
+        .run_account_stage(&next, row.id, &options, ExecutionMode::Delete, &mut lost)
         .await
         .is_err());
     let inspection = entity.inspect(request.id).await.unwrap();
@@ -141,12 +186,24 @@ async fn account_workflow_fences_scope_expiry_and_resumes_atomic_progress() {
     );
     assert_eq!(inspection.stage_history[0].status, "running");
     let remaining = store
-        .preview_account_batches(&options, &mut Vec::new())
+        .run_account_stage(
+            &next,
+            row.id,
+            &options,
+            ExecutionMode::ReadOnly,
+            &mut Vec::new(),
+        )
         .await
         .unwrap()
         .items;
     let result = store
-        .delete_account_stage(&next, row.id, &options, &mut Vec::new())
+        .run_account_stage(
+            &next,
+            row.id,
+            &options,
+            ExecutionMode::Delete,
+            &mut Vec::new(),
+        )
         .await
         .unwrap();
     assert_eq!(result.items, remaining);
@@ -160,7 +217,13 @@ async fn account_workflow_fences_scope_expiry_and_resumes_atomic_progress() {
     assert!(after.stage_history[0].metadata_json.get("result").is_none());
     assert_eq!(
         store
-            .delete_account_stage(&next, row.id, &options, &mut Vec::new())
+            .run_account_stage(
+                &next,
+                row.id,
+                &options,
+                ExecutionMode::Delete,
+                &mut Vec::new()
+            )
             .await
             .unwrap()
             .items,

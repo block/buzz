@@ -208,17 +208,23 @@ def prepare():
     lab = json.loads((STATE / 'lab.json').read_text())
     if not lab['seed_complete']:
         raise RuntimeError('setup did not complete')
-    if (STATE / 'request.json').exists():
-        raise RuntimeError('request.json already exists; inspect it instead of replacing baselines')
+    if any((STATE / name).exists() for name in ('request.json', 'rehearsal.json')):
+        raise RuntimeError('request manifest already exists; inspect it instead of replacing baselines')
     request = json.loads(admin('submit', '--pubkey', TARGET,
         '--requested-by', 'local-lab', '--reason', 'Disposable local workflow verification',
         log='submit.json'))
     admin('approve', request['id'], '--approved-by', 'local-lab',
           '--inventory-digest', request['inventory_digest'], log='approve.json')
     save_new(STATE / 'request.json', request)
+    rehearsal = json.loads(admin('submit', '--pubkey', TARGET, '--read-only',
+        '--requested-by', 'local-lab', '--reason', 'Disposable local workflow rehearsal',
+        log='submit-rehearsal.json'))
+    admin('approve', rehearsal['id'], '--approved-by', 'local-lab',
+          '--inventory-digest', rehearsal['inventory_digest'], log='approve-rehearsal.json')
+    save_new(STATE / 'rehearsal.json', rehearsal)
     for kind in ('content', 'media', 'account'):
         fixture(kind, 'snapshot')
-    print('Request approved and immutable baselines saved. No handler was run.')
+    print('Separate deletion/rehearsal requests approved and baselines saved. No handler was run.')
 
 
 def preview():

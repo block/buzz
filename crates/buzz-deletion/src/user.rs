@@ -43,6 +43,14 @@ pub enum Command {
     },
     /// Save a request. An identical resubmission returns the existing row.
     Submit {
+        /// Save an independent read-only workflow request for --pubkey.
+        #[arg(
+            long = "read-only",
+            alias = "rehearse",
+            requires = "pubkey",
+            conflicts_with = "target"
+        )]
+        rehearse: bool,
         /// Optional demo request label, for example demo:alice. Conflicts with --pubkey.
         #[arg(long, conflicts_with = "pubkey")]
         target: Option<String>,
@@ -67,7 +75,7 @@ pub enum Command {
         #[arg(long)]
         inventory_digest: String,
     },
-    /// Preview real stages by default; --delete runs approved offline cleanup.
+    /// Preview by default; --read-only or --delete runs the persisted worker.
     Run {
         /// Approved request UUID.
         id: Uuid,
@@ -142,7 +150,11 @@ pub async fn run(command: Command) -> Result<i32> {
         &command,
         Command::Inventory { .. }
             | Command::Run {
-                execution: real::Args { delete: false, .. },
+                execution: real::Args {
+                    delete: false,
+                    rehearse: false,
+                    ..
+                },
                 ..
             }
     ) {
@@ -173,6 +185,7 @@ pub async fn run(command: Command) -> Result<i32> {
             crate::print_json(&inventory::generate(&db, &pubkey).await?)?;
         }
         Command::Submit {
+            rehearse,
             target,
             pubkey,
             requested_by,
@@ -182,11 +195,17 @@ pub async fn run(command: Command) -> Result<i32> {
                 None | Some("demo") => "demo:default".to_owned(),
                 Some(key) => key.to_owned(),
             });
-            crate::print_json(
-                &db.user_deletion_store()
+            let users = db.user_deletion_store();
+            let request = if rehearse {
+                users
+                    .submit_rehearsal(&target, &requested_by, reason.as_deref())
+                    .await?
+            } else {
+                users
                     .submit(&target, &requested_by, reason.as_deref())
-                    .await?,
-            )?;
+                    .await?
+            };
+            crate::print_json(&request)?;
         }
         Command::Approve {
             id,
@@ -208,7 +227,7 @@ pub async fn run(command: Command) -> Result<i32> {
             demo_no_agents_in,
         } => {
             let request = store.get(id).await?;
-            if !execution.delete {
+            if !execution.delete && !execution.rehearse {
                 return real::preview(&db, &request, &execution, next_step).await;
             }
             let is_real = !request.target.starts_with("demo:");
@@ -217,11 +236,24 @@ pub async fn run(command: Command) -> Result<i32> {
             {
                 anyhow::bail!("dummy controls cannot be used for real deletion");
             }
-            if is_real && !execution.offline {
-                anyhow::bail!(
-                    "stop relay and external workers, then supply --offline with --delete"
-                );
-            }
+            execution.validate_execution(&request)?;
+            let source = if execution.rehearse {
+                // Workflow progress uses the writer pool; handler reads cannot write
+                // user data even if a preview accidentally acquires a write path.
+                buzz_db::Db::connect_cold_start(
+                    buzz_db::DbConfig {
+                        database_url: crate::required_env("DATABASE_URL")?,
+                        max_connections: 1,
+                        min_connections: 0,
+                        default_transaction_read_only: true,
+                        ..buzz_db::DbConfig::default()
+                    },
+                    "user_rehearsal_source",
+                )
+                .await?
+            } else {
+                buzz_db::Db::from_pool(db.pool().clone())
+            };
             let code = worker::run(
                 &store,
                 id,
@@ -229,7 +261,7 @@ pub async fn run(command: Command) -> Result<i32> {
                 &worker::RunOptions {
                     next_step,
                     real: is_real.then(|| real::Execution {
-                        db: buzz_db::Db::from_pool(db.pool().clone()),
+                        db: source,
                         args: execution,
                     }),
                     fail_stage,

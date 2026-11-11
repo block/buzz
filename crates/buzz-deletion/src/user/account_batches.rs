@@ -1,6 +1,6 @@
 //! Standalone offline account cleanup; never enters the workflow dispatcher.
 use anyhow::Result;
-use buzz_db::user_deletion::account_batches::AccountBatchOptions;
+use buzz_db::user_deletion::{account_batches::AccountBatchOptions, ExecutionMode};
 use uuid::Uuid;
 
 /// Arguments for the account-table debugging command.
@@ -53,11 +53,14 @@ pub(super) async fn run(args: Args) -> Result<i32> {
     let store = db.user_deletion_store();
     let stdout = std::io::stdout();
     let mut writer = stdout.lock();
-    let summary = if args.delete {
-        store.delete_account_batches(&options, &mut writer).await?
+    let mode = if args.delete {
+        ExecutionMode::Delete
     } else {
-        store.preview_account_batches(&options, &mut writer).await?
+        ExecutionMode::ReadOnly
     };
+    let summary = store
+        .run_account_batches(&options, mode, &mut writer)
+        .await?;
     Ok(if summary.supported_scope_exhausted {
         0
     } else {

@@ -71,6 +71,7 @@ mod tests {
             vec!["--read-only"],
             vec!["--print-only"],
             vec!["--delete", "--offline"],
+            vec!["--rehearse", "--next-step"],
         ] {
             let parsed = crate::Cli::try_parse_from(base.into_iter().chain(flags.clone())).unwrap();
             let crate::Command::UserDeletions {
@@ -80,12 +81,20 @@ mod tests {
                 panic!("expected run command");
             };
             assert_eq!(execution.delete, flags.contains(&"--delete"));
+            assert_eq!(
+                execution.rehearse,
+                flags.contains(&"--rehearse") || flags.contains(&"--read-only")
+            );
         }
         for flags in [
             vec!["--read-only", "--delete"],
             vec!["--offline"],
             vec!["--community", "00000000-0000-0000-0000-000000000001"],
             vec!["--delete", "--stage", "purge_media"],
+            vec!["--rehearse", "--delete"],
+            vec!["--read-only", "--print-only"],
+            vec!["--rehearse", "--offline"],
+            vec!["--rehearse", "--stage", "purge_content"],
         ] {
             assert!(crate::Cli::try_parse_from(base.into_iter().chain(flags)).is_err());
         }
@@ -94,6 +103,16 @@ mod tests {
     #[test]
     fn user_workflow_commands_are_registered() {
         for args in [
+            vec![
+                "buzz-admin",
+                "user-deletions",
+                "submit",
+                "--rehearse",
+                "--pubkey",
+                "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+                "--requested-by",
+                "operator-a",
+            ],
             vec![
                 "buzz-admin",
                 "user-deletions",

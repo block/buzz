@@ -110,3 +110,12 @@ large accounts may require substantial memory. Dependency depth is limited to
 64. Each statement has a 30-second timeout and locks a 3-second timeout. These
 limits do not bound total run time or community lock duration. Measure large
 accounts before operational use.
+
+## Mode-aware handler API
+
+The command passes `ExecutionMode::ReadOnly` or `ExecutionMode::Delete` to
+`run_message_batches(options, mode, writer)`. The handler owns the mode branch.
+Both modes use the same content planner; delete adds execution guards and
+commits the selected batches. Existing preview/delete methods remain compatibility
+entry points over that shared planner. New interface regressions are prepared;
+validation of this refactor is pending.

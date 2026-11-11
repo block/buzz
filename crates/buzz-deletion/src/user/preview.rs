@@ -1,7 +1,7 @@
 //! Standalone batch command, deliberately outside the durable account worker.
 
 use anyhow::Result;
-use buzz_db::user_deletion::preview::PreviewOptions;
+use buzz_db::user_deletion::{preview::PreviewOptions, ExecutionMode};
 
 pub(super) fn parse_pubkey(input: &str) -> std::result::Result<String, String> {
     buzz_db::user_deletion::normalize_user_deletion_pubkey(input).map_err(|error| error.to_string())
@@ -20,14 +20,13 @@ pub(super) async fn run(options: PreviewOptions, delete: bool) -> Result<i32> {
     )
     .await?;
     let stdout = std::io::stdout();
-    if delete {
-        db.user_deletion_store()
-            .delete_message_batches(&options, &mut stdout.lock())
-            .await?;
+    let mode = if delete {
+        ExecutionMode::Delete
     } else {
-        db.user_deletion_store()
-            .preview_message_batches(&options, &mut stdout.lock())
-            .await?;
-    }
+        ExecutionMode::ReadOnly
+    };
+    db.user_deletion_store()
+        .run_message_batches(&options, mode, &mut stdout.lock())
+        .await?;
     Ok(0)
 }

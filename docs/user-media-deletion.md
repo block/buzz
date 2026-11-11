@@ -143,6 +143,13 @@ protect media from new uploads or references.
 supports `PrintOnly` and `Delete`. The workflow must own an approved request lease,
 start its `purge_media` stage, and maintain its heartbeat.
 
+Both modes use this entry point and return summary JSON. `PrintOnly` performs a
+fresh observation, prints the proposal, and fails on unresolved decisions. It
+writes no media inventory, source rows, fences, reservations or storage objects;
+the caller saves progress in its separate read-only workflow request. `Delete`
+discovers and protects its own durable inventory before applying changes. Both
+paths share the database scanner, storage inventory and file decision procedure.
+
 The CLI's `--delete` takes `--request-id <approved-request-uuid>` and runs only
 that request's current `purge_media` stage. The request target must match
 `--pubkey`. It claims and renews the lease, runs the real handler, saves success,

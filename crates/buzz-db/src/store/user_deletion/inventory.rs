@@ -16,11 +16,43 @@ pub struct UserDeletionInventory {
 }
 
 impl UserDeletionInventory {
+    /// Read the mode bound to the inventory approval. Legacy requests are destructive.
+    /// Rehearsals have a separate opaque target so old deletion workers fail closed.
+    pub fn is_rehearsal(request: &EntityRequest) -> Result<bool> {
+        let mode = request
+            .inventory_manifest
+            .as_ref()
+            .and_then(|v| v.get("execution_mode"));
+        match (request.target.strip_prefix("rehearsal:"), mode) {
+            (Some(subject), Some(mode)) if mode == "rehearsal" => {
+                if super::normalize_user_deletion_pubkey(subject)? != subject {
+                    return Err(invalid("rehearsal subject is not canonical"));
+                }
+                Ok(true)
+            }
+            (None, None) => Ok(false),
+            _ => Err(invalid("request target and execution mode disagree")),
+        }
+    }
+
+    /// Resolve the source subject without changing the request's separate identity.
+    pub fn subject(request: &EntityRequest) -> Result<&str> {
+        if Self::is_rehearsal(request)? {
+            request
+                .target
+                .strip_prefix("rehearsal:")
+                .ok_or_else(|| invalid("missing rehearsal subject"))
+        } else {
+            Ok(&request.target)
+        }
+    }
+
     /// Validate and read a saved user inventory.
     pub fn read(request: &EntityRequest) -> Result<Self> {
         if request.entity_type != "user" {
             return Err(invalid("user workflow requires entity_type user"));
         }
+        Self::is_rehearsal(request)?;
         let value = request
             .inventory_manifest
             .as_ref()
