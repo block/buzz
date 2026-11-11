@@ -7,7 +7,7 @@ use uuid::Uuid;
 /// Preview real memberships or prepare and execute synthetic deletion requests.
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Print all proposed human-content cleanup batches; never changes data.
+    /// Print human-content cleanup batches; optionally execute them.
     PreviewBatches {
         /// Human public key, as npub or 64-character hex.
         #[arg(long, value_parser = preview::parse_pubkey)]
@@ -15,9 +15,12 @@ pub enum Command {
         /// Explicit community UUID; includes historical content after leaving.
         #[arg(long)]
         community: Uuid,
-        /// Required acknowledgement of the only supported mode.
-        #[arg(long, required = true)]
+        /// Print batches without changing data.
+        #[arg(long, required_unless_present = "delete", conflicts_with = "delete")]
         read_only: bool,
+        /// Print and commit each batch. Stop relay/workers before using this mode.
+        #[arg(long)]
+        delete: bool,
         /// Trusted relay public key for historical actor/p attribution, if needed.
         #[arg(long, value_parser = preview::parse_pubkey)]
         relay_pubkey: Option<String>,
@@ -99,19 +102,23 @@ pub async fn run(command: Command) -> Result<i32> {
         pubkey,
         community,
         read_only,
+        delete,
         relay_pubkey,
         batch_size,
         max_items,
     } = command
     {
-        anyhow::ensure!(read_only, "only --read-only is supported");
-        return preview::run(buzz_db::user_deletion::preview::PreviewOptions {
-            community,
-            pubkey,
-            relay_pubkey,
-            batch_size,
-            max_items,
-        })
+        anyhow::ensure!(read_only != delete, "choose --read-only or --delete");
+        return preview::run(
+            buzz_db::user_deletion::preview::PreviewOptions {
+                community,
+                pubkey,
+                relay_pubkey,
+                batch_size,
+                max_items,
+            },
+            delete,
+        )
         .await;
     }
     let db = if matches!(command, Command::Inventory { .. }) {
@@ -132,7 +139,7 @@ pub async fn run(command: Command) -> Result<i32> {
     let store = db.entity_deletion_store();
     match command {
         Command::PreviewBatches { .. } => {
-            anyhow::bail!("preview must use the read-only connection")
+            anyhow::bail!("batch command must use its standalone connection")
         }
         Command::Inventory { pubkey } => {
             crate::print_json(&inventory::generate(&db, &pubkey).await?)?;

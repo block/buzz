@@ -1,4 +1,4 @@
-//! Observational batch planning. No mutation executor or durable progress exists here.
+//! Shared human-content batch planning with explicit preview and execution APIs.
 //!
 //! A repeatable-read, read-only snapshot supplies rows. An in-memory set models
 //! rows already emitted, so parents can follow children without deleting either.
@@ -13,12 +13,16 @@ use std::collections::HashSet;
 use std::io::Write;
 use uuid::Uuid;
 
+mod execute;
+mod owned;
 #[cfg(test)]
 mod postgres_tests;
 mod rows;
 
 const KINDS: &[i32] = &[
-    1, 7, 9, 30023, 40001, 40002, 40003, 40004, 40005, 40006, 40007, 40008, 45001, 45002, 45003,
+    5, 41010, 41011, 41012, 46020, 46030, 46031, 3, 10000, 10001, 10002, 10003, 30000, 30003,
+    30315, 30078, 30300, 30174, 44200, 43001, 43002, 43003, 43004, 43005, 43006, 30620, 30350, 1,
+    7, 9, 30023, 40001, 40002, 40003, 40004, 40005, 40006, 40007, 40008, 45001, 45002, 45003,
 ];
 const MAX_DEPTH: usize = 64;
 const PAGE_SIZE: i64 = 100;
@@ -27,7 +31,7 @@ const EVENT_COLUMNS: &str = "e.id,e.created_at,e.channel_id,e.kind,
       SELECT 1 FROM jsonb_array_elements(e.tags) t
       WHERE t->>0 IN ('imeta','link-preview','url','thumb','image','x','emoji'))) AS has_media";
 
-/// Input to the standalone preview; never authorizes a deletion.
+/// Scope and bounds for standalone preview or explicitly requested deletion.
 pub struct PreviewOptions {
     /// Explicit tenant scope, including content from former memberships.
     pub community: Uuid,
@@ -42,10 +46,10 @@ pub struct PreviewOptions {
     pub max_items: u32,
 }
 
-/// Final marker proving that all batches in the declared scope were printed.
+/// Final marker for the declared scope; never claims complete account erasure.
 #[derive(Debug, Serialize)]
 pub struct PreviewSummary {
-    /// Always `preview_complete`; absent if the preview fails or is interrupted.
+    /// `preview_complete` or `delete_complete`; absent on failure/interruption.
     pub record: &'static str,
     /// Number of batches printed.
     pub batches: u64,
@@ -94,6 +98,7 @@ struct Output<'a, W> {
     repairs: Vec<Value>,
     batches: u64,
     warnings: usize,
+    collected: Option<Vec<Value>>,
 }
 
 fn invalid(message: impl Into<String>) -> DbError {
@@ -160,13 +165,15 @@ impl<W: Write> Output<'_, W> {
             return Ok(());
         }
         self.batches += 1;
-        line(
-            self.writer,
-            &json!({
-                "record": "batch", "number": self.batches, "community_id": self.community,
-                "items": self.batch, "thread_repairs": self.repairs,
-            }),
-        )?;
+        let batch = json!({
+            "record": "batch", "number": self.batches, "community_id": self.community,
+            "items": self.batch, "thread_repairs": self.repairs,
+        });
+        if let Some(collected) = &mut self.collected {
+            collected.push(batch);
+        } else {
+            line(self.writer, &batch)?;
+        }
         self.batch.clear();
         self.repairs.clear();
         Ok(())
@@ -184,107 +191,127 @@ impl UserDeletionStore {
         options: &PreviewOptions,
         writer: &mut impl Write,
     ) -> Result<PreviewSummary> {
-        if !(1..=100).contains(&options.batch_size) || !(1..=1_000_000).contains(&options.max_items)
-        {
-            return Err(invalid(
-                "batch size must be 1–100 and max items must be 1–1,000,000",
-            ));
-        }
-        let subject = normalize_user_deletion_pubkey(&options.pubkey)?;
-        let relay = options
-            .relay_pubkey
-            .as_deref()
-            .map(normalize_user_deletion_pubkey)
-            .transpose()?;
-        if relay.as_deref() == Some(&subject) {
-            return Err(invalid(
-                "the human and trusted relay public keys must differ",
-            ));
-        }
         let mut tx = snapshot(&self.pool).await?;
-        let host: String = sqlx::query_scalar("SELECT host FROM communities WHERE id=$1")
-            .bind(options.community)
-            .fetch_optional(&mut *tx)
-            .await?
-            .ok_or_else(|| invalid("unknown community"))?;
-        line(
-            writer,
-            &json!({
-                "record": "preview_start", "version": 1, "read_only": true,
-                "community_id": options.community, "host": host, "pubkey": subject,
-                "trusted_relay_pubkey": relay, "included_event_kinds": KINDS,
-                "batch_size": options.batch_size, "max_items": options.max_items,
-                "scope": "human content events, permitted dependents, reaction rows and workflow copies",
-                "relay_attribution": if relay.is_some() { "enabled" } else { "not included; supply --relay-pubkey for relay-authored history" },
-                "execution": "unavailable; media, worker drain, write fences and thread repair require separate validation",
-                "thread_repairs": "reported separately from row items; metadata mutations are not expanded",
-            }),
-        )?;
-        let mut output = Output {
-            writer,
-            community: options.community,
-            limit: usize::from(options.batch_size),
-            max_items: options.max_items as usize,
-            seen: HashSet::new(),
-            events: HashSet::new(),
-            runs: HashSet::new(),
-            batch: Vec::new(),
-            repairs: Vec::new(),
-            batches: 0,
-            warnings: 0,
-        };
-        let mut cursor = Cursor::default();
-        loop {
-            let query = format!(
-                "WITH authored AS ({}) SELECT {EVENT_COLUMNS} FROM authored e
+        let plan = plan(&mut tx, options, writer, false).await?;
+        tx.rollback().await?;
+        line(writer, &plan.summary)?;
+        Ok(plan.summary)
+    }
+}
+
+struct Plan {
+    start: Value,
+    summary: PreviewSummary,
+    batches: Vec<Value>,
+}
+
+async fn plan(
+    conn: &mut PgConnection,
+    options: &PreviewOptions,
+    writer: &mut impl Write,
+    collect: bool,
+) -> Result<Plan> {
+    if !(1..=100).contains(&options.batch_size) || !(1..=1_000_000).contains(&options.max_items) {
+        return Err(invalid(
+            "batch size must be 1–100 and max items must be 1–1,000,000",
+        ));
+    }
+    let subject = normalize_user_deletion_pubkey(&options.pubkey)?;
+    let relay = options
+        .relay_pubkey
+        .as_deref()
+        .map(normalize_user_deletion_pubkey)
+        .transpose()?;
+    if relay.as_deref() == Some(&subject) {
+        return Err(invalid(
+            "the human and trusted relay public keys must differ",
+        ));
+    }
+    let host: String = sqlx::query_scalar("SELECT host FROM communities WHERE id=$1")
+        .bind(options.community)
+        .fetch_optional(&mut *conn)
+        .await?
+        .ok_or_else(|| invalid("unknown community"))?;
+    let start = json!({
+        "record": "preview_start", "version": 1, "read_only": true,
+        "community_id": options.community, "host": host, "pubkey": subject,
+        "trusted_relay_pubkey": relay, "included_event_kinds": KINDS,
+        "batch_size": options.batch_size, "max_items": options.max_items,
+        "scope": "human events, permitted dependents, owned workflows, subscriptions and notification delivery",
+        "relay_attribution": if relay.is_some() { "enabled" } else { "not included; supply --relay-pubkey for relay-authored history" },
+        "execution": "preview only; --delete prints and commits batches after execution checks",
+        "thread_repairs": "reported separately from row items; metadata mutations are not expanded",
+    });
+    if !collect {
+        line(writer, &start)?;
+    }
+    let mut output = Output {
+        writer,
+        community: options.community,
+        limit: usize::from(options.batch_size),
+        max_items: options.max_items as usize,
+        seen: HashSet::new(),
+        events: HashSet::new(),
+        runs: HashSet::new(),
+        batch: Vec::new(),
+        repairs: Vec::new(),
+        batches: 0,
+        warnings: 0,
+        collected: collect.then(Vec::new),
+    };
+    owned::plan(conn, &subject, &mut output).await?;
+    let mut cursor = Cursor::default();
+    loop {
+        let query = format!(
+            "WITH authored AS ({}) SELECT {EVENT_COLUMNS} FROM authored e
                 WHERE e.kind=ANY($4) AND ($5::timestamptz IS NULL OR (e.created_at,e.id)>($5,$6))
                 ORDER BY e.created_at,e.id LIMIT 100",
-                include_str!("authored.sql")
-            );
-            // Only static SQL fragments are interpolated; every value is bound.
-            let events: Vec<Event> = sqlx::query_as(sqlx::AssertSqlSafe(query))
-                .bind(options.community)
-                .bind(&subject)
-                .bind(&relay)
-                .bind(KINDS)
-                .bind(cursor.0)
-                .bind(&cursor.1)
-                .fetch_all(&mut *tx)
-                .await?;
-            if events.is_empty() {
-                break;
-            }
-            for event in events {
-                cursor.advance(&event);
-                walk(&mut tx, event, &mut output).await?;
-            }
-        }
-        rows::orphan_sweeps(&mut tx, &subject, &mut output).await?;
-        let query = format!(
-            "WITH authored AS ({}) SELECT jsonb_build_object('kind',kind,'count',count(*))
-            FROM authored WHERE NOT(kind=ANY($4)) GROUP BY kind ORDER BY kind",
             include_str!("authored.sql")
         );
-        let excluded: Vec<Value> = sqlx::query_scalar(sqlx::AssertSqlSafe(query))
+        // Only static SQL fragments are interpolated; every value is bound.
+        let events: Vec<Event> = sqlx::query_as(sqlx::AssertSqlSafe(query))
             .bind(options.community)
             .bind(&subject)
             .bind(&relay)
             .bind(KINDS)
-            .fetch_all(&mut *tx)
+            .bind(cursor.0)
+            .bind(&cursor.1)
+            .fetch_all(&mut *conn)
             .await?;
-        output.flush()?;
-        let summary = PreviewSummary {
-            record: "preview_complete",
-            batches: output.batches,
-            items: output.seen.len(),
-            warnings: output.warnings,
-            excluded_event_kinds: excluded,
-        };
-        // End the observational snapshot before claiming complete output.
-        tx.rollback().await?;
-        line(output.writer, &summary)?;
-        Ok(summary)
+        if events.is_empty() {
+            break;
+        }
+        for event in events {
+            cursor.advance(&event);
+            walk(conn, event, &mut output).await?;
+        }
     }
+    rows::orphan_sweeps(conn, &subject, &mut output).await?;
+    let query = format!(
+        "WITH authored AS ({}) SELECT jsonb_build_object('kind',kind,'count',count(*))
+            FROM authored WHERE NOT(kind=ANY($4)) GROUP BY kind ORDER BY kind",
+        include_str!("authored.sql")
+    );
+    let excluded: Vec<Value> = sqlx::query_scalar(sqlx::AssertSqlSafe(query))
+        .bind(options.community)
+        .bind(&subject)
+        .bind(&relay)
+        .bind(KINDS)
+        .fetch_all(&mut *conn)
+        .await?;
+    output.flush()?;
+    let summary = PreviewSummary {
+        record: "preview_complete",
+        batches: output.batches,
+        items: output.seen.len(),
+        warnings: output.warnings,
+        excluded_event_kinds: excluded,
+    };
+    Ok(Plan {
+        start,
+        summary,
+        batches: output.collected.unwrap_or_default(),
+    })
 }
 
 async fn walk(

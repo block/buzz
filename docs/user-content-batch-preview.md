@@ -1,95 +1,110 @@
-# Preview human-content cleanup batches
+# Print or delete human-content batches
 
-This operator command prints a proposed cleanup sequence for one public key in
-one community. It has no deletion executor. It neither creates a deletion request
-nor changes workflow progress, counters, rows, media or delivery state.
+This operator command selects one human's supported records in one community.
+Choose exactly one mode: `--read-only` prints batches; `--delete` prints each batch
+and commits its operations. Neither mode starts the durable account-deletion
+workflow, runs migrations, or marks an account erased.
 
 ```sh
-# DATABASE_URL must already identify the database to inspect.
+# DATABASE_URL identifies the database. Only public keys are needed.
 cargo run -p buzz-admin -- user-deletions preview-batches \
-  --pubkey '<npub-or-hex>' \
-  --community '<community-uuid>' \
+  --pubkey '<npub-or-hex>' --community '<community-uuid>' \
   --read-only > batches.jsonl
+
+# Stop the relay and external workers first. This permanently removes rows.
+cargo run -p buzz-admin -- user-deletions preview-batches \
+  --pubkey '<npub-or-hex>' --community '<community-uuid>' \
+  --delete > deletion.jsonl
 ```
 
-Only public keys are accepted. The community is required even when a key currently
-belongs to just one community; historical content after leaving is included.
-Use a database account with SELECT privileges for an additional boundary.
-The command uses a read-only connection and a repeatable-read, read-only
-transaction. It does not run migrations or the durable deletion worker.
+The community is required even when the key currently belongs to only one;
+historical content after leaving is included. For relay-signed message history,
+optionally supply `--relay-pubkey '<trusted-relay-public-key>'`. Only that signer
+may use the existing actor/p attribution rules. Added personal and command kinds,
+notes and articles require direct authorship. No private keys are accepted.
 
-For historical events signed by a relay on behalf of a person, additionally pass
-`--relay-pubkey '<trusted-relay-public-key>'`. Only this signer may use the existing
-actor/p attribution rules. Without it, the header explicitly says that relay
-attribution is not included. A private key is never needed.
+## Output and recovery
 
-## Read the output
+Stdout is JSONL; diagnostics and errors use stderr. Each `batch` names its
+community, number, exact table keys, proposed actions and selection reasons.
+An approval's `token_hash` identifies its stored hash, never a plaintext token.
+Event bodies, approval notes and endpoint grants are not printed.
 
-Stdout contains JSON lines; startup diagnostics and errors use stderr:
+Preview emits `preview_start`, `batch` records and `preview_complete`. It uses a
+repeatable-read, read-only transaction and a read-only connection. A SELECT-only
+database account supplies an additional boundary. Later live writes are outside
+that snapshot.
 
-1. `preview_start`: subject, community, covered kinds, attribution and limits.
-2. `batch`: sequential number, community and up to 100 ordered `items`.
-3. `preview_complete`: total batches, unique items, warnings and excluded kinds.
+Deletion emits `delete_start`, then for each batch:
 
-Each item names a table, exact key within the batch's community, proposed action,
-selection reason and any warning. An approval's `token_hash` identifies its stored
-`token` column; no plaintext approval tokens or event contents are printed.
-Actions are `would_delete` and `would_clear_workflow_run_id`. A batch can mix tables
-and event kinds. `thread_repairs` describes affected events and stored roots whose
-metadata would need repair after that batch; it does not expand or simulate those
-metadata mutations, and they are not counted in the 100 row operations.
+1. Print and flush `batch` before executing any of its operations.
+2. Execute the ordered operations and repair affected thread metadata in one
+   transaction.
+3. Commit, then print `batch_committed` with the batch number and item count.
 
-```sh
-jq 'select(.record == "batch") | {number, items}' batches.jsonl
-jq 'select(.record == "preview_complete")' batches.jsonl
-```
+`delete_complete` appears only after a fresh scan finds no remaining supported
+operations. **A printed batch alone is not a commit receipt.** A crash or output
+failure after commit can lose the receipt even though the rows are gone. Rerun
+the command: it selects remaining database rows, retaining source events and
+parents until their dependent records are removed. Earlier committed batches
+remain deleted when a later batch fails; there is no whole-run undo.
 
-A zero exit status **and** `preview_complete` mean the declared preview scope was
-exhausted. They do not mean all account data is covered or that deletion is safe
-to execute. On a query/output error, cycle, excessive depth or item limit, the
-command fails without that marker. Discard partial output; rerun from the start.
-No position is saved.
+Zero exit status and the appropriate completion marker prove exhaustion only
+for the declared scope. No marker is emitted on query/output failure, cycles,
+excessive depth or item limits. A saved preview cannot be imported for execution;
+`--delete` always generates its own plan against the current database.
 
-## Selection and batching
+## Combined table ownership
 
-Sources are authored events in timestamp/ID order across threads: chat and
-historical chat kinds, forum posts/comments, reactions, edits, votes, individual
-pins/bookmarks, schedules, reminders, diffs, short notes and article versions.
-The exact numeric kinds are printed in the header. Old and soft-deleted stored
-versions are included. Notes/articles require direct authorship.
+The same planner and executor own these tables. A row matching multiple selection
+paths is printed, deleted and counted once.
 
-For each source, the iterator follows incoming reactions, edits and votes within
-the same community and channel, including a NULL channel. Edits/votes use the
-first valid `e` tag and reactions the last. It never follows a source's outgoing
-target to delete somebody else's message. Other people's ordinary replies stay.
-Dependent cleanup comes before the selected event; workflow approvals and run
-pointers come before their run. Direct author sweeps also find remaining reaction
-rows and workflow trigger copies with missing source events.
+| Scope | Selection and ordering |
+| --- | --- |
+| Events | Authored chats, edits, reactions, forum posts/comments/votes, individual pins/bookmarks, schedules/reminders/diffs, notes/articles, personal lists/status/app state/private-state records, job records, workflow definitions, push records, ordinary deletion requests, DM commands and workflow trigger/approval/denial commands. Exact kinds are printed in the header. Stored history and soft-deleted rows are included. Removing command history does not replay or reverse it. |
+| Event dependencies | Incoming reactions, edits and votes in the same community/channel. Edits/votes use the first valid `e` tag, reactions the last. Never follow outgoing targets to remove someone else's message. Ordinary replies stay. |
+| Event copies | `reactions`, `event_mentions`, `push_match_queue`, `push_wake_outbox`, `operator_listener_outbox`, `delivery_log`, and finished workflow runs tied to the selected event. |
+| Workflows | Workflows owned by the human, their scheduled fires, approvals and finished runs, then the workflow parent. Saved trigger-author sweeps also find runs whose source event is gone. Approvals and run pointers precede runs. |
+| Surviving schedules | Clear only the pointer to a removed run; retain another owner's scheduled-fire claim so it cannot execute again. Owned workflow schedules are deleted. |
+| Subscriptions | Human-owned subscriptions' delivery logs, then subscriptions. Another owner's filter mentioning this human does not establish ownership. |
+| Notifications | Push wake-ups selected by recipient `author`, then that human's `push_leases`; listener outbox rows selected by target or receiving listener. Source messages belonging to others stay. |
+| Thread metadata | Remove unused structure and recompute affected counts/times. Preserve ancestry needed by surviving replies, without retaining deleted event payloads. |
 
-The iterator remembers already-emitted exact keys in memory. It fills each batch
-before printing it, including across event boundaries, without changing the
-database. For example, 50 reactions with exactly two stored rows each fill one
-100-item batch. Additional mention or delivery records consume additional slots.
-A message with many dependents spans batches and appears after the last dependent.
+Read positions and separate access/global tables belong to a different handler.
+Profile and agent cleanup remain separate. Shared canvases, artifacts, Git,
+huddles, emoji/persona/team definitions, gift-wrap attribution, and human approval
+copies on somebody else's surviving workflow remain unresolved coverage. They
+are not silently erased or described as completed. The footer counts authored
+event kinds outside this handler; it is not a complete inventory of other tables.
 
-`--batch-size` accepts 1–100 (default 100). `--max-items` bounds the in-memory
-simulation to at most 1,000,000 unique row operations (also the default).
-Exceeding the limit is an error, never a silently truncated success. Dependency
-depth is limited to 64. Queries have a 30-second statement and 3-second lock
-timeout. This is a diagnostic tool: snapshot duration, dependency lookups and
-side-table key sorting still need measurement on large real datasets.
+## Execution checks and limits
 
-## Scope and prerequisites
+Run deletion with the relay and external workers stopped. This standalone tool
+does not cancel jobs, stop processes, revoke credentials or install durable user
+fences. It holds the existing exclusive community advisory lock across planning
+and commits, plus the shared schema-destruction lock; checks the scoped-table inventory;
+and refuses inactive communities or live external serving leases. It owns and
+closes its database connection so cancellation cannot leave session locks in the
+pool. Compliant community writers wait until it releases the lock. This is not
+production account-deletion orchestration.
 
-This is a content-handler preview, not a whole-account erasure inventory. Shared
-canvases/artifacts, command history, profiles, memberships, agents and other
-non-message categories are not selected here. The footer counts authored event
-kinds outside the handler. Media references, active workflow runs and claimed
-delivery work are flagged while the preview continues to print the full proposed
-sequence. Those warnings are not permission to execute any of it. Write fences,
-media evidence, worker drain, authorization and surviving-thread repair remain
-requirements for a future executor.
+The entire plan is checked before the first deletion. Active workflow runs or
+deliveries, inconsistent approval/run ownership, media references and potentially
+encrypted payloads prevent execution. Media evidence integration is not supplied
+by this command: a URL scan cannot authorize deleting opaque payloads. Workflows,
+run traces, approval notes and delivery errors are checked too. No bypass flag is
+provided. Preview can still print blocked records for inspection.
 
-The snapshot is observational: live writes after it starts are not included.
-Compare previews for different users or batch sizes by rerunning the command;
-never treat a saved preview as an executable deletion manifest.
+Each row is locked and checked against its preflight fingerprint before mutation.
+Parents cannot be removed while children remain; foreign-key cascades are not
+used to hide extra deletions. SQL errors roll back the current batch. A final
+remaining-row scan precedes the completion marker.
+
+`--batch-size` is 1–100 (default 100), including mixed tables and event types.
+Thread repairs are reported separately; their work is not bounded by the item
+count. `--max-items` bounds unique planned operations to 1–1,000,000 (default
+1,000,000). Deletion retains this bounded plan in memory before execution;
+large accounts may require substantial memory. Dependency depth is limited to
+64. Each statement has a 30-second timeout and locks a 3-second timeout. These
+limits do not bound total run time or community lock duration. Measure large
+accounts before operational use.

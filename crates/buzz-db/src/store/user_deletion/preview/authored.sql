@@ -8,5 +8,5 @@ WHERE e.community_id = $1 AND e.pubkey IN (decode($2, 'hex'), decode($3, 'hex'))
     (SELECT decode(t->>1, 'hex') FROM jsonb_array_elements(e.tags) t
      WHERE t->>0 = 'p' AND t->>1 ~ '^[0-9a-fA-F]{64}$' LIMIT 1), e.pubkey)
     ELSE e.pubkey END = decode($2, 'hex')
-  -- Notes/articles use direct authorship, not relay attribution.
-  AND (e.kind NOT IN (1, 30023) OR e.pubkey = decode($2, 'hex'))
+  -- Only the original message kinds support trusted relay attribution.
+  AND (e.kind IN (7,9,40001,40002,40003,40004,40005,40006,40007,40008,45001,45002,45003) OR e.pubkey = decode($2, 'hex'))

@@ -98,6 +98,9 @@ fn items(lines: &[Value]) -> Vec<Value> {
 async fn snapshot(pool: &PgPool) -> Vec<Value> {
     let mut values = Vec::new();
     for table in [
+        "workflows",
+        "subscriptions",
+        "push_leases",
         "events",
         "reactions",
         "event_mentions",
@@ -231,7 +234,7 @@ async fn sources_include_all_declared_kinds_and_history_but_preserve_other_autho
         .execute(&pool)
         .await
         .unwrap();
-    event(&pool, options.community, 90, HUMAN, 46020, json!([])).await;
+    event(&pool, options.community, 90, HUMAN, 49001, json!([])).await;
     event(
         &pool,
         options.community,
@@ -256,7 +259,7 @@ async fn sources_include_all_declared_kinds_and_history_but_preserve_other_autho
     assert_eq!(summary.items, KINDS.len() + 3);
     assert_eq!(
         summary.excluded_event_kinds,
-        [json!({"kind":46020,"count":1})]
+        [json!({"kind":49001,"count":1})]
     );
     assert!(items(&lines).iter().any(|v| v["key"]["id"] == id(80)));
     assert!(!items(&lines).iter().any(|v| v["key"]["id"] == id(91)));
@@ -264,6 +267,25 @@ async fn sources_include_all_declared_kinds_and_history_but_preserve_other_autho
         .iter()
         .filter(|v| v["record"] == "batch")
         .all(|v| v["community_id"] == options.community.to_string()));
+    // Exercise every supported kind through execution too. Private formats
+    // with nonempty ciphertext are separately tested as blocked sources.
+    sqlx::query("UPDATE events SET content='' WHERE community_id=$1")
+        .bind(options.community)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let deleted = Db::from_pool(pool.clone())
+        .user_deletion_store()
+        .delete_message_batches(&options, &mut Vec::new())
+        .await
+        .unwrap();
+    assert_eq!(deleted.items, summary.items);
+    let survivors: i64 = sqlx::query_scalar("SELECT count(*) FROM events WHERE community_id=$1")
+        .bind(options.community)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(survivors, 2); // unknown kind and other signer's forged attribution
 }
 
 #[tokio::test]
@@ -432,3 +454,5 @@ async fn cycles_limits_empty_scope_and_output_failures_never_report_false_comple
         .await
         .is_err());
 }
+
+mod deletion_postgres_tests;
