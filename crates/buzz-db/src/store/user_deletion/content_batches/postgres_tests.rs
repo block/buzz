@@ -37,7 +37,7 @@ async fn production_snapshot_rejects_writes_and_does_not_see_later_inserts() {
     tx.rollback().await.unwrap();
 }
 
-async fn setup() -> (PgPool, PreviewOptions) {
+async fn setup() -> (PgPool, ContentBatchOptions) {
     let pool = PgPool::connect(&crate::test_support::database_url())
         .await
         .unwrap();
@@ -50,7 +50,7 @@ async fn setup() -> (PgPool, PreviewOptions) {
         .unwrap();
     (
         pool,
-        PreviewOptions {
+        ContentBatchOptions {
             community,
             pubkey: HUMAN.to_owned(),
             relay_pubkey: None,
@@ -71,7 +71,10 @@ async fn event(pool: &PgPool, c: Uuid, n: u32, author: &str, kind: i32, tags: Va
         .execute(pool).await.unwrap();
 }
 
-async fn preview(pool: &PgPool, options: &PreviewOptions) -> (PreviewSummary, Vec<Value>) {
+async fn preview(
+    pool: &PgPool,
+    options: &ContentBatchOptions,
+) -> (ContentBatchSummary, Vec<Value>) {
     let mut bytes = Vec::new();
     let summary = Db::from_pool(pool.clone())
         .user_deletion_store()

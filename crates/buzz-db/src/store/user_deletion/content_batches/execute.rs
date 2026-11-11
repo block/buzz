@@ -12,10 +12,10 @@ impl UserDeletionStore {
     /// Run the shared message planner and apply its batches only in delete mode.
     pub async fn run_message_batches(
         &self,
-        options: &PreviewOptions,
+        options: &ContentBatchOptions,
         mode: crate::user_deletion::ExecutionMode,
         writer: &mut impl Write,
-    ) -> Result<PreviewSummary> {
+    ) -> Result<ContentBatchSummary> {
         match mode {
             crate::user_deletion::ExecutionMode::ReadOnly => {
                 self.preview_message_batches(options, writer).await
@@ -33,10 +33,10 @@ impl UserDeletionStore {
         &self,
         lease: &crate::entity_deletion::EntityLease,
         stage_id: Uuid,
-        options: &PreviewOptions,
+        options: &ContentBatchOptions,
         mode: crate::user_deletion::ExecutionMode,
         writer: &mut impl Write,
-    ) -> Result<PreviewSummary> {
+    ) -> Result<ContentBatchSummary> {
         match mode {
             crate::user_deletion::ExecutionMode::ReadOnly => {
                 self.preview_message_batches(options, writer).await
@@ -56,9 +56,9 @@ impl UserDeletionStore {
     /// No durable account-deletion request or stage is completed by this API.
     pub async fn delete_message_batches(
         &self,
-        options: &PreviewOptions,
+        options: &ContentBatchOptions,
         writer: &mut impl Write,
-    ) -> Result<PreviewSummary> {
+    ) -> Result<ContentBatchSummary> {
         self.execute_message_batches(options, writer, None).await
     }
 
@@ -71,9 +71,9 @@ impl UserDeletionStore {
         &self,
         lease: &crate::entity_deletion::EntityLease,
         stage_id: Uuid,
-        options: &PreviewOptions,
+        options: &ContentBatchOptions,
         writer: &mut impl Write,
-    ) -> Result<PreviewSummary> {
+    ) -> Result<ContentBatchSummary> {
         let context = stage::Context {
             lease,
             id: stage_id,
@@ -85,10 +85,10 @@ impl UserDeletionStore {
 
     async fn execute_message_batches(
         &self,
-        options: &PreviewOptions,
+        options: &ContentBatchOptions,
         writer: &mut impl Write,
         context: Option<&stage::Context<'_>>,
-    ) -> Result<PreviewSummary> {
+    ) -> Result<ContentBatchSummary> {
         // Own the physical connection: cancellation/error must close it rather
         // than return session advisory locks to a connection pool.
         let mut conn = self.pool.acquire().await?.detach();
@@ -173,7 +173,7 @@ impl UserDeletionStore {
     }
 }
 
-async fn plan_remaining(conn: &mut PgConnection, options: &PreviewOptions) -> Result<usize> {
+async fn plan_remaining(conn: &mut PgConnection, options: &ContentBatchOptions) -> Result<usize> {
     Ok(plan(conn, options, &mut std::io::sink(), false)
         .await?
         .summary

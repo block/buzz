@@ -6,7 +6,7 @@ use sqlx::{Postgres, Transaction};
 pub(super) struct Context<'a> {
     pub lease: &'a EntityLease,
     pub id: Uuid,
-    pub options: &'a PreviewOptions,
+    pub options: &'a ContentBatchOptions,
 }
 
 impl Context<'_> {

@@ -29,7 +29,7 @@ const PAGE_SIZE: i64 = 100;
 const EVENT_COLUMNS: &str = "e.id,e.created_at,e.channel_id,e.kind";
 
 /// Scope and bounds for standalone preview or explicitly requested deletion.
-pub struct PreviewOptions {
+pub struct ContentBatchOptions {
     /// Explicit tenant scope, including content from former memberships.
     pub community: Uuid,
     /// Human public key, as npub or hex.
@@ -45,7 +45,7 @@ pub struct PreviewOptions {
 
 /// Final marker for the declared scope; never claims complete account erasure.
 #[derive(Debug, Serialize)]
-pub struct PreviewSummary {
+pub struct ContentBatchSummary {
     /// `preview_complete` or `delete_complete`; absent on failure/interruption.
     pub record: &'static str,
     /// Number of batches printed.
@@ -184,9 +184,9 @@ impl UserDeletionStore {
     /// the stated handler scope; it is not evidence that deletion is safe to run.
     pub async fn preview_message_batches(
         &self,
-        options: &PreviewOptions,
+        options: &ContentBatchOptions,
         writer: &mut impl Write,
-    ) -> Result<PreviewSummary> {
+    ) -> Result<ContentBatchSummary> {
         let mut tx = snapshot(&self.pool).await?;
         let plan = plan(&mut tx, options, writer, false).await?;
         tx.rollback().await?;
@@ -197,13 +197,13 @@ impl UserDeletionStore {
 
 struct Plan {
     start: Value,
-    summary: PreviewSummary,
+    summary: ContentBatchSummary,
     batches: Vec<Value>,
 }
 
 async fn plan(
     conn: &mut PgConnection,
-    options: &PreviewOptions,
+    options: &ContentBatchOptions,
     writer: &mut impl Write,
     collect: bool,
 ) -> Result<Plan> {
@@ -296,7 +296,7 @@ async fn plan(
         .fetch_all(&mut *conn)
         .await?;
     output.flush()?;
-    let summary = PreviewSummary {
+    let summary = ContentBatchSummary {
         record: "preview_complete",
         batches: output.batches,
         items: output.seen.len(),

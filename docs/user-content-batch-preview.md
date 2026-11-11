@@ -1,6 +1,8 @@
 # Print or delete human-content batches
 
-This operator command selects one human's supported records in one community.
+The `user_deletion::content_batches` module implements content cleanup in both
+read-only and delete modes. Its standalone command selects one human's supported
+records in one community.
 By default it only prints the inventory in batches and changes no data. Explicit
 `--print-only` does the same; `--delete` prints each batch and commits its operations.
 The two flags cannot be combined. `--read-only` remains an alias for `--print-only`.
@@ -91,11 +93,11 @@ pool. Compliant community writers wait until it releases the lock. This is not
 production account-deletion orchestration.
 
 The entire plan is checked before the first deletion. Active workflow runs or
-deliveries, inconsistent approval/run ownership, media references and potentially
-encrypted payloads prevent execution. Media evidence integration is not supplied
-by this command: a URL scan cannot authorize deleting opaque payloads. Workflows,
-run traces, approval notes and delivery errors are checked too. No bypass flag is
-provided. Preview can still print blocked records for inspection.
+deliveries and inconsistent approval/run ownership prevent execution. Under the
+workflow, content deletion also requires the same request to have completed its
+media stage. Copied links do not establish upload ownership and are not scanned
+for deletion authorization. The standalone command does not execute media cleanup.
+Read-only mode can still print blocked records for inspection.
 
 Each row is locked and checked against its preflight fingerprint before mutation.
 Parents cannot be removed while children remain; foreign-key cascades are not
@@ -115,7 +117,7 @@ accounts before operational use.
 
 The command passes `ExecutionMode::ReadOnly` or `ExecutionMode::Delete` to
 `run_message_batches(options, mode, writer)`. The handler owns the mode branch.
-Both modes use the same content planner; delete adds execution guards and
+Both modes use the same content planner; delete validates the selected rows and
 commits the selected batches. Existing preview/delete methods remain compatibility
 entry points over that shared planner. New interface regressions are prepared;
 validation of this refactor is pending.

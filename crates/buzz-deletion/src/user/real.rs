@@ -4,7 +4,8 @@ use anyhow::{bail, ensure, Context, Result};
 use buzz_db::{
     entity_deletion::{EntityDeletionStore, EntityLease, EntityRequest, EntityStage},
     user_deletion::{
-        account_batches::AccountBatchOptions, preview::PreviewOptions, UserDeletionInventory,
+        account_batches::AccountBatchOptions, content_batches::ContentBatchOptions,
+        UserDeletionInventory,
     },
     Db,
 };
@@ -92,8 +93,8 @@ impl Args {
     }
 }
 
-fn content_options(args: &Args, target: &str, community: Uuid) -> PreviewOptions {
-    PreviewOptions {
+fn content_options(args: &Args, target: &str, community: Uuid) -> ContentBatchOptions {
+    ContentBatchOptions {
         community,
         pubkey: target.into(),
         relay_pubkey: args.relay_pubkey.clone(),

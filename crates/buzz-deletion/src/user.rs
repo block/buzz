@@ -10,7 +10,7 @@ pub enum Command {
     /// Print human-content cleanup batches; optionally execute them.
     PreviewBatches {
         /// Human public key, as npub or 64-character hex.
-        #[arg(long, value_parser = preview::parse_pubkey)]
+        #[arg(long, value_parser = content_batches::parse_pubkey)]
         pubkey: String,
         /// Explicit community UUID; includes historical content after leaving.
         #[arg(long)]
@@ -22,7 +22,7 @@ pub enum Command {
         #[arg(long)]
         delete: bool,
         /// Trusted relay public key for historical actor/p attribution, if needed.
-        #[arg(long, value_parser = preview::parse_pubkey)]
+        #[arg(long, value_parser = content_batches::parse_pubkey)]
         relay_pubkey: Option<String>,
         /// Maximum row operations per printed batch.
         #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u16).range(1..=100))]
@@ -127,8 +127,8 @@ pub async fn run(command: Command) -> Result<i32> {
             !(print_only && delete),
             "--print-only conflicts with --delete"
         );
-        return preview::run(
-            buzz_db::user_deletion::preview::PreviewOptions {
+        return content_batches::run(
+            buzz_db::user_deletion::content_batches::ContentBatchOptions {
                 community,
                 pubkey,
                 relay_pubkey,
@@ -281,11 +281,11 @@ pub async fn run(command: Command) -> Result<i32> {
 }
 
 mod account_batches;
+mod content_batches;
 mod handlers;
 mod inventory;
 /// Standalone delegation of an owned community to community deletion.
 pub mod owned_community;
-mod preview;
 mod real;
 /// Read-only summaries of locally saved request progress and external waits.
 pub mod summary;

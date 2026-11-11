@@ -1,6 +1,6 @@
 use super::*;
 
-async fn delete(pool: &PgPool, options: &PreviewOptions) -> (PreviewSummary, Vec<Value>) {
+async fn delete(pool: &PgPool, options: &ContentBatchOptions) -> (ContentBatchSummary, Vec<Value>) {
     let mut bytes = Vec::new();
     let summary = Db::from_pool(pool.clone())
         .user_deletion_store()
@@ -399,7 +399,7 @@ async fn cancellation_closes_the_locked_connection_without_deleting_a_partial_ba
     blocker.rollback().await.unwrap();
     // A subsequent execution must acquire the same community lock and find the
     // uncommitted source. No pooled connection may retain the session lock.
-    let options = PreviewOptions {
+    let options = ContentBatchOptions {
         community,
         pubkey: HUMAN.to_owned(),
         relay_pubkey: None,

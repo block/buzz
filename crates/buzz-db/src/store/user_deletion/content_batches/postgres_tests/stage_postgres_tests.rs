@@ -4,7 +4,7 @@ use crate::entity_deletion::{
 };
 use std::time::Duration;
 
-async fn content_stage(db: &Db, options: &PreviewOptions) -> (EntityLease, EntityStage, Uuid) {
+async fn content_stage(db: &Db, options: &ContentBatchOptions) -> (EntityLease, EntityStage, Uuid) {
     sqlx::query("INSERT INTO relay_members(community_id,pubkey,role) VALUES($1,$2,'member')")
         .bind(options.community)
         .bind(HUMAN)
