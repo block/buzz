@@ -24,19 +24,28 @@ final _huddleLogicalParticipantPubkeysProvider = Provider.autoDispose
             currentPubkey: state.currentPubkey,
             participantPubkeys: state.participantPubkeys,
             wasAdmitted: state.wasAdmitted,
+            parentChannelId: state.parentChannelId,
           ),
         ),
       );
       final backingMembers =
           ref.watch(channelMembersProvider(channelId)).value ??
           const <ChannelMember>[];
+      final parent = session.parentChannelId == null
+          ? null
+          : ref.watch(channelByIdProvider(session.parentChannelId!));
+      final isDm =
+          parent?.isDm == true &&
+          parent!.participantPubkeys.toSet().length == 2;
       return _huddleParticipantPubkeys(
         sessionParticipantPubkeys: session.ephemeralChannelId == channelId
             ? session.participantPubkeys
             : const [],
         currentPubkey: session.currentPubkey,
         members: session.wasAdmitted
-            ? backingMembers.where((member) => member.isBot)
+            ? (isDm
+                  ? const <ChannelMember>[]
+                  : backingMembers.where((member) => member.isBot))
             : backingMembers,
       );
     });
@@ -173,14 +182,25 @@ class _HuddleInvite {
 }
 
 class _HuddleButton extends ConsumerWidget {
-  const _HuddleButton({required this.channel, required this.events});
+  const _HuddleButton({
+    required this.channel,
+    required this.events,
+    this.voiceAgent,
+  });
 
   final Channel channel;
   final List<NostrEvent> events;
+  final String? voiceAgent;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final action = _huddleNavigationAction(context, ref, channel, events);
+    final action = _huddleNavigationAction(
+      context,
+      ref,
+      channel,
+      events,
+      voiceAgent: voiceAgent,
+    );
     return IconButton(
       key: const ValueKey('channel-huddle-button'),
       color: context.colors.primary,
@@ -195,8 +215,9 @@ IosNavigationAction _huddleNavigationAction(
   BuildContext context,
   WidgetRef ref,
   Channel channel,
-  List<NostrEvent> events,
-) {
+  List<NostrEvent> events, {
+  String? voiceAgent,
+}) {
   final session = ref.watch(huddleSessionProvider);
   final latestStart = _activeHuddleStart(events);
   final unavailableFailure =
@@ -247,15 +268,17 @@ IosNavigationAction _huddleNavigationAction(
             final confirmed = await showConfirmation(
               context: context,
               title: 'Start a Huddle?',
-              message:
-                  'Your microphone will turn on, and others in this conversation can join.',
+              message: voiceAgent == null
+                  ? 'Your microphone will turn on, and others in this conversation can join.'
+                  : 'Your microphone will turn on and your Codex agent will be invited. Keep Buzz open on the desktop running this agent.',
               confirmLabel: 'Start Huddle',
             );
             if (!confirmed || !context.mounted) return;
             try {
+              if (!context.mounted) return;
               await ref
                   .read(mobileHuddleControllerProvider.notifier)
-                  .start(parentChannelId: channel.id);
+                  .start(parentChannelId: channel.id, agentPubkey: voiceAgent);
               if (!context.mounted) return;
               final started = ref.read(huddleSessionProvider);
               final ephemeralChannelId = started.ephemeralChannelId;
@@ -459,39 +482,6 @@ Future<void> _startMobileHuddleFromChannel({
   }
 }
 
-void _openMobileHuddle({
-  required BuildContext context,
-  required WidgetRef ref,
-  required _HuddleInvite invite,
-}) {
-  final config = ref.read(relayConfigProvider);
-  final nsec = config.nsec;
-  if (nsec == null || nsec.isEmpty) {
-    ScaffoldMessenger.of(context).showFeedbackSnackBar(
-      const SnackBar(content: Text('A paired identity is required.')),
-      kind: ToastKind.generic,
-    );
-    return;
-  }
-
-  final session = ref.read(huddleSessionProvider);
-  _showMobileHuddleCall(context: context, ref: ref, invite: invite);
-  if (session.ephemeralChannelId != invite.ephemeralChannelId ||
-      session.phase == HuddleSessionPhase.idle ||
-      session.phase == HuddleSessionPhase.failed) {
-    unawaited(
-      ref
-          .read(mobileHuddleControllerProvider.notifier)
-          .join(
-            parentChannelId: invite.parentChannelId,
-            ephemeralChannelId: invite.ephemeralChannelId,
-            startedBy: invite.startedBy,
-            startedEventId: invite.startedEventId,
-          ),
-    );
-  }
-}
-
 void _showMobileHuddleCall({
   required BuildContext context,
   required WidgetRef ref,
@@ -601,9 +591,7 @@ class _MobileHuddleCallPage extends ConsumerWidget {
         !unavailable &&
         session.microphonePermissionRequired;
     final localPubkey = session.currentPubkey?.toLowerCase();
-    // Audio peers remain authoritative for humans after admission. Agents are
-    // logical Huddle participants as soon as their bot membership is published,
-    // before their send-only audio connection starts speaking.
+    // In DMs, only admitted audio peers appear as connected participants.
     final participantPubkeys = ref.watch(
       _huddleLogicalParticipantPubkeysProvider(invite.ephemeralChannelId),
     );
@@ -718,6 +706,7 @@ class _MobileHuddleCallPage extends ConsumerWidget {
                     );
                   },
                 ),
+                _HuddleAgentConnectionNotice(invite: invite),
                 Expanded(
                   child: _HuddleCallParticipants(
                     connected: connected,

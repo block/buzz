@@ -25,6 +25,8 @@ import 'package:nostr/nostr.dart' as nostr;
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/message_content.dart';
+import 'package:buzz/features/channels/message_long_press_region.dart';
+import 'package:buzz/features/channels/message_content/edited_marker.dart';
 import 'package:buzz/features/channels/media_viewer_page.dart';
 import 'package:buzz/features/channels/voice_note_attachment.dart';
 import 'package:buzz/features/channels/voice_note_waveform.dart';
@@ -40,6 +42,7 @@ import 'package:buzz/shared/widgets/buzz_loading_indicator.dart';
 
 part 'message_content_bubble_cases.dart';
 part 'message_carousel_preview_cases.dart';
+part 'message_stack_cases.dart';
 
 Widget _testable(
   Widget child, {
@@ -459,7 +462,9 @@ class _TestChannelsNotifier extends ChannelsNotifier {
 
 void main() {
   carouselPreviewTests();
+  stackJourneyTests();
   bubbleContentTests();
+  editedMarkerTests();
   test('wide voice-note waveforms distribute bars across their full width', () {
     const width = 320.0;
     const sampleCount = 48;
@@ -667,6 +672,142 @@ void main() {
       expect(openedFilename, 'report.pdf');
       expect(openedHeaders?['Authorization'], startsWith('Nostr '));
     });
+
+    testWidgets('a link nothing can open offers only copy and share', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _testable(
+          const MessageContent(
+            content: 'Write to [support](mailto:support@example.com)',
+          ),
+        ),
+      );
+      await tester.longPress(find.text('support'));
+      await tester.pumpAndSettle();
+      expect(find.text('mailto:support@example.com'), findsOneWidget);
+      expect(find.text('Copy link'), findsOneWidget);
+      expect(find.text('Share link'), findsOneWidget);
+      expect(find.text('Open link'), findsNothing);
+    });
+
+    for (final platform in [TargetPlatform.iOS, TargetPlatform.android]) {
+      testWidgets('holding a link opens link actions on ${platform.name}', (
+        tester,
+      ) async {
+        debugDefaultTargetPlatformOverride = platform;
+        addTearDown(() => debugDefaultTargetPlatformOverride = null);
+        const url = 'https://relay.example/media/report.pdf';
+        final opened = <String>[];
+        final clipboard = <String>[];
+        var messageMenus = 0;
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          (call) async {
+            if (call.method == 'Clipboard.setData') {
+              clipboard.add((call.arguments as Map)['text'] as String);
+            }
+            return null;
+          },
+        );
+        addTearDown(
+          () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            SystemChannels.platform,
+            null,
+          ),
+        );
+        final auth = MediaGetAuthService(
+          baseUrl: 'https://relay.example',
+          nsec: nostr.Keys.generate().nsec,
+        );
+
+        await tester.pumpWidget(
+          _testable(
+            MessageLongPressInkWell(
+              onLongPress: (_) => messageMenus++,
+              child: const MessageContent(
+                content: 'See the [report]($url) before standup',
+              ),
+            ),
+            overrides: [
+              mediaGetAuthServiceProvider.overrideWithValue(auth),
+              openDownloadedFileProvider.overrideWithValue(
+                (url, headers, filename) async => opened.add(url),
+              ),
+            ],
+          ),
+        );
+
+        // A hold on the surrounding text still opens the message menu.
+        await tester.longPress(find.textContaining('before standup'));
+        await tester.pumpAndSettle();
+        expect(messageMenus, 1);
+        expect(find.text('Copy link'), findsNothing);
+
+        // A finger on the link tints it until the pointer moves away.
+        Color? linkTint() =>
+            (tester
+                        .widget<DecoratedBox>(
+                          find
+                              .ancestor(
+                                of: find.text('report'),
+                                matching: find.byType(DecoratedBox),
+                              )
+                              .first,
+                        )
+                        .decoration
+                    as BoxDecoration)
+                .color;
+        expect(linkTint(), isNull);
+        final press = await tester.startGesture(
+          tester.getCenter(find.text('report')),
+        );
+        await tester.pump();
+        expect(linkTint(), isNotNull);
+        await press.moveBy(const Offset(0, 40));
+        await tester.pump();
+        expect(linkTint(), isNull);
+        await press.up();
+        await tester.pumpAndSettle();
+        expect(messageMenus, 1);
+        expect(opened, isEmpty);
+
+        // A hold on the link opens its own actions instead.
+        await tester.longPress(find.text('report'));
+        await tester.pumpAndSettle();
+        expect(messageMenus, 1);
+        expect(find.text(url), findsOneWidget);
+        expect(find.text('Share link'), findsOneWidget);
+
+        await tester.tap(find.text('Copy link'));
+        await tester.pumpAndSettle();
+        expect(clipboard, [url]);
+        expect(find.text('Copy link'), findsNothing);
+
+        await tester.longPress(find.text('report'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Open link'));
+        await tester.pumpAndSettle();
+        expect(opened, [url]);
+
+        // An ordinary tap still opens the link directly.
+        await tester.tap(find.text('report'));
+        await tester.pumpAndSettle();
+        expect(opened, [url, url]);
+        expect(messageMenus, 1);
+
+        // A short landscape sheet still reaches every action.
+        _setSurfaceSize(tester, const Size(640, 260));
+        addTearDown(tester.view.reset);
+        await tester.pumpAndSettle();
+        await tester.longPress(find.text('report'));
+        await tester.pumpAndSettle();
+        await tester.ensureVisible(find.text('Share link'));
+        await tester.pumpAndSettle();
+        expect(find.text('Share link').hitTestable(), findsOneWidget);
+        debugDefaultTargetPlatformOverride = null;
+      });
+    }
 
     test('buildImageViewerRoute uses modal-style page route builder', () {
       final route = buildImageViewerRoute(
@@ -2873,20 +3014,31 @@ Photos
             find.bySemanticsLabel('Pull request cdcdcdcd in repository buzz'),
             findsOneWidget,
           );
+          // Repo, PR and issue chips have no destination, so a hold offers
+          // only Copy and Share for the exact URL.
+          final clipboard = <String>[];
+          tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            SystemChannels.platform,
+            (call) async {
+              if (call.method == 'Clipboard.setData') {
+                clipboard.add((call.arguments as Map)['text'] as String);
+              }
+              return null;
+            },
+          );
+          addTearDown(
+            () => tester.binding.defaultBinaryMessenger
+                .setMockMethodCallHandler(SystemChannels.platform, null),
+          );
           for (final url in urls.skip(2)) {
-            final chipKey = ValueKey('buzz-link-chip:$url');
-            final ignoredChip = find.ancestor(
-              of: find.byKey(chipKey),
-              matching: find.byWidgetPredicate(
-                (widget) => widget is IgnorePointer && widget.ignoring,
-              ),
-            );
-            expect(ignoredChip, findsOneWidget, reason: url);
-            expect(
-              tester.widget<IgnorePointer>(ignoredChip).ignoring,
-              isTrue,
-              reason: url,
-            );
+            await tester.longPress(find.byKey(ValueKey('buzz-link-chip:$url')));
+            await tester.pumpAndSettle();
+            expect(find.text(url), findsOneWidget, reason: url);
+            expect(find.text('Share link'), findsOneWidget, reason: url);
+            expect(find.text('Open link'), findsNothing, reason: url);
+            await tester.tap(find.text('Copy link'));
+            await tester.pumpAndSettle();
+            expect(clipboard.last, url);
           }
         },
       );

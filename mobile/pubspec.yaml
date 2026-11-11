@@ -5,7 +5,7 @@ version: 0.0.0+1
 
 environment:
   sdk: ^3.11.4
-  flutter: ">=3.47.7"
+  flutter: ">=3.47.9"
 
 dependencies:
   flutter:
@@ -52,6 +52,9 @@ dependencies:
   share_plus: ^13.3.0
   local_auth: ^3.0.2
   unorm_dart: ^0.3.3
+  flutter_cache_manager: ^3.5.0
+  file: ^7.0.1
+  path: ^1.9.1
 
 dev_dependencies:
   leak_tracker: ^11.0.2

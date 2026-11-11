@@ -47,6 +47,8 @@ pub mod feed;
 pub mod git_repo;
 /// Deployment-wide leader election over session advisory locks.
 pub mod leader_lock;
+/// Compact viewer membership projections.
+pub mod membership_snapshot;
 /// Community moderation: reports, bans/timeouts, audit actions.
 pub mod moderation;
 /// Deployment-global operator-listener mention registrations and delivery queues.
@@ -111,3 +113,11 @@ mod admission_postgres_tests;
 
 /// Durable NIP-FI verified-profile projection state.
 pub mod verified_profiles;
+
+/// Live reference authorization and upload possession.
+pub mod media;
+
+#[cfg(test)]
+mod media_postgres_tests;
+#[cfg(test)]
+mod message_edit_state_postgres_tests;

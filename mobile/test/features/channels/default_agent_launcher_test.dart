@@ -35,7 +35,7 @@ class _SavedDraft extends DefaultAgentVoiceDraft {
   @override
   Future<VoiceNoteRecording?> read() async => notes[identity];
   @override
-  Future<void> clear() async {
+  Future<void> clear({String? generation}) async {
     notes.remove(identity);
     onChanged?.call();
   }

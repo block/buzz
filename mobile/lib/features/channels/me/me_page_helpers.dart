@@ -20,12 +20,14 @@ class _MeChatRow extends ConsumerWidget {
     required this.channelId,
     required this.name,
     required this.onTap,
+    required this.onLongPress,
     required this.isUnread,
   });
   final String channelId;
   final String name;
   final bool isUnread;
   final VoidCallback onTap;
+  final VoidCallback onLongPress;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -35,11 +37,13 @@ class _MeChatRow extends ConsumerWidget {
     return Semantics(
       label: '${isUnread ? '$name, unread' : name}$status',
       onTap: onTap,
+      onLongPress: onLongPress,
       excludeSemantics: true,
       button: true,
       child: InkWell(
         borderRadius: BorderRadius.circular(Radii.md),
         onTap: onTap,
+        onLongPress: onLongPress,
         child: Padding(
           padding: const EdgeInsets.symmetric(
             horizontal: Grid.xxs,

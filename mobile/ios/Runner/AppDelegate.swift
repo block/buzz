@@ -35,6 +35,7 @@ import os.log
   private var hapticsChannel: FlutterMethodChannel?
   private let voiceStartFeedback = UIImpactFeedbackGenerator(style: .medium)
   private let voiceCancelFeedback = UIImpactFeedbackGenerator(style: .rigid)
+  private var appGroupChannel: FlutterMethodChannel?
   private var qrScannerChannel: FlutterMethodChannel?
   private var inlinePhotoPickerSupportChannel: FlutterMethodChannel?
   private var ageSignalChannel: FlutterMethodChannel?
@@ -44,6 +45,7 @@ import os.log
   private var ageSignalRequestID: UUID?
   private var ageSignalResult: FlutterResult?
   private var concentricSheetSurfaceChannel: FlutterMethodChannel?
+  private var nativePhotoZoomCoordinator: NativePhotoZoomCoordinator?
   private var nativeAttachmentPopoverCoordinator: NativeAttachmentPopoverCoordinator?
   private var nativeEmojiPickerCoordinator: NativeEmojiPickerCoordinator?
   private var nativeCreateChannelSheetCoordinator: NativeCreateChannelSheetCoordinator?
@@ -135,6 +137,23 @@ import os.log
     }
     apnsRegistrationBuffer.attach { [weak self] update in
       self?.pushChannel?.invokeMethod(update.method, arguments: update.arguments)
+    }
+    appGroupChannel = FlutterMethodChannel(
+      name: "buzz/app_group",
+      binaryMessenger: messenger
+    )
+    appGroupChannel?.setMethodCallHandler { [weak self] call, result in
+      guard call.method == "cachesDirectory" else {
+        result(FlutterMethodNotImplemented)
+        return
+      }
+      // Caches the app's extensions can read too. The OS may purge it.
+      let caches = self?.appGroupIdentifier
+        .flatMap {
+          FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: $0)
+        }?
+        .appendingPathComponent("Library/Caches", isDirectory: true)
+      result(caches?.path)
     }
     hapticsChannel = FlutterMethodChannel(
       name: "buzz/haptics",
@@ -301,6 +320,13 @@ import os.log
       messenger: messenger,
       parentViewController: engineBridge.pluginRegistry.registrar(
         forPlugin: "BuzzNativeMessagePresentation"
+      )?.viewController
+    )
+
+    nativePhotoZoomCoordinator = NativePhotoZoomCoordinator(
+      messenger: messenger,
+      parentViewController: engineBridge.pluginRegistry.registrar(
+        forPlugin: "BuzzNativePhotoZoom"
       )?.viewController
     )
 

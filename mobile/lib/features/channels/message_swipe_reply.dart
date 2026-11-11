@@ -1,5 +1,5 @@
 import 'dart:async';
-import 'dart:math' show sin, pi;
+import 'dart:math' show min, sin, pi;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/gestures.dart';
@@ -9,11 +9,14 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/theme/buzz_icons.dart';
 import '../../shared/theme/theme.dart';
+import 'channels_provider.dart';
 import 'thread_detail_page.dart';
 import 'message_reply_drag_target.dart';
 import 'timeline_message.dart';
 
-/// Reveals the existing reply action as a message is dragged to the right.
+/// Reveals the existing reply action as a message is dragged to the left.
+///
+/// Leftward keeps rightward drags free for the iOS swipe-back gesture.
 class MessageSwipeReply extends HookConsumerWidget {
   final TimelineMessage message;
   final List<TimelineMessage>? allMessages;
@@ -53,7 +56,8 @@ class MessageSwipeReply extends HookConsumerWidget {
     final cancelled = useRef(false);
     final reducedMotion = MediaQuery.disableAnimationsOf(context);
     final messages = allMessages;
-    if (messages == null || message.isSystem) return child;
+    final startsThreads = ref.watch(channelStartsThreadsProvider(channelId));
+    if (messages == null || message.isSystem || !startsThreads) return child;
 
     void reset() {
       pulse.stop();
@@ -91,7 +95,7 @@ class MessageSwipeReply extends HookConsumerWidget {
                       contentKey,
                       position,
                     );
-                    dragTarget.value = bounds?.shift(Offset(-offset.value, 0));
+                    dragTarget.value = bounds?.shift(Offset(offset.value, 0));
                     return bounds != null;
                   }
                   ..onStart = (_) {
@@ -99,12 +103,16 @@ class MessageSwipeReply extends HookConsumerWidget {
                     final layoutBox = layoutKey.currentContext
                         ?.findRenderObject();
                     if (bounds != null && layoutBox is RenderBox) {
-                      // Keep the same gutter beside the touched bubble on either
-                      // side of the conversation, independent of row width.
-                      feedbackLeft.value =
-                          layoutBox.globalToLocal(bounds.topLeft).dx -
-                          Grid.lg -
-                          Grid.xxs;
+                      // Sit just past the touched bubble's trailing edge, but
+                      // stay on screen beside bubbles that reach the row's end;
+                      // the bubble covers the feedback until it slides away.
+                      final trailing = layoutBox
+                          .globalToLocal(bounds.topRight)
+                          .dx;
+                      feedbackLeft.value = min(
+                        trailing + Grid.xxs,
+                        layoutBox.size.width - Grid.lg - Grid.xxs,
+                      );
                       contentCenter.value = layoutBox
                           .globalToLocal(bounds.center)
                           .dy;
@@ -118,7 +126,7 @@ class MessageSwipeReply extends HookConsumerWidget {
                     cancelled.value = false;
                   }
                   ..onUpdate = (details) {
-                    dragDistance.value = (dragDistance.value + details.delta.dx)
+                    dragDistance.value = (dragDistance.value - details.delta.dx)
                         .clamp(0.0, double.infinity);
                     // Keep pulling beyond readiness, with increasing rubber-band resistance.
                     final excess = dragDistance.value - 72;
@@ -244,7 +252,7 @@ class MessageSwipeReply extends HookConsumerWidget {
                     ),
                   ),
                 Transform.translate(
-                  offset: Offset(offset.value, 0),
+                  offset: Offset(-offset.value, 0),
                   child: child,
                 ),
               ],
@@ -257,11 +265,23 @@ class MessageSwipeReply extends HookConsumerWidget {
 }
 
 // Reject outside starts before entering the gesture arena, leaving navigation
-// and other row interactions free to recognize those drags.
+// and other row interactions free to recognize those drags. Only a leftward
+// drag can win, so a rightward swipe-back starting on a message still pops.
 class _MessageReplyDragRecognizer extends HorizontalDragGestureRecognizer {
   late bool Function(Offset) canStart;
 
   @override
   bool isPointerAllowed(PointerEvent event) =>
       canStart(event.position) && super.isPointerAllowed(event);
+
+  @override
+  bool hasSufficientGlobalDistanceToAccept(
+    PointerDeviceKind pointerDeviceKind,
+    double? deviceTouchSlop,
+  ) =>
+      globalDistanceMoved < 0 &&
+      super.hasSufficientGlobalDistanceToAccept(
+        pointerDeviceKind,
+        deviceTouchSlop,
+      );
 }

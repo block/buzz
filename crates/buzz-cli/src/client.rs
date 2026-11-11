@@ -12,6 +12,8 @@ use crate::error::CliError;
 
 /// NIP-FI assertion header (`docs/nips/NIP-FI.md` §Client-attached transport).
 const FEDERATED_IDENTITY_HEADER: &str = "Nostr-Federated-Identity";
+/// `User-Agent` sent on every WebSocket upgrade.
+const USER_AGENT: &str = concat!("buzz-cli/", env!("CARGO_PKG_VERSION"));
 
 /// Descriptor returned by the relay after a successful upload.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -65,8 +67,9 @@ pub fn build_imeta_tag(d: &BlobDescriptor) -> Vec<String> {
     tag
 }
 
-/// MIME types accepted for upload.
-const ALLOWED_MIMES: &[&str] = &[
+/// MIME types the relay stores as inline media; everything else is a generic
+/// file it validates, stores and serves as a download.
+const MEDIA_MIMES: &[&str] = &[
     "image/jpeg",
     "image/png",
     "image/gif",
@@ -79,6 +82,9 @@ const MAX_IMAGE_BYTES: u64 = 50 * 1024 * 1024;
 
 /// Maximum file size for video uploads (500 MB).
 const MAX_VIDEO_BYTES: u64 = 500 * 1024 * 1024;
+
+/// Maximum file size for generic file uploads (100 MB), the relay's default.
+const MAX_FILE_BYTES: u64 = 100 * 1024 * 1024;
 
 fn relay_server_tag(relay_url: &str) -> Option<String> {
     let authority = buzz_core::tenant::relay_url_authority(relay_url);
@@ -446,8 +452,21 @@ mod media_download_tests {
     }
 }
 
-const QUERY_PAGE_SIZE: u32 = 500;
+pub(crate) const QUERY_PAGE_SIZE: u32 = 500;
 
+/// The most pages one limited query reads before failing, so a relay that
+/// never runs out of events to skip cannot keep a command running forever.
+pub(crate) const MAX_QUERY_PAGES: usize = 100;
+
+fn stalled_query(detail: &str) -> CliError {
+    CliError::Relay {
+        status: 200,
+        body: format!("query pagination stopped: {detail}"),
+    }
+}
+
+/// Move the composite cursor to the page's last event, failing unless it
+/// lands strictly older than the current cursor.
 fn advance_query_cursor(
     filter: &mut serde_json::Value,
     page: &[serde_json::Value],
@@ -464,6 +483,20 @@ fn advance_query_cursor(
         .and_then(serde_json::Value::as_str)
         .filter(|id| id.len() == 64 && id.chars().all(|c| c.is_ascii_hexdigit()))
         .ok_or_else(|| CliError::Other("query event missing valid id".into()))?;
+    if let (Some(until), Some(before_id)) = (
+        filter.get("until").and_then(serde_json::Value::as_u64),
+        filter.get("before_id").and_then(serde_json::Value::as_str),
+    ) {
+        // The relay pages newest first, equal timestamps by ascending id:
+        // the next page lies at `created_at < until`, or at `until` past `before_id`.
+        let older = created_at < until
+            || (created_at == until && id.to_ascii_lowercase() > before_id.to_ascii_lowercase());
+        if !older {
+            return Err(stalled_query(
+                "the relay did not move the cursor to older events",
+            ));
+        }
+    }
     filter["until"] = serde_json::json!(created_at);
     filter["before_id"] = serde_json::json!(id);
     Ok(())
@@ -673,10 +706,14 @@ impl BuzzClient {
         })
     }
 
-    /// The NIP-FI assertion as WebSocket upgrade headers (empty without an
-    /// evidence source).
+    /// The WebSocket upgrade headers: the CLI's `User-Agent`, and the NIP-FI
+    /// assertion when there is an evidence source.
     async fn upgrade_headers(&self) -> Result<buzz_ws_client::HeaderMap, CliError> {
         let mut headers = buzz_ws_client::HeaderMap::new();
+        headers.insert(
+            "user-agent",
+            buzz_ws_client::HeaderValue::from_static(USER_AGENT),
+        );
         if let Some(assertion) = self.evidence().await? {
             let mut value =
                 buzz_ws_client::HeaderValue::from_str(&format!("Bearer {assertion}"))
@@ -701,8 +738,7 @@ impl BuzzClient {
     ///
     /// The relay's `{"error": …}` / `{"message": …}` field becomes the
     /// message. A 401 without a NIP-FI evidence source names the settings,
-    /// since an enforcing relay answers every request that way; a 403 with an
-    /// auth tag configured hints that the tag may be stale.
+    /// since an enforcing relay answers every request that way.
     fn relay_error(&self, status: u16, body: String) -> CliError {
         let message = extract_relay_message_field(&body).unwrap_or(body);
         let message = message.trim_end().to_owned();
@@ -724,18 +760,6 @@ impl BuzzClient {
                  (a human session for this key, not an agent grant) and \
                  {FEDERATED_IDENTITY_ADAPTER_ENV} to its adapter, which mints the assertion"
             ));
-        }
-        if status == 403 && self.credentials.auth_tag().is_some() {
-            let hint = if desktop {
-                "the Buzz desktop's NIP-OA auth tag may be stale or revoked; check this \
-                 identity's owner in Buzz"
-            } else {
-                "BUZZ_AUTH_TAG is set — it may be stale or revoked; try unsetting it"
-            };
-            return CliError::Relay {
-                status,
-                body: format!("{message} ({hint})"),
-            };
         }
         CliError::Relay {
             status,
@@ -805,15 +829,37 @@ impl BuzzClient {
 
     async fn query_pages(
         &self,
-        mut filter: serde_json::Value,
+        filter: serde_json::Value,
         limit: Option<u32>,
     ) -> Result<Vec<serde_json::Value>, CliError> {
+        self.query_pages_keeping(filter, limit, None).await
+    }
+
+    /// Like `query_pages`, but with `keep`, only events it accepts count
+    /// toward `limit`: paging continues past the ones it drops, always in
+    /// full pages, for at most `MAX_QUERY_PAGES` pages.
+    async fn query_pages_keeping(
+        &self,
+        mut filter: serde_json::Value,
+        limit: Option<u32>,
+        keep: Option<&dyn Fn(&serde_json::Value) -> bool>,
+    ) -> Result<Vec<serde_json::Value>, CliError> {
         let mut events = Vec::new();
+        let mut pages = 0;
 
         while limit.is_none_or(|limit| events.len() < limit as usize) {
-            let page_limit = limit
-                .map(|limit| (limit as usize - events.len()).min(QUERY_PAGE_SIZE as usize))
-                .unwrap_or(QUERY_PAGE_SIZE as usize);
+            if keep.is_some() && pages == MAX_QUERY_PAGES {
+                return Err(stalled_query(&format!(
+                    "read {MAX_QUERY_PAGES} pages without reaching the end of the results"
+                )));
+            }
+            pages += 1;
+            let page_limit = match (limit, keep) {
+                (Some(limit), None) => {
+                    (limit as usize - events.len()).min(QUERY_PAGE_SIZE as usize)
+                }
+                _ => QUERY_PAGE_SIZE as usize,
+            };
             filter["limit"] = serde_json::json!(page_limit);
 
             let raw = self.query(&filter).await?;
@@ -824,13 +870,28 @@ impl BuzzClient {
             if !done {
                 advance_query_cursor(&mut filter, &page)?;
             }
-            events.extend(page);
+            events.extend(page.into_iter().filter(|e| keep.is_none_or(|keep| keep(e))));
             if done {
                 break;
             }
         }
 
+        if let Some(limit) = limit {
+            events.truncate(limit as usize);
+        }
         Ok(events)
+    }
+
+    /// Query up to `limit` historical events that `keep` accepts, paging past
+    /// the rest until the limit is met or the history runs out.
+    pub async fn query_paginated_keeping(
+        &self,
+        filter: serde_json::Value,
+        limit: u32,
+        keep: impl Fn(&serde_json::Value) -> bool,
+    ) -> Result<Vec<serde_json::Value>, CliError> {
+        self.query_pages_keeping(filter, Some(limit), Some(&keep))
+            .await
     }
 
     /// Query up to `limit` historical events, following the relay bridge's
@@ -1387,28 +1448,26 @@ impl BuzzClient {
     pub async fn upload_file(&self, file_path: &str) -> Result<BlobDescriptor, CliError> {
         // 1. Read file — validate it exists and is a regular file
         let metadata = std::fs::metadata(file_path)
-            .map_err(|e| CliError::Other(format!("cannot access {file_path}: {e}")))?;
+            .map_err(|e| CliError::Usage(format!("cannot access {file_path}: {e}")))?;
         if !metadata.is_file() {
             return Err(CliError::Usage(format!("{file_path} is not a file")));
         }
 
         let bytes = std::fs::read(file_path)
-            .map_err(|e| CliError::Other(format!("failed to read {file_path}: {e}")))?;
+            .map_err(|e| CliError::Usage(format!("failed to read {file_path}: {e}")))?;
 
         // 2. Detect MIME from magic bytes
         let mime = infer::get(&bytes)
             .map(|t| t.mime_type().to_string())
             .unwrap_or_else(|| "application/octet-stream".to_string());
 
-        if !ALLOWED_MIMES.contains(&mime.as_str()) {
-            return Err(CliError::Usage(format!("unsupported file type: {mime}")));
-        }
-
-        // 3. Size check
-        let max = if mime.starts_with("video/") {
+        // 3. Size check. The relay decides which other types it accepts.
+        let max = if mime == "video/mp4" {
             MAX_VIDEO_BYTES
-        } else {
+        } else if MEDIA_MIMES.contains(&mime.as_str()) {
             MAX_IMAGE_BYTES
+        } else {
+            MAX_FILE_BYTES
         };
         if bytes.len() as u64 > max {
             return Err(CliError::Usage(format!(
@@ -1423,7 +1482,7 @@ impl BuzzClient {
 
         // 5. PUT request to the BUD-02 /upload endpoint with a generous timeout.
         // Auth is signed per attempt — matches the per-attempt signing pattern in download_media.
-        let upload_timeout = if mime.starts_with("video/") {
+        let upload_timeout = if max > MAX_IMAGE_BYTES {
             Duration::from_secs(600)
         } else {
             Duration::from_secs(120)
@@ -2597,6 +2656,27 @@ mod retry_policy_tests {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_unreadable_file_is_bad_input() {
+        use std::os::unix::fs::PermissionsExt;
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::set_permissions(file.path(), std::fs::Permissions::from_mode(0o000)).unwrap();
+        let client = BuzzClient::new(
+            "http://127.0.0.1:9".into(),
+            crate::credentials::Credentials::from_keys(nostr::Keys::generate()),
+        )
+        .unwrap();
+        let err = client
+            .upload_file(file.path().to_str().unwrap())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, crate::error::CliError::Usage(ref m) if m.contains("failed to read")),
+            "{err:?}"
+        );
+    }
+
     use super::{
         advance_query_cursor, create_response_with_id_if_accepted, extract_relay_response_field,
         normalize_events, BuzzClient, Credentials, Proof,
@@ -3497,7 +3577,7 @@ mod desktop_throttle_tests {
         let err = client.get_authed("/forbidden").await.unwrap_err();
         let text = err.to_string();
         assert!(
-            text.contains("in Buzz") && !text.contains("BUZZ_AUTH_TAG"),
+            !text.contains("stale") && !text.contains("BUZZ_AUTH_TAG"),
             "{text}"
         );
     }
@@ -3546,26 +3626,28 @@ mod desktop_throttle_tests {
         (BuzzClient::new(relay.into(), credentials).unwrap(), signed)
     }
 
-    /// A desktop allowing one sign-in signature per 300 ms against a relay
-    /// that drops unsigned sockets after 200 ms: the throttle is waited out
-    /// between connections, so only the live challenge is signed, with a
-    /// fresh assertion on the reconnect after the old one expired.
+    /// A desktop that throttles the first sign-in signature: the throttle is
+    /// waited out between connections, so only the live challenge is signed,
+    /// with a fresh assertion on the reconnect after the old one expired.
+    ///
+    /// The throttle is decided by call count, not by time since the test
+    /// started: on a loaded runner the desktop setup alone could outlast a
+    /// wall-clock throttle window, leaving nothing to wait out. The relay's
+    /// sign-in deadline is long for the same reason; the client drops the
+    /// throttled socket itself.
     #[tokio::test]
     async fn a_throttled_sign_in_reconnects_with_fresh_evidence() {
         use super::ws_deadline_tests::deadline_relay;
         let keys = nostr::Keys::generate();
-        let (relay, conns, _, bearers) =
-            deadline_relay(std::time::Duration::from_millis(200)).await;
-        let last = std::sync::Mutex::new(std::time::Instant::now());
+        let (relay, conns, _, bearers) = deadline_relay(std::time::Duration::from_secs(5)).await;
+        let signs = AtomicUsize::new(0);
         let (c, signed) = desktop(&relay, &keys, || dp::assertion(40), move |_| {
-            let mut last = last.lock().unwrap();
-            if last.elapsed() < std::time::Duration::from_millis(300) {
+            if signs.fetch_add(1, Ordering::SeqCst) == 0 {
                 crate::cached_assertion::test_clock::advance(60);
                 return Some(
                     serde_json::json!({"result": "", "error": "rate_limited", "retry_after": 30}),
                 );
             }
-            *last = std::time::Instant::now();
             None
         })
         .await;
@@ -4021,6 +4103,20 @@ mod ws_deadline_tests {
 
     pub(super) type Log = Arc<std::sync::Mutex<Vec<String>>>;
 
+    /// Every upgrade names the CLI and its version.
+    #[tokio::test]
+    async fn upgrade_headers_carry_the_cli_user_agent() {
+        let keys = Keys::generate();
+        let c = BuzzClient::new(
+            "http://127.0.0.1:1".into(),
+            Credentials::from_signer(Arc::new(keys.clone()), keys.public_key()),
+        )
+        .unwrap();
+        let headers = c.upgrade_headers().await.unwrap();
+        assert_eq!(headers.get("user-agent").unwrap(), super::USER_AGENT);
+        assert!(super::USER_AGENT.starts_with("buzz-cli/"));
+    }
+
     /// A sign-in signature that comes back after the relay's 5 s deadline
     /// reconnects and signs the new challenge, never the old one.
     #[tokio::test]
@@ -4144,6 +4240,51 @@ mod ws_deadline_tests {
             "{err:?}"
         );
         assert_eq!(accepted.load(Ordering::SeqCst), 1);
+    }
+
+    /// The NIP-42 AUTH event names the configured community URL, path and
+    /// trailing slash kept, as the relay checks it.
+    #[tokio::test]
+    async fn the_auth_event_names_the_relay_with_its_trailing_slash() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let named = Arc::new(std::sync::Mutex::new(None::<String>));
+        let log = named.clone();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let _ = ws
+                .send(Message::Text(r#"["AUTH","challenge"]"#.into()))
+                .await;
+            while let Some(Ok(Message::Text(text))) = ws.next().await {
+                let frame: serde_json::Value = serde_json::from_str(&text).unwrap();
+                if frame[0] == "AUTH" {
+                    let relay = frame[1]["tags"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|t| t[0] == "relay")
+                        .map(|t| t[1].as_str().unwrap().to_owned());
+                    *log.lock().unwrap() = relay;
+                }
+                let ok = serde_json::json!(["OK", frame[1]["id"], true, ""]);
+                let _ = ws.send(Message::Text(ok.to_string().into())).await;
+            }
+        });
+        let keys = Keys::generate();
+        let c = BuzzClient::new(
+            format!("http://{addr}/team/"),
+            Credentials::from_keys(keys.clone()),
+        )
+        .unwrap();
+        let event = EventBuilder::new(Kind::Custom(20001), "")
+            .sign_with_keys(&keys)
+            .unwrap();
+        c.publish_ephemeral_event(event).await.unwrap();
+        assert_eq!(
+            named.lock().unwrap().as_deref(),
+            Some(format!("ws://{addr}/team/").as_str())
+        );
     }
 
     #[test]

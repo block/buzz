@@ -1,6 +1,7 @@
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 
 import 'dart:async';
+
 import '../../shared/me/hold_to_talk.dart';
 
 import 'package:flutter/material.dart';
@@ -182,7 +183,10 @@ class DefaultAgentLauncher extends HookConsumerWidget {
                 if (!context.mounted || !destinationIsCurrent()) {
                   throw StateError('The agent or community changed.');
                 }
-                await draft.saveEvent(event);
+                await draft.saveEvent(
+                  event,
+                  generation: recording.draftGeneration,
+                );
               },
             );
           }

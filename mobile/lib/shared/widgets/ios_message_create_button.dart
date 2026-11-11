@@ -5,12 +5,14 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
+import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../relay/relay.dart';
 import '../theme/theme.dart';
 import 'avatar_image.dart';
 
 /// The four desktop creation destinations, presented by UIKit on iOS.
-class IosMessageCreateButton extends HookWidget {
+class IosMessageCreateButton extends HookConsumerWidget {
   const IosMessageCreateButton({
     super.key,
     required this.actions,
@@ -66,7 +68,7 @@ class IosMessageCreateButton extends HookWidget {
   final List<({String label, String symbol, VoidCallback? onPressed})> actions;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final route = ModalRoute.of(context);
     final coveringProgress = useAnimation(
       route?.secondaryAnimation ?? kAlwaysDismissedAnimation,
@@ -76,6 +78,14 @@ class IosMessageCreateButton extends HookWidget {
 
     final brightness = context.theme.brightness;
     final foreground = context.colors.onSurface.toARGB32();
+    // Only an avatar trigger fetches media, so only it depends on the relay.
+    final media = avatarInitial == null
+        ? null
+        : (
+            auth: ref.watch(mediaGetAuthServiceProvider),
+            client: ref.watch(mediaHttpClientProvider),
+            diskCache: ref.watch(mediaDiskCacheProvider),
+          );
     final avatarFuture = useMemoized(
       () => avatarInitial == null
           ? null
@@ -85,10 +95,16 @@ class IosMessageCreateButton extends HookWidget {
               circular: true,
               background: context.colors.primaryContainer,
               foreground: context.colors.onPrimaryContainer,
-              networkImage: NetworkImage.new,
+              networkImages: (url) => smallMediaImageProviders(
+                url: url,
+                auth: media!.auth,
+                client: media.client,
+                diskCache: media.diskCache,
+              ),
             ),
       [
         avatarUrl,
+        media,
         avatarInitial,
         context.colors.primaryContainer,
         context.colors.onPrimaryContainer,

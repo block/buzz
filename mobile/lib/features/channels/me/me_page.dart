@@ -17,11 +17,14 @@ import '../../../shared/widgets/avatar_image.dart';
 import '../../../shared/me/me_groups.dart';
 import '../../../shared/me/default_agent.dart';
 import '../../../shared/me/me_chat_title.dart';
+import '../../../shared/me/solo_chat_seed.dart';
+import '../../activity/compose_drafts_provider.dart';
 import '../../../shared/crypto/event_signing.dart';
 import '../../../shared/me/me_chat_creation.dart';
 import '../../../shared/me/me_sync.dart';
 import '../../../shared/relay/relay.dart';
 import '../../../shared/me/me_recovery.dart';
+import '../../../shared/me/me_assistant_names.dart';
 import '../../../shared/me/me_assistants.dart';
 import '../../../shared/theme/theme.dart';
 import '../../../shared/theme/buzz_icons.dart';
@@ -35,7 +38,11 @@ import 'me_assistant_picker_sheet.dart';
 import 'new_me_project.dart';
 import 'me_workspace_picker.dart';
 import 'me_recovery_dialog.dart';
+import '../../profile/user_profile_sheet.dart';
+import '../channel_actions_sheet.dart';
 import '../channel_detail_page.dart';
+import '../channel_identity_names_provider.dart';
+import '../channel_member_profile_actions.dart';
 import '../channel_management_provider.dart';
 import '../channels_provider.dart';
 
@@ -179,6 +186,21 @@ class MePage extends HookConsumerWidget {
                     ChannelDetailPage(channel: channel, personalChat: true),
               ),
             ),
+            onLongPress: () => showChannelDetailsSheet(
+              context: context,
+              channel: channel,
+              currentPubkey: viewer,
+              onMemberTap: (context, pubkey) => showUserProfileSheet(
+                context,
+                pubkey,
+                names: channelIdentityNamesProvider(channel.id),
+                contextualActions: (_) => ChannelMemberProfileActions(
+                  channel: channel,
+                  pubkey: pubkey,
+                ),
+              ),
+              personalChat: true,
+            ),
           );
           final inventorySlivers = <Widget>[
             SliverPadding(
@@ -211,7 +233,7 @@ class MePage extends HookConsumerWidget {
                     ),
                   for (final group in organization.groups) ...[
                     if (group != organization.groups.first)
-                      const SizedBox(height: Grid.twelve),
+                      const SizedBox(height: Grid.xxs),
                     MeSection(
                       key: ValueKey(group['id']),
                       label: group['name'] as String,
@@ -230,7 +252,7 @@ class MePage extends HookConsumerWidget {
                     ),
                   ],
                   if (organization.groups.isNotEmpty)
-                    const SizedBox(height: Grid.twelve),
+                    const SizedBox(height: Grid.xxs),
                   if (visible.isNotEmpty || organization.groups.isNotEmpty)
                     MeSection(
                       key: const ValueKey('me-ungrouped-chats'),

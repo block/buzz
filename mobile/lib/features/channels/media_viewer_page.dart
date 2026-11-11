@@ -84,6 +84,7 @@ PageRoute<void> buildImageViewerRoute({
   double? aspectRatio,
   List<MediaViewerImage>? galleryItems,
   int initialIndex = 0,
+  ValueChanged<int>? onSelectionChanged,
   VoidCallback? onReply,
   MediaViewerMoreAction? onMore,
   bool disableAnimations = false,
@@ -114,6 +115,7 @@ PageRoute<void> buildImageViewerRoute({
           semanticLabel: semanticLabel,
           galleryItems: images,
           initialIndex: safeInitialIndex,
+          onSelectionChanged: onSelectionChanged,
           onReply: onReply,
           onMore: onMore,
         ),
@@ -131,6 +133,7 @@ void openImageViewer(
   double? aspectRatio,
   List<MediaViewerImage>? galleryItems,
   int initialIndex = 0,
+  ValueChanged<int>? onSelectionChanged,
   VoidCallback? onReply,
   MediaViewerMoreAction? onMore,
 }) {
@@ -143,6 +146,7 @@ void openImageViewer(
       aspectRatio: aspectRatio,
       galleryItems: galleryItems,
       initialIndex: initialIndex,
+      onSelectionChanged: onSelectionChanged,
       onReply: onReply,
       onMore: onMore,
       disableAnimations: MediaQuery.disableAnimationsOf(context),
@@ -182,6 +186,9 @@ class MediaImageViewerPage extends HookConsumerWidget {
   final String? semanticLabel;
   final List<MediaViewerImage>? galleryItems;
   final int initialIndex;
+
+  /// Reports the visible photo immediately, including before any exit path.
+  final ValueChanged<int>? onSelectionChanged;
   final VoidCallback? onReply;
   final MediaViewerMoreAction? onMore;
 
@@ -192,6 +199,7 @@ class MediaImageViewerPage extends HookConsumerWidget {
     this.semanticLabel,
     this.galleryItems,
     this.initialIndex = 0,
+    this.onSelectionChanged,
     this.onReply,
     this.onMore,
   });
@@ -295,6 +303,7 @@ class MediaImageViewerPage extends HookConsumerWidget {
       }
       _precacheViewerImages(context, images, index);
       currentIndex.value = index;
+      onSelectionChanged?.call(index);
       isTransformed.value = _hasImageTransform(
         transformationControllers[index].value,
       );

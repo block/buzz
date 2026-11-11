@@ -75,9 +75,8 @@ void main() {
       );
       expect(find.text('Invite to community'), findsNothing);
       await tester.pumpAndSettle();
-      final version = find.text(
-        buildNumber.isEmpty ? 'v0.16.0' : 'v0.16.0 ($buildNumber)',
-      );
+      final label = buildNumber.isEmpty ? 'v0.16.0' : 'v0.16.0 ($buildNumber)';
+      final version = find.text(label);
       await tester.scrollUntilVisible(version, 200);
       await tester.pumpAndSettle();
       expect(version.hitTestable(), findsOneWidget);

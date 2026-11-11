@@ -111,7 +111,13 @@ class BuilderlabAccountClient {
   String? _unshared;
   bool _sharing = false;
   BuilderlabAccount? _account;
+  // The session that last signed out, in memory only, so push-stop requests
+  // already pending can still reach their relays for a short while.
+  ({String credential, DateTime until})? _signedOut;
   final _queue = SerialQueue();
+
+  /// How long after sign-out [pushStopAssertion] can still issue.
+  static const pushStopWindow = Duration(minutes: 10);
   bool _disposed = false;
 
   BuilderlabAccount? get account => _account;
@@ -382,6 +388,35 @@ class BuilderlabAccountClient {
     expectedSubject: expectedSubject,
   );
 
+  /// A relay assertion from the session that signed out within
+  /// [pushStopWindow], for a push-stop request only. That session is never
+  /// stored, shared or used for anything else, so it cannot sign back in.
+  Future<Map<String, dynamic>> pushStopAssertion(String relay, String nsec) =>
+      _serial(() async {
+        final signedOut = _signedOut;
+        if (signedOut == null || !DateTime.now().isBefore(signedOut.until)) {
+          _signedOut = null;
+          throw AccountFailure.signedOut;
+        }
+        final pubkey = AccountIdentityStore.publicKeyForNsec(nsec);
+        // Never creates a binding: the key must already belong to the account.
+        final current = await _request(
+          '/v1/buzz/nostr-identities/current',
+          credential: signedOut.credential,
+          body: {},
+        );
+        final identity = current['identity'];
+        if (identity is! Map || identity['pubkey_hex'] != pubkey) {
+          throw AccountFailure.denied;
+        }
+        return _request(
+          '/v1/buzz/identity/assertions',
+          credential: signedOut.credential,
+          body: {'relay_url': relay, 'nostr_pubkey': pubkey},
+          signingKey: nsec,
+        );
+      });
+
   Future<void> clearLocalSession() => _serial(_clear);
   Future<void> _clear() async {
     // Attempt both removals so one failure never leaves the other copy live.
@@ -401,6 +436,13 @@ class BuilderlabAccountClient {
       _unshared = _credential;
       _share();
       throw AccountFailure.storage;
+    }
+    final credential = _credential;
+    if (credential != null) {
+      _signedOut = (
+        credential: credential,
+        until: DateTime.now().add(pushStopWindow),
+      );
     }
     _credential = null;
     _unshared = null;
@@ -482,6 +524,7 @@ class BuilderlabAccountClient {
   void dispose() {
     _disposed = true;
     _credential = null;
+    _signedOut = null;
     _account = null;
     _subject.dispose();
     _http.close();

@@ -6,7 +6,8 @@ use nostr::{Event, NostrSigner, Tag};
 use serde_json::{json, Value};
 use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::tungstenite::http::HeaderMap;
+use tokio_tungstenite::tungstenite::handshake::client::Request;
+use tokio_tungstenite::tungstenite::http::{header::USER_AGENT, HeaderMap, HeaderValue};
 use tokio_tungstenite::{
     client_async, connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream,
 };
@@ -38,6 +39,19 @@ async fn phase<T>(
     tokio::time::timeout(wait + Duration::from_secs(1), io)
         .await
         .map_err(|_| WsClientError::Timeout)?
+}
+
+/// `User-Agent` sent on the upgrade unless the caller's headers supply one.
+const DEFAULT_USER_AGENT: &str = concat!("buzz-ws-client/", env!("CARGO_PKG_VERSION"));
+
+/// The upgrade request for `url`: the default `User-Agent`, then `headers`.
+fn upgrade_request(url: &url::Url, headers: HeaderMap) -> Result<Request, WsClientError> {
+    let mut request = url.as_str().into_client_request()?;
+    request
+        .headers_mut()
+        .insert(USER_AGENT, HeaderValue::from_static(DEFAULT_USER_AGENT));
+    request.headers_mut().extend(headers);
+    Ok(request)
 }
 
 /// A NIP-42-capable WebSocket connection to a Nostr relay.
@@ -85,7 +99,8 @@ impl NostrWsConnection {
     /// [`Self::connect`], sending `headers` on the WebSocket upgrade request.
     ///
     /// The headers are added after the handshake headers, so supplying a handshake
-    /// header such as `Sec-WebSocket-Key` replaces it and breaks the upgrade.
+    /// header such as `Sec-WebSocket-Key` replaces it and breaks the upgrade. A
+    /// `User-Agent` among them replaces the default `buzz-ws-client/<version>`.
     pub async fn connect_with_headers(
         url: &str,
         headers: HeaderMap,
@@ -94,8 +109,7 @@ impl NostrWsConnection {
             .parse::<url::Url>()
             .map_err(|e| WsClientError::Url(e.to_string()))?;
 
-        let mut request = parsed.as_str().into_client_request()?;
-        request.headers_mut().extend(headers);
+        let request = upgrade_request(&parsed, headers)?;
 
         let (ws, _response) = connect_async(request)
             .await
@@ -117,7 +131,7 @@ impl NostrWsConnection {
         let parsed = url
             .parse::<url::Url>()
             .map_err(|e| WsClientError::Url(e.to_string()))?;
-        let request = parsed.as_str().into_client_request()?;
+        let request = upgrade_request(&parsed, HeaderMap::new())?;
         let tcp = tokio::net::TcpStream::connect(addr)
             .await
             .map_err(|e| WsClientError::WebSocket(e.into()))?;
@@ -426,7 +440,6 @@ mod tests {
     #[tokio::test]
     async fn connect_with_headers_sends_headers_on_upgrade() {
         use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
-        use tokio_tungstenite::tungstenite::http::HeaderValue;
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("ws://{}", listener.local_addr().unwrap());
@@ -457,6 +470,56 @@ mod tests {
         assert_eq!(
             server.await.unwrap(),
             Some(HeaderValue::from_static("Bearer header.payload.signature"))
+        );
+    }
+
+    /// The `User-Agent` a relay sees on an upgrade sent with `headers`, through
+    /// `connect_with_headers` or, with `via_addr`, `connect_to_addr`.
+    #[allow(clippy::result_large_err)]
+    async fn upgrade_user_agent(headers: HeaderMap, via_addr: bool) -> Option<HeaderValue> {
+        use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut received = None;
+            let _ws = tokio_tungstenite::accept_hdr_async(
+                stream,
+                |request: &Request, response: Response| {
+                    received = request.headers().get(USER_AGENT).cloned();
+                    Ok(response)
+                },
+            )
+            .await
+            .unwrap();
+            received
+        });
+        let url = format!("ws://{addr}");
+        let _conn = if via_addr {
+            NostrWsConnection::connect_to_addr(&url, &addr).await
+        } else {
+            NostrWsConnection::connect_with_headers(&url, headers).await
+        }
+        .unwrap();
+        server.await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn upgrade_sends_default_user_agent() {
+        let expected = Some(HeaderValue::from_static(DEFAULT_USER_AGENT));
+        assert_eq!(upgrade_user_agent(HeaderMap::new(), false).await, expected);
+        assert_eq!(upgrade_user_agent(HeaderMap::new(), true).await, expected);
+        assert!(DEFAULT_USER_AGENT.starts_with("buzz-ws-client/"));
+    }
+
+    #[tokio::test]
+    async fn caller_user_agent_replaces_default() {
+        let mut headers = HeaderMap::new();
+        headers.insert(USER_AGENT, HeaderValue::from_static("example/1.0"));
+        assert_eq!(
+            upgrade_user_agent(headers, false).await,
+            Some(HeaderValue::from_static("example/1.0"))
         );
     }
 

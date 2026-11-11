@@ -11,6 +11,7 @@ import 'package:buzz/shared/widgets/buzz_loading_indicator.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/semantics.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
@@ -67,9 +68,20 @@ class Draft extends DefaultAgentVoiceDraft {
   }
 
   @override
-  Future<void> clear() async {
+  Future<void> clear({String? generation}) async {
     note = null;
     failRead = false;
+  }
+}
+
+class ObservedDiskDraft extends DefaultAgentVoiceDraft {
+  ObservedDiskDraft(Directory directory)
+    : super('test', directory: () async => directory);
+  final cleared = Completer<void>();
+  @override
+  Future<void> clear({String? generation}) async {
+    await super.clear(generation: generation);
+    if (!cleared.isCompleted) cleared.complete();
   }
 }
 
@@ -99,12 +111,19 @@ void main() {
           return null;
         });
   });
-  Future<void> mount(WidgetTester tester, {bool nativeAvatar = false}) async {
+  Future<void> mount(
+    WidgetTester tester, {
+    bool nativeAvatar = false,
+    DefaultAgentVoiceDraft? storage,
+    Future<void> Function(VoiceNoteRecording)? onRecorded,
+  }) async {
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
           voiceNoteRecorderFactoryProvider.overrideWithValue(() => recorder),
-          defaultAgentVoiceDraftProvider('test').overrideWithValue(draft),
+          defaultAgentVoiceDraftProvider(
+            'test',
+          ).overrideWithValue(storage ?? draft),
         ],
         child: MaterialApp(
           theme: AppTheme.light(),
@@ -117,11 +136,13 @@ void main() {
                 agent: DefaultAgentVoiceControl(
                   enabled: true,
                   draftIdentity: 'test',
-                  onRecorded: (_) async {
-                    if (delivery != null) await delivery!.future;
-                    if (fail) throw StateError('offline');
-                    sent++;
-                  },
+                  onRecorded:
+                      onRecorded ??
+                      (_) async {
+                        if (delivery != null) await delivery!.future;
+                        if (fail) throw StateError('offline');
+                        sent++;
+                      },
                   child: SizedBox.square(
                     dimension: 56,
                     child: IconButton(
@@ -401,12 +422,33 @@ void main() {
   testWidgets('discarding a failed send restores the navigation shortcuts', (
     tester,
   ) async {
+    final semantics = tester.ensureSemantics();
+    addTearDown(semantics.dispose);
+    void expectRecoverySemantics(String value) {
+      final node = tester.getSemantics(find.byType(DefaultAgentVoiceControl));
+      expect(node.value, value);
+      expect(node.hint, isNot(contains('Hold to record')));
+      final surface = tester.widget<Semantics>(
+        find
+            .descendant(
+              of: find.byType(DefaultAgentVoiceControl),
+              matching: find.byType(Semantics),
+            )
+            .first,
+      );
+      expect(surface.properties.customSemanticsActions, isNull);
+      final discard = tester.getSemantics(find.byTooltip('Discard voice note'));
+      expect(discard.tooltip, 'Discard voice note');
+      expect(discard.getSemanticsData().hasAction(SemanticsAction.tap), isTrue);
+    }
+
     fail = true;
     await mount(tester);
     final gesture = await hold(tester);
     await gesture.up();
     await tester.pumpAndSettle();
     expect(draft.note, isNotNull);
+    expectRecoverySemantics('Voice note awaiting delivery');
     await tester.tap(find.byTooltip('Discard voice note'));
     await tester.pumpAndSettle();
     expect(draft.note, isNull);
@@ -418,9 +460,85 @@ void main() {
     await mount(tester);
     await tester.pumpAndSettle();
     expect(find.text('Could not restore voice note. Retry'), findsOneWidget);
+    expectRecoverySemantics('Could not restore voice note');
     await tester.tap(find.byTooltip('Discard voice note'));
     await tester.pumpAndSettle();
     expect(find.byTooltip('Agent'), findsOneWidget);
     expect(find.text('Could not restore voice note. Retry'), findsNothing);
+  });
+  testWidgets('late delivery cannot clear a replacement after remount', (
+    tester,
+  ) async {
+    late Directory directory;
+    late ObservedDiskDraft storage;
+    late VoiceNoteRecording replacement;
+    await tester.runAsync(() async {
+      directory = await Directory.systemTemp.createTemp('voice-remount');
+      storage = ObservedDiskDraft(directory);
+      final source = File('${directory.path}/first.m4a');
+      await source.writeAsBytes([1, 2, 3]);
+      await storage.save(
+        VoiceNoteRecording(
+          file: XFile(source.path),
+          duration: const Duration(seconds: 2),
+          waveform: const [.2],
+        ),
+      );
+    });
+    addTearDown(() => directory.delete(recursive: true));
+    late Completer<void> acknowledged;
+    late Completer<void> sendingStarted;
+    await tester.runAsync(() async {
+      acknowledged = Completer<void>();
+      sendingStarted = Completer<void>();
+      await mount(
+        tester,
+        storage: storage,
+        onRecorded: (_) {
+          sendingStarted.complete();
+          return acknowledged.future;
+        },
+      );
+      // Drain the real storage read before interacting with the recovery UI.
+      await storage.read();
+    });
+    await tester.pumpAndSettle();
+    await tester.runAsync(() async {
+      await tester.tap(find.text('Retry voice note'));
+      await sendingStarted.future;
+    });
+    await tester.pumpWidget(const SizedBox.shrink());
+    final remounted = DefaultAgentVoiceDraft(
+      'test',
+      directory: () async => directory,
+    );
+    await tester.runAsync(() async {
+      await mount(tester, storage: remounted);
+      await remounted.read();
+    });
+    await tester.pumpAndSettle();
+    await tester.runAsync(() async {
+      await tester.tap(find.byTooltip('Discard voice note'));
+      // This mutation queues behind the UI's explicit discard.
+      final source = File('${directory.path}/replacement.m4a');
+      await source.writeAsBytes([4, 5, 6]);
+      replacement = await remounted.save(
+        VoiceNoteRecording(
+          file: XFile(source.path),
+          duration: const Duration(seconds: 3),
+          waveform: const [.8],
+        ),
+      );
+      acknowledged.complete();
+      await storage.cleared.future;
+    });
+    await tester.pumpAndSettle();
+    await tester.runAsync(() async {
+      final recovered = await remounted.read();
+      expect(recovered, isNotNull);
+      expect(recovered!.draftGeneration, replacement.draftGeneration);
+      expect(await recovered.file.readAsBytes(), [4, 5, 6]);
+    });
+    expect(tester.takeException(), isNull);
   });
 }

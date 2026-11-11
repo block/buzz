@@ -174,7 +174,8 @@ void main() {
       await tester.pumpAndSettle();
       final key = category == 'Channels'
           ? 'search-channel-row-channel-29'
-          : 'search-person-row-person-29';
+          // The page shows at most [searchPeopleShown] people.
+          : 'search-person-row-person-${searchPeopleShown - 1}';
       final last = find.byKey(ValueKey(key));
       expect(last, findsNothing);
       await tester.scrollUntilVisible(

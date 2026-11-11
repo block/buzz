@@ -214,6 +214,15 @@ pub(crate) fn refresh_team_catalog_heads_for_persona<R: tauri::Runtime>(
     pending::refresh_shared_team_catalog_heads_for_persona(app, state, persona_id);
 }
 
+/// Refresh persona-dependent catalog heads in an edit's captured community.
+pub(crate) fn refresh_team_catalog_heads_for_persona_in_scope<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    scope: &crate::managed_agents::retention::RetentionScope,
+    persona_id: &str,
+) {
+    pending::refresh_shared_team_catalog_heads_for_persona_in_scope(app, scope, persona_id);
+}
+
 /// Refresh (or retract) one team's shared 30178 catalog head after an inbound
 /// 30176 team edit landed on this device.
 ///

@@ -91,7 +91,11 @@ where
     let waiting = tokio::time::timeout(std::time::Duration::from_secs(10), async {
         loop {
             let blocked: bool = sqlx::query_scalar(
-                "SELECT EXISTS(SELECT 1 FROM pg_locks WHERE relation = $1::text::regclass AND NOT granted)",
+                // `pg_locks` spans every database, and the per-test databases
+                // are clones that share relation OIDs: match this one only.
+                "SELECT EXISTS(SELECT 1 FROM pg_locks WHERE relation = $1::text::regclass \
+                 AND NOT granted \
+                 AND database = (SELECT oid FROM pg_database WHERE datname = current_database()))",
             )
             .bind(&ancient_partition)
             .fetch_one(&mut *locker)

@@ -1,4 +1,5 @@
 import '../../shared/widgets/navigation_button_surface.dart';
+
 import 'dart:async';
 
 import 'package:flutter/material.dart';
@@ -93,7 +94,7 @@ class DefaultAgentVoiceControl extends HookConsumerWidget {
         }
         if (context.mounted) pending.value = retained;
         await onRecorded(retained);
-        await draft.clear();
+        await draft.clear(generation: retained.draftGeneration);
         if (context.mounted) pending.value = null;
       } catch (failure) {
         debugPrint('Default agent voice delivery failed: $failure');
@@ -299,16 +300,29 @@ class DefaultAgentVoiceControl extends HookConsumerWidget {
       });
       return null;
     }, [active, overlay]);
+    final canRecord = enabled && !active && !restoring.value;
     return Semantics(
       value: recording.value
           ? cancelled.value
                 ? 'Release to cancel'
                 : 'Recording ${formatVoiceNoteDuration(elapsed.value)}'
+          : sending.value
+          ? 'Sending voice note'
+          : finalizing.value
+          ? 'Preparing voice note'
+          : restoring.value
+          ? 'Restoring voice note'
+          : restoreFailed.value
+          ? 'Could not restore voice note'
+          : pending.value != null
+          ? 'Voice note awaiting delivery'
           : null,
-      hint: enabled
+      hint: canRecord
           ? 'Hold to record a voice note. Release to send. Slide up to cancel.'
+          : recording.value
+          ? 'Release to send. Slide up to cancel.'
           : null,
-      customSemanticsActions: enabled && !active
+      customSemanticsActions: canRecord
           ? {
               const CustomSemanticsAction(label: 'Record voice note'): () =>
                   unawaited(start()),
@@ -321,7 +335,7 @@ class DefaultAgentVoiceControl extends HookConsumerWidget {
           : null,
       child: Listener(
         onPointerDown: (_) {
-          if (enabled && !active) unawaited(prepareRecordingHaptic());
+          if (canRecord) unawaited(prepareRecordingHaptic());
         },
         onPointerCancel: (_) => unawaited(cancel()),
         child: GestureDetector(

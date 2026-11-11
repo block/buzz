@@ -43,13 +43,15 @@ pub(crate) enum AuthOutcome {
     NotRelayMember,
     /// NIP-FI key pairing mismatch: the NIP-42 key differs from the asserted key.
     PairingMismatch,
+    /// Shed by the AUTH concurrency cap (`buzz.relay.concurrency.auth`).
+    ConcurrencyLimit,
     Timeout,
     Disconnect,
     Shutdown,
 }
 
 impl AuthOutcome {
-    pub(crate) const ALL: [Self; 12] = [
+    pub(crate) const ALL: [Self; 13] = [
         Self::Success,
         Self::Invalid,
         Self::Banned,
@@ -59,6 +61,7 @@ impl AuthOutcome {
         Self::RelayMembershipCheckError,
         Self::NotRelayMember,
         Self::PairingMismatch,
+        Self::ConcurrencyLimit,
         Self::Timeout,
         Self::Disconnect,
         Self::Shutdown,
@@ -75,6 +78,7 @@ impl AuthOutcome {
             Self::RelayMembershipCheckError => "relay_membership_check_error",
             Self::NotRelayMember => "not_relay_member",
             Self::PairingMismatch => "pairing_mismatch",
+            Self::ConcurrencyLimit => "concurrency_limit",
             Self::Timeout => "timeout",
             Self::Disconnect => "disconnect",
             Self::Shutdown => "shutdown",

@@ -3,6 +3,8 @@
 //! These endpoints provide HTTP access to the relay's Nostr protocol,
 //! authenticated via NIP-98 signed events.
 
+mod effective_edit;
+mod membership_snapshot;
 mod read_state_snapshot;
 pub(crate) mod search_slots;
 
@@ -710,7 +712,7 @@ fn extract_channel_from_filter(filter: &nostr::Filter) -> Option<uuid::Uuid> {
 // Nostr filter JSON. nostr::Filter silently drops unknown fields during
 // deserialization, so we extract them from the raw JSON Value first.
 
-const BRIDGE_FEED_MAX_LIMIT: i64 = 100;
+const BRIDGE_FEED_MAX_LIMIT: u32 = 100;
 const BRIDGE_THREAD_MAX_LIMIT: u32 = 500;
 
 /// The `before_id` extension field, with "present but malformed" kept distinct
@@ -1063,11 +1065,12 @@ async fn handle_channel_window_filter(
         }
     };
 
-    let limit = filter
-        .limit
-        .map(|l| (l as u32).min(BRIDGE_WINDOW_MAX_LIMIT))
-        .unwrap_or(BRIDGE_WINDOW_DEFAULT_LIMIT)
-        .max(1);
+    let limit = buzz_core::filter::clamp_limit(
+        filter.limit,
+        BRIDGE_WINDOW_DEFAULT_LIMIT,
+        BRIDGE_WINDOW_MAX_LIMIT,
+    )
+    .max(1);
     let kind_filter: Option<Vec<u32>> = filter
         .kinds
         .as_ref()
@@ -1619,6 +1622,11 @@ pub async fn query_events(
         .await
         .enforces();
 
+    // This authority surface always needs payload-bound NIP-98, including dev.
+    // Detect before admission, and before Filter can drop the extension key.
+    let compact_membership = serde_json::from_slice::<Vec<Value>>(&body)
+        .is_ok_and(|filters| membership_snapshot::requested(&filters));
+
     // NIP-FI admission. [FI-TRACE-AUTHORITY-UNIFORM]
     let proof = crate::nip_fi_shadow::EnforcedProof::new(&state, &headers, "bridge");
     crate::nip_fi_shadow::observe_strict_proof(&state, &headers, "bridge", || {
@@ -1633,8 +1641,8 @@ pub async fn query_events(
                 "POST",
                 &url,
                 Some(&body),
-                state.config.require_auth_token || nip_fi_active,
-                nip_fi_enforce,
+                state.config.require_auth_token || nip_fi_active || compact_membership,
+                nip_fi_enforce || compact_membership,
             ))
             .map(|auth| auth.proof((auth.event_id_bytes, auth.signed_created_at)))
             .map_err(|e| e.into_response())
@@ -1713,6 +1721,17 @@ async fn query_member_events(
     // depth_limit, feed_types) that nostr::Filter silently drops.
     let raw_filters: Vec<Value> = serde_json::from_slice(body)
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("invalid filters: {e}")))?;
+    if membership_snapshot::requested(&raw_filters) {
+        caller.read_artifact(&raw_filters);
+        return membership_snapshot::query(
+            state,
+            tenant,
+            &pubkey,
+            caller.event_id_bytes,
+            &raw_filters,
+        )
+        .await;
+    }
     let routed = || caller.read_artifact(&raw_filters);
     if let Some(result) =
         super::artifact::query(state, tenant, &pubkey, &raw_filters, false, routed).await
@@ -1770,6 +1789,9 @@ async fn query_member_events(
             )
         })?
         .map(|events| Json(Value::Array(events)));
+    }
+    if effective_edit::requested(&raw_filters) {
+        return effective_edit::query(state, tenant, &pubkey, &raw_filters).await;
     }
     if read_state_snapshot::requested(&raw_filters) {
         return read_state_snapshot::query(state, tenant, &pubkey, &raw_filters).await;
@@ -1894,10 +1916,11 @@ async fn query_member_events(
             None => continue,
         };
 
-        let limit = filter
-            .limit
-            .map(|l| (l as i64).min(BRIDGE_FEED_MAX_LIMIT))
-            .unwrap_or(20);
+        let limit = i64::from(buzz_core::filter::clamp_limit(
+            filter.limit,
+            20,
+            BRIDGE_FEED_MAX_LIMIT,
+        ));
         let since = filter
             .since
             .and_then(|s| chrono::DateTime::from_timestamp(s.as_secs() as i64, 0));
@@ -2012,10 +2035,7 @@ async fn query_member_events(
             }
         }
 
-        let limit = filter
-            .limit
-            .unwrap_or(100)
-            .min(BRIDGE_THREAD_MAX_LIMIT as usize) as u32;
+        let limit = buzz_core::filter::clamp_limit(filter.limit, 100, BRIDGE_THREAD_MAX_LIMIT);
         let thread_cursor = extract_thread_cursor(raw);
         let thread_replies = state
             .db
@@ -2711,7 +2731,7 @@ async fn handle_bridge_search(
             _ => continue,
         };
 
-        let limit = filter.limit.unwrap_or(100).min(500) as u32;
+        let limit = buzz_core::filter::clamp_limit(filter.limit, 100, 500);
         if limit == 0 {
             continue;
         }
@@ -8264,11 +8284,10 @@ pub(crate) mod postgres_tests {
                                 .ban_community_member(community, &key, &actor, None, None)
                                 .await
                                 .expect("ban");
-                            state.invalidate_restriction_cache(community, &key);
                         }
-                        state.invalidate_restriction_cache(community, &target);
+                        state.invalidate_restrictions_local(community);
                     } else {
-                        state.invalidate_restriction_cache(community, &target);
+                        state.invalidate_restrictions_local(community);
                         state.db.pool().close().await;
                     }
                     release.notify_one();
@@ -10556,10 +10575,14 @@ pub(crate) mod postgres_tests {
 
     /// A shed history read answers 503 `database unavailable` on every
     /// bridge `/query` branch that serves one: channel window, the three
-    /// feeds and legacy thread replies. A saturated reader (every connection
-    /// checked out, none idle) rejects history reads instead of moving them
-    /// to the writer, the same `PoolTimedOut` as a full history gate.
-    /// Mutation: map any of these branches through `internal_error` → RED.
+    /// feeds, legacy thread replies and search hydration. A WS search whose
+    /// hydration is shed closes with the retryable `error: database error`
+    /// instead of an EOSE that would read as "no matches". A saturated reader
+    /// (every connection checked out, none idle) rejects history reads
+    /// instead of moving them to the writer, the same `PoolTimedOut` as a
+    /// full history gate. Mutations: map any of these branches through
+    /// `internal_error`, or let a failed WS hydration fall through to EOSE
+    /// → RED.
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn shed_history_read_maps_to_503_on_every_bridge_branch() {
@@ -10586,11 +10609,14 @@ pub(crate) mod postgres_tests {
                 "thread replies",
                 serde_json::json!({"kinds": [9], "#e": [&fx.root], "depth_limit": 1}),
             ),
+            ("search hydrate", fx.search_filter()),
         ];
         for (branch, filter) in &cases {
             let (status, body) = fx.http("/query", filter).await;
             assert_eq!(status, StatusCode::OK, "healthy {branch}: {body}");
         }
+        let frame = fx.ws_search().await;
+        assert!(frame.contains("root needle"), "healthy WS search: {frame}");
 
         let mut held = Vec::new();
         for _ in 0..fx.replica.options().get_max_connections() {
@@ -10607,6 +10633,14 @@ pub(crate) mod postgres_tests {
                 "shed {branch}: {body}"
             );
         }
+        assert_eq!(
+            fx.ws_search().await,
+            format!(
+                r#"["CLOSED","s","{}"]"#,
+                crate::handlers::req::DATABASE_ERROR_CLOSED
+            ),
+            "shed WS search hydration"
+        );
 
         drop(held);
         fx.drop().await;
@@ -10792,7 +10826,10 @@ pub(crate) mod postgres_tests {
             .expect("lock replica events");
         let search: nostr::Filter =
             serde_json::from_value(fx.search_filter()).expect("search filter");
-        let live_owner = *conn.subscriptions.lock().await.get("x").expect("x owned");
+        // `before_search_query` runs after the claim and before the query, so
+        // the live entry must already be gone there: the timeout CLOSED,
+        // which also retires it, has not happened yet.
+        let (arrived, release) = crate::nip_fi_test_hooks::search_query_hook::arm(fx.community);
         let task = tokio::spawn(handle_req(
             "x".into(),
             vec![search],
@@ -10800,11 +10837,10 @@ pub(crate) mod postgres_tests {
             conn.clone(),
             fx.state.clone(),
         ));
-        // Once search has claimed `x` its hydrate blocks on the lock. The old
-        // live fan-out must already be retired then, not only at final cleanup.
-        while conn.subscriptions.lock().await.get("x") == Some(&live_owner) {
-            tokio::task::yield_now().await;
-        }
+        tokio::time::timeout(std::time::Duration::from_secs(10), arrived)
+            .await
+            .expect("search reaches its query")
+            .expect("hook armed");
         assert!(
             fx.state
                 .sub_registry
@@ -10813,6 +10849,8 @@ pub(crate) mod postgres_tests {
             "accepting search must retire live fan-out"
         );
         assert_eq!(fx.state.pubsub.topic_refcount(&tenant, topic).await, 0);
+        assert!(rx.is_empty(), "nothing sent before the query");
+        release.notify_one();
         task.await.expect("search task");
         locker.rollback().await.expect("unlock");
 

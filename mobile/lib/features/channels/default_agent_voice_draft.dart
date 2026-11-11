@@ -1,7 +1,9 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
 import 'package:crypto/crypto.dart';
+import 'package:uuid/uuid.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:path_provider/path_provider.dart';
@@ -21,6 +23,24 @@ class DefaultAgentVoiceDraft {
   final String identity;
   final void Function()? onChanged;
 
+  // Serialize mutations across remounted controls sharing the same disk draft.
+  static final _writes = <String, Future<void>>{};
+
+  Future<T> _mutate<T>(Future<T> Function(File) action) async {
+    final previous = _writes[identity];
+    final done = Completer<void>();
+    _writes[identity] = done.future;
+    try {
+      await previous;
+      return await action(await _manifest());
+    } finally {
+      done.complete();
+      if (identical(_writes[identity], done.future)) {
+        _writes.remove(identity);
+      }
+    }
+  }
+
   Future<File> _manifest() async {
     final root = await _directory();
     final directory = Directory('${root.path}/agent-voice-drafts');
@@ -30,8 +50,7 @@ class DefaultAgentVoiceDraft {
     );
   }
 
-  Future<VoiceNoteRecording?> read() async {
-    final manifest = await _manifest();
+  Future<VoiceNoteRecording?> read() => _mutate((manifest) async {
     if (!await manifest.exists()) return null;
     final data =
         jsonDecode(await manifest.readAsString()) as Map<String, dynamic>;
@@ -39,29 +58,39 @@ class DefaultAgentVoiceDraft {
       // iOS can relocate the app container on update/reinstall. The audio
       // always lives beside its manifest, including drafts from older builds.
       file: XFile('${manifest.path}.m4a', mimeType: 'audio/mp4'),
+      draftGeneration: data['generation'] as String?,
       duration: Duration(milliseconds: data['duration'] as int),
       waveform: (data['waveform'] as List)
           .cast<num>()
           .map((x) => x.toDouble())
           .toList(),
     );
-  }
+  });
 
-  Future<VoiceNoteRecording> save(VoiceNoteRecording note) async {
-    final manifest = await _manifest();
+  Future<VoiceNoteRecording> save(VoiceNoteRecording note) => _mutate((
+    manifest,
+  ) async {
     // Keep the recipient discoverable even if the manifest becomes unreadable.
     await File(
       '${manifest.path}.identity',
     ).writeAsString(identity, flush: true);
     final path = '${manifest.path}.m4a';
-    if (note.file.path != path) await File(note.file.path).copy(path);
     final existing = await manifest.exists()
         ? jsonDecode(await manifest.readAsString()) as Map<String, dynamic>
         : <String, dynamic>{};
+    if (note.draftGeneration != null &&
+        note.draftGeneration != existing['generation']) {
+      throw StateError('The saved voice note changed.');
+    }
+    if (note.file.path != path) await File(note.file.path).copy(path);
+    final generation = note.file.path == path
+        ? existing['generation'] as String? ?? const Uuid().v4()
+        : const Uuid().v4();
     final temporary = File('${manifest.path}.tmp');
     await temporary.writeAsString(
       jsonEncode({
-        ...existing,
+        if (note.file.path == path) ...existing,
+        'generation': generation,
         'identity': identity,
         'duration': note.duration.inMilliseconds,
         'waveform': note.waveform,
@@ -72,42 +101,51 @@ class DefaultAgentVoiceDraft {
     onChanged?.call();
     return VoiceNoteRecording(
       file: XFile(path, mimeType: 'audio/mp4'),
+      draftGeneration: generation,
       duration: note.duration,
       waveform: note.waveform,
     );
-  }
+  });
 
   /// Reuse the signed event after an uncertain acknowledgement.
-  Future<NostrEvent?> readEvent() async {
-    final manifest = await _manifest();
+  Future<NostrEvent?> readEvent() => _mutate((manifest) async {
     if (!await manifest.exists()) return null;
     final data =
         jsonDecode(await manifest.readAsString()) as Map<String, dynamic>;
     return data['event'] == null
         ? null
         : NostrEvent.fromJson(data['event'] as Map<String, dynamic>);
-  }
+  });
 
   /// Persist the exact signed event before it can leave the device.
-  Future<void> saveEvent(NostrEvent event) async {
-    final manifest = await _manifest();
-    final data =
-        jsonDecode(await manifest.readAsString()) as Map<String, dynamic>;
-    data['event'] = event.toJson();
-    final temporary = File('${manifest.path}.tmp');
-    await temporary.writeAsString(jsonEncode(data), flush: true);
-    await temporary.rename(manifest.path);
-  }
+  Future<void> saveEvent(NostrEvent event, {String? generation}) =>
+      _mutate((manifest) async {
+        final data =
+            jsonDecode(await manifest.readAsString()) as Map<String, dynamic>;
+        if (generation != null && data['generation'] != generation) {
+          throw StateError('The saved voice note changed.');
+        }
+        data['event'] = event.toJson();
+        final temporary = File('${manifest.path}.tmp');
+        await temporary.writeAsString(jsonEncode(data), flush: true);
+        await temporary.rename(manifest.path);
+      });
 
-  Future<void> clear() async {
-    final manifest = await _manifest();
+  /// Clear only this generation after a send; unconditional for explicit discard.
+  Future<void> clear({String? generation}) => _mutate((manifest) async {
+    if (generation != null) {
+      if (!await manifest.exists()) return;
+      final data =
+          jsonDecode(await manifest.readAsString()) as Map<String, dynamic>;
+      if (data['generation'] != generation) return;
+    }
     final audio = File('${manifest.path}.m4a');
     if (await audio.exists()) await audio.delete();
     if (await manifest.exists()) await manifest.delete();
     final index = File('${manifest.path}.identity');
     if (await index.exists()) await index.delete();
     onChanged?.call();
-  }
+  });
 }
 
 /// Injectable local draft storage for the default-agent recording surface.

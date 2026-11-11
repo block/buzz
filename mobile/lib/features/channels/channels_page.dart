@@ -4,6 +4,7 @@ import 'channel_unread.dart';
 import '../../shared/widgets/collapsible_section_body.dart';
 import '../../shared/me/me_sync.dart';
 import '../../shared/hosted/hosted_relay_auth.dart';
+import '../../shared/hosted/organization_environment.dart';
 import '../../shared/hosted/organization_sign_in.dart';
 
 import 'dart:async';
@@ -115,6 +116,7 @@ class ChannelsPage extends HookConsumerWidget {
     this.onSearch,
     this.messagesFilters,
     this.messagesActionsBuilder,
+    this.messagesActionsWidth = 0,
     this.soloSliver,
     this.showTeam = true,
     this.showTeamHeading = false,
@@ -129,9 +131,12 @@ class ChannelsPage extends HookConsumerWidget {
   });
 
   final WidgetBuilder settingsPageBuilder;
-  final Widget? messagesFilters;
+  final Widget Function(bool isCollapsed)? messagesFilters;
   final List<Widget> Function(VoidCallback openSwitcher, GlobalKey avatarKey)?
   messagesActionsBuilder;
+
+  /// Width of the trailing controls that collapsed filters must leave clear.
+  final double messagesActionsWidth;
   final Widget? soloSliver;
   final bool showTeam;
   final bool showTeamHeading;
@@ -187,6 +192,12 @@ class ChannelsPage extends HookConsumerWidget {
           : filterContentHeight,
       useNativeNavigation: messagesFilters == null,
     );
+    // A sheet's dim barrier can't composite over Home's native soft edge, so
+    // use the Flutter backdrop while another route covers this page.
+    final route = ModalRoute.of(context);
+    final headerNativeSuppressed = useValueNotifier(false);
+    headerNativeSuppressed.value =
+        messagesFilters != null && !(route?.isCurrent ?? true);
     final communityAvatarKey = useMemoized(GlobalKey.new);
     final nativeCommunityAvatarBounds = useRef<Rect?>(null);
     final headerKey = useMemoized(GlobalKey.new);
@@ -602,6 +613,7 @@ class ChannelsPage extends HookConsumerWidget {
         onNativeReadyChanged: (ready) => nativeHeaderReady.value = ready,
         nativeTitle: '',
         useNativeNavigation: messagesFilters == null,
+        nativeViewSuppressed: headerNativeSuppressed,
         nativeLeading: messagesFilters != null
             ? null
             : IosNavigationAction(
@@ -736,9 +748,23 @@ class ChannelsPage extends HookConsumerWidget {
             ? const SizedBox.expand()
             : Padding(
                 padding: EdgeInsets.only(
-                  right: 60 * headerCollapse.value / filterContentHeight,
+                  // As soon as the rows overlap, keep the entire action
+                  // cluster clear. Interpolating this inset blocks the bell
+                  // during partial collapse even when the final layout fits.
+                  right: headerCollapse.value > 0
+                      ? messagesActionsWidth + _kTopSectionInset
+                      : 0,
                 ),
-                child: messagesFilters,
+                child: ClipRect(
+                  // Native glass paints its shadows outside the viewport, but
+                  // scrolled filters must not paint over the header actions.
+                  clipBehavior: headerCollapse.value > 0
+                      ? Clip.hardEdge
+                      : Clip.none,
+                  child: messagesFilters!(
+                    headerCollapse.value >= filterContentHeight,
+                  ),
+                ),
               ),
       ),
       body: _ChannelsBody(

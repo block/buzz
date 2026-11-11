@@ -3,6 +3,7 @@ import 'message_swipe_reply.dart';
 import '../../shared/widgets/ios_scroll_to_top.dart';
 import 'message_footer_layout.dart';
 import 'reply_summary_link.dart';
+
 import 'dart:async';
 import 'dart:math' as math;
 
@@ -62,6 +63,7 @@ import 'reaction_row.dart';
 import '../../shared/read_state/read_state_provider.dart';
 import 'send_message_provider.dart';
 import 'sticky_date_header.dart';
+import 'date_header_scroll_activity.dart';
 import 'reading_marks.dart';
 import 'timeline_message.dart';
 
@@ -115,6 +117,11 @@ class ThreadDetailPage extends HookConsumerWidget {
     // signing identity instead of freezing that incomplete route snapshot.
     final currentPubkey =
         ref.watch(currentPubkeyProvider) ?? this.currentPubkey;
+    // A Solo chat's threads are read-only: its agents answer at top level.
+    final canReply =
+        isMember &&
+        !isArchived &&
+        ref.watch(channelStartsThreadsProvider(channelId));
     final appView = View.of(context);
     final composerDockHeight = useState(0.0);
     final composerFocusNode = useFocusNode();
@@ -266,6 +273,7 @@ class ThreadDetailPage extends HookConsumerWidget {
     final itemPositionsListener = useMemoized(ItemPositionsListener.create);
     final listViewport = useMemoized(LaidOutViewport.new);
     useEffect(() => listViewport.dispose, [listViewport]);
+    final dateScrollActivity = useDateHeaderScrollActivity(threadHead.id);
     final stickyDateHeaderState = useValueNotifier(
       StickyDateHeaderState.hidden,
     );
@@ -289,6 +297,7 @@ class ThreadDetailPage extends HookConsumerWidget {
     final tailCorrectionInProgress = useRef(false);
     final tailCorrectionGeneration = useRef(0);
     final activeThreadScrollPosition = useRef<ScrollPosition?>(null);
+    final threadMaxScrollExtents = useMemoized(Expando<double>.new);
     final composerHasFocus = useListenable(composerFocusNode).hasFocus;
     final viewportHeight = useListenable(listViewport.height).value;
     final previousViewportHeight = useRef(viewportHeight);
@@ -345,8 +354,7 @@ class ThreadDetailPage extends HookConsumerWidget {
     );
 
     bool threadTailIsVisible() {
-      if (isMember &&
-          !isArchived &&
+      if (canReply &&
           (!viewportHeight.isFinite ||
               viewportHeight <= 0 ||
               composerDockHeight.value <= 0)) {
@@ -643,12 +651,17 @@ class ThreadDetailPage extends HookConsumerWidget {
           headHeight.value == null) {
         return null;
       }
-      if (initialMessageId != null) {
+      // A targeted entry starts at its target, not the tail. Absorb the
+      // replies it hydrates with (a provisional list, then the relay's) until
+      // the target jump reveals the list; a tail correction scheduled earlier
+      // would cancel that one-shot jump and leave the list hidden. Later
+      // arrivals use the ordinary rules below, so a sent reply comes into view.
+      if (initialMessageId != null && !initialViewportReady.value) {
         initialTailSettle.abandon();
         previousReplyCount.value = replies.length;
         return null;
       }
-      if (isMember && !isArchived && composerDockHeight.value <= 0) {
+      if (canReply && composerDockHeight.value <= 0) {
         return null;
       }
       if (!initialTailSettle.isComplete) {
@@ -731,19 +744,23 @@ class ThreadDetailPage extends HookConsumerWidget {
           1 - ((Grid.xs + navigationBottomInset) / viewportHeight) + 0.01;
       final visible = <TimelineMessage>[];
       for (final position in itemPositionsListener.itemPositions.value) {
-        if (position.itemLeadingEdge < topEdge ||
-            position.itemTrailingEdge > bottomEdge) {
-          continue;
-        }
-        if (position.index == headIndex) {
-          // The head is read like a reply. A thread opened directly, from
-          // a link or a notification, may be the only place it is seen.
-          if (!liveDeletionHidesHead) visible.add(liveHead);
-          continue;
-        }
+        // The head is read like a reply. A thread opened directly, from a
+        // link or a notification, may be the only place it is seen.
         final replyIndex = position.index - indexForReply(0);
-        if (replyIndex < 0 || replyIndex >= replies.length) continue;
-        visible.add(replies[replyIndex]);
+        final message = position.index == headIndex
+            ? (liveDeletionHidesHead ? null : liveHead)
+            : replyIndex < 0 || replyIndex >= replies.length
+            ? null
+            : replies[replyIndex];
+        if (message != null &&
+            isReadableRow(
+              position,
+              start: topEdge,
+              end: bottomEdge,
+              linked: message.id == initialMessageId,
+            )) {
+          visible.add(message);
+        }
       }
       final isDm =
           ref.read(channelsProvider.notifier).channelById(channelId)?.isDm ??
@@ -937,6 +954,7 @@ class ThreadDetailPage extends HookConsumerWidget {
                   child: StickyDateHeader(
                     key: const ValueKey('thread-sticky-date-header'),
                     state: stickyDateHeaderState,
+                    scrollVisible: dateScrollActivity,
                   ),
                 ),
               ],
@@ -950,80 +968,107 @@ class ThreadDetailPage extends HookConsumerWidget {
           Column(
             children: [
               Expanded(
-                child: _ThreadMessageList(
-                  headHeight: headHeight.value ?? 0,
-                  onHeadHeightChanged: (height) {
-                    if (context.mounted) headHeight.value = height;
+                child: NotificationListener<ScrollMetricsNotification>(
+                  onNotification: (notification) {
+                    if (notification.depth == 0) {
+                      _followThreadTailOnMetricsChange(
+                        notification,
+                        activePosition: activeThreadScrollPosition.value,
+                        previousMaxExtents: threadMaxScrollExtents,
+                        followsTail: () =>
+                            followsThreadTail.value &&
+                            initialTailSettle.isComplete &&
+                            !tailIntent.isDragging &&
+                            !userOptedOutOfTailFollow.value &&
+                            !isNavigatingToThreadTail.value &&
+                            // A jump away from the tail can briefly leave the
+                            // position at an estimated end; only content
+                            // growing at the real tail should be followed.
+                            itemPositionsListener.itemPositions.value.any(
+                              (item) =>
+                                  item.index ==
+                                  _threadTailIndex(replies.length),
+                            ),
+                      );
+                    }
+                    return false;
                   },
-                  viewport: listViewport,
-                  onUserScrollStart: () {
-                    hidesLatestForInitialTailSettle.value = false;
-                    hidesLatestForComposerTailCorrection.value = false;
-                    initialTailSettle.abandon();
-                    initialViewportReady.value = true;
-                    tailCorrectionInProgress.value = false;
-                    isNavigatingToThreadTail.value = false;
-                    tailIntent.beginDrag();
-                    userOptedOutOfTailFollow.value = true;
-                    userDragDetachedTailFollow.value = true;
-                    followsThreadTail.value = false;
-                  },
-                  onUserScrollEnd: () {
-                    tailIntent.endDrag();
-                    tailIntent.schedule(
-                      allowed: userOptedOutOfTailFollow.value,
-                      revalidate: () =>
-                          context.mounted &&
-                          itemScrollController.isAttached &&
-                          !tailIntent.isDragging &&
-                          userOptedOutOfTailFollow.value,
-                      action: () {
-                        _resumeThreadTailFollow(
-                          isVisible: threadTailIsVisible,
-                          userOptedOut: userOptedOutOfTailFollow,
-                          followsTail: followsThreadTail,
-                        );
-                        if (!userOptedOutOfTailFollow.value) {
-                          userDragDetachedTailFollow.value = false;
-                        }
-                      },
-                    );
-                  },
-                  visible: threadViewportVisible,
-                  itemScrollController: itemScrollController,
-                  itemPositionsListener: itemPositionsListener,
-                  bottomInset: timelineBottomInset,
-                  replies: replies,
-                  knownAgents: threadTyping.isEmpty
-                      ? const {}
-                      : ref.watch(meAgentInventoryProvider).value ?? const {},
-                  inlineTyping: isMember && !isArchived
-                      ? threadTyping
-                      : const [],
-                  relayReplyState: relayReplyState,
-                  onRetryReplies: () =>
-                      ref.invalidate(threadRepliesProvider(repliesArgs)),
-                  localSendAnimations: localSendAnimations,
-                  trackActiveScrollPosition: trackActiveScrollPosition,
-                  headIsDeleted: liveDeletionHidesHead,
-                  head: liveHead,
-                  stickyDayTimestamp: stickyDayTimestamp,
-                  channelNames: channelNamesMap,
-                  channelId: channelId,
-                  currentPubkey: currentPubkey,
-                  highlightedMessageId: highlightedMessageId.value,
-                  allMessages: allMsgs,
-                  isMember: isMember,
-                  isArchived: isArchived,
-                  composerFocusNode: composerFocusNode,
-                  restoreComposerFocus: () =>
-                      restoreComposerFocus.value?.call(),
-                  childrenByParent: childrenByParent,
+                  child: _ThreadMessageList(
+                    dateScrollActivity: dateScrollActivity,
+                    headHeight: headHeight.value ?? 0,
+                    onHeadHeightChanged: (height) {
+                      if (context.mounted) headHeight.value = height;
+                    },
+                    viewport: listViewport,
+                    onUserScrollStart: () {
+                      hidesLatestForInitialTailSettle.value = false;
+                      hidesLatestForComposerTailCorrection.value = false;
+                      initialTailSettle.abandon();
+                      initialViewportReady.value = true;
+                      tailCorrectionInProgress.value = false;
+                      isNavigatingToThreadTail.value = false;
+                      tailIntent.beginDrag();
+                      userOptedOutOfTailFollow.value = true;
+                      userDragDetachedTailFollow.value = true;
+                      followsThreadTail.value = false;
+                    },
+                    onUserScrollEnd: () {
+                      tailIntent.endDrag();
+                      tailIntent.schedule(
+                        allowed: userOptedOutOfTailFollow.value,
+                        revalidate: () =>
+                            context.mounted &&
+                            itemScrollController.isAttached &&
+                            !tailIntent.isDragging &&
+                            userOptedOutOfTailFollow.value,
+                        action: () {
+                          _resumeThreadTailFollow(
+                            isVisible: threadTailIsVisible,
+                            userOptedOut: userOptedOutOfTailFollow,
+                            followsTail: followsThreadTail,
+                          );
+                          if (!userOptedOutOfTailFollow.value) {
+                            userDragDetachedTailFollow.value = false;
+                          }
+                        },
+                      );
+                    },
+                    visible: threadViewportVisible,
+                    itemScrollController: itemScrollController,
+                    itemPositionsListener: itemPositionsListener,
+                    bottomInset: timelineBottomInset,
+                    replies: replies,
+                    knownAgents: threadTyping.isEmpty
+                        ? const {}
+                        : ref.watch(meAgentInventoryProvider).value ?? const {},
+                    inlineTyping: isMember && !isArchived
+                        ? threadTyping
+                        : const [],
+                    relayReplyState: relayReplyState,
+                    onRetryReplies: () =>
+                        ref.invalidate(threadRepliesProvider(repliesArgs)),
+                    localSendAnimations: localSendAnimations,
+                    trackActiveScrollPosition: trackActiveScrollPosition,
+                    headIsDeleted: liveDeletionHidesHead,
+                    head: liveHead,
+                    stickyDayTimestamp: stickyDayTimestamp,
+                    channelNames: channelNamesMap,
+                    channelId: channelId,
+                    currentPubkey: currentPubkey,
+                    highlightedMessageId: highlightedMessageId.value,
+                    allMessages: allMsgs,
+                    isMember: isMember,
+                    isArchived: isArchived,
+                    composerFocusNode: composerFocusNode,
+                    restoreComposerFocus: () =>
+                        restoreComposerFocus.value?.call(),
+                    childrenByParent: childrenByParent,
+                  ),
                 ),
               ),
             ],
           ),
-          if (isMember && !isArchived)
+          if (canReply)
             AndroidImeLift(
               child: Align(
                 alignment: Alignment.bottomCenter,
@@ -1041,6 +1086,12 @@ class ThreadDetailPage extends HookConsumerWidget {
                         hintText: 'Reply in thread\u2026',
                         threadHeadId: threadHead.id,
                         rootId: effectiveRootId,
+                        prefillScopeMessages: channel?.isDm ?? true
+                            ? null
+                            : [
+                                if (!liveDeletionHidesHead) liveHead,
+                                ...replies,
+                              ],
                         onFocusRequested: followThreadTailFromComposer,
                         onSend:
                             (

@@ -45,7 +45,11 @@ class VoiceNoteRecording {
     required this.file,
     required this.duration,
     required this.waveform,
+    this.draftGeneration,
   });
+
+  /// Identifies the persisted draft generation for conditional cleanup.
+  final String? draftGeneration;
 
   final XFile file;
   final Duration duration;

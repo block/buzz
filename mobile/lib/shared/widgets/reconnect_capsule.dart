@@ -12,6 +12,7 @@ class ReconnectCapsule extends HookWidget {
     this.secondaryAction,
     this.islandOrigin,
     this.islandSpeed = 0.75,
+    this.inline = false,
   });
 
   final VoidCallback onSignIn;
@@ -31,6 +32,9 @@ class ReconnectCapsule extends HookWidget {
   final Rect? islandOrigin;
   final double islandSpeed;
 
+  /// Reserves space in a page layout instead of overlaying its content.
+  final bool inline;
+
   @override
   Widget build(BuildContext context) {
     final transientVisible = useValueListenable(_toastCoordinator(context));
@@ -48,6 +52,7 @@ class ReconnectCapsule extends HookWidget {
       visible: visible,
       islandOrigin: islandOrigin,
       islandSpeed: islandSpeed,
+      inline: inline,
     );
   }
 }

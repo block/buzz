@@ -582,13 +582,13 @@ pub(crate) async fn query_events_on(
         _ => None,
     };
     // Thread-reply reads must be planned with their root: a cached generic
-    // plan sorts every reply of a large thread. Tag matches likewise.
-    let persistent = !has_tag_values(q) && root.is_none();
+    // plan sorts every reply of a large thread. Tag and `#d` matches likewise.
+    let persistent = !plans_with_bound_values(q) && root.is_none();
     let limit = page_limit(q);
     // Recent-first (see `recent_pass`): the newest partitions answer a page
     // that fills there; older rows are read only for what is still missing.
     // A thread-reply read is a `#e` lookup, which is never split.
-    let rows = match (root, recent_pass_floor(q, Utc::now())) {
+    let rows = match (root, recent_pass_split(q, Utc::now())) {
         (Some(root), _) => {
             let mut qb = build_thread_reply_sql(q, root);
             fetch_with_read_deadline(conn, qb.build().persistent(persistent), deadline).await?
@@ -597,10 +597,10 @@ pub(crate) async fn query_events_on(
             let mut qb = build_query_events_sql(q, Range::All, limit);
             fetch_with_read_deadline(conn, qb.build().persistent(persistent), deadline).await?
         }
-        (None, Some(floor)) => {
+        (None, Some(split)) => {
             let mut read = ReadTransaction::begin(conn, deadline).await?;
             let mut rows = Vec::new();
-            let mut pass = Some((Range::Recent(floor), limit));
+            let mut pass = Some((Range::Recent(split), limit));
             while let Some((range, pass_limit)) = pass {
                 let mut qb = build_query_events_sql(q, range, pass_limit);
                 rows.extend(read.fetch(qb.build().persistent(persistent)).await?);
@@ -648,12 +648,15 @@ pub(crate) fn answer_without_db(q: &EventQuery) -> Option<Result<Vec<StoredEvent
     matches_nothing.then(|| Ok(vec![]))
 }
 
-/// The floor to split `q` at ([`crate::store::recent_pass`]), or `None` to
-/// read it whole. Lookups by id, `e` tag or `d` tag, and fetch-everything
+/// Where to split `q` ([`crate::store::recent_pass`]), or `None` to read it
+/// whole. Lookups by id, `e` tag or `d` tag, and fetch-everything
 /// reads (`max_limit`, the COUNT fallback) match a fixed set of rows wherever
 /// they sit, so a recent pass rarely fills their page. An `OFFSET` skips rows
 /// on both sides of the floor, so its split point is unknown.
-fn recent_pass_floor(q: &EventQuery, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+fn recent_pass_split(
+    q: &EventQuery,
+    now: DateTime<Utc>,
+) -> Option<crate::store::recent_pass::Split> {
     let lookup = q.offset.is_some_and(|o| o > 0)
         || q.ids.is_some()
         || q.e_tags.is_some()
@@ -664,7 +667,7 @@ fn recent_pass_floor(q: &EventQuery, now: DateTime<Utc>) -> Option<DateTime<Utc>
     if lookup {
         return None;
     }
-    crate::store::recent_pass::floor_for(now, q.kinds.as_deref(), q.since, q.until)
+    crate::store::recent_pass::split_for(now, q.kinds.as_deref(), q.since, q.until)
 }
 
 /// The `LIMIT` [`query_events_on`] applies: the requested page, clamped.
@@ -863,19 +866,7 @@ fn push_event_filters(qb: &mut QueryBuilder<sqlx::Postgres>, col_prefix: &str, q
         }
     }
 
-    if let Some(ref d) = q.d_tag {
-        qb.push(format!(" AND {col_prefix}d_tag = "))
-            .push_bind(d.clone());
-    } else if let Some(ref ds) = q.d_tags {
-        if !ds.is_empty() {
-            qb.push(format!(" AND {col_prefix}d_tag IN ("));
-            let mut sep = qb.separated(", ");
-            for d in ds {
-                sep.push_bind(d.clone());
-            }
-            qb.push(")");
-        }
-    }
+    push_d_tag_filter(qb, col_prefix, q);
 
     // Shared-gated visibility pushdown: exclude SHARED_GATED_KINDS events that
     // are neither authored by the reader nor explicitly shared.  Applied BEFORE
@@ -1321,12 +1312,34 @@ fn push_exact_tag_match(
         .push(")))");
 }
 
-/// Whether `q` carries a [`EventQuery::tag_values`] match. Such a query runs
-/// as an unnamed statement, so Postgres plans it with the bound values. After
-/// a few runs, a cached generic plan ignores the value and can scan every
-/// group-state row in the community instead of using the `tags` GIN index.
-fn has_tag_values(q: &EventQuery) -> bool {
+/// Whether `q` must run as an unnamed statement, so Postgres plans it with the
+/// bound values. After a few runs on a connection, Postgres can switch a named
+/// statement to a cached generic plan that ignores the values:
+/// - a [`EventQuery::tag_values`] match then scans every group-state row in
+///   the community instead of using the `tags` GIN index;
+/// - a multi-value `#d` ([`EventQuery::d_tags`]) match walks the author's
+///   `created_at` index and filters `d_tag` row by row. Its `LIMIT` is never
+///   reached when it asks for one row per value, so it reads every stored
+///   version of the kind (relay-signed channel metadata, say) instead of
+///   probing `idx_events_parameterized` once per value.
+fn plans_with_bound_values(q: &EventQuery) -> bool {
     q.tag_values.iter().any(|(_, values)| !values.is_empty())
+        || q.d_tags.as_ref().is_some_and(|ds| !ds.is_empty())
+}
+
+/// AND the NIP-33 `d` match: one value, or any of [`EventQuery::d_tags`] as
+/// one array bind, so the number of values does not change the SQL text.
+fn push_d_tag_filter(qb: &mut QueryBuilder<sqlx::Postgres>, col_prefix: &str, q: &EventQuery) {
+    if let Some(ref d) = q.d_tag {
+        qb.push(format!(" AND {col_prefix}d_tag = "))
+            .push_bind(d.clone());
+    } else if let Some(ref ds) = q.d_tags {
+        if !ds.is_empty() {
+            qb.push(format!(" AND {col_prefix}d_tag = ANY("))
+                .push_bind(ds.clone())
+                .push(")");
+        }
+    }
 }
 
 /// AND one [`push_exact_tag_match`] per non-empty [`EventQuery::tag_values`]
@@ -1523,11 +1536,15 @@ pub(crate) async fn count_events_on(
     let mut qb = count_events_sql(q);
     // Same transaction-local deadline as `query_events_on`, so a COUNT cannot
     // stall indefinitely either.
-    let row = fetch_with_read_deadline(conn, qb.build().persistent(!has_tag_values(q)), deadline)
-        .await?
-        .into_iter()
-        .next()
-        .ok_or_else(|| DbError::InvalidData("COUNT returned no rows".to_string()))?;
+    let row = fetch_with_read_deadline(
+        conn,
+        qb.build().persistent(!plans_with_bound_values(q)),
+        deadline,
+    )
+    .await?
+    .into_iter()
+    .next()
+    .ok_or_else(|| DbError::InvalidData("COUNT returned no rows".to_string()))?;
     let cnt: i64 = row.try_get("cnt")?;
 
     Ok(cnt)
@@ -1630,19 +1647,7 @@ fn count_events_sql(q: &EventQuery) -> QueryBuilder<sqlx::Postgres> {
             .push_bind(u);
     }
 
-    if let Some(ref d) = q.d_tag {
-        qb.push(format!(" AND {col_prefix}d_tag = "))
-            .push_bind(d.clone());
-    } else if let Some(ref ds) = q.d_tags {
-        if !ds.is_empty() {
-            qb.push(format!(" AND {col_prefix}d_tag IN ("));
-            let mut sep = qb.separated(", ");
-            for d in ds {
-                sep.push_bind(d.clone());
-            }
-            qb.push(")");
-        }
-    }
+    push_d_tag_filter(&mut qb, col_prefix, q);
 
     qb
 }
@@ -3035,13 +3040,20 @@ mod e_tag_filter_shape_tests {
         assert!(!qb.sql().as_str().contains("MATERIALIZED"));
     }
 
-    /// Each pass bounds `created_at` with a literal so Postgres prunes
-    /// partitions while planning; a `#p` read bounds the mention side too.
-    /// An unsplit read and the COUNT carry no bound.
+    /// Each pass bounds `created_at` with literals so Postgres prunes
+    /// partitions while planning: the recent pass on both sides, the older
+    /// pass below the floor. A `#p` read bounds the mention side too. An
+    /// unsplit read and the COUNT carry no bound.
     #[test]
     fn split_passes_bound_created_at_with_a_literal() {
-        let floor = chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 10, 1, 0, 0, 0).unwrap();
-        let lit = "'2026-10-01T00:00:00Z'::timestamptz";
+        let at = |m| chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, m, 1, 0, 0, 0).unwrap();
+        let split = crate::store::recent_pass::Split {
+            floor: at(10),
+            ceiling: Some(at(12)),
+            older: true,
+        };
+        let floor = "'2026-10-01T00:00:00Z'::timestamptz";
+        let ceiling = "'2026-12-01T00:00:00Z'::timestamptz";
         let sql = |q: &EventQuery, range| {
             build_query_events_sql(q, range, 7)
                 .sql()
@@ -3050,25 +3062,34 @@ mod e_tag_filter_shape_tests {
         };
         let mut q = EventQuery::for_community(CommunityId::from_uuid(uuid::Uuid::nil()));
         q.kinds = Some(vec![9]);
-        let recent = sql(&q, Range::Recent(floor));
+        let recent = sql(&q, Range::Recent(split));
+        for bound in [
+            format!(" AND created_at >= {floor}"),
+            format!(" AND created_at < {ceiling}"),
+        ] {
+            assert!(recent.contains(&bound), "{recent}");
+        }
+        let older = sql(&q, Range::Older(split.floor));
         assert!(
-            recent.contains(&format!(" AND created_at >= {lit}")),
-            "{recent}"
-        );
-        let older = sql(&q, Range::Older(floor));
-        assert!(
-            older.contains(&format!(" AND created_at < {lit}")),
+            older.contains(&format!(" AND created_at < {floor}")),
             "{older}"
         );
+        assert!(!older.contains(ceiling), "{older}");
         let whole = sql(&q, Range::All);
         assert!(!whole.contains("::timestamptz"), "{whole}");
 
         q.p_tag_hex = Some("ab".repeat(32));
-        for (range, op) in [(Range::Recent(floor), ">="), (Range::Older(floor), "<")] {
+        let bounds = [
+            (Range::Recent(split), vec![(">=", floor), ("<", ceiling)]),
+            (Range::Older(split.floor), vec![("<", floor)]),
+        ];
+        for (range, ops) in bounds {
             let mention = sql(&q, range);
             for column in ["e.created_at", "m.event_created_at"] {
-                let bound = format!(" AND {column} {op} {lit}");
-                assert!(mention.contains(&bound), "{mention}");
+                for &(op, lit) in &ops {
+                    let bound = format!(" AND {column} {op} {lit}");
+                    assert!(mention.contains(&bound), "{mention}");
+                }
             }
         }
         let count = count_events_sql(&q).sql().as_str().to_owned();
@@ -3085,10 +3106,10 @@ mod e_tag_filter_shape_tests {
             q.kinds = Some(vec![9]);
             q
         };
-        assert!(recent_pass_floor(&base(), now).is_some(), "page read");
+        assert!(recent_pass_split(&base(), now).is_some(), "page read");
         let mut first_page = base();
         first_page.offset = Some(0);
-        assert!(recent_pass_floor(&first_page, now).is_some(), "offset 0");
+        assert!(recent_pass_split(&first_page, now).is_some(), "offset 0");
         type Narrow = fn(&mut EventQuery);
         let lookups: [(&str, Narrow); 7] = [
             ("offset", |q| q.offset = Some(1)),
@@ -3104,7 +3125,7 @@ mod e_tag_filter_shape_tests {
         for (label, set) in lookups {
             let mut q = base();
             set(&mut q);
-            assert!(recent_pass_floor(&q, now).is_none(), "{label}");
+            assert!(recent_pass_split(&q, now).is_none(), "{label}");
         }
     }
 
@@ -3150,6 +3171,33 @@ mod e_tag_filter_shape_tests {
         assert!(!unbounded.contains("m.event_created_at >="));
         assert!(!unbounded.contains("m.event_created_at <="));
         assert!(!unbounded.contains("m.event_kind"));
+    }
+
+    /// A multi-value `#d` read binds its values as one array, so the number of
+    /// values does not change the SQL text, in both the page SELECT and the
+    /// COUNT. One `IN ($n, …)` bind per value made a new statement (and a new
+    /// `pg_stat_statements` entry) for every arity.
+    #[test]
+    fn d_tag_sql_does_not_depend_on_value_count() {
+        let sql = |n: usize| {
+            let mut q = EventQuery::for_community(CommunityId::from_uuid(uuid::Uuid::nil()));
+            q.kinds = Some(vec![39000]);
+            q.pubkey = Some(vec![7; 32]);
+            q.d_tags = Some((0..n).map(|i| format!("d{i}")).collect());
+            (
+                build_query_events_sql(&q, Range::All, page_limit(&q))
+                    .sql()
+                    .as_str()
+                    .to_owned(),
+                count_events_sql(&q).sql().as_str().to_owned(),
+            )
+        };
+        let two = sql(2);
+        assert_eq!(two, sql(128));
+        for text in [&two.0, &two.1] {
+            assert!(text.contains("d_tag = ANY($"), "{text}");
+            assert!(!text.contains("d_tag IN ("), "{text}");
+        }
     }
 
     /// The channel scope is one array bind: a viewer's channel count must not
@@ -3307,14 +3355,29 @@ mod postgres_tests {
             .expect("read prepared statements")
     }
 
-    /// A label or creator match must keep parameter-aware planning. A cached
-    /// generic plan ignores the label value and scans every group-state row in
-    /// the community instead of using the `tags` GIN index.
+    /// Label/creator matches and multi-value `#d` reads must keep
+    /// parameter-aware planning. A cached generic plan ignores the values: a
+    /// label match scans every group-state row in the community instead of
+    /// using the `tags` GIN index, and a `#d` read walks the author's
+    /// `created_at` index and reads every stored version of the kind. The `#d`
+    /// read still returns and counts exactly the requested addresses.
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn tag_value_queries_are_not_cached_as_prepared_statements() {
+    async fn value_matched_queries_are_not_cached_as_prepared_statements() {
         let pool = setup_pool().await;
         let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let keys = Keys::generate();
+        let mut addressed = Vec::new();
+        for d in ["a", "b", "c"] {
+            let event = EventBuilder::new(Kind::Custom(30023), "")
+                .tags([Tag::parse(["d", d]).unwrap()])
+                .sign_with_keys(&keys)
+                .unwrap();
+            insert_event(&pool, community, &event, None)
+                .await
+                .expect("insert addressable event");
+            addressed.push((d, event.id));
+        }
         let mut conn = pool.acquire().await.expect("acquire");
         // Clear SQLx's statement cache and Postgres's prepared statements
         // together; a raw `DEALLOCATE ALL` would leave the client cache
@@ -3322,23 +3385,51 @@ mod postgres_tests {
         sqlx::Connection::clear_cached_statements(&mut *conn)
             .await
             .expect("clear prepared statements");
-        let mut q = EventQuery::for_community(community);
-        q.kinds = Some(vec![39000]);
-        q.tag_values = vec![("t".to_owned(), vec!["for-you".to_owned()])];
-        for _ in 0..6 {
-            query_events_on(&mut conn, &q, ReadDeadline::PerRead)
-                .await
-                .expect("label query");
-            count_events_on(&mut conn, &q, ReadDeadline::PerRead)
-                .await
-                .expect("label count");
-        }
-        assert_eq!(prepared_like(&mut conn, "%tags @> ANY(%").await, 0);
 
-        // Control: the same query without a tag match stays a cached statement,
-        // so the check above can see one.
-        q.tag_values.clear();
-        query_events_on(&mut conn, &q, ReadDeadline::PerRead)
+        let mut label = EventQuery::for_community(community);
+        label.kinds = Some(vec![39000]);
+        label.tag_values = vec![("t".to_owned(), vec!["for-you".to_owned()])];
+        let mut d_tags = EventQuery::for_community(community);
+        d_tags.kinds = Some(vec![30023]);
+        d_tags.pubkey = Some(keys.public_key().to_bytes().to_vec());
+        d_tags.d_tags = Some(vec!["a".to_owned(), "c".to_owned()]);
+        for (q, statement) in [(&label, "%tags @> ANY(%"), (&d_tags, "%d_tag = ANY(%")] {
+            for _ in 0..6 {
+                query_events_on(&mut conn, q, ReadDeadline::PerRead)
+                    .await
+                    .expect("value-matched query");
+                count_events_on(&mut conn, q, ReadDeadline::PerRead)
+                    .await
+                    .expect("value-matched count");
+            }
+            assert_eq!(prepared_like(&mut conn, statement).await, 0, "{statement}");
+        }
+
+        let mut page: Vec<_> = query_events_on(&mut conn, &d_tags, ReadDeadline::PerRead)
+            .await
+            .expect("d-tag page")
+            .into_iter()
+            .map(|stored| stored.event.id)
+            .collect();
+        page.sort();
+        let mut expected: Vec<_> = addressed
+            .iter()
+            .filter(|(d, _)| *d != "b")
+            .map(|(_, id)| *id)
+            .collect();
+        expected.sort();
+        assert_eq!(page, expected, "exactly the requested addresses");
+        assert_eq!(
+            count_events_on(&mut conn, &d_tags, ReadDeadline::PerRead)
+                .await
+                .expect("d-tag count"),
+            2
+        );
+
+        // Control: the same query without a value match stays a cached
+        // statement, so the checks above can see one.
+        label.tag_values.clear();
+        query_events_on(&mut conn, &label, ReadDeadline::PerRead)
             .await
             .expect("plain query");
         assert!(prepared_like(&mut conn, "%FROM events%").await > 0);
@@ -3558,6 +3649,226 @@ mod postgres_tests {
         assert_eq!(ids(page), expected[..7]);
     }
 
+    /// The `events` partitions one pass of `q` over `range` locks, run in a
+    /// transaction of its own on `conn`, after checking that it returns
+    /// `rows` rows. Run it under `plan_cache_mode = force_generic_plan` to see
+    /// what a cached generic plan locks.
+    async fn locked_partitions(
+        conn: &mut sqlx::PgConnection,
+        q: &EventQuery,
+        range: Range,
+        rows: usize,
+    ) -> std::collections::BTreeSet<String> {
+        let mut tx = sqlx::Connection::begin(conn).await.expect("begin");
+        let mut qb = build_query_events_sql(q, range, 10);
+        let read = qb
+            .build()
+            .persistent(true)
+            .fetch_all(&mut *tx)
+            .await
+            .expect("pass");
+        assert_eq!(read.len(), rows, "the pass reads every row: {range:?}");
+        let locked: Vec<String> = sqlx::query_scalar(
+            "SELECT c.relname::text FROM pg_locks l \
+             JOIN pg_class c ON c.oid = l.relation \
+             JOIN pg_inherits i ON i.inhrelid = c.oid \
+             WHERE l.pid = pg_backend_pid() \
+               AND i.inhparent = 'events'::regclass",
+        )
+        .fetch_all(&mut *tx)
+        .await
+        .expect("locked partitions");
+        tx.rollback().await.expect("rollback");
+        locked.into_iter().collect()
+    }
+
+    /// The recent pass of a regular-kind read locks only the partitions
+    /// between its floor and ceiling, even as a cached generic plan. Without
+    /// the ceiling (a read that may match latest-state kinds) it also locks
+    /// the monthlies made ahead of time and the open-ended last partition.
+    /// Mutation: drop the ceiling from `Range::predicate`, or set it for
+    /// every split read → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn recent_pass_locks_only_the_partitions_below_its_ceiling() {
+        use crate::store::recent_pass::{ceiling_at, split_for};
+        let pool = setup_pool().await;
+        let db = crate::Db::from_pool(pool.clone());
+        // The layout a running relay keeps: dated monthlies through the
+        // months ahead, then an open-ended catch-all.
+        db.maintain_partitions(
+            crate::partition::PARTITION_MANAGER_MONTHS_AHEAD,
+            crate::partition::PartitionMaintenancePolicy {
+                create_enabled: true,
+                advance_enabled: true,
+            },
+        )
+        .await
+        .expect("maintain partitions");
+        let community_uuid = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_uuid);
+        let channel = make_test_channel(&pool, community_uuid, None).await;
+
+        let now = Utc::now();
+        let ceiled = split_for(now, Some(&[9]), None, None).expect("split");
+        let open = split_for(now, Some(&[9, 39002]), None, None).expect("split");
+        assert_eq!(ceiled.ceiling, Some(ceiling_at(now)));
+        assert_eq!(open.ceiling, None);
+
+        // One row at each edge of the ceiled range names its partitions.
+        let author = Keys::generate();
+        let mut expected = std::collections::BTreeSet::new();
+        let last = ceiling_at(now) - chrono::Duration::seconds(1);
+        for at in [ceiled.floor, now, last] {
+            let event = EventBuilder::new(Kind::Custom(9), format!("at {at}"))
+                .custom_created_at(nostr::Timestamp::from(at.timestamp() as u64))
+                .sign_with_keys(&author)
+                .expect("sign");
+            db.insert_event(community, &event, Some(channel))
+                .await
+                .expect("insert");
+            let partition: String =
+                sqlx::query_scalar("SELECT tableoid::regclass::text FROM events WHERE id = $1")
+                    .bind(event.id.as_bytes().to_vec())
+                    .fetch_one(&pool)
+                    .await
+                    .expect("partition");
+            expected.insert(partition);
+        }
+
+        let mut conn = pool.acquire().await.expect("acquire");
+        sqlx::query("SET plan_cache_mode = force_generic_plan")
+            .execute(&mut *conn)
+            .await
+            .expect("force generic plans");
+        let q = EventQuery {
+            kinds: Some(vec![9]),
+            channel_id: Some(channel),
+            ..EventQuery::for_community(community)
+        };
+        let ceiled_locks = locked_partitions(&mut conn, &q, Range::Recent(ceiled), 3).await;
+        assert_eq!(ceiled_locks, expected, "partitions below the ceiling");
+        let open_locks = locked_partitions(&mut conn, &q, Range::Recent(open), 3).await;
+        assert!(
+            open_locks.is_superset(&ceiled_locks) && open_locks.len() > ceiled_locks.len(),
+            "without the ceiling the pass also locks the later partitions: {open_locks:?}"
+        );
+    }
+
+    /// A read whose own `since` is at or above the floor, such as a `#p`
+    /// mention REQ from an agent reconnecting, is one recent pass: it returns
+    /// every matching row and runs no older pass. As a cached generic plan,
+    /// its literal floor and ceiling lock only the partitions between them,
+    /// where the `since` bind alone (the read whole) locks every partition.
+    /// Mutation: drop the `since` case from `split_for`, or run the older
+    /// pass after it → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn since_bounded_mention_read_locks_only_recent_partitions() {
+        use crate::store::recent_pass::{ceiling_at, floor_at, next};
+        let pool = setup_pool().await;
+        let db = crate::Db::from_pool(pool.clone());
+        db.maintain_partitions(
+            crate::partition::PARTITION_MANAGER_MONTHS_AHEAD,
+            crate::partition::PartitionMaintenancePolicy {
+                create_enabled: true,
+                advance_enabled: true,
+            },
+        )
+        .await
+        .expect("maintain partitions");
+        let community_uuid = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_uuid);
+        let channel = make_test_channel(&pool, community_uuid, None).await;
+
+        // Mentions of the target at the floor, now and a second below the
+        // ceiling, newest first, and one the day before the floor.
+        let now = Utc::now();
+        let floor = floor_at(now);
+        let author = Keys::generate();
+        let target = "ab".repeat(32);
+        let mut recent = Vec::new();
+        let mut expected = std::collections::BTreeSet::new();
+        let last = ceiling_at(now) - chrono::Duration::seconds(1);
+        for at in [last, now, floor, floor - chrono::Duration::days(1)] {
+            let event = EventBuilder::new(Kind::Custom(9), format!("at {at}"))
+                .tags([Tag::parse(["p", target.as_str()]).expect("p tag")])
+                .custom_created_at(nostr::Timestamp::from(at.timestamp() as u64))
+                .sign_with_keys(&author)
+                .expect("sign");
+            db.insert_event(community, &event, Some(channel))
+                .await
+                .expect("insert");
+            if at >= floor {
+                recent.push(event.id);
+                let partition: String =
+                    sqlx::query_scalar("SELECT tableoid::regclass::text FROM events WHERE id = $1")
+                        .bind(event.id.as_bytes().to_vec())
+                        .fetch_one(&pool)
+                        .await
+                        .expect("partition");
+                expected.insert(partition);
+            }
+        }
+
+        let q = EventQuery {
+            kinds: Some(vec![9]),
+            p_tag_hex: Some(target.clone()),
+            since: Some(floor),
+            limit: Some(10),
+            ..EventQuery::for_community(community)
+        };
+        let split = recent_pass_split(&q, now).expect("a since-bounded read has a recent pass");
+        assert!(!split.older, "rows below `since` cannot match");
+        assert_eq!(next(Range::Recent(split), recent.len(), 10), None);
+
+        // The production read: every matching row, from exactly the recent
+        // pass's statement, so the lock checks below bind what it prepared.
+        let mut conn = pool.acquire().await.expect("acquire");
+        sqlx::Connection::clear_cached_statements(&mut *conn)
+            .await
+            .expect("clear prepared statements");
+        let page = query_events_on(&mut conn, &q, ReadDeadline::PerRead)
+            .await
+            .expect("mention page");
+        let ids: Vec<_> = page.into_iter().map(|r| r.event.id).collect();
+        assert_eq!(ids, recent);
+        let prepared: Vec<String> = sqlx::query_scalar(
+            "SELECT statement FROM pg_prepared_statements WHERE statement LIKE $1",
+        )
+        .bind("%JOIN event_mentions%")
+        .fetch_all(&mut *conn)
+        .await
+        .expect("read prepared statements");
+        let recent_pass = build_query_events_sql(&q, Range::Recent(split), 10)
+            .sql()
+            .as_str()
+            .to_owned();
+        assert_eq!(prepared, [recent_pass], "one pass, bounded by literals");
+
+        sqlx::query("SET plan_cache_mode = force_generic_plan")
+            .execute(&mut *conn)
+            .await
+            .expect("force generic plans");
+        let bounded = locked_partitions(&mut conn, &q, Range::Recent(split), recent.len()).await;
+        assert_eq!(
+            bounded, expected,
+            "partitions between the floor and ceiling"
+        );
+        let bind_only = locked_partitions(&mut conn, &q, Range::All, recent.len()).await;
+        let every: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_inherits WHERE inhparent = 'events'::regclass",
+        )
+        .fetch_one(&mut *conn)
+        .await
+        .expect("partitions");
+        assert_eq!(
+            bind_only.len() as i64,
+            every,
+            "the `since` bind alone locks every partition: {bind_only:?}"
+        );
+    }
+
     /// A newest-first page read split at the floor returns the rows the
     /// unsplit read returns: the recent pass alone when it fills the page,
     /// otherwise followed by the older pass for just the missing rows.
@@ -3604,8 +3915,17 @@ mod postgres_tests {
             ..EventQuery::for_community(community)
         };
         let ids = |rows: Vec<StoredEvent>| rows.into_iter().map(|r| r.event.id).collect::<Vec<_>>();
-        let recent = "%FROM events WHERE%created_at >= '%::timestamptz%";
-        let older = "%FROM events WHERE%created_at < '%::timestamptz%";
+        // The recent pass of this kind:9 read also stops at the ceiling, so
+        // the older pass is told apart by its `<` bound at the floor.
+        let floor_lit =
+            crate::store::recent_pass::floor_at(Utc::now()).format("%Y-%m-%dT%H:%M:%SZ");
+        let ceiling_lit =
+            crate::store::recent_pass::ceiling_at(Utc::now()).format("%Y-%m-%dT%H:%M:%SZ");
+        let recent = &format!(
+            "%FROM events WHERE%created_at >= '{floor_lit}'::timestamptz \
+             AND created_at < '{ceiling_lit}'::timestamptz%"
+        );
+        let older = &format!("%FROM events WHERE%created_at < '{floor_lit}'::timestamptz%");
         let all = "%FROM events WHERE%";
 
         // Full recent page: answered by the recent pass alone.

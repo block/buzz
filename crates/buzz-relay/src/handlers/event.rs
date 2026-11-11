@@ -21,7 +21,6 @@ use buzz_pubsub::EventTopic;
 use nostr::{Event, PublicKey};
 
 use crate::connection::{AuthState, ConnectionState};
-use crate::protocol::RelayMessage;
 use crate::state::AppState;
 
 use super::ingest::{reject_with_transport, IngestAuth, IngestError};
@@ -255,6 +254,9 @@ async fn check_fanout_access(
     match visibility {
         Ok(v) if v != "private" => return verified(matches),
         Ok(_) => {}
+        // A deleted channel grants no one access. That is an answer, not a
+        // failed check, so its recipients are not unverified.
+        Err(buzz_db::DbError::ChannelNotFound(_)) => return verified(Vec::new()),
         Err(e) => {
             // Fail closed: if we cannot determine visibility, do not leak a
             // possibly-private channel's events.
@@ -266,22 +268,32 @@ async fn check_fanout_access(
         }
     }
 
-    let mut allowed = Vec::with_capacity(matches.len());
+    // One membership read for every recipient the cache lacks, not one per
+    // recipient: each read would wait on the pool in turn.
+    let recipients: Vec<_> = matches
+        .into_iter()
+        .filter_map(|(conn_id, sub_id)| {
+            Some((
+                conn_id,
+                sub_id,
+                state.conn_manager.pubkey_for_conn(conn_id)?,
+            ))
+        })
+        .collect();
+    let members = state
+        .members_cached(
+            community_id,
+            channel_id,
+            recipients.iter().map(|(.., pubkey)| pubkey.clone()),
+        )
+        .await;
+    let mut allowed = Vec::with_capacity(recipients.len());
     let mut unverified = Vec::new();
-    for (conn_id, sub_id) in matches {
-        let Some(pubkey) = state.conn_manager.pubkey_for_conn(conn_id) else {
-            continue;
-        };
-        match state
-            .is_member_cached(community_id, channel_id, &pubkey)
-            .await
-        {
-            Ok(true) => allowed.push((conn_id, sub_id)),
-            Ok(false) => {}
-            Err(e) => {
-                warn!(%channel_id, "fan-out access filter: membership lookup failed: {e}");
-                unverified.push((conn_id, sub_id));
-            }
+    for (conn_id, sub_id, pubkey) in recipients {
+        if members.members.contains(&pubkey) {
+            allowed.push((conn_id, sub_id));
+        } else if members.unverified.contains(&pubkey) {
+            unverified.push((conn_id, sub_id));
         }
     }
     FanoutAccess {
@@ -368,36 +380,59 @@ pub(crate) async fn fan_out_event_to_local_subscribers(
 /// Fan out one event received from Redis pub/sub to this relay's local subscribers.
 #[tracing::instrument(skip_all)]
 pub async fn fan_out_pubsub_event(state: &Arc<AppState>, channel_event: buzz_pubsub::ChannelEvent) {
-    // The Redis topic carries the tenant-local routing scope explicitly:
-    // `Channel(id)` for a per-channel event, `Global` for a channel-less one.
-    // Convert back to the `Option<Uuid>` channel id `fan_out()` indexes on —
-    // `Global` selects the global subscriber index.
+    if take_local_echo(state, &channel_event) {
+        return;
+    }
+    let community_id = channel_event.community_id;
+    deliver_pubsub_event(state, community_id, &pubsub_stored_event(channel_event)).await;
+}
+
+/// Report whether `channel_event` is the Redis echo of an event this relay
+/// already fanned out in-process, consuming the echo record if so.
+///
+/// The dedup key is `(community_id, event_id)` — a same-id event arriving for a
+/// *different* community is a distinct delivery and must not be suppressed.
+/// The cache has TTL-based eviction (60s) so entries are bounded regardless of
+/// subscriber health.
+pub(crate) fn take_local_echo(state: &AppState, channel_event: &buzz_pubsub::ChannelEvent) -> bool {
+    let echo_key = (
+        channel_event.community_id,
+        channel_event.event.id.to_bytes(),
+    );
+    if state.local_event_ids.get(&echo_key).is_some() {
+        state.local_event_ids.invalidate(&echo_key);
+        return true;
+    }
+    false
+}
+
+/// The `StoredEvent` a Redis event fans out as.
+///
+/// The Redis topic carries the tenant-local routing scope explicitly:
+/// `Channel(id)` for a per-channel event, `Global` for a channel-less one.
+/// Convert back to the `Option<Uuid>` channel id `fan_out()` indexes on —
+/// `Global` selects the global subscriber index.
+pub(crate) fn pubsub_stored_event(channel_event: buzz_pubsub::ChannelEvent) -> StoredEvent {
     let channel_id = match channel_event.topic {
         buzz_pubsub::EventTopic::Channel(id) => Some(id),
         buzz_pubsub::EventTopic::Global => None,
     };
-    let community_id = channel_event.community_id;
-    let stored = StoredEvent::new(channel_event.event, channel_id);
+    StoredEvent::new(channel_event.event, channel_id)
+}
 
-    // Skip events that were already fanned out in-process (local echo). The
-    // dedup key is `(community_id, event_id)` — a same-id event arriving for a
-    // *different* community is a distinct delivery and must not be suppressed.
-    // The cache has TTL-based eviction (60s) so entries are bounded regardless
-    // of subscriber health.
-    let event_id_bytes = stored.event.id.to_bytes();
-    let echo_key = (community_id, event_id_bytes);
-    if state.local_event_ids.get(&echo_key).is_some() {
-        state.local_event_ids.invalidate(&echo_key);
-        return;
-    }
-
-    let matches = state.sub_registry.fan_out_scoped(community_id, &stored);
-    let matches = route_fanout_matches(state, community_id, &stored, matches, None).await;
+/// Deliver one Redis event that is not a local echo to this relay's local
+/// subscribers, through the access gate.
+pub(crate) async fn deliver_pubsub_event(
+    state: &Arc<AppState>,
+    community_id: CommunityId,
+    stored: &StoredEvent,
+) {
+    let matches = state.sub_registry.fan_out_scoped(community_id, stored);
+    let matches = route_fanout_matches(state, community_id, stored, matches, None).await;
     metrics::counter!("buzz_multinode_fanout_total").increment(1);
     if matches.is_empty() {
         return;
     }
-
     let event_json = match serde_json::to_string(&stored.event) {
         Ok(json) => json,
         Err(e) => {
@@ -656,6 +691,7 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
     let start = std::time::Instant::now();
     let event_id_hex = event.id.to_hex();
     let kind_u32 = event_kind_u32(&event);
+    let mut write = crate::access::WriteLog::new(&conn, &event);
     let kind_str = bounded_kind_label(kind_u32);
 
     // Record the declared span fields now that we have the values.
@@ -689,11 +725,12 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
             ),
             _ => {
                 reject("auth");
-                conn.send(RelayMessage::ok(
+                write.ok(
+                    &conn,
                     &event_id_hex,
                     false,
                     "auth-required: not authenticated",
-                ));
+                );
                 return;
             }
         }
@@ -705,21 +742,23 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
     let is_gift_wrap = kind_u32 == KIND_GIFT_WRAP;
     if event.pubkey != auth_pubkey && !is_gift_wrap {
         reject("invalid");
-        conn.send(RelayMessage::ok(
+        write.ok(
+            &conn,
             &event_id_hex,
             false,
             "invalid: event pubkey does not match authenticated identity",
-        ));
+        );
         return;
     }
 
     if kind_u32 == buzz_core::kind::KIND_AUTH {
         reject("invalid");
-        conn.send(RelayMessage::ok(
+        write.ok(
+            &conn,
             &event_id_hex,
             false,
             "invalid: AUTH events cannot be submitted via EVENT",
-        ));
+        );
         return;
     }
 
@@ -745,7 +784,7 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
                 | IngestError::CanvasConflict(m) => (m, "auth"),
             };
             reject(reason);
-            conn.send(RelayMessage::ok(&event_id_hex, false, &message));
+            write.ok(&conn, &event_id_hex, false, &message);
             return;
         }
     }
@@ -753,11 +792,12 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
     if kind_u32 == KIND_AGENT_OBSERVER_FRAME {
         if !scopes.is_empty() && !scopes.contains(&buzz_auth::Scope::MessagesWrite) {
             reject("scope");
-            conn.send(RelayMessage::ok(
+            write.ok(
+                &conn,
                 &event_id_hex,
                 false,
                 "restricted: insufficient scope for agent observer frames",
-            ));
+            );
             return;
         }
         // P1-b: acquire an effect permit before the observer handler's
@@ -777,15 +817,16 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
                 // an FI assertion is present. Gate is off_mode when no assertion
                 // exists, so SessionExpired here always implies an active FI session.
                 // [FI-TRACE-DENIAL-ORACLE, NIP-FI §authorization_denied]
-                conn.send(RelayMessage::ok(
+                write.ok(
+                    &conn,
                     &event_id_hex,
                     false,
                     "restricted: authorization denied",
-                ));
+                );
                 return;
             }
         };
-        handle_agent_observer_event(event, conn_id, &event_id_hex, conn, state).await;
+        handle_agent_observer_event(event, conn_id, &event_id_hex, conn, state, &mut write).await;
         return;
     }
 
@@ -800,11 +841,12 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
     if is_ephemeral(kind_u32) && kind_u32 != buzz_core::kind::KIND_NIP43_LEAVE_REQUEST {
         if !scopes.is_empty() && !scopes.contains(&buzz_auth::Scope::MessagesWrite) {
             reject("scope");
-            conn.send(RelayMessage::ok(
+            write.ok(
+                &conn,
                 &event_id_hex,
                 false,
                 "restricted: insufficient scope for ephemeral events",
-            ));
+            );
             return;
         }
         // Cached: this runs per ephemeral event. Persistent ingest keeps the
@@ -816,21 +858,18 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
             Ok(true) => {}
             Ok(false) => {
                 reject("restricted");
-                conn.send(RelayMessage::ok(
+                write.ok(
+                    &conn,
                     &event_id_hex,
                     false,
                     "restricted: community writes are fenced",
-                ));
+                );
                 return;
             }
             Err(error) => {
                 reject("error");
                 tracing::warn!(%error, event_id = %event_id_hex, "failed to check ephemeral-event community lifecycle");
-                conn.send(RelayMessage::ok(
-                    &event_id_hex,
-                    false,
-                    "error: internal server error",
-                ));
+                write.ok(&conn, &event_id_hex, false, "error: internal server error");
                 return;
             }
         }
@@ -841,11 +880,12 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
             Ok(permit) => permit,
             Err(crate::nip_fi_gate::SessionExpired) => {
                 // Fix 4: [FI-TRACE-DENIAL-ORACLE]
-                conn.send(RelayMessage::ok(
+                write.ok(
+                    &conn,
                     &event_id_hex,
                     false,
                     "restricted: authorization denied",
-                ));
+                );
                 return;
             }
         };
@@ -860,7 +900,7 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
         .await
         {
             Ok(()) => {
-                conn.send(RelayMessage::ok(&event_id_hex, true, ""));
+                write.ok(&conn, &event_id_hex, true, "");
             }
             Err(e) => {
                 // Rejections carry the ingest taxonomy so backend failures
@@ -882,7 +922,7 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
                     }
                 };
                 reject(reason);
-                conn.send(RelayMessage::ok(&event_id_hex, false, &message));
+                write.ok(&conn, &event_id_hex, false, &message);
             }
         }
         return;
@@ -909,11 +949,12 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
         Ok(permit) => permit,
         Err(crate::nip_fi_gate::SessionExpired) => {
             // Fix 4: [FI-TRACE-DENIAL-ORACLE]
-            conn.send(RelayMessage::ok(
+            write.ok(
+                &conn,
                 &event_id_hex,
                 false,
                 "restricted: authorization denied",
-            ));
+            );
             return;
         }
     };
@@ -938,11 +979,7 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
                     "not_accepted"
                 },
             );
-            conn.send(RelayMessage::ok(
-                &result.event_id,
-                result.accepted,
-                &result.message,
-            ));
+            write.ok(&conn, &result.event_id, result.accepted, &result.message);
         }
         Err(e) => {
             let e = e.into_legacy();
@@ -958,7 +995,7 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
             };
             record_event_processing(start, reason);
             reject(reason);
-            conn.send(RelayMessage::ok(&event_id_hex, false, &msg));
+            write.ok(&conn, &event_id_hex, false, &msg);
         }
     }
 }
@@ -1322,25 +1359,18 @@ async fn handle_agent_observer_event(
     event_id_hex: &str,
     conn: Arc<ConnectionState>,
     state: Arc<AppState>,
+    write: &mut crate::access::WriteLog,
 ) {
     let event_clone = event.clone();
     let verify_result = tokio::task::spawn_blocking(move || verify_event(&event_clone)).await;
     match verify_result {
         Ok(Ok(())) => {}
         Ok(Err(e)) => {
-            conn.send(RelayMessage::ok(
-                event_id_hex,
-                false,
-                &format!("invalid: {e}"),
-            ));
+            write.ok(&conn, event_id_hex, false, &format!("invalid: {e}"));
             return;
         }
         Err(_) => {
-            conn.send(RelayMessage::ok(
-                event_id_hex,
-                false,
-                "error: internal error",
-            ));
+            write.ok(&conn, event_id_hex, false, "error: internal error");
             return;
         }
     }
@@ -1349,11 +1379,12 @@ async fn handle_agent_observer_event(
     let now = chrono::Utc::now().timestamp();
     let event_ts = event.created_at.as_secs() as i64;
     if (event_ts - now).unsigned_abs() > 300 {
-        conn.send(RelayMessage::ok(
+        write.ok(
+            &conn,
             event_id_hex,
             false,
             "invalid: observer frame timestamp outside ±5 minute freshness window",
-        ));
+        );
         return;
     }
 
@@ -1361,12 +1392,12 @@ async fn handle_agent_observer_event(
         Ok(Some(route)) => route,
         Ok(None) => {
             // Unknown frame value — silently drop, no error to publisher.
-            conn.send(RelayMessage::ok(event_id_hex, true, ""));
+            write.ok(&conn, event_id_hex, true, "");
             return;
         }
         Err(message) => {
             reject("invalid");
-            conn.send(RelayMessage::ok(event_id_hex, false, &message));
+            write.ok(&conn, event_id_hex, false, &message);
             return;
         }
     };
@@ -1405,11 +1436,7 @@ async fn handle_agent_observer_event(
                     }
                     Err(e) => {
                         warn!(conn_id = %conn_id, event_id = %event_id_hex, "agent observer owner check failed: {e}");
-                        conn.send(RelayMessage::ok(
-                            event_id_hex,
-                            false,
-                            "error: internal server error",
-                        ));
+                        write.ok(&conn, event_id_hex, false, "error: internal server error");
                         return;
                     }
                 }
@@ -1418,11 +1445,12 @@ async fn handle_agent_observer_event(
     };
     if !is_owner {
         reject("auth");
-        conn.send(RelayMessage::ok(
+        write.ok(
+            &conn,
             event_id_hex,
             false,
             "restricted: observer frame is not authorized for this agent owner",
-        ));
+        );
         return;
     }
 
@@ -1432,11 +1460,12 @@ async fn handle_agent_observer_event(
     if matches!(route.direction, AgentObserverDirection::Telemetry) {
         let agent_key: [u8; 32] = agent_bytes.as_slice().try_into().unwrap_or([0u8; 32]);
         if observer_frame_rate_limited(&state, conn.tenant.community(), agent_key) {
-            conn.send(RelayMessage::ok(
+            write.ok(
+                &conn,
                 event_id_hex,
                 false,
                 "rate-limited: observer frame rate exceeded (100/sec per agent)",
-            ));
+            );
             return;
         }
     }
@@ -1463,7 +1492,7 @@ async fn handle_agent_observer_event(
     );
     fan_out_event_to_local_subscribers(&state, conn.tenant.community(), &stored_event).await;
 
-    conn.send(RelayMessage::ok(event_id_hex, true, ""));
+    write.ok(&conn, event_id_hex, true, "");
 }
 
 fn agent_observer_route(event: &Event) -> Result<Option<AgentObserverRoute>, String> {
@@ -1831,12 +1860,14 @@ mod tests {
             ),
         });
 
+        let mut write = crate::access::WriteLog::new(&conn, &event);
         super::handle_agent_observer_event(
             event.clone(),
             conn.conn_id,
             &event.id.to_hex(),
             conn,
             state,
+            &mut write,
         )
         .await;
 
@@ -3228,10 +3259,10 @@ mod tests {
             let non_member_pk = vec![2u8; 32];
             state
                 .membership_cache
-                .insert((community_id, channel_id, member_pk.clone()), true);
+                .seed_member((community_id, channel_id, member_pk.clone()), true);
             state
                 .membership_cache
-                .insert((community_id, channel_id, non_member_pk.clone()), false);
+                .seed_member((community_id, channel_id, non_member_pk.clone()), false);
 
             let member = register_conn(&state, Some(member_pk));
             let non_member = register_conn(&state, Some(non_member_pk));
@@ -3347,10 +3378,10 @@ mod tests {
             let non_member_pk = vec![2u8; 32];
             state
                 .membership_cache
-                .insert((community_id, channel_id, member_pk.clone()), true);
+                .seed_member((community_id, channel_id, member_pk.clone()), true);
             state
                 .membership_cache
-                .insert((community_id, channel_id, non_member_pk.clone()), false);
+                .seed_member((community_id, channel_id, non_member_pk.clone()), false);
 
             let threaded = crate::state::ThreadedChannelVisibility {
                 community_id,
@@ -3442,7 +3473,7 @@ mod tests {
             private(known);
             state
                 .membership_cache
-                .insert((community_id, known, pk.clone()), true);
+                .seed_member((community_id, known, pk.clone()), true);
             let conn = sync_on(known);
             super::super::fan_out_event_to_local_subscribers(
                 &state,
@@ -3467,6 +3498,8 @@ mod tests {
                 "visibility lookup"
             );
 
+            // Drop the known user's whole snapshot so this must read the DB.
+            state.membership_cache.invalidate(community_id, &pk);
             // The membership lookup fails (Redis fan-out).
             let channel_id = Uuid::new_v4();
             private(channel_id);
@@ -3485,6 +3518,38 @@ mod tests {
                 Some("resync: access check failed"),
                 "membership lookup"
             );
+        }
+
+        /// A refused WebSocket EVENT writes one `write` access line with the
+        /// OK's fixed prefix as its reason, and never the event's content or
+        /// tag values.
+        #[tokio::test]
+        async fn refused_ws_event_writes_one_access_line_without_its_content() {
+            let state = test_state().await;
+            let (conn, mut send_rx) =
+                crate::connection::tests::test_conn_with_auth(crate::connection::AuthState::Failed);
+            let event = EventBuilder::new(Kind::Custom(9), "secret words")
+                .tag(nostr::Tag::parse(["h", "secret-channel"]).unwrap())
+                .sign_with_keys(&Keys::generate())
+                .unwrap();
+            let (guard, out) = crate::access::tests::capture_scoped();
+            super::super::handle_event(event.clone(), conn, state).await;
+            drop(guard);
+
+            let axum::extract::ws::Message::Text(ack) = send_rx.try_recv().expect("OK") else {
+                panic!("expected text OK");
+            };
+            assert!(ack.contains("auth-required"), "{ack}");
+            assert!(!out.raw().contains("secret"), "{}", out.raw());
+            let lines = out.lines();
+            assert_eq!(lines.len(), 1, "{lines:?}");
+            let line = &lines[0];
+            assert_eq!(line["event"], "write", "{line}");
+            assert_eq!(line["outcome"], "rejected", "{line}");
+            assert_eq!(line["reason"], "auth-required", "{line}");
+            assert_eq!(line["kind"], 9, "{line}");
+            assert_eq!(line["event_id"], event.id.to_hex(), "{line}");
+            assert!(line.get("pubkey").is_none(), "{line}");
         }
     }
 
@@ -3928,15 +3993,15 @@ mod tests {
             assert_eq!(
                 state
                     .community_active
-                    .entry(tenant.community())
+                    .entry(&tenant.community())
                     .map(|(active, _)| active),
                 Some(true)
             );
             assert_eq!(
                 state
                     .restriction_cache
-                    .get(&(tenant.community(), user.public_key().to_bytes().to_vec()))
-                    .map(|cached| cached.state),
+                    .entry(&(tenant.community(), user.public_key().to_bytes().to_vec()))
+                    .map(|(state, _)| state),
                 Some(buzz_db::moderation::RestrictionState::default())
             );
         }
@@ -3948,12 +4013,15 @@ mod tests {
         }
 
         /// Stored writes read the restriction through the cache, and only
-        /// while the entry is younger than `RESTRICTION_CACHE_MAX_AGE`: a
-        /// fresh cached ban on a sender Postgres has never restricted refuses
-        /// a stored write, and the same row past that age is reread and
-        /// admits it.
-        /// Mutation: make ingest read the restriction uncached, or drop the
-        /// max-age check from `restriction_state_cached` → RED.
+        /// while the entry is younger than 10 s: a cached ban on a sender
+        /// Postgres has never restricted refuses a stored write while fresh
+        /// and 9 s old, and the same row 10 s old is reread and admits it.
+        /// The ages are literals, so the bound a pod that misses an
+        /// invalidation serves stale rows for is pinned independently of
+        /// `RESTRICTION_CACHE_MAX_AGE`.
+        /// Mutation: make ingest read the restriction uncached, drop the
+        /// max-age check, or raise `RESTRICTION_CACHE_MAX_AGE` above 10 s
+        /// → RED.
         #[tokio::test]
         #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
         async fn stored_writes_honor_cached_ban_until_it_ages_out() {
@@ -3974,15 +4042,22 @@ mod tests {
                 "a fresh cached ban must refuse a stored write; got {frame}"
             );
 
-            state.restriction_cache.insert(
-                key,
-                crate::state::CachedRestriction {
-                    state: banned,
-                    read_at: std::time::Instant::now()
-                        .checked_sub(crate::state::RESTRICTION_CACHE_MAX_AGE)
-                        .expect("instant past max age"),
-                },
+            let aged = |secs| {
+                std::time::Instant::now()
+                    .checked_sub(std::time::Duration::from_secs(secs))
+                    .expect("instant in the past")
+            };
+            state
+                .restriction_cache
+                .seed_read_at(key.clone(), banned.clone(), aged(9));
+            let frame =
+                ok_frame_scoped(&state, &tenant, &user, text_note(&user), scopes.clone()).await;
+            assert!(
+                frame.contains("blocked: you are banned"),
+                "a 9 s old cached ban must still refuse a stored write; got {frame}"
             );
+
+            state.restriction_cache.seed_read_at(key, banned, aged(10));
             let frame = ok_frame_scoped(&state, &tenant, &user, text_note(&user), scopes).await;
             assert!(
                 frame.contains(",true,"),

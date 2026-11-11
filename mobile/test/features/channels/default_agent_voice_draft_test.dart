@@ -101,6 +101,27 @@ void main() {
         ),
         isEmpty,
       );
+      final firstGeneration = (await restored.read())!.draftGeneration!;
+      await restored.clear();
+      final replacementSource = File('${directory.path}/replacement.m4a');
+      await replacementSource.writeAsBytes([4, 5, 6]);
+      final replacement = await restored.save(
+        VoiceNoteRecording(
+          file: XFile(replacementSource.path),
+          duration: const Duration(seconds: 3),
+          waveform: const [.6],
+        ),
+      );
+      expect(replacement.draftGeneration, isNot(firstGeneration));
+      await draft.clear(generation: firstGeneration);
+      await expectLater(
+        draft.saveEvent(event, generation: firstGeneration),
+        throwsStateError,
+      );
+      expect(await restored.readEvent(), isNull);
+      expect(await (await restored.read())!.file.readAsBytes(), [4, 5, 6]);
+      final retried = await restored.save(replacement);
+      expect(retried.draftGeneration, replacement.draftGeneration);
       final relocatedAudio = (await restored.read())!.file.path;
       // A corrupt sibling must not prevent discovery of a healthy draft.
       final unknown = File('${manifest.parent.path}/unknown.json');
