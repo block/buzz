@@ -38,6 +38,16 @@
       "expected": "Run just ci first"
     },
     {
+      "name": "backticks inside a fenced block don't close it",
+      "input": "```js\nconst fence = \"```\";\nconst text = \"**literal**\";\n```\nDone",
+      "expected": "const fence = \"```\";\nconst text = \"**literal**\";\nDone"
+    },
+    {
+      "name": "a closing fence at the end of the last code line closes the block",
+      "input": "```\nlet x = 1```\n**After**",
+      "expected": "let x = 1\nAfter"
+    },
+    {
       "name": "inline code keeps its text",
       "input": "Call `fetch()` again",
       "expected": "Call fetch() again"

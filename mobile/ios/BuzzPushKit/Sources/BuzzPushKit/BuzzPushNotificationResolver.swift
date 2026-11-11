@@ -684,11 +684,14 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
   /// whitespace in the prefix exceed about 3.8K units.
   static let previewInputLimit = 4096
 
-  /// A fenced code block (with an optional language line) or an inline code
-  /// span. A fence with no closing fence runs to the end of the text, as in
-  /// CommonMark, which also covers a block cut by `previewInputLimit`.
+  /// A fenced code block, a fenced span on one line, or an inline code span.
+  /// A block (an opening fence, an optional language, then a line break)
+  /// closes only at a fence that ends its line, so backticks inside the code
+  /// (a "```" string literal) don't end it. A block with no closing fence
+  /// runs to the end of the text, as in CommonMark, which also covers a
+  /// block cut by `previewInputLimit`.
   private static let previewCode = try! NSRegularExpression(
-    pattern: #"```(?:[^\n`]*\n)?([\s\S]*?)(?:\n?```|\z)|`([^`\n]*)`"#)
+    pattern: #"```[^\n`]*\n([\s\S]*?)(?:\n?```[ \t]*(?=\n|\z)|\z)|```([^\n]*?)```|`([^`\n]*)`"#)
 
   /// Stands in for a code span while the prose rules run over the whole
   /// text, so a link label or a bold run can contain code. Private-use
@@ -725,7 +728,7 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
     var position = 0
     for match in previewCode.matches(in: input, range: NSRange(location: 0, length: text.length)) {
       prose += text.substring(with: NSRange(location: position, length: match.range.location - position))
-      let body = match.range(at: 1).location != NSNotFound ? match.range(at: 1) : match.range(at: 2)
+      let body = (1...3).map(match.range(at:)).first { $0.location != NSNotFound }!
       prose += previewCodeOpen + String(codes.count) + previewCodeClose
       codes.append(text.substring(with: body))
       position = NSMaxRange(match.range)
