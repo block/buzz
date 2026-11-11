@@ -1,3 +1,4 @@
+import 'package:buzz/shared/widgets/dm_header_portrait.dart';
 import 'dart:async';
 import 'package:buzz/shared/relay/media_image.dart';
 import 'package:http/http.dart' as http;
@@ -13,6 +14,60 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 void main() {
+  testWidgets(
+    'animated DM portrait opens the same settings as the native title',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      var settingsOpened = 0;
+      await tester.pumpWidget(
+        _testApp(
+          home: MediaQuery(
+            data: const MediaQueryData(
+              viewPadding: EdgeInsets.only(top: 62),
+              disableAnimations: true,
+            ),
+            child: SizedBox(
+              width: 393,
+              height: 166,
+              child: IosNavigationBar(
+                title: 'Agent',
+                onTitlePressed: () => settingsOpened++,
+                subtitle: 'Online',
+                titleAvatars: const [
+                  IosNavigationAction(
+                    label: 'Agent',
+                    avatarInitial: 'A',
+                    avatarIsAgent: true,
+                    imageUrl:
+                        'https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/gloopies/gloopies-13.png',
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+      final params =
+          tester.widget<UiKitView>(find.byType(UiKitView)).creationParams!
+              as Map;
+      expect((params['titleAvatars'] as List).length, 1);
+      expect(params['titleHasAnimatedPortrait'], isTrue);
+      final portrait = find.byType(DmHeaderPortrait);
+      expect(tester.getSize(portrait), const Size(64, 64));
+      expect(
+        tester.getTopLeft(portrait).dy -
+            tester.getTopLeft(find.byType(UiKitView)).dy,
+        58,
+      );
+      await tester.tap(
+        find.byKey(const ValueKey('navigation-header-avatar-settings')),
+      );
+      expect(settingsOpened, 1);
+      await tester.pumpWidget(const SizedBox());
+      debugDefaultTargetPlatformOverride = null;
+    },
+  );
   testWidgets(
     'native toolbar receives stable safe inset inside a translated route',
     (tester) async {

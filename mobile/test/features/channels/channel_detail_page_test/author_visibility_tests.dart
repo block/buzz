@@ -10,7 +10,7 @@ void messageAuthorVisibilityTests() {
       'unknown',
       'outsider',
     ]) {
-      testWidgets('message names: $kind dark=$dark', (tester) async {
+      testWidgets('message identity: $kind dark=$dark', (tester) async {
         final participants = kind == 'unknown'
             ? <String>[]
             : ['self', 'alice', if (kind == 'group') 'bob'];
@@ -65,6 +65,18 @@ void messageAuthorVisibilityTests() {
         final name = find.byKey(const ValueKey('message-author-incoming'));
         final hidesName = kind == 'dm' || kind == 'solo';
         expect(name, hidesName ? findsNothing : findsOneWidget);
+        final incomingRow = find.byKey(const ValueKey('message-row-incoming'));
+        final outgoingRow = find.byKey(const ValueKey('message-row-outgoing'));
+        final incomingAvatars = find.descendant(
+          of: incomingRow,
+          matching: find.byType(AvatarImage),
+        );
+        expect(incomingAvatars, hidesName ? findsNothing : findsOneWidget);
+        expect(
+          find.descendant(of: outgoingRow, matching: find.byType(AvatarImage)),
+          findsNothing,
+        );
+
         expect(
           find.byKey(const ValueKey('message-timestamp-incoming')),
           findsOneWidget,
@@ -86,6 +98,34 @@ void messageAuthorVisibilityTests() {
             context.tertiaryTextColor,
           );
         }
+        final root = _textMsg(
+          id: 'incoming',
+          pubkey: kind == 'outsider' ? 'bob' : 'alice',
+          content: 'Hello',
+        );
+        unawaited(
+          Navigator.of(tester.element(incomingRow)).push(
+            MaterialPageRoute<void>(
+              builder: (_) => ThreadDetailPage(
+                threadHead: formatTimeline([root]).single,
+                allMessages: formatTimeline([root]),
+                channelId: _channelId,
+                currentPubkey: 'self',
+                isMember: true,
+                isArchived: false,
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        final threadRow = find.byKey(
+          const ValueKey('thread-message-row-incoming'),
+        );
+        expect(threadRow, findsOneWidget);
+        expect(
+          find.descendant(of: threadRow, matching: find.byType(AvatarImage)),
+          hidesName ? findsNothing : findsOneWidget,
+        );
         expect(tester.takeException(), isNull);
       });
     }
