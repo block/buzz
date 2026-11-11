@@ -34,6 +34,10 @@ pub async fn run_stage(
     stage: Uuid,
     options: StageOptions,
 ) -> Result<()> {
+    let request = db.entity_deletion_store().get(lease.request_id).await?;
+    if request.entity_type != "user" || request.target != options.human {
+        bail!("media subject must match the approved user request");
+    }
     let store = db.media_deletion_store();
     let run = store
         .execution_run(lease, stage, serde_json::to_value(&options)?)

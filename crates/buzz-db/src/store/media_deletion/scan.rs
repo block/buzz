@@ -129,6 +129,11 @@ impl Db {
         sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
             .execute(&mut *tx)
             .await?;
+        // Source keys/fingerprints must match downstream deletion sessions even
+        // when their connection defaults use a different timezone.
+        sqlx::query("SET LOCAL TIME ZONE 'UTC'")
+            .execute(&mut *tx)
+            .await?;
         sqlx::query("SELECT set_config('statement_timeout', $1, true)")
             .bind(format!("{}s", budget.statement_timeout_secs))
             .execute(&mut *tx)
