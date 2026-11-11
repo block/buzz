@@ -363,9 +363,17 @@ void main() {
   ) async {
     const channel = MethodChannel('buzz/home_screen_shortcuts');
     final published = <List<String>>[];
+    final widgetBesties = <({String? name, int avatarBytes})>[];
     tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(channel, (
       call,
     ) async {
+      if (call.method == 'setBestie') {
+        final args = call.arguments as Map;
+        widgetBesties.add((
+          name: args['name'] as String?,
+          avatarBytes: (args['avatar'] as Uint8List?)?.length ?? 0,
+        ));
+      }
       if (call.method == 'setItems') {
         published.add([
           for (final item in call.arguments as List)
@@ -389,6 +397,28 @@ void main() {
       );
       await tester.pumpAndSettle();
       return reply;
+    }
+
+    // Avatar artwork rasterizes on the engine, outside fake time. Keep
+    // Home's native controls from finishing their platform views there, as
+    // they do in fake time.
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      SystemChannels.platform_views,
+      (_) => Completer<Object?>().future,
+    );
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform_views,
+        null,
+      ),
+    );
+    Future<void> renderAvatars() async {
+      for (var i = 0; i < 5; i++) {
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 20)),
+        );
+        await tester.pump();
+      }
     }
 
     final bestie = 'b' * 64;
@@ -425,6 +455,11 @@ void main() {
     await tester.pumpAndSettle();
     expect(created, 1);
     expect(published.last, ['New chat', 'New DM', 'Message Pip']);
+    // The lock screen widget gets the Bestie's name and rendered avatar.
+    await renderAvatars();
+    expect(widgetBesties.last.name, 'Pip');
+    expect(widgetBesties.last.avatarBytes, greaterThan(0));
+    final widgetPublishes = widgetBesties.length;
 
     // A tap with another screen open returns to Home first.
     Navigator.of(
@@ -534,9 +569,25 @@ void main() {
     await tester.pumpAndSettle();
     expect(opened, [bestie]);
     expect(pendingHomeScreenShortcut.value, isNull);
+    // Reconnects and failed reads leave the widget's Bestie alone.
+    await renderAvatars();
+    expect(widgetBesties.length, widgetPublishes);
+
+    // A Bestie replaced while its avatar renders never reaches the widget,
+    // and a community without one shows the generic agent.
+    bestieUpdates.add('c' * 64);
+    await tester.pumpAndSettle();
+    bestieUpdates.add(null);
+    await tester.pumpAndSettle();
+    await renderAvatars();
+    expect(widgetBesties.sublist(widgetPublishes), [
+      (name: null, avatarBytes: 0),
+    ]);
 
     await tester.pumpWidget(const SizedBox());
     expect(published.last, isEmpty);
+    expect(widgetBesties.length, widgetPublishes + 2);
+    expect(widgetBesties.last, (name: null, avatarBytes: 0));
     pendingHomeScreenShortcut.value = null;
   }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 

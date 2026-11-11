@@ -56,3 +56,17 @@ Future<void> publishHomeScreenShortcuts(
     // Flutter tests and non-Runner embeddings do not install the native bridge.
   }
 }
+
+/// Shows [name]'s [avatar] on the Bestie lock screen widget, or the generic
+/// agent symbol when [name] is null.
+Future<void> publishBestieWidget({String? name, Uint8List? avatar}) async {
+  if (defaultTargetPlatform != TargetPlatform.iOS) return;
+  try {
+    await _channel.invokeMethod<void>('setBestie', {
+      'name': name,
+      'avatar': avatar,
+    });
+  } on MissingPluginException {
+    // Flutter tests and non-Runner embeddings do not install the native bridge.
+  }
+}

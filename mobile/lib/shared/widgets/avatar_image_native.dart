@@ -1,6 +1,8 @@
 part of 'avatar_image.dart';
 
 /// Renders the same avatar sources used by Flutter as a PNG for native bars.
+///
+/// [dimension] is the square's side in pixels.
 Future<Uint8List?> nativeAvatarImage({
   required String? url,
   required String initial,
@@ -9,14 +11,14 @@ Future<Uint8List?> nativeAvatarImage({
   required Color background,
   required Color foreground,
   required List<ImageProvider> Function(String url) networkImages,
+  double dimension = 72,
 }) async {
-  const dimension = 72.0;
   final animatedAvatar = parseAnimatedAvatarUrl(url);
   final poster = animatedAvatar?.posterUrl ?? url;
   final source = _AvatarSource.parse(poster);
   final recorder = ui.PictureRecorder();
   final canvas = Canvas(recorder);
-  final bounds = const Rect.fromLTWH(0, 0, dimension, dimension);
+  final bounds = Rect.fromLTWH(0, 0, dimension, dimension);
   canvas.clipPath(avatarPath(bounds, isAgent: isAgent && !circular));
   canvas.drawColor(background, BlendMode.src);
   final imageBounds = isAgent && usesInsetAgentArtwork(url)
@@ -32,6 +34,7 @@ Future<Uint8List?> nativeAvatarImage({
           emoji,
           dimension * 258 / 512,
           foreground,
+          dimension,
         );
         rendered = true;
       case _SvgAvatarSource(:final svg):
@@ -95,7 +98,15 @@ Future<Uint8List?> nativeAvatarImage({
   } catch (_) {
     // Match the normal avatar's initial fallback when media is unavailable.
   }
-  if (!rendered) _paintNativeAvatarText(canvas, initial, 32, foreground);
+  if (!rendered) {
+    _paintNativeAvatarText(
+      canvas,
+      initial,
+      dimension * 32 / 72,
+      foreground,
+      dimension,
+    );
+  }
   final picture = recorder.endRecording();
   final image = await picture.toImage(dimension.toInt(), dimension.toInt());
   picture.dispose();
@@ -140,6 +151,7 @@ void _paintNativeAvatarText(
   String text,
   double size,
   Color color,
+  double dimension,
 ) {
   final painter = TextPainter(
     text: TextSpan(
@@ -150,7 +162,7 @@ void _paintNativeAvatarText(
   )..layout();
   painter.paint(
     canvas,
-    Offset((72 - painter.width) / 2, (72 - painter.height) / 2),
+    Offset((dimension - painter.width) / 2, (dimension - painter.height) / 2),
   );
   painter.dispose();
 }
@@ -162,6 +174,7 @@ Future<void> _paintNativeAvatarEmoji(
   String emoji,
   double size,
   Color color,
+  double dimension,
 ) async {
   final painter = TextPainter(
     text: TextSpan(
@@ -207,7 +220,7 @@ Future<void> _paintNativeAvatarEmoji(
       image,
       ink,
       Rect.fromCenter(
-        center: const Offset(36, 36),
+        center: Offset(dimension / 2, dimension / 2),
         width: ink.width * scale,
         height: ink.height * scale,
       ),

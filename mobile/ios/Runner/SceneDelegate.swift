@@ -14,13 +14,23 @@ class SceneDelegate: FlutterSceneDelegate {
     // URLs arrive here instead; warm links still use Flutter's forwarding.
     // Save the launch URL in the plugin before Dart subscribes to its stream.
     if let url = connectionOptions.urlContexts.first?.url {
-      AppLinks.shared.handleLink(url: url)
+      // A lock screen widget tap is a shortcut, not a link.
+      if !HomeScreenShortcuts.shared.handle(url) {
+        AppLinks.shared.handleLink(url: url)
+      }
     } else if let url = connectionOptions.userActivities
       .first(where: { $0.activityType == NSUserActivityTypeBrowsingWeb })?.webpageURL {
       AppLinks.shared.handleLink(url: url)
     }
     if let item = connectionOptions.shortcutItem {
       HomeScreenShortcuts.shared.handle(item)
+    }
+  }
+
+  override func scene(_ scene: UIScene, openURLContexts URLContexts: Set<UIOpenURLContext>) {
+    let links = URLContexts.filter { !HomeScreenShortcuts.shared.handle($0.url) }
+    if !links.isEmpty {
+      super.scene(scene, openURLContexts: links)
     }
   }
 
