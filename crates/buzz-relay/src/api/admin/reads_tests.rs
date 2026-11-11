@@ -957,7 +957,6 @@ fn every_route() -> Vec<(&'static str, String, Check)> {
         ("GET", format!("/members/{PK}?{host}"), View),
         ("GET", format!("/members/{PK}/ownership?{host}"), Operator),
         ("POST", format!("/members/{PK}/archive?{host}"), Operator),
-        ("DELETE", format!("/members/{PK}/archive?{host}"), Operator),
         (
             "DELETE",
             format!("/members/{PK}/execution-hold?{host}"),

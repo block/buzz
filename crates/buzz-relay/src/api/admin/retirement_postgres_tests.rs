@@ -1,6 +1,6 @@
 //! Route journey for identity retirement: Operator-only, feature-gated,
 //! inventory-bound archive with NIP-IA publication, replay and conflict,
-//! visibility-only unarchive, and release.
+//! no operator unarchive route, and release that never clears an archive.
 
 use std::sync::Arc;
 
@@ -257,8 +257,9 @@ async fn retirement_routes_are_operator_only_gated_bound_and_idempotent() {
         (StatusCode::CONFLICT, Some("request_id_conflict"))
     );
 
-    // Unarchive restores visibility only.
-    let (status, unarchived) = call(
+    // There is no operator unarchive: a signed DELETE on the archive route is
+    // refused by routing and applies nothing.
+    let (status, _) = call(
         &on,
         &operator,
         "DELETE",
@@ -266,16 +267,10 @@ async fn retirement_routes_are_operator_only_gated_bound_and_idempotent() {
         &json!({"requestId": Uuid::new_v4()}),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "{unarchived}");
-    assert_eq!(unarchived["identities"][0]["archived"], false);
-    assert_eq!(unarchived["identities"][0]["executionHeld"], true);
-    assert_eq!(unarchived["stages"]["newWorkAdmission"], "unchanged");
-    let undeltas = tags(&pool, c, 8003).await;
-    assert_eq!(undeltas.len(), 1);
-    assert!(undeltas[0]
-        .as_array()
-        .unwrap()
-        .contains(&json!(["p", root])));
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(actions(&pool, c).await, 1);
+    assert_eq!(archived(&pool, c).await, 2);
+    assert!(tags(&pool, c, 8003).await.is_empty());
 
     // Release the agent, then the root.
     let hold = |key: &str| format!("/members/{key}/execution-hold?communityHost={host}");
@@ -314,4 +309,24 @@ async fn retirement_routes_are_operator_only_gated_bound_and_idempotent() {
     )
     .await;
     assert_eq!(released["stages"]["newWorkAdmission"], "released");
+    // Release lifts holds only; both keys stay archived.
+    assert_eq!(released["identities"][0]["archived"], true);
+    assert_eq!(archived(&pool, c).await, 2);
+    assert!(tags(&pool, c, 8003).await.is_empty());
+}
+
+async fn actions(pool: &sqlx::PgPool, c: CommunityId) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM identity_retirement_actions WHERE community_id = $1")
+        .bind(c.as_uuid())
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+async fn archived(pool: &sqlx::PgPool, c: CommunityId) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM archived_identities WHERE community_id = $1")
+        .bind(c.as_uuid())
+        .fetch_one(pool)
+        .await
+        .unwrap()
 }

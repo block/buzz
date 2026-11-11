@@ -78,7 +78,6 @@ pub fn router(state: Arc<crate::state::AppState>) -> Router {
             "/members/{pubkey}/archive",
             axum::routing::post(retirement::archive),
         )
-        .route("/members/{pubkey}/archive", delete(retirement::unarchive))
         .route(
             "/members/{pubkey}/execution-hold",
             delete(retirement::release),

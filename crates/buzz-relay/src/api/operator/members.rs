@@ -1,5 +1,5 @@
-//! Member search, the ownership preview and identity retirement on the
-//! deployment-operator API, for an operator that reaches the relay at
+//! Member search, the ownership preview, identity retirement and hold release
+//! on the deployment-operator API, for an operator that reaches the relay at
 //! `RELAY_OPERATOR_API_ORIGIN` instead of the admin host.
 //!
 //! Authority is the `RELAY_OPERATOR_PUBKEYS` allowlist. The NIP-98 `u` tag
@@ -38,7 +38,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route(
             "/operator/communities/members/{pubkey}/archive",
-            post(archive).delete(unarchive),
+            post(archive),
         )
         .route(
             "/operator/communities/members/{pubkey}/execution-hold",
@@ -119,7 +119,7 @@ async fn identity_inventory(
         .into_response()
 }
 
-/// The three retirement mutations: authorize over the exact body, then the
+/// The retirement mutations: authorize over the exact body, then the
 /// shared lifecycle core.
 #[allow(clippy::too_many_arguments)] // one Axum extractor per argument, plus the operation
 async fn retire(
@@ -162,25 +162,6 @@ async fn archive(
     body: Bytes,
 ) -> Response {
     let operation = RetirementOperation::Archive;
-    retire(
-        state, slot, method, uri, headers, operation, target, query, body,
-    )
-    .await
-}
-
-/// `DELETE /operator/communities/members/{pubkey}/archive?communityHost=`
-#[allow(clippy::too_many_arguments)] // one Axum extractor per argument
-async fn unarchive(
-    State(state): State<Arc<AppState>>,
-    slot: AccessSlot,
-    method: Method,
-    uri: Uri,
-    headers: HeaderMap,
-    Path(target): Path<String>,
-    Query(query): Query<CommunityQuery>,
-    body: Bytes,
-) -> Response {
-    let operation = RetirementOperation::Unarchive;
     retire(
         state, slot, method, uri, headers, operation, target, query, body,
     )

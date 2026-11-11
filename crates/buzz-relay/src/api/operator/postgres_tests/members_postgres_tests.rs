@@ -183,12 +183,14 @@ mod postgres_tests {
         let (_, err) = call(&state, &operator, "POST", &staff, Some(&body)).await;
         assert_eq!(lifecycle_code(&err), Some("target_is_staff"));
 
-        // Revive keeps the hold; release is per key.
-        let revive = serde_json::json!({"requestId": Uuid::new_v4()});
-        let (status, revived) = call(&state, &operator, "DELETE", &archive, Some(&revive)).await;
-        assert_eq!(status, StatusCode::OK, "{revived}");
-        assert_eq!(revived["identities"][0]["archived"], false);
-        assert_eq!(revived["identities"][0]["executionHeld"], true);
+        // There is no operator unarchive: a signed DELETE on the archive
+        // route is refused by routing and applies nothing.
+        let unarchive = serde_json::json!({"requestId": Uuid::new_v4()});
+        let (status, _) = call(&state, &operator, "DELETE", &archive, Some(&unarchive)).await;
+        assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(actions(&state, community).await, 1);
+
+        // Release is per key and lifts holds only: both keys stay archived.
         let hold = |key: &str| format!("{BASE}/{key}/execution-hold?communityHost={host}");
         let release = serde_json::json!({"requestId": Uuid::new_v4()});
         let (status, released) =
@@ -199,7 +201,15 @@ mod postgres_tests {
         let release = serde_json::json!({"requestId": Uuid::new_v4()});
         let (_, released) = call(&state, &operator, "DELETE", &hold(&root), Some(&release)).await;
         assert_eq!(released["stages"]["newWorkAdmission"], "released");
-        assert_eq!(actions(&state, community).await, 4);
+        assert_eq!(released["identities"][0]["archived"], true);
+        let still_archived: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM archived_identities WHERE community_id = $1")
+                .bind(community.as_uuid())
+                .fetch_one(state.db.pool())
+                .await
+                .expect("archived");
+        assert_eq!(still_archived, 2);
+        assert_eq!(actions(&state, community).await, 3);
     }
 
     #[tokio::test]
@@ -214,7 +224,7 @@ mod postgres_tests {
             Arc::new(SeenOnceReplayGuard(Mutex::new(HashSet::new())));
         let (community, host) = community(&state).await;
         let root = hex::encode(ROOT);
-        let archive = format!("{BASE}/{root}/archive?communityHost={host}");
+        let hold = format!("{BASE}/{root}/execution-hold?communityHost={host}");
         let ownership = format!("{BASE}/{root}/ownership?communityHost={host}");
         let body =
             serde_json::to_vec(&serde_json::json!({"requestId": Uuid::new_v4()})).expect("body");
@@ -224,7 +234,7 @@ mod postgres_tests {
         let refusals = [
             (
                 "not allowlisted",
-                nip98_auth_header(&outsider, &url(&archive), "DELETE", Some(&body)),
+                nip98_auth_header(&outsider, &url(&hold), "DELETE", Some(&body)),
                 StatusCode::FORBIDDEN,
                 "not_operator",
             ),
@@ -232,7 +242,7 @@ mod postgres_tests {
                 "admin-host origin",
                 nip98_auth_header(
                     &operator,
-                    &format!("https://{INGRESS_HOST}{archive}"),
+                    &format!("https://{INGRESS_HOST}{hold}"),
                     "DELETE",
                     Some(&body),
                 ),
@@ -244,7 +254,7 @@ mod postgres_tests {
                 nip98_auth_header(
                     &operator,
                     &url(&format!(
-                        "{BASE}/{root}/archive?communityHost=other.example"
+                        "{BASE}/{root}/execution-hold?communityHost=other.example"
                     )),
                     "DELETE",
                     Some(&body),
@@ -256,7 +266,7 @@ mod postgres_tests {
                 "query not signed",
                 nip98_auth_header(
                     &operator,
-                    &url(&format!("{BASE}/{root}/archive")),
+                    &url(&format!("{BASE}/{root}/execution-hold")),
                     "DELETE",
                     Some(&body),
                 ),
@@ -265,25 +275,25 @@ mod postgres_tests {
             ),
             (
                 "different DELETE body signed",
-                nip98_auth_header(&operator, &url(&archive), "DELETE", Some(b"{}")),
+                nip98_auth_header(&operator, &url(&hold), "DELETE", Some(b"{}")),
                 StatusCode::UNAUTHORIZED,
                 "unauthorized",
             ),
             (
                 "DELETE body without payload tag",
-                nip98_auth_header_without_payload(&operator, &url(&archive), "DELETE"),
+                nip98_auth_header_without_payload(&operator, &url(&hold), "DELETE"),
                 StatusCode::UNAUTHORIZED,
                 "unauthorized",
             ),
             (
                 "method not signed",
-                nip98_auth_header(&operator, &url(&archive), "POST", Some(&body)),
+                nip98_auth_header(&operator, &url(&hold), "POST", Some(&body)),
                 StatusCode::UNAUTHORIZED,
                 "unauthorized",
             ),
         ];
         for (case, auth, status, code) in refusals {
-            let (actual, json) = send(&state, "DELETE", &archive, Some(body.clone()), auth).await;
+            let (actual, json) = send(&state, "DELETE", &hold, Some(body.clone()), auth).await;
             assert_eq!(actual, status, "{case}: {json}");
             assert_eq!(json["code"], code, "{case}: {json}");
             assert!(json["error"].is_string(), "{case}: {json}");
@@ -302,7 +312,7 @@ mod postgres_tests {
         );
 
         // Lifecycle refusals use the admin envelope.
-        let unknown = format!("{BASE}/{root}/archive?communityHost=unmapped.example");
+        let unknown = format!("{BASE}/{root}/execution-hold?communityHost=unmapped.example");
         let (status, json) = call(
             &state,
             &operator,
@@ -319,7 +329,7 @@ mod postgres_tests {
         // Over the 4096-byte limit.
         let large = serde_json::json!({"requestId": Uuid::new_v4(), "reason": "a".repeat(5000)});
         assert_eq!(
-            call(&state, &operator, "DELETE", &archive, Some(&large))
+            call(&state, &operator, "DELETE", &hold, Some(&large))
                 .await
                 .0,
             StatusCode::PAYLOAD_TOO_LARGE
@@ -338,7 +348,7 @@ mod postgres_tests {
             &state,
             &operator,
             "DELETE",
-            &archive,
+            &hold,
             Some(&serde_json::json!({"requestId": Uuid::new_v4()})),
         )
         .await;

@@ -1,6 +1,7 @@
 //! Identity retirement through the real store functions: archive, replay,
 //! inventory binding, the execution hold on every workflow and run writer,
-//! cancelled-run fencing, unarchive, and provenance-checked release. The race
+//! cancelled-run fencing, a signed NIP-IA unarchive leaving the hold, and
+//! provenance-checked release. The race
 //! tests hold the other side's lock in an open transaction and assert the
 //! production writer waits for it.
 
@@ -159,17 +160,9 @@ impl Fixture {
 
 fn applied(
     outcome: RetirementOutcome,
-) -> (
-    crate::identity_retirement::RetirementRecord,
-    Vec<String>,
-    Vec<String>,
-) {
+) -> (crate::identity_retirement::RetirementRecord, Vec<String>) {
     match outcome {
-        RetirementOutcome::Applied {
-            record,
-            archived,
-            unarchived,
-        } => (record, archived, unarchived),
+        RetirementOutcome::Applied { record, archived } => (record, archived),
         RetirementOutcome::Replayed(_) => panic!("expected a fresh action"),
     }
 }
@@ -200,10 +193,8 @@ async fn archive_retires_the_exact_key_and_agents_and_replays_without_reapplying
     .unwrap();
 
     let req = f.archive_request().await;
-    let (record, archived, unarchived) =
-        applied(f.db.apply_identity_retirement(&req).await.unwrap());
+    let (record, archived) = applied(f.db.apply_identity_retirement(&req).await.unwrap());
     assert_eq!(archived, vec![hex::encode(ROOT), hex::encode(AGENT)]);
-    assert!(unarchived.is_empty());
     assert!(!record.published);
     let r = &record.result;
     assert_eq!(r.identities.len(), 2);
@@ -306,6 +297,47 @@ async fn archive_retires_the_exact_key_and_agents_and_replays_without_reapplying
             Err(RetirementError::RequestIdConflict)
         ));
     }
+
+    // A row recorded under an operation this release no longer accepts (an
+    // earlier build's operator unarchive) stays as written, and reusing its
+    // request id is a conflict, not a decode failure.
+    let historical = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO identity_retirement_actions \
+         (community_id, id, request_id, operation, target_pubkey, actor_pubkey, request, result) \
+         VALUES ($1, $2, $3, 'unarchive', $4, $5, '{}', '{}')",
+    )
+    .bind(f.c.as_uuid())
+    .bind(Uuid::new_v4())
+    .bind(historical)
+    .bind(ROOT.as_slice())
+    .bind(req.actor.as_slice())
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    let mut reuse = f.request(RetirementOperation::Release, ROOT);
+    reuse.request_id = historical;
+    assert!(matches!(
+        f.db.apply_identity_retirement(&reuse).await,
+        Err(RetirementError::RequestIdConflict)
+    ));
+    let (operation, result): (String, serde_json::Value) = sqlx::query_as(
+        "SELECT operation, result FROM identity_retirement_actions \
+         WHERE community_id = $1 AND request_id = $2",
+    )
+    .bind(f.c.as_uuid())
+    .bind(historical)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        (operation.as_str(), result),
+        ("unarchive", serde_json::json!({}))
+    );
+    assert!(
+        f.held(&ROOT).await,
+        "the conflicting reuse released nothing"
+    );
 }
 
 #[tokio::test]
@@ -350,7 +382,7 @@ async fn archive_binds_to_the_confirmed_inventory_and_fails_closed_on_overflow()
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn hold_blocks_every_workflow_writer_and_survives_unarchive() {
+async fn hold_blocks_every_workflow_writer_and_survives_a_signed_unarchive() {
     let f = Fixture::new().await;
     let root_wf = f.workflow(&ROOT, "active").await;
     let other_wf = f.workflow(&OTHER, "active").await;
@@ -381,16 +413,11 @@ async fn hold_blocks_every_workflow_writer_and_survives_unarchive() {
         .await
         .unwrap();
 
-    // A signed self-unarchive (NIP-IA path) and an operator unarchive restore
+    // A signed NIP-IA unarchive (the store write its handler makes) restores
     // visibility only.
-    assert!(f.db.unarchive(f.c, &hex::encode(AGENT)).await.unwrap());
-    let (record, _, unarchived) = applied(
-        f.db.apply_identity_retirement(&f.request(RetirementOperation::Unarchive, ROOT))
-            .await
-            .unwrap(),
-    );
-    assert_eq!(unarchived, vec![hex::encode(ROOT)]);
-    assert!(record.result.identities[0].execution_held);
+    for key in [ROOT, AGENT] {
+        assert!(f.db.unarchive(f.c, &hex::encode(key)).await.unwrap());
+    }
     assert!(f.db.list_archived(f.c).await.unwrap().is_empty());
     assert!(f.held(&ROOT).await && f.held(&AGENT).await);
     assert!(matches!(
@@ -452,12 +479,12 @@ async fn release_restores_only_unmodified_workflows_of_the_exact_key() {
         .await
         .unwrap();
 
-    let (record, archived, unarchived) = applied(
+    let (record, archived) = applied(
         f.db.apply_identity_retirement(&f.request(RetirementOperation::Release, AGENT))
             .await
             .unwrap(),
     );
-    assert!(archived.is_empty() && unarchived.is_empty());
+    assert!(archived.is_empty());
     let r = &record.result;
     assert_eq!(r.stages.workflows, "partial");
     assert_eq!(
@@ -490,7 +517,7 @@ async fn release_restores_only_unmodified_workflows_of_the_exact_key() {
         Err(DbError::ExecutionHeld)
     ));
 
-    let (record, _, _) = applied(
+    let (record, _) = applied(
         f.db.apply_identity_retirement(&f.request(RetirementOperation::Release, ROOT))
             .await
             .unwrap(),
@@ -505,7 +532,7 @@ async fn release_restores_only_unmodified_workflows_of_the_exact_key() {
         .unwrap();
 
     // Releasing again changes nothing.
-    let (record, _, _) = applied(
+    let (record, _) = applied(
         f.db.apply_identity_retirement(&f.request(RetirementOperation::Release, ROOT))
             .await
             .unwrap(),

@@ -6,10 +6,12 @@ automation are separate states with separate commands:
 
 | State | Set by | Cleared by |
 |-------|--------|------------|
-| NIP-IA archive (`archived_identities`) | archive | unarchive, or a signed NIP-IA self/owner/admin unarchive |
+| NIP-IA archive (`archived_identities`) | archive | a signed NIP-IA unarchive only (see [Clearing an archive](#clearing-an-archive)) |
 | Execution hold (`identity_retirement_holds`) | archive | release only |
 
-Unarchiving never resumes automation: a key can be visible again and still held.
+There is no operator unarchive. Release never clears an archive, and an
+unarchive never resumes automation: a key can be visible again and still held,
+or released and still archived.
 
 Read the ownership preview first ([operator-identity-inventory.md](operator-identity-inventory.md)).
 
@@ -32,8 +34,6 @@ optional, 1–64 characters of `a-z`, `0-9` and `-`.
 POST   /api/admin/v1/members/<hex>/archive?communityHost=<host>
        {"requestId": "<uuid>", "inventoryVersion": "<from the preview>",
         "reason": "left-company", "replacedBy": "<hex>"}
-DELETE /api/admin/v1/members/<hex>/archive?communityHost=<host>
-       {"requestId": "<uuid>", "reason": "returned"}
 DELETE /api/admin/v1/members/<hex>/execution-hold?communityHost=<host>
        {"requestId": "<uuid>"}
 ```
@@ -50,7 +50,6 @@ for example over an internal service mesh, uses the same operations under
 GET    /operator/communities/members/search?communityHost=<host>&q=<text>&limit=<n>
 GET    /operator/communities/members/<hex>/ownership?communityHost=<host>
 POST   /operator/communities/members/<hex>/archive?communityHost=<host>
-DELETE /operator/communities/members/<hex>/archive?communityHost=<host>
 DELETE /operator/communities/members/<hex>/execution-hold?communityHost=<host>
 ```
 
@@ -89,23 +88,43 @@ consent actor, per NIP-IA) and the `kind:13535` snapshot. `replacedBy` is
 recorded on the root only. The target must not be relay staff (`409
 target_is_staff`).
 
-### Unarchive
-
-Removes the target key's NIP-IA archive only, emits `kind:8003` if it changed,
-and republishes the snapshot. Holds, workflows and agents are unchanged.
-
 ### Release
 
 Removes the target key's hold and restores the workflows this key's retirement
 archived, but only those still `archived` and not updated since. Others are
 reported with `"skipped": "modified_since_retirement"` (or `status: "deleted"`).
 Release is per key: releasing a root does not release its agents, and an agent
-stays blocked while its owner is held (`newWorkAdmission: "blocked"`).
+stays blocked while its owner is held (`newWorkAdmission: "blocked"`) until the
+root is released too.
 
 Release never changes NIP-IA visibility and publishes nothing, so it always
 answers `200` with `stages.visibility: "unchanged"`. Only release uses that
-value; archive and unarchive answer `confirmed` or `pending`. The response lists
+value; archive answers `confirmed` or `pending`. The response lists
 exactly one identity, the target, with `role: "root"`.
+
+## Clearing an archive
+
+Only a signed NIP-IA `kind:9036` unarchive request ([NIP-IA](nips/NIP-IA.md))
+removes a key's archive; the relay then publishes `kind:8003` and the
+snapshot. The relay accepts the request when the key itself, its NIP-OA owner
+or a community `owner`/`admin` signs it, whatever archived the key, including
+this feature's `consent=relay` archive. It removes the archive row only; the
+execution hold stays until release. Nothing else clears it: release, a new
+profile, a new agent-owner link and re-joining the community do not.
+Community deletion removes it with the community.
+
+The archive and the hold are keyed by community and pubkey, not by account,
+and the relay knows nothing of account bindings. Moving a person to a new key
+gives them a key that is neither archived nor held, while the retired key stays
+archived and held.
+
+**Known gap: a restored key stays retired.** If a deployment later binds an
+account back to a key retired here (for example, account recovery that
+restores an earlier key), nothing tells the relay: the key stays hidden and
+held in every community where it was retired. Returning it takes two separate
+steps: a signed NIP-IA unarchive (by the key, its owner or a community admin)
+for visibility, and release for automation. This feature adds neither step to
+recovery.
 
 ## Holds
 
@@ -135,8 +154,8 @@ always `unsupported`.
 `200` when the NIP-IA snapshot is published (or the action does not affect
 visibility), `202` when publication is pending. Repeat the same request to
 retry it. `visibility: "confirmed"` means the `kind:13535` snapshot, the state
-clients converge on, reflects the action. The per-key `kind:8002`/`kind:8003`
-deltas are best-effort history: a failed delta is logged and never re-sent,
+clients converge on, reflects the action. The per-key `kind:8002` deltas are
+best-effort history: a failed delta is logged and never re-sent,
 because a late delta could contradict a later action. Body:
 
 ```json
@@ -180,8 +199,8 @@ The relay sees only the caller's NIP-98 request. An admin portal in front of it
 has two separate hops, and each needs its own routing check:
 
 1. browser → portal: the portal's own pages and form posts;
-2. portal → relay: `GET` ownership, `POST` archive, and `DELETE` archive and
-   execution-hold, each with a JSON body.
+2. portal → relay: `GET` ownership, `POST` archive and `DELETE`
+   execution-hold, each mutation with a JSON body.
 
 On the portal → relay hop, every proxy and ingress must forward the method,
 the exact body bytes (including on `DELETE`) and the path and query unchanged.
@@ -190,8 +209,8 @@ The relay checks the signed URL against configuration, never the inbound
 `Host`), `RELAY_OPERATOR_API_ORIGIN` for the operator routes. A dropped
 `DELETE` body answers `400 invalid_body`; a changed body or URL fails NIP-98
 (`401`). Both fail closed, but leave keys held that cannot be released. Before
-enabling mutations, run unarchive and release through the real ingress, not
-only against the relay directly.
+enabling mutations, run release through the real ingress, not only against
+the relay directly.
 
 A proxy or client deadline can expire while the relay is still working: the
 transaction waits at most 5 s for each lock and 15 s for each statement, and
@@ -231,5 +250,7 @@ working, but the precursor does not enforce execution holds. It is an
 acceptable feature rollback only before the first retirement. After a
 retirement, roll back only to a release that enforces holds, or to separately
 validated containment that fails closed. Turning
-`BUZZ_ADMIN_IDENTITY_RETIREMENT` off stops new retirements; it does not enforce
-existing holds.
+`BUZZ_ADMIN_IDENTITY_RETIREMENT` off refuses every mutation, release included,
+and changes no stored state. Existing holds stay until the flag is on again and
+release runs; existing archives stay until a signed NIP-IA unarchive, which does
+not depend on the flag.

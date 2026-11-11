@@ -1,5 +1,7 @@
 //! Operator identity retirement: archive an exact key and its verified agents,
-//! hold their automation, restore visibility, and release the hold.
+//! hold their automation, and release the hold. Release never changes NIP-IA
+//! visibility; only a signed NIP-IA unarchive (`handlers::identity_archive`)
+//! clears an archive.
 //!
 //! See `docs/operator-identity-retirement.md`. Order: authorize (Operator) →
 //! feature gate → parse → tenant → staff guard (archive) → one transaction in
@@ -26,9 +28,7 @@ use super::auth::authorize_write;
 use super::direct::refuse_staff_target;
 use super::error::ApiError;
 use super::{tenant_for_host, CommunityQuery};
-use crate::handlers::side_effects::{
-    publish_nipia_archival_list, publish_nipia_archived, publish_nipia_unarchived,
-};
+use crate::handlers::side_effects::{publish_nipia_archival_list, publish_nipia_archived};
 use crate::state::AppState;
 
 const REASON_MAX: usize = 64;
@@ -40,13 +40,6 @@ struct ArchiveBody {
     reason: Option<String>,
     replaced_by: Option<String>,
     inventory_version: String,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct UnarchiveBody {
-    request_id: Uuid,
-    reason: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -76,32 +69,6 @@ pub(super) async fn archive(
         uri,
         headers,
         RetirementOperation::Archive,
-        target,
-        q,
-        body,
-    )
-    .await
-}
-
-/// `DELETE /members/{pubkey}/archive`
-#[allow(clippy::too_many_arguments)] // one Axum extractor per argument
-pub(super) async fn unarchive(
-    State(state): State<Arc<AppState>>,
-    slot: crate::access::AccessSlot,
-    method: Method,
-    uri: Uri,
-    headers: HeaderMap,
-    Path(target): Path<String>,
-    Query(q): Query<CommunityQuery>,
-    body: Bytes,
-) -> Reply {
-    run(
-        state,
-        slot,
-        method,
-        uri,
-        headers,
-        RetirementOperation::Unarchive,
         target,
         q,
         body,
@@ -189,17 +156,6 @@ fn parse_body(
                     reason: validate_reason(b.reason)?,
                     replaced_by: b.replaced_by,
                     inventory_version: Some(b.inventory_version),
-                },
-            ))
-        }
-        RetirementOperation::Unarchive => {
-            let b: UnarchiveBody = serde_json::from_slice(body).map_err(|_| invalid_body())?;
-            Ok((
-                b.request_id,
-                RetirementPayload {
-                    reason: validate_reason(b.reason)?,
-                    replaced_by: None,
-                    inventory_version: None,
                 },
             ))
         }
@@ -325,20 +281,15 @@ pub(crate) async fn execute(
 
     let (record, replayed) = match outcome {
         RetirementOutcome::Replayed(record) => (record, true),
-        RetirementOutcome::Applied {
-            record,
-            archived,
-            unarchived,
-        } => {
+        RetirementOutcome::Applied { record, archived } => {
             tracing::info!(
                 action_id = %record.action_id,
                 operation = ?operation,
                 target = %target_hex,
                 archived = archived.len(),
-                unarchived = unarchived.len(),
                 "identity retirement action applied"
             );
-            publish_deltas(&tenant, state, &request, &archived, &unarchived).await;
+            publish_deltas(&tenant, state, &request, &archived).await;
             (record, false)
         }
     };
@@ -346,7 +297,7 @@ pub(crate) async fn execute(
     Ok(respond(&tenant, record, replayed, published))
 }
 
-/// Emit one NIP-IA delta per key whose archive state this action changed.
+/// Emit one NIP-IA `kind:8002` delta per key this archive newly archived.
 /// Deltas are history; the snapshot published next is the state clients
 /// converge on, so a failed delta is logged and not retried (a retry could
 /// emit it after a later action reversed it).
@@ -355,7 +306,6 @@ async fn publish_deltas(
     state: &Arc<AppState>,
     request: &RetirementRequest,
     archived: &[String],
-    unarchived: &[String],
 ) {
     let actor = hex::encode(request.actor);
     let reason = request.payload.reason.as_deref();
@@ -378,13 +328,6 @@ async fn publish_deltas(
         .await
         {
             tracing::warn!(target = %key, "NIP-IA archived delta failed: {e:#}");
-        }
-    }
-    for key in unarchived {
-        if let Err(e) =
-            publish_nipia_unarchived(tenant, state, key, "relay", &actor, "", "", reason).await
-        {
-            tracing::warn!(target = %key, "NIP-IA unarchived delta failed: {e:#}");
         }
     }
 }
@@ -423,8 +366,8 @@ fn respond(
 ) -> (StatusCode, Json<serde_json::Value>) {
     let visibility = match (record.operation, published) {
         (RetirementOperation::Release, _) => "unchanged",
-        (_, true) => "confirmed",
-        (_, false) => "pending",
+        (RetirementOperation::Archive, true) => "confirmed",
+        (RetirementOperation::Archive, false) => "pending",
     };
     let mut stages = serde_json::to_value(&record.result.stages).unwrap_or_default();
     stages["visibility"] = visibility.into();

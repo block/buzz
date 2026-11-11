@@ -3,8 +3,8 @@
 //!
 //! See `docs/operator-identity-retirement.md`. Each operation is one admitted
 //! transaction. The execution hold (`identity_retirement_holds`) is separate
-//! from NIP-IA visibility (`archived_identities`): unarchiving, including a
-//! signed self-unarchive, never releases it.
+//! from NIP-IA visibility (`archived_identities`): a signed NIP-IA unarchive
+//! never releases it, and release never changes visibility.
 //!
 //! Serialization: retirement takes the community's invite-admission lock
 //! (held by every agent-owner link writer) and the identity-retirement lock
@@ -81,8 +81,6 @@ pub(crate) async fn owner_is_held(
 pub enum RetirementOperation {
     /// Archive the key and verified agents and hold their automation.
     Archive,
-    /// Restore the key's NIP-IA visibility only.
-    Unarchive,
     /// Release the key's execution hold and restore its retired workflows.
     Release,
 }
@@ -91,7 +89,6 @@ impl RetirementOperation {
     fn as_str(self) -> &'static str {
         match self {
             Self::Archive => "archive",
-            Self::Unarchive => "unarchive",
             Self::Release => "release",
         }
     }
@@ -219,14 +216,12 @@ pub struct RetirementRecord {
 /// Outcome of [`Db::apply_identity_retirement`].
 #[derive(Debug)]
 pub enum RetirementOutcome {
-    /// Applied now. `archived`/`unarchived` list keys whose NIP-IA state changed.
+    /// Applied now.
     Applied {
         /// Stored action.
         record: RetirementRecord,
-        /// Keys newly archived.
+        /// Keys this action newly archived.
         archived: Vec<String>,
-        /// Keys newly unarchived.
-        unarchived: Vec<String>,
     },
     /// The same request was already applied; nothing changed.
     Replayed(RetirementRecord),
@@ -337,25 +332,28 @@ impl Db {
         .fetch_optional(tx.conn())
         .await?
         {
+            // Compare the stored row as written before decoding it: an
+            // earlier release may have recorded an operation this one no
+            // longer accepts, and reusing its request id is a conflict.
+            let operation: String = row.try_get("operation")?;
+            let target: Vec<u8> = row.try_get("target_pubkey")?;
             let actor: Vec<u8> = row.try_get("actor_pubkey")?;
             let stored: serde_json::Value = row.try_get("request")?;
-            let record = record_from_row(&row)?;
             tx.rollback().await?;
-            if record.operation != req.operation
-                || record.target != hex::encode(req.target)
+            if operation != req.operation.as_str()
+                || target != req.target
                 || actor != req.actor
                 || stored != payload
             {
                 return Err(RetirementError::RequestIdConflict);
             }
-            return Ok(RetirementOutcome::Replayed(record));
+            return Ok(RetirementOutcome::Replayed(record_from_row(&row)?));
         }
 
         let action_id = Uuid::new_v4();
-        let (result, archived, unarchived) = match req.operation {
+        let (result, archived) = match req.operation {
             RetirementOperation::Archive => archive(&mut tx, req, action_id).await?,
-            RetirementOperation::Unarchive => unarchive(&mut tx, req).await?,
-            RetirementOperation::Release => release(&mut tx, req).await?,
+            RetirementOperation::Release => (release(&mut tx, req).await?, Vec::new()),
         };
         sqlx::query(
             "INSERT INTO identity_retirement_actions \
@@ -383,7 +381,6 @@ impl Db {
                 published: false,
             },
             archived,
-            unarchived,
         })
     }
 
@@ -413,13 +410,12 @@ impl Db {
     }
 }
 
-type Applied = (RetirementResult, Vec<String>, Vec<String>);
-
+/// Returns the result and the keys this archive newly archived.
 async fn archive(
     tx: &mut crate::AdmittedTx,
     req: &RetirementRequest,
     action_id: Uuid,
-) -> std::result::Result<Applied, RetirementError> {
+) -> std::result::Result<(RetirementResult, Vec<String>), RetirementError> {
     let community = req.community.as_uuid();
     let confirmed = req
         .payload
@@ -612,65 +608,13 @@ async fn archive(
         .into_iter()
         .filter(|k| archived.contains(k))
         .collect();
-    Ok((result, archived, Vec::new()))
-}
-
-async fn is_held(tx: &mut crate::AdmittedTx, community: CommunityId, key: &[u8]) -> Result<bool> {
-    Ok(sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM identity_retirement_holds WHERE community_id = $1 AND pubkey = $2)",
-    )
-    .bind(community.as_uuid())
-    .bind(key)
-    .fetch_one(tx.conn())
-    .await?)
-}
-
-fn unchanged_stages(new_work_admission: &str, workflows: &str) -> Stages {
-    Stages {
-        new_work_admission: new_work_admission.into(),
-        workflows: workflows.into(),
-        in_flight_runs: "none".into(),
-        agent_runtime: "unsupported".into(),
-    }
-}
-
-async fn unarchive(
-    tx: &mut crate::AdmittedTx,
-    req: &RetirementRequest,
-) -> std::result::Result<Applied, RetirementError> {
-    let hex = hex::encode(req.target);
-    let changed =
-        sqlx::query("DELETE FROM archived_identities WHERE community_id = $1 AND pubkey = $2")
-            .bind(req.community.as_uuid())
-            .bind(&hex)
-            .execute(tx.conn())
-            .await?
-            .rows_affected()
-            > 0;
-    let held = is_held(tx, req.community, &req.target).await?;
-    let result = RetirementResult {
-        identities: vec![ResultIdentity {
-            pubkey: hex.clone(),
-            role: "root".into(),
-            archived: false,
-            execution_held: held,
-            changed,
-        }],
-        workflows: Vec::new(),
-        runs: RunCounts::default(),
-        stages: unchanged_stages("unchanged", "unchanged"),
-    };
-    Ok((
-        result,
-        Vec::new(),
-        if changed { vec![hex] } else { Vec::new() },
-    ))
+    Ok((result, archived))
 }
 
 async fn release(
     tx: &mut crate::AdmittedTx,
     req: &RetirementRequest,
-) -> std::result::Result<Applied, RetirementError> {
+) -> std::result::Result<RetirementResult, RetirementError> {
     let community = req.community.as_uuid();
     let key = req.target.as_slice();
     let released = sqlx::query(
@@ -758,7 +702,12 @@ async fn release(
         }],
         workflows,
         runs: RunCounts::default(),
-        stages: unchanged_stages(admission, stage),
+        stages: Stages {
+            new_work_admission: admission.into(),
+            workflows: stage.into(),
+            in_flight_runs: "none".into(),
+            agent_runtime: "unsupported".into(),
+        },
     };
-    Ok((result, Vec::new(), Vec::new()))
+    Ok(result)
 }
