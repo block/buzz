@@ -661,7 +661,7 @@ pub(crate) async fn get_channel_window_on(
     // what is still missing.
     let kinds: Option<Vec<i32>> =
         kind_filter.map(|ks| ks.iter().filter_map(|&k| i32::try_from(k).ok()).collect());
-    let floor = crate::store::recent_pass::floor_for(
+    let split = crate::store::recent_pass::split_for(
         Utc::now(),
         kinds.as_deref(),
         None,
@@ -685,7 +685,7 @@ pub(crate) async fn get_channel_window_on(
         }
         q.bind(pass_limit)
     };
-    let mut db_rows = match floor {
+    let mut db_rows = match split {
         None => {
             crate::event::fetch_with_read_deadline(
                 &mut *conn,
@@ -694,12 +694,12 @@ pub(crate) async fn get_channel_window_on(
             )
             .await?
         }
-        Some(floor) => {
+        Some(split) => {
             // One snapshot and one deadline for both passes (see
             // `ReadTransaction`).
             let mut read = crate::event::ReadTransaction::begin(conn, deadline).await?;
             let mut rows = Vec::new();
-            let mut pass = Some((Range::Recent(floor), probe_limit));
+            let mut pass = Some((Range::Recent(split), probe_limit));
             while let Some((range, pass_limit)) = pass {
                 rows.extend(read.fetch(pass_query(range, pass_limit)).await?);
                 pass = crate::store::recent_pass::next(range, rows.len(), probe_limit);
@@ -942,7 +942,7 @@ impl Db {
                 predicate,
                 crate::observability::ReaderOperation::SubscriptionHistory,
             )
-            .await
+            .await?
         {
             match crate::thread::get_thread_replies_on(
                 &mut tx,
@@ -1104,7 +1104,8 @@ impl Db {
     ///
     /// Every replica failure except a cancelled statement (57014, which the
     /// writer would only repeat) fails closed to the writer and is recorded
-    /// in `buzz_db_route_decision`.
+    /// in `buzz_db_route_decision`. A busy reader rejects the read as
+    /// retryable instead (see [`Db::route_read`]).
     #[datastore_span(name = "get_channel_window", system = "postgresql")]
     pub async fn get_channel_window_with_session(
         &self,
@@ -1125,7 +1126,7 @@ impl Db {
                 RoutePredicate::from_channel_cursor(channel_id, &cursor),
                 crate::observability::ReaderOperation::SubscriptionHistory,
             )
-            .await
+            .await?
         {
             RouteDecision::Replica(mut tx, _entry, reason) => {
                 match crate::thread::get_channel_window_on(
@@ -2627,8 +2628,11 @@ mod postgres_tests {
         let waiting = tokio::time::timeout(std::time::Duration::from_secs(10), async {
             loop {
                 let blocked: bool = sqlx::query_scalar(
+                    // `pg_locks` spans every database, and the per-test
+                    // databases are clones that share relation OIDs.
                     "SELECT EXISTS(SELECT 1 FROM pg_locks \
-                     WHERE relation = $1::text::regclass AND NOT granted)",
+                     WHERE relation = $1::text::regclass AND NOT granted \
+                     AND database = (SELECT oid FROM pg_database WHERE datname = current_database()))",
                 )
                 .bind(&newest)
                 .fetch_one(&mut *newest_lock)

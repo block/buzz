@@ -550,7 +550,7 @@ Subscriber → dedicated PubSub  → PSUBSCRIBE buzz:channel:*
 
 The subscriber uses a **dedicated** `redis::aio::PubSub` connection — not from the pool. This is intentional: pool connections cannot hold `PSUBSCRIBE` state.
 
-**Current state:** The subscriber loop is spawned in `buzz-relay/src/main.rs` and populates the broadcast channel. A consumer task subscribes via `pubsub.subscribe_local()`, calls `sub_registry.fan_out()` on each received event, and delivers matches to local WebSocket connections via `conn_manager.send_to()`. Multi-node fan-out is now wired end-to-end. Local-echo deduplication is implemented via `AppState.local_event_ids` — events published by the local relay instance are tracked and skipped when received via the Redis round-trip.
+**Current state:** The subscriber loop is spawned in `buzz-relay/src/main.rs` and populates the broadcast channel. A dispatcher task subscribes via `pubsub.subscribe_local()` and routes each event to one of 16 delivery workers by `(community, topic)`, so one channel's events keep their order while channels deliver concurrently (`handlers/multinode_fanout.rs`). Each worker calls `sub_registry.fan_out()`, applies the access gate (one bulk membership read for the recipients the membership cache lacks), and delivers matches to local WebSocket connections via `conn_manager.send_to()`. A slow delivery holds only its own worker and arrives late; falling behind never closes a connection, because a database stall slows every node at once and closing recipients then would send the whole fleet back to that database together. An event is dropped on this node only when its worker's bounded queue is full or the dispatcher lags the broadcast; both are counted (`buzz_multinode_fanout_dropped_total`, `buzz_multinode_fanout_lag_total`), and the affected syncs get `CLOSED "resync: ..."` (NIP-AR Sync rule 5). A recipient the access gate cannot check misses that event. Multi-node fan-out is now wired end-to-end. Local-echo deduplication is implemented via `AppState.local_event_ids` — events published by the local relay instance are tracked and skipped when received via the Redis round-trip.
 
 **Reconnection:** exponential backoff 1s → 30s (`backoff_secs * 2`). Backoff resets to 1s only after a clean stream end, not on each reconnect attempt.
 
@@ -578,6 +578,12 @@ Privacy-sensitive kinds are excluded at the storage level (the `search_tsv`
 multi-community mode every query filter includes `community_id`, so the shared
 `events` table is infrastructure, not a cross-community result space; the relay
 re-authorizes every candidate hit before returning it.
+
+A database built from `migrations/0008_fresh_install_search_allowlist.sql` indexes
+only an allowlist of kinds, and so does one converted by
+`scripts/maintenance/nip_rs_search_allowlist.sql`. Such a database does not index
+kind 30180 (custom emoji entries) until an operator runs the updated maintenance
+script, which must happen before the emoji migration rollout.
 
 **Key behaviors:**
 - `SearchService::new(pool)` wraps a `PgPool`; `search(&SearchQuery)` runs a

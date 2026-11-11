@@ -61,7 +61,7 @@ void toggleReaction(WidgetRef ref, TimelineMessage message, String emoji) {
     // Only adding counts as a use — removing a reaction shouldn't promote the
     // emoji in the frequently-used ranking.
     ref.read(recentEmojiProvider.notifier).record(emoji);
-    actions.addReaction(message.id, emoji);
+    actions.addReaction(message.id, emoji, targetAuthor: message.pubkey);
   }
 }
 
@@ -94,7 +94,9 @@ void showAddReactionPicker({
     onSelect: (emoji) {
       ref.read(recentEmojiProvider.notifier).record(emoji);
       armReactionBurst(ref, message, emoji);
-      ref.read(channelActionsProvider).addReaction(message.id, emoji);
+      ref
+          .read(channelActionsProvider)
+          .addReaction(message.id, emoji, targetAuthor: message.pubkey);
     },
   );
 }
@@ -449,6 +451,7 @@ class _ReactionEmoji extends StatelessWidget {
           shortcode: shortcode,
           url: emojiUrl,
           size: size,
+          compact: true,
         ),
       ),
     );
@@ -811,6 +814,7 @@ Future<bool> _showNativeReactionDetails(
       (_, _) => scheduleProfiles(),
     );
     final dataset = container.read(emojiDatasetOrEmptyProvider);
+    final emojiBytes = container.read(customEmojiBytesCacheProvider);
     List<Map<String, Object?>> reactionData() => [
       for (final reaction in reactions.value)
         {
@@ -823,6 +827,10 @@ Future<bool> _showNativeReactionDetails(
           if (reaction.emojiUrl case final String url) ...{
             'url': url,
             'headers': nativeMediaHeaders(url),
+            // The timeline usually downloaded this emoji already; reuse it so
+            // the sheet never depends on a second fetch succeeding.
+            if (emojiBytes.lookup(url) case final Uint8List bytes)
+              'bytes': bytes,
           },
         },
     ];

@@ -2,7 +2,7 @@ use super::*;
 
 fn set_creation(state: &mut Arc<AppState>, enabled: bool) {
     Arc::make_mut(&mut Arc::get_mut(state).expect("exclusive test state").config)
-        .community_creation_enabled = enabled;
+        .multi_community_relay = enabled;
 }
 
 async fn policy_state(operator: &Keys) -> Arc<AppState> {
@@ -55,6 +55,128 @@ async fn owned(state: Arc<AppState>, operator: &Keys, owner: &Keys) -> Value {
 
 mod postgres_tests {
     use super::*;
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn single_mode_serves_only_canonical_and_rejects_extra_target_enrollment() {
+        let operator = Keys::generate();
+        let owner = Keys::generate();
+        let mut state = policy_state(&operator).await;
+        let canonical = format!("canonical-{}.example", Uuid::new_v4().simple());
+        let extra = format!("extra-{}.example", Uuid::new_v4().simple());
+        for host in [&canonical, &extra] {
+            let _fixture = state
+                .db
+                .create_community_with_owner(
+                    host,
+                    &owner.public_key().to_hex(),
+                    &state.relay_keypair,
+                )
+                .await
+                .expect("fixture");
+        }
+        let extra_id = state
+            .db
+            .lookup_community_by_host_for_management(&extra)
+            .await
+            .unwrap()
+            .unwrap()
+            .id;
+        let config = Arc::make_mut(&mut Arc::get_mut(&mut state).expect("exclusive").config);
+        config.relay_url = format!("wss://{canonical}");
+        set_creation(&mut state, false);
+        let app = build_router(state.clone());
+        for host in [&canonical, &extra] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/")
+                        .header("host", host.as_str())
+                        .header("accept", "application/nostr+json")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                if host == &canonical {
+                    StatusCode::OK
+                } else {
+                    StatusCode::NOT_FOUND
+                }
+            );
+        }
+        for path in [
+            "/query",
+            "/api/invites/claim",
+            "/upload",
+            "/git/owner/repo/info/refs",
+            "/huddle/id/audio",
+            "/invite/token",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(path)
+                        .header("host", extra.as_str())
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+        }
+        // UUID selection through the authenticated operator is not an ordinary
+        // serving escape: even a valid owner cannot mint an extra's invite.
+        let body = serde_json::json!({"community_id":extra_id.to_string(), "actor_pubkey":owner.public_key().to_hex()}).to_string();
+        let response = signed_operator_request(
+            state.clone(),
+            &operator,
+            "POST",
+            "/operator/communities/invites",
+            Some(body),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(read_json(response).await["code"], "community_not_served");
+        // A valid invite for the extra, presented on the canonical Host, may
+        // never enroll the caller into the extra (host is authoritative).
+        let invite = state
+            .db
+            .mint_relay_invite_as_admin(extra_id, &owner.public_key().to_hex(), 3600, Some(1))
+            .await
+            .expect("invite fixture");
+        let joiner = Keys::generate();
+        let body = serde_json::json!({"code":invite.code, "community_id":extra_id.to_string(), "communityHost":extra}).to_string();
+        let path = "/api/invites/claim";
+        let url = format!("https://{canonical}{path}");
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .header("host", canonical)
+                    .header("content-type", "application/json")
+                    .header(
+                        "authorization",
+                        nip98_auth_header(&joiner, &url, "POST", Some(body.as_bytes())),
+                    )
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(!response.status().is_success());
+        assert!(state
+            .db
+            .get_relay_member(extra_id, &joiner.public_key().to_hex())
+            .await
+            .unwrap()
+            .is_none());
+    }
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
@@ -138,6 +260,8 @@ mod postgres_tests {
             .bind_nip_fi_issuers(id, &[NIP_FI_ISSUER.to_owned()])
             .await
             .expect("binding");
+        Arc::make_mut(&mut Arc::get_mut(&mut state).expect("exclusive").config).relay_url =
+            format!("wss://{host}");
         set_creation(&mut state, false);
         for _ in 0..2 {
             let response = legacy_request(state.clone(), &operator, &host, Some(&owner)).await;
@@ -192,18 +316,17 @@ mod postgres_tests {
         .await;
         assert_eq!(archived.status(), StatusCode::OK);
         let existing = legacy_request(state.clone(), &operator, &host, None).await;
-        assert_eq!(existing.status(), StatusCode::OK);
-        assert_eq!(read_json(existing).await["status"], "existed");
-        // Exact-owner idempotency remains valid even while archived.
+        assert_eq!(existing.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            read_json(existing).await["code"],
+            "community_creation_disabled"
+        );
         assert_eq!(
             legacy_request(state.clone(), &operator, &host, Some(&owner))
                 .await
                 .status(),
-            StatusCode::OK
+            StatusCode::FORBIDDEN
         );
-        let rotation =
-            legacy_request(state.clone(), &operator, &host, Some(&Keys::generate())).await;
-        assert_eq!(rotation.status(), StatusCode::CONFLICT);
         let restored = signed_operator_request(
             state.clone(),
             &operator,
@@ -217,7 +340,7 @@ mod postgres_tests {
             legacy_request(state, &operator, &host, Some(&owner))
                 .await
                 .status(),
-            StatusCode::OK
+            StatusCode::FORBIDDEN
         );
     }
 
@@ -274,6 +397,8 @@ mod postgres_tests {
             .expect("lookup")
             .expect("row")
             .id;
+        Arc::make_mut(&mut Arc::get_mut(&mut state).expect("exclusive").config).relay_url =
+            format!("wss://{host}");
         set_creation(&mut state, false);
         archive_for_owner_deletion(&state, &host, &owner).await;
         let response = signed_operator_request(
@@ -352,6 +477,44 @@ mod postgres_tests {
         .await;
         assert_eq!(probe.status(), StatusCode::OK);
         assert_eq!(read_json(probe).await["role"], "operator");
+        // An authenticated administrator can still inspect and moderate an
+        // extra community through the admin authority, despite serving denial.
+        let path = format!(
+            "/api/admin/v1/members/{}?communityHost={host}",
+            owner.public_key().to_hex()
+        );
+        let url = format!("https://{INGRESS_HOST}{path}");
+        let read = operator_request_with_auth(
+            state.clone(),
+            "GET",
+            &path,
+            None,
+            nip98_auth_header(&operator, &url, "GET", None),
+        )
+        .await;
+        assert_eq!(read.status(), StatusCode::OK);
+        let target = Keys::generate();
+        let path = format!(
+            "/api/admin/v1/members/{}/ban?communityHost={host}",
+            target.public_key().to_hex()
+        );
+        let url = format!("https://{INGRESS_HOST}{path}");
+        let body = serde_json::json!({"requestId": Uuid::new_v4(), "reason":"cleanup"}).to_string();
+        let ban = operator_request_with_auth(
+            state.clone(),
+            "POST",
+            &path,
+            Some(body.clone()),
+            nip98_auth_header(&operator, &url, "POST", Some(body.as_bytes())),
+        )
+        .await;
+        assert!(
+            ban.status().is_success(),
+            "admin direct action: {}",
+            read_json(ban).await
+        );
+        let path = "/api/admin/v1/probe";
+        let url = format!("https://{INGRESS_HOST}{path}");
         let stranger = operator_request_with_auth(
             state.clone(),
             "GET",
@@ -422,7 +585,7 @@ mod postgres_tests {
         let operator = Keys::generate();
         let owner = Keys::generate();
         let state = policy_state(&operator).await;
-        assert!(state.config.community_creation_enabled);
+        assert!(state.config.multi_community_relay);
         let host = format!("policy-{}.example", Uuid::new_v4().simple());
         let created = legacy_request(state.clone(), &operator, &host, Some(&owner)).await;
         assert_eq!(created.status(), StatusCode::OK);

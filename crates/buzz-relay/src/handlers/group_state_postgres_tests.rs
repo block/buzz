@@ -1046,6 +1046,205 @@ async fn removed_creator_join_racing_a_private_switch_is_refused() {
     );
 }
 
+/// Where a join's kind:39000 publisher is held while a kind:9002 edit races it.
+#[derive(Clone, Copy, Debug)]
+enum HoldPublisher {
+    /// Before it takes the replacement lock: the edit publishes in full
+    /// while the join is held, so anything the join read before the lock is
+    /// stale by the time it stores.
+    BeforeLock,
+    /// After it has read behind the lock: the edit's publisher waits for the
+    /// join's, then must still win with the edit's state.
+    AfterRead,
+}
+
+/// A join's kind:39000 publisher cannot replace a racing edit's kind:39000
+/// with state read before the edit. In the e2e
+/// `test_nip29_announce_channel_wire`, an admission auto-joined a default
+/// channel while a relay admin's kind:9002 cleared `auto_join`; the join read
+/// `auto_join` first, stored after the edit at a later second, and the stale
+/// tag stayed live.
+///
+/// Two legs. `BeforeLock` holds the join immediately before it takes the
+/// lock, lets the edit publish in full, then releases it: a channel or
+/// member read done before the lock (`get_channel_for_event_write`,
+/// `get_members_for_event_write`) stores stale tags last → RED. `AfterRead`
+/// holds the join after its read behind the lock until the edit is waiting
+/// for that lock, so the edit must still win with its own state.
+///
+/// Both legs also check the timestamps: every kind:39000 publication for
+/// the coordinate, replaced rows included, leaves exactly one row, and
+/// their `created_at` strictly increase in storage order. The live event is
+/// first pinned an hour ahead, so each publication's timestamp is the live
+/// one plus a second and the clock cannot separate the two publishers.
+/// Mutation: take the live `created_at` before the lock → RED every time:
+/// the publisher that locks second computes the same second as the first,
+/// and either loses the id tie and leaves no row, or wins it and repeats
+/// the second.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_publisher_that_read_before_an_edit_cannot_replace_it() {
+    for hold in [HoldPublisher::BeforeLock, HoldPublisher::AfterRead] {
+        join_publisher_held_against_an_auto_join_edit(hold).await;
+    }
+}
+
+/// `created_at` of every relay-signed kind:39000 row for `channel_id`,
+/// replaced rows included, in storage order.
+async fn stored_metadata_created_at(
+    state: &AppState,
+    tenant: &TenantContext,
+    channel_id: Uuid,
+) -> Vec<chrono::DateTime<chrono::Utc>> {
+    sqlx::query_scalar(
+        "SELECT created_at FROM events WHERE community_id = $1 AND kind = 39000 \
+         AND pubkey = $2 AND channel_id = $3 ORDER BY received_at ASC",
+    )
+    .bind(tenant.community().as_uuid())
+    .bind(state.relay_keypair.public_key().to_bytes().as_slice())
+    .bind(channel_id)
+    .fetch_all(state.db.pool())
+    .await
+    .expect("read every kind:39000 row")
+}
+
+async fn join_publisher_held_against_an_auto_join_edit(hold: HoldPublisher) {
+    let state = state().await;
+    let tenant = community(&state, "group-state-stale-publisher").await;
+    let owner = Keys::generate();
+    let channel_id = create_channel(&state, &tenant, &owner, &[]).await;
+    let admin = Keys::generate();
+    state
+        .db
+        .add_relay_member(
+            tenant.community(),
+            &admin.public_key().to_hex(),
+            "admin",
+            None,
+            &Keys::generate(),
+        )
+        .await
+        .map(|write| write.outcome)
+        .expect("seed relay admin");
+    edit_channel(
+        &state,
+        &tenant,
+        &admin,
+        channel_id,
+        &[&["auto_join", "true"]],
+    )
+    .await
+    .expect("set auto_join");
+    // Pin the live event an hour ahead: from here on every publication is
+    // stored at the live `created_at` plus one, whatever the clock says.
+    let pinned = EventBuilder::new(Kind::Custom(39000), "")
+        .tags(
+            group_state_tags(&state, &tenant, channel_id, 39000)
+                .await
+                .into_iter()
+                .map(|tag| Tag::parse(tag).expect("tag")),
+        )
+        .custom_created_at(nostr::Timestamp::now() + 3600)
+        .sign_with_keys(&state.relay_keypair)
+        .expect("sign pinned kind:39000");
+    assert!(
+        state
+            .db
+            .replace_addressable_event(tenant.community(), &pinned, Some(channel_id))
+            .await
+            .expect("store pinned kind:39000")
+            .1
+    );
+    let rows_before = stored_metadata_created_at(&state, &tenant, channel_id)
+        .await
+        .len();
+
+    let (arrived, release) = match hold {
+        HoldPublisher::BeforeLock => {
+            crate::nip_fi_test_hooks::group_state_lock_hook::arm(tenant.community())
+        }
+        HoldPublisher::AfterRead => {
+            crate::nip_fi_test_hooks::group_state_read_hook::arm(tenant.community())
+        }
+    };
+    let joiner = Keys::generate();
+    let join = EventBuilder::new(Kind::Custom(9021), "")
+        .tags([Tag::parse(["h", &channel_id.to_string()]).unwrap()])
+        .sign_with_keys(&joiner)
+        .unwrap();
+    let join_task = tokio::spawn({
+        let state = Arc::clone(&state);
+        let tenant = tenant.clone();
+        let auth = http_auth(&joiner);
+        async move { ingest_event(&state, &tenant, join, auth).await }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(10), arrived)
+        .await
+        .unwrap_or_else(|_| panic!("{hold:?}: the join publishes kind:39000"))
+        .unwrap_or_else(|_| panic!("{hold:?}: the hook stays armed until the join reaches it"));
+
+    let edit_task = tokio::spawn({
+        let state = Arc::clone(&state);
+        let tenant = tenant.clone();
+        async move {
+            edit_channel(
+                &state,
+                &tenant,
+                &admin,
+                channel_id,
+                &[&["auto_join", "false"]],
+            )
+            .await
+        }
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !edit_task.is_finished() {
+        if matches!(hold, HoldPublisher::AfterRead) {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND NOT granted \
+                 AND database = (SELECT oid FROM pg_database WHERE datname = current_database()))",
+            )
+            .fetch_one(state.db.pool())
+            .await
+            .expect("read lock waiters");
+            if waiting {
+                break;
+            }
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{hold:?}: the edit neither finished nor waited for the held publisher"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    release.notify_one();
+
+    let joined = join_task
+        .await
+        .expect("join task must not panic")
+        .unwrap_or_else(|error| panic!("{hold:?}: join: {error:?}"));
+    assert!(joined.accepted, "{hold:?}: join: {}", joined.message);
+    edit_task
+        .await
+        .expect("edit task must not panic")
+        .unwrap_or_else(|error| panic!("{hold:?}: clear auto_join: {error}"));
+    let tags = group_state_tags(&state, &tenant, channel_id, 39000).await;
+    assert!(
+        !tags.contains(&vec!["auto_join".to_string()]),
+        "{hold:?}: the join's stale kind:39000 replaced the edit's: {tags:?}"
+    );
+    let created_at = stored_metadata_created_at(&state, &tenant, channel_id).await;
+    assert_eq!(
+        created_at.len(),
+        rows_before + 2,
+        "{hold:?}: the join and the edit each leave one kind:39000 row: {created_at:?}"
+    );
+    assert!(
+        created_at.windows(2).all(|pair| pair[0] < pair[1]),
+        "{hold:?}: kind:39000 timestamps must strictly increase in storage order: {created_at:?}"
+    );
+}
+
 /// A create or rename that would list a second open channel under a taken
 /// name is refused with its reason as a client error, and stores nothing.
 /// Mutation: let `ChannelNameTaken` fall through to the internal-error arm

@@ -11,7 +11,7 @@ use buzz_auth::{DenialClass, NipFiMode};
 use buzz_db::community_auth::CommunityAuthPolicy;
 use futures_util::future::{BoxFuture, FutureExt};
 
-const POLICY_READ_BUDGET: std::time::Duration = std::time::Duration::from_millis(500);
+pub(crate) const POLICY_READ_BUDGET: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// Host policy source, shared by admission and discovery.
 pub(crate) trait PolicySource: Send + Sync {

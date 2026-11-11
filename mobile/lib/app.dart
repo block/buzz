@@ -6,6 +6,8 @@ import 'dart:async';
 
 import 'hosted_app_gate.dart';
 import 'onboarding_app_entry.dart';
+import 'organization_app_entry.dart';
+import 'shared/hosted/organization_environment.dart';
 import 'shared/widgets/ios_navigation_metrics.dart';
 import 'shared/community/paired_community_landing.dart';
 import 'shared/community/community_loading_surface.dart';
@@ -354,6 +356,19 @@ class App extends HookConsumerWidget {
         ? ref.watch(communityThemeProvider)
         : defaultCommunityTheme;
     final themeMode = communityTheme.mode;
+    // The app rebuilds on every lifecycle change. A new ThemeData never
+    // equals the last one, so MaterialApp would animate between identical
+    // themes, and each frame of that makes every message re-parse its
+    // markdown. Build the themes only when the accent changes.
+    final accent = communityTheme.accent;
+    final lightTheme = useMemoized(
+      () => mobileAppearanceTheme(Brightness.light, accent),
+      [accent],
+    );
+    final darkTheme = useMemoized(
+      () => mobileAppearanceTheme(Brightness.dark, accent),
+      [accent],
+    );
     final authState = ref.watch(authProvider);
     final pairedCommunity = ref.watch(pairedCommunityLandingProvider);
 
@@ -413,8 +428,8 @@ class App extends HookConsumerWidget {
       navigatorObservers: [appRouteObserver],
       title: 'Buzz',
       debugShowCheckedModeBanner: false,
-      theme: mobileAppearanceTheme(Brightness.light, communityTheme.accent),
-      darkTheme: mobileAppearanceTheme(Brightness.dark, communityTheme.accent),
+      theme: lightTheme,
+      darkTheme: darkTheme,
       themeMode: themeMode,
       // Above the navigator, so an age restriction cannot be bypassed by a
       // route that was pushed while the store signal request was in flight.
@@ -453,7 +468,11 @@ class App extends HookConsumerWidget {
       },
       home: authState.when(
         loading: () => const _SplashScreen(),
-        error: (_, _) => const PairingPage(),
+        // An internal build never offers pairing, even when auth state is
+        // unreadable: pairing could make another relay the active community.
+        error: (_, _) => OrganizationEnvironment.enabled
+            ? const OrganizationAppEntry()
+            : const PairingPage(),
         data: (state) => switch (state.status) {
           AuthStatus.authenticated => HostedAppGate(
             authenticated: true,

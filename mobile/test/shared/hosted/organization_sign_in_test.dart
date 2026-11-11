@@ -239,6 +239,63 @@ void main() {
     expect(account.account?.subject, 'member');
     signIn.dispose();
   });
+
+  test(
+    'a sign-out that cannot clear the saved session at launch keeps '
+    'the session signed out, so Sign in goes through single sign-on',
+    () async {
+      await const FlutterSecureStorage().write(
+        key: orgSessionKey,
+        value: jsonEncode({
+          'origin': organization.toString(),
+          'credential': 'org-secret',
+          'subject': 'member',
+          'expires_at': expiry.toIso8601String(),
+        }),
+      );
+      final browserReady = Completer<void>();
+      final logins = <Uri>[];
+      final signIn = OrganizationSignIn(
+        account: BuilderlabAccountClient(
+          accountOrigin: organization,
+          storage: _FailingDeleteStorage(orgSessionKey),
+          httpClient: MockClient((request) async => me()),
+        ),
+        browser: _SlowBrowser(
+          browserReady.future,
+          origin: organization,
+          openBrowser: (uri) async {
+            logins.add(uri);
+            return null;
+          },
+        ),
+        reconnect: () async {},
+      );
+      // The landing signs out while browser setup still delays the restore.
+      final initialized = signIn.initialize();
+      await signIn.signOut();
+      browserReady.complete();
+      await initialized;
+      expect(signIn.account.account, isNotNull);
+      expect(signIn.status, OrganizationSessionStatus.signedOut);
+
+      // Sign in retries the clear rather than reuse the session.
+      await signIn.signIn();
+      expect(logins, isEmpty);
+      expect(signIn.failure, AccountFailure.storage);
+      expect(signIn.status, OrganizationSessionStatus.signedOut);
+      signIn.dispose();
+    },
+  );
+}
+
+/// Browser setup that completes only when [ready] does.
+class _SlowBrowser extends BrowserAuth {
+  _SlowBrowser(this.ready, {super.origin, super.openBrowser});
+  final Future<void> ready;
+
+  @override
+  Future<void> initialize() => ready;
 }
 
 /// Fails deletions of keys with [prefix], as an unavailable Keychain would.

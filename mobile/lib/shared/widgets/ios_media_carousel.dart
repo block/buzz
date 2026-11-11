@@ -43,6 +43,8 @@ class IosMediaCarousel extends HookWidget {
     final channel = useState<MethodChannel?>(null);
     final latest = useRef(this)..value = this;
     final brightness = Theme.of(context).brightness.name;
+    // Tints UIKit's loading shimmer like Flutter's SkeletonShimmer.
+    final skeletonColor = Theme.of(context).colorScheme.primary.toARGB32();
     final labelSignature = Object.hashAll(labels);
     final rtl = Directionality.of(context) == TextDirection.rtl;
     final configuration = <String, Object>{
@@ -53,6 +55,7 @@ class IosMediaCarousel extends HookWidget {
       'trailingPadding': trailingPadding,
       'radius': radius,
       'brightness': brightness,
+      'skeletonColor': skeletonColor,
       'rtl': rtl,
     };
     useEffect(() {
@@ -109,6 +112,7 @@ class IosMediaCarousel extends HookWidget {
         trailingPadding,
         radius,
         brightness,
+        skeletonColor,
         rtl,
         labelSignature,
       ],

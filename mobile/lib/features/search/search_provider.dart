@@ -112,6 +112,9 @@ bool _searchesOpenChannels(String query) => _channelNeedle(query).isNotEmpty;
 /// Most channel rows one query shows, ranked best first.
 const searchChannelResultLimit = 8;
 
+/// Most people rows one query shows.
+const searchPeopleShown = 8;
+
 /// How long a loaded open-channel directory serves searches before the next
 /// search reads it again, as desktop's `PUBLIC_CHANNEL_PAGE_TTL` does.
 const searchDirectoryMaxAge = Duration(seconds: 30);
@@ -190,10 +193,21 @@ class SearchNotifier extends Notifier<SearchState> {
     _usersPending = false;
     _directoryLoad = null;
     _directoryAttempted = false;
-    // Channel rows come from the loaded channel list, which gains open
-    // channels when the directory arrives. Re-rank whenever either changes;
-    // the directory status for this community also drives the spinner.
-    ref.listen(channelsProvider, (_, _) => _refreshChannels());
+    // Channel rows are ranked once per query, so live channel events never
+    // reorder rows under a finger: they only update the shown rows' content.
+    // Rows are ranked again when the set of channels changes (the first
+    // load, a directory install); the directory status for this community
+    // also drives the spinner.
+    ref.listen(channelsProvider, (previous, next) {
+      final channels = next.asData?.value;
+      if (channels == null) return;
+      final before = previous?.asData?.value;
+      if (before == null || !_sameChannels(before, channels)) {
+        _refreshChannels();
+      } else {
+        _updateShownChannels(channels);
+      }
+    });
     ref.listen(
       channelDirectoryLoadStatusProvider,
       (_, _) => _refreshChannels(),
@@ -369,18 +383,41 @@ class SearchNotifier extends Notifier<SearchState> {
     }
   }
 
+  /// People asked of the directory search: more than [searchPeopleShown],
+  /// so archived people the page leaves out do not leave it short.
+  static const _peopleSearchLimit = 3 * searchPeopleShown;
+
   Future<void> _searchUsers(String query, int generation) async {
     List<DirectoryUser>? users;
     try {
       users = await ref
           .read(channelActionsProvider)
-          .searchUsers(query, limit: 8);
+          .searchUsers(query, limit: _peopleSearchLimit);
     } catch (_) {
       // User search failure is non-critical — keep existing results.
     }
     if (!ref.mounted || generation != _generation) return;
     _usersPending = false;
     state = state.copyWith(userResults: users, isLoading: _isLoading);
+  }
+
+  static bool _sameChannels(List<Channel> a, List<Channel> b) =>
+      a.length == b.length &&
+      a.map((c) => c.id).toSet().containsAll(b.map((c) => c.id));
+
+  /// Shows each shown channel's latest content (membership, member count,
+  /// name) in the rows' existing order.
+  void _updateShownChannels(List<Channel> channels) {
+    final shown = state.channelResults;
+    if (shown.isEmpty) return;
+    final byId = {for (final channel in channels) channel.id: channel};
+    final updated = [for (final row in shown) byId[row.id] ?? row];
+    for (var i = 0; i < shown.length; i++) {
+      if (!identical(updated[i], shown[i])) {
+        state = state.copyWith(channelResults: updated);
+        return;
+      }
+    }
   }
 
   /// Publishes the channel rows and spinner for the current query.

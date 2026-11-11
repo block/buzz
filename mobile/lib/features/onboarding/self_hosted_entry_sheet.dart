@@ -5,6 +5,8 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/auth/auth.dart';
 import '../../shared/hosted/device_identity_source.dart';
+import '../../shared/hosted/hosted_relay_auth.dart';
+import '../../shared/relay/relay_provider.dart';
 import '../../shared/hosted/self_hosted_entry.dart';
 import '../../shared/identity_transfer/nsec_import_sheet.dart';
 import '../../shared/identity_transfer/native_community_entry.dart';
@@ -16,10 +18,31 @@ import '../../shared/widgets/onboarding_step_page.dart';
 import '../../shared/widgets/onboarding_loading_page.dart';
 import '../../shared/widgets/buzz_titled_sheet_layout.dart';
 
+/// The socket boundary every entry probe connects through.
+final relayProbeProvider =
+    Provider<Future<void> Function(Community, Map<String, String>)>(
+      (ref) => SelfHostedEntry.probeRelay,
+    );
+
 /// Local preparation seam; the production service validates and retains keys.
-final selfHostedEntryProvider = Provider<SelfHostedEntry>(
-  (ref) => SelfHostedEntry(),
-);
+/// An organization relay refuses the upgrade without the session's assertion,
+/// so its probe carries one; every other relay gets none.
+final selfHostedEntryProvider = Provider<SelfHostedEntry>((ref) {
+  final auth = ref.watch(hostedRelayAuthProvider);
+  final probe = ref.watch(relayProbeProvider);
+  return SelfHostedEntry(
+    probe: (community) async {
+      final config = RelayConfig(
+        baseUrl: community.relayUrl,
+        nsec: community.nsec,
+      );
+      await probe(
+        community,
+        auth.organizationProtects(config) ? await auth.headers(config) : {},
+      );
+    },
+  );
+});
 
 /// Uses an explicit identity choice without involving a hosted account.
 Future<bool> showSelfHostedEntry(

@@ -7,6 +7,7 @@ import 'package:buzz/features/profile/profile_provider.dart';
 import 'package:buzz/features/search/recent_searches_provider.dart';
 import 'package:buzz/features/search/search_page.dart';
 import 'package:buzz/features/search/search_provider.dart';
+import 'package:buzz/shared/identity_archives/identity_archives.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/widgets/buzz_loading_indicator.dart';
@@ -140,6 +141,110 @@ void main() {
     await tester.tap(find.text('Channels'));
     await tester.pump();
     expect(find.text("No results for 'ada'"), findsOneWidget);
+  });
+
+  testWidgets('live channel events never reorder shown results', (
+    tester,
+  ) async {
+    final session = _HeldSession();
+    final actions = _HeldUserSearch();
+    final channels = _DirectoryChannels();
+
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [
+          relayConfigProvider.overrideWith(_Community.new),
+          relaySessionProvider.overrideWith(() => session),
+          channelActionsProvider.overrideWith((ref) => actions),
+          channelsProvider.overrideWith(() => channels),
+          recentSearchesProvider.overrideWith(_NoRecentSearches.new),
+          profileProvider.overrideWith(_Profile.new),
+        ],
+        child: const SearchPage(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byType(TextField), 'team');
+    await tester.pump(const Duration(milliseconds: 300));
+    final shown = find.byKey(
+      const ValueKey('search-channel-row-team-4things-id'),
+    );
+    final joined = find.byKey(
+      const ValueKey('search-channel-row-team-chat-id'),
+    );
+    expect(shown, findsOneWidget);
+
+    // A new channel changes the set, so it is ranked in: joined ties
+    // keep the list's order.
+    channels.state = AsyncData([
+      ...channels.state.requireValue,
+      _channel('team-chat', isMember: true),
+    ]);
+    await tester.pump();
+    expect(joined, findsOneWidget);
+    expect(tester.getTopLeft(shown).dy, lessThan(tester.getTopLeft(joined).dy));
+
+    // Activity moves the joined channel to the top of the list. Rows stay put
+    // under the finger.
+    void bump(String name) {
+      final list = channels.state.requireValue;
+      channels.state = AsyncData([
+        ...list.where((c) => c.name == name),
+        ...list.where((c) => c.name != name),
+      ]);
+    }
+
+    bump('team-chat');
+    await tester.pump();
+    expect(tester.getTopLeft(shown).dy, lessThan(tester.getTopLeft(joined).dy));
+
+    // Another caller's directory load: its status turns loaded, a live event
+    // lands, then it installs the open channels, which this search shows.
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(SearchPage)),
+    );
+    final status = container.read(channelDirectoryLoadStatusProvider.notifier);
+    final scope = channelDirectoryScope(
+      'http://community.test',
+      container.read(myPubkeyProvider),
+    );
+    status.markLoaded(scope);
+    await tester.pump();
+    bump('general');
+    await tester.pump();
+    channels.state = AsyncData([
+      ...channels.state.requireValue,
+      _channel('team-open', isMember: false),
+    ]);
+    await tester.pump();
+    final open = find.byKey(const ValueKey('search-channel-row-team-open-id'));
+    expect(open, findsOneWidget);
+    expect(
+      find.descendant(of: open, matching: find.text('Open')),
+      findsOneWidget,
+    );
+
+    // Joining a shown open channel updates its row in place: the badge goes,
+    // and no row moves.
+    final openTop = tester.getTopLeft(open).dy;
+    channels.state = AsyncData([
+      for (final channel in channels.state.requireValue)
+        channel.name == 'team-open'
+            ? channel.copyWith(isMember: true)
+            : channel,
+    ]);
+    await tester.pump();
+    expect(
+      find.descendant(of: open, matching: find.text('Open')),
+      findsNothing,
+    );
+    expect(tester.getTopLeft(open).dy, openTop);
+
+    // The next query ranks the current list.
+    await tester.enterText(find.byType(TextField), 'team ');
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(tester.getTopLeft(joined).dy, lessThan(tester.getTopLeft(shown).dy));
   });
 
   testWidgets('a failed directory offers a retry instead of no results', (
@@ -498,6 +603,56 @@ void main() {
       expect(find.text('ops-room'), findsOneWidget);
     },
   );
+
+  testWidgets('archived people do not crowd live people out of People', (
+    tester,
+  ) async {
+    // Tall enough that every row is built.
+    tester.view.physicalSize = const Size(800, 4000);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    final session = _HeldSession();
+    final actions = _HeldUserSearch();
+    // The relay ranks more archived matches first than the page shows.
+    final archived = [
+      for (var i = 0; i <= searchPeopleShown; i++) i.toRadixString(16) * 64,
+    ];
+    final live = [for (var i = 0; i < searchPeopleShown; i++) 'f$i' * 32];
+
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [
+          relayConfigProvider.overrideWith(_Community.new),
+          relaySessionProvider.overrideWith(() => session),
+          channelActionsProvider.overrideWith((ref) => actions),
+          channelsProvider.overrideWith(_NoMemberChannels.new),
+          recentSearchesProvider.overrideWith(_NoRecentSearches.new),
+          profileProvider.overrideWith(_Profile.new),
+          identityArchivesProvider.overrideWith((ref) async => {...archived}),
+        ],
+        child: const SearchPage(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byType(TextField), 'scout');
+    await tester.pump(const Duration(milliseconds: 300));
+    for (final search in session.searches) {
+      search.complete(const []);
+    }
+    actions.searches.removeAt(0).complete([
+      for (final key in [...archived, ...live])
+        DirectoryUser(pubkey: key, displayName: 'Scout ${key.substring(0, 2)}'),
+    ]);
+    await tester.pumpAndSettle();
+
+    for (final key in archived) {
+      expect(find.byKey(ValueKey('search-person-row-$key')), findsNothing);
+    }
+    for (final key in live) {
+      expect(find.byKey(ValueKey('search-person-row-$key')), findsOneWidget);
+    }
+  });
 }
 
 Channel _channel(String name, {required bool isMember}) => Channel(
@@ -541,11 +696,12 @@ class _HeldSession extends RelaySessionNotifier {
 class _HeldUserSearch implements ChannelActions {
   final searches = <Completer<List<DirectoryUser>>>[];
 
+  /// Answers with at most [limit] people, as the relay does.
   @override
   Future<List<DirectoryUser>> searchUsers(String query, {int limit = 8}) {
     final search = Completer<List<DirectoryUser>>();
     searches.add(search);
-    return search.future;
+    return search.future.then((users) => users.take(limit).toList());
   }
 
   @override

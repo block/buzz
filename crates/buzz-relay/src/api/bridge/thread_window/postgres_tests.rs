@@ -180,8 +180,13 @@ impl Fixture {
     }
 }
 
-async fn production_db(mut config: buzz_db::DbConfig) -> buzz_db::Db {
-    config.database_url = crate::test_support::database_url();
+async fn production_db(config: buzz_db::DbConfig) -> buzz_db::Db {
+    production_db_at(crate::test_support::database_url(), config).await
+}
+
+/// [`production_db`] at another URL, such as a proxy in front of the test database.
+async fn production_db_at(database_url: String, mut config: buzz_db::DbConfig) -> buzz_db::Db {
+    config.database_url = database_url;
     config.max_connections = 5;
     buzz_db::Db::new(&config).await.unwrap()
 }

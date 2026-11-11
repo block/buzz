@@ -69,3 +69,8 @@ CREATE INDEX idx_events_search_tsv ON events USING GIN (search_tsv);
 -- e-tag containment (`tags @> '[["e","<hex>"]]'`) for the aux closure and #e
 -- reads. Mirrors migrations/0004; jsonb_path_ops supports exactly @>.
 CREATE INDEX idx_events_tags_gin ON events USING GIN (tags jsonb_path_ops);
+
+-- First valid edit target, matching the relay Rust rule and indexed probes.
+CREATE INDEX idx_events_media_edit_target ON events
+    (community_id, channel_id, (decode(lower(jsonb_path_query_first(tags, 'strict $[*] ? (@[0] == "e" && @[1] like_regex "^[0-9A-Fa-f]{64}$")[1]', '{}'::jsonb, true) #>> '{}'), 'hex')), created_at DESC, id DESC)
+    WHERE kind = 40003 AND deleted_at IS NULL;

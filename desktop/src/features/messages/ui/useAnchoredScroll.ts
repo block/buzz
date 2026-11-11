@@ -86,8 +86,18 @@ type UseAnchoredScrollResult = {
    *  the hook handled the settlement, including a preserved pinned target. */
   settleAtBottomAfterLayout: () => boolean;
   /** Arm a one-shot scroll-to-bottom that fires on the next appended message
-   *  (used by the composer's send flow). */
-  scrollToBottomOnNextUpdate: () => void;
+   *  (used by the composer's send flow), for a send to `sendChannelId`.
+   *  Returns false without arming when this timeline shows another channel. */
+  scrollToBottomOnNextUpdate: (sendChannelId: string) => boolean;
+  /** True from that arming until the first append lands, whether or not the
+   *  append moves the tail and fires the one-shot. */
+  isOwnSendPending: () => boolean;
+  /** The virtualizer's last bottom report, cleared early by a target jump or
+   *  a live row under a held target, and reset by a channel change. */
+  isVirtualizerAtBottom: () => boolean;
+  /** Disarm that one-shot and the pending send without moving the view, for
+   *  a send that failed. */
+  cancelScrollToBottomOnNextUpdate: () => void;
   /** Imperative: scroll a specific message into view; optionally pulse it.
    *  Returns true if the row was found and scrolled, false otherwise. */
   scrollToMessage: (
@@ -250,6 +260,15 @@ export function useAnchoredScroll({
   // appends, we snap to bottom even if they had scrolled up to read history.
   // Consumed (and cleared) by the next append in the restoration effect.
   const forceBottomOnNextAppendRef = React.useRef(false);
+  // Set with the one-shot, but any append clears it, including one that sorts
+  // above the current tail (a sender whose clock runs ahead, a same-second
+  // row) and so leaves the one-shot armed for a later tail. MessageTimeline
+  // holds its tail open only while this is set.
+  const ownSendPendingRef = React.useRef(false);
+  // The channel the state above belongs to, updated when the reset below
+  // runs. A send can settle after a channel switch, and its arm must not land
+  // on the channel shown now.
+  const channelIdRef = React.useRef(channelId);
   // True from a programmatic bottom pin until the list's row measurement settles
   // and the view reaches a true physical bottom. During this window `onScroll`
   // ignores transient gaps and keeps chasing the floor. A `ref`, not state — the
@@ -271,8 +290,8 @@ export function useAnchoredScroll({
   // Reset everything when the channel changes — the layout effect that runs
   // immediately after this reset is responsible for either jumping to bottom
   // or to the target message for the new channel.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: channelId is intentionally the sole trigger — we want this effect to fire exactly when the channel changes (and on mount).
   React.useLayoutEffect(() => {
+    channelIdRef.current = channelId;
     anchorRef.current = { kind: "at-bottom" };
     virtualizerAtBottomRef.current = true;
     targetHoldRef.current = false;
@@ -286,6 +305,7 @@ export function useAnchoredScroll({
     prevMessagesRef.current = [];
     handledTargetIdRef.current = null;
     forceBottomOnNextAppendRef.current = false;
+    ownSendPendingRef.current = false;
     settlingRef.current = false;
     programmaticScrollTopRef.current = null;
     isWritingScrollRef.current = false;
@@ -442,8 +462,28 @@ export function useAnchoredScroll({
   // Arm a one-shot: the next append snaps to bottom regardless of where the
   // user is. The consumer calls this right before sending so their own
   // outbound message pulls the view down even if they'd scrolled up.
-  const scrollToBottomOnNextUpdate = React.useCallback(() => {
-    forceBottomOnNextAppendRef.current = true;
+  const scrollToBottomOnNextUpdate = React.useCallback(
+    (sendChannelId: string) => {
+      if (sendChannelId !== channelIdRef.current) return false;
+      forceBottomOnNextAppendRef.current = true;
+      ownSendPendingRef.current = true;
+      return true;
+    },
+    [],
+  );
+  const isOwnSendPending = React.useCallback(
+    () => ownSendPendingRef.current,
+    [],
+  );
+  const isVirtualizerAtBottom = React.useCallback(
+    () => virtualizerAtBottomRef.current,
+    [],
+  );
+  // A send that fails may never add a row here, so nothing else would clear
+  // these.
+  const cancelScrollToBottomOnNextUpdate = React.useCallback(() => {
+    forceBottomOnNextAppendRef.current = false;
+    ownSendPendingRef.current = false;
   }, []);
 
   const settleAtBottomAfterLayout = React.useCallback(() => {
@@ -733,6 +773,10 @@ export function useAnchoredScroll({
       previous: prevMessages,
     });
     const isPrepend = messageDelta === "prepend";
+    // The first append ends a pending send, wherever its row sorts.
+    if (newLatestArrived || messageDelta === "append") {
+      ownSendPendingRef.current = false;
+    }
 
     // One-shot: an outbound send armed `scrollToBottomOnNextUpdate`. When the
     // resulting append lands, snap to bottom regardless of the current anchor,
@@ -1059,6 +1103,9 @@ export function useAnchoredScroll({
     scrollToBottom: scrollToBottomImperative,
     settleAtBottomAfterLayout,
     scrollToBottomOnNextUpdate,
+    isOwnSendPending,
+    isVirtualizerAtBottom,
+    cancelScrollToBottomOnNextUpdate,
     scrollToMessage: scrollToMessageImperative,
     onVirtualizerAtBottomStateChange,
   };

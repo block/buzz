@@ -4,7 +4,7 @@ import 'dart:convert';
 import 'package:buzz/shared/hosted/builderlab_account.dart';
 import 'package:buzz/shared/hosted/hosted_environment.dart';
 import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
-import 'package:buzz/shared/hosted/organization_environment.dart';
+import 'package:buzz/shared/hosted/builderlab_build.dart';
 import 'package:buzz/shared/relay/relay_provider.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -91,8 +91,9 @@ void main() {
         client(stall: false),
         organization: client(stall: true),
         organizationRelay: (relay) =>
-            OrganizationEnvironment.matches(relay, [relayHost]),
+            BuilderlabBuild.matchesRelay(relay, [relayHost]),
         enabled: true,
+        discover: (_) async => true,
       );
       final orgHeaders = auth.headers(orgRelay);
       await pumpEventQueue();

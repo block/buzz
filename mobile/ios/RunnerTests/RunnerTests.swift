@@ -9,13 +9,10 @@ import XCTest
 class RunnerTests: XCTestCase {
 
   @MainActor
-  func testRejectedCommunityEntryPresentationCompletesAndAllowsRetry() throws {
+  func testRejectedCommunityEntryPresentationCompletesAndAllowsRetry() async throws {
     let messenger = NavigationTestMessenger()
     let presenter = RejectedCommunityEntryPresenter()
-    let window = UIWindow(frame: UIScreen.main.bounds)
-    window.windowScene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
-    window.rootViewController = presenter
-    window.makeKeyAndVisible()
+    let window = try await keyWindow(showing: presenter)
     defer { window.isHidden = true }
     let coordinator = NativeCommunityEntryCoordinator(messenger: messenger)
     for session in [1, 2] {
@@ -26,11 +23,13 @@ class RunnerTests: XCTestCase {
     }
     let root = UIViewController()
     window.rootViewController = root
-    window.makeKeyAndVisible()
+    // Present only once the new root's view is in the key window: UIKit
+    // drops a presentation from a controller that is not in a window yet.
+    await fulfillment(of: [keyWindowReady(window, showing: root)], timeout: 5)
     let temporary = UIViewController()
     let presented = expectation(description: "Temporary native modal appeared")
     root.present(temporary, animated: false) { presented.fulfill() }
-    wait(for: [presented], timeout: 2)
+    await fulfillment(of: [presented], timeout: 5)
     XCTAssertTrue(root.presentedViewController === temporary)
     XCTAssertNotNil(temporary.view.window)
     var reply: Any?
@@ -2124,5 +2123,47 @@ private final class RejectedCommunityEntryPresenter: UIViewController {
   override func present(_ viewControllerToPresent: UIViewController, animated flag: Bool, completion: (() -> Void)? = nil) {
     // Reproduce UIKit declining a presentation during a scene transition.
     attempts += 1
+  }
+}
+
+// MARK: - Key window readiness
+
+extension XCTestCase {
+  /// A window of the foreground-active scene showing `root`, returned once it
+  /// is the key window and `root`'s view is in it.
+  ///
+  /// Native presenters resolve the key window of the foreground-active scene,
+  /// and UIKit silently drops a presentation from a controller whose view is
+  /// not in a window. `makeKeyAndVisible()` can return before key status moves
+  /// to the new window, so acting right after it raced UIKit.
+  @MainActor
+  func keyWindow(showing root: UIViewController) async throws -> UIWindow {
+    // The scene can still be activating when the first test runs.
+    let activeScene = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+      self.foregroundActiveScene() != nil
+    }, object: nil)
+    await fulfillment(of: [activeScene], timeout: 5)
+    let scene = try XCTUnwrap(foregroundActiveScene())
+    let window = UIWindow(windowScene: scene)
+    window.rootViewController = root
+    window.makeKeyAndVisible()
+    await fulfillment(of: [keyWindowReady(window, showing: root)], timeout: 5)
+    return window
+  }
+
+  /// The scene production code presents in: the foreground-active one.
+  @MainActor
+  func foregroundActiveScene() -> UIWindowScene? {
+    UIApplication.shared.connectedScenes
+      .compactMap { $0 as? UIWindowScene }
+      .first { $0.activationState == .foregroundActive }
+  }
+
+  /// Fulfilled once `window` is the key window and shows `root`'s view.
+  @MainActor
+  func keyWindowReady(_ window: UIWindow, showing root: UIViewController) -> XCTestExpectation {
+    XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+      window.isKeyWindow && root.viewIfLoaded?.window === window
+    }, object: nil)
   }
 }

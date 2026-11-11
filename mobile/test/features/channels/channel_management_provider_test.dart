@@ -6,6 +6,10 @@ import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/mobile_huddle_controller.dart';
 import 'package:buzz/shared/relay/relay.dart';
 
+import 'package:buzz/shared/verified_profiles/verified_profile.dart';
+
+import '../../shared/verified_profiles/verified_profile_fixture.dart';
+
 /// Tests for [channelDetailsFromEvent].
 ///
 /// The function maps a kind:39000 metadata event to [ChannelDetails], and is
@@ -141,47 +145,59 @@ void main() {
   });
 
   test('builds an alphabetized directory from the latest profile events', () {
-    final users = directoryUsersFromProfileEvents([
-      NostrEvent(
-        id: 'alice-old',
-        pubkey: 'alice',
-        createdAt: 10,
-        kind: 0,
-        tags: const [],
-        content: '{"display_name":"Zoe"}',
-        sig: 'sig',
-      ),
-      NostrEvent(
-        id: 'bob',
-        pubkey: 'bob',
-        createdAt: 20,
-        kind: 0,
-        tags: const [],
-        content: '{"display_name":"Bob"}',
-        sig: 'sig',
-      ),
-      NostrEvent(
-        id: 'alice-new',
-        pubkey: 'ALICE',
-        createdAt: 30,
-        kind: 0,
-        tags: const [],
-        content:
-            '{"display_name":"Alice","picture":"https://example.com/alice.png"}',
-        sig: 'sig',
-      ),
-      NostrEvent(
-        id: 'not-a-profile',
-        pubkey: 'charlie',
-        createdAt: 40,
-        kind: 1,
-        tags: const [],
-        content: '{}',
-        sig: 'sig',
-      ),
-    ]);
+    final users = directoryUsersFromSearch(
+      searchedPeople([
+        NostrEvent(
+          id: 'alice-old',
+          pubkey: 'alice',
+          createdAt: 10,
+          kind: 0,
+          tags: const [],
+          content: '{"display_name":"Zoe"}',
+          sig: 'sig',
+        ),
+        NostrEvent(
+          id: 'bob',
+          pubkey: 'bob',
+          createdAt: 20,
+          kind: 0,
+          tags: const [],
+          content: '{"display_name":"Bob"}',
+          sig: 'sig',
+        ),
+        NostrEvent(
+          id: 'alice-new',
+          pubkey: 'ALICE',
+          createdAt: 30,
+          kind: 0,
+          tags: const [],
+          content:
+              '{"display_name":"Alice","picture":"https://example.com/alice.png"}',
+          sig: 'sig',
+        ),
+        NostrEvent(
+          id: 'not-a-profile',
+          pubkey: 'charlie',
+          createdAt: 40,
+          kind: 1,
+          tags: const [],
+          content: '{}',
+          sig: 'sig',
+        ),
+        // Someone with no kind:0 is listed by the relay's verified head.
+        signedProjection(profileTags(subjectA, name: 'Gabi Lilienfeld')),
+        signedProjection(
+          profileTags(subjectB, name: 'Forged'),
+          author: relayKeysOther(),
+        ),
+      ], authority),
+    );
 
-    expect(users.map((user) => user.label), ['Alice', 'Bob']);
+    expect(users.map((user) => user.label), [
+      'Alice',
+      'Bob',
+      'Gabi Lilienfeld',
+    ]);
     expect(users.first.pubkey, 'alice');
     expect(users.first.avatarUrl, 'https://example.com/alice.png');
   });
@@ -472,6 +488,70 @@ void main() {
     },
   );
 
+  test('reactions tag the reacted-to message author', () async {
+    final keys = nostr.Keys.generate();
+    final session = _RecordingPublishRelaySession();
+    final actionsProvider = Provider<ChannelActions>((ref) {
+      return ChannelActions(
+        ref: ref,
+        session: session,
+        signedEventRelay: SignedEventRelay(session: session, nsec: keys.nsec),
+        currentPubkey: keys.public,
+      );
+    });
+    final container = ProviderContainer(retry: (_, _) => null);
+    addTearDown(container.dispose);
+    final author = nostr.Keys.generate().public;
+
+    await container
+        .read(actionsProvider)
+        .addReaction('target-event', '👍', targetAuthor: author);
+
+    expect(session.publishedEvents.single.tags, [
+      ['e', 'target-event'],
+      ['p', author],
+    ]);
+  });
+
+  test(
+    'join confirms membership with strong roster reads before settling',
+    () async {
+      final keys = nostr.Keys.generate();
+      final session = _RecordingPublishRelaySession();
+      final actionsProvider = Provider<ChannelActions>((ref) {
+        return ChannelActions(
+          ref: ref,
+          session: session,
+          signedEventRelay: SignedEventRelay(session: session, nsec: keys.nsec),
+          currentPubkey: keys.public,
+        );
+      });
+      final container = ProviderContainer(
+        retry: (_, _) => null,
+        overrides: [relaySessionProvider.overrideWith(() => session)],
+      );
+      addTearDown(container.dispose);
+
+      await expectLater(
+        container.read(actionsProvider).joinChannel(_channelId),
+        throwsA(isA<ChannelJoinUnconfirmed>()),
+      );
+
+      expect(session.publishedEvents.single.kind, 9021);
+      expect(session.historyQueryCount, 0);
+      expect(session.queryFilters, hasLength(4));
+      for (final filter in session.queryFilters) {
+        expect(filter.toJson(), {
+          'kinds': [39002],
+          'limit': 1,
+          '#d': [_channelId],
+          '#p': [keys.public],
+          'consistency': 'strong',
+        });
+      }
+    },
+  );
+
   group('Huddle channel lifecycle', () {
     test(
       'starts from accepted signed events without refreshing all channels',
@@ -499,7 +579,9 @@ void main() {
         addTearDown(container.dispose);
 
         final actions = container.read(actionsProvider);
-        final backingChannelId = await actions.createHuddleBackingChannel();
+        final backingChannelId = await actions.createHuddleBackingChannel(
+          parentChannelId: _channelId,
+        );
         final started = await actions.announceHuddleStarted(
           parentChannelId: _channelId,
           ephemeralChannelId: backingChannelId,
@@ -513,6 +595,15 @@ void main() {
         expect(create.tags, contains(equals(['visibility', 'private'])));
         expect(create.tags, contains(equals(['channel_type', 'stream'])));
         expect(create.tags, contains(equals(['ttl', '3600'])));
+        expect(
+          create.tags,
+          contains(
+            equals([
+              'about',
+              'Buzz Huddle (buzz.huddles/v1)\nparent:$_channelId',
+            ]),
+          ),
+        );
 
         final start = session.publishedEvents.last;
         expect(start.kind, EventKind.huddleStarted);
@@ -767,6 +858,7 @@ const _memberPubkey =
 
 class _RecordingPublishRelaySession extends RelaySessionNotifier {
   final publishedEvents = <NostrEvent>[];
+  final queryFilters = <NostrFilter>[];
   int historyQueryCount = 0;
 
   @override
@@ -787,6 +879,15 @@ class _RecordingPublishRelaySession extends RelaySessionNotifier {
     Duration timeout = const Duration(seconds: 8),
   }) async {
     historyQueryCount++;
+    return const [];
+  }
+
+  @override
+  Future<List<NostrEvent>> queryRelay(
+    List<NostrFilter> filters, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    queryFilters.addAll(filters);
     return const [];
   }
 }

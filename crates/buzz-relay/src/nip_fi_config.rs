@@ -620,14 +620,19 @@ fn parse_mode() -> Result<NipFiMode, ConfigError> {
     }
 }
 
-/// A missing-setting startup error naming the configured mode.
-fn mode_requires(mode: NipFiMode, missing: &str) -> ConfigError {
-    let value = match mode {
+/// Stable configured mode name for operator diagnostics and status.
+pub(crate) fn mode_name(mode: NipFiMode) -> &'static str {
+    match mode {
         NipFiMode::Enforce => "enforce",
         NipFiMode::Shadow => "shadow",
         NipFiMode::Off => "off",
         NipFiMode::DenyProtected => "deny_protected",
-    };
+    }
+}
+
+/// A missing-setting startup error naming the configured mode.
+fn mode_requires(mode: NipFiMode, missing: &str) -> ConfigError {
+    let value = mode_name(mode);
     ConfigError::InvalidValue(format!("BUZZ_NIP_FI_MODE={value} but {missing}"))
 }
 
