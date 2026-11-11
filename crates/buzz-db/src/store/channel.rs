@@ -1724,10 +1724,11 @@ pub(crate) async fn apply_channel_metadata_event(
             return Err(DbError::AccessDenied("channel is not archived".to_string()));
         }
     }
-    // Opening a private channel changes the admission rules under everyone
-    // who joined it, so only a channel that holds nobody but the sender and
-    // the sender's own agents (NIP-OA) may be opened, for example a Solo
-    // chat. A visibility change holds the membership lock
+    // Opening a private channel publishes its existing history to new
+    // readers. So only a channel that has never held anyone but the sender
+    // and the sender's own agents (NIP-OA) may be opened, for example a Solo
+    // chat; removed members count, because their posts stay. A visibility
+    // change holds the membership lock
     // (`lock_channel_for_settings_write`), so the member set read here stays
     // the same until commit.
     if edit.columns.visibility.as_deref() == Some(ChannelVisibility::Open.as_str())
@@ -2210,8 +2211,8 @@ impl Db {
         .await
     }
 
-    /// Updates a channel's name and/or description. It does not apply the
-    /// private-to-open rule; user edits go through kind:9002.
+    /// Applies every field set in `updates`, visibility included. It does
+    /// not apply the private-to-open rule; user edits go through kind:9002.
     #[datastore_span(name = "update_channel", system = "postgresql")]
     pub async fn update_channel(
         &self,
