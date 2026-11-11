@@ -143,7 +143,10 @@ pub struct RetirementResult {
 pub struct ResultIdentity {
     /// Lowercase hex key.
     pub pubkey: String,
-    /// `root` or `agent`.
+    /// Position in this action, not ownership. `root` is the key the action
+    /// targeted, so a release reports the released key as `root` even when
+    /// it is an owned agent. `agent` is an owned agent key that an archive
+    /// included through its target.
     pub role: String,
     /// NIP-IA state after the action.
     pub archived: bool,
