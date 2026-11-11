@@ -46,10 +46,8 @@ void _mixedGalleryTests() {
     testWidgets('Photos queues $filename as a video alongside photos', (
       tester,
     ) async {
-      final video = XFile.fromData(
-        Uint8List.fromList([1, 2, 3]),
-        name: filename,
-      );
+      // XFile.fromData ignores its name on IO platforms; picker results are paths.
+      final video = XFile('/fixtures/$filename');
       final service = _MixedGalleryService(video);
       String? sent;
       await tester.pumpWidget(

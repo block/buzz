@@ -42,10 +42,18 @@ class _MessageImageStack extends HookConsumerWidget {
     final reducedMotion = MediaQuery.disableAnimationsOf(context);
     final auth = ref.watch(mediaGetAuthServiceProvider);
     final index = value.round() % items.length;
+    // Match the rendered cards, including the next card during a swipe. Do not
+    // download every posterless video in a large attachment group.
+    final posterIndices = {
+      for (var slot = 0; slot <= 3; slot++)
+        (value.floor() + slot) % items.length,
+    };
     final generatedPosters = [
-      for (final item in items)
-        if (item.isVideo && item.posterUrl == null)
-          ref.watch(videoPosterProvider(item.url)).asData?.value
+      for (var i = 0; i < items.length; i++)
+        if (posterIndices.contains(i) &&
+            items[i].isVideo &&
+            items[i].posterUrl == null)
+          ref.watch(videoPosterProvider(items[i].url)).asData?.value
         else
           null,
     ];

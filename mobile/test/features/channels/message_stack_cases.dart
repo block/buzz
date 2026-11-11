@@ -1,6 +1,33 @@
 part of 'message_content_test.dart';
 
 void stackJourneyTests() {
+  testWidgets('large video stacks only fetch posters for rendered cards', (
+    tester,
+  ) async {
+    final requested = <String>[];
+    final client = MockClient((request) async {
+      requested.add(request.url.toString());
+      return http.Response('', 404);
+    });
+    await tester.pumpWidget(
+      _testable(
+        MessageContent(
+          bubble: true,
+          content: List.generate(
+            20,
+            (i) => '![Video $i](https://example.com/clip-$i.mp4)',
+          ).join('\n'),
+        ),
+        disableAnimations: true,
+        overrides: [mediaHttpClientProvider.overrideWithValue(client)],
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(requested.toSet(), {
+      for (var i = 0; i < 4; i++) 'https://example.com/clip-$i.mp4',
+    });
+  });
+
   testWidgets('mixed stacks keep video order and return from the fallback player', (
     tester,
   ) async {
