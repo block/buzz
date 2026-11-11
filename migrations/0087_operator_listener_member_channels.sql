@@ -10,6 +10,26 @@ ALTER TABLE operator_listener_pubkeys
 -- Member-channel enqueue starts from the few opted-in registrations and probes
 -- channel_members by primary key, instead of walking every member of a busy
 -- channel. Every existing row is false, so the index builds empty.
-CREATE INDEX operator_listener_pubkeys_member_channels
-    ON operator_listener_pubkeys (target_pubkey, listener_pubkey)
-    WHERE member_channels;
+SET LOCAL statement_timeout = '5s';
+DO $migration$
+BEGIN
+    IF to_regclass('public.operator_listener_pubkeys_member_channels') IS NULL THEN
+        CREATE INDEX operator_listener_pubkeys_member_channels
+            ON public.operator_listener_pubkeys (target_pubkey, listener_pubkey)
+            WHERE member_channels;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_index i
+        WHERE i.indexrelid = 'public.operator_listener_pubkeys_member_channels'::regclass
+          AND i.indrelid = 'public.operator_listener_pubkeys'::regclass
+          AND i.indisvalid AND i.indisready AND i.indislive
+          AND NOT i.indisunique AND i.indnkeyatts = 2 AND i.indnatts = 2
+          AND pg_get_indexdef(i.indexrelid,1,true) = 'target_pubkey'
+          AND pg_get_indexdef(i.indexrelid,2,true) = 'listener_pubkey'
+          AND i.indoption::text = '0 0'
+          AND pg_get_expr(i.indpred, i.indrelid) = 'member_channels'
+          AND (SELECT amname FROM pg_am WHERE oid=(SELECT relam FROM pg_class WHERE oid=i.indexrelid))='btree'
+    ) THEN
+        RAISE EXCEPTION 'operator_listener_pubkeys_member_channels invalid or wrong definition';
+    END IF;
+END $migration$;
