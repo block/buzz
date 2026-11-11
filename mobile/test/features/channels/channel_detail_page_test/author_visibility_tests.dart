@@ -10,6 +10,7 @@ void messageAuthorVisibilityTests() {
       'pair-channel',
       'unknown',
       'outsider',
+      'stale-dm',
     ]) {
       testWidgets('message identity: $kind dark=$dark', (tester) async {
         final participants = kind == 'unknown'
@@ -17,7 +18,8 @@ void messageAuthorVisibilityTests() {
             : [
                 'self',
                 'alice',
-                if (kind == 'group' || kind == 'channel') 'bob',
+                if (kind == 'group' || kind == 'channel' || kind == 'stale-dm')
+                  'bob',
               ];
         final channel = Channel(
           id: _channelId,
@@ -42,7 +44,9 @@ void messageAuthorVisibilityTests() {
             darkTheme: dark,
             signingPubkey: 'self',
             members: [
-              for (final pubkey in participants)
+              for (final pubkey in participants.where(
+                (key) => kind != 'stale-dm' || key != 'bob',
+              ))
                 ChannelMember(
                   pubkey: pubkey,
                   role: 'member',

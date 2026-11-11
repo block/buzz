@@ -1,3 +1,4 @@
+import 'package:buzz/features/forum/forum_posts_view.dart';
 import 'package:buzz/features/channels/me/me_chat_settings.dart';
 import 'package:buzz/shared/widgets/dm_header_portrait.dart';
 import 'package:buzz/features/channels/dm_voice_agent_provider.dart';
@@ -4314,6 +4315,8 @@ void main() {
     });
 
     testWidgets('shows forum posts view for forum channels', (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
       final forumChannel = Channel(
         id: _channelId,
         name: 'design-forum',
@@ -4342,6 +4345,9 @@ void main() {
         find.byType(FrostedScaffold).first,
       );
       expect(scaffold.resizeToAvoidBottomInset, isTrue);
+      final forum = tester.widget<ForumPostsView>(find.byType(ForumPostsView));
+      expect(forum.titleContentHeight, scaffold.appBar.titleContentHeight);
+      expect(forum.titleContentHeight, greaterThanOrEqualTo(104));
     });
 
     testWidgets('renders video attachments from imeta tags in the timeline', (
@@ -14404,7 +14410,7 @@ void main() {
           payload['ephemeralLabel'],
           contains('after 1 hour of inactivity'),
         );
-        expect(payload['subtitle'], isEmpty);
+        expect(payload['subtitle'], contains('Temporary'));
         const bridge = MethodChannel('buzz/ios_navigation_bar/297');
         tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(bridge, (
           call,
@@ -14427,7 +14433,7 @@ void main() {
         container.invalidate(channelDetailsProvider(_channelId));
         await tester.pumpAndSettle();
         expect(payload['ephemeralLabel'], contains('Cleanup is due now'));
-        expect(payload['subtitle'], isEmpty);
+        expect(payload['subtitle'], contains('Cleanup due'));
         current = conversation();
         container.invalidate(channelDetailsProvider(_channelId));
         await tester.pumpAndSettle();

@@ -691,7 +691,12 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
         alwaysFrosted: true,
         nativeViewSuppressed: messageActionBackdropActive,
         nativeTitle: dmHeader.label,
-        nativeSubtitle: '',
+        nativeSubtitle: retention == null
+            ? ''
+            : [
+                'Temporary',
+                if (retention.detailLabel != null) retention.detailLabel!,
+              ].join(' · '),
         nativeEphemeralLabel: retention?.tooltipLabel,
         nativeTitleAvatars: dmHeader.avatars,
         nativeTitleMaxWidth: conversationTitleMaxWidth(
@@ -757,6 +762,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                         fit: StackFit.expand,
                         children: [
                           ForumPostsView(
+                            titleContentHeight: appBarTitleContentHeight,
                             channel: resolvedChannel,
                             currentPubkey: currentPubkey,
                           ),
