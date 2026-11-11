@@ -25,8 +25,9 @@ Channel chat(String id, {bool member = true, bool archived = false}) => Channel(
   name: id,
   channelType: 'stream',
   visibility: 'private',
+  labels: id == 'ordinary' ? const [] : const ['buzz.solo'],
   description: '',
-  createdBy: 'owner',
+  createdBy: 'other',
   createdAt: DateTime(2026),
   lastMessageAt: DateTime.fromMillisecondsSinceEpoch(20000),
   memberCount: 2,
@@ -123,7 +124,7 @@ const organization = MeGroups(
     {'id': 'project', 'name': 'Project', 'defaultTemplateId': ''},
   ],
   assignments: {'solo': 'project'},
-  channels: ['solo', 'archived', 'nonmember'],
+  channels: ['archived', 'nonmember'],
 );
 
 class _Typing extends ChannelTypingNotifier {
@@ -246,8 +247,7 @@ void main() {
             channelsProvider.overrideWith(() => channels),
             readStateProvider.overrideWith(() => reads),
             meGroupsProvider.overrideWith(
-              (ref) =>
-                  Stream.value(const MeGroups(channels: ['solo', 'ordinary'])),
+              (ref) => Stream.value(const MeGroups(channels: ['ordinary'])),
             ),
           ],
         );

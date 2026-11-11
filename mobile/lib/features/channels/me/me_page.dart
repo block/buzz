@@ -170,7 +170,7 @@ class MePage extends HookConsumerWidget {
                     (c) =>
                         c.isMember &&
                         !c.isArchived &&
-                        c.isPersonalChat(viewer, organization.channels),
+                        c.isSoloChat(organization.channels),
                   )
                   .toList()
                 ..sort(
@@ -210,8 +210,13 @@ class MePage extends HookConsumerWidget {
                   onTap: () => openConversationPane(
                     context,
                     channel.id,
-                    (_) =>
-                        ChannelDetailPage(channel: channel, personalChat: true),
+                    (_) => ChannelDetailPage(
+                      channel: channel,
+                      personalChat: channel.isPersonalChat(
+                        viewer,
+                        organization.channels,
+                      ),
+                    ),
                   ),
                 ),
               ),

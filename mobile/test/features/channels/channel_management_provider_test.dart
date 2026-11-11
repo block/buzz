@@ -111,6 +111,8 @@ void main() {
           expect(channel.labels, ['buzz.solo']);
           expect(channel.createdBy, 'owner');
           expect(channel.isSolo, type == 'stream' && private);
+          expect(channel.isSoloChat(const []), type == 'stream' && private);
+          expect(channel.isSoloChat(const ['chat']), isTrue);
           expect(
             channel.isPersonalChat('owner', const []),
             type == 'stream' && private,

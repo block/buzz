@@ -28,7 +28,7 @@ class MeUnreadChannelIds extends Notifier<Set<String>> {
           (c) =>
               c.isMember &&
               !c.isArchived &&
-              c.isPersonalChat(reads.pubkey, organization.channels),
+              c.isSoloChat(organization.channels),
         )
         .toList();
     final pending = active.where((c) => !seeded.contains(c.id)).toList();
