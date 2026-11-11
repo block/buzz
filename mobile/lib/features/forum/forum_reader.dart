@@ -69,7 +69,6 @@ abstract class ForumReader<T extends ForumReadResponse>
     }
     final generation = _generation;
     final source = _source!;
-    final continuation = channelWindowNextCursor(_store);
     final loadMoreError = state.value?.loadMoreError;
     _busy = true;
     try {
@@ -77,14 +76,10 @@ abstract class ForumReader<T extends ForumReadResponse>
       if (!ref.mounted || generation != _generation) return;
       final store = mergeForumWindow(_store, page, refresh: true);
       final next = channelWindowNextCursor(store);
-      final sameContinuation =
-          continuation != null &&
-          next != null &&
-          continuation.createdAt == next.createdAt &&
-          continuation.eventId == next.eventId;
+      // A head gap can change the cursor without settling a failed older read.
       final response = source.render(
         store,
-        loadMoreError: sameContinuation ? loadMoreError : null,
+        loadMoreError: next == null ? null : loadMoreError,
       );
       _store = store;
       state = AsyncData(response);

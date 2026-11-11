@@ -1,5 +1,8 @@
 import '../../shared/relay/relay.dart';
 import '../channels/channel_window.dart';
+import 'forum_auxiliary.dart';
+
+final _editEventId = RegExp(r'^[0-9a-fA-F]{64}$');
 
 /// Maximum retained history, including rows merged by periodic head refreshes.
 const forumPageLimit = 200;
@@ -15,7 +18,7 @@ class ForumWindowPage extends ChannelWindowPage {
   /// Missing entries represent relay-authorized served-window events.
   final Map<String, Set<String>> auxiliaryTargets;
 
-  /// Unconfirmed effects on a thread page that had no reply rows to mark.
+  /// Unconfirmed root/page effects without a retained row to mark.
   final bool hasUnconfirmedRootEffects;
 
   const ForumWindowPage({
@@ -93,6 +96,7 @@ ChannelWindowStore mergeForumWindow(
   }
   final rows = {...previous, ...incoming}.values.toList()
     ..sort((a, b) => _order(a.event, b.event));
+  final rowIds = rows.map((row) => row.event.id).toSet();
   final aux = {
     for (final p in current.pages)
       for (final event in p.aux) event.id: event,
@@ -102,9 +106,27 @@ ChannelWindowStore mergeForumWindow(
     for (final previous in current.pages)
       if (previous is ForumWindowPage) ...previous.incompletePostIds,
   }..removeAll(incoming.keys);
-  incompletePostIds.retainAll(rows.map((row) => row.event.id));
+  incompletePostIds.retainAll(rowIds);
   if (page is ForumWindowPage) {
     incompletePostIds.addAll(page.incompletePostIds);
+  }
+  var hasUnconfirmedRootEffects =
+      page is ForumWindowPage && page.hasUnconfirmedRootEffects;
+  for (final event in page.aux) {
+    if (forumEditTargetsAgree(event)) continue;
+    final last = event.tags
+        .where((tag) => tag.length >= 2 && tag[0] == 'e')
+        .lastOrNull;
+    // Both the relay-authorized and formatter-applied targets may be stale.
+    // Capture their uncertainty on receipt, so retained raw aux cannot revive
+    // warnings after each affected row has been reread or removed.
+    for (final target in [_firstEditTarget(event), last?[1].toLowerCase()]) {
+      if (target != null && rowIds.contains(target)) {
+        incompletePostIds.add(target);
+      } else {
+        hasUnconfirmedRootEffects = true;
+      }
+    }
   }
   final auxiliaryTargets = <String, Set<String>>{};
   for (final source in [...current.pages, page]) {
@@ -131,7 +153,7 @@ ChannelWindowStore mergeForumWindow(
         incompletePostIds: incompletePostIds,
         auxiliaryTargets: auxiliaryTargets,
         hasUnconfirmedRootEffects:
-            (page is ForumWindowPage && page.hasUnconfirmedRootEffects) ||
+            hasUnconfirmedRootEffects ||
             (!refresh &&
                 current.pages.whereType<ForumWindowPage>().any(
                   (p) => p.hasUnconfirmedRootEffects,
@@ -142,6 +164,18 @@ ChannelWindowStore mergeForumWindow(
     liveAux: const [],
     liveThreadSummaries: const {},
   );
+}
+
+String? _firstEditTarget(NostrEvent event) {
+  for (final tag in event.tags) {
+    if (tag.length >= 2 &&
+        tag[0] == 'e' &&
+        tag[1].length == 64 &&
+        _editEventId.hasMatch(tag[1])) {
+      return tag[1].toLowerCase();
+    }
+  }
+  return null;
 }
 
 int _order(NostrEvent a, NostrEvent b) {

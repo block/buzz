@@ -245,10 +245,10 @@ class ForumPostsResponse implements ForumReadResponse {
     Object? refreshError,
     bool hasUnconfirmedContinuation = false,
   }) {
-    final effects = _forumDisplayEvents(store);
+    final events = _forumDisplayEvents(store);
     final display = {
       for (final message in formatTimeline(
-        effects.events,
+        events,
         contentKinds: NostrFilters.forumRootKinds,
       ))
         message.id: message,
@@ -278,20 +278,17 @@ class ForumPostsResponse implements ForumReadResponse {
       isLoadingMore: isLoadingMore,
       loadMoreError: loadMoreError,
       refreshError: refreshError,
-      hasUnconfirmedHistory:
-          effects.hasUnconfirmedEffects ||
-          store.pages.whereType<ForumWindowPage>().any(
-            (page) =>
-                page.incompletePostIds.isNotEmpty ||
-                page.hasUnconfirmedRootEffects,
-          ),
+      hasUnconfirmedHistory: store.pages.whereType<ForumWindowPage>().any(
+        (page) =>
+            page.incompletePostIds.isNotEmpty || page.hasUnconfirmedRootEffects,
+      ),
       hasUnconfirmedContinuation:
           hasUnconfirmedContinuation && channelWindowNextCursor(store) != null,
     );
   }
 }
 
-({List<NostrEvent> events, bool hasUnconfirmedEffects}) _forumDisplayEvents(
+List<NostrEvent> _forumDisplayEvents(
   ChannelWindowStore store, {
   NostrEvent? root,
 }) {
@@ -301,10 +298,8 @@ class ForumPostsResponse implements ForumReadResponse {
   };
   final canonical = [?root, ...flattenChannelWindowEvents(store)];
   final events = <NostrEvent>[];
-  var unconfirmed = false;
   for (final event in canonical) {
     if (!forumEditTargetsAgree(event)) {
-      unconfirmed = true;
       continue;
     }
     final targets = auxiliaryTargets[event.id];
@@ -332,7 +327,7 @@ class ForumPostsResponse implements ForumReadResponse {
       events.add(event);
     }
   }
-  return (events: events, hasUnconfirmedEffects: unconfirmed);
+  return events;
 }
 
 /// Response for a single forum thread with replies.
@@ -398,8 +393,7 @@ class ForumThreadResponse implements ForumReadResponse {
     Object? loadMoreError,
     Object? refreshError,
   }) {
-    final effects = _forumDisplayEvents(store, root: root);
-    final events = effects.events
+    final events = _forumDisplayEvents(store, root: root)
       ..sort(compareChannelTimelineEventsChronologically);
     final display = {
       for (final message in formatTimeline(
@@ -441,13 +435,10 @@ class ForumThreadResponse implements ForumReadResponse {
       isLoadingMore: isLoadingMore,
       loadMoreError: loadMoreError,
       refreshError: refreshError,
-      hasUnconfirmedHistory:
-          effects.hasUnconfirmedEffects ||
-          store.pages.whereType<ForumWindowPage>().any(
-            (page) =>
-                page.incompletePostIds.isNotEmpty ||
-                page.hasUnconfirmedRootEffects,
-          ),
+      hasUnconfirmedHistory: store.pages.whereType<ForumWindowPage>().any(
+        (page) =>
+            page.incompletePostIds.isNotEmpty || page.hasUnconfirmedRootEffects,
+      ),
     );
   }
 }
