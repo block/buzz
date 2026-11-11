@@ -285,6 +285,20 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
     }
   }
 
+  func testPreviewBodyBoundsLongUnclosedMarkup() {
+    // Unclosed bold markers make the bold regex scan to the end of the line
+    // for each opener; without the input cut this takes minutes.
+    let body = BuzzPushNotificationResolver.previewBody(
+      String(repeating: " **a", count: 64 * 1024))
+    XCTAssertLessThanOrEqual(body.utf16.count, BuzzPushNotificationResolver.previewBodyLimit)
+    XCTAssertTrue(body.hasSuffix("…"))
+  }
+
+  func testPreviewBodyMarksCutInputEvenWhenShort() {
+    let content = "Hi" + String(repeating: " ", count: 5000) + "there"
+    XCTAssertEqual(BuzzPushNotificationResolver.previewBody(content), "Hi…")
+  }
+
   func testDecodeResolutionUsesLowestIDWhenCreatedAtTies() {
     let result = BuzzPushNotificationResolver.decodeResolution(
       events: [

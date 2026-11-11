@@ -677,6 +677,13 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
   /// unit short and add our own. See docs/adr/0002-notification-message-text.md.
   static let previewBodyLimit = 256
 
+  /// Most of a message's content, in UTF-16 code units, that the body is
+  /// built from. The regexes below can take quadratic time on unclosed
+  /// markup, and content can be up to 256 KB, so a long message is cut
+  /// first. This only changes the result when stripped markup and
+  /// whitespace in the prefix exceed about 3.8K units.
+  static let previewInputLimit = 4096
+
   /// A fenced code block (with an optional language line) or an inline code span.
   private static let previewCode = try! NSRegularExpression(
     pattern: #"```(?:[^\n`]*\n)?([\s\S]*?)\n?```|`([^`\n]*)`"#)
@@ -689,7 +696,16 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
     // Work in UTF-16 ranges: a match may start or end inside a grapheme
     // cluster (a combining mark after a backtick), where String indices
     // don't exist.
-    let text = content.replacingOccurrences(of: "\r\n", with: "\n") as NSString
+    var input = content
+    let cut = input.utf16.count > previewInputLimit
+    if cut {
+      var units = 0
+      input = String(input.prefix { character in
+        units += character.utf16.count
+        return units <= previewInputLimit
+      })
+    }
+    let text = input.replacingOccurrences(of: "\r\n", with: "\n") as NSString
     var result = ""
     var prose = 0
     for match in previewCode.matches(in: text as String, range: NSRange(location: 0, length: text.length)) {
@@ -704,7 +720,7 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
     result = result.replacingOccurrences(
       of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
       .trimmingCharacters(in: .whitespacesAndNewlines)
-    guard result.utf16.count > previewBodyLimit else { return result }
+    guard cut || result.utf16.count > previewBodyLimit else { return result }
     var kept = ""
     var units = 0
     for character in result {
