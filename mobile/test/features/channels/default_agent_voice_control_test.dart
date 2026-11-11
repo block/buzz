@@ -423,7 +423,6 @@ void main() {
     tester,
   ) async {
     final semantics = tester.ensureSemantics();
-    addTearDown(semantics.dispose);
     void expectRecoverySemantics(String value) {
       final node = tester.getSemantics(find.byType(DefaultAgentVoiceControl));
       expect(node.value, value);
@@ -465,6 +464,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.byTooltip('Agent'), findsOneWidget);
     expect(find.text('Could not restore voice note. Retry'), findsNothing);
+    semantics.dispose();
   });
   testWidgets('late delivery cannot clear a replacement after remount', (
     tester,
