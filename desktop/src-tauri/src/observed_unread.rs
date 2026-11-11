@@ -54,6 +54,17 @@ fn cached_conn<'a>(
     Ok(slot.as_mut().expect("connection just initialized"))
 }
 
+/// True when applying `request` can change a channel projection. Membership
+/// updates never feed `projections()`, so membership-only (or empty) requests
+/// need neither the before/after scans nor `prune()`.
+fn request_affects_projections(request: &IngestRequest) -> bool {
+    request.clear_all
+        || !request.clear_channels.is_empty()
+        || !request.events.is_empty()
+        || !request.channel_latest.is_empty()
+        || !request.markers.is_empty()
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ObservedUnreadScope {
@@ -580,7 +591,14 @@ fn ingest_locked(
             last_acked_sequence: last,
         });
     }
-    let before = projections(&tx, &scope)?;
+    // Membership-only / empty requests cannot change any projection, so the
+    // full-scope scans (and prune) are skipped; the revision still advances.
+    let affects_projections = request_affects_projections(&request);
+    let before = if affects_projections {
+        projections(&tx, &scope)?
+    } else {
+        Vec::new()
+    };
     let before_by_channel: HashMap<_, _> = before
         .into_iter()
         .map(|projection| (projection.channel_id.clone(), projection))
@@ -626,8 +644,15 @@ fn ingest_locked(
     for update in &request.markers {
         match update.read_at { Some(read_at)=>{tx.execute("INSERT INTO read_markers(scope,context_id,read_at) VALUES(?1,?2,?3) ON CONFLICT(scope,context_id) DO UPDATE SET read_at=MAX(read_at,excluded.read_at)",params![scope,update.context_id,read_at])},None=>tx.execute("DELETE FROM read_markers WHERE scope=?1 AND context_id=?2",params![scope,update.context_id])}.map_err(|e| format!("update observed marker: {e}"))?;
     }
-    prune(&tx, &scope)?;
-    let after = projections(&tx, &scope)?;
+    // Same gate as `before`: prune + the second scan only matter if a
+    // projection could have changed. (Age prune is thus deferred to the next
+    // event/marker ingest or open_scope for membership-only requests.)
+    let after = if affects_projections {
+        prune(&tx, &scope)?;
+        projections(&tx, &scope)?
+    } else {
+        Vec::new()
+    };
     let after_ids: HashSet<_> = after
         .iter()
         .map(|projection| projection.channel_id.clone())
@@ -766,6 +791,60 @@ mod tests {
         let projected = projections(&tx, &key).unwrap();
         assert_eq!(projected[0].latest, 42);
         assert_eq!(projected[0].count, 0);
+    }
+    // Fixture for the scan-skip predicate tests below.
+    fn empty_request() -> IngestRequest {
+        serde_json::from_value(serde_json::json!({
+            "scope":{"pubkey":"PK","relayUrl":"wss://relay/"},
+            "sequence":1,"baseRevision":0,"events":[],"channelLatest":[],
+            "markers":[],"membership":[],"clearChannels":[],"clearAll":false
+        }))
+        .unwrap()
+    }
+    // Guards the hot-loop fix: membership-only ingests must not trigger scans.
+    #[test]
+    fn membership_only_and_empty_ingests_skip_projection_work() {
+        let mut request = empty_request();
+        assert!(!request_affects_projections(&request));
+        request.membership.push(MembershipUpdate {
+            kind: "participated".into(),
+            value: "root".into(),
+            present: true,
+        });
+        assert!(!request_affects_projections(&request));
+    }
+    // Guards correctness: skipping must never hide a projection-changing kind.
+    #[test]
+    fn projection_affecting_ingests_still_scan() {
+        let mut request = empty_request();
+        request.clear_all = true;
+        assert!(request_affects_projections(&request));
+        let mut request = empty_request();
+        request.clear_channels.push("ch".into());
+        assert!(request_affects_projections(&request));
+        let mut request = empty_request();
+        request.channel_latest.push(ChannelLatestUpdate {
+            channel_id: "ch".into(),
+            created_at: 1,
+        });
+        assert!(request_affects_projections(&request));
+        let mut request = empty_request();
+        request.markers.push(MarkerUpdate {
+            context_id: "ch".into(),
+            read_at: Some(1),
+        });
+        assert!(request_affects_projections(&request));
+        let mut request = empty_request();
+        request.events.push(IngestEvent {
+            channel_id: "ch".into(),
+            id: "e".into(),
+            created_at: 1,
+            root_id: None,
+            high_priority: false,
+            counts_toward_badge: false,
+            counts_toward_app_badge: false,
+        });
+        assert!(request_affects_projections(&request));
     }
     #[test]
     fn ingest_request_wire_accepts_channel_latest() {
