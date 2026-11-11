@@ -268,6 +268,10 @@ class RunnerTests: XCTestCase {
   @MainActor
   func testDmPortraitFloatsAboveGlassTitleAndClearsForChannels() throws {
     let parent = UIViewController()
+    let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 393, height: 852))
+    window.rootViewController = parent
+    window.makeKeyAndVisible()
+    defer { window.isHidden = true }
     let messenger = NavigationTestMessenger()
     let factory = IosNavigationBarFactory(messenger: messenger, parent: parent)
     let portrait: [String: Any] = ["id": "titlePortrait0", "avatarInitial": "A",
