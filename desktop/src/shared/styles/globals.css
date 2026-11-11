@@ -18,6 +18,8 @@
 @import "./globals/image-lightbox.css";
 @import "./globals/video-review.css";
 @import "./globals/progress.css";
+/* Pauses infinite animations while the window is hidden (see hidden-pause.css). */
+@import "./globals/hidden-pause.css";
 
 @config "../../../tailwind.config.js";
 

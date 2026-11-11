@@ -21,6 +21,7 @@ import { Toaster } from "@/shared/ui/sonner";
 import { TooltipProvider } from "@/shared/ui/tooltip";
 import { recoverLocalStorageQuotaOnStartup } from "@/shared/lib/localStorageQuota";
 import { startLocalStorageSweep } from "@/shared/lib/localStorageSweep";
+import { startPauseAnimationsWhenHidden } from "@/shared/lib/pauseAnimationsWhenHidden";
 import { initializeConversationDensityPreference } from "@/shared/lib/conversationDensityPreference";
 import { initializeFontSizePreference } from "@/shared/lib/fontSizePreference";
 
@@ -131,6 +132,8 @@ async function bootstrap() {
   initializeConversationDensityPreference();
   initializeFontSizePreference();
   startLocalStorageSweep();
+  // Background throttling is disabled, so hidden-window animations keep ticking.
+  startPauseAnimationsWhenHidden();
   await installE2eBridgeIfConfigured();
   await migrateLegacyCommunityStorageBeforeRender();
   renderApp();
