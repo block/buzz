@@ -26,12 +26,6 @@ impl ProtectedMedia for Backend {
         }
         Ok(())
     }
-    async fn decide(&self, _: &MediaRun, file: &MediaFile) -> Result<MediaFile> {
-        let mut file = file.clone();
-        file.status = "to_be_deleted".into();
-        file.delete_targets_json = json!([{"key":format!("{}.jpg",file.file_hash),"version_id":"v1"},{"key":format!("{}.thumb.webp",file.file_hash),"version_id":"v2"}]);
-        Ok(file)
-    }
     async fn present(&self, t: &MediaTarget) -> Result<bool> {
         Ok(self.present.lock().unwrap().contains(&t.version_id))
     }
@@ -114,6 +108,13 @@ async fn print_only_skips_deletion_and_crash_recovery_uses_saved_versions() {
         )
         .await
         .unwrap();
+    let mut decided = store.load(&run).await.unwrap().unwrap().remove(0);
+    decided.status = "to_be_deleted".into();
+    decided.delete_targets_json = json!([
+        {"key":format!("{}.jpg",decided.file_hash),"version_id":"v1"},
+        {"key":format!("{}.thumb.webp",decided.file_hash),"version_id":"v2"}
+    ]);
+    store.save_execution_decision(&run, &decided).await.unwrap();
     let backend = Backend {
         present: Mutex::new(BTreeSet::from(["v1".into(), "v2".into()])),
         fail_after_delete: AtomicBool::new(true),

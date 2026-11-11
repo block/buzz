@@ -79,6 +79,18 @@ async fn preview_cli_saves_inventory_resumes_and_never_calls_delete() {
     .execute(&pool)
     .await
     .unwrap();
+    // Own the row-budget boundary: this test must exceed one upload row even
+    // when no other test has populated the database.
+    let unrelated = nostr::Keys::generate().public_key().to_hex();
+    sqlx::query(
+        "INSERT INTO media_uploaders (community_id,sha256,pubkey) VALUES ($1,$2,decode($3,'hex'))",
+    )
+    .bind(community)
+    .bind(Uuid::new_v4().simple().to_string().repeat(2))
+    .bind(&unrelated)
+    .execute(&pool)
+    .await
+    .unwrap();
     let state = S3Fixture {
         hash: hash.clone(),
         upload_key: format!(
@@ -154,6 +166,32 @@ async fn preview_cli_saves_inventory_resumes_and_never_calls_delete() {
         inventory["files"][1]["evidence_json"]["sources"][0]["table"],
         "storage_uploads"
     );
+    // Fresh observations preserve the same hashes once another actual uploader
+    // is recorded, including historical attribution found only in the audit log.
+    sqlx::query(
+        "INSERT INTO media_uploaders (community_id,sha256,pubkey) VALUES ($1,$2,decode($3,'hex'))",
+    )
+    .bind(community)
+    .bind(&hash)
+    .bind(&unrelated)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO audit_log (community_id,seq,hash,action,actor_pubkey,object_id,detail) VALUES ($1,1,decode($2,'hex'),'media_uploaded',decode($3,'hex'),$2,jsonb_build_object('sha256',$2::text))")
+        .bind(community).bind(&storage_hash).bind(&unrelated).execute(&pool).await.unwrap();
+    let shared = invoke(Uuid::new_v4(), 10_000_000).output().await.unwrap();
+    assert!(
+        shared.status.success(),
+        "{}",
+        String::from_utf8_lossy(&shared.stderr)
+    );
+    let shared: Value = serde_json::from_slice(&shared.stdout).unwrap();
+    assert_eq!(shared["candidate_count"], 2);
+    assert!(shared["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|file| file["status"] == "dont_delete"));
     let methods = state.methods.lock().unwrap().clone();
     assert!(!methods.is_empty());
     assert!(methods.iter().all(|m| *m == Method::GET));
@@ -177,7 +215,7 @@ async fn preview_cli_saves_inventory_resumes_and_never_calls_delete() {
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert_eq!(remaining, 1);
+    assert_eq!(remaining, 3);
     let count: i64 =
         sqlx::query_scalar("SELECT count(*) FROM entity_deletion_media_files WHERE stage_id=$1")
             .bind(run)

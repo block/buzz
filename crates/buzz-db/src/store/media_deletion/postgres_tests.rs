@@ -193,7 +193,7 @@ async fn exact_execution_plan_survives_failure_and_cannot_be_replaced() {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn source_scan_finds_unposted_uploads_private_survivors_and_scoped_agents() {
+async fn source_scan_uses_uploaders_and_audit_ignores_links_and_scopes_agents() {
     let db = Db::from_pool(
         sqlx::postgres::PgPoolOptions::new()
             .after_connect(|connection, _| {
@@ -213,6 +213,9 @@ async fn source_scan_finds_unposted_uploads_private_survivors_and_scoped_agents(
     let human = human_keys.public_key().to_hex();
     let agent = nostr::Keys::generate().public_key().to_hex();
     let other = nostr::Keys::generate().public_key().to_hex();
+    let hashes: Vec<_> = (0..5)
+        .map(|_| Uuid::new_v4().simple().to_string().repeat(2))
+        .collect();
     let a = Uuid::new_v4();
     let b = Uuid::new_v4();
     for c in [a, b] {
@@ -234,40 +237,39 @@ async fn source_scan_finds_unposted_uploads_private_survivors_and_scoped_agents(
     sqlx::query("UPDATE users SET agent_owner_pubkey=decode($2,'hex') WHERE community_id=$1 AND pubkey=decode($3,'hex')").bind(a).bind(&human).bind(&agent).execute(pool).await.unwrap();
     // No membership rows: historical source discovery must still find these.
     for (c, key, hash) in [
-        (a, &human, "a"),
-        (a, &agent, "b"),
-        (b, &agent, "b"),
-        (a, &human, "c"),
+        (a, &human, &hashes[0]),
+        (a, &agent, &hashes[1]),
+        (b, &agent, &hashes[1]),
+        (a, &human, &hashes[2]),
     ] {
-        sqlx::query("INSERT INTO media_uploaders (community_id,pubkey,sha256) VALUES ($1,decode($2,'hex'),$3)").bind(c).bind(key).bind(hash.repeat(64)).execute(pool).await.unwrap();
+        sqlx::query("INSERT INTO media_uploaders (community_id,pubkey,sha256) VALUES ($1,decode($2,'hex'),$3)").bind(c).bind(key).bind(hash).execute(pool).await.unwrap();
     }
     sqlx::query("UPDATE users SET avatar_url=$3 WHERE community_id=$1 AND pubkey=decode($2,'hex')")
         .bind(b)
         .bind(&other)
-        .bind(format!("/media/{}.jpg", "a".repeat(64)))
+        .bind(format!("/media/{}.jpg", hashes[0]))
         .execute(pool)
         .await
         .unwrap();
     sqlx::query("UPDATE users SET about=$3 WHERE community_id=$1 AND pubkey=decode($2,'hex')")
         .bind(a)
         .bind(&human)
-        .bind(format!("only a reference /media/{}.bin", "d".repeat(64)))
+        .bind(format!("only a reference /media/{}.bin", hashes[3]))
         .execute(pool)
         .await
         .unwrap();
     let event = nostr::EventBuilder::new(
         nostr::Kind::TextNote,
-        format!("attachment /media/{}.jpg", "c".repeat(64)),
+        format!("attachment /media/{}.jpg", hashes[2]),
     )
     .sign_with_keys(&human_keys)
     .unwrap();
     db.insert_event(buzz_core::CommunityId::from_uuid(a), &event, None)
         .await
         .unwrap();
-    let scan = db
-        .scan_user_media(&human, true, "fixture", &[])
-        .await
-        .unwrap();
+    sqlx::query("INSERT INTO audit_log (community_id,seq,hash,action,actor_pubkey,object_id,detail) VALUES ($1,1,decode($2,'hex'),'media_uploaded',decode($3,'hex'),$2,jsonb_build_object('sha256',$2::text))")
+        .bind(a).bind(&hashes[4]).bind(&human).execute(pool).await.unwrap();
+    let scan = db.scan_user_media(&human, true, "fixture").await.unwrap();
     let alternate_pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(1)
         .after_connect(|connection, _| {
@@ -282,7 +284,7 @@ async fn source_scan_finds_unposted_uploads_private_survivors_and_scoped_agents(
         .await
         .unwrap();
     let alternate = crate::Db::from_pool(alternate_pool)
-        .scan_user_media(&human, true, "fixture", &[])
+        .scan_user_media(&human, true, "fixture")
         .await
         .unwrap();
     assert_eq!(
@@ -295,21 +297,68 @@ async fn source_scan_finds_unposted_uploads_private_survivors_and_scoped_agents(
         .iter()
         .map(|f| (f.file_hash.clone(), f))
         .collect();
-    for hash in ["a", "b", "c", "d"] {
-        assert!(files.contains_key(&hash.repeat(64)));
+    for hash in [&hashes[0], &hashes[1], &hashes[2], &hashes[4]] {
+        assert!(files.contains_key(hash));
     }
+    assert!(
+        !files.contains_key(&hashes[3]),
+        "a copied link is not upload attribution"
+    );
     assert_eq!(scan.scope.agents.len(), 1);
-    for hash in ["a", "b"] {
-        assert!(files[&hash.repeat(64)].evidence_json["sources"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|s| s["surviving"] == true));
+    for (hash, kept) in [(&hashes[0], false), (&hashes[1], true), (&hashes[2], false)] {
+        assert_eq!(
+            files[hash].evidence_json["sources"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|s| s["surviving"] == true),
+            kept
+        );
     }
-    assert!(!files[&"c".repeat(64)].evidence_json["sources"]
+    assert!(!scan.scanned.contains_key("events"));
+    assert!(!scan.scanned.contains_key("users"));
+    let candidates = vec![hashes[0].clone(), hashes[4].clone()];
+    let targeted = db
+        .scan_media_uploads(
+            &scan.scope,
+            "fixture",
+            Some(&candidates),
+            MediaScanBudget::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(targeted.files.len(), 2);
+    assert!(targeted
+        .files
+        .iter()
+        .all(|f| candidates.contains(&f.file_hash)));
+    // A second actual upload changes the evidence; a copied avatar above did not.
+    sqlx::query(
+        "INSERT INTO media_uploaders (community_id,pubkey,sha256) VALUES ($1,decode($2,'hex'),$3)",
+    )
+    .bind(b)
+    .bind(&other)
+    .bind(&hashes[0])
+    .execute(pool)
+    .await
+    .unwrap();
+    let targeted = db
+        .scan_media_uploads(
+            &scan.scope,
+            "fixture",
+            Some(&candidates),
+            MediaScanBudget::default(),
+        )
+        .await
+        .unwrap();
+    assert!(targeted
+        .files
+        .iter()
+        .find(|f| f.file_hash == hashes[0])
+        .unwrap()
+        .evidence_json["sources"]
         .as_array()
         .unwrap()
         .iter()
         .any(|s| s["surviving"] == true));
-    assert!(scan.scanned.contains_key("events"));
 }

@@ -1,53 +1,23 @@
 //! The same decision procedure is used by previews and execution. A preview
 //! records what the current observation permits; execution additionally reserves
-//! the files and repeats discovery before using these decisions.
+//! the files and revalidates candidate upload claims before deletion.
 use super::*;
 use buzz_db::media_deletion::MediaSource;
 use buzz_media::{ObjectVersionEntry, ObjectVersionKind};
-use std::collections::BTreeSet;
 
 pub(super) async fn decide(media: &MediaStorage, mut file: MediaFile) -> Result<MediaFile> {
     let sources: Vec<MediaSource> = serde_json::from_value(file.evidence_json["sources"].clone())?;
     let objects: Vec<ObjectVersionEntry> =
         serde_json::from_value(file.evidence_json["observed_objects"].clone())?;
-    let departing_communities: BTreeSet<_> = sources
+    if sources
         .iter()
-        .filter(|s| s.selected_subject)
-        .filter_map(|s| s.community)
-        .collect();
-    if sources.iter().any(|s| s.surviving) {
-        return keep(file, "surviving reference or uploader claim");
+        .any(|s| s.upload_claim && !s.selected_subject)
+    {
+        return keep(file, "another recorded uploader remains");
     }
     if !sources.iter().any(|s| s.selected_subject && s.upload_claim) {
-        bail!("file is referenced by the subject but has no uploader attribution; ownership is unresolved");
+        bail!("file has no selected uploader attribution; ownership is unresolved");
     }
-    for object in &objects {
-        if let Some(path) = object.key.strip_prefix("_meta/") {
-            let (community, _) = path
-                .split_once('/')
-                .context("invalid metadata object path")?;
-            let community = Uuid::parse_str(community)?;
-            if !departing_communities.contains(&community) {
-                return keep(
-                    file,
-                    "metadata in another community protects the shared file",
-                );
-            }
-        }
-    }
-    // Save the exact rows whose references this decision assumes will disappear.
-    // A caller must preserve this selection through subsequent database removal.
-    file.evidence_json["remove_sources"] = serde_json::to_value(
-        sources
-            .iter()
-            .filter(|s| {
-                s.selected_subject
-                    && !s.upload_claim
-                    && !s.surviving
-                    && s.table != "workflow_trigger_runs"
-            })
-            .collect::<Vec<_>>(),
-    )?;
     let mut targets = Vec::new();
     let mut checks = Vec::new();
     // Delete byte-bearing versions before delete markers so an interrupted run
@@ -77,7 +47,13 @@ pub(super) async fn decide(media: &MediaStorage, mut file: MediaFile) -> Result<
             {
                 bail!("upload record has no selected uploader evidence");
             }
-        } else if !object.key.starts_with("_meta/") {
+        } else if let Some(path) = object.key.strip_prefix("_meta/") {
+            let (community, name) = path.split_once('/').context("invalid metadata path")?;
+            Uuid::parse_str(community)?;
+            if name != format!("{}.json", file.file_hash) {
+                bail!("metadata does not belong to file");
+            }
+        } else {
             let prefix = format!("{}.", file.file_hash);
             let suffix = object
                 .key
@@ -113,7 +89,7 @@ pub(super) async fn decide(media: &MediaStorage, mut file: MediaFile) -> Result<
     }
     file.status = "to_be_deleted".into();
     file.delete_targets_json = serde_json::to_value(targets)?;
-    file.reason = Some("all observed uses and uploader claims are within the selected removal scope; storage restrictions permit deletion".into());
+    file.reason = Some("all observed uploader claims are within the selected removal scope; storage restrictions permit deletion".into());
     file.last_error = None;
     Ok(file)
 }

@@ -9,6 +9,7 @@ use uuid::Uuid;
 mod command;
 mod decision;
 mod execute;
+mod pipeline;
 mod preview;
 mod stage;
 mod storage;
@@ -31,7 +32,7 @@ pub enum Mode {
 
 /// The workflow's safety boundary, distinct from its worker lease. The provider
 /// must verify approved scope/removal fingerprints, storage retention/holds,
-/// complete cross-community scans and crash-persistent all-writer reservations.
+/// upload evidence and crash-persistent hash reservations.
 /// The concrete implementation is used by run_stage. The standalone preview
 /// cannot grant execution authority.
 #[allow(async_fn_in_trait)]
@@ -42,9 +43,6 @@ pub trait ProtectedMedia {
     async fn ready(&self, run: &MediaRun) -> Result<()> {
         self.verify(run).await
     }
-    /// Perform the final checks and return keep, unresolved or exact delete targets.
-    /// Failure must leave the saved row unknown, never manufacture a keep decision.
-    async fn decide(&self, run: &MediaRun, file: &MediaFile) -> Result<MediaFile>;
     /// Confirm whether this exact version (including delete markers) is present.
     async fn present(&self, target: &MediaTarget) -> Result<bool>;
     /// Delete only this exact version. Errors/timeout are retryable, never absence.
@@ -54,8 +52,8 @@ pub trait ProtectedMedia {
     async fn cleanup(&self, run: &MediaRun) -> Result<()>;
 }
 
-/// Run steps 2 and 3 over a committed inventory. The caller publishes step 1
-/// through MediaDeletionStore::publish and owns workflow claim/heartbeat/routing.
+/// Apply the classified inventory saved by the shared pipeline.
+/// The caller owns workflow claim, heartbeat and routing.
 /// PrintOnly always returns after printing, including when checks are unresolved.
 pub async fn handle<P: ProtectedMedia>(
     store: &MediaDeletionStore,
@@ -67,27 +65,6 @@ pub async fn handle<P: ProtectedMedia>(
         .load(run)
         .await?
         .context("media discovery has not completed")?;
-    for file in files.iter().filter(|f| f.status == "unknown") {
-        protected.verify(run).await?;
-        let decision = match protected.decide(run, file).await {
-            Ok(decision) => decision,
-            Err(error) => {
-                let mut pending = file.clone();
-                pending.last_error = Some(format!("{error:#}"));
-                pending
-            }
-        };
-        if decision.file_hash != file.file_hash
-            || decision.storage_namespace != file.storage_namespace
-        {
-            bail!("media decision changed file identity");
-        }
-        store.save_execution_decision(run, &decision).await?;
-    }
-    let files = store
-        .load(run)
-        .await?
-        .context("media discovery disappeared")?;
     crate::print_json(&json!({"stage_id":run.id,"mode":mode,"files":files}))?;
     if mode == Mode::PrintOnly {
         return Ok(());

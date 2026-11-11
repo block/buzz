@@ -4,7 +4,7 @@ use buzz_db::{
     media_deletion::{MediaScanBudget, MediaSource, SubjectScope},
     Db,
 };
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 /// Stable inputs bound to a media stage across retries.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -15,19 +15,26 @@ pub struct StageOptions {
     pub include_owned_agents: bool,
     /// Identity of the actual bucket and endpoint being operated on.
     pub storage_namespace: String,
-    /// Additional media URL aliases for reference parsing.
-    pub media_bases: Vec<String>,
     /// Resource bounds; exceeding them never publishes a partial inventory.
     pub scan_budget: MediaScanBudget,
     /// Print-only stops after the same decision procedure, before deletion.
     pub mode: Mode,
 }
 
+impl StageOptions {
+    /// Bind immutable policy semantics along with operator inputs.
+    pub(super) fn binding(&self) -> Result<serde_json::Value> {
+        let mut binding = serde_json::to_value(self)?;
+        binding["policy"] = json!("upload-ownership-v1");
+        Ok(binding)
+    }
+}
+
 /// Run all three steps against real PostgreSQL and storage. The workflow owns
 /// the approved request lease and heartbeat, and starts the purge_media stage.
 /// PrintOnly observes without writing source data or media journal records and
-/// fails if any decision is unresolved. Delete gates uploads, drains earlier
-/// requests, reserves files, rechecks live uses, and deletes exact versions.
+/// fails if any decision is unresolved. Delete verifies the completed user gate,
+/// reserves hashes, revalidates upload claims, and deletes exact versions.
 /// The caller persists the returned summary in its own workflow journal.
 pub async fn run_stage(
     db: &Db,
@@ -51,70 +58,29 @@ pub async fn run_stage(
     if request.entity_type != "user" || request.target != options.human {
         bail!("media subject must match the approved user request");
     }
+    let scope = db
+        .user_media_scope(&options.human, options.include_owned_agents)
+        .await?;
+    db.user_deletion_store()
+        .verify_user_gate(lease, &scope)
+        .await?;
     let store = db.media_deletion_store();
     let run = store
-        .execution_run(lease, stage, serde_json::to_value(&options)?)
+        .execution_run(lease, stage, options.binding()?)
         .await?;
-    let executing = options.mode != Mode::PrintOnly;
-    if store.load(&run).await?.is_none() {
-        let mut scan = scan(db, &options).await?;
-        if executing {
-            store.gate_uploads(&run, &scan.scope).await?;
-            store.verify_upload_gate(&run, &scan.scope).await?;
-            // The first scan resolved ownership; the second collects evidence
-            // after new subject uploads are gated and older uploads have drained.
-            let gated = scan.scope;
-            scan = self::scan(db, &options).await?;
-            if serde_json::to_value(&scan.scope)? != serde_json::to_value(&gated)? {
-                bail!("agent ownership changed while gating uploads");
-            }
-        }
-        storage::supplement(&mut scan, media, &options.storage_namespace).await?;
-        store.publish(&run, &scan.files, json!({"tables":scan.scanned,"scope":scan.scope,"unresolved":scan.unresolved,"database_snapshot_at":scan.database_snapshot_at})).await?;
-    }
-    let receipt = store.receipt(&run).await?;
-    let scope: SubjectScope = serde_json::from_value(receipt["scans"]["scope"].clone())?;
-    let saved = store.load(&run).await?.context("discovery missing")?;
-    let mut current: BTreeMap<String, MediaFile> = saved
+    let scan = pipeline::prepare(
+        Some(db),
+        media,
+        &options,
+        pipeline::Journal::Execution(&store, &run, &scope),
+    )
+    .await?;
+    db.user_deletion_store()
+        .verify_user_gate(lease, &scan.scope)
+        .await?;
+    let markers = scan
+        .files
         .iter()
-        .cloned()
-        .map(|f| (f.file_hash.clone(), f))
-        .collect();
-    if executing {
-        store.verify_upload_gate(&run, &scope).await?;
-        store.validate_removal_scope(&run).await?;
-        store.reserve(&run).await?;
-        let mut live = scan(db, &options).await?;
-        storage::supplement(&mut live, media, &options.storage_namespace).await?;
-        if serde_json::to_value(&live.scope)? != serde_json::to_value(&scope)? {
-            bail!("saved subject scope changed");
-        }
-        let live: BTreeMap<_, _> = live
-            .files
-            .into_iter()
-            .map(|f| (f.file_hash.clone(), f))
-            .collect();
-        for file in &saved {
-            if file.status == "unknown" {
-                if let Some(fresh) = live.get(&file.file_hash) {
-                    current.insert(file.file_hash.clone(), fresh.clone());
-                } else {
-                    bail!("candidate attribution disappeared before its decision");
-                }
-            } else if file.status == "to_be_deleted" {
-                // Retry keeps the frozen targets even when earlier deletes removed
-                // upload metadata. Every remaining source must still be accounted for.
-                if let Some(fresh) = live.get(&file.file_hash) {
-                    validate_remaining_sources(file, fresh)?;
-                }
-            }
-        }
-        if live.keys().any(|hash| !current.contains_key(hash)) {
-            bail!("new subject files appeared after discovery; saved inventory cannot be extended");
-        }
-    }
-    let markers = current
-        .values()
         .flat_map(|f| {
             f.evidence_json["observed_objects"]
                 .as_array()
@@ -133,21 +99,24 @@ pub async fn run_stage(
         media,
         store: &store,
         scope,
-        current,
-        executing,
+        db,
+        lease,
+        options: &options,
         markers,
     };
     handle(&store, &run, options.mode, &concrete).await?;
     Ok(json!({"supported_scope_exhausted":true,"account_erasure_complete":false}))
 }
 
-pub(super) async fn scan(db: &Db, options: &StageOptions) -> Result<buzz_db::media_deletion::MediaScan> {
+pub(super) async fn scan(
+    db: &Db,
+    options: &StageOptions,
+) -> Result<buzz_db::media_deletion::MediaScan> {
     Ok(db
         .scan_user_media_with_budget(
             &options.human,
             options.include_owned_agents,
             &options.storage_namespace,
-            &options.media_bases,
             options.scan_budget,
         )
         .await?)
@@ -176,37 +145,61 @@ struct StorageDeletion<'a> {
     media: &'a MediaStorage,
     store: &'a MediaDeletionStore,
     scope: SubjectScope,
-    current: BTreeMap<String, MediaFile>,
-    executing: bool,
+    db: &'a Db,
+    lease: &'a buzz_db::entity_deletion::EntityLease,
+    options: &'a StageOptions,
     markers: BTreeSet<(String, String)>,
 }
 
 impl ProtectedMedia for StorageDeletion<'_> {
     async fn verify(&self, run: &MediaRun) -> Result<()> {
-        if self.executing {
-            self.store.verify_upload_gate(run, &self.scope).await?;
-            self.store.verify_reserved(run).await?;
-        }
+        self.db
+            .user_deletion_store()
+            .verify_user_gate(self.lease, &self.scope)
+            .await?;
+        self.store.verify_reserved(run).await?;
         Ok(())
     }
     async fn ready(&self, run: &MediaRun) -> Result<()> {
         self.store.validate_removal_scope(run).await?;
+        self.verify(run).await?;
+        let saved = self.store.load(run).await?.context("discovery missing")?;
+        let hashes: Vec<_> = saved
+            .iter()
+            .filter(|f| f.status == "to_be_deleted")
+            .map(|f| f.file_hash.clone())
+            .collect();
+        if hashes.is_empty() {
+            return Ok(());
+        }
+        // Separate from classification: only candidate DB upload evidence is
+        // reread. Admission persists a claim before storage writes. The offline
+        // prerequisite and completed drain exclude in-flight storage writers;
+        // reservations exclude subsequent claims. Saved exact versions remain
+        // immutable, including across interrupted deletions.
+        let live = self
+            .db
+            .scan_media_uploads(
+                &self.scope,
+                &self.options.storage_namespace,
+                Some(&hashes),
+                self.options.scan_budget,
+            )
+            .await?;
+        let saved: std::collections::BTreeMap<_, _> =
+            saved.iter().map(|f| (f.file_hash.as_str(), f)).collect();
+        for fresh in live.files {
+            let before = saved
+                .get(fresh.file_hash.as_str())
+                .context("unexpected candidate")?;
+            validate_remaining_sources(before, &fresh)?;
+        }
         self.verify(run).await
-    }
-    async fn decide(&self, _: &MediaRun, file: &MediaFile) -> Result<MediaFile> {
-        let fresh = self
-            .current
-            .get(&file.file_hash)
-            .context("missing current file evidence")?;
-        decision::decide(self.media, fresh.clone()).await
     }
     async fn present(&self, target: &MediaTarget) -> Result<bool> {
         version_present(self.media, target).await
     }
     async fn delete(&self, target: &MediaTarget) -> Result<()> {
-        if !self.executing {
-            bail!("print-only cannot delete");
-        }
         if !self
             .markers
             .contains(&(target.key.clone(), target.version_id.clone()))
@@ -221,11 +214,51 @@ impl ProtectedMedia for StorageDeletion<'_> {
         delete_version(self.media, target).await
     }
     async fn cleanup(&self, run: &MediaRun) -> Result<()> {
-        if !self.executing {
-            bail!("print-only cannot remove uploader claims");
-        }
         self.store.cleanup_uploaders(run).await?;
         self.store.release_reserved(run).await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn revalidation_rejects_new_uploaders_and_changed_evidence_but_allows_removed_records() {
+        let source = MediaSource {
+            table: "media_uploaders".into(),
+            community: Some(Uuid::new_v4()),
+            key: json!(["a".repeat(64), "b".repeat(64)]),
+            fingerprint: "original".into(),
+            field: "direct_hash".into(),
+            selected_subject: true,
+            upload_claim: true,
+            surviving: false,
+        };
+        let saved = MediaFile {
+            storage_namespace: "fixture".into(),
+            file_hash: "a".repeat(64),
+            status: "to_be_deleted".into(),
+            evidence_json: json!({"sources":[source]}),
+            delete_targets_json: json!([]),
+            reason: None,
+            last_error: None,
+        };
+        assert!(validate_remaining_sources(&saved, &saved).is_ok());
+        let mut fresh = saved.clone();
+        fresh.evidence_json["sources"] = json!([]);
+        assert!(validate_remaining_sources(&saved, &fresh).is_ok());
+        for change in [
+            json!({"fingerprint":"changed"}),
+            json!({"surviving":true,"selected_subject":false}),
+            json!({"key":["new", "uploader"]}),
+        ] {
+            fresh = saved.clone();
+            for (field, value) in change.as_object().unwrap() {
+                fresh.evidence_json["sources"][0][field] = value.clone();
+            }
+            assert!(validate_remaining_sources(&saved, &fresh).is_err());
+        }
     }
 }

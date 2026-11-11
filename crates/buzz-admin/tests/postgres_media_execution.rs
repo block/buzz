@@ -127,6 +127,15 @@ async fn actual_handler_checks_retention_blocks_writers_and_recovers_deleted_ver
     )
     .await
     .unwrap();
+    // A second person copying the file URL must not keep its bytes alive.
+    let copier = nostr::Keys::generate();
+    let copied =
+        nostr::EventBuilder::new(nostr::Kind::TextNote, format!("copied /media/{hash}.jpg"))
+            .sign_with_keys(&copier)
+            .unwrap();
+    db.insert_event(buzz_core::CommunityId::from_uuid(other), &copied, None)
+        .await
+        .unwrap();
     let request = db
         .user_deletion_store()
         .submit(&human, "fixture-operator", None)
@@ -221,7 +230,6 @@ async fn actual_handler_checks_retention_blocks_writers_and_recovers_deleted_ver
         human: human.clone(),
         include_owned_agents: false,
         storage_namespace: "fixture".into(),
-        media_bases: vec![],
         scan_budget: Default::default(),
         mode: buzz_deletion::user::media::Mode::PrintOnly,
     };
@@ -365,8 +373,8 @@ async fn actual_handler_checks_retention_blocks_writers_and_recovers_deleted_ver
         .sign_with_keys(&outsider)
         .unwrap();
     assert!(db.insert_event(other, &event, None).await.is_err());
-    // Embedded JSON may encode each hash character; the writer must use the
-    // same recursive interpretation as inventory extraction.
+    // Existing serving reservations still reject conflicting writes even when
+    // a URL encodes each hash character. Inventory does not scan these links.
     let embedded = format!(
         r#"{{"url":"/media/{}.jpg"}}"#,
         hash.chars()
@@ -429,5 +437,16 @@ async fn actual_handler_checks_retention_blocks_writers_and_recovers_deleted_ver
     db.record_media_upload(other, &hash, outsider.public_key().as_bytes())
         .await
         .unwrap();
+    let copied_still_present: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM events WHERE community_id=$1 AND id=$2)")
+            .bind(other.as_uuid())
+            .bind(copied.id.as_bytes().as_slice())
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+    assert!(
+        copied_still_present,
+        "media deletion preserves the other person's now-broken link"
+    );
     server.abort();
 }

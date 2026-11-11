@@ -19,14 +19,14 @@ pub struct Options {
     #[arg(long, visible_alias = "read-only", conflicts_with = "delete")]
     pub print_only: bool,
     /// Delete eligible versions for an approved request's current media stage.
-    #[arg(long, requires = "request_id")]
+    #[arg(long, requires_all = ["request_id", "offline"])]
     pub delete: bool,
+    /// Assert relay and external workers stay stopped throughout deletion.
+    #[arg(long, requires = "delete")]
+    pub offline: bool,
     /// Approved account request whose current stage is purge_media; required with --delete.
     #[arg(long, requires = "delete")]
     pub request_id: Option<Uuid>,
-    /// Additional canonical media base URLs (including /media) for deployment aliases.
-    #[arg(long)]
-    pub media_base: Vec<String>,
     /// Maximum source records to inspect; exceeding it publishes no inventory.
     #[arg(long, default_value_t = 1_000_000)]
     pub max_source_rows: usize,
@@ -42,6 +42,9 @@ pub async fn run(options: Options) -> Result<i32> {
     }
     if options.delete != options.request_id.is_some() {
         bail!("--delete and --request-id must be supplied together");
+    }
+    if options.delete && !options.offline {
+        bail!("--delete requires --offline; keep relay and external workers stopped");
     }
     if options.max_source_rows == 0 || options.scan_timeout_secs == 0 {
         bail!("media scan budgets must be positive");
@@ -81,7 +84,6 @@ pub async fn run(options: Options) -> Result<i32> {
                 human: options.pubkey,
                 include_owned_agents: options.include_owned_agents,
                 storage_namespace: namespace,
-                media_bases: options.media_base,
                 scan_budget: budget,
                 mode: Mode::Delete,
             },
@@ -91,54 +93,40 @@ pub async fn run(options: Options) -> Result<i32> {
     let run_id = options.run_id.unwrap_or_else(Uuid::new_v4);
     eprintln!("media inventory run {run_id}; retry with --run-id {run_id}");
     let store = journal.media_deletion_store();
-    let binding = json!({"version":3,"mode":"print-only","human":options.pubkey,"include_owned_agents":options.include_owned_agents,"source":source_identity,"namespace":namespace,"media_bases":options.media_base,"scan_budget":budget});
+    let binding = json!({"version":4,"mode":"print-only","human":options.pubkey,"include_owned_agents":options.include_owned_agents,"source":source_identity,"namespace":namespace,"scan_budget":budget});
     let run = store.open_preview(run_id, binding).await?;
-    if store.load(&run).await?.is_none() {
-        let source = Db::connect_cold_start(
-            DbConfig {
-                database_url: source_url,
-                max_connections: 1,
-                min_connections: 0,
-                default_transaction_read_only: true,
-                ..DbConfig::default()
-            },
-            "media_source",
+    let source = if store.load(&run).await?.is_none() {
+        Some(
+            Db::connect_cold_start(
+                DbConfig {
+                    database_url: source_url,
+                    max_connections: 1,
+                    min_connections: 0,
+                    default_transaction_read_only: true,
+                    ..DbConfig::default()
+                },
+                "media_source",
+            )
+            .await?,
         )
-        .await?;
-        let mut scan = source
-            .scan_user_media_with_budget(
-                &options.pubkey,
-                options.include_owned_agents,
-                &namespace,
-                &options.media_base,
-                budget,
-            )
-            .await?;
-        storage::supplement(&mut scan, &media, &namespace).await?;
-        store
-            .publish(
-                &run,
-                &scan.files,
-                json!({"tables":scan.scanned,"scope":scan.scope,"unresolved":scan.unresolved,"database_snapshot_at":scan.database_snapshot_at,"storage_listing_finished_at":chrono::Utc::now()}),
-            )
-            .await?;
-    }
-    let files = store
-        .load(&run)
-        .await?
-        .context("discovery did not publish")?;
-    for file in files.into_iter().filter(|f| f.status == "unknown") {
-        let decided = match decision::decide(&media, file.clone()).await {
-            Ok(decided) => decided,
-            Err(error) => {
-                let mut pending = file;
-                pending.last_error = Some(format!("{error:#}"));
-                pending
-            }
-        };
-        store.save_preview_decision(&run, &decided).await?;
-    }
-    let files = store.load(&run).await?.context("discovery missing")?;
+    } else {
+        None
+    };
+    let options = StageOptions {
+        human: options.pubkey,
+        include_owned_agents: options.include_owned_agents,
+        storage_namespace: namespace,
+        scan_budget: budget,
+        mode: Mode::PrintOnly,
+    };
+    let scan = pipeline::prepare(
+        source.as_ref(),
+        &media,
+        &options,
+        pipeline::Journal::Preview(&store, &run),
+    )
+    .await?;
+    let files = scan.files;
     let unknown = files.iter().filter(|f| f.status == "unknown").count();
     let discovery = store.receipt(&run).await?;
     let output: Value = json!({"discovery":discovery,"run_id":run_id,"mode":"print-only","discovery_complete":true,"candidate_count":files.len(),"decision_complete":unknown==0,"execution_authorized":false,"unknown_count":unknown,"files":files});
@@ -223,13 +211,16 @@ mod tests {
         assert!(parse(&["--read-only"]).unwrap().options.print_only);
         let request = Uuid::new_v4().to_string();
         assert!(
-            parse(&["--delete", "--request-id", &request])
+            parse(&["--delete", "--offline", "--request-id", &request])
                 .unwrap()
                 .options
                 .delete
         );
         for flags in [
             vec!["--delete"],
+            vec!["--delete", "--request-id", &request],
+            vec!["--offline"],
+            vec!["--media-base", "https://example.org/media"],
             vec!["--request-id", &request],
             vec!["--print-only", "--delete", "--request-id", &request],
             vec!["--read-only", "--delete", "--request-id", &request],

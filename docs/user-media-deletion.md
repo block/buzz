@@ -1,260 +1,154 @@
 # User media inventory and deletion
 
-`buzz-admin user-deletions media --pubkey <hex-or-npub> --print-only`
-collects media associated with a person across the source database's communities,
-saves one row per file, classifies the observation, and prints JSON. Add
-`--include-owned-agents` to include current agent ownership from
-`users.agent_owner_pubkey`, separately in each community. Current memberships
-are not required: old events and unposted uploads remain discoverable.
+Media deletion uses recorded upload ownership. If Alice uploaded a file and Bob
+only copied its URL, deleting Alice deletes eligible stored versions and Bob's
+link stops working. If Bob also uploaded identical bytes, his upload record keeps
+the file. The decision considers uploaders across communities sharing storage.
 
-There are two mutually exclusive modes: `--print-only` (the default when neither
-flag is supplied, with `--read-only` as an alias) and `--delete`. Print-only prints the inventory and stops before
-deletion. It does not install a user fence, approve a deletion request, migrate a
-database, or enqueue the subject for deletion.
+The workflow runs `gate_user(None)` first, then `purge_media(None)` once for the
+request, then community content/account stages. Media verifies the completed
+gate; it never installs a user fence or writes a gate receipt. Relay and external
+workers must remain stopped throughout destructive execution. Uploader fences
+and hash reservations do not provide complete online user-write blocking.
 
-## Connections and a first test
-
-Use an already-migrated local control database for `DATABASE_URL`. Set
-`BUZZ_MEDIA_SOURCE_DATABASE_URL` to the source database; the command connects with
-`default_transaction_read_only=true` and scans in a read-only repeatable-read
-transaction. Source access must include private and historical rows in every
-community sharing the configured storage namespace. Use SELECT-only credentials
-when testing against a live deployment. Never run the migrator against that
-source merely to make a preview work.
-
-Configure `BUZZ_S3_ENDPOINT`, `BUZZ_S3_BUCKET`, region/addressing style, and the
-normal S3 credentials or workload identity. Print-only requires only
-version listing, GET, GetObjectLockConfiguration, GetObjectLegalHold and
-GetObjectRetention access. It scans historical upload-record versions as
-well as current ones. A missing table, unreadable record, denied storage request,
-malformed upload record, or exceeded resource limit fails discovery; none is
-interpreted as an empty result.
+## Preview and connections
 
 ```sh
-# Configure connection and storage environment through the operator's normal setup.
 cargo run -p buzz-admin -- user-deletions media \
   --pubkey <npub> --include-owned-agents --print-only
 ```
 
-Stdout is inventory JSON. Stderr prints a run UUID immediately; retry the same
-command with `--run-id <uuid>` after an interruption. Use a **new** run UUID to
-observe changed source data. A retry intentionally reprints the saved observation.
-Additional canonical storage aliases can be supplied with repeated
-`--media-base https://files.example.org/media` arguments. The run binds the
-subject, agent-selection flag, source-connection fingerprint (excluding rotating
-credentials), storage namespace,
-aliases and parser version. Changing any of these requires a new run.
+`--print-only` is the default; `--read-only` is an alias. Optional owned agents
+come from `users.agent_owner_pubkey`, separately in each community. Membership
+is not required to discover past uploads. No media URL setting is needed.
 
-Exit 0 means no file decisions remain unknown, including a valid empty inventory.
-Exit 2 prints the inventory but reports unresolved decisions. Other failures
-produce an error, not partial discovery success. `execution_authorized` is always
-false in a standalone observation, including when it prints `to_be_deleted`.
-Those decisions describe this observation; a later execution must use an approved
-workflow stage and repeat its checks while writers respect the reservations.
+Use an already-migrated control database for `DATABASE_URL` and set
+`BUZZ_MEDIA_SOURCE_DATABASE_URL` to the source database. Preview connects with
+`default_transaction_read_only=true`; upload evidence is read in a repeatable-read
+transaction. Use SELECT-only source credentials with access to historical upload
+records across all communities sharing the storage namespace. Do not migrate a
+live source just to preview it.
 
-## Tables read
+Configure `BUZZ_S3_ENDPOINT`, `BUZZ_S3_BUCKET`, region/addressing style and normal
+S3 credentials or workload identity. Preview needs version listing, GET,
+GetObjectLockConfiguration, GetObjectLegalHold and GetObjectRetention permissions.
+It reads upload-record JSON versions, not photo/video bytes.
 
-The executable query catalog is
-[`sources.sql`](../crates/buzz-db/src/store/media_deletion/sources.sql).
-The database scan uses no visibility, membership, or soft-deletion filter.
+Stdout is JSON. Stderr prints a run UUID; `--run-id <uuid>` resumes that saved
+observation. Use a new UUID to observe changed data. The binding includes subject,
+agent-selection flag, source identity excluding rotating credentials, storage
+namespace, scan budget and policy version. Old link-based observations cannot be
+resumed under the new policy. Preview exit 0 means no unknown decisions; exit 2
+prints unresolved decisions. `execution_authorized` remains false in either case.
 
-| Tables | Fields/relationship inspected |
+## Discovery and decisions
+
+All entry points use the same [pipeline](../crates/buzz-deletion/src/user/media/pipeline.rs):
+load saved inventory or discover it once, then classify unknown files with one
+loop. Workflow preview keeps everything in memory. Standalone preview saves an
+isolated observation journal. Delete journals decisions and applies them.
+
+The [source query](../crates/buzz-db/src/store/media_deletion/sources.sql) reads:
+
+| Source | Evidence |
 |---|---|
-| `users` | Current `agent_owner_pubkey`; avatar, about and capabilities |
-| `events` | Content/tags for every stored kind, including messages, edits, profiles, notes, canvases, personas, teams and artifacts |
-| `nip_fi_profile_heads` | Stored verified-profile event |
-| `workflows` | Definition, attributed to `owner_pubkey` |
-| `workflow_runs` | Trigger context and trace; owner joined through `(community_id, workflow_id)`; separate association through `trigger_context.author` |
-| `workflow_approvals` | Note/spec, with the same composite owner join |
-| `subscriptions`, `delivery_log` | Delivery URL and delivery-log ownership; diagnostic errors are not attachment claims |
-| `product_feedback` | Body/tags; retained feedback protects its files |
-| `channels`, `communities` | Canvas copy, descriptions and community icon; shared state protects its files |
-| `moderation_reports` | Notes, direct blob hashes and referenced event payloads; retained evidence protects files |
-| `moderation_actions`, `relay_admin_actions`, `relay_admin_outbox` | Reasons and notice payloads; retained state protects files |
-| `artifact_heads` | Live head's referenced event; shared head protects its files |
-| `media_uploaders` | Recorded uploader/hash pairs, including unposted uploads |
-| `audit_log` | `media_uploaded` actor/hash evidence; conflicting hashes fail the scan |
+| `media_uploaders` | Community, file hash and uploader, including pending/unposted claims |
+| `audit_log`, action `media_uploaded` | Community, actor and matching object/detail hash |
+| Storage `_uploads/<community>/<hash>/<event>.json` | Validated uploader and hash at an exact object version |
 
-The application parses JSON strings, attachment tags, free-text local media URLs
-and encoded animated-avatar descriptors. Absolute foreign-host URLs are not
-mapped to local objects. Evidence contains source keys, field paths and payload
-fingerprints; it does not persist message bodies, upload IP addresses or signed
-URLs. Source association is not a claim that the author originally uploaded the
-file or that the source is approved for removal.
+`users` is read only to resolve optional owned-agent scope. Messages, profiles,
+workflows, canvases and other URL-bearing fields are not scanned. Copied links
+neither add candidates nor protect files. `_meta` paths identify stored sidecars;
+a sidecar in another community alone does not establish another uploader.
 
-Storage reads enumerate versions and delete markers. `_uploads/<community>/`
-JSON records are read at their listed versions and validated against their path,
-format, public key and ULID. Original/thumbnail keys and `_meta` sidecars are
-recorded as observed objects. Step 2 checks retention and turns eligible versions
-into exact targets. A missing version ID, denied lock API or unrecognized
-attribution remains an error, including in print-only mode.
+Discovery reads database upload records once, lists the bucket's versions and
+delete markers once, and validates upload JSON against its path, hash, actor and
+ULID. It groups evidence and original/derived/sidecar versions by file hash, then
+selects files attributed to the requested scope. Missing tables, malformed
+records, denied reads or exceeded bounds fail discovery; no partial inventory is
+published. Historical absent attribution cannot prove that nobody else uploaded
+the file before tracking was enabled. This remains an explicit coverage limit.
 
-## Tables written and crash behavior
+Classification consumes that inventory without another source scan:
 
-Only one new table is added: `entity_deletion_media_files`. Its primary key is
-`(stage_id, storage_namespace, file_hash)`. Every file row has one of
-`unknown`, `dont_delete`, `to_be_deleted`, `deleted`, with per-file evidence,
-targets, decision reason and error.
+1. Another recorded uploader outside scope keeps the file.
+2. Missing selected-uploader attribution leaves an error.
+3. Invalid object paths or missing/null version IDs leave an error.
+4. Active legal hold or retention keeps the file. Denied retention APIs leave an error.
+5. Otherwise the exact observed versions become deletion targets. No remaining
+   versions produces a keep decision.
 
-Print-only creates an isolated `media-preview:<run UUID>` control record
-in the existing `entity_deletion_requests`, terminal and ineligible for worker
-claims. Its `media_preview` row in `entity_deletion_stage_history` is never the
-current workflow stage. This records the observation without enrolling the
-person in a destructive request. Control evidence intentionally survives
-community deletion; no tenant data is owned by the new table.
+Object Lock checks use bucket configuration and exact-version hold/retention
+APIs. Missing HEAD headers never establish permission. Governance retention is
+never bypassed. Errors remain `unknown`, with a recorded reason; deletion cannot
+start while any decision is unknown.
 
-1. **Discover.** Collect and deduplicate the complete bounded observation in
-   memory. After DB and storage scans succeed, one transaction inserts all file
-   rows as `unknown` and writes `metadata_json.media_discovery` with `complete`,
-   count and scan receipt. A failed insert rolls back every row and the marker.
-   Zero files still commits the marker with count zero. A lost commit response is
-   resolved by reading the same stage. Partial rows never count as completion.
-2. **Decide.** Process only unknown rows with the same function in every mode.
-   Keep files with surviving references/uploader claims, another community's
-   metadata, or an active storage hold/retention period. A file with references
-   but no uploader attribution remains unknown. Otherwise save the exact target
-   keys/versions and `to_be_deleted` together. `evidence_json.remove_sources`
-   identifies the exact subject-owned source keys and fingerprints assumed to be
-   removed by later handlers. Reads that fail leave the file unknown with the
-   error. Print-only prints this inventory and returns here.
-3. **Execute.** Require the discovery marker, matching row count, no unknown
-   decisions, current request ownership and continuous external-write protection.
-   Delete the exact recorded versions; verify their absence; only then change the
-   file row to `deleted`. A crash after storage deletion but before the row update
-   leaves `to_be_deleted`; retry verifies the same versions and finishes the row.
-   If only a thumbnail was removed, retry still handles every saved target.
-   Permission errors and timeouts are never absence. Finally remove the exact
-   approved uploader proofs idempotently; preserve sticky `media_publications`.
-   Source-message removal and workflow advancement belong to later handlers.
-
-`deleted` describes **all selected targets being confirmed absent**. It does not
-claim that intentionally retained components or a later re-upload were erased.
-This implementation keeps all components of a shared file; it does not delete
-community metadata separately while retaining the original.
-
-Every control write checks the run generation. An older invocation cannot
-publish after a replacement starts. Workflow writes additionally validate the
-existing request lease and inventory approval. A worker lease does not by itself
-protect media from new uploads or references.
-
-## Workflow handler and writer protection
-
-`run_stage(db, storage, lease, stage_id, options)` is the concrete handler. It
-supports `PrintOnly` and `Delete`. The workflow must own an approved request lease,
-start its `purge_media` stage, and maintain its heartbeat.
-
-Both modes use this entry point and return summary JSON. `PrintOnly` performs a
-fresh observation, prints the proposal, and fails on unresolved decisions. It
-writes no media inventory, source rows, fences, reservations or storage objects;
-the caller saves progress in its separate read-only workflow request. `Delete`
-discovers and protects its own durable inventory before applying changes. Both
-paths share the database scanner, storage inventory and file decision procedure.
-
-The CLI's `--delete` takes `--request-id <approved-request-uuid>` and runs only
-that request's current `purge_media` stage. The request target must match
-`--pubkey`. It claims and renews the lease, runs the real handler, saves success,
-and releases ownership. It does not advance to later account-deletion stages.
-An interruption retains reservations and targets for retrying the same command;
-a completed matching stage returns success without deleting again. Wrong stages,
-unapproved requests, changed options and a preview's run ID are rejected.
+## Destructive execution and recovery
 
 ```sh
 cargo run -p buzz-admin -- user-deletions media \
-  --pubkey <npub> --delete --request-id <approved-request-uuid>
+  --pubkey <npub> --delete --offline --request-id <approved-request-uuid>
 ```
 
-For deletion, `DATABASE_URL` must be the serving relay's writable database and
-storage credentials must allow exact-version deletion. Unset
-`BUZZ_MEDIA_SOURCE_DATABASE_URL` or set it to exactly `DATABASE_URL`; execution
-always scans and installs reservations through that same connection. A separate
-local preview journal cannot protect files in a live deployment. `--run-id` is
-for print-only observations and conflicts with `--delete`. Existing account
-workflow routing remains separate; this command requires the workflow to have
-reached its media stage.
+The approved request must already have completed its separate request-wide gate
+and reached `purge_media`. The command verifies that gate, subject and scope,
+claims/renews the request lease, runs media, records success and releases the
+lease. It does not advance the workflow. `--offline` asserts that relay and
+external workers remain stopped; checking drained leases alone cannot enforce
+that operator obligation. A completed-stage retry also verifies the gate.
 
-Execution additionally writes the existing `user_deletion_fences` table to stop
-new subject uploads. It snapshots pre-existing upload leases from
-`community_serving_write_leases` and waits for those to finish; unrelated new
-uploads do not extend that drain. It then publishes discovery, checks that the
-source communities are covered by the approved request, and sets `reserved` on
-candidate rows in the one media table. Reservation batches are bounded; no
-execution starts until all have committed. A stage receipt records the completed
-drain and reservation checks, so per-version verification checks ownership and
-that receipt without rescanning every file. It re-scans current references,
-claims and storage before deciding. On a retry after targets were selected,
-changed or newly surviving source evidence blocks deletion rather than replacing
-the target list. It validates the saved source selection against approval again
-after decisions finish, before the first deletion.
+Execution uses the serving writable `DATABASE_URL`; the source URL must be unset
+or identical. The stage binding includes `policy="upload-ownership-v1"` and
+rejects old decisions rather than silently applying new semantics to old targets.
+`--run-id` is only for preview and conflicts with deletion.
 
-Reference writers take a shared lock for their media hashes, check the indexed
-reservation flag, and retain the lock until their transaction finishes.
-Reservation installation takes the corresponding exclusive locks first. The
-flag persists through a worker crash. These checks cover event insert/replacement,
-profiles, channel fields/canvas, community icons, workflows/runs/approvals,
-feedback, moderation evidence, and admin notice payloads. Inventory and writer
-checks share the reference parser; a `p` tag's public key is not a file hash.
-Diagnostic error strings and immutable audit history are retained as history,
-not new attachment publications. Subscription/delivery tables have no serving
-write path in this revision.
+The shared pipeline publishes discovery atomically into
+`entity_deletion_media_files`, with a receipt in `entity_deletion_stage_history`.
+Zero candidates still gets a receipt. Preview's parent request is terminal and
+its stage is never current, so it cannot authorize execution. File statuses are
+`unknown`, `dont_delete`, `to_be_deleted` and `deleted`.
 
-Every relay upload path records its verified uploader claim before the first
-storage read/write, including idempotent reuploads and media-read mode `off`.
-This rejects subject upload restrictions and reserved hashes. The pre-storage
-claim uses `media_uploaders.pending=true` and grants no preview/publication
-authority. Existing publication checks run before confirmation clears that flag.
-A failed upload (or an upload in media-read mode off) can leave a conservative
-possession claim without preview authority, since the sender proved possession
-of the bytes. Upload requests already in flight are covered by the drain above.
-All relay writers must run this implementation before executing deletion;
-pre-upgrade relay processes and direct administrative SQL/storage writes do not
-participate in application reservations.
+Delete validates approved source communities and reserves candidate hashes
+against competing upload/deletion workers. These reservations coordinate files;
+they do not install another user gate. Classification uses saved evidence.
+Immediately before applying saved targets, a separate bounded query revalidates
+only the candidate hashes' database upload claims. New other-uploader or changed
+source evidence stops execution; it never replaces already-frozen targets.
+Retries reuse the discovery and targets, and repeat this candidate revalidation.
+The audit schema currently has no action/actor/object-hash lookup index, so a
+hash predicate bounds returned evidence without guaranteeing an indexed read.
 
-Object Lock checks call the bucket configuration API and, when enabled, the
-legal-hold and retention APIs for the exact version. Missing HEAD headers never
-establish permission. An explicit missing bucket Object Lock configuration is
-accepted; a denied or malformed response is not. Governance retention is never
-bypassed. Retention is checked again before deleting each byte-bearing version;
-delete markers are removed only after byte-bearing versions.
+Every relay upload records its claim before storage reads/writes. Reservations
+exclude new claims after acquisition; the offline prerequisite and completed
+drain exclude in-flight storage writers. Storage attribution from discovery is
+retained, and execution checks presence and retention for each exact target
+version. No second bucket-wide discovery is performed. External SQL/storage
+writers must also remain stopped.
 
-After all work succeeds, execution removes only the captured departing rows
-from `media_uploaders`, preserves `audit_log` and `media_publications`, then
-releases reservations. Kept files release their reservation when the decision
-commits. Failed/unfinished deletion targets keep theirs for recovery. The
-existing user upload restrictions remain for the surrounding account-deletion
-workflow. Source messages/profiles/workflows are not removed by this media
-handler: later handlers must consume the saved source selection rather than
-assuming every associated record belongs to the departing person.
+Byte-bearing versions are deleted before markers. After deletion, listing must
+prove each exact version absent; permission errors/timeouts are not absence.
+Only then is the file marked `deleted`. A lost acknowledgement or interrupted
+multi-version deletion retries those same versions without deleting replacements.
+After all selected work succeeds, cleanup removes captured departing
+`media_uploaders` rows, including for kept files, and releases reservations.
+Audit history and `media_publications` remain. The media handler does not delete
+messages, profiles or automations.
 
-Missing historical orphan-upload attribution cannot be reconstructed from a
-file hash. The completion marker certifies that the defined scans finished;
-missing historical records and future source formats cannot be inferred from
-that marker. New media-bearing write paths must join the same reservation checks
-and source catalog.
+Every journal write verifies generation and execution lease. Unfinished work
+retains reservations and immutable targets. A `deleted` result means the selected
+versions are absent, not that intentionally kept files or future reuploads have
+been erased. This is a media stage, not proof of complete account erasure.
 
-Initial limits are one million source rows, one million storage versions,
-100,000 distinct hashes, 128 MiB of evidence/storage descriptors, 1 MiB per
-source/file document and 64 KiB per upload record. Exceeding a limit reports an
-error without publishing partial discovery. Scale measurements may justify a
-later unpublished-generation design; this implementation never quietly commits
-individual discovery pages.
+## Bounds and fixtures
 
-For a larger database, set `--max-source-rows 10000000 --scan-timeout-secs 900`
-on a new run. These positive limits are bound to that run and do not relax the
-memory, per-file or storage limits. Choose a reader endpoint and a budget suited
-to the deployment; increasing the budget allows more work, not partial success.
+Defaults: one million database source rows, one million storage versions,
+100,000 hashes, 128 MiB evidence/storage descriptors, 1 MiB per source/file and
+64 KiB per upload record. `--max-source-rows` and `--scan-timeout-secs` can raise
+positive database budgets on a new run; they do not permit partial publication.
 
-## Workflow preview adapter
-
-`media::preview(db, storage, &StageOptions)` performs a fresh observation with
-`Mode::PrintOnly` and returns inventory JSON. It writes no database rows, fences,
-reservations, storage objects or workflow progress. Check `decision_complete`:
-unresolved decisions are printed with errors and are not execution permission.
-Unlike the resumable standalone preview, this workflow preview has no journal.
-
-`media::configured_storage()` returns the S3 client and its namespace from the
-same environment settings as the standalone command. The workflow supplies the
-subject, media bases, budget and mode in `StageOptions`. Deletion calls
-`media::run_stage` with the already-started `purge_media` stage and its current
-lease; the workflow owns heartbeat, failure recording and stage completion.
-Do not pass a print-only inventory into deletion or mark a stage complete after
-preview. Execution creates and protects its own fresh inventory.
+The disposable media fixture includes exclusive and unposted uploads, shared
+uploaders in one/two communities, other-community metadata, and a copied-link
+case. Exclusive, unposted, metadata-only and copied-link cases delete; recorded
+other uploaders keep their files. The copier's message remains after media and
+content cleanup for the departing user. Fixture commands mutate services and
+must only run when local execution is authorized.

@@ -11,19 +11,8 @@ pub async fn preview(db: &Db, media: &MediaStorage, options: &StageOptions) -> R
     if options.mode != Mode::PrintOnly {
         bail!("media preview requires print-only mode");
     }
-    let mut scan = stage::scan(db, options).await?;
-    storage::supplement(&mut scan, media, &options.storage_namespace).await?;
-    let mut files = Vec::with_capacity(scan.files.len());
-    for file in scan.files {
-        files.push(match decision::decide(media, file.clone()).await {
-            Ok(decided) => decided,
-            Err(error) => {
-                let mut pending = file;
-                pending.last_error = Some(format!("{error:#}"));
-                pending
-            }
-        });
-    }
+    let scan = pipeline::prepare(Some(db), media, options, pipeline::Journal::None).await?;
+    let files = scan.files;
     let unknown = files.iter().filter(|file| file.status == "unknown").count();
     Ok(json!({
         "mode": "print-only", "execution_authorized": false,

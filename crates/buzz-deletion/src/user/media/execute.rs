@@ -71,8 +71,14 @@ async fn execute(
             stage.stage
         );
     }
+    let scope = db
+        .user_media_scope(&options.human, options.include_owned_agents)
+        .await?;
+    db.user_deletion_store()
+        .verify_user_gate(lease, &scope)
+        .await?;
     if stage.status == "completed" {
-        if stage.metadata_json["binding"] != serde_json::to_value(&options)?
+        if stage.metadata_json["binding"] != options.binding()?
             || stage.metadata_json["result"]["media_deleted"] != true
         {
             bail!("completed media stage does not match this execution");

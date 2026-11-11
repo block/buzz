@@ -1,8 +1,8 @@
 //! Consistent read-only PostgreSQL inventory. No membership-only filter: departed
-//! users can still have events/uploads after leaving every channel.
+//! users can still have uploads after leaving every channel.
 use super::{invalid, MediaFile, MAX_FILES, MAX_FILE_BYTES};
 use crate::{Db, Result};
-use buzz_core::media_inventory::{references, valid_hash};
+use buzz_core::media_inventory::valid_hash;
 use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -28,7 +28,7 @@ impl SubjectScope {
                 .is_some_and(|(c, k)| self.agents.contains(&(c, k.into())))
     }
 }
-/// Evidence locates a source without persisting message bodies or private URLs.
+/// Evidence locates an upload record without persisting IP addresses or URLs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MediaSource {
     /// Table or storage-record source name.
@@ -39,7 +39,7 @@ pub struct MediaSource {
     pub key: Value,
     /// Hash of inspected payload, for later source revalidation.
     pub fingerprint: String,
-    /// Field path containing the reference.
+    /// Field establishing the upload attribution.
     pub field: String,
     /// Source is associated with the requested subject.
     pub selected_subject: bool,
@@ -53,11 +53,11 @@ pub struct MediaSource {
 pub struct MediaScan {
     /// Database snapshot time; storage listing occurs separately afterwards.
     pub database_snapshot_at: String,
-    /// Subject selection captured in this snapshot.
+    /// Subject selection resolved before the upload snapshot.
     pub scope: SubjectScope,
-    /// Deduplicated reference hashes before joining storage-only upload candidates.
+    /// Deduplicated upload hashes before joining storage-only upload candidates.
     pub files: Vec<MediaFile>,
-    /// Per-source inspected row counts (including sources with zero references).
+    /// Per-source inspected upload row counts.
     pub scanned: BTreeMap<String, usize>,
     /// Known coverage limitations; never converted into successful deletion checks.
     pub unresolved: Vec<String>,
@@ -70,14 +70,12 @@ struct SourceRow {
     subject: Option<String>,
     payload: Value,
     direct_hash: Option<String>,
-    upload_claim: bool,
-    subject_owned: bool,
 }
 
 /// Operator-selected work limits; exceeding either aborts the entire observation.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct MediaScanBudget {
-    /// Maximum inspected database records, including records without references.
+    /// Maximum inspected database upload records.
     pub max_source_rows: usize,
     /// Per-statement deadline for the read-only source scan.
     pub statement_timeout_secs: u64,
@@ -92,20 +90,18 @@ impl Default for MediaScanBudget {
 }
 
 impl Db {
-    /// Scan media-bearing records in all communities under one read-only repeatable
+    /// Scan upload records in all communities under one read-only repeatable
     /// read transaction. Bounds fail the whole scan; no partial inventory is returned.
     pub async fn scan_user_media(
         &self,
         human: &str,
         include_agents: bool,
         namespace: &str,
-        extra_bases: &[String],
     ) -> Result<MediaScan> {
         self.scan_user_media_with_budget(
             human,
             include_agents,
             namespace,
-            extra_bases,
             MediaScanBudget::default(),
         )
         .await
@@ -118,13 +114,56 @@ impl Db {
         human: &str,
         include_agents: bool,
         namespace: &str,
-        extra_bases: &[String],
+        budget: MediaScanBudget,
+    ) -> Result<MediaScan> {
+        let scope = self.user_media_scope(human, include_agents).await?;
+        self.scan_media_uploads(&scope, namespace, None, budget)
+            .await
+    }
+
+    /// Resolve the exact subject without scanning upload history.
+    pub async fn user_media_scope(
+        &self,
+        human: &str,
+        include_agents: bool,
+    ) -> Result<SubjectScope> {
+        let human = crate::user_deletion::normalize_user_deletion_pubkey(human)?;
+        let agents: Vec<(Uuid, String)> = if include_agents {
+            let mut tx = self.pool().begin().await?;
+            sqlx::query("SET TRANSACTION READ ONLY")
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("SET LOCAL statement_timeout='120s'")
+                .execute(&mut *tx)
+                .await?;
+            let agents = sqlx::query_as("SELECT community_id,encode(pubkey,'hex') FROM users WHERE agent_owner_pubkey=decode($1,'hex') ORDER BY community_id,pubkey LIMIT 10001")
+                .bind(&human).fetch_all(&mut *tx).await?;
+            tx.commit().await?;
+            agents
+        } else {
+            vec![]
+        };
+        if agents.len() > 10_000 {
+            return Err(invalid("owned-agent limit exceeded"));
+        }
+        Ok(SubjectScope {
+            human,
+            agents: agents.into_iter().collect(),
+        })
+    }
+
+    /// Collect upload claims, optionally restricted to candidate hashes for
+    /// pre-delete revalidation. This never inspects message contents or links.
+    pub async fn scan_media_uploads(
+        &self,
+        scope: &SubjectScope,
+        namespace: &str,
+        hashes: Option<&[String]>,
         budget: MediaScanBudget,
     ) -> Result<MediaScan> {
         if budget.max_source_rows == 0 || budget.statement_timeout_secs == 0 {
             return Err(invalid("media scan budgets must be positive"));
         }
-        let human = crate::user_deletion::normalize_user_deletion_pubkey(human)?;
         let mut tx = self.pool().begin().await?;
         sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
             .execute(&mut *tx)
@@ -142,37 +181,14 @@ impl Db {
             sqlx::query_scalar("SELECT transaction_timestamp()::text")
                 .fetch_one(&mut *tx)
                 .await?;
-        let agents: Vec<(Uuid, String)> = if include_agents {
-            sqlx::query_as("SELECT community_id,encode(pubkey,'hex') FROM users WHERE agent_owner_pubkey=decode($1,'hex') ORDER BY community_id,pubkey LIMIT 10001")
-                .bind(&human).fetch_all(&mut *tx).await?
-        } else {
-            vec![]
-        };
-        if agents.len() > 10_000 {
-            return Err(invalid("owned-agent limit exceeded"));
-        }
-        let scope = SubjectScope {
-            human,
-            agents: agents.into_iter().collect(),
-        };
-        let hosts: Vec<String> =
-            sqlx::query_scalar("SELECT host FROM communities ORDER BY id LIMIT 10001")
-                .fetch_all(&mut *tx)
-                .await?;
-        if hosts.len() > 10_000 {
-            return Err(invalid("community limit exceeded"));
-        }
-        let mut bases = extra_bases.to_vec();
-        bases.extend(hosts.into_iter().map(|h| format!("https://{h}/media")));
-        // Root-relative references remain discoverable in an otherwise empty host registry.
-        bases.push("https://invalid.example/media".into());
         let mut scanned = BTreeMap::new();
         let mut sightings: BTreeMap<String, Vec<MediaSource>> = BTreeMap::new();
         let mut total_bytes = 0usize;
         let mut count = 0usize;
         {
-            let mut rows =
-                sqlx::query_as::<_, SourceRow>(include_str!("sources.sql")).fetch(&mut *tx);
+            let mut rows = sqlx::query_as::<_, SourceRow>(include_str!("sources.sql"))
+                .bind(hashes)
+                .fetch(&mut *tx);
             while let Some(row) = rows.try_next().await? {
                 count += 1;
                 if count > budget.max_source_rows {
@@ -185,85 +201,55 @@ impl Db {
                 if payload.len() > MAX_FILE_BYTES {
                     return Err(invalid("media source exceeds parser byte limit"));
                 }
-                let mut refs = references(&row.payload, &bases).map_err(|e| invalid(&e))?;
-                if let Some(hash) = &row.direct_hash {
-                    if !valid_hash(hash) {
-                        return Err(invalid("invalid direct media hash"));
-                    }
-                    if row.upload_claim && row.payload["sha256"].as_str().is_some_and(|h| h != hash)
-                    {
-                        return Err(invalid("contradictory upload audit hash"));
-                    }
-                    refs.insert((hash.clone(), "direct_hash".into()));
+                let hash = row
+                    .direct_hash
+                    .as_ref()
+                    .ok_or_else(|| invalid("upload claim has no hash"))?;
+                if !valid_hash(hash) {
+                    return Err(invalid("invalid upload hash"));
                 }
-                if row.upload_claim {
-                    let actor = row
-                        .subject
-                        .as_deref()
-                        .ok_or_else(|| invalid("upload claim has no actor"))?;
-                    crate::user_deletion::normalize_user_deletion_pubkey(actor)?;
-                    if row.community_id.is_none() || row.direct_hash.is_none() {
-                        return Err(invalid("upload claim has no community or hash"));
-                    }
-                    if !row.payload["sha256"].is_null()
-                        && row.payload["sha256"].as_str() != row.direct_hash.as_deref()
-                    {
-                        return Err(invalid("upload claim has an invalid or contradictory hash"));
-                    }
+                let actor = row
+                    .subject
+                    .as_deref()
+                    .ok_or_else(|| invalid("upload claim has no actor"))?;
+                crate::user_deletion::normalize_user_deletion_pubkey(actor)?;
+                if row.community_id.is_none() {
+                    return Err(invalid("upload claim has no community"));
                 }
-                let selected = scope.contains(row.community_id, row.subject.as_deref());
+                if !row.payload["sha256"].is_null()
+                    && row.payload["sha256"].as_str() != Some(hash.as_str())
+                {
+                    return Err(invalid("upload claim has an invalid or contradictory hash"));
+                }
+                let selected = scope.contains(row.community_id, Some(actor));
                 let fingerprint = hex::encode(Sha256::digest(serde_json::to_vec(
-                    &json!({"key":row.source_key,"community":row.community_id,"subject":row.subject,"payload":row.payload,"direct_hash":row.direct_hash,"upload_claim":row.upload_claim,"subject_owned":row.subject_owned}),
+                    &json!({"key":row.source_key,"community":row.community_id,"subject":row.subject,"payload":row.payload,"direct_hash":hash}),
                 )?));
-                for (hash, field) in refs {
-                    let evidence = MediaSource {
-                        table: row.source_table.clone(),
-                        community: row.community_id,
-                        key: row.source_key.clone(),
-                        fingerprint: fingerprint.clone(),
-                        field,
-                        selected_subject: selected,
-                        upload_claim: row.upload_claim,
-                        surviving: row.source_table != "workflow_trigger_runs"
-                            && (!selected || !row.subject_owned),
-                    };
-                    total_bytes += serde_json::to_vec(&evidence)?.len();
-                    if total_bytes > 128 * 1024 * 1024 {
-                        return Err(invalid(
-                            "media evidence exceeds 128 MiB; no partial inventory published",
-                        ));
-                    }
-                    sightings.entry(hash).or_default().push(evidence);
-                    if sightings.len() > MAX_FILES {
-                        return Err(invalid("media reference file limit exceeded"));
-                    }
+                let evidence = MediaSource {
+                    table: row.source_table,
+                    community: row.community_id,
+                    key: row.source_key,
+                    fingerprint,
+                    field: "direct_hash".into(),
+                    selected_subject: selected,
+                    upload_claim: true,
+                    surviving: !selected,
+                };
+                total_bytes += serde_json::to_vec(&evidence)?.len();
+                if total_bytes > 128 * 1024 * 1024 {
+                    return Err(invalid(
+                        "media evidence exceeds 128 MiB; no partial inventory published",
+                    ));
+                }
+                sightings.entry(hash.clone()).or_default().push(evidence);
+                if sightings.len() > MAX_FILES {
+                    return Err(invalid("media upload file limit exceeded"));
                 }
             }
         }
-        // The parser/selector names are version-bound in the stage; zero table
+        // The upload policy is version-bound in the stage; zero table
         // counts still appear in the scan receipt.
-        for table in [
-            "events",
-            "users",
-            "nip_fi_profile_heads",
-            "workflows",
-            "workflow_runs",
-            "workflow_trigger_runs",
-            "workflow_approvals",
-            "subscriptions",
-            "delivery_log",
-            "product_feedback",
-            "channels",
-            "communities",
-            "moderation_reports",
-            "moderation_report_events",
-            "moderation_actions",
-            "relay_admin_actions",
-            "relay_admin_outbox",
-            "artifact_heads",
-            "media_uploaders",
-            "audit_log.media_uploaded",
-        ] {
+        for table in ["media_uploaders", "audit_log.media_uploaded"] {
             scanned.entry(table.into()).or_insert(0);
         }
         tx.commit().await?;
@@ -283,8 +269,8 @@ impl Db {
             }
             files.push(file);
         }
-        Ok(MediaScan {database_snapshot_at,scope,files,scanned,unresolved:vec![
-            "historical unreferenced uploads without attribution cannot be assigned to a subject".into(),
+        Ok(MediaScan {database_snapshot_at,scope:scope.clone(),files,scanned,unresolved:vec![
+            "historical uploads without attribution cannot be assigned; absent records do not prove no earlier other uploader".into(),
         ]})
     }
 }

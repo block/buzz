@@ -155,7 +155,8 @@ def seed(services, args):
         json.dump(manifest, file, indent=2)
     statements = ["BEGIN;", "SET LOCAL TIME ZONE 'UTC';"]
     cases = [("exclusive", True), ("shared-user", False), ("shared-community", False),
-             ("other-metadata", False), ("unrelated", False), ("unposted", True)]
+             ("other-metadata", True), ("copied-link", True),
+             ("unrelated", False), ("unposted", True)]
     for name, delete in cases:
         payload = f"local deletion fixture {name} {uuid.uuid4()}\n".encode()
         sha = hashlib.sha256(payload).hexdigest()
@@ -184,7 +185,8 @@ def seed(services, args):
                               f"{literal(claim_community)},{literal(sha)},decode({literal(pubkey)},'hex'));")
             statements.append("INSERT INTO media_publications(community_id,sha256) VALUES ("
                               f"{literal(claim_community)},{literal(sha)}) ON CONFLICT DO NOTHING;")
-        for claim_community, pubkey in claims:
+        references = claims + ([(other, args.survivor)] if name == "copied-link" else [])
+        for claim_community, pubkey in references:
             event_id = hashlib.sha256(uuid.uuid4().bytes).hexdigest()
             manifest["events"].append({"id": event_id, "community": claim_community,
                                         "pubkey": pubkey, "hash": sha})
