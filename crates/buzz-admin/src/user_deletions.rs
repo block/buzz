@@ -12,7 +12,7 @@ mod tests {
     use clap::Parser;
 
     #[test]
-    fn batch_preview_requires_read_only_scope_and_valid_keys() {
+    fn batch_preview_requires_explicit_mode_scope_and_valid_keys() {
         let args = [
             "buzz-admin",
             "user-deletions",
@@ -25,6 +25,8 @@ mod tests {
         ];
         assert!(crate::Cli::try_parse_from(args).is_ok());
         assert!(crate::Cli::try_parse_from(&args[..7]).is_err());
+        assert!(crate::Cli::try_parse_from(args[..7].iter().copied().chain(["--delete"])).is_ok());
+        assert!(crate::Cli::try_parse_from(args.into_iter().chain(["--delete"])).is_err());
         for extra in [
             ["--batch-size", "0"],
             ["--batch-size", "101"],
