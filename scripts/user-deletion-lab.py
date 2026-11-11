@@ -229,13 +229,13 @@ def prepare():
 
 def preview():
     request = json.loads((STATE / 'request.json').read_text())
-    for stage in ('purge_media', 'purge_content', 'purge_account'):
-        admin('run', request['id'], '--read-only', '--stage', stage,
-              '--media-base', URL + '/media', '--relay-pubkey', RELAY,
+    for stage in ('gate_user', 'purge_media', 'purge_content', 'purge_account'):
+        admin('run', request['id'], '--print-only', '--stage', stage,
+              '--relay-pubkey', RELAY,
               log=f'preview-{stage}.jsonl')
         for kind in ('content', 'media', 'account'):
             fixture(kind, 'verify', '--phase', 'preview')
-    print('All three read-only stages passed their fixture comparisons.')
+    print('All four print-only stages passed their fixture comparisons.')
 
 
 def main():
@@ -246,7 +246,7 @@ def main():
     if args.action == 'plan':
         print('setup: isolated services/schema, two communities and users, SQL fixtures, signed relay activity; stops relay.')
         print('prepare: submit/approve the synthetic request and save verification baselines.')
-        print('preview: run three read-only handlers and compare baselines. No delete action exists in this script.')
+        print('preview: print all four handlers and compare baselines. No delete action exists in this script.')
         print('See docs/user-deletion-lab.md for prerequisites and separately approved deletion commands.')
     else:
         globals()[args.action]()

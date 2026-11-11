@@ -1,4 +1,4 @@
-//! Exercise the real CLI with SELECT-only access and no workflow tables.
+//! CLI inventory permissions, explicit execution modes, and saved request identity.
 
 use nostr::ToBech32;
 use serde_json::Value;
@@ -194,6 +194,13 @@ fn invalid_inventory_key_fails_before_database_connection() {
 }
 
 async fn workflow_cli(url: &str, args: &[&str], success: bool) -> Value {
+    workflow_cli_records(url, args, success)
+        .await
+        .pop()
+        .unwrap_or(Value::Null)
+}
+
+async fn workflow_cli_records(url: &str, args: &[&str], success: bool) -> Vec<Value> {
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(20),
         Command::new(admin_binary())
@@ -214,15 +221,18 @@ async fn workflow_cli(url: &str, args: &[&str], success: bool) -> Value {
         String::from_utf8_lossy(&output.stderr)
     );
     if success {
-        serde_json::from_slice(&output.stdout).unwrap()
+        serde_json::Deserializer::from_slice(&output.stdout)
+            .into_iter::<Value>()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
     } else {
-        Value::Null
+        vec![]
     }
 }
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn inventory_submission_runs_demo_and_public_key_workflows_end_to_end() {
+async fn inventory_submission_keeps_preview_separate_from_explicit_workflow_execution() {
     let url = std::env::var("BUZZ_TEST_DATABASE_URL").unwrap();
     let pool = PgPool::connect(&url).await.unwrap();
     let key = "ab".repeat(32);
@@ -264,7 +274,16 @@ async fn inventory_submission_runs_demo_and_public_key_workflows_end_to_end() {
         );
         assert_eq!(saved["status"], "inventoried");
         let id = saved["id"].as_str().unwrap();
-        workflow_cli(&url, &["run", id], false).await;
+        let initial = workflow_cli(&url, &["inspect", id], true).await;
+        let preview = workflow_cli_records(&url, &["run", id, "--next-step"], true).await;
+        assert!(preview.iter().any(|record| record["read_only"] == true));
+        assert_eq!(workflow_cli(&url, &["inspect", id], true).await, initial);
+        workflow_cli(
+            &url,
+            &["run", id, "--delete", "--offline", "--next-step"],
+            false,
+        )
+        .await;
         workflow_cli(
             &url,
             &[
@@ -292,19 +311,99 @@ async fn inventory_submission_runs_demo_and_public_key_workflows_end_to_end() {
         )
         .await;
         assert!(approved["stage_history"].as_array().unwrap().is_empty());
-        let stepped = workflow_cli(&url, &["run", id, "--next-step"], true).await;
-        assert_eq!(stepped["stage_history"][0]["status"], "completed");
-        let first_id = stepped["stage_history"][0]["id"].clone();
-        let done = workflow_cli(&url, &["run", id], true).await;
-        assert_eq!(done["status"], "completed");
-        assert_eq!(done["stage_history"][0]["id"], first_id);
-        let stages = done["stage_history"].as_array().unwrap();
-        assert_eq!(stages.len(), if subject == "demo" { 5 } else { 3 });
-        assert!(stages
-            .iter()
-            .all(|s| s["status"] == "completed" && s["is_current"] == false));
+        let expected = if subject == "demo" {
+            let stepped = workflow_cli(&url, &["run", id, "--delete", "--next-step"], true).await;
+            assert_eq!(stepped["stage_history"][0]["stage"], "gate_user");
+            assert_eq!(stepped["stage_history"][0]["status"], "completed");
+            let first_id = stepped["stage_history"][0]["id"].clone();
+            let done = workflow_cli(&url, &["run", id, "--delete"], true).await;
+            assert_eq!(done["status"], "completed");
+            assert_eq!(done["stage_history"][0]["id"], first_id);
+            let stages = done["stage_history"].as_array().unwrap();
+            assert_eq!(stages.len(), 5);
+            assert!(stages
+                .iter()
+                .all(|s| s["status"] == "completed" && s["is_current"] == false));
+            done
+        } else {
+            // Approval does not turn the default print-only mode into a worker.
+            let preview = workflow_cli_records(&url, &["run", id, "--next-step"], true).await;
+            assert_eq!(preview[0]["record"], "user_gate_preview");
+            assert_eq!(preview[0]["subject"], key);
+            assert_eq!(workflow_cli(&url, &["inspect", id], true).await, approved);
+            workflow_cli(&url, &["run", id, "--read-only", "--next-step"], false).await;
+            workflow_cli(&url, &["run", id, "--delete", "--next-step"], false).await;
+            assert_eq!(workflow_cli(&url, &["inspect", id], true).await, approved);
+
+            let read_only = workflow_cli(
+                &url,
+                &[
+                    "submit",
+                    "--pubkey",
+                    subject,
+                    "--read-only",
+                    "--requested-by",
+                    "operator-a",
+                ],
+                true,
+            )
+            .await;
+            assert_ne!(read_only["id"], saved["id"]);
+            assert_eq!(read_only["target"], format!("rehearsal:{key}"));
+            let read_only_id = read_only["id"].as_str().unwrap();
+            workflow_cli(
+                &url,
+                &[
+                    "approve",
+                    read_only_id,
+                    "--approved-by",
+                    "operator-b",
+                    "--inventory-digest",
+                    read_only["inventory_digest"].as_str().unwrap(),
+                ],
+                true,
+            )
+            .await;
+            let stepped = workflow_cli(
+                &url,
+                &["run", read_only_id, "--read-only", "--next-step"],
+                true,
+            )
+            .await;
+            let stages = stepped["stage_history"].as_array().unwrap();
+            assert_eq!(stages.len(), 2);
+            let gate = stages
+                .iter()
+                .find(|stage| stage["stage"] == "gate_user")
+                .unwrap();
+            assert_eq!(gate["status"], "completed");
+            assert_eq!(gate["is_current"], false);
+            assert_eq!(gate["target_community_id"], Value::Null);
+            assert_eq!(
+                gate["metadata_json"]["result"]["source_data_unchanged"],
+                true
+            );
+            let media = stages
+                .iter()
+                .find(|stage| stage["stage"] == "purge_media")
+                .unwrap();
+            assert_eq!(media["status"], "pending");
+            assert_eq!(media["is_current"], true);
+            assert_eq!(media["target_community_id"], Value::Null);
+            // The read-only gate must not install a real restriction or change
+            // the separately approved destructive request.
+            let fences: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM user_deletion_fences WHERE pubkey=$1")
+                    .bind(&key)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(fences, 0);
+            assert_eq!(workflow_cli(&url, &["inspect", id], true).await, approved);
+            approved
+        };
         let inspected = workflow_cli(&url, &["inspect", id], true).await;
-        assert_eq!(inspected, done);
+        assert_eq!(inspected, expected);
         // Hex and npub converge on the same saved request without rediscovery.
         let repeat = workflow_cli(
             &url,
@@ -319,7 +418,7 @@ async fn inventory_submission_runs_demo_and_public_key_workflows_end_to_end() {
         )
         .await;
         for (field, value) in repeat.as_object().unwrap() {
-            assert_eq!(value, &done[field]);
+            assert_eq!(value, &expected[field]);
         }
         workflow_cli(
             &url,
@@ -334,7 +433,7 @@ async fn inventory_submission_runs_demo_and_public_key_workflows_end_to_end() {
         )
         .await;
     }
-    // Real membership data remains unchanged after all dummy handlers execute.
+    // Neither demo execution nor the real read-only gate changes memberships.
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM channel_members WHERE community_id = $1 AND pubkey = decode($2, 'hex')")
         .bind(community).bind(&key).fetch_one(&pool).await.unwrap();
     assert_eq!(count, 1);
@@ -342,7 +441,7 @@ async fn inventory_submission_runs_demo_and_public_key_workflows_end_to_end() {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn inventory_approval_and_resume_use_saved_account_identity_without_resolution() {
+async fn inventory_approval_preserves_account_identity_but_execution_rejects_unsupported_subject() {
     let url = std::env::var("BUZZ_TEST_DATABASE_URL").unwrap();
     let pool = PgPool::connect(&url).await.unwrap();
     let saved = workflow_cli(
@@ -380,15 +479,36 @@ async fn inventory_approval_and_resume_use_saved_account_identity_without_resolu
         true,
     )
     .await;
-    let stepped = workflow_cli(&url, &["run", id, "--next-step"], true).await;
-    let first_stage = stepped["stage_history"][0]["id"].clone();
-    let completed = workflow_cli(&url, &["run", id], true).await;
-    assert_eq!(completed["target"], account);
-    assert_eq!(completed["inventory_manifest"], saved["inventory_manifest"]);
-    assert_eq!(completed["status"], "completed");
-    assert_eq!(completed["stage_history"][0]["id"], first_stage);
-    for stage in completed["stage_history"].as_array().unwrap() {
-        assert_eq!(stage["metadata_json"]["inputs"]["target"], account);
-        assert_eq!(stage["status"], "completed");
-    }
+    let approved = workflow_cli(&url, &["inspect", id], true).await;
+    assert_eq!(approved["target"], account);
+    assert_eq!(approved["inventory_manifest"], saved["inventory_manifest"]);
+    assert_eq!(approved["status"], "approved");
+    let preview = workflow_cli_records(&url, &["run", id, "--next-step"], true).await;
+    assert_eq!(preview[0]["record"], "user_gate_preview");
+    assert_eq!(preview[0]["subject"], account);
+    assert_eq!(workflow_cli(&url, &["inspect", id], true).await, approved);
+
+    // A future opaque identity may be approved and inspected, but it must not
+    // fall back to simulated cleanup when real handlers require a public key.
+    workflow_cli(
+        &url,
+        &["run", id, "--delete", "--offline", "--next-step"],
+        false,
+    )
+    .await;
+    let failed = workflow_cli(&url, &["inspect", id], true).await;
+    assert_eq!(failed["target"], account);
+    assert_eq!(failed["inventory_manifest"], saved["inventory_manifest"]);
+    assert_eq!(failed["status"], "retry_wait");
+    let stages = failed["stage_history"].as_array().unwrap();
+    assert_eq!(stages.len(), 1);
+    assert_eq!(stages[0]["stage"], "gate_user");
+    assert_eq!(stages[0]["status"], "failed");
+    assert_eq!(stages[0]["metadata_json"]["inputs"]["target"], account);
+    assert!(stages[0]["metadata_json"].get("result").is_none());
+    let fences: i64 = sqlx::query_scalar("SELECT count(*) FROM user_deletion_fences")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(fences, 0);
 }

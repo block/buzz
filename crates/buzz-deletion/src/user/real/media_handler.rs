@@ -10,14 +10,7 @@ pub(super) async fn run(context: &HandlerContext<'_>) -> Result<Value> {
     );
     let mode = match context.mode {
         ExecutionMode::ReadOnly => media::Mode::PrintOnly,
-        ExecutionMode::Delete => {
-            context
-                .db
-                .user_deletion_store()
-                .verify_offline_work_stopped()
-                .await?;
-            media::Mode::Delete
-        }
+        ExecutionMode::Delete => media::Mode::Delete,
     };
     let (storage, namespace) = media::configured_storage()?;
     media::run_stage(
@@ -25,7 +18,7 @@ pub(super) async fn run(context: &HandlerContext<'_>) -> Result<Value> {
         &storage,
         context.lease,
         context.row.id,
-        media_options(context.args, context.subject, namespace, mode),
+        media_options(context.subject, namespace, mode),
     )
     .await
 }

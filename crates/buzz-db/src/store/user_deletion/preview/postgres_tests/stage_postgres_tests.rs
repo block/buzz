@@ -48,33 +48,17 @@ async fn content_stage(db: &Db, options: &PreviewOptions) -> (EntityLease, Entit
             &lease,
             media.id,
             json!({
-                "mode":"delete", "human":HUMAN, "storage_namespace":"fixture", "media_bases":[]
+                "mode":"delete", "policy":"upload-ownership-v1", "human":HUMAN, "storage_namespace":"fixture"
             }),
         )
         .await
         .unwrap();
-    let scan = db
-        .scan_user_media(HUMAN, false, "fixture", &[])
-        .await
-        .unwrap();
+    // There are no uploads in this fixture. Its copied links deliberately have
+    // no file rows or source fingerprints in the completed media inventory.
     media_store
-        .publish(
-            &run,
-            &scan.files,
-            json!({"scope":scan.scope,"tables":scan.scanned}),
-        )
+        .publish(&run, &[], json!({"scope":{"human":HUMAN,"agents":[]}}))
         .await
         .unwrap();
-    // The storage boundary retains every fixture file. The content adapter must
-    // still consume the real scan's exact fingerprints and terminal decisions.
-    for mut file in scan.files {
-        file.status = "dont_delete".into();
-        file.reason = Some("fixture storage retention".into());
-        media_store
-            .save_execution_decision(&run, &file)
-            .await
-            .unwrap();
-    }
     store
         .save_stage_success(&lease, media.id, json!({"media_complete":true}))
         .await
@@ -112,7 +96,7 @@ async fn set_media(pool: &PgPool, community: Uuid, event: u32, caption: &str) {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn content_stage_requires_exact_media_evidence_and_resumes_atomic_progress() {
+async fn content_stage_requires_completed_media_but_not_link_evidence_and_resumes_progress() {
     let (pool, mut options) = setup().await;
     options.batch_size = 1;
     let (_, other) = setup().await;
@@ -125,11 +109,6 @@ async fn content_stage_requires_exact_media_evidence_and_resumes_atomic_progress
     let db = Db::from_pool(pool.clone());
     let (lease, stage, media) = content_stage(&db, &options).await;
     let users = db.user_deletion_store();
-    // Standalone deletion cannot borrow workflow evidence implicitly.
-    assert!(users
-        .delete_message_batches(&options, &mut Vec::new())
-        .await
-        .is_err());
     let before = serde_json::to_value(
         db.entity_deletion_store()
             .inspect(lease.request_id)
@@ -157,23 +136,27 @@ async fn content_stage_requires_exact_media_evidence_and_resumes_atomic_progress
         )
         .unwrap()
     );
-    // A changed caption with the same media hash must not reuse old evidence.
-    set_media(&pool, options.community, 1, "changed").await;
+    // Editing a copied link after media completion does not make it an upload.
+    // The content planner will fingerprint the current row for its own deletion.
+    set_media(&pool, options.community, 1, "changed after media").await;
+    // A stage that did not finish discovery cannot authorize content cleanup.
+    sqlx::query("UPDATE entity_deletion_stage_history SET metadata_json=jsonb_set(metadata_json,'{media_discovery,complete}','false') WHERE id=$1")
+        .bind(media).execute(&pool).await.unwrap();
     let error = users
-        .run_message_stage(
-            &lease,
-            stage.id,
-            &options,
-            crate::user_deletion::ExecutionMode::Delete,
-            &mut Vec::new(),
-        )
+        .delete_message_stage(&lease, stage.id, &options, &mut Vec::new())
         .await
         .unwrap_err();
-    assert!(error.to_string().contains("source changed"), "{error}");
+    assert!(
+        error
+            .to_string()
+            .contains("completed destructive inventory"),
+        "{error}"
+    );
     assert_eq!(preview(&pool, &options).await.0.items, 2);
-    set_media(&pool, options.community, 1, "before").await;
+    sqlx::query("UPDATE entity_deletion_stage_history SET metadata_json=jsonb_set(metadata_json,'{media_discovery,complete}','true') WHERE id=$1")
+        .bind(media).execute(&pool).await.unwrap();
     // A missing journal row cannot masquerade as an empty completed inventory.
-    sqlx::query("UPDATE entity_deletion_stage_history SET metadata_json=jsonb_set(metadata_json,'{media_discovery,candidate_count}','2') WHERE id=$1")
+    sqlx::query("UPDATE entity_deletion_stage_history SET metadata_json=jsonb_set(metadata_json,'{media_discovery,candidate_count}','1') WHERE id=$1")
         .bind(media).execute(&pool).await.unwrap();
     assert!(users
         .run_message_stage(
@@ -187,7 +170,24 @@ async fn content_stage_requires_exact_media_evidence_and_resumes_atomic_progress
         .unwrap_err()
         .to_string()
         .contains("row count"));
-    sqlx::query("UPDATE entity_deletion_stage_history SET metadata_json=jsonb_set(metadata_json,'{media_discovery,candidate_count}','1') WHERE id=$1")
+    // Even with the right row count, an unresolved media file blocks content.
+    sqlx::query("INSERT INTO entity_deletion_media_files(stage_id,storage_namespace,file_hash,evidence_json) VALUES($1,'fixture',$2,'{}')")
+        .bind(media).bind("b".repeat(64)).execute(&pool).await.unwrap();
+    let error = users
+        .delete_message_stage(&lease, stage.id, &options, &mut Vec::new())
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("unfinished or mismatched"),
+        "{error}"
+    );
+    assert_eq!(preview(&pool, &options).await.0.items, 2);
+    sqlx::query("DELETE FROM entity_deletion_media_files WHERE stage_id=$1")
+        .bind(media)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE entity_deletion_stage_history SET metadata_json=jsonb_set(metadata_json,'{media_discovery,candidate_count}','0') WHERE id=$1")
         .bind(media).execute(&pool).await.unwrap();
     struct StopAfterCommit {
         bytes: Vec<u8>,
@@ -212,16 +212,20 @@ async fn content_stage_requires_exact_media_evidence_and_resumes_atomic_progress
         bytes: Vec::new(),
         stopped: false,
     };
-    assert!(users
+    let error = users
         .run_message_stage(
             &lease,
             stage.id,
             &options,
             crate::user_deletion::ExecutionMode::Delete,
-            &mut output
+            &mut output,
         )
         .await
-        .is_err());
+        .unwrap_err();
+    assert!(
+        error.to_string().to_lowercase().contains("broken pipe"),
+        "{error}"
+    );
     let progress: Value = sqlx::query_scalar(
         "SELECT metadata_json->'content_batches' FROM entity_deletion_stage_history WHERE id=$1",
     )

@@ -1,9 +1,19 @@
-# Run and recover a dummy user-deletion workflow
+# Run and recover a user-deletion workflow
 
-This workflow tests orchestration using real PostgreSQL rows and dummy actions.
-It never gates a real account or deletes user data. Submit still creates an
-artificial inventory: B (participant), then C (former participant). Only `demo:`
-targets are accepted. Owned communities and production fencing are future work.
+The real workflow runs `gate_user` and `purge_media` once with no community,
+then `purge_content` and `purge_account` for each approved community. It stops
+at `remaining_cleanup`; supported cleanup is not complete account erasure.
+See [the local test environment guide](user-deletion-lab.md) for real modes.
+
+`--read-only` uses the same stage order and journals proposals on a separately
+approved read-only request. `--delete --offline` applies them to the source.
+The first gate installs user restrictions and verifies admitted work has drained.
+The relay and external workers must remain stopped: the existing fence covers
+uploader admission, not every user write. Media only verifies the completed gate.
+
+The `demo:` workflow remains available for orchestration tests using dummy
+actions and the artificial B/C inventory. Its gate transitions directly into
+the simulated community handlers described below.
 
 ## Code map: worker, policy, and persistence
 
@@ -45,7 +55,7 @@ User submission and inventory interpretation are deliberately separate from
 common workflow storage, even though they use the same tables. User approval
 runs its inventory validator inside the common approval transaction. Future
 real PostgreSQL deletion operations belong in the user-specific database folder;
-the current handlers still perform no real deletion. Existing community deletion
+the dummy handlers still perform no real deletion. Existing community deletion
 continues using its existing implementation.
 
 ## The execution contract
@@ -108,7 +118,7 @@ parent to `running` in one transaction. A previously started request with no
 current row and no terminal outcome is an error, not permission to create a
 second gate.
 
-The version-1 workflow rules are:
+The demo workflow rules are:
 
 | Stage | Allowed outcome | Runtime choice |
 | --- | --- | --- |
@@ -118,8 +128,9 @@ The version-1 workflow rules are:
 
 After a community completes, select the first uncovered community in inventory
 order. After all are covered, finish the request. Missing `has_agents` is an
-error, not an implicit skip. The inventory's version selects the currently
-supported rules; future versions must retain the rules needed by active requests.
+error, not an implicit skip. Real histories from the older media-first implementation fail explicitly on
+resume. Preserve them and reconcile any partial work before creating a new
+approved request; never infer a completed gate from an old media stage.
 No full execution plan is created upfront.
 
 `previous_stage_id` is bookkeeping for uninterrupted execution. It must belong

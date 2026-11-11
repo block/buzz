@@ -146,18 +146,50 @@ async fn actual_handler_checks_retention_blocks_writers_and_recovers_deleted_ver
         .await
         .unwrap()
         .unwrap();
-    let NextStage::Stage(stage) = requests
+    let inventory = buzz_db::user_deletion::UserDeletionInventory::read(&request).unwrap();
+    let NextStage::Stage(gate) = requests
         .transition_stage(&lease, None, |_, _| {
             Ok(StageTransition::Initialize(NewEntityStage {
-                stage: "purge_media".into(),
+                stage: "gate_user".into(),
                 community: None,
-                inputs: json!({}),
+                inputs: inventory.inputs(&human, None)?,
             }))
         })
         .await
         .unwrap()
     else {
-        panic!("stage missing")
+        panic!("gate missing")
+    };
+    requests.start_stage(&lease, gate.id).await.unwrap();
+    let scope = buzz_db::media_deletion::SubjectScope {
+        human: human.clone(),
+        agents: Default::default(),
+    };
+    let result = db
+        .user_deletion_store()
+        .gate_user(&lease, gate.id, &scope)
+        .await
+        .unwrap();
+    requests
+        .save_stage_success(&lease, gate.id, result)
+        .await
+        .unwrap();
+    let NextStage::Stage(stage) = requests
+        .transition_stage(&lease, Some(gate.id), |_, _| {
+            Ok(StageTransition::Advance {
+                previous: gate.id,
+                decision: json!({"kind":"stage", "stage":"purge_media"}),
+                successor: Some(NewEntityStage {
+                    stage: "purge_media".into(),
+                    community: None,
+                    inputs: inventory.inputs(&human, None)?,
+                }),
+            })
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("media stage missing")
     };
     requests.start_stage(&lease, stage.id).await.unwrap();
     let state = Objects {
@@ -274,6 +306,7 @@ async fn actual_handler_checks_retention_blocks_writers_and_recovers_deleted_ver
                 "--pubkey",
                 subject,
                 "--delete",
+                "--offline",
                 "--request-id",
                 &request.id.to_string(),
                 "--max-source-rows",

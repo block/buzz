@@ -153,7 +153,7 @@ async fn interrupted_output_keeps_committed_progress_and_releases_session_locks(
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn unsafe_sources_or_limits_reject_before_any_deletion() {
+async fn limits_reject_before_deletion_but_links_and_opaque_payloads_are_allowed() {
     let (pool, mut options) = setup().await;
     let c = options.community;
     event(&pool, c, 1, HUMAN, 9, json!([])).await;
@@ -167,34 +167,32 @@ async fn unsafe_sources_or_limits_reject_before_any_deletion() {
     )
     .await;
     let store = Db::from_pool(pool.clone()).user_deletion_store();
-    for limit in [1, 10_000] {
-        options.max_items = limit;
-        let before = snapshot(&pool).await;
-        let mut bytes = Vec::new();
-        assert!(store
-            .delete_message_batches(&options, &mut bytes)
-            .await
-            .is_err());
-        assert_eq!(snapshot(&pool).await, before);
-        assert!(!String::from_utf8(bytes).unwrap().lines().any(
-            |line| serde_json::from_str::<Value>(line).unwrap()["record"] == "batch_committed"
-        ));
-    }
-    sqlx::query(
-        "UPDATE events SET tags='[]',kind=30078 WHERE community_id=$1 AND id=decode($2,'hex')",
-    )
-    .bind(c)
-    .bind(id(2))
-    .execute(&pool)
-    .await
-    .unwrap();
+    options.max_items = 1;
     let before = snapshot(&pool).await;
-    let error = store
-        .delete_message_batches(&options, &mut Vec::new())
+    let mut bytes = Vec::new();
+    assert!(store
+        .delete_message_batches(&options, &mut bytes)
         .await
-        .unwrap_err();
-    assert!(error.to_string().contains("media evidence"));
+        .is_err());
     assert_eq!(snapshot(&pool).await, before);
+    assert!(!String::from_utf8(bytes)
+        .unwrap()
+        .lines()
+        .any(|line| serde_json::from_str::<Value>(line).unwrap()["record"] == "batch_committed"));
+    options.max_items = 10_000;
+    // Opaque content and copied media links are not upload ownership evidence.
+    sqlx::query("UPDATE events SET kind=30078 WHERE community_id=$1 AND id=decode($2,'hex')")
+        .bind(c)
+        .bind(id(2))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (summary, printed) = preview(&pool, &options).await;
+    assert_eq!(summary.warnings, 0);
+    let (summary, executed) = delete(&pool, &options).await;
+    assert_eq!(summary.items, 2);
+    assert_eq!(items(&printed), items(&executed));
+    assert_eq!(preview(&pool, &options).await.0.items, 0);
 }
 
 #[tokio::test]
@@ -270,24 +268,9 @@ async fn owned_workflows_subscriptions_and_delivery_share_one_ordered_plan() {
         .execute(&pool)
         .await
         .unwrap();
-    // A blocked payload near the end of the plan must protect its earlier
-    // scheduled-fire and approval rows too.
+    // A copied link in the workflow definition does not block its cleanup.
     sqlx::query("UPDATE workflows SET definition='{\"url\":\"https://example.org/file\"}' WHERE community_id=$1 AND id=$2")
         .bind(c).bind(owned).execute(&pool).await.unwrap();
-    let before = snapshot(&pool).await;
-    let error = Db::from_pool(pool.clone())
-        .user_deletion_store()
-        .delete_message_batches(&options, &mut Vec::new())
-        .await
-        .unwrap_err();
-    assert!(error.to_string().contains("media evidence"));
-    assert_eq!(snapshot(&pool).await, before);
-    sqlx::query("UPDATE workflows SET definition='{}' WHERE community_id=$1 AND id=$2")
-        .bind(c)
-        .bind(owned)
-        .execute(&pool)
-        .await
-        .unwrap();
     let (_, printed) = preview(&pool, &options).await;
     let (_, executed) = delete(&pool, &options).await;
     assert_eq!(items(&printed), items(&executed));

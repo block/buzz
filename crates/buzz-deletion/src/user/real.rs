@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 mod account;
 mod content;
+mod gate;
 mod media_handler;
 
 pub(super) use buzz_db::user_deletion::ExecutionMode;
@@ -44,14 +45,11 @@ pub struct Args {
     #[arg(long, requires = "delete")]
     pub offline: bool,
     /// Preview only this handler, without changing the saved workflow position.
-    #[arg(long, value_parser=["purge_media", "purge_content", "purge_account"])]
+    #[arg(long, value_parser=["gate_user", "purge_media", "purge_content", "purge_account"])]
     pub stage: Option<String>,
     /// Preview a single approved community's content/account operations.
     #[arg(long, requires = "stage")]
     pub community: Option<Uuid>,
-    /// Canonical media base URLs used for reference validation.
-    #[arg(long)]
-    pub media_base: Vec<String>,
     /// Trusted relay key for historical content attribution.
     #[arg(long, value_parser=buzz_db::user_deletion::normalize_user_deletion_pubkey)]
     pub relay_pubkey: Option<String>,
@@ -112,17 +110,11 @@ fn account_options(args: &Args, target: &str, community: Uuid) -> AccountBatchOp
         max_items: args.max_items,
     }
 }
-fn media_options(
-    args: &Args,
-    target: &str,
-    namespace: String,
-    mode: media::Mode,
-) -> media::StageOptions {
+fn media_options(target: &str, namespace: String, mode: media::Mode) -> media::StageOptions {
     media::StageOptions {
         human: target.into(),
         include_owned_agents: false,
         storage_namespace: namespace,
-        media_bases: args.media_base.clone(),
         scan_budget: Default::default(),
         mode,
     }
@@ -149,8 +141,8 @@ pub(super) async fn preview(
             "preview community is outside the saved inventory"
         );
         ensure!(
-            args.stage.as_deref() != Some("purge_media"),
-            "media is request-wide; omit --community"
+            !matches!(args.stage.as_deref(), Some("gate_user" | "purge_media")),
+            "gate and media are request-wide; omit --community"
         );
     }
     let current = db.entity_deletion_store().inspect(request.id).await?;
@@ -161,7 +153,7 @@ pub(super) async fn preview(
                 .iter()
                 .find(|s| s.is_current)
                 .map(|s| s.stage.as_str())
-                .unwrap_or("purge_media"),
+                .unwrap_or("gate_user"),
         )
     } else {
         args.stage.as_deref()
@@ -170,7 +162,11 @@ pub(super) async fn preview(
         ensure!(
             matches!(
                 stage,
-                "purge_media" | "purge_content" | "purge_account" | "remaining_cleanup"
+                "gate_user"
+                    | "purge_media"
+                    | "purge_content"
+                    | "purge_account"
+                    | "remaining_cleanup"
             ),
             "saved workflow stage is not supported by the real preview"
         );
@@ -180,12 +176,15 @@ pub(super) async fn preview(
         return Ok(2);
     }
     let mut complete = true;
+    if selected.is_none() || selected == Some("gate_user") {
+        crate::print_json(&gate::proposal(subject))?;
+    }
     if selected.is_none() || selected == Some("purge_media") {
         let (storage, namespace) = media::configured_storage()?;
         let result = media::preview(
             db,
             &storage,
-            &media_options(args, subject, namespace, media::Mode::PrintOnly),
+            &media_options(subject, namespace, media::Mode::PrintOnly),
         )
         .await?;
         complete &= result.get("decision_complete").and_then(|v| v.as_bool()) == Some(true);
@@ -298,6 +297,7 @@ async fn execute(context: &HandlerContext<'_>) -> Result<serde_json::Value> {
     );
     // Stage routing is independent of mode. Each handler owns its effects.
     match context.row.stage.as_str() {
+        "gate_user" => gate::run(context).await,
         "purge_media" => media_handler::run(context).await,
         "purge_content" => content::run(context).await,
         "purge_account" => account::run(context).await,

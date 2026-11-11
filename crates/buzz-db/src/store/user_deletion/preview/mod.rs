@@ -26,10 +26,7 @@ const KINDS: &[i32] = &[
 ];
 const MAX_DEPTH: usize = 64;
 const PAGE_SIZE: i64 = 100;
-const EVENT_COLUMNS: &str = "e.id,e.created_at,e.channel_id,e.kind,
-    (e.content ~* 'https?://|/media/' OR EXISTS (
-      SELECT 1 FROM jsonb_array_elements(e.tags) t
-      WHERE t->>0 IN ('imeta','link-preview','url','thumb','image','x','emoji'))) AS has_media";
+const EVENT_COLUMNS: &str = "e.id,e.created_at,e.channel_id,e.kind";
 
 /// Scope and bounds for standalone preview or explicitly requested deletion.
 pub struct PreviewOptions {
@@ -55,7 +52,7 @@ pub struct PreviewSummary {
     pub batches: u64,
     /// Number of unique proposed row operations.
     pub items: usize,
-    /// Operations carrying a media, active-work or delivery warning.
+    /// Operations carrying an active-work or delivery warning.
     pub warnings: usize,
     /// Authored event kinds outside this handler, with counts.
     pub excluded_event_kinds: Vec<Value>,
@@ -67,7 +64,6 @@ struct Event {
     created_at: DateTime<Utc>,
     channel_id: Option<Uuid>,
     kind: i32,
-    has_media: bool,
 }
 
 #[derive(Default, Clone)]
@@ -386,10 +382,7 @@ async fn walk(
                 json!({"id": hex::encode(&frame.event.id), "created_at": frame.event.created_at}),
                 "would_delete",
                 &json!({"selection": frame.reason, "kind": frame.event.kind}),
-                frame
-                    .event
-                    .has_media
-                    .then(|| "media references require prior cleanup".to_owned()),
+                None,
             )?;
             output
                 .events

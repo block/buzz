@@ -26,12 +26,8 @@ pub(super) struct Rule {
 }
 
 pub(super) const INITIAL_STAGE: &str = "gate_user";
-pub(super) fn initial_stage(request: &EntityRequest) -> &'static str {
-    if request.target.starts_with("demo:") {
-        INITIAL_STAGE
-    } else {
-        "purge_media"
-    }
+pub(super) fn initial_stage(_request: &EntityRequest) -> &'static str {
+    INITIAL_STAGE
 }
 const COMMUNITY_INITIAL_STAGE: &str = "purge_db";
 const RULES: &[Rule] = &[
@@ -63,8 +59,8 @@ const RULES: &[Rule] = &[
     Rule {
         name: "gate_user",
         community_scope: false,
-        allowed: &[Decision::EnterCommunities],
-        decide: |_| Ok(Decision::EnterCommunities),
+        allowed: &[Decision::Stage("purge_media"), Decision::EnterCommunities],
+        decide: |_| Ok(Decision::Stage("purge_media")),
     },
     Rule {
         name: "purge_db",
@@ -108,7 +104,17 @@ pub(super) fn decision(stage: &EntityStage) -> Result<Decision> {
         .metadata_json
         .get("result")
         .ok_or_else(|| invalid("completed stage has no saved result"))?;
-    let next = (rule.decide)(result)?;
+    // Demo requests retain their simulated community handlers. Every real
+    // request, including a read-only run, goes through gate then media.
+    let demo_gate = stage.stage == "gate_user"
+        && stage.metadata_json["inputs"]["target"]
+            .as_str()
+            .is_some_and(|target| target.starts_with("demo:"));
+    let next = if demo_gate {
+        Decision::EnterCommunities
+    } else {
+        (rule.decide)(result)?
+    };
     if !rule.allowed.contains(&next) {
         return Err(invalid("stage selected a disallowed transition"));
     }
@@ -164,6 +170,11 @@ impl Progress {
         });
         let mut visited = HashSet::new();
         while let Some(row) = successors.get(&previous) {
+            if previous.is_none() && progress.real && row.stage == "purge_media" {
+                return Err(invalid(
+                    "legacy media-first request cannot resume without a gate; preserve its history and reconcile it before creating a new approved request",
+                ));
+            }
             if !visited.insert(row.id) {
                 return Err(invalid("cycle in stage history"));
             }

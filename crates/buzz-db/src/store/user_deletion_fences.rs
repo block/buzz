@@ -1,5 +1,6 @@
-//! Operator-global restriction storage and identity locks; no serving or worker
-//! path calls these helpers yet. Installing fences does not itself enforce them.
+//! Operator-global restriction storage and identity locks. Uploader admission
+//! checks these restrictions; general user-write fencing is not yet complete.
+//! Destructive user cleanup therefore still requires stopped serving workers.
 //!
 //! Callers use a writer-pool READ COMMITTED transaction. Acquire existing
 //! community guards first, then `lock_request` for the worker, then all human

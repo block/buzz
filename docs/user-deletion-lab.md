@@ -1,4 +1,4 @@
-# Local user-deletion lab
+# Local user-deletion test environment
 
 This lab prepares repeatable content, media and account cleanup scenarios in
 isolated local services. It is a development fixture, not a production erasure
@@ -86,7 +86,7 @@ REHEARSAL_ID=$(python3 -c 'import json; print(json.load(open(".local/user-deleti
 RELAY_PUBKEY=f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9
 target/debug/buzz-admin user-deletions run "$REHEARSAL_ID" \
   --read-only --next-step \
-  --media-base http://localhost:58300/media --relay-pubkey "$RELAY_PUBKEY"
+  --relay-pubkey "$RELAY_PUBKEY"
 target/debug/buzz-admin user-deletions inspect "$REHEARSAL_ID"
 ```
 
@@ -94,7 +94,7 @@ The ordinary worker claims and heartbeats the request, loads its saved stage,
 runs the real handler in print mode, persists its result, transitions to the
 next stage, and releases its lease. No script chooses the next handler. Invoke
 the same command again only after inspecting the saved result and successor.
-The sequence is media, content/account for the first community, then
+The sequence is request-wide gate, request-wide media, content/account for the first community, then
 content/account for the second. The next invocation reports `remaining_cleanup`
 with exit code 2 and `account_erasure_complete: false`.
 
@@ -120,7 +120,7 @@ media prerequisites. Keep the lab quiet for reproducible proposal comparisons.
 
 ### Optional strictly read-only preview
 
-Default `run`, `--read-only` and `--print-only` retain their no-write behavior:
+Default `run` and `--print-only` retain their no-write behavior:
 they neither claim a request nor advance it. `user-deletion-lab.py preview`
 remains a convenience for those observations, not the worker rehearsal above.
 Incomplete media/account observations return exit code 2.
@@ -152,7 +152,7 @@ target/debug/buzz-admin user-deletions inspect "$REQUEST_ID"
 # Only after approval for this step:
 target/debug/buzz-admin user-deletions run "$REQUEST_ID" \
   --delete --offline --next-step \
-  --media-base http://localhost:58300/media --relay-pubkey "$RELAY_PUBKEY"
+  --relay-pubkey "$RELAY_PUBKEY"
 ```
 
 Each invocation executes one handler and advances to the next. Inspect its saved
@@ -160,6 +160,7 @@ counters and verify the resulting state before proceeding:
 
 | Completed stage | Verification |
 | --- | --- |
+| Request-wide `gate_user` | Saved gate result matches the user, all active external work has drained, and no content or files have been deleted. |
 | Request-wide `purge_media` | Media fixture `verify --phase after-media`; content fixture must still match preview. |
 | First community `purge_content` | Content fixture `verify --phase after-content`. |
 | First community `purge_account` | Account fixture `verify --phase after-account`. |
@@ -189,7 +190,7 @@ not evidence that the person's entire account has been erased.
 ## Handler contract
 
 The worker supplies `ExecutionMode::ReadOnly` or `ExecutionMode::Delete` through
-one dispatcher call. Stage routing selects `media_handler::run`, `content::run`
+one dispatcher call. Stage routing selects `gate::run`, `media_handler::run`, `content::run`
 or `account::run`; each receives the same `HandlerContext` containing source DB,
 options, request, lease, stage, subject and mode. The handlers own mode decisions
 and reuse their existing scanners, selectors and planners. Delete-specific
@@ -201,3 +202,23 @@ Both worker modes persist claims, results and transitions; only delete changes
 source data. Separate request identities prevent printed stages from counting
 as completed deletion. Each read-only stage observes original data, so its
 proposal is not a simulation of earlier stages' deletions.
+
+
+The first gate owns identity restrictions and the drain receipt. Delete mode
+requires `--offline`: stop the relay and external workers before running it,
+and keep them stopped throughout cleanup. The current identity fence enforces
+uploader admission only, so the receipt explicitly reports that online write
+fencing is incomplete. Media checks the completed gate and never installs it.
+Read-only mode prints the proposed gate without installing restrictions.
+
+Media decisions use upload attribution from `media_uploaders`, upload audit
+entries, and storage `_uploads` records. A copied link does not protect a file.
+Classification uses the collected inventory rather than repeating discovery;
+deletion retries recheck candidate upload claims and exact storage versions.
+Historical upload attribution may be incomplete. Discovery of storage-only
+uploads can still require a bounded listing of upload records.
+
+Saved requests from the earlier media-first implementation cannot resume under
+this order. The worker fails with an explicit legacy-history error. Preserve
+that history and reconcile any partial deletion and reservations before
+preparing a new request; do not manually relabel an old stage as completed gating.

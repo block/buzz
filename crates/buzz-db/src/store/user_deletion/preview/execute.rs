@@ -64,8 +64,8 @@ impl UserDeletionStore {
 
     /// Execute one started content stage under its request lease. Every batch
     /// checks approved scope and records progress in the same transaction as
-    /// deletion. Media references require the completed same-request media
-    /// inventory and exact, unchanged source evidence. This does not complete
+    /// deletion. The same request must have completed its upload cleanup; copied
+    /// links need no file ownership evidence. This does not complete
     /// the stage or claim complete account erasure.
     pub async fn delete_message_stage(
         &self,
@@ -111,15 +111,12 @@ impl UserDeletionStore {
             .await?;
         crate::store::deletion::validate_catalog_on(&mut conn).await?;
         guards::community(&mut conn, options.community).await?;
-        let media = if let Some(context) = context {
+        if let Some(context) = context {
             let mut tx = conn.begin().await?;
             context.bind(&mut tx).await?;
-            let media = media::Evidence::load(&mut tx, context).await?;
+            media::verify_completed(&mut tx, context).await?;
             tx.commit().await?;
-            Some(media)
-        } else {
-            None
-        };
+        }
         let mut plan = plan(&mut conn, options, &mut std::io::sink(), true).await?;
         plan.start["record"] = json!("delete_start");
         plan.start["read_only"] = json!(false);
@@ -127,7 +124,7 @@ impl UserDeletionStore {
             json!("print each batch, commit, then print batch_committed; rerun after interruption");
         line(writer, &plan.start)?;
         if plan.summary.warnings != 0 && context.is_none() {
-            return Err(invalid("selected records have media or active-work warnings; nothing deleted; inspect --read-only output"));
+            return Err(invalid("selected records have active-work warnings; nothing deleted; inspect --read-only output"));
         }
         // Validate *all* source payloads before deleting even the first child.
         let mut fingerprints = HashMap::new();
@@ -141,7 +138,6 @@ impl UserDeletionStore {
                     predicate,
                     &item["key"],
                     true,
-                    media.as_ref(),
                 )
                 .await?;
                 fingerprints.insert(identity(item), hash);
@@ -155,7 +151,6 @@ impl UserDeletionStore {
                 &fingerprints,
                 writer,
                 context,
-                media.as_ref(),
             )
             .await?;
         }
@@ -223,7 +218,7 @@ pub(super) async fn execute_batch(
     fingerprints: &HashMap<String, String>,
     writer: &mut impl Write,
 ) -> Result<()> {
-    execute_owned_batch(conn, community, batch, fingerprints, writer, None, None).await
+    execute_owned_batch(conn, community, batch, fingerprints, writer, None).await
 }
 
 async fn execute_owned_batch(
@@ -233,7 +228,6 @@ async fn execute_owned_batch(
     fingerprints: &HashMap<String, String>,
     writer: &mut impl Write,
     context: Option<&stage::Context<'_>>,
-    media: Option<&media::Evidence>,
 ) -> Result<()> {
     let mut tx = conn.begin().await?;
     sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
@@ -247,16 +241,8 @@ async fn execute_owned_batch(
     line(writer, batch)?;
     for item in items(batch)? {
         let (table, predicate) = selection(item)?;
-        let hash = guards::inspect(
-            &mut tx,
-            community,
-            table,
-            predicate,
-            &item["key"],
-            false,
-            media,
-        )
-        .await?;
+        let hash =
+            guards::inspect(&mut tx, community, table, predicate, &item["key"], false).await?;
         if fingerprints.get(&identity(item)) != Some(&hash) {
             return Err(invalid(format!(
                 "{table} row changed after planning; current batch rolled back"

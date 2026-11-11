@@ -528,7 +528,29 @@ async fn real_workflow_orders_three_handlers_and_never_claims_full_erasure() {
     let transition = UserDeletionTransition::new(&store);
     let inventory = Inventory::read(&request).unwrap();
     let mut previous = None;
+    // An old media-first history must fail without silently inventing a gate.
+    let NextStage::Stage(initial) = transition.get_next_stage(&lease, None).await.unwrap() else {
+        panic!("initial gate")
+    };
+    sqlx::query("UPDATE entity_deletion_stage_history SET stage='purge_media' WHERE id=$1")
+        .bind(initial.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let legacy = serde_json::to_value(store.inspect(request.id).await.unwrap()).unwrap();
+    let error = transition.get_next_stage(&lease, None).await.unwrap_err();
+    assert!(error.to_string().contains("legacy media-first request"));
+    assert_eq!(
+        legacy,
+        serde_json::to_value(store.inspect(request.id).await.unwrap()).unwrap()
+    );
+    sqlx::query("UPDATE entity_deletion_stage_history SET stage='gate_user' WHERE id=$1")
+        .bind(initial.id)
+        .execute(&pool)
+        .await
+        .unwrap();
     let expected = vec![
+        ("gate_user", None),
         ("purge_media", None),
         ("purge_content", Some(inventory.communities[0].0)),
         ("purge_account", Some(inventory.communities[0].0)),

@@ -393,7 +393,7 @@ async fn workflow_children_orphans_and_warnings_are_printed_without_writes() {
     let (summary, lines) = preview(&pool, &options).await;
     let operations = items(&lines);
     assert_eq!(summary.items, 211);
-    assert_eq!(summary.warnings, 3);
+    assert_eq!(summary.warnings, 2);
     assert!(operations[..205]
         .iter()
         .all(|v| v["table"] == "workflow_approvals"));

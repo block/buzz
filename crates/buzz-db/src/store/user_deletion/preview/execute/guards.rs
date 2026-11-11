@@ -19,7 +19,6 @@ pub(super) async fn inspect(
     predicate: &str,
     key: &Value,
     preflight: bool,
-    evidence: Option<&media::Evidence>,
 ) -> Result<String> {
     if table == "workflow_approvals" {
         let inconsistent: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM workflow_approvals a JOIN workflow_runs r ON r.community_id=a.community_id AND r.id=a.run_id WHERE a.community_id=$1 AND a.token=decode($2->>'token_hash','hex') AND a.workflow_id<>r.workflow_id)").bind(community).bind(key).fetch_one(&mut *conn).await?;
@@ -29,14 +28,6 @@ pub(super) async fn inspect(
             ));
         }
     }
-    let media = match table {
-        "events" => "content || tags::text",
-        "workflow_runs" => "COALESCE(trigger_context::text,'') || execution_trace::text || COALESCE(error_message,'')",
-        "workflow_approvals" => "COALESCE(note,'') || approver_spec",
-        "workflows" => "definition::text",
-        "delivery_log" => "COALESCE(error_message,'')",
-        _ => "''::text",
-    };
     let active = match table {
         "workflow_runs" => "status NOT IN ('completed','failed','cancelled')",
         "push_match_queue" => "COALESCE(lease_until>clock_timestamp(),false)",
@@ -45,36 +36,18 @@ pub(super) async fn inspect(
         }
         _ => "false",
     };
-    // These formats may hide media in ciphertext. An empty URL scan cannot
-    // authorize losing their source before media evidence is integrated.
-    let opaque = if table == "events" {
-        "(kind IN (10000,10001,10003,30000,30003,30078,30300,30174,44200,30350) AND content<>'') OR tags @> '[\"encrypted\"]'::jsonb OR tags @> '[[\"encrypted\"]]'::jsonb"
-    } else {
-        "false"
-    };
     let lock = if preflight { "" } else { " FOR UPDATE" };
-    let query = format!("SELECT md5(to_jsonb(t)::text),({media}) ~* 'https?://|/media/',({active}),({opaque}) FROM {table} t WHERE community_id=$1 AND {predicate}{lock}");
-    let (hash, media, active, opaque): (String, bool, bool, bool) =
-        sqlx::query_as(sqlx::AssertSqlSafe(query))
-            .bind(community)
-            .bind(key)
-            .fetch_optional(&mut *conn)
-            .await?
-            .ok_or_else(|| invalid(format!("selected {table} row is missing")))?;
-    if opaque || (media && evidence.is_none()) {
-        return Err(invalid(format!(
-            "selected {table} payload requires media evidence; nothing further deleted"
-        )));
-    }
+    let query = format!("SELECT md5(to_jsonb(t)::text),({active}) FROM {table} t WHERE community_id=$1 AND {predicate}{lock}");
+    let (hash, active): (String, bool) = sqlx::query_as(sqlx::AssertSqlSafe(query))
+        .bind(community)
+        .bind(key)
+        .fetch_optional(&mut *conn)
+        .await?
+        .ok_or_else(|| invalid(format!("selected {table} row is missing")))?;
     if active {
         return Err(invalid(format!(
             "selected {table} has active work; nothing further deleted"
         )));
-    }
-    if let Some(evidence) = evidence {
-        evidence
-            .verify_source(conn, community, table, predicate, key)
-            .await?;
     }
     Ok(hash)
 }

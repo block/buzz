@@ -4,6 +4,7 @@ use sqlx::PgPool;
 /// Bounded, offline cleanup of one human's community account records.
 pub mod account_batches;
 mod discovery;
+mod gate;
 mod inventory;
 /// Read-only, ordered previews of human content cleanup batches.
 pub mod preview;
@@ -42,6 +43,9 @@ mod postgres_tests;
 
 #[cfg(test)]
 mod discovery_postgres_tests;
+
+#[cfg(test)]
+mod gate_postgres_tests;
 
 impl UserDeletionStore {
     /// Refuse offline execution while a serving worker owns external work.

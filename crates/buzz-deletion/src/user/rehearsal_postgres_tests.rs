@@ -1,6 +1,6 @@
 //! PostgreSQL coverage of the real print adapters and persisted worker recovery.
-//! Media's S3 scan is exercised separately in the local lab; this fixture starts
-//! at its completed journal boundary, never claiming to have tested storage.
+//! Media's S3 scan is outside this database fixture: its completed journal
+//! boundary is simulated, never claiming to have tested storage.
 use super::*;
 use buzz_db::{user_deletion::UserDeletionInventory, Db, DbConfig};
 use serde_json::{json, Value};
@@ -77,7 +77,6 @@ async fn rehearsal_worker_recovers_completed_stage_retries_limit_and_rejects_mod
                 offline: false,
                 stage: None,
                 community: None,
-                media_base: vec![],
                 relay_pubkey: None,
                 batch_size: 100,
                 max_items: 1_000_000,
@@ -109,6 +108,29 @@ async fn rehearsal_worker_recovers_completed_stage_retries_limit_and_rejects_mod
     args.delete = false;
     args.rehearse = true;
     args.offline = false;
+
+    // Exercise the real read-only gate through the worker. It advances to
+    // media without requiring S3, installing fences, or changing source rows.
+    let before_gate = source_snapshot(&pool).await;
+    assert_eq!(
+        run(&store, rehearsal.id, "gate-preview", &options, &cancel)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(before_gate, source_snapshot(&pool).await);
+    let saved = store.inspect(rehearsal.id).await.unwrap();
+    let gate = saved
+        .stage_history
+        .iter()
+        .find(|s| s.stage == "gate_user")
+        .unwrap();
+    assert_eq!(gate.status, "completed");
+    assert!(!gate.is_current);
+    assert_eq!(
+        gate.metadata_json["result"]["proposal"]["record"],
+        "user_gate_preview"
+    );
 
     // Establish only the media-completed boundary for this database-only test.
     let lease = store
@@ -249,4 +271,43 @@ async fn rehearsal_worker_recovers_completed_stage_retries_limit_and_rejects_mod
         serde_json::to_value(store.inspect(deletion.id).await.unwrap()).unwrap()
     );
     assert!(UserDeletionInventory::is_rehearsal(&store.get(rehearsal.id).await.unwrap()).unwrap());
+
+    // The destructive worker must execute the real gate before it can select
+    // media, without touching messages, memberships or uploader data.
+    let execution = options.real.as_mut().unwrap();
+    execution.db = Db::from_pool(pool.clone());
+    execution.args.rehearse = false;
+    execution.args.delete = true;
+    execution.args.offline = true;
+    assert_eq!(
+        run(&store, deletion.id, "delete-gate", &options, &cancel)
+            .await
+            .unwrap(),
+        0
+    );
+    let gated = store.inspect(deletion.id).await.unwrap();
+    let gate = gated
+        .stage_history
+        .iter()
+        .find(|s| s.stage == "gate_user")
+        .unwrap();
+    assert_eq!(gate.status, "completed");
+    assert!(!gate.is_current);
+    assert_eq!(gate.metadata_json["result"]["record"], "user_gate_complete");
+    assert_eq!(
+        gated
+            .stage_history
+            .iter()
+            .find(|s| s.is_current)
+            .unwrap()
+            .stage,
+        "purge_media"
+    );
+    let after_gate = source_snapshot(&pool).await;
+    for key in ["members", "allowlist", "events"] {
+        assert_eq!(after_gate[key], before[key]);
+    }
+    let fences: i64 = sqlx::query_scalar("SELECT count(*) FROM user_deletion_fences WHERE request_id=$1 AND pubkey=$2 AND scope_community_id IS NULL")
+        .bind(deletion.id).bind(TARGET).fetch_one(&pool).await.unwrap();
+    assert_eq!(fences, 1);
 }
