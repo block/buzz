@@ -350,6 +350,8 @@ void main() {
                 children: [
                   FrostedAppBar(
                     title: Text('Conversation'),
+                    titleContentHeight: 104,
+                    nativeTitleAvatars: [IosNavigationAction(label: 'Alice')],
                     alwaysFrosted: true,
                   ),
                 ],
@@ -359,6 +361,14 @@ void main() {
         ),
       );
       final backdrop = tester.element(find.byType(BackdropFilter));
+      expect(tester.getSize(find.byType(BackdropFilter)).height, 56);
+      expect(
+        find.descendant(
+          of: find.byType(BackdropFilter),
+          matching: find.text('Conversation'),
+        ),
+        findsNothing,
+      );
       final initial = tester
           .widget<Container>(
             find.byKey(const ValueKey('frosted-app-bar-background')),
