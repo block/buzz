@@ -3,10 +3,10 @@ use super::*;
 use sqlx::Connection;
 use std::collections::HashMap;
 
-mod guards;
 mod media;
 mod repair;
 mod stage;
+mod validation;
 
 impl UserDeletionStore {
     /// Run the shared message planner and apply its batches only in delete mode.
@@ -110,7 +110,7 @@ impl UserDeletionStore {
             .execute(&mut conn)
             .await?;
         crate::store::deletion::validate_catalog_on(&mut conn).await?;
-        guards::community(&mut conn, options.community).await?;
+        validation::community(&mut conn, options.community).await?;
         if let Some(context) = context {
             let mut tx = conn.begin().await?;
             context.bind(&mut tx).await?;
@@ -131,7 +131,7 @@ impl UserDeletionStore {
         for batch in &plan.batches {
             for item in items(batch)? {
                 let (table, predicate) = selection(item)?;
-                let hash = guards::inspect(
+                let hash = validation::inspect(
                     &mut conn,
                     options.community,
                     table,
@@ -236,19 +236,19 @@ async fn execute_owned_batch(
     if let Some(context) = context {
         context.validate(&mut tx).await?;
     }
-    guards::community(&mut tx, community).await?;
+    validation::community(&mut tx, community).await?;
     // Output must succeed before any mutation in this transaction.
     line(writer, batch)?;
     for item in items(batch)? {
         let (table, predicate) = selection(item)?;
         let hash =
-            guards::inspect(&mut tx, community, table, predicate, &item["key"], false).await?;
+            validation::inspect(&mut tx, community, table, predicate, &item["key"], false).await?;
         if fingerprints.get(&identity(item)) != Some(&hash) {
             return Err(invalid(format!(
                 "{table} row changed after planning; current batch rolled back"
             )));
         }
-        guards::children(&mut tx, community, table, &item["key"]).await?;
+        validation::children(&mut tx, community, table, &item["key"]).await?;
         let verb = if item["action"] == "would_clear_workflow_run_id"
             && table == "scheduled_workflow_fires"
         {

@@ -135,6 +135,12 @@ in the combined journey.
 
 ## Delete one handler at a time
 
+**Blocked until the separate gate handler is integrated.** This PR retains
+`gate_user` as the first workflow position but does not implement gating.
+Read-only output identifies it as `implemented: false`; a delete invocation
+currently fails at that stage without changing source data. The steps below
+apply after that separate prerequisite is supplied.
+
 Deletion needs separate explicit operator approval after inspecting rehearsal.
 The setup script has no delete action. Stop the relay and every worker using
 this database before invoking `--offline`; this flag is the operator's assertion
@@ -155,12 +161,12 @@ target/debug/buzz-admin user-deletions run "$REQUEST_ID" \
   --relay-pubkey "$RELAY_PUBKEY"
 ```
 
-Each invocation executes one handler and advances to the next. Inspect its saved
+After gate integration, each successful invocation executes one handler and advances to the next. Inspect its saved
 counters and verify the resulting state before proceeding:
 
 | Completed stage | Verification |
 | --- | --- |
-| Request-wide `gate_user` | Saved gate result matches the user, all active external work has drained, and no content or files have been deleted. |
+| Request-wide `gate_user` | Separate gate implementation and its verification are required; this PR cannot complete this stage in delete mode. |
 | Request-wide `purge_media` | Media fixture `verify --phase after-media`; content fixture must still match preview. |
 | First community `purge_content` | Content fixture `verify --phase after-content`. |
 | First community `purge_account` | Account fixture `verify --phase after-account`. |
@@ -190,7 +196,7 @@ not evidence that the person's entire account has been erased.
 ## Handler contract
 
 The worker supplies `ExecutionMode::ReadOnly` or `ExecutionMode::Delete` through
-one dispatcher call. Stage routing selects `gate::run`, `media_handler::run`, `content::run`
+one dispatcher call. Stage routing selects the gate placeholder, `media_handler::run`, `content::run`
 or `account::run`; each receives the same `HandlerContext` containing source DB,
 options, request, lease, stage, subject and mode. The handlers own mode decisions
 and reuse their existing scanners, selectors and planners. Delete-specific
@@ -204,12 +210,12 @@ as completed deletion. Each read-only stage observes original data, so its
 proposal is not a simulation of earlier stages' deletions.
 
 
-The first gate owns identity restrictions and the drain receipt. Delete mode
-requires `--offline`: stop the relay and external workers before running it,
-and keep them stopped throughout cleanup. The current identity fence enforces
-uploader admission only, so the receipt explicitly reports that online write
-fencing is incomplete. Media checks the completed gate and never installs it.
-Read-only mode prints the proposed gate without installing restrictions.
+Gate implementation is outside this PR. The first workflow position is retained
+for that separate handler; it cannot report destructive success while missing.
+The cleanup handlers add no serving guards, file reservations or user restrictions.
+They retain approved-scope and lease validation, exact deletion targets and
+retry checkpoints. Delete mode requires `--offline`: stop the relay and external
+workers before execution and keep them stopped throughout cleanup.
 
 Media decisions use upload attribution from `media_uploaders`, upload audit
 entries, and storage `_uploads` records. A copied link does not protect a file.
@@ -220,5 +226,5 @@ uploads can still require a bounded listing of upload records.
 
 Saved requests from the earlier media-first implementation cannot resume under
 this order. The worker fails with an explicit legacy-history error. Preserve
-that history and reconcile any partial deletion and reservations before
+that history and reconcile any partial deletion and legacy reservations before
 preparing a new request; do not manually relabel an old stage as completed gating.

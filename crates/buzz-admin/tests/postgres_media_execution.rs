@@ -156,44 +156,13 @@ async fn actual_handler_checks_retention_blocks_writers_and_recovers_deleted_ver
         .unwrap()
         .unwrap();
     let inventory = buzz_db::user_deletion::UserDeletionInventory::read(&request).unwrap();
-    let NextStage::Stage(gate) = requests
+    let NextStage::Stage(stage) = requests
         .transition_stage(&lease, None, |_, _| {
             Ok(StageTransition::Initialize(NewEntityStage {
-                stage: "gate_user".into(),
+                stage: "purge_media".into(),
                 community: None,
                 inputs: inventory.inputs(&human, None)?,
             }))
-        })
-        .await
-        .unwrap()
-    else {
-        panic!("gate missing")
-    };
-    requests.start_stage(&lease, gate.id).await.unwrap();
-    let scope = buzz_db::media_deletion::SubjectScope {
-        human: human.clone(),
-        agents: Default::default(),
-    };
-    let result = db
-        .user_deletion_store()
-        .gate_user(&lease, gate.id, &scope)
-        .await
-        .unwrap();
-    requests
-        .save_stage_success(&lease, gate.id, result)
-        .await
-        .unwrap();
-    let NextStage::Stage(stage) = requests
-        .transition_stage(&lease, Some(gate.id), |_, _| {
-            Ok(StageTransition::Advance {
-                previous: gate.id,
-                decision: json!({"kind":"stage", "stage":"purge_media"}),
-                successor: Some(NewEntityStage {
-                    stage: "purge_media".into(),
-                    community: None,
-                    inputs: inventory.inputs(&human, None)?,
-                }),
-            })
         })
         .await
         .unwrap()

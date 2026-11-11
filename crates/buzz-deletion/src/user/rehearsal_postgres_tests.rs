@@ -109,7 +109,7 @@ async fn rehearsal_worker_recovers_completed_stage_retries_limit_and_rejects_mod
     args.rehearse = true;
     args.offline = false;
 
-    // Exercise the real read-only gate through the worker. It advances to
+    // Exercise the read-only gate placeholder through the worker. It advances to
     // media without requiring S3, installing fences, or changing source rows.
     let before_gate = source_snapshot(&pool).await;
     assert_eq!(
@@ -125,6 +125,10 @@ async fn rehearsal_worker_recovers_completed_stage_retries_limit_and_rejects_mod
         .iter()
         .find(|s| s.stage == "gate_user")
         .unwrap();
+    assert_eq!(
+        gate.metadata_json["result"]["proposal"]["implemented"],
+        false
+    );
     assert_eq!(gate.status, "completed");
     assert!(!gate.is_current);
     assert_eq!(
@@ -272,42 +276,24 @@ async fn rehearsal_worker_recovers_completed_stage_retries_limit_and_rejects_mod
     );
     assert!(UserDeletionInventory::is_rehearsal(&store.get(rehearsal.id).await.unwrap()).unwrap());
 
-    // The destructive worker must execute the real gate before it can select
-    // media, without touching messages, memberships or uploader data.
+    // A separate gate implementation is outside this cleanup PR. Never turn
+    // its placeholder into destructive success or advance into media.
     let execution = options.real.as_mut().unwrap();
     execution.db = Db::from_pool(pool.clone());
     execution.args.rehearse = false;
     execution.args.delete = true;
     execution.args.offline = true;
-    assert_eq!(
-        run(&store, deletion.id, "delete-gate", &options, &cancel)
-            .await
-            .unwrap(),
-        0
-    );
-    let gated = store.inspect(deletion.id).await.unwrap();
-    let gate = gated
-        .stage_history
-        .iter()
-        .find(|s| s.stage == "gate_user")
-        .unwrap();
-    assert_eq!(gate.status, "completed");
-    assert!(!gate.is_current);
-    assert_eq!(gate.metadata_json["result"]["record"], "user_gate_complete");
-    assert_eq!(
-        gated
-            .stage_history
-            .iter()
-            .find(|s| s.is_current)
-            .unwrap()
-            .stage,
-        "purge_media"
-    );
-    let after_gate = source_snapshot(&pool).await;
-    for key in ["members", "allowlist", "events"] {
-        assert_eq!(after_gate[key], before[key]);
-    }
-    let fences: i64 = sqlx::query_scalar("SELECT count(*) FROM user_deletion_fences WHERE request_id=$1 AND pubkey=$2 AND scope_community_id IS NULL")
-        .bind(deletion.id).bind(TARGET).fetch_one(&pool).await.unwrap();
-    assert_eq!(fences, 1);
+    let error = run(&store, deletion.id, "delete-gate", &options, &cancel)
+        .await
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("gate_user handler is not implemented"));
+    let inspection = store.inspect(deletion.id).await.unwrap();
+    assert_eq!(inspection.stage_history.len(), 1);
+    let gate = &inspection.stage_history[0];
+    assert_eq!(gate.stage, "gate_user");
+    assert!(gate.is_current);
+    assert_ne!(gate.status, "completed");
+    assert_eq!(before, source_snapshot(&pool).await);
 }

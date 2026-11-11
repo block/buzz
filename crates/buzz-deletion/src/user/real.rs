@@ -13,7 +13,6 @@ use uuid::Uuid;
 
 mod account;
 mod content;
-mod gate;
 mod media_handler;
 
 pub(super) use buzz_db::user_deletion::ExecutionMode;
@@ -177,7 +176,7 @@ pub(super) async fn preview(
     }
     let mut complete = true;
     if selected.is_none() || selected == Some("gate_user") {
-        crate::print_json(&gate::proposal(subject))?;
+        crate::print_json(&gate_proposal(subject))?;
     }
     if selected.is_none() || selected == Some("purge_media") {
         let (storage, namespace) = media::configured_storage()?;
@@ -297,10 +296,23 @@ async fn execute(context: &HandlerContext<'_>) -> Result<serde_json::Value> {
     );
     // Stage routing is independent of mode. Each handler owns its effects.
     match context.row.stage.as_str() {
-        "gate_user" => gate::run(context).await,
+        "gate_user" => {
+            ensure!(context.mode == ExecutionMode::ReadOnly,
+                "gate_user handler is not implemented in this cleanup PR; supply the separate gate handler before destructive workflow execution");
+            let proposal = gate_proposal(context.subject);
+            crate::print_json(&proposal)?;
+            Ok(proposal)
+        }
         "purge_media" => media_handler::run(context).await,
         "purge_content" => content::run(context).await,
         "purge_account" => account::run(context).await,
         _ => bail!("unsupported real workflow stage {}", context.row.stage),
     }
+}
+
+// Routing includes this prerequisite, but gate implementation belongs separately.
+fn gate_proposal(subject: &str) -> serde_json::Value {
+    json!({"record":"user_gate_preview", "read_only":true, "subject":subject,
+        "community":null, "implemented":false,
+        "detail":"separate gate handler required before destructive workflow execution"})
 }

@@ -1,15 +1,18 @@
 # Run and recover a user-deletion workflow
 
-The real workflow runs `gate_user` and `purge_media` once with no community,
+The workflow routes `gate_user` and `purge_media` once with no community,
 then `purge_content` and `purge_account` for each approved community. It stops
 at `remaining_cleanup`; supported cleanup is not complete account erasure.
 See [the local test environment guide](user-deletion-lab.md) for real modes.
 
 `--read-only` uses the same stage order and journals proposals on a separately
-approved read-only request. `--delete --offline` applies them to the source.
-The first gate installs user restrictions and verifies admitted work has drained.
-The relay and external workers must remain stopped: the existing fence covers
-uploader admission, not every user write. Media only verifies the completed gate.
+approved read-only request. The gate is an integration placeholder: its preview
+reports `implemented: false`, and destructive execution stops there with an
+explicit error. Gate implementation belongs to separate work. This cleanup PR
+adds no write guards, reservations, admission hooks or fence installation.
+Once the separate gate handler is integrated, `--delete --offline` applies the
+cleanup handlers. Operators must keep the relay and external workers stopped
+throughout execution; the flag itself does not stop them.
 
 The `demo:` workflow remains available for orchestration tests using dummy
 actions and the artificial B/C inventory. Its gate transitions directly into

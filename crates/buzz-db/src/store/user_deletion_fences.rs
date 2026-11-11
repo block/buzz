@@ -1,6 +1,5 @@
-//! Operator-global restriction storage and identity locks. Uploader admission
-//! checks these restrictions; general user-write fencing is not yet complete.
-//! Destructive user cleanup therefore still requires stopped serving workers.
+//! Operator-global restriction storage and identity locks; no serving or worker
+//! path calls these helpers yet. Installing fences does not itself enforce them.
 //!
 //! Callers use a writer-pool READ COMMITTED transaction. Acquire existing
 //! community guards first, then `lock_request` for the worker, then all human
@@ -192,7 +191,7 @@ async fn read(
 /// verify that the identities and agent ownership belong to this request.
 pub async fn lock_request(tx: &mut Transaction<'_, Postgres>, lease: &EntityLease) -> Result<()> {
     let request = lock_owned(tx, lease).await?;
-    if request.entity_type != "user" || request.target.starts_with("rehearsal:") {
+    if request.entity_type != "user" {
         return Err(DbError::DeletionSafety(
             "fences require a user deletion request".into(),
         ));

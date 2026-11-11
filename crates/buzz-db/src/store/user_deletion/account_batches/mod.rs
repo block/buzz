@@ -9,8 +9,8 @@ use sqlx::{Connection, PgConnection};
 use std::io::Write;
 use uuid::Uuid;
 
-mod guards;
 mod operations;
+mod validation;
 mod workflow;
 use operations::{Operation, OPERATIONS};
 
@@ -135,7 +135,7 @@ impl UserDeletionStore {
                 .execute(&mut conn)
                 .await?;
             crate::store::deletion::validate_catalog_on(&mut conn).await?;
-            guards::community(&mut conn, &options).await?;
+            validation::community(&mut conn, &options).await?;
         }
         let mut summary = AccountBatchSummary {
             record: "account_batches_summary",
@@ -153,8 +153,8 @@ impl UserDeletionStore {
                     if let Some((lease, id)) = stage {
                         workflow::guard(&mut tx, lease, id, &options).await?;
                     }
-                    guards::community(&mut tx, &options).await?;
-                    guards::parent(&mut tx, &options, op).await?;
+                    validation::community(&mut tx, &options).await?;
+                    validation::parent(&mut tx, &options, op).await?;
                     let keys = select(&mut tx, &options, op, None, true, &summary).await?;
                     if keys.is_empty() {
                         tx.commit().await?;
@@ -167,7 +167,7 @@ impl UserDeletionStore {
                     }
                     batch(writer, &options, op, &keys, &summary)?;
                     mutate(&mut tx, &options, op, &keys).await?;
-                    guards::community(&mut tx, &options).await?;
+                    validation::community(&mut tx, &options).await?;
                     if let Some((lease, id)) = stage {
                         workflow::progress(&mut tx, id, op, keys.len()).await?;
                         // Output and SQL may have outlived the lease. Check the
