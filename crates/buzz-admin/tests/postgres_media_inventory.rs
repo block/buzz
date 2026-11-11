@@ -61,7 +61,10 @@ async fn preview_cli_saves_inventory_resumes_and_never_calls_delete() {
     let human = nostr::Keys::generate().public_key().to_hex();
     let community = Uuid::new_v4();
     let run = Uuid::new_v4();
-    let hash = "a".repeat(64);
+    let hash = format!("a{}a", Uuid::new_v4().simple()).repeat(2);
+    let hash = hash[..64].to_owned();
+    let storage_hash = format!("b{}b", Uuid::new_v4().simple()).repeat(2);
+    let storage_hash = storage_hash[..64].to_owned();
     sqlx::query("INSERT INTO communities (id,host) VALUES ($1,'preview-fixture.example.org')")
         .bind(community)
         .execute(&pool)
@@ -80,10 +83,10 @@ async fn preview_cli_saves_inventory_resumes_and_never_calls_delete() {
         hash: hash.clone(),
         upload_key: format!(
             "_uploads/{community}/{}/01ARZ3NDEKTSV4RRFFQ69G5FAV.json",
-            "b".repeat(64)
+            storage_hash
         ),
         upload_record: serde_json::json!({
-            "version":1,"community_id":community,"sha256":"b".repeat(64),
+            "version":1,"community_id":community,"sha256":storage_hash,
             "event_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","uploader_id":human
         })
         .to_string(),
@@ -105,8 +108,6 @@ async fn preview_cli_saves_inventory_resumes_and_never_calls_delete() {
                 &human,
                 "--run-id",
                 &run_id.to_string(),
-                "--mode",
-                "print-only",
                 "--max-source-rows",
                 &max_source_rows.to_string(),
                 "--scan-timeout-secs",
@@ -148,7 +149,7 @@ async fn preview_cli_saves_inventory_resumes_and_never_calls_delete() {
     );
     // This file has no database uploader or reference. Its historical upload
     // record alone must add it, and must be fetched at the listed version.
-    assert_eq!(inventory["files"][1]["file_hash"], "b".repeat(64));
+    assert_eq!(inventory["files"][1]["file_hash"], storage_hash);
     assert_eq!(
         inventory["files"][1]["evidence_json"]["sources"][0]["table"],
         "storage_uploads"
@@ -157,7 +158,11 @@ async fn preview_cli_saves_inventory_resumes_and_never_calls_delete() {
     assert!(!methods.is_empty());
     assert!(methods.iter().all(|m| *m == Method::GET));
     server.abort(); // Recovery must use the saved inventory even with S3 offline.
-    let second = invoke(run, 10_000_000).output().await.unwrap();
+    let second = invoke(run, 10_000_000)
+        .arg("--print-only")
+        .output()
+        .await
+        .unwrap();
     assert_eq!(
         second.status.code(),
         Some(0),
@@ -186,13 +191,13 @@ async fn preview_cli_saves_inventory_resumes_and_never_calls_delete() {
             "media",
             "--pubkey",
             &human,
-            "--mode",
-            "print",
+            "--print-only",
+            "--delete",
         ])
         .env_remove("DATABASE_URL")
         .output()
         .await
         .unwrap();
     assert!(!rejected.status.success());
-    assert!(String::from_utf8_lossy(&rejected.stderr).contains("approved workflow stage"));
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("cannot be used with"));
 }

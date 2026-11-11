@@ -1,14 +1,14 @@
 //! Direct media inventory and the shared three-step handler. The direct command
-//! is observational; a workflow must supply durable protection before execution.
+//! defaults to observation; explicit deletion requires an approved media stage.
 use anyhow::{bail, Context, Result};
 use buzz_db::media_deletion::{MediaDeletionStore, MediaFile, MediaRun, MediaTarget};
 use buzz_media::{MediaStorage, ObjectVersionRef};
-use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use uuid::Uuid;
 mod command;
 mod decision;
+mod execute;
 mod stage;
 mod storage;
 mod upload;
@@ -17,15 +17,14 @@ pub use stage::{run_stage, StageOptions};
 pub use upload::UploadClaims;
 
 /// Output/execution policy for the media stage.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, ValueEnum, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum Mode {
     /// Print saved step-2 inventory and stop before any deletion.
+    #[default]
     PrintOnly,
     /// Print saved step-2 inventory, then execute its protected targets.
-    Print,
-    /// Execute protected targets without printing inventory.
-    NoPrint,
+    Delete,
 }
 
 /// The workflow's safety boundary, distinct from its worker lease. The provider
@@ -87,9 +86,7 @@ pub async fn handle<P: ProtectedMedia>(
         .load(run)
         .await?
         .context("media discovery disappeared")?;
-    if mode != Mode::NoPrint {
-        crate::print_json(&json!({"stage_id":run.id,"mode":mode,"files":files}))?;
-    }
+    crate::print_json(&json!({"stage_id":run.id,"mode":mode,"files":files}))?;
     if mode == Mode::PrintOnly {
         return Ok(());
     }
