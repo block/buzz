@@ -350,7 +350,10 @@ class _HuddleJoinSurface extends ConsumerWidget {
     final canJoin =
         isMember && !isArchived && !ended && !stale && !blockedByOtherHuddle;
 
-    final label = unavailable
+    final viewHistory = ended || (stale && !isThisSession);
+    final label = viewHistory
+        ? 'View'
+        : unavailable
         ? 'Start new'
         : switch ((isThisSession, session.phase, ended || stale)) {
             (true, HuddleSessionPhase.connected, _) => 'Open',
@@ -358,7 +361,7 @@ class _HuddleJoinSurface extends ConsumerWidget {
             (true, HuddleSessionPhase.reconnecting, _) => 'Reconnecting',
             (true, HuddleSessionPhase.failed, _) => 'Retry',
             (true, _, _) => 'Joining',
-            (_, _, true) => 'Ended',
+            (_, _, true) => 'View',
             _ => 'Join',
           };
 
@@ -383,7 +386,7 @@ class _HuddleJoinSurface extends ConsumerWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    ended || stale || unavailable
+                    viewHistory || unavailable
                         ? 'Huddle ended'
                         : 'Huddle in progress',
                     style: context.textTheme.labelLarge?.copyWith(
@@ -405,9 +408,15 @@ class _HuddleJoinSurface extends ConsumerWidget {
             const SizedBox(width: Grid.xxs),
             FilledButton.tonal(
               key: ValueKey('huddle-$label-$ephemeralChannelId'),
-              onPressed:
-                  (canJoin || isThisSession) &&
-                      session.phase != HuddleSessionPhase.leaving
+              onPressed: viewHistory
+                  ? () => Navigator.of(context).push(
+                      MaterialPageRoute<void>(
+                        builder: (_) =>
+                            _HuddleHistoryPage(channelId: ephemeralChannelId),
+                      ),
+                    )
+                  : (canJoin || isThisSession) &&
+                        session.phase != HuddleSessionPhase.leaving
                   ? () => unavailable
                         ? unawaited(
                             _startMobileHuddleFromChannel(
