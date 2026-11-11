@@ -6,6 +6,10 @@ import 'package:buzz/features/activity/inbox_unread_provider.dart';
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/shared/me/default_agent.dart';
+import 'package:buzz/shared/relay/app_lifecycle_provider.dart';
+import 'package:buzz/shared/profile/user_cache_provider.dart';
+import 'package:buzz/shared/profile/user_profile.dart';
+import 'package:buzz/shared/shortcuts/home_screen_shortcuts.dart';
 import 'package:buzz/shared/widgets/frosted_app_bar.dart';
 import 'package:buzz/features/home/home_page.dart';
 import 'package:buzz/features/home/messages_filters.dart';
@@ -17,6 +21,7 @@ import 'package:buzz/features/search/search_page.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -39,6 +44,8 @@ void main() {
     bool disableAnimations = false,
     Gradient? topSectionGradient,
     ValueChanged<ValueNotifier<VoidCallback?>>? onNewChatAction,
+    String? bestie,
+    ValueChanged<String>? onOpenBestie,
   }) async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
@@ -46,8 +53,10 @@ void main() {
       overrides: [
         savedPrefsProvider.overrideWithValue(prefs),
         inboxHasUnreadProvider.overrideWithValue(inboxUnread),
-        defaultAgentProvider.overrideWith((ref) => Stream.value(null)),
+        defaultAgentProvider.overrideWith((ref) => Stream.value(bestie)),
         channelsProvider.overrideWith(_Channels.new),
+        // Lifecycle changes here exercise Home, not the relay connection.
+        appLifecycleProvider.overrideWith(_Lifecycle.new),
       ],
       child: MaterialApp(
         theme: AppTheme.light(topSectionGradient: topSectionGradient),
@@ -59,6 +68,8 @@ void main() {
         ),
         home: HomePage(
           onAgents: showAgents,
+          openBestieConversation: (_, _, pubkey) async =>
+              onOpenBestie?.call(pubkey),
           defaultAgentBuilder: (context) =>
               DefaultAgentLauncher(onChooseAgent: () => showAgents(context)),
           mePageBuilder: (_, action, workspace) {
@@ -342,6 +353,83 @@ void main() {
     });
   }
 
+  testWidgets('app icon shortcuts name the Bestie and open each destination', (
+    tester,
+  ) async {
+    const channel = MethodChannel('buzz/home_screen_shortcuts');
+    final published = <List<String>>[];
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(channel, (
+      call,
+    ) async {
+      if (call.method == 'setItems') {
+        published.add([
+          for (final item in call.arguments as List)
+            '${(item as Map)['title']}',
+        ]);
+      }
+      return null;
+    });
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        channel,
+        null,
+      ),
+    );
+    Future<Object?> tap(String type) async {
+      Object? reply;
+      await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+        channel.name,
+        const StandardMethodCodec().encodeMethodCall(MethodCall('open', type)),
+        (data) => reply = const StandardMethodCodec().decodeEnvelope(data!),
+      );
+      await tester.pumpAndSettle();
+      return reply;
+    }
+
+    final bestie = 'b' * 64;
+    ValueNotifier<VoidCallback?>? chat;
+    var created = 0;
+    final opened = <String>[];
+    await tester.pumpWidget(
+      await buildHome(
+        bestie: bestie,
+        onOpenBestie: opened.add,
+        onNewChatAction: (value) => chat = value,
+      ),
+    );
+    await tester.pumpAndSettle();
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    // A tap that launched the app waits for its destination to be ready.
+    expect(await tap('new-chat'), 'handled');
+    expect(created, 0);
+    chat!.value = () => created++;
+    ProviderScope.containerOf(tester.element(find.byType(HomePage)))
+        .read(userCacheProvider.notifier)
+        .put(UserProfile(pubkey: bestie, displayName: 'Pip'));
+    await tester.pumpAndSettle();
+    // iOS delivers the tap before the app is active again.
+    expect(created, 0);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pumpAndSettle();
+    expect(created, 1);
+    expect(published.last, ['New chat', 'New DM', 'Message Pip']);
+
+    // A tap with another screen open returns to Home first.
+    Navigator.of(
+      tester.element(find.byType(HomePage)),
+    ).push(MaterialPageRoute<void>(builder: (_) => const Text('Open sheet')));
+    await tester.pumpAndSettle();
+    await tap('message-bestie');
+    expect(find.text('Open sheet'), findsNothing);
+    expect(opened, [bestie]);
+    await tap('new-chat');
+    expect(created, 2);
+
+    await tester.pumpWidget(const SizedBox());
+    expect(published.last, isEmpty);
+    pendingHomeScreenShortcut.value = null;
+  }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
   for (final platform in [TargetPlatform.android, TargetPlatform.iOS]) {
     testWidgets('$platform scrolled bell opens Activity', (tester) async {
       debugDefaultTargetPlatformOverride = platform;
@@ -615,4 +703,9 @@ class _Channels extends ChannelsNotifier {
       isMember: true,
     ),
   ];
+}
+
+class _Lifecycle extends AppLifecycleNotifier {
+  @override
+  AppLifecycleState build() => AppLifecycleState.resumed;
 }

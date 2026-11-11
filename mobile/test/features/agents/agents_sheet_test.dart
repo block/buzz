@@ -280,6 +280,7 @@ void main() {
       overrides: [savedPrefsProvider.overrideWithValue(prefs)],
       home: HomePage(
         onAgents: showAgents,
+        openBestieConversation: (_, _, _) async {},
         defaultAgentBuilder: (context) => DefaultAgentLauncher(
           onChooseAgent: () => showAgents(context, createOnOpen: true),
         ),
