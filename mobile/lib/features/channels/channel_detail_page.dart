@@ -1,5 +1,6 @@
 import '../../shared/widgets/duo_toolbar.dart';
 import 'message_author_visibility.dart';
+
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 
 import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
@@ -27,7 +28,9 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 
+import '../../shared/agents/owned_agent_directory.dart';
 import '../../shared/emoji/emoji_burst.dart';
+import '../../shared/identity_archives/identity_archives.dart';
 import '../../shared/me/me_assistants.dart';
 import '../../shared/me/me_sync.dart';
 import '../../shared/me/me_search_placement.dart';
@@ -89,6 +92,7 @@ import 'jump_to_latest_switcher.dart';
 import 'local_message_send_animation_provider.dart';
 import 'local_message_send_transition.dart';
 import 'mobile_huddle_controller.dart';
+import 'dm_voice_agent_provider.dart';
 import 'message_actions.dart';
 import 'message_action_backdrop_state.dart';
 import 'message_long_press_region.dart';
@@ -122,6 +126,7 @@ part 'channel_detail_page/system_rows.dart';
 part 'channel_detail_page/thread_working.dart';
 part 'channel_detail_page/activity_members_sheet.dart';
 part 'channel_detail_page/huddle_sheet.dart';
+part 'channel_detail_page/huddle_agent_connection.dart';
 part 'channel_detail_page/huddle_call_avatar.dart';
 part 'channel_detail_page/huddle_participant_cluster.dart';
 part 'channel_detail_page/huddle_call_participants.dart';
@@ -571,10 +576,18 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
             memberProfilesPreloadState.connectionState !=
                 ConnectionState.done ||
             memberProfilesPreloadState.data != true);
+    final isAgentDm = _isOneToOneAgentDm(resolvedChannel, agentPubkeys);
+    final voiceAgent = isAgentDm
+        ? dmVoiceAgent(
+            resolvedChannel,
+            ref.watch(myPubkeyProvider),
+            ref.watch(ownedCodexVoiceAgentsProvider).value ?? const {},
+          )
+        : null;
     final showsHuddleAction =
         showsComposer &&
         !isAgentIdentityUnresolved &&
-        !_isOneToOneAgentDm(resolvedChannel, agentPubkeys);
+        (!isAgentDm || voiceAgent != null);
     final messagesNotifier = ref.read(messagesProvider.notifier);
     final isConnectionInProgress =
         sessionStatus == SessionStatus.connecting ||
@@ -851,7 +864,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
             _huddleNavigationAction(context, ref, resolvedChannel, [
               ...messagesState.value ?? const [],
               ...huddleLifecycle,
-            ]),
+            ], voiceAgent: voiceAgent),
         ],
         iconColor: context.colors.primary,
         titleContentHeight: appBarTitleContentHeight,
@@ -874,6 +887,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
             )
           else if (resolvedChannel.isDm ? showsHuddleAction : showsComposer)
             _HuddleButton(
+              voiceAgent: voiceAgent,
               channel: resolvedChannel,
               events: [...messagesState.value ?? const [], ...huddleLifecycle],
             ),
@@ -992,6 +1006,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                                           null),
                               channelId: channel.id,
                               isDm: resolvedChannel.isDm,
+                              flat: personalChat,
                               currentPubkey: currentPubkey,
                               isMember: resolvedChannel.isMember,
                               isArchived: resolvedChannel.isArchived,
@@ -1036,6 +1051,13 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                       ComposeBar(
                         channelId: channel.id,
                         focusNode: composerFocusNode,
+                        prefillScopeMessages:
+                            personalChat || resolvedChannel.isDm
+                            ? null
+                            : [
+                                for (final entry in timelineEntries)
+                                  entry.message,
+                              ],
                         onFocusRestorerChanged: (restoreFocus) =>
                             restoreComposerFocus.value = restoreFocus,
                         channelName: resolvedChannel.isDm

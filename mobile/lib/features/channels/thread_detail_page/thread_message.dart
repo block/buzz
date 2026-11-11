@@ -305,28 +305,13 @@ class _ThreadMessage extends HookConsumerWidget {
                                                 ),
                                               ),
                                             ),
-                                            if (message.edited) ...[
-                                              const SizedBox(width: Grid.half),
-                                              Text(
-                                                '(edited)',
-                                                style: context
-                                                    .textTheme
-                                                    .labelSmall
-                                                    ?.copyWith(
-                                                      color: context
-                                                          .colors
-                                                          .onSurfaceVariant,
-                                                      fontStyle:
-                                                          FontStyle.italic,
-                                                    ),
-                                              ),
-                                            ],
                                           ],
                                         ),
                                       ),
                                     MessageContent(
                                       key: swipeContentKey,
                                       content: message.content,
+                                      edited: message.edited,
                                       bubble: true,
                                       hasReactions:
                                           message.reactions.isNotEmpty,
@@ -366,6 +351,13 @@ class _ThreadMessage extends HookConsumerWidget {
                                                 ),
                                               );
                                             },
+                                      nativePhotoActions: nativeImageActions(
+                                        context: context,
+                                        ref: ref,
+                                        message: message,
+                                        channelId: channelId,
+                                        canManageMessage: canManageMessage,
+                                      ),
                                       onMediaMore: (viewerContext, imageUrl) =>
                                           showImageActions(
                                             context: viewerContext,

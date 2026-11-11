@@ -16,6 +16,10 @@ RUN apk add --no-cache \
       protoc
 WORKDIR /build
 COPY . .
+# GCC's outlined ARM64 atomics require libgcc helpers that Rust's static musl
+# link does not provide (notably __aarch64_ldadd4_sync in vendored D-Bus).
+# Emit baseline ARM64 atomics inline; cc-rs applies this only to that target.
+ENV CFLAGS_aarch64_unknown_linux_musl="-mno-outline-atomics"
 RUN cargo build --locked --profile sprig -p sprig \
     && strip target/sprig/sprig
 

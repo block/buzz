@@ -1,12 +1,16 @@
 # Buzz domain language
 
-Shared terminology for Buzz product behavior. This glossary currently covers mobile [push suppression](#push-suppression) and [mobile builds](#mobile-builds); it is not a complete model of Buzz.
+Shared terminology for Buzz product behavior. This glossary currently covers mobile [push suppression](#push-suppression), the [notification body](#notification-body) and [mobile builds](#mobile-builds); it is not a complete model of Buzz.
 
 ## Notifications
 
 ### Mobile push notification
 
 A notification directed to a user's mobile installation through the platform's push service.
+
+### Notification body
+
+The text a [mobile push notification](#mobile-push-notification) shows for a message: the message's text with its Markdown syntax removed, cut only where the platform would cut it. See [ADR 0002](docs/adr/0002-notification-message-text.md).
 
 ### Push suppression
 
