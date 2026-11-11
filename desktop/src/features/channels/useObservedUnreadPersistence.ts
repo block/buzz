@@ -103,6 +103,10 @@ export function useObservedUnreadPersistence(
   );
   const nativeRef = React.useRef<NativeState | null>(null);
   const nativeFailedRef = React.useRef(false);
+  // Bumped on every scope reset. A reopen that started under an earlier epoch
+  // must not write its snapshot into the current one: the scope key alone
+  // cannot tell A -> B -> A apart from A.
+  const openEpochRef = React.useRef(0);
   const timerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const queueRef = React.useRef<QueuedObservedUnreadEvent[]>([]);
   const pendingMarkersRef = React.useRef(
@@ -121,6 +125,7 @@ export function useObservedUnreadPersistence(
 
   const reopen = React.useCallback(
     async (scope: { pubkey: string; relayUrl: string }) => {
+      const epoch = openEpochRef.current;
       const response = await openObservedUnreadScope({
         scope,
         legacyPayload: null,
@@ -130,11 +135,11 @@ export function useObservedUnreadPersistence(
         throw new Error(
           "native observed-unread reopen did not return snapshot",
         );
-      if (
-        activityScopeKey(scope.pubkey, scope.relayUrl) !==
-        scopeLoadedRef.current
-      )
-        return;
+      if (epoch !== openEpochRef.current) return;
+      // `apply` starts a reopen without awaiting it. If the ingest chain
+      // declared native unhealthy in the meantime, restoring the handle here
+      // would send later writes to native while readers stay on the fallback.
+      if (nativeFailedRef.current) return;
       nativeRef.current = {
         scope,
         generation: response.generation,
@@ -521,6 +526,7 @@ export function useObservedUnreadPersistence(
     flushCoalesced();
     flushNative();
     flushObservedUnreadWrite(persistRefs.current);
+    openEpochRef.current += 1;
     nativeRef.current = null;
     nativeFailedRef.current = false;
     projectionsRef.current = new Map();

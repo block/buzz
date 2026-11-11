@@ -1071,3 +1071,145 @@ test("catch-up: a completed fetch is not replayed when read-state activity re-ru
     rig.restore();
   }
 });
+
+// ── Reopen fencing ───────────────────────────────────────────────────────────
+//
+// `apply` starts a reopen without awaiting it, outside the ingest chain. Its
+// snapshot can land after the chain has moved on: after native was declared
+// failed, or after the scope went A -> B -> A. Both must be dropped.
+
+/** Hold the next `observed_unread_open_scope` result until the returned fn runs. */
+function holdNextOpen() {
+  const inner = globalThis.window.__TAURI_INTERNALS__.invoke;
+  let release;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  let armed = true;
+  globalThis.window.__TAURI_INTERNALS__.invoke = async (command, args) => {
+    const result = inner(command, args);
+    if (command !== "observed_unread_open_scope" || !armed) return result;
+    armed = false;
+    const value = await result;
+    await gate;
+    return value;
+  };
+  return release;
+}
+
+function sequentialGenerations() {
+  let generation = 0;
+  return () => `gen-${++generation}`;
+}
+
+test("reopen: a snapshot that lands after native failed does not split readers from writers", async () => {
+  installFreshStorage();
+  let harness;
+  const failCommands = new Set();
+  const rig = installNativeRig({
+    failCommands,
+    newGeneration: sequentialGenerations(),
+  });
+  const scope = { pubkey: "pk-reopen-after-failure", relayUrl: RELAY };
+  const refs = makeRefs();
+  try {
+    harness = await mountHook({ ...DEFAULT_PROPS, pubkey: scope.pubkey }, refs);
+    await settle();
+
+    // A rebuilt generation makes the next delta mismatch, so `apply` starts an
+    // un-awaited reopen. Hold its result.
+    rig.rebuildScope(scope);
+    const release = holdNextOpen();
+    harness.api.updateMembership("followed", "reopen-trigger", true);
+    await settle();
+    assert.equal(
+      rig.requests("observed_unread_open_scope").length,
+      2,
+      "precondition: the generation mismatch started a reopen",
+    );
+
+    // Meanwhile the chain fails twice and declares native unhealthy.
+    failCommands.add("observed_unread_ingest");
+    failCommands.add("observed_unread_open_scope");
+    harness.api.updateMembership("followed", "fails", true);
+    await settle();
+    await settle();
+    assert.equal(harness.api.isNative(), false, "precondition: fallback");
+
+    // The stale reopen now resolves.
+    release();
+    await settle();
+
+    const ingestsBefore = rig.requests("observed_unread_ingest").length;
+    harness.api.advanceLatest("channel-split", NOW_S);
+    await settle();
+    assert.equal(
+      harness.api.latestForChannel("channel-split"),
+      NOW_S,
+      "a write after the failure must land where the fallback reader looks",
+    );
+    assert.equal(
+      rig.requests("observed_unread_ingest").length,
+      ingestsBefore,
+      "a stale reopen must not re-arm native writes after the failure",
+    );
+    assert.equal(harness.api.isNative(), false);
+  } finally {
+    await harness?.unmount();
+    rig.restore();
+  }
+});
+
+test("reopen: a snapshot from before a scope round-trip (A -> B -> A) is dropped", async () => {
+  installFreshStorage();
+  let harness;
+  const rig = installNativeRig({ newGeneration: sequentialGenerations() });
+  const scope = { pubkey: "pk-reopen-aba", relayUrl: RELAY };
+  try {
+    harness = await mountHook(
+      { ...DEFAULT_PROPS, pubkey: scope.pubkey },
+      makeRefs(),
+    );
+    await settle();
+
+    rig.rebuildScope(scope);
+    const release = holdNextOpen();
+    harness.api.updateMembership("followed", "under-old-open", true);
+    await settle();
+    assert.equal(
+      rig.requests("observed_unread_open_scope").length,
+      2,
+      "precondition: the generation mismatch started a reopen",
+    );
+
+    // Switch away and back while that reopen is pending, then move on under
+    // the fresh open.
+    await harness.render({ ...DEFAULT_PROPS, pubkey: "pk-reopen-aba-other" });
+    await settle();
+    await harness.render({ ...DEFAULT_PROPS, pubkey: scope.pubkey });
+    await settle();
+    harness.api.updateMembership("followed", "under-fresh-open", true);
+    await settle();
+    const sequenceBefore = rig.scope(scope).lastSequence;
+
+    // The stale snapshot carries an older revision and sequence.
+    release();
+    await settle();
+
+    harness.api.updateMembership("followed", "after-stale-snapshot", true);
+    await settle();
+    assert.equal(
+      rig.scope(scope).lastSequence,
+      sequenceBefore + 1,
+      "the write after the stale snapshot must use the fresh sequence, not replay an acked one",
+    );
+    assert.ok(
+      rig.scope(scope).membership.has("followed\u0000after-stale-snapshot"),
+      "a stale reopen must not make the next mutation a silent no-op",
+    );
+    assert.equal(harness.api.isNative(), true);
+  } finally {
+    await harness?.unmount();
+    rig.restore();
+  }
+});
