@@ -339,6 +339,7 @@ class DefaultAgentVoiceControl extends HookConsumerWidget {
         },
         onPointerCancel: (_) => unawaited(cancel()),
         child: GestureDetector(
+          excludeFromSemantics: true,
           behavior: HitTestBehavior.opaque,
           onLongPressStart: enabled ? (_) => unawaited(start()) : null,
           onLongPressMoveUpdate: (details) {

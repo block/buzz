@@ -427,6 +427,10 @@ void main() {
       final node = tester.getSemantics(find.byType(DefaultAgentVoiceControl));
       expect(node.value, value);
       expect(node.hint, isNot(contains('Hold to record')));
+      expect(
+        node.getSemanticsData().hasAction(SemanticsAction.longPress),
+        isFalse,
+      );
       final surface = tester.widget<Semantics>(
         find
             .descendant(
