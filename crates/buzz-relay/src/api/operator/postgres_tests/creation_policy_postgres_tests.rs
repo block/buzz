@@ -397,8 +397,6 @@ mod postgres_tests {
             .expect("lookup")
             .expect("row")
             .id;
-        Arc::make_mut(&mut Arc::get_mut(&mut state).expect("exclusive").config).relay_url =
-            format!("wss://{host}");
         set_creation(&mut state, false);
         archive_for_owner_deletion(&state, &host, &owner).await;
         let response = signed_operator_request(
@@ -410,6 +408,11 @@ mod postgres_tests {
         )
         .await;
         assert_eq!(response.status(), StatusCode::ACCEPTED);
+        // Queue deletion while this is an extra community: the deployment
+        // community is protected from archival and deletion. Then select it
+        // as canonical to exercise legacy convergence against pending deletion.
+        Arc::make_mut(&mut Arc::get_mut(&mut state).expect("exclusive").config).relay_url =
+            format!("wss://{host}");
         let rotation =
             legacy_request(state.clone(), &operator, &host, Some(&Keys::generate())).await;
         assert_eq!(rotation.status(), StatusCode::CONFLICT);
