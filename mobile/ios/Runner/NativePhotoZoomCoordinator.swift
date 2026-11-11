@@ -72,7 +72,7 @@ final class NativePhotoZoomCoordinator {
          let width = args["railWindowWidth"] as? Double,
          let height = args["railWindowHeight"] as? Double,
          [center, width, height].allSatisfy({ $0.isFinite }), width > 0, height > 0 {
-        controller.sourceRailGeometry = (CGSize(width: width, height: height), center)
+        controller.sourceRailGeometry = (CGSize(width: width, height: height), CGFloat(center))
       }
       controller.request = { [weak self] method, index, action, completion in
         var payload: [String: Any] = ["session": session, "index": index]
