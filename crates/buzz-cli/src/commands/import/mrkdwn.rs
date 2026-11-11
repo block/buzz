@@ -1,8 +1,10 @@
 //! Minimal Slack mrkdwn → markdown conversion.
 //!
-//! Code blocks (``` fenced) and inline code (single backtick) are preserved
-//! verbatim. Outside code, Slack angle-bracket tokens are rewritten to
-//! plain-text/markdown equivalents and HTML entities are unescaped.
+//! Outside code, Slack angle-bracket tokens are rewritten to plain-text or
+//! markdown equivalents and HTML entities are unescaped. Inside code blocks
+//! (``` fenced) and inline code (single backtick) no markdown is produced, but
+//! Slack's own encoding is still undone: it escapes `&`, `<` and `>` and wraps
+//! URLs in angle brackets everywhere, code included.
 //!
 //! Mentions become plain `@Name` text on purpose — no `p` tags are emitted
 //! anywhere in the importer, so backdated history cannot flood mention
@@ -14,8 +16,8 @@ use std::collections::HashMap;
 ///
 /// `user_names` maps Slack user IDs to display names for `<@U...>` tokens.
 pub fn convert(text: &str, user_names: &HashMap<String, String>) -> String {
-    map_outside_code_blocks(text, |segment| {
-        map_outside_inline_code(segment, |plain| {
+    map_delimited(text, "```", decode_code, |segment| {
+        map_delimited(segment, "`", decode_code, |plain| {
             let replaced = convert_tokens(plain, user_names);
             let unescaped = unescape_entities(&replaced);
             convert_bold(&unescaped)
@@ -23,37 +25,56 @@ pub fn convert(text: &str, user_names: &HashMap<String, String>) -> String {
     })
 }
 
-/// Split on ``` fences; apply `f` to segments outside fences, keep fenced
-/// segments (and the fences themselves) verbatim.
-fn map_outside_code_blocks(text: &str, f: impl Fn(&str) -> String) -> String {
+/// Split on `delimiter`; apply `outside` to the segments outside a delimited
+/// span and `inside` to the spans themselves, keeping the delimiters.
+fn map_delimited(
+    text: &str,
+    delimiter: &str,
+    inside: impl Fn(&str) -> String,
+    outside: impl Fn(&str) -> String,
+) -> String {
     let mut out = String::with_capacity(text.len());
-    for (i, segment) in text.split("```").enumerate() {
+    for (i, segment) in text.split(delimiter).enumerate() {
         if i > 0 {
-            out.push_str("```");
+            out.push_str(delimiter);
         }
         if i % 2 == 0 {
-            out.push_str(&f(segment));
+            out.push_str(&outside(segment));
         } else {
-            out.push_str(segment);
+            out.push_str(&inside(segment));
         }
     }
     out
 }
 
-/// Split on single backticks; apply `f` outside inline code spans.
-fn map_outside_inline_code(text: &str, f: impl Fn(&str) -> String) -> String {
-    let mut out = String::with_capacity(text.len());
-    for (i, segment) in text.split('`').enumerate() {
-        if i > 0 {
-            out.push('`');
-        }
-        if i % 2 == 0 {
-            out.push_str(&f(segment));
-        } else {
-            out.push_str(segment);
+/// Undo Slack's encoding inside code without adding markdown: a bracketed URL
+/// becomes the bare URL, and entities become the characters they stand for.
+fn decode_code(code: &str) -> String {
+    let mut out = String::with_capacity(code.len());
+    let mut rest = code;
+    while let Some(start) = rest.find('<') {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 1..];
+        let link = after
+            .find('>')
+            .map(|end| (&after[..end], &after[end + 1..]));
+        match link {
+            Some((inner, tail))
+                if ["http://", "https://", "mailto:"]
+                    .iter()
+                    .any(|scheme| inner.starts_with(scheme)) =>
+            {
+                out.push_str(split_pipe(inner).0);
+                rest = tail;
+            }
+            _ => {
+                out.push('<');
+                rest = after;
+            }
         }
     }
-    out
+    out.push_str(rest);
+    unescape_entities(&out)
 }
 
 /// Rewrite `<...>` tokens: user/channel mentions, specials, and links.
@@ -235,6 +256,28 @@ mod tests {
         assert_eq!(
             convert("run `cmd <@U123>` now", &names()),
             "run `cmd <@U123>` now"
+        );
+    }
+
+    #[test]
+    fn code_is_decoded_but_gains_no_markdown() {
+        // Slack escapes `&`, `<`, `>` inside code as well; the reader must see
+        // the characters, not the entities.
+        assert_eq!(
+            convert("```if a &lt; b &amp;&amp; c &gt; d {}```", &names()),
+            "```if a < b && c > d {}```"
+        );
+        assert_eq!(
+            convert("use `Vec&lt;u8&gt;` here", &names()),
+            "use `Vec<u8>` here"
+        );
+        // A URL Slack wrapped in brackets becomes the bare URL, never a link.
+        assert_eq!(
+            convert(
+                "```curl <https://example.org/a?b=1&amp;c=2|example.org>```",
+                &names()
+            ),
+            "```curl https://example.org/a?b=1&c=2```"
         );
     }
 

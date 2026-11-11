@@ -115,6 +115,11 @@ import and archived again afterwards. DMs and MPIMs cannot be adopted this way:
 they are opened through Buzz's native DM command so the relay can enforce the
 exact participant set.
 
+The importer only ever writes into a channel it created itself or one named in
+`--channel-map`. A relay keeps listed channel names unique, so when the
+community already has a `#general`, creating Slack's `#general` is refused and
+the run stops; map the Slack channel to the existing one to import into it.
+
 `--user-map` tells the importer which Slack users hold a Buzz key, as
 `SLACKID=npub-or-hex` pairs. It takes public keys only and is used for
 membership, not attribution:
@@ -128,7 +133,9 @@ membership, not attribution:
   the person running it to someone else's private conversation. Buzz supports
   2–9 DM participants and one DM per participant set, so two Slack
   conversations that resolve to the same set are blocked rather than merged. A
-  dry run lists each blocked conversation with its reason.
+  blocked conversation is left out with a warning and listed in the summary as
+  `dm_conversations_blocked`; the rest of the workspace is still imported. A
+  dry run lists each one with its reason.
 
 ## Ordering, pacing, and resume
 
@@ -153,10 +160,16 @@ membership, not attribution:
   before it is sent. If the run is interrupted, or the relay's answer is lost,
   the next run looks that id up on the relay and either adopts the stored event
   or signs the message again.
-- **A partial run exits non-zero.** The summary's `failed` count is the number
-  of writes the relay did not confirm; run the same command again to finish.
-  `skipped` counts records that can never be imported, such as a message over
-  the relay's size limit.
+- **A run stops at the first message the relay does not confirm.** A message
+  retried later would be stamped later and land after everything imported in
+  between, so the importer does not carry on past a gap. Run the same command
+  again to continue from that message.
+- **A partial run exits non-zero.** Besides a stopped run, the summary's
+  `failed` count covers the other writes the relay did not confirm (a reaction,
+  a member, a topic, an archive); running again retries them. `skipped` counts
+  records that can never be imported, such as a message over the relay's size
+  limit. Those are recorded, so they do not keep a finished import looking
+  partial.
 
 ## Before you run it
 
@@ -175,7 +188,9 @@ membership, not attribution:
 
 ## Text conversion (mrkdwn → markdown)
 
-Code blocks and inline code are preserved verbatim. Outside code:
+Inside code blocks and inline code, Slack's own encoding is undone and nothing
+else changes: `&lt;` `&gt;` `&amp;` become the characters they stand for, and a
+URL Slack wrapped as `<https://…|label>` becomes the bare URL. Outside code:
 
 - `<@U123>` → `@DisplayName`
 - `<#C123|name>` → `#name`
@@ -240,7 +255,7 @@ buzz import slack
 
 Output follows CLI conventions: progress on stderr and a final JSON summary on
 stdout (`channels_created`, `messages_imported`, `reactions_imported`,
-`private_members_added`, `private_members_unmapped`, `skipped`, `failed`,
-`warnings`, `state_file`). A dry run instead reports conversation classes,
+`private_members_added`, `private_members_unmapped`,
+`dm_conversations_blocked`, `skipped`, `failed`, `warnings`, `state_file`). A dry run instead reports conversation classes,
 raw and skipped record counts, reaction use, private membership coverage,
 channels to adopt, and blocked DMs.

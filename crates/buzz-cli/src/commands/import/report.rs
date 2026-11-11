@@ -89,7 +89,7 @@ pub(super) fn dry_run_report(
         duplicate_records += scan.duplicate_records;
         for msg in scan.messages {
             let message_key = ImportState::message_key(&channel.id, &msg.ts);
-            if !state.messages.contains_key(&message_key) {
+            if !state.message_settled(&message_key) {
                 if dm_blocker.is_some() {
                     dm_messages_blocked += 1;
                 } else {
@@ -149,7 +149,7 @@ pub(super) fn pending_reaction_count(
     msg.reactions
         .iter()
         .map(|reaction| emoji_for_shortcode(&reaction.name))
-        .filter(|emoji| !state.reactions.contains(&format!("{message_key}:{emoji}")))
+        .filter(|emoji| !state.reaction_settled(&format!("{message_key}:{emoji}")))
         .collect::<HashSet<_>>()
         .len()
 }

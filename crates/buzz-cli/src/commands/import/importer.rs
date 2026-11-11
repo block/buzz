@@ -12,7 +12,7 @@ use buzz_core::kind::KIND_STREAM_MESSAGE;
 use nostr::{EventBuilder, EventId, Timestamp};
 use uuid::Uuid;
 
-use super::channel_state::require_unarchived;
+use super::channel_state::{is_archived, require_unarchived};
 use super::dm::{
     build_import_dm_open, ensure_dm_uuid_unclaimed, mapped_dm_participants, response_payload,
 };
@@ -23,11 +23,6 @@ use super::render::{emoji_for_shortcode, render_attachment, render_slack_blocks}
 use super::state::{ChannelState, ImportState, Journal, JournalRecord};
 use crate::client::BuzzClient;
 use crate::error::CliError;
-
-/// Abort after this many consecutive message-submit failures — a wall of
-/// failures means the relay is down or rejecting everything, not a handful
-/// of individually bad messages.
-const MAX_CONSECUTIVE_FAILURES: usize = 5;
 
 /// Unconfirmed event ids looked up per relay query when settling the pending
 /// intents a previous run left behind.
@@ -40,6 +35,8 @@ struct Summary {
     reactions_imported: u64,
     private_members_added: u64,
     private_members_unmapped: u64,
+    /// DMs left out because they cannot be opened safely, with the reason.
+    conversations_blocked: Vec<String>,
     /// Records that can never be imported (for example, over the size limit).
     skipped: u64,
     /// Writes the relay did not confirm; a re-run retries them.
@@ -106,6 +103,16 @@ impl<'a> Importer<'a> {
             skip_reactions: options.skip_reactions,
             user_map: options.user_map,
         })
+    }
+
+    /// Note a DM that is left out of this run because it cannot be opened
+    /// safely.
+    pub(super) fn block_conversation(&mut self, slack_id: &str, reason: &str) {
+        self.summary
+            .warn(format!("not importing {slack_id}: {reason}"));
+        self.summary
+            .conversations_blocked
+            .push(slack_id.to_string());
     }
 
     /// Compact the ledger: rewrite the snapshot, then drop the journal entries
@@ -187,6 +194,7 @@ impl<'a> Importer<'a> {
             return self.ensure_dm(channel).await;
         }
 
+        let mut created_now = false;
         let (uuid, metadata_done) = match self.state.channels.get(&channel.id) {
             Some(state) => (
                 Uuid::parse_str(&state.uuid)
@@ -214,9 +222,35 @@ impl<'a> Importer<'a> {
                     false,
                 )
                 .map_err(|e| CliError::Other(format!("build_create_channel failed: {e}")))?;
-                submit(self.client, builder).await.map_err(|e| {
-                    CliError::Other(format!("channel create failed for #{}: {e}", channel.name))
-                })?;
+                let (_, response) =
+                    submit_with_response(self.client, builder)
+                        .await
+                        .map_err(|e| {
+                            // The relay keeps listed channel names unique, so a
+                            // workspace that already has this name needs the
+                            // operator to say which channel receives the history.
+                            let hint = if e.to_string().contains("already exists") {
+                                "; to import into an existing channel, name it with --channel-map"
+                            } else {
+                                ""
+                            };
+                            CliError::Other(format!(
+                                "channel create failed for #{}: {e}{hint}",
+                                channel.name
+                            ))
+                        })?;
+                // The UUID is derived from public Slack ids, so a channel that
+                // already holds it may belong to someone else. Never write
+                // history into a channel this ledger did not create: adopting
+                // one is the operator's explicit choice.
+                if is_duplicate(&response) {
+                    return Err(CliError::Usage(format!(
+                        "Buzz channel {uuid} already exists but is not in the state file, so \
+                         Slack conversation {} was not imported into it; if that channel is \
+                         yours, adopt it with --channel-map ({},{uuid})",
+                        channel.id, channel.id
+                    )));
+                }
 
                 // Persist the UUID before the separate topic write. If that
                 // write or the process fails, a re-run resumes metadata on the
@@ -228,48 +262,25 @@ impl<'a> Importer<'a> {
                         metadata_done: false,
                         archived_done: false,
                         private_visibility_done: channel.kind.is_private(),
-                        prepared_for_import: true,
+                        restore_archived: false,
                         members_added: std::collections::HashSet::new(),
                     },
                 );
                 self.flush()?;
                 self.summary.channels_created += 1;
+                created_now = true;
                 (uuid, false)
             }
         };
 
-        let (prepared_for_import, archived_done) = self
-            .state
-            .channels
-            .get(&channel.id)
-            .map(|state| (state.prepared_for_import, state.archived_done))
-            .unwrap_or((true, false));
-        if !prepared_for_import || (channel.is_archived && archived_done && needs_writes) {
-            // The crosswalk says which channel to adopt, but not whether that
-            // Buzz channel is currently archived. Attempt the transition on
-            // every first adoption, even when Slack says the source is active.
-            // Kind:9002 side effects are best-effort at the relay, so its
-            // accepted response cannot prove the channel is active. Read the
-            // relay-generated channel metadata back before any history write.
-            let builder = buzz_sdk::build_unarchive(uuid)
-                .map_err(|e| CliError::Other(format!("build_unarchive failed: {e}")))?;
-            submit(self.client, builder).await.map_err(|error| {
-                CliError::Other(format!(
-                    "could not prepare conversation {} for history import: {error}",
-                    channel.id
-                ))
-            })?;
-            require_unarchived(self.client, uuid, &channel.id).await?;
-            if let Some(state) = self.state.channels.get_mut(&channel.id) {
-                state.prepared_for_import = true;
-                state.archived_done = false;
-            }
-            self.flush()?;
+        // A channel this run did not just create may be archived: one adopted
+        // through the crosswalk, or one an earlier run already archived.
+        if needs_writes && !created_now {
+            self.reopen_if_archived(channel, uuid).await?;
         }
 
-        // Older importer ledgers could contain a Slackdump private record from
-        // `channels.json` even though the old create path always emitted
-        // `visibility=open`. Narrow it before publishing any history.
+        // An adopted channel's visibility is unknown. Narrow it before
+        // publishing any private history.
         let private_visibility_done = self
             .state
             .channels
@@ -316,13 +327,63 @@ impl<'a> Importer<'a> {
                     }
                     self.flush()?;
                 }
-                Err(e) => self
-                    .summary
-                    .warn(format!("topic set failed for #{}: {e}", channel.name)),
+                Err(e) => {
+                    self.summary
+                        .warn(format!("topic set failed for #{}: {e}", channel.name));
+                    self.summary.failed += 1;
+                }
             }
         }
 
         Ok(uuid)
+    }
+
+    /// History cannot be written into an archived channel. Reopen one the
+    /// relay reports as archived, after recording that it has to be archived
+    /// again — so the channel is restored even if this run is interrupted.
+    async fn reopen_if_archived(
+        &mut self,
+        channel: &SlackChannel,
+        uuid: Uuid,
+    ) -> Result<(), CliError> {
+        if !is_archived(self.client, uuid, &channel.id).await? {
+            return Ok(());
+        }
+        if let Some(state) = self.state.channels.get_mut(&channel.id) {
+            state.restore_archived = true;
+            state.archived_done = false;
+        }
+        self.flush()?;
+        let builder = buzz_sdk::build_unarchive(uuid)
+            .map_err(|e| CliError::Other(format!("build_unarchive failed: {e}")))?;
+        submit(self.client, builder).await.map_err(|error| {
+            CliError::Other(format!(
+                "could not prepare conversation {} for history import: {error}",
+                channel.id
+            ))
+        })?;
+        require_unarchived(self.client, uuid, &channel.id).await
+    }
+
+    /// Archive a channel whose history is in. The relay refuses to archive a
+    /// channel twice, so when the request fails the relay is asked whether an
+    /// earlier run already did it.
+    async fn archive(&mut self, channel: &SlackChannel, uuid: Uuid) -> Result<(), CliError> {
+        let builder = buzz_sdk::build_archive(uuid)
+            .map_err(|e| CliError::Other(format!("build_archive failed: {e}")))?;
+        if let Err(error) = submit(self.client, builder).await {
+            if !matches!(is_archived(self.client, uuid, &channel.id).await, Ok(true)) {
+                self.summary
+                    .warn(format!("archive failed for #{}: {error}", channel.name));
+                self.summary.failed += 1;
+                return Ok(());
+            }
+        }
+        if let Some(state) = self.state.channels.get_mut(&channel.id) {
+            state.archived_done = true;
+            state.restore_archived = false;
+        }
+        self.flush()
     }
 
     /// Open a native Buzz DM using the exact mapped Slack participant set.
@@ -387,7 +448,7 @@ impl<'a> Importer<'a> {
                 metadata_done: true,
                 archived_done: true,
                 private_visibility_done: true,
-                prepared_for_import: true,
+                restore_archived: false,
                 members_added: participant_pubkeys.into_iter().collect(),
             },
         );
@@ -458,6 +519,7 @@ impl<'a> Importer<'a> {
                         "mapped member add failed for private conversation {}: {e}",
                         channel.id
                     ));
+                    self.summary.failed += 1;
                     continue;
                 }
             }
@@ -486,24 +548,14 @@ impl<'a> Importer<'a> {
         let channel_uuid = self.ensure_channel(channel, needs_writes).await?;
         self.ensure_private_members(channel, channel_uuid).await?;
 
-        // Messages, oldest first; thread roots always precede replies.
-        //
-        // `channel_messages` already dropped every non-importable message and
-        // sorted the rest chronologically, so an importable thread root always
-        // appears before — and is imported before — its replies. Any root that
-        // is *not* in this set (an empty `bot_message` root, a system subtype)
-        // can never be imported, so a reply pointing at it must not be deferred
-        // forever; it is promoted to a top-level message instead.
-        let importable_ts: std::collections::HashSet<&str> =
-            messages.iter().map(|m| m.ts.as_str()).collect();
-        let mut consecutive_failures = 0usize;
+        // Messages, oldest first. `channel_messages` sorted them, so a thread
+        // root is always handled before its replies.
         let mut imported_in_channel = 0u64;
         for msg in &messages {
             let key = ImportState::message_key(&channel.id, &msg.ts);
-            if self.state.messages.contains_key(&key) {
-                // Already imported — but a prior run may have stopped between
-                // the message and its reactions, so reactions still get their
-                // (state-deduped) pass below.
+            if self.state.message_settled(&key) {
+                // A prior run may have stopped between a message and its
+                // reactions, so reactions still get their (deduped) pass.
                 if !self.skip_reactions {
                     self.import_reactions(channel, msg, &key).await?;
                 }
@@ -511,7 +563,7 @@ impl<'a> Importer<'a> {
             }
 
             // Slack threads are flat: thread_ts is the root, every reply is a
-            // direct reply to it. Roots resolved through the state ledger.
+            // direct reply to it. Roots are resolved through the ledger.
             let thread_ref = match thread_root_key(channel, msg) {
                 Some(root_key) => match self.state.messages.get(&root_key) {
                     Some(root_hex) => {
@@ -524,24 +576,15 @@ impl<'a> Importer<'a> {
                         })
                     }
                     None => {
-                        // Root importable but not yet in state → an earlier run
-                        // was interrupted between root and reply; re-running
-                        // resumes. Root absent from the importable set → Slack
-                        // filtered it (empty bot root / system subtype) and it
-                        // will never import, so keep the reply's real content as
-                        // a top-level message rather than deferring it forever.
-                        let root_ts = msg.thread_ts.as_deref().unwrap_or_default();
-                        if importable_ts.contains(root_ts) {
-                            self.summary.warn(format!(
-                                "thread root {root_key} is not imported yet — deferring reply \
-                                 {key}; re-run to resume"
-                            ));
-                            self.summary.failed += 1;
-                            continue;
-                        }
+                        // The root sorts before this reply, so it has already
+                        // been handled. It is missing from the ledger only
+                        // because it can never be imported: Slack filtered it
+                        // (an empty bot root, a system subtype) or it was
+                        // skipped. Keep the reply's content as a top-level
+                        // message.
                         self.summary.warn(format!(
-                            "thread root {root_key} was filtered out of the import (empty or \
-                             system message); importing reply {key} as a top-level message"
+                            "thread root {root_key} is not part of the import; importing \
+                             reply {key} as a top-level message"
                         ));
                         None
                     }
@@ -560,6 +603,7 @@ impl<'a> Importer<'a> {
                 Ok(b) => b,
                 Err(e) => {
                     self.summary.warn(format!("skipping {key}: {e}"));
+                    self.record(JournalRecord::Skipped { key })?;
                     self.summary.skipped += 1;
                     continue;
                 }
@@ -578,7 +622,6 @@ impl<'a> Importer<'a> {
             })?;
             match submit_signed(self.client, event).await {
                 Ok(_) => {
-                    consecutive_failures = 0;
                     self.record(JournalRecord::Message {
                         key: key.clone(),
                         id: event_id,
@@ -591,17 +634,16 @@ impl<'a> Importer<'a> {
                 }
                 Err(e @ CliError::Auth(_)) => return Err(e),
                 Err(e) => {
-                    consecutive_failures += 1;
-                    self.summary.warn(format!("message {key} failed: {e}"));
-                    self.summary.failed += 1;
-                    if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
-                        self.flush()?;
-                        return Err(CliError::Other(format!(
-                            "{MAX_CONSECUTIVE_FAILURES} consecutive submit failures — aborting; \
-                             re-run to resume from the state file"
-                        )));
-                    }
-                    continue;
+                    // A message retried later would be stamped later and land
+                    // after everything imported since, so the run stops here
+                    // rather than import the rest of the channel around a gap.
+                    self.flush()?;
+                    return Err(CliError::Other(format!(
+                        "message {key} was not confirmed by the relay ({e}); stopped so \
+                         #{} stays in order — re-run to resume from {}",
+                        channel.name,
+                        self.state_path.display()
+                    )));
                 }
             }
 
@@ -611,33 +653,17 @@ impl<'a> Importer<'a> {
             self.import_reactions(channel, msg, &key).await?;
         }
 
-        // Mirror Slack's archived flag once the channel's history is in.
-        let archive_done = self
-            .state
-            .channels
-            .get(&channel.id)
-            .is_some_and(|state| state.archived_done);
-        if channel.is_archived
-            && !matches!(
-                channel.kind,
-                super::export::SlackConversationKind::DirectMessage
-                    | super::export::SlackConversationKind::GroupDirectMessage
-            )
-            && !archive_done
-        {
-            let builder = buzz_sdk::build_archive(channel_uuid)
-                .map_err(|e| CliError::Other(format!("build_archive failed: {e}")))?;
-            match submit(self.client, builder).await {
-                Ok(_) => {
-                    if let Some(state) = self.state.channels.get_mut(&channel.id) {
-                        state.archived_done = true;
-                    }
-                    self.flush()?;
-                }
-                Err(e) => self
-                    .summary
-                    .warn(format!("archive failed for #{}: {e}", channel.name)),
-            }
+        // Archive a channel Slack had archived, or one this import reopened.
+        let is_dm = matches!(
+            channel.kind,
+            super::export::SlackConversationKind::DirectMessage
+                | super::export::SlackConversationKind::GroupDirectMessage
+        );
+        let needs_archive = self.state.channels.get(&channel.id).is_some_and(|state| {
+            state.restore_archived || (channel.is_archived && !state.archived_done)
+        });
+        if needs_archive && !is_dm {
+            self.archive(channel, channel_uuid).await?;
         }
         self.flush()?;
         Ok(())
@@ -649,10 +675,7 @@ impl<'a> Importer<'a> {
         let Some(state) = self.state.channels.get(&channel.id) else {
             return true;
         };
-        if !state.prepared_for_import
-            || !state.metadata_done
-            || (channel.kind.is_private() && !state.private_visibility_done)
-        {
+        if !state.metadata_done || (channel.kind.is_private() && !state.private_visibility_done) {
             return true;
         }
 
@@ -670,14 +693,14 @@ impl<'a> Importer<'a> {
 
         messages.iter().any(|message| {
             let message_key = ImportState::message_key(&channel.id, &message.ts);
-            !self.state.messages.contains_key(&message_key)
+            !self.state.message_settled(&message_key)
                 || (!self.skip_reactions
+                    && self.state.messages.contains_key(&message_key)
                     && message.reactions.iter().any(|reaction| {
                         let emoji = emoji_for_shortcode(&reaction.name);
                         !self
                             .state
-                            .reactions
-                            .contains(&format!("{message_key}:{emoji}"))
+                            .reaction_settled(&format!("{message_key}:{emoji}"))
                     }))
         })
     }
@@ -706,16 +729,18 @@ impl<'a> Importer<'a> {
         for reaction in &msg.reactions {
             let emoji = emoji_for_shortcode(&reaction.name);
             let dedupe = format!("{message_key}:{emoji}");
-            if self.state.reactions.contains(&dedupe) {
+            if self.state.reaction_settled(&dedupe) {
                 continue;
             }
             let builder = match buzz_sdk::build_reaction(target, &emoji) {
                 Ok(b) => b,
                 Err(e) => {
                     self.summary.warn(format!(
-                        "reaction :{}: on {message_key}: {e}",
+                        "skipping reaction :{}: on {message_key}: {e}",
                         reaction.name
                     ));
+                    self.record(JournalRecord::Skipped { key: dedupe })?;
+                    self.summary.skipped += 1;
                     continue;
                 }
             };
@@ -754,6 +779,7 @@ impl<'a> Importer<'a> {
             "reactions_imported": self.summary.reactions_imported,
             "private_members_added": self.summary.private_members_added,
             "private_members_unmapped": self.summary.private_members_unmapped,
+            "dm_conversations_blocked": self.summary.conversations_blocked,
             "skipped": self.summary.skipped,
             "failed": self.summary.failed,
             "warnings": self.summary.warnings,
@@ -920,7 +946,7 @@ async fn submit_signed(client: &BuzzClient, event: nostr::Event) -> Result<Strin
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        if !message.contains("duplicate") {
+        if !is_duplicate(&resp) {
             return Err(CliError::Other(format!(
                 "relay rejected event: {}",
                 if message.is_empty() { &resp } else { &message }
@@ -928,6 +954,19 @@ async fn submit_signed(client: &BuzzClient, event: nostr::Event) -> Result<Strin
         }
     }
     Ok(resp)
+}
+
+/// Whether a relay response reports that it already held what was submitted.
+fn is_duplicate(response: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(response)
+        .ok()
+        .and_then(|parsed| {
+            parsed
+                .get("message")?
+                .as_str()
+                .map(|message| message.contains("duplicate"))
+        })
+        .unwrap_or(false)
 }
 
 /// The ids of the events in a relay query response.

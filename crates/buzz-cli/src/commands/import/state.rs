@@ -22,7 +22,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
-use std::io::Write;
+use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -49,10 +49,11 @@ pub struct ChannelState {
     /// that is still open.
     #[serde(default)]
     pub private_visibility_done: bool,
-    /// Whether an adopted, pre-existing channel has been prepared for history
-    /// writes. Archived adopted channels are temporarily unarchived first.
+    /// Set before the importer reopens a channel it found archived, and
+    /// cleared once the channel is archived again, so an interrupted run still
+    /// restores it.
     #[serde(default)]
-    pub prepared_for_import: bool,
+    pub restore_archived: bool,
     /// Buzz public keys already added from mapped Slack conversation members.
     #[serde(default)]
     pub members_added: HashSet<String>,
@@ -74,6 +75,11 @@ pub struct ImportState {
     /// Reaction dedupe keys: `"<slack channel id>:<ts>:<emoji>"`.
     #[serde(default)]
     pub reactions: HashSet<String>,
+    /// Message and reaction keys that can never be imported (for example, a
+    /// message over the size limit), so later runs do not treat them as
+    /// outstanding work.
+    #[serde(default)]
+    pub skipped: HashSet<String>,
     /// Message key → id of an event that was signed and handed to the relay
     /// without a confirmed outcome.
     #[serde(default)]
@@ -88,6 +94,7 @@ impl Default for ImportState {
             channels: HashMap::new(),
             messages: HashMap::new(),
             reactions: HashSet::new(),
+            skipped: HashSet::new(),
             pending: HashMap::new(),
         }
     }
@@ -105,6 +112,8 @@ pub enum JournalRecord {
     Reaction { key: String },
     /// A mapped member was added to the conversation with this Slack id.
     Member { channel: String, pubkey: String },
+    /// The message or reaction with this key can never be imported.
+    Skipped { key: String },
 }
 
 impl ImportState {
@@ -172,19 +181,45 @@ impl ImportState {
                     state.members_added.insert(pubkey);
                 }
             }
+            JournalRecord::Skipped { key } => {
+                self.skipped.insert(key);
+            }
         }
     }
 
-    /// Persist the snapshot to `path` (write-temp-then-rename so an
-    /// interrupted save never truncates the previous snapshot).
+    /// Whether the message with this key needs no further work: it was
+    /// imported, or it never can be.
+    pub fn message_settled(&self, key: &str) -> bool {
+        self.messages.contains_key(key) || self.skipped.contains(key)
+    }
+
+    /// Whether the reaction with this dedupe key needs no further work.
+    pub fn reaction_settled(&self, key: &str) -> bool {
+        self.reactions.contains(key) || self.skipped.contains(key)
+    }
+
+    /// Persist the snapshot to `path`: write a temp file, sync it, then
+    /// rename it into place. The snapshot is durable before this returns, so
+    /// the caller may drop the journal entries it replaces.
     pub fn save(&self, path: &Path) -> Result<(), CliError> {
-        let raw = serde_json::to_string(self)
+        let raw = serde_json::to_vec(self)
             .map_err(|e| CliError::Other(format!("state serialization failed: {e}")))?;
         let tmp = sibling(path, ".tmp");
-        std::fs::write(&tmp, raw)
+        File::create(&tmp)
+            .and_then(|mut file| {
+                file.write_all(&raw)?;
+                file.sync_all()
+            })
             .map_err(|e| CliError::Other(format!("cannot write {}: {e}", tmp.display())))?;
         std::fs::rename(&tmp, path)
             .map_err(|e| CliError::Other(format!("cannot rename state file into place: {e}")))?;
+        // Make the rename itself durable where the platform allows syncing a
+        // directory; elsewhere the rename is already the best available.
+        if let Some(parent) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
+            if let Ok(dir) = File::open(parent) {
+                let _ = dir.sync_all();
+            }
+        }
         Ok(())
     }
 
@@ -201,7 +236,8 @@ pub struct Journal {
 }
 
 impl Journal {
-    /// Open (creating if needed) the journal that accompanies `state_path`.
+    /// Open (creating if needed) the journal that accompanies `state_path`,
+    /// positioned to append.
     ///
     /// A final line cut short by a crash is removed first, so the next append
     /// starts on a line of its own instead of extending the fragment.
@@ -209,9 +245,13 @@ impl Journal {
         let path = journal_path(state_path);
         let io_error =
             |e: std::io::Error| CliError::Other(format!("cannot open {}: {e}", path.display()));
-        let file = OpenOptions::new()
+        // Plain read/write, not append mode: an append-only handle cannot be
+        // truncated on every platform.
+        let mut file = OpenOptions::new()
             .create(true)
-            .append(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
             .open(&path)
             .map_err(io_error)?;
         let existing = std::fs::read(&path).map_err(io_error)?;
@@ -224,6 +264,7 @@ impl Journal {
                 .and_then(|()| file.sync_data())
                 .map_err(io_error)?;
         }
+        file.seek(SeekFrom::End(0)).map_err(io_error)?;
         Ok(Self { file, path })
     }
 
@@ -243,6 +284,7 @@ impl Journal {
     pub fn clear(&mut self) -> Result<(), CliError> {
         self.file
             .set_len(0)
+            .and_then(|()| self.file.seek(SeekFrom::Start(0)).map(|_| ()))
             .and_then(|()| self.file.sync_data())
             .map_err(|e| CliError::Other(format!("cannot clear {}: {e}", self.path.display())))
     }
@@ -315,7 +357,7 @@ mod tests {
             metadata_done: true,
             archived_done: true,
             private_visibility_done: true,
-            prepared_for_import: true,
+            restore_archived: true,
             members_added: HashSet::from(["aa".repeat(32)]),
         }
     }
@@ -339,7 +381,7 @@ mod tests {
         assert!(loaded.channels["C1"].metadata_done);
         assert!(loaded.channels["C1"].archived_done);
         assert!(loaded.channels["C1"].private_visibility_done);
-        assert!(loaded.channels["C1"].prepared_for_import);
+        assert!(loaded.channels["C1"].restore_archived);
         assert!(loaded.channels["C1"]
             .members_added
             .contains(&"aa".repeat(32)));
@@ -409,6 +451,9 @@ mod tests {
                 key: "C1:2.0".into(),
                 id: "cc".repeat(32),
             },
+            JournalRecord::Skipped {
+                key: "C1:3.0".into(),
+            },
         ] {
             journal.append(&record).expect("append");
         }
@@ -416,6 +461,8 @@ mod tests {
 
         let loaded = ImportState::load_for_workspace(&path, "T1").expect("replay");
         assert_eq!(loaded.messages["C1:1.0"], "aa".repeat(32));
+        assert!(loaded.message_settled("C1:1.0") && loaded.message_settled("C1:3.0"));
+        assert!(!loaded.message_settled("C1:2.0"));
         assert!(loaded.reactions.contains("C1:1.0:👍"));
         assert!(loaded.channels["C1"]
             .members_added
@@ -450,6 +497,16 @@ mod tests {
         assert!(std::fs::read_to_string(journal_path(&path))
             .expect("journal exists")
             .is_empty());
+
+        // A cleared journal keeps accepting records from the start of the file.
+        let later = JournalRecord::Reaction {
+            key: "C1:1.0:👍".into(),
+        };
+        journal.append(&later).expect("append after clear");
+        assert_eq!(
+            std::fs::read_to_string(journal_path(&path)).expect("journal"),
+            format!("{}\n", serde_json::to_string(&later).expect("serialize"))
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

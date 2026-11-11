@@ -22,7 +22,7 @@ mod mrkdwn;
 mod render;
 mod report;
 #[cfg(test)]
-mod resume_tests;
+mod run_tests;
 mod state;
 
 use std::collections::{HashMap, HashSet};
@@ -112,19 +112,6 @@ pub async fn cmd_import_slack(client: &BuzzClient, p: ImportSlackParams) -> Resu
             p.skip_reactions,
         );
     }
-    if !dm_blockers.is_empty() {
-        let mut blocked: Vec<String> = dm_blockers
-            .iter()
-            .map(|(id, reason)| format!("{id}: {reason}"))
-            .collect();
-        blocked.sort();
-        return Err(CliError::Usage(format!(
-            "{} Slack DM/MPIM conversation(s) are not safe to import:\n{}",
-            blocked.len(),
-            blocked.join("\n")
-        )));
-    }
-
     seed_channel_map(&mut state, &channel_map);
     let mut importer = Importer::new(
         client,
@@ -141,7 +128,12 @@ pub async fn cmd_import_slack(client: &BuzzClient, p: ImportSlackParams) -> Resu
 
     importer.resolve_pending().await?;
     for channel in &selected {
-        importer.import_channel(channel).await?;
+        // A DM that cannot be opened with exactly its Slack participants is
+        // left out; the rest of the workspace is still imported.
+        match dm_blockers.get(&channel.id) {
+            Some(reason) => importer.block_conversation(&channel.id, reason),
+            None => importer.import_channel(channel).await?,
+        }
     }
 
     importer.finish()
@@ -306,7 +298,7 @@ fn seed_channel_map(state: &mut ImportState, channel_map: &HashMap<String, Strin
                 metadata_done: false,
                 archived_done: false,
                 private_visibility_done: false,
-                prepared_for_import: false,
+                restore_archived: false,
                 members_added: HashSet::new(),
             });
     }
@@ -388,7 +380,7 @@ mod tests {
     }
 
     #[test]
-    fn existing_channel_map_is_validated_and_seeded_as_unprepared() {
+    fn existing_channel_map_is_validated_and_seeded_as_unverified() {
         let dir =
             std::env::temp_dir().join(format!("buzz-import-channel-map-export-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&dir).expect("mkdir");
@@ -408,7 +400,7 @@ mod tests {
         seed_channel_map(&mut state, &channel_map);
         let adopted = &state.channels["C1"];
         assert_eq!(adopted.uuid, buzz_id);
-        assert!(!adopted.prepared_for_import);
+        assert!(!adopted.metadata_done);
         assert!(!adopted.private_visibility_done);
         assert!(!adopted.archived_done);
 
@@ -555,7 +547,7 @@ mod tests {
                 metadata_done: true,
                 archived_done: true,
                 private_visibility_done: true,
-                prepared_for_import: true,
+                restore_archived: false,
                 members_added: HashSet::new(),
             },
         );
