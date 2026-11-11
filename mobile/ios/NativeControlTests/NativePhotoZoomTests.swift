@@ -156,6 +156,11 @@ struct NativePhotoZoomTests {
   }
   @available(iOS 18.0, *)
   @MainActor static func zoomJourney(data: Data) {
+    let captured = UIView(frame: CGRect(x: 0, y: 0, width: 300, height: 400))
+    let crop = NativeGallerySnapshotView(snapshot: captured, size: captured.bounds.size)
+    crop.bounds = CGRect(x: 0, y: 0, width: 120, height: 140); crop.layoutIfNeeded()
+    precondition(abs(captured.frame.width / captured.frame.height - 0.75) < 0.001, "Closing snapshots must preserve media aspect ratio")
+    precondition(captured.frame.width >= crop.bounds.width && captured.frame.height >= crop.bounds.height)
     let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
     let source = UIViewController(); window.rootViewController = source; window.isHidden = false
     let anchor = UIImageView(image: UIImage(data: data))

@@ -706,7 +706,7 @@ private final class NativeGalleryZoomAnimator: NSObject, UIViewControllerAnimate
       let moving: UIView
       if !presenting, let mediaRect = owner.controller?.photoAlignmentRect(),
         let captured = view.resizableSnapshotView(from: mediaRect, afterScreenUpdates: false, withCapInsets: .zero) {
-        moving = captured
+        moving = NativeGallerySnapshotView(snapshot: captured, size: mediaRect.size)
       } else { moving = UIImageView(image: image) }
       moving.contentMode = .scaleAspectFill; moving.clipsToBounds = true
       moving.layer.cornerCurve = .continuous
@@ -715,6 +715,7 @@ private final class NativeGalleryZoomAnimator: NSObject, UIViewControllerAnimate
       moving.center = presenting ? sourceCenter : CGPoint(x: target.midX, y: target.midY)
       moving.transform = presenting ? sourceTransform : .identity
       moving.layer.cornerRadius = presenting ? anchor.layer.cornerRadius : 0
+      moving.layoutIfNeeded()
       container.addSubview(moving); snapshot = moving
       owner.controller?.setTransitionMediaHidden(true)
     }
@@ -726,6 +727,7 @@ private final class NativeGalleryZoomAnimator: NSObject, UIViewControllerAnimate
         snapshot.bounds = self.presenting ? CGRect(origin: .zero, size: target.size) : sourceBounds
         snapshot.center = self.presenting ? CGPoint(x: target.midX, y: target.midY) : sourceCenter
         snapshot.layer.cornerRadius = self.presenting ? 0 : (anchor?.layer.cornerRadius ?? 26)
+        snapshot.layoutIfNeeded()
       }
     } completion: { _ in
       let completed = !context.transitionWasCancelled
@@ -735,5 +737,25 @@ private final class NativeGalleryZoomAnimator: NSObject, UIViewControllerAnimate
       if !self.presenting && completed { view.removeFromSuperview() }
       context.completeTransition(completed)
     }
+  }
+}
+
+// Keep the captured video frame's aspect ratio while its clipping box shrinks.
+private final class NativeGallerySnapshotView: UIView {
+  private let snapshot: UIView
+  private let mediaSize: CGSize
+  init(snapshot: UIView, size: CGSize) {
+    self.snapshot = snapshot; mediaSize = size
+    super.init(frame: CGRect(origin: .zero, size: size))
+    addSubview(snapshot); clipsToBounds = true
+  }
+  required init?(coder: NSCoder) { nil }
+  override func layoutSubviews() {
+    super.layoutSubviews()
+    guard mediaSize.width > 0, mediaSize.height > 0 else { return }
+    let scale = max(bounds.width / mediaSize.width, bounds.height / mediaSize.height)
+    snapshot.bounds = CGRect(origin: .zero, size: mediaSize)
+    snapshot.center = CGPoint(x: bounds.midX, y: bounds.midY)
+    snapshot.transform = CGAffineTransform(scaleX: scale, y: scale)
   }
 }
