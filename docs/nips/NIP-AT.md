@@ -102,7 +102,7 @@ Each object is one artifact of type `buzz.agent-attention` in the attention chan
 - **Title.** The slug. Only channel members can read it.
 - **Content.** A UTF-8 JSON object with exactly the fields `schema`, `slug` and `value`, at most 65,535 bytes. `schema` is `agent-attention/v1`.
 - **Deletion.** A `delete` revision has empty content and no `title`, and keeps the head's `root`, as NIP-AR defines.
-- **Other tags.** This NIP defines none. Readers ignore tags they do not know, and editors keep them, as NIP-AR requires. A NIP-OA `auth` tag is not one of them: it belongs to the revision's signer, and the relay checks it against that signer. An editor never copies another revision's `auth` tag.
+- **Other tags.** This NIP defines none. Readers ignore tags they do not know, and editors keep them, as NIP-AR requires. Tags that a signer sets for itself, such as NIP-OA `auth`, are not among them: they belong to the revision's signer, and the relay checks `auth` against that signer. An editor never copies them from another revision.
 - **Modified time.** The revision's `created_at`, for display only.
 - **Order.** Objects have no order. Readers list them by slug.
 
@@ -287,7 +287,7 @@ An event matches an event watch when all of these are true, in this order:
    - it is a kind:4 DM with a `p` tag for the agent; or
    - it is a kind:9 in a one-to-one direct-message channel with the agent.
 
-   A reply to one of the agent's events, or a reaction to it, is not directly addressed. Only a watch can wake the agent for it.
+   A reply to one of the agent's events, or a reaction to it, does not by itself make an event directly addressed. Unless it also meets one of the rules above, only a watch can wake the agent for it.
 5. The classifier, if any, passes. A runtime checks it last, because it calls a model.
 
 Each matching watch starts its own task. One watch handles one event ID at most once.
