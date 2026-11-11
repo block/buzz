@@ -4,7 +4,11 @@ async fn delete(pool: &PgPool, options: &PreviewOptions) -> (PreviewSummary, Vec
     let mut bytes = Vec::new();
     let summary = Db::from_pool(pool.clone())
         .user_deletion_store()
-        .delete_message_batches(options, &mut bytes)
+        .run_message_batches(
+            options,
+            crate::user_deletion::ExecutionMode::Delete,
+            &mut bytes,
+        )
         .await
         .unwrap();
     let lines = String::from_utf8(bytes)
@@ -50,7 +54,27 @@ async fn deletion_matches_printed_batches_preserves_replies_and_other_tenants() 
         CASE WHEN id=decode($2,'hex') THEN NULL ELSE decode($2,'hex') END,CASE WHEN id=decode($2,'hex') THEN 0 ELSE 1 END,99,99
         FROM events WHERE community_id=$1 AND id IN (decode($2,'hex'),decode($3,'hex'))")
         .bind(c).bind(id(1)).bind(id(4)).execute(&pool).await.unwrap();
-    let (expected, printed) = preview(&pool, &options).await;
+    let mut proposed = Vec::new();
+    let expected = Db::from_pool(pool.clone())
+        .user_deletion_store()
+        .run_message_batches(
+            &options,
+            crate::user_deletion::ExecutionMode::ReadOnly,
+            &mut proposed,
+        )
+        .await
+        .unwrap();
+    let printed: Vec<Value> = String::from_utf8(proposed)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM events WHERE community_id=$1")
+        .bind(c)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 6, "read-only mode must preserve source events");
     let (summary, executed) = delete(&pool, &options).await;
     assert_eq!(items(&printed), items(&executed));
     assert_eq!(summary.items, expected.items);

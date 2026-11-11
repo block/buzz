@@ -7,6 +7,23 @@ mod guards;
 mod repair;
 
 impl UserDeletionStore {
+    /// Run the shared message planner and apply its batches only in delete mode.
+    pub async fn run_message_batches(
+        &self,
+        options: &PreviewOptions,
+        mode: crate::user_deletion::ExecutionMode,
+        writer: &mut impl Write,
+    ) -> Result<PreviewSummary> {
+        match mode {
+            crate::user_deletion::ExecutionMode::ReadOnly => {
+                self.preview_message_batches(options, writer).await
+            }
+            crate::user_deletion::ExecutionMode::Delete => {
+                self.delete_message_batches(options, writer).await
+            }
+        }
+    }
+
     /// Print and execute the supported cleanup in transactions of at most 100
     /// explicit row operations. Operators must stop external workers first.
     ///
