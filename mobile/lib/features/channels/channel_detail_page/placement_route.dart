@@ -32,10 +32,12 @@ class ChannelDetailPage extends ConsumerWidget {
     final details = ref.watch(channelDetailsProvider(channel.id)).value;
     final current = details == null ? channel : channel.mergeDetails(details);
     final placed =
-        current.isPersonalChat(ref.watch(myPubkeyProvider), const []) ||
+        current.isPersonalChat(
+          ref.watch(myPubkeyProvider),
+          groups?.channels ?? const [],
+        ) ||
         personalChat ||
-        placement == ChannelRoutePlacement.solo ||
-        (groups?.channels.contains(channel.id) ?? false);
+        placement == ChannelRoutePlacement.solo;
     final lookup = ref.watch(meSearchPlacementProvider(channel.id));
     if (!placed &&
         placement != ChannelRoutePlacement.ordinary &&

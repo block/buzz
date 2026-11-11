@@ -96,11 +96,13 @@ class FakeChannels extends ChannelsNotifier {
 class LabeledChannels extends ChannelsNotifier {
   @override
   Future<List<Channel>> build() async => [
-    for (final (id, name, owner, member) in [
-      ('filed', 'Filed labeled chat', 'owner', true),
-      ('loose', 'Unfiled labeled chat', 'owner', true),
-      ('shared', 'Someone else chat', 'other', true),
-      ('hidden', 'Inaccessible labeled chat', 'owner', false),
+    for (final (id, name, owner, member, archived) in [
+      ('filed', 'Filed labeled chat', 'owner', true, false),
+      ('loose', 'Unfiled labeled chat', 'owner', true, false),
+      ('shared', 'Someone else chat', 'other', true, false),
+      ('agent-created', 'Agent-created chat', 'agent', true, false),
+      ('hidden', 'Inaccessible labeled chat', 'owner', false, false),
+      ('archived', 'Archived labeled chat', 'other', true, true),
     ])
       Channel(
         id: id,
@@ -113,6 +115,7 @@ class LabeledChannels extends ChannelsNotifier {
         createdAt: DateTime(2026),
         memberCount: 2,
         isMember: member,
+        archivedAt: archived ? DateTime(2026) : null,
       ),
   ];
 }
@@ -148,8 +151,10 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Filed labeled chat'), findsOneWidget);
     expect(find.text('Unfiled labeled chat'), findsOneWidget);
-    expect(find.text('Someone else chat'), findsNothing);
+    expect(find.text('Someone else chat'), findsOneWidget);
+    expect(find.text('Agent-created chat'), findsOneWidget);
     expect(find.text('Inaccessible labeled chat'), findsNothing);
+    expect(find.text('Archived labeled chat'), findsNothing);
     expect(find.text('A place to work with your agents'), findsNothing);
   });
 
