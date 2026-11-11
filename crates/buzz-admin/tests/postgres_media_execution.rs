@@ -10,7 +10,6 @@ use buzz_db::{
     entity_deletion::{NewEntityStage, NextStage, StageTransition},
     Db,
 };
-use buzz_deletion::user::media::{run_stage, Mode, StageOptions};
 use serde_json::json;
 use std::{
     collections::BTreeMap,
@@ -120,7 +119,7 @@ async fn actual_handler_checks_retention_blocks_writers_and_recovers_deleted_ver
         .execute(db.pool())
         .await
         .unwrap();
-    let hash = "a".repeat(64);
+    let hash = Uuid::new_v4().simple().to_string().repeat(2);
     db.record_media_upload(
         buzz_core::CommunityId::from_uuid(community),
         &hash,
@@ -174,34 +173,54 @@ async fn actual_handler_checks_retention_blocks_writers_and_recovers_deleted_ver
     let address = listener.local_addr().unwrap();
     let app = Router::new().fallback(any(s3)).with_state(state.clone());
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    let media = buzz_media::MediaStorage::new(&buzz_media::MediaConfig {
-        s3_endpoint: format!("http://{address}"),
-        s3_bucket: "fixture".into(),
-        s3_access_key: "fixture-key".into(),
-        s3_secret_key: "fixture-secret".into(),
-        s3_region: "us-east-1".into(),
-        s3_addressing_style: buzz_media::S3AddressingStyle::Path,
-        max_image_bytes: 100,
-        max_gif_bytes: 100,
-        max_video_bytes: 100,
-        max_file_bytes: 100,
-        public_base_url: "https://example.org/media".into(),
-        upload_records_enabled: false,
-        upload_ip_header: None,
-        upload_port_header: None,
-    })
-    .unwrap();
-    let options = StageOptions {
-        human,
-        include_owned_agents: false,
-        storage_namespace: "fixture".into(),
-        media_bases: vec![],
-        scan_budget: Default::default(),
-        mode: Mode::NoPrint,
+    requests.release(&lease).await.unwrap();
+    let invoke = |subject: &str| {
+        let binary = std::env::var_os("NEXTEST_BIN_EXE_buzz_admin")
+            .unwrap_or_else(|| env!("CARGO_BIN_EXE_buzz-admin").into());
+        let mut command = tokio::process::Command::new(binary);
+        command
+            .args([
+                "user-deletions",
+                "media",
+                "--pubkey",
+                subject,
+                "--delete",
+                "--request-id",
+                &request.id.to_string(),
+                "--max-source-rows",
+                "10000000",
+                "--scan-timeout-secs",
+                "900",
+            ])
+            .env("DATABASE_URL", &url)
+            .env_remove("BUZZ_MEDIA_SOURCE_DATABASE_URL")
+            .env("BUZZ_S3_ENDPOINT", format!("http://{address}"))
+            .env("BUZZ_S3_BUCKET", "fixture")
+            .env("BUZZ_S3_ACCESS_KEY", "fixture-key")
+            .env("BUZZ_S3_SECRET_KEY", "fixture-secret")
+            .env("BUZZ_S3_ADDRESSING_STYLE", "path");
+        command
     };
-    let first = run_stage(&db, &media, &lease, stage.id, options.clone()).await;
+    let wrong_subject = invoke(&nostr::Keys::generate().public_key().to_hex())
+        .output()
+        .await
+        .unwrap();
+    assert!(!wrong_subject.status.success());
+    assert!(String::from_utf8_lossy(&wrong_subject.stderr).contains("account request for --pubkey"));
+    let separate_source = invoke(&human)
+        .env(
+            "BUZZ_MEDIA_SOURCE_DATABASE_URL",
+            "postgres://reader@example.org/other",
+        )
+        .output()
+        .await
+        .unwrap();
+    assert!(!separate_source.status.success());
+    assert!(String::from_utf8_lossy(&separate_source.stderr).contains("identical to DATABASE_URL"));
+    assert!(state.deletes.lock().unwrap().is_empty());
+    let first = invoke(&human).output().await.unwrap();
     assert!(
-        first.is_err(),
+        !first.status.success(),
         "denied retention must not authorize deletion"
     );
     assert!(state.deletes.lock().unwrap().is_empty());
@@ -226,15 +245,20 @@ async fn actual_handler_checks_retention_blocks_writers_and_recovers_deleted_ver
     assert!(db.insert_event(other, &event, None).await.is_err());
     // Embedded JSON may encode each hash character; the writer must use the
     // same recursive interpretation as inventory extraction.
-    let embedded = format!(r#"{{"url":"/media/{}.jpg"}}"#, "\\u0061".repeat(64));
+    let embedded = format!(
+        r#"{{"url":"/media/{}.jpg"}}"#,
+        hash.chars()
+            .map(|c| format!("\\u{:04x}", c as u32))
+            .collect::<String>()
+    );
     let encoded = nostr::EventBuilder::new(nostr::Kind::TextNote, embedded)
         .sign_with_keys(&outsider)
         .unwrap();
     assert!(db.insert_event(other, &encoded, None).await.is_err());
     state.denied_retention.store(false, Ordering::SeqCst);
-    let second = run_stage(&db, &media, &lease, stage.id, options.clone()).await;
+    let second = invoke(&human).output().await.unwrap();
     assert!(
-        second.is_err(),
+        !second.status.success(),
         "lost deletion acknowledgement must stay retryable"
     );
     assert_eq!(state.versions.lock().unwrap().len(), 1);
@@ -248,9 +272,22 @@ async fn actual_handler_checks_retention_blocks_writers_and_recovers_deleted_ver
     assert_eq!(saved.0, "to_be_deleted");
     assert_eq!(saved.1.as_array().unwrap().len(), 2);
     state.fail_delete_response.store(false, Ordering::SeqCst);
-    run_stage(&db, &media, &lease, stage.id, options)
-        .await
-        .unwrap();
+    let last = invoke(&human).output().await.unwrap();
+    assert!(
+        last.status.success(),
+        "{}",
+        String::from_utf8_lossy(&last.stderr)
+    );
+    let again = invoke(&human).output().await.unwrap();
+    assert!(
+        again.status.success(),
+        "{}",
+        String::from_utf8_lossy(&again.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&again.stdout).unwrap()["complete"],
+        true
+    );
     assert!(state.versions.lock().unwrap().is_empty());
     assert_eq!(
         state.deletes.lock().unwrap().len(),

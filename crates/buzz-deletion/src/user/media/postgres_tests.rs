@@ -127,15 +127,15 @@ async fn print_only_skips_deletion_and_crash_recovery_uses_saved_versions() {
     assert_eq!(backend.deletes.load(Ordering::SeqCst), 0);
     assert_eq!(backend.cleanups.load(Ordering::SeqCst), 0);
     backend.protected.store(false, Ordering::SeqCst);
-    assert!(handle(&store, &run, Mode::NoPrint, &backend).await.is_err());
+    assert!(handle(&store, &run, Mode::Delete, &backend).await.is_err());
     assert_eq!(backend.deletes.load(Ordering::SeqCst), 0);
     backend.protected.store(true, Ordering::SeqCst);
-    assert!(handle(&store, &run, Mode::NoPrint, &backend).await.is_err());
+    assert!(handle(&store, &run, Mode::Delete, &backend).await.is_err());
     let pending = store.load(&run).await.unwrap().unwrap().remove(0);
     assert_eq!(pending.status, "to_be_deleted");
     assert!(pending.last_error.is_some());
     assert_eq!(backend.cleanups.load(Ordering::SeqCst), 0);
-    handle(&store, &run, Mode::NoPrint, &backend).await.unwrap();
+    handle(&store, &run, Mode::Delete, &backend).await.unwrap();
     assert_eq!(
         store.load(&run).await.unwrap().unwrap()[0].status,
         "deleted"

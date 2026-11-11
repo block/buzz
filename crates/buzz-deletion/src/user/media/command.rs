@@ -1,4 +1,4 @@
-//! Standalone preview: read-only source sessions, separate journal connection.
+//! Default read-only inventory, or explicit execution of an approved media stage.
 use super::*;
 use buzz_db::{Db, DbConfig};
 use serde_json::Value;
@@ -10,14 +10,20 @@ pub struct Options {
     #[arg(long,value_parser=buzz_db::user_deletion::normalize_user_deletion_pubkey)]
     pub pubkey: String,
     /// Stable UUID for retries. Omit to begin a fresh observation.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "delete")]
     pub run_id: Option<Uuid>,
     /// Include agents currently owned by this person, separately in each community.
     #[arg(long)]
     pub include_owned_agents: bool,
-    /// Direct execution supports print-only; deletion runs through an approved workflow stage.
-    #[arg(long, value_enum, default_value = "print-only")]
-    pub mode: Mode,
+    /// Print the inventory without deleting anything (the default).
+    #[arg(long, conflicts_with = "delete")]
+    pub print_only: bool,
+    /// Delete eligible versions for an approved request's current media stage.
+    #[arg(long, requires = "request_id")]
+    pub delete: bool,
+    /// Approved account request whose current stage is purge_media; required with --delete.
+    #[arg(long, requires = "delete")]
+    pub request_id: Option<Uuid>,
     /// Additional canonical media base URLs (including /media) for deployment aliases.
     #[arg(long)]
     pub media_base: Vec<String>,
@@ -29,11 +35,13 @@ pub struct Options {
     pub scan_timeout_secs: u64,
 }
 
-/// Run the direct command. It never migrates either DB, fences subjects, mutates
-/// source tables, removes uploader proofs, or calls storage deletion.
+/// Run the direct command. Only explicit --delete can invoke storage deletion.
 pub async fn run(options: Options) -> Result<i32> {
-    if options.mode != Mode::PrintOnly {
-        bail!("direct execution requires print-only; use run_stage on an approved workflow stage for deletion");
+    if options.delete && (options.print_only || options.run_id.is_some()) {
+        bail!("--delete conflicts with --print-only and --run-id");
+    }
+    if options.delete != options.request_id.is_some() {
+        bail!("--delete and --request-id must be supplied together");
     }
     if options.max_source_rows == 0 || options.scan_timeout_secs == 0 {
         bail!("media scan budgets must be positive");
@@ -42,15 +50,23 @@ pub async fn run(options: Options) -> Result<i32> {
         max_source_rows: options.max_source_rows,
         statement_timeout_secs: options.scan_timeout_secs,
     };
-    let source_url = crate::required_env("BUZZ_MEDIA_SOURCE_DATABASE_URL")?;
     let journal_url = crate::required_env("DATABASE_URL")?;
+    let source_url = if options.delete {
+        // Execution reads and reserves through the same writable database. Never
+        // silently ignore a preview's separately configured source connection.
+        if std::env::var("BUZZ_MEDIA_SOURCE_DATABASE_URL").is_ok_and(|source| source != journal_url)
+        {
+            bail!("--delete requires BUZZ_MEDIA_SOURCE_DATABASE_URL to be unset or identical to DATABASE_URL");
+        }
+        journal_url.clone()
+    } else {
+        crate::required_env("BUZZ_MEDIA_SOURCE_DATABASE_URL")?
+    };
     let endpoint = crate::required_env("BUZZ_S3_ENDPOINT")?;
     let bucket = crate::required_env("BUZZ_S3_BUCKET")?;
     let namespace =
         buzz_db::entity_deletion::inventory_digest(&json!({"endpoint":endpoint,"bucket":bucket}))?;
     let source_identity = source_identity(&source_url)?;
-    let run_id = options.run_id.unwrap_or_else(Uuid::new_v4);
-    eprintln!("media inventory run {run_id}; retry with --run-id {run_id}");
     let journal = Db::connect_cold_start(
         DbConfig {
             database_url: journal_url,
@@ -59,9 +75,6 @@ pub async fn run(options: Options) -> Result<i32> {
         "media_journal",
     )
     .await?;
-    let store = journal.media_deletion_store();
-    let binding = json!({"version":3,"mode":"print-only","human":options.pubkey,"include_owned_agents":options.include_owned_agents,"source":source_identity,"namespace":namespace,"media_bases":options.media_base,"scan_budget":budget});
-    let run = store.open_preview(run_id, binding).await?;
     let (s3_access_key, s3_secret_key) = crate::s3_key_pair_from_env();
     let media = MediaStorage::new(&buzz_media::MediaConfig {
         s3_endpoint: endpoint,
@@ -82,6 +95,27 @@ pub async fn run(options: Options) -> Result<i32> {
         upload_ip_header: None,
         upload_port_header: None,
     })?;
+    if let Some(request) = options.request_id {
+        return super::execute::run(
+            &journal,
+            &media,
+            request,
+            StageOptions {
+                human: options.pubkey,
+                include_owned_agents: options.include_owned_agents,
+                storage_namespace: namespace,
+                media_bases: options.media_base,
+                scan_budget: budget,
+                mode: Mode::Delete,
+            },
+        )
+        .await;
+    }
+    let run_id = options.run_id.unwrap_or_else(Uuid::new_v4);
+    eprintln!("media inventory run {run_id}; retry with --run-id {run_id}");
+    let store = journal.media_deletion_store();
+    let binding = json!({"version":3,"mode":"print-only","human":options.pubkey,"include_owned_agents":options.include_owned_agents,"source":source_identity,"namespace":namespace,"media_bases":options.media_base,"scan_budget":budget});
+    let run = store.open_preview(run_id, binding).await?;
     if store.load(&run).await?.is_none() {
         let source = Db::connect_cold_start(
             DbConfig {
@@ -157,6 +191,45 @@ fn source_identity(connection: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct Cli {
+        #[command(flatten)]
+        options: Options,
+    }
+
+    #[test]
+    fn modes_default_to_preview_and_require_explicit_execution_context() {
+        let key = "a".repeat(64);
+        let parse = |extra: &[&str]| {
+            Cli::try_parse_from(
+                ["media", "--pubkey", &key]
+                    .into_iter()
+                    .chain(extra.iter().copied()),
+            )
+        };
+        let default = parse(&[]).unwrap().options;
+        assert!(!default.delete);
+        assert!(!parse(&["--print-only"]).unwrap().options.delete);
+        let request = Uuid::new_v4().to_string();
+        assert!(
+            parse(&["--delete", "--request-id", &request])
+                .unwrap()
+                .options
+                .delete
+        );
+        for flags in [
+            vec!["--delete"],
+            vec!["--request-id", &request],
+            vec!["--print-only", "--delete", "--request-id", &request],
+            vec!["--delete", "--request-id", &request, "--run-id", &request],
+            vec!["--mode", "print"],
+        ] {
+            assert!(parse(&flags).is_err(), "accepted invalid flags: {flags:?}");
+        }
+    }
+
     #[test]
     fn saved_source_survives_credential_rotation_but_not_database_changes() {
         let mut connection =
