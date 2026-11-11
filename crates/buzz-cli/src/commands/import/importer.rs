@@ -1,13 +1,14 @@
 //! The `buzz import slack` execution engine: the stateful [`Importer`] run loop
 //! plus the pure helpers that shape one imported event (message building,
-//! provenance tags, emoji mapping, thread resolution) and the relay submit /
-//! attestation calls. The command layer in the parent module parses inputs and
-//! constructs an [`Importer`]; everything that actually writes to the relay
-//! lives here.
+//! the provenance tag, emoji mapping, thread resolution) and the relay submit
+//! calls. The command layer in the parent module parses inputs and constructs
+//! an [`Importer`]; everything that actually writes to the relay lives here.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::time::Duration;
 
+use buzz_core::kind::KIND_STREAM_MESSAGE;
 use nostr::{EventBuilder, EventId, Timestamp};
 use uuid::Uuid;
 
@@ -19,7 +20,7 @@ use super::export::{ts_seconds, SlackChannel, SlackExport, SlackMessage};
 use super::mrkdwn;
 use super::print_json;
 use super::render::{emoji_for_shortcode, render_attachment, render_slack_blocks};
-use super::state::{ChannelState, ImportState};
+use super::state::{ChannelState, ImportState, Journal, JournalRecord};
 use crate::client::BuzzClient;
 use crate::error::CliError;
 
@@ -28,16 +29,9 @@ use crate::error::CliError;
 /// of individually bad messages.
 const MAX_CONSECUTIVE_FAILURES: usize = 5;
 
-/// Persist the state ledger at most every N successful writes.
-///
-/// The ledger is serialized whole on every save, so saving per message costs
-/// O(n²) bytes over a large workspace. Batching is safe because every import
-/// write is deterministic and idempotent: a crash loses at most the last N
-/// ledger entries, and re-running rebuilds byte-identical events that the relay
-/// reports as duplicates (which [`submit`] treats as success), repopulating the
-/// ledger. Channel creation, archival, and end-of-channel state are still
-/// flushed immediately.
-const STATE_CHECKPOINT_WRITES: usize = 50;
+/// Unconfirmed event ids looked up per relay query when settling the pending
+/// intents a previous run left behind.
+const PENDING_LOOKUP_BATCH: usize = 100;
 
 #[derive(Default)]
 struct Summary {
@@ -46,7 +40,10 @@ struct Summary {
     reactions_imported: u64,
     private_members_added: u64,
     private_members_unmapped: u64,
+    /// Records that can never be imported (for example, over the size limit).
     skipped: u64,
+    /// Writes the relay did not confirm; a re-run retries them.
+    failed: u64,
     warnings: Vec<String>,
 }
 
@@ -64,18 +61,16 @@ pub(super) struct Importer<'a> {
     export: &'a SlackExport,
     /// Slack user id → display name.
     names: &'a HashMap<String, String>,
-    /// Slack workspace id — namespaces identity bindings and channel UUIDs.
+    /// Slack workspace id — namespaces provenance references and channel UUIDs.
     team_id: &'a str,
     state: ImportState,
     state_path: PathBuf,
+    journal: Journal,
+    clock: ImportClock,
     summary: Summary,
     skip_reactions: bool,
-    /// Slack user id → Buzz public key. Besides publishing identity
-    /// attestations, explicit mappings populate private conversation members.
-    bindings: &'a HashMap<String, String>,
-    /// Writes recorded since the last state flush (see
-    /// [`STATE_CHECKPOINT_WRITES`]).
-    unsaved: usize,
+    /// Slack user id → Buzz public key, for private-conversation membership.
+    user_map: &'a HashMap<String, String>,
 }
 
 /// Owned and borrowed run settings grouped separately from the parsed export
@@ -85,51 +80,97 @@ pub(super) struct ImporterOptions<'a> {
     pub(super) state: ImportState,
     pub(super) state_path: PathBuf,
     pub(super) skip_reactions: bool,
-    pub(super) bindings: &'a HashMap<String, String>,
+    pub(super) user_map: &'a HashMap<String, String>,
 }
 
 impl<'a> Importer<'a> {
-    /// Assemble a run from parsed inputs and a freshly loaded state ledger.
+    /// Assemble a run from parsed inputs and a freshly loaded ledger, opening
+    /// the journal that records this run's writes.
     pub(super) fn new(
         client: &'a BuzzClient,
         export: &'a SlackExport,
         names: &'a HashMap<String, String>,
         options: ImporterOptions<'a>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, CliError> {
+        let journal = Journal::open(&options.state_path)?;
+        Ok(Self {
             client,
             export,
             names,
             team_id: options.team_id,
             state: options.state,
             state_path: options.state_path,
+            journal,
+            clock: ImportClock::starting_after(unix_now()),
             summary: Summary::default(),
             skip_reactions: options.skip_reactions,
-            bindings: options.bindings,
-            unsaved: 0,
-        }
+            user_map: options.user_map,
+        })
     }
 
-    /// Persist the running state ledger.
-    fn save(&self) -> Result<(), CliError> {
-        self.state.save(&self.state_path)
-    }
-
-    /// Persist immediately and clear the checkpoint counter.
+    /// Compact the ledger: rewrite the snapshot, then drop the journal entries
+    /// it now covers.
     fn flush(&mut self) -> Result<(), CliError> {
-        self.save()?;
-        self.unsaved = 0;
+        self.state.save(&self.state_path)?;
+        self.journal.clear()
+    }
+
+    /// Journal one write durably and fold it into the in-memory ledger.
+    fn record(&mut self, record: JournalRecord) -> Result<(), CliError> {
+        self.journal.append(&record)?;
+        self.state.apply(record);
         Ok(())
     }
 
-    /// Record one completed write, persisting once a checkpoint's worth has
-    /// accumulated (see [`STATE_CHECKPOINT_WRITES`]).
-    fn checkpoint(&mut self) -> Result<(), CliError> {
-        self.unsaved += 1;
-        if self.unsaved >= STATE_CHECKPOINT_WRITES {
-            self.flush()?;
+    /// Settle the messages an earlier run signed but never saw confirmed.
+    ///
+    /// Each pending intent names the exact event id that was handed to the
+    /// relay, so one lookup decides it: an event the relay stored is adopted
+    /// into the ledger, and anything else is forgotten and signed afresh by
+    /// this run. A failed lookup aborts the run instead of risking a message
+    /// published twice.
+    pub(super) async fn resolve_pending(&mut self) -> Result<(), CliError> {
+        if self.state.pending.is_empty() {
+            return Ok(());
         }
-        Ok(())
+        let pending: Vec<(String, String)> = self
+            .state
+            .pending
+            .iter()
+            .map(|(key, id)| (key.clone(), id.clone()))
+            .collect();
+        let mut stored = HashSet::new();
+        for batch in pending.chunks(PENDING_LOOKUP_BATCH) {
+            let ids: Vec<&str> = batch.iter().map(|(_, id)| id.as_str()).collect();
+            let filter = serde_json::json!({
+                "ids": ids,
+                "kinds": [KIND_STREAM_MESSAGE],
+                "limit": ids.len(),
+            });
+            let response = self.client.query(&filter).await?;
+            stored.extend(stored_event_ids(&response)?);
+        }
+
+        let mut adopted = 0u64;
+        for (key, id) in pending {
+            self.state.pending.remove(&key);
+            if stored.contains(&id) {
+                self.state.messages.insert(key, id);
+                adopted += 1;
+            }
+        }
+        eprintln!("settled unconfirmed messages from an earlier run: {adopted} already stored");
+        self.flush()
+    }
+
+    /// Reserve the next message timestamp and wait for the wall clock to reach
+    /// it, so no imported message is ever dated in the future.
+    async fn next_created_at(&mut self) -> Timestamp {
+        let (created_at, wait_secs) = self.clock.tick(unix_now());
+        if wait_secs > 0 {
+            tokio::time::sleep(Duration::from_secs(wait_secs)).await;
+        }
+        Timestamp::from(created_at)
     }
 
     /// Create a channel once and independently resume its topic metadata.
@@ -235,18 +276,17 @@ impl<'a> Importer<'a> {
             .get(&channel.id)
             .is_some_and(|state| state.private_visibility_done);
         if channel.kind.is_private() && !private_visibility_done {
-            let builder =
-                buzz_sdk::build_update_channel(
-                    uuid,
-                    None,
-                    None,
-                    Some("private"),
-                    None,
-                    None,
-                    None,
-                    None,
-                )
-                    .map_err(|e| CliError::Other(format!("build_update_channel failed: {e}")))?;
+            let builder = buzz_sdk::build_update_channel(
+                uuid,
+                None,
+                None,
+                Some("private"),
+                None,
+                None,
+                None,
+                None,
+            )
+            .map_err(|e| CliError::Other(format!("build_update_channel failed: {e}")))?;
             submit(self.client, builder).await.map_err(|e| {
                 CliError::Other(format!(
                     "refusing to import private conversation {} because Buzz visibility \
@@ -302,7 +342,7 @@ impl<'a> Importer<'a> {
 
         let importer_pubkey = self.client.public_key().to_hex();
         let participant_pubkeys =
-            mapped_dm_participants(self.export, channel, self.bindings, &importer_pubkey)?;
+            mapped_dm_participants(self.export, channel, self.user_map, &importer_pubkey)?;
         let builder = build_import_dm_open(
             channel,
             self.team_id,
@@ -384,7 +424,7 @@ impl<'a> Importer<'a> {
             if !self.export.is_mappable_member(slack_id) {
                 continue;
             }
-            match self.bindings.get(slack_id) {
+            match self.user_map.get(slack_id) {
                 Some(pubkey) => {
                     mapped_pubkeys.insert(pubkey.clone());
                 }
@@ -421,11 +461,11 @@ impl<'a> Importer<'a> {
                     continue;
                 }
             }
-            if let Some(state) = self.state.channels.get_mut(&channel.id) {
-                state.members_added.insert(pubkey);
-            }
+            self.record(JournalRecord::Member {
+                channel: channel.id.clone(),
+                pubkey,
+            })?;
             self.summary.private_members_added += 1;
-            self.checkpoint()?;
         }
         Ok(())
     }
@@ -496,7 +536,7 @@ impl<'a> Importer<'a> {
                                 "thread root {root_key} is not imported yet — deferring reply \
                                  {key}; re-run to resume"
                             ));
-                            self.summary.skipped += 1;
+                            self.summary.failed += 1;
                             continue;
                         }
                         self.summary.warn(format!(
@@ -524,11 +564,25 @@ impl<'a> Importer<'a> {
                     continue;
                 }
             };
-            match submit(self.client, builder).await {
-                Ok(event_id) => {
+            // Journal the signed id before the relay sees it: if the answer is
+            // lost, the next run can tell whether this exact event was stored.
+            let created_at = self.next_created_at().await;
+            let event = self
+                .client
+                .sign_event(builder.custom_created_at(created_at))
+                .await?;
+            let event_id = event.id.to_hex();
+            self.record(JournalRecord::Intent {
+                key: key.clone(),
+                id: event_id.clone(),
+            })?;
+            match submit_signed(self.client, event).await {
+                Ok(_) => {
                     consecutive_failures = 0;
-                    self.state.messages.insert(key.clone(), event_id);
-                    self.checkpoint()?;
+                    self.record(JournalRecord::Message {
+                        key: key.clone(),
+                        id: event_id,
+                    })?;
                     self.summary.messages_imported += 1;
                     imported_in_channel += 1;
                     if imported_in_channel.is_multiple_of(50) {
@@ -539,7 +593,7 @@ impl<'a> Importer<'a> {
                 Err(e) => {
                     consecutive_failures += 1;
                     self.summary.warn(format!("message {key} failed: {e}"));
-                    self.summary.skipped += 1;
+                    self.summary.failed += 1;
                     if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
                         self.flush()?;
                         return Err(CliError::Other(format!(
@@ -606,7 +660,7 @@ impl<'a> Importer<'a> {
             && channel.members.iter().any(|slack_id| {
                 self.export.is_mappable_member(slack_id)
                     && self
-                        .bindings
+                        .user_map
                         .get(slack_id)
                         .is_some_and(|pubkey| !state.members_added.contains(pubkey))
             })
@@ -628,9 +682,11 @@ impl<'a> Importer<'a> {
         })
     }
 
-    /// Import reactions for one message. Bot mode signs with a single key, so
-    /// each distinct emoji becomes one bot-signed reaction (a key can react
-    /// only once per target); the count of reactors is not preserved.
+    /// Import reactions for one message. The importer signs with a single key,
+    /// so each distinct emoji becomes one reaction (a key can react only once
+    /// per target); the count of reactors is not preserved. The relay refuses
+    /// a repeated reaction as a duplicate, which makes these writes idempotent
+    /// without an intent.
     async fn import_reactions(
         &mut self,
         channel: &SlackChannel,
@@ -647,9 +703,6 @@ impl<'a> Importer<'a> {
         };
         let target = EventId::from_hex(&target_hex)
             .map_err(|e| CliError::Other(format!("state file holds invalid event id: {e}")))?;
-        // Slack exports don't record reaction times; anchor just after the message.
-        let created_at = ts_seconds(&msg.ts)?.saturating_add(1);
-
         for reaction in &msg.reactions {
             let emoji = emoji_for_shortcode(&reaction.name);
             let dedupe = format!("{message_key}:{emoji}");
@@ -666,27 +719,35 @@ impl<'a> Importer<'a> {
                     continue;
                 }
             };
-            let builder = builder
-                .custom_created_at(Timestamp::from(created_at))
-                .tags(provenance_tags("slack", "slack", &msg.ts)?);
+            let source_ref = format!(
+                "{}/{}/{}/{}",
+                self.team_id, channel.id, msg.ts, reaction.name
+            );
+            let builder = builder.tags([imported_from_tag(&source_ref)?]);
             match submit(client, builder).await {
                 Ok(_) => {
-                    self.state.reactions.insert(dedupe);
-                    self.checkpoint()?;
+                    self.record(JournalRecord::Reaction { key: dedupe })?;
                     self.summary.reactions_imported += 1;
                 }
-                Err(e) => self.summary.warn(format!(
-                    "reaction :{}: on {message_key} in #{} failed: {e}",
-                    reaction.name, channel.name
-                )),
+                Err(e @ CliError::Auth(_)) => return Err(e),
+                Err(e) => {
+                    self.summary.warn(format!(
+                        "reaction :{}: on {message_key} in #{} failed: {e}",
+                        reaction.name, channel.name
+                    ));
+                    self.summary.failed += 1;
+                }
             }
         }
         Ok(())
     }
 
-    /// Flush the final state and print the run summary as JSON.
-    pub(super) fn finish(&self) -> Result<(), CliError> {
-        self.save()?;
+    /// Compact the ledger and print the run summary as JSON.
+    ///
+    /// A run that left retryable writes behind exits non-zero, so a caller
+    /// never mistakes a partial import for a finished one.
+    pub(super) fn finish(mut self) -> Result<(), CliError> {
+        self.flush()?;
         print_json(&serde_json::json!({
             "channels_created": self.summary.channels_created,
             "messages_imported": self.summary.messages_imported,
@@ -694,14 +755,24 @@ impl<'a> Importer<'a> {
             "private_members_added": self.summary.private_members_added,
             "private_members_unmapped": self.summary.private_members_unmapped,
             "skipped": self.summary.skipped,
+            "failed": self.summary.failed,
             "warnings": self.summary.warnings,
             "state_file": self.state_path.display().to_string(),
-        }))
+        }))?;
+        if self.summary.failed > 0 {
+            return Err(CliError::Other(format!(
+                "{} write(s) were not confirmed by the relay — re-run to resume from {}",
+                self.summary.failed,
+                self.state_path.display()
+            )));
+        }
+        Ok(())
     }
 }
 
-/// Build one imported message while preserving the channel/thread tags from
-/// the SDK builder and appending Slack provenance.
+/// Build one imported message: the SDK's channel/thread tags, an attribution
+/// header in the content, and the `imported_from` provenance tag. The caller
+/// stamps `created_at` when it is ready to submit.
 pub(super) fn build_imported_message(
     channel: &SlackChannel,
     channel_uuid: Uuid,
@@ -710,14 +781,6 @@ pub(super) fn build_imported_message(
     team_id: &str,
     thread_ref: Option<&buzz_sdk::ThreadRef>,
 ) -> Result<EventBuilder, CliError> {
-    let author = author_id(msg);
-    let author_name = author_display(msg, names);
-    // The `import_author` id is the workspace-scoped foreign id `<team>:<user>`,
-    // so it composes to the same `slack:<team>:<user>` key the identity binding
-    // uses — that is how the client joins an imported message to its attributed
-    // Buzz profile. Without the team prefix the join would miss.
-    let author_foreign = format!("{team_id}:{}", author.as_deref().unwrap_or("unknown"));
-
     let mut content_parts = Vec::new();
     if !msg.text.trim().is_empty() {
         content_parts.push(mrkdwn::convert(&msg.text, names));
@@ -739,33 +802,58 @@ pub(super) fn build_imported_message(
             None => content_parts.push(format!("📎 {}", file.label())),
         }
     }
-    let content = content_parts.join("\n\n");
-    // The prefix keeps imported history readable in clients that do not
-    // understand identity-binding events. Buzz Desktop removes the redundant
-    // prefix when rendering the provenance-aware message.
-    let escaped_author_name = escape_markdown_emphasis(&author_name);
-    let content = format!("**{escaped_author_name}**: {}", content.trim());
+    let header = attribution_header(&author_display(msg, names), &msg.ts);
+    let content = with_header(&header, content_parts.join("\n\n").trim());
 
     let broadcast = matches!(
         msg.subtype.as_deref(),
         Some("thread_broadcast" | "reply_broadcast")
     );
-    let mut import_tags = provenance_tags(&author_foreign, &author_name, &msg.ts)?;
-    import_tags.push(
-        nostr::Tag::parse([
-            "import_conversation",
-            &format!("{team_id}:{}", channel.id),
-            channel.kind.as_str(),
-        ])
-        .map_err(|e| CliError::Other(format!("invalid conversation provenance tag: {e}")))?,
-    );
+    let provenance = imported_from_tag(&format!("{team_id}/{}/{}", channel.id, msg.ts))?;
     buzz_sdk::build_message(channel_uuid, &content, thread_ref, &[], broadcast, &[], &[])
+        .map(|builder| builder.tags([provenance]))
         .map_err(|e| CliError::Other(format!("build_message failed: {e}")))
-        .and_then(|builder| {
-            Ok(builder
-                .custom_created_at(Timestamp::from(ts_seconds(&msg.ts)?))
-                .tags(import_tags))
-        })
+}
+
+/// `**Author** (2024-03-04 09:43 UTC):` — who wrote the message and when.
+///
+/// The importer signs every event and the relay only accepts a current
+/// `created_at`, so the original author and time are kept where every client
+/// can show them: in the content.
+fn attribution_header(author_name: &str, slack_ts: &str) -> String {
+    let name = escape_markdown_emphasis(author_name);
+    let written_at = ts_seconds(slack_ts)
+        .ok()
+        .and_then(|secs| i64::try_from(secs).ok())
+        .and_then(|secs| chrono::DateTime::from_timestamp(secs, 0))
+        .map(|at| at.format("%Y-%m-%d %H:%M UTC").to_string());
+    match written_at {
+        Some(written_at) => format!("**{name}** ({written_at}):"),
+        None => format!("**{name}**:"),
+    }
+}
+
+/// Put `header` in front of `body`: on the same line for ordinary text, on a
+/// line of its own when the body opens with block-level markdown that must
+/// start a line to render (a code fence, quote, list, heading, or table).
+fn with_header(header: &str, body: &str) -> String {
+    if body.is_empty() {
+        return header.to_string();
+    }
+    let first_line = body.lines().next().unwrap_or_default();
+    let opens_block = ["```", "~~~", ">", "|", "- ", "* ", "+ "]
+        .iter()
+        .any(|marker| first_line.starts_with(marker))
+        || (first_line.starts_with('#') && first_line.trim_start_matches('#').starts_with(' '))
+        || first_line
+            .trim_start_matches(|c: char| c.is_ascii_digit())
+            .strip_prefix(['.', ')'])
+            .is_some_and(|rest| rest.starts_with(' ') && !first_line.starts_with(['.', ')']));
+    if opens_block {
+        format!("{header}\n\n{body}")
+    } else {
+        format!("{header} {body}")
+    }
 }
 
 fn escape_markdown_emphasis(value: &str) -> String {
@@ -783,16 +871,6 @@ fn escape_markdown_emphasis(value: &str) -> String {
 }
 
 /// Sign with `client` and submit, returning the locally computed event id.
-///
-/// A 2xx response with `accepted: false` whose message marks a duplicate is
-/// success (idempotent re-run after state loss); any other rejection is an
-/// error.
-///
-/// Bulk imports run head-first into the relay's per-pubkey minute quotas,
-/// and the relay's `retry in 0s` hint makes the client's built-in retry
-/// spin uselessly — so 429s are absorbed here with a real backoff. The
-/// signed event is resubmitted verbatim; a re-send that lands twice is a
-/// relay-side duplicate, which the acceptance check below treats as success.
 pub(super) async fn submit(client: &BuzzClient, builder: EventBuilder) -> Result<String, CliError> {
     submit_with_response(client, builder)
         .await
@@ -805,13 +883,27 @@ async fn submit_with_response(
 ) -> Result<(String, String), CliError> {
     let event = client.sign_event(builder).await?;
     let event_id = event.id.to_hex();
+    let response = submit_signed(client, event).await?;
+    Ok((event_id, response))
+}
+
+/// Submit an already-signed event and return the relay's response body.
+///
+/// A 2xx response with `accepted: false` whose message marks a duplicate is
+/// success: the relay already holds this event, or — for a reaction — the same
+/// reaction from this key. Any other rejection is an error.
+///
+/// Bulk imports run head-first into the relay's per-pubkey minute quotas, so
+/// 429s are absorbed here with a bounded backoff. The same signed event is
+/// resubmitted each time; it cannot land twice.
+async fn submit_signed(client: &BuzzClient, event: nostr::Event) -> Result<String, CliError> {
     let mut backoff_secs = 1u64;
     let resp = loop {
         match client.submit_event(event.clone()).await {
             Ok(resp) => break resp,
             Err(CliError::Relay { status: 429, .. }) if backoff_secs <= 64 => {
                 eprintln!("  rate-limited — retrying in {backoff_secs}s");
-                tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+                tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
                 backoff_secs *= 2;
             }
             Err(e) => return Err(e),
@@ -835,7 +927,51 @@ async fn submit_with_response(
             )));
         }
     }
-    Ok((event_id, resp))
+    Ok(resp)
+}
+
+/// The ids of the events in a relay query response.
+fn stored_event_ids(response: &str) -> Result<HashSet<String>, CliError> {
+    let events: Vec<serde_json::Value> = serde_json::from_str(response).map_err(|e| {
+        CliError::Other(format!(
+            "could not parse the relay's answer about unconfirmed messages: {e}"
+        ))
+    })?;
+    Ok(events
+        .iter()
+        .filter_map(|event| event.get("id")?.as_str().map(str::to_string))
+        .collect())
+}
+
+/// Hands out strictly increasing `created_at` seconds for imported messages.
+///
+/// The relay orders a channel by `created_at` in whole seconds and breaks ties
+/// by event id, so two messages stamped in the same second can swap places.
+/// Giving each message its own second keeps the Slack order.
+pub(super) struct ImportClock {
+    last: u64,
+}
+
+impl ImportClock {
+    /// A clock whose first timestamp is later than `now`, so a run that
+    /// starts within a second of the previous one cannot reuse its last stamp.
+    pub(super) fn starting_after(now: u64) -> Self {
+        Self { last: now }
+    }
+
+    /// The next timestamp, and how many seconds remain until the wall clock
+    /// (`now`) reaches it.
+    pub(super) fn tick(&mut self, now: u64) -> (u64, u64) {
+        let created_at = now.max(self.last.saturating_add(1));
+        self.last = created_at;
+        (created_at, created_at - now)
+    }
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
 }
 
 /// Deterministic Buzz channel UUID for a Slack channel, derived from the
@@ -849,21 +985,14 @@ pub(super) fn channel_uuid(team_id: &str, channel_id: &str) -> Uuid {
     Uuid::new_v5(&Uuid::NAMESPACE_URL, name.as_bytes())
 }
 
-/// Provenance tags carried by every imported event.
-pub(super) fn provenance_tags(
-    author_id: &str,
-    author_name: &str,
-    slack_ts: &str,
-) -> Result<Vec<nostr::Tag>, CliError> {
-    let mk = |parts: &[&str]| {
-        nostr::Tag::parse(parts.iter().copied())
-            .map_err(|e| CliError::Other(format!("invalid provenance tag: {e}")))
-    };
-    Ok(vec![
-        mk(&["import", "slack"])?,
-        mk(&["import_author", author_id, author_name])?,
-        mk(&["import_ts", slack_ts])?,
-    ])
+/// The provenance tag carried by every imported event:
+/// `["imported_from", "slack", <source_ref>]`, where `source_ref` is a
+/// slash-delimited path of Slack's own ids (`<team>/<channel>/<ts>` for a
+/// message). It marks the event as imported and names the record it came from;
+/// it does not claim the signer wrote it.
+pub(super) fn imported_from_tag(source_ref: &str) -> Result<nostr::Tag, CliError> {
+    nostr::Tag::parse(["imported_from", "slack", source_ref])
+        .map_err(|e| CliError::Other(format!("invalid provenance tag: {e}")))
 }
 
 /// The Slack-side author identifier of a message: user id, else bot id.

@@ -1,27 +1,16 @@
-//! `buzz import` — migrate history from external workspaces.
+//! `buzz import` — bring history in from external workspaces.
 //!
 //! v1 supports Slack workspace exports; see `docs/slack-import.md` for the
-//! full design (attribution model, security, limitations).
+//! model and its limits.
 //!
-//! ## Attribution model (zero key custody, two-party consent)
-//!
-//! Every imported event is signed by the CLI identity (bot mode) and carries
-//! `import`/`import_author`/`import_ts` provenance tags. Real people are
-//! attributed by a **two-party identity binding**, using **public keys only** —
-//! no private key is ever generated for or distributed to anyone:
-//!
-//! 1. An owner/admin **attestation** (kind `KIND_IMPORT_IDENTITY_BINDING`)
-//!    mapping a Slack user id to a person's Buzz pubkey — `buzz import bind` /
-//!    `--identity-map`.
-//! 2. The subject's own **claim** (kind `KIND_IMPORT_IDENTITY_CLAIM`),
-//!    self-signed with their key — `buzz import claim`.
-//!
-//! History renders under the real person only when both exist for the same
-//! Slack id and the attestation's pubkey equals the claim's signer. So a member
-//! cannot claim another person's history (no admin attestation), and an admin
-//! cannot make someone appear to author history they never wrote (no subject
-//! claim). See `docs/slack-import.md` for the residual trust in a colluding
-//! admin + subject.
+//! The importer is an ordinary client: it needs no relay support beyond what
+//! any member already has. Every imported event is signed by the CLI identity
+//! and published with a current `created_at`, because the relay accepts no
+//! other. What Slack knew — who wrote a message and when — is kept in the
+//! content as an attribution header, and each event carries an
+//! `["imported_from", "slack", "<team>/<channel>/<ts>"]` tag naming the record
+//! it came from. The tag marks an event as imported; it does not claim the
+//! signer is the original author.
 
 mod channel_state;
 mod dm;
@@ -32,6 +21,8 @@ mod model;
 mod mrkdwn;
 mod render;
 mod report;
+#[cfg(test)]
+mod resume_tests;
 mod state;
 
 use std::collections::{HashMap, HashSet};
@@ -53,8 +44,8 @@ pub struct ImportSlackParams {
     /// One or more unzipped Slack export directories. Multiple roots support
     /// Slackdump's separate public/private export passes.
     pub export_dirs: Vec<String>,
-    /// Slack workspace id (team id) — namespaces identity bindings and channel
-    /// UUIDs so ids can't collide across workspaces.
+    /// Slack workspace id (team id) — namespaces provenance references and
+    /// channel UUIDs so ids can't collide across workspaces.
     pub team_id: String,
     /// State file path override.
     pub state: Option<String>,
@@ -66,9 +57,9 @@ pub struct ImportSlackParams {
     pub dry_run: bool,
     /// Skip reaction import.
     pub skip_reactions: bool,
-    /// Optional `SLACKID=npub,SLACKID=hex,…` identity bindings to publish
-    /// (owner/admin-signed) so imported history renders under real people.
-    pub identity_map: Option<String>,
+    /// Optional `SLACKID=npub,SLACKID=hex,…` map from Slack users to the Buzz
+    /// public keys they hold, used to populate private channels and DMs.
+    pub user_map: Option<String>,
 }
 
 pub async fn cmd_import_slack(client: &BuzzClient, p: ImportSlackParams) -> Result<(), CliError> {
@@ -92,23 +83,21 @@ pub async fn cmd_import_slack(client: &BuzzClient, p: ImportSlackParams) -> Resu
     validate_channel_map(&export, &state, &channel_map)?;
 
     // Slack user id → display name, for mrkdwn mention rewriting and
-    // author attribution tags.
+    // attribution headers.
     let names: HashMap<String, String> = export
         .users
         .iter()
         .map(|(id, u)| (id.clone(), u.best_name().to_string()))
         .collect();
 
-    // Parse identity bindings (Slack id → Buzz pubkey), public keys only.
-    let bindings = parse_identity_map(p.identity_map.as_deref())?;
-    let binding_map: HashMap<String, String> = bindings.iter().cloned().collect();
+    let user_map = parse_user_map(p.user_map.as_deref())?;
 
     let selected = select_channels(&export, p.channels.as_deref())?;
     let dm_blockers = dm_import_blockers(
         &export,
         &selected,
         &state,
-        &binding_map,
+        &user_map,
         &client.public_key().to_hex(),
     );
 
@@ -118,7 +107,7 @@ pub async fn cmd_import_slack(client: &BuzzClient, p: ImportSlackParams) -> Resu
             &selected,
             &state,
             &channel_map,
-            &binding_map,
+            &user_map,
             &dm_blockers,
             p.skip_reactions,
         );
@@ -146,10 +135,11 @@ pub async fn cmd_import_slack(client: &BuzzClient, p: ImportSlackParams) -> Resu
             state,
             state_path,
             skip_reactions: p.skip_reactions,
-            bindings: &binding_map,
+            user_map: &user_map,
         },
-    );
+    )?;
 
+    importer.resolve_pending().await?;
     for channel in &selected {
         importer.import_channel(channel).await?;
     }
@@ -157,37 +147,30 @@ pub async fn cmd_import_slack(client: &BuzzClient, p: ImportSlackParams) -> Resu
     importer.finish()
 }
 
-/// Parse a `SLACKID=key,SLACKID=key` list into `(slack_id, pubkey_hex)` pairs.
+/// Parse a `SLACKID=key,SLACKID=key` list into a Slack id → hex pubkey map.
 /// Each key may be an `npub1…` or a 64-char hex pubkey — **public keys only**.
-fn parse_identity_map(spec: Option<&str>) -> Result<Vec<(String, String)>, CliError> {
-    let Some(spec) = spec else {
-        return Ok(Vec::new());
-    };
-    let entries: Vec<(String, String)> = spec
+fn parse_user_map(spec: Option<&str>) -> Result<HashMap<String, String>, CliError> {
+    let mut map = HashMap::new();
+    for entry in spec
+        .unwrap_or_default()
         .split(',')
         .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(|entry| {
-            let (slack_id, key) = entry.split_once('=').ok_or_else(|| {
-                CliError::Usage(format!(
-                    "--identity-map entry must be SLACKID=npub-or-hex (got {entry:?})"
-                ))
-            })?;
-            Ok((
-                validate_slack_id(slack_id)?.to_string(),
-                parse_pubkey(key.trim())?,
+        .filter(|entry| !entry.is_empty())
+    {
+        let (slack_id, key) = entry.split_once('=').ok_or_else(|| {
+            CliError::Usage(format!(
+                "--user-map entry must be SLACKID=npub-or-hex (got {entry:?})"
             ))
-        })
-        .collect::<Result<_, CliError>>()?;
-    let mut seen = HashSet::new();
-    for (slack_id, _) in &entries {
-        if !seen.insert(slack_id) {
+        })?;
+        let slack_id = validate_slack_id(slack_id)?.to_string();
+        let pubkey = parse_pubkey(key.trim())?;
+        if map.insert(slack_id.clone(), pubkey).is_some() {
             return Err(CliError::Usage(format!(
-                "--identity-map contains duplicate Slack id {slack_id}"
+                "--user-map contains duplicate Slack id {slack_id}"
             )));
         }
     }
-    Ok(entries)
+    Ok(map)
 }
 
 /// Validate and normalize a Slack user id supplied on the command line.
@@ -218,7 +201,7 @@ fn validate_slack_ident<'a>(value: &'a str, label: &str) -> Result<&'a str, CliE
 fn parse_pubkey(key: &str) -> Result<String, CliError> {
     if key.starts_with("nsec1") {
         return Err(CliError::Usage(
-            "identity bindings take a PUBLIC key (npub or hex), not an nsec".into(),
+            "--user-map takes PUBLIC keys (npub or hex), not an nsec".into(),
         ));
     }
     PublicKey::parse(key)
@@ -348,7 +331,7 @@ pub async fn dispatch(cmd: crate::ImportCmd, client: &BuzzClient) -> Result<(), 
             channels,
             dry_run,
             skip_reactions,
-            identity_map,
+            user_map,
         } => {
             cmd_import_slack(
                 client,
@@ -360,7 +343,7 @@ pub async fn dispatch(cmd: crate::ImportCmd, client: &BuzzClient) -> Result<(), 
                     channels,
                     dry_run,
                     skip_reactions,
-                    identity_map,
+                    user_map,
                 },
             )
             .await
@@ -376,8 +359,8 @@ mod tests {
     };
     use super::export::SlackMessage;
     use super::importer::{
-        author_display, author_id, build_imported_message, channel_uuid, provenance_tags,
-        thread_root_key,
+        author_display, author_id, build_imported_message, channel_uuid, imported_from_tag,
+        thread_root_key, ImportClock,
     };
     use super::render::{emoji_for_shortcode, render_attachment, render_slack_blocks};
     use super::report::pending_reaction_count;
@@ -462,12 +445,12 @@ mod tests {
         let importer_keys = Keys::generate();
         let importer_pubkey = importer_keys.public_key().to_hex();
         let other_pubkey = Keys::generate().public_key().to_hex();
-        let mut bindings = HashMap::from([("U1".to_string(), importer_pubkey.clone())]);
-        assert!(mapped_dm_participants(&export, dm, &bindings, &importer_pubkey).is_err());
+        let mut user_map = HashMap::from([("U1".to_string(), importer_pubkey.clone())]);
+        assert!(mapped_dm_participants(&export, dm, &user_map, &importer_pubkey).is_err());
 
-        bindings.insert("U2".to_string(), other_pubkey.clone());
+        user_map.insert("U2".to_string(), other_pubkey.clone());
         let participants =
-            mapped_dm_participants(&export, dm, &bindings, &importer_pubkey).expect("complete map");
+            mapped_dm_participants(&export, dm, &user_map, &importer_pubkey).expect("complete map");
         assert_eq!(
             participants.iter().cloned().collect::<HashSet<_>>(),
             HashSet::from([importer_pubkey.clone(), other_pubkey.clone()])
@@ -476,7 +459,7 @@ mod tests {
             mapped_dm_participants(
                 &export,
                 dm,
-                &bindings,
+                &user_map,
                 &Keys::generate().public_key().to_hex()
             )
             .is_err(),
@@ -495,12 +478,10 @@ mod tests {
             .collect();
         assert!(tags.contains(&vec!["p".into(), other_pubkey]));
         assert!(!tags.contains(&vec!["p".into(), importer_pubkey]));
-        assert!(tags.contains(&vec!["d".into(), "slack:T1:D1".into()]));
-        assert!(tags.contains(&vec!["import".into(), "slack".into()]));
         assert!(tags.contains(&vec![
-            "import_conversation".into(),
-            "T1:D1".into(),
-            "direct_message".into()
+            "imported_from".into(),
+            "slack".into(),
+            "T1/D1".into()
         ]));
 
         std::fs::remove_dir_all(&dir).ok();
@@ -551,12 +532,12 @@ mod tests {
         let export = SlackExport::load_many(std::slice::from_ref(&dir)).expect("export");
         let selected: Vec<&SlackChannel> = export.channels.iter().collect();
         let importer_pubkey = Keys::generate().public_key().to_hex();
-        let bindings = HashMap::from([
+        let user_map = HashMap::from([
             ("U1".to_string(), importer_pubkey.clone()),
             ("U2".to_string(), Keys::generate().public_key().to_hex()),
         ]);
         let state = ImportState::load_for_workspace(&dir.join("state.json"), "T1").expect("state");
-        let blockers = dm_import_blockers(&export, &selected, &state, &bindings, &importer_pubkey);
+        let blockers = dm_import_blockers(&export, &selected, &state, &user_map, &importer_pubkey);
         assert_eq!(blockers.len(), 2);
         assert!(blockers["D1"].contains("merge separate histories"));
         assert!(blockers["D2"].contains("merge separate histories"));
@@ -638,17 +619,73 @@ mod tests {
         assert_eq!(author_display(&bot_msg, &names), "CI");
     }
 
-    #[test]
-    fn imported_message_escapes_markdown_in_the_author_prefix() {
-        let message = msg(r#"{"type":"message","user":"U1","text":"hello","ts":"100.0"}"#);
-        let names = HashMap::from([("U1".to_string(), r"A*B_C\D[bot]`".to_string())]);
-        let event =
-            build_imported_message(&channel(), Uuid::new_v4(), &message, &names, "T1", None)
-                .expect("builder")
-                .sign_with_keys(&Keys::generate())
-                .expect("signs");
+    fn imported_content(text: &str, author: &str) -> String {
+        let message = serde_json::json!({
+            "type": "message", "user": "U1", "text": text, "ts": "1709545400.000400",
+        });
+        let names = HashMap::from([("U1".to_string(), author.to_string())]);
+        build_imported_message(
+            &channel(),
+            Uuid::new_v4(),
+            &msg(&message.to_string()),
+            &names,
+            "T1",
+            None,
+        )
+        .expect("builder")
+        .sign_with_keys(&Keys::generate())
+        .expect("signs")
+        .content
+    }
 
-        assert_eq!(event.content, r"**A\*B\_C\\D\[bot\]\`**: hello");
+    #[test]
+    fn imported_message_names_its_author_and_original_time() {
+        assert_eq!(
+            imported_content("hello", "Alice"),
+            "**Alice** (2024-03-04 09:43 UTC): hello"
+        );
+        // Markdown in a display name must not leak out of the bold span.
+        assert_eq!(
+            imported_content("hello", r"A*B_C\D[bot]`"),
+            r"**A\*B\_C\\D\[bot\]\`** (2024-03-04 09:43 UTC): hello"
+        );
+    }
+
+    #[test]
+    fn attribution_header_gets_its_own_line_before_block_markdown() {
+        for block in [
+            "```\nlet x = 1;\n```",
+            "> quoted",
+            "- item",
+            "1. first",
+            "# heading",
+        ] {
+            assert_eq!(
+                imported_content(block, "Alice"),
+                format!("**Alice** (2024-03-04 09:43 UTC):\n\n{block}"),
+                "block markdown must start its own line: {block:?}"
+            );
+        }
+        // Text that merely starts with a marker character stays inline.
+        for inline in ["#general moved", "2024 was long", "-5 degrees"] {
+            assert_eq!(
+                imported_content(inline, "Alice"),
+                format!("**Alice** (2024-03-04 09:43 UTC): {inline}")
+            );
+        }
+    }
+
+    #[test]
+    fn import_clock_gives_every_message_its_own_second() {
+        let mut clock = ImportClock::starting_after(1_000);
+        // A burst within one wall-clock second is spread over later seconds,
+        // and each caller is told how long to wait for its stamp.
+        assert_eq!(clock.tick(1_000), (1_001, 1));
+        assert_eq!(clock.tick(1_000), (1_002, 2));
+        // Once the wall clock is ahead, stamps follow it with no wait.
+        assert_eq!(clock.tick(1_010), (1_010, 0));
+        // A wall clock that steps backwards never produces a repeated stamp.
+        assert_eq!(clock.tick(1_005), (1_011, 6));
     }
 
     #[test]
@@ -675,28 +712,25 @@ mod tests {
     }
 
     #[test]
-    fn identity_map_parses_npub_and_hex_and_rejects_nsec() {
+    fn user_map_parses_npub_and_hex_and_rejects_nsec() {
         let hex = "8f3904246ba9d9cc7e821e7752e123d435234d17c2513d85785f4a0b1ca07e56";
-        let parsed = parse_identity_map(Some(&format!("U1={hex}"))).expect("parses hex");
-        assert_eq!(parsed, vec![("U1".to_string(), hex.to_string())]);
+        let parsed = parse_user_map(Some(&format!("U1={hex}"))).expect("parses hex");
+        assert_eq!(parsed, HashMap::from([("U1".to_string(), hex.to_string())]));
 
         assert!(
-            parse_identity_map(Some("U1=nsec1abc")).is_err(),
+            parse_user_map(Some("U1=nsec1abc")).is_err(),
             "nsec rejected"
         );
+        assert!(parse_user_map(Some("U1")).is_err(), "missing = rejected");
         assert!(
-            parse_identity_map(Some("U1")).is_err(),
-            "missing = rejected"
-        );
-        assert!(
-            parse_identity_map(Some(&format!("U1={hex},U1={hex}"))).is_err(),
+            parse_user_map(Some(&format!("U1={hex},U1={hex}"))).is_err(),
             "duplicate Slack ids rejected"
         );
         assert!(
-            parse_identity_map(Some(&format!("={hex}"))).is_err(),
+            parse_user_map(Some(&format!("={hex}"))).is_err(),
             "empty Slack id rejected"
         );
-        assert!(parse_identity_map(None).expect("none ok").is_empty());
+        assert!(parse_user_map(None).expect("none ok").is_empty());
     }
 
     #[test]
@@ -743,21 +777,17 @@ mod tests {
 
         assert!(tags.contains(&vec!["h".into(), channel_id.to_string()]));
         assert!(tags.iter().any(|tag| tag.first().is_some_and(|v| v == "e")));
-        assert!(tags.contains(&vec!["import".into(), "slack".into()]));
-        // The import_author id is workspace-scoped (`<team>:<user>`) so it
-        // composes to the same `slack:T1:U1` key the identity binding uses.
+        // Slack's own ids, verbatim, so the reference is stable across runs.
         assert!(tags.contains(&vec![
-            "import_author".into(),
-            "T1:U1".into(),
-            "Alice".into()
+            "imported_from".into(),
+            "slack".into(),
+            "T1/C1/100.000002".into()
         ]));
-        assert!(tags.contains(&vec!["import_ts".into(), "100.000002".into()]));
-        assert!(tags.contains(&vec![
-            "import_conversation".into(),
-            "T1:C1".into(),
-            "public_channel".into()
-        ]));
-        assert_eq!(event.created_at.as_secs(), 100);
+        // A relay that implements consented imports reserves the `import` tag
+        // for them; an archive import must never carry it.
+        assert!(!tags
+            .iter()
+            .any(|tag| tag.first().is_some_and(|name| name == "import")));
     }
 
     #[test]
@@ -892,7 +922,7 @@ mod tests {
                 channels: None,
                 dry_run: true,
                 skip_reactions: false,
-                identity_map: None,
+                user_map: None,
             },
         )
         .await
@@ -905,23 +935,11 @@ mod tests {
     }
 
     #[test]
-    fn provenance_tags_shape() {
-        let tags = provenance_tags("U1", "alice", "1.000200").expect("tags build");
-        let flat: Vec<Vec<String>> = tags
-            .iter()
-            .map(|t| t.as_slice().iter().map(|s| s.to_string()).collect())
-            .collect();
+    fn imported_from_tag_shape() {
+        let tag = imported_from_tag("T1/C1/1.000200").expect("tag builds");
         assert_eq!(
-            flat,
-            vec![
-                vec!["import".to_string(), "slack".to_string()],
-                vec![
-                    "import_author".to_string(),
-                    "U1".to_string(),
-                    "alice".to_string()
-                ],
-                vec!["import_ts".to_string(), "1.000200".to_string()],
-            ]
+            tag.as_slice(),
+            ["imported_from", "slack", "T1/C1/1.000200"].map(String::from)
         );
     }
 }

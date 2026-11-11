@@ -1493,28 +1493,26 @@ pub enum WorkflowsCmd {
 pub enum ImportCmd {
     /// Import a Slack workspace export directory (see docs/slack-import.md)
     #[command(
-        after_help = "History is signed by the CLI identity (bot mode) and tagged with the \
-original author (import_author) and timestamp. No private key is ever \
-generated for or distributed to anyone.\n\n\
-Attributing history to a real person takes TWO signatures: an owner/admin \
-attestation (Slack id → that person's PUBLIC key) via --identity-map here or \
-`buzz import bind`, AND the person's own consent via `buzz import claim`, run \
-by them with their key. An attestation alone does not attribute history, so an \
-admin cannot make someone appear to author messages they never wrote.\n\n\
-Re-running resumes from the state file — completed writes are skipped.\n\n\
+        after_help = "Works against any relay: the CLI identity signs every event, stamped with \
+the time of the import. Each message opens with its original author and time, \
+and each event carries an imported_from tag naming the Slack record it came \
+from. Messages are spaced one second apart to keep their order, so a large \
+workspace takes a while.\n\n\
+Re-running resumes from the state file — completed writes are skipped, and a \
+message whose outcome was lost is looked up on the relay before it is sent again.\n\n\
 Examples:\n  \
 buzz import slack --export-dir ./export --team-id T0266FRGM --dry-run\n  \
 buzz import slack --export-dir ./export --team-id T0266FRGM\n  \
 buzz import slack --export-dir ./export --team-id T0266FRGM --channel-map ./crosswalk.csv --dry-run\n  \
-buzz import slack --export-dir ./export --team-id T0266FRGM --identity-map U060=npub1abc,U081=npub1def"
+buzz import slack --export-dir ./export --team-id T0266FRGM --user-map U060=npub1abc,U081=npub1def"
     )]
     Slack {
         /// Path to an unzipped Slack export directory. Repeat for separate
         /// Slackdump public/private export roots.
         #[arg(long = "export-dir", required = true, action = clap::ArgAction::Append)]
         export_dirs: Vec<String>,
-        /// Slack workspace id (team id, e.g. T0266FRGM). Namespaces identity
-        /// bindings and channel UUIDs so ids never collide across workspaces.
+        /// Slack workspace id (team id, e.g. T0266FRGM). Namespaces provenance
+        /// references and channel UUIDs so ids never collide across workspaces.
         #[arg(long)]
         team_id: String,
         /// State file path (default: <export-dir>/buzz-import-state.json)
@@ -1522,7 +1520,7 @@ buzz import slack --export-dir ./export --team-id T0266FRGM --identity-map U060=
         state: Option<String>,
         /// CSV or JSON crosswalk from Slack channel ids to existing Buzz
         /// channel UUIDs. Adopted archived channels are reopened for the
-        /// backfill and restored afterward.
+        /// import and restored afterward.
         #[arg(long)]
         channel_map: Option<String>,
         /// Only import these conversation names or Slack IDs (comma-separated)
@@ -1534,10 +1532,10 @@ buzz import slack --export-dir ./export --team-id T0266FRGM --identity-map U060=
         /// Skip importing reactions
         #[arg(long, default_value_t = false)]
         skip_reactions: bool,
-        /// Owner/admin-signed identity bindings: SLACKID=npub-or-hex, comma-separated.
-        /// Public keys only — never an nsec.
+        /// Slack users who hold a Buzz key: SLACKID=npub-or-hex, comma-separated.
+        /// Populates private channels and DMs. Public keys only — never an nsec.
         #[arg(long)]
-        identity_map: Option<String>,
+        user_map: Option<String>,
     },
 }
 

@@ -2,10 +2,11 @@
 
 use std::collections::HashMap;
 
-use nostr::{EventBuilder, Tag};
+use nostr::EventBuilder;
 use uuid::Uuid;
 
 use super::export::{SlackChannel, SlackConversationKind, SlackExport};
+use super::importer::imported_from_tag;
 use super::state::ImportState;
 use crate::error::CliError;
 
@@ -13,7 +14,7 @@ pub(super) fn dm_import_blockers(
     export: &SlackExport,
     selected: &[&SlackChannel],
     state: &ImportState,
-    bindings: &HashMap<String, String>,
+    user_map: &HashMap<String, String>,
     importer_pubkey: &str,
 ) -> HashMap<String, String> {
     let mut blockers = HashMap::new();
@@ -25,7 +26,7 @@ pub(super) fn dm_import_blockers(
         )
     }) {
         let is_new = !state.channels.contains_key(&conversation.id);
-        match mapped_dm_participants(export, conversation, bindings, importer_pubkey) {
+        match mapped_dm_participants(export, conversation, user_map, importer_pubkey) {
             Ok(participants) => {
                 participant_sets
                     .entry(participants.join(":"))
@@ -68,7 +69,7 @@ pub(super) fn response_payload(response: &str) -> Option<serde_json::Value> {
 pub(super) fn mapped_dm_participants(
     export: &SlackExport,
     channel: &SlackChannel,
-    bindings: &HashMap<String, String>,
+    user_map: &HashMap<String, String>,
     importer_pubkey: &str,
 ) -> Result<Vec<String>, CliError> {
     let mappable_ids: Vec<&str> = channel
@@ -79,12 +80,12 @@ pub(super) fn mapped_dm_participants(
         .collect();
     let missing = mappable_ids
         .iter()
-        .filter(|id| !bindings.contains_key(**id))
+        .filter(|id| !user_map.contains_key(**id))
         .count();
     if missing > 0 {
         return Err(CliError::Usage(format!(
             "Slack {} {} has {missing} unmapped active participant(s); provide every mapping \
-             with --identity-map before importing DM history",
+             with --user-map before importing DM history",
             channel.kind.as_str(),
             channel.id
         )));
@@ -92,7 +93,7 @@ pub(super) fn mapped_dm_participants(
 
     let participant_pubkeys: std::collections::BTreeSet<String> = mappable_ids
         .into_iter()
-        .filter_map(|id| bindings.get(id).cloned())
+        .filter_map(|id| user_map.get(id).cloned())
         .collect();
     if !participant_pubkeys.contains(importer_pubkey) {
         return Err(CliError::Usage(format!(
@@ -131,28 +132,10 @@ pub(super) fn build_import_dm_open(
         .filter(|pubkey| pubkey.as_str() != importer_pubkey)
         .map(String::as_str)
         .collect();
-    let mut tags = Vec::new();
-    let import_id = format!("slack:{team_id}:{}", channel.id);
-    tags.push(
-        Tag::parse(["d", import_id.as_str()])
-            .map_err(|e| CliError::Other(format!("invalid DM import d-tag: {e}")))?,
-    );
-    tags.push(
-        Tag::parse(["import", "slack"])
-            .map_err(|e| CliError::Other(format!("invalid import tag: {e}")))?,
-    );
-    let foreign_id = format!("{team_id}:{}", channel.id);
-    tags.push(
-        Tag::parse([
-            "import_conversation",
-            foreign_id.as_str(),
-            channel.kind.as_str(),
-        ])
-        .map_err(|e| CliError::Other(format!("invalid conversation provenance tag: {e}")))?,
-    );
+    let provenance = imported_from_tag(&format!("{team_id}/{}", channel.id))?;
     buzz_sdk::build_dm_open(&participant_refs)
         .map_err(|e| CliError::Other(format!("build_dm_open failed: {e}")))
-        .map(|builder| builder.tags(tags))
+        .map(|builder| builder.tags([provenance]))
 }
 
 /// Reject a relay-assigned native DM UUID that is already owned by another

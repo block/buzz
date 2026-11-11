@@ -1,93 +1,86 @@
 # Slack Import
 
-`buzz import slack` migrates a Slack workspace export into a Buzz community.
-Buzz was built to reduce dependency on Slack; this tool is the on-ramp — it
-carries a team's conversational history (channels, messages, threads,
-reactions) onto a relay you own, so agents and people can search it as one
-record from day one.
+`buzz import slack` copies a Slack workspace export into a Buzz community:
+channels, messages, threads, and reactions. It is an ordinary client. It needs
+no relay configuration, no operator access, and no permissions beyond those of
+the member who runs it, so it works the same against a relay you host and one
+hosted for you.
 
 ```bash
-buzz import slack --export-dir ./export --team-id T0266FRGM              # import history
 buzz import slack --export-dir ./export --team-id T0266FRGM --dry-run    # plan only
+buzz import slack --export-dir ./export --team-id T0266FRGM              # import
 # Merge separate Slackdump public/private passes:
 buzz import slack \
   --export-dir ./public-export \
   --export-dir ./private-export \
   --team-id T0266FRGM --dry-run
-# Adopt channel shells that were mirrored before the history backfill:
+# Write into channels that already exist in Buzz:
 buzz import slack --export-dir ./export --team-id T0266FRGM \
-  --channel-map ./slack-buzz-crosswalk.csv --dry-run
+  --channel-map ./slack-buzz-crosswalk.csv
+# Populate private channels and DMs with the people who hold a Buzz key:
 buzz import slack --export-dir ./export --team-id T0266FRGM \
-  --identity-map U060=npub1abc,U081=npub1def                            # admin attests people
-buzz import bind --team-id T0266FRGM --slack-id U060 --pubkey npub1abc   # admin attests one, later
-buzz import claim --team-id T0266FRGM --slack-id U060                    # the person consents (their key)
+  --user-map U060=npub1abc,U081=npub1def
 ```
 
-`--team-id` is the Slack workspace id (e.g. `T0266FRGM`). It namespaces every
-identity binding and channel UUID so a `U…` id can't collide across two Slack
-workspaces.
+`--team-id` is the Slack workspace id (for example `T0266FRGM`). It namespaces
+every provenance reference and channel UUID, so ids from two workspaces cannot
+collide.
+
+## The model: an archive, signed by the importer
+
+Buzz events are signed by their author, and a relay accepts an event only when
+its `created_at` is within fifteen minutes of the relay's clock. An importer
+that is an ordinary client therefore cannot publish a message as the person who
+wrote it, or date it in the past. This tool does neither. It publishes an
+**archive**:
+
+- **Every event is signed by the CLI identity.** No key is generated for, or
+  held on behalf of, anyone else, and no event claims another person's
+  signature.
+- **Every event is stamped with the time of the import.**
+- **The original author and time open each message**, where every client can
+  show them:
+
+  ```
+  **Ada Lovelace** (2024-03-04 09:43 UTC): the build is green again
+  ```
+
+- **Every event carries a provenance tag** naming the Slack record it came
+  from:
+
+  ```json
+  ["imported_from", "slack", "T0266FRGM/C024BE91L/1709545400.000400"]
+  ```
+
+  The reference is `<team id>/<channel id>/<message ts>`, using Slack's ids
+  verbatim. A reaction appends its Slack name (`…/1709545400.000400/tada`) and
+  a DM-open event uses `<team id>/<conversation id>`. The tag marks an event as
+  imported; it does not claim that the signer is the original author. Its shape
+  follows the convention proposed in
+  [#3306](https://github.com/block/buzz/issues/3306).
+
+History that must keep its original timestamps and per-author signatures needs
+relay support and each author's participation; see
+[Relation to consented import](#relation-to-consented-import).
 
 ## What gets imported
 
 | Slack | Buzz | Notes |
 |-------|------|-------|
-| Public channels (`channels.json`) | open stream, kind `9007` create + `9002` topic/purpose | UUID generated per channel, recorded in the state file |
+| Public channels (`channels.json`) | open stream, kind `9007` create + `9002` topic/purpose | UUID derived from the team and channel ids, recorded in the state file |
 | Private channels (`groups.json`, or Slackdump private records in `channels.json`) | **private** stream | Visibility is narrowed before any history write; never promoted to open |
-| DMs (`dms.json`) / MPIMs (`mpims.json`) | native Buzz DM (`41010` open; relay-confirmed `41001`) | The exact active-human participant set must be mapped before history can be written |
-| Messages (per-day JSON) | kind `9` stream message, `h`-tagged | `created_at` backdated to the original Slack `ts` |
+| DMs (`dms.json`) / MPIMs (`mpims.json`) | native Buzz DM (`41010` open) | The exact active-human participant set must be mapped before history can be written |
+| Messages (per-day JSON) | kind `9` stream message, `h`-tagged | Attribution header in the content; `created_at` is the import time |
 | Threads (`thread_ts`) | NIP-10 `e` reply tags | Slack threads are flat; every reply is a direct reply to the root |
-| Reactions | kind `7` | One bot-signed reaction per distinct emoji (per-reactor identity isn't reproduced) |
-| Classic attachments / Block Kit | Markdown text, fields, lists, quotes, links | Interactive app actions are not executable after migration |
-| Files | Links appended to message content | Downloaded blobs are not yet re-hosted (see Limitations) |
+| Reactions | kind `7` | One reaction per distinct emoji, signed by the importer |
+| Classic attachments / Block Kit | Markdown text, fields, lists, quotes, links | Interactive app actions are not executable after import |
+| Files | Links appended to message content | Blobs are not re-hosted (see Limitations) |
 | Custom emoji | — | Use `scripts/grab-emoji.sh` (separate tool, needs a Slack API token) |
-
-`--export-dir` is repeatable. This matters for Slackdump migrations where
-public and accessible-private conversations were exported in separate passes.
-The importer merges user and conversation indexes, deduplicates identical
-Slack timestamps across roots, and rejects conflicting conversation IDs or
-target names before connecting to the relay. `users.json` and Enterprise
-`org_users.json` are both supported.
-
-`--channel-map` adopts channels that already exist in Buzz instead of creating
-duplicates. The file can be CSV with `slack_channel_id` and `buzz_channel_id`
-columns (extra audit columns are ignored), or a JSON array of objects with
-those two fields. Every Slack id must exist in the loaded export, Buzz UUIDs
-must be unique, and a map cannot override a different UUID already recorded in
-the state file. DMs and MPIMs cannot be adopted through this path: they must be
-opened through Buzz's native DM command so the relay can enforce the exact
-participant set.
-
-Private Slack channels become private Buzz streams. `--identity-map` serves two
-purposes for them: it publishes the owner/admin half of identity attribution
-and adds each mapped Slack participant's Buzz public key as a channel member.
-Unmapped, deactivated, and bot identities are not replaced by some other
-account.
-
-DMs and MPIMs use Buzz's native DM-open command rather than ordinary channel
-creation. Because a Buzz DM's participant set is immutable, every active human
-Slack participant must have a mapping before that conversation is opened. The
-CLI identity must itself be the mapped key for one of those Slack participants;
-otherwise the importer would silently add the migration operator to private
-history. Buzz supports 2–9 total DM participants and one native DM per
-participant set; two separate Slack conversations that resolve to the same set
-are blocked rather than silently merged. A dry run lists each blocked DM/MPIM
-and its reason, and does not count its messages as ready to import.
-
-Every imported event carries provenance tags:
-
-- `["import", "slack"]` — marks the event as imported (the `<source>`)
-- `["import_author", "<team id>:<user id>", "<display name>"]` — original
-  author, workspace-scoped so it composes to the binding key `slack:<team>:<user>`
-- `["import_ts", "<slack ts>"]` — original microsecond-precision timestamp
-  (Nostr `created_at` is seconds, so this preserves sub-second ordering data)
-- `["import_conversation", "<team id>:<conversation id>", "<class>"]` — the
-  workspace-scoped Slack conversation and whether it was a public channel,
-  private channel, DM, or MPIM
 
 ### Message subtypes
 
 Slack tags non-plain messages with a `subtype`. The importer is deliberately
-conservative — it imports genuine conversation and silently skips system noise:
+conservative: it imports genuine conversation and skips system noise.
 
 | Slack subtype | Handling |
 |---|---|
@@ -96,343 +89,140 @@ conservative — it imports genuine conversation and silently skips system noise
 | `bot_message` and app/integration posts | Imported when text, files, classic attachments, or blocks are renderable |
 | `file_share`, `file_comment`, `me_message`, huddle/canvas sharing content | Imported when renderable |
 | `channel_join` / `channel_leave` / `channel_topic` / `channel_purpose` and other system notices | Skipped |
-| `message_changed` (edits) and `message_deleted` / tombstones | Skipped — only final, still-present text is imported; edit history is not reconstructed |
+| `message_changed` (edits) and `message_deleted` / tombstones | Skipped — only final, still-present text is imported |
 | Message with empty top-level `text` | Block Kit rich text, classic attachment fallback/text/fields, and files are rendered; only genuinely contentless records are skipped |
 
 Unknown future subtypes are accepted when they carry renderable conversation
-content. Known channel lifecycle, membership, pin, bot-management, and edit
-audit records stay out of the Buzz message timeline. Dry-run output makes this
-auditable with raw record totals and separate system, mutation, contentless,
-and duplicate counts.
+content. A dry run makes the filtering auditable: it reports raw record totals
+and separate system, mutation, contentless, and duplicate counts.
 
-Timestamps are read as the exact Slack `ts` **string** — integer seconds plus a
-microsecond fraction, never parsed as a float. `created_at` is the whole
-seconds; the full-precision `ts` is preserved in `import_ts` for ordering.
+## Conversations and people
 
-## Attribution model — zero key custody, two-party consent
+`--export-dir` is repeatable. This matters for Slackdump exports where public
+and accessible-private conversations were exported in separate passes. The
+importer merges user and conversation indexes, deduplicates identical Slack
+timestamps across roots, and rejects conflicting conversation ids or target
+names before connecting to the relay. `users.json` and Enterprise
+`org_users.json` are both supported.
 
-Every imported event is signed by the **CLI identity** (bot mode). No
-private key is ever generated for, or distributed to, anyone. Message
-bodies keep a `**Name**: ` prefix (for search and non-Buzz clients) and the
-`import_author` tag records the original person.
+`--channel-map` writes into channels that already exist in Buzz instead of
+creating new ones. The file is CSV with `slack_channel_id` and
+`buzz_channel_id` columns (extra columns are ignored), or a JSON array of
+objects with those two fields. Every Slack id must exist in the loaded export,
+Buzz UUIDs must be unique, and a map cannot override a different UUID already
+recorded in the state file. An adopted archived channel is unarchived for the
+import and archived again afterwards. DMs and MPIMs cannot be adopted this way:
+they are opened through Buzz's native DM command so the relay can enforce the
+exact participant set.
 
-Attributing history to a real person takes **two signatures** — an admin
-and the person — so neither side can do it alone:
+`--user-map` tells the importer which Slack users hold a Buzz key, as
+`SLACKID=npub-or-hex` pairs. It takes public keys only and is used for
+membership, not attribution:
 
-1. **Attestation** (kind `30623`, `KIND_IMPORT_IDENTITY_BINDING`) — a
-   community owner/admin signs `slack:<team id>:<user id> → <public key>` (the
-   `d` tag is the workspace-scoped `slack:<team>:<user>`). The relay accepts
-   this kind only from an owner/admin.
-2. **Claim** (kind `30624`, `KIND_IMPORT_IDENTITY_CLAIM`) — the person signs
-   their own consent for the same `slack:<team id>:<user id>` with their key. It
-   has no `p` tag: the signer *is* the subject, and the relay's signer==author
-   rule means you can only ever claim for yourself.
+- **Private channels** become private Buzz streams, and each mapped member is
+  added. Unmapped, deactivated, and bot users are counted in the summary and
+  never replaced by another account.
+- **DMs and MPIMs** need a mapping for every active human participant, because
+  a Buzz DM's participant set is fixed when it is opened. The CLI identity must
+  itself be the mapped key of one participant; otherwise the importer would add
+  the person running it to someone else's private conversation. Buzz supports
+  2–9 DM participants and one DM per participant set, so two Slack
+  conversations that resolve to the same set are blocked rather than merged. A
+  dry run lists each blocked conversation with its reason.
 
-The `d` tag is **workspace-scoped** (`slack:<team>:<user>`) because Slack user
-ids are only unique within a workspace. Imported messages carry the same scoped
-id in their `import_author` tag, so the client joins a message to its binding
-by the identical key. Both events are NIP-33 parameterized-replaceable on that
-`d` tag: re-binding supersedes the prior binding, and re-keying or revoking is a
-fresh event on the same `d` (a claim can also be replaced by the subject to
-withdraw consent).
+## Ordering, pacing, and resume
 
-```bash
-# admin attests (npub is public — not a secret):
-buzz import slack --export-dir ./export --team-id T0266FRGM --identity-map U060=npub1abc,U081=npub1def
-buzz import bind --team-id T0266FRGM --slack-id U060 --pubkey npub1abc   # or one at a time, later
+- **Order is kept by spacing messages one second apart.** A relay orders a
+  channel by `created_at` in whole seconds, so each imported message gets its
+  own second, in Slack order. Imports therefore run at no more than one message
+  per second — about an hour per 3,600 messages — and no message is ever dated
+  in the future. A relay's per-key rate limit (60 messages a minute by default)
+  allows the same pace; when the relay answers 429 the importer backs off and
+  resends the same signed event.
+- **Thread roots come before their replies.** Conversations are imported one at
+  a time, sorted by Slack `ts`. When a thread root is itself skipped (a
+  contentless or system record), its replies are imported as top-level messages
+  rather than dropped, with a warning per reply.
+- **A state file makes the import resumable.** By default it is
+  `<export-dir>/buzz-import-state.json`, with a `.journal` file beside it. It
+  maps each Slack conversation to its Buzz channel and each
+  `"<channel>:<ts>"` to the event that was published, and it is pinned to one
+  workspace. Re-running skips everything already recorded, including on a newer
+  export of the same workspace.
+- **A message is never published twice.** Its signed event id is journaled
+  before it is sent. If the run is interrupted, or the relay's answer is lost,
+  the next run looks that id up on the relay and either adopts the stored event
+  or signs the message again.
+- **A partial run exits non-zero.** The summary's `failed` count is the number
+  of writes the relay did not confirm; run the same command again to finish.
+  `skipped` counts records that can never be imported, such as a message over
+  the relay's size limit.
 
-# the person consents, run by them with their own key:
-buzz import claim --team-id T0266FRGM --slack-id U060
-```
+## Before you run it
 
-The Buzz client renders imported history under the real person's profile
-(name + avatar) **only when both exist and agree** — the attestation's
-pubkey equals the claim's signer for the same `slack:<team>:<id>`. Either half
-alone is inert; unconfirmed history still shows the `import_author` name.
-
-Why this is safe:
-
-- **Zero end-user key custody.** No member private key is ever generated for
-  or distributed to anyone — only public keys (npubs) are handled on the
-  attribution path, so there is no `keys.json` of member keys to leak. (The
-  optional claim-service does hold the operator's *own* owner/admin key and the
-  Slack client secret to sign attestations server-side; that is operator
-  infrastructure, not end-user custody — see [Configure the claim
-  service](#configure-the-claim-service).)
-- **A member can't seize history.** A claim without a matching owner/admin
-  attestation attributes nothing — a member cannot map
-  `slack:<team>:U060 → their own pubkey` to grab someone else's history.
-- **An admin can't forge authorship.** An attestation without the subject's
-  own claim attributes nothing either — an admin cannot make an existing
-  member appear to have written imported messages. This is the vector a
-  single admin signature could not close.
-- **No third-party signatures.** Every stored event is signed by its
-  submitter; there is no path for one key to post as another.
-- Display names remain freely editable (Slack-like); the binding ties a
-  Slack id to a **pubkey**, independent of display name. Verified handles
-  are a separate layer (NIP-05).
-
-**Residual trust.** A *colluding* owner/admin and a consenting pubkey can
-still attribute orphaned history to that pubkey (both sign). This is inherent
-without a Slack-side oracle to prove who really owned `slack:<team>:<id>`; the
-consenting party is publicly volunteering, and the immutable `import_author`
-provenance on every event records the original Slack identity regardless.
-What two-party consent removes is the *unilateral* admin — the realistic
-insider risk before production.
-
-### Slack migration join
-
-For people coming from the imported Slack workspace, use one dedicated
-onboarding link:
-
-```text
-buzz://join-slack?relay=<percent-encoded-ws(s)-relay>&service=<percent-encoded-https-claim-service>
-```
-
-For example:
-
-```text
-buzz://join-slack?relay=wss%3A%2F%2Fbuzz.example.com&service=https%3A%2F%2Fmigrate.example.com
-```
-
-Opening it in Buzz:
-
-1. Creates or loads the person's device key, generates a device-held verifier,
-   and opens `<service>/oidc/start` with only its one-way challenge.
-2. Slack authenticates them through its Sign in with Slack OpenID Connect
-   flow. The claim service verifies Slack's signed ID token (issuer, audience,
-   expiry, nonce, workspace) and confirms the same identity through Slack
-   userInfo.
-3. Slack returns through the internal `buzz://import-claim` callback with a
-   short-lived finalize code. Buzz verifies that it matches the pending join
-   and sends the service both the retained verifier and a self-signed identity
-   claim. A stolen custom-scheme callback code is unusable without that
-   verifier.
-4. The service verifies that signature, idempotently adds the key to the target
-   community, and publishes the owner/admin attestation. The code becomes bound
-   to that key, so the same device can safely retry a partial network failure
-   but another key cannot take over the migration.
-5. Buzz connects to the target community and publishes the person's matching
-   self-claim. Completing Slack OAuth is the consent action, so there is no
-   second confirmation prompt.
-6. With both signatures present, imported messages for that Slack user render
-   under the person's Buzz profile.
-
-Slack OAuth is intentionally a migration-time onboarding method. It is not a
-permanent Buzz sign-in method and does not appear in Settings. Do not
-distribute `buzz://import-claim` URLs: they are short-lived callbacks generated
-by the claim service, not an alternative invitation format. Use normal Buzz
-invite links for people who are not members of the imported Slack workspace.
-The `buzz import bind` and `buzz import claim` commands above remain
-manual fallbacks.
-
-#### Configure the claim service
-
-Create a Slack OIDC application for the workspace and register this exact
-redirect URL:
-
-```text
-https://migrate.example.com/oidc/callback
-```
-
-The Slack exchange uses the documented Sign in with Slack OpenID Connect
-endpoints. The device-held verifier described above protects the separate
-claim-service-to-Buzz handoff; it is not sent to Slack.
-
-Run `buzz-migrate` behind HTTPS with an owner/admin Buzz key:
-
-```bash
-export BUZZ_RELAY_URL=wss://buzz.example.com
-export BUZZ_PRIVATE_KEY=<owner-or-admin-nsec-or-hex>
-export SLACK_CLIENT_ID=<slack-client-id>
-export SLACK_CLIENT_SECRET=<slack-client-secret>
-export SLACK_TEAM_ID=<slack-workspace-id>
-
-buzz-migrate \
-  --export-dir ./my-workspace-export \
-  --bind 127.0.0.1:8787 \
-  --base-url https://migrate.example.com
-```
-
-When OIDC is enabled, startup logs print the complete
-`buzz://join-slack?...` migration link. Share that link with members of the
-imported Slack workspace. It is separate from the relay's normal invite link:
-
-- **Imported Slack member:** open the logged migration link; Slack verification
-  admits the person's device key and attaches their imported history.
-- **Everyone else:** in Buzz, open **Settings → Community access → Create invite
-  link**, choose an expiry, and share the resulting HTTPS link or QR code.
-
-> **Don't paste secrets on the command line.** `export BUZZ_PRIVATE_KEY=…` and
-> `SLACK_CLIENT_SECRET=…` land in shell history and process listings. Inject
-> both from a secret manager (or a `chmod 600` env file loaded by the service
-> supervisor) so the owner/admin key and Slack secret never persist in history.
-> The two shown here are illustrative.
-
-`SLACK_TEAM_ID` is **required** — it is the `<team>` in every
-`slack:<team>:<user>` subject the service mints, on both channels, and (for the
-OIDC path) the workspace Slack sign-ins are checked against. `SLACK_CLIENT_ID`
-and `SLACK_CLIENT_SECRET` are optional and enable the Sign-in-with-Slack (OIDC)
-channel when set together; omit both to run the email channel only.
-
-`--export-dir` supplies `users.json` for the optional email fallback; the OIDC
-path gets the verified Slack user id directly from Slack. `--base-url` must be
-the externally reachable **HTTPS** claim-service origin, with no path, query,
-fragment, or credentials; its `/oidc/callback` is the default OIDC redirect
-URI. Plain HTTP is accepted only with `--dev`. Use `--oidc-redirect-uri` only
-when the registered redirect differs. If the relay requires a NIP-OA
-delegation, also set `BUZZ_AUTH_TAG`.
-
-The join link's `relay` must identify the same community as
-`BUZZ_RELAY_URL`. The service's `BUZZ_PRIVATE_KEY` must be an owner/admin key
-for that community.
-
-The service holds a Buzz owner/admin private key and the Slack client secret.
-Run it as trusted migration infrastructure, keep it off the public relay
-process, terminate TLS in front of it, and retire the service and migration
-link when onboarding is complete. The join link remains usable while the
-service is running; it does not expire by itself. Never run `--dev` in
-production. Rate-limit `/oidc/start`, `/oidc/callback`, and `/oidc/finalize` at
-the reverse proxy. Pending OIDC state and finalize codes are process-local, so
-run one claim-service instance (or use sticky routing); restarting it
-invalidates sign-ins currently in progress. Outbound Slack token, userInfo, and
-signing-key requests use a 5-second connection timeout and a 30-second total
-request timeout.
-
-Before distributing the migration link in production, run one end-to-end smoke
-test against the actual Slack application and workspace: open
-`buzz://join-slack`, complete Slack authorization, verify that Buzz joins the
-expected community, and confirm that imported history resolves to that Buzz
-profile. The `--dev` flow exercises the app handoff and relay writes, but it
-does not validate Slack application configuration or Slack's live OIDC
-responses.
-
-The email magic-link channel is an identity-attribution fallback for someone
-who is already a community member; it deliberately does **not** grant
-membership. Only a workspace-verified Slack OIDC join performs automatic
-member admission. `buzz-migrate` currently has no production email-delivery
-backend, so this channel is only useful in `--dev` or after integrating a
-mailer: outside `--dev`, `POST /email/start` answers `503` for every address
-rather than reporting a link it cannot send (the answer is identical for known
-and unknown addresses, so it still reveals no workspace membership).
-
-## Relay requirements
-
-**The CLI identity must be a community owner or admin.** Two relay checks
-matter for imports:
-
-- Backdating: the relay rejects `created_at` more than 15 minutes in the
-  past, *except* for `import`-tagged events submitted by an owner/admin —
-  no restart or config change; the operator's auth is the authorization,
-  scoped per event. (Under the hood this also disarms the DB commit-time
-  floor guard for those inserts, and on read-replica deployments closes the
-  replica fence until a fresh handshake covers the backfilled rows —
-  degraded read capacity during the import, never missing rows.
-  Single-instance deployments are unaffected.)
-- Identity **attestations** (kind `30623`): accepted **only** from an
-  owner/admin. Identity **claims** (kind `30624`) are self-signed and
-  accepted from any member — but only for their own pubkey, and inert without
-  a matching attestation.
-
-Two optional knobs for the import window:
-
-```bash
-# Only if you cannot grant the importer admin: raise the past-drift window
-# relay-wide instead (requires restart; the DB floor guard follows at +60s).
-BUZZ_MAX_PAST_DRIFT_SECS=315360000
-
-# Speed: bot mode signs thousands of events with one key and the default
-# quota is 60 messages/minute. The importer backs off and retries on 429,
-# so an import finishes at default limits — just slowly.
-BUZZ_RATE_LIMIT_HUMAN_MESSAGES_PER_MIN=100000
-BUZZ_RATE_LIMIT_HUMAN_API_CALLS_PER_MIN=100000
-```
-
-> Both knobs are **relay-wide** and both weaken relay protections (past-drift
-> anti-spoofing; per-pubkey flood limits) for *every* account, not just the
-> importer. Prefer granting the importer owner/admin (the per-event exemption
-> above needs no relay-wide change at all). If you must raise them, restore the
-> defaults as soon as the import finishes — leaving them at 100000 leaves the
-> relay open to backdated-event spoofing and message floods.
-
-### Future: self-expiring import window
-
-A possible refinement — proposed, not implemented — is an admin-published
-relay command ("open import window: max age N, expires in H hours"),
-making the import authorization itself a signed, audit-logged,
-self-expiring event, with optional scoping to specific author pubkeys.
-The per-event admin exemption above covers the practical cases today.
-
-## Ordering, threads, idempotency
-
-- Conversations are imported one at a time; messages within a conversation are sorted
-  by Slack `ts`, so a thread root is always imported before its replies. If a
-  thread root is itself skipped (a genuinely contentless or system record),
-  its replies can't be `e`-tagged to it, so they are imported as ordinary
-  top-level messages instead of being dropped — their real content is preserved,
-  only the (contentless) thread linkage is lost. A warning is logged per reply.
-- An adopted archived channel is temporarily unarchived before its first
-  metadata, membership, message, or reaction write and restored to archived
-  after the backfill. If a later export adds messages, the state ledger causes
-  the same reopen/backfill/restore sequence. The relay rejects mutations on an
-  archived channel, so this is required for pre-created channel shells. If the
-  process stops after reopening an adopted channel, that channel may remain
-  unarchived until the next run resumes the backfill and restores it.
-- A state file (default `<export-dir>/buzz-import-state.json`) records
-  `Slack conversation id → Buzz channel UUID` (including relay-assigned native
-  DM UUIDs), private-visibility repair, mapped membership writes, and
-  `"<channel>:<ts>" → Nostr event id`. Re-running the import skips
-  everything already recorded — interrupted imports resume where they
-  stopped. The state file is saved incrementally during the run.
-- The state file is pinned to its schema version and `SLACK_TEAM_ID`. Reusing
-  it with another workspace is rejected. A non-empty state created before
-  workspace-scoped identities is also rejected because its skipped messages
-  could carry incompatible `import_author` values.
-- Reply `e`-tags are resolved from the state map, never from the relay.
+- **Run a dry run first.** `--dry-run` reads the export and the state file,
+  reports what would be written, and never contacts the relay.
+- **Import before the community is busy.** Imported messages are new messages
+  to the relay: members of the destination channels see them as fresh activity,
+  and workflows or agents that react to channel messages will see them too.
+  Import into channels before adding people, agents, or message-triggered
+  workflows, or expect the noise.
+- **Existing messages stay above imported ones.** History written into a
+  channel that already has messages lands after them. Import first, then start
+  using the channel.
+- **Mentions are not `p`-tagged.** A Slack `<@U123>` becomes plain `@Name`
+  text, so an import does not fill anyone's mention feed.
 
 ## Text conversion (mrkdwn → markdown)
 
 Code blocks and inline code are preserved verbatim. Outside code:
 
-- `<@U123>` → `@DisplayName` (plain text — see mention note below)
+- `<@U123>` → `@DisplayName`
 - `<#C123|name>` → `#name`
 - `<http://url|label>` → `[label](url)`; `<http://url>` → `url`
 - `<!here>` / `<!channel>` / `<!everyone>` → `@here` / `@channel` / `@everyone`
 - `&lt;` `&gt;` `&amp;` unescaped
 - `*bold*` → `**bold**` (conservative, single-line, non-space-adjacent)
 
-**Mentions are intentionally not `p`-tagged.** A `p` tag on thousands of
-backdated messages would flood mention feeds and notifications for everyone
-who was ever @-mentioned in Slack. Imported mentions render as plain
-`@Name` text.
+When a message opens with block-level markdown (a code fence, quote, list, or
+heading), the attribution header is placed on its own line so the block still
+renders.
 
-## Limitations (v1)
+## Limitations
 
-- **Files are not re-hosted.** Slack file URLs (which require Slack auth)
-  are appended as links. A future `--download-files` could fetch blobs with
-  a Slack token and re-upload via Blossom, rewriting links.
-- **Private coverage is export- and identity-bound.** The importer can migrate
-  private channels, DMs, and MPIMs present in `groups.json`, `dms.json`, and
-  `mpims.json` (or Slackdump's classified `channels.json` records). It cannot
-  recover conversations absent from the export. Private streams add only
-  explicitly mapped members; native DMs/MPIMs require the complete active-human
-  participant map and require the CLI key to represent one participant. Review
+- **Timestamps are the import time.** The original time is in each message's
+  header and in its `imported_from` reference, not in `created_at`, so date
+  filters and "jump to date" see the day of the import.
+- **Messages appear under the importer's identity.** The original author is
+  named in the header. Nothing here lets a person later take over the messages
+  they wrote in Slack.
+- **Per-reactor identity is not preserved.** One key can react to a message
+  once per emoji, so several people's 👍 become one.
+- **Files are not re-hosted.** Slack file URLs, which require Slack
+  authentication, are appended as links.
+- **Private coverage is bounded by the export and the user map.** Conversations
+  absent from the export cannot be recovered. Review
   `private_memberships_unmapped`, `dm_conversations_blocked`, and
   `dm_messages_blocked` in the dry run before writing.
-- **Per-reactor identity in reactions is not preserved.** Bot mode signs one
-  reaction per distinct emoji — a single key can react to a target once *per
-  emoji* (NIP-25), so N reactors of the same emoji collapse to one event and the
-  reactor count is lost.
-- **Reaction timestamps are synthetic** (message `ts + 1s`) — Slack exports
-  don't record when a reaction was added.
-- **Sub-second ordering may flatten.** Two messages inside the same second
-  get the same `created_at`; original ordering is preserved in `import_ts`.
-- **Edit history is not reconstructed** — the export contains only final
-  text.
-- **Interactive Slack app actions do not survive.** Classic attachment text,
-  fallbacks, fields, links, and Block Kit rich text are converted to Markdown,
-  but buttons, menus, callbacks, and application execution cannot be replayed.
+- **Edit history is not reconstructed.** The export holds only final text.
+- **Interactive Slack app actions do not survive.** Attachment text, fields,
+  links, and Block Kit rich text are converted to markdown; buttons, menus, and
+  callbacks cannot be replayed.
 - **Slack workflows are not translated** to `buzz-workflow` YAML.
+
+## Relation to consented import
+
+[#8981](https://github.com/block/buzz/pull/8981) proposes NIP-CI, in which the
+participants of a conversation each sign their own past messages and the relay
+accepts the original timestamps inside a session everyone has consented to.
+That is the right tool when the authors are present and each holds a key. It
+keeps real authorship and real dates, which this importer cannot.
+
+This importer covers the other case: an operator bringing over a whole
+workspace as a readable record, including the words of people who have left and
+will never hold a key. The two do not overlap on the wire. An archive import
+never carries the `import` tag that NIP-CI reserves, and it asks the relay for
+nothing a member cannot already do.
 
 ## CLI reference
 
@@ -442,25 +232,15 @@ buzz import slack
   --team-id <ID>           Slack workspace id (required, e.g. T0266FRGM)
   --state <PATH>           state file (default: <export-dir>/buzz-import-state.json)
   --channel-map <PATH>     CSV/JSON map: Slack channel id → existing Buzz UUID
-  --channels <a,b,c>       import only these conversation names or Slack IDs
+  --channels <a,b,c>       import only these conversation names or Slack ids
   --dry-run                parse and report what would be imported; no writes
   --skip-reactions         do not import reactions
-  --identity-map <MAP>     SLACKID=npub-or-hex,… admin attestations (public keys only)
-
-buzz import bind           # owner/admin half: attest a Slack id → public key
-  --team-id <ID>           Slack workspace id (e.g. T0266FRGM)
-  --slack-id <ID>          Slack user id (e.g. U060976D0QN)
-  --pubkey <NPUB|HEX>      the person's PUBLIC key (never an nsec)
-
-buzz import claim          # subject half: consent, run by the person with their key
-  --team-id <ID>           Slack workspace id (e.g. T0266FRGM)
-  --slack-id <ID>          your Slack user id (e.g. U060976D0QN)
+  --user-map <MAP>         SLACKID=npub-or-hex,… Slack users who hold a Buzz key
 ```
 
-Output follows CLI conventions: progress on stderr, a final JSON summary on
+Output follows CLI conventions: progress on stderr and a final JSON summary on
 stdout (`channels_created`, `messages_imported`, `reactions_imported`,
-`private_members_added`, `private_members_unmapped`, `bindings_published`,
-`skipped`, `warnings`). Dry runs also report conversation-class, visibility,
-raw record, intentionally skipped-record, reaction-use, private-membership,
-existing-channel adoption (`channels_to_adopt`), and blocked native-DM details
-without writing the state file or connecting to the relay.
+`private_members_added`, `private_members_unmapped`, `skipped`, `failed`,
+`warnings`, `state_file`). A dry run instead reports conversation classes,
+raw and skipped record counts, reaction use, private membership coverage,
+channels to adopt, and blocked DMs.

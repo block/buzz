@@ -13,7 +13,7 @@ pub(super) fn dry_run_report(
     selected: &[&SlackChannel],
     state: &ImportState,
     channel_map: &HashMap<String, String>,
-    bindings: &HashMap<String, String>,
+    user_map: &HashMap<String, String>,
     dm_blockers: &HashMap<String, String>,
     skip_reactions: bool,
 ) -> Result<(), CliError> {
@@ -39,7 +39,7 @@ pub(super) fn dry_run_report(
     let mut duplicate_records = 0u64;
     let mut dm_conversations_blocked = Vec::new();
     let mut dm_messages_blocked = 0u64;
-    let mapped: HashSet<&str> = bindings.keys().map(String::as_str).collect();
+    let mapped: HashSet<&str> = user_map.keys().map(String::as_str).collect();
     for channel in selected {
         match channel.kind {
             SlackConversationKind::PublicChannel => public_channels += 1,
@@ -137,11 +137,10 @@ pub(super) fn dry_run_report(
         "private_memberships_mapped": mapped_private_members,
         "private_memberships_unmapped": mappable_private_members
             .saturating_sub(mapped_private_members),
-        "bindings_to_publish": bindings.len(),
     }))
 }
 
-/// Number of distinct bot-signed reactions that still need publishing.
+/// Number of distinct reactions that still need publishing.
 pub(super) fn pending_reaction_count(
     state: &ImportState,
     message_key: &str,
