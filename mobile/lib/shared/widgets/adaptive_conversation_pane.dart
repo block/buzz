@@ -167,8 +167,10 @@ class AdaptiveConversationPane extends HookConsumerWidget {
             final wide = usesConversationPanes(context, strip: strip);
             final book = wide ? bookDivisionOf(context) : null;
             final selected = controller.selectedId;
+            // Pane surfaces meet at the fold so their header backdrops remain
+            // continuous. Content insets below keep controls out of its bounds.
             final listWidth = book != null
-                ? book.left - leftInset
+                ? book.center.dx - leftInset
                 : wide
                 ? listWidthFraction == null
                       ? preferredListWidth?.clamp(
@@ -179,7 +181,7 @@ class AdaptiveConversationPane extends HookConsumerWidget {
                       : (contentWidth - 1) * listWidthFraction!
                 : constraints.maxWidth;
             final detailLeft =
-                book?.right ?? (wide ? listWidth + leftInset + 1 : 0.0);
+                book?.center.dx ?? (wide ? listWidth + leftInset + 1 : 0.0);
             final media = MediaQuery.of(context);
             return TweenAnimationBuilder<Offset>(
               tween: Tween(end: Offset(listWidth, detailLeft)),
@@ -218,7 +220,9 @@ class AdaptiveConversationPane extends HookConsumerWidget {
                               strip: strip,
                               contentInsets: EdgeInsets.only(
                                 left: leftInset,
-                                right: wide ? 0 : rightInset,
+                                right: wide
+                                    ? (book?.width ?? 0) / 2
+                                    : rightInset,
                               ),
                               active:
                                   active &&
@@ -250,7 +254,7 @@ class AdaptiveConversationPane extends HookConsumerWidget {
                               strip: strip,
                               leadingSlots: wide ? listToolbarSlots : 0,
                               contentInsets: EdgeInsets.only(
-                                left: wide ? 0 : leftInset,
+                                left: wide ? (book?.width ?? 0) / 2 : leftInset,
                                 right: rightInset,
                               ),
                               active:

@@ -150,14 +150,21 @@ void main() {
           find.byKey(const ValueKey('detail-surface')),
         );
         expect(moving.left, greaterThan(flatLeft));
-        expect(moving.left, lessThan(482));
+        expect(moving.left, lessThan(476));
         expect(moving.right, 951);
         await tester.pumpAndSettle();
         final detail = tester.getRect(
           find.byKey(const ValueKey('detail-surface')),
         );
-        expect(detail.left, division == null ? flatLeft : 482);
+        expect(detail.left, division == null ? flatLeft : 476);
         expect(detail.right, 951);
+        if (division != null) {
+          expect(tester.getRect(find.text('Sidebar')).right, detail.left);
+          expect(
+            tester.getCenter(find.text('Open sheet')).dx,
+            closeTo((482 + 875) / 2, 1),
+          );
+        }
         expect(controller.selectedId, 'settings');
         expect(find.text('Open sheet'), findsOneWidget);
       }
@@ -176,7 +183,7 @@ void main() {
       await tester.pump();
       expect(
         tester.getRect(find.byKey(const ValueKey('detail-surface'))).left,
-        482,
+        476,
       );
       IosNavigationMetrics.updateRail(tester.element(find.text('Sidebar')), {
         'centerX': 920,
