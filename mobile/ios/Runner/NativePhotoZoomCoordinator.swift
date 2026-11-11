@@ -398,6 +398,7 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
   }
   override func viewDidAppear(_ animated: Bool) {
     super.viewDidAppear(animated); appeared = true
+    selectionFeedback.prepare()
     (pager.viewControllers?.first as? NativePhotoPage)?.playVideo()
   }
   override func viewWillDisappear(_ animated: Bool) {
@@ -411,12 +412,14 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
     guard let page = viewController as? NativePhotoPage, page.index + 1 < labels.count else { return nil }; return self.page(page.index + 1)
   }
   func pageViewController(_ pageViewController: UIPageViewController, willTransitionTo pendingViewControllers: [UIViewController]) {
-    selectionFeedback.prepare()
+    // Respond when the swipe starts, not after UIKit finishes settling the page.
+    if !paging { selectionFeedback.selectionChanged() }
     paging = true; indicator.isEnabled = false
     for page in pager.children.compactMap({ $0 as? NativePhotoPage }) { page.pauseVideo() }
   }
   func pageViewController(_ pageViewController: UIPageViewController, didFinishAnimating finished: Bool, previousViewControllers: [UIViewController], transitionCompleted completed: Bool) {
     paging = false; indicator.isEnabled = true
+    selectionFeedback.prepare()
     if completed, let page = pager.viewControllers?.first as? NativePhotoPage {
       for previous in previousViewControllers.compactMap({ $0 as? NativePhotoPage }) where previous !== page { previous.stopVideo() }
       selected(page.index)
@@ -431,7 +434,6 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
   }
   private func selected(_ value: Int) {
     guard value != index else { return }
-    selectionFeedback.selectionChanged()
     stopVideos()
     index = value; indicator.currentPage = value
     updateMore()
@@ -443,6 +445,7 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
     guard !paging, !finishing else { return }
     let target = indicator.currentPage
     guard target != index else { return }
+    selectionFeedback.selectionChanged()
     // Scrubbing must not disable its own control or wait for a page animation.
     let direction: UIPageViewController.NavigationDirection = target >= index ? .forward : .reverse
     selected(target)
