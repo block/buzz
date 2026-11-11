@@ -360,7 +360,7 @@ void main() {
     expect(find.text('Find my communities'), findsOneWidget);
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pumpAndSettle();
-  });
+  }, skip: HostedEnvironment.authDomains.isEmpty);
 }
 
 Future<void> revealOptions(WidgetTester tester) async {
