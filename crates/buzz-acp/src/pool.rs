@@ -157,6 +157,12 @@ pub struct SessionState {
     /// pool uses this fence to discard that stale provider session before the
     /// worker becomes claimable again.
     scope_owner_generations: HashMap<SessionScope, u64>,
+    /// Provider session ids dropped from this worker's maps while its agent
+    /// process stays alive. Each still pins provider-side resources (one
+    /// `claude` subprocess per session in claude-agent-acp) until it receives
+    /// ACP `session/close`; [`OwnedAgent::flush_pending_closes`] sends those.
+    /// Bounded by the sessions this worker ever held; drained on every flush.
+    pub(crate) pending_closes: Vec<String>,
 }
 
 impl SessionState {
@@ -171,7 +177,9 @@ impl SessionState {
                 self.invalidate_scope(scope);
             }
             PromptSource::Heartbeat => {
-                self.heartbeat_session = None;
+                if let Some(sid) = self.heartbeat_session.take() {
+                    self.pending_closes.push(sid);
+                }
                 self.heartbeat_turn_count = 0;
                 self.heartbeat_standing_context_sent = false;
             }
@@ -186,7 +194,13 @@ impl SessionState {
         self.canvas_sections.remove(scope);
         self.deliveries.remove(scope);
         self.scope_owner_generations.remove(scope);
-        self.sessions.remove(scope).is_some()
+        match self.sessions.remove(scope) {
+            Some(sid) => {
+                self.pending_closes.push(sid);
+                true
+            }
+            None => false,
+        }
     }
 
     /// Invalidate every session scope belonging to `channel_id` (channel-wide
@@ -216,8 +230,14 @@ impl SessionState {
     }
 
     /// Invalidate all sessions and turn counters (e.g. after agent exit).
+    ///
+    /// Every caller has lost the agent process (exit, or a hard timeout that
+    /// tears it down), and the provider sessions die with it — so nothing is
+    /// queued for `session/close`, and closes queued for the dead process are
+    /// dropped rather than sent to its replacement.
     pub fn invalidate_all(&mut self) {
         self.sessions.clear();
+        self.pending_closes.clear();
         self.turn_counts.clear();
         self.heartbeat_session = None;
         self.heartbeat_turn_count = 0;
@@ -347,6 +367,43 @@ fn session_new_system_prompt<'a>(
 }
 
 impl OwnedAgent {
+    /// Send ACP `session/close` for every session this worker discarded.
+    ///
+    /// Must run only while the agent is owned and idle (no `session/prompt` in
+    /// flight): ACP requests share one stdio stream. Closing is best-effort and
+    /// never retried: an agent that rejects a close no longer holds the session,
+    /// and one that times out or breaks its pipe is unhealthy — the remaining
+    /// ids are dropped so a wedged adapter cannot stall the caller once per
+    /// sweep, and its next turn's timeout/exit path respawns the process, which
+    /// releases every session it still held.
+    pub async fn flush_pending_closes(&mut self) {
+        for sid in std::mem::take(&mut self.state.pending_closes) {
+            match self.acp.session_close(&sid).await {
+                Ok(true) => tracing::info!(
+                    target: "pool::session",
+                    agent = self.index,
+                    "closed discarded session {sid}"
+                ),
+                Ok(false) => return,
+                Err(e @ (AcpError::AgentError { .. } | AcpError::Protocol(_))) => {
+                    tracing::warn!(
+                        target: "pool::session",
+                        agent = self.index,
+                        "agent rejected session/close for {sid}: {e}"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "pool::session",
+                        agent = self.index,
+                        "session/close for {sid} failed: {e}; dropping remaining closes until respawn"
+                    );
+                    return;
+                }
+            }
+        }
+    }
+
     pub(crate) fn has_system_prompt_support(&self) -> bool {
         has_system_prompt_support(
             self.protocol_version,
@@ -1319,6 +1376,29 @@ impl AgentPool {
 
     pub fn agents_mut(&mut self) -> &mut Vec<Option<OwnedAgent>> {
         &mut self.agents
+    }
+
+    /// Flush [`OwnedAgent::flush_pending_closes`] on every idle worker.
+    /// Checked-out workers flush when their next turn starts or after they
+    /// return and the next sweep runs.
+    pub async fn flush_idle_pending_closes(&mut self) {
+        for agent in self.agents.iter_mut().flatten() {
+            if !agent.state.pending_closes.is_empty() {
+                agent.flush_pending_closes().await;
+            }
+        }
+    }
+
+    /// Channels with a live provider session on an idle worker or a recorded
+    /// scope owner (which covers workers that are checked out right now).
+    pub fn channels_with_sessions(&self) -> HashSet<Uuid> {
+        self.agents
+            .iter()
+            .flatten()
+            .flat_map(|agent| agent.state.sessions.keys())
+            .chain(self.session_owners.keys())
+            .map(SessionScope::channel_id)
+            .collect()
     }
 
     /// Remove the session for `channel_id` from all idle agents.
@@ -2503,6 +2583,10 @@ pub async fn run_prompt_task(
         .map(|b| b.events.iter().map(|be| be.routing_event_id()).collect())
         .unwrap_or_default();
     let _reaction_guard = ReactionGuard::new(ctx.rest_client.clone(), reaction_ids.clone());
+
+    // Release sessions this worker discarded since its last turn (rotation,
+    // invalidation, stale-ownership fence) before the stdio stream is busy.
+    agent.flush_pending_closes().await;
 
     // Resolve project authority exactly once, before any ACP session creation or
     // initial-message delivery. An indeterminate result is a local relay-state
@@ -12445,3 +12529,7 @@ done"#
 #[cfg(all(test, unix))]
 #[path = "pool/pi_prompt_tests.rs"]
 mod pi_prompt_tests;
+
+#[cfg(all(test, unix))]
+#[path = "pool/session_close_tests.rs"]
+pub(crate) mod session_close_tests;

@@ -207,6 +207,13 @@ pub struct AcpClient {
     /// a JSON-RPC *success*, not `-32601` — which the main loop would read as
     /// a delivered steer and drop the user's message from the queue.
     steering_supported: bool,
+    /// Whether the agent advertised `agentCapabilities.sessionCapabilities.close`
+    /// in its `initialize` response. Set once by [`initialize`](Self::initialize).
+    /// Gates [`session_close`](Self::session_close): without it, a session the
+    /// pool discards keeps its provider-side resources (a `claude` subprocess per
+    /// session in claude-agent-acp, per-thread runtimes in codex) for the life of
+    /// the adapter process.
+    session_close_supported: bool,
     /// Per-turn channel for receiving goose-native non-cancelling steer
     /// requests from the main loop. Installed by
     /// [`install_steer_rx`](Self::install_steer_rx) at dispatch and
@@ -629,6 +636,7 @@ impl AcpClient {
             observer_context: ObserverContext::default(),
             active_run_id: None,
             steering_supported: false,
+            session_close_supported: false,
             steer_rx: None,
             goose_usage: UsageTracker::default(),
             standard_usage: StandardUsageTracker::default(),
@@ -688,6 +696,7 @@ impl AcpClient {
             .pointer("/_meta/steering/supported")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        self.session_close_supported = session_close_advertised(&result);
         tracing::debug!(target: "acp::init", "initialize response: {result}");
         Ok(result)
     }
@@ -935,6 +944,28 @@ impl AcpClient {
         self.send_notification("session/cancel", params).await
     }
 
+    /// Bound on each `session/close` write and response. Adapters answer in
+    /// well under a second (measured: claude-agent-acp ~0.7s, codex-acp ~1ms;
+    /// teardown continues after the reply), and closes run on the harness
+    /// main loop and at turn start, so a wedged adapter must not stall either
+    /// for the general [`REQUEST_TIMEOUT`](Self::REQUEST_TIMEOUT).
+    const SESSION_CLOSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+    /// Release a session the pool will never prompt again (ACP `session/close`).
+    ///
+    /// A no-op returning `Ok(false)` when the agent did not advertise
+    /// `sessionCapabilities.close`. Returns `Ok(true)` once the agent
+    /// acknowledged the close.
+    pub async fn session_close(&mut self, session_id: &str) -> Result<bool, AcpError> {
+        if !self.session_close_supported {
+            return Ok(false);
+        }
+        let params = serde_json::json!({ "sessionId": session_id });
+        self.send_request_within("session/close", params, Self::SESSION_CLOSE_TIMEOUT)
+            .await?;
+        Ok(true)
+    }
+
     /// Returns `true` if a `session/prompt` request is currently in flight.
     pub fn has_in_flight_prompt(&self) -> bool {
         self.last_prompt_id.is_some()
@@ -1178,6 +1209,19 @@ impl AcpClient {
         method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, AcpError> {
+        self.send_request_within(method, params, Self::REQUEST_TIMEOUT)
+            .await
+    }
+
+    /// [`send_request`](Self::send_request) with a caller-chosen bound on the
+    /// write and on the response read (each). A late response after a timeout
+    /// is skipped by the next read (id mismatch).
+    async fn send_request_within(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+        timeout: std::time::Duration,
+    ) -> Result<serde_json::Value, AcpError> {
         let id = self.next_id;
         self.next_id += 1;
 
@@ -1193,7 +1237,6 @@ impl AcpClient {
         // Wrap write + read in a single timeout so a hung agent can't block forever.
         // We cannot use an async block that borrows `self` mutably across two awaits
         // inside timeout(), so we sequence them with early-return on timeout.
-        let timeout = Self::REQUEST_TIMEOUT;
         match tokio::time::timeout(timeout, self.write_ndjson(&msg)).await {
             Ok(result) => result?,
             Err(_) => return Err(AcpError::Timeout(timeout)),
@@ -2238,6 +2281,14 @@ pub enum ModelSwitchMethod {
     },
     /// Unstable: use `session/set_model` with this model_id.
     SetModel { model_id: String },
+}
+
+/// Whether an `initialize` result advertises ACP `session/close` support
+/// (`agentCapabilities.sessionCapabilities.close` present as an object).
+pub(crate) fn session_close_advertised(initialize_result: &serde_json::Value) -> bool {
+    initialize_result
+        .pointer("/agentCapabilities/sessionCapabilities/close")
+        .is_some_and(serde_json::Value::is_object)
 }
 
 /// Extract `configOptions` entries with `category == "model"` from a `session/new` result.
