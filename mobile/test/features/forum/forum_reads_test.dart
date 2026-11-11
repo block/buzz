@@ -485,9 +485,11 @@ void main() {
       );
       expect(response.posts.single.eventId, root.id);
       // Inclusive timestamp bounds cannot prove completeness when a relay
-      // may clamp within the final second. Keep the root and a retry warning.
+      // may clamp within the final second. Keep the root and a neutral
+      // completeness notice.
       expect(response.hasMore, isTrue);
-      expect(response.refreshError, isA<StateError>());
+      expect(response.refreshError, isNull);
+      expect(response.hasUnconfirmedHistory, isTrue);
       expect(
         session.filters.where(
           (filter) =>

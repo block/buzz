@@ -905,6 +905,54 @@ void main() {
       expect(find.text('First post'), findsOneWidget);
       expect(find.text('Second post'), findsOneWidget);
     });
+
+    testWidgets(
+      'separates unconfirmed history from a retryable refresh failure',
+      (tester) async {
+        final post = _makePost(content: 'Readable post');
+        await tester.pumpWidget(
+          _buildPostsView(
+            postsResponse: ForumPostsResponse(
+              posts: [post],
+              hasUnconfirmedHistory: true,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(find.text('Readable post'), findsOneWidget);
+        expect(
+          find.text("This relay can't confirm that history is complete."),
+          findsOneWidget,
+        );
+        expect(find.text('Retry refresh'), findsNothing);
+        expect(
+          find.text('Could not refresh. Loaded history may be incomplete.'),
+          findsNothing,
+        );
+
+        await tester.pumpWidget(const SizedBox());
+        await tester.pumpAndSettle();
+        await tester.pumpWidget(
+          _buildPostsView(
+            postsResponse: ForumPostsResponse(
+              posts: [post],
+              refreshError: Exception('temporary failure'),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(find.text('Readable post'), findsOneWidget);
+        expect(
+          find.text("This relay can't confirm that history is complete."),
+          findsNothing,
+        );
+        expect(
+          find.text('Could not refresh. Loaded history may be incomplete.'),
+          findsOneWidget,
+        );
+        expect(find.text('Retry refresh'), findsOneWidget);
+      },
+    );
   });
 
   group('ForumThreadPage', () {

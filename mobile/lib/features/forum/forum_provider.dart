@@ -131,7 +131,7 @@ class _PostsSource implements ForumSource<ForumPostsResponse> {
     store,
     isLoadingMore: loadingMore,
     loadMoreError: loadMoreError,
-    refreshError: refreshError ?? reader.incompleteError,
+    refreshError: refreshError,
   );
 }
 

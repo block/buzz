@@ -103,7 +103,8 @@ class ForumPostsView extends HookConsumerWidget {
                 final posts = response.posts;
                 if (posts.isEmpty &&
                     !response.hasMore &&
-                    response.refreshError == null) {
+                    response.refreshError == null &&
+                    !response.hasUnconfirmedHistory) {
                   return _EmptyState(
                     isMember: channel.isMember,
                     isArchived: channel.isArchived,
@@ -127,11 +128,22 @@ class ForumPostsView extends HookConsumerWidget {
                         const SizedBox(height: Grid.xxs),
                     itemBuilder: (context, index) {
                       if (index == 0) {
-                        return ForumRefreshError(
-                          error: response.refreshError,
-                          onRetry: () => ref
-                              .read(forumPostsProvider(channel.id).notifier)
-                              .refresh(),
+                        return Column(
+                          children: [
+                            if (response.hasUnconfirmedHistory)
+                              const Padding(
+                                padding: EdgeInsets.all(Grid.xs),
+                                child: Text(
+                                  "This relay can't confirm that history is complete.",
+                                ),
+                              ),
+                            ForumRefreshError(
+                              error: response.refreshError,
+                              onRetry: () => ref
+                                  .read(forumPostsProvider(channel.id).notifier)
+                                  .refresh(),
+                            ),
+                          ],
                         );
                       }
                       index--;

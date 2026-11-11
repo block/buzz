@@ -220,10 +220,12 @@ void main() {
       reason:
           'A standard relay cap below 1000 truncates the aux closure without any error/incomplete state.',
     );
-    expect(r.refreshError, isNotNull);
+    expect(r.refreshError, isNull);
+    expect(r.hasUnconfirmedHistory, isTrue);
     await c.read(p.notifier).loadMore();
     expect(c.read(p).requireValue.hasMore, isFalse);
-    expect(c.read(p).requireValue.refreshError, isNotNull);
+    expect(c.read(p).requireValue.refreshError, isNull);
+    expect(c.read(p).requireValue.hasUnconfirmedHistory, isTrue);
   });
 
   test('fallback must not treat a relay-clamped page as exhaustion', () async {
@@ -547,16 +549,13 @@ void main() {
         c
             .read(relayConfigProvider.notifier)
             .update(baseUrl: 'http://relay.example');
-        await expectLater(
-          c.read(forumPostsProvider(_channel).future),
-          throwsA(
-            isA<StateError>().having(
-              (e) => e.message,
-              'message',
-              contains('author'),
-            ),
-          ),
-        );
+        final response = await c.read(forumPostsProvider(_channel).future);
+        expect(response.posts.single.eventId, root.id);
+        expect(response.posts.single.content, 'authentic original');
+        expect(response.hasUnconfirmedHistory, isTrue);
+        expect(response.refreshError, isNull);
+        expect(response.loadMoreError, isNull);
+        expect(c.read(forumPostsProvider(_channel)).hasError, isFalse);
       },
     );
   }
@@ -814,7 +813,7 @@ void main() {
   }
 
   test(
-    'fallback accepts author-signed channel-less deletion and rejects foreign deletion of aux',
+    'fallback accepts author-signed channel-less deletion and excludes unverified deletion of aux',
     () async {
       final root = _event(9, 10);
       final deletion = NostrEvent.fromJson(
@@ -842,7 +841,8 @@ void main() {
       final r = await c.read(forumPostsProvider(_channel).future);
       expect(r.posts, isEmpty);
       expect(r.hasMore, isTrue);
-      expect(r.refreshError, isNotNull);
+      expect(r.hasUnconfirmedHistory, isTrue);
+      expect(r.refreshError, isNull);
 
       final reaction = _event(
         7,
@@ -860,16 +860,11 @@ void main() {
       });
       final other = _container(otherSession);
       addTearDown(other.dispose);
-      await expectLater(
-        other.read(forumPostsProvider(_channel).future),
-        throwsA(
-          isA<StateError>().having(
-            (e) => e.message,
-            'message',
-            contains('author'),
-          ),
-        ),
-      );
+      final response = await other.read(forumPostsProvider(_channel).future);
+      expect(response.posts.single.eventId, root.id);
+      expect(other.read(forumPostsProvider(_channel)).hasError, isFalse);
+      expect(response.hasUnconfirmedHistory, isTrue);
+      expect(response.refreshError, isNull);
     },
   );
 

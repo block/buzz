@@ -5,6 +5,7 @@ import '../channels/channel_event_order.dart';
 import '../channels/channel_window.dart';
 import '../channels/thread_window.dart';
 import '../channels/timeline_message.dart';
+import 'forum_window.dart';
 
 /// A top-level forum post with an optional thread summary.
 @immutable
@@ -201,6 +202,10 @@ class ForumPostsResponse implements ForumReadResponse {
   @override
   final Object? refreshError;
 
+  /// A loaded page has unconfirmed fallback history or auxiliary authority.
+  /// This is independent of a failed refresh and has no retry affordance.
+  final bool hasUnconfirmedHistory;
+
   /// More rows remain, or a bounded legacy scan has not established exhaustion.
   @override
   bool get hasMore => nextCursor != null;
@@ -211,6 +216,7 @@ class ForumPostsResponse implements ForumReadResponse {
     this.isLoadingMore = false,
     this.loadMoreError,
     this.refreshError,
+    this.hasUnconfirmedHistory = false,
   });
 
   factory ForumPostsResponse.fromJson(Map<String, dynamic> json) {
@@ -231,7 +237,7 @@ class ForumPostsResponse implements ForumReadResponse {
     Object? loadMoreError,
     Object? refreshError,
   }) {
-    final events = flattenChannelWindowEvents(store);
+    final events = _forumDisplayEvents(store);
     final display = {
       for (final message in formatTimeline(
         events,
@@ -264,8 +270,41 @@ class ForumPostsResponse implements ForumReadResponse {
       isLoadingMore: isLoadingMore,
       loadMoreError: loadMoreError,
       refreshError: refreshError,
+      hasUnconfirmedHistory: store.pages.whereType<ForumWindowPage>().any(
+        (page) => page.incompletePostIds.isNotEmpty,
+      ),
     );
   }
+}
+
+List<NostrEvent> _forumDisplayEvents(ChannelWindowStore store) {
+  final auxiliaryTargets = {
+    for (final page in store.pages)
+      if (page is ForumWindowPage) ...page.auxiliaryTargets,
+  };
+  return [
+    for (final event in flattenChannelWindowEvents(store))
+      if (auxiliaryTargets[event.id] case final targets?)
+        // Display-only projection: ignored references must not affect other
+        // retained or subsequently loaded posts. The signed event in the store
+        // stays untouched; this projection is never verified or sent.
+        NostrEvent(
+          id: event.id,
+          pubkey: event.pubkey,
+          createdAt: event.createdAt,
+          kind: event.kind,
+          content: event.content,
+          sig: event.sig,
+          tags: event.tags
+              .where(
+                (tag) =>
+                    tag.length < 2 || tag[0] != 'e' || targets.contains(tag[1]),
+              )
+              .toList(),
+        )
+      else
+        event,
+  ];
 }
 
 /// Response for a single forum thread with replies.

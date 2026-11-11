@@ -4,6 +4,7 @@ import '../../shared/relay/relay.dart';
 import '../channels/channel_window.dart';
 import '../channels/thread_window.dart';
 import 'forum_ancestry.dart';
+import 'forum_window.dart';
 
 /// Pages forum posts using the channel window protocol (NIP-CW `top_level`).
 /// Falls back to bounded standard-filter scans when channel windows are
@@ -15,11 +16,7 @@ class ForumRootReader {
   final String relayUrl;
   final void Function() checkActive;
   bool _legacy = false;
-  Object? _pageError;
-  Object? _auxError;
-
-  /// An unproved standard-filter boundary or auxiliary closure stays visible.
-  Object? get incompleteError => _pageError ?? _auxError;
+  bool _incomplete = false;
 
   ForumRootReader(
     this.session,
@@ -32,7 +29,7 @@ class ForumRootReader {
   /// many older pages the user has loaded; it never declares a capped scan EOF.
   Future<ChannelWindowPage> fetch(ChannelPageCursor? cursor) async {
     checkActive();
-    _pageError = null;
+    _incomplete = false;
     // NIP-CW authenticated-transport profile. Plain HTTP uses verified events.
     if (!_legacy && Uri.parse(relayUrl).scheme == 'https') {
       try {
@@ -145,7 +142,7 @@ class ForumRootReader {
         if (roots.isEmpty) throw error;
         // Even a short response may be clamped inside this second. Publish
         // roots already found, but never call an ambiguous boundary exhausted.
-        _pageError = error;
+        _incomplete = true;
         break;
       }
       for (final event in fresh) {
@@ -160,34 +157,44 @@ class ForumRootReader {
     if (!exhausted && scan == null) {
       throw StateError('Legacy forum scan made no progress');
     }
-    if (exhausted && start == null && roots.isEmpty) {
-      // The whole root range is empty, so no retained auxiliary gap matters.
-      _auxError = null;
-    }
     final aux = <NostrEvent>[];
+    final auxiliaryTargets = <String, Set<String>>{};
     if (roots.isNotEmpty) {
       final first = await _aux({
         for (final event in roots) event.id: event,
       }, EventKind.channelAuxEventKinds);
       aux.addAll(first);
+      final rootIds = roots.map((event) => event.id).toSet();
+      for (final event in first) {
+        if (_isDeletion(event)) {
+          auxiliaryTargets[event.id] = _knownDeletionTargets(event, rootIds);
+        }
+      }
       if (first.isNotEmpty) {
-        aux.addAll(
-          await _aux(
-            {
-              for (final event in [...roots, ...first]) event.id: event,
-            },
-            const [EventKind.deletion, EventKind.nip29DeleteEvent],
-            ids: first.map((event) => event.id).toList(),
-          ),
+        final second = await _aux(
+          {
+            for (final event in [...roots, ...first]) event.id: event,
+          },
+          const [EventKind.deletion, EventKind.nip29DeleteEvent],
+          ids: first.map((event) => event.id).toList(),
         );
+        aux.addAll(second);
+        final knownIds = {...rootIds, ...first.map((event) => event.id)};
+        for (final event in second) {
+          auxiliaryTargets[event.id] = _knownDeletionTargets(event, knownIds);
+        }
       }
     }
-    return ChannelWindowPage(
+    return ForumWindowPage(
       startCursor: start,
       rows: roots.map((event) => ChannelWindowRow(event: event)).toList(),
       aux: aux,
       nextCursor: exhausted ? null : scan,
       hasMore: !exhausted,
+      incompletePostIds: _incomplete
+          ? roots.map((event) => event.id).toSet()
+          : {},
+      auxiliaryTargets: auxiliaryTargets,
     );
   }
 
@@ -209,14 +216,15 @@ class ForumRootReader {
         ),
       ]);
       checkActive();
-      if (events.isEmpty) return collected.values.toList();
+      if (events.isEmpty) {
+        return _authorizeAux(collected.values.toList(), targets);
+      }
       if (events.length >= 1000 ||
           events.any((event) => !kinds.contains(event.kind))) {
         throw StateError('Legacy forum auxiliary history is incomplete');
       }
       await verifyForumEvents(events);
       checkActive();
-      _authorizeAux(events, targets);
       final fresh = events.where((event) => !collected.containsKey(event.id));
       if (fresh.isEmpty) break;
       collected.addAll({for (final event in fresh) event.id: event});
@@ -234,32 +242,43 @@ class ForumRootReader {
     // An inclusive boundary that stops yielding new IDs may hide more events
     // in that second under a relay clamp. Keep the authorized effects fetched,
     // but expose incomplete closure rather than treating a short page as EOF.
-    _auxError ??= StateError('Legacy forum auxiliary history is incomplete');
-    return collected.values.toList();
+    _incomplete = true;
+    return _authorizeAux(collected.values.toList(), targets);
   }
 
-  void _authorizeAux(List<NostrEvent> events, Map<String, NostrEvent> targets) {
-    // Plain #e reads provide no relay authorization guarantee. Never infer
-    // moderator or agent-owner authority from an event's valid signature.
-    for (final event in events) {
-      final edit = event.kind == EventKind.streamMessageEdit;
-      if (!edit &&
-          event.kind != EventKind.deletion &&
-          event.kind != EventKind.nip29DeleteEvent) {
-        continue;
-      }
-      final references = event.tags
-          .where((tag) => tag.length >= 2 && tag[0] == 'e')
-          .map((tag) => tag[1]);
-      for (final id
-          in edit ? references.toList().reversed.take(1) : references) {
-        if (targets[id]?.pubkey != event.pubkey) {
-          throw StateError('Legacy auxiliary target author is not authorized');
-        }
+  /// Keeps verified author effects; unproved authority leaves this page
+  /// incomplete without discarding its readable posts. Plain #e reads cannot
+  /// establish agent-owner or moderator authority from a signature alone.
+  List<NostrEvent> _authorizeAux(
+    List<NostrEvent> events,
+    Map<String, NostrEvent> targets,
+  ) => events.where((event) {
+    final edit = event.kind == EventKind.streamMessageEdit;
+    if (!edit && !_isDeletion(event)) return true;
+    final references = event.tags
+        .where((tag) => tag.length >= 2 && tag[0] == 'e')
+        .map((tag) => tag[1]);
+    for (final id in edit ? references.toList().reversed.take(1) : references) {
+      // Deletions can name unloaded events. Their ignored references are
+      // scoped away for display; only loaded targets need author checks.
+      if (!edit && !targets.containsKey(id)) continue;
+      if (targets[id]?.pubkey != event.pubkey) {
+        _incomplete = true;
+        return false;
       }
     }
-  }
+    return true;
+  }).toList();
 }
+
+bool _isDeletion(NostrEvent event) =>
+    event.kind == EventKind.deletion ||
+    event.kind == EventKind.nip29DeleteEvent;
+
+Set<String> _knownDeletionTargets(NostrEvent event, Set<String> knownIds) => {
+  for (final tag in event.tags)
+    if (tag.length >= 2 && tag[0] == 'e' && knownIds.contains(tag[1])) tag[1],
+};
 
 int _order(NostrEvent a, NostrEvent b) {
   final time = b.createdAt.compareTo(a.createdAt);

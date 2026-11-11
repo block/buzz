@@ -6,6 +6,26 @@ const forumPageLimit = 200;
 const _maxRows = forumPageLimit * 50;
 const _maxAux = forumPageLimit * 2000;
 
+/// Forum-only completeness and fallback effect scopes for a fetched page.
+class ForumWindowPage extends ChannelWindowPage {
+  /// Posts whose page had unconfirmed history or auxiliary authority/closure.
+  final Set<String> incompletePostIds;
+
+  /// Deletion effects checked against these targets on the fallback path.
+  /// Missing entries represent relay-authorized served-window events.
+  final Map<String, Set<String>> auxiliaryTargets;
+
+  const ForumWindowPage({
+    required super.startCursor,
+    required super.rows,
+    required super.aux,
+    required super.nextCursor,
+    required super.hasMore,
+    this.incompletePostIds = const {},
+    this.auxiliaryTargets = const {},
+  });
+}
+
 /// Merges a head refresh or continuation by event ID without refetching history.
 ///
 /// A head refresh removes absent rows only inside the range it actually read.
@@ -74,6 +94,22 @@ ChannelWindowStore mergeForumWindow(
       for (final event in p.aux) event.id: event,
     for (final event in page.aux) event.id: event,
   }.values.toList();
+  final incompletePostIds = {
+    for (final previous in current.pages)
+      if (previous is ForumWindowPage) ...previous.incompletePostIds,
+  }..removeAll(incoming.keys);
+  incompletePostIds.retainAll(rows.map((row) => row.event.id));
+  if (page is ForumWindowPage) {
+    incompletePostIds.addAll(page.incompletePostIds);
+  }
+  final auxiliaryTargets = <String, Set<String>>{};
+  for (final source in [...current.pages, page]) {
+    if (source is! ForumWindowPage) continue;
+    for (final entry in source.auxiliaryTargets.entries) {
+      // One deletion may have targets authorized on different loaded pages.
+      auxiliaryTargets.putIfAbsent(entry.key, () => {}).addAll(entry.value);
+    }
+  }
   if (rows.length > _maxRows || aux.length > _maxAux) {
     throw StateError('Forum history limit reached; more history remains');
   }
@@ -82,12 +118,14 @@ ChannelWindowStore mergeForumWindow(
       : next;
   return ChannelWindowStore(
     pages: [
-      ChannelWindowPage(
+      ForumWindowPage(
         startCursor: null,
         rows: rows,
         aux: aux,
         nextCursor: next == null && refresh ? null : cursor,
         hasMore: (next == null && refresh ? null : cursor) != null,
+        incompletePostIds: incompletePostIds,
+        auxiliaryTargets: auxiliaryTargets,
       ),
     ],
     liveOverlay: const [],
