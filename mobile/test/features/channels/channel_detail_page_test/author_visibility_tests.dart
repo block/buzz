@@ -37,9 +37,11 @@ void messageAuthorVisibilityTests() {
           participantPubkeys: participants,
           isMember: true,
         );
+        final channels = _FakeChannelsNotifier([channel]);
         await tester.pumpWidget(
           _buildTestable(
             channel: channel,
+            channelsNotifier: channels,
             personalChat: kind == 'solo',
             darkTheme: dark,
             signingPubkey: 'self',
@@ -80,6 +82,20 @@ void messageAuthorVisibilityTests() {
           ),
         );
         await tester.pumpAndSettle();
+        // Live activity replaces the Channel object; rows must not be told
+        // to recompute identity unless the confirmed pair itself changes.
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(ChannelDetailPage)),
+        );
+        var pairNotifications = 0;
+        final pairSubscription = container.listen(
+          confirmedConversationPairProvider(_channelId),
+          (_, _) => pairNotifications++,
+        );
+        channels.setChannels([channel.copyWith(lastMessageAt: DateTime(2026))]);
+        await tester.pump();
+        expect(pairNotifications, 0);
+        pairSubscription.close();
         final name = find.byKey(const ValueKey('message-author-incoming'));
         final hidesName =
             kind == 'dm' || kind == 'solo' || kind == 'pair-channel';

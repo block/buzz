@@ -95,6 +95,16 @@ class _ConversationAppBarTitle extends StatelessWidget {
                             ),
                           ),
                           const SizedBox(width: 8),
+                          if (!channel.isDm &&
+                              channel.visibility == 'private') ...[
+                            Icon(
+                              BuzzIcons.lock,
+                              size: 14,
+                              color: context.colors.onSurfaceVariant,
+                              semanticLabel: 'Private channel',
+                            ),
+                            const SizedBox(width: Grid.quarter),
+                          ],
                           Flexible(
                             child: Text(
                               label,
