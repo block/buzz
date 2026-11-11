@@ -285,6 +285,19 @@ class RunnerTests: XCTestCase {
     XCTAssertEqual(title.accessibilityLabel, "Open settings for Alice")
     XCTAssertTrue(title.accessibilityActivate())
     XCTAssertEqual(messenger.actions, ["title"])
+    // The app appearance can differ from the surrounding iOS appearance.
+    for dark in [true, false, true] {
+      parent.overrideUserInterfaceStyle = dark ? .light : .dark
+      var themedArguments = arguments
+      themedArguments["dark"] = dark
+      messenger.configure(themedArguments)
+      bar.view().layoutIfNeeded()
+      let themedTitle = try XCTUnwrap(bar.view().subviews.compactMap { $0 as? NavigationTitleView }.first)
+      XCTAssertEqual(themedTitle.traitCollection.userInterfaceStyle, dark ? .dark : .light)
+      for label in descendants(of: themedTitle.contentView).compactMap({ $0 as? UILabel }) {
+        XCTAssertEqual(label.traitCollection.userInterfaceStyle, dark ? .dark : .light)
+      }
+    }
     var animatedArguments = arguments
     animatedArguments["titleHasAnimatedPortrait"] = true
     messenger.configure(animatedArguments)

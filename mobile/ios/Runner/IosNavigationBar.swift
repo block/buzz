@@ -489,6 +489,7 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     floatingTitleLift = args["titleHasAnimatedPortrait"] as? Bool == true ? 14 : 0
     titleMaxWidth = (args["titleMaxWidth"] as? NSNumber).map { max(0, CGFloat($0.doubleValue)) }
     navigation.overrideUserInterfaceStyle = args["dark"] as? Bool == true ? .dark : .light
+    container.overrideUserInterfaceStyle = navigation.overrideUserInterfaceStyle
     material.overrideUserInterfaceStyle = navigation.overrideUserInterfaceStyle
     // Let the ultra-thin system material provide its own adaptive tint.
     material.contentView.backgroundColor = .clear

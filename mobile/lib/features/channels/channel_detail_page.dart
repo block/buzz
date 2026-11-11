@@ -691,12 +691,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
         alwaysFrosted: true,
         nativeViewSuppressed: messageActionBackdropActive,
         nativeTitle: dmHeader.label,
-        nativeSubtitle: retention == null
-            ? ''
-            : [
-                'Temporary',
-                if (retention.detailLabel != null) retention.detailLabel!,
-              ].join(' · '),
+        nativeSubtitle: '',
         nativeEphemeralLabel: retention?.tooltipLabel,
         nativeTitleAvatars: dmHeader.avatars,
         nativeTitleMaxWidth: conversationTitleMaxWidth(

@@ -14412,7 +14412,7 @@ void main() {
           payload['ephemeralLabel'],
           contains('after 1 hour of inactivity'),
         );
-        expect(payload['subtitle'], contains('Temporary'));
+        expect(payload['subtitle'], isEmpty);
         const bridge = MethodChannel('buzz/ios_navigation_bar/297');
         tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(bridge, (
           call,
@@ -14435,7 +14435,7 @@ void main() {
         container.invalidate(channelDetailsProvider(_channelId));
         await tester.pumpAndSettle();
         expect(payload['ephemeralLabel'], contains('Cleanup is due now'));
-        expect(payload['subtitle'], contains('Cleanup due'));
+        expect(payload['subtitle'], isEmpty);
         current = conversation();
         container.invalidate(channelDetailsProvider(_channelId));
         await tester.pumpAndSettle();
