@@ -52,7 +52,7 @@ impl UserDeletionStore {
         if plan.summary.warnings != 0 {
             return Err(invalid("selected records have active-work warnings; nothing deleted; inspect --read-only output"));
         }
-        // Validate *all* source payloads before deleting even the first child.
+        // Validate *all* source payloads before deleting even the first row.
         let mut fingerprints = HashMap::new();
         for batch in &plan.batches {
             for item in items(batch)? {
@@ -113,10 +113,6 @@ fn selection(item: &Value) -> Result<(&'static str, &'static str)> {
         Some("push_wake_outbox") => ("push_wake_outbox", "id=($2->>'id')::uuid"),
         Some("operator_listener_outbox") => ("operator_listener_outbox", "id=($2->>'id')::uuid"),
         Some("delivery_log") => ("delivery_log", "id=($2->>'id')::bigint AND delivered_at=($2->>'delivered_at')::timestamptz"),
-        Some("workflow_approvals") => ("workflow_approvals", "token=decode($2->>'token_hash','hex')"),
-        Some("scheduled_workflow_fires") => ("scheduled_workflow_fires", "workflow_id=($2->>'workflow_id')::uuid AND scheduled_for=($2->>'scheduled_for')::timestamptz"),
-        Some("workflow_runs") => ("workflow_runs", "id=($2->>'id')::uuid"),
-        Some("workflows") => ("workflows", "id=($2->>'id')::uuid"),
         Some("subscriptions") => ("subscriptions", "id=$2->>'id'"),
         Some("push_leases") => ("push_leases", "author=decode($2->>'author','hex') AND installation_id=$2->>'installation_id'"),
         _ => return Err(invalid("unknown internal batch table")),
@@ -160,16 +156,10 @@ async fn execute_owned_batch(
             )));
         }
         children(&mut tx, community, table, &item["key"]).await?;
-        let verb = if item["action"] == "would_clear_workflow_run_id"
-            && table == "scheduled_workflow_fires"
-        {
-            "UPDATE scheduled_workflow_fires SET workflow_run_id=NULL".to_owned()
-        } else if item["action"] == "would_delete" {
-            format!("DELETE FROM {table}")
-        } else {
+        if item["action"] != "would_delete" {
             return Err(invalid("unsupported internally generated action"));
-        };
-        let sql = format!("{verb} WHERE community_id=$1 AND {predicate}");
+        }
+        let sql = format!("DELETE FROM {table} WHERE community_id=$1 AND {predicate}");
         let count = sqlx::query(sqlx::AssertSqlSafe(sql))
             .bind(community)
             .bind(&item["key"])
@@ -200,16 +190,7 @@ async fn inspect(
     key: &Value,
     preflight: bool,
 ) -> Result<String> {
-    if table == "workflow_approvals" {
-        let inconsistent: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM workflow_approvals a JOIN workflow_runs r ON r.community_id=a.community_id AND r.id=a.run_id WHERE a.community_id=$1 AND a.token=decode($2->>'token_hash','hex') AND a.workflow_id<>r.workflow_id)").bind(community).bind(key).fetch_one(&mut *conn).await?;
-        if inconsistent {
-            return Err(invalid(
-                "approval and run workflow disagree; reconcile before deletion",
-            ));
-        }
-    }
     let active = match table {
-        "workflow_runs" => "status NOT IN ('completed','failed','cancelled')",
         "push_match_queue" => "COALESCE(lease_until>clock_timestamp(),false)",
         "push_wake_outbox" | "operator_listener_outbox" => {
             "state='sending' OR COALESCE(lease_until>clock_timestamp(),false)"
@@ -241,30 +222,14 @@ async fn children(
     key: &Value,
 ) -> Result<()> {
     let query = match table {
-        "workflows" => "SELECT EXISTS(SELECT 1 FROM workflow_runs WHERE community_id=$1 AND workflow_id=($2->>'id')::uuid)
-            OR EXISTS(SELECT 1 FROM workflow_approvals WHERE community_id=$1 AND workflow_id=($2->>'id')::uuid)
-            OR EXISTS(SELECT 1 FROM scheduled_workflow_fires WHERE community_id=$1 AND workflow_id=($2->>'id')::uuid)",
-        "workflow_runs" => "SELECT EXISTS(SELECT 1 FROM workflow_approvals WHERE community_id=$1 AND run_id=($2->>'id')::uuid)
-            OR EXISTS(SELECT 1 FROM scheduled_workflow_fires WHERE community_id=$1 AND workflow_run_id=($2->>'id')::uuid)",
         "subscriptions" => "SELECT EXISTS(SELECT 1 FROM delivery_log WHERE community_id=$1 AND subscription_id=$2->>'id')",
         "push_leases" => "SELECT EXISTS(SELECT 1 FROM push_wake_outbox WHERE community_id=$1 AND author=decode($2->>'author','hex') AND installation_id=$2->>'installation_id')",
-        "events" => r#"SELECT EXISTS(SELECT 1 FROM reactions WHERE community_id=$1 AND
-    (event_id=decode($2->>'id','hex') OR reaction_event_id=decode($2->>'id','hex')))
-OR EXISTS(SELECT 1 FROM event_mentions WHERE community_id=$1 AND event_id=decode($2->>'id','hex'))
+        // Other authors' events/reactions and workflow records may retain
+        // references to this event. They are intentionally outside this pass.
+        "events" => "SELECT EXISTS(SELECT 1 FROM event_mentions WHERE community_id=$1 AND event_id=decode($2->>'id','hex'))
 OR EXISTS(SELECT 1 FROM push_match_queue WHERE community_id=$1 AND event_id=decode($2->>'id','hex'))
 OR EXISTS(SELECT 1 FROM push_wake_outbox WHERE community_id=$1 AND event_id=decode($2->>'id','hex'))
-OR EXISTS(SELECT 1 FROM operator_listener_outbox WHERE community_id=$1 AND event_id=decode($2->>'id','hex'))
-OR EXISTS(SELECT 1 FROM delivery_log WHERE community_id=$1 AND event_id=decode($2->>'id','hex'))
-OR EXISTS(SELECT 1 FROM workflow_runs WHERE community_id=$1 AND
-    (trigger_event_id=decode($2->>'id','hex') OR lower(trigger_context->>'message_id')=$2->>'id'))
-OR EXISTS(SELECT 1 FROM events e CROSS JOIN LATERAL (
-    SELECT decode(t->>1,'hex') AS id FROM jsonb_array_elements(e.tags) WITH ORDINALITY a(t,n)
-    WHERE t->>0='e' AND t->>1 ~ '^[0-9a-fA-F]{64}$'
-    ORDER BY CASE WHEN e.kind IN (40003,45002) THEN n ELSE -n END LIMIT 1) target
-    WHERE e.community_id=$1 AND e.kind IN (7,40003,45002) AND target.id=decode($2->>'id','hex')
-      AND e.channel_id IS NOT DISTINCT FROM
-        (SELECT channel_id FROM events WHERE community_id=$1 AND id=decode($2->>'id','hex')
-          AND created_at=($2->>'created_at')::timestamptz))"#,
+OR EXISTS(SELECT 1 FROM operator_listener_outbox WHERE community_id=$1 AND event_id=decode($2->>'id','hex'))",
         _ => return Ok(()),
     };
     let remains: bool = sqlx::query_scalar(query)

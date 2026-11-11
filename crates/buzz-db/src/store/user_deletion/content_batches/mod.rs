@@ -1,7 +1,7 @@
 //! Shared human-content batch planning with explicit preview and execution APIs.
 //!
 //! A repeatable-read, read-only snapshot supplies rows. An in-memory set models
-//! rows already emitted, so parents can follow children without deleting either.
+//! rows already emitted without changing the source data during planning.
 
 use super::{normalize_user_deletion_pubkey, UserDeletionStore};
 use crate::{DbError, Result};
@@ -22,7 +22,6 @@ const KINDS: &[i32] = &[
     30315, 30078, 30300, 30174, 44200, 43001, 43002, 43003, 43004, 43005, 43006, 30620, 30350, 1,
     7, 9, 30023, 40001, 40002, 40003, 40004, 40005, 40006, 40007, 40008, 45001, 45002, 45003,
 ];
-const MAX_DEPTH: usize = 64;
 const PAGE_SIZE: i64 = 100;
 const EVENT_COLUMNS: &str = "e.id,e.created_at,e.channel_id,e.kind";
 
@@ -74,20 +73,12 @@ impl Cursor {
     }
 }
 
-struct Frame {
-    event: Event,
-    children: Cursor,
-    reason: Value,
-}
-
 struct Output<'a, W> {
     writer: &'a mut W,
     community: Uuid,
     limit: usize,
     max_items: usize,
     seen: HashSet<String>,
-    events: HashSet<(Vec<u8>, DateTime<Utc>)>,
-    runs: HashSet<Uuid>,
     batch: Vec<Value>,
     repairs: Vec<Value>,
     batches: u64,
@@ -231,7 +222,8 @@ async fn plan(
         "community_id": options.community, "host": host, "pubkey": subject,
         "trusted_relay_pubkey": relay, "included_event_kinds": KINDS,
         "batch_size": options.batch_size, "max_items": options.max_items,
-        "scope": "human events, permitted dependents, owned workflows, subscriptions and notification delivery",
+        "scope": "human-attributed events and reactions, owned subscriptions and notification delivery",
+        "preserved": "other users' events and reactions; workflow database records and other owners' delivery logs",
         "relay_attribution": if relay.is_some() { "enabled" } else { "not included; supply --relay-pubkey for relay-authored history" },
         "execution": "preview only; --delete prints and commits batches after execution checks",
         "thread_repairs": "reported separately from row items; metadata mutations are not expanded",
@@ -245,8 +237,6 @@ async fn plan(
         limit: usize::from(options.batch_size),
         max_items: options.max_items as usize,
         seen: HashSet::new(),
-        events: HashSet::new(),
-        runs: HashSet::new(),
         batch: Vec::new(),
         repairs: Vec::new(),
         batches: 0,
@@ -277,10 +267,10 @@ async fn plan(
         }
         for event in events {
             cursor.advance(&event);
-            walk(conn, event, &mut output).await?;
+            plan_event(conn, &event, &mut output).await?;
         }
     }
-    rows::orphan_sweeps(conn, &subject, &mut output).await?;
+    rows::authored_reactions(conn, &subject, &mut output).await?;
     let query = format!(
         "WITH authored AS ({}) SELECT jsonb_build_object('kind',kind,'count',count(*))
             FROM authored WHERE NOT(kind=ANY($4)) GROUP BY kind ORDER BY kind",
@@ -308,84 +298,37 @@ async fn plan(
     })
 }
 
-async fn walk(
+// The authored query is the only event selector. References never expand scope.
+async fn plan_event(
     conn: &mut PgConnection,
-    seed: Event,
+    event: &Event,
     output: &mut Output<'_, impl Write>,
 ) -> Result<()> {
-    if output.events.contains(&(seed.id.clone(), seed.created_at)) {
-        return Ok(());
-    }
-    let mut stack = vec![Frame {
-        event: seed,
-        children: Cursor::default(),
-        reason: json!({"type": "authored_event"}),
-    }];
-    while let Some(frame) = stack.last_mut() {
-        let query = format!("SELECT {EVENT_COLUMNS} FROM events e CROSS JOIN LATERAL (
-            SELECT decode(t->>1,'hex') AS id FROM jsonb_array_elements(e.tags) WITH ORDINALITY a(t,n)
-            WHERE t->>0='e' AND t->>1 ~ '^[0-9a-fA-F]{{64}}$'
-            ORDER BY CASE WHEN e.kind IN (40003,45002) THEN n ELSE -n END LIMIT 1) target
-            WHERE e.community_id=$1 AND e.kind IN (7,40003,45002) AND target.id=$2
-              AND e.channel_id IS NOT DISTINCT FROM $3::uuid
-              AND ($4::timestamptz IS NULL OR (e.created_at,e.id)>($4,$5))
-            ORDER BY e.created_at,e.id LIMIT 1");
-        let child: Option<Event> = sqlx::query_as(sqlx::AssertSqlSafe(query))
-            .bind(output.community)
-            .bind(&frame.event.id)
-            .bind(frame.event.channel_id)
-            .bind(frame.children.0)
-            .bind(&frame.children.1)
-            .fetch_optional(&mut *conn)
-            .await?;
-        if let Some(child) = child {
-            frame.children.advance(&child);
-            let reason =
-                json!({"type": "dependent_event", "target_event_id": hex::encode(&frame.event.id)});
-            if stack.iter().any(|f| f.event.id == child.id) {
-                return Err(invalid("cyclic event dependencies; preview is incomplete"));
-            }
-            if output
-                .events
-                .contains(&(child.id.clone(), child.created_at))
-            {
-                continue;
-            }
-            if stack.len() >= MAX_DEPTH {
-                return Err(invalid(
-                    "event dependency depth exceeds 64; preview is incomplete",
-                ));
-            }
-            stack.push(Frame {
-                event: child,
-                children: Cursor::default(),
-                reason,
-            });
-        } else {
-            let frame = stack
-                .pop()
-                .ok_or_else(|| invalid("missing preview frame"))?;
-            rows::event_rows(conn, &frame.event, output).await?;
-            let roots: Vec<Value> = sqlx::query_scalar("SELECT jsonb_build_object(
-                'channel_id',channel_id,'root_event_id',encode(COALESCE(root_event_id,event_id),'hex'))
-                FROM thread_metadata WHERE community_id=$1 AND event_id=$2 AND event_created_at=$3
-                ORDER BY channel_id,root_event_id")
-                .bind(output.community).bind(&frame.event.id).bind(frame.event.created_at)
-                .fetch_all(&mut *conn).await?;
-            output.repairs.push(json!({"event_id": hex::encode(&frame.event.id),
-                "channel_id": frame.event.channel_id, "stored_threads": roots,
-                "action": "recompute affected thread metadata; preserve surviving reply ancestry"}));
-            output.add(
-                "events",
-                json!({"id": hex::encode(&frame.event.id), "created_at": frame.event.created_at}),
-                "would_delete",
-                &json!({"selection": frame.reason, "kind": frame.event.kind}),
-                None,
-            )?;
-            output
-                .events
-                .insert((frame.event.id, frame.event.created_at));
-        }
-    }
-    Ok(())
+    rows::event_rows(conn, event, output).await?;
+    let roots: Vec<Value> = sqlx::query_scalar(
+        "SELECT jsonb_build_object(
+        'channel_id',channel_id,'root_event_id',encode(COALESCE(root_event_id,event_id),'hex'))
+        FROM thread_metadata WHERE community_id=$1 AND event_id=$2 AND event_created_at=$3
+        ORDER BY channel_id,root_event_id",
+    )
+    .bind(output.community)
+    .bind(&event.id)
+    .bind(event.created_at)
+    .fetch_all(&mut *conn)
+    .await?;
+    output
+        .repairs
+        .push(json!({"event_id": hex::encode(&event.id),
+        "channel_id": event.channel_id, "stored_threads": roots,
+        "action": "recompute affected thread metadata; preserve surviving reply ancestry"}));
+    output.add(
+        "events",
+        json!({"id": hex::encode(&event.id), "created_at": event.created_at}),
+        "would_delete",
+        &json!({"selection": {"type": "authored_event"}, "kind": event.kind}),
+        None,
+    )
 }
+
+#[cfg(test)]
+mod postgres_tests;
