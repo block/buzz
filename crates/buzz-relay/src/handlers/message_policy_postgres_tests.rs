@@ -75,7 +75,8 @@ async fn publisher_policy_applies_to_existing_roles_threads_and_edits() {
         let post = message(&actor, channel, 9, &[]);
         let error = ingest_event(&state, &tenant, post, http_auth(&actor))
             .await
-            .unwrap_err();
+            .err()
+            .expect("event must be rejected");
         assert!(
             format!("{error:?}")
                 .contains("restricted: reply to a post by this channel's publisher"),
@@ -281,7 +282,8 @@ async fn publisher_policy_checks_claimed_roots_deleted_roots_and_old_edits() {
         &reader.public_key().to_bytes(),
     )
     .await
-    .unwrap_err();
+    .err()
+    .expect("event must be rejected");
     assert!(error.contains("restricted: reply to a post by this channel's publisher"));
     assert!(
         ingest_event(&state, &tenant, mismatched, http_auth(&reader))
@@ -296,7 +298,8 @@ async fn publisher_policy_checks_claimed_roots_deleted_roots_and_old_edits() {
     );
     let error = ingest_event(&state, &tenant, root_only, http_auth(&publisher))
         .await
-        .unwrap_err();
+        .err()
+        .expect("event must be rejected");
     assert!(
         format!("{error:?}").contains("restricted: reply to a post by this channel's publisher")
     );
@@ -325,12 +328,14 @@ async fn publisher_policy_checks_claimed_roots_deleted_roots_and_old_edits() {
         &reader.public_key().to_bytes(),
     )
     .await
-    .unwrap_err();
+    .err()
+    .expect("event must be rejected");
     assert!(error.contains("restricted: reply to a post by this channel's publisher"));
     let edit = message(&reader, channel, 40003, &[&["e", &old.id.to_hex()]]);
     let error = ingest_event(&state, &tenant, edit, http_auth(&reader))
         .await
-        .unwrap_err();
+        .err()
+        .expect("event must be rejected");
     assert!(
         format!("{error:?}").contains("restricted: reply to a post by this channel's publisher")
     );
@@ -348,6 +353,7 @@ async fn publisher_policy_checks_claimed_roots_deleted_roots_and_old_edits() {
     );
     let error = ingest_event(&state, &tenant, reply, http_auth(&reader))
         .await
-        .unwrap_err();
+        .err()
+        .expect("event must be rejected");
     assert!(format!("{error:?}").contains("reply parent not found"));
 }
