@@ -1,6 +1,7 @@
 import type { Page } from "@playwright/test";
 import type { ChannelTemplate, RelayEvent } from "../../src/shared/api/types";
 import type { MockManagedAgentSeed } from "../../src/testing/e2eBridge";
+import { DEPRECATION_BANNER_STORAGE_KEY } from "../../src/app/deprecationBannerVisibility";
 import { FEATURE_OVERRIDES_STORAGE_KEY, PREVIEW_FEATURE_IDS } from "./features";
 
 export const TEST_IDENTITIES = {
@@ -873,6 +874,13 @@ async function seedDefaultCommunity(
   );
 }
 
+// Keep the deprecation banner out of existing layout and visual baselines.
+async function seedDeprecationBannerDismissed(page: Page) {
+  await page.addInitScript((key) => {
+    window.localStorage.setItem(key, String(Date.now()));
+  }, DEPRECATION_BANNER_STORAGE_KEY);
+}
+
 async function seedPreviewFeaturesEnabled(page: Page) {
   await page.addInitScript(
     ({ key, ids }) => {
@@ -908,6 +916,7 @@ export async function installBridge(page: Page, options: BridgeOptions) {
   if (options.seedPreviewFeatures !== false) {
     await seedPreviewFeaturesEnabled(page);
   }
+  await seedDeprecationBannerDismissed(page);
 
   await page.addInitScript(
     ({
