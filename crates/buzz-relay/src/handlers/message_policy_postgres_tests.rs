@@ -73,11 +73,13 @@ async fn publisher_policy_applies_to_existing_roles_threads_and_edits() {
                 .unwrap();
         }
         let post = message(&actor, channel, 9, &[]);
+        let error = ingest_event(&state, &tenant, post, http_auth(&actor))
+            .await
+            .unwrap_err();
         assert!(
-            ingest_event(&state, &tenant, post, http_auth(&actor))
-                .await
-                .is_err(),
-            "{role} root"
+            format!("{error:?}")
+                .contains("restricted: reply to a post by this channel's publisher"),
+            "{role}: {error:?}"
         );
         let event = message(&actor, channel, 9, &[&["e", &root_hex, "", "reply"]]);
         assert!(
@@ -230,4 +232,122 @@ async fn publisher_policy_rejects_foreign_missing_forged_and_non_message_roots()
     assert!(ingest_event(&state, &tenant, reply, http_auth(&outsider))
         .await
         .is_err());
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn publisher_policy_checks_claimed_roots_deleted_roots_and_old_edits() {
+    let state = state().await;
+    let tenant = community(&state, "publisher-ancestry").await;
+    let publisher = Keys::generate();
+    let reader = Keys::generate();
+    let channel = create_channel(&state, &tenant, &publisher, &[]).await;
+    let root = message(&publisher, channel, 9, &[]);
+    let old = message(&reader, channel, 9, &[]);
+    for (event, actor) in [(&root, &publisher), (&old, &reader)] {
+        ingest_event(&state, &tenant, event.clone(), http_auth(actor))
+            .await
+            .unwrap();
+    }
+    edit_channel(
+        &state,
+        &tenant,
+        &publisher,
+        channel,
+        &[&["message_publisher", &publisher.public_key().to_hex()]],
+    )
+    .await
+    .unwrap();
+    let mismatched = message(
+        &reader,
+        channel,
+        9,
+        &[
+            &["e", &old.id.to_hex(), "", "root"],
+            &["e", &root.id.to_hex(), "", "reply"],
+        ],
+    );
+    let record = state
+        .db
+        .get_channel(tenant.community(), channel)
+        .await
+        .unwrap();
+    // Generic ingest also checks ancestry, so witness the policy's independent guard.
+    let error = super::message_policy::validate(
+        &state,
+        tenant.community(),
+        &record,
+        &mismatched,
+        &reader.public_key().to_bytes(),
+    )
+    .await
+    .unwrap_err();
+    assert!(error.contains("restricted: reply to a post by this channel's publisher"));
+    assert!(
+        ingest_event(&state, &tenant, mismatched, http_auth(&reader))
+            .await
+            .is_err()
+    );
+    let root_only = message(
+        &publisher,
+        channel,
+        9,
+        &[&["e", &old.id.to_hex(), "", "root"]],
+    );
+    let error = ingest_event(&state, &tenant, root_only, http_auth(&publisher))
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{error:?}").contains("restricted: reply to a post by this channel's publisher")
+    );
+    let legacy_root_only = message(
+        &publisher,
+        channel,
+        9,
+        &[&["e", &old.id.to_hex(), "", "root"]],
+    );
+    state
+        .db
+        .insert_event(tenant.community(), &legacy_root_only, Some(channel))
+        .await
+        .unwrap();
+    let legacy_reply = message(
+        &reader,
+        channel,
+        9,
+        &[&["e", &legacy_root_only.id.to_hex(), "", "reply"]],
+    );
+    let error = super::message_policy::validate(
+        &state,
+        tenant.community(),
+        &record,
+        &legacy_reply,
+        &reader.public_key().to_bytes(),
+    )
+    .await
+    .unwrap_err();
+    assert!(error.contains("restricted: reply to a post by this channel's publisher"));
+    let edit = message(&reader, channel, 40003, &[&["e", &old.id.to_hex()]]);
+    let error = ingest_event(&state, &tenant, edit, http_auth(&reader))
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{error:?}").contains("restricted: reply to a post by this channel's publisher")
+    );
+    sqlx::query("UPDATE events SET deleted_at = NOW() WHERE community_id = $1 AND id = $2")
+        .bind(tenant.community().as_uuid())
+        .bind(root.id.as_bytes().as_slice())
+        .execute(state.db.pool())
+        .await
+        .unwrap();
+    let reply = message(
+        &reader,
+        channel,
+        9,
+        &[&["e", &root.id.to_hex(), "", "reply"]],
+    );
+    let error = ingest_event(&state, &tenant, reply, http_auth(&reader))
+        .await
+        .unwrap_err();
+    assert!(format!("{error:?}").contains("reply parent not found"));
 }

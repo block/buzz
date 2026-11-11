@@ -1,3 +1,6 @@
+import 'channels_provider.dart';
+import '../../shared/relay/relay_author_provider.dart';
+import 'publisher_policy.dart';
 import 'dart:async';
 
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -334,7 +337,16 @@ List<NostrEvent> _mergeReplies(
 /// One exact read per opened publisher thread; scoped to its channel. Failed or
 /// missing roots leave the composer closed, without affecting readable history.
 final publisherThreadRootProvider = FutureProvider.autoDispose
-    .family<NostrEvent?, ThreadRepliesArgs>((ref, args) async {
+    .family<({NostrEvent event, String author})?, ThreadRepliesArgs>((
+      ref,
+      args,
+    ) async {
+      ref.listen(relaySessionProvider, (before, after) {
+        if (before?.status != SessionStatus.connected &&
+            after.status == SessionStatus.connected) {
+          ref.invalidateSelf();
+        }
+      });
       final session = ref.read(relaySessionProvider.notifier);
       final events = await session.fetchHistory(
         NostrFilter(
@@ -346,11 +358,26 @@ final publisherThreadRootProvider = FutureProvider.autoDispose
           limit: 1,
         ),
       );
-      return events
+      final event = events
           .where(
             (event) =>
                 event.id == args.rootId &&
                 event.threadReference.parentId == null,
           )
           .firstOrNull;
+      if (event == null) return null;
+      final hasAttribution = event.tags.any(
+        (tag) => tag.isNotEmpty && (tag[0] == 'actor' || tag[0] == 'p'),
+      );
+      final publisher = ref
+          .watch(channelByIdProvider(args.channelId))
+          ?.messagePublisher;
+      final authority = hasAttribution && event.pubkey != publisher
+          ? await ref.watch(
+              relayAuthorProvider(
+                ref.watch(relayConfigProvider).baseUrl,
+              ).future,
+            )
+          : null;
+      return (event: event, author: publisherMessageAuthor(event, authority));
     });

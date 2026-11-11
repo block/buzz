@@ -1,3 +1,4 @@
+import 'package:buzz/features/channels/publisher_policy.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/shared/relay/nostr_models.dart';
@@ -36,6 +37,22 @@ void main() {
       );
     },
   );
+  test('only the verified relay may attribute publisher authorship', () {
+    final event = NostrEvent(
+      id: 'root',
+      pubkey: 'relay',
+      createdAt: 1,
+      kind: EventKind.streamMessage,
+      tags: [
+        ['actor', publisher],
+      ],
+      content: 'Update',
+      sig: '',
+    );
+    expect(publisherMessageAuthor(event, 'relay'), publisher);
+    expect(publisherMessageAuthor(event, 'other-relay'), 'relay');
+    expect(publisherMessageAuthor(event, null), 'relay');
+  });
   test(
     'policy survives snapshots and copies; absent and malformed metadata differ',
     () {

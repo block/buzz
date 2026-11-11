@@ -195,13 +195,14 @@ class ThreadDetailPage extends HookConsumerWidget {
         ? null
         : ref.watch(publisherThreadRootProvider(repliesArgs)).value;
     final canReply =
+        !_isDeletedBy(liveChannelEvents, queryRootId) &&
         !(channel?.isArchived ?? isArchived) &&
         ref.watch(channelStartsThreadsProvider(channelId)) &&
         (publisher == null
             ? isMember
             : currentPubkey != null &&
                   policyRoot != null &&
-                  policyRoot.pubkey == publisher &&
+                  policyRoot.author == publisher &&
                   (channel?.visibility == 'open' || channel?.isMember == true));
     final routeAnimation = ModalRoute.of(context)?.animation;
     final reducedLandingHighlightMotion = MediaQuery.disableAnimationsOf(

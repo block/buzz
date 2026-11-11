@@ -1,0 +1,79 @@
+part of 'channel_detail_page_test.dart';
+
+void publisherThreadTests() {
+  const publisher =
+      'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc';
+  const relay =
+      'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+  for (final workflow in [false, true]) {
+    testWidgets(
+      'publisher channel keeps main composer closed and enables non-member thread replies workflow=$workflow',
+      (tester) async {
+        final sender = _RecordingOrdinarySender();
+        final channel = Channel(
+          id: _channelId,
+          name: 'Updates',
+          channelType: 'stream',
+          visibility: 'open',
+          description: '',
+          createdBy: publisher,
+          createdAt: DateTime.utc(2026),
+          memberCount: 1,
+          isMember: false,
+          messagePublisher: publisher,
+        );
+        final root = _textMsg(
+          id: threadIdRoot,
+          pubkey: workflow ? relay : publisher,
+          content: 'Publisher update',
+          extraTags: workflow
+              ? [
+                  ['actor', publisher],
+                ]
+              : [],
+        );
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [root],
+            sender: sender,
+            channel: channel,
+            publisherRoots: {
+              root.id: (
+                event: root,
+                author: publisherMessageAuthor(root, relay),
+              ),
+            },
+            threadReplies: {root.id: []},
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(find.byType(ComposeBar), findsNothing);
+        expect(
+          find.text('Open a post by the channel publisher to reply'),
+          findsOneWidget,
+        );
+        final context = tester.element(find.byType(ChannelDetailPage));
+        final head = formatTimeline([root]).single;
+        Navigator.of(context).push(
+          MaterialPageRoute<void>(
+            builder: (_) => ThreadDetailPage(
+              threadHead: head,
+              allMessages: [head],
+              channelId: _channelId,
+              currentPubkey: 'self',
+              isMember: false,
+              isArchived: false,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(find.byType(ComposeBar), findsOneWidget);
+        await tester
+            .widget<ComposeBar>(find.byType(ComposeBar))
+            .onSend('My reply', []);
+        expect(sender.sent, ['My reply']);
+        expect(sender.parents, [root.id]);
+      },
+    );
+  }
+}

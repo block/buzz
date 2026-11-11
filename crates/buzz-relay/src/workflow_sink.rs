@@ -1587,17 +1587,32 @@ mod postgres_tests {
             )
             .await
             .unwrap();
-        assert!(sink
+        let error = sink
             .send_message(
                 tenant.community(),
                 &channel.to_string(),
                 "other root",
                 "other root",
                 &reader.public_key().to_hex(),
-                None
+                None,
             )
             .await
-            .is_err());
+            .unwrap_err();
+        assert!(format!("{error:?}")
+            .contains("restricted: reply to a post by this channel's publisher"));
+        let stored = state
+            .db
+            .get_event_by_id(tenant.community(), &hex::decode(&root).unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            crate::handlers::ingest::effective_message_author(
+                &stored.event,
+                &state.relay_keypair.public_key()
+            ),
+            publisher.public_key().to_bytes()
+        );
         let reply = sink
             .send_message(
                 tenant.community(),

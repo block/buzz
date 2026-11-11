@@ -60,6 +60,9 @@ pub(crate) async fn validate(
         return Err(DENIED.into());
     }
     let markers = buzz_core::nip10::parse_thread_markers(&event.tags);
+    if markers.root.is_some() && markers.reply.is_none() {
+        return Err(DENIED.into());
+    }
     let is_publisher = actor == publisher;
     if !is_publisher
         && event
@@ -97,7 +100,11 @@ pub(crate) async fn validate(
                     && super::req::event_visible_to_reader(&target.event, actor)
             })
             .ok_or_else(|| DENIED.to_string())?;
-        let next = buzz_core::nip10::parse_thread_markers(&target.event.tags).resolve();
+        let target_markers = buzz_core::nip10::parse_thread_markers(&target.event.tags);
+        if target_markers.root.is_some() && target_markers.reply.is_none() {
+            return Err(DENIED.into());
+        }
+        let next = target_markers.resolve();
         if let Some((root, next_parent)) = next {
             roots.push(root);
             parent = next_parent;
