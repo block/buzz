@@ -5,6 +5,7 @@ import '../../../shared/crypto/nip_oa.dart';
 import '../../../shared/identity_archives/identity_archives.dart';
 import '../../../shared/identity_names/identity_names.dart';
 import '../../../shared/identity_names/identity_names_provider.dart';
+import '../../../shared/me/default_agent.dart';
 import '../../../shared/mentions/agent_identity_provider.dart';
 import '../../../shared/relay/relay.dart';
 import '../../../shared/profile/user_cache_provider.dart';
@@ -436,6 +437,8 @@ List<MentionCandidate> _chooserCandidates(
     viewer: currentPubkey,
     history: ref.watch(mentionHistoryProvider)[historyKey] ?? const {},
     presence: (key) => presence[key] ?? 'unknown',
+    // The last known choice holds through a reconnect reload or error.
+    bestie: ref.watch(defaultAgentProvider).value,
   );
 }
 

@@ -1,7 +1,8 @@
 import 'package:flutter/foundation.dart';
 
 /// One key the user can mention. The fields are the inputs of the portable
-/// mention rules (buzz-app `src/bundled/mentions/README.md`, version 1).
+/// mention rules (buzz-app `src/bundled/mentions/README.md`, version 1, plus the
+/// version 4 order of the viewer's own agents).
 @immutable
 class MentionChoice {
   /// Lowercase 64-hex public key.
@@ -78,13 +79,16 @@ int? mentionMatch(MentionChoice choice, String query) {
 int _compare(String a, String b) => a.compareTo(b);
 
 /// Section 4 order. Every rule is a key of one choice, so the result is the
-/// same for any input order. Agents that share a name form one block at its
-/// lowest label; recency, managed and presence order only that block.
+/// same for any input order. The viewer's own agents sort among themselves by
+/// [bestie] (the viewer's default agent) first, then [history] recency, then
+/// label. Other agents that share a name form one block at its lowest label;
+/// recency, managed and presence order only that block.
 List<MentionChoice> rankMentions(
   Iterable<MentionChoice> choices,
   String query, {
   Map<String, int> history = const {},
   String Function(String pubkey)? presence,
+  String? bestie,
 }) {
   final needle = _normalized(query);
   final keyed = <_Keyed>[];
@@ -103,7 +107,9 @@ List<MentionChoice> rankMentions(
           choice.agent && choice.owned ? 0 : 1,
         ],
         label: _normalized(choice.label),
-        blockName: choice.agent ? _normalized(choice.name) : null,
+        blockName: choice.agent && !choice.owned
+            ? _normalized(choice.name)
+            : null,
         recent: history[choice.pubkey] ?? 0,
         online: switch (status) {
           'online' => 0,
@@ -124,6 +130,18 @@ List<MentionChoice> rankMentions(
     for (var i = 0; i < a.tier.length; i++) {
       final d = a.tier[i] - b.tier[i];
       if (d != 0) return d;
+    }
+    // Equal tiers, so both or neither are the viewer's own agents.
+    if (a.choice.agent && a.choice.owned) {
+      var d =
+          (b.choice.pubkey == bestie ? 1 : 0) -
+          (a.choice.pubkey == bestie ? 1 : 0);
+      if (d != 0) return d;
+      d = b.recent - a.recent;
+      if (d != 0) return d;
+      d = _compare(a.label, b.label);
+      if (d != 0) return d;
+      return _compare(a.choice.pubkey, b.choice.pubkey);
     }
     var d = _compare(firstLabel[a.block]!, firstLabel[b.block]!);
     if (d != 0) return d;
@@ -152,7 +170,8 @@ class _Keyed {
   final List<int> tier;
   final String label;
 
-  /// Normalized name for an agent, null for a person.
+  /// Normalized name for an agent that forms blocks, null for a person or
+  /// the viewer's own agent.
   final String? blockName;
   final int recent;
   final int online;

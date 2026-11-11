@@ -123,6 +123,79 @@ void main() {
     }
   });
 
+  // Mention rules v4 order of the viewer's own agents: Bestie, then recency,
+  // then label and key, without same-name blocks. Membership and match
+  // still come first. Same shape as the ranking fixtures.
+  group('own agent order', () {
+    String key(String c) => c * 64;
+    for (final row in <Map<String, dynamic>>[
+      {
+        'name': 'bestie_then_recency_then_label',
+        'query': '',
+        'bestie': key('b'),
+        'history': {key('c'): 5, key('e'): 9},
+        'choices': [
+          {'pubkey': key('a'), 'name': 'Alpha', 'agent': true, 'owned': true},
+          {'pubkey': key('b'), 'name': 'Zed', 'agent': true, 'owned': true},
+          {'pubkey': key('c'), 'name': 'Mid', 'agent': true, 'owned': true},
+          {'pubkey': key('d'), 'name': 'Aaron'},
+          {'pubkey': key('e'), 'name': 'Beta', 'agent': true},
+        ],
+        'expected': [key('b'), key('c'), key('a'), key('d'), key('e')],
+      },
+      {
+        'name': 'recency_splits_own_same_name_agents',
+        'query': '',
+        'history': {key('b'): 3, key('c'): 5},
+        'choices': [
+          {'pubkey': key('a'), 'name': 'Goose', 'agent': true, 'owned': true},
+          {'pubkey': key('b'), 'name': 'Goose', 'agent': true, 'owned': true},
+          {'pubkey': key('c'), 'name': 'Hawk', 'agent': true, 'owned': true},
+        ],
+        'expected': [key('c'), key('b'), key('a')],
+      },
+      {
+        'name': 'bestie_does_not_override_match_quality',
+        'query': 'zed',
+        'bestie': key('a'),
+        'choices': [
+          {'pubkey': key('a'), 'name': 'Zed Two', 'agent': true, 'owned': true},
+          {'pubkey': key('b'), 'name': 'Zed', 'agent': true, 'owned': true},
+        ],
+        'expected': [key('b'), key('a')],
+      },
+      {
+        'name': 'bestie_does_not_override_membership',
+        'query': '',
+        'bestie': key('a'),
+        'choices': [
+          {'pubkey': key('a'), 'name': 'Alpha', 'agent': true, 'owned': true},
+          {
+            'pubkey': key('b'),
+            'name': 'Zed',
+            'member': true,
+            'agent': true,
+            'owned': true,
+          },
+        ],
+        'expected': [key('b'), key('a')],
+      },
+    ]) {
+      test(row['name'], () {
+        final ranked = rankMentions(
+          [
+            for (final choice in row['choices'] as List)
+              _choice({'member': false, ...choice as Map<String, dynamic>}),
+          ],
+          row['query'] as String,
+          history: {...?row['history'] as Map<String, int>?},
+          bestie: row['bestie'] as String?,
+        );
+        expect([for (final c in ranked) c.pubkey], row['expected']);
+      });
+    }
+  });
+
   group('Space fixtures', () {
     for (final fixture in _cases('space')) {
       test(fixture['name'], () {

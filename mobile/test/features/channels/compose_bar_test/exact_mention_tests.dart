@@ -19,6 +19,7 @@ void exactMentionTests() {
     nostr.Keys? signer,
     List<OwnedAgentDirectoryEntry>? ownedAgents,
     bool ownedAgentsUnknown = false,
+    String? bestie,
   }) async {
     await tester.pumpWidget(
       _buildComposeBar(
@@ -39,6 +40,7 @@ void exactMentionTests() {
         onSend: onSend,
         ownedAgents: ownedAgents,
         ownedAgentsUnknown: ownedAgentsUnknown,
+        bestie: bestie,
       ),
     );
     if (find.byType(TextField).evaluate().isEmpty &&
@@ -57,6 +59,37 @@ void exactMentionTests() {
     of: find.byKey(const ValueKey('mention-suggestions-popover')),
     matching: find.textContaining('Scout'),
   );
+
+  testWidgets("the saved Bestie leads the viewer's own agents", (tester) async {
+    final alpha = 'c' * 64;
+    final zed = 'd' * 64;
+    await mountComposer(
+      tester,
+      const [],
+      (_, _, {mediaTags = const []}) async {},
+      signer: nostr.Keys.generate(),
+      ownedAgents: [
+        OwnedAgentDirectoryEntry(pubkey: alpha, displayName: 'Alpha'),
+        OwnedAgentDirectoryEntry(pubkey: zed, displayName: 'Zed'),
+      ],
+      bestie: zed,
+    );
+    // Home's Bestie button keeps the choice loaded from launch.
+    ProviderScope.containerOf(
+      tester.element(find.byType(TextField)),
+    ).listen(defaultAgentProvider, (_, _) {});
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField), '@');
+    await tester.pumpAndSettle();
+    Finder row(String name) => find.descendant(
+      of: find.byKey(const ValueKey('mention-suggestions-popover')),
+      matching: find.text(name),
+    );
+    expect(
+      tester.getTopLeft(row('Zed')).dy,
+      lessThan(tester.getTopLeft(row('Alpha')).dy),
+    );
+  });
 
   Future<void> pick(
     WidgetTester tester,
