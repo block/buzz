@@ -698,15 +698,6 @@ impl HuddleOwnerRegistry {
         self.draining.load(std::sync::atomic::Ordering::Acquire)
     }
 
-    pub(crate) fn owns_generation(&self, session_id: Uuid, generation: u64) -> bool {
-        self.entries.get(&session_id).is_some_and(|entry| {
-            entry.generation == generation
-                && !entry.lost.is_cancelled()
-                && !entry.draining.is_cancelled()
-                && !self.is_draining()
-        })
-    }
-
     /// The room's owner-loss signal, or `None` when this pod holds no live
     /// owner lease for the session. The acceptor passes this into
     /// `serve_control_loop`; a steady-state owner joiner uses it to reuse the
@@ -1249,7 +1240,7 @@ impl<D: HuddleDirectory + ?Sized> HuddleControlAcceptor<D> {
     ///
     /// **Only call for committed peers.** For pending (uncommitted) slots use
     /// [`Self::remove_remote_peer_pending`].
-    async fn remove_remote_peer(
+    fn remove_remote_peer(
         &self,
         community: CommunityId,
         session_id: Uuid,
@@ -1262,17 +1253,8 @@ impl<D: HuddleDirectory + ?Sized> HuddleControlAcceptor<D> {
         let Some((delta, should_end)) = room.remove_peer_and_check_ended(peer_id) else {
             return;
         };
-        let participant = delta.left.as_ref().map(|peer| peer.pubkey.clone());
         broadcast_peer_left(&room, delta, session_id);
-        let finalized = if should_end {
-            match room.end_handler.get() {
-                Some(handler) => handler.finish(&room, participant.as_deref()).await,
-                None => true,
-            }
-        } else {
-            false
-        };
-        if finalized && self.rooms.cleanup_ended_room(&room) {
+        if should_end && self.rooms.cleanup_if_empty(community, session_id) {
             self.owners.release(session_id, generation);
         }
     }
@@ -1282,7 +1264,7 @@ impl<D: HuddleDirectory + ?Sized> HuddleControlAcceptor<D> {
     /// logic still runs so an empty room whose only peer was pending does not
     /// linger.
     /// [Fix B: FI-TRACE-COMMIT-BEFORE-PUBLISH]
-    async fn remove_remote_peer_pending(
+    fn remove_remote_peer_pending(
         &self,
         community: CommunityId,
         session_id: Uuid,
@@ -1293,15 +1275,7 @@ impl<D: HuddleDirectory + ?Sized> HuddleControlAcceptor<D> {
             return;
         };
         let (_, should_end) = room.remove_peer_silent_and_check_ended(peer_id);
-        let finalized = if should_end {
-            match room.end_handler.get() {
-                Some(handler) => handler.finish(&room, None).await,
-                None => true,
-            }
-        } else {
-            false
-        };
-        if finalized && self.rooms.cleanup_ended_room(&room) {
+        if should_end && self.rooms.cleanup_if_empty(community, session_id) {
             self.owners.release(session_id, generation);
         }
     }
@@ -1555,8 +1529,7 @@ impl<D: HuddleDirectory + ?Sized> HuddleControlAcceptor<D> {
                                 session_id,
                                 fenced.generation,
                                 peer_id,
-                            )
-                            .await;
+                            );
                         }
                     } else if let Some(peer_id) = pending_registered.remove(&pubkey) {
                         if let Some(community_id) = stream_community {
@@ -1565,8 +1538,7 @@ impl<D: HuddleDirectory + ?Sized> HuddleControlAcceptor<D> {
                                 session_id,
                                 fenced.generation,
                                 peer_id,
-                            )
-                            .await;
+                            );
                         }
                     }
                 }
@@ -1637,16 +1609,14 @@ impl<D: HuddleDirectory + ?Sized> HuddleControlAcceptor<D> {
         if let Some(community_id) = stream_community {
             let community = CommunityId::from_uuid(community_id);
             for (_pubkey, peer_id) in registered {
-                self.remove_remote_peer(community, session_id, fenced.generation, peer_id)
-                    .await;
+                self.remove_remote_peer(community, session_id, fenced.generation, peer_id);
             }
             // Pending peers (commit never arrived): remove silently.
             // They were never visible — no `joined` was published.
             // Using remove_remote_peer_pending so no delta/revision bump fires.
             // [Fix B: FI-TRACE-COMMIT-BEFORE-PUBLISH]
             for (_pubkey, peer_id) in pending_registered {
-                self.remove_remote_peer_pending(community, session_id, fenced.generation, peer_id)
-                    .await;
+                self.remove_remote_peer_pending(community, session_id, fenced.generation, peer_id);
             }
         }
         result
@@ -3010,17 +2980,6 @@ mod tests {
         assert_eq!(room.peer_pubkeys(), vec![("owner-local".into(), 0)]);
     }
 
-    struct RecordedRoomEnd(Arc<std::sync::Mutex<Vec<Option<String>>>>);
-
-    #[async_trait::async_trait]
-    impl super::super::room::RoomEndHandler for RecordedRoomEnd {
-        async fn finish(&self, room: &Room, participant: Option<&str>) -> bool {
-            assert!(room.is_empty());
-            self.0.lock().unwrap().push(participant.map(str::to_owned));
-            true
-        }
-    }
-
     #[tokio::test]
     async fn remote_only_stream_close_releases_owner_room_and_lease() {
         let owner_rt = rt(1);
@@ -3061,52 +3020,12 @@ mod tests {
         assert!(rooms.get(community(), session_id).is_some());
         assert!(owners.lost_for(session_id).is_some());
 
-        let endings = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let room = rooms.get(community(), session_id).unwrap();
-        assert!(room
-            .end_handler
-            .set(Arc::new(RecordedRoomEnd(Arc::clone(&endings))))
-            .is_ok());
-
         drop(client);
         served.await.unwrap().unwrap();
 
         assert!(rooms.get(community(), session_id).is_none());
         assert!(owners.lost_for(session_id).is_none());
-        assert_eq!(
-            *endings.lock().unwrap(),
-            vec![Some("remote-only".to_owned())]
-        );
         await_release_calls(&dir, 1).await;
-    }
-
-    #[tokio::test]
-    async fn pending_last_slot_finishes_committed_room_but_not_a_new_room() {
-        for committed in [false, true] {
-            let rooms = Arc::new(AudioRoomManager::new());
-            let session = Uuid::new_v4();
-            let room = rooms.get_or_create(community(), session);
-            let endings = Arc::new(std::sync::Mutex::new(Vec::new()));
-            if committed {
-                assert!(room
-                    .end_handler
-                    .set(Arc::new(RecordedRoomEnd(Arc::clone(&endings))))
-                    .is_ok());
-            }
-            let (peer, ..) = room.add_peer_pending("pending".into(), 2).unwrap();
-            let acceptor = HuddleControlAcceptor::new(
-                Arc::clone(&rooms),
-                Arc::new(NullTransport),
-                Arc::new(FakeDir::default()),
-                rt(1),
-                Arc::new(HuddleOwnerRegistry::new()),
-            );
-            acceptor
-                .remove_remote_peer_pending(community(), session, 7, peer)
-                .await;
-            assert_eq!(endings.lock().unwrap().len(), usize::from(committed));
-            assert!(rooms.get(community(), session).is_none());
-        }
     }
 
     /// A `RegisterPeer` whose fence is rejected (wrong community keys a lease

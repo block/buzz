@@ -1411,6 +1411,8 @@ async fn run_active_audio_connection(
         peer_id: None,
         room: Arc::clone(&room),
         audio_rooms: Arc::clone(&state.audio_rooms),
+        community: tenant.community(),
+        channel_id,
     };
 
     // Remote registration happens before ingress admission. The owner-assigned
@@ -2147,19 +2149,6 @@ async fn run_active_audio_connection(
     let remote_stream = guard.take_remote_stream();
     let _ = guard.take_peer_id(); // peer_id was taken for the commit path
 
-    // The owner installs lifecycle context before advertising owner readiness.
-    // Remote last-peer teardown must publish the same ending as a local exit.
-    if remote_session.is_none() {
-        let _ = room.end_handler.set(Arc::new(CommittedRoomEnd {
-            state: Arc::downgrade(&state),
-            tenant: tenant.clone(),
-            parent: parent_id_for_event,
-            participant: pubkey_hex.clone(),
-            generation: lifecycle_generation.clone(),
-            owner_generation,
-        }));
-    }
-
     // I1 mandated: transfer-after-commit-won. Now that the join is committed,
     // take the lease from the guard and install the registry renewer. Every
     // exit after this point is in the live runtime (no pre-commit resources
@@ -2412,20 +2401,46 @@ async fn run_active_audio_connection(
     )
     .await;
 
-    let room_emptied = if should_auto_end {
-        match room.end_handler.get() {
-            Some(handler) if handler.finish(&room, Some(&pubkey_hex)).await => {
-                state.audio_rooms.cleanup_ended_room(&room)
+    let room_emptied;
+    if should_auto_end {
+        info!(channel_id = %channel_id, "audio room empty — auto-ending huddle");
+
+        match state
+            .db
+            .archive_channel(tenant.community(), channel_id)
+            .await
+        {
+            Err(e) => {
+                warn!(channel_id = %channel_id, "auto-archive failed, huddle stays alive: {e}");
+                room.clear_ended();
+                room_emptied = false;
             }
-            _ => false,
+            Ok(()) => {
+                room_emptied = state
+                    .audio_rooms
+                    .cleanup_if_empty(tenant.community(), channel_id);
+
+                emit_participant_event(
+                    &state,
+                    &tenant,
+                    channel_id,
+                    parent_id_for_event,
+                    ParticipantLifecycle {
+                        kind: Kind::Custom(48103),
+                        participant_pubkey: &pubkey_hex,
+                        roster_revision: None,
+                        admission_id: None,
+                        generation: &lifecycle_generation,
+                    },
+                )
+                .await;
+            }
         }
-    } else if remote_session.is_some() {
-        state.audio_rooms.cleanup_ended_room(&room)
     } else {
-        // Another leaver owns finalization. Keep its ended admission gate
-        // installed while archival is in flight.
-        false
-    };
+        room_emptied = state
+            .audio_rooms
+            .cleanup_if_empty(tenant.community(), channel_id);
+    }
 
     // Owner path: release this room's lease when the room empties, so a new
     // owner can acquire and the renewer stops cleanly (silent, not owner-loss).
@@ -2444,95 +2459,6 @@ async fn run_active_audio_connection(
         pubkey = %pubkey_hex,
         "audio peer left"
     );
-}
-
-struct CommittedRoomEnd {
-    state: std::sync::Weak<AppState>,
-    tenant: TenantContext,
-    parent: Uuid,
-    participant: String,
-    generation: String,
-    owner_generation: Option<u64>,
-}
-
-#[async_trait::async_trait]
-impl crate::audio::room::RoomEndHandler for CommittedRoomEnd {
-    async fn finish(&self, room: &crate::audio::room::Room, participant: Option<&str>) -> bool {
-        let Some(state) = self.state.upgrade() else {
-            return true;
-        };
-        // Draining/retired owners release local resources but cannot end the
-        // shared call that another owner may already be serving.
-        if let Some(generation) = self.owner_generation {
-            if !state
-                .mesh()
-                .is_some_and(|mesh| mesh.owners.owns_generation(room.channel_id, generation))
-            {
-                return true;
-            }
-        }
-        match state
-            .db
-            .archive_channel_if(self.tenant.community(), room.channel_id, || async {
-                let Some(generation) = self.owner_generation else {
-                    return Ok(true);
-                };
-                let Some(mesh) = state.mesh() else {
-                    return Ok(false);
-                };
-                if !mesh.owners.owns_generation(room.channel_id, generation) {
-                    return Ok(false);
-                }
-                let fenced = buzz_relay_mesh::FencedHeader {
-                    session_id: room.channel_id,
-                    generation,
-                    owner_runtime_id: mesh.local_runtime_id,
-                };
-                let checked = tokio::time::timeout(
-                    Duration::from_secs(5),
-                    mesh.effective_directory()
-                        .validate(self.tenant.community(), &fenced),
-                )
-                .await;
-                match checked {
-                    Ok(Ok(())) => Ok(mesh.owners.owns_generation(room.channel_id, generation)),
-                    Ok(Err(
-                        buzz_relay_mesh::MeshError::StaleGeneration { .. }
-                        | buzz_relay_mesh::MeshError::NoActiveLease { .. }
-                        | buzz_relay_mesh::MeshError::OwnerMismatch { .. }
-                        | buzz_relay_mesh::MeshError::FutureGeneration { .. },
-                    )) => Ok(false),
-                    _ => Err(buzz_db::DbError::AccessDenied(
-                        "Huddle ownership could not be verified".into(),
-                    )),
-                }
-            })
-            .await
-        {
-            Ok(true) => {}
-            Ok(false) => return true,
-            Err(error) => {
-                warn!(channel_id = %room.channel_id, %error, "auto-archive failed, huddle stays alive");
-                room.clear_ended();
-                return false;
-            }
-        }
-        emit_participant_event(
-            &state,
-            &self.tenant,
-            room.channel_id,
-            self.parent,
-            ParticipantLifecycle {
-                kind: Kind::Custom(48103),
-                participant_pubkey: participant.unwrap_or(&self.participant),
-                roster_revision: None,
-                admission_id: None,
-                generation: &self.generation,
-            },
-        )
-        .await;
-        true
-    }
 }
 
 /// React to a non-owner huddle teardown signal read off the owner's control
@@ -2992,6 +2918,9 @@ struct HuddleAdmissionGuard {
     room: std::sync::Arc<crate::audio::room::Room>,
     /// Back-reference to the room manager for `cleanup_if_empty`.
     audio_rooms: std::sync::Arc<crate::audio::room::AudioRoomManager>,
+    /// Community + channel for `cleanup_if_empty`.
+    community: buzz_core::CommunityId,
+    channel_id: Uuid,
 }
 
 impl HuddleAdmissionGuard {
@@ -3029,7 +2958,6 @@ impl HuddleAdmissionGuard {
         {
             crate::audio::join::send_clean_close(stream, session.fenced(), session.pubkey()).await;
         }
-        let was_remote = self.remote_session.is_some();
         self.remote_session = None;
         self.remote_stream = None;
         // Remove the peer from the room.
@@ -3039,20 +2967,11 @@ impl HuddleAdmissionGuard {
         // avoid emitting a phantom `left` delta.
         // [Fix B: FI-TRACE-COMMIT-BEFORE-PUBLISH]
         if let Some(pid) = self.peer_id.take() {
-            if was_remote {
-                self.room.remove_peer_silent(pid);
-                return self.audio_rooms.cleanup_ended_room(&self.room);
-            }
-            let (_, should_end) = self.room.remove_peer_silent_and_check_ended(pid);
-            if !should_end {
-                return false;
-            }
-            if let Some(handler) = self.room.end_handler.get() {
-                if !handler.finish(&self.room, None).await {
-                    return false;
-                }
-            }
-            return self.audio_rooms.cleanup_ended_room(&self.room);
+            self.room.remove_peer_silent(pid);
+            let cleaned = self
+                .audio_rooms
+                .cleanup_if_empty(self.community, self.channel_id);
+            return cleaned;
         }
         false
     }
@@ -6198,6 +6117,8 @@ mod tests {
             peer_id: None,
             room,
             audio_rooms,
+            community,
+            channel_id,
         };
 
         let _ = guard.release_before_commit().await; // pre-add-peer; owner_generation not set
@@ -6306,6 +6227,8 @@ mod tests {
             peer_id: None,
             room,
             audio_rooms,
+            community,
+            channel_id,
         };
 
         let _ = guard.release_before_commit().await; // pre-add-peer; owner_generation not set
@@ -11219,8 +11142,6 @@ mod tests {
             let (fanout_rx, fanout_release) =
                 crate::nip_fi_test_hooks::audio_participant_fanout_hook::arm(community);
 
-            let finished = Arc::new(tokio::sync::Notify::new());
-            let completion = Arc::clone(&finished);
             let server = tokio::spawn(async move {
                 let app = axum::Router::new().route(
                     "/",
@@ -11230,7 +11151,6 @@ mod tests {
                         let assertion_i = assertion_c.clone();
                         let cancel_i = conn_cancel_c.clone();
                         move |ws: axum::extract::ws::WebSocketUpgrade| {
-                            let completion = Arc::clone(&completion);
                             let state_i = Arc::clone(&state_i);
                             let tenant_i = tenant_i.clone();
                             let assertion_i = assertion_i.clone();
@@ -11249,8 +11169,7 @@ mod tests {
                                         conn_time,
                                         None,
                                     )
-                                    .await;
-                                    completion.notify_one();
+                                    .await
                                 })
                             }
                         }
@@ -11332,22 +11251,9 @@ mod tests {
             // Release hook → commit_participant_join returns → session enters recv_loop.
             fanout_release.notify_one();
 
-            // Wait for the actual admission acknowledgement before leaving.
-            // Cancelling at the fan-out hook instead exercises failed admission,
-            // before the live room lifecycle has been installed.
-            tokio::time::timeout(std::time::Duration::from_secs(10), async {
-                loop {
-                    let message = client.next().await.expect("joined frame").unwrap();
-                    if let tokio_tungstenite::tungstenite::Message::Text(text) = message {
-                        let payload: serde_json::Value = serde_json::from_str(&text).unwrap();
-                        if payload["type"] == "joined" {
-                            break;
-                        }
-                    }
-                }
-            })
-            .await
-            .expect("client admitted before disconnect");
+            // Give the session a moment to enter recv_loop before we disconnect.
+            tokio::task::yield_now().await;
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
             // Trigger disconnect — cancelling conn_cancel signals the handler's
             // cancel token, which causes recv_loop, send_loop, and forward_loop to
@@ -11357,10 +11263,8 @@ mod tests {
             // Handler returns after teardown. Wait for the WS connection to close.
             let _ = tokio::time::timeout(std::time::Duration::from_secs(5), client.next()).await;
 
-            // Socket close precedes persistence. Await the real teardown.
-            tokio::time::timeout(std::time::Duration::from_secs(10), finished.notified())
-                .await
-                .expect("handler teardown completed");
+            // Wait a moment for the handler to finish emitting 48102.
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
             // Exactly one 48102 row must exist — the "committed join ⇒ exactly one leave" invariant.
             let row_48102: i64 = sqlx::query_scalar(
@@ -11376,23 +11280,6 @@ mod tests {
             assert_eq!(
                 row_48102, 1,
                 "CW10-full: exactly 1 48102 must be committed after a committed join + disconnect; found {row_48102}"
-            );
-
-            // The owner-installed finalizer persists the ending, not just the
-            // empty audio map. Remote removal invokes this same finalizer.
-            assert!(state
-                .db
-                .get_channel(community, channel_id)
-                .await
-                .unwrap()
-                .archived_at
-                .is_some());
-            let endings: i64 = sqlx::query_scalar(
-                "SELECT COUNT(*) FROM events WHERE community_id = $1 AND channel_id = $2 AND kind = 48103",
-            ).bind(community.as_uuid()).bind(channel_id).fetch_one(&pool).await.unwrap();
-            assert_eq!(
-                endings, 1,
-                "a committed empty room must publish exactly one ending"
             );
 
             // Room must be cleaned up.

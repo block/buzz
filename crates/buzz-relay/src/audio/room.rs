@@ -248,12 +248,6 @@ impl AdmissionGuard {
     }
 }
 
-/// Persist a committed room's ending before releasing its admission gate.
-#[async_trait::async_trait]
-pub(crate) trait RoomEndHandler: Send + Sync {
-    async fn finish(&self, room: &Room, participant: Option<&str>) -> bool;
-}
-
 /// A single audio room for one channel.
 pub struct Room {
     /// Community this room belongs to.
@@ -267,7 +261,6 @@ pub struct Room {
     /// Ordered authoritative roster mutations. Lag is recoverable from
     /// [`Self::roster_snapshot`], so the owner never blocks admission.
     roster_tx: broadcast::Sender<RosterDelta>,
-    pub(crate) end_handler: std::sync::OnceLock<Arc<dyn RoomEndHandler>>,
 }
 
 impl Room {
@@ -280,7 +273,6 @@ impl Room {
             peers: DashMap::new(),
             guard: std::sync::Mutex::new(AdmissionGuard::new()),
             roster_tx,
-            end_handler: std::sync::OnceLock::new(),
         }
     }
 
@@ -929,23 +921,10 @@ impl AudioRoomManager {
         Some(room)
     }
 
-    /// Remove only this room instance after its finalizer has settled.
-    pub(crate) fn cleanup_ended_room(&self, expected: &Arc<Room>) -> bool {
-        self.rooms
-            .remove_if(&(expected.community_id, expected.channel_id), |_, room| {
-                Arc::ptr_eq(room, expected) && room.is_empty()
-            })
-            .is_some()
-    }
-
     /// Remove the room if it has no peers. Returns `true` if the room was removed.
     pub fn cleanup_if_empty(&self, community_id: CommunityId, channel_id: Uuid) -> bool {
         self.rooms
-            .remove_if(&(community_id, channel_id), |_, room| {
-                room.is_empty()
-                    && !(room.end_handler.get().is_some()
-                        && room.guard.lock().map_or(true, |guard| guard.ended))
-            })
+            .remove_if(&(community_id, channel_id), |_, room| room.is_empty())
             .is_some()
     }
 }
