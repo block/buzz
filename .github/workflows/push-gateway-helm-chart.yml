@@ -14,6 +14,7 @@ on:
   pull_request:
     paths:
       - "deploy/charts/buzz-push-gateway/**"
+      - "crates/buzz-push-gateway/src/config.rs"
       - ".github/workflows/push-gateway-helm-chart.yml"
 permissions: {}
 env:
@@ -27,6 +28,7 @@ jobs:
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || '' }}
           fetch-depth: 0
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
       - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4
         with: { version: v3.16.4 }
       - run: deploy/charts/buzz-push-gateway/tests/render.sh

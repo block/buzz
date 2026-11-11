@@ -5,6 +5,10 @@ use thiserror::Error;
 /// Errors produced by database operations.
 #[derive(Debug, Error)]
 pub enum DbError {
+    /// Media authorization could not reserve capacity within its bounded wait.
+    #[error("media authorization capacity exceeded")]
+    MediaAuthorizationCapacity,
+
     /// A SQLx driver-level error.
     #[error("database error: {0}")]
     Sqlx(#[from] sqlx::Error),
@@ -25,6 +29,11 @@ pub enum DbError {
     #[error("channel not found: {0}")]
     ChannelNotFound(uuid::Uuid),
 
+    /// Another listed open channel in the community already has this name
+    /// (the `idx_channels_listed_name` index, migration 0083).
+    #[error("an open channel named \"{0}\" already exists")]
+    ChannelNameTaken(String),
+
     /// The requested member is not in the channel.
     #[error("member not found in channel {0}")]
     MemberNotFound(uuid::Uuid),
@@ -37,6 +46,22 @@ pub enum DbError {
     #[error("access denied: {0}")]
     AccessDenied(String),
 
+    /// Required initial policy cannot be created without issuer bindings.
+    #[error("required community creation needs NIP-FI issuer bindings")]
+    NipFiBindingRequired,
+
+    /// Invitation admission or minting was denied by authoritative restrictions.
+    #[error("invitation principal is restricted")]
+    InviteRestricted,
+
+    /// The invitation issuer is not an owner or admin at mint time.
+    #[error("invitation issuer is not an owner or admin")]
+    InviteIssuerNotAdmin,
+
+    /// A verified invitation owner conflicts with the recorded owner.
+    #[error("invitation owner does not match the recorded owner")]
+    InviteOwnerMismatch,
+
     /// JSON serialization or deserialization failed.
     #[error("serialization error: {0}")]
     Serde(#[from] serde_json::Error),
@@ -44,6 +69,11 @@ pub enum DbError {
     /// A value in the database is malformed or unexpected.
     #[error("invalid data: {0}")]
     InvalidData(String),
+
+    /// A partition the catalog audit had already listed was dropped before the
+    /// audit finished. A fresh snapshot sees a consistent catalog.
+    #[error("partition catalog changed mid-audit: {0}")]
+    PartitionDroppedMidAudit(String),
 
     /// A serving write admitted before the lifecycle transition is still live.
     /// This is an ordinary retryable drain condition, not a safety violation.
@@ -64,10 +94,127 @@ pub enum DbError {
     #[error("deletion safety error: {0}")]
     DeletionSafety(String),
 
+    /// An artifact sync page exceeds its resource limit.
+    #[error("artifact sync limit exceeded")]
+    ArtifactSyncLimit,
+
+    /// A complete read-state snapshot exceeds its bounded resource budget.
+    #[error("read-state snapshot exceeds event or byte limit")]
+    ReadStateSnapshotTooLarge,
+
+    /// A complete membership snapshot exceeds its bounded resource budget.
+    #[error("membership snapshot exceeds channel or byte limit")]
+    MembershipSnapshotTooLarge,
+
+    /// A complete thread window exceeds its request-wide work allowance.
+    #[error("thread window exceeds {0} budget")]
+    ThreadWindowBudgetExceeded(&'static str),
+
     /// A stored timestamp value could not be interpreted.
     #[error("invalid timestamp: {0}")]
     InvalidTimestamp(i64),
+
+    /// A roster mutation would remove the last effective relay Operator,
+    /// leaving no one able to administer the deployment through the API.
+    /// The transaction is rolled back and the caller must add a replacement
+    /// Operator before demoting or deleting the current one.
+    #[error("operation would remove the last relay operator")]
+    LastOperator,
+}
+
+impl DbError {
+    /// Whether Postgres cancelled the statement (SQLSTATE 57014:
+    /// `statement_timeout` or an explicit cancel).
+    ///
+    /// Replica-routed reads surface a cancel instead of re-running on the
+    /// writer. Usually the cancel means expensive work that the writer would
+    /// only repeat at the primary's cost. It can also mean the replica waited
+    /// on a lock that only it holds (a replayed `ACCESS EXCLUSIVE` from
+    /// primary DDL), when the writer would have answered quickly. That miss is
+    /// the accepted price of keeping runaway reads off the primary. Per-call
+    /// routed reads record it as the `statement_cancelled` route reason;
+    /// `ReadSession` reads return it to the relay, which logs the failed read.
+    pub fn is_statement_cancelled(&self) -> bool {
+        matches!(
+            self,
+            DbError::Sqlx(sqlx::Error::Database(db)) if db.code().as_deref() == Some("57014")
+        )
+    }
+
+    /// Whether the failure is about reaching the database at all (pool
+    /// acquire timeout, closed pool, or socket I/O) rather than about the
+    /// statement or its tenant. Every later query on the pool is expected to
+    /// fail the same way.
+    pub fn is_connection_unavailable(&self) -> bool {
+        matches!(
+            self,
+            DbError::Sqlx(sqlx::Error::PoolTimedOut | sqlx::Error::PoolClosed | sqlx::Error::Io(_))
+        )
+    }
 }
 
 /// Convenience alias for `Result<T, DbError>`.
 pub type Result<T> = std::result::Result<T, DbError>;
+
+/// A fixed description of a driver error for log lines. Postgres primary
+/// messages can repeat a bound value (`invalid input syntax for type uuid:
+/// "<value>"`), so only the SQLSTATE code is kept.
+pub fn sqlx_error_kind(e: &sqlx::Error) -> String {
+    let kind = match e {
+        sqlx::Error::Database(db) => {
+            return format!("database:{}", db.code().as_deref().unwrap_or("unknown"))
+        }
+        sqlx::Error::RowNotFound => "row_not_found",
+        sqlx::Error::PoolTimedOut => "pool_timed_out",
+        sqlx::Error::PoolClosed => "pool_closed",
+        sqlx::Error::Io(_) => "io",
+        sqlx::Error::Tls(_) => "tls",
+        sqlx::Error::Protocol(_) => "protocol",
+        sqlx::Error::ColumnDecode { .. } | sqlx::Error::Decode(_) => "decode",
+        sqlx::Error::Encode(_) => "encode",
+        _ => "other",
+    };
+    kind.to_owned()
+}
+
+impl DbError {
+    /// A fixed description of this error for log lines: never the
+    /// message, which can repeat bound values.
+    pub fn kind(&self) -> String {
+        use DbError as E;
+        let kind = match self {
+            E::Sqlx(e) => return sqlx_error_kind(e),
+            E::Serde(_) => "serde",
+            E::InvalidData(_) => "invalid_data",
+            E::NotFound(_) | E::ChannelNotFound(_) | E::MemberNotFound(_) => "not_found",
+            E::AccessDenied(_) => "access_denied",
+            E::NipFiBindingRequired => "nip_fi_binding_required",
+            _ => "other",
+        };
+        kind.to_owned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DbError;
+
+    #[test]
+    fn connection_unavailable_covers_only_pool_and_io_failures() {
+        for error in [
+            sqlx::Error::PoolTimedOut,
+            sqlx::Error::PoolClosed,
+            sqlx::Error::Io(std::io::Error::from(std::io::ErrorKind::ConnectionReset)),
+        ] {
+            assert!(DbError::Sqlx(error).is_connection_unavailable());
+        }
+        for error in [
+            DbError::Sqlx(sqlx::Error::RowNotFound),
+            DbError::Sqlx(sqlx::Error::Protocol("bad frame".into())),
+            DbError::AccessDenied("write-fenced".into()),
+            DbError::InvalidData("bad row".into()),
+        ] {
+            assert!(!error.is_connection_unavailable(), "{error:?}");
+        }
+    }
+}

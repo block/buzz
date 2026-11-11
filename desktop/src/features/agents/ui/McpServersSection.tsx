@@ -5,6 +5,7 @@ import { cn } from "@/shared/lib/cn";
 type McpServersSectionProps = {
   extensions: ExtensionEntry[];
   runtimeId: string | null;
+  mcpConfigFilePath?: string | null;
   variant?: "compact" | "profile";
   buzzAgentSlot?: React.ReactNode;
 };
@@ -19,9 +20,19 @@ export function shouldRenderMcpServers(
   return runtimeId === "buzz-agent" || extensions.length > 0;
 }
 
+// #3493: the servers are read from the isolated `.claude.json` under a custom
+// `CLAUDE_CONFIG_DIR`. Attribute them to that actual file so the panel never
+// implies the default `~/.claude.json` when isolation is in effect.
+export function mcpConfigFileCaption(
+  mcpConfigFilePath: string | null | undefined,
+): string | null {
+  return mcpConfigFilePath ? `From config file (${mcpConfigFilePath})` : null;
+}
+
 export function McpServersSection({
   buzzAgentSlot,
   extensions,
+  mcpConfigFilePath,
   runtimeId,
   variant = "compact",
 }: McpServersSectionProps) {
@@ -30,6 +41,8 @@ export function McpServersSection({
   if (!shouldRenderMcpServers(runtimeId, extensions)) {
     return null;
   }
+
+  const fileCaption = mcpConfigFileCaption(mcpConfigFilePath);
 
   return (
     <div
@@ -67,6 +80,17 @@ export function McpServersSection({
           No custom servers configured.
         </p>
       )}
+
+      {extensions.length > 0 && fileCaption ? (
+        <p
+          className={cn(
+            "truncate text-xs text-muted-foreground/70",
+            variant === "compact" ? "py-1" : "px-4 py-2",
+          )}
+        >
+          {fileCaption}
+        </p>
+      ) : null}
     </div>
   );
 }

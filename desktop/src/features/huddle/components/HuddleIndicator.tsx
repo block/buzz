@@ -25,6 +25,7 @@ const KIND_HUDDLE_ENDED = 48103;
 
 type ActiveHuddle = {
   ephemeralChannelId: string;
+  huddleThreadEventId: string | null;
   participants: Set<string>;
 };
 
@@ -105,6 +106,7 @@ export function HuddleIndicator({
             endedChannels.delete(ephId);
             huddle = {
               ephemeralChannelId: ephId,
+              huddleThreadEventId: ev.id,
               participants: new Set([ev.pubkey]),
             };
             break;
@@ -120,6 +122,7 @@ export function HuddleIndicator({
             if (!huddle || ephId !== huddle.ephemeralChannelId) {
               huddle = {
                 ephemeralChannelId: ephId,
+                huddleThreadEventId: null,
                 participants: new Set(),
               };
             }
@@ -135,6 +138,7 @@ export function HuddleIndicator({
             if (!huddle || ephId !== huddle.ephemeralChannelId) {
               huddle = {
                 ephemeralChannelId: ephId,
+                huddleThreadEventId: null,
                 participants: new Set(),
               };
             }
@@ -227,7 +231,11 @@ export function HuddleIndicator({
 
       if (activeHuddle) {
         setIsJoining(true);
-        void joinHuddle(channelId, activeHuddle.ephemeralChannelId)
+        void joinHuddle(
+          channelId,
+          activeHuddle.ephemeralChannelId,
+          activeHuddle.huddleThreadEventId ?? undefined,
+        )
           .then(() => {
             void queryClient.invalidateQueries({ queryKey: ["channels"] });
           })
@@ -309,7 +317,11 @@ export function HuddleIndicator({
     if (!activeHuddle || isJoining) return;
     setIsJoining(true);
     try {
-      await joinHuddle(channelId, activeHuddle.ephemeralChannelId);
+      await joinHuddle(
+        channelId,
+        activeHuddle.ephemeralChannelId,
+        activeHuddle.huddleThreadEventId ?? undefined,
+      );
       // Refetch channels so the ephemeral channel appears in the sidebar.
       void queryClient.invalidateQueries({ queryKey: ["channels"] });
     } catch (e) {

@@ -389,6 +389,91 @@ mod tests {
         assert_eq!(env["BUZZ_ACP_MODEL"], "sonnet");
     }
 
+    /// F2 provider seam: the desktop strips both model keys from a Claude
+    /// launch.env and rides the canonical model on policy_env alone. This test
+    /// pins the final `build_env` output for that shape: the canonical
+    /// ANTHROPIC_MODEL survives (tier 1, no tier-2 key to overwrite it) and
+    /// BUZZ_ACP_MODEL is absent — so the remote process has exactly one model
+    /// authority. Same-value and conflicting-value collisions are both moot
+    /// because the desktop already removed the launch.env keys.
+    #[test]
+    fn claude_launch_yields_single_model_authority_through_build_env() {
+        let agent = payload_json(serde_json::json!({
+            "launch": {
+                "command": "claude",
+                "policy_env": {"ANTHROPIC_MODEL": "claude-opus-4"},
+                // Desktop stripped both model keys from launch.env for claude.
+                "env": {"KEEP_ME": "yes"},
+                "owner_pubkey": "beef"
+            }
+        }));
+        let env = build(&agent).unwrap();
+        assert_eq!(
+            env["ANTHROPIC_MODEL"], "claude-opus-4",
+            "canonical model must survive as the single authority"
+        );
+        assert!(
+            !env.contains_key("BUZZ_ACP_MODEL"),
+            "no second model authority may reach the remote process"
+        );
+        assert_eq!(env["KEEP_ME"], "yes");
+    }
+
+    /// F2 provider seam, adversarial: even if a launch.env somehow still carries
+    /// model keys (older desktop, tampering), tier 2 later-wins over tier 1 —
+    /// which is exactly why the desktop must strip them. This documents the
+    /// hazard the desktop fix prevents: a launch.env ANTHROPIC_MODEL overrides
+    /// the canonical, and a launch.env BUZZ_ACP_MODEL introduces a second
+    /// authority. Neither key is authoritative in k8s, so the provider cannot
+    /// defend against it — the desktop strip is the only guard.
+    #[test]
+    fn launch_env_model_keys_would_win_over_policy_env_documenting_the_hazard() {
+        let agent = payload_json(serde_json::json!({
+            "launch": {
+                "command": "claude",
+                "policy_env": {"ANTHROPIC_MODEL": "claude-opus-4"},
+                "env": {"ANTHROPIC_MODEL": "user-haiku", "BUZZ_ACP_MODEL": "user-sonnet"},
+                "owner_pubkey": "beef"
+            }
+        }));
+        let env = build(&agent).unwrap();
+        assert_eq!(
+            env["ANTHROPIC_MODEL"], "user-haiku",
+            "launch.env later-wins — proving the desktop must strip it"
+        );
+        assert_eq!(
+            env["BUZZ_ACP_MODEL"], "user-sonnet",
+            "a leftover BUZZ_ACP_MODEL would be a second authority — desktop strips it"
+        );
+    }
+
+    /// F2 provider seam, same-value collision: a leftover launch.env
+    /// ANTHROPIC_MODEL that happens to match the canonical policy_env value is
+    /// still a second authority structurally — tier 2 later-wins, so the value
+    /// the remote process sees comes from launch.env, not the canonical tier.
+    /// It is only benign because the strings coincide; the desktop strip is what
+    /// guarantees the canonical tier is authoritative regardless of the leftover
+    /// value. Pinning the same-value case proves `build_env` cannot itself
+    /// distinguish a matching leftover from a conflicting one.
+    #[test]
+    fn launch_env_same_value_model_key_still_rides_tier_two_through_build_env() {
+        let agent = payload_json(serde_json::json!({
+            "launch": {
+                "command": "claude",
+                "policy_env": {"ANTHROPIC_MODEL": "claude-opus-4"},
+                // Same value as the canonical policy_env entry.
+                "env": {"ANTHROPIC_MODEL": "claude-opus-4"},
+                "owner_pubkey": "beef"
+            }
+        }));
+        let env = build(&agent).unwrap();
+        assert_eq!(
+            env["ANTHROPIC_MODEL"], "claude-opus-4",
+            "value coincides, but it is tier 2 (launch.env) that wins — the \
+             provider cannot tell a matching leftover from a conflicting one"
+        );
+    }
+
     /// `launch.env` already contains the merged user env, so re-merging the
     /// legacy field would undo a layering the desktop already resolved.
     #[test]

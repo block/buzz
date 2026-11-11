@@ -13,7 +13,7 @@ import {
   MessagesSquare,
   MonitorCog,
   Moon,
-  ShieldAlert,
+  ServerCog,
   Smartphone,
   Smile,
   Sun,
@@ -55,6 +55,7 @@ import {
 import { appearanceCommunityLabel } from "../lib/appearanceScopeCopy";
 import {
   AccentPickerContent,
+  ConversationDisplaySettings,
   GlassBackgroundSetting,
   LinkPreviewStyleSetting,
   ProminentActiveTabSetting,
@@ -65,15 +66,16 @@ import { ExperimentalFeaturesCard } from "./ExperimentalFeaturesCard";
 import { KeyboardShortcutsCard } from "./KeyboardShortcutsCard";
 import { MeshComputeSettingsCard } from "@/features/mesh-compute/ui/MeshComputeSettingsCard";
 import { MobilePairingCard } from "./MobilePairingCard";
-import { ModerationQueueCard } from "./ModerationQueueCard";
 import { NotificationSettingsCard } from "./NotificationSettingsCard";
 import { AgentsSettingsPanel } from "./AgentsSettingsPanel";
 import { HostedCommunitiesSettingsCard } from "./HostedCommunitiesSettingsCard";
+import { AdminConsoleSettingsCard } from "@/features/admin-console/AdminConsoleSettingsCard";
 import {
   SettingsOptionGroup,
   SettingsOptionGroupList,
   SettingsOptionRow,
 } from "./SettingsOptionGroup";
+import { SegmentedControl } from "@/shared/ui/segmented-control";
 import { ProfileSettingsCard } from "./ProfileSettingsCard";
 import { UpdateChecker } from "../UpdateChecker";
 import { SettingsSectionHeader } from "./SettingsSectionHeader";
@@ -91,7 +93,7 @@ export type SettingsSection =
   | "shortcuts"
   | "hosted-communities"
   | "community-members"
-  | "moderation"
+  | "relay-admin"
   | "custom-emoji"
   | "local-archive"
   | "mobile"
@@ -111,7 +113,7 @@ const SETTINGS_SECTION_VALUES: readonly SettingsSection[] = [
   "shortcuts",
   "hosted-communities",
   "community-members",
-  "moderation",
+  "relay-admin",
   "custom-emoji",
   "local-archive",
   "mobile",
@@ -207,9 +209,9 @@ export const settingsSections: SettingsSectionDescriptor[] = [
     icon: Ticket,
   },
   {
-    value: "moderation",
-    label: "Moderation",
-    icon: ShieldAlert,
+    value: "relay-admin",
+    label: "Admin",
+    icon: ServerCog,
   },
   {
     value: "custom-emoji",
@@ -674,39 +676,19 @@ function ThemeSettingsCard() {
                 Follow your system or choose a light or dark appearance.
               </p>
             </div>
-            <fieldset
-              className="relative isolate grid h-8 w-[15rem] shrink-0 grid-cols-3 overflow-hidden rounded-md bg-muted/45 p-0.5"
-              data-testid="appearance-color-mode-control"
-            >
-              <legend className="sr-only">Color mode</legend>
-              <div
-                aria-hidden="true"
-                className="absolute bottom-0.5 left-0.5 top-0.5 z-0 rounded-md bg-background shadow-sm transition-transform duration-[250ms] ease-out motion-reduce:transition-none"
-                data-testid="appearance-color-mode-indicator"
-                style={{
-                  transform: `translateX(${APPEARANCE_MODE_OPTIONS.findIndex((option) => option.mode === selectedMode) * 100}%)`,
-                  width: "calc((100% - 4px) / 3)",
-                }}
-              />
-              {APPEARANCE_MODE_OPTIONS.map(({ mode, label, Icon }) => (
-                <button
-                  aria-pressed={selectedMode === mode}
-                  className={cn(
-                    "relative z-10 flex h-full items-center justify-center gap-1.5 rounded-md bg-transparent px-2.5 text-xs font-medium transition-colors duration-[250ms] ease-out focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transition-none",
-                    selectedMode === mode
-                      ? "text-foreground"
-                      : "text-muted-foreground hover:text-foreground",
-                  )}
-                  data-testid={`appearance-mode-${mode}`}
-                  key={mode}
-                  onClick={() => handleModeSelect(mode)}
-                  type="button"
-                >
-                  <Icon className="h-3.5 w-3.5" />
-                  {label}
-                </button>
-              ))}
-            </fieldset>
+            <SegmentedControl
+              indicatorTestId="appearance-color-mode-indicator"
+              legend="Color mode"
+              onValueChange={handleModeSelect}
+              optionTestIdPrefix="appearance-mode"
+              options={APPEARANCE_MODE_OPTIONS.map(({ mode, label, Icon }) => ({
+                value: mode,
+                label,
+                Icon,
+              }))}
+              testId="appearance-color-mode-control"
+              value={selectedMode}
+            />
           </SettingsOptionRow>
 
           <SettingsOptionRow data-testid="theme-style-row">
@@ -808,6 +790,7 @@ function ThemeSettingsCard() {
           data-testid="appearance-preferences-card"
           title="Preferences"
         >
+          <ConversationDisplaySettings />
           <LinkPreviewStyleSetting />
           <ThreadLayoutSetting />
         </SettingsOptionGroup>
@@ -865,8 +848,8 @@ export function renderSettingsSection(
       return (
         <CommunityMembersSettingsCard currentPubkey={props.currentPubkey} />
       );
-    case "moderation":
-      return <ModerationQueueCard />;
+    case "relay-admin":
+      return <AdminConsoleSettingsCard />;
     case "custom-emoji":
       return <CustomEmojiSettingsCard />;
     case "local-archive":

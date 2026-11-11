@@ -103,6 +103,54 @@ test("buildTranscript renders Prompt context + user message for a multi-block se
   assert.equal(userMessage.messageId, PROMPT_EVENT_ID);
 });
 
+test("buildTranscript preserves a slash-command preamble before semantic prompt blocks", () => {
+  const authorPubkey = "a".repeat(64);
+  const event = {
+    ...baseEvent,
+    payload: {
+      method: "session/prompt",
+      params: {
+        sessionId: "sess-1",
+        prompt: [
+          { type: "text", text: "/goal ship it" },
+          {
+            type: "text",
+            text: "<context>\nScope: channel\n</context>",
+          },
+          {
+            type: "text",
+            text: [
+              '<buzz-event type="@mention">',
+              `Event ID: ${PROMPT_EVENT_ID.toUpperCase()}`,
+              "Channel: agents",
+              "Kind: 40002",
+              `From: Eva (hex: ${authorPubkey})`,
+              "Content: @Eva /goal ship it",
+              "</buzz-event>",
+            ].join("\n"),
+          },
+        ],
+      },
+    },
+  };
+
+  const items = buildTranscript([event]);
+  const userMessage = items.find((item) => item.type === "message");
+  assert.equal(userMessage?.text, "@Eva /goal ship it");
+  assert.equal(userMessage?.title, "@Mention");
+  assert.equal(userMessage?.authorPubkey, authorPubkey);
+  assert.equal(userMessage?.messageId, PROMPT_EVENT_ID);
+
+  const promptContext = items.find(
+    (item) => item.type === "metadata" && item.title === "Prompt context",
+  );
+  assert.deepEqual(
+    promptContext?.sections.map((section) => section.title),
+    ["Prompt", "Context", "Buzz event: @mention"],
+  );
+  assert.equal(promptContext?.sections[0]?.body, "/goal ship it");
+});
+
 test("buildTranscript falls back to a single turn trigger id for older prompt frames", () => {
   const promptEvent = {
     ...baseEvent,

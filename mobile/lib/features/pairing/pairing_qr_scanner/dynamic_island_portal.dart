@@ -1,19 +1,19 @@
 part of '../pairing_qr_scanner.dart';
 
-const _dynamicIslandOpenDuration = Duration(milliseconds: 460);
-const _dynamicIslandCloseDuration = Duration(milliseconds: 340);
-const _dynamicIslandEaseOut = Cubic(0.16, 1, 0.3, 1);
+// A smooth, non-bouncy spring inspired by Apple's public motion guidance;
+// these are our timings, not private Dynamic Island animation constants.
+const _dynamicIslandOpenDuration = Duration(milliseconds: 230);
+const _dynamicIslandCloseDuration = Duration(milliseconds: 230);
 
 class _DynamicIslandQrScannerPortal extends HookWidget {
-  const _DynamicIslandQrScannerPortal();
+  const _DynamicIslandQrScannerPortal({this.onProgress});
+
+  final ValueChanged<double>? onProgress;
 
   @override
   Widget build(BuildContext context) {
     final controller = useMemoized(MobileScannerController.new);
-    final animation = useAnimationController(
-      duration: _dynamicIslandOpenDuration,
-      reverseDuration: _dynamicIslandCloseDuration,
-    );
+    final animation = useAnimationController();
     final isClosing = useState(false);
     final canPop = useState(false);
     final hasHandledResult = useRef(false);
@@ -21,19 +21,37 @@ class _DynamicIslandQrScannerPortal extends HookWidget {
 
     useEffect(() {
       unawaited(_setDynamicIslandScannerStatusBarHidden(true));
-      if (reduceMotion) {
-        animation.value = 1;
-      } else {
-        unawaited(animation.forward());
-      }
-
       return () {
         unawaited(_setDynamicIslandScannerStatusBarHidden(false));
         unawaited(controller.dispose());
       };
-    }, [animation, controller, reduceMotion]);
+    }, [controller]);
+
+    useEffect(() {
+      var active = true;
+      void publish() {
+        if (active) onProgress?.call(animation.value.clamp(0.0, 1.0));
+      }
+
+      void changed() {
+        // Reduced motion can update the controller while this route builds.
+        if (WidgetsBinding.instance.schedulerPhase ==
+            SchedulerPhase.persistentCallbacks) {
+          WidgetsBinding.instance.addPostFrameCallback((_) => publish());
+        } else {
+          publish();
+        }
+      }
+
+      animation.addListener(changed);
+      return () {
+        active = false;
+        animation.removeListener(changed);
+      };
+    }, [animation, onProgress]);
 
     Future<void> finish(String? result) async {
+      if (canPop.value) return;
       canPop.value = true;
       await WidgetsBinding.instance.endOfFrame;
       if (context.mounted) {
@@ -41,23 +59,47 @@ class _DynamicIslandQrScannerPortal extends HookWidget {
       }
     }
 
-    Future<void> closePortal() async {
-      if (isClosing.value || hasHandledResult.value) {
-        return;
+    useEffect(() {
+      Future<void> transition() async {
+        final closing = isClosing.value;
+        final target = closing ? 0.0 : 1.0;
+        try {
+          if (reduceMotion) {
+            animation.value = target;
+          } else {
+            await animation
+                .animateWith(
+                  SpringSimulation(
+                    SpringDescription.withDurationAndBounce(
+                      duration: closing
+                          ? _dynamicIslandCloseDuration
+                          : _dynamicIslandOpenDuration,
+                      bounce: 0,
+                    ),
+                    animation.value,
+                    target,
+                    animation.velocity,
+                    tolerance: const Tolerance(distance: 0.001, velocity: 0.02),
+                    snapToEnd: true,
+                  ),
+                )
+                .orCancel;
+          }
+          if (closing && context.mounted) await finish(null);
+        } on TickerCanceled {
+          // A dismissal, motion-setting change, or unmount can retarget the spring.
+        }
       }
-      hasHandledResult.value = true;
-      isClosing.value = true;
-      canPop.value = true;
 
-      if (reduceMotion) {
-        animation.value = 0;
-        await WidgetsBinding.instance.endOfFrame;
-      } else {
-        await animation.reverse();
-      }
-      if (context.mounted) {
-        Navigator.of(context).pop();
-      }
+      unawaited(transition());
+      return null;
+    }, [animation, reduceMotion, isClosing.value]);
+
+    void closePortal() {
+      if (isClosing.value || hasHandledResult.value) return;
+      hasHandledResult.value = true;
+      unawaited(_setDynamicIslandScannerStatusBarHidden(false));
+      isClosing.value = true;
     }
 
     void handleDetection(BarcodeCapture capture) {
@@ -78,7 +120,7 @@ class _DynamicIslandQrScannerPortal extends HookWidget {
       canPop: canPop.value,
       onPopInvokedWithResult: (didPop, _) {
         if (!didPop) {
-          unawaited(closePortal());
+          closePortal();
         }
       },
       child: Material(
@@ -108,23 +150,16 @@ class _DynamicIslandQrScannerPortal extends HookWidget {
                   AnimatedBuilder(
                     animation: animation,
                     builder: (context, _) {
-                      final progress = _dynamicIslandEaseOut.transform(
-                        animation.value.clamp(0.0, 1.0),
-                      );
+                      final progress = animation.value.clamp(0.0, 1.0);
                       final frame = geometry.frameAt(progress);
                       final scannerOpacity = geometry.scannerOpacityAt(
                         progress,
                       );
-                      final introLabelOpacity = isClosing.value
-                          ? 0.0
-                          : geometry.introLabelOpacityAt(progress);
-                      final promptOpacity = isClosing.value
-                          ? 0.0
-                          : math.max(introLabelOpacity, scannerOpacity);
 
                       return Positioned.fromRect(
                         rect: frame,
-                        child: ClipRRect(
+                        // Continuous corners stay smooth throughout the island morph.
+                        child: ClipRSuperellipse(
                           key: const ValueKey(
                             'dynamic-island-qr-scanner-portal',
                           ),
@@ -136,17 +171,18 @@ class _DynamicIslandQrScannerPortal extends HookWidget {
                             child: Stack(
                               fit: StackFit.expand,
                               children: [
-                                if (!isClosing.value && scannerOpacity > 0)
-                                  Opacity(
-                                    opacity: scannerOpacity,
-                                    child: _QrScannerCamera(
-                                      controller: controller,
-                                      onDetect: handleDetection,
-                                    ),
+                                // Start warming the camera on the first frame,
+                                // and keep it mounted throughout dismissal.
+                                Opacity(
+                                  opacity: scannerOpacity,
+                                  child: _QrScannerCamera(
+                                    controller: controller,
+                                    onDetect: handleDetection,
                                   ),
+                                ),
                                 IgnorePointer(
                                   child: Opacity(
-                                    opacity: promptOpacity,
+                                    opacity: scannerOpacity,
                                     child: Center(
                                       child: Text(
                                         'Scan a QR code',

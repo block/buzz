@@ -1,5 +1,96 @@
 part of 'thread_detail_page.dart';
 
+const _threadTailScrollTolerance = 0.5;
+
+// Keep the direct-position correction finite in case the viewport cannot
+// expose its tail (for example, continuously changing media dimensions).
+const _latestTailCorrectionLimit = 8;
+
+Widget _trackActiveThreadScrollPosition(
+  Widget child,
+  ObjectRef<ScrollPosition?> activePosition,
+) => Builder(
+  builder: (context) {
+    activePosition.value = Scrollable.of(context).position;
+    return child;
+  },
+);
+
+/// Keeps a tail-following thread at its end while content there grows.
+///
+/// A sent reply's entrance transition grows its row over several frames, and
+/// media or typing rows can grow too. The one-shot tail correction can finish
+/// before that growth does, leaving the new content under the composer. Every
+/// growth reports new scroll metrics, so move a position that was at its old
+/// end to the new one while the reader follows the tail.
+void _followThreadTailOnMetricsChange(
+  ScrollMetricsNotification notification, {
+  required ScrollPosition? activePosition,
+  required Expando<double> previousMaxExtents,
+  required bool Function() followsTail,
+}) {
+  final position = Scrollable.maybeOf(notification.context)?.position;
+  if (position == null ||
+      !identical(position, activePosition) ||
+      !position.hasContentDimensions) {
+    return;
+  }
+  final maxExtent = position.maxScrollExtent;
+  final previousMaxExtent = previousMaxExtents[position];
+  previousMaxExtents[position] = maxExtent;
+  if (previousMaxExtent == null || maxExtent <= previousMaxExtent) return;
+  final wasAtEnd =
+      position.pixels >= previousMaxExtent - _threadTailScrollTolerance;
+  if (!wasAtEnd || !followsTail()) return;
+  position.jumpTo(maxExtent);
+}
+
+bool _jumpActiveThreadScrollToTail(
+  ObjectRef<ScrollPosition?> activePosition,
+  bool Function()? testOverride,
+) {
+  if (testOverride != null) return testOverride();
+  final position = activePosition.value;
+  if (position == null || !position.hasContentDimensions) return false;
+  // Moving the one active viewport avoids a second list and its visible bounce.
+  position.jumpTo(position.maxScrollExtent);
+  return true;
+}
+
+Future<bool> _animateActiveThreadScrollToTail(
+  BuildContext context,
+  ObjectRef<ScrollPosition?> activePosition,
+) async {
+  final position = activePosition.value;
+  if (position == null || !position.hasContentDimensions) return false;
+  if (MediaQuery.disableAnimationsOf(context)) {
+    position.jumpTo(position.maxScrollExtent);
+    return true;
+  }
+  await position.animateTo(
+    position.maxScrollExtent,
+    duration: jumpToLatestScrollDuration,
+    curve: jumpToLatestScrollCurve,
+  );
+  return true;
+}
+
+/// Returns whether the thread is at its effective scroll end.
+///
+/// Item positions can lag or briefly oscillate during lazy layout, so an exact
+/// end-of-scroll measurement remains authoritative even while the tail item
+/// reports outside the visible boundary.
+@visibleForTesting
+bool threadTailIsAtEffectiveEnd({
+  required bool tailIsLaidOut,
+  required bool tailIsVisible,
+  required double? extentAfter,
+}) =>
+    tailIsVisible ||
+    (tailIsLaidOut &&
+        extentAfter != null &&
+        extentAfter <= _threadTailScrollTolerance);
+
 int _threadTailIndex(int replyCount) => replyCount;
 
 void _resumeThreadTailFollow({
@@ -90,24 +181,22 @@ class _ThreadTailIntent {
   }
 }
 
-/// Thread-scoped typing status with optional size animation.
-class _ThreadTypingIndicator extends StatelessWidget {
-  final List<TypingEntry> entries;
-  final bool animated;
-
-  const _ThreadTypingIndicator({required this.entries, this.animated = true});
-
-  @override
-  Widget build(BuildContext context) {
-    final child = entries.isEmpty
-        ? const SizedBox.shrink()
-        : ChannelTypingIndicator(entries: entries);
-    if (!animated || MediaQuery.disableAnimationsOf(context)) return child;
-    return AnimatedSize(
-      duration: const Duration(milliseconds: 180),
-      curve: Curves.easeOutCubic,
-      alignment: Alignment.bottomCenter,
-      child: child,
-    );
-  }
+/// Display evidence while the authoritative thread query has no value (still
+/// loading, or failed on first load): the route snapshot plus live, cached
+/// and optimistic replies. The page keeps the query's loading/error status,
+/// so this list is never presented as complete, and nothing is re-queried.
+List<TimelineMessage> _provisionalThreadMessages(
+  List<TimelineMessage> routeSnapshot,
+  List<TimelineMessage> observed,
+  List<NostrEvent> liveChannelEvents,
+) {
+  final byId = <String, TimelineMessage>{
+    for (final message in routeSnapshot)
+      if (!_isDeletedBy(liveChannelEvents, message.id)) message.id: message,
+    for (final message in observed) message.id: message,
+  };
+  return byId.values.toList()..sort((a, b) {
+    final order = a.createdAt.compareTo(b.createdAt);
+    return order != 0 ? order : a.id.compareTo(b.id);
+  });
 }

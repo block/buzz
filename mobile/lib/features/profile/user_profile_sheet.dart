@@ -1,16 +1,28 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+
+import '../../shared/widgets/profile_action_chip.dart';
+import '../../shared/widgets/app_list_card.dart';
+
 import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:hooks_riverpod/misc.dart' show ProviderListenable;
+import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import '../../shared/animated_avatar.dart';
+import '../../shared/widgets/buzz_toast.dart';
+import '../../shared/identity_names/identity_names.dart';
+import '../../shared/identity_names/identity_names_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/utils/string_utils.dart';
+import '../../shared/widgets/avatar_shape.dart';
 import '../../shared/widgets/avatar_image.dart';
+import '../../shared/widgets/agent_artwork_panel.dart';
+import '../../shared/widgets/buzz_sheet_header.dart';
+import '../../shared/verified_profiles/verified_profile_directory.dart';
 import '../../shared/widgets/buzz_action_tile.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/widgets/progressive_animated_avatar.dart';
@@ -19,21 +31,37 @@ import '../channels/channel_detail_page.dart';
 import '../channels/channel_management_provider.dart';
 import '../channels/message_content.dart';
 import 'presence_cache_provider.dart';
-import 'user_cache_provider.dart';
+import '../../shared/profile/user_cache_provider.dart';
 import 'user_status_cache_provider.dart';
 
 /// Show a user profile bottom sheet for the given [pubkey].
-void showUserProfileSheet(BuildContext context, String pubkey) {
+///
+/// The sheet names [pubkey] as the opening surface did: within the live
+/// comparison context [names] (for example a channel's members). Without it,
+/// the identity is compared only with itself.
+void showUserProfileSheet(
+  BuildContext context,
+  String pubkey, {
+  ProviderListenable<IdentityNames>? names,
+  WidgetBuilder? contextualActions,
+}) {
   showBuzzModalBottomSheet<Channel>(
     context: context,
     isScrollControlled: true,
     showDragHandle: false,
-    builder: (_) => UserProfileSheet(pubkey: pubkey),
+    builder: (_) => UserProfileSheet(
+      pubkey: pubkey,
+      names: names,
+      contextualActions: contextualActions,
+    ),
   ).then((channel) {
     if (channel == null || !context.mounted) return;
     Navigator.of(context).push(
       MaterialPageRoute<void>(
-        builder: (_) => ChannelDetailPage(channel: channel),
+        builder: (_) => ChannelDetailPage(
+          channel: channel,
+          placement: ChannelRoutePlacement.ordinary,
+        ),
       ),
     );
   });
@@ -42,7 +70,46 @@ void showUserProfileSheet(BuildContext context, String pubkey) {
 class UserProfileSheet extends HookConsumerWidget {
   final String pubkey;
 
-  const UserProfileSheet({super.key, required this.pubkey});
+  /// Agent artwork treatment within the profile sheet.
+  final bool agentPresentation;
+  final String? agentSubtitle;
+  final Widget? agentSubtitleIcon;
+
+  /// The opening surface's comparison context. The sheet watches it, so its
+  /// title follows profile and context changes while it is open. The caller
+  /// owns the context, so this sheet depends on no other feature's state.
+  final ProviderListenable<IdentityNames>? names;
+
+  /// Optional actions supplied by the opening surface, below the profile tiles.
+  final WidgetBuilder? contextualActions;
+
+  /// Optional action opposite the sheet close control.
+  final Widget? headerLeading;
+
+  /// Agent-specific content supplied by the owning surface.
+  final WidgetBuilder? agentIdentity;
+  final WidgetBuilder? agentSettings;
+
+  /// Space before the primary profile actions.
+  final double primaryActionsSpacing;
+
+  /// Space between primary actions and caller-supplied actions.
+  final double contextualActionsSpacing;
+
+  const UserProfileSheet({
+    super.key,
+    required this.pubkey,
+    this.agentPresentation = false,
+    this.agentSubtitle,
+    this.agentSubtitleIcon,
+    this.names,
+    this.contextualActions,
+    this.headerLeading,
+    this.agentIdentity,
+    this.agentSettings,
+    this.primaryActionsSpacing = Grid.xs + Grid.half,
+    this.contextualActionsSpacing = Grid.xs,
+  });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -53,8 +120,8 @@ class UserProfileSheet extends HookConsumerWidget {
     final profile =
         ref.watch(userCacheProvider.select((cache) => cache[pk])) ??
         ref.read(userCacheProvider.notifier).get(pk);
-    final presenceMap = ref.watch(presenceCacheProvider);
-    final presence = presenceMap[pk] ?? 'offline';
+    final presenceMap = ref.watch(presentedPresenceProvider);
+    final presence = presenceMap[pk];
     final statusCache = ref.watch(userStatusCacheProvider);
     final userStatus = statusCache[pk];
 
@@ -83,20 +150,42 @@ class UserProfileSheet extends HookConsumerWidget {
     final copied = useState(false);
     final isOpeningDirectMessage = useState(false);
 
-    final displayName = profile?.displayName;
+    // Canonical npub for the copy action; null when [pubkey] is not a valid
+    // identity, in which case the copy tile is disabled — an invalid key is
+    // never placed on the clipboard.
+    final npub = fullNpub(pubkey);
+
+    // Keep the opening surface's comparison context and qualified identity.
+    final opener = names;
+    final displayName =
+        (opener != null ? ref.watch(opener) : watchIdentityNames(ref, {pk}))
+            .labelFor(pk);
+    final verifiedFullName = ref.watch(
+      verifiedProfilesProvider.select((all) => all[pk]?.fullName),
+    );
+    final titleName = agentPresentation
+        ? displayName
+        : verifiedFullName ?? displayName;
+    final secondaryName = titleName != displayName ? displayName : null;
     final avatarUrl = profile?.avatarUrl;
     final nip05 = profile?.nip05Handle;
     final initial =
         profile?.initial ?? (pubkey.isNotEmpty ? pubkey[0].toUpperCase() : '?');
 
+    final copyGeneration = useRef(0);
+
     Future<void> copyPublicKey() async {
-      await Clipboard.setData(ClipboardData(text: pubkey));
+      if (npub == null) return;
+      await Clipboard.setData(ClipboardData(text: npub));
       if (!context.mounted) return;
+      final generation = ++copyGeneration.value;
       copied.value = true;
-      _showProfileCopyToast(context);
+      showBuzzToast(context, 'Public key copied', kind: ToastKind.success);
       unawaited(
         Future<void>.delayed(const Duration(seconds: 2), () {
-          if (context.mounted) copied.value = false;
+          if (context.mounted && copyGeneration.value == generation) {
+            copied.value = false;
+          }
         }),
       );
     }
@@ -107,7 +196,7 @@ class UserProfileSheet extends HookConsumerWidget {
       try {
         final channel = await ref
             .read(channelActionsProvider)
-            .openDm(pubkeys: [pk]);
+            .openDm(pubkeys: [pk], waitForChannelList: false);
         if (!context.mounted) return;
         Navigator.of(context).pop(channel);
       } catch (_) {
@@ -116,7 +205,7 @@ class UserProfileSheet extends HookConsumerWidget {
       }
     }
 
-    return ConstrainedBox(
+    final content = ConstrainedBox(
       constraints: BoxConstraints(
         maxHeight: MediaQuery.sizeOf(context).height * 0.7,
       ),
@@ -140,42 +229,121 @@ class UserProfileSheet extends HookConsumerWidget {
                   children: [
                     // Center the presence chip on the avatar's lower edge.
                     Padding(
-                      padding: const EdgeInsets.only(bottom: Grid.xl / 2),
+                      padding: EdgeInsets.only(
+                        bottom: agentPresentation ? 0 : Grid.xl / 2,
+                      ),
                       child: Stack(
                         clipBehavior: Clip.none,
                         children: [
                           Align(
                             alignment: Alignment.center,
-                            child: FractionallySizedBox(
-                              widthFactor: 0.5,
-                              child: _ProfileAvatar(
-                                avatarUrl: avatarUrl,
-                                initial: initial,
-                              ),
-                            ),
+                            child: agentPresentation
+                                ? SizedBox(
+                                    width: Grid.xxl * 2,
+                                    child: _ProfileAvatar(
+                                      avatarUrl: avatarUrl,
+                                      initial: initial,
+                                      isAgent: true,
+                                    ),
+                                  )
+                                : FractionallySizedBox(
+                                    widthFactor: 0.5,
+                                    child: _ProfileAvatar(
+                                      avatarUrl: avatarUrl,
+                                      initial: initial,
+                                      isAgent: profile?.isAgent == true,
+                                    ),
+                                  ),
                           ),
-                          Positioned(
-                            left: 0,
-                            right: 0,
-                            bottom: -(Grid.xl / 2),
-                            child: _ProfilePresenceChip(presence: presence),
+                          if (!agentPresentation)
+                            Positioned(
+                              left: 0,
+                              right: 0,
+                              bottom: -(Grid.xl / 2),
+                              child: _ProfilePresenceChip(presence: presence),
+                            ),
+                        ],
+                      ),
+                    ),
+                    SizedBox(height: agentPresentation ? Grid.xs : Grid.half),
+
+                    // Display name — centered, large
+                    Center(
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Flexible(
+                            child: Text(
+                              titleName,
+                              style: agentPresentation
+                                  ? context.textTheme.bodyLarge?.copyWith(
+                                      fontSize: 20,
+                                      height: 1.4,
+                                      letterSpacing: -0.2,
+                                    )
+                                  : context.textTheme.headlineSmall?.copyWith(
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                              textAlign: TextAlign.center,
+                            ),
                           ),
                         ],
                       ),
                     ),
-                    const SizedBox(height: Grid.half),
-
-                    // Display name — centered, large
-                    Center(
-                      child: Text(
-                        displayName ?? shortPubkey(pubkey),
-                        style: context.textTheme.headlineSmall?.copyWith(
-                          fontWeight: FontWeight.w700,
+                    if (secondaryName != null)
+                      Padding(
+                        padding: const EdgeInsets.only(top: Grid.xxs),
+                        child: Center(
+                          child: Text(
+                            secondaryName,
+                            textAlign: TextAlign.center,
+                            style: context.textTheme.bodySmall?.copyWith(
+                              color: context.colors.onSurfaceVariant,
+                            ),
+                          ),
                         ),
                       ),
-                    ),
-                    // Match Settings: status is quiet, centered copy directly
-                    // below the profile name rather than a separate information row.
+                    if (!agentPresentation && agentSubtitle != null) ...[
+                      const SizedBox(height: Grid.xxs),
+                      Center(
+                        child: Wrap(
+                          alignment: WrapAlignment.center,
+                          crossAxisAlignment: WrapCrossAlignment.center,
+                          spacing: Grid.half,
+                          children: [
+                            if (agentSubtitleIcon != null)
+                              ExcludeSemantics(
+                                child: IconTheme(
+                                  data: IconThemeData(
+                                    color: context.colors.onSurfaceVariant,
+                                  ),
+                                  child: agentSubtitleIcon!,
+                                ),
+                              ),
+                            Text(
+                              agentSubtitle!,
+                              style: context.textTheme.bodySmall?.copyWith(
+                                color: context.colors.onSurfaceVariant,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                    if (about.trim().isNotEmpty) ...[
+                      const SizedBox(height: Grid.xxs),
+                      SizedBox(
+                        width: double.infinity,
+                        child: Text(
+                          about,
+                          textAlign: TextAlign.center,
+                          style: context.textTheme.bodyMedium?.copyWith(
+                            color: context.colors.onSurfaceVariant,
+                          ),
+                        ),
+                      ),
+                    ],
+                    // Keep the current status centered beneath the profile identity.
                     if (userStatus != null && !userStatus.isEmpty)
                       SizedBox(
                         width: double.infinity,
@@ -212,62 +380,139 @@ class UserProfileSheet extends HookConsumerWidget {
                       ),
                     ],
 
-                    const SizedBox(height: Grid.xs + Grid.half),
+                    // The 48-point target adds 8 points above the 32-point capsule.
+                    SizedBox(
+                      height: agentPresentation
+                          ? Grid.xxs
+                          : primaryActionsSpacing,
+                    ),
 
-                    Row(
-                      children: [
-                        if (pk != currentPubkey) ...[
-                          Expanded(
-                            child: BuzzActionTile(
-                              icon: isOpeningDirectMessage.value
-                                  ? null
-                                  : LucideIcons.messageSquare,
-                              label: isOpeningDirectMessage.value
-                                  ? 'Opening…'
-                                  : 'Message',
-                              isLoading: isOpeningDirectMessage.value,
-                              loadingSemanticLabel: 'Opening direct message',
-                              onTap: openDirectMessage,
+                    if (agentPresentation) ...[
+                      Center(
+                        child: Wrap(
+                          alignment: WrapAlignment.center,
+                          crossAxisAlignment: WrapCrossAlignment.center,
+                          spacing: Grid.xxs,
+                          runSpacing: Grid.xxs,
+                          children: [
+                            if (pk != currentPubkey)
+                              ProfileActionChip(
+                                onPressed: isOpeningDirectMessage.value
+                                    ? null
+                                    : openDirectMessage,
+                                label: isOpeningDirectMessage.value
+                                    ? 'Opening…'
+                                    : 'Message',
+                              ),
+                            if (contextualActions != null)
+                              Builder(builder: contextualActions!),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: Grid.sm),
+                      if (agentIdentity != null)
+                        Builder(builder: agentIdentity!),
+                      AppListCard(
+                        label: 'Public key',
+                        horizontalPadding: 0,
+                        children: [
+                          Semantics(
+                            button: true,
+                            enabled: npub != null,
+                            label: copied.value
+                                ? 'Copied public key'
+                                : 'Copy public key',
+                            value: npub,
+                            liveRegion: true,
+                            child: Tooltip(
+                              message: 'Copy public key',
+                              excludeFromSemantics: true,
+                              child: InkWell(
+                                onTap: npub == null ? null : copyPublicKey,
+                                child: Padding(
+                                  padding: const EdgeInsets.all(Grid.xs),
+                                  child: ExcludeSemantics(
+                                    child: Row(
+                                      children: [
+                                        Expanded(
+                                          child: Text(
+                                            npub ?? 'Public key unavailable',
+                                            style: context.textTheme.bodySmall,
+                                          ),
+                                        ),
+                                        const SizedBox(width: Grid.xs),
+                                        AnimatedSwitcher(
+                                          duration:
+                                              MediaQuery.disableAnimationsOf(
+                                                context,
+                                              )
+                                              ? Duration.zero
+                                              : const Duration(
+                                                  milliseconds: 180,
+                                                ),
+                                          switchInCurve: Curves.easeOutCubic,
+                                          switchOutCurve: Curves.easeInCubic,
+                                          transitionBuilder:
+                                              (child, animation) =>
+                                                  ScaleTransition(
+                                                    scale: animation,
+                                                    child: child,
+                                                  ),
+                                          child: Icon(
+                                            copied.value
+                                                ? BuzzIcons.check
+                                                : BuzzIcons.copy,
+                                            key: ValueKey(copied.value),
+                                            size: 18,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                              ),
                             ),
                           ),
-                          const SizedBox(width: Grid.twelve),
                         ],
-                        Expanded(
-                          child: BuzzActionTile(
-                            icon: copied.value
-                                ? LucideIcons.check
-                                : LucideIcons.key,
-                            label: copied.value ? 'Copied' : 'Copy public key',
-                            onTap: copyPublicKey,
+                      ),
+                      if (agentSettings != null)
+                        Builder(builder: agentSettings!),
+                    ] else ...[
+                      Row(
+                        children: [
+                          if (pk != currentPubkey) ...[
+                            Expanded(
+                              child: BuzzActionTile(
+                                icon: isOpeningDirectMessage.value
+                                    ? null
+                                    : BuzzIcons.messageSquare,
+                                label: isOpeningDirectMessage.value
+                                    ? 'Opening…'
+                                    : 'Message',
+                                isLoading: isOpeningDirectMessage.value,
+                                loadingSemanticLabel: 'Opening direct message',
+                                onTap: openDirectMessage,
+                              ),
+                            ),
+                            const SizedBox(width: Grid.twelve),
+                          ],
+                          Expanded(
+                            child: BuzzActionTile(
+                              icon: copied.value
+                                  ? BuzzIcons.check
+                                  : BuzzIcons.key,
+                              label: copied.value
+                                  ? 'Copied'
+                                  : 'Copy public key',
+                              isEnabled: npub != null,
+                              onTap: copyPublicKey,
+                            ),
                           ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: Grid.xs),
-
-                    // About / bio section
-                    if (about.isNotEmpty) ...[
-                      const SizedBox(height: Grid.xxs),
-                      Divider(
-                        color: context.colors.outlineVariant.withValues(
-                          alpha: 0.3,
-                        ),
+                        ],
                       ),
-                      const SizedBox(height: Grid.xxs),
-                      Text(
-                        'About',
-                        style: context.textTheme.labelSmall?.copyWith(
-                          color: context.colors.onSurfaceVariant,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                      const SizedBox(height: Grid.half),
-                      Text(
-                        about,
-                        style: context.textTheme.bodyMedium?.copyWith(
-                          color: context.colors.onSurfaceVariant,
-                        ),
-                      ),
+                      SizedBox(height: contextualActionsSpacing),
+                      if (contextualActions != null)
+                        Builder(builder: contextualActions!),
                     ],
                   ],
                 ),
@@ -277,48 +522,19 @@ class UserProfileSheet extends HookConsumerWidget {
         ],
       ),
     );
-  }
-}
-
-/// Shows clipboard feedback above the bottom-sheet route. A regular SnackBar
-/// belongs to the page Scaffold, which sits behind the modal sheet.
-void _showProfileCopyToast(BuildContext context) {
-  final overlay = Overlay.of(context, rootOverlay: true);
-  final colors = context.colors;
-  final textStyle = context.textTheme.bodyMedium?.copyWith(
-    color: colors.onInverseSurface,
-  );
-  late final OverlayEntry entry;
-  entry = OverlayEntry(
-    builder: (overlayContext) => Positioned(
-      left: Grid.gutter,
-      right: Grid.gutter,
-      bottom: MediaQuery.viewPaddingOf(overlayContext).bottom + Grid.xs,
-      child: Material(
-        color: colors.inverseSurface,
-        elevation: 6,
-        borderRadius: BorderRadius.circular(Radii.lg),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(
-            horizontal: Grid.xs,
-            vertical: Grid.twelve,
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(LucideIcons.check, size: 18, color: colors.onInverseSurface),
-              const SizedBox(width: Grid.xxs),
-              Text('Public key copied', style: textStyle),
-            ],
-          ),
-        ),
+    if (!agentPresentation) return content;
+    return AgentArtworkPanel(
+      imageUrl: avatarUrl,
+      borderRadius: BorderRadius.zero,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          BuzzSheetHeader(leading: headerLeading),
+          Flexible(child: SafeArea(top: false, child: content)),
+        ],
       ),
-    ),
-  );
-  overlay.insert(entry);
-  Future<void>.delayed(const Duration(seconds: 2), () {
-    if (entry.mounted) entry.remove();
-  });
+    );
+  }
 }
 
 /// The read-only version of the presence control in Settings. A viewed profile
@@ -327,13 +543,13 @@ void _showProfileCopyToast(BuildContext context) {
 class _ProfilePresenceChip extends StatelessWidget {
   const _ProfilePresenceChip({required this.presence});
 
-  final String presence;
+  final String? presence;
 
   @override
   Widget build(BuildContext context) {
     final effectivePresence = switch (presence) {
-      'online' || 'away' => presence,
-      _ => 'offline',
+      'online' || 'away' || 'offline' => presence,
+      _ => null,
     };
     final backgroundColor = switch (effectivePresence) {
       'online' => context.appColors.success,
@@ -343,11 +559,13 @@ class _ProfilePresenceChip extends StatelessWidget {
     final label = switch (effectivePresence) {
       'online' => 'Online',
       'away' => 'Away',
-      _ => 'Offline',
+      'offline' => 'Offline',
+      _ => 'Unknown',
     };
 
     return Semantics(
       label: 'Presence: $label',
+      excludeSemantics: true,
       child: SizedBox(
         height: Grid.xl,
         child: Center(
@@ -377,8 +595,13 @@ class _ProfilePresenceChip extends StatelessWidget {
 class _ProfileAvatar extends HookWidget {
   final String? avatarUrl;
   final String initial;
+  final bool isAgent;
 
-  const _ProfileAvatar({required this.avatarUrl, required this.initial});
+  const _ProfileAvatar({
+    required this.avatarUrl,
+    required this.initial,
+    required this.isAgent,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -398,17 +621,29 @@ class _ProfileAvatar extends HookWidget {
                   stoppedAnimationUrl.value == animatedAvatar.animationUrl
                   ? null
                   : animatedAvatar.animationUrl,
-        child: ClipOval(
-          child: isPlaying
-              ? ProgressiveAnimatedAvatar(
-                  key: ValueKey(animatedAvatar.animationUrl),
-                  descriptor: animatedAvatar,
-                  fallback: _AvatarFallback(initial: initial),
-                )
-              : AvatarImageContent(
-                  imageUrl: animatedAvatar?.posterUrl ?? avatarUrl,
-                  fallback: _AvatarFallback(initial: initial),
-                ),
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final avatar = isPlaying
+                ? ProgressiveAnimatedAvatar(
+                    key: ValueKey(animatedAvatar.animationUrl),
+                    descriptor: animatedAvatar,
+                    fallback: _AvatarFallback(initial: initial),
+                  )
+                : AvatarImageContent(
+                    imageUrl: animatedAvatar?.posterUrl ?? avatarUrl,
+                    preferThumbnail: true,
+                    fallback: _AvatarFallback(initial: initial),
+                  );
+            return AvatarClip(
+              isAgent: isAgent,
+              child: !isAgent || !usesInsetAgentArtwork(avatarUrl)
+                  ? avatar
+                  : Transform.scale(
+                      scale: animatedAvatarArtworkScale,
+                      child: avatar,
+                    ),
+            );
+          },
         ),
       ),
     );
@@ -423,7 +658,7 @@ class _AvatarFallback extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      color: context.colors.primaryContainer,
+      color: context.controlSurface,
       alignment: Alignment.center,
       child: Text(
         initial,

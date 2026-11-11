@@ -2,9 +2,11 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import '../theme/theme.dart';
+import 'buzz_navigation_metrics.dart';
+import 'ios_glass_navigation_button.dart';
 
 /// A titled sheet header with balanced actions and an exactly centered title.
 class BuzzSheetHeader extends StatelessWidget {
@@ -14,6 +16,7 @@ class BuzzSheetHeader extends StatelessWidget {
     this.titleKey,
     this.leading,
     this.trailing,
+    this.onClose,
     this.showDragHandle = false,
   });
 
@@ -21,6 +24,9 @@ class BuzzSheetHeader extends StatelessWidget {
   final Key? titleKey;
   final Widget? leading;
   final Widget? trailing;
+
+  /// Overrides route dismissal while retaining the standard close control.
+  final VoidCallback? onClose;
   final bool showDragHandle;
 
   @override
@@ -33,7 +39,7 @@ class BuzzSheetHeader extends StatelessWidget {
         bottom: Grid.xs,
       ),
       child: SizedBox(
-        height: 56,
+        height: buzzNavigationRowHeight,
         child: Stack(
           alignment: Alignment.topCenter,
           children: [
@@ -59,7 +65,7 @@ class BuzzSheetHeader extends StatelessWidget {
               ),
             Align(
               alignment: Alignment.bottomRight,
-              child: trailing ?? const _SheetCloseButton(),
+              child: trailing ?? _SheetCloseButton(onClose: onClose),
             ),
             if (leading case final leading?)
               Align(alignment: Alignment.bottomLeft, child: leading),
@@ -71,27 +77,46 @@ class BuzzSheetHeader extends StatelessWidget {
 }
 
 class _SheetCloseButton extends StatelessWidget {
-  const _SheetCloseButton();
+  const _SheetCloseButton({this.onClose});
+  final VoidCallback? onClose;
 
   @override
   Widget build(BuildContext context) {
+    void closeSheet() {
+      unawaited(HapticFeedback.lightImpact());
+      if (onClose != null) {
+        onClose!();
+      } else {
+        Navigator.of(context).pop();
+      }
+    }
+
+    if (Theme.of(context).platform == TargetPlatform.iOS) {
+      return IosGlassNavigationButton(
+        key: const ValueKey('buzz-sheet-ios-glass-close'),
+        icon: IosGlassNavigationIcon.close,
+        semanticLabel: 'Close sheet',
+        onPressed: closeSheet,
+        width: buzzNavigationActionSize,
+        height: buzzNavigationActionSize,
+        foregroundColor: context.colors.primary,
+      );
+    }
+
     return SizedBox.square(
-      dimension: 44,
+      dimension: buzzNavigationActionSize,
       child: IconButton(
         tooltip: 'Close sheet',
-        onPressed: () {
-          unawaited(HapticFeedback.lightImpact());
-          Navigator.of(context).pop();
-        },
+        onPressed: closeSheet,
         style: IconButton.styleFrom(
           padding: EdgeInsets.zero,
           backgroundColor: context.colors.surfaceContainerHighest,
-          foregroundColor: context.colors.onSurface,
+          foregroundColor: context.colors.primary,
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(Radii.dialog),
           ),
         ),
-        icon: const Icon(LucideIcons.x, size: 22),
+        icon: const Icon(BuzzIcons.x, size: 24),
       ),
     );
   }

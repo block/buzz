@@ -289,6 +289,30 @@ function ProfileConfigSection({
   );
 }
 
+/**
+ * #3493: caveat shown when the surface was read from a user-set
+ * `CLAUDE_CONFIG_DIR`. Claude Code keys its stored login to the config-dir
+ * path, so a custom dir maps to a fresh Keychain namespace — the agent starts
+ * logged out unless `CLAUDE_SECURESTORAGE_CONFIG_DIR` is set to match the
+ * default login.
+ */
+function ClaudeConfigDirNotice() {
+  return (
+    <div className="mt-3 border-t border-border/50 px-4 pt-2">
+      <p className="text-xs text-muted-foreground/80">
+        ⚠ Custom <code className="font-mono text-xs">CLAUDE_CONFIG_DIR</code>{" "}
+        active — config is read from that directory. Claude Code keys its login
+        to the config-dir path, so a custom dir creates a new Keychain
+        namespace. The agent will need to re-authenticate unless you also set{" "}
+        <code className="font-mono text-xs">
+          CLAUDE_SECURESTORAGE_CONFIG_DIR
+        </code>{" "}
+        to match your default login.
+      </p>
+    </div>
+  );
+}
+
 export function AgentConfigPanel({
   advancedMode = "collapsed",
   onEdit,
@@ -355,7 +379,9 @@ export function AgentConfigSurfaceRows({
 }: AgentConfigSurfaceRowsProps) {
   const [advancedOpen, setAdvancedOpen] = React.useState(false);
 
-  const { normalized, advanced, extensions, runtimeId } = data;
+  const { normalized, advanced, extensions, runtimeId, sources } = data;
+  const mcpConfigFilePath = sources.mcpConfigFilePath;
+  const claudeConfigDirCustom = data.claudeConfigDirCustom ?? false;
 
   const normalizedEntries = (
     Object.entries(normalized) as [
@@ -414,6 +440,7 @@ export function AgentConfigSurfaceRows({
           >
             <McpServersSection
               extensions={extensions}
+              mcpConfigFilePath={mcpConfigFilePath}
               runtimeId={runtimeId}
               variant="profile"
             />
@@ -430,6 +457,8 @@ export function AgentConfigSurfaceRows({
             ))}
           </ProfileConfigSection>
         ) : null}
+
+        {claudeConfigDirCustom ? <ClaudeConfigDirNotice /> : null}
       </div>
     );
   }
@@ -457,6 +486,7 @@ export function AgentConfigSurfaceRows({
 
       <McpServersSection
         extensions={extensions}
+        mcpConfigFilePath={mcpConfigFilePath}
         runtimeId={runtimeId}
         variant="compact"
       />
@@ -485,6 +515,8 @@ export function AgentConfigSurfaceRows({
           ) : null}
         </div>
       ) : null}
+
+      {claudeConfigDirCustom ? <ClaudeConfigDirNotice /> : null}
     </div>
   );
 }

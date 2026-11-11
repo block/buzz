@@ -1,7 +1,9 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/mentions/mention_candidates.dart';
-import 'package:buzz/features/profile/user_profile.dart';
+import 'package:buzz/features/channels/mentions/mention_ranking.dart';
+import 'package:buzz/shared/agents/owned_agent_directory.dart';
+import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 
 final userPubkey = 'a' * 64;
@@ -19,8 +21,9 @@ ChannelMember member(String pubkey, {String role = 'member'}) {
 }
 
 void main() {
-  test('role-only agent mentions fall back to a pubkey prefix label', () {
-    const pubkey = 'deadbeef0123456789';
+  test('role-only agent mentions fall back to a compact npub label', () {
+    const pubkey =
+        'deadbeef00000000000000000000000000000000000000000000000000000000';
 
     expect(
       mentionNamesWithDirectoryLabels(
@@ -29,7 +32,7 @@ void main() {
         directoryDisplayNames: const {},
         agentMentionPubkeys: const {pubkey},
       ),
-      const {pubkey: 'deadbeef'},
+      const {pubkey: 'npub1m6k\u20263kf3'},
     );
   });
 
@@ -61,14 +64,14 @@ void main() {
       expect(formatOwnerLabel(userPubkey, userPubkey, const {}), 'you');
     });
 
-    test('prefers display name, then handle, then pubkey prefix', () {
+    test('prefers display name, then handle, then compact npub', () {
       final profiles = {
         ownerPubkey: UserProfile(pubkey: ownerPubkey, displayName: 'Wes'),
       };
       expect(formatOwnerLabel(ownerPubkey, userPubkey, profiles), 'Wes');
       expect(
         formatOwnerLabel(ownerPubkey, userPubkey, const {}),
-        '${'d' * 8}\u2026',
+        'npub1mhw\u2026dmpv',
       );
     });
 
@@ -165,27 +168,71 @@ void main() {
       expect(human.displayName, 'Wes Outside');
     });
 
-    test('search results show agents owned by the current user', () {
-      final ownedAgent = '2' * 64;
-      final candidates = buildMentionCandidates(
+    test('offers only owned agents the Agents page lists', () {
+      final listed = '2' * 64;
+      final unlisted = '4' * 64;
+      final unlistedMember = '5' * 64;
+      UserProfile own(String pubkey, String name) => UserProfile(
+        pubkey: pubkey,
+        displayName: name,
+        ownerPubkey: userPubkey,
+      );
+      List<MentionCandidate> build({
+        required bool offer,
+        bool known = true,
+      }) => buildMentionCandidates(
+        members: [member(unlistedMember)],
+        relayAgents: [
+          AgentDirectoryEntry(
+            pubkey: unlisted,
+            respondTo: 'anyone',
+            channelIds: const ['chan-1'],
+          ),
+        ],
+        sharedChannelIds: const {'chan-1'},
+        userCache: {
+          unlisted: own(unlisted, 'old-app'),
+          unlistedMember: own(unlistedMember, 'old-member'),
+        },
+        ownerByAgentPubkey: const {},
+        searchResults: [own(listed, 'raccoon'), own(unlisted, 'old-app')],
+        currentPubkey: userPubkey,
+        ownedAgents: known
+            ? [OwnedAgentDirectoryEntry(pubkey: listed, displayName: 'raccoon')]
+            : null,
+        offerOwnedAgents: offer,
+      );
+
+      // Members always stay; an earlier Buzz's agent outside the channel is
+      // offered neither from the directory nor from search.
+      for (final offer in [false, true]) {
+        final candidates = build(offer: offer);
+        expect(candidates.map((c) => c.pubkey), [unlistedMember, listed]);
+        expect(candidates.last.isAgent, isTrue);
+        expect(candidates.last.isMember, isFalse);
+        expect(candidates.last.ownerPubkey, userPubkey);
+      }
+      // While the list is unknown (loading, failed or offline), no owned
+      // agent is held back as unlisted.
+      expect(build(offer: true, known: false).map((c) => c.pubkey), [
+        unlistedMember,
+        unlisted,
+        listed,
+      ]);
+      // Streams and forums offer listed agents before anyone searches.
+      final offered = buildMentionCandidates(
         members: const [],
         relayAgents: const [],
         sharedChannelIds: const {},
         userCache: const {},
         ownerByAgentPubkey: const {},
-        searchResults: [
-          UserProfile(
-            pubkey: ownedAgent,
-            displayName: 'raccoon',
-            ownerPubkey: userPubkey,
-          ),
-        ],
         currentPubkey: userPubkey,
+        ownedAgents: [
+          OwnedAgentDirectoryEntry(pubkey: listed, displayName: 'raccoon'),
+        ],
+        offerOwnedAgents: true,
       );
-
-      expect(candidates, hasLength(1));
-      expect(candidates.single.isAgent, isTrue);
-      expect(candidates.single.ownerPubkey, userPubkey);
+      expect(offered.map((c) => c.displayName), ['raccoon']);
     });
 
     test('search results hide non-shared agents owned by someone else', () {

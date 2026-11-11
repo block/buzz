@@ -170,6 +170,7 @@ impl<'a> Importer<'a> {
                     Some(channel.kind.buzz_channel_kind()),
                     about,
                     None,
+                    false,
                 )
                 .map_err(|e| CliError::Other(format!("build_create_channel failed: {e}")))?;
                 submit(self.client, builder).await.map_err(|e| {
@@ -235,7 +236,16 @@ impl<'a> Importer<'a> {
             .is_some_and(|state| state.private_visibility_done);
         if channel.kind.is_private() && !private_visibility_done {
             let builder =
-                buzz_sdk::build_update_channel(uuid, None, None, Some("private"), None)
+                buzz_sdk::build_update_channel(
+                    uuid,
+                    None,
+                    None,
+                    Some("private"),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
                     .map_err(|e| CliError::Other(format!("build_update_channel failed: {e}")))?;
             submit(self.client, builder).await.map_err(|e| {
                 CliError::Other(format!(
@@ -290,7 +300,7 @@ impl<'a> Importer<'a> {
             return Ok(uuid);
         }
 
-        let importer_pubkey = self.client.keys().public_key().to_hex();
+        let importer_pubkey = self.client.public_key().to_hex();
         let participant_pubkeys =
             mapped_dm_participants(self.export, channel, self.bindings, &importer_pubkey)?;
         let builder = build_import_dm_open(
@@ -367,7 +377,7 @@ impl<'a> Importer<'a> {
             return Ok(());
         }
 
-        let importer_pubkey = self.client.keys().public_key().to_hex();
+        let importer_pubkey = self.client.public_key().to_hex();
         let mut mapped_pubkeys = std::collections::BTreeSet::new();
         let mut unmapped = 0u64;
         for slack_id in &channel.members {
@@ -749,7 +759,7 @@ pub(super) fn build_imported_message(
         ])
         .map_err(|e| CliError::Other(format!("invalid conversation provenance tag: {e}")))?,
     );
-    buzz_sdk::build_message(channel_uuid, &content, thread_ref, &[], broadcast, &[])
+    buzz_sdk::build_message(channel_uuid, &content, thread_ref, &[], broadcast, &[], &[])
         .map_err(|e| CliError::Other(format!("build_message failed: {e}")))
         .and_then(|builder| {
             Ok(builder
@@ -793,7 +803,7 @@ async fn submit_with_response(
     client: &BuzzClient,
     builder: EventBuilder,
 ) -> Result<(String, String), CliError> {
-    let event = client.sign_event(builder)?;
+    let event = client.sign_event(builder).await?;
     let event_id = event.id.to_hex();
     let mut backoff_secs = 1u64;
     let resp = loop {

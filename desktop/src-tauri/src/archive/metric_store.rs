@@ -9,7 +9,7 @@
 //! via [`AgentMetricIndexRow::from_payload`].
 //!
 //! Kept in a sibling file (not `store.rs`) to keep that file under the
-//! 1000-line gate, per the existing `pipeline.rs` precedent.
+//! 1500-line gate, per the existing `pipeline.rs` precedent.
 
 use rusqlite::{params, Connection, OptionalExtension};
 

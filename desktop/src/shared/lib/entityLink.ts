@@ -3,7 +3,7 @@
  * `features/messages/lib/messageLink.ts` for `buzz://message`.
  *
  * Formats:
- *   buzz://repo?owner=<owner-pubkey>&d=<repo-dtag>[&tab=<tab>]
+ *   buzz://repo?owner=<owner-pubkey>&d=<repo-dtag>[&tab=<tab>][&commit=<git-hash>]
  *   buzz://project?owner=<owner-pubkey>&d=<project-dtag>[&tab=<tab>]
  *   buzz://pr?id=<event-id>&owner=<owner-pubkey>&d=<repo-dtag>
  *   buzz://issue?id=<event-id>&owner=<owner-pubkey>&d=<repo-dtag>
@@ -45,7 +45,13 @@ export function isEntityLinkTab(value: unknown): value is EntityLinkTab {
 export type ParsedEntityLink =
   | { type: "pr"; id: string; owner: string; dtag: string }
   | { type: "issue"; id: string; owner: string; dtag: string }
-  | { type: "repo"; owner: string; dtag: string; tab?: EntityLinkTab }
+  | {
+      type: "repo";
+      owner: string;
+      dtag: string;
+      tab?: EntityLinkTab;
+      commitHash?: string;
+    }
   | { type: "project"; owner: string; dtag: string; tab?: EntityLinkTab };
 
 export type EntityLinkParseResult =
@@ -53,6 +59,7 @@ export type EntityLinkParseResult =
   | { ok: false; reason: string };
 
 const HEX64_RE = /^[a-fA-F0-9]{64}$/;
+const GIT_OBJECT_ID_RE = /^(?:[a-fA-F0-9]{40}|[a-fA-F0-9]{64})$/;
 const DTAG_RE = /^[a-zA-Z0-9._-]{1,64}$/;
 
 function isValidDtag(dtag: string): boolean {
@@ -100,6 +107,19 @@ export function buildRepoLink(input: {
 }): string {
   checkCoordinate(input.owner, input.dtag);
   return `buzz://repo?owner=${input.owner.toLowerCase()}&d=${input.dtag}${tabSuffix(input.tab)}`;
+}
+
+/** Build a link to a specific commit in a repository. */
+export function buildCommitLink(input: {
+  commitHash: string;
+  owner: string;
+  dtag: string;
+}): string {
+  checkCoordinate(input.owner, input.dtag);
+  if (!GIT_OBJECT_ID_RE.test(input.commitHash)) {
+    throw new Error("entityLink: commit must be a 40- or 64-char hex hash");
+  }
+  return `buzz://repo?owner=${input.owner.toLowerCase()}&d=${input.dtag}&tab=commits&commit=${input.commitHash.toLowerCase()}`;
 }
 
 /** Build a `buzz://project` link for a project announcement (kind 30621). */
@@ -198,10 +218,13 @@ export function parseEntityLink(url: string): EntityLinkParseResult {
   }
 
   // Validate known params and reject unknown ones, and enforce single-instance.
-  const KNOWN_COORDINATE_PARAMS = new Set(["owner", "d", "tab"]);
+  const KNOWN_REPO_PARAMS = new Set(["owner", "d", "tab", "commit"]);
+  const KNOWN_PROJECT_PARAMS = new Set(["owner", "d", "tab"]);
   const KNOWN_EVENT_PARAMS = new Set(["id", "owner", "d"]);
   const knownParams = isCoordinateHost
-    ? KNOWN_COORDINATE_PARAMS
+    ? host === "repo"
+      ? KNOWN_REPO_PARAMS
+      : KNOWN_PROJECT_PARAMS
     : KNOWN_EVENT_PARAMS;
 
   for (const key of parsed.searchParams.keys()) {
@@ -230,6 +253,14 @@ export function parseEntityLink(url: string): EntityLinkParseResult {
     if (tab !== null && !isEntityLinkTab(tab)) {
       return { ok: false, reason: "invalid-tab" };
     }
+    const commitHash =
+      host === "repo" ? parsed.searchParams.get("commit") : null;
+    if (
+      commitHash !== null &&
+      (tab !== "commits" || !GIT_OBJECT_ID_RE.test(commitHash))
+    ) {
+      return { ok: false, reason: "invalid-commit" };
+    }
     return {
       ok: true,
       value: {
@@ -237,6 +268,9 @@ export function parseEntityLink(url: string): EntityLinkParseResult {
         owner: owner.toLowerCase(),
         dtag,
         ...(tab !== null && isEntityLinkTab(tab) ? { tab } : {}),
+        ...(commitHash !== null
+          ? { commitHash: commitHash.toLowerCase() }
+          : {}),
       },
     };
   }

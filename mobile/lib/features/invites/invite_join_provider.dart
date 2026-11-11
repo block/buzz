@@ -3,16 +3,27 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
+import 'package:url_launcher/url_launcher.dart';
 
+import '../../shared/hosted/hosted_relay_auth.dart';
+import '../../shared/hosted/community_entry_requirements.dart';
 import '../../shared/auth/auth.dart';
 import '../../shared/deeplink/deep_link.dart';
+import '../../shared/relay/relay_provider.dart';
 import '../../shared/relay/relay_session.dart';
 import '../../shared/relay/relay_validation.dart';
 
 final inviteJoinHttpClientProvider = Provider<http.Client>((ref) {
-  final client = http.Client();
+  final client = ref.watch(hostedHttpClientFactoryProvider)();
   ref.onDispose(client.close);
   return client;
+});
+
+/// Opens policy acceptance in the browser without claiming another identity.
+final invitePolicyLauncherProvider = Provider<Future<bool> Function(Uri)>((
+  ref,
+) {
+  return (uri) => launchUrl(uri, mode: LaunchMode.externalApplication);
 });
 
 final inviteKeyGeneratorProvider = Provider<InviteKeyGenerator>((ref) {
@@ -20,6 +31,39 @@ final inviteKeyGeneratorProvider = Provider<InviteKeyGenerator>((ref) {
 });
 
 typedef InviteKeyGenerator = nostr.Keys Function();
+
+const _unset = Object();
+
+/// Ensures starter-channel memberships after an invite membership claim.
+abstract interface class InviteJoinRecovery {
+  /// Ensures the public starters and returns the preferred focus.
+  Future<String?> ensureStarterChannels();
+}
+
+/// The active relay and signing identity a recovery instance must be bound to.
+class InviteJoinRecoveryScope {
+  const InviteJoinRecoveryScope({
+    required this.relayHttpOrigin,
+    required this.nsec,
+  });
+
+  /// Canonical HTTP(S) origin used by the active relay session.
+  final String relayHttpOrigin;
+
+  /// Signing identity that must remain active for the recovery lifetime.
+  final String? nsec;
+}
+
+/// Constructs a fresh recovery operation for one scoped setup attempt.
+typedef InviteJoinRecoveryFactory =
+    InviteJoinRecovery Function(InviteJoinRecoveryScope scope);
+
+/// Provides recovery construction after the active community is authenticated.
+final inviteJoinRecoveryProvider = Provider<InviteJoinRecoveryFactory>((ref) {
+  throw StateError(
+    'inviteJoinRecoveryProvider must be configured by the app root',
+  );
+});
 
 enum InviteJoinStatus {
   idle,
@@ -37,6 +81,9 @@ class InviteJoinState {
   final String? communityName;
   final String? errorMessage;
   final bool requiresFreshInvite;
+  final bool requiresPolicyAcceptance;
+  final bool isStarterSetupRecovery;
+  final String? focusChannelId;
 
   const InviteJoinState({
     this.status = InviteJoinStatus.idle,
@@ -45,6 +92,9 @@ class InviteJoinState {
     this.communityName,
     this.errorMessage,
     this.requiresFreshInvite = false,
+    this.requiresPolicyAcceptance = false,
+    this.isStarterSetupRecovery = false,
+    this.focusChannelId,
   });
 
   InviteJoinState copyWith({
@@ -52,19 +102,34 @@ class InviteJoinState {
     InviteDeepLink? invite,
     String? host,
     String? communityName,
-    String? errorMessage,
+    Object? errorMessage = _unset,
     bool? requiresFreshInvite,
+    bool? requiresPolicyAcceptance,
+    bool? isStarterSetupRecovery,
+    Object? focusChannelId = _unset,
   }) => InviteJoinState(
     status: status ?? this.status,
     invite: invite ?? this.invite,
     host: host ?? this.host,
     communityName: communityName ?? this.communityName,
-    errorMessage: errorMessage ?? this.errorMessage,
+    errorMessage: identical(errorMessage, _unset)
+        ? this.errorMessage
+        : errorMessage as String?,
     requiresFreshInvite: requiresFreshInvite ?? this.requiresFreshInvite,
+    requiresPolicyAcceptance:
+        requiresPolicyAcceptance ?? this.requiresPolicyAcceptance,
+    isStarterSetupRecovery:
+        isStarterSetupRecovery ?? this.isStarterSetupRecovery,
+    focusChannelId: identical(focusChannelId, _unset)
+        ? this.focusChannelId
+        : focusChannelId as String?,
   );
 }
 
 class InviteJoinNotifier extends Notifier<InviteJoinState> {
+  Community? _pendingStarterSetupCommunity;
+  Future<void>? _starterSetupInFlight;
+
   @override
   InviteJoinState build() => const InviteJoinState();
 
@@ -73,9 +138,22 @@ class InviteJoinNotifier extends Notifier<InviteJoinState> {
     final communities = await ref.read(communityListProvider.future);
     final existing = _existingCommunity(communities, invite.relayUrl);
     if (existing != null) {
+      await _retirePendingInvite(invite, existing);
       await ref
           .read(communityListProvider.notifier)
           .switchCommunity(existing.id);
+      if (existing.starterSetupIncomplete) {
+        _pendingStarterSetupCommunity = existing;
+        state = InviteJoinState(
+          status: InviteJoinStatus.claiming,
+          invite: invite,
+          host: _hostFromRelay(invite.relayUrl),
+          communityName: existing.name,
+          isStarterSetupRecovery: true,
+        );
+        return;
+      }
+      _pendingStarterSetupCommunity = null;
       state = InviteJoinState(
         status: InviteJoinStatus.switchedExisting,
         invite: invite,
@@ -85,6 +163,7 @@ class InviteJoinNotifier extends Notifier<InviteJoinState> {
       return;
     }
 
+    _pendingStarterSetupCommunity = null;
     state = InviteJoinState(
       status: InviteJoinStatus.confirming,
       invite: invite,
@@ -102,22 +181,53 @@ class InviteJoinNotifier extends Notifier<InviteJoinState> {
       return;
     }
 
-    state = state.copyWith(status: InviteJoinStatus.claiming);
+    state = state.copyWith(
+      status: InviteJoinStatus.claiming,
+      errorMessage: null,
+      requiresFreshInvite: false,
+    );
     try {
+      CommunityEntryRequirements.requireSelfHosted(invite.relayUrl);
       final communities = await ref.read(communityListProvider.future);
       final existing = _existingCommunity(communities, invite.relayUrl);
       if (existing != null) {
+        await _retirePendingInvite(invite, existing);
         await ref
             .read(communityListProvider.notifier)
             .switchCommunity(existing.id);
+        if (existing.starterSetupIncomplete || state.isStarterSetupRecovery) {
+          _pendingStarterSetupCommunity = existing;
+          await startStarterSetupRecovery();
+        } else {
+          state = state.copyWith(
+            status: InviteJoinStatus.switchedExisting,
+            communityName: existing.name,
+            isStarterSetupRecovery: false,
+          );
+        }
+        return;
+      }
+
+      if (state.isStarterSetupRecovery) {
         state = state.copyWith(
-          status: InviteJoinStatus.switchedExisting,
-          communityName: existing.name,
+          status: InviteJoinStatus.error,
+          errorMessage:
+              'This community is no longer available. Re-open the invite link to try again.',
         );
         return;
       }
 
-      final keys = ref.read(inviteKeyGeneratorProvider)();
+      final storage = ref.read(communityStorageProvider);
+      final nsec = await storage.pendingInviteIdentity(
+        invite.relayUrl,
+        invite.code,
+        () => ref.read(inviteKeyGeneratorProvider)().nsec,
+      );
+      final decodedKey = nostr.Nip19.decode(payload: nsec);
+      if (decodedKey.prefix != nostr.Nip19Prefix.nsec) {
+        throw const FormatException('Pending invite identity is unreadable');
+      }
+      final keys = nostr.Keys(decodedKey.data);
       final body = jsonEncode({
         'code': invite.code,
         if (invite.policyReceipt != null)
@@ -160,25 +270,147 @@ class InviteJoinNotifier extends Notifier<InviteJoinState> {
         pubkey: keys.public,
         nsec: keys.nsec,
         sensitiveActionPolicy: SensitiveActionPolicy.disabledByUser,
+        starterSetupIncomplete: true,
       );
       await ref
           .read(authProvider.notifier)
           .authenticateWithCommunity(community);
-      state = state.copyWith(
-        status: InviteJoinStatus.success,
-        communityName: community.name,
-      );
+      await _retirePendingInvite(invite, community);
+      _pendingStarterSetupCommunity = community;
+      state = state.copyWith(isStarterSetupRecovery: true);
+      await startStarterSetupRecovery();
     } catch (error) {
       final requiresFreshInvite = _requiresFreshInvite(error);
       state = state.copyWith(
         status: InviteJoinStatus.error,
         errorMessage: _friendlyInviteError(error),
         requiresFreshInvite: requiresFreshInvite,
+        requiresPolicyAcceptance: error.toString().contains(
+          'join_policy_required',
+        ),
       );
     }
   }
 
+  /// Opens the canonical invite so the user can accept the current join policy.
+  Future<bool> openPolicyAcceptance() async {
+    final invite = state.invite;
+    if (!state.requiresPolicyAcceptance || invite == null) return false;
+    final relay = Uri.parse(invite.relayUrl);
+    final uri = relay.replace(
+      scheme: relay.scheme == 'wss' ? 'https' : 'http',
+      pathSegments: ['invite', invite.code],
+    );
+    try {
+      if (await ref.read(invitePolicyLauncherProvider)(uri)) return true;
+    } catch (_) {
+      // Keep the pending identity and expose the same action for another try.
+    }
+    state = state.copyWith(
+      errorMessage:
+          'Could not open the browser. Try reviewing the join requirements again.',
+    );
+    return false;
+  }
+
+  Future<void> _retirePendingInvite(
+    InviteDeepLink invite,
+    Community community,
+  ) async {
+    try {
+      await ref
+          .read(communityStorageProvider)
+          .completePendingInvite(invite.relayUrl, invite.code, community);
+    } catch (_) {
+      // The saved destination is authoritative. Reopening retries cleanup;
+      // community removal must erase every journal copy before it succeeds.
+    }
+  }
+
+  /// Runs the pending recovery after its progress UI has been presented.
+  Future<void> startStarterSetupRecovery() async {
+    final community = _pendingStarterSetupCommunity;
+    if (community == null ||
+        state.status != InviteJoinStatus.claiming ||
+        !state.isStarterSetupRecovery) {
+      return;
+    }
+    final inFlight = _starterSetupInFlight;
+    if (inFlight != null) return inFlight;
+
+    final setup = _finishStarterSetup(community);
+    _starterSetupInFlight = setup;
+    try {
+      await setup;
+    } finally {
+      if (identical(_starterSetupInFlight, setup)) {
+        _starterSetupInFlight = null;
+      }
+    }
+  }
+
+  Future<void> _finishStarterSetup(Community community) async {
+    try {
+      // Authentication and community switches invalidate the scoped providers.
+      // Wait for the active community projection to settle before constructing
+      // the recovery, otherwise it could capture the previous relay's actions.
+      final activeCommunity = await ref.read(activeCommunityProvider.future);
+      if (activeCommunity?.id != community.id ||
+          activeCommunity?.relayUrl != community.relayUrl ||
+          activeCommunity?.nsec != community.nsec) {
+        throw StateError('Active community changed before invite recovery');
+      }
+      final config = RelayConfig(
+        baseUrl: community.relayUrl,
+        nsec: community.nsec,
+      );
+      final focusChannelId = await ref
+          .read(inviteJoinRecoveryProvider)(
+            InviteJoinRecoveryScope(
+              relayHttpOrigin: config.baseUrl,
+              nsec: config.nsec,
+            ),
+          )
+          .ensureStarterChannels();
+      await _saveStarterSetupState(community, incomplete: false);
+      state = state.copyWith(
+        status: InviteJoinStatus.success,
+        communityName: community.name,
+        isStarterSetupRecovery: false,
+        focusChannelId: focusChannelId,
+      );
+    } catch (error) {
+      Object visibleError = error;
+      try {
+        await _saveStarterSetupState(community, incomplete: true);
+      } catch (storageError) {
+        visibleError = storageError;
+      }
+      state = state.copyWith(
+        status: InviteJoinStatus.error,
+        errorMessage: _friendlyStarterSetupError(visibleError),
+        requiresFreshInvite: false,
+        isStarterSetupRecovery: true,
+        focusChannelId: null,
+      );
+    }
+  }
+
+  Future<void> _saveStarterSetupState(
+    Community community, {
+    required bool incomplete,
+  }) {
+    return ref.read(communityTransitionProvider).runExclusive(() async {
+      final updated = community.copyWith(starterSetupIncomplete: incomplete);
+      await ref.read(communityStorageProvider).save(updated);
+      ref.invalidate(communityListProvider);
+      ref.invalidate(activeCommunityProvider);
+      ref.invalidate(authProvider);
+    });
+  }
+
   void reset() {
+    _pendingStarterSetupCommunity = null;
     state = const InviteJoinState();
   }
 }
@@ -269,13 +501,19 @@ bool _requiresFreshInvite(Object error) {
 
 String _friendlyInviteError(Object error) {
   final message = error.toString();
+  if (message.contains('invite_restricted')) {
+    return 'This account, or the account that owns it, is restricted in this community. Contact a community administrator. If the restriction is temporary, try again after it ends.';
+  }
+  if (message.contains('invite_owner_mismatch')) {
+    return 'This account does not match its recorded owner. Use the correct account or owner identity to join this community.';
+  }
   if (message.contains('invite_expired')) return 'This invite has expired.';
   if (message.contains('invite_exhausted')) {
     return 'This invite has reached its use limit. Ask for a new invite.';
   }
   if (message.contains('invite_invalid')) return 'This invite is not valid.';
   if (message.contains('join_policy_required')) {
-    return 'This invite approval has expired. Re-open the invite link to try again.';
+    return 'Review this community’s join requirements in your browser, then return to Buzz.';
   }
   if (message.contains('SocketException') ||
       message.contains('Connection refused') ||
@@ -284,4 +522,15 @@ String _friendlyInviteError(Object error) {
     return 'Could not reach the relay. Check your connection and try again.';
   }
   return 'Could not join this community: $message';
+}
+
+String _friendlyStarterSetupError(Object error) {
+  final message = error.toString();
+  if (message.contains('SocketException') ||
+      message.contains('Connection refused') ||
+      message.contains('Network is unreachable') ||
+      message.contains('No route to host')) {
+    return 'Starter channels could not reach the relay. Check your connection and retry setup.';
+  }
+  return 'Starter channels could not be set up. Retry setup to try again.';
 }

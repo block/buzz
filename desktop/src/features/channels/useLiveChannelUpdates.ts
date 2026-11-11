@@ -2,17 +2,22 @@ import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
 
 import { channelsQueryKey } from "@/features/channels/hooks";
+import { updateChannelLastMessageAt } from "@/features/channels/lib/channelRecency";
 import { mergeTimelineCacheMessages } from "@/features/messages/hooks";
 import { channelMessagesKey } from "@/features/messages/lib/messageQueryKeys";
 import {
   getChannelIdFromTags,
   isThreadReply,
 } from "@/features/messages/lib/threading";
-import { shouldNotifyForEvent } from "@/features/notifications/lib/shouldNotify";
+import {
+  hasMentionForEvent,
+  shouldNotifyForEvent,
+} from "@/features/notifications/lib/shouldNotify";
 import { relayClient } from "@/shared/api/relayClient";
 import {
   CHANNEL_EVENT_KINDS,
   CHANNEL_MESSAGE_EVENT_KINDS,
+  HOME_MENTION_EVENT_KINDS,
 } from "@/shared/constants/kinds";
 import type { Channel, RelayEvent } from "@/shared/api/types";
 import {
@@ -110,6 +115,17 @@ function isExternalMentionEvent(event: RelayEvent, currentPubkey: string) {
   );
 }
 
+type LiveChannelEntry = {
+  controller: AbortController;
+  pending: Promise<boolean>;
+  dispose?: () => Promise<void>;
+};
+
+function retireLiveChannel(entry: LiveChannelEntry) {
+  entry.controller.abort();
+  void entry.dispose?.().catch(() => {});
+}
+
 const SEEN_NOTIFICATION_EVENT_LIMIT = 5_000;
 
 export function trackSeenEvent(
@@ -141,10 +157,8 @@ export function useLiveChannelUpdates(
   const normalizedCurrentPubkey =
     options.currentPubkey?.trim().toLowerCase() ?? "";
   const seenMentionEventIdsRef = React.useRef(new Set<string>());
-  // Reconnect replay overlaps each live filter by five seconds so no message is
-  // lost at the boundary. Keep one shared guard for every notification side
-  // effect: the same event can be replayed repeatedly while a relay flaps, and
-  // mention events also arrive through both the channel and mention filters.
+  // Reconnect replay overlaps live filters so no message is lost at the
+  // boundary. Guard notification side effects against repeated delivery.
   const seenNotificationEventIdsRef = React.useRef(new Set<string>());
   const channelsInvalidateRef = React.useRef<TrailingDebounce | null>(null);
   if (channelsInvalidateRef.current === null) {
@@ -242,10 +256,28 @@ export function useLiveChannelUpdates(
     }
 
     const isDmChannel = dmChannelMap.has(channelId);
+    // Mention kinds are already in the channel stream. Keep Home's narrower
+    // kind/recipient policy without opening a second REQ for every channel.
+    if (
+      options.onLiveMention &&
+      HOME_MENTION_EVENT_KINDS.some((kind) => kind === event.kind) &&
+      isExternalMentionEvent(event, normalizedCurrentPubkey) &&
+      hasMentionForEvent(event, normalizedCurrentPubkey) &&
+      trackSeenEvent(seenMentionEventIdsRef.current, event.id)
+    ) {
+      options.onLiveMention();
+    }
     const isUnreadTriggerKind = isChannelUnreadTriggerKind(
       event.kind,
       isDmChannel,
     );
+
+    // Recency is presentation state, not notification state. Every recognized
+    // message advances Recent ordering, including self-authored and muted
+    // messages that the notification policy deliberately filters below.
+    if (isUnreadTriggerKind) {
+      updateChannelLastMessageAt(queryClient, channelId, event.created_at);
+    }
 
     // Let the caller observe self-authored trigger events (e.g. to track
     // thread participation) before the author-exclusion guard filters them.
@@ -330,19 +362,6 @@ export function useLiveChannelUpdates(
     );
   });
 
-  const handleMentionEvent = React.useEffectEvent((event: RelayEvent) => {
-    if (!isExternalMentionEvent(event, normalizedCurrentPubkey)) {
-      return;
-    }
-
-    if (!trackSeenEvent(seenMentionEventIdsRef.current, event.id)) {
-      return;
-    }
-
-    handleIncomingMessage(event);
-    options.onLiveMention?.();
-  });
-
   React.useEffect(() => {
     return relayClient.subscribeToReconnects(() => {
       void queryClient.invalidateQueries({ queryKey: channelsQueryKey });
@@ -353,7 +372,15 @@ export function useLiveChannelUpdates(
     });
   }, [queryClient]);
 
-  const liveSubsRef = React.useRef(new Map<string, () => Promise<void>>());
+  React.useEffect(
+    () =>
+      relayClient.subscribeToChannelAccessRevocations(
+        invalidateChannelsDebounced,
+      ),
+    [invalidateChannelsDebounced],
+  );
+
+  const liveSubsRef = React.useRef(new Map<string, LiveChannelEntry>());
 
   React.useEffect(() => {
     let isCancelled = false;
@@ -364,10 +391,10 @@ export function useLiveChannelUpdates(
       const activeSubs = liveSubsRef.current;
       const targetIds = new Set(channelIdsKey ? channelIdsKey.split(",") : []);
 
-      for (const [channelId, dispose] of activeSubs) {
+      for (const [channelId, entry] of activeSubs) {
         if (!targetIds.has(channelId)) {
           activeSubs.delete(channelId);
-          void dispose().catch(() => {});
+          retireLiveChannel(entry);
         }
       }
 
@@ -377,37 +404,55 @@ export function useLiveChannelUpdates(
         dmSubscriptionStartedAtRef.current = Math.floor(Date.now() / 1000);
       }
 
-      let anyFailed = false;
-      const additions = Array.from(targetIds)
-        .filter((channelId) => !activeSubs.has(channelId))
-        .map(async (channelId) => {
-          try {
-            const dispose = await relayClient.subscribeLive(
-              {
-                kinds: [...CHANNEL_EVENT_KINDS],
-                "#h": [channelId],
-                limit: 1000,
-                since: Math.floor(Date.now() / 1_000),
-              },
-              (event) =>
-                handleIncomingMessage(withChannelTagFallback(event, channelId)),
-            );
-            if (isCancelled) {
+      const pending = Array.from(targetIds).map((channelId) => {
+        const existing = activeSubs.get(channelId);
+        if (existing) return existing.pending;
+        const entry: LiveChannelEntry = {
+          controller: new AbortController(),
+          pending: Promise.resolve(true),
+        };
+        // Claim before the first await so a membership rerun retains this work.
+        activeSubs.set(channelId, entry);
+        entry.pending = relayClient
+          .subscribeLive(
+            {
+              kinds: [...CHANNEL_EVENT_KINDS],
+              "#h": [channelId],
+              limit: 1000,
+              since: Math.floor(Date.now() / 1_000),
+            },
+            (event) => {
+              if (activeSubs.get(channelId) === entry) {
+                handleIncomingMessage(withChannelTagFallback(event, channelId));
+              }
+            },
+            undefined,
+            undefined,
+            entry.controller.signal,
+          )
+          .then((dispose) => {
+            if (activeSubs.get(channelId) !== entry) {
               void dispose().catch(() => {});
-              return;
+            } else {
+              entry.dispose = dispose;
             }
-            activeSubs.set(channelId, dispose);
-          } catch (err) {
-            anyFailed = true;
+            return true;
+          })
+          .catch((err) => {
+            if (activeSubs.get(channelId) !== entry) return true;
+            activeSubs.delete(channelId);
+            if (err instanceof DOMException && err.name === "AbortError")
+              return true;
             console.error(
               "Failed to subscribe to live channel updates",
               channelId,
               err,
             );
-          }
-        });
-      await Promise.allSettled(additions);
-      return !anyFailed;
+            return false;
+          });
+        return entry.pending;
+      });
+      return (await Promise.all(pending)).every(Boolean);
     };
 
     const runSync = async () => {
@@ -438,120 +483,14 @@ export function useLiveChannelUpdates(
     };
   }, [channelIdsKey]);
 
-  // Subscribe to mention events per channel with a diff-based manager: only
-  // subscribe newly-added channels and unsubscribe removed ones on each sync.
-  // The ref survives re-renders so churn-with-identical-IDs does zero work.
-  const mentionSubsRef = React.useRef(new Map<string, () => Promise<void>>());
-  const mentionSubsPubkeyRef = React.useRef<string | null>(null);
-
-  React.useEffect(() => {
-    if (!options.onLiveMention || normalizedCurrentPubkey.length === 0) {
-      return;
-    }
-
-    let isCancelled = false;
-    let retryTimeout: number | undefined;
-    let retryAttempt = 0;
-
-    const syncSubs = async (): Promise<boolean> => {
-      const activeSubs = mentionSubsRef.current;
-
-      if (
-        mentionSubsPubkeyRef.current !== null &&
-        mentionSubsPubkeyRef.current !== normalizedCurrentPubkey
-      ) {
-        const stale = Array.from(activeSubs.values());
-        activeSubs.clear();
-        await Promise.allSettled(stale.map((dispose) => dispose()));
-        if (isCancelled) return true;
-      }
-      mentionSubsPubkeyRef.current = normalizedCurrentPubkey;
-
-      const targetIds = new Set(channelIdsKey ? channelIdsKey.split(",") : []);
-
-      for (const [channelId, dispose] of activeSubs) {
-        if (!targetIds.has(channelId)) {
-          activeSubs.delete(channelId);
-          void dispose().catch(() => {});
-        }
-      }
-
-      let anyFailed = false;
-      // Pass handleMentionEvent directly — it's a stable useEffectEvent
-      // callback. Do NOT wrap in an isCancelled check here: subs persist
-      // across effect runs (that's the point of the diff manager), so a
-      // stale isCancelled flag from a prior run would silently drop events
-      // on long-lived subs.
-      const additions = Array.from(targetIds)
-        .filter((channelId) => !activeSubs.has(channelId))
-        .map(async (channelId) => {
-          try {
-            const dispose = await relayClient.subscribeToChannelMentionEvents(
-              channelId,
-              normalizedCurrentPubkey,
-              handleMentionEvent,
-            );
-            if (isCancelled) {
-              void dispose().catch(() => {});
-              return;
-            }
-            activeSubs.set(channelId, dispose);
-          } catch (err) {
-            anyFailed = true;
-            console.error(
-              "Failed to subscribe to mention events",
-              channelId,
-              err,
-            );
-          }
-        });
-      await Promise.allSettled(additions);
-      return !anyFailed;
-    };
-
-    const runSync = async () => {
-      const ok = await syncSubs();
-      if (isCancelled) return;
-      if (ok) {
-        retryAttempt = 0;
-        return;
-      }
-      const delayMs = Math.min(
-        LIVE_SUBSCRIPTION_RETRY_BASE_MS * 2 ** retryAttempt,
-        LIVE_SUBSCRIPTION_RETRY_MAX_MS,
-      );
-      retryAttempt += 1;
-      retryTimeout = window.setTimeout(() => {
-        retryTimeout = undefined;
-        void runSync();
-      }, delayMs);
-    };
-
-    void runSync();
-
-    return () => {
-      isCancelled = true;
-      if (retryTimeout !== undefined) {
-        window.clearTimeout(retryTimeout);
-      }
-    };
-  }, [channelIdsKey, normalizedCurrentPubkey, options.onLiveMention]);
-
   React.useEffect(() => {
     return () => {
       channelsInvalidateRef.current?.cancel();
 
-      for (const dispose of liveSubsRef.current.values()) {
-        void dispose().catch(() => {});
+      for (const entry of liveSubsRef.current.values()) {
+        retireLiveChannel(entry);
       }
       liveSubsRef.current.clear();
-
-      const subs = mentionSubsRef.current;
-      for (const dispose of subs.values()) {
-        void dispose().catch(() => {});
-      }
-      subs.clear();
-      mentionSubsPubkeyRef.current = null;
     };
   }, []);
 }

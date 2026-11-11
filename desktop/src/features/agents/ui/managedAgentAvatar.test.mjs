@@ -21,14 +21,22 @@ test("resolveManagedAgentAvatarUrl uploads data image URIs", async () => {
   assert.equal(uploaded, "https://relay.example/avatar.png");
 });
 
-test("resolveManagedAgentAvatarUrl passes emoji svg data URLs through", async () => {
-  const emojiUrl =
-    "data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%3E%3C%2Fsvg%3E";
-  const uploaded = await resolveManagedAgentAvatarUrl(emojiUrl, async () => {
+test("resolveManagedAgentAvatarUrl squares legacy emoji svg data URLs", async () => {
+  const legacySvg =
+    '<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512"><rect width="512" height="512" rx="256" fill="#ffcc00"/><text x="50%" y="56%" dominant-baseline="middle" text-anchor="middle" font-size="258">🐝</text></svg>';
+  const emojiUrl = `data:image/svg+xml,${encodeURIComponent(legacySvg)}`;
+  const resolved = await resolveManagedAgentAvatarUrl(emojiUrl, async () => {
     throw new Error("should not upload inline emoji svg data URLs");
   });
 
-  assert.equal(uploaded, emojiUrl);
+  assert.ok(resolved);
+  const normalizedSvg = decodeURIComponent(resolved.split(",", 2)[1]);
+  assert.match(
+    normalizedSvg,
+    /<rect width="512" height="512" fill="#ffcc00"\/>/u,
+  );
+  assert.doesNotMatch(normalizedSvg, /\brx=/u);
+  assert.match(normalizedSvg, />🐝<\/text>/u);
 });
 
 test("resolveManagedAgentAvatarUrl passes non-data URLs through", async () => {

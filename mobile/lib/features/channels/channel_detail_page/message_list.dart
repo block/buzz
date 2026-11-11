@@ -1,60 +1,105 @@
 part of '../channel_detail_page.dart';
 
 class _MessageList extends HookConsumerWidget {
+  final DateHeaderScrollActivity dateScrollActivity;
+  final ValueNotifier<StickyDateHeaderState> stickyDateHeaderState;
   final List<MainTimelineEntry> entries;
+  final List<TypingEntry> inlineTyping;
+
+  /// Agents typing in each thread, by lowercase root message ID.
+  final Map<String, List<String>> threadWorking;
   final List<TimelineMessage> allMessages;
   final String? initialMessageId;
   final String? initialThreadRootId;
+  final InitialThreadRouteBehavior initialThreadRouteBehavior;
   final Set<String> initialOrdinaryUnreadMessageIds;
   final String? initialOldestOrdinaryUnreadMessageId;
   final Set<String> initialForcedUnreadMessageIds;
   final bool hasInitialUnread;
   final String channelId;
+  final String? welcomeAgent;
+  final ChannelMessagesNotifier notifier;
+  final bool isDm;
+  final bool flat;
   final String? currentPubkey;
   final bool isMember;
   final bool isArchived;
   final double appBarTitleContentHeight;
   final double composerBottomInset;
+  final FocusNode? composerFocusNode;
+  final VoidCallback? restoreComposerFocus;
 
   const _MessageList({
+    required this.dateScrollActivity,
     required this.entries,
+    this.inlineTyping = const [],
+    this.threadWorking = const {},
+    required this.stickyDateHeaderState,
     required this.allMessages,
     required this.initialMessageId,
     required this.initialThreadRootId,
+    required this.initialThreadRouteBehavior,
     required this.initialOrdinaryUnreadMessageIds,
     required this.initialOldestOrdinaryUnreadMessageId,
     required this.initialForcedUnreadMessageIds,
     required this.hasInitialUnread,
     required this.channelId,
+    this.welcomeAgent,
+    required this.notifier,
+    required this.isDm,
+    required this.flat,
     required this.currentPubkey,
     required this.isMember,
     required this.isArchived,
     required this.appBarTitleContentHeight,
     required this.composerBottomInset,
+    this.composerFocusNode,
+    this.restoreComposerFocus,
   });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final handoff = useAgentReplyHandoffs(channelId, inlineTyping, allMessages);
+    final displayedTyping = handoff.typing;
+    final workingAgents = {
+      for (final agents in threadWorking.values) ...agents,
+    };
     final appView = View.of(context);
+    final localSendAnimations = ref.watch(
+      localMessageSendAnimationProvider(channelId),
+    );
     final displayEntries = groupMembershipTimelineEntries(entries);
     final itemScrollController = useMemoized(ItemScrollController.new);
     final itemPositionsListener = useMemoized(ItemPositionsListener.create);
+    final stickyDayTimestamp = useValueNotifier<int?>(null);
+    final timelineViewportHeight = useRef(MediaQuery.sizeOf(context).height);
     final isLoadingOlder = useState(false);
+    final navigatingOldest = useRef(false);
+    final olderFetchPaused = useRef(false);
+    final viewportFillPages = useRef(0);
+    final boundaryFetchInFlight = useRef(false);
+    final showLoadEarlier = useState(false);
+    final oldestNavigationGeneration = useRef(0);
     final isAtLatest = useState(true);
     final settledImeBottomInset = useState(
       usesFixedAndroidImeViewport
           ? appView.viewInsets.bottom / appView.devicePixelRatio
           : 0.0,
     );
+    final isJumpToLatestVisible = useState(false);
     final hasUserScrolled = useState(false);
+    final distanceFromLatest = useRef(0.0);
+    final hasUnseenLatestEntry = useRef(false);
     final followsLatest = useState(
       initialMessageId == null && initialThreadRootId == null,
     );
     final isAutoScrolling = useRef(false);
     final latestNavigationRequest = useState(0);
+    final latestNavigationTargetId = useRef<String?>(null);
     final latestRealignmentQueued = useRef(false);
     final latestEntryId = entries.isEmpty ? null : entries.last.message.id;
     final previousLatestEntryId = useRef<String?>(null);
+    final observedLocalSendIds = useRef(localSendAnimations.keys.toSet());
     final didOpenInitialThread = useRef(false);
     final didJumpToInitialMessage = useRef(false);
     final isUnreadNavigationDismissed = useState(false);
@@ -62,9 +107,15 @@ class _MessageList extends HookConsumerWidget {
     final oldestUnreadMessageId = useState<String?>(null);
     final unreadBoundaryLoadFailed = useState(false);
     final unreadBoundaryFetchCount = useRef(0);
+    // Reaching the oldest page publishes no messages, so nothing else
+    // rebuilds this list to re-run the unread effect below. A count, not a
+    // flag: a reconnect can reset the notifier and reach the oldest page again.
+    final unreadBoundaryReachedOldestCount = useState(0);
     final hasUnreadDeepLink =
         initialMessageId != null || initialThreadRootId != null;
-    final notifier = ref.read(channelMessagesProvider(channelId).notifier);
+    final dayTimestampByReversedIndex = <int, int>{};
+    final dayStartByReversedIndex = <int, int>{};
+    final dayHeaderTimestampByReversedIndex = <int, int>{};
     final settledImeLift = usesFixedAndroidImeViewport
         ? (settledImeBottomInset.value -
                   MediaQuery.viewPaddingOf(context).bottom)
@@ -74,6 +125,37 @@ class _MessageList extends HookConsumerWidget {
     final timelineBottomInset =
         composerBottomInset + (followsLatest.value ? settledImeLift : 0);
     final navigationBottomInset = composerBottomInset + settledImeLift;
+    var currentDayTimestamp =
+        displayEntries.firstOrNull?.first.message.createdAt;
+    var currentDayStartIndex = displayEntries.isEmpty
+        ? -1
+        : displayEntries.length - 1;
+    for (
+      var chronologicalIndex = 0;
+      chronologicalIndex < displayEntries.length;
+      chronologicalIndex += 1
+    ) {
+      final message = displayEntries[chronologicalIndex].first.message;
+      // A membership group can span days; it sits under its first change's
+      // day, so the next row compares against that same change.
+      final previousMessage = chronologicalIndex > 0
+          ? displayEntries[chronologicalIndex - 1].first.message
+          : null;
+      final startsDay =
+          previousMessage == null ||
+          !isSameDay(previousMessage.createdAt, message.createdAt);
+      final reversedIndex = displayEntries.length - 1 - chronologicalIndex;
+      if (startsDay) {
+        currentDayTimestamp = message.createdAt;
+        currentDayStartIndex = reversedIndex;
+        dayHeaderTimestampByReversedIndex[reversedIndex] = message.createdAt;
+      }
+      final dayTimestamp = currentDayTimestamp;
+      if (dayTimestamp != null) {
+        dayTimestampByReversedIndex[reversedIndex] = dayTimestamp;
+        dayStartByReversedIndex[reversedIndex] = currentDayStartIndex;
+      }
+    }
 
     useEffect(
       () {
@@ -109,10 +191,16 @@ class _MessageList extends HookConsumerWidget {
         if (canFetchTarget) {
           unreadBoundaryFetchCount.value += 1;
           var cancelled = false;
+          boundaryFetchInFlight.value = true;
           unawaited(
             Future<void>(() async {
-              final loaded = await notifier.fetchOlder();
-              if (!cancelled && !loaded && !notifier.reachedOldest) {
+              final loaded = await notifier.fetchOlder().whenComplete(
+                () => boundaryFetchInFlight.value = false,
+              );
+              if (cancelled || loaded) return;
+              if (notifier.reachedOldest) {
+                unreadBoundaryReachedOldestCount.value += 1;
+              } else {
                 unreadBoundaryLoadFailed.value = true;
               }
             }),
@@ -152,6 +240,7 @@ class _MessageList extends HookConsumerWidget {
         initialOldestOrdinaryUnreadMessageId,
         initialForcedUnreadMessageIds,
         entries.length,
+        allMessages.length, // A page of hidden notices adds no entry.
         notifier.reachedOldest,
         unreadBoundaryLoadFailed.value,
       ],
@@ -172,10 +261,120 @@ class _MessageList extends HookConsumerWidget {
     }
 
     double latestAlignment() {
-      final viewportHeight = context.size?.height ?? 0;
+      final viewportHeight = timelineViewportHeight.value;
       return viewportHeight > 0
           ? (timelineBottomInset / viewportHeight).clamp(0.0, 1.0).toDouble()
           : 0.0;
+    }
+
+    void updateStickyDateHeader(Iterable<ItemPosition> rawPositions) {
+      void setStickyDateHeader(
+        StickyDateHeaderState state, {
+        int? activeDayTimestamp,
+      }) {
+        stickyDateHeaderState.value = showUnreadNavigation
+            ? StickyDateHeaderState.hidden
+            : state;
+        stickyDayTimestamp.value = activeDayTimestamp;
+      }
+
+      final viewportHeight = timelineViewportHeight.value;
+      if (viewportHeight <= 0 || displayEntries.isEmpty) {
+        setStickyDateHeader(StickyDateHeaderState.hidden);
+        return;
+      }
+
+      final positions = rawPositions
+          .where(
+            (position) =>
+                position.index < displayEntries.length &&
+                position.itemLeadingEdge < 1 &&
+                position.itemTrailingEdge > 0,
+          )
+          .toList();
+      if (positions.isEmpty) {
+        if (!isLoadingOlder.value) {
+          setStickyDateHeader(StickyDateHeaderState.hidden);
+        }
+        return;
+      }
+
+      final stickyTop =
+          frostedAppBarHeight(
+            context,
+            titleContentHeight: appBarTitleContentHeight,
+          ) +
+          Grid.twelve;
+      double physicalTop(ItemPosition position) =>
+          viewportHeight * (1 - position.itemTrailingEdge);
+      double physicalBottom(ItemPosition position) =>
+          viewportHeight * (1 - position.itemLeadingEdge);
+
+      final positionAtStickyTop = positions
+          .where(
+            (position) =>
+                physicalTop(position) <= stickyTop &&
+                physicalBottom(position) > stickyTop,
+          )
+          .firstOrNull;
+      if (positionAtStickyTop == null) {
+        if (!isLoadingOlder.value) {
+          setStickyDateHeader(StickyDateHeaderState.hidden);
+        }
+        return;
+      }
+
+      final activeDayTimestamp =
+          dayTimestampByReversedIndex[positionAtStickyTop.index];
+      final activeDayStartIndex =
+          dayStartByReversedIndex[positionAtStickyTop.index];
+      if (activeDayTimestamp == null || activeDayStartIndex == null) {
+        setStickyDateHeader(StickyDateHeaderState.hidden);
+        return;
+      }
+
+      final activeHeaderPosition = positions
+          .where((position) => position.index == activeDayStartIndex)
+          .firstOrNull;
+      final oldestVisibleIndex = positions
+          .map((position) => position.index)
+          .reduce((a, b) => a > b ? a : b);
+      final activeHeaderHasCrossed = activeHeaderPosition != null
+          ? physicalTop(activeHeaderPosition) <= stickyTop
+          : activeDayStartIndex > oldestVisibleIndex;
+      if (!activeHeaderHasCrossed) {
+        setStickyDateHeader(StickyDateHeaderState.hidden);
+        return;
+      }
+
+      double? nextHeaderTop;
+      for (final position in positions) {
+        if (!dayHeaderTimestampByReversedIndex.containsKey(position.index) ||
+            position.index >= activeDayStartIndex) {
+          continue;
+        }
+        final top = physicalTop(position);
+        if (top <= stickyTop ||
+            (nextHeaderTop != null && top >= nextHeaderTop)) {
+          continue;
+        }
+        nextHeaderTop = top;
+      }
+
+      final stickyHeaderHeight = StickyDateHeader.heightOf(context);
+      final rawTranslateY = nextHeaderTop == null
+          ? 0.0
+          : min(0.0, nextHeaderTop - stickyTop - stickyHeaderHeight - 5);
+      final translateY = rawTranslateY
+          .clamp(-(stickyHeaderHeight + 5), 0.0)
+          .toDouble();
+      setStickyDateHeader(
+        StickyDateHeaderState(
+          label: formatDayHeading(activeDayTimestamp),
+          translateY: (translateY * 2).round() / 2,
+        ),
+        activeDayTimestamp: activeDayTimestamp,
+      );
     }
 
     Future<void> performLatestNavigation() async {
@@ -184,25 +383,38 @@ class _MessageList extends HookConsumerWidget {
         return;
       }
       try {
+        final targetIndex =
+            reversedIndexOf(latestNavigationTargetId.value) ?? 0;
+        if (latestNavigationTargetId.value != null) {
+          itemScrollController.jumpTo(
+            index: targetIndex,
+            // Index zero already includes the composer padding.
+            alignment: targetIndex == 0 ? 0 : latestAlignment(),
+          );
+          return;
+        }
         await itemScrollController.scrollTo(
-          index: 0,
+          index: targetIndex,
           alignment: latestAlignment(),
-          duration: const Duration(milliseconds: 220),
-          curve: Curves.easeOutCubic,
+          duration: jumpToLatestScrollDuration,
+          curve: jumpToLatestScrollCurve,
         );
         if (context.mounted && !hasUserScrolled.value) {
-          isAtLatest.value = true;
+          isAtLatest.value = targetIndex == 0;
+          isJumpToLatestVisible.value = false;
         }
       } finally {
         isAutoScrolling.value = false;
       }
     }
 
-    void scrollToLatest() {
+    void scrollToLatest({String? targetMessageId}) {
       if (!itemScrollController.isAttached || isAutoScrolling.value) return;
       isAutoScrolling.value = true;
       followsLatest.value = true;
       hasUserScrolled.value = false;
+      hasUnseenLatestEntry.value = false;
+      latestNavigationTargetId.value = targetMessageId;
       latestNavigationRequest.value += 1;
     }
 
@@ -253,6 +465,41 @@ class _MessageList extends HookConsumerWidget {
       );
     }
 
+    void updateJumpToLatestVisibility(
+      Iterable<ItemPosition> positions, {
+      double? viewportDimension,
+    }) {
+      final latestIsVisible = positions.any(
+        (position) =>
+            position.index == 0 &&
+            position.itemLeadingEdge < 1 &&
+            position.itemTrailingEdge > latestAlignment(),
+      );
+      final viewportHeight = viewportDimension ?? timelineViewportHeight.value;
+      final visiblePageHeight = max(
+        0.0,
+        viewportHeight -
+            frostedAppBarHeight(
+              context,
+              titleContentHeight: appBarTitleContentHeight,
+            ) -
+            composerBottomInset,
+      );
+      final hidesJumpToLatest = shouldHideChannelJumpToLatest(
+        isAtLatest: latestIsAtBoundary(),
+        followsLatest: followsLatest.value,
+        userHasDetached: hasUserScrolled.value,
+      );
+      final shouldShow =
+          !hidesJumpToLatest &&
+          (hasUnseenLatestEntry.value ||
+              !latestIsVisible ||
+              distanceFromLatest.value > visiblePageHeight);
+      if (isJumpToLatestVisible.value != shouldShow) {
+        isJumpToLatestVisible.value = shouldShow;
+      }
+    }
+
     void realignLatestAfterLayoutChange() {
       if (latestRealignmentQueued.value ||
           isAutoScrolling.value ||
@@ -273,48 +520,177 @@ class _MessageList extends HookConsumerWidget {
         }
         // A dock or keyboard resize is a layout correction, not a navigation
         // action. Keeping it instant avoids restarting a smooth scroll for
-        // every position report while the viewport settles. The rebuilt list
-        // padding already owns the composer/IME offset; the default alignment
-        // also keeps short timelines flush with that padding.
+        // every position report while the viewport settles.
         itemScrollController.jumpTo(index: 0);
       });
     }
 
-    useEffect(() {
-      void onPositionsChanged() {
-        final positions = itemPositionsListener.itemPositions.value;
-        if (positions.isEmpty) return;
-        final nextIsAtLatest = latestIsAtBoundary();
-        if (showUnreadNavigation &&
-            nextIsAtLatest &&
-            detachedWhileUnreadShown.value) {
-          isUnreadNavigationDismissed.value = true;
-        }
-        if (nextIsAtLatest) {
-          if (!isAtLatest.value) isAtLatest.value = true;
-        } else if (!followsLatest.value && isAtLatest.value) {
-          isAtLatest.value = false;
+    useEffect(
+      () {
+        var disposed = false;
+        void onPositionsChanged() {
+          final positions = itemPositionsListener.itemPositions.value;
+          if (positions.isEmpty) return;
+          updateStickyDateHeader(positions);
+          updateJumpToLatestVisibility(positions);
+          final nextIsAtLatest = latestIsAtBoundary();
+          if (showUnreadNavigation &&
+              nextIsAtLatest &&
+              detachedWhileUnreadShown.value) {
+            isUnreadNavigationDismissed.value = true;
+          }
+          if (nextIsAtLatest) {
+            hasUnseenLatestEntry.value = false;
+            if (!isAtLatest.value) isAtLatest.value = true;
+            if (isJumpToLatestVisible.value) {
+              isJumpToLatestVisible.value = false;
+            }
+          } else if (!followsLatest.value && isAtLatest.value) {
+            isAtLatest.value = false;
+          }
+
+          final oldestVisible = positions
+              .map((position) => position.index)
+              .reduce((a, b) => a > b ? a : b);
+          final (:fills, :offerLoadEarlier) = _viewportFill(
+            fits: _oldestRowFits(positions, displayEntries.length),
+            scrolled: hasUserScrolled.value,
+            busy: boundaryFetchInFlight.value || isLoadingOlder.value,
+            pages: viewportFillPages.value,
+            reachedOldest: notifier.reachedOldest,
+            paused: olderFetchPaused.value,
+          );
+          if (showLoadEarlier.value != offerLoadEarlier) {
+            showLoadEarlier.value = offerLoadEarlier;
+          }
+          if ((!hasUserScrolled.value && !fills) ||
+              oldestVisible < displayEntries.length - 3 ||
+              isLoadingOlder.value ||
+              navigatingOldest.value ||
+              olderFetchPaused.value ||
+              viewportFillPages.value >= _maxAutoOlderPages) {
+            return;
+          }
+          if (notifier.reachedOldest) return;
+          viewportFillPages.value++;
+          _fetchOlderPage(
+            context,
+            notifier,
+            isLoadingOlder,
+            olderFetchPaused,
+            // Re-check: a page of hidden notices adds no entry to re-run this.
+            onDone: () => WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (!disposed && context.mounted) onPositionsChanged();
+            }),
+          );
         }
 
-        final oldestVisible = positions
-            .map((position) => position.index)
-            .reduce((a, b) => a > b ? a : b);
-        if (!hasUserScrolled.value ||
-            oldestVisible < displayEntries.length - 3 ||
-            isLoadingOlder.value) {
-          return;
-        }
-        final notifier = ref.read(channelMessagesProvider(channelId).notifier);
-        if (notifier.reachedOldest) return;
-        isLoadingOlder.value = true;
-        notifier.fetchOlder().whenComplete(() => isLoadingOlder.value = false);
+        itemPositionsListener.itemPositions.addListener(onPositionsChanged);
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!disposed && context.mounted) onPositionsChanged();
+        });
+        return () {
+          disposed = true;
+          itemPositionsListener.itemPositions.removeListener(
+            onPositionsChanged,
+          );
+        };
+      },
+      [
+        channelId,
+        entries.length,
+        itemPositionsListener,
+        appBarTitleContentHeight,
+        composerBottomInset,
+        showUnreadNavigation,
+        stickyDateHeaderState,
+      ],
+    );
+
+    void readVisibleRows() {
+      final readState = ref.read(readStateProvider);
+      final viewportHeight = timelineViewportHeight.value;
+      if (!context.mounted ||
+          !readState.isReady ||
+          isAutoScrolling.value ||
+          viewportHeight <= 0 ||
+          entries.isEmpty) {
+        return;
       }
-
-      itemPositionsListener.itemPositions.addListener(onPositionsChanged);
-      return () => itemPositionsListener.itemPositions.removeListener(
-        onPositionsChanged,
+      // Rows hidden under the app bar, the composer or the keyboard are not
+      // read. The keyboard covers rows even when the list does not follow
+      // the latest message, so this uses the whole covered height, not the
+      // list's own bottom inset.
+      final bottomEdge =
+          (navigationBottomInset / viewportHeight).clamp(0.0, 1.0) - 0.01;
+      final topEdge =
+          1 -
+          frostedAppBarHeight(
+                context,
+                titleContentHeight: appBarTitleContentHeight,
+              ) /
+              viewportHeight +
+          0.01;
+      final visible = <TimelineMessage>[];
+      for (final position in itemPositionsListener.itemPositions.value) {
+        if (position.index >= displayEntries.length) continue;
+        final group = displayEntries.reversed.elementAt(position.index);
+        if (isReadableRow(
+          position,
+          start: bottomEdge,
+          end: topEdge,
+          linked: group.any((e) => e.message.id == initialMessageId),
+        )) {
+          visible.addAll(group.map((entry) => entry.message));
+        }
+      }
+      final latest = entries.last.message;
+      final atBottom =
+          latestIsAtBoundary() &&
+          itemPositionsListener.itemPositions.value.any(
+            (position) =>
+                position.index == 0 && position.itemLeadingEdge >= bottomEdge,
+          );
+      final marks = readingMarks(
+        readState: readState,
+        channelId: channelId,
+        isDm: isDm,
+        currentPubkey: currentPubkey,
+        loaded: allMessages,
+        visible: visible,
+        bottom: atBottom ? latest : null,
+        flat: flat,
       );
-    }, [channelId, entries.length, itemPositionsListener]);
+      final notifier = ref.read(readStateProvider.notifier);
+      // Reading to the bottom ends a manual "mark unread" on the channel.
+      if (atBottom && readState.isForcedUnread(channelId)) {
+        notifier.clearForcedUnread(channelId);
+      }
+      for (final mark in marks.entries) {
+        notifier.markContextRead(mark.key, mark.value);
+      }
+    }
+
+    // Reading starts once the timeline holds still for the dwell while this
+    // page is in front and the app is in use.
+    final appInUse = isAppInUse(useAppLifecycleState());
+    final readStateReady = ref.watch(
+      readStateProvider.select((state) => state.isReady),
+    );
+    useReadingDwell(
+      positions: itemPositionsListener.itemPositions,
+      active:
+          readStateReady &&
+          appInUse &&
+          (ModalRoute.of(context)?.isCurrent ?? true),
+      onDwell: readVisibleRows,
+      keys: [channelId, readingContentKey(allMessages), navigationBottomInset],
+    );
+
+    useEffect(() {
+      stickyDayTimestamp.value = null;
+      return null;
+    }, [channelId]);
 
     // Composer size changes and keyboard metrics changes arrive in separate
     // layout passes. Preserve the latest-message anchor for both, but only
@@ -355,23 +731,30 @@ class _MessageList extends HookConsumerWidget {
       if (threadHead == null) return null;
       didOpenInitialThread.value = true;
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!context.mounted) return;
-        Navigator.of(context).push(
-          MaterialPageRoute<void>(
-            builder: (_) => ThreadDetailPage(
-              threadHead: threadHead,
-              allMessages: allMessages,
-              channelId: channelId,
-              currentPubkey: currentPubkey,
-              isMember: isMember,
-              isArchived: isArchived,
-              initialMessageId: initialMessageId,
-            ),
+        if (!context.mounted || ModalRoute.of(context)?.isCurrent != true) {
+          return;
+        }
+        final route = MaterialPageRoute<void>(
+          builder: (_) => ThreadDetailPage(
+            threadHead: threadHead,
+            allMessages: allMessages,
+            channelId: channelId,
+            currentPubkey: currentPubkey,
+            isMember: isMember,
+            isArchived: isArchived,
+            initialMessageId: initialMessageId,
           ),
         );
+        final navigator = Navigator.of(context);
+        switch (initialThreadRouteBehavior) {
+          case InitialThreadRouteBehavior.push:
+            navigator.push(route);
+          case InitialThreadRouteBehavior.replaceCurrentRoute:
+            navigator.pushReplacement(route);
+        }
       });
       return null;
-    }, [initialThreadRootId, allMessages]);
+    }, [initialThreadRootId, allMessages, initialThreadRouteBehavior]);
 
     useEffect(() {
       final targetIndex = reversedIndexOf(initialMessageId);
@@ -394,62 +777,168 @@ class _MessageList extends HookConsumerWidget {
     useEffect(() {
       final previous = previousLatestEntryId.value;
       previousLatestEntryId.value = latestEntryId;
-      if (previous == null ||
-          latestEntryId == null ||
-          previous == latestEntryId ||
-          !isAtLatest.value) {
+      final entryIds = entries.map((entry) => entry.message.id).toSet();
+      final newlyInsertedLocalSendIds = localSendAnimations.keys
+          .where(
+            (eventId) =>
+                !observedLocalSendIds.value.contains(eventId) &&
+                entryIds.contains(eventId),
+          )
+          .toList();
+      observedLocalSendIds.value
+        ..removeWhere((eventId) => !localSendAnimations.containsKey(eventId))
+        ..addAll(newlyInsertedLocalSendIds);
+      final localSendId = newlyInsertedLocalSendIds.firstOrNull;
+      final latestEntryChanged =
+          previous != null &&
+          latestEntryId != null &&
+          previous != latestEntryId;
+      if (!latestEntryChanged && localSendId == null) {
         return null;
       }
+      if (localSendId != null) {
+        followsLatest.value = true;
+        hasUserScrolled.value = false;
+      }
+      if (!followsLatest.value || hasUserScrolled.value) {
+        hasUnseenLatestEntry.value = true;
+      }
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (context.mounted) scrollToLatest();
+        if (!context.mounted) return;
+        if (followsLatest.value && !hasUserScrolled.value) {
+          scrollToLatest(targetMessageId: localSendId);
+          return;
+        }
+        final positions = itemPositionsListener.itemPositions.value;
+        if (positions.isNotEmpty) {
+          if (latestIsAtBoundary()) {
+            hasUnseenLatestEntry.value = false;
+          }
+          updateJumpToLatestVisibility(positions);
+        }
       });
       return null;
-    }, [latestEntryId]);
+    }, [latestEntryId, localSendAnimations]);
 
-    if (entries.isEmpty) {
-      return Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(
-              LucideIcons.messageSquare,
-              size: Grid.xl,
-              color: context.colors.onSurfaceVariant,
-            ),
-            const SizedBox(height: Grid.xxs),
-            Text(
-              'No messages yet',
-              style: context.textTheme.bodyLarge?.copyWith(
-                color: context.colors.onSurfaceVariant,
-              ),
-            ),
-            const SizedBox(height: Grid.half),
-            Text(
-              'Be the first to say something!',
-              style: context.textTheme.bodySmall?.copyWith(
-                color: context.colors.onSurfaceVariant,
-              ),
-            ),
-          ],
+    _useChannelScrollToOldest(
+      context,
+      notifier: notifier,
+      itemScrollController: itemScrollController,
+      displayCount: displayEntries.length,
+      isLoadingOlder: isLoadingOlder,
+      navigatingOldest: navigatingOldest,
+      olderFetchPaused: olderFetchPaused,
+      oldestNavigationGeneration: oldestNavigationGeneration,
+      onStart: () {
+        followsLatest.value = false;
+        hasUserScrolled.value = true;
+        isAtLatest.value = false;
+        if (showUnreadNavigation) detachedWhileUnreadShown.value = true;
+      },
+    );
+
+    final hiddenHistory = _useHiddenHistoryPaging(
+      context: context,
+      noRows: entries.isEmpty,
+      loaded: allMessages,
+      notifier: notifier,
+      isLoadingOlder: isLoadingOlder,
+      olderFetchPaused: olderFetchPaused,
+    );
+
+    if (entries.isEmpty &&
+        welcomeAgent == null &&
+        (displayedTyping.isNotEmpty || TypingMotionPreview.enabled)) {
+      return Align(
+        alignment: Alignment.bottomCenter,
+        child: Padding(
+          padding: EdgeInsets.fromLTRB(
+            Grid.gutter,
+            0,
+            Grid.gutter,
+            composerBottomInset,
+          ),
+          child: _aboveHiddenHistory(
+            hiddenHistory,
+            TypingMotionPreview.enabled
+                ? TypingMotionPreview(channelId: channelId)
+                : InlineAgentTyping(
+                    channelId: channelId,
+                    entries: displayedTyping,
+                    knownAgents: workingAgents,
+                  ),
+          ),
         ),
       );
     }
-
-    // Build channel names map once for all message bubbles.
-    final channelsAsync = ref.watch(channelsProvider);
-    final channelNamesMap = <String, String>{};
-    channelsAsync.whenData((channels) {
-      for (final ch in channels) {
-        channelNamesMap[ch.name.toLowerCase()] = ch.id;
+    if (entries.isEmpty) {
+      if (welcomeAgent != null) {
+        return SingleChildScrollView(
+          padding: EdgeInsets.fromLTRB(
+            Grid.gutter,
+            frostedAppBarHeight(
+                  context,
+                  titleContentHeight: appBarTitleContentHeight,
+                ) +
+                Grid.md,
+            Grid.gutter,
+            composerBottomInset + Grid.md,
+          ),
+          child: Column(
+            children: [
+              BestieWelcome(agent: welcomeAgent!),
+              ?hiddenHistory,
+              if (displayedTyping.isNotEmpty)
+                InlineAgentTyping(
+                  channelId: channelId,
+                  entries: displayedTyping,
+                  knownAgents: workingAgents,
+                ),
+            ],
+          ),
+        );
       }
-    });
+      return hiddenHistory ?? const _EmptyMessages();
+    }
+
+    final channelNamesMap = ref.watch(channelIdsByNameProvider);
+    final rowCache = _useRowCache(this, [channelNamesMap, localSendAnimations]);
 
     return Stack(
       children: [
-        NotificationListener<ScrollNotification>(
+        NotificationListener<Notification>(
           onNotification: (notification) {
+            if (notification is ScrollMetricsNotification &&
+                notification.depth != 0) {
+              return false;
+            }
+            if (notification is ScrollNotification && notification.depth != 0) {
+              return false;
+            }
+            if (notification is ScrollMetricsNotification) {
+              timelineViewportHeight.value =
+                  notification.metrics.viewportDimension;
+              return false;
+            }
+            if (notification is! ScrollNotification) return false;
+            dateScrollActivity.onNotification(notification);
+            timelineViewportHeight.value =
+                notification.metrics.viewportDimension;
+            distanceFromLatest.value = max(
+              0.0,
+              notification.metrics.pixels -
+                  notification.metrics.minScrollExtent,
+            );
+            updateJumpToLatestVisibility(
+              itemPositionsListener.itemPositions.value,
+              viewportDimension: notification.metrics.viewportDimension,
+            );
             if (notification is UserScrollNotification &&
                 notification.direction != ScrollDirection.idle) {
+              navigatingOldest.value = false;
+              oldestNavigationGeneration.value++;
+              olderFetchPaused.value = false;
+              viewportFillPages.value = 0;
               hasUserScrolled.value = true;
               followsLatest.value = false;
               if (showUnreadNavigation) {
@@ -481,9 +970,25 @@ class _MessageList extends HookConsumerWidget {
                 ),
                 bottom: timelineBottomInset,
               ),
-              itemCount: displayEntries.length + (isLoadingOlder.value ? 1 : 0),
+              itemCount:
+                  displayEntries.length +
+                  (isLoadingOlder.value || showLoadEarlier.value ? 1 : 0),
               itemBuilder: (context, index) {
                 // Loading indicator at the top (last index in reversed list).
+                if (index >= displayEntries.length && !isLoadingOlder.value) {
+                  return _LoadEarlierButton(
+                    onPressed: () {
+                      showLoadEarlier.value = false;
+                      viewportFillPages.value = 0;
+                      _fetchOlderPage(
+                        context,
+                        notifier,
+                        isLoadingOlder,
+                        olderFetchPaused,
+                      );
+                    },
+                  );
+                }
                 if (index >= displayEntries.length) {
                   return const Padding(
                     padding: EdgeInsets.symmetric(vertical: Grid.xs),
@@ -503,8 +1008,10 @@ class _MessageList extends HookConsumerWidget {
                 final message = entry.message;
 
                 // Day boundary check — applies to all messages including system.
+                // Compare with the change that dates the previous group (see
+                // the day index above).
                 final prevEntry = chronIdx > 0
-                    ? displayEntries[chronIdx - 1].last
+                    ? displayEntries[chronIdx - 1].first
                     : null;
                 final prevMessage = prevEntry?.message;
                 final showDayDivider =
@@ -514,6 +1021,7 @@ class _MessageList extends HookConsumerWidget {
                 final showAuthor =
                     !message.isSystem &&
                     (message.hasAttachments ||
+                        prevMessage?.hasAttachments == true ||
                         prevMessage == null ||
                         prevMessage.isSystem ||
                         showDayDivider ||
@@ -521,53 +1029,139 @@ class _MessageList extends HookConsumerWidget {
                             message.pubkey.toLowerCase() ||
                         (message.createdAt - prevMessage.createdAt) > 300);
 
-                return Padding(
-                  key: ValueKey('channel-message-group-${message.id}'),
-                  padding: EdgeInsets.only(bottom: index == 0 ? Grid.xs : 0),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      if (showDayDivider)
-                        DayDivider(label: formatDayHeading(message.createdAt)),
-                      if (message.isSystem)
-                        _SystemMessageRow(
-                          message: message,
-                          groupedMessages: entryGroup.length > 1
-                              ? entryGroup
-                                    .map((entry) => entry.message)
-                                    .toList()
-                              : null,
-                          channelId: channelId,
-                          currentPubkey: currentPubkey,
-                          allMessages: null,
-                          isMember: isMember,
-                          isArchived: isArchived,
-                        )
-                      else ...[
-                        _MessageBubble(
-                          message: message,
-                          showAuthor: showAuthor,
-                          channelNames: channelNamesMap,
-                          currentChannelId: channelId,
-                          currentPubkey: currentPubkey,
-                          allMessages: allMessages,
-                          isMember: isMember,
-                          isArchived: isArchived,
-                        ),
-                        if (entry.summary != null)
-                          _ThreadSummaryRow(
-                            summary: entry.summary!,
+                final nextMessage = chronIdx + 1 < displayEntries.length
+                    ? displayEntries[chronIdx + 1].first.message
+                    : null;
+                final showAvatar =
+                    message.hasAttachments ||
+                    nextMessage == null ||
+                    nextMessage.isSystem ||
+                    nextMessage.hasAttachments ||
+                    !isSameDay(message.createdAt, nextMessage.createdAt) ||
+                    nextMessage.pubkey.toLowerCase() !=
+                        message.pubkey.toLowerCase() ||
+                    nextMessage.createdAt - message.createdAt > 300;
+                final animate = isRecentLocalMessageSendAnimation(
+                  localSendAnimations,
+                  message.id,
+                );
+                final isHandoff = isRecentAgentReplyHandoff(
+                  handoff.messageIds,
+                  message.id,
+                );
+                final endsDay =
+                    nextMessage != null &&
+                    !isSameDay(message.createdAt, nextMessage.createdAt);
+                final inputs = _rowInputs(entryGroup, [
+                  prevMessage,
+                  nextMessage,
+                  animate,
+                  isHandoff,
+                  threadWorking[message.id.toLowerCase()],
+                  if (index == 0) ...[displayedTyping, workingAgents],
+                ]);
+                if (rowCache.reuse(message, inputs) case final row?) return row;
+                final row = LocalMessageSendTransition(
+                  messageId: message.id,
+                  channelId: channelId,
+                  key: ValueKey('channel-message-send-${message.id}'),
+                  animate: animate,
+                  startOffsetFactor: showAuthor
+                      ? localMessageSendTransitionAvatarStartOffset
+                      : localMessageSendTransitionStartOffset,
+                  child: Padding(
+                    key: ValueKey('channel-message-group-${message.id}'),
+                    padding: EdgeInsets.only(bottom: index == 0 ? Grid.xs : 0),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        if (chronIdx == 0 &&
+                            notifier.reachedOldest &&
+                            welcomeAgent != null)
+                          Padding(
+                            padding: const EdgeInsets.only(
+                              top: Grid.md,
+                              bottom: Grid.md,
+                            ),
+                            child: BestieWelcome(agent: welcomeAgent!),
+                          ),
+                        if (showDayDivider)
+                          DayDivider(
+                            label: formatDayHeading(message.createdAt),
+                            dayTimestamp: message.createdAt,
+                            stickyDayTimestamp: stickyDayTimestamp,
+                            scrollVisible: dateScrollActivity,
+                          ),
+                        if (message.isSystem)
+                          _SystemMessageRow(
                             message: message,
-                            allMessages: allMessages,
+                            startsDay: showDayDivider,
+                            endsDay: endsDay,
+                            groupedMessages: entryGroup.length > 1
+                                ? entryGroup
+                                      .map((entry) => entry.message)
+                                      .toList()
+                                : null,
                             channelId: channelId,
                             currentPubkey: currentPubkey,
+                            allMessages: allMessages,
                             isMember: isMember,
                             isArchived: isArchived,
+                          )
+                        else ...[
+                          _MessageBubble(
+                            message: message,
+                            startsDay: showDayDivider,
+                            endsDay: endsDay,
+                            showAuthor: showAuthor || isHandoff,
+                            typingHandoff: isHandoff,
+                            showAvatar: showAvatar,
+                            hasReplies: entry.summary != null,
+                            replyFooter:
+                                entry.summary == null &&
+                                    !threadWorking.containsKey(
+                                      message.id.toLowerCase(),
+                                    )
+                                ? null
+                                : _ThreadSummaryRow(
+                                    summary: entry.summary,
+                                    working:
+                                        threadWorking[message.id
+                                            .toLowerCase()] ??
+                                        const [],
+                                    message: message,
+                                    allMessages: allMessages,
+                                    channelId: channelId,
+                                    currentPubkey: currentPubkey,
+                                    isMember: isMember,
+                                    isArchived: isArchived,
+                                  ),
+                            channelNames: channelNamesMap,
+                            currentChannelId: channelId,
+                            currentPubkey: currentPubkey,
+                            allMessages: allMessages,
+                            isMember: isMember,
+                            isArchived: isArchived,
+                            composerFocusNode: composerFocusNode,
+                            restoreComposerFocus: restoreComposerFocus,
                           ),
+                        ],
+                        if (index == 0 &&
+                            (displayedTyping.isNotEmpty ||
+                                TypingMotionPreview.enabled))
+                          if (TypingMotionPreview.enabled)
+                            TypingMotionPreview(channelId: channelId)
+                          else
+                            InlineAgentTyping(
+                              channelId: channelId,
+                              entries: displayedTyping,
+                              knownAgents: workingAgents,
+                            ),
                       ],
-                    ],
+                    ),
                   ),
                 );
+                return rowCache.keep(message, inputs, row);
               },
             ),
           ),
@@ -583,27 +1177,18 @@ class _MessageList extends HookConsumerWidget {
                 ) +
                 Grid.xs,
             child: Center(
-              child: IconButton.filled(
-                key: const ValueKey('channel-jump-to-oldest-unread'),
-                onPressed: scrollToOldestUnread,
-                tooltip: 'Jump to oldest unread message',
-                style: IconButton.styleFrom(
-                  backgroundColor: context.colors.primaryContainer,
-                  foregroundColor: context.colors.onPrimaryContainer,
-                ),
-                icon: const Icon(LucideIcons.chevronUp, size: 20),
-              ),
+              child: _JumpToOldestUnreadButton(onPressed: scrollToOldestUnread),
             ),
           )
-        else if (!isAtLatest.value)
+        else
           Positioned(
             left: 0,
             right: 0,
             bottom: navigationBottomInset + Grid.xs,
             child: Center(
-              child: LatestMessageButton(
-                key: const ValueKey('channel-jump-to-latest'),
-                surfaceKey: const ValueKey('channel-jump-to-latest-surface'),
+              child: JumpToLatestSwitcher(
+                id: 'channel',
+                visible: isJumpToLatestVisible.value,
                 onPressed: scrollToLatest,
               ),
             ),

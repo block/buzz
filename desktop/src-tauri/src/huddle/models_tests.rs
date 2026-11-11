@@ -1,5 +1,18 @@
 use super::*;
 
+#[test]
+fn voice_models_follow_the_selected_build_nest() {
+    let home = PathBuf::from("/Users/example");
+    for nest_name in [
+        ".buzz",
+        ".buzz-demo-workstream-board",
+        ".buzz-demo-second-demo",
+    ] {
+        let nest = home.join(nest_name);
+        assert_eq!(models_dir(nest.clone()), nest.join("models"));
+    }
+}
+
 fn create_ready_model_dir(root: &Path) -> PathBuf {
     let model_dir = root.join(TTS_MODEL_DIR_NAME);
     std::fs::create_dir_all(&model_dir).expect("create model dir");

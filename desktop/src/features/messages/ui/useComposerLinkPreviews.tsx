@@ -12,6 +12,7 @@ import {
   beginRelayOriginFetch,
   getCachedRelayOrigin,
 } from "@/shared/lib/mediaUrl";
+import { useRelayOrigin } from "@/shared/lib/useRelayOrigin";
 import {
   isBuzzEntityPreview,
   type ResolvedLinkPreview,
@@ -199,9 +200,10 @@ export interface ComposerLinkPreviewInput {
 export function updateComposerLinkPreviewInput(
   current: ComposerLinkPreviewInput,
   content: string,
+  relayOrigin: string | null,
 ): ComposerLinkPreviewInput {
   const nextHrefs = new Set(
-    extractSupportedLinkPreviews(content)
+    extractSupportedLinkPreviews(content, relayOrigin)
       .filter((preview) =>
         preview.href.startsWith("buzz://")
           ? true
@@ -235,11 +237,28 @@ export function useComposerLinkPreviewInput() {
     hrefVersions: new Map(),
     nextHrefVersion: 0,
   }));
+  // Read the origin through the store subscription so a paste that lands
+  // before the async lookup resolves is reclassified — an href set frozen at
+  // first-render time would keep a same-relay clone URL versioned as an
+  // external candidate for the life of the composer.
+  const relayOrigin = useRelayOrigin();
   const update = React.useCallback(
     (content: string) =>
-      setInput((current) => updateComposerLinkPreviewInput(current, content)),
-    [],
+      setInput((current) =>
+        updateComposerLinkPreviewInput(current, content, relayOrigin),
+      ),
+    [relayOrigin],
   );
+  // Re-classify already-entered content when the origin resolves or changes.
+  // An empty draft has nothing to reclassify; returning `current` lets React
+  // bail out of the mount-time pass instead of re-rendering the composer.
+  React.useEffect(() => {
+    setInput((current) =>
+      current.content
+        ? updateComposerLinkPreviewInput(current, current.content, relayOrigin)
+        : current,
+    );
+  }, [relayOrigin]);
   return [input, update] as const;
 }
 
@@ -273,16 +292,17 @@ export function useComposerLinkPreviews(
     );
     return () => window.clearTimeout(timer);
   }, [content]);
+  const relayOrigin = useRelayOrigin();
   const extractCandidates = React.useCallback(
     (source: string) =>
       enabled
-        ? extractSupportedLinkPreviews(source).filter((preview) =>
+        ? extractSupportedLinkPreviews(source, relayOrigin).filter((preview) =>
             preview.href.startsWith("buzz://")
               ? true
               : isValidLinkPreviewSnapshotCanonicalUrl(preview.href),
           )
         : [],
-    [enabled],
+    [enabled, relayOrigin],
   );
   const candidates = React.useMemo(
     () => extractCandidates(debounced),

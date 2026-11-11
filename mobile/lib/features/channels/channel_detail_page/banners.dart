@@ -1,12 +1,56 @@
 part of '../channel_detail_page.dart';
 
-class _ReadOnlyNotice extends StatelessWidget {
+class _ReadOnlyNotice extends HookConsumerWidget {
   final Channel channel;
 
   const _ReadOnlyNotice({required this.channel});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    final isJoining = useState(false);
+    // The relay accepted a join that this client could not confirm yet.
+    final isUnconfirmed = useState(false);
+    final place = channel.isForum ? 'forum' : 'channel';
+    final isOpen = channel.visibility == 'open' && !channel.isArchived;
+    // Joining a guest-join channel grants a role that cannot post, so it
+    // offers no Join (as on desktop).
+    final canJoin = isOpen && !channel.joinsAsGuest;
+
+    Future<void> join() async {
+      if (isJoining.value) return;
+      isJoining.value = true;
+      final actions = ref.read(channelActionsProvider);
+      try {
+        await (isUnconfirmed.value
+            ? actions.recheckJoin(channel.id)
+            : actions.joinChannel(channel.id));
+      } on ChannelJoinUnconfirmed {
+        if (context.mounted) isUnconfirmed.value = true;
+      } catch (_) {
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showFeedbackSnackBar(
+            SnackBar(content: Text('Couldn’t join $place. Try again.')),
+            kind: ToastKind.error,
+          );
+        }
+      } finally {
+        if (context.mounted) isJoining.value = false;
+      }
+    }
+
+    final message = channel.isArchived
+        ? 'This $place is archived and read-only on mobile.'
+        : isOpen && channel.joinsAsGuest
+        ? 'This $place is read-only'
+        : canJoin && isUnconfirmed.value
+        ? 'Join sent, but not confirmed yet'
+        : canJoin
+        ? 'Join $place to send messages'
+        : 'You’re previewing this $place';
+    final buttonLabel = isJoining.value
+        ? (isUnconfirmed.value ? 'Checking…' : 'Joining…')
+        : (isUnconfirmed.value ? 'Check again' : 'Join');
+
     return Container(
       width: double.infinity,
       padding: EdgeInsets.only(
@@ -19,14 +63,30 @@ class _ReadOnlyNotice extends StatelessWidget {
         border: Border(top: BorderSide(color: context.colors.outlineVariant)),
         color: context.colors.surface,
       ),
-      child: Text(
-        channel.isArchived
-            ? 'This ${channel.isForum ? 'forum' : 'channel'} is archived and read-only on mobile.'
-            : 'Join this ${channel.isForum ? 'forum' : 'channel'} from Manage to participate.',
-        style: context.textTheme.bodySmall?.copyWith(
-          color: context.colors.onSurfaceVariant,
-        ),
-        textAlign: TextAlign.center,
+      child: Wrap(
+        alignment: WrapAlignment.center,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        spacing: Grid.xxs,
+        runSpacing: Grid.half,
+        children: [
+          Text(
+            message,
+            style: context.textTheme.bodySmall?.copyWith(
+              color: context.colors.onSurfaceVariant,
+            ),
+            textAlign: TextAlign.center,
+          ),
+          if (canJoin)
+            FilledButton(
+              key: const ValueKey('channel-join-button'),
+              style: FilledButton.styleFrom(
+                backgroundColor: context.colors.primary,
+                foregroundColor: context.colors.onPrimary,
+              ),
+              onPressed: isJoining.value ? null : join,
+              child: Text(buttonLabel),
+            ),
+        ],
       ),
     );
   }
@@ -45,7 +105,7 @@ class _HeaderEphemeralBadge extends StatelessWidget {
     return Tooltip(
       message: display.tooltipLabel,
       child: Icon(
-        LucideIcons.clockFading,
+        BuzzIcons.clockFading,
         key: const Key('chat-ephemeral-badge'),
         size: 16,
         color: context.colors.onSurfaceVariant,
@@ -55,41 +115,37 @@ class _HeaderEphemeralBadge extends StatelessWidget {
 }
 
 class _MessageTimelineSkeleton extends StatelessWidget {
+  final List<TimelineMessage> messages;
   final double appBarTitleContentHeight;
-  final SessionStatus status;
 
   const _MessageTimelineSkeleton({
+    required this.messages,
     required this.appBarTitleContentHeight,
-    required this.status,
   });
 
   @override
   Widget build(BuildContext context) {
-    final semanticsLabel = switch (status) {
-      SessionStatus.connecting => 'Connecting',
-      SessionStatus.reconnecting => 'Reconnecting',
-      SessionStatus.connected || SessionStatus.disconnected => 'Loading',
-    };
-    return Semantics(
-      key: const Key('channel-detail-connection-skeleton'),
-      liveRegion: true,
-      label: semanticsLabel,
-      child: ExcludeSemantics(
-        child: ListView.separated(
-          physics: const NeverScrollableScrollPhysics(),
-          padding: EdgeInsets.fromLTRB(
-            Grid.gutter,
-            frostedAppBarHeight(
-                  context,
-                  titleContentHeight: appBarTitleContentHeight,
-                ) +
-                Grid.xs,
-            Grid.gutter,
+    return ListView.builder(
+      scrollCacheExtent: const ScrollCacheExtent.pixels(0),
+      reverse: true,
+      physics: const NeverScrollableScrollPhysics(),
+      padding: EdgeInsets.fromLTRB(
+        Grid.gutter,
+        frostedAppBarHeight(
+              context,
+              titleContentHeight: appBarTitleContentHeight,
+            ) +
             Grid.xs,
-          ),
-          itemCount: 4,
-          separatorBuilder: (_, _) => const SizedBox(height: Grid.xs),
-          itemBuilder: (_, index) => _MessageSkeletonRow(index: index),
+        Grid.gutter,
+        Grid.xs,
+      ),
+      itemBuilder: (_, index) => Padding(
+        padding: const EdgeInsets.only(bottom: Grid.xs),
+        child: _MessageSkeletonRow(
+          index: index % 4,
+          message: index < messages.length
+              ? messages[messages.length - 1 - index]
+              : null,
         ),
       ),
     );
@@ -98,8 +154,9 @@ class _MessageTimelineSkeleton extends StatelessWidget {
 
 class _MessageSkeletonRow extends StatelessWidget {
   final int index;
+  final TimelineMessage? message;
 
-  const _MessageSkeletonRow({required this.index});
+  const _MessageSkeletonRow({required this.index, this.message});
 
   @override
   Widget build(BuildContext context) {
@@ -133,10 +190,16 @@ class _MessageSkeletonRow extends StatelessWidget {
                 ],
               ),
               const SizedBox(height: Grid.half),
-              for (final width in lineWidths[index]) ...[
-                SkeletonBar(width: min(width, availableWidth), height: 16),
-                const SizedBox(height: Grid.half),
-              ],
+              if (message != null)
+                MessageSkeletonBody(
+                  content: message!.content,
+                  tags: message!.tags,
+                )
+              else
+                for (final width in lineWidths[index]) ...[
+                  SkeletonBar(width: min(width, availableWidth), height: 16),
+                  const SizedBox(height: Grid.half),
+                ],
               const Row(
                 children: [
                   SkeletonBar(width: 32, height: 16),
@@ -173,39 +236,59 @@ class _ForumConnectionSkeleton extends StatelessWidget {
       child: ExcludeSemantics(
         child: IgnorePointer(
           child: ExcludeFocus(
-            child: DecoratedBox(
-              decoration: BoxDecoration(
-                color: context.colors.surface,
-                borderRadius: BorderRadius.circular(Radii.lg),
-                border: Border.all(color: context.colors.outlineVariant),
-              ),
-              child: Padding(
-                padding: const EdgeInsets.all(Grid.twelve),
-                child: SkeletonShimmer(
-                  child: const Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Row(
-                        children: [
-                          SkeletonBar(
-                            width: 28,
-                            height: 28,
-                            borderRadius: BorderRadius.all(
-                              Radius.circular(Radii.full),
-                            ),
-                          ),
-                          SizedBox(width: Grid.xxs),
-                          SkeletonBar(width: 112, height: 14),
-                        ],
-                      ),
-                      SizedBox(height: Grid.xxs),
-                      SkeletonBar(width: 240, height: 14),
-                    ],
-                  ),
+            child: ListView.builder(
+              scrollCacheExtent: const ScrollCacheExtent.pixels(0),
+              padding: EdgeInsets.zero,
+              physics: const NeverScrollableScrollPhysics(),
+              itemBuilder: (_, _) => Padding(
+                padding: const EdgeInsets.only(bottom: Grid.xs),
+                child: _ForumSkeletonCard(
+                  shimmerEnabled: status != SessionStatus.disconnected,
                 ),
               ),
             ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ForumSkeletonCard extends StatelessWidget {
+  final bool shimmerEnabled;
+
+  const _ForumSkeletonCard({required this.shimmerEnabled});
+
+  @override
+  Widget build(BuildContext context) {
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: context.colors.surface,
+        borderRadius: BorderRadius.circular(Radii.lg),
+        border: Border.all(color: context.colors.outlineVariant),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(Grid.twelve),
+        child: SkeletonShimmer(
+          enabled: shimmerEnabled,
+          child: const Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Row(
+                children: [
+                  SkeletonBar(
+                    width: 28,
+                    height: 28,
+                    borderRadius: BorderRadius.all(Radius.circular(Radii.full)),
+                  ),
+                  SizedBox(width: Grid.xxs),
+                  SkeletonBar(width: 112, height: 14),
+                ],
+              ),
+              SizedBox(height: Grid.xxs),
+              SkeletonBar(width: 240, height: 14),
+            ],
           ),
         ),
       ),

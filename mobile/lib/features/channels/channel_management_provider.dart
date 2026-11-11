@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 
@@ -7,11 +8,21 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import '../../shared/auth/auth.dart';
 import '../../shared/custom_emoji/custom_emoji.dart';
 import '../../shared/custom_emoji/custom_emoji_provider.dart';
+import '../../shared/crypto/nip_oa.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/relay/relay.dart';
+import '../../shared/utils/string_utils.dart';
+import '../../shared/verified_profiles/verified_profile.dart';
+import '../../shared/verified_profiles/verified_profile_directory.dart';
 import '../profile/profile_provider.dart';
 import 'channel.dart';
+import 'channel_metadata_updates.dart';
 import 'channels_provider.dart';
+
+export 'channel_metadata_updates.dart';
+
+part 'channel_huddle_actions.dart';
+part 'channel_management_actions.dart';
 
 String _relayErrorMessage(Object error) =>
     error.toString().replaceFirst('Exception: ', '');
@@ -28,14 +39,40 @@ class AddMembersException implements Exception {
   const AddMembersException(this.failures);
 
   String get message => failures.entries
-      .map(
-        (entry) =>
-            '${entry.key.length > 8 ? '${entry.key.substring(0, 8)}…' : entry.key}: ${entry.value}',
-      )
+      .map((entry) => '${shortPubkey(entry.key)}: ${entry.value}')
       .join('; ');
 
   @override
   String toString() => 'AddMembersException($message)';
+}
+
+/// The keys in a DM. Current membership is authoritative. The channel
+/// metadata's `p` tags can lag membership changes, so they count only when
+/// the membership snapshot is unavailable or empty.
+Iterable<String> dmParticipantPubkeys(
+  Channel channel,
+  List<ChannelMember>? members,
+) => members != null && members.isNotEmpty
+    ? members.map((member) => member.pubkey)
+    : channel.participantPubkeys;
+
+/// Whether a joined, unarchived DM contains exactly this account and peer.
+bool isActiveDirectConversation(
+  Channel channel,
+  List<ChannelMember>? members,
+  String? currentPubkey,
+  String peerPubkey,
+) {
+  if (currentPubkey == null ||
+      !channel.isDm ||
+      !channel.isMember ||
+      channel.isArchived) {
+    return false;
+  }
+  final expected = {currentPubkey, peerPubkey};
+  final participants = dmParticipantPubkeys(channel, members).toSet();
+  return participants.length == expected.length &&
+      participants.containsAll(expected);
 }
 
 @immutable
@@ -64,7 +101,7 @@ class ChannelMember {
     if (displayName case final name? when name.trim().isNotEmpty) {
       return name.trim();
     }
-    return pubkey.length > 8 ? '${pubkey.substring(0, 8)}…' : pubkey;
+    return shortPubkey(pubkey);
   }
 }
 
@@ -149,12 +186,14 @@ class DirectoryUser {
   final String? displayName;
   final String? avatarUrl;
   final String? nip05Handle;
+  final bool isAgent;
 
   const DirectoryUser({
     required this.pubkey,
     this.displayName,
     this.avatarUrl,
     this.nip05Handle,
+    this.isAgent = false,
   });
 
   String get label {
@@ -166,7 +205,7 @@ class DirectoryUser {
     if (nip05 != null && nip05.isNotEmpty) {
       return nip05;
     }
-    return pubkey.length > 8 ? '${pubkey.substring(0, 8)}…' : pubkey;
+    return shortPubkey(pubkey);
   }
 
   String get secondaryLabel {
@@ -174,73 +213,23 @@ class DirectoryUser {
     if (nip05 != null && nip05.isNotEmpty && nip05 != label) {
       return nip05;
     }
-    return pubkey.length > 16 ? '${pubkey.substring(0, 16)}…' : pubkey;
+    // The primary label is already the compact key when no name or NIP-05
+    // exists; a second key-shaped line would only duplicate it.
+    final display = displayName?.trim();
+    return display != null && display.isNotEmpty ? shortPubkey(pubkey) : '';
   }
 
-  /// First visible character used when no avatar image is available.
-  String get initial => label.isNotEmpty ? label[0].toUpperCase() : '?';
-}
-
-/// Whether the mobile DM directory should show local preview identities.
-const bool mockDmDirectoryEnabled =
-    kDebugMode && bool.fromEnvironment('BUZZ_MOCK_DM_DIRECTORY');
-
-/// Whether the new-DM picker should use local preview identities.
-///
-/// Debug builds fall back automatically while disconnected. Production builds
-/// always use the active relay directory.
-final dmDirectoryPreviewEnabledProvider = Provider<bool>((ref) {
-  if (mockDmDirectoryEnabled) {
-    return true;
+  /// Avatar initial — name-derived when available, otherwise keyed to the
+  /// hex public key so unnamed identities keep distinct initials (a compact
+  /// npub would render `N` for everyone).
+  String get initial {
+    final display = displayName?.trim();
+    if (display != null && display.isNotEmpty) return display[0].toUpperCase();
+    final nip05 = nip05Handle?.trim();
+    if (nip05 != null && nip05.isNotEmpty) return nip05[0].toUpperCase();
+    return pubkey.isNotEmpty ? pubkey[0].toUpperCase() : '?';
   }
-  final relayStatus = ref.watch(
-    relaySessionProvider.select((session) => session.status),
-  );
-  return kDebugMode && relayStatus != SessionStatus.connected;
-});
-
-String _mockEmojiAvatar(String emoji, String color) {
-  return Uri.dataFromString(
-    '<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128">'
-    '<rect width="128" height="128" fill="$color"/>'
-    '<text x="64" y="80" text-anchor="middle" font-size="58">$emoji</text>'
-    '</svg>',
-    mimeType: 'image/svg+xml',
-    encoding: utf8,
-  ).toString();
 }
-
-/// Local identities used to preview the new-DM picker without a relay.
-final dmDirectoryPreviewUsers = List<DirectoryUser>.unmodifiable([
-  DirectoryUser(
-    pubkey: '1111111111111111111111111111111111111111111111111111111111111111',
-    displayName: 'Maya Chen',
-    avatarUrl: _mockEmojiAvatar('🎨', '#8AADF4'),
-    nip05Handle: 'maya@demo.buzz',
-  ),
-  DirectoryUser(
-    pubkey: '2222222222222222222222222222222222222222222222222222222222222222',
-    displayName: 'Jordan Brooks',
-    avatarUrl: _mockEmojiAvatar('🌱', '#A6DA95'),
-    nip05Handle: 'jordan@demo.buzz',
-  ),
-  const DirectoryUser(
-    pubkey: '3333333333333333333333333333333333333333333333333333333333333333',
-    displayName: 'Priya Shah',
-    nip05Handle: 'priya@demo.buzz',
-  ),
-  DirectoryUser(
-    pubkey: '4444444444444444444444444444444444444444444444444444444444444444',
-    displayName: 'Theo Martin',
-    avatarUrl: _mockEmojiAvatar('💻', '#C6A0F6'),
-    nip05Handle: 'theo@demo.buzz',
-  ),
-  const DirectoryUser(
-    pubkey: '5555555555555555555555555555555555555555555555555555555555555555',
-    displayName: 'Sam Rivera',
-    nip05Handle: 'sam@demo.buzz',
-  ),
-]);
 
 final currentPubkeyProvider = Provider<String?>((ref) {
   // Prefer the explicitly-derived pubkey from nsec — this is the signing
@@ -284,145 +273,49 @@ List<String> relayMemberPubkeysFromEvents(List<NostrEvent> events) {
   return pubkeys.toList();
 }
 
-/// Converts kind:0 events into a deduplicated, alphabetized people directory.
+/// Converts the people a profile search found into a directory.
+///
+/// The directory listing is alphabetized. Search results pass
+/// [alphabetize] false to keep the relay's order, which ranks the best name
+/// match first.
 @visibleForTesting
-List<DirectoryUser> directoryUsersFromProfileEvents(List<NostrEvent> events) {
-  final latestByPubkey = <String, NostrEvent>{};
-  for (final event in events) {
-    if (event.kind != 0) {
-      continue;
-    }
-    final pubkey = event.pubkey.toLowerCase();
-    final current = latestByPubkey[pubkey];
-    if (current == null || event.createdAt > current.createdAt) {
-      latestByPubkey[pubkey] = event;
-    }
+List<DirectoryUser> directoryUsersFromSearch(
+  List<SearchedPerson> people, {
+  bool alphabetize = true,
+}) {
+  DirectoryUser fromProfile(String pubkey, NostrEvent event) {
+    final profile = ProfileData.fromEvent(event);
+    return DirectoryUser(
+      pubkey: pubkey,
+      displayName: profile.displayName,
+      avatarUrl: profile.avatarUrl,
+      nip05Handle: profile.nip05,
+      isAgent: verifiedOaOwnerPubkey(event.tags, event.pubkey) != null,
+    );
   }
 
-  return [
-    for (final event in latestByPubkey.values)
-      if (ProfileData.fromEvent(event) case final profile)
+  final users = [
+    for (final person in people)
+      if (person.profile case final event?)
+        fromProfile(person.pubkey, event)
+      else
         DirectoryUser(
-          pubkey: profile.pubkey.toLowerCase(),
-          displayName: profile.displayName,
-          avatarUrl: profile.avatarUrl,
-          nip05Handle: profile.nip05,
+          pubkey: person.pubkey,
+          displayName: person.verified?.displayName,
         ),
-  ]..sort((a, b) {
-    final labelComparison = a.label.toLowerCase().compareTo(
-      b.label.toLowerCase(),
-    );
-    return labelComparison != 0
-        ? labelComparison
-        : a.pubkey.compareTo(b.pubkey);
-  });
-}
-
-/// People and agents discoverable on the active relay.
-///
-/// This mirrors desktop's empty-query people directory by listing kind:0
-/// profiles through the HTTP bridge. The relay membership snapshot remains a
-/// fallback for older relays that do not support directory listing.
-///
-/// autoDispose so the cached listing is dropped when the New message sheet
-/// closes, and the [relayConfigProvider] watch invalidates it at the
-/// community boundary. [relaySessionProvider.notifier] is a stable Notifier
-/// instance and [currentPubkeyProvider] keeps its value when two communities
-/// share a signing key, so neither triggers a refetch on its own.
-final relayDirectoryUsersProvider =
-    FutureProvider.autoDispose<List<DirectoryUser>>((ref) async {
-      if (mockDmDirectoryEnabled) {
-        return dmDirectoryPreviewUsers;
-      }
-
-      // Rebuild whenever the active relay/community configuration changes.
-      ref.watch(relayConfigProvider);
-      final session = ref.watch(relaySessionProvider.notifier);
-      final currentPubkey = ref.watch(currentPubkeyProvider)?.toLowerCase();
-      final directoryEvents = await session.queryRelay([
-        const NostrFilter(kinds: [0], limit: 50, extensions: {'page': 1}),
-      ]);
-      var users = directoryUsersFromProfileEvents(directoryEvents);
-      if (users.isNotEmpty) {
-        return users
-            .where((user) => user.pubkey.toLowerCase() != currentPubkey)
-            .toList();
-      }
-
-      final membershipEvents = await session.fetchHistory(
-        NostrFilters.relayMembers(),
+  ];
+  if (alphabetize) {
+    users.sort((a, b) {
+      final labelComparison = a.label.toLowerCase().compareTo(
+        b.label.toLowerCase(),
       );
-      final memberPubkeys = relayMemberPubkeysFromEvents(
-        membershipEvents,
-      ).where((pubkey) => pubkey != currentPubkey).toList();
-      if (memberPubkeys.isEmpty) {
-        return const [];
-      }
-
-      final profileEvents = await session.queryRelay([
-        NostrFilters.profilesBatch(memberPubkeys),
-      ]);
-      final profilesByPubkey = {
-        for (final event in profileEvents)
-          event.pubkey.toLowerCase(): ProfileData.fromEvent(event),
-      };
-      users =
-          [
-            for (final pubkey in memberPubkeys)
-              if (profilesByPubkey[pubkey] case final profile?)
-                DirectoryUser(
-                  pubkey: pubkey,
-                  displayName: profile.displayName,
-                  avatarUrl: profile.avatarUrl,
-                  nip05Handle: profile.nip05,
-                )
-              else
-                DirectoryUser(pubkey: pubkey),
-          ]..sort((a, b) {
-            final labelComparison = a.label.toLowerCase().compareTo(
-              b.label.toLowerCase(),
-            );
-            return labelComparison != 0
-                ? labelComparison
-                : a.pubkey.compareTo(b.pubkey);
-          });
-      return users;
+      return labelComparison != 0
+          ? labelComparison
+          : a.pubkey.compareTo(b.pubkey);
     });
-
-/// Prefix-searches the active relay's kind:0 people directory.
-///
-/// autoDispose family: each distinct query would otherwise cache a provider
-/// instance for the whole session (the mention search provider is autoDispose
-/// for the same reason). The [relayConfigProvider] watch invalidates cached
-/// results at the community boundary.
-final relayDirectorySearchProvider = FutureProvider.autoDispose
-    .family<List<DirectoryUser>, String>((ref, query) async {
-      final trimmed = query.trim();
-      if (mockDmDirectoryEnabled) {
-        final normalizedQuery = trimmed.toLowerCase();
-        return dmDirectoryPreviewUsers
-            .where(
-              (user) =>
-                  user.label.toLowerCase().contains(normalizedQuery) ||
-                  user.secondaryLabel.toLowerCase().contains(normalizedQuery),
-            )
-            .toList();
-      }
-      if (trimmed.isEmpty) {
-        return ref.watch(relayDirectoryUsersProvider.future);
-      }
-
-      // Rebuild whenever the active relay/community configuration changes.
-      ref.watch(relayConfigProvider);
-      final session = ref.watch(relaySessionProvider.notifier);
-      final currentPubkey = ref.watch(currentPubkeyProvider)?.toLowerCase();
-      final events = await session.queryRelay([
-        NostrFilters.searchUsers(trimmed, limit: 50),
-      ]);
-      return directoryUsersFromProfileEvents(
-        events,
-      ).where((user) => user.pubkey.toLowerCase() != currentPubkey).toList();
-    });
+  }
+  return users;
+}
 
 /// Build [ChannelDetails] from a kind:39000 metadata event.
 ///
@@ -441,10 +334,11 @@ ChannelDetails channelDetailsFromEvent(NostrEvent event) {
     id: data.id,
     name: data.name,
     channelType: data.channelType,
+    labels: data.labels,
     visibility: data.visibility,
     description: data.description,
     topic: data.topic,
-    createdBy: event.pubkey,
+    createdBy: data.creator ?? event.pubkey,
     createdAt: eventTime,
     memberCount: 0,
     // Same archival-timestamp convention as `_channelFromMeta` — the event's
@@ -482,7 +376,11 @@ final channelDetailsProvider = FutureProvider.family<ChannelDetails, String>((
 /// Channel members from kind:39002 NIP-29 members event.
 final channelMembersProvider = FutureProvider.autoDispose
     .family<List<ChannelMember>, String>((ref, channelId) async {
-      ref.watch(channelMembershipUpdateProvider(channelId));
+      ref.watch(
+        channelMembershipUpdateProvider(
+          channelId,
+        ).select((update) => update.version),
+      );
       final relayBaseUrl = ref.watch(relayConfigProvider).baseUrl;
       final pubkey = ref.watch(myPubkeyProvider)?.toLowerCase();
       final snapshotCache = ref.read(_channelMembersSnapshotCacheProvider);
@@ -553,6 +451,24 @@ final channelMembersProvider = FutureProvider.autoDispose
       return members;
     });
 
+/// The latest roster for [channelId] in the current relay, account, and
+/// channel scope, or null if none has loaded in that scope yet.
+///
+/// While [channelMembersProvider] reloads (for example after a kind:39002
+/// update), this keeps the roster from the last completed load in the same
+/// scope instead of dropping it. Another relay or account never sees it.
+List<ChannelMember>? watchLatestChannelMembers(Ref ref, String channelId) {
+  final loaded = ref.watch(channelMembersProvider(channelId)).asData?.value;
+  if (loaded != null) return loaded;
+  return ref
+      .read(_channelMembersSnapshotCacheProvider)
+      .read(
+        relayBaseUrl: ref.watch(relayConfigProvider).baseUrl,
+        pubkey: ref.watch(myPubkeyProvider)?.toLowerCase(),
+        channelId: channelId,
+      );
+}
+
 /// Channel canvas (kind:40100 for the channel).
 final channelCanvasProvider = FutureProvider.family<ChannelCanvas, String>((
   ref,
@@ -597,6 +513,7 @@ List<List<String>> buildCreateChannelTags({
   required String name,
   required String channelType,
   required String visibility,
+  List<String> labels = const [],
   String? description,
   int? ttlSeconds,
 }) {
@@ -609,360 +526,9 @@ List<List<String>> buildCreateChannelTags({
     ['name', name],
     ['visibility', visibility],
     ['channel_type', channelType],
+    for (final label in labels) ['t', label],
     if (description case final about? when about.trim().isNotEmpty)
       ['about', about.trim()],
     if (ttlSeconds != null) ['ttl', ttlSeconds.toString()],
   ];
 }
-
-/// Builds the relay tags for setting the archived state of [channelId].
-List<List<String>> buildSetChannelArchivedTags(
-  String channelId, {
-  required bool archived,
-}) => [
-  ['h', channelId],
-  ['archived', archived.toString()],
-];
-
-/// Builds the relay tags for deleting [channelId].
-List<List<String>> buildDeleteChannelTags(String channelId) => [
-  ['h', channelId],
-];
-
-class ChannelActions {
-  final Ref _ref;
-  final RelaySessionNotifier _session;
-  final SignedEventRelay _signedEventRelay;
-  final String? _currentPubkey;
-  final bool Function()? _isCommunityValid;
-
-  ChannelActions({
-    required Ref ref,
-    required RelaySessionNotifier session,
-    required SignedEventRelay signedEventRelay,
-    required String? currentPubkey,
-    bool Function()? isCommunityValid,
-  }) : _ref = ref,
-       _session = session,
-       _signedEventRelay = signedEventRelay,
-       _currentPubkey = currentPubkey,
-       _isCommunityValid = isCommunityValid;
-
-  Future<Channel> createChannel({
-    required String name,
-    required String channelType,
-    required String visibility,
-    String? description,
-    int? ttlSeconds,
-  }) async {
-    final channelId = _newUuidV4();
-    final tags = buildCreateChannelTags(
-      channelId: channelId,
-      name: name,
-      channelType: channelType,
-      visibility: visibility,
-      description: description,
-      ttlSeconds: ttlSeconds,
-    );
-    await _signedEventRelay.submit(kind: 9007, content: '', tags: tags);
-    return _refreshChannelsAndRead(channelId);
-  }
-
-  /// Open (or create) a DM channel with the given pubkeys.
-  ///
-  /// This submits a kind:41010 command event; the relay responds with an OK
-  /// message whose content carries `response:{...}` containing the new
-  /// `channel_id`.
-  Future<Channel> openDm({required List<String> pubkeys}) async {
-    final result = await _signedEventRelay.submit(
-      kind: 41010,
-      content: '',
-      tags: pubkeys.map((pk) => ['p', pk]).toList(),
-    );
-    final response = parseCommandResponse(result.content);
-    final channelId = response?['channel_id'] as String?;
-    if (channelId == null || channelId.isEmpty) {
-      throw Exception('Relay did not return a DM channel id');
-    }
-    return _refreshChannelsAndRead(channelId);
-  }
-
-  Future<void> addMembers({
-    required String channelId,
-    required List<String> pubkeys,
-    String role = 'member',
-  }) async {
-    final normalizedRole = role.trim();
-    if (normalizedRole.isEmpty) {
-      throw ArgumentError.value(role, 'role', 'must not be empty');
-    }
-    final normalizedPubkeys = {
-      for (final pubkey in pubkeys)
-        if (pubkey.trim().isNotEmpty) pubkey.trim().toLowerCase(),
-    };
-    _ensureCommunityValid();
-    // Per-pubkey failures are collected rather than thrown on the spot: one
-    // relay rejection must not skip the remaining adds or the invalidation
-    // below, which would leave the members list stale for the adds that landed.
-    final failures = <String, String>{};
-    for (final pubkey in normalizedPubkeys) {
-      // Outside the catch: a community switch mid-loop must abort the whole
-      // add, not be recorded as this pubkey's rejection.
-      _ensureCommunityValid();
-      try {
-        await _signedEventRelay.submit(
-          kind: 9000,
-          content: '',
-          tags: [
-            ['h', channelId],
-            ['p', pubkey],
-            ['role', normalizedRole],
-          ],
-        );
-      } catch (error) {
-        failures[pubkey] = _relayErrorMessage(error);
-      }
-    }
-    _ensureCommunityValid();
-    _ref.invalidate(channelMembersProvider(channelId));
-    _ref.invalidate(channelBotPubkeysProvider(channelId));
-    if (failures.isNotEmpty) {
-      throw AddMembersException(failures);
-    }
-  }
-
-  void _ensureCommunityValid() {
-    if (_isCommunityValid?.call() == false) {
-      throw StateError(
-        'Channel action cancelled because the active community changed',
-      );
-    }
-  }
-
-  Future<void> joinChannel(String channelId) async {
-    await _signedEventRelay.submit(
-      kind: 9021,
-      content: '',
-      tags: [
-        ['h', channelId],
-      ],
-    );
-    await _refreshChannelState(channelId);
-  }
-
-  Future<void> leaveChannel(String channelId) async {
-    await _signedEventRelay.submit(
-      kind: 9022,
-      content: '',
-      tags: [
-        ['h', channelId],
-      ],
-    );
-    await _refreshChannelState(channelId);
-  }
-
-  /// Archives the channel and refreshes its cached state.
-  Future<void> archiveChannel(String channelId) =>
-      _setChannelArchived(channelId, archived: true);
-
-  /// Unarchives the channel and refreshes its cached state.
-  Future<void> unarchiveChannel(String channelId) =>
-      _setChannelArchived(channelId, archived: false);
-
-  Future<void> _setChannelArchived(
-    String channelId, {
-    required bool archived,
-  }) async {
-    await _signedEventRelay.submit(
-      kind: 9002,
-      content: '',
-      tags: buildSetChannelArchivedTags(channelId, archived: archived),
-    );
-    await _refreshChannelState(channelId);
-  }
-
-  /// Deletes the channel and refreshes its cached state.
-  Future<void> deleteChannel(String channelId) async {
-    await _signedEventRelay.submit(
-      kind: 9008,
-      content: '',
-      tags: buildDeleteChannelTags(channelId),
-    );
-    await _refreshChannelState(channelId);
-  }
-
-  Future<void> setCanvas({
-    required String channelId,
-    required String content,
-  }) async {
-    await _signedEventRelay.submit(
-      kind: 40100,
-      content: content,
-      tags: [
-        ['h', channelId],
-      ],
-    );
-    _ref.invalidate(channelCanvasProvider(channelId));
-  }
-
-  /// User search via NIP-50 over kind:0 profile events.
-  Future<List<DirectoryUser>> searchUsers(String query, {int limit = 8}) async {
-    final trimmed = query.trim();
-    if (trimmed.isEmpty) return const [];
-
-    final events = await _session.queryRelay([
-      NostrFilters.searchUsers(trimmed, limit: limit),
-    ]);
-    return directoryUsersFromProfileEvents(events)
-        .where(
-          (user) =>
-              _currentPubkey == null ||
-              user.pubkey.toLowerCase() != _currentPubkey,
-        )
-        .toList();
-  }
-
-  Future<Channel> _refreshChannelsAndRead(String channelId) async {
-    await _ref.read(channelsProvider.notifier).refresh();
-    final channels = await _ref.read(channelsProvider.future);
-    return channels.firstWhere(
-      (channel) => channel.id == channelId,
-      orElse: () =>
-          throw Exception('Channel was created but is not visible yet'),
-    );
-  }
-
-  Future<void> _refreshChannelState(String channelId) async {
-    await _ref.read(channelsProvider.notifier).refresh();
-    _ref.invalidate(channelDetailsProvider(channelId));
-    _ref.invalidate(channelMembersProvider(channelId));
-    _ref.invalidate(channelBotPubkeysProvider(channelId));
-    _ref.invalidate(channelCanvasProvider(channelId));
-  }
-
-  String _newUuidV4() {
-    final bytes = List<int>.generate(16, (_) => _random.nextInt(256));
-    bytes[6] = (bytes[6] & 0x0f) | 0x40;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-
-    final hex = bytes
-        .map((byte) => byte.toRadixString(16).padLeft(2, '0'))
-        .join();
-    return '${hex.substring(0, 8)}-'
-        '${hex.substring(8, 12)}-'
-        '${hex.substring(12, 16)}-'
-        '${hex.substring(16, 20)}-'
-        '${hex.substring(20, 32)}';
-  }
-
-  Future<void> changeMemberRole({
-    required String channelId,
-    required String pubkey,
-    required String role,
-  }) async {
-    await _signedEventRelay.submit(
-      kind: 9000,
-      content: '',
-      tags: [
-        ['h', channelId],
-        ['p', pubkey.toLowerCase()],
-        ['role', role],
-      ],
-    );
-    _ref.invalidate(channelMembersProvider(channelId));
-    _ref.invalidate(channelBotPubkeysProvider(channelId));
-  }
-
-  Future<void> removeMember({
-    required String channelId,
-    required String pubkey,
-  }) async {
-    await _signedEventRelay.submit(
-      kind: 9001,
-      content: '',
-      tags: [
-        ['h', channelId],
-        ['p', pubkey.toLowerCase()],
-      ],
-    );
-    _ref.invalidate(channelMembersProvider(channelId));
-    _ref.invalidate(channelBotPubkeysProvider(channelId));
-  }
-
-  Future<void> addReaction(String eventId, String emoji) async {
-    final shortcode = normalizeShortcode(emoji);
-    final emojiUrl = reactionEmojiUrl(
-      emoji,
-      _ref.read(customEmojiListProvider),
-    );
-    await _signedEventRelay.submit(
-      kind: EventKind.reaction,
-      content: emoji,
-      tags: [
-        ['e', eventId],
-        if (shortcode != null && emojiUrl != null)
-          ['emoji', shortcode, emojiUrl],
-      ],
-    );
-  }
-
-  Future<void> removeReaction(String reactionEventId, String emoji) async {
-    await _signedEventRelay.submit(
-      kind: EventKind.deletion,
-      content: '',
-      tags: [
-        ['e', reactionEventId],
-      ],
-    );
-  }
-
-  Future<void> editMessage({
-    required String channelId,
-    required String eventId,
-    required String content,
-    List<List<String>> mediaTags = const [],
-  }) async {
-    await _signedEventRelay.submit(
-      kind: EventKind.streamMessageEdit,
-      content: content,
-      tags: [
-        ['h', channelId],
-        ['e', eventId],
-        ...mediaTags,
-      ],
-    );
-  }
-
-  Future<void> deleteMessage({
-    required String channelId,
-    required String eventId,
-  }) async {
-    await _signedEventRelay.submit(
-      kind: EventKind.deletion,
-      content: '',
-      tags: buildDeleteMessageTags(channelId: channelId, eventId: eventId),
-    );
-  }
-
-  static final Random _random = Random.secure();
-}
-
-final channelActionsProvider = Provider<ChannelActions>((ref) {
-  final relayConfig = ref.watch(relayConfigProvider);
-  final currentPubkey = ref.watch(currentPubkeyProvider);
-  final session = ref.read(relaySessionProvider.notifier);
-  return ChannelActions(
-    ref: ref,
-    session: session,
-    signedEventRelay: SignedEventRelay(
-      session: session,
-      nsec: relayConfig.nsec,
-    ),
-    currentPubkey: currentPubkey,
-    isCommunityValid: () {
-      final currentConfig = ref.read(relayConfigProvider);
-      return currentConfig.baseUrl == relayConfig.baseUrl &&
-          currentConfig.nsec == relayConfig.nsec;
-    },
-  );
-});

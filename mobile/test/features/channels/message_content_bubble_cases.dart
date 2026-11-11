@@ -1,0 +1,444 @@
+part of 'message_content_test.dart';
+
+void bubbleContentTests() {
+  final bubbles = find.byWidgetPredicate(
+    (widget) =>
+        widget.key is ValueKey<String> &&
+        (widget.key! as ValueKey<String>).value.startsWith(
+          'message-text-bubble-',
+        ),
+  );
+  testWidgets('message shapes remain inside their bounds without tails', (
+    tester,
+  ) async {
+    for (final tail in [false, true]) {
+      await tester.pumpWidget(
+        _testable(
+          MessageContent(content: 'Hello', bubble: true, bubbleEnd: tail),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final decoration = tester.widget<LocalSendBubbleSurface>(
+        find.descendant(
+          of: bubbles,
+          matching: find.byType(LocalSendBubbleSurface),
+        ),
+      );
+      final bounds = decoration.shape
+          .getOuterPath(Offset.zero & tester.getSize(bubbles))
+          .getBounds();
+      expect(bounds.left, 0);
+      expect(bounds.bottom, tester.getSize(bubbles).height);
+    }
+  });
+
+  for (final brightness in Brightness.values) {
+    testWidgets('bubbles inherit every chat color in $brightness', (
+      tester,
+    ) async {
+      for (final choice in chatColorChoices) {
+        final theme = mobileAppearanceTheme(brightness, choice.wireValue);
+        for (final own in [false, true]) {
+          await tester.pumpWidget(
+            _testable(
+              MessageContent(
+                content: 'Themed message',
+                bubble: true,
+                ownMessage: own,
+              ),
+              theme: theme,
+            ),
+          );
+          await tester.pumpAndSettle();
+          final surface = tester.widget<LocalSendBubbleSurface>(
+            find.byType(LocalSendBubbleSurface),
+          );
+          expect(
+            surface.color,
+            own
+                ? theme.extension<ChatColors>()!.outgoing
+                : receivedMessageSurface(brightness),
+          );
+        }
+      }
+    });
+  }
+
+  for (final dark in [false, true]) {
+    testWidgets('outgoing headings, mentions and links contrast in dark=$dark', (
+      tester,
+    ) async {
+      String? tapped;
+      await tester.pumpWidget(
+        _testable(
+          MessageContent(
+            content:
+                '# H1\n\n## H2\n\n### H3\n\n#### H4\n\n##### H5\n\n###### H6\n\n@Alice @Helper [Website](https://example.com)',
+            bubble: true,
+            ownMessage: true,
+            mentionNames: const {'person': 'Alice', 'agent': 'Helper'},
+            agentMentionPubkeys: const {'agent'},
+            onMentionTap: (pubkey) => tapped = pubkey,
+          ),
+          dark: dark,
+        ),
+      );
+      await tester.pumpAndSettle();
+      final foreground = ChatColors.of(
+        tester.element(find.byType(MessageContent)),
+      ).foreground;
+      for (final heading in ['H1', 'H2', 'H3', 'H4', 'H5', 'H6']) {
+        final text = tester.widget<RichText>(_findRich(heading).last);
+        final colors = <Color?>[];
+        void inspect(InlineSpan span, TextStyle? inherited) {
+          final effective = inherited?.merge(span.style) ?? span.style;
+          if (span is TextSpan) {
+            if (span.text?.contains(heading) == true) {
+              colors.add(effective?.color);
+            }
+            for (final child in span.children ?? const <InlineSpan>[]) {
+              inspect(child, effective);
+            }
+          }
+        }
+
+        inspect(text.text, null);
+        expect(colors, [foreground]);
+      }
+      final linkColor = ChatColors.of(
+        tester.element(find.byType(MessageContent)),
+      ).foreground;
+      for (final label in ['Alice', 'Helper']) {
+        expect(tester.widget<Text>(find.text(label)).style?.color, linkColor);
+      }
+      expect(
+        tester.widget<BuzzAgentIcon>(find.byType(BuzzAgentIcon)).color,
+        linkColor,
+      );
+      final link = tester.widget<Text>(
+        find.byWidgetPredicate(
+          (w) => w is Text && w.textSpan?.toPlainText() == 'Website',
+        ),
+      );
+      expect(link.textSpan?.style?.color, linkColor);
+      await tester.tap(find.text('Alice'));
+      expect(tapped, 'person');
+      await tester.tap(find.text('Helper'));
+      expect(tapped, 'agent');
+    });
+  }
+
+  for (final content in [
+    '- screenshots:\n  ![result](https://example.com/result.png)\n  explanation',
+    '1. screenshots:\n  ![result](https://example.com/result.png)\n  explanation',
+    '> screenshots:\n> ![result](https://example.com/result.png)\n> explanation',
+    '> screenshots:\n![result](https://example.com/result.png)\nexplanation',
+  ]) {
+    testWidgets('nested media retains its Markdown block: $content', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _testable(MessageContent(content: content, bubble: true)),
+      );
+      await tester.pumpAndSettle();
+      expect(bubbles, findsOneWidget);
+      final markdown = tester.widget<GptMarkdown>(find.byType(GptMarkdown));
+      expect(markdown.data, content);
+      final media = find.byKey(
+        const ValueKey(
+          'message-media-image-preview:https://example.com/result.png',
+        ),
+      );
+      expect(find.descendant(of: bubbles, matching: media), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  testWidgets(
+    'image corners remain uniform throughout the conversation group',
+    (tester) async {
+      for (final grouped in [false, true]) {
+        await tester.pumpWidget(
+          _testable(
+            MessageContent(
+              content: '![photo](https://example.com/photo.png)',
+              bubble: true,
+              bubbleStart: !grouped,
+              bubbleEnd: !grouped,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        final frame = tester.widget<Container>(
+          find.byKey(
+            const ValueKey(
+              'message-media-image-preview:https://example.com/photo.png',
+            ),
+          ),
+        );
+        final corners =
+            (frame.decoration! as BoxDecoration).borderRadius! as BorderRadius;
+        expect(corners.topLeft.x, Radii.container);
+        expect(corners.bottomLeft.x, Radii.container);
+        expect(corners.topRight.x, Radii.container);
+        expect(corners.bottomRight.x, Radii.container);
+      }
+    },
+  );
+
+  testWidgets('photo gallery stays outside its caption bubble', (tester) async {
+    await tester.pumpWidget(
+      _testable(
+        const MessageContent(
+          content:
+              'Photos\n![one](https://example.com/one.png)\n![two](https://example.com/two.png)',
+          bubble: true,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final gallery = find.byKey(const ValueKey('message-media-stack'));
+    expect(gallery, findsOneWidget);
+    expect(bubbles, findsOneWidget);
+    expect(find.descendant(of: bubbles, matching: gallery), findsNothing);
+    expect(
+      tester.getTopLeft(gallery).dy,
+      greaterThanOrEqualTo(tester.getBottomLeft(bubbles).dy),
+    );
+  });
+
+  testWidgets('neutral bubbles hug short text and distinguish own messages', (
+    tester,
+  ) async {
+    for (final own in [false, true]) {
+      await tester.pumpWidget(
+        _testable(
+          MessageContent(content: 'Hello', bubble: true, ownMessage: own),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(bubbles, findsOneWidget);
+      expect(tester.getSize(bubbles).width, lessThan(160));
+      final decoration = tester.widget<LocalSendBubbleSurface>(
+        find.descendant(
+          of: bubbles,
+          matching: find.byType(LocalSendBubbleSurface),
+        ),
+      );
+      expect(decoration.color, isNotNull);
+      expect(
+        find.descendant(of: bubbles, matching: _findRich('Hello')),
+        findsWidgets,
+      );
+    }
+  });
+
+  testWidgets('attachments stay outside bubbles and text order is preserved', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _testable(
+        const MessageContent(
+          content:
+              // The escaped destination must still match its plain imeta URL.
+              'Before\n\n[file.txt](https://example.com/file\\_a.txt)\n\nAfter',
+          tags: [
+            ['imeta', 'url https://example.com/file_a.txt', 'm text/plain'],
+          ],
+          bubble: true,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(bubbles, findsNWidgets(2));
+    expect(
+      find.descendant(of: bubbles, matching: _findRich('file.txt')),
+      findsNothing,
+    );
+    expect(
+      tester.getTopLeft(_findRich('Before')).dy,
+      lessThan(tester.getTopLeft(_findRich('file.txt')).dy),
+    );
+    expect(
+      tester.getTopLeft(_findRich('file.txt')).dy,
+      lessThan(tester.getTopLeft(_findRich('After')).dy),
+    );
+  });
+
+  testWidgets('fenced attachment examples remain in the text bubble', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _testable(
+        const MessageContent(
+          content: '```text\n![example](https://example.com/image.png)\n```',
+          bubble: true,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(bubbles, findsOneWidget);
+    expect(
+      find.descendant(
+        of: bubbles,
+        matching: _findRich('![example](https://example.com/image.png)'),
+      ),
+      findsWidgets,
+    );
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('bubble text reflows at narrow width and large text', (
+    tester,
+  ) async {
+    _setSurfaceSize(tester, const Size(320, 800));
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    await tester.pumpWidget(
+      _testable(
+        MediaQuery(
+          data: const MediaQueryData(
+            size: Size(320, 800),
+            textScaler: TextScaler.linear(2),
+          ),
+          child: const SizedBox(
+            width: 230,
+            child: MessageContent(
+              content:
+                  'A longer message that wraps across multiple lines without clipping.',
+              bubble: true,
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(tester.getSize(bubbles).width, lessThanOrEqualTo(230));
+    expect(tester.getSize(bubbles).height, greaterThan(80));
+    expect(tester.takeException(), isNull);
+  });
+}
+
+void editedMarkerTests() {
+  Iterable<String> plainTexts(WidgetTester tester) => tester
+      .widgetList<RichText>(find.byType(RichText))
+      .map((text) => text.text.toPlainText());
+  TextSpan? markerSpan(WidgetTester tester) {
+    TextSpan? found;
+    for (final text in tester.widgetList<RichText>(find.byType(RichText))) {
+      text.text.visitChildren((span) {
+        if (span is TextSpan && span.text == '(edited)') found = span;
+        return found == null;
+      });
+    }
+    return found;
+  }
+
+  testWidgets('an edit is marked after the body, never inside other text', (
+    tester,
+  ) async {
+    Future<void> show(String content, {bool edited = true, bool own = false}) =>
+        tester
+            .pumpWidget(
+              _testable(
+                MessageContent(
+                  content: content,
+                  bubble: true,
+                  edited: edited,
+                  ownMessage: own,
+                ),
+              ),
+            )
+            .then((_) => tester.pumpAndSettle());
+
+    // Prose: inline after the last line, in the muted metadata colour.
+    await show('First\n\nHi how are ya.');
+    expect(
+      plainTexts(tester),
+      anyElement(endsWith('\nHi how are ya. (edited)')),
+    );
+    final context = tester.element(find.byType(MessageContent));
+    expect(markerSpan(tester)?.style?.color, context.colors.onSurfaceVariant);
+
+    // Your own accent bubble draws it in the bubble's ink.
+    await show('Mine', own: true);
+    expect(plainTexts(tester), contains('Mine (edited)'));
+    expect(
+      markerSpan(tester)?.style?.color,
+      ChatColors.of(tester.element(find.byType(MessageContent))).foreground,
+    );
+
+    // Bodies the slot could restyle render exactly as unedited, plus the
+    // marker on its own line inside the same text bubble.
+    for (final content in [
+      '```npm install```',
+      'Run this:\n```npm install```',
+      'Intro\n\n```\ncode\n```',
+      '````\ncode\n````',
+      '```\nunclosed',
+      '| a | b |\n| - | - |\n| 1 | 2 |',
+      'Above\n\n---',
+      'ok\n-',
+      'ok\n#',
+      'todo\n[x]',
+      '# Heading',
+      'ok\n\nhttps://example.com/file.pdf',
+    ]) {
+      await show(content, edited: false);
+      final unedited = plainTexts(tester).toList();
+      await show(content);
+      expect(plainTexts(tester), [...unedited, '(edited)'], reason: content);
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('message-text-bubble-0')),
+          matching: find.text('(edited)'),
+        ),
+        findsOneWidget,
+        reason: content,
+      );
+    }
+
+    // An escaped bracket is text, not display math, so the marker joins it.
+    await show(r'see \[x\]');
+    expect(plainTexts(tester), contains('see [x] (edited)'));
+
+    // Inside an unclosed <u> or a heading the marker keeps its own style.
+    await show('see <u>this');
+    expect(markerSpan(tester)?.style?.decoration, TextDecoration.none);
+
+    // Trailing media: the marker follows it, outside every text bubble.
+    await show('![](https://example.com/a.png)');
+    expect(find.text('(edited)'), findsOneWidget);
+    expect(
+      find.descendant(
+        of: find.byWidgetPredicate(
+          (widget) =>
+              widget.key is ValueKey<String> &&
+              (widget.key! as ValueKey<String>).value.startsWith(
+                'message-text-bubble-',
+              ),
+        ),
+        matching: find.text('(edited)'),
+      ),
+      findsNothing,
+    );
+
+    // Unedited bodies stay unmarked. An authored slot character is drawn as
+    // written, and only an edit adds the marker, on its own line.
+    bool shows(String text) => tester
+        .widgetList<RichText>(find.byType(RichText))
+        .any((rich) => rich.text.toPlainText().contains(text));
+    await show('Plain', edited: false);
+    expect(markerSpan(tester), isNull);
+    await show('Sneaky $editedSlot', edited: false);
+    expect(shows('Sneaky $editedSlot'), isTrue);
+    expect(markerSpan(tester), isNull);
+    await show('Sneaky $editedSlot');
+    expect(shows('Sneaky $editedSlot'), isTrue);
+    expect(find.text('(edited)'), findsOneWidget);
+    // Also when the authored slot is in an earlier part of the message.
+    await show('Sneaky $editedSlot\n![](https://example.com/a.png)\nafter');
+    expect(shows('Sneaky $editedSlot'), isTrue);
+    expect(find.text('(edited)'), findsOneWidget);
+  });
+}

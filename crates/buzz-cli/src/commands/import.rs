@@ -109,7 +109,7 @@ pub async fn cmd_import_slack(client: &BuzzClient, p: ImportSlackParams) -> Resu
         &selected,
         &state,
         &binding_map,
-        &client.keys().public_key().to_hex(),
+        &client.public_key().to_hex(),
     );
 
     if p.dry_run {
@@ -879,9 +879,7 @@ mod tests {
         // Points at a port nothing listens on — dry run must never dial it.
         let client = BuzzClient::new(
             "http://127.0.0.1:1".to_string(),
-            Keys::generate(),
-            None,
-            None,
+            crate::credentials::Credentials::from_keys(Keys::generate()),
         )
         .expect("client");
         cmd_import_slack(

@@ -185,6 +185,13 @@ export function useEmojiAutocomplete(customEmoji: CustomEmoji[] = []) {
 
       if (debounceTimerRef.current !== null) {
         clearTimeout(debounceTimerRef.current);
+        debounceTimerRef.current = null;
+      }
+
+      // A cleared draft closes now; see useChannelLinks.
+      if (value.length === 0) {
+        setEmojiQuery(null);
+        return;
       }
 
       debounceTimerRef.current = setTimeout(() => {
@@ -238,8 +245,11 @@ export function useEmojiAutocomplete(customEmoji: CustomEmoji[] = []) {
         return { handled: true };
       }
 
+      // Forward Tab selects; Shift+Tab deliberately does not. The reverse
+      // move stays the browser's, so this overlay can't swallow a keyboard
+      // user's way back out (see useMentions for the same split).
       if (
-        event.key === "Tab" ||
+        (event.key === "Tab" && !event.shiftKey) ||
         (event.key === "Enter" &&
           !event.ctrlKey &&
           !event.metaKey &&

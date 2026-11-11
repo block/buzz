@@ -137,7 +137,9 @@ class _FlappingBeePainter extends CustomPainter {
     canvas.drawPath(finishedMark, Paint()..color = color);
 
     if (eyeProgress case final progress?) {
-      final pupilRadius = 20 * progress.clamp(0.0, 1.0);
+      // The eye cutouts are 54px wide. A full pupil must reach their 27px
+      // radius so the emoji-eye overlay never exposes the background beneath.
+      final pupilRadius = 27 * progress.clamp(0.0, 1.0);
       final pupilPaint = Paint()..color = color;
       canvas
         ..drawCircle(const Offset(193.3, 84.4), pupilRadius, pupilPaint)

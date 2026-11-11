@@ -385,10 +385,9 @@ class BeeRefreshIndicator extends HookConsumerWidget {
                                   width: _beeWidth,
                                   color: context.colors.primary,
                                   flapAmount: flapAmount,
-                                  eyeProgress:
-                                      !isLoading &&
-                                          !showEyeEmoji &&
-                                          pupilProgress > 0
+                                  eyeProgress: showEyeEmoji
+                                      ? 1
+                                      : !isLoading && pupilProgress > 0
                                       ? pupilProgress
                                       : null,
                                 ),

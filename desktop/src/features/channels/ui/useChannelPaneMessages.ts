@@ -5,6 +5,7 @@ import {
 } from "@/features/channels/ui/ChannelPane.helpers";
 import type { ChannelPaneProps } from "@/features/channels/ui/ChannelPane.types";
 import { buildMainTimelineEntries } from "@/features/messages/lib/threadPanel";
+import { getRecentMentionPubkeys } from "@/features/messages/lib/recentMentionPubkeys";
 import { isWelcomeExperienceChannel } from "@/features/onboarding/welcome";
 
 type ChannelPaneMessagesOptions = Pick<
@@ -46,5 +47,14 @@ export function useChannelPaneMessages({
     [isHuddleTranscript, profiles, threadSummaries, visibleMessages],
   );
 
-  return { mainTimelineEntries, visibleMessages };
+  const recentMentionPubkeys = React.useMemo(
+    () => getRecentMentionPubkeys(messages, activeChannel?.channelType),
+    [activeChannel?.channelType, messages],
+  );
+
+  return {
+    mainTimelineEntries,
+    recentMentions: recentMentionPubkeys,
+    visibleMessages,
+  };
 }

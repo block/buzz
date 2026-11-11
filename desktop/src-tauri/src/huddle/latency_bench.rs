@@ -64,8 +64,10 @@ fn read_wav_f32_48k(path: &str) -> Vec<f32> {
     assert!(fmt_ok, "fmt chunk missing");
     let (off, len) = data.expect("data chunk missing");
     bytes[off..off + len]
-        .chunks_exact(4)
-        .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|b| f32::from_le_bytes(*b))
         .collect()
 }
 
@@ -141,6 +143,7 @@ fn baseline_stt_fake_llm_tts_first_audio() {
         tts_dir,
         Arc::clone(&tts_active),
         Arc::clone(&tts_cancel),
+        super::human_floor::HumanFloor::new(),
         "eve",
         None, // default output device
         None, // no Tauri app handle
@@ -152,7 +155,14 @@ fn baseline_stt_fake_llm_tts_first_audio() {
     );
 
     let t = Instant::now();
-    let (stt, mut text_rx) = SttPipeline::new(stt_dir, None, None).expect("stt pipeline");
+    let (stt, mut text_rx) = SttPipeline::new(
+        stt_dir,
+        None,
+        None,
+        super::human_floor::HumanFloor::new(),
+        None,
+    )
+    .expect("stt pipeline");
     // Recognizer loads inside the worker thread; give it time, then verify
     // liveness via a first throwaway feed below.
     std::thread::sleep(Duration::from_secs(2));

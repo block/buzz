@@ -1,26 +1,56 @@
+import 'package:buzz/features/channels/channel_management_provider.dart';
+import 'package:buzz/shared/custom_emoji/custom_emoji_render.dart';
+import 'package:buzz/shared/emoji/native_emoji_glyph.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
+import 'package:buzz/shared/emoji/emoji_avatar.dart';
+import 'dart:async';
+import 'dart:ui' show SemanticsAction;
+import 'package:buzz/shared/theme/buzz_icons.dart';
+import 'package:buzz/features/channels/channel_identity_names_provider.dart';
+import 'package:buzz/shared/identity_names/identity_names.dart';
+import 'package:buzz/features/channels/message_long_press_region.dart';
 import 'package:buzz/features/channels/reaction_row.dart';
+import 'package:buzz/shared/hosted/builderlab_account.dart';
+import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
+import 'package:buzz/shared/hosted/native_media_headers.dart';
+import 'package:buzz/shared/relay/relay.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:nostr/nostr.dart' as nostr;
+import 'dart:convert';
 import 'package:buzz/features/channels/timeline_message.dart';
 import 'package:buzz/shared/emoji/emoji_burst.dart';
 import 'package:buzz/shared/emoji/emoji_data.dart';
 import 'package:buzz/shared/emoji/emoji_data_provider.dart';
-import 'package:buzz/features/profile/user_cache_provider.dart';
-import 'package:buzz/features/profile/user_profile.dart';
+import 'package:buzz/shared/profile/user_cache_provider.dart';
+import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter/foundation.dart';
+import 'package:buzz/shared/widgets/native_message_presentation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../helpers/widget_helpers.dart';
+
+part 'reaction_row_test/combined_tests.dart';
+
+const _alice =
+    'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 
 const _fire = '\u{1F525}';
 
 /// 👀 — a real reaction that is deliberately not in the positive-burst set.
 const _eyes = '\u{1F440}';
 
+const _aliceAvatarUrl = 'https://relay.example/media/alice.png';
+const _customEmojiUrl = 'https://relay.example/media/fire.png';
+
 TimelineReaction _reaction({
   String emoji = _fire,
   int count = 1,
   bool reactedByCurrentUser = false,
-  List<String> userPubkeys = const ['alice'],
+  List<String> userPubkeys = const [_alice],
 }) => TimelineReaction(
   emoji: emoji,
   count: count,
@@ -55,8 +85,10 @@ Future<ProviderContainer> _pumpRow(
   required List<TimelineReaction> reactions,
   void Function(String emoji)? onToggle,
   bool showAddButton = false,
+  bool combined = false,
   VoidCallback? onAddReaction,
   String messageId = _messageId,
+  VoidCallback? onMessageLongPress,
 }) async {
   await tester.pumpWidget(
     WidgetHelpers.testable(
@@ -64,16 +96,21 @@ Future<ProviderContainer> _pumpRow(
         emojiDatasetOrEmptyProvider.overrideWithValue(_dataset),
         userCacheProvider.overrideWith(
           () => _FakeUserCacheNotifier({
-            'alice': const UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            _alice: const UserProfile(pubkey: _alice, displayName: 'Alice'),
           }),
         ),
       ],
-      child: ReactionRow(
-        messageId: messageId,
-        reactions: reactions,
-        onToggle: onToggle ?? (_) {},
-        showAddButton: showAddButton,
-        onAddReaction: onAddReaction,
+      child: MessageLongPressInkWell(
+        onLongPress: (_) => onMessageLongPress?.call(),
+        child: ReactionRow(
+          messageId: messageId,
+          combined: combined,
+          channelId: 'channel',
+          reactions: reactions,
+          onToggle: onToggle ?? (_) {},
+          showAddButton: showAddButton,
+          onAddReaction: onAddReaction,
+        ),
       ),
     ),
   );
@@ -89,11 +126,777 @@ class _FakeUserCacheNotifier extends UserCacheNotifier {
   @override
   Map<String, UserProfile> build() => _profiles;
 
+  void replace(Map<String, UserProfile> profiles) => state = profiles;
+
   @override
-  Future<void> preload(Iterable<String> pubkeys) async {}
+  Future<bool> preload(List<String> pubkeys) async => true;
+}
+
+class _RecordingReactionActions implements ChannelActions {
+  final removed = <String>[];
+  final added = <String>[];
+  @override
+  Future<void> removeReaction(String eventId, String emoji) async =>
+      removed.add(eventId);
+  @override
+  Future<void> addReaction(
+    String eventId,
+    String emoji, {
+    required String targetAuthor,
+  }) async => added.add(eventId);
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 void main() {
+  combinedReactionTests();
+
+  testWidgets('removing the sole reaction closes the sheet', (tester) async {
+    final reactions = ValueNotifier<List<TimelineReaction>>([
+      _reaction(reactedByCurrentUser: true),
+    ]);
+    addTearDown(reactions.dispose);
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [
+          userCacheProvider.overrideWith(() => _FakeUserCacheNotifier({})),
+        ],
+        child: Builder(
+          builder: (context) => TextButton(
+            onPressed: () => showReactionDetailSheet(
+              context: context,
+              channelId: 'channel',
+              reactions: reactions,
+              onToggle: (_) => reactions.value = [],
+            ),
+            child: const Text('Open'),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('Open'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('reaction-toggle-$_fire')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('reaction-details-sheet')), findsNothing);
+    expect(find.text('Open'), findsOneWidget);
+  });
+
+  testWidgets('a stale toggle for an absent emoji does nothing', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        child: Consumer(
+          builder: (context, ref, _) => TextButton(
+            onPressed: () => toggleReaction(
+              ref,
+              TimelineMessage(
+                id: 'message',
+                pubkey: _alice,
+                createdAt: 1,
+                content: '',
+              ),
+              _fire,
+            ),
+            child: const Text('Toggle'),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('Toggle'));
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('native combined tray toggles and streams updated counts', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    final completion = Completer<Map<String, Object?>>();
+    Map<Object?, Object?>? payload;
+    Map<Object?, Object?>? updated;
+    final toggles = <String>[];
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      NativeMessagePresentation.channel,
+      (call) async {
+        if (call.method == 'reactions') {
+          payload = call.arguments as Map;
+          return completion.future;
+        }
+        if (call.method == 'updateReactions') updated = call.arguments as Map;
+        return <String, Object?>{};
+      },
+    );
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        NativeMessagePresentation.channel,
+        null,
+      ),
+    );
+    await _pumpRow(
+      tester,
+      combined: true,
+      reactions: [_reaction()],
+      onToggle: (emoji) => toggles.add('old:$emoji'),
+    );
+    await tester.tap(find.byKey(const ValueKey('combined-reaction-tray')));
+    await tester.pumpAndSettle();
+    await _pumpRow(
+      tester,
+      combined: true,
+      reactions: [_reaction(count: 2, reactedByCurrentUser: true)],
+      onToggle: (emoji) => toggles.add('new:$emoji'),
+    );
+    expect((updated!['reactions'] as List).single, containsPair('count', 2));
+    expect(
+      (updated!['reactions'] as List).single,
+      containsPair('selected', true),
+    );
+    expect(updated!['requestId'], payload!['requestId']);
+    await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+      NativeMessagePresentation.channel.name,
+      const StandardMethodCodec().encodeMethodCall(
+        MethodCall('toggleReaction', {
+          'requestId': payload!['requestId'],
+          'emoji': _fire,
+        }),
+      ),
+      (_) {},
+    );
+    await tester.pump();
+    expect(toggles, ['new:$_fire']);
+    await tester.pumpWidget(const SizedBox());
+    await tester.pumpAndSettle();
+    expect(updated!['reactions'], isEmpty);
+    completion.complete({});
+    await tester.pumpAndSettle();
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets(
+    'native reactor labels retain channel qualifications and live updates',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      final bot = 'b' * 64;
+      final roster = 'c' * 64;
+      var directoryName = 'Honey';
+      final calls = <Map<Object?, Object?>>[];
+      final mergedProfiles = <Object?, Object?>{};
+      final completion = Completer<Map<String, Object?>>();
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        NativeMessagePresentation.channel,
+        (call) async {
+          if (call.method == 'reactions' || call.method == 'updateProfiles') {
+            final args = call.arguments as Map<Object?, Object?>;
+            mergedProfiles.addAll(args['profiles'] as Map);
+            calls.add({...args, 'profiles': Map.of(mergedProfiles)});
+          }
+          if (call.method == 'reactions') return completion.future;
+          return <String, Object?>{};
+        },
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          NativeMessagePresentation.channel,
+          null,
+        ),
+      );
+      await tester.pumpWidget(
+        WidgetHelpers.testable(
+          overrides: [
+            emojiDatasetOrEmptyProvider.overrideWithValue(_dataset),
+            userCacheProvider.overrideWith(
+              () => _FakeUserCacheNotifier({
+                _alice: const UserProfile(
+                  pubkey: _alice,
+                  displayName: 'Honey',
+                  avatarUrl: _aliceAvatarUrl,
+                ),
+              }),
+            ),
+            // Native image loads bypass the hosted HTTP client, so the sheet
+            // must carry the relay-auth headers for each image itself.
+            nativeMediaHeadersProvider.overrideWithValue(
+              (url) => {'Nostr-Federated-Identity': 'Bearer $url'},
+            ),
+            channelIdentityNamesProvider('channel').overrideWith(
+              (ref) =>
+                  IdentityNameSources(
+                    profiles: ref.watch(userCacheProvider),
+                    agentDisplayNames: {bot: directoryName},
+                  ).scope(
+                    [_alice, bot, roster],
+                    agentPubkeys: {bot},
+                    fallbackNames: {roster: 'Roster name'},
+                  ),
+            ),
+          ],
+          child: ReactionRow(
+            messageId: _messageId,
+            channelId: 'channel',
+            reactions: [
+              TimelineReaction(
+                emoji: _fire,
+                count: 3,
+                reactedByCurrentUser: false,
+                userPubkeys: [_alice, bot, roster],
+                emojiUrl: _customEmojiUrl,
+              ),
+            ],
+            onToggle: (_) {},
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(ReactionRow)),
+      );
+      await tester.longPress(
+        find.byKey(const ValueKey('reaction-pill-$_fire')),
+      );
+      await tester.pumpAndSettle();
+      List<Object?> labels(Map<Object?, Object?> payload) {
+        final profiles = payload['profiles'] as Map;
+        return [
+          for (final key in [_alice, bot, roster])
+            (profiles[key] as Map)['name'],
+        ];
+      }
+
+      expect(labels(calls.first), ['Honey', 'Honey (agent)', 'Roster name']);
+      final avatar = (calls.first['profiles'] as Map)[_alice] as Map;
+      expect(avatar['headers'], {
+        'Nostr-Federated-Identity': 'Bearer $_aliceAvatarUrl',
+      });
+      final reaction = (calls.first['reactions'] as List).single as Map;
+      expect(reaction['headers'], {
+        'Nostr-Federated-Identity': 'Bearer $_customEmojiUrl',
+      });
+      // Directory/roster changes must propagate without a user-cache event.
+      directoryName = 'Helper';
+      container.invalidate(channelIdentityNamesProvider('channel'));
+      await tester.pumpAndSettle();
+      expect(labels(calls.last), ['Honey', 'Helper', 'Roster name']);
+      (container.read(userCacheProvider.notifier) as _FakeUserCacheNotifier)
+          .replace({
+            _alice: const UserProfile(pubkey: _alice, displayName: 'Helper'),
+          });
+      await tester.pumpAndSettle();
+      expect(labels(calls.last), ['Helper', 'Helper (agent)', 'Roster name']);
+      expect(calls.map((c) => c['requestId']).toSet(), hasLength(1));
+      completion.complete(<String, Object?>{});
+      await tester.pumpAndSettle();
+      final count = calls.length;
+      directoryName = 'Closed';
+      container.invalidate(channelIdentityNamesProvider('channel'));
+      await tester.pumpAndSettle();
+      expect(calls, hasLength(count));
+      debugDefaultTargetPlatformOverride = null;
+    },
+  );
+
+  testWidgets(
+    'native reaction sheet opens at once and resends media auth after a refresh',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      FlutterSecureStorage.setMockInitialValues({});
+      final keys = nostr.Keys.generate();
+      final organization = Uri.parse('https://org.example');
+      final config = RelayConfig(
+        baseUrl: 'https://relay.example',
+        nsec: keys.nsec,
+      );
+      final expiry = DateTime.now().toUtc().add(const Duration(days: 1));
+      await const FlutterSecureStorage().write(
+        key: 'buzz_hosted_session_org_example_v1',
+        value: jsonEncode({
+          'origin': organization.toString(),
+          'credential': 'secret',
+          'subject': 'member',
+          'expires_at': expiry.toIso8601String(),
+        }),
+      );
+      var clock = DateTime.utc(2026, 11, 4, 12);
+      var issued = 0;
+      Completer<void>? issuerGate;
+      final auth = HostedRelayAuth(
+        BuilderlabAccountClient(),
+        organization: BuilderlabAccountClient(
+          accountOrigin: organization,
+          httpClient: MockClient((request) async {
+            if (request.url.path.endsWith('/assertions')) {
+              await issuerGate?.future;
+            }
+            return switch (request.url.path) {
+              '/api/goose/v1/auth/me' => http.Response(
+                jsonEncode({
+                  'subject': 'member',
+                  'expires_at': expiry.toIso8601String(),
+                }),
+                200,
+              ),
+              '/api/goose/v1/buzz/nostr-identities/current' => http.Response(
+                jsonEncode({
+                  'identity': {'pubkey_hex': keys.public},
+                }),
+                200,
+              ),
+              '/api/goose/v1/buzz/identity/assertions' => http.Response(
+                jsonEncode({
+                  'assertion': 'token-${++issued}',
+                  'nostr_pubkey': keys.public,
+                  'expires_at': clock.millisecondsSinceEpoch ~/ 1000 + 120,
+                }),
+                200,
+              ),
+              _ => http.Response('{}', 404),
+            };
+          }),
+        ),
+        organizationRelay: (relay) => relay.host == 'relay.example',
+        now: () => clock,
+      );
+      addTearDown(auth.dispose);
+      // The live socket's assertion, issued when the session connected.
+      expect(await auth.headers(config), {
+        'Nostr-Federated-Identity': 'Bearer token-1',
+      });
+      final payloads = <Map<Object?, Object?>>[];
+      final reactionUpdates = <List<Object?>>[];
+      final profileUpdates = <Map<Object?, Object?>>[];
+      var completion = Completer<Map<String, Object?>>();
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        NativeMessagePresentation.channel,
+        (call) async {
+          final args = call.arguments as Map<Object?, Object?>;
+          switch (call.method) {
+            case 'reactions':
+              payloads.add(args);
+              return completion.future;
+            case 'updateReactions':
+              reactionUpdates.add(args['reactions'] as List<Object?>);
+            case 'updateProfiles':
+              profileUpdates.add(args['profiles'] as Map<Object?, Object?>);
+          }
+          return <String, Object?>{};
+        },
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          NativeMessagePresentation.channel,
+          null,
+        ),
+      );
+      await tester.pumpWidget(
+        WidgetHelpers.testable(
+          overrides: [
+            emojiDatasetOrEmptyProvider.overrideWithValue(_dataset),
+            relayConfigProvider.overrideWith(
+              () => _FixedRelayConfigNotifier(config),
+            ),
+            hostedRelayAuthProvider.overrideWithValue(auth),
+            userCacheProvider.overrideWith(
+              () => _FakeUserCacheNotifier({
+                _alice: const UserProfile(
+                  pubkey: _alice,
+                  displayName: 'Honey',
+                  avatarUrl: _aliceAvatarUrl,
+                ),
+              }),
+            ),
+            channelIdentityNamesProvider('channel').overrideWith(
+              (ref) => IdentityNameSources(
+                profiles: ref.watch(userCacheProvider),
+              ).scope([_alice]),
+            ),
+          ],
+          child: ReactionRow(
+            messageId: _messageId,
+            channelId: 'channel',
+            reactions: [
+              TimelineReaction(
+                emoji: _fire,
+                count: 1,
+                reactedByCurrentUser: false,
+                userPubkeys: [_alice],
+                emojiUrl: _customEmojiUrl,
+              ),
+            ],
+            onToggle: (_) {},
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      // Rendering the row may itself fetch media through the hosted client,
+      // so enter the margin only now (120s lifetime, 30s margin): the socket
+      // is still valid, but the synchronous cache reads as empty.
+      String? authOf(Object? item) =>
+          ((item as Map)['headers'] as Map?)?['Nostr-Federated-Identity']
+              as String?;
+      final issuedBeforeSheet = issued;
+      clock = clock.add(const Duration(seconds: 100));
+      expect(auth.cachedHeaders(config), isNull);
+      // A stalled issuer must not hold the sheet back: cached names and
+      // emoji show at once, and media gets the assertion when it arrives.
+      issuerGate = Completer<void>();
+      await tester.longPress(
+        find.byKey(const ValueKey('reaction-pill-$_fire')),
+      );
+      await tester.pump();
+      final payload = payloads.single;
+      final initialProfiles = payload['profiles'] as Map;
+      expect((initialProfiles[_alice] as Map)['name'], 'Honey');
+      expect(authOf(initialProfiles[_alice]), isNull);
+      expect(authOf((payload['reactions'] as List).single), isNull);
+      expect(issued, issuedBeforeSheet);
+
+      issuerGate.complete();
+      await tester.pumpAndSettle();
+      expect(issued, issuedBeforeSheet + 1);
+      expect(authOf(reactionUpdates.last.single), 'Bearer token-$issued');
+      expect(authOf(profileUpdates.last[_alice]), 'Bearer token-$issued');
+      completion.complete(<String, Object?>{});
+      await tester.pumpAndSettle();
+
+      // A fresh assertion needs no refresh, so nothing is resent.
+      reactionUpdates.clear();
+      completion = Completer<Map<String, Object?>>();
+      await tester.longPress(
+        find.byKey(const ValueKey('reaction-pill-$_fire')),
+      );
+      await tester.pumpAndSettle();
+      expect(payloads, hasLength(2));
+      expect(
+        authOf((payloads.last['reactions'] as List).single),
+        'Bearer token-$issued',
+      );
+      expect(reactionUpdates, isEmpty);
+      completion.complete(<String, Object?>{});
+      await tester.pumpAndSettle();
+
+      // Unmounting while a slow issuer is pending sends nothing afterwards:
+      // the sheet's cleanup marks it disposed before auth completes.
+      issuerGate = Completer<void>();
+      clock = clock.add(const Duration(seconds: 200));
+      expect(auth.cachedHeaders(config), isNull);
+      completion = Completer<Map<String, Object?>>();
+      await tester.longPress(
+        find.byKey(const ValueKey('reaction-pill-$_fire')),
+      );
+      await tester.pump();
+      expect(payloads, hasLength(3));
+      await tester.pumpWidget(const SizedBox());
+      completion.complete(<String, Object?>{});
+      await tester.pumpAndSettle();
+      reactionUpdates.clear();
+      profileUpdates.clear();
+      issuerGate.complete();
+      await tester.pumpAndSettle();
+      expect(reactionUpdates, isEmpty);
+      expect(profileUpdates, isEmpty);
+      expect(tester.takeException(), isNull);
+      debugDefaultTargetPlatformOverride = null;
+    },
+  );
+
+  testWidgets(
+    'native hydration sends bounded diffs and preserves emoji avatars',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      final pubkeys = [
+        for (var i = 1; i <= 2500; i++) i.toRadixString(16).padLeft(64, '0'),
+      ];
+      final completion = Completer<Map<String, Object?>>();
+      final updates = <Map>[];
+      Map? initial;
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        NativeMessagePresentation.channel,
+        (call) async {
+          final args = call.arguments as Map;
+          if (call.method == 'reactions') {
+            initial = args['profiles'] as Map;
+            return completion.future;
+          }
+          if (call.method == 'updateProfiles') {
+            updates.add(args['profiles'] as Map);
+          }
+          return <String, Object?>{};
+        },
+      );
+      await tester.pumpWidget(
+        WidgetHelpers.testable(
+          overrides: [
+            emojiDatasetOrEmptyProvider.overrideWithValue(_dataset),
+            userCacheProvider.overrideWith(() => _FakeUserCacheNotifier({})),
+            channelIdentityNamesProvider('channel').overrideWith(
+              (ref) => IdentityNameSources(
+                profiles: ref.watch(userCacheProvider),
+              ).scope(pubkeys),
+            ),
+          ],
+          child: ReactionRow(
+            messageId: _messageId,
+            channelId: 'channel',
+            reactions: [_reaction(userPubkeys: pubkeys)],
+            onToggle: (_) {},
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(ReactionRow)),
+      );
+      await tester.longPress(
+        find.byKey(const ValueKey('reaction-pill-$_fire')),
+      );
+      await tester.pumpAndSettle();
+      expect(initial, hasLength(2500));
+      final cache = <String, UserProfile>{};
+      for (var start = 0; start < pubkeys.length; start += 1000) {
+        for (final key in pubkeys.skip(start).take(1000)) {
+          cache[key] = UserProfile(
+            pubkey: key,
+            displayName: 'Person $key',
+            avatarUrl: key == pubkeys.first
+                ? emojiAvatarDataUrl('😊', 0xFFFF6B9A)
+                : null,
+          );
+        }
+        (container.read(userCacheProvider.notifier) as _FakeUserCacheNotifier)
+            .replace(Map.of(cache));
+        await tester.pumpAndSettle();
+      }
+      expect(
+        updates.length,
+        10,
+      ); // 4 + 4 + 2 chunks, rather than full-set payloads.
+      expect(updates.every((p) => p.length <= 256), isTrue);
+      expect(updates.fold<int>(0, (sum, p) => sum + p.length), 2500);
+      final avatar = updates.first[pubkeys.first] as Map;
+      expect(avatar['avatarEmoji'], '😊');
+      expect(avatar['avatarColor'], 0xFFFF6B9A);
+      expect(avatar.containsKey('url'), isFalse);
+      cache['f' * 64] = UserProfile(pubkey: 'f' * 64, displayName: 'Unrelated');
+      (container.read(userCacheProvider.notifier) as _FakeUserCacheNotifier)
+          .replace(Map.of(cache));
+      await tester.pumpAndSettle();
+      expect(updates, hasLength(10));
+      completion.complete(<String, Object?>{});
+      await tester.pumpAndSettle();
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        NativeMessagePresentation.channel,
+        null,
+      );
+      debugDefaultTargetPlatformOverride = null;
+    },
+  );
+
+  testWidgets(
+    'holding a pill opens native membership with all reactions without toggling',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      Map<Object?, Object?>? payload;
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        NativeMessagePresentation.channel,
+        (call) async {
+          if (call.method == 'reactions') {
+            payload = call.arguments as Map<Object?, Object?>;
+          }
+          return <String, Object?>{};
+        },
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          NativeMessagePresentation.channel,
+          null,
+        ),
+      );
+      var toggles = 0;
+      var messageHolds = 0;
+      await _pumpRow(
+        tester,
+        reactions: [
+          _reaction(),
+          _reaction(emoji: _eyes),
+        ],
+        onToggle: (_) => toggles++,
+        onMessageLongPress: () => messageHolds++,
+      );
+      await tester.longPress(
+        find.byKey(const ValueKey('reaction-pill-$_eyes')),
+      );
+      await tester.pumpAndSettle();
+      expect(toggles, 0);
+      expect(messageHolds, 0);
+      expect(payload!.containsKey('initialEmoji'), isFalse);
+      expect(
+        ((payload!['reactions'] as List).first as Map)['selected'],
+        isFalse,
+      );
+      expect((payload!['reactions'] as List).length, 2);
+      expect(((payload!['reactions'] as List).first as Map)['burst'], isTrue);
+      expect(((payload!['reactions'] as List).last as Map)['burst'], isFalse);
+      final profiles = payload!['profiles'] as Map;
+      expect((profiles[_alice] as Map)['name'], 'Alice');
+      expect(find.byType(BottomSheet), findsNothing);
+      debugDefaultTargetPlatformOverride = null;
+    },
+  );
+
+  testWidgets(
+    'Android reaction counts open attribution without toggling or opening message actions',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      var toggles = 0;
+      var messageHolds = 0;
+      await _pumpRow(
+        tester,
+        reactions: [
+          _reaction(reactedByCurrentUser: true),
+          _reaction(emoji: _eyes),
+        ],
+        onToggle: (_) => toggles++,
+        onMessageLongPress: () => messageHolds++,
+      );
+      final pill = find.byKey(const ValueKey('reaction-pill-$_eyes'));
+      await tester.longPress(
+        find.descendant(of: pill, matching: find.text('1')),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Reactions'), findsOneWidget);
+      expect(find.text('All 2'), findsNothing);
+      for (final emoji in [_fire, _eyes]) {
+        expect(
+          find.byKey(ValueKey('reactor-$_alice-$emoji')).hitTestable(),
+          findsOneWidget,
+        );
+      }
+      expect(
+        tester
+            .widget<FilterChip>(
+              find.byKey(const ValueKey('reaction-toggle-$_fire')),
+            )
+            .selected,
+        isTrue,
+      );
+      expect(
+        tester
+            .widget<FilterChip>(
+              find.byKey(const ValueKey('reaction-toggle-$_eyes')),
+            )
+            .selected,
+        isFalse,
+      );
+      await tester.tap(find.byKey(const ValueKey('reaction-toggle-$_fire')));
+      await tester.pumpAndSettle();
+      expect(toggles, 1);
+      for (final emoji in [_fire, _eyes]) {
+        expect(
+          find.byKey(ValueKey('reactor-$_alice-$emoji')).hitTestable(),
+          findsOneWidget,
+        );
+      }
+      expect(messageHolds, 0);
+      await tester.tapAt(const Offset(20, 20));
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('reaction-details-sheet')),
+        findsNothing,
+      );
+      debugDefaultTargetPlatformOverride = null;
+    },
+  );
+
+  testWidgets(
+    'native sheet reuses custom emoji bytes the pill already downloaded',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      const shortcode = ':partyparrot:';
+      final png = base64Decode(
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==',
+      );
+      var fetches = 0;
+      Map<Object?, Object?>? payload;
+      final completion = Completer<Map<String, Object?>>();
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        NativeMessagePresentation.channel,
+        (call) async {
+          if (call.method == 'reactions') {
+            payload = call.arguments as Map<Object?, Object?>;
+            return completion.future;
+          }
+          return <String, Object?>{};
+        },
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          NativeMessagePresentation.channel,
+          null,
+        ),
+      );
+      await tester.pumpWidget(
+        WidgetHelpers.testable(
+          overrides: [
+            emojiDatasetOrEmptyProvider.overrideWithValue(_dataset),
+            mediaHttpClientProvider.overrideWithValue(
+              MockClient((request) async {
+                fetches++;
+                return http.Response.bytes(png, 200);
+              }),
+            ),
+          ],
+          child: ReactionRow(
+            messageId: _messageId,
+            channelId: 'channel',
+            reactions: const [
+              TimelineReaction(
+                emoji: shortcode,
+                count: 1,
+                reactedByCurrentUser: false,
+                userPubkeys: [_alice],
+                emojiUrl: 'https://relay.example/media/party.png',
+              ),
+            ],
+            onToggle: (_) {},
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final source = tester.widget<Image>(
+        find.descendant(
+          of: find.byType(CustomEmojiImage),
+          matching: find.byType(Image),
+        ),
+      );
+      await tester.runAsync(
+        () => precacheImage(
+          source.image,
+          tester.element(find.byType(CustomEmojiImage)),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(fetches, 1);
+
+      await tester.longPress(
+        find.byKey(const ValueKey('reaction-pill-$shortcode')),
+      );
+      await tester.pumpAndSettle();
+
+      final reaction = (payload!['reactions'] as List).single as Map;
+      expect(reaction['url'], 'https://relay.example/media/party.png');
+      expect(reaction['bytes'], png);
+      completion.complete(<String, Object?>{});
+      await tester.pumpAndSettle();
+      debugDefaultTargetPlatformOverride = null;
+    },
+  );
+
   group('ReactionRow', () {
     testWidgets('shows the count even at one, matching desktop', (
       tester,
@@ -187,7 +990,7 @@ void main() {
       await _pumpRow(
         tester,
         reactions: [
-          _reaction(count: 1, userPubkeys: const ['alice']),
+          _reaction(count: 1, userPubkeys: const [_alice]),
         ],
       );
 
@@ -196,10 +999,42 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.text(':fire:'), findsOneWidget);
+      expect(find.byTooltip(':fire:'), findsOneWidget);
+      expect(find.byType(FilterChip), findsOneWidget);
+      expect(find.text('All 1'), findsNothing);
       expect(find.text('Alice'), findsOneWidget);
     });
   });
+
+  for (final entry in [
+    (emoji: _fire, selected: false, bursts: true),
+    (emoji: _fire, selected: true, bursts: false),
+    (emoji: _eyes, selected: false, bursts: false),
+  ]) {
+    testWidgets('sheet burst for ${entry.emoji}, selected=${entry.selected}', (
+      tester,
+    ) async {
+      final container = await _pumpRow(
+        tester,
+        reactions: [
+          _reaction(emoji: entry.emoji, reactedByCurrentUser: entry.selected),
+        ],
+      );
+      final controller = container.read(emojiBurstControllerProvider);
+      await tester.longPress(
+        find.byKey(ValueKey('reaction-pill-${entry.emoji}')),
+      );
+      await tester.pumpAndSettle();
+      final chip = find.byKey(ValueKey('reaction-toggle-${entry.emoji}'));
+      expect(tester.widget<FilterChip>(chip).side!.width, 1);
+      await tester.tap(chip);
+      await tester.pump();
+      expect(controller.hasParticles, entry.bursts);
+      if (entry.bursts) {
+        expect(controller.debugLastBurstOrigin, tester.getCenter(chip));
+      }
+    });
+  }
 
   group('reaction bursts', () {
     testWidgets('adding a positive reaction bursts from the pill', (
@@ -321,6 +1156,7 @@ void main() {
               home: Scaffold(
                 body: ReactionRow(
                   messageId: _messageId,
+                  channelId: 'channel',
                   reactions: [_reaction(reactedByCurrentUser: true)],
                   onToggle: (_) {},
                 ),
@@ -367,6 +1203,7 @@ void main() {
               home: Scaffold(
                 body: ReactionRow(
                   messageId: _messageId,
+                  channelId: 'channel',
                   reactions: [_reaction()],
                   onToggle: (_) {},
                 ),
@@ -387,4 +1224,13 @@ void main() {
       expect(controller.hasParticles, isFalse);
     });
   });
+}
+
+class _FixedRelayConfigNotifier extends RelayConfigNotifier {
+  _FixedRelayConfigNotifier(this._config);
+
+  final RelayConfig _config;
+
+  @override
+  RelayConfig build() => _config;
 }

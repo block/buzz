@@ -37,6 +37,39 @@ export function entityDiscussionQuery(eventId: string): string {
   return eventId;
 }
 
+/** Channel the entity was created from (`h` tag, author-claimed). The tag
+ * proves only the channel — no event ties any specific message to the
+ * entity, so the origin renders as a channel-only row: never fetch nearby
+ * channel traffic to fabricate, quote, or attribute a "spawning"
+ * conversation. */
+export type DiscussionOrigin = {
+  channelId: string;
+  createdAt: number;
+  pubkey: string;
+};
+
+/** Prepend the origin channel when search did not already return it. */
+export function mergeOriginDiscussionChannel(
+  channels: DiscussionChannel[],
+  origin: DiscussionOrigin | null | undefined,
+): DiscussionChannel[] {
+  const channelId = origin?.channelId?.trim();
+  if (!channelId || !origin) return channels;
+  if (channels.some((channel) => channel.id === channelId)) {
+    return channels;
+  }
+  return [
+    {
+      id: channelId,
+      name: null,
+      messageCount: 1,
+      lastActivityAt: origin.createdAt,
+      participants: [origin.pubkey.toLowerCase()],
+    },
+    ...channels,
+  ];
+}
+
 /**
  * Search text matching messages that link a repository or any of its PRs
  * and issues: all those links carry `owner=<pubkey>&d=<dtag>`, so the owner

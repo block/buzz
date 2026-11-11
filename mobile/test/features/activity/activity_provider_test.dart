@@ -1,7 +1,16 @@
+import 'package:buzz/app.dart';
+import 'package:buzz/features/activity/activity_page.dart';
+import 'package:buzz/features/age_gate/age_signal_provider.dart';
+import 'package:buzz/shared/auth/auth.dart';
+import 'package:buzz/shared/theme/theme_provider.dart';
+import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'dart:async';
 
 import 'package:buzz/features/activity/activity_provider.dart';
+import 'package:buzz/features/activity/feed_item.dart';
 import 'package:buzz/features/channels/channel.dart';
+import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -20,6 +29,13 @@ class _RecordingSessionNotifier extends RelaySessionNotifier {
   int mentionFetchCount = 0;
   int activeMentionFetches = 0;
   int maxActiveMentionFetches = 0;
+  Completer<void>? hiddenSubscribeGate;
+  bool failNextHiddenSubscribe = false;
+  int hiddenUnsubscribeCount = 0;
+  // Per-batch gates keyed by hidden-subscribe call order (0-based), so a test
+  // can park an individual batch's REQ while letting earlier ones settle.
+  final Map<int, Completer<void>> hiddenSubscribeGatesByCall = {};
+  int hiddenSubscribeCallCount = 0;
 
   @override
   SessionState build() => const SessionState(status: SessionStatus.connected);
@@ -50,7 +66,7 @@ class _RecordingSessionNotifier extends RelaySessionNotifier {
         activeMentionFetches -= 1;
       }
     }
-    return _history.where((event) => _matches(filter, event)).toList();
+    return _window(filter);
   }
 
   @override
@@ -87,9 +103,8 @@ class _RecordingSessionNotifier extends RelaySessionNotifier {
         activeMentionFetches -= 1;
       }
     }
-    return _history
-        .where((event) => filters.any((filter) => _matches(filter, event)))
-        .toList();
+    // Like the production bridge: each filter's results, concatenated.
+    return [for (final filter in filters) ..._window(filter)];
   }
 
   @override
@@ -98,10 +113,49 @@ class _RecordingSessionNotifier extends RelaySessionNotifier {
     void Function(NostrEvent) onEvent, {
     void Function(String message)? onClosed,
   }) async {
+    // A hidden-DM resurface subscription carries the full channel-message kind
+    // set plus an `#h` tag; the visible-DM sub uses only kind 9. Batching and
+    // teardown assertions look only at the hidden-DM subscriptions.
+    final isHidden =
+        filter.tags.containsKey('#h') &&
+        filter.kinds.length == EventKind.channelMessageEventKinds.length;
+    if (isHidden) {
+      final callIndex = hiddenSubscribeCallCount++;
+      final perCallGate = hiddenSubscribeGatesByCall[callIndex];
+      if (perCallGate != null) await perCallGate.future;
+      final gate = hiddenSubscribeGate;
+      if (gate != null) await gate.future;
+      if (failNextHiddenSubscribe) {
+        failNextHiddenSubscribe = false;
+        throw StateError('relay rejected hidden-DM subscription');
+      }
+    }
     final subscription = (filter: filter, onEvent: onEvent);
     _subscriptions.add(subscription);
-    return () => _subscriptions.remove(subscription);
+    return () {
+      if (isHidden) hiddenUnsubscribeCount += 1;
+      _subscriptions.remove(subscription);
+    };
   }
+
+  /// The `#h` value lists of every registered hidden-DM subscription, in order.
+  List<List<String>> get hiddenDmSubscriptionBatches => [
+    for (final subscription in _subscriptions)
+      if (subscription.filter.tags.containsKey('#h') &&
+          subscription.filter.kinds.length ==
+              EventKind.channelMessageEventKinds.length)
+        subscription.filter.tags['#h']!,
+  ];
+
+  /// The `#h` value lists of every registered visible-DM subscription (kind 9
+  /// only), in order.
+  List<List<String>> get visibleDmSubscriptionBatches => [
+    for (final subscription in _subscriptions)
+      if (subscription.filter.tags.containsKey('#h') &&
+          subscription.filter.kinds.length == 1 &&
+          subscription.filter.kinds.single == 9)
+        subscription.filter.tags['#h']!,
+  ];
 
   void emit(NostrEvent event) {
     _history.add(event);
@@ -114,8 +168,26 @@ class _RecordingSessionNotifier extends RelaySessionNotifier {
 
   void seed(NostrEvent event) => _history.add(event);
 
+  /// The newest [NostrFilter.limit] matches, as a relay returns them.
+  List<NostrEvent> _window(NostrFilter filter) =>
+      (_history.where((event) => _matches(filter, event)).toList()
+            ..sort((a, b) {
+              final time = b.createdAt.compareTo(a.createdAt);
+              return time != 0 ? time : a.id.compareTo(b.id);
+            }))
+          .take(filter.limit)
+          .toList();
+
   bool _matches(NostrFilter filter, NostrEvent event) {
     if (!filter.kinds.contains(event.kind)) return false;
+    final until = filter.until;
+    if (until != null && event.createdAt > until) return false;
+    final beforeId = filter.extensions['before_id'] as String?;
+    if (beforeId != null &&
+        event.createdAt == until &&
+        event.id.compareTo(beforeId) <= 0) {
+      return false;
+    }
     for (final entry in filter.tags.entries) {
       final tagName = entry.key.startsWith('#')
           ? entry.key.substring(1)
@@ -257,6 +329,277 @@ void main() {
     expect(feed.mentions.map((item) => item.id), ['fallback-mention']);
   });
 
+  test('a workflow owner attribution is not a mention of the owner', () async {
+    NostrEvent workflowMessage(String id, List<List<String>> mentions) =>
+        NostrEvent(
+          id: id,
+          pubkey: 'relay_pk',
+          createdAt: 1_700_000_001,
+          kind: 9,
+          tags: [
+            ['p', 'me_pk', '', 'owner'],
+            ['h', 'channel-1'],
+            ['buzz:workflow', 'true'],
+            ['buzz:workflow-owner', 'me_pk'],
+            ...mentions,
+          ],
+          content: 'workflow output',
+          sig: '',
+        );
+    final session = _RecordingSessionNotifier()
+      ..seed(
+        workflowMessage('mentions-agent', [
+          ['p', 'agent_pk'],
+        ]),
+      )
+      ..seed(
+        workflowMessage('mentions-owner', [
+          ['p', 'me_pk'],
+        ]),
+      );
+    final container = ProviderContainer(
+      overrides: [
+        relayConfigProvider.overrideWith(_FixedRelayConfigNotifier.new),
+        myPubkeyProvider.overrideWithValue('me_pk'),
+        relaySessionProvider.overrideWith(() => session),
+        channelsProvider.overrideWith(
+          () => _FixedChannelsNotifier(const <Channel>[]),
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    await container.read(channelsProvider.future);
+    final feed = await container.read(activityProvider.future);
+
+    expect(feed.mentions.map((item) => item.id), ['mentions-owner']);
+  });
+
+  test('quiet agent messages never become Activity items', () async {
+    NostrEvent mention(String id, {bool quiet = false, int at = 0}) =>
+        NostrEvent(
+          id: id,
+          pubkey: 'agent_pk',
+          createdAt: 1_700_000_001 + at,
+          kind: 9,
+          tags: [
+            ['p', 'me_pk'],
+            ['h', 'channel-1'],
+            if (quiet) ['audience', 'agents'],
+          ],
+          content: 'progress',
+          sig: '',
+        );
+    // A full mention window of quiet messages hides the older real one.
+    // The real mention shares the boundary second with quiet ones that sort
+    // before it, so a one-second-back cursor would skip it.
+    final session = _RecordingSessionNotifier()..seed(mention('z-mention'));
+    for (var i = 0; i < 50; i++) {
+      session.seed(
+        mention(
+          'quiet-${i.toString().padLeft(2, '0')}',
+          quiet: true,
+          at: i < 5 ? 0 : i,
+        ),
+      );
+    }
+    final container = ProviderContainer(
+      overrides: [
+        relayConfigProvider.overrideWith(_FixedRelayConfigNotifier.new),
+        myPubkeyProvider.overrideWithValue('me_pk'),
+        relaySessionProvider.overrideWith(() => session),
+        channelsProvider.overrideWith(
+          () => _FixedChannelsNotifier(const <Channel>[]),
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    await container.read(channelsProvider.future);
+    final feed = await container.read(activityProvider.future);
+
+    expect(feed.all.map((item) => item.id), ['z-mention']);
+    expect(container.read(inboxItemsProvider).map((item) => item.id), [
+      'z-mention',
+    ]);
+  });
+
+  test('paging past quiet mentions refills only up to the limit', () async {
+    NostrEvent mention(String id, int at, {bool quiet = false}) => NostrEvent(
+      id: id,
+      pubkey: 'agent_pk',
+      createdAt: 1_700_000_000 + at,
+      kind: 9,
+      tags: [
+        ['p', 'me_pk'],
+        ['h', 'channel-1'],
+        if (quiet) ['audience', 'agents'],
+      ],
+      content: 'hi',
+      sig: '',
+    );
+    // The newest window holds one quiet mention and 49 real ones; a full
+    // window of older real mentions sits behind it.
+    final session = _RecordingSessionNotifier()
+      ..seed(mention('quiet', 1000, quiet: true));
+    for (var i = 0; i < 49; i++) {
+      session.seed(mention('new-$i', 900 + i));
+    }
+    for (var i = 0; i < 50; i++) {
+      session.seed(mention('old-$i', 100 + i));
+    }
+    final container = ProviderContainer(
+      overrides: [
+        relayConfigProvider.overrideWith(_FixedRelayConfigNotifier.new),
+        myPubkeyProvider.overrideWithValue('me_pk'),
+        relaySessionProvider.overrideWith(() => session),
+        channelsProvider.overrideWith(
+          () => _FixedChannelsNotifier(const <Channel>[]),
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    await container.read(channelsProvider.future);
+    final feed = await container.read(activityProvider.future);
+
+    expect(feed.mentions, hasLength(50));
+    expect(feed.mentions.map((item) => item.id), contains('old-49'));
+    expect(feed.mentions.map((item) => item.id), isNot(contains('old-48')));
+  });
+
+  test(
+    'an addressed DM mention counts once toward the mention window',
+    () async {
+      NostrEvent mention(String id, int at, {bool quiet = false}) => NostrEvent(
+        id: id,
+        pubkey: 'agent_pk',
+        createdAt: 1_700_000_000 + at,
+        kind: 9,
+        tags: [
+          ['p', 'me_pk'],
+          ['h', 'dm-1'],
+          if (quiet) ['audience', 'agents'],
+        ],
+        content: 'hi',
+        sig: '',
+      );
+      // The DM filter returns the newest DM mentions a second time.
+      final session = _RecordingSessionNotifier()
+        ..seed(mention('quiet', 1000, quiet: true))
+        ..seed(mention('older', 1));
+      for (var i = 0; i < 49; i++) {
+        session.seed(mention('new-$i', 900 + i));
+      }
+      final container = ProviderContainer(
+        overrides: [
+          relayConfigProvider.overrideWith(_FixedRelayConfigNotifier.new),
+          myPubkeyProvider.overrideWithValue('me_pk'),
+          relaySessionProvider.overrideWith(() => session),
+          channelsProvider.overrideWith(
+            () => _FixedChannelsNotifier([_dmChannel('dm-1')]),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await container.read(channelsProvider.future);
+      final feed = await container.read(activityProvider.future);
+
+      expect(feed.mentions, hasLength(50));
+      expect(feed.mentions.map((item) => item.id), contains('older'));
+    },
+  );
+
+  group('paging past quiet messages per source', () {
+    NostrEvent message(
+      String id,
+      int at, {
+      required String channel,
+      bool mention = true,
+      bool quiet = false,
+    }) => NostrEvent(
+      id: id,
+      pubkey: 'agent_pk',
+      createdAt: 1_700_000_000 + at,
+      kind: 9,
+      tags: [
+        if (mention) ['p', 'me_pk'],
+        ['h', channel],
+        if (quiet) ['audience', 'agents'],
+      ],
+      content: 'hi',
+      sig: '',
+    );
+    Future<HomeFeedResponse> load(_RecordingSessionNotifier session) async {
+      final container = ProviderContainer(
+        overrides: [
+          relayConfigProvider.overrideWith(_FixedRelayConfigNotifier.new),
+          myPubkeyProvider.overrideWithValue('me_pk'),
+          relaySessionProvider.overrideWith(() => session),
+          channelsProvider.overrideWith(
+            () => _FixedChannelsNotifier([_dmChannel('dm-1')]),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+      await container.read(channelsProvider.future);
+      return container.read(activityProvider.future);
+    }
+
+    test('a DM window full of quiet messages is refilled', () async {
+      final session = _RecordingSessionNotifier()
+        ..seed(message('dm-older', 1, channel: 'dm-1', mention: false));
+      for (var i = 0; i < 30; i++) {
+        session.seed(
+          message('dm-quiet-$i', 100 + i, channel: 'dm-1', quiet: true),
+        );
+      }
+      final feed = await load(session);
+      expect(feed.activity.map((item) => item.id), ['dm-older']);
+    });
+
+    test('overlapping matches past a window stay on later pages', () async {
+      // 50 quiet channel mentions fill the mention window. 30 older quiet DM
+      // mentions match it too, through the DM filter, and fill its next page
+      // with 20 more quiet channel mentions, so the real one is a page later.
+      final session = _RecordingSessionNotifier()
+        ..seed(message('real', 1, channel: 'channel-1'));
+      for (var i = 0; i < 20; i++) {
+        session.seed(
+          message('older-quiet-$i', 20 + i, channel: 'channel-1', quiet: true),
+        );
+      }
+      for (var i = 0; i < 50; i++) {
+        session.seed(
+          message('quiet-$i', 500 + i, channel: 'channel-1', quiet: true),
+        );
+      }
+      for (var i = 0; i < 30; i++) {
+        session.seed(
+          message('dm-quiet-$i', 100 + i, channel: 'dm-1', quiet: true),
+        );
+      }
+      final feed = await load(session);
+      expect(feed.mentions.map((item) => item.id), ['real']);
+    });
+
+    test('a DM-only event never moves the mention cursor', () async {
+      // The mention window: one quiet and 49 real channel mentions. An
+      // older addressed DM comes back only through the DM filter, and a
+      // real channel mention sits between it and the window.
+      final session = _RecordingSessionNotifier()
+        ..seed(message('quiet', 1000, channel: 'channel-1', quiet: true))
+        ..seed(message('gap', 500, channel: 'channel-1'))
+        ..seed(message('dm-old', 100, channel: 'dm-1'));
+      for (var i = 0; i < 49; i++) {
+        session.seed(message('new-$i', 900 + i, channel: 'channel-1'));
+      }
+      final feed = await load(session);
+      expect(feed.mentions.map((item) => item.id), contains('gap'));
+    });
+  });
+
   test(
     'refreshes the inbox projection when addressed activity arrives',
     () async {
@@ -297,6 +640,418 @@ void main() {
       expect(container.read(inboxItemsProvider).single.id, 'live-mention');
     },
   );
+
+  testWidgets(
+    'authenticated shell resurfaces hidden DMs without opening Inbox',
+    (tester) async {
+      const self =
+          '1111111111111111111111111111111111111111111111111111111111111111';
+      const alice =
+          '2222222222222222222222222222222222222222222222222222222222222222';
+      const bob =
+          '3333333333333333333333333333333333333333333333333333333333333333';
+      final session = _RecordingSessionNotifier();
+      final reopened = <List<String>>[];
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final container = ProviderContainer(
+        overrides: [
+          savedPrefsProvider.overrideWithValue(prefs),
+          authProvider.overrideWith(_ShellAuth.new),
+          ageSignalProvider.overrideWith(_ShellAge.new),
+          relayConfigProvider.overrideWith(_FixedRelayConfigNotifier.new),
+          myPubkeyProvider.overrideWithValue(self),
+          relaySessionProvider.overrideWith(() => session),
+          channelsProvider.overrideWith(
+            () => _FixedChannelsNotifier(
+              const <Channel>[],
+              hiddenDmIds: const {'hidden-dm'},
+            ),
+          ),
+          channelMembersProvider('hidden-dm').overrideWith(
+            (ref) async => [
+              ChannelMember(
+                pubkey: self,
+                role: 'member',
+                joinedAt: DateTime(2026),
+              ),
+              ChannelMember(
+                pubkey: alice,
+                role: 'member',
+                joinedAt: DateTime(2026),
+              ),
+              ChannelMember(
+                pubkey: bob,
+                role: 'member',
+                joinedAt: DateTime(2026),
+              ),
+            ],
+          ),
+          dmResurfaceActionProvider.overrideWithValue((pubkeys) async {
+            reopened.add(pubkeys);
+            return 'hidden-dm';
+          }),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await container.read(channelsProvider.future);
+      await tester.pumpWidget(
+        UncontrolledProviderScope(container: container, child: const App()),
+      );
+      for (var i = 0; i < 20; i++) {
+        await tester.pump();
+      }
+      expect(find.byType(ActivityPage), findsNothing);
+      expect(session.hiddenDmSubscriptionBatches, [
+        ['hidden-dm'],
+      ]);
+
+      session.emit(
+        const NostrEvent(
+          id: 'hidden-dm-message',
+          pubkey: alice,
+          createdAt: 1_700_000_000,
+          kind: EventKind.streamMessageV2,
+          tags: [
+            ['p', self],
+            ['h', 'hidden-dm'],
+          ],
+          content: 'Hello again',
+          sig: '',
+        ),
+      );
+
+      for (var i = 0; i < 20 && reopened.isEmpty; i++) {
+        await tester.pump();
+      }
+      expect(reopened, [
+        [alice, bob],
+      ]);
+      await tester.pumpWidget(const SizedBox.shrink());
+      container.dispose();
+    },
+  );
+
+  test(
+    'queues a hidden DM message until channel discovery completes',
+    () async {
+      const self =
+          '1111111111111111111111111111111111111111111111111111111111111111';
+      const alice =
+          '2222222222222222222222222222222222222222222222222222222222222222';
+      final session = _RecordingSessionNotifier();
+      late _DeferredChannelsNotifier channels;
+      final reopened = <List<String>>[];
+      final container = ProviderContainer(
+        overrides: [
+          relayConfigProvider.overrideWith(_FixedRelayConfigNotifier.new),
+          myPubkeyProvider.overrideWithValue(self),
+          relaySessionProvider.overrideWith(() => session),
+          channelsProvider.overrideWith(
+            () => channels = _DeferredChannelsNotifier(
+              hiddenDmIds: const {'hidden-dm'},
+            ),
+          ),
+          channelMembersProvider('hidden-dm').overrideWith(
+            (ref) async => [
+              ChannelMember(
+                pubkey: self,
+                role: 'member',
+                joinedAt: DateTime(2026),
+              ),
+              ChannelMember(
+                pubkey: alice,
+                role: 'member',
+                joinedAt: DateTime(2026),
+              ),
+            ],
+          ),
+          dmResurfaceActionProvider.overrideWithValue((pubkeys) async {
+            reopened.add(pubkeys);
+            return 'hidden-dm';
+          }),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      container.read(channelsProvider);
+      await container.read(activityProvider.future);
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      session.emit(
+        const NostrEvent(
+          id: 'hidden-dm-during-discovery',
+          pubkey: alice,
+          createdAt: 1_700_000_000,
+          kind: EventKind.streamMessageV2,
+          tags: [
+            ['p', self],
+            ['h', 'hidden-dm'],
+          ],
+          content: 'Hello during startup',
+          sig: '',
+        ),
+      );
+      expect(reopened, isEmpty);
+
+      channels.complete(const <Channel>[]);
+      await container.read(channelsProvider.future);
+      await _waitFor(() => reopened.isNotEmpty);
+      expect(reopened, [
+        [alice],
+      ]);
+    },
+  );
+
+  test('a concurrent follower survives a failed in-flight reopen', () async {
+    const self =
+        '1111111111111111111111111111111111111111111111111111111111111111';
+    const alice =
+        '2222222222222222222222222222222222222222222222222222222222222222';
+    final session = _RecordingSessionNotifier();
+    final reopenAttempts = <List<String>>[];
+    final firstReopenGate = Completer<void>();
+    var reopenCalls = 0;
+    final container = ProviderContainer(
+      overrides: [
+        relayConfigProvider.overrideWith(_FixedRelayConfigNotifier.new),
+        myPubkeyProvider.overrideWithValue(self),
+        relaySessionProvider.overrideWith(() => session),
+        channelsProvider.overrideWith(
+          () => _FixedChannelsNotifier(
+            const <Channel>[],
+            hiddenDmIds: const {'hidden-dm'},
+          ),
+        ),
+        channelMembersProvider('hidden-dm').overrideWith(
+          (ref) async => [
+            ChannelMember(
+              pubkey: self,
+              role: 'member',
+              joinedAt: DateTime(2026),
+            ),
+            ChannelMember(
+              pubkey: alice,
+              role: 'member',
+              joinedAt: DateTime(2026),
+            ),
+          ],
+        ),
+        dmResurfaceActionProvider.overrideWithValue((pubkeys) async {
+          reopenCalls += 1;
+          reopenAttempts.add(pubkeys);
+          if (reopenCalls == 1) {
+            // Hold the first attempt open so the follower coalesces into it,
+            // then fail it — the follower must not be silently dropped.
+            await firstReopenGate.future;
+            throw StateError('transient reopen failure');
+          }
+          return 'hidden-dm';
+        }),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    await container.read(channelsProvider.future);
+    await container.read(activityProvider.future);
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+
+    NostrEvent hiddenDmEvent(String id) => NostrEvent(
+      id: id,
+      pubkey: alice,
+      createdAt: 1_700_000_000,
+      kind: EventKind.streamMessageV2,
+      tags: const [
+        ['p', self],
+        ['h', 'hidden-dm'],
+      ],
+      content: 'Hello again',
+      sig: '',
+    );
+
+    session.emit(hiddenDmEvent('message-a'));
+    await _waitFor(() => reopenCalls == 1);
+    // Follower arrives while attempt A is in flight → coalesced for retry.
+    session.emit(hiddenDmEvent('message-b'));
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+    firstReopenGate.complete();
+
+    await _waitFor(() => reopenCalls >= 2);
+    expect(reopenAttempts, [
+      [alice],
+      [alice],
+    ]);
+  });
+
+  test(
+    'a follower on a rebuilt subscription reopens after the old attempt retires',
+    () async {
+      const self =
+          '1111111111111111111111111111111111111111111111111111111111111111';
+      const alice =
+          '2222222222222222222222222222222222222222222222222222222222222222';
+      final session = _RecordingSessionNotifier();
+      final reopenAttempts = <String>[];
+      final gateA = Completer<void>();
+      final gateB = Completer<void>();
+      var reopenCalls = 0;
+      final container = ProviderContainer(
+        overrides: [
+          relayConfigProvider.overrideWith(_FixedRelayConfigNotifier.new),
+          myPubkeyProvider.overrideWithValue(self),
+          relaySessionProvider.overrideWith(() => session),
+          channelsProvider.overrideWith(
+            () => _FixedChannelsNotifier(
+              const <Channel>[],
+              hiddenDmIds: const {'hidden-dm'},
+            ),
+          ),
+          channelMembersProvider('hidden-dm').overrideWith(
+            (ref) async => [
+              ChannelMember(
+                pubkey: self,
+                role: 'member',
+                joinedAt: DateTime(2026),
+              ),
+              ChannelMember(
+                pubkey: alice,
+                role: 'member',
+                joinedAt: DateTime(2026),
+              ),
+            ],
+          ),
+          dmResurfaceActionProvider.overrideWithValue((pubkeys) async {
+            final call = ++reopenCalls;
+            reopenAttempts.add(pubkeys.single);
+            // Suspend attempt A (call 1, old generation) and attempt B (call 2,
+            // new generation) so both are in flight simultaneously: A must
+            // retire while B's entry still occupies the pending map. B's first
+            // attempt then fails so its retry loop drains the coalesced
+            // follower C as call 3.
+            if (call == 1) await gateA.future;
+            if (call == 2) {
+              await gateB.future;
+              throw StateError('transient reopen failure');
+            }
+            return 'hidden-dm';
+          }),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await container.read(channelsProvider.future);
+      await container.read(activityProvider.future);
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      NostrEvent hiddenDmEvent(String id) => NostrEvent(
+        id: id,
+        pubkey: alice,
+        createdAt: 1_700_000_000,
+        kind: EventKind.streamMessageV2,
+        tags: const [
+          ['p', self],
+          ['h', 'hidden-dm'],
+        ],
+        content: 'Hello again',
+        sig: '',
+      );
+
+      // Attempt A starts on generation N and suspends inside the reopen.
+      session.emit(hiddenDmEvent('message-a'));
+      await _waitFor(() => reopenCalls == 1);
+
+      // Activity rebuilds (generation N+1). Follower B lands on the replacement
+      // subscription: A's entry belongs to the old generation, so B does not
+      // coalesce — it installs its own entry and starts a second attempt, which
+      // suspends. A and B are now both in flight.
+      container.invalidate(activityProvider);
+      await container.read(activityProvider.future);
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      session.emit(hiddenDmEvent('message-b'));
+      await _waitFor(() => reopenCalls == 2);
+
+      // A retires while B is still pending. Its instance-checked cleanup must
+      // leave B's entry in the map; unconditional removal would evict B's live
+      // entry here.
+      gateA.complete();
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      // Follower C arrives on the current generation. Because B's entry is still
+      // present, C coalesces into it (no new attempt). With unconditional
+      // cleanup, A would have evicted B's entry and C would wrongly start a
+      // third overlapping attempt.
+      session.emit(hiddenDmEvent('message-c'));
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      expect(reopenCalls, 2);
+
+      // Releasing B fails its first attempt; the coalesced follower C drives one
+      // retry, which succeeds as the third reopen.
+      gateB.complete();
+      await _waitFor(() => reopenCalls == 3);
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      expect(reopenAttempts, [alice, alice, alice]);
+    },
+  );
+
+  test('a suspended membership read cannot mutate a rebuilt scope', () async {
+    const self =
+        '1111111111111111111111111111111111111111111111111111111111111111';
+    const alice =
+        '2222222222222222222222222222222222222222222222222222222222222222';
+    final session = _RecordingSessionNotifier();
+    final membersRequested = Completer<void>();
+    final membersGate = Completer<List<ChannelMember>>();
+    var reopenCount = 0;
+    final container = ProviderContainer(
+      overrides: [
+        relayConfigProvider.overrideWith(_FixedRelayConfigNotifier.new),
+        myPubkeyProvider.overrideWithValue(self),
+        relaySessionProvider.overrideWith(() => session),
+        channelsProvider.overrideWith(
+          () => _FixedChannelsNotifier(
+            const <Channel>[],
+            hiddenDmIds: const {'hidden-dm'},
+          ),
+        ),
+        channelMembersProvider('hidden-dm').overrideWith((ref) {
+          if (!membersRequested.isCompleted) membersRequested.complete();
+          return membersGate.future;
+        }),
+        dmResurfaceActionProvider.overrideWithValue((pubkeys) async {
+          reopenCount += 1;
+          return 'hidden-dm';
+        }),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    await container.read(channelsProvider.future);
+    await container.read(activityProvider.future);
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+    session.emit(
+      const NostrEvent(
+        id: 'hidden-dm-stale-message',
+        pubkey: alice,
+        createdAt: 1_700_000_000,
+        kind: EventKind.streamMessageV2,
+        tags: [
+          ['p', self],
+          ['h', 'hidden-dm'],
+        ],
+        content: 'Hello again',
+        sig: '',
+      ),
+    );
+    await membersRequested.future;
+    container.invalidate(activityProvider);
+    await container.read(activityProvider.future);
+    membersGate.complete([
+      ChannelMember(pubkey: self, role: 'member', joinedAt: DateTime(2026)),
+      ChannelMember(pubkey: alice, role: 'member', joinedAt: DateTime(2026)),
+    ]);
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    expect(reopenCount, 0);
+  });
 
   test(
     'serializes live refreshes and catches up events queued mid-fetch',
@@ -405,13 +1160,324 @@ void main() {
       containsAll(['existing', 'newer']),
     );
   });
+
+  group('hidden-DM subscription batching', () {
+    const self =
+        '1111111111111111111111111111111111111111111111111111111111111111';
+
+    Set<String> hiddenIds(int count) => {
+      for (var i = 0; i < count; i++) 'dm-${i.toString().padLeft(4, '0')}',
+    };
+
+    ProviderContainer containerFor(
+      _RecordingSessionNotifier session,
+      Set<String> hidden,
+    ) => ProviderContainer(
+      overrides: [
+        relayConfigProvider.overrideWith(_FixedRelayConfigNotifier.new),
+        myPubkeyProvider.overrideWithValue(self),
+        relaySessionProvider.overrideWith(() => session),
+        channelsProvider.overrideWith(
+          () => _FixedChannelsNotifier(const <Channel>[], hiddenDmIds: hidden),
+        ),
+      ],
+    );
+
+    test(
+      '128 hidden DMs register a single subscription within the cap',
+      () async {
+        final session = _RecordingSessionNotifier();
+        final container = containerFor(session, hiddenIds(128));
+        addTearDown(container.dispose);
+
+        await container.read(channelsProvider.future);
+        await container.read(activityProvider.future);
+        await _waitFor(() => session.hiddenDmSubscriptionBatches.isNotEmpty);
+
+        final batches = session.hiddenDmSubscriptionBatches;
+        expect(batches, hasLength(1));
+        expect(batches.single, hasLength(128));
+      },
+    );
+
+    test(
+      '129 hidden DMs split into two subscriptions, both within the cap',
+      () async {
+        final session = _RecordingSessionNotifier();
+        final container = containerFor(session, hiddenIds(129));
+        addTearDown(container.dispose);
+
+        await container.read(channelsProvider.future);
+        await container.read(activityProvider.future);
+        await _waitFor(() => session.hiddenDmSubscriptionBatches.length == 2);
+
+        final batches = session.hiddenDmSubscriptionBatches;
+        expect(batches.map((batch) => batch.length), [128, 1]);
+        final all = batches.expand((batch) => batch).toSet();
+        expect(all, hasLength(129));
+        for (final batch in batches) {
+          expect(batch.length, lessThanOrEqualTo(128));
+        }
+      },
+    );
+
+    test('activity on the final batch resurfaces its DM', () async {
+      const alice =
+          '2222222222222222222222222222222222222222222222222222222222222222';
+      final hidden = hiddenIds(129);
+      final target = 'dm-0128';
+      final session = _RecordingSessionNotifier();
+      final reopened = <List<String>>[];
+      final container = ProviderContainer(
+        overrides: [
+          relayConfigProvider.overrideWith(_FixedRelayConfigNotifier.new),
+          myPubkeyProvider.overrideWithValue(self),
+          relaySessionProvider.overrideWith(() => session),
+          channelsProvider.overrideWith(
+            () =>
+                _FixedChannelsNotifier(const <Channel>[], hiddenDmIds: hidden),
+          ),
+          channelMembersProvider(target).overrideWith(
+            (ref) async => [
+              ChannelMember(
+                pubkey: self,
+                role: 'member',
+                joinedAt: DateTime(2026),
+              ),
+              ChannelMember(
+                pubkey: alice,
+                role: 'member',
+                joinedAt: DateTime(2026),
+              ),
+            ],
+          ),
+          dmResurfaceActionProvider.overrideWithValue((pubkeys) async {
+            reopened.add(pubkeys);
+            return target;
+          }),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await container.read(channelsProvider.future);
+      await container.read(activityProvider.future);
+      await _waitFor(() => session.hiddenDmSubscriptionBatches.length == 2);
+
+      // The target lives only in the second batch; delivering it exercises
+      // that batch's live subscription.
+      session.emit(
+        NostrEvent(
+          id: 'final-batch-message',
+          pubkey: alice,
+          createdAt: 1_700_000_000,
+          kind: EventKind.streamMessageV2,
+          tags: [
+            ['p', self],
+            ['h', target],
+          ],
+          content: 'Hello again',
+          sig: '',
+        ),
+      );
+
+      await _waitFor(() => reopened.isNotEmpty);
+      expect(reopened.single, [alice]);
+    });
+
+    test('a batch subscription failure does not abort later batches', () async {
+      final session = _RecordingSessionNotifier()
+        ..failNextHiddenSubscribe = true;
+      final container = containerFor(session, hiddenIds(129));
+      addTearDown(container.dispose);
+
+      await container.read(channelsProvider.future);
+      await container.read(activityProvider.future);
+      // The first batch throws; the loop continues and registers the second.
+      await _waitFor(() => session.hiddenDmSubscriptionBatches.isNotEmpty);
+
+      final batches = session.hiddenDmSubscriptionBatches;
+      expect(batches, hasLength(1));
+      expect(batches.single, hasLength(1));
+    });
+
+    test('teardown during batch-1 setup self-disposes batch 1 and never starts '
+        'batch 2', () async {
+      final session = _RecordingSessionNotifier()
+        ..hiddenSubscribeGatesByCall[0] = Completer<void>();
+      final container = containerFor(session, hiddenIds(129));
+
+      await container.read(channelsProvider.future);
+      await container.read(activityProvider.future);
+      // Batch 1's REQ is parked in flight; batch 2 has not been requested.
+      await _waitFor(() => session.hiddenSubscribeCallCount == 1);
+
+      // Supersede this generation mid-setup, then let batch 1's REQ resolve.
+      container.dispose();
+      session.hiddenSubscribeGatesByCall[0]!.complete();
+
+      // Batch 1 resolves stale and self-disposes; batch 2 is never requested.
+      await _waitFor(() => session.hiddenUnsubscribeCount == 1);
+      expect(session.hiddenUnsubscribeCount, 1);
+      expect(session.hiddenSubscribeCallCount, 1);
+      expect(session.hiddenDmSubscriptionBatches, isEmpty);
+    });
+
+    test(
+      'teardown after batch 1 settles while batch 2 is pending tears down both',
+      () async {
+        final session = _RecordingSessionNotifier()
+          ..hiddenSubscribeGatesByCall[1] = Completer<void>();
+        final container = containerFor(session, hiddenIds(129));
+
+        await container.read(channelsProvider.future);
+        await container.read(activityProvider.future);
+        // Batch 1 has settled and registered; batch 2's REQ is parked in flight.
+        await _waitFor(() => session.hiddenSubscribeCallCount == 2);
+        expect(session.hiddenDmSubscriptionBatches, hasLength(1));
+
+        // Supersede this generation with batch 2 pending, then let it resolve.
+        container.dispose();
+        session.hiddenSubscribeGatesByCall[1]!.complete();
+
+        // Batch 2 resolves stale and disposes itself plus the settled batch 1.
+        await _waitFor(() => session.hiddenUnsubscribeCount == 2);
+        expect(session.hiddenUnsubscribeCount, 2);
+        expect(session.hiddenDmSubscriptionBatches, isEmpty);
+      },
+    );
+
+    test(
+      '129 visible DMs batch under the cap and hidden activity still resurfaces',
+      () async {
+        // An over-cap visible-DM set previously rejected as one REQ, aborting
+        // the whole live setup — so the hidden batches never registered and
+        // resurfacing silently died. Batching the visible set keeps every REQ
+        // within the cap and leaves the hidden subscription intact.
+        const alice =
+            '2222222222222222222222222222222222222222222222222222222222222222';
+        final visibleChannels = [
+          for (var i = 0; i < 129; i++)
+            _dmChannel('visible-${i.toString().padLeft(4, '0')}'),
+        ];
+        const hiddenTarget = 'hidden-dm';
+        final session = _RecordingSessionNotifier();
+        final reopened = <List<String>>[];
+        final container = ProviderContainer(
+          overrides: [
+            relayConfigProvider.overrideWith(_FixedRelayConfigNotifier.new),
+            myPubkeyProvider.overrideWithValue(self),
+            relaySessionProvider.overrideWith(() => session),
+            channelsProvider.overrideWith(
+              () => _FixedChannelsNotifier(
+                visibleChannels,
+                hiddenDmIds: const {hiddenTarget},
+              ),
+            ),
+            channelMembersProvider(hiddenTarget).overrideWith(
+              (ref) async => [
+                ChannelMember(
+                  pubkey: self,
+                  role: 'member',
+                  joinedAt: DateTime(2026),
+                ),
+                ChannelMember(
+                  pubkey: alice,
+                  role: 'member',
+                  joinedAt: DateTime(2026),
+                ),
+              ],
+            ),
+            dmResurfaceActionProvider.overrideWithValue((pubkeys) async {
+              reopened.add(pubkeys);
+              return hiddenTarget;
+            }),
+          ],
+        );
+        addTearDown(container.dispose);
+
+        await container.read(channelsProvider.future);
+        await container.read(activityProvider.future);
+        await _waitFor(() => session.hiddenDmSubscriptionBatches.isNotEmpty);
+
+        // Every visible-DM REQ stays within the cap, split 128 + 1.
+        final visibleBatches = session.visibleDmSubscriptionBatches;
+        expect(visibleBatches.map((batch) => batch.length), [128, 1]);
+        expect(visibleBatches.expand((batch) => batch).toSet(), hasLength(129));
+        // The hidden subscription registered despite the over-cap visible set.
+        expect(session.hiddenDmSubscriptionBatches, hasLength(1));
+
+        // Hidden activity still resurfaces its DM.
+        session.emit(
+          NostrEvent(
+            id: 'hidden-message',
+            pubkey: alice,
+            createdAt: 1_700_000_000,
+            kind: EventKind.streamMessageV2,
+            tags: [
+              ['p', self],
+              ['h', hiddenTarget],
+            ],
+            content: 'Hello again',
+            sig: '',
+          ),
+        );
+
+        await _waitFor(() => reopened.isNotEmpty);
+        expect(reopened.single, [alice]);
+      },
+    );
+  });
 }
 
 class _FixedChannelsNotifier extends ChannelsNotifier {
   final List<Channel> channels;
+  final Set<String> _hiddenDmIds;
 
-  _FixedChannelsNotifier(this.channels);
+  _FixedChannelsNotifier(this.channels, {Set<String> hiddenDmIds = const {}})
+    : _hiddenDmIds = hiddenDmIds;
+
+  @override
+  bool get hasLoaded => true;
+
+  @override
+  Set<String> get hiddenDmIds => _hiddenDmIds;
 
   @override
   Future<List<Channel>> build() async => channels;
+}
+
+class _DeferredChannelsNotifier extends ChannelsNotifier {
+  _DeferredChannelsNotifier({required Set<String> hiddenDmIds})
+    : _hiddenDmIds = hiddenDmIds;
+
+  final Set<String> _hiddenDmIds;
+  final _gate = Completer<List<Channel>>();
+  bool _hasLoaded = false;
+
+  @override
+  bool get hasLoaded => _hasLoaded;
+
+  @override
+  Set<String> get hiddenDmIds => _hiddenDmIds;
+
+  @override
+  Future<List<Channel>> build() => _gate.future;
+
+  void complete(List<Channel> channels) {
+    _hasLoaded = true;
+    _gate.complete(channels);
+  }
+}
+
+class _ShellAuth extends AuthNotifier {
+  @override
+  Future<AuthState> build() async =>
+      const AuthState(status: AuthStatus.authenticated);
+}
+
+class _ShellAge extends AgeSignalNotifier {
+  @override
+  AgeSignalState build() => AgeSignalState.allowed;
+  @override
+  Future<void> request() async {}
 }
