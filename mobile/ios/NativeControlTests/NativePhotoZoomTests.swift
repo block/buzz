@@ -72,6 +72,7 @@ struct NativePhotoZoomTests {
       precondition(closedPhoto.image === closedImage, "Closed viewers must ignore continuing frames")
       print("PASS: native photo window, stale responses, eviction and teardown")
       videoJourney(data: data)
+      loaderJourney()
 
     }
   }
@@ -81,6 +82,8 @@ struct NativePhotoZoomTests {
     let viewer = NativePhotoZoomViewController(image: UIImage(data: data)!,
       labels: ["Clip", "Photo", "Second clip"], initialIndex: 0,
       canReply: true, canMore: true, canDelete: false, videoIndices: [0, 2])
+    let feedback = GalleryFeedbackSpy()
+    viewer.selectionFeedback = feedback
     var requested: [Int] = []
     var lateVideo: FlutterResult?
     viewer.request = { method, index, _, completion in
@@ -102,24 +105,68 @@ struct NativePhotoZoomTests {
     let playerController = first.children.compactMap { $0 as? AVPlayerViewController }.first!
     let player = playerController.player!
     let item = player.currentItem!
+    let firstSpinner = descendants(first.view).compactMap { $0 as? NativeGalleryLoadingIndicator }.first!
     let deadline = Date().addingTimeInterval(5)
-    while item.status == .unknown && Date() < deadline {
+    while (item.status == .unknown || !firstSpinner.isHidden) && Date() < deadline {
       RunLoop.current.run(until: Date().addingTimeInterval(0.01))
     }
     precondition(item.status == .readyToPlay, "Real MP4 fixture must become playable")
+    precondition(firstSpinner.isHidden, "Playable video removes the loader")
     precondition(requested == [0], "Only the selected video may download")
+    precondition(feedback.clicks == 0, "Opening must not trigger selection haptics")
+    viewer.pageViewController(pager, willTransitionTo: [first])
+    viewer.pageViewController(pager, didFinishAnimating: true, previousViewControllers: [first], transitionCompleted: false)
+    precondition(feedback.clicks == 0, "Cancelled drags must not trigger haptics")
     indicator.currentPage = 2; sendValueChanged(indicator)
     precondition(player.currentItem == nil && playerController.player == nil, "Paging releases the old player before Dart deletes its file")
     precondition(requested == [0, 2], "Paging requests the selected video")
+    precondition(feedback.clicks == 1, "Changing to a video triggers one selection click")
+    let loadingPage = pager.viewControllers!.first!
+    loadingPage.loadViewIfNeeded()
+    let spinner = descendants(loadingPage.view).compactMap { $0 as? NativeGalleryLoadingIndicator }.first!
+    precondition(!spinner.isHidden && spinner.accessibilityLabel == "Loading video", "Show the shared arc treatment while loading")
+    precondition(!descendants(loadingPage.view).compactMap { $0 as? UILabel }.contains { $0.text == "Loading video…" }, "No visible loading copy")
+    lateVideo?(nil)
+    precondition(spinner.isHidden, "Failure stops the loader")
+    let retry = descendants(loadingPage.view).compactMap { $0 as? UIButton }.first { $0.currentTitle == "Retry video" }!
+    precondition(!retry.isHidden, "Failure retains retry")
+    for target in retry.allTargets {
+      for action in retry.actions(forTarget: target, forControlEvent: .touchUpInside) ?? [] {
+        _ = (target as AnyObject).perform(NSSelectorFromString(action), with: retry)
+      }
+    }
+    precondition(!spinner.isHidden && requested == [0, 2, 2], "Retry restarts the loader")
     indicator.currentPage = 0; sendValueChanged(indicator)
     lateVideo?(path)
     let current = pager.viewControllers!.first!
     current.loadViewIfNeeded()
     let active = current.children.compactMap { $0 as? AVPlayerViewController }.first!
     precondition(active.player != nil, "Returning to a video restores its player")
+    precondition(spinner.isHidden, "Leaving a loading video stops its loader")
+    let next = viewer.pageViewController(pager, viewControllerAfter: current)!
+    pager.setViewControllers([next], direction: .forward, animated: false)
+    viewer.pageViewController(pager, didFinishAnimating: true, previousViewControllers: [current], transitionCompleted: true)
+    precondition(feedback.clicks == 3, "Completed swipe to a photo adds one haptic")
+    viewer.pageViewController(pager, didFinishAnimating: true, previousViewControllers: [current], transitionCompleted: true)
+    precondition(feedback.clicks == 3, "Repeated callbacks for the same page do not duplicate haptics")
     viewer.viewDidDisappear(false)
     precondition(active.player == nil, "Closing releases the player before returning to Flutter")
     print("PASS: native video decoding, selected-only loading, paging and teardown")
+  }
+  @MainActor static func loaderJourney() {
+    let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 100, height: 100))
+    let root = UIViewController(); window.rootViewController = root
+    let loader = NativeGalleryLoadingIndicator(frame: CGRect(x: 28, y: 28, width: 44, height: 44))
+    root.view.addSubview(loader); window.isHidden = false
+    loader.setLoading(true); loader.layoutIfNeeded()
+    if !UIAccessibility.isReduceMotionEnabled {
+      precondition(loader.layer.animation(forKey: "loading")?.duration == 0.5, "Match the shared spinner cadence")
+    }
+    loader.setLoading(false)
+    precondition(loader.layer.animation(forKey: "loading") == nil && loader.isHidden)
+    loader.setLoading(true); loader.removeFromSuperview()
+    precondition(loader.layer.animation(forKey: "loading") == nil, "Detached loaders must stop animating")
+    window.isHidden = true
   }
   @MainActor static func sendValueChanged(_ control: UIControl) {
     // A command-line UIKit fixture has no UIApplication action dispatcher.
@@ -132,4 +179,10 @@ struct NativePhotoZoomTests {
   @MainActor static func descendants(_ view: UIView) -> [UIView] {
     [view] + view.subviews.flatMap { descendants($0) }
   }
+}
+
+@MainActor
+private final class GalleryFeedbackSpy: UISelectionFeedbackGenerator {
+  var clicks = 0
+  override func selectionChanged() { clicks += 1 }
 }
