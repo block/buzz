@@ -1016,3 +1016,55 @@ test("coalesce: pagehide and unmount flush the buffer without waiting for the ti
     rig.restore();
   }
 });
+
+// ── Catch-up claims survive effect re-runs once the fetch completed ───────────
+
+test("catch-up: a completed fetch is not replayed when read-state activity re-runs the effect", async () => {
+  installFreshStorage();
+  const CHANNEL = "channel-catchup-once";
+  let harness;
+  const rig = installNativeRig({
+    catchUpChannels: (request) =>
+      request.channels.map((channel) => ({
+        status: "success",
+        channelId: channel.id,
+        observedEvents: [],
+        maxTrigger: 0,
+        activityRows: [],
+        discovered: { participated: [], authored: [], mentioned: [] },
+      })),
+  });
+  try {
+    harness = await mountUnreadChannels({
+      pubkey: "pk-catchup-once",
+      relay: RELAY,
+      channels: [{ id: CHANNEL, name: "c", channelType: "stream" }],
+      relayClient: makeStubRelayClient(),
+    });
+    await settle();
+    const first = rig.requests("unread_catch_up").length;
+    assert.equal(first, 1, "precondition: one catch-up on first load");
+
+    // Read-state activity bumps readStateVersion and may change getter identity.
+    await act(async () => {
+      harness.markChannelRead(CHANNEL, new Date(NOW_S * 1_000).toISOString());
+    });
+    await settle();
+    await act(async () => {
+      harness.markChannelRead(
+        CHANNEL,
+        new Date((NOW_S + 5) * 1_000).toISOString(),
+      );
+    });
+    await settle();
+
+    assert.equal(
+      rig.requests("unread_catch_up").length,
+      first,
+      "read-state churn must not re-release claims and replay catch-up",
+    );
+  } finally {
+    await harness?.unmount();
+    rig.restore();
+  }
+});
