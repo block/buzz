@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:buzz/features/channels/default_agent_launcher.dart';
 import 'package:buzz/features/agents/agents_page.dart';
 import 'package:buzz/features/channels/me/me_section.dart';
@@ -45,6 +47,7 @@ void main() {
     Gradient? topSectionGradient,
     ValueChanged<ValueNotifier<VoidCallback?>>? onNewChatAction,
     String? bestie,
+    Stream<String?>? bestieUpdates,
     ValueChanged<String>? onOpenBestie,
   }) async {
     SharedPreferences.setMockInitialValues({});
@@ -53,7 +56,9 @@ void main() {
       overrides: [
         savedPrefsProvider.overrideWithValue(prefs),
         inboxHasUnreadProvider.overrideWithValue(inboxUnread),
-        defaultAgentProvider.overrideWith((ref) => Stream.value(bestie)),
+        defaultAgentProvider.overrideWith(
+          (ref) => bestieUpdates ?? Stream.value(bestie),
+        ),
         channelsProvider.overrideWith(_Channels.new),
         // Lifecycle changes here exercise Home, not the relay connection.
         appLifecycleProvider.overrideWith(_Lifecycle.new),
@@ -387,13 +392,16 @@ void main() {
     }
 
     final bestie = 'b' * 64;
+    final bestieUpdates = StreamController<String?>();
+    addTearDown(bestieUpdates.close);
+    bestieUpdates.add(bestie);
     ValueNotifier<VoidCallback?>? chat;
     var homeBuilds = 0;
     var created = 0;
     final opened = <String>[];
     await tester.pumpWidget(
       await buildHome(
-        bestie: bestie,
+        bestieUpdates: bestieUpdates.stream,
         onOpenBestie: opened.add,
         onNewChatAction: (value) {
           chat = value;
@@ -444,6 +452,55 @@ void main() {
     expect(created, 3);
     expect(pendingHomeScreenShortcut.value, isNull);
 
+    // A New DM tap with a New DM picker already open replaces it, and the
+    // replacement keeps receiving the native picker's callbacks.
+    const dmBridge = MethodChannel('buzz/add_members_sheet');
+    final dmStates = <Map<Object?, Object?>>[];
+    final dmCalls = <String>[];
+    String? nativeSession;
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(dmBridge, (
+      call,
+    ) async {
+      final args = Map<Object?, Object?>.from(call.arguments as Map);
+      dmCalls.add('${call.method}:${args['session']}');
+      if (call.method == 'present') {
+        if (nativeSession != null) throw PlatformException(code: 'busy');
+        nativeSession = args['session'] as String;
+        dmStates.add(args);
+      } else if (call.method == 'dismiss') {
+        if (nativeSession == args['session']) nativeSession = null;
+      } else if (call.method == 'update') {
+        dmStates.add(args);
+      }
+      return null;
+    });
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        dmBridge,
+        null,
+      ),
+    );
+    await tap('new-dm');
+    expect(dmStates.last['title'], 'New DM');
+    final firstSession = nativeSession;
+    expect(firstSession, isNotNull);
+    await tap('new-dm');
+    expect(nativeSession, isNotNull, reason: dmCalls.join('\n'));
+    expect(nativeSession, isNot(firstSession));
+    await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+      dmBridge.name,
+      const StandardMethodCodec().encodeMethodCall(
+        MethodCall('closed', {'session': nativeSession}),
+      ),
+      (_) {},
+    );
+    await tester.pumpAndSettle();
+    expect(
+      Navigator.of(tester.element(find.byType(HomePage))).canPop(),
+      isFalse,
+      reason: dmCalls.join(', '),
+    );
+
     // Shortcut state rebuilds only its own leaf, never Home.
     final builds = homeBuilds;
     tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
@@ -451,6 +508,32 @@ void main() {
     tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
     await tester.pumpAndSettle();
     expect(homeBuilds, builds);
+
+    // A tap waiting on an unavailable Bestie returns to Home once, never
+    // closing screens opened while it waits.
+    bestieUpdates.addError(StateError('Bestie sync stopped'));
+    await tester.pumpAndSettle();
+    await tap('message-bestie');
+    Navigator.of(
+      tester.element(find.byType(HomePage)),
+    ).push(MaterialPageRoute<void>(builder: (_) => const Text('Opened later')));
+    await tester.pumpAndSettle();
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    await tester.pumpAndSettle();
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pumpAndSettle();
+    expect(find.text('Opened later'), findsOneWidget);
+    // Once the Bestie is back, the stale tap opens nothing, even after the
+    // newer screen closes.
+    bestieUpdates.add(bestie);
+    await tester.pumpAndSettle();
+    expect(find.text('Opened later'), findsOneWidget);
+    Navigator.of(
+      tester.element(find.byType(HomePage, skipOffstage: false)),
+    ).pop();
+    await tester.pumpAndSettle();
+    expect(opened, [bestie]);
+    expect(pendingHomeScreenShortcut.value, isNull);
 
     await tester.pumpWidget(const SizedBox());
     expect(published.last, isEmpty);

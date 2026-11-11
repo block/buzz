@@ -68,6 +68,13 @@ class HomeScreenShortcutHost extends HookConsumerWidget {
       return null;
     }, [bestie.isLoading, bestie.hasError, bestiePubkey, bestieName]);
     final pendingShortcut = useValueListenable(pendingHomeScreenShortcut);
+    // The tap Home already returned to, so a waiting tap never pops screens
+    // the user opens while it waits.
+    final poppedFor = useRef<HomeScreenShortcut?>(null);
+    if (pendingShortcut == null) poppedFor.value = null;
+    // Covering Home pauses this leaf's providers, so a screen opened while a
+    // tap waits is noticed through the route instead.
+    final homeCurrent = ModalRoute.of(context)?.isCurrent ?? true;
     // A tap arrives while iOS is still bringing the app forward, before
     // native sheets such as New DM can present.
     final resumed =
@@ -102,8 +109,19 @@ class HomeScreenShortcutHost extends HookConsumerWidget {
           // Each shortcut starts from Home, so it never opens beneath a
           // sheet or a conversation left open earlier. Leaving an open New
           // chat draft also makes New chat available again.
-          Navigator.of(context).popUntil((route) => route.isFirst);
+          if (poppedFor.value == pendingShortcut) {
+            // A screen opened after Home was revealed wins; drop the tap.
+            if (ModalRoute.of(context)?.isCurrent == false) {
+              poppedFor.value = null;
+              pendingHomeScreenShortcut.value = null;
+              return;
+            }
+          } else {
+            poppedFor.value = pendingShortcut;
+            Navigator.of(context).popUntil((route) => route.isFirst);
+          }
           if (run == null) return;
+          poppedFor.value = null;
           pendingHomeScreenShortcut.value = null;
           run();
         });
@@ -112,6 +130,7 @@ class HomeScreenShortcutHost extends HookConsumerWidget {
       [
         pendingShortcut,
         resumed,
+        homeCurrent,
         startChat,
         startDm,
         bestie.isLoading,
