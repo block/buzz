@@ -38,7 +38,9 @@ class _ReadOnlyNotice extends HookConsumerWidget {
       }
     }
 
-    final message = channel.isArchived
+    final message = channel.messagePublisher != null && !channel.isArchived
+        ? 'Open a post by the channel publisher to reply'
+        : channel.isArchived
         ? 'This $place is archived and read-only on mobile.'
         : isOpen && channel.joinsAsGuest
         ? 'This $place is read-only'

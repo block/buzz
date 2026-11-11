@@ -310,6 +310,9 @@ class ChannelData {
   /// means member; anything but a single `member` value fails closed to guest.
   final bool joinsAsGuest;
 
+  /// Null means ordinary policy; malformed explicit policy remains locked.
+  final String? messagePublisher;
+
   const ChannelData({
     required this.id,
     required this.name,
@@ -325,6 +328,7 @@ class ChannelData {
     this.isArchived = false,
     this.isUnlisted = false,
     this.joinsAsGuest = false,
+    this.messagePublisher,
   });
 
   factory ChannelData.fromEvent(NostrEvent event) {
@@ -390,6 +394,7 @@ class ChannelData {
       isArchived: isArchived,
       isUnlisted: event.tags.any((t) => t.isNotEmpty && t[0] == 'unlisted'),
       joinsAsGuest: joinsAsGuest,
+      messagePublisher: parseMessagePublisher(event.tags),
     );
   }
 }
@@ -435,4 +440,18 @@ Map<String, dynamic>? parseCommandResponse(String message) {
     if (decoded is Map<String, dynamic>) return decoded;
   } catch (_) {}
   return null;
+}
+
+/// Parse the relay-published single-publisher policy without widening malformed state.
+String? parseMessagePublisher(List<List<String>> tags) {
+  final values = tags
+      .where((tag) => tag.isNotEmpty && tag.first == 'message_publisher')
+      .toList();
+  if (values.isEmpty) return null;
+  if (values.length != 1 ||
+      values.single.length != 2 ||
+      !RegExp(r'^[0-9a-f]{64}$').hasMatch(values.single[1])) {
+    return '';
+  }
+  return values.single[1];
 }

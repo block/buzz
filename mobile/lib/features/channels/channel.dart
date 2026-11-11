@@ -38,6 +38,9 @@ class Channel {
   /// [ChannelData.joinsAsGuest]).
   final bool joinsAsGuest;
 
+  /// Sole root publisher; channel readers may reply to this identity’s roots.
+  final String? messagePublisher;
+
   const Channel({
     required this.id,
     required this.name,
@@ -59,6 +62,7 @@ class Channel {
     this.ttlDeadline,
     this.isUnlisted = false,
     this.joinsAsGuest = false,
+    this.messagePublisher,
   });
 
   factory Channel.fromJson(Map<String, dynamic> json) => Channel(
@@ -91,6 +95,7 @@ class Channel {
         : null,
     isUnlisted: json['unlisted'] as bool? ?? false,
     joinsAsGuest: json['joins_as_guest'] as bool? ?? false,
+    messagePublisher: json['message_publisher'] as String?,
   );
 
   /// Inverse of [Channel.fromJson].
@@ -115,7 +120,15 @@ class Channel {
     'ttl_deadline': ttlDeadline?.toIso8601String(),
     'unlisted': isUnlisted,
     'joins_as_guest': joinsAsGuest,
+    'message_publisher': messagePublisher,
   };
+
+  /// Main composer eligibility, independent of reply eligibility.
+  bool canStartMessage(String? viewer) =>
+      !isArchived &&
+      (messagePublisher == null
+          ? isMember
+          : viewer != null && viewer == messagePublisher);
 
   bool get isEphemeral => ttlSeconds != null || ttlDeadline != null;
 
@@ -197,6 +210,7 @@ class Channel {
     ttlDeadline: details.ttlDeadline,
     isUnlisted: isUnlisted,
     joinsAsGuest: joinsAsGuest,
+    messagePublisher: details.messagePublisher,
   );
 
   Channel copyWith({
@@ -232,11 +246,13 @@ class Channel {
     ttlDeadline: ttlDeadline,
     isUnlisted: isUnlisted,
     joinsAsGuest: joinsAsGuest ?? this.joinsAsGuest,
+    messagePublisher: messagePublisher,
   );
 }
 
 @immutable
 class ChannelDetails {
+  final String? messagePublisher;
   final String id;
   final String name;
 
@@ -255,6 +271,7 @@ class ChannelDetails {
   final DateTime? ttlDeadline;
 
   const ChannelDetails({
+    this.messagePublisher,
     required this.id,
     required this.name,
     required this.channelType,
@@ -272,6 +289,7 @@ class ChannelDetails {
   });
 
   factory ChannelDetails.fromJson(Map<String, dynamic> json) => ChannelDetails(
+    messagePublisher: json['message_publisher'] as String?,
     id: json['id'] as String,
     name: json['name'] as String,
     channelType: json['channel_type'] as String,
@@ -293,6 +311,7 @@ class ChannelDetails {
   );
 
   factory ChannelDetails.fromChannel(Channel channel) => ChannelDetails(
+    messagePublisher: channel.messagePublisher,
     id: channel.id,
     name: channel.name,
     channelType: channel.channelType,

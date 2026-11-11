@@ -1477,6 +1477,37 @@ async fn validate_edit_ownership(
         .ok_or_else(|| EDIT_TARGET_DENIED.to_string())?;
 
     let author = effective_message_author(&target_event.event, &state.relay_keypair.public_key());
+    let channel = state
+        .db
+        .get_channel_for_event_write(community_id, edit_channel_id)
+        .await
+        .map_err(|e| format!("error: database error: {e}"))?;
+    if channel.message_publisher.is_some() {
+        if author != actor
+            || !super::message_policy::is_message(target_event.event.kind.as_u16() as u32)
+        {
+            return Err(EDIT_TARGET_DENIED.into());
+        }
+        check_channel_membership(
+            community_id,
+            state,
+            edit_channel_id,
+            &actor,
+            Some(&channel),
+            ChannelWrite::Membership,
+        )
+        .await?;
+        if event
+            .tags
+            .iter()
+            .any(|t| t.kind().to_string() == "broadcast")
+        {
+            return Err(EDIT_TARGET_DENIED.into());
+        }
+        super::message_policy::validate(state, community_id, &channel, &target_event.event, &actor)
+            .await?;
+        return Ok(());
+    }
     if author == actor {
         // Author editing their own message: re-gate on the channel write gate so that
         // a removed private-channel member cannot mutate old messages after access is revoked.
@@ -2955,7 +2986,15 @@ async fn ingest_event_inner(
                 ch_id,
                 &pubkey_bytes,
                 channel_row.as_ref(),
-                ChannelWrite::for_kind(kind_u32),
+                if channel_row
+                    .as_ref()
+                    .is_some_and(|ch| ch.message_publisher.is_some())
+                    && super::message_policy::is_message(kind_u32)
+                {
+                    ChannelWrite::Membership
+                } else {
+                    ChannelWrite::for_kind(kind_u32)
+                },
             )
             .await;
             let claimed = claimed_community_from_event(&event);
@@ -3435,6 +3474,20 @@ async fn ingest_event_inner(
     } else {
         None
     };
+
+    if super::message_policy::is_message(kind_u32) {
+        if let Some(channel) = &channel_row {
+            super::message_policy::validate(
+                state,
+                tenant.community(),
+                channel,
+                &event,
+                &pubkey_bytes,
+            )
+            .await
+            .map_err(IngestError::Rejected)?;
+        }
+    }
 
     // Pre-validate kind:0 content before storage so we don't store an event
     // whose profile sync will silently fail in the side-effect handler.

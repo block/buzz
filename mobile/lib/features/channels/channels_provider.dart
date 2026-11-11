@@ -833,6 +833,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       ttlDeadline: data.ttlDeadline,
       isUnlisted: data.isUnlisted,
       joinsAsGuest: data.joinsAsGuest,
+      messagePublisher: data.messagePublisher,
     );
   }
 

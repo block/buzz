@@ -117,11 +117,6 @@ class ThreadDetailPage extends HookConsumerWidget {
     // signing identity instead of freezing that incomplete route snapshot.
     final currentPubkey =
         ref.watch(currentPubkeyProvider) ?? this.currentPubkey;
-    // A Solo chat's threads are read-only: its agents answer at top level.
-    final canReply =
-        isMember &&
-        !isArchived &&
-        ref.watch(channelStartsThreadsProvider(channelId));
     final appView = View.of(context);
     final composerDockHeight = useState(0.0);
     final composerFocusNode = useFocusNode();
@@ -194,6 +189,20 @@ class ThreadDetailPage extends HookConsumerWidget {
               threadHead,
             ...fetchedReplies,
           ];
+    final channel = ref.watch(channelByIdProvider(channelId));
+    final publisher = channel?.messagePublisher;
+    final policyRoot = publisher == null
+        ? null
+        : ref.watch(publisherThreadRootProvider(repliesArgs)).value;
+    final canReply =
+        !(channel?.isArchived ?? isArchived) &&
+        ref.watch(channelStartsThreadsProvider(channelId)) &&
+        (publisher == null
+            ? isMember
+            : currentPubkey != null &&
+                  policyRoot != null &&
+                  policyRoot.pubkey == publisher &&
+                  (channel?.visibility == 'open' || channel?.isMember == true));
     final routeAnimation = ModalRoute.of(context)?.animation;
     final reducedLandingHighlightMotion = MediaQuery.disableAnimationsOf(
       context,
@@ -940,7 +949,6 @@ class ThreadDetailPage extends HookConsumerWidget {
       return null;
     }, [settledImeBottomInset.value]);
 
-    final channel = ref.watch(channelByIdProvider(channelId));
     final channelNamesMap = ref.watch(channelIdsByNameProvider);
 
     return FrostedScaffold(

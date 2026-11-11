@@ -932,6 +932,14 @@ pub enum ChannelsCmd {
         #[arg(long, value_name = "true|false")]
         auto_join: Option<bool>,
     },
+    /// Set the sole stream publisher; readers may reply in their threads.
+    MessagePublisher {
+        #[arg(long)]
+        channel: String,
+        /// Publisher hex key, or an empty string to restore ordinary permissions.
+        #[arg(long)]
+        pubkey: String,
+    },
     /// Set the channel topic
     Topic {
         /// Channel UUID
@@ -3000,6 +3008,7 @@ mod tests {
                 "leave",
                 "list",
                 "members",
+                "message-publisher",
                 "purpose",
                 "remove-member",
                 "search",
@@ -3119,7 +3128,7 @@ mod tests {
         let expected: Vec<(&str, usize)> = vec![
             ("agents", 5),
             ("canvas", 4),
-            ("channels", 17),
+            ("channels", 18),
             ("dms", 4),
             ("emoji", 5),
             ("feed", 1),

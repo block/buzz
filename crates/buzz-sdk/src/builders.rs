@@ -958,6 +958,19 @@ pub fn build_update_channel(
     Ok(EventBuilder::new(Kind::Custom(9002), "").tags(tags))
 }
 
+/// Restrict stream roots to one publisher, allowing readers to reply to its
+/// validated threads. `None` explicitly restores the ordinary channel policy.
+pub fn build_set_message_publisher(
+    channel_id: Uuid,
+    publisher: Option<nostr::PublicKey>,
+) -> Result<EventBuilder, SdkError> {
+    let value = publisher.map(|key| key.to_hex()).unwrap_or_default();
+    Ok(EventBuilder::new(Kind::Custom(9002), "").tags(vec![
+        tag(&["h", &channel_id.to_string()])?,
+        tag(&["message_publisher", &value])?,
+    ]))
+}
+
 /// Build a NIP-29 edit-metadata event for topic (kind 9002).
 pub fn build_set_topic(channel_id: Uuid, topic: &str) -> Result<EventBuilder, SdkError> {
     let tags = vec![

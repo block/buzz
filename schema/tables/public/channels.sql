@@ -42,6 +42,8 @@ CREATE TABLE channels (
     -- channel listings for non-members. Matters only while the channel is open.
     unlisted        BOOLEAN NOT NULL DEFAULT FALSE,
     auto_join       BOOLEAN NOT NULL DEFAULT false,
+    -- When set, only this identity starts messages; readers may reply to its roots.
+    message_publisher BYTEA CHECK (message_publisher IS NULL OR octet_length(message_publisher) = 32),
     PRIMARY KEY (community_id, id),
     CONSTRAINT chk_channels_id_not_nil CHECK (id <> '00000000-0000-0000-0000-000000000000'::uuid)
 );

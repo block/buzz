@@ -330,3 +330,27 @@ List<NostrEvent> _mergeReplies(
   }
   return byId.values.toList()..sort(compareThreadRepliesChronologically);
 }
+
+/// One exact read per opened publisher thread; scoped to its channel. Failed or
+/// missing roots leave the composer closed, without affecting readable history.
+final publisherThreadRootProvider = FutureProvider.autoDispose
+    .family<NostrEvent?, ThreadRepliesArgs>((ref, args) async {
+      final session = ref.read(relaySessionProvider.notifier);
+      final events = await session.fetchHistory(
+        NostrFilter(
+          ids: [args.rootId],
+          kinds: [EventKind.streamMessage, EventKind.streamMessageV2],
+          tags: {
+            '#h': [args.channelId],
+          },
+          limit: 1,
+        ),
+      );
+      return events
+          .where(
+            (event) =>
+                event.id == args.rootId &&
+                event.threadReference.parentId == null,
+          )
+          .firstOrNull;
+    });
