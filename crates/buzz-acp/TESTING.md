@@ -40,6 +40,50 @@ BUZZ_TEST_PI_ACP=/absolute/buzz-pi-acp/dist/index.js \
   cargo test -p buzz-acp real_pi_preserves -- --ignored
 ```
 
+## Observer retention measurement
+
+The observer has deterministic regression tests for replay byte/count limits,
+oversized payloads and envelopes, and a stalled live subscriber. Run them with:
+
+```sh
+cargo test -p buzz-acp --lib observer::tests -- --test-threads=1
+```
+
+An ignored local probe measures the actual `ObserverHandle::emit`, `snapshot`
+and broadcast paths without a relay or agent. It defaults to the #7987 workload:
+1,000 events with a 1 MiB ASCII string each and a subscriber that does not drain
+until after emission. It prints JSON with `emitMs`, replay/live serialized byte
+totals and event counts, and the subscriber's lag count.
+
+```sh
+cargo test --release -p buzz-acp --lib observer::tests::retention_probe -- \
+  --exact --ignored --nocapture
+
+# Small-event throughput control, including ordinary count-based eviction:
+BUZZ_OBSERVER_PROBE_EVENTS=10000 BUZZ_OBSERVER_PROBE_BYTES=1024 \
+  cargo test --release -p buzz-acp --lib observer::tests::retention_probe -- \
+  --exact --ignored --nocapture
+```
+
+Use fresh processes, the same profile and workload, an idle machine, and repeated
+alternating baseline/candidate runs for timing comparisons. There is no timing
+threshold. `emitMs` includes payload construction and excludes the later snapshot
+and receive/serialization measurement. Serialized byte totals are not heap/RSS
+measurements. On macOS, `/usr/bin/time -l` around the test executable printed by
+`cargo test --release -p buzz-acp --lib --no-run` can additionally measure peak
+RSS; do not time Cargo compilation as part of the memory workload. The probe's
+snapshot and receive measurements allocate their own copies, so its peak RSS
+includes measurement overhead.
+
+Replay keeps the newest suffix within both 1,000 events and 4 MiB of serialized
+JSON. Events are fitted with the existing relay payload elision before either
+store retains them. The live ring preserves its requested 1,000-event capacity
+(Tokio rounds it to 1,024 slots); its per-event relay-size cap bounds retained
+serialized JSON to less than 64 MiB. These are JSON budgets, not exact allocator
+limits. Oversized telemetry carries the existing elision markers; an envelope
+that cannot fit even after payload elision is dropped with a warning and sequence
+gap. A lagging receiver continues to report its dropped-event count.
+
 ## Git bootstrap
 
 `cargo test -p buzz-acp --test git_bootstrap` starts the actual harness with a

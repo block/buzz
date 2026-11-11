@@ -15,7 +15,11 @@ use std::{
 use serde::Serialize;
 use tokio::sync::broadcast;
 
+#[cfg(test)]
+mod tests;
+
 const OBSERVER_BUFFER_CAP: usize = 1_000;
+const OBSERVER_REPLAY_MAX_BYTES: usize = 4 * 1024 * 1024;
 
 /// Best-effort metadata attached to observer events.
 #[derive(Clone, Debug, Default)]
@@ -37,9 +41,18 @@ pub struct ObserverHandle {
 }
 
 struct ObserverInner {
+    // Events are fitted to the relay frame limit BEFORE either store takes
+    // ownership. Tokio rounds 1,000 slots up to 1,024, bounding this ring to
+    // less than 64 MiB of serialized JSON even when a subscriber never drains.
     tx: broadcast::Sender<ObserverEvent>,
-    buffer: Mutex<VecDeque<ObserverEvent>>,
+    buffer: Mutex<ReplayBuffer>,
     seq: AtomicU64,
+}
+
+#[derive(Default)]
+struct ReplayBuffer {
+    events: VecDeque<(usize, ObserverEvent)>,
+    bytes: usize,
 }
 
 fn new_observer_handle() -> ObserverHandle {
@@ -47,7 +60,7 @@ fn new_observer_handle() -> ObserverHandle {
     ObserverHandle {
         inner: Arc::new(ObserverInner {
             tx,
-            buffer: Mutex::new(VecDeque::with_capacity(OBSERVER_BUFFER_CAP)),
+            buffer: Mutex::new(ReplayBuffer::default()),
             seq: AtomicU64::new(1),
         }),
     }
@@ -89,10 +102,14 @@ impl ObserverHandle {
         self.inner.tx.subscribe()
     }
 
-    /// Return the current replay buffer.
+    /// Return the newest events within the 1,000-event and 4 MiB JSON budgets.
     pub fn snapshot(&self) -> Vec<ObserverEvent> {
         match self.inner.buffer.lock() {
-            Ok(buffer) => buffer.iter().cloned().collect(),
+            Ok(buffer) => buffer
+                .events
+                .iter()
+                .map(|(_, event)| event.clone())
+                .collect(),
             Err(error) => {
                 tracing::warn!(target: "observer", "observer replay buffer lock poisoned: {error}");
                 Vec::new()
@@ -100,7 +117,7 @@ impl ObserverHandle {
         }
     }
 
-    /// Emit a local observer event.
+    /// Emit a local observer event, fitting telemetry before retaining it.
     pub fn emit(
         &self,
         kind: impl Into<String>,
@@ -108,7 +125,17 @@ impl ObserverHandle {
         context: &ObserverContext,
         payload: serde_json::Value,
     ) {
-        let event = ObserverEvent {
+        // Assign sequence numbers and publish under the replay lock so a slow
+        // fit cannot be overtaken by a newer event and then skipped by the
+        // publisher's snapshot high-water mark.
+        let mut buffer = match self.inner.buffer.lock() {
+            Ok(buffer) => buffer,
+            Err(error) => {
+                tracing::warn!(target: "observer", "observer replay buffer lock poisoned: {error}");
+                return;
+            }
+        };
+        let mut event = ObserverEvent {
             seq: self.inner.seq.fetch_add(1, Ordering::Relaxed),
             timestamp: chrono::Utc::now().to_rfc3339(),
             kind: kind.into(),
@@ -120,17 +147,28 @@ impl ObserverHandle {
             payload,
         };
 
-        match self.inner.buffer.lock() {
-            Ok(mut buffer) => {
-                if buffer.len() >= OBSERVER_BUFFER_CAP {
-                    buffer.pop_front();
-                }
-                buffer.push_back(event.clone());
-            }
-            Err(error) => {
-                tracing::warn!(target: "observer", "observer replay buffer lock poisoned: {error}");
-            }
+        // Reuse the publisher's leaf elision and explicit fallback markers.
+        // Fitting only downstream leaves both of these stores holding raw ACP
+        // payloads (up to 10 MB each), regardless of the publish queue's budget.
+        let bytes = super::fit_observer_event_to_budget(&mut event);
+        if bytes > super::OBSERVER_MAX_PLAINTEXT_LEN {
+            // Payload elision cannot fix an oversized context/kind. Do not let
+            // an untrusted envelope bypass the broadcast's per-event bound.
+            tracing::warn!(target: "observer", seq = event.seq, bytes, dropped = 1,
+                "observer envelope exceeds byte budget; dropped event");
+            return;
         }
+
+        while buffer.events.len() >= OBSERVER_BUFFER_CAP
+            || buffer.bytes + bytes > OBSERVER_REPLAY_MAX_BYTES
+        {
+            let Some((old_bytes, _)) = buffer.events.pop_front() else {
+                break;
+            };
+            buffer.bytes -= old_bytes;
+        }
+        buffer.bytes += bytes;
+        buffer.events.push_back((bytes, event.clone()));
 
         let _ = self.inner.tx.send(event);
     }

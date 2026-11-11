@@ -1650,32 +1650,31 @@ const OBSERVER_LEAF_RETAIN_BYTES: usize = 3_000;
 /// can shrink the frame and it still overflows, the payload is replaced with a
 /// tiny stub, which trivially fits. Monotone decrease, bounded below by the stub.
 ///
-/// **Signature choice (`&mut`, double-serialize accepted):** on the common
-/// under-budget path this serializes the frame once to decide it fits, then
-/// `encrypt_observer_payload` serializes it again — one extra `to_string` of an
-/// already-small frame. Reusing that string would mean changing buzz-core's
-/// `encrypt_observer_payload` signature or adding a parallel encrypt path; both
-/// are out of this change's scope (buzz-core stays untouched). The clean `&mut`
-/// signature with one cheap redundant serialize is the deliberate tradeoff.
-fn fit_observer_event_to_budget(event: &mut observer::ObserverEvent) {
-    if serialized_len(event) <= OBSERVER_MAX_PLAINTEXT_LEN {
-        return;
+/// Returns the fitted serialized size so retention can account for bytes
+/// without another traversal. Counting writes avoid allocating a second copy
+/// of a potentially multi-megabyte source frame just to measure its size.
+fn fit_observer_event_to_budget(event: &mut observer::ObserverEvent) -> usize {
+    let bytes = serialized_len(event);
+    if bytes <= OBSERVER_MAX_PLAINTEXT_LEN {
+        return bytes;
     }
 
-    // Raw size of the payload we are about to trim, captured before mutation so
-    // the stub's `originalBytes` reports source bytes discarded, not serialized
-    // overflow — consistent with the per-leaf marker's raw byte count.
-    let original_payload_bytes = serde_json::to_string(&event.payload)
-        .map(|s| s.len())
-        .unwrap_or(0);
+    // Derive the original payload size from the measured frame and its small
+    // envelope, avoiding a second traversal of the oversized source payload.
+    // JSON null occupies four bytes in the temporary envelope.
+    let payload = event.payload.take();
+    let envelope_bytes = serialized_len(event).saturating_sub(4);
+    event.payload = payload;
+    let original_payload_bytes = bytes.saturating_sub(envelope_bytes);
 
     // Elide the largest shrinkable leaf, reserialize, repeat. Each successful
     // elision strictly shrinks the serialized frame, and a floored leaf can
     // never be re-elided, so the loop is bounded by the leaf count.
     while let Some(leaf) = largest_shrinkable_leaf(&mut event.payload) {
         elide_leaf(leaf);
-        if serialized_len(event) <= OBSERVER_MAX_PLAINTEXT_LEN {
-            return;
+        let bytes = serialized_len(event);
+        if bytes <= OBSERVER_MAX_PLAINTEXT_LEN {
+            return bytes;
         }
     }
 
@@ -1685,10 +1684,27 @@ fn fit_observer_event_to_budget(event: &mut observer::ObserverEvent) {
         "elided": format!("{} payload too large", event.kind),
         "originalBytes": original_payload_bytes,
     });
+    serialized_len(event)
 }
 
-fn serialized_len(event: &observer::ObserverEvent) -> usize {
-    serde_json::to_string(event).map(|s| s.len()).unwrap_or(0)
+fn serialized_len(value: &impl serde::Serialize) -> usize {
+    let mut counter = ObserverByteCounter(0);
+    serde_json::to_writer(&mut counter, value)
+        .map(|()| counter.0)
+        .unwrap_or(usize::MAX)
+}
+
+struct ObserverByteCounter(usize);
+
+impl std::io::Write for ObserverByteCounter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0 = self.0.saturating_add(bytes.len());
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 /// Find the longest string leaf that would STRICTLY shrink if elided, returning
