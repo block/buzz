@@ -4348,6 +4348,8 @@ void main() {
       final forum = tester.widget<ForumPostsView>(find.byType(ForumPostsView));
       expect(forum.titleContentHeight, scaffold.appBar.titleContentHeight);
       expect(forum.titleContentHeight, greaterThanOrEqualTo(104));
+      await tester.pumpWidget(const SizedBox());
+      debugDefaultTargetPlatformOverride = null;
     });
 
     testWidgets('renders video attachments from imeta tags in the timeline', (
