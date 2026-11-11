@@ -106,19 +106,26 @@ class HomeScreenShortcutHost extends HookConsumerWidget {
               pendingHomeScreenShortcut.value != pendingShortcut) {
             return;
           }
-          // Each shortcut starts from Home, so it never opens beneath a
-          // sheet or a conversation left open earlier. Leaving an open New
-          // chat draft also makes New chat available again.
-          if (poppedFor.value == pendingShortcut) {
-            // A screen opened after Home was revealed wins; drop the tap.
-            if (ModalRoute.of(context)?.isCurrent == false) {
-              poppedFor.value = null;
-              pendingHomeScreenShortcut.value = null;
-              return;
-            }
-          } else {
+          if (poppedFor.value != pendingShortcut) {
             poppedFor.value = pendingShortcut;
-            Navigator.of(context).popUntil((route) => route.isFirst);
+            // Each shortcut starts from Home, so it never opens beneath a
+            // sheet or a conversation left open earlier. Leaving an open
+            // New chat draft also makes New chat available again. A screen
+            // that refuses to close, such as a first message still sending,
+            // stays.
+            Navigator.of(context).popUntil(
+              (route) =>
+                  route.isFirst ||
+                  (route is ModalRoute &&
+                      route.popDisposition == RoutePopDisposition.doNotPop),
+            );
+          }
+          // Drop the tap when a screen kept Home covered or opened over it
+          // while the tap waited.
+          if (ModalRoute.of(context)?.isCurrent == false) {
+            poppedFor.value = null;
+            pendingHomeScreenShortcut.value = null;
+            return;
           }
           if (run == null) return;
           poppedFor.value = null;
