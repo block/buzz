@@ -16,7 +16,7 @@ pub struct Options {
     #[arg(long)]
     pub include_owned_agents: bool,
     /// Print the inventory without deleting anything (the default).
-    #[arg(long, conflicts_with = "delete")]
+    #[arg(long, visible_alias = "read-only", conflicts_with = "delete")]
     pub print_only: bool,
     /// Delete eligible versions for an approved request's current media stage.
     #[arg(long, requires = "request_id")]
@@ -62,10 +62,7 @@ pub async fn run(options: Options) -> Result<i32> {
     } else {
         crate::required_env("BUZZ_MEDIA_SOURCE_DATABASE_URL")?
     };
-    let endpoint = crate::required_env("BUZZ_S3_ENDPOINT")?;
-    let bucket = crate::required_env("BUZZ_S3_BUCKET")?;
-    let namespace =
-        buzz_db::entity_deletion::inventory_digest(&json!({"endpoint":endpoint,"bucket":bucket}))?;
+    let (media, namespace) = configured_storage()?;
     let source_identity = source_identity(&source_url)?;
     let journal = Db::connect_cold_start(
         DbConfig {
@@ -75,26 +72,6 @@ pub async fn run(options: Options) -> Result<i32> {
         "media_journal",
     )
     .await?;
-    let (s3_access_key, s3_secret_key) = crate::s3_key_pair_from_env();
-    let media = MediaStorage::new(&buzz_media::MediaConfig {
-        s3_endpoint: endpoint,
-        s3_bucket: bucket,
-        s3_access_key,
-        s3_secret_key,
-        s3_region: crate::s3_region_from_env(),
-        s3_addressing_style: std::env::var("BUZZ_S3_ADDRESSING_STYLE")
-            .unwrap_or_else(|_| "path".into())
-            .parse()
-            .map_err(anyhow::Error::msg)?,
-        max_image_bytes: 1,
-        max_gif_bytes: 1,
-        max_video_bytes: 1,
-        max_file_bytes: 1,
-        public_base_url: "https://example.org/media".into(),
-        upload_records_enabled: false,
-        upload_ip_header: None,
-        upload_port_header: None,
-    })?;
     if let Some(request) = options.request_id {
         return super::execute::run(
             &journal,
@@ -169,6 +146,37 @@ pub async fn run(options: Options) -> Result<i32> {
     Ok(if unknown == 0 { 0 } else { 2 })
 }
 
+/// Build the shared storage client and stable namespace from BUZZ_S3_* settings.
+/// Workflow callers use the returned namespace in StageOptions and must use the
+/// serving database for execution, never a separate preview journal database.
+pub fn configured_storage() -> Result<(MediaStorage, String)> {
+    let endpoint = crate::required_env("BUZZ_S3_ENDPOINT")?;
+    let bucket = crate::required_env("BUZZ_S3_BUCKET")?;
+    let namespace =
+        buzz_db::entity_deletion::inventory_digest(&json!({"endpoint":endpoint,"bucket":bucket}))?;
+    let (s3_access_key, s3_secret_key) = crate::s3_key_pair_from_env();
+    let media = MediaStorage::new(&buzz_media::MediaConfig {
+        s3_endpoint: endpoint,
+        s3_bucket: bucket,
+        s3_access_key,
+        s3_secret_key,
+        s3_region: crate::s3_region_from_env(),
+        s3_addressing_style: std::env::var("BUZZ_S3_ADDRESSING_STYLE")
+            .unwrap_or_else(|_| "path".into())
+            .parse()
+            .map_err(anyhow::Error::msg)?,
+        max_image_bytes: 1,
+        max_gif_bytes: 1,
+        max_video_bytes: 1,
+        max_file_bytes: 1,
+        public_base_url: "https://example.org/media".into(),
+        upload_records_enabled: false,
+        upload_ip_header: None,
+        upload_port_header: None,
+    })?;
+    Ok((media, namespace))
+}
+
 // Credentials rotate independently of the database whose observation is saved.
 fn source_identity(connection: &str) -> Result<String> {
     let mut url = url::Url::parse(connection).context("invalid media source connection URL")?;
@@ -212,6 +220,7 @@ mod tests {
         let default = parse(&[]).unwrap().options;
         assert!(!default.delete);
         assert!(!parse(&["--print-only"]).unwrap().options.delete);
+        assert!(parse(&["--read-only"]).unwrap().options.print_only);
         let request = Uuid::new_v4().to_string();
         assert!(
             parse(&["--delete", "--request-id", &request])
@@ -223,6 +232,7 @@ mod tests {
             vec!["--delete"],
             vec!["--request-id", &request],
             vec!["--print-only", "--delete", "--request-id", &request],
+            vec!["--read-only", "--delete", "--request-id", &request],
             vec!["--delete", "--request-id", &request, "--run-id", &request],
             vec!["--mode", "print"],
         ] {

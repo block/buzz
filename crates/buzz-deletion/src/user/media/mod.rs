@@ -9,10 +9,12 @@ use uuid::Uuid;
 mod command;
 mod decision;
 mod execute;
+mod preview;
 mod stage;
 mod storage;
 mod upload;
-pub use command::{run, Options};
+pub use command::{configured_storage, run, Options};
+pub use preview::preview;
 pub use stage::{run_stage, StageOptions};
 pub use upload::UploadClaims;
 

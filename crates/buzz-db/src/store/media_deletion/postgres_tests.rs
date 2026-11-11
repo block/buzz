@@ -194,9 +194,23 @@ async fn exact_execution_plan_survives_failure_and_cannot_be_replaced() {
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn source_scan_finds_unposted_uploads_private_survivors_and_scoped_agents() {
-    let db = db().await;
+    let db = Db::from_pool(
+        sqlx::postgres::PgPoolOptions::new()
+            .after_connect(|connection, _| {
+                Box::pin(async move {
+                    sqlx::query("SET TIME ZONE 'UTC'")
+                        .execute(connection)
+                        .await?;
+                    Ok(())
+                })
+            })
+            .connect(&crate::test_support::database_url())
+            .await
+            .unwrap(),
+    );
     let pool = db.pool();
-    let human = nostr::Keys::generate().public_key().to_hex();
+    let human_keys = nostr::Keys::generate();
+    let human = human_keys.public_key().to_hex();
     let agent = nostr::Keys::generate().public_key().to_hex();
     let other = nostr::Keys::generate().public_key().to_hex();
     let a = Uuid::new_v4();
@@ -241,10 +255,41 @@ async fn source_scan_finds_unposted_uploads_private_survivors_and_scoped_agents(
         .execute(pool)
         .await
         .unwrap();
+    let event = nostr::EventBuilder::new(
+        nostr::Kind::TextNote,
+        format!("attachment /media/{}.jpg", "c".repeat(64)),
+    )
+    .sign_with_keys(&human_keys)
+    .unwrap();
+    db.insert_event(buzz_core::CommunityId::from_uuid(a), &event, None)
+        .await
+        .unwrap();
     let scan = db
         .scan_user_media(&human, true, "fixture", &[])
         .await
         .unwrap();
+    let alternate_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .after_connect(|connection, _| {
+            Box::pin(async move {
+                sqlx::query("SET TIME ZONE 'America/New_York'")
+                    .execute(connection)
+                    .await?;
+                Ok(())
+            })
+        })
+        .connect_with(pool.connect_options().as_ref().clone())
+        .await
+        .unwrap();
+    let alternate = crate::Db::from_pool(alternate_pool)
+        .scan_user_media(&human, true, "fixture", &[])
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&scan.files).unwrap(),
+        serde_json::to_value(&alternate.files).unwrap(),
+        "event timestamp keys and fingerprints must not depend on the session timezone"
+    );
     let files: BTreeMap<_, _> = scan
         .files
         .iter()

@@ -173,6 +173,70 @@ async fn actual_handler_checks_retention_blocks_writers_and_recovers_deleted_ver
     let address = listener.local_addr().unwrap();
     let app = Router::new().fallback(any(s3)).with_state(state.clone());
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    // Workflow preview must not bind or advance this destructive stage, create
+    // journal rows, gate uploads, or change source/storage state.
+    let preview_media = buzz_media::MediaStorage::new(
+        &serde_json::from_value::<buzz_media::MediaConfig>(json!({
+            "s3_endpoint": format!("http://{address}"), "s3_bucket": "fixture",
+            "s3_access_key": "fixture", "s3_secret_key": Uuid::new_v4().to_string(),
+            "max_image_bytes": 1, "max_gif_bytes": 1,
+            "public_base_url": "https://example.org/media"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let preview_options = buzz_deletion::user::media::StageOptions {
+        human: human.clone(),
+        include_owned_agents: false,
+        storage_namespace: "fixture".into(),
+        media_bases: vec![],
+        scan_budget: Default::default(),
+        mode: buzz_deletion::user::media::Mode::PrintOnly,
+    };
+    let snapshot = || async {
+        sqlx::query_scalar::<_, serde_json::Value>(
+            "SELECT jsonb_build_object(
+             'requests',(SELECT jsonb_agg(to_jsonb(r) ORDER BY id) FROM entity_deletion_requests r),
+             'stages',(SELECT jsonb_agg(to_jsonb(s) ORDER BY id) FROM entity_deletion_stage_history s),
+             'files',(SELECT jsonb_agg(to_jsonb(f)) FROM entity_deletion_media_files f),
+             'fences',(SELECT jsonb_agg(to_jsonb(f)) FROM user_deletion_fences f),
+             'uploaders',(SELECT jsonb_agg(to_jsonb(u)) FROM media_uploaders u))"
+        ).fetch_one(db.pool()).await.unwrap()
+    };
+    let before = snapshot().await;
+    let mut wrong_options = preview_options.clone();
+    wrong_options.human = nostr::Keys::generate().public_key().to_hex();
+    wrong_options.mode = buzz_deletion::user::media::Mode::Delete;
+    let wrong =
+        buzz_deletion::user::media::run_stage(&db, &preview_media, &lease, stage.id, wrong_options)
+            .await
+            .unwrap_err();
+    assert!(wrong
+        .to_string()
+        .contains("must match the approved user request"));
+    assert_eq!(snapshot().await, before);
+    let unresolved = buzz_deletion::user::media::preview(&db, &preview_media, &preview_options)
+        .await
+        .unwrap();
+    assert_eq!(unresolved["decision_complete"], false);
+    assert_eq!(unresolved["unknown_count"], 1);
+    assert_eq!(unresolved["execution_authorized"], false);
+    state.denied_retention.store(false, Ordering::SeqCst);
+    let planned = buzz_deletion::user::media::preview(&db, &preview_media, &preview_options)
+        .await
+        .unwrap();
+    assert_eq!(planned["decision_complete"], true);
+    assert_eq!(
+        planned["files"][0]["delete_targets_json"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(snapshot().await, before);
+    assert_eq!(state.versions.lock().unwrap().len(), 2);
+    assert!(state.deletes.lock().unwrap().is_empty());
+    state.denied_retention.store(true, Ordering::SeqCst);
     requests.release(&lease).await.unwrap();
     let invoke = |subject: &str| {
         let binary = std::env::var_os("NEXTEST_BIN_EXE_buzz_admin")

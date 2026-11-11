@@ -159,7 +159,7 @@ async fn preview_cli_saves_inventory_resumes_and_never_calls_delete() {
     assert!(methods.iter().all(|m| *m == Method::GET));
     server.abort(); // Recovery must use the saved inventory even with S3 offline.
     let second = invoke(run, 10_000_000)
-        .arg("--print-only")
+        .arg("--read-only")
         .output()
         .await
         .unwrap();

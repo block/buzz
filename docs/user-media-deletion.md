@@ -8,7 +8,7 @@ saves one row per file, classifies the observation, and prints JSON. Add
 are not required: old events and unposted uploads remain discoverable.
 
 There are two mutually exclusive modes: `--print-only` (the default when neither
-flag is supplied) and `--delete`. Print-only prints the inventory and stops before
+flag is supplied, with `--read-only` as an alias) and `--delete`. Print-only prints the inventory and stops before
 deletion. It does not install a user fence, approve a deletion request, migrate a
 database, or enqueue the subject for deletion.
 
@@ -235,3 +235,19 @@ For a larger database, set `--max-source-rows 10000000 --scan-timeout-secs 900`
 on a new run. These positive limits are bound to that run and do not relax the
 memory, per-file or storage limits. Choose a reader endpoint and a budget suited
 to the deployment; increasing the budget allows more work, not partial success.
+
+## Workflow preview adapter
+
+`media::preview(db, storage, &StageOptions)` performs a fresh observation with
+`Mode::PrintOnly` and returns inventory JSON. It writes no database rows, fences,
+reservations, storage objects or workflow progress. Check `decision_complete`:
+unresolved decisions are printed with errors and are not execution permission.
+Unlike the resumable standalone preview, this workflow preview has no journal.
+
+`media::configured_storage()` returns the S3 client and its namespace from the
+same environment settings as the standalone command. The workflow supplies the
+subject, media bases, budget and mode in `StageOptions`. Deletion calls
+`media::run_stage` with the already-started `purge_media` stage and its current
+lease; the workflow owns heartbeat, failure recording and stage completion.
+Do not pass a print-only inventory into deletion or mark a stage complete after
+preview. Execution creates and protects its own fresh inventory.
