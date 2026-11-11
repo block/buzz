@@ -169,7 +169,7 @@ async fn expired_and_superseded_workers_cannot_change_any_execution_state() {
         .await
         .unwrap();
     let next = next(&store, &new, Some(stage.id)).await;
-    assert_eq!(next.stage, "purge_db");
+    assert_eq!(next.stage, "purge_content");
     assert_eq!(store.inspect(id).await.unwrap().stage_history.len(), 2);
 }
 
@@ -248,21 +248,27 @@ async fn transition_recovers_on_both_sides_of_commit_and_repeated_previous_id_is
 
     // Restart before transition: None finds the completed current row and advances.
     let second = claim(&store, id, "worker-b").await;
-    let db_stage = next(&store, &second, None).await;
-    assert_eq!(db_stage.stage, "purge_db");
+    let content_stage = next(&store, &second, None).await;
+    assert_eq!(content_stage.stage, "purge_content");
     assert_eq!(
-        db_stage.metadata_json["previous_stage_id"],
+        content_stage.metadata_json["previous_stage_id"],
         gate.id.to_string()
     );
-    assert_eq!(db_stage.metadata_json["inputs"]["target"], "demo:executor");
+    assert_eq!(
+        content_stage.metadata_json["inputs"]["target"],
+        "demo:executor"
+    );
     let before = snapshot(&store, id).await;
-    assert_eq!(next(&store, &second, Some(gate.id)).await.id, db_stage.id);
+    assert_eq!(
+        next(&store, &second, Some(gate.id)).await.id,
+        content_stage.id
+    );
     assert_eq!(snapshot(&store, id).await, before);
     store.release(&second).await.unwrap();
 
     // Restart after transition: None returns the saved successor, without replay.
     let third = claim(&store, id, "worker-c").await;
-    assert_eq!(next(&store, &third, None).await.id, db_stage.id);
+    assert_eq!(next(&store, &third, None).await.id, content_stage.id);
     let after = store.inspect(id).await.unwrap();
     assert_eq!(after.stage_history.len(), 2);
     assert_eq!(after.stage_history[0].finished_at, result_time);
@@ -288,7 +294,7 @@ async fn failed_transition_keeps_completed_current_row_and_retry_creates_only_on
         .save_stage_success(&lease, gate.id, serde_json::json!({"dummy":true}))
         .await
         .unwrap();
-    sqlx::query("ALTER TABLE entity_deletion_stage_history ADD CONSTRAINT reject_successor CHECK (stage <> 'purge_db') NOT VALID")
+    sqlx::query("ALTER TABLE entity_deletion_stage_history ADD CONSTRAINT reject_successor CHECK (stage <> 'purge_content') NOT VALID")
         .execute(&store.pool).await.unwrap();
     let before = snapshot(&store, id).await;
     assert!(store.get_next_stage(&lease, Some(gate.id)).await.is_err());

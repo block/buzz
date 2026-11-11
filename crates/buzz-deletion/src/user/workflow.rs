@@ -26,13 +26,7 @@ pub(super) struct Rule {
 }
 
 pub(super) const INITIAL_STAGE: &str = "gate_user";
-fn community_initial_stage(target: &str) -> &'static str {
-    if target.starts_with("demo:") {
-        "purge_db"
-    } else {
-        "purge_content"
-    }
-}
+const COMMUNITY_INITIAL_STAGE: &str = "purge_content";
 const RULES: &[Rule] = &[
     Rule {
         name: "gate_user",
@@ -41,16 +35,10 @@ const RULES: &[Rule] = &[
         decide: |_| Ok(Decision::EnterCommunities),
     },
     Rule {
-        name: "purge_db",
-        community_scope: true,
-        allowed: &[Decision::Stage("purge_agents"), Decision::CommunityComplete],
-        decide: after_purge_db,
-    },
-    Rule {
         name: "purge_content",
         community_scope: true,
-        allowed: &[Decision::Stage("purge_agents")],
-        decide: |_| Ok(Decision::Stage("purge_agents")),
+        allowed: &[Decision::Stage("purge_agents"), Decision::CommunityComplete],
+        decide: after_purge_content,
     },
     Rule {
         name: "purge_agents",
@@ -60,11 +48,16 @@ const RULES: &[Rule] = &[
     },
 ];
 
-fn after_purge_db(result: &Value) -> Result<Decision> {
+fn after_purge_content(result: &Value) -> Result<Decision> {
+    // Real content cleanup leaves account and agent cleanup to later stages.
+    if result["account_erasure_complete"] == false {
+        return Ok(Decision::Stage("purge_agents"));
+    }
+    // Demo execution retains its saved, simulated agent-routing result.
     match result["has_agents"].as_bool() {
         Some(true) => Ok(Decision::Stage("purge_agents")),
         Some(false) => Ok(Decision::CommunityComplete),
-        None => Err(invalid("purge_db result must contain has_agents")),
+        None => Err(invalid("purge_content result must contain has_agents")),
     }
 }
 
@@ -215,11 +208,7 @@ impl Progress {
                     .find(|(id, _)| !self.completed_communities.contains(id))
                 {
                     Some((id, _)) => Ok(Some(Step {
-                        name: community_initial_stage(
-                            row.metadata_json["inputs"]["target"]
-                                .as_str()
-                                .ok_or_else(|| invalid("missing target input"))?,
-                        ),
+                        name: COMMUNITY_INITIAL_STAGE,
                         community: Some(*id),
                     })),
                     None => self.apply(inventory, row, Decision::RequestComplete),
@@ -240,15 +229,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn real_content_routes_to_agent_cleanup_without_claiming_completion() {
-        assert_eq!(community_initial_stage("demo:alice"), "purge_db");
-        assert_eq!(community_initial_stage(&"ab".repeat(32)), "purge_content");
-        let content = rule("purge_content").unwrap();
+    fn content_routes_real_cleanup_and_saved_demo_results() {
+        assert_eq!(COMMUNITY_INITIAL_STAGE, "purge_content");
+        let content = rule(COMMUNITY_INITIAL_STAGE).unwrap();
         assert!(content.community_scope);
-        assert_eq!(
-            (content.decide)(&serde_json::json!({})).unwrap(),
-            Decision::Stage("purge_agents")
-        );
+        for (result, expected) in [
+            (
+                serde_json::json!({"content": {}, "account_erasure_complete": false}),
+                Decision::Stage("purge_agents"),
+            ),
+            (
+                serde_json::json!({"account_erasure_complete": false, "has_agents": false}),
+                Decision::Stage("purge_agents"),
+            ),
+            (
+                serde_json::json!({"dummy": true, "has_agents": true}),
+                Decision::Stage("purge_agents"),
+            ),
+            (
+                serde_json::json!({"dummy": true, "has_agents": false}),
+                Decision::CommunityComplete,
+            ),
+        ] {
+            assert_eq!((content.decide)(&result).unwrap(), expected);
+        }
+        assert!((content.decide)(&serde_json::json!({})).is_err());
     }
 
     #[test]
