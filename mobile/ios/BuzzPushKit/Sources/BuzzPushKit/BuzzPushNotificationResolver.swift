@@ -686,17 +686,19 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
   /// links, images, bold and strikethrough is removed and runs of spaces are
   /// collapsed outside code.
   static func previewBody(_ content: String) -> String {
-    let text = content.replacingOccurrences(of: "\r\n", with: "\n")
+    // Work in UTF-16 ranges: a match may start or end inside a grapheme
+    // cluster (a combining mark after a backtick), where String indices
+    // don't exist.
+    let text = content.replacingOccurrences(of: "\r\n", with: "\n") as NSString
     var result = ""
-    var prose = text.startIndex
-    for match in previewCode.matches(in: text, range: NSRange(text.startIndex..., in: text)) {
-      let range = Range(match.range, in: text)!
-      result += previewProse(text[prose..<range.lowerBound])
-      let body = Range(match.range(at: 1), in: text) ?? Range(match.range(at: 2), in: text)!
-      result += text[body]
-      prose = range.upperBound
+    var prose = 0
+    for match in previewCode.matches(in: text as String, range: NSRange(location: 0, length: text.length)) {
+      result += previewProse(text.substring(with: NSRange(location: prose, length: match.range.location - prose)))
+      let body = match.range(at: 1).location != NSNotFound ? match.range(at: 1) : match.range(at: 2)
+      result += text.substring(with: body)
+      prose = NSMaxRange(match.range)
     }
-    result += previewProse(text[prose...])
+    result += previewProse(text.substring(from: prose))
     result = result.replacingOccurrences(
       of: #"[ \t]+\n"#, with: "\n", options: .regularExpression)
     result = result.replacingOccurrences(
@@ -713,8 +715,8 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
     return kept.trimmingCharacters(in: .whitespacesAndNewlines) + "…"
   }
 
-  private static func previewProse(_ prose: Substring) -> String {
-    String(prose)
+  private static func previewProse(_ prose: String) -> String {
+    prose
       .replacingOccurrences(
         of: #"!?\[([^\]]*)\]\([^)]*\)"#, with: "$1", options: .regularExpression)
       .replacingOccurrences(

@@ -53,6 +53,11 @@
       "expected": "**kwargs and def __init__(self, **kw): pass"
     },
     {
+      "name": "a combining mark next to a code span's backticks is kept",
+      "input": "`x`́ and `́y`",
+      "expected": "x́ and ́y"
+    },
+    {
       "name": "single asterisks, underscores, quotes, lists and headings stay as typed",
       "input": "> quoted\n- item one\n# Heading\n*soft* snake_case",
       "expected": "> quoted\n- item one\n# Heading\n*soft* snake_case"
