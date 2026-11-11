@@ -684,8 +684,11 @@ export function useUnreadChannels(
       .then(({ channels: results }) => {
         // Identity/relay reset swapped the claims object: result is for a dead scope.
         if (claims !== caughtUpChannelsRef.current) return;
-        const { observedPersistence, recordUnreadEvent, getEffectiveTimestamp } =
-          catchUpLatestRef.current;
+        const {
+          observedPersistence,
+          recordUnreadEvent,
+          getEffectiveTimestamp,
+        } = catchUpLatestRef.current;
         // The command rejects if relay/pubkey scope changes in flight. Keep the
         // renderer fence too, and release here: nothing else would, so the
         // claim would stay inFlight forever and these channels never catch up.

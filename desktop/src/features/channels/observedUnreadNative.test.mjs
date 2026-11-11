@@ -949,7 +949,10 @@ test("coalesce: a burst of membership/latest/marker mutations is ONE ingest", as
     assert.equal(sent.length, 1, "the whole burst must be a single ingest");
     assert.equal(sent[0].membership.length, 20);
     assert.equal(rig.scope(scope).membership.size, 20);
-    assert.equal(rig.scope(scope).channelLatest.get("channel-burst"), NOW_S - 5);
+    assert.equal(
+      rig.scope(scope).channelLatest.get("channel-burst"),
+      NOW_S - 5,
+    );
     assert.equal(rig.scope(scope).markers.get("channel-burst"), NOW_S);
   } finally {
     await harness?.unmount();
