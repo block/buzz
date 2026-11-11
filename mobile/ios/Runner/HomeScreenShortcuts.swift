@@ -51,8 +51,11 @@ final class HomeScreenShortcuts {
         let state = BestieWidgetState(
           name: args["name"] as? String,
           avatar: (args["avatar"] as? FlutterStandardTypedData)?.data)
-        guard state.save() else {
-          result(FlutterError(code: "unavailable", message: "No app group", details: nil))
+        do {
+          try state.save()
+        } catch {
+          result(
+            FlutterError(code: "unavailable", message: error.localizedDescription, details: nil))
           return
         }
         WidgetCenter.shared.reloadTimelines(ofKind: BestieWidgetState.kind)

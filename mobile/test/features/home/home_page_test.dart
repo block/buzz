@@ -14,6 +14,7 @@ import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/shared/shortcuts/home_screen_shortcuts.dart';
 import 'package:buzz/shared/widgets/frosted_app_bar.dart';
 import 'package:buzz/features/home/home_page.dart';
+import 'package:buzz/features/home/home_screen_shortcut_host.dart';
 import 'package:buzz/features/home/messages_filters.dart';
 import 'package:buzz/features/home/messages_navigation_bar.dart';
 import 'package:buzz/shared/widgets/ios_message_create_button.dart';
@@ -26,6 +27,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:hooks_riverpod/misc.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 // Production iOS capsules fit the semibold label plus 16 points on each side.
@@ -49,6 +51,7 @@ void main() {
     String? bestie,
     Stream<String?>? bestieUpdates,
     ValueChanged<String>? onOpenBestie,
+    List<Override> overrides = const [],
   }) async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
@@ -62,6 +65,7 @@ void main() {
         channelsProvider.overrideWith(_Channels.new),
         // Lifecycle changes here exercise Home, not the relay connection.
         appLifecycleProvider.overrideWith(_Lifecycle.new),
+        ...overrides,
       ],
       child: MaterialApp(
         theme: AppTheme.light(topSectionGradient: topSectionGradient),
@@ -412,13 +416,31 @@ void main() {
         null,
       ),
     );
-    Future<void> renderAvatars() async {
-      for (var i = 0; i < 5; i++) {
+    // Each widget avatar render, by initial: started, finished, and any
+    // the test holds before it draws.
+    final renders = <String>[];
+    final rendered = <String>[];
+    final heldRenders = <String, Completer<void>>{};
+    final avatarRenderer = bestieWidgetAvatarProvider.overrideWith((ref) {
+      final render = nativeBestieWidgetAvatar(ref);
+      return ({required url, required initial}) async {
+        renders.add(initial);
+        await heldRenders[initial]?.future;
+        try {
+          return await render(url: url, initial: initial);
+        } finally {
+          rendered.add(initial);
+        }
+      };
+    });
+    Future<void> waitFor(String what, bool Function() done) async {
+      for (var i = 0; i < 500 && !done(); i++) {
         await tester.runAsync(
-          () => Future<void>.delayed(const Duration(milliseconds: 20)),
+          () => Future<void>.delayed(const Duration(milliseconds: 10)),
         );
         await tester.pump();
       }
+      expect(done(), isTrue, reason: 'Timed out waiting for $what');
     }
 
     final bestie = 'b' * 64;
@@ -433,6 +455,7 @@ void main() {
       await buildHome(
         bestieUpdates: bestieUpdates.stream,
         onOpenBestie: opened.add,
+        overrides: [avatarRenderer],
         onNewChatAction: (value) {
           chat = value;
           homeBuilds++;
@@ -456,8 +479,10 @@ void main() {
     expect(created, 1);
     expect(published.last, ['New chat', 'New DM', 'Message Pip']);
     // The lock screen widget gets the Bestie's name and rendered avatar.
-    await renderAvatars();
-    expect(widgetBesties.last.name, 'Pip');
+    await waitFor(
+      "Pip's widget avatar",
+      () => widgetBesties.isNotEmpty && widgetBesties.last.name == 'Pip',
+    );
     expect(widgetBesties.last.avatarBytes, greaterThan(0));
     final widgetPublishes = widgetBesties.length;
 
@@ -570,16 +595,21 @@ void main() {
     expect(opened, [bestie]);
     expect(pendingHomeScreenShortcut.value, isNull);
     // Reconnects and failed reads leave the widget's Bestie alone.
-    await renderAvatars();
+    expect(renders, rendered);
+    final renderCount = renders.length;
     expect(widgetBesties.length, widgetPublishes);
 
     // A Bestie replaced while its avatar renders never reaches the widget,
     // and a community without one shows the generic agent.
+    final replaced = heldRenders['C'] = Completer<void>();
     bestieUpdates.add('c' * 64);
     await tester.pumpAndSettle();
+    expect(renders.sublist(renderCount), ['C']);
     bestieUpdates.add(null);
     await tester.pumpAndSettle();
-    await renderAvatars();
+    replaced.complete();
+    await waitFor('the replaced avatar', () => rendered.last == 'C');
+    await tester.pumpAndSettle();
     expect(widgetBesties.sublist(widgetPublishes), [
       (name: null, avatarBytes: 0),
     ]);

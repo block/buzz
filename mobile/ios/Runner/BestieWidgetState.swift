@@ -35,18 +35,27 @@ struct BestieWidgetState {
       avatar: avatarURL.flatMap { try? Data(contentsOf: $0) })
   }
 
-  /// Saves the state, returning false when the app group is unavailable.
-  @discardableResult
-  func save() -> Bool {
-    guard let group = Self.groupIdentifier, let defaults = UserDefaults(suiteName: group)
-    else { return false }
-    if let url = Self.avatarURL {
-      if let avatar { try? avatar.write(to: url, options: .atomic) } else {
-        try? FileManager.default.removeItem(at: url)
-      }
+  /// Saves the state. Throws when the app group is unavailable or the avatar
+  /// can't be written, leaving the previous Bestie in place.
+  func save() throws {
+    guard let group = Self.groupIdentifier, let defaults = UserDefaults(suiteName: group),
+      let url = Self.avatarURL
+    else { throw CocoaError(.fileNoSuchFile) }
+    guard let name else {
+      // Hiding the Bestie first means a leftover image is never shown.
+      defaults.set(false, forKey: Self.presentKey)
+      defaults.removeObject(forKey: Self.nameKey)
+      try? FileManager.default.removeItem(at: url)
+      return
     }
-    defaults.set(name != nil, forKey: Self.presentKey)
+    // The image lands before the name, so a failed write never pairs one
+    // Bestie's name with another's avatar.
+    if let avatar {
+      try avatar.write(to: url, options: .atomic)
+    } else if FileManager.default.fileExists(atPath: url.path) {
+      try FileManager.default.removeItem(at: url)
+    }
+    defaults.set(true, forKey: Self.presentKey)
     defaults.set(name, forKey: Self.nameKey)
-    return true
   }
 }

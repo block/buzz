@@ -274,8 +274,8 @@ BUZZ_APP_ATTEST_ENVIRONMENT = development
 BUZZ_PUSH_GATEWAY_URL = https:/$()/push.example
 ```
 
-Use your personal bundle ID and team above. Provision both the parent and its
-`.NotificationService` extension. Configure an isolated gateway with the matching
+Use your personal bundle ID and team above. Provision the parent and its
+`.NotificationService` and `.BuzzWidgets` extensions. Configure an isolated gateway with the matching
 App Attest application ID, APNs topic and sandbox certificate. Development
 attestation requires the explicit `personal-dev-app-attest` gateway build feature
 and `BUZZ_PUSH_APP_ATTEST_ENVIRONMENT=development`; ordinary gateway builds accept

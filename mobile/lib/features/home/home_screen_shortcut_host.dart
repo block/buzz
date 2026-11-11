@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
@@ -89,11 +90,7 @@ class HomeScreenShortcutHost extends HookConsumerWidget {
       unawaited(publishHomeScreenShortcuts(items));
       return null;
     }, [bestie.isLoading, bestie.hasError, bestiePubkey, bestieName]);
-    final media = (
-      auth: ref.watch(mediaGetAuthServiceProvider),
-      client: ref.watch(mediaHttpClientProvider),
-      diskCache: ref.watch(mediaDiskCacheProvider),
-    );
+    final renderAvatar = ref.watch(bestieWidgetAvatarProvider);
     useEffect(
       () {
         if (bestie.isLoading || bestie.hasError) return null;
@@ -108,28 +105,23 @@ class HomeScreenShortcutHost extends HookConsumerWidget {
           return null;
         }
         unawaited(() async {
-          final avatar = await nativeAvatarImage(
+          final avatar = await renderAvatar(
             url: next.avatar?.url,
             initial: next.avatar?.initial ?? next.pubkey[0].toUpperCase(),
-            isAgent: true,
-            circular: true,
-            // The lock screen tints widgets by brightness, so artwork
-            // floats on the system's widget backdrop, not a light fill.
-            background: Colors.transparent,
-            foreground: Colors.white,
-            dimension: _widgetAvatarDimension,
-            networkImages: (url) => smallMediaImageProviders(
-              url: url,
-              auth: media.auth,
-              client: media.client,
-              diskCache: media.diskCache,
-            ),
           );
           if (generation != widgetGeneration.value) return;
-          await publishBestieWidget(
-            name: next.name ?? 'your Bestie',
-            avatar: avatar,
-          );
+          try {
+            await publishBestieWidget(
+              name: next.name ?? 'your Bestie',
+              avatar: avatar,
+            );
+          } on PlatformException {
+            // The widget kept its previous Bestie. Forget this one so the
+            // next reload of the Bestie tries again.
+            if (generation == widgetGeneration.value) {
+              widgetBestie.value = _unpublished;
+            }
+          }
         }());
         return null;
       },
@@ -221,6 +213,43 @@ class HomeScreenShortcutHost extends HookConsumerWidget {
     );
     return const SizedBox.shrink();
   }
+}
+
+/// Renders the lock screen widget's Bestie avatar as PNG bytes.
+typedef BestieWidgetAvatarRenderer =
+    Future<Uint8List?> Function({
+      required String? url,
+      required String initial,
+    });
+
+/// The [BestieWidgetAvatarRenderer] Home uses.
+final bestieWidgetAvatarProvider = Provider<BestieWidgetAvatarRenderer>(
+  nativeBestieWidgetAvatar,
+);
+
+/// Draws the Bestie's avatar for the lock screen, loading it through [ref]'s
+/// media cache.
+BestieWidgetAvatarRenderer nativeBestieWidgetAvatar(Ref ref) {
+  final auth = ref.watch(mediaGetAuthServiceProvider);
+  final client = ref.watch(mediaHttpClientProvider);
+  final diskCache = ref.watch(mediaDiskCacheProvider);
+  return ({required url, required initial}) => nativeAvatarImage(
+    url: url,
+    initial: initial,
+    isAgent: true,
+    circular: true,
+    // The lock screen tints widgets by brightness, so artwork floats on the
+    // system's widget backdrop, not a light fill.
+    background: Colors.transparent,
+    foreground: Colors.white,
+    dimension: _widgetAvatarDimension,
+    networkImages: (url) => smallMediaImageProviders(
+      url: url,
+      auth: auth,
+      client: client,
+      diskCache: diskCache,
+    ),
+  );
 }
 
 /// Marks the lock screen widget as not yet published by this Home.
