@@ -3,6 +3,7 @@ use crate::Db;
 use sqlx::PgPool;
 mod discovery;
 mod inventory;
+mod media;
 mod requests;
 pub use discovery::normalize_user_deletion_pubkey;
 pub use inventory::UserDeletionInventory;

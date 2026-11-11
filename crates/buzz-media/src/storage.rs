@@ -1119,3 +1119,38 @@ pub struct BlobMeta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_secs: Option<f64>,
 }
+
+impl MediaStorage {
+    /// Read a small attribution record at its exact immutable version. A bounded
+    /// Range request avoids fetching arbitrary media bytes as upload metadata.
+    pub async fn get_small_version(
+        &self,
+        key: &str,
+        version_id: &str,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, MediaError> {
+        let bucket = self
+            .bucket
+            .with_extra_query(HashMap::from([(
+                "versionId".to_owned(),
+                version_id.to_owned(),
+            )]))
+            .map_err(|e| MediaError::StorageError(e.to_string()))?;
+        let response = bucket
+            .get_object_range(key, 0, Some(max_bytes as u64))
+            .await
+            .map_err(|e| MediaError::StorageError(e.to_string()))?;
+        if response.status_code() != 200 && response.status_code() != 206 {
+            return Err(MediaError::StorageError(format!(
+                "version read failed: {}",
+                response.status_code()
+            )));
+        }
+        if response.as_slice().len() > max_bytes {
+            return Err(MediaError::StorageError(
+                "upload record exceeds size bound".into(),
+            ));
+        }
+        Ok(response.to_vec())
+    }
+}

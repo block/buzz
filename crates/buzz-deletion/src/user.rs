@@ -1,12 +1,14 @@
-//! Read-only user inventory and synthetic user-deletion workflow commands.
+//! User inventory, direct cleanup and persisted deletion workflow commands.
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use clap::Subcommand;
 use uuid::Uuid;
 
-/// Preview real memberships or prepare and execute synthetic deletion requests.
+/// Inspect memberships, run cleanup handlers, or execute approved deletion requests.
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Run the media handler directly, without a workflow request.
+    MediaBatches(media::Args),
     /// Print real current memberships as JSON; does not save or execute a request.
     Inventory {
         /// Demo fixture (default), hex public key, or npub. Current memberships only.
@@ -39,8 +41,11 @@ pub enum Command {
         #[arg(long)]
         inventory_digest: String,
     },
-    /// Run dummy stages for an approved request; no real user data is changed.
+    /// Run the implemented handler for a real request, or synthetic demo stages.
     Run {
+        /// Execute real deletion; required for non-demo workflow requests.
+        #[arg(long)]
+        delete: bool,
         /// Approved request UUID.
         id: Uuid,
         /// Worker identity; defaults to hostname and process id.
@@ -72,8 +77,12 @@ pub enum Command {
     },
 }
 
-/// Run inventory discovery or synthetic workflow commands against PostgreSQL.
+/// Run direct cleanup or workflow commands against PostgreSQL.
 pub async fn run(command: Command) -> Result<i32> {
+    let command = match command {
+        Command::MediaBatches(args) => return media::run(args).await,
+        command => command,
+    };
     let db = if matches!(command, Command::Inventory { .. }) {
         buzz_db::Db::connect_cold_start(
             buzz_db::DbConfig {
@@ -91,6 +100,7 @@ pub async fn run(command: Command) -> Result<i32> {
     };
     let store = db.entity_deletion_store();
     match command {
+        Command::MediaBatches(_) => bail!("direct media command must run before workflow setup"),
         Command::Inventory { pubkey } => {
             crate::print_json(&inventory::generate(&db, &pubkey).await?)?;
         }
@@ -121,6 +131,7 @@ pub async fn run(command: Command) -> Result<i32> {
             crate::print_json(&store.inspect(id).await?)?;
         }
         Command::Run {
+            delete,
             id,
             executor_id,
             next_step,
@@ -128,11 +139,17 @@ pub async fn run(command: Command) -> Result<i32> {
             stage_delay_ms,
             demo_no_agents_in,
         } => {
+            let real = !store.get(id).await?.target.starts_with("demo:");
+            if real && !delete {
+                bail!("real workflow requires --delete; use media-batches --read-only for observation");
+            }
             let code = worker::run(
                 &store,
                 id,
                 &executor_id.unwrap_or_else(crate::default_executor_id),
                 &worker::RunOptions {
+                    db: real.then(|| db.clone()),
+                    delete,
                     next_step,
                     fail_stage,
                     stage_delay: std::time::Duration::from_millis(stage_delay_ms),
@@ -152,6 +169,8 @@ pub async fn run(command: Command) -> Result<i32> {
 
 mod handlers;
 mod inventory;
+/// Direct upload-only media cleanup and its workflow handler.
+pub mod media;
 /// Standalone delegation of an owned community to community deletion.
 pub mod owned_community;
 /// Read-only summaries of locally saved request progress and external waits.

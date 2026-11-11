@@ -1,8 +1,8 @@
-//! Dummy handlers read full saved rows and persist outcomes; they never route.
+//! Stage handlers persist outcomes; the transition function owns routing.
 
 use super::worker::RunOptions;
 use crate::RETRY_DELAY;
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use buzz_db::entity_deletion::{EntityDeletionStore, EntityLease, EntityStage};
 use uuid::Uuid;
 
@@ -12,6 +12,32 @@ pub(super) async fn dispatch(
     row: &EntityStage,
     options: &RunOptions,
 ) -> Result<()> {
+    let target = row.metadata_json["inputs"]["target"]
+        .as_str()
+        .context("missing target input")?;
+    if !target.starts_with("demo:") {
+        if row.stage != "purge_media" {
+            bail!("real handler for {} is not implemented", row.stage);
+        }
+        if !options.delete {
+            bail!("real workflow requires --delete; use media-batches --read-only for observation");
+        }
+        let db = options
+            .db
+            .as_ref()
+            .context("real handler requires database")?;
+        store.start_stage(lease, row.id).await?;
+        match super::media::handle(db, target, options.delete).await {
+            Ok(result) => store.save_stage_success(lease, row.id, result).await?,
+            Err(error) => {
+                store
+                    .fail_stage(lease, row.id, &format!("{error:#}"), RETRY_DELAY)
+                    .await?;
+                return Err(error);
+            }
+        }
+        return Ok(());
+    }
     match row.stage.as_str() {
         "gate_user" => gate_user(store, lease, row, options).await,
         "purge_db" => purge_db(store, lease, row, options).await,

@@ -25,9 +25,21 @@ pub(super) struct Rule {
     pub decide: fn(&Value) -> Result<Decision>,
 }
 
-pub(super) const INITIAL_STAGE: &str = "gate_user";
+pub(super) fn initial_stage(target: &str) -> &'static str {
+    if target.starts_with("demo:") {
+        "gate_user"
+    } else {
+        "purge_media"
+    }
+}
 const COMMUNITY_INITIAL_STAGE: &str = "purge_db";
 const RULES: &[Rule] = &[
+    Rule {
+        name: "purge_media",
+        community_scope: false,
+        allowed: &[Decision::EnterCommunities],
+        decide: |_| Ok(Decision::EnterCommunities),
+    },
     Rule {
         name: "gate_user",
         community_scope: false,
@@ -125,7 +137,7 @@ impl Progress {
         }
         let mut previous = None;
         let mut expected = Some(Step {
-            name: INITIAL_STAGE,
+            name: initial_stage(&request.target),
             community: None,
         });
         let mut visited = HashSet::new();
@@ -222,6 +234,18 @@ impl Progress {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn real_media_starts_globally_then_enters_communities() {
+        assert_eq!(initial_stage("demo:alice"), "gate_user");
+        assert_eq!(initial_stage(&"a".repeat(64)), "purge_media");
+        let media = rule("purge_media").unwrap();
+        assert!(!media.community_scope);
+        assert_eq!(
+            (media.decide)(&serde_json::json!({})).unwrap(),
+            Decision::EnterCommunities
+        );
+    }
 
     #[test]
     fn stage_options_follow_the_workflow_definition() {

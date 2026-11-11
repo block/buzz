@@ -1,6 +1,6 @@
 //! User-deletion routing. The store owns the lock and atomic writes; this module
 //! interprets the saved user inventory, history, and handler results.
-use super::workflow::{decision, invalid, Progress, Step, INITIAL_STAGE};
+use super::workflow::{decision, initial_stage, invalid, Progress, Step};
 use buzz_db::entity_deletion::{
     EntityDeletionStore, EntityLease, EntityRequest, EntityStage, NewEntityStage, NextStage,
     StageTransition,
@@ -50,7 +50,7 @@ fn decide_next(request: &EntityRequest, history: &[EntityStage]) -> Result<Stage
             request,
             &inventory,
             Step {
-                name: INITIAL_STAGE,
+                name: initial_stage(&request.target),
                 community: None,
             },
         )?));
