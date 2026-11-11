@@ -1,6 +1,34 @@
 part of 'message_content_test.dart';
 
 void stackJourneyTests() {
+  testWidgets('large video stacks only fetch posters for rendered cards', (
+    tester,
+  ) async {
+    final requested = <String>[];
+    await tester.pumpWidget(
+      _testable(
+        MessageContent(
+          bubble: true,
+          content: List.generate(
+            20,
+            (i) => '![Video $i](https://example.com/clip-$i.mp4)',
+          ).join('\n'),
+        ),
+        disableAnimations: true,
+        overrides: [
+          videoPosterProvider.overrideWith((ref, url) async {
+            requested.add(url);
+            return null;
+          }),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(requested.toSet(), {
+      for (var i = 0; i < 4; i++) 'https://example.com/clip-$i.mp4',
+    });
+  });
+
   testWidgets('mixed stacks keep video order and return from the fallback player', (
     tester,
   ) async {
@@ -39,7 +67,8 @@ void stackJourneyTests() {
     await tester.pumpAndSettle();
     expect(requested, contains(photo));
     expect(requested, contains(poster));
-    expect(requested, isNot(contains(clip)));
+    // Only the legacy video without poster metadata needs a background fetch.
+    expect(requested, contains(clip));
     expect(requested, isNot(contains('https://example.com/second.mov')));
     final stack = find.byKey(const ValueKey('message-media-stack'));
     final spoken = find.byKey(const ValueKey('message-media-stack-semantics'));

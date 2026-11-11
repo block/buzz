@@ -19,6 +19,7 @@ import 'package:flutter/scheduler.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
+
 import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import 'package:nostr/nostr.dart' as nostr;
@@ -69,6 +70,7 @@ part 'compose_bar/suggestions.dart';
 part 'compose_bar/mention_chooser.dart';
 part 'compose_bar/formatting_toolbar.dart';
 part 'compose_bar/attachments.dart';
+part 'compose_bar/video_thumbnail.dart';
 part 'compose_bar/upload_progress_pill.dart';
 part 'compose_bar/photo_gallery_picker.dart';
 part 'compose_bar/ios_photo_picker.dart';
