@@ -26,7 +26,12 @@ const PER_CHANNEL_CAP: i64 = 1_000;
 const GLOBAL_CAP: i64 = 5_000;
 const HORIZON_SECONDS: i64 = 7 * 24 * 60 * 60;
 
-/// Serializes the two observed-unread commands against each other.
+/// Serializes the two observed-unread commands against each other, and owns
+/// the single cached SQLite connection they share.
+///
+/// The connection is opened (and its DDL run) lazily on first use and then
+/// reused; reopening per call re-ran the WAL pragma and every
+/// `CREATE ... IF NOT EXISTS` on each ingest.
 ///
 /// `Arc` because the guard is taken *inside* the blocking closure the commands
 /// hand to `spawn_blocking`: a `std::sync::MutexGuard` is not `Send`, so it
@@ -35,7 +40,18 @@ const HORIZON_SECONDS: i64 = 7 * 24 * 60 * 60;
 /// thread that runs the IPC handler.
 #[derive(Default)]
 pub(crate) struct ObservedUnreadStore {
-    write_lock: Arc<Mutex<()>>,
+    write_lock: Arc<Mutex<Option<Connection>>>,
+}
+
+/// Returns the cached connection, opening it on first use.
+fn cached_conn<'a>(
+    slot: &'a mut Option<Connection>,
+    app: &AppHandle,
+) -> Result<&'a mut Connection, String> {
+    if slot.is_none() {
+        *slot = Some(open_db(&db_path(app)?)?);
+    }
+    Ok(slot.as_mut().expect("connection just initialized"))
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -459,12 +475,13 @@ pub(crate) async fn observed_unread_open_scope(
 
 fn open_scope_locked(
     _proof: OnBlockingThread,
-    write_lock: &Mutex<()>,
+    write_lock: &Mutex<Option<Connection>>,
     app: &AppHandle,
     request: OpenScopeRequest,
 ) -> Result<ObservedUnreadResponse, String> {
-    let _guard = write_lock.lock().map_err(|e| e.to_string())?;
-    let mut conn = open_db(&db_path(app)?)?;
+    // The guard now also owns the cached connection (no per-call open_db()).
+    let mut guard = write_lock.lock().map_err(|e| e.to_string())?;
+    let conn = cached_conn(&mut guard, app)?;
     let tx = conn
         .transaction()
         .map_err(|e| format!("begin observed-unread open: {e}"))?;
@@ -528,12 +545,13 @@ pub(crate) async fn observed_unread_ingest(
 
 fn ingest_locked(
     _proof: OnBlockingThread,
-    write_lock: &Mutex<()>,
+    write_lock: &Mutex<Option<Connection>>,
     app: &AppHandle,
     request: IngestRequest,
 ) -> Result<ObservedUnreadResponse, String> {
-    let _guard = write_lock.lock().map_err(|e| e.to_string())?;
-    let mut conn = open_db(&db_path(app)?)?;
+    // The guard now also owns the cached connection (no per-call open_db()).
+    let mut guard = write_lock.lock().map_err(|e| e.to_string())?;
+    let conn = cached_conn(&mut guard, app)?;
     let tx = conn
         .transaction()
         .map_err(|e| format!("begin observed ingest: {e}"))?;
