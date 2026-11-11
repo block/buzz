@@ -23,25 +23,36 @@ Map<String, String> namesakeRequalifications(
   };
 }
 
-/// Rewrite plain mentions of [renames] keys, shifting [offset] with the text.
-({String text, int offset}) renameMentions(
+/// Qualify plain mentions of [renames] keys, shifting [offset] with the text.
+/// Each occurrence keeps its authored spelling; one inside [excluded] text,
+/// such as code, stays as typed. [renamed] holds the keys with a qualified
+/// occurrence, [kept] those with one left as typed.
+({String text, int offset, Set<String> renamed, Set<String> kept})
+renameMentions(
   String text,
   Iterable<String> labels,
   Map<String, String> renames,
-  int offset,
-) {
+  int offset, {
+  bool Function(int start, int end)? excluded,
+}) {
   var result = text;
   var shifted = offset;
+  final renamed = <String>{};
+  final kept = <String>{};
   for (final range in mentionOccurrences(text, labels).reversed) {
     final to = renames[range.label];
     // The query being replaced starts at [offset].
     if (to == null || range.start == offset) continue;
-    result = result.replaceRange(range.start, range.end, '@$to');
-    if (range.end <= offset) {
-      shifted += to.length - (range.end - range.start - 1);
+    if (excluded?.call(range.start, range.end) ?? false) {
+      kept.add(range.label);
+      continue;
     }
+    final qualifier = to.substring(range.label.length);
+    result = result.replaceRange(range.end, range.end, qualifier);
+    renamed.add(range.label);
+    if (range.end <= offset) shifted += qualifier.length;
   }
-  return (text: result, offset: shifted);
+  return (text: result, offset: shifted, renamed: renamed, kept: kept);
 }
 
 /// Reserve an exact label without retargeting an earlier selection. Every
