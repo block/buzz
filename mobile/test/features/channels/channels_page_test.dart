@@ -3588,25 +3588,35 @@ void main() {
         auth.dispose();
         account.dispose();
       });
-      await tester.pumpWidget(
-        buildTestable(
-          overrides: [
-            organizationSignInProvider.overrideWithValue(signIn),
-            hostedRelayAuthProvider.overrideWithValue(auth),
-            channelsProvider.overrideWith(() => _UnauthorizedNotifier()),
-          ],
-        ),
-      );
-      await tester.pump();
-      await tester.pump(const Duration(seconds: 3));
-      await tester.pump();
+      Future<void> pumpError(ChannelsNotifier Function() notifier) async {
+        await tester.pumpWidget(const SizedBox());
+        await tester.pumpWidget(
+          buildTestable(
+            overrides: [
+              organizationSignInProvider.overrideWithValue(signIn),
+              hostedRelayAuthProvider.overrideWithValue(auth),
+              channelsProvider.overrideWith(notifier),
+            ],
+          ),
+        );
+        await tester.pump();
+        await tester.pump(const Duration(seconds: 3));
+        await tester.pump();
+      }
 
+      await pumpError(_UnauthorizedNotifier.new);
       expect(find.text('Could not load channels'), findsOneWidget);
+      expect(find.text('Use the prompt above to reconnect.'), findsOneWidget);
+      expect(find.text('Retry'), findsNothing);
+
+      // A relay that does not require the sign-in can still serve the read,
+      // so an error other than the refusal keeps its message and Retry.
+      await pumpError(_ErrorNotifier.new);
       expect(
-        find.text('Use the sign-in prompt below to reconnect.'),
+        find.text('Something went wrong. Check your connection.'),
         findsOneWidget,
       );
-      expect(find.text('Retry'), findsNothing);
+      expect(find.text('Retry'), findsOneWidget);
     },
   );
 
