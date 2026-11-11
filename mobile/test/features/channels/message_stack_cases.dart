@@ -5,10 +5,6 @@ void stackJourneyTests() {
     tester,
   ) async {
     final requested = <String>[];
-    final client = MockClient((request) async {
-      requested.add(request.url.toString());
-      return http.Response('', 404);
-    });
     await tester.pumpWidget(
       _testable(
         MessageContent(
@@ -19,7 +15,12 @@ void stackJourneyTests() {
           ).join('\n'),
         ),
         disableAnimations: true,
-        overrides: [mediaHttpClientProvider.overrideWithValue(client)],
+        overrides: [
+          videoPosterProvider.overrideWith((ref, url) async {
+            requested.add(url);
+            return null;
+          }),
+        ],
       ),
     );
     await tester.pumpAndSettle();
