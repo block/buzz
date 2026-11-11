@@ -8,35 +8,8 @@ pub(super) async fn plan(
     output: &mut Output<'_, impl Write>,
 ) -> Result<()> {
     let reason = json!({"type": "owned_resource", "pubkey": subject});
-    // Schedule deletion must win over a pointer clear, even when a schedule
-    // references a run from another selected workflow.
-    rows(conn, output, "scheduled_workflow_fires", "SELECT jsonb_build_object('workflow_id',workflow_id,'scheduled_for',scheduled_for) AS row_key,
-        NULL::text AS warning FROM scheduled_workflow_fires WHERE community_id=$1 AND workflow_id IN
-        (SELECT id FROM workflows WHERE community_id=$1 AND owner_pubkey=decode($2,'hex'))",
-        subject, &reason, "would_delete").await?;
-    let mut cursor: Option<Uuid> = None;
-    loop {
-        let ids: Vec<Uuid> = sqlx::query_scalar(
-            "SELECT id FROM workflows WHERE community_id=$1 AND owner_pubkey=decode($2,'hex')
-            AND ($3::uuid IS NULL OR id>$3) ORDER BY id LIMIT 100",
-        )
-        .bind(output.community)
-        .bind(subject)
-        .bind(cursor)
-        .fetch_all(&mut *conn)
-        .await?;
-        if ids.is_empty() {
-            break;
-        }
-        for id in ids {
-            cursor = Some(id);
-            rows::runs(conn, &id.to_string(), "workflow", output).await?;
-            rows(conn, output, "workflow_approvals", "SELECT jsonb_build_object('token_hash',encode(token,'hex')) AS row_key,
-                NULL::text AS warning FROM workflow_approvals WHERE community_id=$1 AND workflow_id=$2::uuid",
-                &id.to_string(), &reason, "would_delete").await?;
-            output.add("workflows", json!({"id":id}), "would_delete", &reason, None)?;
-        }
-    }
+    // Workflow state can contain another user's approvals or work. Leave it
+    // intact in this initial ownership-only content pass.
     rows(
         conn,
         output,
