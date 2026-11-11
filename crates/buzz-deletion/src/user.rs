@@ -1,12 +1,14 @@
-//! Read-only user inventory and synthetic user-deletion workflow commands.
+//! User inventory, offline account cleanup and persisted deletion workflows.
 
 use anyhow::Result;
 use clap::Subcommand;
 use uuid::Uuid;
 
-/// Preview real memberships or prepare and execute synthetic deletion requests.
+/// Inspect user data, run account cleanup or execute persisted workflows.
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Print account-table batches for one community; --delete executes offline.
+    AccountBatches(account_batches::Args),
     /// Print real current memberships as JSON; does not save or execute a request.
     Inventory {
         /// Demo fixture (default), hex public key, or npub. Current memberships only.
@@ -39,10 +41,19 @@ pub enum Command {
         #[arg(long)]
         inventory_digest: String,
     },
-    /// Run dummy stages for an approved request; no real user data is changed.
+    /// Run an approved workflow; real handlers require explicit --delete.
     Run {
         /// Approved request UUID.
         id: Uuid,
+        /// Execute implemented real handlers; stop relay and external writers first.
+        #[arg(long)]
+        delete: bool,
+        /// Maximum account rows per transaction.
+        #[arg(long, default_value_t=100, value_parser=clap::value_parser!(u16).range(1..=100))]
+        batch_size: u16,
+        /// Maximum account row operations in one handler invocation.
+        #[arg(long, default_value_t=100_000, value_parser=clap::value_parser!(u32).range(1..=1_000_000))]
+        max_items: u32,
         /// Worker identity; defaults to hostname and process id.
         #[arg(long)]
         executor_id: Option<String>,
@@ -72,8 +83,11 @@ pub enum Command {
     },
 }
 
-/// Run inventory discovery or synthetic workflow commands against PostgreSQL.
+/// Run the selected user-deletion command against PostgreSQL.
 pub async fn run(command: Command) -> Result<i32> {
+    if let Command::AccountBatches(args) = command {
+        return account_batches::run(args).await;
+    }
     let db = if matches!(command, Command::Inventory { .. }) {
         buzz_db::Db::connect_cold_start(
             buzz_db::DbConfig {
@@ -91,6 +105,7 @@ pub async fn run(command: Command) -> Result<i32> {
     };
     let store = db.entity_deletion_store();
     match command {
+        Command::AccountBatches(_) => anyhow::bail!("account command dispatched above"),
         Command::Inventory { pubkey } => {
             crate::print_json(&inventory::generate(&db, &pubkey).await?)?;
         }
@@ -122,17 +137,33 @@ pub async fn run(command: Command) -> Result<i32> {
         }
         Command::Run {
             id,
+            delete,
+            batch_size,
+            max_items,
             executor_id,
             next_step,
             fail_stage,
             stage_delay_ms,
             demo_no_agents_in,
         } => {
+            let request = store.get(id).await?;
+            let real = !request.target.starts_with("demo:");
+            if real {
+                anyhow::ensure!(delete, "real workflow execution requires --delete; use account-batches --read-only to preview");
+                anyhow::ensure!(
+                    fail_stage.is_none() && stage_delay_ms == 0 && demo_no_agents_in.is_empty(),
+                    "dummy controls cannot be used for real deletion"
+                );
+            }
             let code = worker::run(
                 &store,
                 id,
                 &executor_id.unwrap_or_else(crate::default_executor_id),
                 &worker::RunOptions {
+                    db: real.then(|| buzz_db::Db::from_pool(db.pool().clone())),
+                    delete,
+                    batch_size,
+                    max_items,
                     next_step,
                     fail_stage,
                     stage_delay: std::time::Duration::from_millis(stage_delay_ms),
@@ -150,6 +181,7 @@ pub async fn run(command: Command) -> Result<i32> {
     Ok(0)
 }
 
+mod account_batches;
 mod handlers;
 mod inventory;
 /// Standalone delegation of an owned community to community deletion.

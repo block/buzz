@@ -1,4 +1,4 @@
-//! Dummy handlers read full saved rows and persist outcomes; they never route.
+//! Dispatch real account cleanup or demo handlers; transitions own routing.
 
 use super::worker::RunOptions;
 use crate::RETRY_DELAY;
@@ -12,6 +12,18 @@ pub(super) async fn dispatch(
     row: &EntityStage,
     options: &RunOptions,
 ) -> Result<()> {
+    let target = row.metadata_json["inputs"]["target"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("missing target input"))?;
+    if !target.starts_with("demo:") {
+        if row.stage == "purge_account" {
+            return super::account_batches::dispatch(store, lease, row, options).await;
+        }
+        bail!(
+            "real handler {} is not implemented in this account-cleanup PR",
+            row.stage
+        );
+    }
     match row.stage.as_str() {
         "gate_user" => gate_user(store, lease, row, options).await,
         "purge_db" => purge_db(store, lease, row, options).await,
