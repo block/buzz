@@ -23,7 +23,7 @@ pub(super) async fn dispatch(
     }
     match row.stage.as_str() {
         "gate_user" => gate_user(store, lease, row, options).await,
-        "purge_db" => purge_db(store, lease, row, options).await,
+        "purge_content" => purge_content(store, lease, row, options).await,
         "purge_agents" => purge_agents(store, lease, row, options).await,
         name => bail!("unknown dummy stage {name}"),
     }
@@ -38,13 +38,13 @@ async fn gate_user(
     dummy_action(store, lease, row, options, "would gate user").await
 }
 
-async fn purge_db(
+async fn purge_content(
     store: &EntityDeletionStore,
     lease: &EntityLease,
     row: &EntityStage,
     options: &RunOptions,
 ) -> Result<()> {
-    dummy_action(store, lease, row, options, "would purge user database rows").await
+    dummy_action(store, lease, row, options, "would purge user content").await
 }
 
 async fn purge_agents(
@@ -97,7 +97,7 @@ async fn perform(
         bail!("injected dummy failure for {}", row.stage);
     }
     let mut result = serde_json::json!({"dummy": true, "message": message});
-    if row.stage == "purge_db" {
+    if row.stage == "purge_content" {
         let community = inputs["community"]["community_id"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("missing community input"))?
