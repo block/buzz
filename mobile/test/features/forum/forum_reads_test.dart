@@ -484,13 +484,16 @@ void main() {
         forumPostsProvider(_channel).future,
       );
       expect(response.posts.single.eventId, root.id);
-      expect(response.hasMore, isFalse);
+      // Inclusive timestamp bounds cannot prove completeness when a relay
+      // may clamp within the final second. Keep the root and a retry warning.
+      expect(response.hasMore, isTrue);
+      expect(response.refreshError, isA<StateError>());
       expect(
         session.filters.where(
           (filter) =>
               filter.extensions.isEmpty && !filter.tags.containsKey('#e'),
         ),
-        hasLength(2),
+        hasLength(3),
       );
     },
   );

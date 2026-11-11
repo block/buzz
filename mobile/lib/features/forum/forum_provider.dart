@@ -26,10 +26,21 @@ class ForumPostsNotifier extends ForumReader<ForumPostsResponse> {
   ForumPostsNotifier(this.channelId);
 
   @override
-  Future<ForumSource<ForumPostsResponse>> open() async {
+  Future<ForumSource<ForumPostsResponse>> open(
+    void Function() checkActive,
+  ) async {
     final config = ref.watch(relayConfigProvider);
     final session = ref.watch(relaySessionProvider.notifier);
-    return _PostsSource(ForumRootReader(session, channelId, config.baseUrl));
+    void checkScope() {
+      checkActive();
+      if (!identical(config, ref.read(relayConfigProvider))) {
+        throw StateError('Forum community or identity changed');
+      }
+    }
+
+    return _PostsSource(
+      ForumRootReader(session, channelId, config.baseUrl, checkScope),
+    );
   }
 }
 
@@ -50,10 +61,20 @@ class ForumThreadNotifier extends ForumReader<ForumThreadResponse> {
   ForumThreadNotifier(this.args);
 
   @override
-  Future<ForumSource<ForumThreadResponse>> open() async {
+  Future<ForumSource<ForumThreadResponse>> open(
+    void Function() checkActive,
+  ) async {
     final config = ref.watch(relayConfigProvider);
     final session = ref.watch(relaySessionProvider.notifier);
     final reader = ref.watch(myPubkeyProvider);
+    void checkScope() {
+      checkActive();
+      if (!identical(config, ref.read(relayConfigProvider))) {
+        throw StateError('Forum community or identity changed');
+      }
+    }
+
+    checkScope();
     final roots = await session.queryRelay([
       NostrFilter(
         kinds: NostrFilters.forumRootKinds,
@@ -64,6 +85,7 @@ class ForumThreadNotifier extends ForumReader<ForumThreadResponse> {
         limit: 1,
       ),
     ]);
+    checkScope();
     if (roots.length != 1 ||
         roots.single.id != args.eventId ||
         roots.single.channelId != args.channelId ||
@@ -72,9 +94,11 @@ class ForumThreadNotifier extends ForumReader<ForumThreadResponse> {
       throw StateError('Forum thread not found in this channel');
     }
     await verifyForumEvents(roots);
+    checkScope();
     final relayAuthor = await ref.watch(
       relayAuthorProvider(config.baseUrl).future,
     );
+    checkScope();
     if (relayAuthor == null || reader == null) {
       throw StateError('Cannot authenticate forum thread bounds');
     }
@@ -84,6 +108,7 @@ class ForumThreadNotifier extends ForumReader<ForumThreadResponse> {
       config.baseUrl,
       reader,
       relayAuthor,
+      checkScope,
     );
   }
 }
@@ -106,7 +131,7 @@ class _PostsSource implements ForumSource<ForumPostsResponse> {
     store,
     isLoadingMore: loadingMore,
     loadMoreError: loadMoreError,
-    refreshError: refreshError,
+    refreshError: refreshError ?? reader.incompleteError,
   );
 }
 
@@ -116,6 +141,7 @@ class _ThreadSource implements ForumSource<ForumThreadResponse> {
   final String relayUrl;
   final String reader;
   final String relayAuthor;
+  final void Function() checkActive;
   ForumAncestry ancestry;
 
   _ThreadSource(
@@ -124,6 +150,7 @@ class _ThreadSource implements ForumSource<ForumThreadResponse> {
     this.relayUrl,
     this.reader,
     this.relayAuthor,
+    this.checkActive,
   ) : ancestry = ForumAncestry(root);
 
   @override
@@ -134,7 +161,9 @@ class _ThreadSource implements ForumSource<ForumThreadResponse> {
       until: cursor?.createdAt,
       beforeId: cursor?.eventId,
     );
+    checkActive();
     final events = await session.queryRelay([filter]);
+    checkActive();
     final page = await decodeThreadWindow(
       events,
       ThreadWindowRequest(
@@ -145,9 +174,16 @@ class _ThreadSource implements ForumSource<ForumThreadResponse> {
       ),
       cursor,
     );
+    checkActive();
     await verifyForumEvents(page.aux);
+    checkActive();
     final next = ancestry.copy();
-    await next.resolve(session, page.rows.map((row) => row.event).toList());
+    await next.resolve(
+      session,
+      page.rows.map((row) => row.event).toList(),
+      checkActive,
+    );
+    checkActive();
     ancestry = next;
     return page;
   }

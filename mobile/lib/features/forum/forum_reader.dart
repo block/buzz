@@ -28,15 +28,22 @@ abstract class ForumReader<T extends ForumReadResponse>
   int _pages = 0;
   bool _busy = false;
 
-  /// Captures the active channel/community and validates a thread's root.
-  Future<ForumSource<T>> open();
+  /// Captures the active scope; only thread sources validate a root here.
+  /// [checkActive] must fence requests and asynchronous verification results.
+  Future<ForumSource<T>> open(void Function() checkActive);
 
   @override
   Future<T> build() async {
     final generation = ++_generation;
     ref.onDispose(() => _generation++);
     _busy = true;
-    final source = await open();
+    void checkActive() {
+      if (!ref.mounted || generation != _generation) {
+        throw StateError('Forum read superseded');
+      }
+    }
+
+    final source = await open(checkActive);
     if (!ref.mounted || generation != _generation) {
       throw StateError('Forum read superseded');
     }
@@ -89,7 +96,10 @@ abstract class ForumReader<T extends ForumReadResponse>
     final source = _source!;
     final generation = _generation;
     _busy = true;
-    state = AsyncData(source.render(_store, loadingMore: true));
+    final refreshError = response.refreshError;
+    state = AsyncData(
+      source.render(_store, loadingMore: true, refreshError: refreshError),
+    );
     try {
       if (_pages >= forumPageLimit) {
         throw StateError('Forum page limit reached; history is incomplete');
@@ -97,7 +107,7 @@ abstract class ForumReader<T extends ForumReadResponse>
       final page = await source.fetch(channelWindowNextCursor(_store));
       if (!ref.mounted || generation != _generation) return;
       final store = mergeForumWindow(_store, page);
-      final next = source.render(store);
+      final next = source.render(store, refreshError: refreshError);
       _store = store;
       _pages++;
       state = AsyncData(next);
@@ -106,7 +116,13 @@ abstract class ForumReader<T extends ForumReadResponse>
       if (error is ForumPostDeleted) {
         state = AsyncError(error, stack);
       } else {
-        state = AsyncData(source.render(_store, loadMoreError: error));
+        state = AsyncData(
+          source.render(
+            _store,
+            loadMoreError: error,
+            refreshError: refreshError,
+          ),
+        );
       }
     } finally {
       if (generation == _generation) _busy = false;

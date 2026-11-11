@@ -23,8 +23,10 @@ void _verifyEvents(List<NostrEvent> events) {
   }
 }
 
-/// Resolves reply ancestry to a channel-checked root, including out-of-page
-/// parents. A claimed root is only a hint, never a substitute for the path.
+/// Resolves signed reply chains to [root], fetching parents outside the page.
+///
+/// The caller must first verify the root's signature, channel, and lack of a
+/// reply parent. A claimed root tag alone does not establish ancestry.
 class ForumAncestry {
   final NostrEvent root;
   final Map<String, NostrEvent> _events;
@@ -41,8 +43,11 @@ class ForumAncestry {
   Future<void> resolve(
     RelaySessionNotifier session,
     List<NostrEvent> rows,
+    void Function() checkActive,
   ) async {
+    checkActive();
     await verifyForumEvents(rows);
+    checkActive();
     _events.addAll({for (final event in rows) event.id: event});
     _checkSize();
     final attempted = <String>{};
@@ -53,8 +58,10 @@ class ForumAncestry {
       }
       missing.removeAll(attempted);
       if (missing.isEmpty || attempted.length >= 1000) break;
-      final targets = missing.take(100).toList();
+      final remaining = 1000 - attempted.length;
+      final targets = missing.take(remaining < 100 ? remaining : 100).toList();
       attempted.addAll(targets);
+      checkActive();
       final parents = await session.queryRelay([
         NostrFilter(
           kinds: EventKind.channelMessageEventKinds,
@@ -65,7 +72,9 @@ class ForumAncestry {
           limit: targets.length,
         ),
       ]);
+      checkActive();
       await verifyForumEvents(parents);
+      checkActive();
       for (final event in parents) {
         if (targets.contains(event.id) &&
             event.channelId == root.channelId &&

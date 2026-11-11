@@ -54,8 +54,9 @@ class ThreadWindowRequest {
   }
 }
 
-/// Verifies bounds and parses rows off the UI isolate. Failed pages never
-/// advance a cursor and never fall back to an unrelated query mode.
+/// Verifies bounds and parses rows off the UI isolate, checking row channel
+/// scope and that no row is the root. The caller verifies row signatures and
+/// ancestry. Failed pages never advance a cursor or change query mode.
 Future<ChannelWindowPage> decodeThreadWindow(
   List<NostrEvent> events,
   ThreadWindowRequest request,
