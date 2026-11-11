@@ -26,7 +26,13 @@ pub(super) struct Rule {
 }
 
 pub(super) const INITIAL_STAGE: &str = "gate_user";
-const COMMUNITY_INITIAL_STAGE: &str = "purge_db";
+fn community_initial_stage(target: &str) -> &'static str {
+    if target.starts_with("demo:") {
+        "purge_db"
+    } else {
+        "purge_content"
+    }
+}
 const RULES: &[Rule] = &[
     Rule {
         name: "gate_user",
@@ -39,6 +45,12 @@ const RULES: &[Rule] = &[
         community_scope: true,
         allowed: &[Decision::Stage("purge_agents"), Decision::CommunityComplete],
         decide: after_purge_db,
+    },
+    Rule {
+        name: "purge_content",
+        community_scope: true,
+        allowed: &[Decision::Stage("purge_agents")],
+        decide: |_| Ok(Decision::Stage("purge_agents")),
     },
     Rule {
         name: "purge_agents",
@@ -203,7 +215,11 @@ impl Progress {
                     .find(|(id, _)| !self.completed_communities.contains(id))
                 {
                     Some((id, _)) => Ok(Some(Step {
-                        name: COMMUNITY_INITIAL_STAGE,
+                        name: community_initial_stage(
+                            row.metadata_json["inputs"]["target"]
+                                .as_str()
+                                .ok_or_else(|| invalid("missing target input"))?,
+                        ),
                         community: Some(*id),
                     })),
                     None => self.apply(inventory, row, Decision::RequestComplete),
@@ -222,6 +238,18 @@ impl Progress {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn real_content_routes_to_agent_cleanup_without_claiming_completion() {
+        assert_eq!(community_initial_stage("demo:alice"), "purge_db");
+        assert_eq!(community_initial_stage(&"ab".repeat(32)), "purge_content");
+        let content = rule("purge_content").unwrap();
+        assert!(content.community_scope);
+        assert_eq!(
+            (content.decide)(&serde_json::json!({})).unwrap(),
+            Decision::Stage("purge_agents")
+        );
+    }
 
     #[test]
     fn stage_options_follow_the_workflow_definition() {

@@ -10,9 +10,14 @@ use uuid::Uuid;
 use super::{handlers, transition::UserDeletionTransition};
 use crate::{StageOutcome, DEFAULT_LEASE_DURATION, HEARTBEAT_INTERVAL};
 
-/// Controls for a synthetic run. Delays and failures never invoke real deletion.
+/// Shared handler controls. Demo delays and failures never invoke real deletion.
 pub(super) struct RunOptions {
     pub next_step: bool,
+    pub db: Option<buzz_db::Db>,
+    pub delete: bool,
+    pub relay_pubkey: Option<String>,
+    pub batch_size: u16,
+    pub max_items: u32,
     pub fail_stage: Option<String>,
     pub stage_delay: Duration,
     pub no_agents_in: Vec<Uuid>,
