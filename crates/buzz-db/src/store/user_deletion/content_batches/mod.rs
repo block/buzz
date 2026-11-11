@@ -180,7 +180,7 @@ impl UserDeletionStore {
     /// This does not save a request, acquire a worker lease, update counters,
     /// migrate the schema, or delete rows. The completion marker describes only
     /// the stated handler scope; it is not evidence that deletion is safe to run.
-    pub async fn preview_message_batches(
+    async fn preview_message_batches(
         &self,
         options: &ContentBatchOptions,
         writer: &mut impl Write,
