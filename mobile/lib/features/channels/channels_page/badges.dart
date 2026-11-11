@@ -58,13 +58,15 @@ class _ErrorView extends HookConsumerWidget {
     final auth = ref.watch(hostedRelayAuthProvider);
     useListenable(signIn);
     useListenable(auth);
-    // With the organization sign-in ended, a read goes out unsigned and Retry
-    // cannot succeed. The Home banner then shows the working action.
-    final signInOwned = organizationSignInPromptVisible(
-      signIn,
-      auth,
-      ref.watch(relayConfigProvider),
-    );
+    // When the relay refuses the read while the Home banner is up, the banner
+    // shows the working action. Other errors keep their message and Retry: a
+    // relay that does not require the organization sign-in can still serve
+    // the read.
+    final config = ref.watch(relayConfigProvider);
+    final signInOwned =
+        error is RelayException &&
+        (error as RelayException).statusCode == 401 &&
+        organizationSignInPromptVisible(signIn, auth, config);
     return Center(
       child: Padding(
         padding: const EdgeInsets.all(Grid.sm),
@@ -80,7 +82,7 @@ class _ErrorView extends HookConsumerWidget {
             const SizedBox(height: Grid.xxs),
             Text(
               signInOwned
-                  ? 'Use the sign-in prompt below to reconnect.'
+                  ? 'Use the prompt above to reconnect.'
                   : _userMessage(error),
               style: context.textTheme.bodySmall?.copyWith(
                 color: context.colors.onSurfaceVariant,
