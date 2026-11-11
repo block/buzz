@@ -60,6 +60,10 @@ enum HostedFlowProblem {
   inviteRestricted,
   inviteOwnerMismatch,
   communityCreationRejected,
+
+  /// Shown on the create form after setup ends, so another address can be
+  /// chosen directly.
+  communityNameTaken,
 }
 
 /// Resolves only after relay admission is proven and local persistence completes.
@@ -783,9 +787,22 @@ class HostedFlow extends ChangeNotifier {
       await _continueCommunities(generation, session.subject, pubkey);
       return;
     }
-    final destination = target is HostedCreateCommunity
-        ? await target.provision(account, pubkey, _isCurrent(generation))
-        : target;
+    final BuzzDeepLink destination;
+    try {
+      destination = target is HostedCreateCommunity
+          ? await target.provision(account, pubkey, _isCurrent(generation))
+          : target;
+    } on HostedCreationFailure catch (failure) {
+      if (failure != HostedCreationFailure.taken) rethrow;
+      // Nothing was created: end setup and return to the create form.
+      final leaving = leave();
+      final left = _generation;
+      await leaving;
+      if (!_disposed && left == _generation && stage == HostedFlowStage.idle) {
+        _set(HostedFlowStage.idle, HostedFlowProblem.communityNameTaken);
+      }
+      return;
+    }
     if (_disposed || generation != _generation) return;
     await enterCommunity(
       destination,

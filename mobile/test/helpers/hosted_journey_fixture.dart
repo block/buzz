@@ -102,6 +102,9 @@ class HostedJourneyFixture {
   final knownSaved = <String>{};
   bool missingList = false;
   bool loseCreateResponse = false;
+
+  /// Creating one of these answers the service's 409 `taken` rejection.
+  final takenNames = <String>{};
   bool loseClaimResponse = false;
   bool inviteExpired = false;
   String? claimError;
@@ -274,6 +277,17 @@ class HostedJourneyFixture {
       };
     } else if (path.endsWith('/v1/buzz/communities')) {
       final name = jsonDecode(request.body)['name'] as String;
+      if (takenNames.contains(name)) {
+        return http.Response(
+          jsonEncode({
+            'error': {
+              'code': 'taken',
+              'message': 'Community name is unavailable.',
+            },
+          }),
+          409,
+        );
+      }
       final created =
           owned
               .where(

@@ -2,7 +2,12 @@ import '../deeplink/deep_link.dart';
 import 'builderlab_account.dart';
 import 'hosted_environment.dart';
 
-enum HostedCreationFailure { rejected }
+enum HostedCreationFailure {
+  rejected,
+
+  /// Another community already uses this address.
+  taken,
+}
 
 /// Internal setup intent; no external deep link can request provisioning.
 class HostedCreateCommunity extends AddCommunityDeepLink {
@@ -13,6 +18,8 @@ class HostedCreateCommunity extends AddCommunityDeepLink {
       ) {
     if (!validName(name)) throw ArgumentError.value(name, 'name');
   }
+
+  static const _path = '/v1/buzz/communities';
 
   static bool validName(String name) =>
       name.length <= 63 && RegExp(r'^[a-z0-9]+(?:-[a-z0-9]+)*$').hasMatch(name);
@@ -35,12 +42,17 @@ class HostedCreateCommunity extends AddCommunityDeepLink {
 
     check();
     final Map<String, dynamic> response;
+    account.lastRejectedRequest = null;
     try {
-      response = await account.post('/v1/buzz/communities', {'name': name});
+      response = await account.post(_path, {'name': name});
     } on AccountFailure catch (failure) {
       check();
       if (failure == AccountFailure.rejected) {
-        throw HostedCreationFailure.rejected;
+        throw switch (account.lastRejectedRequest) {
+          (path: _path, status: 409, code: 'taken') =>
+            HostedCreationFailure.taken,
+          _ => HostedCreationFailure.rejected,
+        };
       }
       rethrow;
     }
