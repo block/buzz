@@ -22,6 +22,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use buzz_core::{CommunityId, TenantContext};
+use buzz_db::operator_listener::ListenerRegistration;
 
 use crate::handlers::community_provisioning::{
     normalize_candidate_host, validate_pubkey_hex, ProvisionCommunityRequest,
@@ -89,6 +90,7 @@ struct ListenerRegistrationRequest {
 }
 
 const MAX_LISTENER_PUBKEYS: usize = 1_000;
+const LISTENER_SCOPE_MEMBER_CHANNELS: &str = "member_channels";
 const LISTENER_PUBKEYS_PATH: &str = "/operator/listener/pubkeys";
 /// Matches the NIP-98 request window: proofs are signed just before sending.
 const REGISTRATION_PROOF_MAX_SKEW_SECS: u64 = 60;
@@ -126,14 +128,14 @@ fn parse_listener_pubkeys(body: &[u8]) -> Result<Vec<Vec<u8>>, (StatusCode, Json
         .collect()
 }
 
-/// Parse a registration body and return the target pubkeys whose proofs
+/// Parse a registration body and return the registrations whose proofs
 /// verify for `listener` at `url`.
 fn parse_listener_registrations(
     body: &[u8],
     listener: &nostr::PublicKey,
     url: &str,
     now: u64,
-) -> Result<Vec<Vec<u8>>, (StatusCode, Json<Value>)> {
+) -> Result<Vec<ListenerRegistration>, (StatusCode, Json<Value>)> {
     let request: ListenerRegistrationRequest = serde_json::from_slice(body).map_err(|e| {
         api_error(
             StatusCode::BAD_REQUEST,
@@ -154,18 +156,19 @@ fn parse_listener_registrations(
         .map_err(|reason| api_error(StatusCode::BAD_REQUEST, reason))
 }
 
-/// Verify one target-signed registration proof and return the target pubkey.
+/// Verify one target-signed registration proof and return the registration it
+/// consents to.
 ///
-/// The proof binds the target's consent to this listener (`p`) and this
-/// deployment's registration endpoint (`u`). The outer NIP-98 request is
-/// replay-checked; within the skew window a proof can only re-register the
-/// pair it was signed for.
+/// The proof binds the target's consent to this listener (`p`), this
+/// deployment's registration endpoint (`u`) and, optionally, the delivery
+/// scope (`scope`). The outer NIP-98 request is replay-checked; within the
+/// skew window a proof can only re-register the pair it was signed for.
 fn verify_registration_proof(
     proof: &nostr::Event,
     listener: &nostr::PublicKey,
     url: &str,
     now: u64,
-) -> Result<Vec<u8>, &'static str> {
+) -> Result<ListenerRegistration, &'static str> {
     if u32::from(proof.kind.as_u16()) != buzz_core::kind::KIND_OPERATOR_LISTENER_REGISTRATION {
         return Err("registration proof has the wrong kind");
     }
@@ -192,7 +195,16 @@ fn verify_registration_proof(
     if tag_values("u") != [url] {
         return Err("registration proof must name this endpoint in one u tag");
     }
-    Ok(proof.pubkey.to_bytes().to_vec())
+    let member_channels = match tag_values("scope").as_slice() {
+        [] => false,
+        [LISTENER_SCOPE_MEMBER_CHANNELS] => true,
+        [_] => return Err("registration proof scope must be member_channels"),
+        _ => return Err("registration proof must carry at most one scope tag"),
+    };
+    Ok(ListenerRegistration {
+        target_pubkey: proof.pubkey.to_bytes().to_vec(),
+        member_channels,
+    })
 }
 
 /// Shared deployment-global operator auth prelude. The canonical management
@@ -303,7 +315,7 @@ pub async fn register_listener_pubkeys(
         .relay_operator_api_origin
         .as_deref()
         .ok_or_else(|| internal_error("operator API origin is not configured"))?;
-    let target_pubkeys = parse_listener_registrations(
+    let registrations = parse_listener_registrations(
         &body,
         &listener,
         &format!("{origin}{LISTENER_PUBKEYS_PATH}"),
@@ -311,7 +323,7 @@ pub async fn register_listener_pubkeys(
     )?;
     state
         .db
-        .register_operator_listener_pubkeys(listener.as_bytes(), &target_pubkeys)
+        .register_operator_listener_pubkeys(listener.as_bytes(), &registrations)
         .await
         .map_err(|e| internal_error(&format!("register operator-listener pubkeys: {e}")))?;
     Ok(Json(serde_json::json!({})))
@@ -1112,8 +1124,40 @@ mod tests {
 
         assert_eq!(
             verify_registration_proof(&valid, &listener.public_key(), URL, NOW),
-            Ok(target.public_key().to_bytes().to_vec())
+            Ok(ListenerRegistration {
+                target_pubkey: target.public_key().to_bytes().to_vec(),
+                member_channels: false,
+            })
         );
+    }
+
+    #[test]
+    fn registration_proof_scope_is_absent_or_member_channels() {
+        let listener = Keys::generate();
+        let target = Keys::generate();
+        let scoped = |scopes: &[&str]| {
+            let mut tags = proof_tags(&listener, URL);
+            tags.extend(
+                scopes
+                    .iter()
+                    .map(|scope| Tag::custom(TagKind::custom("scope"), [*scope])),
+            );
+            let event = proof(&target, PROOF_KIND, NOW, tags);
+            verify_registration_proof(&event, &listener.public_key(), URL, NOW)
+        };
+
+        assert!(
+            scoped(&["member_channels"])
+                .expect("member_channels scope")
+                .member_channels
+        );
+        for rejected in [
+            &["everything"][..],
+            &["member_channels", "member_channels"],
+            &["member_channels", "everything"],
+        ] {
+            assert!(scoped(rejected).is_err(), "accepted scopes {rejected:?}");
+        }
     }
 
     #[test]
@@ -1190,7 +1234,10 @@ mod tests {
 
         assert_eq!(
             parse(serde_json::json!({"registrations": [valid]})).expect("signed registration"),
-            vec![target.public_key().to_bytes().to_vec()]
+            vec![ListenerRegistration {
+                target_pubkey: target.public_key().to_bytes().to_vec(),
+                member_channels: false,
+            }]
         );
         for body in [
             serde_json::json!({}),
@@ -2667,20 +2714,42 @@ mod postgres_tests {
             .iter()
             .map(|target| target.public_key().to_hex())
             .collect::<Vec<_>>();
-        let registration_proof = |target: &Keys, listener: &Keys| {
+        let scoped_registration_proof = |target: &Keys, listener: &Keys, scope: Option<&str>| {
             EventBuilder::new(
                 Kind::Custom(buzz_core::kind::KIND_OPERATOR_LISTENER_REGISTRATION as u16),
                 "",
             )
-            .tags([
-                Tag::public_key(listener.public_key()),
-                Tag::custom(
-                    nostr::TagKind::custom("u"),
-                    [format!("http://{INGRESS_HOST}/operator/listener/pubkeys")],
-                ),
-            ])
+            .tags(
+                [
+                    Tag::public_key(listener.public_key()),
+                    Tag::custom(
+                        nostr::TagKind::custom("u"),
+                        [format!("http://{INGRESS_HOST}/operator/listener/pubkeys")],
+                    ),
+                ]
+                .into_iter()
+                .chain(scope.map(|scope| Tag::custom(nostr::TagKind::custom("scope"), [scope]))),
+            )
             .sign_with_keys(target)
             .expect("sign registration proof")
+        };
+        let registration_proof =
+            |target: &Keys, listener: &Keys| scoped_registration_proof(target, listener, None);
+        let stored_scope = |target: &Keys| {
+            let pool = pool.clone();
+            let listener_pubkey = listener.public_key().to_bytes().to_vec();
+            let target_pubkey = target.public_key().to_bytes().to_vec();
+            async move {
+                sqlx::query_scalar::<_, bool>(
+                    "SELECT member_channels FROM operator_listener_pubkeys \
+                     WHERE listener_pubkey = $1 AND target_pubkey = $2",
+                )
+                .bind(listener_pubkey)
+                .bind(target_pubkey)
+                .fetch_one(&pool)
+                .await
+                .expect("read stored scope")
+            }
         };
         let register_body = serde_json::json!({
             "registrations": targets
@@ -2715,6 +2784,39 @@ mod postgres_tests {
         .expect("count other listener targets");
         assert_eq!(listener_count, 2);
         assert_eq!(other_listener_count, 0);
+        assert!(!stored_scope(&targets[0]).await);
+
+        let register_with_scope = |scope: Option<&'static str>| {
+            let state = Arc::clone(&state);
+            let body = serde_json::json!({
+                "registrations": [scoped_registration_proof(&targets[0], &listener, scope)]
+            })
+            .to_string();
+            let listener = &listener;
+            async move {
+                signed_operator_request(
+                    state,
+                    listener,
+                    "POST",
+                    "/operator/listener/pubkeys",
+                    Some(body),
+                )
+                .await
+                .status()
+            }
+        };
+        assert_eq!(
+            register_with_scope(Some("member_channels")).await,
+            StatusCode::OK
+        );
+        assert!(stored_scope(&targets[0]).await);
+        assert_eq!(
+            register_with_scope(Some("everything")).await,
+            StatusCode::BAD_REQUEST
+        );
+        assert!(stored_scope(&targets[0]).await);
+        assert_eq!(register_with_scope(None).await, StatusCode::OK);
+        assert!(!stored_scope(&targets[0]).await);
 
         // A proof signed for another listener, and the old unsigned form.
         for rejected_body in [

@@ -902,7 +902,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 86);
+        assert_eq!(migrations.len(), 87);
         assert!(migrations[83]
             .sql
             .as_str()
@@ -915,6 +915,12 @@ mod postgres_tests {
             .sql
             .as_str()
             .contains("CREATE TABLE media_uploaders"));
+        assert!(migrations[86]
+            .sql
+            .as_str()
+            .contains("ADD COLUMN member_channels BOOLEAN NOT NULL DEFAULT false"));
+        assert!(crate::test_support::desired_state_schema_sql()
+            .contains("member_channels BOOLEAN NOT NULL DEFAULT false"));
         for (index, migration) in migrations.iter().enumerate() {
             assert_eq!(migration.version, (index + 1) as i64);
         }

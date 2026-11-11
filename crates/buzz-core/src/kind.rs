@@ -80,7 +80,9 @@ pub const KIND_BLOSSOM_AUTH: u32 = 24242;
 /// Buzz custom one-time identity binding proof (ephemeral, not stored).
 pub const KIND_NOSTR_IDENTITY_BINDING: u32 = 24243;
 /// Operator-listener registration proof: a target pubkey consents to mention
-/// delivery to the listener in its `p` tag (HTTP body only, not stored).
+/// delivery to the listener in its `p` tag (HTTP body only, not stored). An
+/// optional `["scope", "member_channels"]` tag widens consent to every chat
+/// event in channels the target is a member of.
 pub const KIND_OPERATOR_LISTENER_REGISTRATION: u32 = 24245;
 /// NIP-98: HTTP auth event (used in nip98.rs, not stored).
 pub const KIND_HTTP_AUTH: u32 = 27235;
