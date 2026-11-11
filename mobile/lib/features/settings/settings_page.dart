@@ -162,6 +162,7 @@ class SettingsPage extends HookConsumerWidget {
       child: AdaptiveConversationDestination(
         preferredListWidth: avatarFirst ? 375 : null,
         emptyLabel: 'Select a setting',
+        listToolbarSlots: 1,
         controller: controller,
         persistentSelection: sections.any(
           (section) => section.$1 == controller.selectedId,

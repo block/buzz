@@ -67,6 +67,7 @@ class _ProfileSection extends StatelessWidget {
             return DuoToolbarScope(
               strip: routeStrip,
               active: routeScope?.active ?? true,
+              leadingSlots: routeScope?.leadingSlots ?? 0,
               contentInsets:
                   routeScope?.contentInsets ??
                   EdgeInsets.only(

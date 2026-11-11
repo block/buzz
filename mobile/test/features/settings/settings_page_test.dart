@@ -1,4 +1,6 @@
 import 'package:buzz/shared/widgets/frosted_app_bar.dart';
+import 'package:buzz/shared/widgets/frosted_scaffold.dart';
+import 'package:buzz/shared/widgets/ios_navigation_bar.dart';
 import 'dart:async';
 import 'dart:io';
 import 'dart:ui' as ui;
@@ -51,8 +53,17 @@ void main() {
           home: SettingsPage(
             profileHeader: const SizedBox.shrink(),
             identityRecoveryPageBuilder: (_) => const SizedBox.shrink(),
-            profileEditPageBuilder: (_) =>
-                Scaffold(appBar: AppBar(title: const Text('Photo editor'))),
+            profileEditPageBuilder: (context) => FrostedScaffold(
+              body: const Text('Photo editor'),
+              appBar: FrostedAppBar(
+                nativeTitle: 'Photo editor',
+                leading: IconButton(
+                  tooltip: 'Back to profile',
+                  onPressed: () => Navigator.of(context).pop(),
+                  icon: const Icon(Icons.arrow_back),
+                ),
+              ),
+            ),
           ),
         ),
       ),
@@ -176,7 +187,26 @@ void main() {
       find.byKey(const ValueKey('duo-toolbar-Close settings')),
       findsOneWidget,
     );
-    await tester.binding.handlePopRoute();
+    final closeSettings = find.byKey(
+      const ValueKey('duo-toolbar-Close settings'),
+    );
+    final backToProfile = find.byKey(
+      const ValueKey('duo-toolbar-Back to profile'),
+    );
+    expect(backToProfile, findsOneWidget);
+    expect(
+      tester.getRect(closeSettings).overlaps(tester.getRect(backToProfile)),
+      isFalse,
+    );
+    tester
+        .widget<IosNavigationBar>(
+          find.descendant(
+            of: backToProfile,
+            matching: find.byType(IosNavigationBar),
+          ),
+        )
+        .leading!
+        .onPressed!();
     await tester.pumpAndSettle();
     expect(find.text('Edit photo'), findsOneWidget);
     expect(find.text('Set status'), findsNothing);
