@@ -335,6 +335,8 @@ void main() {
     await tester.binding.setSurfaceSize(const Size(440, 956));
     addTearDown(() => tester.binding.setSurfaceSize(null));
     FlutterSecureStorage.setMockInitialValues({});
+    PendingDeepLinkNotifier.debugUriStreamOverride = const Stream<Uri>.empty();
+    addTearDown(() => PendingDeepLinkNotifier.debugUriStreamOverride = null);
     final f = HostedCommunitiesFixture();
     await f.initialize();
     addTearDown(f.dispose);
@@ -347,17 +349,31 @@ void main() {
     await f.flow.addSelectedCommunities();
     expect(f.flow.stage, HostedFlowStage.complete);
 
-    // Later, with no communities left, the signed-in landing mounts again.
+    // Later, with no communities left, the signed-in landing mounts again
+    // while the account service is briefly unavailable.
+    f.unavailableAccount = true;
     await tester.pumpWidget(
       WidgetHelpers.testable(
         disableAnimations: true,
         overrides: [hostedFlowProvider.overrideWithValue(f.flow)],
-        child: const OnboardingAppEntry(),
+        child: const HostedAppGate(
+          authenticated: false,
+          child: OnboardingAppEntry(),
+        ),
       ),
     );
     await tester.pumpAndSettle();
+    expect(f.flow.stage, HostedFlowStage.idle);
     expect(find.text('Signed in as owner@example.com'), findsOneWidget);
+    expect(find.text('Create a community').hitTestable(), findsOneWidget);
     expect(find.text('Find my communities'), findsOneWidget);
+
+    // Once the service recovers, discovery continues to the picker.
+    f.unavailableAccount = false;
+    await tester.tap(find.text('Find my communities'));
+    await tester.pumpAndSettle();
+    expect(f.flow.stage, HostedFlowStage.chooseCommunities);
+    expect(find.byType(CommunityGridOption), findsOneWidget);
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pumpAndSettle();
   }, skip: HostedEnvironment.authDomains.isEmpty);
