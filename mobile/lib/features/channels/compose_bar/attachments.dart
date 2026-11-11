@@ -88,6 +88,10 @@ bool _queueComposerImages(
 
 enum _AttachmentSurface { closed, menu, camera, photos }
 
+bool get _hasCombinedMediaPicker =>
+    defaultTargetPlatform == TargetPlatform.iOS ||
+    defaultTargetPlatform == TargetPlatform.android;
+
 const _attachmentMenuWidth = 216.0;
 const _attachmentMenuPadding = Grid.xs;
 const _attachmentMenuItemHeight = 52.0;
@@ -120,10 +124,11 @@ class _AttachmentMenuLayout {
       textPainter.height + (Grid.xxs * 2),
     );
     textPainter.dispose();
+    final itemCount = _hasCombinedMediaPicker ? 4 : 5;
     final contentHeight =
         (_attachmentMenuPadding * 2) +
-        (itemHeight * 5) +
-        (_attachmentMenuItemSpacing * 4);
+        (itemHeight * itemCount) +
+        (_attachmentMenuItemSpacing * (itemCount - 1));
 
     return _AttachmentMenuLayout(
       itemHeight: itemHeight,
@@ -561,7 +566,7 @@ class _AttachmentMenu extends StatelessWidget {
     final items = <(IconData, String, VoidCallback)>[
       (BuzzIcons.camera, 'Camera', onCamera),
       (BuzzIcons.images, 'Photos', onPhotos),
-      (BuzzIcons.video, 'Video', onVideo),
+      if (!_hasCombinedMediaPicker) (BuzzIcons.video, 'Video', onVideo),
       (BuzzIcons.mic, 'Voice note', onVoiceNote),
       (BuzzIcons.file, 'Files', onFiles),
     ];
