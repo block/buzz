@@ -63,9 +63,36 @@ struct NativePhotoZoomTests {
       viewer.updateFrame(data, at: 0)
       precondition(closedPhoto.image === closedImage, "Closed viewers must ignore continuing frames")
       print("PASS: native photo window, stale responses, eviction and teardown")
+      railJourney(data: data)
       videoJourney(data: data)
 
     }
+  }
+  @available(iOS 18.0, *)
+  @MainActor static func railJourney(data: Data) {
+    let viewer = NativePhotoZoomViewController(image: UIImage(data: data)!,
+      labels: ["One", "Two"], initialIndex: 0, canReply: true, canMore: true, canDelete: false)
+    viewer.loadViewIfNeeded()
+    viewer.view.frame = CGRect(x: 0, y: 0, width: 951, height: 669)
+    let pager = viewer.children.compactMap { $0 as? UIPageViewController }.first!
+    let buttons = ["Close photo", "Reply in thread", "More image actions"].map { label in
+      descendants(viewer.view).compactMap { $0 as? UIButton }.first { $0.accessibilityLabel == label }!
+    }
+    let page = pager.viewControllers!.first!
+    for left in [false, true] {
+      viewer.layoutGallery(insets: UIEdgeInsets(top: 0, left: left ? 76 : 0, bottom: 0, right: left ? 0 : 76))
+      precondition(pager.view.frame == viewer.view.bounds, "Native gallery must span the full Duo window")
+      for (slot, button) in buttons.enumerated() {
+        precondition(left ? button.frame.maxX <= 76 : button.frame.minX >= 875, "Every action belongs inside the rail")
+        precondition(button.bounds.width >= 44 && button.bounds.height >= 44, "Retain accessible hit targets")
+        if slot > 0 { precondition(button.frame.minY > buttons[slot - 1].frame.maxY, "Close, Reply, More must not overlap") }
+      }
+    }
+    viewer.view.frame = CGRect(x: 0, y: 0, width: 390, height: 844)
+    viewer.layoutGallery(insets: UIEdgeInsets(top: 59, left: 0, bottom: 34, right: 0))
+    precondition(buttons[0].frame.maxY < buttons[1].frame.minY, "Ordinary phones retain top Close and bottom actions")
+    precondition(pager.viewControllers!.first === page, "Folding must retain the selected native page")
+    print("PASS: native gallery rail sides, full viewport, targets and compact transition")
   }
   @available(iOS 18.0, *)
   @MainActor static func videoJourney(data: Data) {
