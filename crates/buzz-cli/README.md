@@ -69,13 +69,14 @@ export BUZZ_RELAY_URL="https://relay.example.com"
 
 # Messages
 buzz messages send --channel <uuid> --content "Hello"
-buzz messages send --channel <uuid> --content "Reply" --reply-to <event-id> --broadcast
+buzz messages send --channel <uuid> --content "Reply" --reply-to <event-id> --broadcast   # reply also shown in the channel timeline
 buzz messages send --channel <uuid> --content - < message.md   # read body from stdin
 buzz messages send --channel <uuid> --content "Decision: ship" --from-thread <root-event-id>   # desktop "Send to channel"
 buzz messages get --channel <uuid> --limit 20
 buzz messages thread --channel <uuid> --event <event-id>
 buzz messages thread --link 'buzz://message?channel=<uuid>&id=<event-id>&thread=<root-id>'
 buzz messages search --query "architecture"
+buzz messages search --query "architecture" --channel <uuid> --since <unix-ts> --until <unix-ts>
 buzz messages search --author <pubkey|npub|name> --since <unix-ts>
 buzz messages edit --event <event-id> --content "Updated text"
 buzz messages delete --event <event-id>
@@ -222,7 +223,7 @@ The table below mirrors that tree for readers who are not at a terminal.
 | | `report` | Report a message or user to community moderators (NIP-56); reasons: `illegal`, `nudity`, `malware`, `spam`, `impersonation`, `profanity`, `other` |
 | | `get` | List messages in a channel |
 | | `thread` | Get a message thread |
-| | `search` | Full-text search, filterable by author |
+| | `search` | Full-text search, filterable by author, channel, and time window |
 | | `vote` | Vote on a forum post |
 | `channels` | `list` | List channels |
 | | `get` | Get channel details |
