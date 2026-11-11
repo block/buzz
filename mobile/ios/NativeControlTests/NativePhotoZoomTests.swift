@@ -87,12 +87,17 @@ struct NativePhotoZoomTests {
     let buttons = ["Close photo", "Reply in thread", "More image actions"].map { label in
       descendants(viewer.view).compactMap { $0 as? UIButton }.first { $0.accessibilityLabel == label }!
     }
+    let indicator = descendants(viewer.view).compactMap { $0 as? UIPageControl }.first!
+    let pageContainer = indicator.superview!.superview!.superview!
     let page = pager.viewControllers!.first!
     for left in [false, true] {
       let centerX: CGFloat = left ? 48 : 903
       viewer.sourceRailGeometry = (viewer.view.bounds.size, centerX)
       viewer.layoutGallery(insets: UIEdgeInsets(top: 0, left: left ? 76 : 0, bottom: 0, right: left ? 0 : 76))
       precondition(pager.view.frame == viewer.view.bounds, "Native gallery must span the full Duo window")
+      pageContainer.layoutIfNeeded()
+      let indicatorFrame = indicator.convert(indicator.bounds, to: viewer.view)
+      precondition(abs(indicatorFrame.midX - pager.view.frame.midX) < 0.5, "Photo indicator must share the full-width photo center on either rail side")
       for (slot, button) in buttons.enumerated() {
         precondition(left ? button.center.x <= 76 : button.center.x >= 875, "Every action is centered inside the rail")
         precondition(button.center.x == (left ? 54 : 897), "Native actions must match the channel rail's inward-aligned centerline")

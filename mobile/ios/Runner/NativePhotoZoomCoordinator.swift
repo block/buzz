@@ -262,8 +262,9 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
     let inRail = insets.top == 0 && (right || left)
     let safe = bounds.inset(by: insets)
     let bottom = safe.maxY - 56
-    pageContainer.frame = CGRect(x: safe.minX + 68, y: bottom,
-                                 width: max(0, safe.width - 136), height: 44)
+    let indicatorBounds = inRail ? bounds : safe
+    pageContainer.frame = CGRect(x: indicatorBounds.minX + 68, y: bottom,
+                                 width: max(0, indicatorBounds.width - 136), height: 44)
     if inRail {
       pager.view.frame = bounds
       let width = right ? insets.right : insets.left
