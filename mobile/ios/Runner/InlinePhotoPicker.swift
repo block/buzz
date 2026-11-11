@@ -90,10 +90,10 @@ final class InlinePhotoPickerPlatformView: NSObject, FlutterPlatformView {
   @available(iOS 17.0, *)
   private func installPicker() {
     var configuration = PHPickerConfiguration(photoLibrary: .shared())
-    configuration.filter = .images
+    configuration.filter = .any(of: [.images, .videos])
     configuration.selectionLimit = 0
     configuration.selection = .continuousAndOrdered
-    configuration.preferredAssetRepresentationMode = .compatible
+    configuration.preferredAssetRepresentationMode = .current
     configuration.disabledCapabilities = [
       .search,
       .stagingArea,
@@ -129,7 +129,7 @@ final class InlinePhotoPickerPlatformView: NSObject, FlutterPlatformView {
     guard
       let typeIdentifier = provider.registeredTypeIdentifiers.first(where: {
         guard let type = UTType($0) else { return false }
-        return type.conforms(to: .image)
+        return type.conforms(to: .image) || type.conforms(to: .movie)
       })
     else {
       throw InlinePhotoPickerError.unsupportedImage
@@ -200,9 +200,8 @@ extension InlinePhotoPickerPlatformView: PHPickerViewControllerDelegate {
       guard let self else { return }
       var paths: [String] = []
       do {
-        for result in results {
-          try Task.checkCancellation()
-          paths.append(try await self.exportPickerResult(result))
+        paths = try await PickerFilePreparation.prepare(count: results.count) {
+          try await self.exportPickerResult(results[$0])
         }
         try Task.checkCancellation()
         await MainActor.run {
@@ -234,4 +233,50 @@ extension InlinePhotoPickerPlatformView: PHPickerViewControllerDelegate {
 private enum InlinePhotoPickerError: Error {
   case missingFile
   case unsupportedImage
+}
+
+// Keep Photos exports bounded without serializing an entire multi-selection.
+// Drain cancelled exports before cleaning up: providers can finish after cancel.
+enum PickerFilePreparation {
+  @MainActor
+  static func prepare(
+    count: Int,
+    export: @escaping @MainActor (Int) async throws -> String
+  ) async throws -> [String] {
+    var paths = Array<String?>(repeating: nil, count: count)
+    var failure: Error?
+    await withTaskGroup(of: (Int, Result<String, Error>).self) { group in
+      func enqueue(_ index: Int) {
+        group.addTask {
+          do {
+            try Task.checkCancellation()
+            return (index, .success(try await export(index)))
+          } catch {
+            return (index, .failure(error))
+          }
+        }
+      }
+      var next = min(3, count)
+      for index in 0..<next { enqueue(index) }
+      for await (index, result) in group {
+        switch result {
+        case .success(let path): paths[index] = path
+        case .failure(let error):
+          if failure == nil { failure = error }
+          group.cancelAll()
+        }
+        if failure == nil && !Task.isCancelled && next < count {
+          enqueue(next)
+          next += 1
+        }
+      }
+    }
+    if Task.isCancelled || failure != nil {
+      for path in paths.compactMap({ $0 }) {
+        try? FileManager.default.removeItem(atPath: path)
+      }
+      throw failure ?? CancellationError()
+    }
+    return paths.compactMap { $0 }
+  }
 }

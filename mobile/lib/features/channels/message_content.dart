@@ -42,6 +42,7 @@ import 'local_send_bubble_surface.dart';
 import 'media_viewer_page.dart';
 import 'native_photo_zoom_preview.dart';
 import 'native_video_files.dart';
+import 'video_poster.dart';
 import 'message_content/link_normalizer.dart';
 import 'message_content/markdown_escapes.dart';
 import 'message_content/preview_text.dart';
