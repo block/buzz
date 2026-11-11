@@ -85,6 +85,12 @@ pub struct EventQuery {
     /// Restrict results to events with an `e` tag referencing any of these event IDs (hex).
     /// Matched positionally, with JSONB containment as the index prefilter.
     pub e_tags: Option<Vec<String>>,
+    /// Restrict results to events with an `a` tag referencing any of these
+    /// NIP-01 addresses (`<kind>:<pubkey>:<d>`), so references to an
+    /// addressable event can be read across its revisions. Matched
+    /// positionally, with JSONB containment as the index prefilter, like
+    /// [`EventQuery::e_tags`].
+    pub a_tags: Option<Vec<String>>,
     /// Restrict artifact rows ([`ARTIFACT_KINDS`]) to those with a `d` tag
     /// matching any of these values, matched positionally. Their `d_tag`
     /// column is NULL (not NIP-33), so this lets identity lookups match before
@@ -163,6 +169,7 @@ impl EventQuery {
             authors: None,
             ids: None,
             e_tags: None,
+            a_tags: None,
             d_tag_values: None,
             custom_tag: None,
             tag_values: Vec::new(),
@@ -644,12 +651,13 @@ pub(crate) fn answer_without_db(q: &EventQuery) -> Option<Result<Vec<StoredEvent
         || q.kinds.as_deref().is_some_and(|k| k.is_empty())
         || q.authors.as_deref().is_some_and(|a| a.is_empty())
         || q.ids.as_deref().is_some_and(|i| i.is_empty())
-        || q.e_tags.as_deref().is_some_and(|e| e.is_empty());
+        || q.e_tags.as_deref().is_some_and(|e| e.is_empty())
+        || q.a_tags.as_deref().is_some_and(|a| a.is_empty());
     matches_nothing.then(|| Ok(vec![]))
 }
 
 /// Where to split `q` ([`crate::store::recent_pass`]), or `None` to read it
-/// whole. Lookups by id, `e` tag or `d` tag, and fetch-everything
+/// whole. Lookups by id, `e`, `a` or `d` tag, and fetch-everything
 /// reads (`max_limit`, the COUNT fallback) match a fixed set of rows wherever
 /// they sit, so a recent pass rarely fills their page. An `OFFSET` skips rows
 /// on both sides of the floor, so its split point is unknown.
@@ -660,6 +668,7 @@ fn recent_pass_split(
     let lookup = q.offset.is_some_and(|o| o > 0)
         || q.ids.is_some()
         || q.e_tags.is_some()
+        || q.a_tags.is_some()
         || q.d_tag.is_some()
         || q.d_tags.is_some()
         || q.d_tag_values.is_some()
@@ -677,6 +686,15 @@ fn page_limit(q: &EventQuery) -> i64 {
         .min(q.max_limit.unwrap_or(DEFAULT_MAX_PAGE_LIMIT))
 }
 
+/// Whether `q` filters inside a MATERIALIZED CTE and sorts/limits outside it:
+/// any `#e` or `#a` read. With `ORDER BY created_at LIMIT n` in the same
+/// scope, the planner overestimates matches and walks each partition's pkey
+/// backward, testing every community row against the reference set; the
+/// fence keeps it on the GIN tags index.
+fn reference_tag_fence(q: &EventQuery) -> bool {
+    q.e_tags.is_some() || q.a_tags.is_some()
+}
+
 /// Generic SQL for [`query_events_on`], after [`answer_without_db`]: the rows
 /// of `q` inside `range` (see [`crate::store::recent_pass`]), at most
 /// `limit_val`.
@@ -687,16 +705,11 @@ fn build_query_events_sql(
 ) -> QueryBuilder<sqlx::Postgres> {
     let offset_val = q.offset.unwrap_or(0);
 
-    // e-tag reads filter inside a MATERIALIZED CTE and sort/limit outside it.
-    // With `ORDER BY created_at LIMIT n` in the same scope, the planner
-    // overestimates matches and walks each partition's pkey backward, testing
-    // every community row against the id set; the fence keeps it on the GIN
-    // tags index.
-    let e_tag_fence = q.e_tags.is_some();
+    let reference_tag_fence = reference_tag_fence(q);
     let per_channel = per_channel_scope(q);
     let mut qb: QueryBuilder<sqlx::Postgres> = if let Some(ref p_hex) = q.p_tag_hex {
         // Join against event_mentions for #p-filtered queries (indexed).
-        let mut b = QueryBuilder::new(if e_tag_fence {
+        let mut b = QueryBuilder::new(if reference_tag_fence {
             "WITH m AS MATERIALIZED ("
         } else {
             ""
@@ -710,7 +723,7 @@ fn build_query_events_sql(
         push_mention_join(&mut b, q, p_hex, range);
         b
     } else {
-        let mut b = QueryBuilder::new(if e_tag_fence {
+        let mut b = QueryBuilder::new(if reference_tag_fence {
             "WITH m AS MATERIALIZED ("
         } else {
             ""
@@ -748,7 +761,7 @@ fn build_query_events_sql(
     // same second.  No existing index covers this trailing column — Postgres
     // sorts in memory, which is fine at current scale.  If query performance
     // degrades, add a composite index like `(pubkey, kind, created_at DESC, id ASC)`.
-    if e_tag_fence {
+    if reference_tag_fence {
         qb.push(") SELECT * FROM m ORDER BY created_at DESC, id ASC LIMIT ");
     } else if per_channel.is_some() {
         qb.push(" ORDER BY created_at DESC, id ASC LIMIT ")
@@ -830,6 +843,14 @@ fn push_event_filters(qb: &mut QueryBuilder<sqlx::Postgres>, col_prefix: &str, q
         if !e_tags.is_empty() {
             qb.push(" AND ");
             push_exact_tag_match(qb, col_prefix, "e", e_tags);
+        }
+    }
+
+    // a-tag pushdown: the same exact match and GIN prefilter as `#e`.
+    if let Some(ref a_tags) = q.a_tags {
+        if !a_tags.is_empty() {
+            qb.push(" AND ");
+            push_exact_tag_match(qb, col_prefix, "a", a_tags);
         }
     }
 
@@ -1025,7 +1046,8 @@ fn build_thread_reply_sql(q: &EventQuery, root: Vec<u8>) -> QueryBuilder<sqlx::P
 const PER_CHANNEL_CANDIDATE_BUDGET: usize = 8_192;
 
 /// The channels of a read that takes them one at a time: an explicit `#h` set
-/// (no global events), without a `#p` join, e-tag fence or offset, whose
+/// (no global events), without a `#p` join, reference-tag fence
+/// ([`reference_tag_fence`]) or offset, whose
 /// channels × page limit fit [`PER_CHANNEL_CANDIDATE_BUDGET`].
 ///
 /// `channel_id = ANY($set) ORDER BY created_at DESC LIMIT n` leaves the
@@ -1046,7 +1068,7 @@ fn per_channel_scope(q: &EventQuery) -> Option<&[Uuid]> {
         && q.channel_id.is_none()
         && !q.global_only
         && q.p_tag_hex.is_none()
-        && q.e_tags.is_none()
+        && !reference_tag_fence(q)
         && q.offset.unwrap_or(0) == 0
         && usize::try_from(page_limit(q))
             .is_ok_and(|n| ids.len().saturating_mul(n) <= PER_CHANNEL_CANDIDATE_BUDGET);
@@ -1532,6 +1554,9 @@ pub(crate) async fn count_events_on(
     if q.e_tags.as_deref().is_some_and(|e| e.is_empty()) {
         return Ok(0);
     }
+    if q.a_tags.as_deref().is_some_and(|a| a.is_empty()) {
+        return Ok(0);
+    }
 
     let mut qb = count_events_sql(q);
     // Same transaction-local deadline as `query_events_on`, so a COUNT cannot
@@ -1624,6 +1649,13 @@ fn count_events_sql(q: &EventQuery) -> QueryBuilder<sqlx::Postgres> {
         if !e_tags.is_empty() {
             qb.push(" AND ");
             push_exact_tag_match(&mut qb, col_prefix, "e", e_tags);
+        }
+    }
+
+    if let Some(ref a_tags) = q.a_tags {
+        if !a_tags.is_empty() {
+            qb.push(" AND ");
+            push_exact_tag_match(&mut qb, col_prefix, "a", a_tags);
         }
     }
 
@@ -3033,6 +3065,25 @@ mod e_tag_filter_shape_tests {
         }
     }
 
+    /// An `#a` read is a reference lookup like `#e`, so it is fenced the same
+    /// way; COUNT applies the same match.
+    #[test]
+    fn a_tag_query_filters_in_materialized_fence() {
+        let mut q = EventQuery::for_community(CommunityId::from_uuid(uuid::Uuid::nil()));
+        q.kinds = Some(vec![7]);
+        q.a_tags = Some(vec![format!("30175:{}:persona", "ab".repeat(32))]);
+        let sql = build_query_events_sql(&q, Range::All, page_limit(&q))
+            .sql()
+            .as_str()
+            .to_owned();
+
+        assert!(sql.starts_with("WITH m AS MATERIALIZED (SELECT "));
+        assert_eq!(sql.matches("tags @> ANY(").count(), 1);
+        let fence_end = sql.find(") SELECT * FROM m ").expect("fence closes");
+        assert!(!sql[..fence_end].contains("LIMIT"));
+        assert!(count_events_sql(&q).sql().as_str().contains("tags @> ANY("));
+    }
+
     #[test]
     fn non_e_tag_query_is_not_fenced() {
         let q = EventQuery::for_community(CommunityId::from_uuid(uuid::Uuid::nil()));
@@ -3111,10 +3162,11 @@ mod e_tag_filter_shape_tests {
         first_page.offset = Some(0);
         assert!(recent_pass_split(&first_page, now).is_some(), "offset 0");
         type Narrow = fn(&mut EventQuery);
-        let lookups: [(&str, Narrow); 7] = [
+        let lookups: [(&str, Narrow); 8] = [
             ("offset", |q| q.offset = Some(1)),
             ("ids", |q| q.ids = Some(vec![vec![0; 32]])),
             ("e tags", |q| q.e_tags = Some(vec!["00".repeat(32)])),
+            ("a tags", |q| q.a_tags = Some(vec!["30175:00:x".into()])),
             ("d tag", |q| q.d_tag = Some("x".into())),
             ("d tags", |q| q.d_tags = Some(vec!["x".into()])),
             ("artifact d tags", |q| {
@@ -3252,7 +3304,7 @@ mod e_tag_filter_shape_tests {
     }
 
     /// Only a plain explicit `#h` page within the candidate budget reads
-    /// channel by channel: global events, a `#p` join, an e-tag fence, an
+    /// channel by channel: global events, a `#p` join, a reference-tag fence, an
     /// offset, an empty set or a set × limit over the budget keep their own
     /// SQL.
     #[test]
@@ -3277,10 +3329,11 @@ mod e_tag_filter_shape_tests {
         // The clamped page limit counts, not the requested one.
         assert!(per_channel_scope(&at_budget(8, 5_000)).is_some());
         type Edit = fn(&mut EventQuery);
-        let others: [(&str, Edit); 5] = [
+        let others: [(&str, Edit); 6] = [
             ("global", |q| q.channel_ids_include_global = true),
             ("#p", |q| q.p_tag_hex = Some("ab".repeat(32))),
             ("#e", |q| q.e_tags = Some(vec!["cd".repeat(32)])),
+            ("#a", |q| q.a_tags = Some(vec!["30175:cd:x".into()])),
             ("offset", |q| q.offset = Some(1)),
             ("empty", |q| q.channel_ids = Some(Vec::new())),
         ];
@@ -4141,6 +4194,7 @@ mod postgres_tests {
         let keys = Keys::generate();
         let now = nostr::Timestamp::now().as_secs();
         let target = "ab".repeat(32);
+        let address = format!("30175:{target}:persona");
         let insert = |kind: u16, tag: Vec<&str>, at: u64| {
             let event = EventBuilder::new(Kind::Custom(kind), "")
                 .tags([Tag::parse(tag).unwrap()])
@@ -4196,6 +4250,17 @@ mod postgres_tests {
                 query: {
                     let mut q = EventQuery::for_community(community);
                     q.e_tags = Some(vec![target.clone()]);
+                    q
+                },
+            },
+            Case {
+                label: "a tag shifted right",
+                kind: 7,
+                real: vec!["a", &address],
+                decoy: vec!["x", "a", &address],
+                query: {
+                    let mut q = EventQuery::for_community(community);
+                    q.a_tags = Some(vec![address.clone()]);
                     q
                 },
             },

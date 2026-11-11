@@ -1025,6 +1025,7 @@ async fn match_nothing_reads_take_no_connection() {
         ("empty authors", with(|q| q.authors = Some(vec![]))),
         ("empty ids", with(|q| q.ids = Some(vec![]))),
         ("empty #e", with(|q| q.e_tags = Some(vec![]))),
+        ("empty #a", with(|q| q.a_tags = Some(vec![]))),
     ];
     // Validation runs before the match-nothing check, so the error wins.
     let invalid = [
