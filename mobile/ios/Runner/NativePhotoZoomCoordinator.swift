@@ -68,6 +68,12 @@ final class NativePhotoZoomCoordinator {
         canDelete: args["canDelete"] as? Bool ?? false,
         videoIndices: Set(args["videoIndices"] as? [Int] ?? [])
       )
+      if let center = args["railCenterX"] as? Double,
+         let width = args["railWindowWidth"] as? Double,
+         let height = args["railWindowHeight"] as? Double,
+         [center, width, height].allSatisfy({ $0.isFinite }), width > 0, height > 0 {
+        controller.sourceRailGeometry = (CGSize(width: width, height: height), center)
+      }
       controller.request = { [weak self] method, index, action, completion in
         var payload: [String: Any] = ["session": session, "index": index]
         if let action { payload["action"] = action }
@@ -166,6 +172,7 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
   private lazy var downwardDismiss = UIPanGestureRecognizer(target: self, action: #selector(dragToDismiss(_:)))
   private var paging = false
   private var acting = false
+  var sourceRailGeometry: (size: CGSize, centerX: CGFloat)?
   var onClose: ((String) -> Void)?
   var request: ((String, Int, String?, @escaping FlutterResult) -> Void)?
   var onSelection: ((UIImage?, [String: Any]?) -> Void)?
@@ -261,27 +268,38 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
       let width = right ? insets.right : insets.left
       var centerX = right ? bounds.maxX - width / 2 : width / 2
       var top: CGFloat = min(bounds.width, bounds.height) >= 600 ? 110 : 170
+      var railBottom = bounds.maxY - max(insets.bottom, 12)
       #if canImport(UIKit, _version: 9127.0.85)
       if #available(iOS 27.1, *), let window = view.window {
         let strip = CGRect(x: right ? window.bounds.maxX - width : 0, y: 0,
                            width: width, height: window.bounds.height)
-        let regions = window.reservedRegions(kind: .occlusion)
-          .filter { $0.isActive && $0.frame.intersects(strip) && $0.frame.midY < window.bounds.midY }
+        let occlusions = window.reservedRegions(kind: .occlusion)
+          .filter { $0.isActive && $0.frame.intersects(strip) }
+        let regions = occlusions.filter { $0.frame.midY < window.bounds.midY }
           .sorted { $0.frame.minY < $1.frame.minY }
         let margins = window.rootViewController?.view.layoutMargins ?? .zero
         let margin = right ? margins.left : margins.right
         let axis = regions.first.map { $0.frame.inset(by: $0.margins).midX }
           ?? (right ? window.bounds.maxX - margin - 28 : margin + 28)
         centerX = view.convert(CGPoint(x: axis, y: 0), from: window).x
+        if let edge = occlusions.filter({ $0.frame.midY >= window.bounds.midY }).map({ $0.frame.minY }).min() {
+          railBottom = min(railBottom, view.convert(CGPoint(x: 0, y: edge), from: window).y - 12)
+        }
         if let edge = regions.map({ $0.frame.maxY }).max() {
           top = view.convert(CGPoint(x: 0, y: edge), from: window).y + 12
         }
       }
       #endif
-      for (slot, button) in [close, reply, more].enumerated() {
-        button.frame = CGRect(x: centerX - 24, y: top + CGFloat(slot) * 60 + 6,
-                              width: 48, height: 48)
+      // Reuse the app rail's measured axis while its window/side still match.
+      // Presentation can change UIKit's fallback margins under the modal.
+      if let source = sourceRailGeometry, source.size == bounds.size,
+         (left && (0...width).contains(source.centerX)) ||
+         (right && (bounds.maxX - width...bounds.maxX).contains(source.centerX)) {
+        centerX = source.centerX
       }
+      close.frame = CGRect(x: centerX - 24, y: top + 6, width: 48, height: 48)
+      reply.frame = CGRect(x: centerX - 24, y: railBottom - 108, width: 48, height: 48)
+      more.frame = CGRect(x: centerX - 24, y: railBottom - 48, width: 48, height: 48)
     } else {
       pager.view.frame = CGRect(x: safe.minX, y: safe.minY + 56,
                                 width: safe.width, height: max(0, bottom - 16 - safe.minY - 56))

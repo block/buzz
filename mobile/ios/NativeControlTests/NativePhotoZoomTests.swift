@@ -80,14 +80,18 @@ struct NativePhotoZoomTests {
     }
     let page = pager.viewControllers!.first!
     for left in [false, true] {
+      let centerX: CGFloat = left ? 48 : 903
+      viewer.sourceRailGeometry = (viewer.view.bounds.size, centerX)
       viewer.layoutGallery(insets: UIEdgeInsets(top: 0, left: left ? 76 : 0, bottom: 0, right: left ? 0 : 76))
       precondition(pager.view.frame == viewer.view.bounds, "Native gallery must span the full Duo window")
       for (slot, button) in buttons.enumerated() {
         precondition(left ? button.frame.maxX <= 76 : button.frame.minX >= 875, "Every action belongs inside the rail")
+        precondition(button.center.x == centerX, "Native actions must share the app rail centerline")
         precondition(button.bounds.width >= 44 && button.bounds.height >= 44, "Retain accessible hit targets")
         if slot > 0 { precondition(button.frame.minY > buttons[slot - 1].frame.maxY, "Close, Reply, More must not overlap") }
       }
     }
+    precondition(buttons[1].frame.minY > 669 - 140 && buttons[2].frame.maxY == 669 - 12, "Reply and More must anchor to the bottom of the rail")
     viewer.view.frame = CGRect(x: 0, y: 0, width: 390, height: 844)
     viewer.layoutGallery(insets: UIEdgeInsets(top: 59, left: 0, bottom: 34, right: 0))
     precondition(buttons[0].frame.maxY < buttons[1].frame.minY, "Ordinary phones retain top Close and bottom actions")
