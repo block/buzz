@@ -133,12 +133,12 @@ pub async fn filter_fanout_by_access(
 }
 
 /// The result of the fan-out access gate.
-pub(crate) struct FanoutAccess {
+struct FanoutAccess {
     /// Recipients that may receive the event.
-    pub(crate) allowed: Vec<(crate::subscription::ConnId, crate::subscription::SubId)>,
+    allowed: Vec<(crate::subscription::ConnId, crate::subscription::SubId)>,
     /// Recipients dropped because a visibility or membership lookup failed,
     /// not because they lack access.
-    pub(crate) unverified: Vec<(crate::subscription::ConnId, crate::subscription::SubId)>,
+    unverified: Vec<(crate::subscription::ConnId, crate::subscription::SubId)>,
 }
 
 /// `filter_fanout_by_access`, also reporting the recipients it dropped
@@ -302,19 +302,17 @@ async fn check_fanout_access(
     }
 }
 
-/// Pass fan-out matches through the access gate. `allowed` is the matches
-/// that receive the event itself: syncs among them get its change signal
-/// instead (NIP-AR rule 5), and each local fan-out path calls this, so none
-/// of them can skip a sync. `unverified` is the matches the gate could not
-/// check. The Redis path, [`deliver_pubsub_event`], takes the same steps but
-/// re-checks `unverified` before it resyncs them.
+/// Pass fan-out matches through the access gate, and return the ones that
+/// receive the event itself. Syncs among the matches get its change signal
+/// instead (NIP-AR rule 5), and each fan-out path calls this, so none of them
+/// can skip a sync.
 pub(crate) async fn route_fanout_matches(
     state: &AppState,
     community_id: CommunityId,
     stored: &StoredEvent,
     matches: Vec<(crate::subscription::ConnId, crate::subscription::SubId)>,
     threaded: Option<&crate::state::ThreadedChannelVisibility>,
-) -> FanoutAccess {
+) -> Vec<(crate::subscription::ConnId, crate::subscription::SubId)> {
     state.artifact_syncs.signal_access_change(stored, &matches);
     let access = check_fanout_access(state, community_id, stored, matches, threaded).await;
     // A sync that the gate could not check loses this change, so its copy is
@@ -322,10 +320,7 @@ pub(crate) async fn route_fanout_matches(
     state
         .artifact_syncs
         .resync_matches(&access.unverified, "resync: access check failed");
-    FanoutAccess {
-        allowed: state.artifact_syncs.divert(stored, access.allowed),
-        unverified: access.unverified,
-    }
+    state.artifact_syncs.divert(stored, access.allowed)
 }
 
 /// Deliver one event to this relay's local subscribers through the access gate.
@@ -349,9 +344,7 @@ pub(crate) async fn fan_out_event_to_local_subscribers(
     stored: &StoredEvent,
 ) {
     let matches = state.sub_registry.fan_out_scoped(community_id, stored);
-    let matches = route_fanout_matches(state, community_id, stored, matches, None)
-        .await
-        .allowed;
+    let matches = route_fanout_matches(state, community_id, stored, matches, None).await;
     metrics::histogram!("buzz_fanout_recipients").record(matches.len() as f64);
     if matches.is_empty() {
         return;
@@ -391,8 +384,7 @@ pub async fn fan_out_pubsub_event(state: &Arc<AppState>, channel_event: buzz_pub
         return;
     }
     let community_id = channel_event.community_id;
-    let stored = pubsub_stored_event(channel_event);
-    deliver_pubsub_event(state, community_id, &stored, tokio::time::Instant::now()).await;
+    deliver_pubsub_event(state, community_id, &pubsub_stored_event(channel_event)).await;
 }
 
 /// Report whether `channel_event` is the Redis echo of an event this relay
@@ -428,60 +420,16 @@ pub(crate) fn pubsub_stored_event(channel_event: buzz_pubsub::ChannelEvent) -> S
     StoredEvent::new(channel_event.event, channel_id)
 }
 
-/// The first wait before re-checking recipients the access gate could not
-/// check. It doubles on each failure up to [`GATE_RETRY_MAX`].
-const GATE_RETRY_MIN: std::time::Duration = std::time::Duration::from_millis(250);
-/// The longest wait between access-gate re-checks.
-const GATE_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(2);
-
 /// Deliver one Redis event that is not a local echo to this relay's local
-/// subscribers, through the access gate. Recipients the gate lets through get
-/// the event at once. Recipients it could not check (a visibility or
-/// membership read failed) are checked again, with backoff, while the next
-/// check can start before `retry_until`, and get the event if one passes.
-/// Returns the connections still unchecked then, which did not get the event.
+/// subscribers, through the access gate.
 pub(crate) async fn deliver_pubsub_event(
     state: &Arc<AppState>,
     community_id: CommunityId,
     stored: &StoredEvent,
-    retry_until: tokio::time::Instant,
-) -> Vec<crate::subscription::ConnId> {
-    metrics::counter!("buzz_multinode_fanout_total").increment(1);
-    let mut matches = state.sub_registry.fan_out_scoped(community_id, stored);
-    state.artifact_syncs.signal_access_change(stored, &matches);
-    let mut backoff = GATE_RETRY_MIN;
-    loop {
-        let access = check_fanout_access(state, community_id, stored, matches, None).await;
-        send_pubsub_event(
-            state,
-            stored,
-            state.artifact_syncs.divert(stored, access.allowed),
-        );
-        if access.unverified.is_empty() || tokio::time::Instant::now() + backoff >= retry_until {
-            // A sync that the gate could not check loses this change, so its
-            // copy is no longer exact. It must not stay open as if it were.
-            state
-                .artifact_syncs
-                .resync_matches(&access.unverified, "resync: access check failed");
-            return access
-                .unverified
-                .into_iter()
-                .map(|(conn_id, _)| conn_id)
-                .collect();
-        }
-        metrics::counter!("buzz_multinode_fanout_gate_retries_total").increment(1);
-        tokio::time::sleep(backoff).await;
-        backoff = (backoff * 2).min(GATE_RETRY_MAX);
-        matches = access.unverified;
-    }
-}
-
-/// Send a Redis event's EVENT frames to `matches`, which passed the gate.
-fn send_pubsub_event(
-    state: &AppState,
-    stored: &StoredEvent,
-    matches: Vec<(crate::subscription::ConnId, crate::subscription::SubId)>,
 ) {
+    let matches = state.sub_registry.fan_out_scoped(community_id, stored);
+    let matches = route_fanout_matches(state, community_id, stored, matches, None).await;
+    metrics::counter!("buzz_multinode_fanout_total").increment(1);
     if matches.is_empty() {
         return;
     }
@@ -601,8 +549,7 @@ async fn dispatch_persistent_event_inner(
         matches,
         threaded_visibility.as_ref(),
     )
-    .await
-    .allowed;
+    .await;
     metrics::histogram!("buzz_fanout_recipients").record(matches.len() as f64);
     debug!(
         event_id = %event_id_hex,
@@ -2553,7 +2500,6 @@ mod tests {
                             community_id: buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
                             topic: EventTopic::Global,
                             event,
-                            received_at: tokio::time::Instant::now(),
                         },
                     )
                     .await;
@@ -2649,7 +2595,6 @@ mod tests {
                     community_id: buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
                     topic: EventTopic::Global,
                     event,
-                    received_at: tokio::time::Instant::now(),
                 },
             )
             .await;
@@ -2673,7 +2618,6 @@ mod tests {
                     community_id: community,
                     topic: EventTopic::Global,
                     event,
-                    received_at: tokio::time::Instant::now(),
                 },
             )
             .await;
@@ -2716,7 +2660,6 @@ mod tests {
                     community_id: community_b,
                     topic: EventTopic::Global,
                     event,
-                    received_at: tokio::time::Instant::now(),
                 },
             )
             .await;
@@ -2746,7 +2689,6 @@ mod tests {
                     community_id: buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
                     topic: EventTopic::Global,
                     event,
-                    received_at: tokio::time::Instant::now(),
                 },
             )
             .await;
@@ -3493,8 +3435,7 @@ mod tests {
         /// cannot check it: the gate drops the change, so the sync's copy is
         /// no longer exact. Runs through both production fan-out entries.
         /// Mutation: drop the `resync_matches` call in `route_fanout_matches`
-        /// or in `deliver_pubsub_event` → the failed lookups leave that
-        /// entry's sync open with no resync → RED.
+        /// → the failed lookups leave every sync open with no resync → RED.
         #[tokio::test]
         async fn failed_access_lookup_resyncs_the_syncs_it_drops() {
             let state = test_state().await;
@@ -3569,7 +3510,6 @@ mod tests {
                     community_id,
                     topic: buzz_pubsub::EventTopic::Channel(channel_id),
                     event: artifact(channel_id).event,
-                    received_at: tokio::time::Instant::now(),
                 },
             )
             .await;

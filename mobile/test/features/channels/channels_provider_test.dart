@@ -1,9 +1,17 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
+import 'dart:io';
+import 'dart:ui' as ui;
 
 import 'package:fake_async/fake_async.dart';
-import 'package:flutter/widgets.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
+import 'package:flutter/services.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:buzz/shared/theme/theme.dart';
+import 'package:buzz/features/activity/activity_page.dart';
+import 'package:buzz/features/channels/channel_detail_page.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
@@ -14,12 +22,18 @@ import 'package:buzz/features/channels/unread_badge/observed_unread_event.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/read_state/read_state_provider.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
+import 'package:buzz/features/activity/activity_provider.dart';
+import 'package:buzz/features/activity/inbox_item.dart';
+import 'package:buzz/features/activity/inbox_read_state.dart';
+import 'package:nostr/nostr.dart' as nostr;
 
 part 'channels_provider_live_cases.dart';
 part 'channels_provider_deletion_cases.dart';
 part 'channels_provider_terminal_cases.dart';
 part 'channels_provider_readiness_cases.dart';
 part 'channels_provider_request_path_cases.dart';
+part 'channels_provider_activity_cases.dart';
+part 'channels_provider_join_cases.dart';
 
 /// Tests for [ChannelsNotifier] in the pure-Nostr world.
 ///
@@ -37,6 +51,8 @@ void main() {
   _unreadReadinessCases();
   _unreadDeletionCases();
   _requestPathCases();
+  _threadActivityCases();
+  _confirmedJoinCases();
   const myPk = 'me';
 
   test(

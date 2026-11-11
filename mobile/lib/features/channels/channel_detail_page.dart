@@ -1,4 +1,5 @@
 import 'message_author_visibility.dart';
+
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 
 import 'message_swipe_reply.dart';
@@ -27,7 +28,7 @@ import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 
 import '../../shared/agents/owned_agent_directory.dart';
 import '../../shared/emoji/emoji_burst.dart';
-import '../../shared/me/me_archived_agents.dart';
+import '../../shared/identity_archives/identity_archives.dart';
 import '../../shared/me/me_assistants.dart';
 import '../../shared/me/me_sync.dart';
 import '../../shared/me/me_search_placement.dart';
@@ -1032,6 +1033,13 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                       ComposeBar(
                         channelId: channel.id,
                         focusNode: composerFocusNode,
+                        prefillScopeMessages:
+                            personalChat || resolvedChannel.isDm
+                            ? null
+                            : [
+                                for (final entry in timelineEntries)
+                                  entry.message,
+                              ],
                         onFocusRestorerChanged: (restoreFocus) =>
                             restoreComposerFocus.value = restoreFocus,
                         channelName: resolvedChannel.isDm

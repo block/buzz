@@ -43,6 +43,7 @@ import os.log
   private var ageSignalRequestID: UUID?
   private var ageSignalResult: FlutterResult?
   private var concentricSheetSurfaceChannel: FlutterMethodChannel?
+  private var nativePhotoZoomCoordinator: NativePhotoZoomCoordinator?
   private var nativeAttachmentPopoverCoordinator: NativeAttachmentPopoverCoordinator?
   private var nativeEmojiPickerCoordinator: NativeEmojiPickerCoordinator?
   private var nativeCreateChannelSheetCoordinator: NativeCreateChannelSheetCoordinator?
@@ -297,6 +298,13 @@ import os.log
       messenger: messenger,
       parentViewController: engineBridge.pluginRegistry.registrar(
         forPlugin: "BuzzNativeMessagePresentation"
+      )?.viewController
+    )
+
+    nativePhotoZoomCoordinator = NativePhotoZoomCoordinator(
+      messenger: messenger,
+      parentViewController: engineBridge.pluginRegistry.registrar(
+        forPlugin: "BuzzNativePhotoZoom"
       )?.viewController
     )
 
