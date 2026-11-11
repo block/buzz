@@ -28,6 +28,10 @@ class ComposeBar extends HookConsumerWidget {
   /// Optional thread IDs for thread-scoped typing indicators.
   final String? threadHeadId;
   final String? rootId;
+
+  /// The conversation's displayed messages, oldest first; prefills the agents
+  /// the viewer's latest one notified. Null turns the prefill off.
+  final List<TimelineMessage>? prefillScopeMessages;
   const ComposeBar({
     super.key,
     required this.channelId,
@@ -41,6 +45,7 @@ class ComposeBar extends HookConsumerWidget {
     this.focusNode,
     this.onFocusRestorerChanged,
     this.onFocusRequested,
+    this.prefillScopeMessages,
     required this.onSend,
   });
   @override
@@ -120,7 +125,9 @@ class ComposeBar extends HookConsumerWidget {
     );
     final voiceNoteRef = useRef(voiceNote)..value = voiceNote;
     final mentionMap = useRef(<String, MentionCandidate>{});
+    final prefillText = useRef<String?>(null);
     _useComposeDraftLifecycle(
+      prefillText: prefillText,
       mentionMap: mentionMap,
       ref: ref,
       controller: controller,
@@ -165,30 +172,14 @@ class ComposeBar extends HookConsumerWidget {
       return () => focusNode.removeListener(collapseWhenUnfocused);
     }, [focusNode]);
 
-    final appView = View.of(context);
-    useEffect(() {
-      final observer = _ComposerKeyboardMetricsObserver(
-        view: appView,
-        onKeyboardShown: () {
-          androidImeFallbackTimer.value?.cancel();
-          androidImeTransitionStarted.value = true;
-        },
-        onKeyboardHidden: () {
-          androidImeFallbackTimer.value?.cancel();
-          if (defaultTargetPlatform == TargetPlatform.android) {
-            androidImeTransitionStarted.value = false;
-          }
-          voiceNote.onKeyboardHidden();
-          collapseComposer();
-          focusNode.unfocus();
-        },
-      );
-      WidgetsBinding.instance.addObserver(observer);
-      return () {
-        WidgetsBinding.instance.removeObserver(observer);
-        observer.dispose();
-      };
-    }, [appView, focusNode, voiceNote.isPreparing]);
+    _useComposerKeyboardMetrics(
+      context: context,
+      focusNode: focusNode,
+      voiceNote: voiceNote,
+      androidImeFallbackTimer: androidImeFallbackTimer,
+      androidImeTransitionStarted: androidImeTransitionStarted,
+      collapseComposer: collapseComposer,
+    );
     final resolvedHint =
         hintText ??
         (channelName.isNotEmpty ? 'Message #$channelName' : 'Message\u2026');
@@ -362,6 +353,18 @@ class ComposeBar extends HookConsumerWidget {
       }
       mentionQuery.value = null;
     }
+
+    _useAgentMentionPrefill(
+      ref: ref,
+      channelId: channelId,
+      scopeMessages: prefillScopeMessages,
+      draftKey: draftKey,
+      controller: controller,
+      mentionMap: mentionMap,
+      prefillText: prefillText,
+      isModifyingText: isModifyingText,
+      hasAttachments: hasAttachments,
+    );
 
     // Detect @mention query and broadcast typing on text / selection change.
     useEffect(() {
@@ -1033,7 +1036,7 @@ class ComposeBar extends HookConsumerWidget {
       attachmentSurface: attachmentSurface,
       onFocusRequested: onFocusRequested,
       focusNode: focusNode,
-      view: appView,
+      view: View.of(context),
       androidImeTransitionStarted: androidImeTransitionStarted,
       androidImeFallbackTimer: androidImeFallbackTimer,
     );
