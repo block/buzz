@@ -1,10 +1,10 @@
-//! Read-only user inventory and synthetic user-deletion workflow commands.
+//! User inventory, offline account batches, and synthetic deletion workflows.
 
 use anyhow::Result;
 use clap::Subcommand;
 use uuid::Uuid;
 
-/// Preview real memberships or prepare and execute synthetic deletion requests.
+/// Inspect user data, execute offline account batches, or run synthetic workflows.
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Print human-content cleanup batches; optionally execute them.
@@ -33,6 +33,8 @@ pub enum Command {
     },
     /// Direct media discovery and inventory; print-only stops after step 2.
     Media(media::Options),
+    /// Print account-table batches for one community; --delete executes offline.
+    AccountBatches(account_batches::Args),
     /// Print real current memberships as JSON; does not save or execute a request.
     Inventory {
         /// Demo fixture (default), hex public key, or npub. Current memberships only.
@@ -98,7 +100,7 @@ pub enum Command {
     },
 }
 
-/// Run inventory discovery or synthetic workflow commands against PostgreSQL.
+/// Run the selected user-deletion command against PostgreSQL.
 pub async fn run(command: Command) -> Result<i32> {
     if let Command::PreviewBatches {
         pubkey,
@@ -130,6 +132,9 @@ pub async fn run(command: Command) -> Result<i32> {
         Command::Media(options) => return media::run(options).await,
         other => other,
     };
+    if let Command::AccountBatches(args) = command {
+        return account_batches::run(args).await;
+    }
     let db = if matches!(command, Command::Inventory { .. }) {
         buzz_db::Db::connect_cold_start(
             buzz_db::DbConfig {
@@ -151,6 +156,9 @@ pub async fn run(command: Command) -> Result<i32> {
             anyhow::bail!("batch command must use its standalone connection")
         }
         Command::Media(_) => anyhow::bail!("media command was already dispatched"),
+        Command::AccountBatches(_) => {
+            anyhow::bail!("account command must use its isolated connection")
+        }
         Command::Inventory { pubkey } => {
             crate::print_json(&inventory::generate(&db, &pubkey).await?)?;
         }
@@ -210,6 +218,7 @@ pub async fn run(command: Command) -> Result<i32> {
     Ok(0)
 }
 
+mod account_batches;
 mod handlers;
 mod inventory;
 /// Standalone delegation of an owned community to community deletion.

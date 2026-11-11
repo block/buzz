@@ -1,6 +1,8 @@
-//! User-specific submission and inventory preparation over the shared deletion tables.
+//! User request preparation and offline account-table cleanup.
 use crate::Db;
 use sqlx::PgPool;
+/// Bounded, offline cleanup of one human's community account records.
+pub mod account_batches;
 mod discovery;
 mod inventory;
 /// Read-only, ordered previews of human content cleanup batches.
@@ -11,7 +13,7 @@ pub use inventory::UserDeletionInventory;
 
 const MAX_COMMUNITIES: usize = 1000;
 
-/// Database operations that prepare user-deletion requests.
+/// User-deletion inventory, request preparation, and offline account operations.
 #[derive(Clone)]
 pub struct UserDeletionStore {
     pool: PgPool,
