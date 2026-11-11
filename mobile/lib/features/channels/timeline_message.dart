@@ -340,6 +340,11 @@ VoidCallback? debugOnFormatTimeline;
 List<TimelineMessage> formatTimeline(
   List<NostrEvent> events, {
   String? currentPubkey,
+  List<int> contentKinds = const [
+    EventKind.streamMessage,
+    EventKind.streamMessageV2,
+    EventKind.streamMessageDiff,
+  ],
 }) {
   assert(() {
     debugOnFormatTimeline?.call();
@@ -479,9 +484,7 @@ List<TimelineMessage> formatTimeline(
       continue;
     }
 
-    if (event.kind == EventKind.streamMessage ||
-        event.kind == EventKind.streamMessageV2 ||
-        event.kind == EventKind.streamMessageDiff) {
+    if (contentKinds.contains(event.kind)) {
       final edit = edits[event.id];
       final effectiveTags = edit?.tags ?? event.tags;
       // Include both notify (`p`) and reference-only (`mention`) tags —

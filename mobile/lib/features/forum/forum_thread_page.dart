@@ -7,7 +7,6 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import '../../shared/mentions/agent_identity_provider.dart';
-import '../../shared/relay/relay_closed_policy.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/sheet_action_section.dart';
 import '../../shared/widgets/avatar_image.dart';
@@ -23,7 +22,10 @@ import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/profile/user_profile.dart';
 import '../profile/user_profile_sheet.dart';
 import 'forum_models.dart';
+import 'forum_pagination.dart';
 import 'forum_provider.dart';
+import 'forum_reader.dart';
+import 'forum_refresh_error.dart';
 
 /// Full-screen page showing a forum post and its replies.
 class ForumThreadPage extends HookConsumerWidget {
@@ -58,14 +60,14 @@ class ForumThreadPage extends HookConsumerWidget {
       // Only a deadline already settled when this surface mounts is a
       // reopen; a first load that fails after mounting is not retried.
       // Hooks run effects during build, so defer the invalidation past it.
-      if (isSettledRelayDeadline(ref.read(provider))) {
+      if (forumPollingPaused(ref.read(provider))) {
         Future.microtask(() {
-          if (context.mounted) ref.invalidate(provider);
+          if (context.mounted) ref.read(provider.notifier).refresh();
         });
       }
       final timer = Stream.periodic(const Duration(seconds: 10)).listen((_) {
-        if (!isSettledRelayDeadline(ref.read(provider))) {
-          ref.invalidate(provider);
+        if (!forumPollingPaused(ref.read(provider))) {
+          ref.read(provider.notifier).refresh();
         }
       });
       return timer.cancel;
@@ -264,6 +266,17 @@ class _ThreadContent extends HookConsumerWidget {
               bottom: Grid.xs,
             ),
             children: [
+              ForumRefreshError(
+                error: thread.refreshError,
+                onRetry: () => ref
+                    .read(
+                      forumThreadProvider((
+                        channelId: channelId,
+                        eventId: post.eventId,
+                      )).notifier,
+                    )
+                    .refresh(),
+              ),
               _OriginalPost(post: post),
 
               Padding(
@@ -280,7 +293,7 @@ class _ThreadContent extends HookConsumerWidget {
                     ),
                     const SizedBox(width: Grid.half),
                     Text(
-                      '${replies.length} ${replies.length == 1 ? 'reply' : 'replies'}',
+                      '${replies.length}${thread.isIncomplete ? '+' : ''} ${replies.length == 1 ? 'reply' : 'replies'}',
                       style: context.textTheme.labelMedium?.copyWith(
                         color: context.colors.onSurfaceVariant,
                         fontWeight: FontWeight.w600,
@@ -291,7 +304,28 @@ class _ThreadContent extends HookConsumerWidget {
               ),
 
               // Reply list
-              if (replies.isEmpty)
+              ForumPagination(
+                hasMore: thread.hasMore,
+                isLoading: thread.isLoadingMore,
+                error: thread.loadMoreError,
+                subject: 'replies',
+                onLoadMore: () => ref
+                    .read(
+                      forumThreadProvider((
+                        channelId: channelId,
+                        eventId: post.eventId,
+                      )).notifier,
+                    )
+                    .loadMore(),
+              ),
+              if (thread.unresolvedReplies > 0)
+                const Padding(
+                  padding: EdgeInsets.all(Grid.xs),
+                  child: Text(
+                    'Some replies could not be verified. This thread is incomplete.',
+                  ),
+                ),
+              if (replies.isEmpty && !thread.isIncomplete)
                 Padding(
                   padding: const EdgeInsets.all(Grid.sm),
                   child: Text(

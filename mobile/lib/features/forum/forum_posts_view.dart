@@ -5,7 +5,6 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
 
-import '../../shared/relay/relay_closed_policy.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
@@ -14,8 +13,11 @@ import '../../shared/widgets/bee_refresh_indicator.dart';
 import '../channels/channel.dart';
 import '../channels/compose_bar.dart';
 import 'forum_models.dart';
+import 'forum_pagination.dart';
 import 'forum_post_card.dart';
 import 'forum_provider.dart';
+import 'forum_reader.dart';
+import 'forum_refresh_error.dart';
 import 'forum_thread_page.dart';
 
 /// Main forum view — replaces the old _ForumPlaceholder.
@@ -48,14 +50,14 @@ class ForumPostsView extends HookConsumerWidget {
       // Only a deadline already settled when this surface mounts is a
       // reopen; a first load that fails after mounting is not retried.
       // Hooks run effects during build, so defer the invalidation past it.
-      if (isSettledRelayDeadline(ref.read(provider))) {
+      if (forumPollingPaused(ref.read(provider))) {
         Future.microtask(() {
-          if (context.mounted) ref.invalidate(provider);
+          if (context.mounted) ref.read(provider.notifier).refresh();
         });
       }
       final timer = Stream.periodic(const Duration(seconds: 15)).listen((_) {
-        if (!isSettledRelayDeadline(ref.read(provider))) {
-          ref.invalidate(provider);
+        if (!forumPollingPaused(ref.read(provider))) {
+          ref.read(provider.notifier).refresh();
         }
       });
       return timer.cancel;
@@ -99,7 +101,9 @@ class ForumPostsView extends HookConsumerWidget {
               ),
               data: (response) {
                 final posts = response.posts;
-                if (posts.isEmpty) {
+                if (posts.isEmpty &&
+                    !response.hasMore &&
+                    response.refreshError == null) {
                   return _EmptyState(
                     isMember: channel.isMember,
                     isArchived: channel.isArchived,
@@ -107,8 +111,9 @@ class ForumPostsView extends HookConsumerWidget {
                 }
                 return BeeRefreshIndicator(
                   onRefresh: () async {
-                    ref.invalidate(forumPostsProvider(channel.id));
-                    await ref.read(forumPostsProvider(channel.id).future);
+                    await ref
+                        .read(forumPostsProvider(channel.id).notifier)
+                        .refresh();
                   },
                   child: ListView.separated(
                     padding: EdgeInsets.only(
@@ -117,10 +122,30 @@ class ForumPostsView extends HookConsumerWidget {
                       right: Grid.gutter,
                       bottom: Grid.xs,
                     ),
-                    itemCount: posts.length,
+                    itemCount: posts.length + 2,
                     separatorBuilder: (_, _) =>
                         const SizedBox(height: Grid.xxs),
                     itemBuilder: (context, index) {
+                      if (index == 0) {
+                        return ForumRefreshError(
+                          error: response.refreshError,
+                          onRetry: () => ref
+                              .read(forumPostsProvider(channel.id).notifier)
+                              .refresh(),
+                        );
+                      }
+                      index--;
+                      if (index == posts.length) {
+                        return ForumPagination(
+                          hasMore: response.hasMore,
+                          isLoading: response.isLoadingMore,
+                          error: response.loadMoreError,
+                          subject: 'posts',
+                          onLoadMore: () => ref
+                              .read(forumPostsProvider(channel.id).notifier)
+                              .loadMore(),
+                        );
+                      }
                       final post = posts[index];
                       return ForumPostCard(
                         post: post,

@@ -1,59 +1,172 @@
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/relay/relay.dart';
+import '../../shared/relay/relay_author_provider.dart';
+import '../channels/channel_window.dart';
+import '../channels/thread_window.dart';
 import '../channels/channel_management_provider.dart';
 import '../../shared/custom_emoji/custom_emoji.dart';
 import '../../shared/custom_emoji/custom_emoji_provider.dart';
 import 'forum_models.dart';
+import 'forum_ancestry.dart';
+import 'forum_reader.dart';
+import 'forum_root_reader.dart';
 
-/// Fetches forum posts (kind:45001) for a channel from the relay.
-///
-/// Posts are top-level events tagged `#h:<channelId>`. Invalidate to refresh
-/// (e.g. after creating a new post).
-final forumPostsProvider = FutureProvider.family<ForumPostsResponse, String>((
-  ref,
-  channelId,
-) async {
-  final session = ref.watch(relaySessionProvider.notifier);
-  final events = await session.fetchHistory(
-    NostrFilters.forumPosts(channelId, limit: 50),
-  );
-  return ForumPostsResponse.fromEvents(events);
-});
+/// Pages forum roots without letting reply volume consume the row budget.
+final forumPostsProvider =
+    AsyncNotifierProvider.family<
+      ForumPostsNotifier,
+      ForumPostsResponse,
+      String
+    >(ForumPostsNotifier.new);
 
-/// Fetches a forum thread (root post + replies) from the relay.
+/// In-memory forum roots. Polls merge only the head; invalidation resets scope.
+class ForumPostsNotifier extends ForumReader<ForumPostsResponse> {
+  final String channelId;
+  ForumPostsNotifier(this.channelId);
+
+  @override
+  Future<ForumSource<ForumPostsResponse>> open() async {
+    final config = ref.watch(relayConfigProvider);
+    final session = ref.watch(relaySessionProvider.notifier);
+    return _PostsSource(ForumRootReader(session, channelId, config.baseUrl));
+  }
+}
+
+/// The channel-scoped identity of a forum root.
+typedef ForumThreadArgs = ({String channelId, String eventId});
+
+/// Pages mixed-kind replies, admitting only resolved ancestry.
 final forumThreadProvider =
-    FutureProvider.family<
+    AsyncNotifierProvider.family<
+      ForumThreadNotifier,
       ForumThreadResponse,
-      ({String channelId, String eventId})
-    >((ref, args) async {
-      final session = ref.watch(relaySessionProvider.notifier);
+      ForumThreadArgs
+    >(ForumThreadNotifier.new);
 
-      final results = await Future.wait([
-        // Root event lookup by id.
-        session.fetchHistory(
-          NostrFilter(
-            kinds: const [9, 40002, 45001, 45003],
-            ids: [args.eventId],
-            limit: 1,
-          ),
-        ),
-        // Replies pointing at this root.
-        session.fetchHistory(
-          NostrFilters.forumThread(args.eventId, args.channelId),
-        ),
-      ]);
+/// In-memory thread history with explicit unresolved and continuation state.
+class ForumThreadNotifier extends ForumReader<ForumThreadResponse> {
+  final ForumThreadArgs args;
+  ForumThreadNotifier(this.args);
 
-      final rootEvents = results[0];
-      final replyEvents = results[1];
-      if (rootEvents.isEmpty) {
-        throw Exception('Forum thread not found: ${args.eventId}');
-      }
-      return ForumThreadResponse.fromEvents(
-        root: rootEvents.first,
-        replies: replyEvents,
-      );
-    });
+  @override
+  Future<ForumSource<ForumThreadResponse>> open() async {
+    final config = ref.watch(relayConfigProvider);
+    final session = ref.watch(relaySessionProvider.notifier);
+    final reader = ref.watch(myPubkeyProvider);
+    final roots = await session.queryRelay([
+      NostrFilter(
+        kinds: NostrFilters.forumRootKinds,
+        ids: [args.eventId],
+        tags: {
+          '#h': [args.channelId],
+        },
+        limit: 1,
+      ),
+    ]);
+    if (roots.length != 1 ||
+        roots.single.id != args.eventId ||
+        roots.single.channelId != args.channelId ||
+        !NostrFilters.forumRootKinds.contains(roots.single.kind) ||
+        roots.single.threadReference.parentId != null) {
+      throw StateError('Forum thread not found in this channel');
+    }
+    await verifyForumEvents(roots);
+    final relayAuthor = await ref.watch(
+      relayAuthorProvider(config.baseUrl).future,
+    );
+    if (relayAuthor == null || reader == null) {
+      throw StateError('Cannot authenticate forum thread bounds');
+    }
+    return _ThreadSource(
+      session,
+      roots.single,
+      config.baseUrl,
+      reader,
+      relayAuthor,
+    );
+  }
+}
+
+class _PostsSource implements ForumSource<ForumPostsResponse> {
+  final ForumRootReader reader;
+  _PostsSource(this.reader);
+
+  @override
+  Future<ChannelWindowPage> fetch(ChannelPageCursor? cursor) =>
+      reader.fetch(cursor);
+
+  @override
+  ForumPostsResponse render(
+    ChannelWindowStore store, {
+    bool loadingMore = false,
+    Object? loadMoreError,
+    Object? refreshError,
+  }) => ForumPostsResponse.fromWindow(
+    store,
+    isLoadingMore: loadingMore,
+    loadMoreError: loadMoreError,
+    refreshError: refreshError,
+  );
+}
+
+class _ThreadSource implements ForumSource<ForumThreadResponse> {
+  final RelaySessionNotifier session;
+  final NostrEvent root;
+  final String relayUrl;
+  final String reader;
+  final String relayAuthor;
+  ForumAncestry ancestry;
+
+  _ThreadSource(
+    this.session,
+    this.root,
+    this.relayUrl,
+    this.reader,
+    this.relayAuthor,
+  ) : ancestry = ForumAncestry(root);
+
+  @override
+  Future<ChannelWindowPage> fetch(ChannelPageCursor? cursor) async {
+    final filter = NostrFilters.forumThread(
+      root.id,
+      root.channelId!,
+      until: cursor?.createdAt,
+      beforeId: cursor?.eventId,
+    );
+    final events = await session.queryRelay([filter]);
+    final page = await decodeThreadWindow(
+      events,
+      ThreadWindowRequest(
+        relayUrl: relayUrl,
+        reader: reader,
+        relayAuthor: relayAuthor,
+        filter: filter,
+      ),
+      cursor,
+    );
+    await verifyForumEvents(page.aux);
+    final next = ancestry.copy();
+    await next.resolve(session, page.rows.map((row) => row.event).toList());
+    ancestry = next;
+    return page;
+  }
+
+  @override
+  ForumThreadResponse render(
+    ChannelWindowStore store, {
+    bool loadingMore = false,
+    Object? loadMoreError,
+    Object? refreshError,
+  }) => ForumThreadResponse.fromWindow(
+    root: root,
+    store: store,
+    verifiedReplyIds: ancestry.verified,
+    isLoadingMore: loadingMore,
+    loadMoreError: loadMoreError,
+    refreshError: refreshError,
+  );
+}
 
 /// A forum event delivery bound to the community where composition began.
 ///

@@ -1,6 +1,10 @@
 import 'package:flutter/foundation.dart';
 
 import '../../shared/relay/relay.dart';
+import '../channels/channel_event_order.dart';
+import '../channels/channel_window.dart';
+import '../channels/thread_window.dart';
+import '../channels/timeline_message.dart';
 
 /// A top-level forum post with an optional thread summary.
 @immutable
@@ -43,16 +47,28 @@ class ForumPost {
     );
   }
 
-  /// Build a [ForumPost] from a raw Nostr event (kind:45001).
-  factory ForumPost.fromEvent(NostrEvent event) {
+  /// Builds a post from its immutable event and optional display overlays.
+  factory ForumPost.fromEvent(
+    NostrEvent event, {
+    TimelineMessage? display,
+    ChannelWindowThreadSummary? summary,
+  }) {
     return ForumPost(
       eventId: event.id,
       pubkey: event.pubkey,
-      content: event.content,
+      content: display?.content ?? event.content,
       kind: event.kind,
       createdAt: event.createdAt,
       channelId: event.channelId ?? '',
-      tags: event.tags,
+      tags: display?.tags ?? event.tags,
+      threadSummary: summary == null
+          ? null
+          : ForumThreadSummary(
+              replyCount: summary.replyCount,
+              descendantCount: summary.descendantCount,
+              lastReplyAt: summary.lastReplyAt,
+              participants: summary.participantPubkeys,
+            ),
     );
   }
 
@@ -137,18 +153,22 @@ class ThreadReply {
   }
 
   /// Build a [ThreadReply] from a raw Nostr event.
-  factory ThreadReply.fromEvent(NostrEvent event) {
+  factory ThreadReply.fromEvent(
+    NostrEvent event, {
+    TimelineMessage? display,
+    String? resolvedRootId,
+  }) {
     final ref = event.threadReference;
     return ThreadReply(
       eventId: event.id,
       pubkey: event.pubkey,
-      content: event.content,
+      content: display?.content ?? event.content,
       kind: event.kind,
       createdAt: event.createdAt,
       channelId: event.channelId ?? '',
-      tags: event.tags,
+      tags: display?.tags ?? event.tags,
       parentEventId: ref.parentId,
-      rootEventId: ref.rootId,
+      rootEventId: resolvedRootId ?? ref.rootId,
       depth: 0,
     );
   }
@@ -160,13 +180,38 @@ class ThreadReply {
   ];
 }
 
+/// Shared loading and completeness signals for forum readers.
+abstract interface class ForumReadResponse {
+  bool get hasMore;
+  Object? get refreshError;
+}
+
+/// A deletion that must remove the retained root content immediately.
+class ForumPostDeleted implements Exception {
+  const ForumPostDeleted();
+}
+
 /// Paginated response for forum posts.
 @immutable
-class ForumPostsResponse {
+class ForumPostsResponse implements ForumReadResponse {
   final List<ForumPost> posts;
-  final int? nextCursor;
+  final ChannelPageCursor? nextCursor;
+  final bool isLoadingMore;
+  final Object? loadMoreError;
+  @override
+  final Object? refreshError;
 
-  const ForumPostsResponse({required this.posts, this.nextCursor});
+  /// More rows remain, or a bounded legacy scan has not established exhaustion.
+  @override
+  bool get hasMore => nextCursor != null;
+
+  const ForumPostsResponse({
+    required this.posts,
+    this.nextCursor,
+    this.isLoadingMore = false,
+    this.loadMoreError,
+    this.refreshError,
+  });
 
   factory ForumPostsResponse.fromJson(Map<String, dynamic> json) {
     final messages = json['messages'] as List<dynamic>? ?? const [];
@@ -175,31 +220,87 @@ class ForumPostsResponse {
           .cast<Map<String, dynamic>>()
           .map(ForumPost.fromJson)
           .toList(),
-      nextCursor: json['next_cursor'] as int?,
+      nextCursor: parseWindowCursor(json['next_cursor']),
     );
   }
 
-  /// Build from a list of kind:45001 events. Posts are sorted newest-first.
-  factory ForumPostsResponse.fromEvents(List<NostrEvent> events) {
-    final posts = events.map(ForumPost.fromEvent).toList()
-      ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
-    return ForumPostsResponse(posts: posts, nextCursor: null);
+  /// Applies chat's edit/deletion semantics to mixed-kind root pages.
+  factory ForumPostsResponse.fromWindow(
+    ChannelWindowStore store, {
+    bool isLoadingMore = false,
+    Object? loadMoreError,
+    Object? refreshError,
+  }) {
+    final events = flattenChannelWindowEvents(store);
+    final display = {
+      for (final message in formatTimeline(
+        events,
+        contentKinds: NostrFilters.forumRootKinds,
+      ))
+        message.id: message,
+    };
+    final summaries = channelWindowThreadSummaries(store);
+    final roots =
+        [
+          for (final page in store.pages)
+            for (final row in page.rows)
+              if (row.event.threadReference.parentId == null &&
+                  display.containsKey(row.event.id))
+                row.event,
+        ]..sort((a, b) {
+          final time = b.createdAt.compareTo(a.createdAt);
+          return time == 0 ? a.id.compareTo(b.id) : time;
+        });
+    return ForumPostsResponse(
+      posts: [
+        for (final event in roots)
+          ForumPost.fromEvent(
+            event,
+            display: display[event.id],
+            summary: summaries[event.id],
+          ),
+      ],
+      nextCursor: channelWindowNextCursor(store),
+      isLoadingMore: isLoadingMore,
+      loadMoreError: loadMoreError,
+      refreshError: refreshError,
+    );
   }
 }
 
 /// Response for a single forum thread with replies.
 @immutable
-class ForumThreadResponse {
+class ForumThreadResponse implements ForumReadResponse {
   final ForumPost post;
   final List<ThreadReply> replies;
   final int totalReplies;
-  final String? nextCursor;
+  final int unresolvedReplies;
+
+  /// Missing ancestry, resource caps, and continuation are never exhaustion.
+  bool get isIncomplete =>
+      hasMore ||
+      unresolvedReplies > 0 ||
+      loadMoreError != null ||
+      refreshError != null;
+  final ChannelPageCursor? nextCursor;
+  final bool isLoadingMore;
+  final Object? loadMoreError;
+  @override
+  final Object? refreshError;
+
+  /// True when older replies remain outside the loaded thread window.
+  @override
+  bool get hasMore => nextCursor != null;
 
   const ForumThreadResponse({
     required this.post,
     required this.replies,
     required this.totalReplies,
+    this.unresolvedReplies = 0,
     this.nextCursor,
+    this.isLoadingMore = false,
+    this.loadMoreError,
+    this.refreshError,
   });
 
   factory ForumThreadResponse.fromJson(Map<String, dynamic> json) {
@@ -211,23 +312,61 @@ class ForumThreadResponse {
           .map(ThreadReply.fromJson)
           .toList(),
       totalReplies: json['total_replies'] as int? ?? 0,
-      nextCursor: json['next_cursor'] as String?,
+      nextCursor: parseWindowCursor(json['next_cursor']),
     );
   }
 
-  /// Build from a root event and a list of reply events. Replies are sorted
-  /// oldest-first so the UI can render them top-down.
-  factory ForumThreadResponse.fromEvents({
+  /// Applies auxiliary events while retaining the original reply ancestry.
+  factory ForumThreadResponse.fromWindow({
     required NostrEvent root,
-    required List<NostrEvent> replies,
+    required ChannelWindowStore store,
+    required Set<String> verifiedReplyIds,
+    bool isLoadingMore = false,
+    Object? loadMoreError,
+    Object? refreshError,
   }) {
-    final sortedReplies = replies.map(ThreadReply.fromEvent).toList()
-      ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+    final events = [root, ...flattenChannelWindowEvents(store)]
+      ..sort(compareChannelTimelineEventsChronologically);
+    final display = {
+      for (final message in formatTimeline(
+        events,
+        contentKinds: EventKind.channelMessageEventKinds,
+      ))
+        message.id: message,
+    };
+    final rootDisplay = display[root.id];
+    if (rootDisplay == null) throw const ForumPostDeleted();
+    final rows = [
+      for (final page in store.pages)
+        for (final row in page.rows)
+          if (display.containsKey(row.event.id) &&
+              verifiedReplyIds.contains(row.event.id))
+            row.event,
+    ]..sort(compareThreadRepliesChronologically);
+    final replies = [
+      for (final event in rows)
+        ThreadReply.fromEvent(
+          event,
+          display: display[event.id],
+          resolvedRootId: root.id,
+        ),
+    ];
     return ForumThreadResponse(
-      post: ForumPost.fromEvent(root),
-      replies: sortedReplies,
-      totalReplies: sortedReplies.length,
-      nextCursor: null,
+      post: ForumPost.fromEvent(root, display: rootDisplay),
+      replies: replies,
+      totalReplies: replies.length,
+      unresolvedReplies: store.pages
+          .expand((page) => page.rows)
+          .where(
+            (row) =>
+                display.containsKey(row.event.id) &&
+                !verifiedReplyIds.contains(row.event.id),
+          )
+          .length,
+      nextCursor: channelWindowNextCursor(store),
+      isLoadingMore: isLoadingMore,
+      loadMoreError: loadMoreError,
+      refreshError: refreshError,
     );
   }
 }
