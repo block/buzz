@@ -1,5 +1,7 @@
 import 'dart:convert';
+
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
+import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
@@ -17,11 +19,14 @@ import '../../../shared/widgets/avatar_image.dart';
 import '../../../shared/me/me_groups.dart';
 import '../../../shared/me/default_agent.dart';
 import '../../../shared/me/me_chat_title.dart';
+import '../../../shared/me/solo_chat_seed.dart';
+import '../../activity/compose_drafts_provider.dart';
 import '../../../shared/crypto/event_signing.dart';
 import '../../../shared/me/me_chat_creation.dart';
 import '../../../shared/me/me_sync.dart';
 import '../../../shared/relay/relay.dart';
 import '../../../shared/me/me_recovery.dart';
+import '../../../shared/me/me_assistant_names.dart';
 import '../../../shared/me/me_assistants.dart';
 import '../../../shared/theme/theme.dart';
 import '../../../shared/theme/buzz_icons.dart';
@@ -35,7 +40,11 @@ import 'me_assistant_picker_sheet.dart';
 import 'new_me_project.dart';
 import 'me_workspace_picker.dart';
 import 'me_recovery_dialog.dart';
+import '../../profile/user_profile_sheet.dart';
+import '../channel_actions_sheet.dart';
 import '../channel_detail_page.dart';
+import '../channel_identity_names_provider.dart';
+import '../channel_member_profile_actions.dart';
 import '../channel_management_provider.dart';
 import '../channels_provider.dart';
 
@@ -169,17 +178,46 @@ class MePage extends HookConsumerWidget {
                     a.lastMessageAt ?? a.createdAt,
                   ),
                 );
-          Widget row(Channel channel) => _MeChatRow(
-            channelId: channel.id,
-            name: channel.name,
-            isUnread: unreadIds.contains(channel.id),
-            onTap: () => Navigator.of(context).push(
-              MaterialPageRoute<void>(
-                builder: (_) =>
-                    ChannelDetailPage(channel: channel, personalChat: true),
+          Widget row(Channel channel) {
+            final pane = ConversationPaneScope.maybeOf(context);
+            final selected = pane?.selectedId == channel.id;
+            return DecoratedBox(
+              decoration: BoxDecoration(
+                color: selected ? context.colors.primaryContainer : null,
+                borderRadius: BorderRadius.circular(Radii.md),
               ),
-            ),
-          );
+              child: Semantics(
+                selected: selected,
+                child: _MeChatRow(
+                  channelId: channel.id,
+                  name: channel.name,
+                  isUnread: unreadIds.contains(channel.id),
+                  onLongPress: () => showChannelDetailsSheet(
+                    context: context,
+                    channel: channel,
+                    currentPubkey: viewer,
+                    onMemberTap: (context, pubkey) => showUserProfileSheet(
+                      context,
+                      pubkey,
+                      names: channelIdentityNamesProvider(channel.id),
+                      contextualActions: (_) => ChannelMemberProfileActions(
+                        channel: channel,
+                        pubkey: pubkey,
+                      ),
+                    ),
+                    personalChat: true,
+                  ),
+                  onTap: () => openConversationPane(
+                    context,
+                    channel.id,
+                    (_) =>
+                        ChannelDetailPage(channel: channel, personalChat: true),
+                  ),
+                ),
+              ),
+            );
+          }
+
           final inventorySlivers = <Widget>[
             SliverPadding(
               padding: EdgeInsets.fromLTRB(
@@ -192,27 +230,32 @@ class MePage extends HookConsumerWidget {
                     ? 0
                     : MediaQuery.viewPaddingOf(context).bottom + Grid.gutter,
               ),
-              sliver: SliverList.list(
-                children: [
+              sliver: SliverMainAxisGroup(
+                slivers: [
                   if (offlineSaveFailed)
-                    Semantics(
-                      liveRegion: true,
-                      child: Column(
-                        children: [
-                          const Text(
-                            'Your chats are available, but couldn’t be saved for offline use.',
-                          ),
-                          TextButton(
-                            onPressed: () => ref.invalidate(meGroupsProvider),
-                            child: const Text('Retry offline save'),
-                          ),
-                        ],
+                    SliverToBoxAdapter(
+                      child: Semantics(
+                        liveRegion: true,
+                        child: Column(
+                          children: [
+                            const Text(
+                              'Your chats are available, but couldn’t be saved for offline use.',
+                            ),
+                            TextButton(
+                              onPressed: () => ref.invalidate(meGroupsProvider),
+                              child: const Text('Retry offline save'),
+                            ),
+                          ],
+                        ),
                       ),
                     ),
                   for (final group in organization.groups) ...[
                     if (group != organization.groups.first)
-                      const SizedBox(height: Grid.twelve),
+                      const SliverToBoxAdapter(
+                        child: SizedBox(height: Grid.xxs),
+                      ),
                     MeSection(
+                      sliver: true,
                       key: ValueKey(group['id']),
                       label: group['name'] as String,
                       children: [
@@ -230,9 +273,10 @@ class MePage extends HookConsumerWidget {
                     ),
                   ],
                   if (organization.groups.isNotEmpty)
-                    const SizedBox(height: Grid.twelve),
+                    const SliverToBoxAdapter(child: SizedBox(height: Grid.xxs)),
                   if (visible.isNotEmpty || organization.groups.isNotEmpty)
                     MeSection(
+                      sliver: true,
                       key: const ValueKey('me-ungrouped-chats'),
                       label: 'Chats',
                       children: [

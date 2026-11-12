@@ -128,7 +128,11 @@ fn env_output_format(value: Option<&std::ffi::OsStr>) -> OutputFormat {
 Buzz CLI — interact with a Buzz relay
 
 Configuration (flags override env vars):
-  BUZZ_RELAY_URL     Relay base URL        [default: http://localhost:3000]
+  BUZZ_RELAY_URL     Relay base URL        [default: the relay an agent's inherited
+                     Buzz desktop credential acts on; else, with no private key,
+                     the one relay a running Buzz desktop accepts this CLI's
+                     pairing for (see `buzz auth desktop list`); else
+                     http://localhost:3000]
   BUZZ_PRIVATE_KEY   Nostr private key (hex or nsec)  [unless a Buzz desktop provides it]
   BUZZ_AUTH_TAG      NIP-OA auth tag JSON  [optional]
   BUZZ_FEDERATED_IDENTITY_TOKEN    Your NIP-FA sign-in session token  [optional]
@@ -145,8 +149,11 @@ Errors are JSON on stderr: {\"error\": \"<category>\", \"message\": \"<detail>\"
 )]
 struct Cli {
     /// Relay URL (http:// or https://). Overrides BUZZ_RELAY_URL env var.
-    #[arg(long, env = "BUZZ_RELAY_URL", default_value = "http://localhost:3000")]
-    relay: String,
+    /// Without either, the relay an agent's inherited Buzz desktop credential
+    /// acts on; else, with no private key, the one relay a running Buzz
+    /// desktop accepts this CLI's pairing for; otherwise http://localhost:3000.
+    #[arg(long, env = "BUZZ_RELAY_URL")]
+    relay: Option<String>,
 
     /// Nostr private key (hex or nsec). This is the CLI's identity.
     #[arg(long, env = "BUZZ_PRIVATE_KEY", hide_env_values = true)]
@@ -281,6 +288,9 @@ enum Cmd {
     /// Get and set channel canvas documents
     #[command(subcommand)]
     Canvas(CanvasCmd),
+    /// Organize your own sidebar: sections, sort modes, stars, mutes, and project pins
+    #[command(subcommand)]
+    Sidebar(SidebarCmd),
     /// Add, remove, and list emoji reactions
     #[command(subcommand)]
     Reactions(ReactionsCmd),
@@ -370,6 +380,59 @@ enum DesktopAuthCmd {
         #[arg(long)]
         instance: Option<String>,
     },
+    /// List this CLI's pairings: instance, relays, pubkey, and whether a
+    /// running Buzz desktop accepts each now. Never prints tokens; needs no
+    /// relay.
+    List,
+}
+
+/// The relay for a command given none: the one an agent's inherited Buzz
+/// desktop credential acts on; else, without an explicit key, the one relay
+/// a running Buzz desktop still accepts this CLI's pairing for; else
+/// `http://localhost:3000`. Local-only unpairing never asks the desktop,
+/// and pairing never asks for other pairings.
+async fn default_relay(command: &Cmd, explicit_key: bool) -> Result<String, CliError> {
+    #[cfg(unix)]
+    let (inherited, paired) = (
+        desktop_provider::inherited_relay(),
+        desktop_provider::paired_relay(),
+    );
+    #[cfg(not(unix))]
+    let (inherited, paired) = (async { Ok(None) }, async { Ok(None) });
+    default_relay_with(command, explicit_key, inherited, paired).await
+}
+
+/// [`default_relay`], with the agent and paired-person selectors (each
+/// awaited only when needed) parameters so a test can run it against a fake
+/// desktop.
+pub(crate) async fn default_relay_with(
+    command: &Cmd,
+    explicit_key: bool,
+    inherited: impl std::future::Future<Output = Result<Option<String>, CliError>>,
+    paired: impl std::future::Future<Output = Result<Option<String>, CliError>>,
+) -> Result<String, CliError> {
+    #[cfg(unix)]
+    if !matches!(
+        command,
+        Cmd::Auth(AuthCmd::Desktop(DesktopAuthCmd::Unpair { .. }))
+    ) {
+        if let Some(relay) = inherited.await? {
+            return Ok(relay);
+        }
+        // Pairing asks its own desktop; another desktop's answer is moot.
+        let pairing = matches!(
+            command,
+            Cmd::Auth(AuthCmd::Desktop(DesktopAuthCmd::Pair { .. }))
+        );
+        if !explicit_key && !pairing {
+            if let Some(relay) = paired.await? {
+                return Ok(relay);
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (command, explicit_key, inherited, paired);
+    Ok("http://localhost:3000".to_owned())
 }
 
 #[cfg(unix)]
@@ -380,9 +443,32 @@ async fn run_auth(cmd: AuthCmd, relay_url: &str) -> Result<(), CliError> {
             desktop_provider::pair(relay_url, &name, instance.as_deref()).await?
         }
         DesktopAuthCmd::Unpair { instance } => desktop_provider::unpair(instance.as_deref())?,
+        DesktopAuthCmd::List => unreachable!("listing runs before any relay is chosen"),
     };
     println!("{out}");
     Ok(())
+}
+
+/// `auth desktop list`, in `format`: `compact` drops the pubkey.
+#[cfg(unix)]
+async fn list_pairings(format: &OutputFormat) -> Result<(), CliError> {
+    let mut listed = desktop_provider::list().await?;
+    if matches!(format, OutputFormat::Compact) {
+        for pairing in &mut listed {
+            if let Some(fields) = pairing.as_object_mut() {
+                fields.remove("pubkey");
+            }
+        }
+    }
+    println!("{}", serde_json::Value::Array(listed));
+    Ok(())
+}
+
+#[cfg(not(unix))]
+async fn list_pairings(_: &OutputFormat) -> Result<(), CliError> {
+    Err(CliError::Usage(
+        "the Buzz desktop credential provider is not available on Windows yet".into(),
+    ))
 }
 
 #[cfg(not(unix))]
@@ -588,7 +674,7 @@ pub enum MessagesCmd {
         #[arg(long)]
         reply_to: Option<String>,
     },
-    /// Edit a previously sent message
+    /// Edit a previously sent message, retaining its current attachments
     Edit {
         /// Event ID of the message to edit (64-char hex)
         #[arg(long)]
@@ -596,6 +682,9 @@ pub enum MessagesCmd {
         /// New message content
         #[arg(long)]
         content: String,
+        /// Remove all attachments on kinds 9/40002/40008/45001/45003 (later edits keep them removed)
+        #[arg(long)]
+        clear_attachments: bool,
     },
     /// Delete a message by event ID
     Delete {
@@ -681,7 +770,7 @@ pub enum MessagesCmd {
     },
     /// Full-text search across messages
     #[command(
-        after_help = "Examples:\n  buzz messages search --query checkout\n  buzz messages search --author npub1... --since 1783497600\n  buzz messages search --author Aaron --query checkout --limit 20"
+        after_help = "Examples:\n  buzz messages search --query checkout\n  buzz messages search --author npub1... --since 1783497600\n  buzz messages search --author Aaron --query checkout --limit 20\n  buzz messages search --author npub1... --before 1783584000 --before-id <last result id> --limit 100"
     )]
     Search {
         /// Search query string (optional when --author is given)
@@ -693,6 +782,14 @@ pub enum MessagesCmd {
         /// Unix timestamp — return messages after this time
         #[arg(long)]
         since: Option<i64>,
+        /// Unix timestamp cursor — return messages created at or before this time.
+        /// To page back, pass the last result's `created_at` here and its `id` as --before-id.
+        #[arg(long)]
+        before: Option<i64>,
+        /// Event ID cursor — with --before, resume after this event, so events from the
+        /// same second are neither repeated nor skipped. Not allowed with --query.
+        #[arg(long, requires = "before")]
+        before_id: Option<String>,
         /// Maximum number of results to return
         #[arg(long)]
         limit: Option<u32>,
@@ -998,6 +1095,156 @@ pub enum ReactionsCmd {
         /// Event ID (64-char hex)
         #[arg(long)]
         event: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum SidebarCmd {
+    /// List, create, and arrange your channel sections (synced with Buzz desktop)
+    ///
+    /// Each edit reads your current sections and publishes the full result.
+    /// Concurrent edits from another CLI run or another client can overwrite
+    /// each other, and the last publish wins.
+    #[command(subcommand)]
+    Sections(SidebarSectionsCmd),
+    /// List and set how each sidebar group is sorted (synced with Buzz desktop)
+    #[command(subcommand)]
+    Sort(SidebarSortCmd),
+    /// List, star, and unstar your channels (synced with Buzz desktop)
+    #[command(subcommand)]
+    Stars(SidebarChannelFlagCmd),
+    /// List, mute, and unmute your channels (synced with Buzz desktop)
+    #[command(subcommand)]
+    Mutes(SidebarChannelFlagCmd),
+    /// List, pin, and unpin your sidebar projects (synced with Buzz desktop)
+    #[command(subcommand)]
+    Projects(SidebarProjectsCmd),
+}
+
+/// How a sidebar group orders its channels.
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum SidebarSortMode {
+    /// By name, A to Z
+    Alpha,
+    /// By last message, newest first
+    Recent,
+}
+
+/// `--group` takes `starred`, `channels`, `forums`, `dms`, `section:<id>`, or
+/// the name of a section.
+#[derive(Subcommand)]
+pub enum SidebarSortCmd {
+    /// List the groups that have a sort mode set
+    List,
+    /// Sort a group by name or by recent activity
+    Set {
+        /// Group to sort
+        #[arg(long)]
+        group: String,
+        /// Sort mode
+        #[arg(long, value_enum)]
+        mode: SidebarSortMode,
+    },
+    /// Return a group to the default sort (alpha)
+    Reset {
+        /// Group to reset
+        #[arg(long)]
+        group: String,
+    },
+}
+
+/// Shared by `sidebar stars` and `sidebar mutes`.
+#[derive(Subcommand)]
+pub enum SidebarChannelFlagCmd {
+    /// List the channels that are set
+    List,
+    /// Set one or more channels
+    Add {
+        /// Channel UUID (repeatable)
+        #[arg(long = "channel", required = true)]
+        channels: Vec<String>,
+    },
+    /// Clear one or more channels
+    Remove {
+        /// Channel UUID (repeatable)
+        #[arg(long = "channel", required = true)]
+        channels: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum SidebarProjectsCmd {
+    /// List the projects pinned to your sidebar
+    List,
+    /// Pin one or more projects
+    Add {
+        /// Project address `30621:<owner-pubkey>:<d-tag>` (repeatable)
+        #[arg(long = "project", required = true)]
+        projects: Vec<String>,
+    },
+    /// Unpin one or more projects
+    Remove {
+        /// Project address `30621:<owner-pubkey>:<d-tag>` (repeatable)
+        #[arg(long = "project", required = true)]
+        projects: Vec<String>,
+    },
+}
+
+/// `--section` takes a section id, or a section name that is unique.
+#[derive(Subcommand)]
+pub enum SidebarSectionsCmd {
+    /// List your sections and the channels assigned to each one
+    List,
+    /// Create a section at the end of your sidebar
+    Create {
+        /// Section name
+        #[arg(long)]
+        name: String,
+        /// Emoji shown next to the section name
+        #[arg(long)]
+        icon: Option<String>,
+    },
+    /// Rename a section or change its icon
+    Update {
+        /// Section id or unique name
+        #[arg(long)]
+        section: String,
+        /// New section name
+        #[arg(long)]
+        name: Option<String>,
+        /// New emoji icon
+        #[arg(long, conflicts_with = "clear_icon")]
+        icon: Option<String>,
+        /// Remove the section icon
+        #[arg(long, default_value_t = false)]
+        clear_icon: bool,
+    },
+    /// Delete a section; its channels return to the default channel list
+    Delete {
+        /// Section id or unique name
+        #[arg(long)]
+        section: String,
+    },
+    /// Put sections in order; unlisted sections keep their order after them
+    Reorder {
+        /// Section id or unique name, in the new order (repeatable)
+        #[arg(long = "section", required = true)]
+        sections: Vec<String>,
+    },
+    /// Move one or more channels into a section
+    Move {
+        /// Channel UUID (repeatable)
+        #[arg(long = "channel", required = true)]
+        channels: Vec<String>,
+        /// Section id or unique name
+        #[arg(long)]
+        section: String,
+    },
+    /// Return one or more channels to the default channel list
+    Unassign {
+        /// Channel UUID (repeatable)
+        #[arg(long = "channel", required = true)]
+        channels: Vec<String>,
     },
 }
 
@@ -2392,7 +2639,16 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         ..Default::default()
     }
     .with_env_evidence();
-    let Some((command, client)) = connect(&cli.relay, cli.command, run_auth, async |relay| {
+    // Listing pairings is local: it needs no relay and runs no discovery.
+    if let Cmd::Auth(AuthCmd::Desktop(DesktopAuthCmd::List)) = cli.command {
+        return list_pairings(&cli.format).await;
+    }
+    let explicit_key = settings.private_key.is_some();
+    let relay = match cli.relay {
+        Some(relay) => relay,
+        None => default_relay(&cli.command, explicit_key).await?,
+    };
+    let Some((command, client)) = connect(&relay, cli.command, run_auth, async |relay| {
         credentials::resolve(settings, relay).await
     })
     .await?
@@ -2405,6 +2661,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Messages(sub) => commands::messages::dispatch(sub, &client, &cli.format).await,
         Cmd::Channels(sub) => commands::channels::dispatch(sub, &client, &cli.format).await,
         Cmd::Canvas(sub) => commands::channels::dispatch_canvas(sub, &client).await,
+        Cmd::Sidebar(sub) => commands::sidebar::dispatch(sub, &client).await,
         Cmd::Reactions(sub) => commands::reactions::dispatch(sub, &client).await,
         Cmd::Emoji(sub) => commands::emoji::dispatch(sub, &client).await,
         Cmd::Gifs(sub) => commands::gifs::dispatch(sub, &client).await,
@@ -2502,6 +2759,38 @@ mod tests {
         Cli::command().debug_assert();
     }
 
+    /// Relay selection asks only what a command needs: an explicit key never
+    /// asks for a pairing, unpairing asks nothing, pairing asks for no other
+    /// pairing, and an agent's inherited relay comes first. `None` for
+    /// `inherited` means it must not be asked; the paired lookup never is.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn relay_selection_asks_only_what_a_command_needs() {
+        use clap::Parser;
+        const INHERITED: &str = "wss://inherited.example/";
+        const DEFAULT: &str = "http://localhost:3000";
+        let cases = [
+            ("users get", true, Some(None), DEFAULT),
+            ("auth desktop unpair", false, None, DEFAULT),
+            ("auth desktop pair", false, Some(None), DEFAULT),
+            ("users get", false, Some(Some(INHERITED)), INHERITED),
+        ];
+        for (args, explicit_key, inherited, want) in cases {
+            let argv = std::iter::once("buzz").chain(args.split(' '));
+            let cli = Cli::try_parse_from(argv).unwrap();
+            let inherited = async move {
+                Ok(inherited
+                    .unwrap_or_else(|| panic!("`{args}` asked for an inherited relay"))
+                    .map(str::to_owned))
+            };
+            let paired = async { panic!("`{args}` asked for a paired relay") };
+            let relay = default_relay_with(&cli.command, explicit_key, inherited, paired)
+                .await
+                .unwrap();
+            assert_eq!(relay, want, "`{args}`");
+        }
+    }
+
     #[test]
     fn messages_send_from_thread_conflicts_with_reply_and_broadcast() {
         let base = [
@@ -2544,6 +2833,26 @@ mod tests {
             event.as_str(),
         ])
         .is_ok());
+    }
+
+    #[test]
+    fn messages_search_parses_cursor_and_requires_before_for_before_id() {
+        let search = |extra: &[&str]| {
+            let mut argv = vec!["buzz", "messages", "search", "--author", "x"];
+            argv.extend_from_slice(extra);
+            Cli::try_parse_from(argv)
+        };
+        let id = "a".repeat(64);
+        match search(&["--before", "200", "--before-id", &id]).map(|c| c.command) {
+            Ok(Cmd::Messages(MessagesCmd::Search {
+                before, before_id, ..
+            })) => {
+                assert_eq!(before, Some(200));
+                assert_eq!(before_id.as_deref(), Some(id.as_str()));
+            }
+            _ => panic!("messages search should parse --before and --before-id"),
+        }
+        assert!(search(&["--before-id", &id]).is_err());
     }
 
     #[test]
@@ -2637,6 +2946,7 @@ mod tests {
             "projects",
             "reactions",
             "repos",
+            "sidebar",
             "social",
             "upload",
             "users",

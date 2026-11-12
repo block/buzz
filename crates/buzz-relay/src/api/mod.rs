@@ -8,6 +8,8 @@ pub mod gifs;
 pub mod git;
 pub mod invites;
 pub mod media;
+/// Channel-aware media authorization.
+pub mod media_access;
 pub mod mesh_demo;
 pub mod nip05;
 pub mod nip_fi;
@@ -643,6 +645,10 @@ pub mod relay_members {
             state
                 .author_type_cache
                 .insert((tenant.community(), agent.to_bytes().to_vec()), true);
+            state.agent_owner_cache.insert(
+                (tenant.community(), agent.to_bytes().to_vec()),
+                owner.to_bytes().to_vec(),
+            );
             state.observer_owner_cache.insert(owner_key, true);
         }
         link
@@ -944,3 +950,6 @@ mod parse_query_tests {
 
 mod artifact;
 pub(crate) mod artifact_sync;
+
+#[cfg(test)]
+mod media_access_postgres_tests;

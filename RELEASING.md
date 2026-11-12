@@ -51,6 +51,20 @@ or mobile GitHub Release.
 
 ### Desktop
 
+Repository admins can manually validate an existing candidate with:
+
+```sh
+gh workflow run desktop-release-candidate.yml --repo block/buzz --ref main -f version=0.5.3
+```
+
+This checks out `version-bump/0.5.3` and runs the same immutable-candidate
+validator as the PR check. Dispatch from `main`; both the original caller and
+anyone rerunning the workflow must currently have repository admin permission.
+GitHub allows users with write access to dispatch workflows, but this workflow
+fails their manual runs before checkout. Permission lookup failures also stop
+the run. Manual validation does not create a candidate, publish a release, or
+replace the required checks on the candidate PR.
+
 1. Run `just release-desktop <version>` from a clean, up-to-date `main` checkout.
    The script creates one deterministic candidate commit and records both its
    frozen base and the verified prior release ledger in candidate metadata.
@@ -90,8 +104,11 @@ prior release's recorded squash commit; tag ancestry is deliberately irrelevant.
    `debug-0.3.0` and `debug-latest`) for native profiling. The ordinary tags
    remain stripped and are the default for deployments that do not need it.
 
-Every push to `main` continues to publish the rolling relay `:main` and
-`:sha-<7>` tags, plus matching `:debug-main` and `:debug-sha-<7>` variants.
+Every push to `main` that changes the image build context continues to
+publish the rolling relay `:main` and `:sha-<7>` tags, plus matching
+`:debug-main` and `:debug-sha-<7>` variants. Pushes that only touch paths
+`.dockerignore` excludes (such as `desktop/`, `mobile/` and `docs/`) publish
+nothing.
 
 ### Mobile
 

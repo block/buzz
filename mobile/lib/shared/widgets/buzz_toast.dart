@@ -135,6 +135,7 @@ class _ToastBubble extends HookWidget {
     this.actionLabel = 'Retry',
     this.destructiveAction = false,
     this.secondaryAction,
+    this.inline = false,
   });
 
   final String message;
@@ -147,6 +148,7 @@ class _ToastBubble extends HookWidget {
   final String actionLabel;
   final bool destructiveAction;
   final ({String label, VoidCallback onPressed})? secondaryAction;
+  final bool inline;
 
   @override
   Widget build(BuildContext context) {
@@ -156,7 +158,7 @@ class _ToastBubble extends HookWidget {
         secondaryAction != null ||
         (onRetry != null &&
             MediaQuery.textScalerOf(context).scale(14) > 14 * 1.3);
-    final origin = !stacked
+    final origin = !stacked && !inline
         ? islandOrigin ?? _toastIslandOrigin(context)
         : null;
     final reduceMotion = MediaQuery.disableAnimationsOf(context);
@@ -263,62 +265,55 @@ class _ToastBubble extends HookWidget {
     final foreground = dark
         ? darkColorScheme.onSurface
         : lightColorScheme.onInverseSurface;
-    return Positioned(
-      top: top,
-      left: Grid.gutter,
-      right: Grid.gutter,
-      child: IgnorePointer(
-        ignoring: onRetry == null || exiting,
-        child: Align(
-          alignment: Alignment.topCenter,
-          child: FractionalTranslation(
-            translation: Offset(
+    final bubble = IgnorePointer(
+      ignoring: onRetry == null || exiting,
+      child: Align(
+        alignment: Alignment.topCenter,
+        heightFactor: inline ? 1 : null,
+        child: FractionalTranslation(
+          translation: Offset(0, -(island == null ? 1 : 0.5) * (1 - progress)),
+          child: Transform.translate(
+            offset: Offset(
               0,
-              -(island == null ? 1 : 0.5) * (1 - progress),
+              ((island?.center.dy ?? 0) - top) * (1 - progress),
             ),
-            child: Transform.translate(
-              offset: Offset(
-                0,
-                ((island?.center.dy ?? 0) - top) * (1 - progress),
-              ),
-              child: Semantics(
-                liveRegion: true,
-                onDismiss: persistent ? null : onDismiss,
-                // Lay text out once at its full width. Only the capsule's
-                // painted bounds expand, revealing rather than scaling text.
-                child: CustomPaint(
-                  painter: island == null || shader == null
-                      ? null
-                      : _ToastIslandSurface(
-                          shader: shader,
-                          reveal: reveal,
-                          pixelRatio: MediaQuery.devicePixelRatioOf(context),
-                          island: island,
-                          top: top,
-                          progress: progress,
-                        ),
-                  child: PhysicalShape(
-                    clipper: _ToastRevealClipper(
-                      reveal,
-                      radius: stacked ? Radii.navigationCapsule : null,
-                    ),
-                    clipBehavior: Clip.antiAlias,
-                    color: island != null && shader != null
-                        ? Colors.transparent
-                        : background,
-                    elevation: island != null && shader != null ? 0 : 4,
-                    shadowColor: Colors.black.withValues(alpha: 0.18),
-                    child: Opacity(
-                      opacity: contentOpacity,
-                      child: ToastCapsuleContent(
-                        message: message,
-                        foreground: foreground,
-                        actionLabel: actionLabel,
-                        destructiveAction: destructiveAction,
-                        secondaryAction: secondaryAction,
-                        onAction: onRetry,
-                        stackActions: stacked,
+            child: Semantics(
+              liveRegion: true,
+              onDismiss: persistent ? null : onDismiss,
+              // Lay text out once at its full width. Only the capsule's
+              // painted bounds expand, revealing rather than scaling text.
+              child: CustomPaint(
+                painter: island == null || shader == null
+                    ? null
+                    : _ToastIslandSurface(
+                        shader: shader,
+                        reveal: reveal,
+                        pixelRatio: MediaQuery.devicePixelRatioOf(context),
+                        island: island,
+                        top: top,
+                        progress: progress,
                       ),
+                child: PhysicalShape(
+                  clipper: _ToastRevealClipper(
+                    reveal,
+                    radius: stacked ? Radii.navigationCapsule : null,
+                  ),
+                  clipBehavior: Clip.antiAlias,
+                  color: island != null && shader != null
+                      ? Colors.transparent
+                      : background,
+                  elevation: island != null && shader != null ? 0 : 4,
+                  shadowColor: Colors.black.withValues(alpha: 0.18),
+                  child: Opacity(
+                    opacity: contentOpacity,
+                    child: ToastCapsuleContent(
+                      message: message,
+                      foreground: foreground,
+                      actionLabel: actionLabel,
+                      destructiveAction: destructiveAction,
+                      secondaryAction: secondaryAction,
+                      onAction: onRetry,
+                      stackActions: stacked,
                     ),
                   ),
                 ),
@@ -327,6 +322,21 @@ class _ToastBubble extends HookWidget {
           ),
         ),
       ),
+    );
+    if (inline) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(
+          horizontal: Grid.gutter,
+          vertical: Grid.xxs,
+        ),
+        child: bubble,
+      );
+    }
+    return Positioned(
+      top: top,
+      left: Grid.gutter,
+      right: Grid.gutter,
+      child: bubble,
     );
   }
 }

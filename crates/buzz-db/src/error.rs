@@ -5,6 +5,10 @@ use thiserror::Error;
 /// Errors produced by database operations.
 #[derive(Debug, Error)]
 pub enum DbError {
+    /// Media authorization could not reserve capacity within its bounded wait.
+    #[error("media authorization capacity exceeded")]
+    MediaAuthorizationCapacity,
+
     /// A SQLx driver-level error.
     #[error("database error: {0}")]
     Sqlx(#[from] sqlx::Error),
@@ -42,9 +46,17 @@ pub enum DbError {
     #[error("access denied: {0}")]
     AccessDenied(String),
 
+    /// Required initial policy cannot be created without issuer bindings.
+    #[error("required community creation needs NIP-FI issuer bindings")]
+    NipFiBindingRequired,
+
     /// Invitation admission or minting was denied by authoritative restrictions.
     #[error("invitation principal is restricted")]
     InviteRestricted,
+
+    /// The invitation issuer is not an owner or admin at mint time.
+    #[error("invitation issuer is not an owner or admin")]
+    InviteIssuerNotAdmin,
 
     /// A verified invitation owner conflicts with the recorded owner.
     #[error("invitation owner does not match the recorded owner")]
@@ -101,6 +113,13 @@ pub enum DbError {
     /// A stored timestamp value could not be interpreted.
     #[error("invalid timestamp: {0}")]
     InvalidTimestamp(i64),
+
+    /// A channel event is too old for replica-fence completeness. Retrying the
+    /// same signed event cannot make its timestamp newer. Like the mixed-version
+    /// trigger's SQLx error, this remains a database error at the relay boundary
+    /// (WS OK false / HTTP 500), rather than a different ingest rejection class.
+    #[error("database error: events.created_at is below the replica-fence floor")]
+    CreatedAtFloorRejected,
 
     /// A roster mutation would remove the last effective relay Operator,
     /// leaving no one able to administer the deployment through the API.
@@ -176,6 +195,7 @@ impl DbError {
             E::InvalidData(_) => "invalid_data",
             E::NotFound(_) | E::ChannelNotFound(_) | E::MemberNotFound(_) => "not_found",
             E::AccessDenied(_) => "access_denied",
+            E::NipFiBindingRequired => "nip_fi_binding_required",
             _ => "other",
         };
         kind.to_owned()

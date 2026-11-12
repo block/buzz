@@ -8,6 +8,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import '../../shared/clipboard_utils.dart';
+import '../../shared/identity_archives/identity_archives.dart';
 import '../../shared/identity_names/identity_names_provider.dart';
 import 'dm_channel_labels.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
@@ -481,6 +482,8 @@ Future<void> _confirmAndRun(
   required String confirmLabel,
   required Future<void> Function() action,
 }) async {
+  final ownerNavigator = Navigator.of(sheetContext);
+  final ownerRoute = ModalRoute.of(sheetContext);
   final pageContext = Navigator.of(sheetContext, rootNavigator: true).context;
   final confirmed = await showBuzzDialog<bool>(
     context: pageContext,
@@ -502,7 +505,9 @@ Future<void> _confirmAndRun(
   if (confirmed != true) return;
   try {
     await action();
-    if (pageContext.mounted) Navigator.of(pageContext).pop(true);
+    if (ownerNavigator.mounted && ownerRoute?.isCurrent == true) {
+      ownerNavigator.pop(true);
+    }
   } catch (error) {
     if (!pageContext.mounted) return;
     ScaffoldMessenger.of(pageContext).showFeedbackSnackBar(

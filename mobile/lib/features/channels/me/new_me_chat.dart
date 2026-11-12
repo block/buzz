@@ -2,7 +2,49 @@ part of 'me_page.dart';
 
 /// Opens the New chat draft, first offering to resume or discard a creation
 /// that was interrupted before it finished.
-Future<void> _openNewMeChat(BuildContext context, WidgetRef ref) async {
+Future<void> _openNewMeChat(BuildContext context, WidgetRef ref) =>
+    _openMeChatDraft(context, ref);
+
+/// Opens a New chat draft that starts from a message, like desktop's Start
+/// Solo chat. The composer is seeded with the message's link when its channel
+/// is open to the agent, else with the message quoted. Each source message
+/// keeps its own unsent draft, so starting again returns to what was left.
+Future<void> openSoloChatFromMessage(
+  BuildContext context,
+  WidgetRef ref, {
+  required Channel? channel,
+  required String channelId,
+  required String messageId,
+  required String? threadRootId,
+  required String content,
+}) {
+  final key = soloChatSeedDraftKey(messageId);
+  final drafts = ref.read(composeDraftsProvider.notifier);
+  if (drafts.draftFor(key) == null) {
+    drafts.save(
+      key: key,
+      channelId: key,
+      text: soloChatSeed(
+        linkable:
+            channel != null &&
+            (channel.isStream || channel.isForum) &&
+            !channel.isPrivate,
+        channelId: channelId,
+        messageId: messageId,
+        threadRootId: threadRootId,
+        content: content,
+      ),
+    );
+  }
+  return _openMeChatDraft(context, ref, composerKey: key, focusComposer: true);
+}
+
+Future<void> _openMeChatDraft(
+  BuildContext context,
+  WidgetRef ref, {
+  String composerKey = 'new-solo',
+  bool focusComposer = false,
+}) async {
   final initialSync = ref.read(meSyncProvider);
   final unfinished = MeChatCreation.pending(initialSync);
   if (unfinished != null) {
@@ -36,9 +78,12 @@ Future<void> _openNewMeChat(BuildContext context, WidgetRef ref) async {
     }
   }
   if (!context.mounted) return;
-  await Navigator.of(
-    context,
-  ).push<void>(MaterialPageRoute(builder: (_) => const _MeChatDraft()));
+  await Navigator.of(context).push<void>(
+    MaterialPageRoute(
+      builder: (_) =>
+          _MeChatDraft(composerKey: composerKey, focusComposer: focusComposer),
+    ),
+  );
 }
 
 Future<Channel> _createMeChat(

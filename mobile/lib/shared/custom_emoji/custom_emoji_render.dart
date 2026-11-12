@@ -1,7 +1,10 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:gpt_markdown/gpt_markdown.dart';
+import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../relay/relay.dart';
+import '../theme/buzz_icons.dart';
 
 import 'custom_emoji.dart';
 
@@ -9,27 +12,91 @@ import 'custom_emoji.dart';
 /// Roughly matches a line of body text so emoji sit on the baseline cleanly.
 const double kCustomEmojiInlineSize = 20.0;
 
+/// Encoded bytes of custom emoji that [CustomEmojiImage] has downloaded, so a
+/// native surface such as the iOS reactions sheet shows an emoji the timeline
+/// already displays without fetching it again. Least recently used entries
+/// are evicted past [maxTotalBytes]; an emoji over [maxEntryBytes] is not kept.
+class CustomEmojiBytesCache {
+  static const maxEntryBytes = 512 * 1024;
+  static const maxTotalBytes = 8 * 1024 * 1024;
+
+  final _entries = <String, Uint8List>{};
+  var _totalBytes = 0;
+
+  void remember(String url, Uint8List bytes) {
+    if (bytes.lengthInBytes > maxEntryBytes) return;
+    final previous = _entries.remove(url);
+    if (previous != null) _totalBytes -= previous.lengthInBytes;
+    _entries[url] = bytes;
+    _totalBytes += bytes.lengthInBytes;
+    while (_totalBytes > maxTotalBytes) {
+      final oldest = _entries.keys.first;
+      _totalBytes -= _entries.remove(oldest)!.lengthInBytes;
+    }
+  }
+
+  Uint8List? lookup(String url) {
+    final bytes = _entries.remove(url);
+    if (bytes != null) _entries[url] = bytes;
+    return bytes;
+  }
+}
+
+/// Rebuilt with the media auth scope, like [MediaImageProvider]'s cache key,
+/// so one account's downloads never reach another account's surfaces.
+final customEmojiBytesCacheProvider = Provider<CustomEmojiBytesCache>((ref) {
+  ref.watch(mediaGetAuthServiceProvider);
+  return CustomEmojiBytesCache();
+});
+
+/// The neutral glyph that stands in for a custom emoji with no image: a muted
+/// sparkles icon, because a truncated `:shortcode:` is illegible at glyph size.
+/// The shortcode survives only as the semantics label.
+class CustomEmojiPlaceholder extends StatelessWidget {
+  final String shortcode;
+  final double size;
+
+  const CustomEmojiPlaceholder({
+    super.key,
+    required this.shortcode,
+    required this.size,
+  });
+
+  @override
+  Widget build(BuildContext context) => Icon(
+    BuzzIcons.sparkles,
+    size: size,
+    color: DefaultTextStyle.of(context).style.color?.withValues(alpha: 0.6),
+    semanticLabel: ':$shortcode:',
+  );
+}
+
 /// A single custom-emoji image rendered as a square, network-loaded glyph.
 ///
 /// Reused everywhere a `:shortcode:` resolves to an image: inline in message
-/// bodies, reaction pills, status, and the picker. Falls back to the literal
-/// `:shortcode:` text if the image fails to load, so a broken URL never leaves
-/// a blank gap.
-class CustomEmojiImage extends StatelessWidget {
+/// bodies, reaction pills, status, and the picker. If the image fails to load,
+/// it falls back to the literal `:shortcode:` text, so a broken URL never
+/// leaves a blank gap in prose; a [compact] glyph, such as a reaction pill,
+/// shows the [CustomEmojiPlaceholder] instead. A reaction slot is always
+/// [compact]: it never renders shortcode text.
+class CustomEmojiImage extends ConsumerWidget {
   final String shortcode;
   final String url;
   final double size;
+  final bool compact;
 
   const CustomEmojiImage({
     super.key,
     required this.shortcode,
     required this.url,
     this.size = kCustomEmojiInlineSize,
+    this.compact = false,
   });
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final fallbackStyle = DefaultTextStyle.of(context).style;
+    final bytesCache = ref.watch(customEmojiBytesCacheProvider);
     return MediaImage(
       url: url,
       width: size,
@@ -38,7 +105,10 @@ class CustomEmojiImage extends StatelessWidget {
       fit: BoxFit.contain,
       filterQuality: FilterQuality.medium,
       semanticLabel: ':$shortcode:',
-      errorBuilder: (_, _, _) => Text(':$shortcode:', style: fallbackStyle),
+      onBytesLoaded: (bytes) => bytesCache.remember(url, bytes),
+      errorBuilder: (_, _, _) => compact
+          ? CustomEmojiPlaceholder(shortcode: shortcode, size: size)
+          : Text(':$shortcode:', style: fallbackStyle),
     );
   }
 }

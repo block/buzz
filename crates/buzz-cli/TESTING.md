@@ -235,6 +235,9 @@ buzz messages search --query "CLI test" --limit 5 | jq .
 
 # messages edit
 buzz messages edit --event "$EVENT_ID" --content "Edited by CLI test" | jq .
+# Explicit removal stays removed in a subsequent text edit.
+buzz messages edit --event "$EVENT_ID" --content "Remove attached files" --clear-attachments | jq .
+buzz messages edit --event "$EVENT_ID" --content "Still no attachments" | jq .
 
 # messages delete
 buzz messages delete --event "$REPLY_ID" | jq .

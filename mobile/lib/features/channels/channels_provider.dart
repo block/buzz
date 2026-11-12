@@ -31,6 +31,7 @@ part 'channel_snapshot.dart';
 part 'channel_member_snapshots.dart';
 part 'channels_provider_lifecycle.dart';
 part 'channel_list_changes.dart';
+part 'channels_provider_joins.dart';
 
 const _channelTypeOrder = {'stream': 0, 'forum': 1, 'dm': 2};
 const _unreadCatchUpLimit = 1000;
@@ -68,6 +69,8 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   int _nextLiveChunkGeneration = 0;
   // Closed by the relay for capacity, so retried with backoff.
   final Set<String> _terminallyClosedLiveChunks = {};
+  // This client's own confirmed joins that replicas may not show yet.
+  final Set<String> _confirmedJoins = {};
   // Refused for good, so left alone until the next connection.
   final Set<String> _refusedLiveChunks = {};
   String? _subscriptionRelayBaseUrl;
@@ -222,6 +225,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       _directoryMetas = const [];
       _directoryMetasScope = null;
       _hiddenDmIds = const {};
+      _confirmedJoins.clear();
       // Retire any in-flight directory request: its response describes the
       // previous relay or identity and must not reach this scope's state.
       _refreshCoordinator.retireInFlight();
@@ -377,10 +381,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     final listChanges = _channelListChanges;
 
     // Step 1: find the channels I'm a member of via kind:39002.
-    final memberships = _latestChannelEvents(
-      await _fenced(fence, _fetchChannelMemberships(session, myPk)),
-      kind: 39002,
-    );
+    final memberships = await _readMemberships(fence, session, myPk);
     final memberChannelIds = memberships
         .map((e) => e.getTagValue('d'))
         .whereType<String>()
@@ -831,6 +832,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       ttlSeconds: data.ttlSeconds,
       ttlDeadline: data.ttlDeadline,
       isUnlisted: data.isUnlisted,
+      joinsAsGuest: data.joinsAsGuest,
     );
   }
 
@@ -1153,6 +1155,18 @@ final channelByIdProvider = Provider.autoDispose.family<Channel?, String>(
         ),
       ) ??
       ref.watch(_openedAheadProvider.select((opened) => opened[channelId])),
+);
+
+/// Whether this channel can start or continue threads. A Solo chat's agents
+/// answer at its top level, so it keeps existing threads readable but starts
+/// none and takes no thread replies, as desktop does. A channel not loaded yet
+/// keeps the default thread behavior.
+final channelStartsThreadsProvider = Provider.autoDispose.family<bool, String>(
+  (ref, channelId) => !(ref.watch(
+    channelByIdProvider(
+      channelId,
+    ).select((channel) => channel?.isSolo ?? false),
+  )),
 );
 
 /// Channels opened from their own metadata before the list had them, as a

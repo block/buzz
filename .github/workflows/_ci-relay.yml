@@ -121,6 +121,7 @@ jobs:
           cargo nextest archive \
             --cargo-profile ci \
             -p buzz-db \
+            -p buzz-pubsub \
             -p buzz-relay \
             -p buzz-relay-mesh \
             -p buzz-test-client \
@@ -559,6 +560,19 @@ jobs:
             --archive-file target/ci/backend-integration-tests.tar.zst \
             -E 'package(buzz-relay) and test(/api::admin::postgres_tests::external_infra_minio_tests::/)' \
             --run-ignored ignored-only
+      - name: Media thumbnail regeneration regressions
+        # The tests share one fixture image's storage keys, and nextest gives
+        # each its own process, so their in-process lock can't order them.
+        env:
+          BUZZ_TEST_DATABASE_URL: postgres://buzz:${{ env.BUZZ_TEST_POSTGRES_PASSWORD }}@localhost:5432/buzz
+          BUZZ_S3_ENDPOINT: http://localhost:9000
+          BUZZ_S3_BUCKET: buzz-media
+        run: |
+          cargo nextest run \
+            --archive-file target/ci/backend-integration-tests.tar.zst \
+            -E 'package(buzz-relay) and test(/^api::media::tests::postgres_tests::external_infra_minio_tests::/)' \
+            --run-ignored ignored-only \
+            --test-threads 1
       - name: Relay quota accounting and rejection regressions
         env:
           BUZZ_TEST_REDIS_URL: redis://localhost:6379
@@ -582,6 +596,13 @@ jobs:
           cargo nextest run \
             --archive-file target/ci/backend-integration-tests.tar.zst \
             -E 'package(buzz-relay-mesh) and test(/^registry::tests::external_infra_redis::/)' \
+            --run-ignored ignored-only
+      - name: Pubsub subscriber reconciliation regression
+        # Runs the live Redis subscriber; the test dials redis://127.0.0.1:6379.
+        run: |
+          cargo nextest run \
+            --archive-file target/ci/backend-integration-tests.tar.zst \
+            -E 'package(buzz-pubsub) and test(=tests::live_subscriber_recovers_a_dropped_subscribe_hint)' \
             --run-ignored ignored-only
       - name: Workflow message provenance unit tests
         # The relay's workflow_sink suite is not selected by the infra-free
@@ -663,6 +684,8 @@ jobs:
           merge-multiple: true
           path: target/ci
       - name: Start relay
+        env:
+          BUZZ_MEDIA_READ_MODE: enforce
         run: |
           chmod +x ./target/ci/buzz-relay ./target/ci/git-credential-nostr
           ./scripts/start-relay-for-tests.sh --no-build

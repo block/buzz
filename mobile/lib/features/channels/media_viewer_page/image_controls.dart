@@ -1,6 +1,7 @@
 part of '../media_viewer_page.dart';
 
 class _MediaViewerBottomControls extends StatelessWidget {
+  final bool showActions;
   final List<MediaViewerImage> images;
   final int currentIndex;
   final ValueChanged<int> onSelect;
@@ -8,6 +9,7 @@ class _MediaViewerBottomControls extends StatelessWidget {
   final VoidCallback? onMore;
 
   const _MediaViewerBottomControls({
+    this.showActions = true,
     required this.images,
     required this.currentIndex,
     required this.onSelect,
@@ -22,13 +24,14 @@ class _MediaViewerBottomControls extends StatelessWidget {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.center,
         children: [
-          _MediaViewerCircleButton(
-            key: const ValueKey('message-media-image-viewer-reply-thread'),
-            icon: BuzzIcons.messageSquareReply,
-            tooltip: 'Reply in thread',
-            onPressed: onReply,
-          ),
-          const SizedBox(width: Grid.xxs),
+          if (showActions)
+            _MediaViewerCircleButton(
+              key: const ValueKey('message-media-image-viewer-reply-thread'),
+              icon: BuzzIcons.messageSquareReply,
+              tooltip: 'Reply in thread',
+              onPressed: onReply,
+            ),
+          if (showActions) const SizedBox(width: Grid.xxs),
           Expanded(
             child: images.length > 1
                 ? Theme(
@@ -47,13 +50,14 @@ class _MediaViewerBottomControls extends StatelessWidget {
                   )
                 : const SizedBox(height: 56),
           ),
-          const SizedBox(width: Grid.xxs),
-          _MediaViewerCircleButton(
-            key: const ValueKey('message-media-image-viewer-more-actions'),
-            icon: BuzzIcons.ellipsis,
-            tooltip: 'More image actions',
-            onPressed: onMore,
-          ),
+          if (showActions) const SizedBox(width: Grid.xxs),
+          if (showActions)
+            _MediaViewerCircleButton(
+              key: const ValueKey('message-media-image-viewer-more-actions'),
+              icon: BuzzIcons.ellipsis,
+              tooltip: 'More image actions',
+              onPressed: onMore,
+            ),
         ],
       ),
     );

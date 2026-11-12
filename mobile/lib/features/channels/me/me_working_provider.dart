@@ -1,5 +1,6 @@
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../../../shared/me/me_assistant_names.dart';
 import '../../../shared/me/me_assistants.dart';
 import '../channel_typing_provider.dart';
 
@@ -12,11 +13,12 @@ final meWorkingAgentsProvider = Provider.autoDispose
       if (agents.isEmpty) return const [];
       final typing = ref.watch(channelTypingProvider(channelId));
       final active = typing.map((entry) => entry.pubkey.toLowerCase()).toSet();
-      return [
+      final working = [
         for (final agent in agents)
-          if (active.contains(agent.pubkey.toLowerCase()))
-            agent.displayName?.trim().isNotEmpty == true
-                ? agent.displayName!.trim()
-                : 'Agent',
+          if (active.contains(agent.pubkey.toLowerCase())) agent.pubkey,
       ];
+      // An idle chat reads no names at all.
+      if (working.isEmpty) return const [];
+      final names = ref.watch(meAssistantNamesProvider);
+      return [for (final pubkey in working) names.labelFor(pubkey)];
     });

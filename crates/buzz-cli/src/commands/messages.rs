@@ -1,3 +1,5 @@
+mod edit;
+
 use buzz_sdk::{DeleteMessageOptions, DiffMeta, ThreadRef, VoteDirection};
 use nostr::PublicKey;
 use uuid::Uuid;
@@ -347,10 +349,7 @@ pub async fn cmd_get_messages(
 
     // If specific kinds requested, override
     if let Some(k) = kinds {
-        let kind_list: Vec<u64> = k.split(',').filter_map(|s| s.trim().parse().ok()).collect();
-        if !kind_list.is_empty() {
-            filter["kinds"] = serde_json::json!(kind_list);
-        }
+        filter["kinds"] = serde_json::json!(parse_kinds(k)?);
     }
 
     if let Some(b) = before {
@@ -438,11 +437,14 @@ pub async fn cmd_get_thread(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn cmd_search(
     client: &BuzzClient,
     query: Option<&str>,
     author: Option<&str>,
     since: Option<i64>,
+    before: Option<i64>,
+    before_id: Option<&str>,
     limit: Option<u32>,
     format: &crate::OutputFormat,
 ) -> Result<(), CliError> {
@@ -451,26 +453,23 @@ pub async fn cmd_search(
             "at least one of --query or --author is required".into(),
         ));
     }
-    let limit = limit.unwrap_or(20).min(100);
+    // Validate the cursor before resolving the author, so a bad flag fails
+    // without a relay round trip.
+    search_filter(query, None, since, before, before_id, None)?;
 
     let author_hex = match author {
         Some(a) => Some(resolve_author(client, a).await?),
         None => None,
     };
 
-    let mut filter = serde_json::json!({
-        "kinds": [9, 40002, 45001, 45003],
-        "limit": limit
-    });
-    if let Some(q) = query {
-        filter["search"] = serde_json::json!(q);
-    }
-    if let Some(ref pk) = author_hex {
-        filter["authors"] = serde_json::json!([pk]);
-    }
-    if let Some(s) = since {
-        filter["since"] = serde_json::json!(s);
-    }
+    let filter = search_filter(
+        query,
+        author_hex.as_deref(),
+        since,
+        before,
+        before_id,
+        limit,
+    )?;
     let resp = client.query(&filter).await?;
     let mut events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
     // The full-text path returns relevance order; a pure author/time query has
@@ -483,6 +482,53 @@ pub async fn cmd_search(
     let normalized = normalize_events(&events);
     println!("{}", format_events(&normalized, format));
     Ok(())
+}
+
+/// The relay filter for `messages search`.
+///
+/// `before` maps to `until`; `before_id` adds the relay's composite
+/// `(until, before_id)` cursor, so an author-only search pages back with the
+/// last result's `created_at` and `id`. Full-text results are ranked by
+/// relevance, not time, so `before_id` is rejected with `query`.
+fn search_filter(
+    query: Option<&str>,
+    author_hex: Option<&str>,
+    since: Option<i64>,
+    before: Option<i64>,
+    before_id: Option<&str>,
+    limit: Option<u32>,
+) -> Result<serde_json::Value, CliError> {
+    if let Some(bid) = before_id {
+        if query.is_some() {
+            return Err(CliError::Usage(
+                "--before-id cannot be combined with --query: full-text results are ranked by relevance, not time".into(),
+            ));
+        }
+        if before.is_none() {
+            return Err(CliError::Usage("--before-id requires --before".into()));
+        }
+        validate_hex64(bid)?;
+    }
+    let mut filter = serde_json::json!({
+        "kinds": [9, 40002, 45001, 45003],
+        "limit": limit.unwrap_or(20).min(100)
+    });
+    if let Some(q) = query {
+        filter["search"] = serde_json::json!(q);
+    }
+    if let Some(pk) = author_hex {
+        filter["authors"] = serde_json::json!([pk]);
+    }
+    if let Some(s) = since {
+        filter["since"] = serde_json::json!(s);
+    }
+    if let Some(b) = before {
+        filter["until"] = serde_json::json!(b);
+    }
+    if let Some(bid) = before_id {
+        filter["before_id"] = serde_json::json!(bid.to_ascii_lowercase());
+    }
+    Ok(filter)
 }
 
 /// Resolve an `--author` value to a 64-char hex pubkey.
@@ -674,18 +720,13 @@ pub async fn cmd_send_message(
     let mut media_tags: Vec<Vec<String>> = Vec::new();
     let mut media_content = String::new();
     for file_path in &p.files {
-        let desc = client
-            .upload_file(file_path)
-            .await
-            .map_err(|e| CliError::Other(format!("upload failed for {file_path}: {e}")))?;
-        media_tags.push(crate::client::build_imeta_tag(&desc));
-        if desc.mime_type.starts_with("video/") {
-            media_content.push_str("\n![video](");
-        } else {
-            media_content.push_str("\n![image](");
-        }
-        media_content.push_str(&desc.url);
-        media_content.push(')');
+        let desc = client.upload_file(file_path).await?;
+        let name = attachment_name(file_path);
+        let mut tag = crate::client::build_imeta_tag(&desc);
+        tag.push(format!("filename {name}"));
+        media_tags.push(tag);
+        media_content.push('\n');
+        media_content.push_str(&attachment_markdown(&name, &desc));
     }
     let final_content = if media_content.is_empty() {
         p.content.clone()
@@ -903,29 +944,6 @@ pub async fn cmd_delete_message(
     Ok(())
 }
 
-/// Edit a message you previously sent.
-pub async fn cmd_edit_message(
-    client: &BuzzClient,
-    event_id: &str,
-    content: &str,
-) -> Result<(), CliError> {
-    validate_hex64(event_id)?;
-    validate_content_size(content)?;
-
-    // Resolve channel_id from the event's h-tag
-    let channel_uuid = resolve_channel_id(client, event_id).await?;
-    let target_eid = parse_event_id(event_id)?;
-
-    let builder = buzz_sdk::build_edit(channel_uuid, target_eid, content)
-        .map_err(|e| CliError::Other(format!("build_edit failed: {e}")))?;
-
-    let event = client.sign_event(builder).await?;
-
-    let resp = client.submit_event(event).await?;
-    println!("{}", normalize_write_response(&resp));
-    Ok(())
-}
-
 /// Vote on a forum post or comment.
 pub async fn cmd_vote_on_post(
     client: &BuzzClient,
@@ -1022,7 +1040,11 @@ pub async fn dispatch(
             )
             .await
         }
-        MessagesCmd::Edit { event, content } => cmd_edit_message(client, &event, &content).await,
+        MessagesCmd::Edit {
+            event,
+            content,
+            clear_attachments,
+        } => edit::edit_message(client, &event, &content, clear_attachments).await,
         MessagesCmd::Delete {
             event,
             action_id,
@@ -1111,6 +1133,8 @@ pub async fn dispatch(
             query,
             author,
             since,
+            before,
+            before_id,
             limit,
         } => {
             cmd_search(
@@ -1118,6 +1142,8 @@ pub async fn dispatch(
                 query.as_deref(),
                 author.as_deref(),
                 since,
+                before,
+                before_id.as_deref(),
                 limit,
                 format,
             )
@@ -1129,8 +1155,150 @@ pub async fn dispatch(
     }
 }
 
+/// A file's name as relay filename metadata takes it: its basename with
+/// control characters and path separators as spaces, capped at 255 UTF-8 bytes.
+fn attachment_name(file_path: &str) -> String {
+    let base = std::path::Path::new(file_path)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let mut name = String::new();
+    for c in base.chars() {
+        let c = if c.is_control() || c == '/' || c == '\\' {
+            ' '
+        } else {
+            c
+        };
+        if name.len() + c.len_utf8() > 255 {
+            break;
+        }
+        name.push(c);
+    }
+    match name.trim() {
+        "" => "File".to_string(),
+        trimmed => trimmed.to_string(),
+    }
+}
+
+/// An uploaded file's Markdown link: inline media embeds, other files link.
+fn attachment_markdown(name: &str, desc: &crate::client::BlobDescriptor) -> String {
+    let mut label = String::new();
+    for c in name.chars() {
+        if "\\`*_{}[]()!<>&".contains(c) {
+            label.push('\\');
+        }
+        label.push(c);
+    }
+    let embed = matches!(
+        desc.mime_type.as_str(),
+        "image/jpeg" | "image/png" | "image/gif" | "image/webp" | "video/mp4"
+    );
+    format!("{}[{label}](<{}>)", if embed { "!" } else { "" }, desc.url)
+}
+
+/// A `--kinds` list: comma-separated event kinds, each 0–65535.
+fn parse_kinds(list: &str) -> Result<Vec<u16>, CliError> {
+    list.split(',')
+        .map(|s| {
+            s.trim()
+                .parse()
+                .map_err(|_| CliError::Usage(format!("--kinds: invalid kind {s:?}")))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn search_filter_pages_by_composite_cursor() {
+        use super::{search_filter, CliError};
+        let pk = "a".repeat(64);
+        let id = "B".repeat(64);
+
+        // No cursor flags: the filter is unchanged from before.
+        assert_eq!(
+            search_filter(None, Some(&pk), Some(100), None, None, None).unwrap(),
+            serde_json::json!({
+                "kinds": [9, 40002, 45001, 45003],
+                "limit": 20,
+                "authors": [pk],
+                "since": 100
+            })
+        );
+
+        // --before maps to `until`; --before-id rides along, lowercased.
+        assert_eq!(
+            search_filter(None, Some(&pk), Some(100), Some(200), Some(&id), Some(500)).unwrap(),
+            serde_json::json!({
+                "kinds": [9, 40002, 45001, 45003],
+                "limit": 100,
+                "authors": [pk],
+                "since": 100,
+                "until": 200,
+                "before_id": "b".repeat(64)
+            })
+        );
+
+        // --before alone is a plain time bound, allowed with --query.
+        let f = search_filter(Some("q"), None, None, Some(200), None, None).unwrap();
+        assert_eq!(f["until"], 200);
+        assert_eq!(f["search"], "q");
+        assert!(f.get("before_id").is_none());
+
+        for (query, before, before_id) in [
+            (Some("q"), Some(200), Some(id.as_str())), // relevance order has no cursor
+            (None, None, Some(id.as_str())),           // before_id needs until
+            (None, Some(200), Some("short")),          // malformed id
+        ] {
+            assert!(
+                matches!(
+                    search_filter(query, Some(&pk), None, before, before_id, None),
+                    Err(CliError::Usage(_))
+                ),
+                "{query:?} {before:?} {before_id:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_kinds_rejects_any_invalid_kind() {
+        use super::{parse_kinds, CliError};
+        assert_eq!(parse_kinds("9, 40002").unwrap(), vec![9, 40002]);
+        for bad in ["bad", "65536", "9,typo", "", "-1"] {
+            assert!(matches!(parse_kinds(bad), Err(CliError::Usage(_))), "{bad}");
+        }
+    }
+
+    #[test]
+    fn attachments_embed_media_and_link_other_files() {
+        use super::{attachment_markdown, attachment_name};
+        let blob = |mime: &str| crate::client::BlobDescriptor {
+            url: "https://r.example/media/x.bin".into(),
+            sha256: "x".into(),
+            size: 1,
+            mime_type: mime.into(),
+            uploaded: 0,
+            dim: None,
+            blurhash: None,
+            thumb: None,
+            duration: None,
+        };
+        assert_eq!(
+            attachment_markdown("notes [v1].txt", &blob("application/octet-stream")),
+            "[notes \\[v1\\].txt](<https://r.example/media/x.bin>)"
+        );
+        assert_eq!(
+            attachment_markdown("a.png", &blob("image/png")),
+            "![a.png](<https://r.example/media/x.bin>)"
+        );
+        assert_eq!(attachment_name("/tmp/dir/report.pdf"), "report.pdf");
+        assert_eq!(attachment_name("/tmp/a\nb.txt"), "a b.txt");
+        assert_eq!(attachment_name("/"), "File");
+        // On Windows a backslash is a path separator, not part of the name.
+        #[cfg(unix)]
+        assert_eq!(attachment_name("/tmp/a\\b.txt"), "a b.txt");
+    }
+
     use super::{
         channel_id_from_event, cmd_get_thread, cmd_send_message, event_mention_pubkeys,
         find_root_from_tags, match_profiles_by_name, merge_message_mentions, missing_members,

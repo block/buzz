@@ -58,6 +58,41 @@ const _typingThrottleMs = 3000;
 /// milliseconds after `resumed` (flutter/flutter#189051 logs about 0.4 s).
 const _composerKeyboardRestoreGrace = Duration(seconds: 1);
 
+// Keyboard show/hide drives Android IME lift and collapses on hide.
+void _useComposerKeyboardMetrics({
+  required BuildContext context,
+  required FocusNode focusNode,
+  required _ComposerVoiceNote voiceNote,
+  required ObjectRef<Timer?> androidImeFallbackTimer,
+  required ValueNotifier<bool> androidImeTransitionStarted,
+  required VoidCallback collapseComposer,
+}) {
+  final appView = View.of(context);
+  useEffect(() {
+    final observer = _ComposerKeyboardMetricsObserver(
+      view: appView,
+      onKeyboardShown: () {
+        androidImeFallbackTimer.value?.cancel();
+        androidImeTransitionStarted.value = true;
+      },
+      onKeyboardHidden: () {
+        androidImeFallbackTimer.value?.cancel();
+        if (defaultTargetPlatform == TargetPlatform.android) {
+          androidImeTransitionStarted.value = false;
+        }
+        voiceNote.onKeyboardHidden();
+        collapseComposer();
+        focusNode.unfocus();
+      },
+    );
+    WidgetsBinding.instance.addObserver(observer);
+    return () {
+      WidgetsBinding.instance.removeObserver(observer);
+      observer.dispose();
+    };
+  }, [appView, focusNode, voiceNote.isPreparing]);
+}
+
 class _ComposerKeyboardMetricsObserver with WidgetsBindingObserver {
   final FlutterView view;
   final VoidCallback onKeyboardShown;

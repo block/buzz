@@ -1,4 +1,5 @@
 import 'features/activity/activity_provider.dart';
+import 'features/channels/bestie_conversation.dart';
 import 'features/channels/default_agent_launcher.dart';
 import 'features/agents/agents_page.dart';
 
@@ -6,6 +7,8 @@ import 'dart:async';
 
 import 'hosted_app_gate.dart';
 import 'onboarding_app_entry.dart';
+import 'organization_app_entry.dart';
+import 'shared/hosted/organization_environment.dart';
 import 'shared/widgets/ios_navigation_metrics.dart';
 import 'shared/community/paired_community_landing.dart';
 import 'shared/community/community_loading_surface.dart';
@@ -466,7 +469,11 @@ class App extends HookConsumerWidget {
       },
       home: authState.when(
         loading: () => const _SplashScreen(),
-        error: (_, _) => const PairingPage(),
+        // An internal build never offers pairing, even when auth state is
+        // unreadable: pairing could make another relay the active community.
+        error: (_, _) => OrganizationEnvironment.enabled
+            ? const OrganizationAppEntry()
+            : const PairingPage(),
         data: (state) => switch (state.status) {
           AuthStatus.authenticated => HostedAppGate(
             authenticated: true,
@@ -476,6 +483,7 @@ class App extends HookConsumerWidget {
                 defaultAgentBuilder: (context) => DefaultAgentLauncher(
                   onChooseAgent: () => showAgents(context, createOnOpen: true),
                 ),
+                openBestieConversation: openBestieConversation,
                 mePageBuilder: (_, chat, workspace) => MePage(
                   sliver: true,
                   newChatAction: chat,

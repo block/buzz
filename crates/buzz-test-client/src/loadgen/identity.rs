@@ -16,6 +16,9 @@ pub enum Role {
     /// Posts only hot-thread roots, so `run` finds them among its newest
     /// posts however many other roots a channel has.
     HotRoot,
+    /// Creates a block of channels after a community's first and signs their
+    /// seed writes; see `seed::channel_creator`.
+    Creator,
 }
 
 impl Role {
@@ -26,6 +29,7 @@ impl Role {
             Role::Agent => "agent",
             Role::HotAuthor => "hot-author",
             Role::HotRoot => "hot-root",
+            Role::Creator => "creator",
         }
     }
 }

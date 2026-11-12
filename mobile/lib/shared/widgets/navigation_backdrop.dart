@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 
 import '../theme/theme.dart';
 import 'ios_navigation_bar.dart';
+import 'duo_toolbar.dart';
 
 /// The shared top-edge treatment, independent of a header's controls.
 ///
@@ -37,6 +38,8 @@ class NavigationBackdrop extends StatelessWidget {
               child: ExcludeSemantics(
                 child: IosNavigationBar(
                   title: '',
+                  centerTitleInPane:
+                      DuoToolbarScope.maybeOf(context)?.strip != null,
                   backdropOnly: true,
                   alwaysFrosted: true,
                 ),

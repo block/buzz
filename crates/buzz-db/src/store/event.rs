@@ -85,6 +85,12 @@ pub struct EventQuery {
     /// Restrict results to events with an `e` tag referencing any of these event IDs (hex).
     /// Matched positionally, with JSONB containment as the index prefilter.
     pub e_tags: Option<Vec<String>>,
+    /// Restrict results to events with an `a` tag referencing any of these
+    /// NIP-01 addresses (`<kind>:<pubkey>:<d>`), so references to an
+    /// addressable event can be read across its revisions. Matched
+    /// positionally, with JSONB containment as the index prefilter, like
+    /// [`EventQuery::e_tags`].
+    pub a_tags: Option<Vec<String>>,
     /// Restrict artifact rows ([`ARTIFACT_KINDS`]) to those with a `d` tag
     /// matching any of these values, matched positionally. Their `d_tag`
     /// column is NULL (not NIP-33), so this lets identity lookups match before
@@ -163,6 +169,7 @@ impl EventQuery {
             authors: None,
             ids: None,
             e_tags: None,
+            a_tags: None,
             d_tag_values: None,
             custom_tag: None,
             tag_values: Vec::new(),
@@ -455,7 +462,8 @@ pub async fn insert_event(
 ///
 /// This is the transaction-composition seam for callers that must keep the
 /// event insert open while performing related work. The caller owns commit or
-/// rollback.
+/// rollback. On error, roll back or drop the transaction: the event row may
+/// already have been inserted before the app floor check rejected it.
 pub async fn insert_event_in_transaction(
     tx: &mut AdmittedTx,
     event: &Event,
@@ -522,6 +530,7 @@ async fn insert_event_on(
 
     let was_inserted = result.rows_affected() > 0;
     if was_inserted {
+        crate::replica_fence::guard_event_created_at_floor(tx, created_at, channel_id).await?;
         crate::store::event_follow_up::after_admitted_insert(
             tx,
             id_bytes.as_slice(),
@@ -644,12 +653,13 @@ pub(crate) fn answer_without_db(q: &EventQuery) -> Option<Result<Vec<StoredEvent
         || q.kinds.as_deref().is_some_and(|k| k.is_empty())
         || q.authors.as_deref().is_some_and(|a| a.is_empty())
         || q.ids.as_deref().is_some_and(|i| i.is_empty())
-        || q.e_tags.as_deref().is_some_and(|e| e.is_empty());
+        || q.e_tags.as_deref().is_some_and(|e| e.is_empty())
+        || q.a_tags.as_deref().is_some_and(|a| a.is_empty());
     matches_nothing.then(|| Ok(vec![]))
 }
 
 /// Where to split `q` ([`crate::store::recent_pass`]), or `None` to read it
-/// whole. Lookups by id, `e` tag or `d` tag, and fetch-everything
+/// whole. Lookups by id, `e`, `a` or `d` tag, and fetch-everything
 /// reads (`max_limit`, the COUNT fallback) match a fixed set of rows wherever
 /// they sit, so a recent pass rarely fills their page. An `OFFSET` skips rows
 /// on both sides of the floor, so its split point is unknown.
@@ -660,6 +670,7 @@ fn recent_pass_split(
     let lookup = q.offset.is_some_and(|o| o > 0)
         || q.ids.is_some()
         || q.e_tags.is_some()
+        || q.a_tags.is_some()
         || q.d_tag.is_some()
         || q.d_tags.is_some()
         || q.d_tag_values.is_some()
@@ -677,6 +688,15 @@ fn page_limit(q: &EventQuery) -> i64 {
         .min(q.max_limit.unwrap_or(DEFAULT_MAX_PAGE_LIMIT))
 }
 
+/// Whether `q` filters inside a MATERIALIZED CTE and sorts/limits outside it:
+/// any `#e` or `#a` read. With `ORDER BY created_at LIMIT n` in the same
+/// scope, the planner overestimates matches and walks each partition's pkey
+/// backward, testing every community row against the reference set; the
+/// fence keeps it on the GIN tags index.
+fn reference_tag_fence(q: &EventQuery) -> bool {
+    q.e_tags.is_some() || q.a_tags.is_some()
+}
+
 /// Generic SQL for [`query_events_on`], after [`answer_without_db`]: the rows
 /// of `q` inside `range` (see [`crate::store::recent_pass`]), at most
 /// `limit_val`.
@@ -687,16 +707,11 @@ fn build_query_events_sql(
 ) -> QueryBuilder<sqlx::Postgres> {
     let offset_val = q.offset.unwrap_or(0);
 
-    // e-tag reads filter inside a MATERIALIZED CTE and sort/limit outside it.
-    // With `ORDER BY created_at LIMIT n` in the same scope, the planner
-    // overestimates matches and walks each partition's pkey backward, testing
-    // every community row against the id set; the fence keeps it on the GIN
-    // tags index.
-    let e_tag_fence = q.e_tags.is_some();
+    let reference_tag_fence = reference_tag_fence(q);
     let per_channel = per_channel_scope(q);
     let mut qb: QueryBuilder<sqlx::Postgres> = if let Some(ref p_hex) = q.p_tag_hex {
         // Join against event_mentions for #p-filtered queries (indexed).
-        let mut b = QueryBuilder::new(if e_tag_fence {
+        let mut b = QueryBuilder::new(if reference_tag_fence {
             "WITH m AS MATERIALIZED ("
         } else {
             ""
@@ -710,7 +725,7 @@ fn build_query_events_sql(
         push_mention_join(&mut b, q, p_hex, range);
         b
     } else {
-        let mut b = QueryBuilder::new(if e_tag_fence {
+        let mut b = QueryBuilder::new(if reference_tag_fence {
             "WITH m AS MATERIALIZED ("
         } else {
             ""
@@ -748,7 +763,7 @@ fn build_query_events_sql(
     // same second.  No existing index covers this trailing column — Postgres
     // sorts in memory, which is fine at current scale.  If query performance
     // degrades, add a composite index like `(pubkey, kind, created_at DESC, id ASC)`.
-    if e_tag_fence {
+    if reference_tag_fence {
         qb.push(") SELECT * FROM m ORDER BY created_at DESC, id ASC LIMIT ");
     } else if per_channel.is_some() {
         qb.push(" ORDER BY created_at DESC, id ASC LIMIT ")
@@ -830,6 +845,14 @@ fn push_event_filters(qb: &mut QueryBuilder<sqlx::Postgres>, col_prefix: &str, q
         if !e_tags.is_empty() {
             qb.push(" AND ");
             push_exact_tag_match(qb, col_prefix, "e", e_tags);
+        }
+    }
+
+    // a-tag pushdown: the same exact match and GIN prefilter as `#e`.
+    if let Some(ref a_tags) = q.a_tags {
+        if !a_tags.is_empty() {
+            qb.push(" AND ");
+            push_exact_tag_match(qb, col_prefix, "a", a_tags);
         }
     }
 
@@ -1025,7 +1048,8 @@ fn build_thread_reply_sql(q: &EventQuery, root: Vec<u8>) -> QueryBuilder<sqlx::P
 const PER_CHANNEL_CANDIDATE_BUDGET: usize = 8_192;
 
 /// The channels of a read that takes them one at a time: an explicit `#h` set
-/// (no global events), without a `#p` join, e-tag fence or offset, whose
+/// (no global events), without a `#p` join, reference-tag fence
+/// ([`reference_tag_fence`]) or offset, whose
 /// channels × page limit fit [`PER_CHANNEL_CANDIDATE_BUDGET`].
 ///
 /// `channel_id = ANY($set) ORDER BY created_at DESC LIMIT n` leaves the
@@ -1046,7 +1070,7 @@ fn per_channel_scope(q: &EventQuery) -> Option<&[Uuid]> {
         && q.channel_id.is_none()
         && !q.global_only
         && q.p_tag_hex.is_none()
-        && q.e_tags.is_none()
+        && !reference_tag_fence(q)
         && q.offset.unwrap_or(0) == 0
         && usize::try_from(page_limit(q))
             .is_ok_and(|n| ids.len().saturating_mul(n) <= PER_CHANNEL_CANDIDATE_BUDGET);
@@ -1532,6 +1556,9 @@ pub(crate) async fn count_events_on(
     if q.e_tags.as_deref().is_some_and(|e| e.is_empty()) {
         return Ok(0);
     }
+    if q.a_tags.as_deref().is_some_and(|a| a.is_empty()) {
+        return Ok(0);
+    }
 
     let mut qb = count_events_sql(q);
     // Same transaction-local deadline as `query_events_on`, so a COUNT cannot
@@ -1624,6 +1651,13 @@ fn count_events_sql(q: &EventQuery) -> QueryBuilder<sqlx::Postgres> {
         if !e_tags.is_empty() {
             qb.push(" AND ");
             push_exact_tag_match(&mut qb, col_prefix, "e", e_tags);
+        }
+    }
+
+    if let Some(ref a_tags) = q.a_tags {
+        if !a_tags.is_empty() {
+            qb.push(" AND ");
+            push_exact_tag_match(&mut qb, col_prefix, "a", a_tags);
         }
     }
 
@@ -1989,6 +2023,7 @@ pub(crate) async fn insert_event_with_thread_metadata_tx(
     let was_inserted = result.rows_affected() > 0;
 
     if was_inserted {
+        crate::replica_fence::guard_event_created_at_floor(tx, created_at, channel_id).await?;
         crate::store::event_follow_up::after_admitted_insert(
             tx,
             id_bytes.as_slice(),
@@ -3033,6 +3068,25 @@ mod e_tag_filter_shape_tests {
         }
     }
 
+    /// An `#a` read is a reference lookup like `#e`, so it is fenced the same
+    /// way; COUNT applies the same match.
+    #[test]
+    fn a_tag_query_filters_in_materialized_fence() {
+        let mut q = EventQuery::for_community(CommunityId::from_uuid(uuid::Uuid::nil()));
+        q.kinds = Some(vec![7]);
+        q.a_tags = Some(vec![format!("30175:{}:persona", "ab".repeat(32))]);
+        let sql = build_query_events_sql(&q, Range::All, page_limit(&q))
+            .sql()
+            .as_str()
+            .to_owned();
+
+        assert!(sql.starts_with("WITH m AS MATERIALIZED (SELECT "));
+        assert_eq!(sql.matches("tags @> ANY(").count(), 1);
+        let fence_end = sql.find(") SELECT * FROM m ").expect("fence closes");
+        assert!(!sql[..fence_end].contains("LIMIT"));
+        assert!(count_events_sql(&q).sql().as_str().contains("tags @> ANY("));
+    }
+
     #[test]
     fn non_e_tag_query_is_not_fenced() {
         let q = EventQuery::for_community(CommunityId::from_uuid(uuid::Uuid::nil()));
@@ -3050,6 +3104,7 @@ mod e_tag_filter_shape_tests {
         let split = crate::store::recent_pass::Split {
             floor: at(10),
             ceiling: Some(at(12)),
+            older: true,
         };
         let floor = "'2026-10-01T00:00:00Z'::timestamptz";
         let ceiling = "'2026-12-01T00:00:00Z'::timestamptz";
@@ -3110,10 +3165,11 @@ mod e_tag_filter_shape_tests {
         first_page.offset = Some(0);
         assert!(recent_pass_split(&first_page, now).is_some(), "offset 0");
         type Narrow = fn(&mut EventQuery);
-        let lookups: [(&str, Narrow); 7] = [
+        let lookups: [(&str, Narrow); 8] = [
             ("offset", |q| q.offset = Some(1)),
             ("ids", |q| q.ids = Some(vec![vec![0; 32]])),
             ("e tags", |q| q.e_tags = Some(vec!["00".repeat(32)])),
+            ("a tags", |q| q.a_tags = Some(vec!["30175:00:x".into()])),
             ("d tag", |q| q.d_tag = Some("x".into())),
             ("d tags", |q| q.d_tags = Some(vec!["x".into()])),
             ("artifact d tags", |q| {
@@ -3251,7 +3307,7 @@ mod e_tag_filter_shape_tests {
     }
 
     /// Only a plain explicit `#h` page within the candidate budget reads
-    /// channel by channel: global events, a `#p` join, an e-tag fence, an
+    /// channel by channel: global events, a `#p` join, a reference-tag fence, an
     /// offset, an empty set or a set × limit over the budget keep their own
     /// SQL.
     #[test]
@@ -3276,10 +3332,11 @@ mod e_tag_filter_shape_tests {
         // The clamped page limit counts, not the requested one.
         assert!(per_channel_scope(&at_budget(8, 5_000)).is_some());
         type Edit = fn(&mut EventQuery);
-        let others: [(&str, Edit); 5] = [
+        let others: [(&str, Edit); 6] = [
             ("global", |q| q.channel_ids_include_global = true),
             ("#p", |q| q.p_tag_hex = Some("ab".repeat(32))),
             ("#e", |q| q.e_tags = Some(vec!["cd".repeat(32)])),
+            ("#a", |q| q.a_tags = Some(vec!["30175:cd:x".into()])),
             ("offset", |q| q.offset = Some(1)),
             ("empty", |q| q.channel_ids = Some(Vec::new())),
         ];
@@ -3553,7 +3610,6 @@ mod postgres_tests {
             channels.push(make_test_channel(&pool, community_uuid, None).await);
         }
         let (busy, quiet, empty, outside) = (channels[0], channels[1], channels[2], channels[3]);
-        let db = crate::Db::from_pool(pool.clone());
         let author = Keys::generate();
         let now = Utc::now().timestamp() as u64;
         let floor = crate::store::recent_pass::floor_at(Utc::now()).timestamp() as u64;
@@ -3584,9 +3640,8 @@ mod postgres_tests {
         events.push(insert(busy, 9, floor - 86_400, true));
         events.push(insert(quiet, 9, floor - 2 * 86_400, true));
         for (channel, event) in &events {
-            db.insert_event(community, event, Some(*channel))
-                .await
-                .expect("insert");
+            // Rows already in storage: the floor rejects the aged ones.
+            crate::test_support::insert_historical_event(&pool, community, event, *channel).await;
         }
         matching.sort_by(|a, b| {
             b.0.cmp(&a.0)
@@ -3648,6 +3703,39 @@ mod postgres_tests {
         assert_eq!(ids(page), expected[..7]);
     }
 
+    /// The `events` partitions one pass of `q` over `range` locks, run in a
+    /// transaction of its own on `conn`, after checking that it returns
+    /// `rows` rows. Run it under `plan_cache_mode = force_generic_plan` to see
+    /// what a cached generic plan locks.
+    async fn locked_partitions(
+        conn: &mut sqlx::PgConnection,
+        q: &EventQuery,
+        range: Range,
+        rows: usize,
+    ) -> std::collections::BTreeSet<String> {
+        let mut tx = sqlx::Connection::begin(conn).await.expect("begin");
+        let mut qb = build_query_events_sql(q, range, 10);
+        let read = qb
+            .build()
+            .persistent(true)
+            .fetch_all(&mut *tx)
+            .await
+            .expect("pass");
+        assert_eq!(read.len(), rows, "the pass reads every row: {range:?}");
+        let locked: Vec<String> = sqlx::query_scalar(
+            "SELECT c.relname::text FROM pg_locks l \
+             JOIN pg_class c ON c.oid = l.relation \
+             JOIN pg_inherits i ON i.inhrelid = c.oid \
+             WHERE l.pid = pg_backend_pid() \
+               AND i.inhparent = 'events'::regclass",
+        )
+        .fetch_all(&mut *tx)
+        .await
+        .expect("locked partitions");
+        tx.rollback().await.expect("rollback");
+        locked.into_iter().collect()
+    }
+
     /// The recent pass of a regular-kind read locks only the partitions
     /// between its floor and ceiling, even as a cached generic plan. Without
     /// the ceiling (a read that may match latest-state kinds) it also locks
@@ -3690,9 +3778,7 @@ mod postgres_tests {
                 .custom_created_at(nostr::Timestamp::from(at.timestamp() as u64))
                 .sign_with_keys(&author)
                 .expect("sign");
-            db.insert_event(community, &event, Some(channel))
-                .await
-                .expect("insert");
+            crate::test_support::insert_historical_event(&pool, community, &event, channel).await;
             let partition: String =
                 sqlx::query_scalar("SELECT tableoid::regclass::text FROM events WHERE id = $1")
                     .bind(event.id.as_bytes().to_vec())
@@ -3712,39 +3798,124 @@ mod postgres_tests {
             channel_id: Some(channel),
             ..EventQuery::for_community(community)
         };
-        async fn locked(
-            conn: &mut sqlx::PgConnection,
-            q: &EventQuery,
-            split: crate::store::recent_pass::Split,
-        ) -> std::collections::BTreeSet<String> {
-            let mut tx = sqlx::Connection::begin(conn).await.expect("begin");
-            let mut qb = build_query_events_sql(q, Range::Recent(split), 10);
-            let rows = qb
-                .build()
-                .persistent(true)
-                .fetch_all(&mut *tx)
-                .await
-                .expect("recent pass");
-            assert_eq!(rows.len(), 3, "the recent pass reads every row");
-            let locked: Vec<String> = sqlx::query_scalar(
-                "SELECT c.relname::text FROM pg_locks l \
-                 JOIN pg_class c ON c.oid = l.relation \
-                 JOIN pg_inherits i ON i.inhrelid = c.oid \
-                 WHERE l.pid = pg_backend_pid() \
-                   AND i.inhparent = 'events'::regclass",
-            )
-            .fetch_all(&mut *tx)
-            .await
-            .expect("locked partitions");
-            tx.rollback().await.expect("rollback");
-            locked.into_iter().collect()
-        }
-        let ceiled_locks = locked(&mut conn, &q, ceiled).await;
+        let ceiled_locks = locked_partitions(&mut conn, &q, Range::Recent(ceiled), 3).await;
         assert_eq!(ceiled_locks, expected, "partitions below the ceiling");
-        let open_locks = locked(&mut conn, &q, open).await;
+        let open_locks = locked_partitions(&mut conn, &q, Range::Recent(open), 3).await;
         assert!(
             open_locks.is_superset(&ceiled_locks) && open_locks.len() > ceiled_locks.len(),
             "without the ceiling the pass also locks the later partitions: {open_locks:?}"
+        );
+    }
+
+    /// A read whose own `since` is at or above the floor, such as a `#p`
+    /// mention REQ from an agent reconnecting, is one recent pass: it returns
+    /// every matching row and runs no older pass. As a cached generic plan,
+    /// its literal floor and ceiling lock only the partitions between them,
+    /// where the `since` bind alone (the read whole) locks every partition.
+    /// Mutation: drop the `since` case from `split_for`, or run the older
+    /// pass after it → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn since_bounded_mention_read_locks_only_recent_partitions() {
+        use crate::store::recent_pass::{ceiling_at, floor_at, next};
+        let pool = setup_pool().await;
+        let db = crate::Db::from_pool(pool.clone());
+        db.maintain_partitions(
+            crate::partition::PARTITION_MANAGER_MONTHS_AHEAD,
+            crate::partition::PartitionMaintenancePolicy {
+                create_enabled: true,
+                advance_enabled: true,
+            },
+        )
+        .await
+        .expect("maintain partitions");
+        let community_uuid = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_uuid);
+        let channel = make_test_channel(&pool, community_uuid, None).await;
+
+        // Mentions of the target at the floor, now and a second below the
+        // ceiling, newest first, and one the day before the floor.
+        let now = Utc::now();
+        let floor = floor_at(now);
+        let author = Keys::generate();
+        let target = "ab".repeat(32);
+        let mut recent = Vec::new();
+        let mut expected = std::collections::BTreeSet::new();
+        let last = ceiling_at(now) - chrono::Duration::seconds(1);
+        for at in [last, now, floor, floor - chrono::Duration::days(1)] {
+            let event = EventBuilder::new(Kind::Custom(9), format!("at {at}"))
+                .tags([Tag::parse(["p", target.as_str()]).expect("p tag")])
+                .custom_created_at(nostr::Timestamp::from(at.timestamp() as u64))
+                .sign_with_keys(&author)
+                .expect("sign");
+            crate::test_support::insert_historical_event(&pool, community, &event, channel).await;
+            if at >= floor {
+                recent.push(event.id);
+                let partition: String =
+                    sqlx::query_scalar("SELECT tableoid::regclass::text FROM events WHERE id = $1")
+                        .bind(event.id.as_bytes().to_vec())
+                        .fetch_one(&pool)
+                        .await
+                        .expect("partition");
+                expected.insert(partition);
+            }
+        }
+
+        let q = EventQuery {
+            kinds: Some(vec![9]),
+            p_tag_hex: Some(target.clone()),
+            since: Some(floor),
+            limit: Some(10),
+            ..EventQuery::for_community(community)
+        };
+        let split = recent_pass_split(&q, now).expect("a since-bounded read has a recent pass");
+        assert!(!split.older, "rows below `since` cannot match");
+        assert_eq!(next(Range::Recent(split), recent.len(), 10), None);
+
+        // The production read: every matching row, from exactly the recent
+        // pass's statement, so the lock checks below bind what it prepared.
+        let mut conn = pool.acquire().await.expect("acquire");
+        sqlx::Connection::clear_cached_statements(&mut *conn)
+            .await
+            .expect("clear prepared statements");
+        let page = query_events_on(&mut conn, &q, ReadDeadline::PerRead)
+            .await
+            .expect("mention page");
+        let ids: Vec<_> = page.into_iter().map(|r| r.event.id).collect();
+        assert_eq!(ids, recent);
+        let prepared: Vec<String> = sqlx::query_scalar(
+            "SELECT statement FROM pg_prepared_statements WHERE statement LIKE $1",
+        )
+        .bind("%JOIN event_mentions%")
+        .fetch_all(&mut *conn)
+        .await
+        .expect("read prepared statements");
+        let recent_pass = build_query_events_sql(&q, Range::Recent(split), 10)
+            .sql()
+            .as_str()
+            .to_owned();
+        assert_eq!(prepared, [recent_pass], "one pass, bounded by literals");
+
+        sqlx::query("SET plan_cache_mode = force_generic_plan")
+            .execute(&mut *conn)
+            .await
+            .expect("force generic plans");
+        let bounded = locked_partitions(&mut conn, &q, Range::Recent(split), recent.len()).await;
+        assert_eq!(
+            bounded, expected,
+            "partitions between the floor and ceiling"
+        );
+        let bind_only = locked_partitions(&mut conn, &q, Range::All, recent.len()).await;
+        let every: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_inherits WHERE inhparent = 'events'::regclass",
+        )
+        .fetch_one(&mut *conn)
+        .await
+        .expect("partitions");
+        assert_eq!(
+            bind_only.len() as i64,
+            every,
+            "the `since` bind alone locks every partition: {bind_only:?}"
         );
     }
 
@@ -3759,7 +3930,6 @@ mod postgres_tests {
         let community_uuid = make_test_community(&pool).await;
         let community = CommunityId::from_uuid(community_uuid);
         let channel = make_test_channel(&pool, community_uuid, None).await;
-        let db = crate::Db::from_pool(pool.clone());
         let author = Keys::generate();
         let now = Utc::now().timestamp() as u64;
         let floor = crate::store::recent_pass::floor_at(Utc::now()).timestamp() as u64;
@@ -3776,9 +3946,7 @@ mod postgres_tests {
                 .custom_created_at(nostr::Timestamp::from(at))
                 .sign_with_keys(&author)
                 .expect("sign");
-            db.insert_event(community, &event, Some(channel))
-                .await
-                .expect("insert");
+            crate::test_support::insert_historical_event(&pool, community, &event, channel).await;
             newest_first.push(event.id);
         }
 
@@ -3853,9 +4021,7 @@ mod postgres_tests {
             .custom_created_at(nostr::Timestamp::from(1_748_736_000)) // 2025-06-01
             .sign_with_keys(&author)
             .expect("sign");
-        db.insert_event(community, &ancient, Some(channel))
-            .await
-            .expect("insert ancient");
+        crate::test_support::insert_historical_event(&pool, community, &ancient, channel).await;
         let partition_of = |id: nostr::EventId| {
             let pool = pool.clone();
             async move {
@@ -4020,6 +4186,7 @@ mod postgres_tests {
         let keys = Keys::generate();
         let now = nostr::Timestamp::now().as_secs();
         let target = "ab".repeat(32);
+        let address = format!("30175:{target}:persona");
         let insert = |kind: u16, tag: Vec<&str>, at: u64| {
             let event = EventBuilder::new(Kind::Custom(kind), "")
                 .tags([Tag::parse(tag).unwrap()])
@@ -4079,6 +4246,17 @@ mod postgres_tests {
                 },
             },
             Case {
+                label: "a tag shifted right",
+                kind: 7,
+                real: vec!["a", &address],
+                decoy: vec!["x", "a", &address],
+                query: {
+                    let mut q = EventQuery::for_community(community);
+                    q.a_tags = Some(vec![address.clone()]);
+                    q
+                },
+            },
+            Case {
                 label: "artifact d tag shifted right",
                 kind: artifact_kind,
                 real: vec!["d", "a1"],
@@ -4127,7 +4305,8 @@ mod postgres_tests {
         let community = CommunityId::from_uuid(community_uuid);
         let channel = make_test_channel(&pool, community_uuid, None).await;
         let keys = Keys::generate();
-        let now = nostr::Timestamp::now().as_secs() - 1_000;
+        // Inside the `created_at` floor (960 s) even with the later offsets.
+        let now = nostr::Timestamp::now().as_secs() - 600;
         let h = channel.to_string();
         let message = |kind: u16, tags: Vec<Vec<String>>, at: u64| {
             EventBuilder::new(Kind::Custom(kind), "")
@@ -5636,21 +5815,40 @@ mod postgres_tests {
 
     // ─── canvas CAS tests ─────────────────────────────────────────────────────
 
-    fn make_canvas_event_at(content: &str, created_at: u64) -> nostr::Event {
-        make_event_at(buzz_core::kind::KIND_CANVAS as u16, content, created_at)
+    fn make_canvas_event_at(base: u64, content: &str, created_at: u64) -> nostr::Event {
+        // Each test owns its fresh base; logical seconds and ties stay explicit.
+        make_event_at(
+            buzz_core::kind::KIND_CANVAS as u16,
+            content,
+            base + created_at,
+        )
     }
 
     /// Build two canvas events sharing `created_at`, returned `(lower, higher)`
     /// by event id. Regenerates until the ids differ (always, since keys differ)
     /// so tests can assert deterministic head ordering on the id tiebreak.
-    fn same_second_ordered_pair(created_at: u64) -> (nostr::Event, nostr::Event) {
-        let a = make_canvas_event_at("# A", created_at);
-        let b = make_canvas_event_at("# B", created_at);
+    fn same_second_ordered_pair(base: u64, created_at: u64) -> (nostr::Event, nostr::Event) {
+        let a = make_canvas_event_at(base, "# A", created_at);
+        let b = make_canvas_event_at(base, "# B", created_at);
         if a.id.as_bytes() <= b.id.as_bytes() {
             (a, b)
         } else {
             (b, a)
         }
+    }
+
+    #[test]
+    fn canvas_fixture_base_is_owned_by_each_test() {
+        let first_base = 1_700_000_000;
+        let second_base = first_base + crate::replica_fence::CREATED_AT_FLOOR_SECS as u64 * 2;
+        let first = make_canvas_event_at(first_base, "first test", 1000);
+        let second = make_canvas_event_at(second_base, "later test", 1000);
+        assert_eq!(first.created_at.as_secs(), first_base + 1000);
+        assert_eq!(second.created_at.as_secs(), second_base + 1000);
+        let (lower, higher) = same_second_ordered_pair(second_base, 1000);
+        assert_eq!(lower.created_at, higher.created_at);
+        assert_eq!(lower.created_at.as_secs(), second_base + 1000);
+        assert!(lower.id.as_bytes() < higher.id.as_bytes());
     }
 
     #[tokio::test]
@@ -5680,10 +5878,11 @@ mod postgres_tests {
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn channel_head_checked_expect_no_head_creates_first_canvas() {
+        let canvas_base = nostr::Timestamp::now().as_secs() - 1000;
         let pool = setup_pool().await;
         let community = CommunityId::from_uuid(make_test_community(&pool).await);
         let channel = make_test_channel(&pool, community.as_uuid().to_owned(), None).await;
-        let event = make_canvas_event_at("# First", 1000);
+        let event = make_canvas_event_at(canvas_base, "# First", 1000);
 
         let (_, status) = insert_canvas_head_checked(
             &pool,
@@ -5700,10 +5899,11 @@ mod postgres_tests {
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn channel_head_checked_expect_no_head_rejects_when_head_exists() {
+        let canvas_base = nostr::Timestamp::now().as_secs() - 1000;
         let pool = setup_pool().await;
         let community = CommunityId::from_uuid(make_test_community(&pool).await);
         let channel = make_test_channel(&pool, community.as_uuid().to_owned(), None).await;
-        let first = make_canvas_event_at("# First", 1000);
+        let first = make_canvas_event_at(canvas_base, "# First", 1000);
         insert_canvas_head_checked(
             &pool,
             community,
@@ -5714,7 +5914,7 @@ mod postgres_tests {
         .await
         .expect("first canvas");
 
-        let second = make_canvas_event_at("# Racing create", 1001);
+        let second = make_canvas_event_at(canvas_base, "# Racing create", 1001);
         let (_, status) = insert_canvas_head_checked(
             &pool,
             community,
@@ -5740,10 +5940,11 @@ mod postgres_tests {
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn channel_head_checked_expected_head_matches_and_advances() {
+        let canvas_base = nostr::Timestamp::now().as_secs() - 1000;
         let pool = setup_pool().await;
         let community = CommunityId::from_uuid(make_test_community(&pool).await);
         let channel = make_test_channel(&pool, community.as_uuid().to_owned(), None).await;
-        let first = make_canvas_event_at("# First", 1000);
+        let first = make_canvas_event_at(canvas_base, "# First", 1000);
         insert_canvas_head_checked(
             &pool,
             community,
@@ -5754,7 +5955,7 @@ mod postgres_tests {
         .await
         .expect("first canvas");
 
-        let second = make_canvas_event_at("# Second", 1001);
+        let second = make_canvas_event_at(canvas_base, "# Second", 1001);
         let head = first.id.as_bytes();
         let (_, status) = insert_canvas_head_checked(
             &pool,
@@ -5771,10 +5972,11 @@ mod postgres_tests {
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn channel_head_checked_expected_head_mismatch_rejects() {
+        let canvas_base = nostr::Timestamp::now().as_secs() - 1000;
         let pool = setup_pool().await;
         let community = CommunityId::from_uuid(make_test_community(&pool).await);
         let channel = make_test_channel(&pool, community.as_uuid().to_owned(), None).await;
-        let first = make_canvas_event_at("# First", 1000);
+        let first = make_canvas_event_at(canvas_base, "# First", 1000);
         insert_canvas_head_checked(
             &pool,
             community,
@@ -5785,7 +5987,7 @@ mod postgres_tests {
         .await
         .expect("first canvas");
 
-        let stale = make_canvas_event_at("# Stale edit", 1002);
+        let stale = make_canvas_event_at(canvas_base, "# Stale edit", 1002);
         let wrong_head = [0u8; 32];
         let (_, status) = insert_canvas_head_checked(
             &pool,
@@ -5802,10 +6004,11 @@ mod postgres_tests {
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn channel_head_checked_expected_head_missing_rejects() {
+        let canvas_base = nostr::Timestamp::now().as_secs() - 1000;
         let pool = setup_pool().await;
         let community = CommunityId::from_uuid(make_test_community(&pool).await);
         let channel = make_test_channel(&pool, community.as_uuid().to_owned(), None).await;
-        let event = make_canvas_event_at("# Edit with no head", 1000);
+        let event = make_canvas_event_at(canvas_base, "# Edit with no head", 1000);
         let some_head = [1u8; 32];
 
         let (_, status) = insert_canvas_head_checked(
@@ -5823,10 +6026,11 @@ mod postgres_tests {
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn channel_head_checked_replay_of_head_is_duplicate() {
+        let canvas_base = nostr::Timestamp::now().as_secs() - 1000;
         let pool = setup_pool().await;
         let community = CommunityId::from_uuid(make_test_community(&pool).await);
         let channel = make_test_channel(&pool, community.as_uuid().to_owned(), None).await;
-        let event = make_canvas_event_at("# First", 1000);
+        let event = make_canvas_event_at(canvas_base, "# First", 1000);
         insert_canvas_head_checked(
             &pool,
             community,
@@ -5858,10 +6062,11 @@ mod postgres_tests {
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn channel_head_checked_replay_skips_stale_precondition() {
+        let canvas_base = nostr::Timestamp::now().as_secs() - 1000;
         let pool = setup_pool().await;
         let community = CommunityId::from_uuid(make_test_community(&pool).await);
         let channel = make_test_channel(&pool, community.as_uuid().to_owned(), None).await;
-        let event = make_canvas_event_at("# First", 1000);
+        let event = make_canvas_event_at(canvas_base, "# First", 1000);
         insert_canvas_head_checked(
             &pool,
             community,
@@ -5893,11 +6098,12 @@ mod postgres_tests {
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn channel_head_checked_rejects_same_second_higher_id() {
+        let canvas_base = nostr::Timestamp::now().as_secs() - 1000;
         let pool = setup_pool().await;
         let community = CommunityId::from_uuid(make_test_community(&pool).await);
         let channel = make_test_channel(&pool, community.as_uuid().to_owned(), None).await;
 
-        let (lower, higher) = same_second_ordered_pair(1000);
+        let (lower, higher) = same_second_ordered_pair(canvas_base, 1000);
         insert_canvas_head_checked(
             &pool,
             community,
@@ -5936,11 +6142,12 @@ mod postgres_tests {
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn channel_head_checked_accepts_same_second_lower_id() {
+        let canvas_base = nostr::Timestamp::now().as_secs() - 1000;
         let pool = setup_pool().await;
         let community = CommunityId::from_uuid(make_test_community(&pool).await);
         let channel = make_test_channel(&pool, community.as_uuid().to_owned(), None).await;
 
-        let (lower, higher) = same_second_ordered_pair(1000);
+        let (lower, higher) = same_second_ordered_pair(canvas_base, 1000);
         // Seed the higher-id event as the head first.
         insert_canvas_head_checked(
             &pool,
@@ -5970,10 +6177,11 @@ mod postgres_tests {
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn channel_head_checked_rejects_behind_clock_writer() {
+        let canvas_base = nostr::Timestamp::now().as_secs() - 1000;
         let pool = setup_pool().await;
         let community = CommunityId::from_uuid(make_test_community(&pool).await);
         let channel = make_test_channel(&pool, community.as_uuid().to_owned(), None).await;
-        let head = make_canvas_event_at("# Head", 2000);
+        let head = make_canvas_event_at(canvas_base, "# Head", 2000);
         insert_canvas_head_checked(
             &pool,
             community,
@@ -5985,7 +6193,7 @@ mod postgres_tests {
         .expect("head at t=2000");
 
         // Writer's clock is behind — created_at earlier than head.
-        let behind = make_canvas_event_at("# Behind clock", 1100);
+        let behind = make_canvas_event_at(canvas_base, "# Behind clock", 1100);
         let (_, status) = insert_canvas_head_checked(
             &pool,
             community,
@@ -6069,12 +6277,13 @@ mod postgres_tests {
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn channel_head_checked_deleted_replay_returns_revision_mismatch() {
+        let canvas_base = nostr::Timestamp::now().as_secs() - 1000;
         let pool = setup_pool().await;
         let community = CommunityId::from_uuid(make_test_community(&pool).await);
         let channel = make_test_channel(&pool, community.as_uuid().to_owned(), None).await;
 
         // H: seed the initial head.
-        let head = make_canvas_event_at("# Head", 1000);
+        let head = make_canvas_event_at(canvas_base, "# Head", 1000);
         insert_canvas_head_checked(
             &pool,
             community,
@@ -6087,7 +6296,7 @@ mod postgres_tests {
         let head_id = head.id.to_bytes().to_vec();
 
         // A: insert a second revision.
-        let a = make_canvas_event_at("# A", 1001);
+        let a = make_canvas_event_at(canvas_base, "# A", 1001);
         insert_canvas_head_checked(
             &pool,
             community,
@@ -6192,11 +6401,12 @@ mod postgres_tests {
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn channel_head_checked_concurrent_authors_only_one_advances() {
+        let canvas_base = nostr::Timestamp::now().as_secs() - 1000;
         let pool = setup_pool().await;
         let community = CommunityId::from_uuid(make_test_community(&pool).await);
         let channel = make_test_channel(&pool, community.as_uuid().to_owned(), None).await;
 
-        let base = make_canvas_event_at("# Base", 1000);
+        let base = make_canvas_event_at(canvas_base, "# Base", 1000);
         insert_canvas_head_checked(
             &pool,
             community,
@@ -6221,8 +6431,8 @@ mod postgres_tests {
         // Both edits assert `base` as their head and are timestamped strictly
         // ahead of it (writer discipline), so neither trips SupersedeFailed —
         // only the advisory-lock serialization decides the winner.
-        let a = make_canvas_event_at("# Author A", 1001);
-        let b = make_canvas_event_at("# Author B", 1002);
+        let a = make_canvas_event_at(canvas_base, "# Author A", 1001);
+        let b = make_canvas_event_at(canvas_base, "# Author B", 1002);
 
         let (pool_a, pool_b) = (pool.clone(), pool.clone());
         let (id_a, id_b) = (base_id.clone(), base_id.clone());
@@ -6333,6 +6543,7 @@ mod postgres_tests {
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn channel_head_checked_concurrent_first_create_only_one_wins() {
+        let canvas_base = nostr::Timestamp::now().as_secs() - 1000;
         let pool = setup_pool().await;
         let community = CommunityId::from_uuid(make_test_community(&pool).await);
         let channel = make_test_channel(&pool, community.as_uuid().to_owned(), None).await;
@@ -6346,8 +6557,8 @@ mod postgres_tests {
             .await
             .expect("blocker acquires key");
 
-        let a = make_canvas_event_at("# First A", 1000);
-        let b = make_canvas_event_at("# First B", 1001);
+        let a = make_canvas_event_at(canvas_base, "# First A", 1000);
+        let b = make_canvas_event_at(canvas_base, "# First B", 1001);
 
         let (pool_a, pool_b) = (pool.clone(), pool.clone());
         let ta = tokio::spawn(async move {
@@ -6454,6 +6665,7 @@ mod postgres_tests {
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn db_untagged_canvas_append_serializes_on_advisory_key() {
+        let canvas_base = nostr::Timestamp::now().as_secs() - 1000;
         let pool = setup_pool().await;
         let db = crate::Db::from_pool(pool.clone());
         let community = CommunityId::from_uuid(make_test_community(&pool).await);
@@ -6467,7 +6679,7 @@ mod postgres_tests {
             .await
             .expect("holder acquires key");
 
-        let event = make_canvas_event_at("# Untagged", 1000);
+        let event = make_canvas_event_at(canvas_base, "# Untagged", 1000);
         let write_task = tokio::spawn(async move {
             db.insert_event_with_thread_metadata(community, &event, Some(channel), None)
                 .await
@@ -6509,13 +6721,14 @@ mod postgres_tests {
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn channel_head_canvas_deletion_serializes_on_advisory_key() {
+        let canvas_base = nostr::Timestamp::now().as_secs() - 1000;
         let pool = setup_pool().await;
         let community = CommunityId::from_uuid(make_test_community(&pool).await);
         let channel = make_test_channel(&pool, community.as_uuid().to_owned(), None).await;
         let lock_key = canvas_lock_key(community, channel);
 
         // Insert a canvas event to delete.
-        let event = make_canvas_event_at("# To delete", 1000);
+        let event = make_canvas_event_at(canvas_base, "# To delete", 1000);
         insert_canvas_head_checked(
             &pool,
             community,

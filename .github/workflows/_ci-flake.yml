@@ -287,7 +287,9 @@ jobs:
     needs: [flake-select]
     if: needs.flake-select.outputs.dart != ''
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Large mobile changes take about three minutes per repetition, plus SDK
+    # setup. Allow all ten repetitions to finish with runner variance.
+    timeout-minutes: 45
     permissions:
       contents: read
     steps:

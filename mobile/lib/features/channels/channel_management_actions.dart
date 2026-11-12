@@ -14,6 +14,25 @@ List<List<String>> buildDeleteChannelTags(String channelId) => [
   ['h', channelId],
 ];
 
+/// Re-read schedule while confirming a join, matching desktop's.
+const _joinConfirmationDelays = [
+  Duration.zero,
+  Duration(milliseconds: 250),
+  Duration(milliseconds: 750),
+  Duration(milliseconds: 1500),
+];
+
+/// A join the relay accepted but this client could not yet confirm or show.
+///
+/// The membership may already exist. [ChannelActions.recheckJoin] checks
+/// again without a second write.
+class ChannelJoinUnconfirmed implements Exception {
+  const ChannelJoinUnconfirmed();
+
+  @override
+  String toString() => 'Join was sent but is not confirmed yet';
+}
+
 class ChannelActions {
   final Ref _ref;
   final RelaySessionNotifier _session;
@@ -218,6 +237,11 @@ class ChannelActions {
     }
   }
 
+  /// Joins [channelId] and returns once the channel list shows the
+  /// membership.
+  ///
+  /// A refused join throws the relay's error. An accepted join that cannot
+  /// be confirmed or shown yet throws [ChannelJoinUnconfirmed].
   Future<void> joinChannel(String channelId) async {
     _ensureCommunityValid();
     await _signedEventRelay.submit(
@@ -227,8 +251,61 @@ class ChannelActions {
         ['h', channelId],
       ],
     );
+    await recheckJoin(channelId);
+  }
+
+  /// Confirms an accepted join without sending it again, then shows it.
+  ///
+  /// The relay can acknowledge the join before its roster reflects it, and
+  /// replicas can lag the writer for many seconds, so each roster read pins
+  /// the writer pool with `consistency: strong`. Only the relay's HTTP query
+  /// path honors that; a WebSocket REQ reads replicas.
+  Future<void> recheckJoin(String channelId) async {
+    final pubkey = _currentPubkey;
+    if (pubkey == null) {
+      throw StateError('No signing identity available');
+    }
+    var confirmed = false;
+    for (final delay in _joinConfirmationDelays) {
+      if (delay > Duration.zero) await Future<void>.delayed(delay);
+      _ensureCommunityValid();
+      final List<NostrEvent> rosters;
+      try {
+        rosters = await _session.queryRelay([
+          NostrFilter(
+            kinds: const [39002],
+            tags: {
+              '#d': [channelId],
+              '#p': [pubkey],
+            },
+            limit: 1,
+            extensions: const {'consistency': 'strong'},
+          ),
+        ]);
+      } catch (error) {
+        debugPrint('Join confirmation read failed: $error');
+        throw const ChannelJoinUnconfirmed();
+      }
+      confirmed = rosters.any(
+        (event) => event.kind == 39002 && event.getTagValue('d') == channelId,
+      );
+      if (confirmed) break;
+    }
+    if (!confirmed) throw const ChannelJoinUnconfirmed();
     _ensureCommunityValid();
-    await _refreshChannelState(channelId);
+    final bool shown;
+    try {
+      shown = await _ref
+          .read(channelsProvider.notifier)
+          .installConfirmedJoin(channelId);
+    } catch (error) {
+      _ensureCommunityValid();
+      debugPrint('Showing a confirmed join failed: $error');
+      throw const ChannelJoinUnconfirmed();
+    }
+    _ensureCommunityValid();
+    _invalidateChannelDetails(channelId);
+    if (!shown) throw const ChannelJoinUnconfirmed();
   }
 
   Future<void> leaveChannel(String channelId) async {
@@ -349,6 +426,10 @@ class ChannelActions {
     _ensureCommunityValid();
     await _ref.read(channelsProvider.notifier).refresh();
     _ensureCommunityValid();
+    _invalidateChannelDetails(channelId);
+  }
+
+  void _invalidateChannelDetails(String channelId) {
     _ref.invalidate(channelDetailsProvider(channelId));
     _ref.invalidate(channelMembersProvider(channelId));
     _ref.invalidate(channelBotPubkeysProvider(channelId));
@@ -408,7 +489,12 @@ class ChannelActions {
     _ref.invalidate(channelBotPubkeysProvider(channelId));
   }
 
-  Future<void> addReaction(String eventId, String emoji) async {
+  /// [targetAuthor] fills the NIP-25 `p` tag, which Activity reads by `#p`.
+  Future<void> addReaction(
+    String eventId,
+    String emoji, {
+    required String targetAuthor,
+  }) async {
     final shortcode = normalizeShortcode(emoji);
     final emojiUrl = reactionEmojiUrl(
       emoji,
@@ -419,6 +505,7 @@ class ChannelActions {
       content: emoji,
       tags: [
         ['e', eventId],
+        ['p', targetAuthor],
         if (shortcode != null && emojiUrl != null)
           ['emoji', shortcode, emojiUrl],
       ],

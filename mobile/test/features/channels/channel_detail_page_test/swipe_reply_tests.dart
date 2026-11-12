@@ -1,10 +1,91 @@
 part of '../channel_detail_page_test.dart';
 
 void swipeReplyTests() {
+  // Solo agents answer at top level, so a Solo chat starts no threads.
+  Channel soloChannel() => Channel(
+    id: _channelId,
+    name: 'Solo',
+    channelType: 'stream',
+    visibility: 'private',
+    labels: const ['buzz.solo'],
+    description: '',
+    createdBy: 'self',
+    createdAt: DateTime(2026),
+    memberCount: 2,
+    isMember: true,
+  );
+
+  testWidgets('Solo chat offers no reply by swipe or message actions', (
+    tester,
+  ) async {
+    final channel = soloChannel();
+    final events = [
+      _textMsg(id: threadIdRoot, pubkey: 'agent', content: 'Agent answer'),
+    ];
+    await tester.pumpWidget(
+      _buildTestable(
+        signingPubkey: 'self',
+        messages: events,
+        channel: channel,
+        personalChat: true,
+        organization: Stream.value(const MeGroups()),
+        home: ChannelDetailPage(channel: channel),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final row = find.byKey(const ValueKey('message-row-$threadIdRoot'));
+    final bubble = find
+        .descendant(of: row, matching: find.byType(LocalSendBubbleSurface))
+        .first;
+    final initial = tester.getTopLeft(row);
+    final gesture = await tester.startGesture(tester.getCenter(bubble));
+    await gesture.moveBy(const Offset(25, 0));
+    await gesture.moveBy(const Offset(150, 0));
+    await tester.pump();
+    expect(tester.getTopLeft(row), initial);
+    expect(find.byKey(const ValueKey('swipe-reply-circle')), findsNothing);
+    await gesture.up();
+    await tester.pumpAndSettle();
+    expect(find.byType(ThreadDetailPage), findsNothing);
+
+    await tester.longPress(bubble);
+    await tester.pumpAndSettle();
+    expect(find.text('Copy link'), findsOneWidget);
+    expect(find.text('Reply'), findsNothing);
+  });
+
+  testWidgets('Solo thread is read-only', (tester) async {
+    final channel = soloChannel();
+    final events = [
+      _textMsg(id: threadIdRoot, pubkey: 'self', content: 'Old thread head'),
+    ];
+    final messages = formatTimeline(events);
+    await tester.pumpWidget(
+      _buildTestable(
+        signingPubkey: 'self',
+        messages: events,
+        channel: channel,
+        personalChat: true,
+        organization: Stream.value(const MeGroups()),
+        home: ThreadDetailPage(
+          threadHead: messages.first,
+          allMessages: messages,
+          channelId: _channelId,
+          currentPubkey: 'self',
+          isMember: true,
+          isArchived: false,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Old thread head'), findsOneWidget);
+    expect(find.byType(ComposeBar), findsNothing);
+  });
+
   for (final thread in [false, true]) {
     for (final own in [false, true]) {
       testWidgets(
-        'right drag opens existing reply destination, thread=$thread own=$own',
+        'left drag opens existing reply destination, thread=$thread own=$own',
         (tester) async {
           final events = [
             _textMsg(
@@ -72,8 +153,8 @@ void swipeReplyTests() {
             if (bubbleRect.contains(start)) continue;
             final previousNavigationDrags = navigationDrags;
             final outside = await tester.startGesture(start);
-            await outside.moveBy(const Offset(25, 0));
-            await outside.moveBy(const Offset(100, 0));
+            await outside.moveBy(const Offset(-25, 0));
+            await outside.moveBy(const Offset(-100, 0));
             await tester.pump();
             expect(tester.getTopLeft(row), initial);
             expect(haptics, isEmpty);
@@ -82,20 +163,24 @@ void swipeReplyTests() {
             await tester.pumpAndSettle();
             expect(Navigator.of(tester.element(row)).canPop(), isFalse);
           }
-          final gesture = await tester.startGesture(
-            tester.getCenter(
-              find
-                  .descendant(
-                    of: row,
-                    matching: find.byType(LocalSendBubbleSurface),
-                  )
-                  .first,
-            ),
-          );
-          await gesture.moveBy(const Offset(25, 0));
-          await gesture.moveBy(const Offset(40, 0));
+          // A rightward drag on the bubble is left to swipe-back navigation.
+          final bubbleCenter = bubbleRect.center;
+          final previousNavigationDrags = navigationDrags;
+          final back = await tester.startGesture(bubbleCenter);
+          await back.moveBy(const Offset(25, 0));
+          await back.moveBy(const Offset(100, 0));
           await tester.pump();
-          expect(tester.getTopLeft(row).dx, greaterThan(initial.dx));
+          expect(tester.getTopLeft(row), initial);
+          expect(haptics, isEmpty);
+          expect(navigationDrags, greaterThan(previousNavigationDrags));
+          await back.up();
+          await tester.pumpAndSettle();
+          expect(Navigator.of(tester.element(row)).canPop(), isFalse);
+          final gesture = await tester.startGesture(bubbleCenter);
+          await gesture.moveBy(const Offset(-25, 0));
+          await gesture.moveBy(const Offset(-40, 0));
+          await tester.pump();
+          expect(tester.getTopLeft(row).dx, lessThan(initial.dx));
           expect(haptics, isEmpty);
           final partialCircle = tester.widget<DecoratedBox>(
             find.byKey(const ValueKey('swipe-reply-circle')),
@@ -112,23 +197,46 @@ void swipeReplyTests() {
           );
           expect(ring.strokeWidth, 2);
           expect(ring.value, inExclusiveRange(0, 1));
-          await gesture.moveBy(const Offset(45, 0));
+          await gesture.moveBy(const Offset(-45, 0));
           await tester.pump();
           expect(haptics, hasLength(1));
-          await gesture.moveBy(const Offset(10, 0));
+          await gesture.moveBy(const Offset(-10, 0));
           await tester.pump();
           expect(haptics, hasLength(1));
           final armedPosition = tester.getTopLeft(row);
-          await gesture.moveBy(const Offset(160, 0));
+          await gesture.moveBy(const Offset(-160, 0));
           await tester.pump();
           final resistedPosition = tester.getTopLeft(row);
-          expect(resistedPosition.dx, greaterThan(armedPosition.dx));
-          expect(resistedPosition.dx, lessThan(armedPosition.dx + 40));
+          expect(resistedPosition.dx, lessThan(armedPosition.dx));
+          expect(resistedPosition.dx, greaterThan(armedPosition.dx - 40));
           final circle = find.byKey(const ValueKey('swipe-reply-circle'));
+          final circleRect = tester.getRect(circle);
+          // The armed slide uncovers the feedback, which stays on screen.
           expect(
-            tester.getRect(circle).left,
-            closeTo(bubbleRect.left - Grid.lg - Grid.xxs, 0.01),
+            circleRect.left,
+            greaterThan(
+              tester
+                  .getRect(
+                    find
+                        .descendant(
+                          of: row,
+                          matching: find.byType(LocalSendBubbleSurface),
+                        )
+                        .first,
+                  )
+                  .right,
+            ),
           );
+          expect(
+            circleRect.right,
+            lessThanOrEqualTo(
+              tester.view.physicalSize.width / tester.view.devicePixelRatio,
+            ),
+          );
+          if (!own) {
+            // Incoming bubbles leave room for the usual gutter.
+            expect(circleRect.left, closeTo(bubbleRect.right + Grid.xxs, 0.01));
+          }
           final fill =
               tester.widget<DecoratedBox>(circle).decoration as BoxDecoration;
           // The armed circle uses the chosen message color, not the app accent.
@@ -159,10 +267,10 @@ void swipeReplyTests() {
             tester.element(circle).colors.onSurfaceVariant,
           );
           // Retreat below readiness without returning to rest, then cross again.
-          await gesture.moveBy(const Offset(-210, 0));
+          await gesture.moveBy(const Offset(210, 0));
           await tester.pump();
-          expect(tester.getTopLeft(row).dx, greaterThan(initial.dx));
-          await gesture.moveBy(const Offset(45, 0));
+          expect(tester.getTopLeft(row).dx, lessThan(initial.dx));
+          await gesture.moveBy(const Offset(-45, 0));
           await tester.pump();
           expect(haptics, hasLength(2));
           await tester.pump(const Duration(milliseconds: 60));
@@ -192,8 +300,8 @@ void swipeReplyTests() {
   }
 
   for (final movement in [
-    const Offset(45, 0),
-    const Offset(-100, 0),
+    const Offset(-45, 0),
+    const Offset(100, 0),
     const Offset(0, -100),
   ]) {
     testWidgets('non-reply drag $movement does not navigate', (tester) async {
@@ -246,8 +354,8 @@ void swipeReplyTests() {
               .first,
         ),
       );
-      await gesture.moveBy(const Offset(25, 0));
-      await gesture.moveBy(const Offset(90, 0));
+      await gesture.moveBy(const Offset(-25, 0));
+      await gesture.moveBy(const Offset(-90, 0));
       await tester.pump();
       final icon = find.byIcon(BuzzIcons.messageSquareReply);
       expect(
@@ -284,11 +392,49 @@ void swipeReplyTests() {
             .first,
       ),
     );
-    await gesture.moveBy(const Offset(25, 0));
-    await gesture.moveBy(const Offset(90, 0));
-    await gesture.moveBy(const Offset(-70, 0));
+    await gesture.moveBy(const Offset(-25, 0));
+    await gesture.moveBy(const Offset(-90, 0));
+    await gesture.moveBy(const Offset(70, 0));
     await gesture.up();
     await tester.pumpAndSettle();
     expect(find.byType(ThreadDetailPage), findsNothing);
   });
+}
+
+void swipeReplyLinkTests() {
+  for (final onLink in [true, false]) {
+    testWidgets(
+      'left drag starting ${onLink ? 'on a link' : 'beside a link'} replies',
+      variant: const TargetPlatformVariant({
+        TargetPlatform.iOS,
+        TargetPlatform.android,
+      }),
+      (tester) async {
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [
+              _textMsg(
+                id: 'swipe-link',
+                pubkey: 'alice',
+                content: 'Read [the doc](https://example.com/doc) carefully',
+              ),
+            ],
+          ),
+        );
+        await tester.pumpAndSettle();
+        final gesture = await tester.startGesture(
+          tester.getCenter(
+            onLink ? find.text('the doc') : find.textContaining('carefully'),
+          ),
+        );
+        await gesture.moveBy(const Offset(-25, 0));
+        await gesture.moveBy(const Offset(-100, 0));
+        await tester.pump();
+        await gesture.up();
+        await tester.pumpAndSettle();
+        expect(find.byType(ThreadDetailPage), findsOneWidget);
+        expect(find.text('Copy link'), findsNothing);
+      },
+    );
+  }
 }

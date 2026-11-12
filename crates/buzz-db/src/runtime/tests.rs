@@ -913,27 +913,27 @@ fn signed_event_at(keys: &nostr::Keys, content: &str, secs: u64) -> nostr::Event
         .expect("sign event")
 }
 
+// Routing tests intentionally model stored history and divergent replicas.
+// Raw fixture SQL keeps them independent of serving-time floor admission.
 async fn insert_top_level(pool: &PgPool, community: Uuid, channel: Uuid, ev: &nostr::Event) {
-    let ts = chrono::DateTime::from_timestamp(ev.created_at.as_secs() as i64, 0).expect("valid ts");
-    event::insert_event_with_thread_metadata(
+    crate::test_support::insert_historical_event(
         pool,
         CommunityId::from_uuid(community),
         ev,
-        Some(channel),
-        Some(event::ThreadMetadataParams {
-            event_id: ev.id.as_bytes(),
-            event_created_at: ts,
-            channel_id: channel,
-            parent_event_id: None,
-            parent_event_created_at: None,
-            root_event_id: None,
-            root_event_created_at: None,
-            depth: 0,
-            broadcast: true,
-        }),
+        channel,
     )
+    .await;
+    sqlx::query(
+        "INSERT INTO thread_metadata (community_id,event_id,event_created_at,channel_id,depth,broadcast) \
+         VALUES ($1,$2,to_timestamp($3),$4,0,true)",
+    )
+    .bind(community)
+    .bind(ev.id.as_bytes().as_slice())
+    .bind(ev.created_at.as_secs() as f64)
+    .bind(channel)
+    .execute(pool)
     .await
-    .expect("insert top-level event");
+    .expect("seed top-level metadata");
 }
 
 async fn insert_thread_reply(
@@ -943,29 +943,37 @@ async fn insert_thread_reply(
     root: &nostr::Event,
     reply: &nostr::Event,
 ) {
-    let reply_ts =
-        chrono::DateTime::from_timestamp(reply.created_at.as_secs() as i64, 0).expect("valid ts");
-    let root_ts =
-        chrono::DateTime::from_timestamp(root.created_at.as_secs() as i64, 0).expect("valid ts");
-    event::insert_event_with_thread_metadata(
+    crate::test_support::insert_historical_event(
         pool,
         CommunityId::from_uuid(community),
         reply,
-        Some(channel),
-        Some(event::ThreadMetadataParams {
-            event_id: reply.id.as_bytes(),
-            event_created_at: reply_ts,
-            channel_id: channel,
-            parent_event_id: Some(root.id.as_bytes()),
-            parent_event_created_at: Some(root_ts),
-            root_event_id: Some(root.id.as_bytes()),
-            root_event_created_at: Some(root_ts),
-            depth: 1,
-            broadcast: false,
-        }),
+        channel,
     )
+    .await;
+    sqlx::query(
+        "INSERT INTO thread_metadata \
+         (community_id,event_id,event_created_at,channel_id,parent_event_id,parent_event_created_at, \
+          root_event_id,root_event_created_at,depth,broadcast) \
+         VALUES ($1,$2,to_timestamp($3),$4,$5,to_timestamp($6),$5,to_timestamp($6),1,false)",
+    )
+    .bind(community)
+    .bind(reply.id.as_bytes().as_slice())
+    .bind(reply.created_at.as_secs() as f64)
+    .bind(channel)
+    .bind(root.id.as_bytes().as_slice())
+    .bind(root.created_at.as_secs() as f64)
+    .execute(pool)
     .await
-    .expect("insert reply");
+    .expect("seed reply metadata");
+    sqlx::query(
+        "UPDATE thread_metadata SET reply_count=reply_count+1,descendant_count=descendant_count+1, \
+         last_reply_at=now() WHERE community_id=$1 AND event_id=$2",
+    )
+    .bind(community)
+    .bind(root.id.as_bytes().as_slice())
+    .execute(pool)
+    .await
+    .expect("seed root counters");
 }
 
 /// Composite thread cursor: 8-byte BE seconds + raw event id.
@@ -1025,6 +1033,7 @@ async fn match_nothing_reads_take_no_connection() {
         ("empty authors", with(|q| q.authors = Some(vec![]))),
         ("empty ids", with(|q| q.ids = Some(vec![]))),
         ("empty #e", with(|q| q.e_tags = Some(vec![]))),
+        ("empty #a", with(|q| q.a_tags = Some(vec![]))),
     ];
     // Validation runs before the match-nothing check, so the error wins.
     let invalid = [
@@ -1616,7 +1625,7 @@ async fn history_permit_follows_the_read_session_and_a_full_gate_rejects() {
     let cap = db.history_reads.available();
     assert_eq!(
         cap,
-        super::history_reads::HistoryReadGate::cap(db.read_max_connections) as usize
+        super::history_reads::cap(db.read_max_connections) as usize
     );
 
     let head = db
@@ -1638,7 +1647,12 @@ async fn history_permit_follows_the_read_session_and_a_full_gate_rejects() {
     // Fill the gate: every remaining permit is held elsewhere.
     let mut others = Vec::new();
     for _ in 1..cap {
-        others.push(db.history_reads.admit().await.expect("free permit"));
+        others.push(
+            db.history_reads
+                .admit(super::history_reads::PERMIT_WAIT)
+                .await
+                .expect("free permit"),
+        );
     }
     let recorder = DebuggingRecorder::new();
     let snapshotter = recorder.snapshotter();
@@ -1655,7 +1669,7 @@ async fn history_permit_follows_the_read_session_and_a_full_gate_rejects() {
         "the rejection must be the retryable pool timeout; got {rejected:?}"
     );
     assert!(
-        started.elapsed() >= super::history_reads::HistoryReadGate::PERMIT_WAIT,
+        started.elapsed() >= super::history_reads::PERMIT_WAIT,
         "the read must wait out the bounded permit wait before rejecting"
     );
     let decisions: Vec<(String, String)> = snapshotter
@@ -1684,12 +1698,36 @@ async fn history_permit_follows_the_read_session_and_a_full_gate_rejects() {
     drop(session);
     assert_eq!(db.history_reads.available(), 1);
     let (_window, session) = db
-        .get_channel_window_with_session(cid, channel, 10, Some(cursor), None)
+        .get_channel_window_with_session(cid, channel, 10, Some(cursor.clone()), None)
         .await
         .expect("a released permit admits the next read");
     assert!(session.is_replica());
     drop(session);
     drop(others);
+    assert_eq!(db.history_reads.available(), cap);
+
+    // An operator lowering the cap at runtime holds new reads to the new
+    // limit while one is in flight, and raising it readmits them.
+    let (_window, held) = db
+        .get_channel_window_with_session(cid, channel, 10, Some(cursor.clone()), None)
+        .await
+        .expect("routed cursor window");
+    assert_eq!(db.history_read_gate().set_limit(1), 1);
+    let rejected = db
+        .get_channel_window_with_session(cid, channel, 10, Some(cursor.clone()), None)
+        .await
+        .err()
+        .expect("a lowered cap must reject the next history read");
+    assert!(
+        matches!(rejected, DbError::Sqlx(sqlx::Error::PoolTimedOut)),
+        "a lowered cap sheds as retryable; got {rejected:?}"
+    );
+    assert_eq!(db.history_read_gate().set_limit(cap), cap);
+    let (_window, second) = db
+        .get_channel_window_with_session(cid, channel, 10, Some(cursor), None)
+        .await
+        .expect("a raised cap admits the next read");
+    drop((held, second));
     assert_eq!(db.history_reads.available(), cap);
 }
 
@@ -2088,6 +2126,65 @@ async fn is_relay_member_is_bounded_routed_and_fails_closed() {
             .expect("entry too old"),
         "an over-budget entry must fail closed to the writer"
     );
+}
+
+/// The per-AUTH pending default-channel read is bounded-routed like
+/// membership; the roster writers' read stays on the writer. A different
+/// token on each pool proves which pool answered.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn pending_default_channel_join_routed_reads_the_bounded_replica() {
+    let (writer, _writer_db) = ScratchDb::migrated(&admin_url().await, "pend_w").await;
+    let (replica, _replica_db) = ScratchDb::migrated(&admin_url().await, "pend_r").await;
+
+    let community = Uuid::new_v4();
+    let pubkey = "cc".repeat(32);
+    let (writer_token, replica_token) = (Uuid::new_v4(), Uuid::new_v4());
+    for (pool, token) in [(&writer, writer_token), (&replica, replica_token)] {
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(community)
+            .bind(format!("pending-routing-{}.example", community.simple()))
+            .execute(pool)
+            .await
+            .expect("insert community");
+        sqlx::query(
+            "INSERT INTO relay_members (community_id, pubkey, role, auto_join_pending) \
+             VALUES ($1, $2, 'member', $3)",
+        )
+        .bind(community)
+        .bind(&pubkey)
+        .bind(token)
+        .execute(pool)
+        .await
+        .expect("seed pending work");
+    }
+    let cid = CommunityId::from_uuid(community);
+    let token = |pending: Option<relay_members::PendingDefaultChannelJoin>| {
+        pending.expect("pending work").token
+    };
+
+    let mut db = Db::from_pools(writer.clone(), replica.clone());
+    db.fence().force_open_for_tests(chrono::Utc::now());
+
+    // Budget unset ⇒ writer.
+    let pending = db.pending_default_channel_join_routed(cid, &pubkey).await;
+    assert_eq!(token(pending.expect("gate off")), writer_token);
+
+    // Budget set + fresh entry ⇒ replica; the writer-only read ignores it.
+    db.set_replica_read_max_age_for_tests(Some(std::time::Duration::from_secs(5)));
+    let pending = db.pending_default_channel_join_routed(cid, &pubkey).await;
+    assert_eq!(token(pending.expect("gate on")), replica_token);
+    let pending = db.pending_default_channel_join(cid, &pubkey).await;
+    assert_eq!(token(pending.expect("writer read")), writer_token);
+
+    // Entry older than the budget ⇒ fail closed to the writer.
+    db.fence().close();
+    db.fence().force_open_for_tests_at(
+        chrono::Utc::now(),
+        std::time::Instant::now() - std::time::Duration::from_secs(10),
+    );
+    let pending = db.pending_default_channel_join_routed(cid, &pubkey).await;
+    assert_eq!(token(pending.expect("entry too old")), writer_token);
 }
 
 /// Community separation across every routed seam, verified on
@@ -2502,6 +2599,66 @@ async fn lazy_reader_pool_still_spawns_fence_probe() {
         .await
         .expect("floor-guard verification must pass on the migrated writer");
     assert!(spawned, "a configured (lazy) reader must spawn the probe");
+}
+
+/// The fence probe must keep beating while every serving writer connection
+/// is checked out. On the serving pool its beat queued behind request
+/// traffic, so under load every pod's newest token aged past the
+/// bounded-read budget and reads spilled onto the saturated writer.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn fence_probe_beats_while_serving_writer_pool_is_exhausted() {
+    let (seed, scratch) = ScratchDb::migrated(&admin_url().await, "fence_own_pool").await;
+    seed.close().await;
+
+    let url = scratch.url().to_owned();
+    let db = Db::new(&DbConfig {
+        database_url: url.clone(),
+        read_database_url: Some(url),
+        max_connections: 1,
+        min_connections: 0,
+        acquire_timeout_secs: 1,
+        ..DbConfig::default()
+    })
+    .await
+    .expect("connect armed Db with one serving writer connection");
+    assert!(
+        db.spawn_fence_probe().await.expect("verification passes"),
+        "a configured reader must spawn the probe"
+    );
+
+    // Hold the serving writer pool's only connection for the whole test.
+    let mut held = db.pool.acquire().await.expect("hold serving connection");
+    let baseline = db.fence().newest().map(|entry| entry.token);
+
+    // Two beats strictly after the hold: one in flight when the hold began
+    // cannot satisfy this on its own.
+    let mut beats = 0;
+    let mut last = baseline;
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while beats < 2 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "probe stopped beating while the serving writer pool was exhausted"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let newest = db.fence().newest().map(|entry| entry.token);
+        if newest > last {
+            beats += 1;
+            last = newest;
+        }
+    }
+
+    // The beats come from the probe's own, identifiable session.
+    let probe_sessions: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pg_stat_activity \
+         WHERE datname = current_database() AND application_name = $1",
+    )
+    .bind(replica_fence::PROBE_APPLICATION_NAME)
+    .fetch_one(&mut *held)
+    .await
+    .expect("count probe sessions");
+    assert_eq!(probe_sessions, 1, "the probe holds exactly one connection");
 }
 
 /// Thread replies: head fetch reads the writer; a FULL cursor page is
@@ -4218,6 +4375,9 @@ mod listed_channel_name_postgres_tests;
 #[path = "tests/reader_pool_postgres_tests.rs"]
 mod reader_pool_postgres_tests;
 
+#[path = "tests/writer_pool_postgres_tests.rs"]
+mod writer_pool_postgres_tests;
+
 #[path = "tests/event_hydration_postgres_tests.rs"]
 mod event_hydration_postgres_tests;
 
@@ -4376,3 +4536,6 @@ async fn serving_write_guard_insert_indexes_mentions_in_event_transaction() {
         .await
         .expect("release serving-write lease"));
 }
+
+#[path = "tests/pool_release_postgres_tests.rs"]
+mod pool_release_postgres_tests;
