@@ -535,7 +535,12 @@ void main() {
     expect(opened, [bestie]);
     expect(pendingHomeScreenShortcut.value, isNull);
 
+    // Signing out drops a tap that is still waiting, so it can't run in the
+    // next account's Home.
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    await tap('new-chat');
     await tester.pumpWidget(const SizedBox());
+    expect(pendingHomeScreenShortcut.value, isNull);
     expect(published.last, isEmpty);
     pendingHomeScreenShortcut.value = null;
   }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));

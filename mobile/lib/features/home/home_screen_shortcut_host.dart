@@ -30,6 +30,12 @@ class HomeScreenShortcutHost extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    // Signing out removes Home; a tap still waiting must not run in the next
+    // account's Home. Declared before the pending tap's listener, so its
+    // cleanup runs after that listener is gone.
+    useEffect(() {
+      return () => pendingHomeScreenShortcut.value = null;
+    }, const []);
     final startChat = useValueListenable(newChat);
     final startDm = useValueListenable(newDm);
     final bestie = ref.watch(defaultAgentProvider);
