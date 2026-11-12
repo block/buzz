@@ -745,14 +745,14 @@ async fn prefix_mode_preserves_storage_level_privacy_exclusions() {
     teardown(pool, &schema).await;
 }
 
-/// Prefix relevance (typeahead) ranks only the newest 1000 matches, so an
-/// older, better-ranked message drops out, and its pages end with that
-/// window; full-text and profile relevance still rank every match.
-/// Mutation: rank every prefix match → the old message tops the first page;
-/// window profiles too → the old profile drops off the first page.
+/// Prefix and full-text relevance rank only the newest 1000 matches, so an
+/// older, better-ranked message drops out, and their pages end with that
+/// window; profile relevance still ranks every match.
+/// Mutation: rank every prefix or full-text match → the old message tops the
+/// first page; window profiles too → the old profile drops off the first page.
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn prefix_relevance_ranks_only_the_newest_matches() {
+async fn relevance_ranks_only_the_newest_matches() {
     let (pool, schema) = setup().await;
     let c = mk_community(&pool, "rank-window.example").await;
     let (old, old_profile) = (rand_bytes32(), rand_bytes32());
@@ -798,31 +798,24 @@ async fn prefix_relevance_ranks_only_the_newest_matches() {
     };
     let ids = |r: buzz_search::SearchResult| r.hits.iter().map(|h| h.event_id).collect::<Vec<_>>();
 
-    let typeahead = ids(svc
-        .search(&query("plan", buzz_search::SearchMode::Prefix, 1))
-        .await
-        .expect("prefix"));
-    assert_eq!(typeahead.len(), 20);
-    assert!(!typeahead.contains(&old), "outside the newest-1000 window");
+    for (q, mode) in [
+        ("plan", buzz_search::SearchMode::Prefix),
+        ("planning", buzz_search::SearchMode::FullText),
+    ] {
+        let first = ids(svc.search(&query(q, mode, 1)).await.expect("page 1"));
+        assert_eq!(first.len(), 20, "{mode:?}");
+        assert!(
+            !first.contains(&old),
+            "{mode:?}: outside the newest-1000 window"
+        );
 
-    let full_text = ids(svc
-        .search(&query("planning", buzz_search::SearchMode::FullText, 1))
-        .await
-        .expect("full text"));
-    assert_eq!(full_text.first(), Some(&old), "full text ranks every match");
-
-    // Every page ranks the same window, so prefix pages end with it.
-    let last = ids(svc
-        .search(&query("plan", buzz_search::SearchMode::Prefix, 50))
-        .await
-        .expect("page 50"));
-    assert_eq!(last.len(), 20);
-    assert!(!last.contains(&old));
-    let past = svc
-        .search(&query("plan", buzz_search::SearchMode::Prefix, 51))
-        .await
-        .expect("page 51");
-    assert!(past.hits.is_empty(), "no page past the window");
+        // Every page ranks the same window, so pages end with it.
+        let last = ids(svc.search(&query(q, mode, 50)).await.expect("page 50"));
+        assert_eq!(last.len(), 20, "{mode:?}");
+        assert!(!last.contains(&old), "{mode:?}");
+        let past = svc.search(&query(q, mode, 51)).await.expect("page 51");
+        assert!(past.hits.is_empty(), "{mode:?}: no page past the window");
+    }
 
     let profiles = ids(svc
         .search(&SearchQuery {
