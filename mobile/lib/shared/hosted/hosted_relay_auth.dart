@@ -94,7 +94,7 @@ class HostedRelayAuth extends ChangeNotifier {
        _discover = discover ?? _fetchRequirement;
 
   static Future<bool> _fetchRequirement(Uri origin) async {
-    final client = http.Client();
+    final client = newAppHttpClient();
     try {
       return await fetchNipFiRequirement(client, origin);
     } finally {
