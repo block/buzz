@@ -728,7 +728,9 @@ pub async fn put_members(
 /// Self-join `pubkey` to `channel_id` as [`put_member`] with no actor and no
 /// requested role (so the channel's `join_role` applies), but only if
 /// `pubkey` has never had a membership row in the channel, active or removed.
-/// Returns `None`, writing nothing, when such a row exists.
+/// Returns `None`, writing nothing, when such a row exists or the channel is
+/// no longer a default (`auto_join`) channel. Callers may pass candidates
+/// from a stale (replica) read: both are decided here, on the writer.
 ///
 /// The row is checked under the [`put_member`] locks, so a leave, a join or
 /// another first join of the same person commits wholly before or after this
@@ -778,6 +780,18 @@ async fn put_first_member_with_pending(
         None
     };
     lock_channel_for_member_put(&mut tx, channel_id).await?;
+    // Only default channels are joined here. A missing channel falls through
+    // to the put_members_on error.
+    let auto_join: Option<bool> =
+        sqlx::query_scalar("SELECT auto_join FROM channels WHERE community_id = $1 AND id = $2")
+            .bind(community_id.as_uuid())
+            .bind(channel_id)
+            .fetch_optional(tx.conn())
+            .await?;
+    if auto_join == Some(false) {
+        tx.rollback().await?;
+        return Ok(None);
+    }
     let history: Option<(Option<DateTime<Utc>>,)> = sqlx::query_as(
         "SELECT removed_at FROM channel_members \
          WHERE community_id = $1 AND channel_id = $2 AND pubkey = $3",
@@ -2912,7 +2926,8 @@ mod postgres_tests {
     /// undone (RED); take the locks after the row check → racing joins both
     /// write (RED); drop the `NOT EXISTS` from
     /// `list_never_joined_auto_join_channels` → the left channel is still
-    /// listed (RED).
+    /// listed (RED); drop the `auto_join` recheck from `put_first_member` →
+    /// an unflagged channel is joined (RED).
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn first_member_put_joins_once_and_never_undoes_a_leave() {
@@ -3005,6 +3020,33 @@ mod postgres_tests {
                 .await
                 .expect("role"),
             None
+        );
+
+        // A stale (replica) candidate for a channel unflagged since writes
+        // nothing.
+        assert!(put_first(unflagged).await.expect("put unflagged").is_none());
+        update_channel(
+            &pool,
+            community,
+            announcements,
+            ChannelUpdate {
+                auto_join: Some(false),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("unflag channel");
+        let newcomer = random_pubkey();
+        assert!(put_first_member(&pool, community, announcements, &newcomer)
+            .await
+            .expect("put after unflag")
+            .is_none());
+        assert_eq!(
+            get_member_role(&pool, community, announcements, &newcomer)
+                .await
+                .expect("role"),
+            None,
+            "an unflagged channel is not joined"
         );
     }
 

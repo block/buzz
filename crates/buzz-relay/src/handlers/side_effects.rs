@@ -3203,7 +3203,7 @@ async fn join_never_joined_channels(
     let member = hex::encode(pubkey);
     let channels = match state
         .db
-        .list_never_joined_auto_join_channels(tenant.community(), pubkey)
+        .list_never_joined_auto_join_channels_routed(tenant.community(), pubkey)
         .await
     {
         Ok(channels) => channels,
