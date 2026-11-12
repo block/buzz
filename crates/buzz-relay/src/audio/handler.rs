@@ -2260,6 +2260,14 @@ async fn run_active_audio_connection(
                     roster_revision,
                     &roster_ctrl_tx,
                 ) => {
+                    // The owner only says goodbye with Draining or
+                    // StaleGeneration, so SessionEnded here means the local
+                    // client's control sink closed: the client is leaving.
+                    // Unregister it, or the owner treats the bare stream end
+                    // as transport loss and keeps the Huddle open for rejoin.
+                    if matches!(cause, crate::audio::join::HuddleTeardownCause::SessionEnded) {
+                        crate::audio::join::send_clean_close(&mut stream, fenced, &pubkey).await;
+                    }
                     teardown_remote_huddle(cause, channel_id, &reader_cancel, &fence);
                 }
                 _ = reader_cancel.cancelled() => {
@@ -11406,6 +11414,205 @@ mod tests {
 
             server.abort();
             let _ = server.await;
+        }
+
+        /// The last participant leaves through another relay after the owner's
+        /// local participant has left. A clean remote leave ends the Huddle
+        /// once, and releases the owner room and lease even when the creator
+        /// already archived the channel (the mobile end flow archives first).
+        ///
+        /// Mutation: drop the already-archived early return in
+        /// `Db::archive_channel_if` → the archived row keeps the room and
+        /// live registry entry → the `archived` row fails.
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        #[tokio::test]
+        async fn remote_last_leave_ends_huddle_and_releases_owner_resources() {
+            use crate::audio::join::{
+                decode_control, encode_control, send_clean_close, HuddleControlAcceptor,
+                HuddleControlMsg,
+            };
+            use buzz_relay_mesh::{Profile, StreamRole};
+
+            let redis_url =
+                std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
+            for archived_first in [false, true] {
+                let state = audio_test_state_real_db_with(|config| {
+                    config.redis_url = redis_url.clone();
+                })
+                .await
+                .expect("postgres-ci provides an isolated database");
+                let (tenant, channel_id, local_key) = seed_audio_fixture(state.db.pool()).await;
+                let community = tenant.community();
+                let owners = Arc::new(HuddleOwnerRegistry::new());
+                let mut mesh =
+                    crate::mesh_boot::MeshHandle::for_test_only(Arc::clone(&owners)).await;
+                mesh.directory = crate::tunnel::directory::SessionDirectory::with_db(
+                    state.redis_pool.clone(),
+                    state.db.clone(),
+                );
+                let directory = Arc::new(mesh.directory.clone());
+                let owner_runtime_id = mesh.local_runtime_id;
+                state.mesh.set(mesh).map_err(|_| ()).expect("fresh mesh");
+
+                // Real local admission installs the production finalizer.
+                let (mut local, server) = open_admitted_audio_socket(
+                    &state,
+                    tenant.clone(),
+                    channel_id,
+                    &local_key,
+                    None,
+                )
+                .await;
+                let room = state
+                    .audio_rooms
+                    .get(community, channel_id)
+                    .expect("owner room");
+                assert!(room.end_handler.get().is_some());
+                let generation = owners.generation_for(channel_id).expect("owner lease");
+                let fenced = FencedHeader {
+                    session_id: channel_id,
+                    generation,
+                    owner_runtime_id,
+                };
+                let remote_runtime_id = RuntimeId([37; 32]);
+                let remote_pubkey = nostr::Keys::generate().public_key().to_hex();
+                let (owner_tx, ingress_rx) = tokio::sync::mpsc::unbounded_channel();
+                let (ingress_tx, owner_rx) = tokio::sync::mpsc::unbounded_channel();
+                let owner_stream = MeshStream::new(
+                    Box::new(ChanHalfSend(owner_tx)),
+                    Box::new(ChanHalfRecv(owner_rx)),
+                );
+                let mut remote = MeshStream::new(
+                    Box::new(ChanHalfSend(ingress_tx)),
+                    Box::new(ChanHalfRecv(ingress_rx)),
+                );
+                let acceptor = HuddleControlAcceptor::new(
+                    Arc::clone(&state.audio_rooms),
+                    Arc::new(NoopDatagramTransport),
+                    Arc::clone(&directory),
+                    owner_runtime_id,
+                    Arc::clone(&owners),
+                );
+                let served = tokio::spawn(async move {
+                    acceptor
+                        .accept_inbound(
+                            remote_runtime_id,
+                            StreamHello {
+                                sender: remote_runtime_id,
+                                role: StreamRole::Session {
+                                    fenced,
+                                    profile: Profile::HuddleControl,
+                                },
+                            },
+                            owner_stream,
+                        )
+                        .await
+                });
+                remote
+                    .send_frame(MeshStreamFrame::Data {
+                        fenced,
+                        payload: encode_control(&HuddleControlMsg::RegisterPeerCommitPhase {
+                            community_id: *community.as_uuid(),
+                            pubkey: remote_pubkey.clone(),
+                            protocol_version: 1,
+                        })
+                        .unwrap(),
+                    })
+                    .await
+                    .unwrap();
+                let reply = tokio::time::timeout(Duration::from_secs(5), remote.recv_frame())
+                    .await
+                    .expect("registration completes")
+                    .unwrap()
+                    .unwrap();
+                assert!(matches!(reply, MeshStreamFrame::Data { payload, .. }
+                    if matches!(decode_control(&payload).unwrap(), HuddleControlMsg::PeerRegistered { .. })));
+                remote
+                    .send_frame(MeshStreamFrame::Data {
+                        fenced,
+                        payload: encode_control(&HuddleControlMsg::CommitConfirmed {
+                            pubkey: remote_pubkey.clone(),
+                        })
+                        .unwrap(),
+                    })
+                    .await
+                    .unwrap();
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while room.roster_snapshot().peers.len() != 2 {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("remote committed before the owner's participant leaves");
+
+                local.close(None).await.unwrap();
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    loop {
+                        let leaves: i64 = sqlx::query_scalar(
+                            "SELECT COUNT(*) FROM events WHERE community_id = $1 AND channel_id = $2 AND kind = 48102",
+                        )
+                        .bind(community.as_uuid())
+                        .bind(channel_id)
+                        .fetch_one(state.db.pool())
+                        .await
+                        .unwrap();
+                        if room.peer_pubkeys().len() == 1 && leaves == 1 {
+                            break;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("local participant leaves first");
+                if archived_first {
+                    state
+                        .db
+                        .archive_channel(community, channel_id)
+                        .await
+                        .unwrap();
+                }
+                send_clean_close(&mut remote, fenced, &remote_pubkey).await;
+                tokio::time::timeout(Duration::from_secs(10), served)
+                    .await
+                    .expect("remote teardown finishes")
+                    .unwrap()
+                    .unwrap();
+
+                assert!(room.is_empty());
+                let endings: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM events WHERE community_id = $1 AND channel_id = $2 AND kind = 48103",
+                )
+                .bind(community.as_uuid())
+                .bind(channel_id)
+                .fetch_one(state.db.pool())
+                .await
+                .unwrap();
+                let retained = (
+                    state.audio_rooms.get(community, channel_id).is_some(),
+                    owners.owns_generation(channel_id, generation),
+                );
+                // Release before asserting so a failure leaves no live lease.
+                owners.release(channel_id, generation);
+                server.abort();
+                let _ = server.await;
+                assert_eq!(
+                    retained,
+                    (false, false),
+                    "archived_first={archived_first}: owner room or lease retained"
+                );
+                assert_eq!(
+                    endings,
+                    i64::from(!archived_first),
+                    "archived_first={archived_first}: the relay publishes one ending only when it archived"
+                );
+                assert!(state
+                    .db
+                    .get_channel(community, channel_id)
+                    .await
+                    .unwrap()
+                    .archived_at
+                    .is_some());
+            }
         }
 
         /// Answers the server's NIP-42 challenge with an audio `auth` message.
