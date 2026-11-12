@@ -1625,6 +1625,7 @@ dependencies = [
  "dashmap",
  "evalexpr",
  "hex",
+ "metrics",
  "moka",
  "nostr 0.44.7",
  "reqwest 0.13.4",

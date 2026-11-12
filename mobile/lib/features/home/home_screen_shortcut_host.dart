@@ -8,6 +8,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import '../../shared/me/default_agent.dart';
 import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/shortcuts/home_screen_shortcuts.dart';
+import '../../shared/widgets/adaptive_conversation_pane.dart';
 
 /// Publishes Home's app icon quick actions and runs a tapped one.
 ///
@@ -117,7 +118,8 @@ class HomeScreenShortcutHost extends HookConsumerWidget {
               (route) =>
                   route.isFirst ||
                   (route is ModalRoute &&
-                      route.popDisposition == RoutePopDisposition.doNotPop),
+                      route.popDisposition == RoutePopDisposition.doNotPop &&
+                      !popCompactConversationDestination(route)),
             );
           }
           // Drop the tap when a screen kept Home covered or opened over it

@@ -482,6 +482,8 @@ Future<void> _confirmAndRun(
   required String confirmLabel,
   required Future<void> Function() action,
 }) async {
+  final ownerNavigator = Navigator.of(sheetContext);
+  final ownerRoute = ModalRoute.of(sheetContext);
   final pageContext = Navigator.of(sheetContext, rootNavigator: true).context;
   final confirmed = await showBuzzDialog<bool>(
     context: pageContext,
@@ -503,7 +505,9 @@ Future<void> _confirmAndRun(
   if (confirmed != true) return;
   try {
     await action();
-    if (pageContext.mounted) Navigator.of(pageContext).pop(true);
+    if (ownerNavigator.mounted && ownerRoute?.isCurrent == true) {
+      ownerNavigator.pop(true);
+    }
   } catch (error) {
     if (!pageContext.mounted) return;
     ScaffoldMessenger.of(pageContext).showFeedbackSnackBar(

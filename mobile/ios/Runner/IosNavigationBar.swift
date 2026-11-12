@@ -1,6 +1,9 @@
 import Flutter
 import UIKit
 
+// UIKit 9127.0.85 is the iOS 27.1 SDK with Duo APIs. SDK checks must
+// surround runtime availability checks: older SDKs cannot resolve these symbols.
+
 /// Each Flutter route owns a UIKit navigation controller. Its private scroll
 /// view mirrors the Flutter viewport so UIKit performs the large-title layout.
 final class IosNavigationBarFactory: NSObject, FlutterPlatformViewFactory {
@@ -340,6 +343,17 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
   private let channel: FlutterMethodChannel
   private var offset: CGFloat = 0
   private var controlBackground = UIColor.secondarySystemBackground
+  private var foldRefresh: DispatchWorkItem?
+  private var standaloneControl = false
+  private var standaloneLargeTitle = false
+  private var standaloneSurface: UIView?
+  private var horizontalControls = false
+  private var headerLeading: UIView?
+  private var headerTrailing: UIView?
+  private var paneTitle: UIView?
+  private var titleInsetLeft: CGFloat = 0
+  private var titleInsetRight: CGFloat = 0
+  private var alignCollapsedTitleToLeading = false
   private var alwaysFrosted = false
   private var backdropOnly = false
   private var usesSystemScrollEdge = false
@@ -362,6 +376,8 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
   private var floatingTitle: NavigationTitleView?
   private var titleMaxWidth: CGFloat?
   private var floatingTitleLift: CGFloat = 0
+  private var portraitTopPadding: CGFloat = 0
+  private var centerTitleInPane = false
 
   init(frame: CGRect, id: Int64, args: Any?, messenger: FlutterBinaryMessenger, parent: UIViewController?) {
     container = NavigationClipView(frame: frame)
@@ -402,11 +418,46 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
       result(nil)
     }
     configure(args as? [String: Any] ?? [:])
+    #if canImport(UIKit, _version: 9127.0.85)
+    if #available(iOS 27.1, *), standaloneControl {
+      container.addInteraction(UIHingeInteraction { [weak self] _, _ in
+        guard let self else { return }
+        self.container.setNeedsLayout()
+        // Reserved divisions settle shortly after the physical hinge does.
+        self.foldRefresh?.cancel()
+        let refresh = DispatchWorkItem { [weak self] in self?.container.setNeedsLayout() }
+        self.foldRefresh = refresh
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2, execute: refresh)
+      })
+    }
+    #endif
   }
 
   func view() -> UIView { container }
 
   private func layout() {
+    if standaloneLargeTitle, let scroll = standaloneSurface as? UIScrollView,
+       let label = scroll.subviews.compactMap({ $0 as? UILabel }).first {
+      scroll.frame = container.bounds
+      let width = max(0, scroll.bounds.width - 32)
+      let size = label.sizeThatFits(CGSize(width: width, height: .greatestFiniteMagnitude))
+      // Match the pane's 44-point navigation row plus its 24-point top spacing.
+      label.frame = CGRect(x: 16, y: flutterSafeTop + 68, width: width, height: size.height)
+      scroll.contentSize = CGSize(width: scroll.bounds.width, height: label.frame.maxY + 24)
+      return
+    }
+    if standaloneControl {
+      reportRailGeometry()
+      if let surface = standaloneSurface {
+        let size = surface.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize)
+        surface.frame = CGRect(x: (container.bounds.width - size.width) / 2,
+                               y: (container.bounds.height - size.height) / 2,
+                               width: size.width, height: size.height)
+        surface.layoutIfNeeded()
+        reportAvatarBounds()
+      }
+      return
+    }
     // Only the bar is exposed by the platform-view clip. A full viewport is
     // needed for UIKit's scroll-edge and large-title calculations.
     guard !measuring else { return }
@@ -419,11 +470,18 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     let automaticTop = container.safeAreaInsets.top
     // An empty native bar supplies the same edge geometry beneath a custom
     // Flutter header. Place its lower edge at the end of that header so the
-    // system fade protects the filters as well as the status area.
+    // system fade protects the filters as well as the status area. Duo may
+    // collapse the native row to zero; do not subtract a phone-sized row.
     let protectedTop = backdropOnly
-      ? max(flutterSafeTop, container.bounds.height - max(44, navigation.navigationBar.bounds.height))
+      ? max(flutterSafeTop, container.bounds.height - navigation.navigationBar.bounds.height)
       : flutterSafeTop
-    let requiredTop = max(0, protectedTop - automaticTop)
+    // Duo can collapse the native horizontal control row to zero because its
+    // controls live in the side rail. Flutter still reserves a 44-point row
+    // plus 24 points of breathing room. Give expanded titles that same space.
+    let compact = (metrics?["compactHeight"] as? CGFloat) ?? 44
+    let paneTitleClearance = alignCollapsedTitleToLeading
+      ? max(44, compact) + 24 - compact : 0
+    let requiredTop = max(0, protectedTop + paneTitleClearance - automaticTop)
     if abs(navigation.additionalSafeAreaInsets.top - requiredTop) > 0.5 {
       navigation.additionalSafeAreaInsets.top = requiredTop
     }
@@ -439,11 +497,12 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     // beneath the entire control area, not just the status indicators.
     let glassBackedControls: Bool
     if #available(iOS 26.0, *) {
-      glassBackedControls = content.navigationItem.titleView is NavigationTitleView || floatingTitle != nil
+      glassBackedControls = content.navigationItem.titleView is NavigationTitleView || paneTitle is NavigationTitleView || floatingTitle != nil
     } else {
       glassBackedControls = false
     }
-    let statusOnly = alwaysFrosted && !navigation.navigationBar.prefersLargeTitles && glassBackedControls
+    let statusOnly = alwaysFrosted && !centerTitleInPane && paneTitle == nil && !horizontalControls
+      && !navigation.navigationBar.prefersLargeTitles && glassBackedControls
     let height = statusOnly
       ? min(container.bounds.height, statusHeight > 0 ? statusHeight + 6 : 0)
       : container.bounds.height
@@ -453,19 +512,97 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     materialFade.frame = material.bounds
     materialFade.locations = statusOnly
       ? [0, NSNumber(value: Double(max(0, height - 12) / max(1, height))), 1]
-      : (navigation.navigationBar.prefersLargeTitles ? [0, 0.55, 1] : [0, 0.85, 1])
+      : [0, 0.55, 1]
     CATransaction.commit()
+    if let title = paneTitle {
+      let titleWidth = max(0, container.bounds.width - titleInsetLeft - titleInsetRight)
+      let center = titleInsetLeft + titleWidth / 2
+      var availableWidth = max(0, titleWidth - 32)
+      if horizontalControls && !alignCollapsedTitleToLeading {
+        let leadingWidth = headerLeading?.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize).width ?? 0
+        let trailingWidth = headerTrailing?.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize).width ?? 0
+        let leftEdge = titleInsetLeft + 16 + leadingWidth
+        let rightEdge = container.bounds.width - titleInsetRight - 20 - trailingWidth
+        availableWidth = max(0, min(center - leftEdge, rightEdge - center) * 2 - 16)
+      }
+      let size = title.sizeThatFits(CGSize(width: availableWidth, height: 44))
+      title.frame = CGRect(x: alignCollapsedTitleToLeading
+                           ? navigation.navigationBar.layoutMargins.left
+                           : titleInsetLeft + (titleWidth - size.width) / 2,
+                           y: alignCollapsedTitleToLeading
+                             ? flutterSafeTop + 24 + (44 - size.height) / 2
+                             : (container.bounds.height - size.height) / 2,
+                           width: size.width, height: size.height)
+      title.layoutIfNeeded()
+    }
+    if horizontalControls {
+      // These native glass groups belong to the Flutter pane, whose bounds
+      // already exclude the rail. Avoid UINavigationBar reserving it again.
+      for (surface, trailing) in [(headerLeading, false), (headerTrailing, true)] {
+        guard let surface else { continue }
+        let size = surface.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize)
+        surface.frame = CGRect(x: trailing ? container.bounds.width - titleInsetRight - 20 - size.width : titleInsetLeft + 16,
+                               y: navigation.navigationBar.prefersLargeTitles
+                                 ? max(12, flutterSafeTop + 24 + (44 - size.height) / 2)
+                                 : max(12, (container.bounds.height - size.height) / 2),
+                               width: size.width, height: size.height)
+        surface.layoutIfNeeded()
+      }
+    }
     if let title = floatingTitle {
       let available = max(0, container.bounds.width - 48)
       let width = min(title.intrinsicContentSize.width, min(available, titleMaxWidth ?? available))
       title.frame = CGRect(x: (container.bounds.width - width) / 2,
-                           y: flutterSafeTop + 56 - floatingTitleLift, width: width, height: 44)
+                           y: flutterSafeTop + portraitTopPadding + 56 - floatingTitleLift, width: width, height: 44)
       // This overlay is outside UINavigationBar, which normally lays out the
       // effect content after constraining its title. Apply that pass here too.
       title.layoutIfNeeded()
 
     }
     reportAvatarBounds()
+  }
+
+  private func reportRailGeometry() {
+    #if canImport(UIKit, _version: 9127.0.85)
+    guard #available(iOS 27.1, *), let window = container.window else { return }
+    let inset = window.safeAreaInsets
+    let right = inset.right > 0 && inset.left == 0
+    let left = inset.left > 0 && inset.right == 0
+    guard inset.top == 0, right || left else { return }
+    let strip = CGRect(x: right ? window.bounds.width - inset.right : 0,
+                       y: 0, width: right ? inset.right : inset.left,
+                       height: window.bounds.height)
+    // Reserved-region frames include interactive margins. Remove those
+    // before finding the hardware axis; the safe-area strip is asymmetric.
+    let regions = window.reservedRegions(kind: .occlusion)
+      .filter { $0.isActive && $0.frame.intersects(strip) && $0.frame.midY < window.bounds.midY }
+      .sorted { $0.frame.minY < $1.frame.minY }
+    // Some hosts don't expose occlusions. The full safe-area inset includes
+    // content clearance; use UIKit's outer layout margin for the control,
+    // rather than centering it in that asymmetric inset.
+    guard let root = window.rootViewController else { return }
+    // Read the unobstructed edge: the strip-side margin has already been
+    // expanded to the safe area, while Flutter's controller reports a zero
+    // systemMinimumLayoutMargins despite its view's actual UIKit margins.
+    let margins = root.view.layoutMargins
+    let outerMargin = right ? margins.left : margins.right
+    let marginCenter = right ? window.bounds.width - outerMargin - 28 : outerMargin + 28
+    let center = regions.first.map { $0.frame.inset(by: $0.margins).midX } ?? marginCenter
+    guard strip.contains(CGPoint(x: center, y: strip.midY)) else { return }
+    let division = window.reservedRegions(kind: .division)
+      .first { $0.isActive && $0.frame.height >= window.bounds.height - 1
+        && $0.frame.minX > 0 && $0.frame.maxX < window.bounds.width }
+    let fold: Any = division.map { region -> Any in
+      [region.frame.minX, region.frame.minY, region.frame.width, region.frame.height]
+    } ?? NSNull()
+    let values: [String: Any] = ["bookDivision": fold, "centerX": center,
+                               "topClearance": regions.map { $0.frame.maxY }.max() as Any? ?? NSNull(),
+                               "windowWidth": window.bounds.width,
+                               "windowHeight": window.bounds.height]
+    DispatchQueue.main.async { [weak self] in
+      self?.channel.invokeMethod("railGeometry", arguments: values)
+    }
+    #endif
   }
 
   private func reportAvatarBounds() {
@@ -484,6 +621,8 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
   }
 
   private func configure(_ args: [String: Any]) {
+    titleInsetLeft = max(0, (args["titleInsetLeft"] as? NSNumber)?.doubleValue ?? 0)
+    titleInsetRight = max(0, (args["titleInsetRight"] as? NSNumber)?.doubleValue ?? 0)
     controlBackground = Self.color(args["controlBackground"])
     flutterSafeTop = (args["safeTop"] as? NSNumber)?.doubleValue ?? 0
     floatingTitleLift = args["titleHasAnimatedPortrait"] as? Bool == true ? 14 : 0
@@ -493,6 +632,58 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     material.overrideUserInterfaceStyle = navigation.overrideUserInterfaceStyle
     // Let the ultra-thin system material provide its own adaptive tint.
     material.contentView.backgroundColor = .clear
+    standaloneControl = args["standaloneControl"] as? Bool == true
+    standaloneLargeTitle = args["standaloneLargeTitle"] as? Bool == true
+    standaloneSurface?.removeFromSuperview()
+    standaloneSurface = nil
+    horizontalControls = args["horizontalControls"] as? Bool == true
+    centerTitleInPane = args["centerTitleInPane"] as? Bool == true
+    portraitTopPadding = CGFloat((args["portraitTopPadding"] as? NSNumber)?.doubleValue ?? 0)
+    paneTitle?.removeFromSuperview()
+    paneTitle = nil
+    alignCollapsedTitleToLeading = args["alignCollapsedTitleToLeading"] as? Bool == true
+    headerLeading?.removeFromSuperview()
+    headerTrailing?.removeFromSuperview()
+    headerLeading = nil
+    headerTrailing = nil
+    navigation.view.isHidden = standaloneControl || standaloneLargeTitle
+      || (horizontalControls && args["largeTitle"] as? Bool != true)
+    if standaloneLargeTitle {
+      container.overrideUserInterfaceStyle = navigation.overrideUserInterfaceStyle
+      material.isHidden = true
+      container.clipsToBounds = true
+      let scroll = UIScrollView()
+      scroll.contentInsetAdjustmentBehavior = .never
+      let label = UILabel()
+      let font = UIFont.preferredFont(forTextStyle: .largeTitle)
+      label.font = UIFont(descriptor: font.fontDescriptor.withSymbolicTraits(.traitBold) ?? font.fontDescriptor, size: 0)
+      label.adjustsFontForContentSizeCategory = true
+      label.text = args["title"] as? String
+      label.textColor = Self.color(args["foreground"])
+      label.numberOfLines = 0
+      label.lineBreakMode = .byWordWrapping
+      label.accessibilityTraits = .header
+      scroll.addSubview(label)
+      standaloneSurface = scroll
+      container.addSubview(scroll)
+      container.setNeedsLayout()
+      return
+    }
+    if standaloneControl {
+      material.isHidden = true
+      container.clipsToBounds = false
+      container.overrideUserInterfaceStyle = navigation.overrideUserInterfaceStyle
+      navigation.navigationBar.tintColor = Self.color(args["foreground"])
+      trackedAvatar = nil
+      reportedAvatarFrame = nil
+      if let leading = args["leading"] as? [String: Any],
+         let surface = makeControlGroup([leading]).customView {
+        standaloneSurface = surface
+        container.addSubview(surface)
+      }
+      container.setNeedsLayout()
+      return
+    }
     let bar = navigation.navigationBar
     let color = Self.color(args["foreground"])
     bar.tintColor = color
@@ -505,7 +696,11 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     let largeTitle = args["largeTitle"] as? Bool == true
     alwaysFrosted = args["alwaysFrosted"] as? Bool == true
     if #available(iOS 26.0, *) {
-      if #available(iOS 27.0, *) { usesSystemScrollEdge = true }
+      if #available(iOS 27.0, *) {
+        // All headers use the same native soft scroll edge. Custom titles
+        // also retain material, like large titles, when embedding clips it.
+        usesSystemScrollEdge = true
+      }
       content.scrollView.topEdgeEffect.style = .soft
       content.scrollView.topEdgeEffect.isHidden = !usesSystemScrollEdge
     }
@@ -515,6 +710,7 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     // Keep the graduated material throughout that transition so partial
     // scrolling never leaves the title and status area unprotected.
     material.isHidden = usesSystemScrollEdge && !largeTitle
+      && args["centerTitleInPane"] as? Bool != true && !backdropOnly
     // Let the native fade extend past the bar without enlarging its hit area.
     // The mirrored content is transparent and the bottom edge is hidden.
     container.clipsToBounds = !usesSystemScrollEdge
@@ -589,9 +785,37 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
       compactTitle.layer.mask = compactTitleMask
       if compactTitle.superview == nil { compactTitleContainer.addArrangedSubview(compactTitle) }
       compactTitleContainer.frame.size = compactTitle.intrinsicContentSize
-      item.titleView = compactTitleContainer
+      if alignCollapsedTitleToLeading {
+        // Duo's list title fades in place: the compact label uses the same
+        // leading margin as UIKit's expanded title, rather than recentering.
+        item.titleView = UIView()
+        compactTitleContainer.translatesAutoresizingMaskIntoConstraints = true
+        paneTitle = compactTitleContainer
+        container.addSubview(compactTitleContainer)
+      } else {
+        item.titleView = compactTitleContainer
+      }
     } else {
       item.titleView = nil
+    }
+    if args["centerTitleInPane"] as? Bool == true, !largeTitle {
+      if let titleView = item.titleView {
+        item.titleView = nil
+        titleView.translatesAutoresizingMaskIntoConstraints = true
+        paneTitle = titleView
+      } else if let text = item.title, !text.isEmpty {
+        let label = UILabel()
+        label.text = text
+        label.font = .preferredFont(forTextStyle: .headline)
+        label.adjustsFontForContentSizeCategory = true
+        label.textColor = color
+        label.textAlignment = .center
+        label.lineBreakMode = .byTruncatingTail
+        label.accessibilityTraits = .header
+        paneTitle = label
+      }
+      item.title = nil
+      if let paneTitle { container.addSubview(paneTitle) }
     }
     item.largeTitleDisplayMode = bar.prefersLargeTitles ? .always : .never
     trackedAvatar = nil
@@ -614,7 +838,21 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
         groups.append([action])
       }
     }
-    item.rightBarButtonItems = groups.reversed().map(makeControlGroup)
+    if horizontalControls {
+      item.leftBarButtonItems = nil
+      item.rightBarButtonItems = nil
+      if let leading = args["leading"] as? [String: Any] {
+        headerLeading = makeControlGroup([leading]).customView
+      }
+      if let actions = args["actions"] as? [[String: Any]], !actions.isEmpty {
+        headerTrailing = makeControlGroup(actions).customView
+      }
+      for surface in [headerLeading, headerTrailing].compactMap({ $0 }) {
+        container.addSubview(surface)
+      }
+    } else {
+      item.rightBarButtonItems = groups.reversed().map(makeControlGroup)
+    }
     if let metrics {
       channel.invokeMethod("metrics", arguments: metrics)
     }
@@ -651,12 +889,16 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     var metrics: [String: Any] = ["compactHeight": compact]
     if large { metrics["expandedHeight"] = expandedBarHeight }
     self.metrics = metrics
+    // The first measurement may reveal a zero-height Duo control row.
+    // Reconcile its reserved title space on the next native layout pass.
+    if alignCollapsedTitleToLeading { container.setNeedsLayout() }
     DispatchQueue.main.async { [weak self] in
       self?.channel.invokeMethod("metrics", arguments: metrics)
     }
   }
 
   private func setScrollOffset(_ value: CGFloat) {
+    guard !standaloneControl && !standaloneLargeTitle else { return }
     guard value.isFinite else { return }
     // The mirror scroll view is finite. Past its end UIKit sees no content
     // under the bar and drops the scroll-edge blur, so a long chat whose
@@ -746,7 +988,7 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
   }
 
   private func makeControlGroup(_ actions: [[String: Any]]) -> UIBarButtonItem {
-    if actions.count == 1 {
+    if actions.count == 1 && !standaloneControl {
       let item = makeItem(actions[0])
       // Let UIKit retain its navigation typography and sizing for text actions
       // such as Edit/Done, rather than inheriting UIButton's default styling.
@@ -763,9 +1005,9 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     } else {
       surface.backgroundColor = controlBackground
     }
-    // Match the navigation bar's 44-point content height so single
-    // controls remain circular rather than being compressed vertically.
-    surface.layer.cornerRadius = 22
+    // Use compact controls while retaining the 44-point minimum hit target.
+    let controlSize: CGFloat = standaloneControl ? 48 : 44
+    surface.layer.cornerRadius = controlSize / 2
     surface.layer.cornerCurve = .circular
     surface.clipsToBounds = true
     let stack = UIStackView()
@@ -790,7 +1032,7 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
           if #available(iOS 26.0, *) {
             button.cornerConfiguration = .capsule()
           }
-          button.layer.cornerRadius = 22
+          button.layer.cornerRadius = controlSize / 2
           button.layer.cornerCurve = .circular
           button.clipsToBounds = true
         }
@@ -803,8 +1045,8 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
       slot.addSubview(button)
       button.translatesAutoresizingMaskIntoConstraints = false
       NSLayoutConstraint.activate([
-        slot.widthAnchor.constraint(equalToConstant: item.image == nil && item.customView == nil ? max(44, button.intrinsicContentSize.width + 16) : 44),
-        slot.heightAnchor.constraint(equalToConstant: 44),
+        slot.widthAnchor.constraint(equalToConstant: item.image == nil && item.customView == nil ? max(controlSize, button.intrinsicContentSize.width + 16) : controlSize),
+        slot.heightAnchor.constraint(equalToConstant: controlSize),
         button.centerXAnchor.constraint(equalTo: slot.centerXAnchor),
         button.centerYAnchor.constraint(equalTo: slot.centerYAnchor)
       ])
@@ -823,6 +1065,11 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
       stack.bottomAnchor.constraint(equalTo: surface.contentView.bottomAnchor)
     ])
     let item = UIBarButtonItem(customView: surface)
+    #if canImport(UIKit, _version: 9127.0.85)
+    if #available(iOS 27.1, *), actions.allSatisfy({ $0["keepInHeaderOnDuo"] as? Bool == true }) {
+      item.axisBehavior = .horizontalOnly
+    }
+    #endif
     if #available(iOS 26.0, *) { item.hidesSharedBackground = true }
     return item
   }
@@ -900,9 +1147,10 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
       let button = UIButton(type: .custom)
       // UIKit adds the glass button's own padding around this custom view.
       // Match the 36-point image on both axes so that glass stays circular.
-      button.frame = CGRect(x: 0, y: 0, width: 36, height: 36)
-      button.widthAnchor.constraint(equalToConstant: 36).isActive = true
-      button.heightAnchor.constraint(equalToConstant: 36).isActive = true
+      let avatarTarget: CGFloat = standaloneControl ? 48 : 36
+      button.frame = CGRect(x: 0, y: 0, width: avatarTarget, height: avatarTarget)
+      button.widthAnchor.constraint(equalToConstant: avatarTarget).isActive = true
+      button.heightAnchor.constraint(equalToConstant: avatarTarget).isActive = true
       button.setImage(item.image?.withAlignmentRectInsets(.zero), for: .normal)
       button.addAction(action, for: .touchUpInside)
       button.isEnabled = item.isEnabled
@@ -935,6 +1183,7 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
   }
 
   deinit {
+    foldRefresh?.cancel()
     channel.setMethodCallHandler(nil)
     navigation.willMove(toParent: nil)
     navigation.view.removeFromSuperview()

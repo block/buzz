@@ -41,9 +41,55 @@ class _ProfileSection extends StatelessWidget {
         trailing: const _RowChevron(),
         onTap: () {
           unawaited(HapticFeedback.selectionClick());
-          Navigator.of(
-            context,
-          ).push(immediatePageRoute<void>(builder: profileEditPageBuilder));
+          final scope = DuoToolbarScope.maybeOf(context);
+          final strip = scope?.strip ?? FoldGeometry.of(context).strip;
+          if (strip == null) {
+            Navigator.of(
+              context,
+            ).push(immediatePageRoute<void>(builder: profileEditPageBuilder));
+            return;
+          }
+          final windowSize =
+              View.of(context).physicalSize / View.of(context).devicePixelRatio;
+          final pane = ConversationPaneScope.maybeOf(context);
+          // From the compact all-settings list, the editor is the initial
+          // detail. An existing Profile detail must remain beneath the editor.
+          if (windowSize.shortestSide < 600 &&
+              pane != null &&
+              pane.selectedId == null) {
+            pane.open('settings-photo', profileEditPageBuilder, animate: false);
+            return;
+          }
+          Widget editor(BuildContext routeContext) {
+            final routeScope = DuoToolbarScope.maybeOf(routeContext);
+            final routeStrip =
+                routeScope?.strip ?? FoldGeometry.of(routeContext).strip;
+            return DuoToolbarScope(
+              strip: routeStrip,
+              active: routeScope?.active ?? true,
+              leadingSlots: routeScope?.leadingSlots ?? 0,
+              contentInsets:
+                  routeScope?.contentInsets ??
+                  EdgeInsets.only(
+                    left: routeStrip?.side == FoldStripSide.left
+                        ? routeStrip!.width
+                        : 0,
+                    right: routeStrip?.side == FoldStripSide.right
+                        ? routeStrip!.width
+                        : 0,
+                  ),
+              child: profileEditPageBuilder(routeContext),
+            );
+          }
+
+          Navigator.of(context).push(
+            windowSize.shortestSide < 600
+                ? immediatePageRoute<void>(builder: editor)
+                : BottomUpPageRoute<void>(
+                    reducedMotion: MediaQuery.disableAnimationsOf(context),
+                    builder: editor,
+                  ),
+          );
         },
       ),
     ],
