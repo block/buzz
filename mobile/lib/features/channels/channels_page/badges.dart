@@ -27,7 +27,7 @@ class _EphemeralBadge extends StatelessWidget {
   }
 }
 
-class _ErrorView extends StatelessWidget {
+class _ErrorView extends HookConsumerWidget {
   final Object error;
   final VoidCallback onRetry;
 
@@ -35,8 +35,11 @@ class _ErrorView extends StatelessWidget {
 
   static String _userMessage(Object error) {
     if (error is RelayException) {
+      // There is no API token to check. A protected community's Retry gets a
+      // fresh token; once the organization sign-in has ended, the shell
+      // banner owns the action instead (see build).
       if (error.statusCode == 401) {
-        return 'Not authorized. Check your API token.';
+        return "This community couldn't authenticate the request. Try again.";
       }
       if (error.statusCode == 403) {
         return 'Access denied.';
@@ -50,7 +53,20 @@ class _ErrorView extends StatelessWidget {
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    final signIn = ref.watch(organizationSignInProvider);
+    final auth = ref.watch(hostedRelayAuthProvider);
+    useListenable(signIn);
+    useListenable(auth);
+    // When the relay refuses the read while the Home banner is up, the banner
+    // shows the working action. Other errors keep their message and Retry: a
+    // relay that does not require the organization sign-in can still serve
+    // the read.
+    final config = ref.watch(relayConfigProvider);
+    final signInOwned =
+        error is RelayException &&
+        (error as RelayException).statusCode == 401 &&
+        organizationSignInPromptVisible(signIn, auth, config);
     return Center(
       child: Padding(
         padding: const EdgeInsets.all(Grid.sm),
@@ -65,7 +81,9 @@ class _ErrorView extends StatelessWidget {
             ),
             const SizedBox(height: Grid.xxs),
             Text(
-              _userMessage(error),
+              signInOwned
+                  ? 'Use the prompt above to reconnect.'
+                  : _userMessage(error),
               style: context.textTheme.bodySmall?.copyWith(
                 color: context.colors.onSurfaceVariant,
               ),
@@ -73,12 +91,14 @@ class _ErrorView extends StatelessWidget {
               maxLines: 3,
               overflow: TextOverflow.ellipsis,
             ),
-            const SizedBox(height: Grid.xs),
-            FilledButton.icon(
-              onPressed: onRetry,
-              icon: const Icon(BuzzIcons.refreshCw),
-              label: const Text('Retry'),
-            ),
+            if (!signInOwned) ...[
+              const SizedBox(height: Grid.xs),
+              FilledButton.icon(
+                onPressed: onRetry,
+                icon: const Icon(BuzzIcons.refreshCw),
+                label: const Text('Retry'),
+              ),
+            ],
           ],
         ),
       ),
