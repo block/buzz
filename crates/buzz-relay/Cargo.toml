@@ -95,6 +95,7 @@ async-compression = { version = "0.4.42", features = ["tokio", "gzip"] }
 dev = ["buzz-auth/dev"]
 
 [dev-dependencies]
+crossbeam-epoch = "0.9.20"
 buzz-cli = { path = "../buzz-cli" }
 # Generate ephemeral P-256 signing fixtures; already in the runtime dependency graph.
 ring = "0.17"

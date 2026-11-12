@@ -13,6 +13,19 @@ fn snapshot<T>(value: T) -> ReadAt<T> {
     }
 }
 
+/// Moka frees removed values through crossbeam-epoch deferred garbage.
+/// Flush epochs as Moka's own Drop does, within the same bound, then
+/// require release without relaxing the allocation-lifetime assertion.
+fn assert_released<T>(weak: &std::sync::Weak<T>, message: &str) {
+    for _ in 0..128 {
+        if weak.upgrade().is_none() {
+            return;
+        }
+        crossbeam_epoch::pin().flush();
+    }
+    assert!(weak.upgrade().is_none(), "{message}");
+}
+
 #[tokio::test]
 async fn membership_check_future_stays_small_in_nested_handlers() {
     let state = crate::state::tests::test_state().await;
@@ -445,7 +458,7 @@ async fn completed_payload_is_weighed_and_moka_evicts_under_byte_pressure() {
     cache.invalidate_community(community(1));
     cache.entries.run_pending_tasks();
     assert_eq!(cache.entries.weighted_size(), 0);
-    assert!(weak.upgrade().is_none(), "removed payload must be released");
+    assert_released(&weak, "removed payload must be released");
 }
 
 #[tokio::test]
@@ -510,10 +523,7 @@ async fn ttl_reclaims_idle_snapshots_and_invalidation_preserves_only_active_read
         "an active reader owns the old allocation"
     );
     drop(entry);
-    assert!(
-        weak.upgrade().is_none(),
-        "last reader must release the allocation"
-    );
+    assert_released(&weak, "last reader must release the allocation");
     assert!(cache
         .contains(
             key.clone(),
@@ -530,10 +540,7 @@ async fn ttl_reclaims_idle_snapshots_and_invalidation_preserves_only_active_read
     assert!(cache.entries.get(&key).is_none());
     cache.entries.run_pending_tasks();
     assert_eq!(cache.entries.weighted_size(), 0);
-    assert!(
-        weak.upgrade().is_none(),
-        "TTL maintenance must release the idle payload"
-    );
+    assert_released(&weak, "TTL maintenance must release the idle payload");
 }
 
 /// One fan-out's recipients: fresh sets answer without a read, the rest share
