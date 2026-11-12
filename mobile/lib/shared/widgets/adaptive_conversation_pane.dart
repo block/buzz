@@ -6,6 +6,7 @@ import 'package:duo_kit/duo_kit.dart';
 
 import 'duo_toolbar.dart';
 import 'app_route_observer.dart';
+import 'covered_route_keyboard_insets.dart';
 import 'ios_navigation_metrics.dart';
 import 'duo_workspace_scaffold.dart';
 
@@ -193,10 +194,9 @@ class AdaptiveConversationPane extends HookConsumerWidget {
                 : constraints.maxWidth;
             final detailLeft =
                 book?.center.dx ?? (wide ? listWidth + leftInset + 1 : 0.0);
-            final media = MediaQuery.of(context);
             return TweenAnimationBuilder<Offset>(
               tween: Tween(end: Offset(listWidth, detailLeft)),
-              duration: wide && !media.disableAnimations
+              duration: wide && !MediaQuery.disableAnimationsOf(context)
                   ? const Duration(milliseconds: 240)
                   : Duration.zero,
               curve: Curves.easeInOutCubic,
@@ -223,8 +223,8 @@ class AdaptiveConversationPane extends HookConsumerWidget {
                         ),
                         child: _CoveredList(
                           covered: !wide && selected != null,
-                          child: MediaQuery(
-                            data: media.copyWith(
+                          child: MediaQueryOverride(
+                            transform: (media) => media.copyWith(
                               size: Size(listWidth, constraints.maxHeight),
                             ),
                             child: DuoToolbarScope(
@@ -257,8 +257,8 @@ class AdaptiveConversationPane extends HookConsumerWidget {
                         offstage: !wide && selected == null,
                         child: TickerMode(
                           enabled: wide || selected != null,
-                          child: MediaQuery(
-                            data: media.copyWith(
+                          child: MediaQueryOverride(
+                            transform: (media) => media.copyWith(
                               size: Size(detailWidth, constraints.maxHeight),
                             ),
                             child: DuoToolbarScope(
@@ -412,10 +412,34 @@ class _CoveredList extends StatelessWidget {
       ignoring: covered,
       child: ExcludeFocus(
         excluding: covered,
-        child: ExcludeSemantics(excluding: covered, child: child),
+        child: ExcludeSemantics(
+          excluding: covered,
+          // A detail's keyboard must not relayout the list it covers. The
+          // scope keeps the detail's focus from counting as the list's own.
+          child: FocusScope(
+            child: CoveredRouteKeyboardInsets(isCovered: covered, child: child),
+          ),
+        ),
       ),
     ),
   );
+}
+
+/// Derives [child]'s [MediaQuery] in a leaf, so the caller's build does not
+/// depend on every field (keyboard insets change on each animation frame).
+class MediaQueryOverride extends StatelessWidget {
+  const MediaQueryOverride({
+    required this.transform,
+    required this.child,
+    super.key,
+  });
+
+  final MediaQueryData Function(MediaQueryData) transform;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) =>
+      MediaQuery(data: transform(MediaQuery.of(context)), child: child);
 }
 
 /// Reports its route as [covering] once the route fully covers the compact
@@ -521,13 +545,12 @@ class AdaptiveConversationDestination extends HookConsumerWidget {
     useEffect(() => ownedController.dispose, [ownedController]);
     final controller = this.controller ?? ownedController;
     final strip = FoldGeometry.of(context).strip;
-    final media = MediaQuery.of(context);
     return ColoredBox(
       color: context.colors.surface,
       child: DuoWorkspaceScaffold(
         navigationBuilder: (_, _) => const SizedBox.shrink(),
-        body: MediaQuery(
-          data: media.removePadding(
+        body: MediaQueryOverride(
+          transform: (media) => media.removePadding(
             removeLeft: strip?.side == FoldStripSide.left,
             removeRight: strip?.side == FoldStripSide.right,
           ),

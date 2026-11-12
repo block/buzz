@@ -111,6 +111,36 @@ void main() {
     }
   });
 
+  testWidgets('keyboard in a phone conversation does not rebuild Home', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(402, 874);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    var homeBuilds = 0;
+    await tester.pumpWidget(
+      await buildHome(onNewChatAction: (_) => homeBuilds++),
+    );
+    await tester.pumpAndSettle();
+    tester
+        .widget<AdaptiveConversationPane>(find.byType(AdaptiveConversationPane))
+        .controller
+        .open(
+          'sample',
+          (_) => const Scaffold(body: Text('Conversation content')),
+        );
+    await tester.pumpAndSettle();
+    expect(find.text('Conversation content'), findsOneWidget);
+    homeBuilds = 0;
+
+    for (var frame = 1; frame <= 20; frame++) {
+      tester.view.viewInsets = FakeViewPadding(bottom: frame * 15.0);
+      await tester.pump(const Duration(milliseconds: 16));
+    }
+
+    expect(homeBuilds, 0);
+  });
+
   testWidgets('feedback clears floating navigation and wraps large text', (
     tester,
   ) async {
