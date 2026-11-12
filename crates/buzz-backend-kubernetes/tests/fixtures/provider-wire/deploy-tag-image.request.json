@@ -1,0 +1,10 @@
+{
+  "op": "deploy",
+  "request_id": "req-4",
+  "agent": {
+    "relay_url": "wss://relay.example",
+    "private_key_nsec": "nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5",
+    "auth_tag": "tag-1"
+  },
+  "provider_config": {"namespace": "buzz-agents-test", "image": "ghcr.io/block/buzz-sprig:latest"}
+}

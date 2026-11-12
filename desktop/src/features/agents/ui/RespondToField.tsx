@@ -1,10 +1,11 @@
 import * as React from "react";
-import { ChevronDown, Search, X } from "lucide-react";
+import { AlertTriangle, ChevronDown, Search, X } from "lucide-react";
 import {
   mergeAllowlist,
   parsePubkeyInput,
 } from "@/features/agents/lib/respondToAllowlist";
-import { truncatePubkey } from "@/shared/lib/pubkey";
+import { parsePubkeyInput as parseCanonicalPubkey } from "@/shared/lib/nostrUtils";
+import { truncateNpub } from "@/shared/lib/pubkey";
 import { PubKey } from "@/shared/ui/PubKey";
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
 import { useUserSearchQuery } from "@/features/profile/hooks";
@@ -13,6 +14,11 @@ import { cn } from "@/shared/lib/cn";
 import { Input } from "@/shared/ui/input";
 import { Textarea } from "@/shared/ui/textarea";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
+import {
+  type AgentRunLocation,
+  agentAccessWarningText,
+} from "@/features/agents/lib/agentAccessWarning";
+import { useAgentRunLocation } from "./AgentRunLocationContext";
 import { PersonaDropdownField } from "./PersonaDropdownField";
 import type { PersonaDropdownOption } from "./agentConfigOptions";
 
@@ -20,13 +26,30 @@ import type { PersonaDropdownOption } from "./agentConfigOptions";
  * Inbound author gate UI for create/edit agent dialogs.
  *
  * Dropdown:
- *   - Owner only  (default; matches `buzz-acp --respond-to=owner-only`)
- *   - Anyone      (`--respond-to=anyone` — fully open bot)
- *   - Allowlist   (`--respond-to=allowlist`, plus the chip list as
- *                  `--respond-to-allowlist`)
+ *   - Only me        (default; maps to `buzz-acp --respond-to=owner-only`)
+ *   - Anyone         (`--respond-to=anyone` — fully open agent)
+ *   - Selected people (`--respond-to=allowlist`, plus the selected pubkeys as
+ *                     `--respond-to-allowlist`)
  *
  * `nobody` is intentionally not surfaced — it pairs with a heartbeat-only
  * setup that has no meaningful GUI use case.
+ *
+ * Anyone and Selected people both share the host's access with someone other
+ * than the owner, so both render the persistent warning; only the audience
+ * phrase differs. It leads with the audience so it reads as a warning rather
+ * than an explanation, and stays one sentence — Only me already owns the line
+ * below the control.
+ *
+ * The line below Only me says "Only you and your agents", because the harness
+ * gate admits the owner and every verified same-owner agent, not the owner
+ * alone (see `managed_agents/access_policy.rs`). The dropdown label stays
+ * "Only me": it is the audience the user picks, and it has meant this since
+ * before agents could instruct each other.
+ *
+ * Which machine and stakes it names follow the optional `runLocation` prop, and
+ * an unknown location falls back to the local wording rather than hedging with
+ * "computer or server" — see `lib/agentAccessWarning.ts` for the copy and the
+ * reasoning.
  *
  * Validation is duplicated lightly here for inline UX feedback only; the
  * authoritative validator is `validate_respond_to_allowlist` in
@@ -37,7 +60,7 @@ function formatSearchUserName(user: UserSearchResult) {
   return (
     user.displayName?.trim() ||
     user.nip05Handle?.trim() ||
-    truncatePubkey(user.pubkey)
+    truncateNpub(user.pubkey)
   );
 }
 
@@ -47,14 +70,17 @@ function formatSearchUserSecondary(user: UserSearchResult) {
   if (displayName && nip05Handle) {
     return nip05Handle;
   }
-  return truncatePubkey(user.pubkey);
+  return truncateNpub(user.pubkey);
 }
 
 const RESPOND_TO_OPTIONS: PersonaDropdownOption[] = [
   { label: "Only me (default)", value: "owner-only" },
   { label: "Anyone", value: "anyone" },
-  { label: "Allowlist", value: "allowlist" },
+  { label: "Selected people", value: "allowlist" },
 ];
+
+export const OWNER_ONLY_ACCESS_DISABLED_REASON =
+  "This build disallows changing this setting.";
 
 export function CreateAgentRespondToField({
   mode,
@@ -63,7 +89,9 @@ export function CreateAgentRespondToField({
   onAllowlistChange,
   ownerPubkey,
   disabled,
+  disabledReason,
   variant,
+  runLocation,
 }: {
   mode: RespondToMode;
   allowlist: string[];
@@ -76,8 +104,16 @@ export function CreateAgentRespondToField({
    */
   ownerPubkey?: string | null;
   disabled?: boolean;
+  /** Explanation shown when this access control is unavailable. */
+  disabledReason?: string;
   /** When "persona", uses PersonaDropdownField styling to match the persona dialog. */
   variant?: "default" | "persona";
+  /**
+   * Where the agent's process runs, when the surface can tell. Omit or pass
+   * `null` when it can't — the warning then uses the same "your computer"
+   * wording as a local agent rather than hedging. Never synthesize a value.
+   */
+  runLocation?: AgentRunLocation | null;
 }) {
   const [query, setQuery] = React.useState("");
   const [isDirectEntryOpen, setIsDirectEntryOpen] = React.useState(false);
@@ -132,6 +168,33 @@ export function CreateAgentRespondToField({
 
   const isPersonaVariant = variant === "persona";
 
+  // An explicit prop wins; otherwise inherit from the dialog subtree. Surfaces
+  // inside AgentDialog get it from context (see AgentRunLocationContext for
+  // why), standalone ones like EditRespondToDialog pass the prop.
+  const inheritedRunLocation = useAgentRunLocation();
+  const warningText = agentAccessWarningText(
+    mode,
+    runLocation ?? inheritedRunLocation,
+  );
+
+  // Rendered in two positions: directly below the selector for Anyone, but
+  // after the people picker for Selected people, so it never sits between the
+  // user and the selection they came here to make.
+  const accessWarning = warningText ? (
+    <div
+      className="flex items-start gap-2 rounded-xl border border-warning/30 bg-warning-bg px-3 py-2.5"
+      data-testid="agent-access-warning"
+    >
+      <AlertTriangle
+        aria-hidden="true"
+        className="mt-0.5 h-4 w-4 shrink-0 text-warning"
+      />
+      <p aria-live="polite" className="text-xs leading-5 text-warning">
+        {warningText}
+      </p>
+    </div>
+  ) : null;
+
   return (
     <div className="space-y-2" data-testid="agent-respond-to">
       <label
@@ -142,7 +205,7 @@ export function CreateAgentRespondToField({
         }
         htmlFor="agent-respond-to"
       >
-        Who can talk to this agent
+        Who can send instructions
       </label>
       {isPersonaVariant ? (
         <PersonaDropdownField
@@ -162,16 +225,25 @@ export function CreateAgentRespondToField({
           onChange={(e) => onModeChange(e.target.value as RespondToMode)}
           value={mode}
         >
-          <option value="owner-only">Owner only (default)</option>
-          <option value="anyone">Anyone</option>
-          <option value="allowlist">Allowlist</option>
+          {RESPOND_TO_OPTIONS.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
         </select>
       )}
-      {!isPersonaVariant ? (
+      {disabledReason ? (
+        <p
+          className="text-xs text-muted-foreground"
+          data-testid="agent-respond-to-disabled-reason"
+        >
+          {disabledReason}
+        </p>
+      ) : null}
+      {mode === "anyone" ? accessWarning : null}
+      {mode === "owner-only" ? (
         <p className="text-xs text-muted-foreground">
-          Controls which Nostr authors the agent listens to (@mentions, DMs,
-          thread replies). The agent&apos;s owner can always shut it down with
-          <span className="font-mono"> !shutdown</span>.
+          Only you and your agents can send instructions.
         </p>
       ) : null}
       {mode === "allowlist" ? (
@@ -202,11 +274,10 @@ export function CreateAgentRespondToField({
           variant={isPersonaVariant ? "persona" : "default"}
         />
       ) : null}
+      {mode === "allowlist" ? accessWarning : null}
     </div>
   );
 }
-
-const HEX_64_RE = /^[0-9a-f]{64}$/i;
 
 function AllowlistPicker({
   allowlist,
@@ -253,10 +324,12 @@ function AllowlistPicker({
 }) {
   const isPersona = variant === "persona";
 
-  // Detect if the query is a valid hex pubkey that's not already in the list.
-  const queryIsHexPubkey =
-    HEX_64_RE.test(deferredQuery) &&
-    !allowlist.some((p) => p.toLowerCase() === deferredQuery.toLowerCase());
+  // Detect if the query is a pubkey (npub or hex) not already in the list;
+  // direct entry offers the canonical hex for storage.
+  const queryPubkey = parseCanonicalPubkey(deferredQuery);
+  const queryIsDirectPubkey =
+    queryPubkey !== null &&
+    !allowlist.some((p) => p.toLowerCase() === queryPubkey);
 
   return (
     <div
@@ -269,7 +342,7 @@ function AllowlistPicker({
     >
       {!isPersona ? (
         <div className="flex items-center justify-between gap-2">
-          <span className="text-sm font-medium">Allowed pubkeys</span>
+          <span className="text-sm font-medium">Selected people</span>
           <span className="rounded-full bg-background px-2 py-1 text-2xs font-medium leading-none text-muted-foreground">
             {allowlist.length} selected
           </span>
@@ -277,13 +350,13 @@ function AllowlistPicker({
       ) : null}
       {!isPersona && ownerPubkey ? (
         <p className="text-xs text-muted-foreground">
-          Owner (
-          <PubKey pubkey={ownerPubkey} />) is always implicitly allowed by the
-          harness — no need to add it here.
+          You (
+          <PubKey pubkey={ownerPubkey} />) can always use this agent. You
+          don&apos;t need to add yourself.
         </p>
       ) : !isPersona ? (
         <p className="text-xs text-muted-foreground">
-          The agent&apos;s owner is always implicitly allowed.
+          You can always use this agent.
         </p>
       ) : null}
       <div className="rounded-lg border border-border/80 bg-background">
@@ -310,12 +383,12 @@ function AllowlistPicker({
               >
                 <UserAvatar
                   avatarUrl={null}
-                  displayName={truncatePubkey(pubkey)}
+                  displayName={truncateNpub(pubkey)}
                   size="xs"
                 />
                 <PubKey pubkey={pubkey} />
                 <button
-                  aria-label={`Remove ${truncatePubkey(pubkey)}`}
+                  aria-label={`Remove ${truncateNpub(pubkey)}`}
                   className="text-muted-foreground transition-colors hover:text-foreground"
                   disabled={disabled}
                   onClick={() => onRemove(pubkey)}
@@ -347,6 +420,7 @@ function AllowlistPicker({
                       <UserAvatar
                         avatarUrl={result.avatarUrl}
                         displayName={formatSearchUserName(result)}
+                        shape={result.isAgent ? "squircle" : "circle"}
                         size="xs"
                       />
                       <div className="min-w-0">
@@ -362,22 +436,22 @@ function AllowlistPicker({
                   </button>
                 ))}
               </div>
-            ) : queryIsHexPubkey ? (
+            ) : queryIsDirectPubkey ? (
               <button
                 className="flex w-full items-center justify-between rounded-md px-2.5 py-1.5 text-left transition-colors hover:bg-accent hover:text-accent-foreground"
                 data-testid="agent-respond-to-add-raw-pubkey"
-                onClick={() => onAddRawPubkey(deferredQuery.toLowerCase())}
+                onClick={() => onAddRawPubkey(queryPubkey)}
                 type="button"
               >
                 <div className="flex items-center gap-2 min-w-0">
                   <UserAvatar
                     avatarUrl={null}
-                    displayName={truncatePubkey(deferredQuery)}
+                    displayName={truncateNpub(queryPubkey)}
                     size="xs"
                   />
                   <div className="min-w-0">
                     <p className="truncate text-sm font-medium leading-5">
-                      {truncatePubkey(deferredQuery)}
+                      {truncateNpub(queryPubkey)}
                     </p>
                     <p className="truncate text-xs text-muted-foreground">
                       Add pubkey directly
@@ -421,22 +495,22 @@ function AllowlistPicker({
               id="agent-respond-to-direct-panel"
             >
               <p className="text-xs text-muted-foreground">
-                One per line, or comma/space-separated. 64-char lowercase hex
-                only — npub decoding is not yet supported here.
+                One per line, or comma/space-separated. Each entry is an npub
+                (npub1…) or a 64-char hex public key.
               </p>
               <Textarea
                 className="min-h-20 font-mono text-xs"
                 data-testid="agent-respond-to-paste"
                 disabled={disabled}
                 onChange={(event) => onPasteTextChange(event.target.value)}
-                placeholder="abcdef0123…"
+                placeholder="npub1… or abcdef0123…"
                 value={pasteText}
               />
               {pasteInvalid.length > 0 ? (
                 <p className="text-xs text-destructive">
                   {pasteInvalid.length} entr
-                  {pasteInvalid.length === 1 ? "y is" : "ies are"} not 64-char
-                  hex and will be ignored.
+                  {pasteInvalid.length === 1 ? "y is" : "ies are"} not a valid
+                  npub or 64-char hex public key and will be ignored.
                 </p>
               ) : null}
               <div className="flex items-center justify-between gap-2">
@@ -452,7 +526,7 @@ function AllowlistPicker({
                   onClick={onAddFromPaste}
                   type="button"
                 >
-                  Add to allowlist
+                  Add people
                 </button>
               </div>
             </div>

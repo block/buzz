@@ -157,6 +157,8 @@ mod tests {
             format: "buzz-agent-snapshot".to_string(),
             version: 1,
             definition: AgentSnapshotDefinition {
+                session_policy: Default::default(),
+                acp_command: None,
                 name: "Tree Trunks".to_string(),
                 source_is_builtin: false,
                 system_prompt: Some("You are a helpful agent.".to_string()),
@@ -204,6 +206,7 @@ mod tests {
             s3_secret_key: String::new(),
             s3_bucket: String::new(),
             s3_region: "us-east-1".to_string(),
+            s3_addressing_style: buzz_media_pkg::S3AddressingStyle::Path,
             max_image_bytes: 50 * 1024 * 1024,
             max_gif_bytes: 10 * 1024 * 1024,
             max_video_bytes: 524_288_000,

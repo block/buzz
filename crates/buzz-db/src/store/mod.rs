@@ -1,0 +1,123 @@
+//! Domain-owned persistence implementations.
+
+/// Explicit deployment-global admin report reads.
+pub mod admin_moderation;
+/// Community-scoped authentication allowlist persistence.
+pub mod allowlist;
+/// API token storage and lookup.
+pub mod api_token;
+/// Relay-scoped archived identity persistence (NIP-IA).
+pub mod archived_identities;
+/// Channel lifecycle and metadata persistence.
+pub mod channel;
+/// Channel membership and roster persistence.
+pub mod channel_members;
+/// Community lifecycle and host-map persistence.
+pub mod community;
+/// Monotonic community auth policy and operator acceptance receipts.
+pub mod community_auth;
+/// Durable whole-community deletion lifecycle and PostgreSQL adapter.
+pub mod deletion;
+/// Direct message channel persistence.
+pub mod dm;
+/// Shared operator-global deletion workflow persistence.
+pub mod entity_deletion;
+/// Event storage and retrieval.
+pub mod event;
+/// Atomic event deletion and retention-free purging.
+mod event_deletion;
+/// App-owned push enqueue and channel TTL refresh for inserted events.
+pub(crate) mod event_follow_up;
+mod event_hydration;
+/// Per-community NIP-FI issuer bindings.
+pub mod nip_fi_binding;
+/// Recent-first passes for newest-first `events` page reads.
+pub(crate) mod recent_pass;
+/// User-specific deletion submission and inventory preparation.
+pub mod user_deletion;
+/// Operator-global user restrictions and identity-lock primitives.
+pub mod user_deletion_fences;
+
+#[cfg(test)]
+mod event_follow_up_postgres_tests;
+
+/// Home feed queries.
+pub mod feed;
+/// Git repository name registry (NIP-34 kind:30617).
+pub mod git_repo;
+/// Deployment-wide leader election over session advisory locks.
+pub mod leader_lock;
+/// Compact viewer membership projections.
+pub mod membership_snapshot;
+/// Community moderation: reports, bans/timeouts, audit actions.
+pub mod moderation;
+/// Deployment-global operator-listener mention registrations and delivery queues.
+pub mod operator_listener;
+/// Monthly table partition management.
+pub mod partition;
+/// Private signer-owned accessory read progress.
+pub mod personal_read;
+/// Buzz product-feedback sidecar persistence.
+pub mod product_feedback;
+/// Community-scoped push lease and durable wake-outbox persistence.
+pub mod push;
+/// Reaction persistence.
+pub mod reaction;
+/// Complete own-author read-state snapshots.
+pub mod read_state;
+/// HTTP report-resolution enforcement state machine persistence.
+pub mod relay_admin_actions;
+/// Use-limited relay invite persistence (v2 opaque tokens).
+pub mod relay_invite;
+/// Relay-level membership persistence (NIP-43).
+pub mod relay_members;
+/// Deployment-global relay operator/moderator roster persistence.
+pub mod relay_operators;
+/// Event-reminder delivery query, claim, and release persistence.
+pub mod reminder;
+/// Replaceable-event persistence and coordinate locking.
+pub mod replaceable;
+/// Durable completed snapshots from the isolated media-storage worker.
+pub mod storage_accounting;
+/// Thread metadata persistence.
+pub mod thread;
+/// Strict newest-first thread windows and auxiliary scans.
+pub mod thread_window;
+/// User profile persistence.
+pub mod user;
+/// Workflow, run, and approval persistence.
+pub mod workflow;
+
+/// NIP-AR artifact lifecycle and durable delivery.
+pub mod artifact;
+
+mod artifact_query;
+/// Timestamp-based incremental artifact reads.
+pub mod artifact_sync;
+pub use artifact_query::{ArtifactSnapshot, SnapshotDenied};
+
+#[cfg(test)]
+mod artifact_postgres_tests;
+
+#[cfg(test)]
+mod legacy_channel_types_postgres_tests;
+
+#[cfg(test)]
+mod unlisted_channels_postgres_tests;
+
+#[cfg(test)]
+mod channel_name_postgres_tests;
+
+#[cfg(test)]
+mod admission_postgres_tests;
+
+/// Durable NIP-FI verified-profile projection state.
+pub mod verified_profiles;
+
+/// Live reference authorization and upload possession.
+pub mod media;
+
+#[cfg(test)]
+mod media_postgres_tests;
+#[cfg(test)]
+mod message_edit_state_postgres_tests;

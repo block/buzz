@@ -15,8 +15,8 @@ use crate::app_state::AppState;
 
 const STATUS_EVENT: &str = "managed-agent-runtime-status";
 
-fn status_for(
-    app: &AppHandle,
+fn status_for<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     record: &super::ManagedAgentRecord,
     key: &ManagedAgentRuntimeKey,
     runtime: Option<&ManagedAgentPairRuntime>,
@@ -44,8 +44,8 @@ struct StatusInputs<'a> {
     global: &'a super::GlobalAgentConfig,
 }
 
-fn status_for_with(
-    app: &AppHandle,
+fn status_for_with<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     record: &super::ManagedAgentRecord,
     key: &ManagedAgentRuntimeKey,
     runtime: Option<&ManagedAgentPairRuntime>,
@@ -73,7 +73,7 @@ fn status_for_with(
     }
 }
 
-fn emit_status(app: &AppHandle, status: &ManagedAgentRuntimeStatus) {
+fn emit_status<R: tauri::Runtime>(app: &AppHandle<R>, status: &ManagedAgentRuntimeStatus) {
     let _ = app.emit(STATUS_EVENT, status);
 }
 
@@ -137,94 +137,100 @@ pub fn put_managed_agent_runtime_lifecycle(
     Ok(status)
 }
 
+// Keep disk, process, and mutex work off the main thread so opening members cannot stall the UI.
 #[tauri::command]
-pub fn list_managed_agent_runtimes(
+pub async fn list_managed_agent_runtimes(
     app: AppHandle,
 ) -> Result<Vec<ManagedAgentRuntimeStatus>, String> {
-    // This command is polled whenever the members sidebar opens and refetched
-    // on every status event — load the per-row status inputs once, outside
-    // the locks, instead of hitting disk per row while holding them.
-    let personas = load_personas(&app).unwrap_or_default();
-    let global = load_global_agent_config(&app).unwrap_or_default();
-    let state = app.state::<AppState>();
-    let _transition = state
-        .managed_agent_runtime_transition
-        .lock()
-        .map_err(|e| e.to_string())?;
-    let _store = state
-        .managed_agents_store_lock
-        .lock()
-        .map_err(|e| e.to_string())?;
-    let mut records = load_managed_agents(&app)?;
-    let mut runtimes = state
-        .managed_agent_processes
-        .lock()
-        .map_err(|e| e.to_string())?;
-    let exited_keys: Vec<_> = runtimes
-        .iter_mut()
-        .filter_map(|(key, runtime)| match runtime.child.try_wait() {
-            Ok(Some(_)) | Err(_) => Some(key.clone()),
-            Ok(None) => None,
-        })
-        .collect();
-    let records_changed = !exited_keys.is_empty();
-    let mut statuses = Vec::new();
-    for key in exited_keys {
-        runtimes.remove(&key);
-        super::remove_agent_runtime_receipt(&app, &key);
-        state.clear_agent_session_cache(&key);
-        if let Some(record) = records
+    tokio::task::spawn_blocking(move || {
+        // This command is polled whenever the members sidebar opens and refetched
+        // on every status event — load the per-row status inputs once, outside
+        // the locks, instead of hitting disk per row while holding them.
+        let personas = load_personas(&app).unwrap_or_default();
+        let global = load_global_agent_config(&app).unwrap_or_default();
+        let state = app.state::<AppState>();
+        let _transition = state
+            .managed_agent_runtime_transition
+            .lock()
+            .map_err(|e| e.to_string())?;
+        let _store = state
+            .managed_agents_store_lock
+            .lock()
+            .map_err(|e| e.to_string())?;
+        let mut records = load_managed_agents(&app)?;
+        let mut runtimes = state
+            .managed_agent_processes
+            .lock()
+            .map_err(|e| e.to_string())?;
+        let exited_keys: Vec<_> = runtimes
             .iter_mut()
-            .find(|record| record.pubkey.eq_ignore_ascii_case(&key.pubkey))
-        {
-            record.updated_at = crate::util::now_iso();
-            record.last_stopped_at = Some(record.updated_at.clone());
-            let status = status_for_with(
+            .filter_map(|(key, runtime)| match runtime.child.try_wait() {
+                Ok(Some(_)) | Err(_) => Some(key.clone()),
+                Ok(None) => None,
+            })
+            .collect();
+        let records_changed = !exited_keys.is_empty();
+        let mut statuses = Vec::new();
+        for key in exited_keys {
+            runtimes.remove(&key);
+            super::remove_agent_runtime_receipt(&app, &key);
+            state.clear_agent_session_cache(&key);
+            if let Some(record) = records
+                .iter_mut()
+                .find(|record| record.pubkey.eq_ignore_ascii_case(&key.pubkey))
+            {
+                record.updated_at = crate::util::now_iso();
+                record.last_stopped_at = Some(record.updated_at.clone());
+                let status = status_for_with(
+                    &app,
+                    record,
+                    &key,
+                    None,
+                    None,
+                    StatusInputs {
+                        personas: &personas,
+                        global: &global,
+                    },
+                );
+                emit_status(&app, &status);
+                statuses.push(status);
+            }
+        }
+        statuses.extend(runtimes.iter().filter_map(|(key, runtime)| {
+            let record = records
+                .iter()
+                .find(|record| record.pubkey.eq_ignore_ascii_case(&key.pubkey))?;
+            Some(status_for_with(
                 &app,
                 record,
-                &key,
-                None,
+                key,
+                Some(runtime),
                 None,
                 StatusInputs {
                     personas: &personas,
                     global: &global,
                 },
-            );
-            emit_status(&app, &status);
-            statuses.push(status);
+            ))
+        }));
+        drop(runtimes);
+        // Records are only mutated above when a runtime exited — skip the store
+        // rewrite on the common nothing-changed poll.
+        if records_changed {
+            save_managed_agents(&app, &records)?;
         }
-    }
-    statuses.extend(runtimes.iter().filter_map(|(key, runtime)| {
-        let record = records
-            .iter()
-            .find(|record| record.pubkey.eq_ignore_ascii_case(&key.pubkey))?;
-        Some(status_for_with(
-            &app,
-            record,
-            key,
-            Some(runtime),
-            None,
-            StatusInputs {
-                personas: &personas,
-                global: &global,
-            },
-        ))
-    }));
-    drop(runtimes);
-    // Records are only mutated above when a runtime exited — skip the store
-    // rewrite on the common nothing-changed poll.
-    if records_changed {
-        save_managed_agents(&app, &records)?;
-    }
-    Ok(statuses)
+        Ok(statuses)
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking failed: {e}"))?
 }
 
 pub(crate) fn start_managed_agent_runtime_pair_lazy(
     pubkey: String,
     relay_url: String,
+    admission: &super::AdmissionSnapshot,
     app: AppHandle,
 ) -> Result<ManagedAgentRuntimeStatus, String> {
-    start_pair(pubkey, relay_url, true, None, app)
+    start_pair(pubkey, relay_url, true, None, admission, app)
 }
 
 #[tauri::command]
@@ -233,24 +239,27 @@ pub fn start_managed_agent_runtime(
     relay_url: String,
     app: AppHandle,
 ) -> Result<ManagedAgentRuntimeStatus, String> {
-    start_managed_agent_runtime_pair_lazy(pubkey, relay_url, app)
+    let admission = super::AdmissionSnapshot::capture(&app.state::<AppState>());
+    start_managed_agent_runtime_pair_lazy(pubkey, relay_url, &admission, app)
 }
 
-fn start_pair(
+fn start_pair<R: tauri::Runtime>(
     pubkey: String,
     relay_url: String,
     lazy: bool,
     expected_updated_at: Option<&str>,
-    app: AppHandle,
+    admission: &super::AdmissionSnapshot,
+    app: AppHandle<R>,
 ) -> Result<ManagedAgentRuntimeStatus, String> {
     let state = app.state::<AppState>();
-    let _transition = state
+    let transition = state
         .managed_agent_runtime_transition
         .lock()
         .map_err(|e| e.to_string())?;
     if state.shutdown_started.load(Ordering::Acquire) {
         return Err("desktop shutdown has started".into());
     }
+    let admitted = transition.admit(admission, &relay_url)?;
     let _store = state
         .managed_agents_store_lock
         .lock()
@@ -283,7 +292,15 @@ fn start_pair(
         .lock()
         .ok()
         .map(|keys| keys.public_key().to_hex());
-    let mut process = spawn_agent_child(&app, record, &key.relay_url, lazy, owner.as_deref())?;
+    let mut process = spawn_agent_child(
+        &app,
+        record,
+        &key.relay_url,
+        &admitted,
+        lazy,
+        owner.as_deref(),
+        None,
+    )?;
     let now = crate::util::now_iso();
     let receipt = ManagedAgentRuntimeReceipt {
         key: key.clone(),
@@ -314,6 +331,14 @@ pub fn stop_managed_agent_runtime(
     pubkey: String,
     relay_url: String,
     app: AppHandle,
+) -> Result<ManagedAgentRuntimeStatus, String> {
+    stop_pair(pubkey, relay_url, app)
+}
+
+fn stop_pair<R: tauri::Runtime>(
+    pubkey: String,
+    relay_url: String,
+    app: AppHandle<R>,
 ) -> Result<ManagedAgentRuntimeStatus, String> {
     let state = app.state::<AppState>();
     let _transition = state
@@ -382,8 +407,23 @@ pub fn restart_managed_agent_runtime(
     relay_url: String,
     app: AppHandle,
 ) -> Result<ManagedAgentRuntimeStatus, String> {
-    stop_managed_agent_runtime(pubkey.clone(), relay_url.clone(), app.clone())?;
-    start_pair(pubkey, relay_url, true, None, app)
+    let stop_app = app.clone();
+    let (stop_pubkey, stop_relay) = (pubkey.clone(), relay_url.clone());
+    restart_pair(pubkey, relay_url, app, move || {
+        stop_pair(stop_pubkey, stop_relay, stop_app).map(drop)
+    })
+}
+
+fn restart_pair<R: tauri::Runtime>(
+    pubkey: String,
+    relay_url: String,
+    app: AppHandle<R>,
+    stop: impl FnOnce() -> Result<(), String>,
+) -> Result<ManagedAgentRuntimeStatus, String> {
+    // Captured before the stop, so a removal landing between the two refuses the start.
+    let admission = super::AdmissionSnapshot::capture(&app.state::<AppState>());
+    stop()?;
+    start_pair(pubkey, relay_url, true, None, &admission, app)
 }
 
 /// Probe whether this agent can operate on `requested_relay_url`.
@@ -463,6 +503,8 @@ pub async fn reconcile_managed_agent_runtimes(
 ) -> Result<Vec<ManagedAgentRuntimeStatus>, String> {
     use futures_util::{stream, StreamExt};
 
+    // Captured before the probes: a community removed while they run is refused.
+    let admission = super::AdmissionSnapshot::capture(&app.state::<AppState>());
     let records = load_managed_agents(&app)?;
     let mut jobs = Vec::new();
     for community in communities {
@@ -507,12 +549,15 @@ pub async fn reconcile_managed_agent_runtimes(
                         key.relay_url.clone(),
                         true,
                         Some(&record.updated_at),
+                        &admission,
                         app.clone(),
                     ) {
                         Ok(mut status) => {
                             status.requested_relay_url = Some(requested);
                             rows.push(status);
                         }
+                        // Removed mid-reconcile: nothing to start and nothing to report.
+                        Err(error) if error == super::RELAY_REMOVED_ERROR => {}
                         Err(error) => {
                             let mut status = status_for_with(
                                 &app,
@@ -571,6 +616,18 @@ pub async fn reconcile_managed_agent_runtimes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn list_managed_agent_runtimes_returns_a_future() {
+        fn assert_async_command<F, Fut>(_command: F)
+        where
+            F: Fn(AppHandle) -> Fut,
+            Fut: std::future::Future<Output = Result<Vec<ManagedAgentRuntimeStatus>, String>>,
+        {
+        }
+
+        assert_async_command(list_managed_agent_runtimes);
+    }
 
     fn payload(
         relay_url: &str,
@@ -714,3 +771,7 @@ mod tests {
         assert!(observer_lifecycle_key(&ready_with_error.pubkey, &ready_with_error).is_err());
     }
 }
+
+#[cfg(all(test, not(target_os = "windows")))]
+#[path = "runtime_commands_admission_tests.rs"]
+mod admission_tests;

@@ -49,6 +49,7 @@ import {
   defaultPersonScaleForSource,
   PERSON_SIZE_TIP,
   preferredCameraDevice,
+  presentAnimatedAvatar,
   randomBackdropColor,
 } from "@/features/profile/ui/AnimatedAvatarCapture.helpers";
 import {
@@ -63,7 +64,6 @@ import {
   normalizeHue,
 } from "@/features/profile/ui/ProfileAvatarEditor.utils";
 import { uploadMediaBytes } from "@/shared/api/tauri";
-import { buildAnimatedAvatarUrl } from "@/shared/lib/animatedAvatar";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { Spinner } from "@/shared/ui/spinner";
@@ -81,6 +81,8 @@ export function AnimatedAvatarCapture({
   showApplyButton = true,
   autoStartCamera = false,
   compactReview = false,
+  compactColorPicker = false,
+  stackCameraOptions = false,
 }: AnimatedAvatarCaptureProps) {
   const [phase, setPhase] = React.useState<CapturePhase>("idle");
   const [errorMessage, setErrorMessage] = React.useState<string | null>(null);
@@ -519,7 +521,9 @@ export function AnimatedAvatarCapture({
         setErrorMessage("The relay rejected the recording. Try again.");
         return false;
       }
-      onApply(buildAnimatedAvatarUrl(posterUpload.url, animationUpload.url));
+      onApply(
+        presentAnimatedAvatar(posterUpload, animationUpload, posterBytes),
+      );
       return true;
     } catch (error) {
       setErrorMessage(
@@ -795,14 +799,18 @@ export function AnimatedAvatarCapture({
   return (
     <div
       className={cn(
-        "relative grid content-start",
+        "relative grid",
         phase === "review"
           ? compactReview
-            ? "gap-4 pb-2 pt-0"
-            : "gap-7 pb-9 pt-2"
-          : "gap-4 pb-5",
+            ? "content-start gap-4 pb-2 pt-0"
+            : "content-start gap-7 pb-9 pt-2"
+          : stackCameraOptions && showCameraControls
+            ? "h-full min-h-0 grid-rows-[minmax(0,1fr)] content-stretch gap-0 pb-0"
+            : "content-start gap-4 pb-5",
+        stackCameraOptions && "min-h-full",
         phase === "review" && !showApplyButton && !compactReview && "mb-5",
-        isCustomPickerVisible && "min-h-[504px]",
+        isCustomPickerVisible &&
+          (compactColorPicker ? "min-h-[360px]" : "min-h-[504px]"),
       )}
       data-testid={`${testIdPrefix}-animated`}
     >
@@ -937,6 +945,7 @@ export function AnimatedAvatarCapture({
           }
           onSelectSource={selectCameraSource}
           showCameraPicker={showCameraPicker}
+          stackCameraOptions={stackCameraOptions}
           testIdPrefix={testIdPrefix}
         />
       ) : usePortal && inlineCaptureHelpText ? (
@@ -987,7 +996,8 @@ export function AnimatedAvatarCapture({
           setCustomValue(nextValue);
         }}
         saturation={customSaturation}
-        className="h-[504px]"
+        className={compactColorPicker ? undefined : "h-[504px]"}
+        compact={compactColorPicker}
         testIdPrefix={`${testIdPrefix}-animated`}
         value={customValue}
         visible={isCustomPickerVisible}

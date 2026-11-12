@@ -1,0 +1,83 @@
+import 'package:hooks_riverpod/hooks_riverpod.dart';
+
+import '../mentions/agent_identity_provider.dart';
+import '../profile/user_cache_provider.dart';
+import '../relay/relay.dart';
+import '../verified_profiles/verified_profile_directory.dart';
+import 'identity_names.dart';
+
+/// Client-wide naming facts. Views choose their own comparison context with
+/// [IdentityNameSources.scope]; never resolve against this whole cache.
+final identityNameSourcesProvider = Provider<IdentityNameSources>((ref) {
+  return IdentityNameSources(
+    profiles: ref.watch(userCacheProvider),
+    verifiedNames: {
+      for (final MapEntry(:key, :value)
+          in ref.watch(verifiedProfilesProvider).entries)
+        key: value.displayName,
+    },
+    agentPubkeys: ref.watch(knownAgentPubkeysProvider),
+    agentDisplayNames: ref.watch(agentDirectoryDisplayNamesProvider),
+    agentOwners: ref.watch(agentOwnersProvider).asData?.value ?? const {},
+    viewer: ref.watch(myPubkeyProvider)?.toLowerCase(),
+  );
+});
+
+/// Requests missing owner profiles for [names] after the current build.
+void loadIdentityNameOwners(Ref ref, IdentityNames names) {
+  final missing = names.missingOwnerProfiles();
+  if (missing.isEmpty) return;
+  Future.microtask(() {
+    if (ref.mounted) {
+      ref.read(userCacheProvider.notifier).preload(missing.toList());
+    }
+  });
+}
+
+/// Labels for a displayed collection with no channel context, such as search
+/// results or a picker's choices. [candidates] is that collection; keys
+/// outside it resolve against it plus themselves.
+///
+/// Uncached profiles are loaded for the identities in [shown] (default: all
+/// [candidates]). Pass [shown] when the context also holds identities that are
+/// only compared, such as a channel roster whose names another owner loads,
+/// so opening the view does not queue a profile read for every one of them.
+/// [sources] replaces the client-wide facts for views that adjust them.
+IdentityNames watchIdentityNames(
+  WidgetRef ref,
+  Iterable<String> candidates, {
+  Set<String> agentPubkeys = const {},
+  Map<String, String> fallbackNames = const {},
+  Iterable<String>? shown,
+  IdentityNameSources? sources,
+}) {
+  final IdentityNameSources facts =
+      sources ?? ref.watch<IdentityNameSources>(identityNameSourcesProvider);
+  final names = facts.scope(
+    candidates,
+    agentPubkeys: agentPubkeys,
+    fallbackNames: fallbackNames,
+  );
+  // A displayed identity's profile carries its owner hint, so load uncached
+  // candidates as well as their owners; channels load member profiles
+  // elsewhere, but a displayed collection has no other loader.
+  final loadFor = shown == null
+      ? names.candidates
+      : {
+          for (final key in shown)
+            if (names.candidates.contains(key.toLowerCase())) key.toLowerCase(),
+        };
+  final missing = {
+    for (final key in loadFor)
+      if (!facts.profiles.containsKey(key)) key,
+    ...names.missingOwnerProfiles(loadFor),
+  };
+  if (missing.isNotEmpty) {
+    Future.microtask(() {
+      if (ref.context.mounted) {
+        ref.read(userCacheProvider.notifier).preload(missing.toList());
+      }
+    });
+  }
+  return names;
+}

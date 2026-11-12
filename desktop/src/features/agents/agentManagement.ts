@@ -2,6 +2,7 @@ import type {
   AgentPersona,
   CreatePersonaInput,
   RespondToMode,
+  UpdatePersonaInput,
 } from "@/shared/api/types";
 
 export const AGENT_MANAGEMENT_REQUEST = "agent_management_request" as const;
@@ -146,5 +147,31 @@ export function createInputFromRequest(
   return {
     displayName: request.request.displayName,
     systemPrompt: request.request.systemPrompt,
+  };
+}
+
+/** Overlay an approved agent-requested edit without resetting unrequested behavior. */
+export function updateInputFromRequest(
+  request: Extract<AgentManagementRequest, { action: "update" }>,
+  current: UpdatePersonaInput,
+): UpdatePersonaInput {
+  const changes = request.request;
+  return {
+    ...current,
+    displayName: changes.displayName ?? current.displayName,
+    systemPrompt: changes.systemPrompt ?? current.systemPrompt,
+    runtime: changes.runtime ?? current.runtime,
+    provider: changes.provider ?? current.provider,
+    model: changes.model ?? current.model,
+    ...(changes.respondTo
+      ? {
+          behavior: {
+            respondTo: changes.respondTo,
+            respondToAllowlist: [],
+            parallelism: current.behavior?.parallelism,
+            sessionPolicy: current.behavior?.sessionPolicy,
+          },
+        }
+      : {}),
   };
 }

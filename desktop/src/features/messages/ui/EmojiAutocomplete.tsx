@@ -3,6 +3,10 @@ import * as React from "react";
 import type { EmojiSuggestion } from "@/features/messages/lib/useEmojiAutocomplete";
 import { cn } from "@/shared/lib/cn";
 import {
+  type ListVirtualizer,
+  VirtualizedList,
+} from "@/shared/ui/VirtualizedList";
+import {
   POPOVER_CUSTOM_ENTER_MOTION_CLASS,
   POPOVER_SHADOW_STYLE,
   POPOVER_SURFACE_CLASS,
@@ -11,6 +15,11 @@ import {
 type EmojiAutocompleteProps = {
   suggestions: EmojiSuggestion[];
   selectedIndex: number;
+  /**
+   * Whether the owning composer owns document focus. Composers that don't
+   * must not render suggestions — see MentionAutocomplete for the rationale.
+   */
+  composerOwnsFocus: boolean;
   onSelect: (suggestion: EmojiSuggestion) => void;
   position?: "above" | "below";
 };
@@ -18,19 +27,26 @@ type EmojiAutocompleteProps = {
 export const EmojiAutocomplete = React.memo(function EmojiAutocomplete({
   suggestions,
   selectedIndex,
+  composerOwnsFocus,
   onSelect,
   position = "above",
 }: EmojiAutocompleteProps) {
-  const listRef = React.useRef<HTMLDivElement>(null);
+  const listVirtualizerRef = React.useRef<ListVirtualizer | null>(null);
 
   React.useEffect(() => {
-    const activeItem = listRef.current?.children[selectedIndex] as
-      | HTMLElement
-      | undefined;
-    activeItem?.scrollIntoView({ block: "nearest" });
+    listVirtualizerRef.current?.scrollToIndex(selectedIndex, {
+      align: "auto",
+    });
   }, [selectedIndex]);
 
-  if (suggestions.length === 0) {
+  const handleVirtualizer = React.useCallback(
+    (virtualizer: ListVirtualizer) => {
+      listVirtualizerRef.current = virtualizer;
+    },
+    [],
+  );
+
+  if (!composerOwnsFocus || suggestions.length === 0) {
     return null;
   }
 
@@ -41,49 +57,59 @@ export const EmojiAutocomplete = React.memo(function EmojiAutocomplete({
         position === "below" ? "top-full mt-1" : "bottom-full mb-1",
       )}
     >
+      {/* biome-ignore lint/a11y/noStaticElementInteractions: pointer-only guard, no behavior of its own — an unprevented mousedown here blurs the editor, and the focus gate above would unmount the overlay mid-press. The scroll element lives inside VirtualizedList, but its mousedown bubbles to this wrapper and preventDefault acts on the same event, so scrollbar presses are covered too. */}
       <div
         className={cn(
-          "max-h-48 overflow-y-auto rounded-xl p-1",
+          "rounded-xl p-1",
           POPOVER_CUSTOM_ENTER_MOTION_CLASS,
           position === "below"
             ? "origin-top slide-in-from-top-1"
             : "origin-bottom slide-in-from-bottom-1",
           POPOVER_SURFACE_CLASS,
         )}
-        ref={listRef}
+        data-testid="emoji-autocomplete"
+        onMouseDown={(event) => event.preventDefault()}
         style={POPOVER_SHADOW_STYLE}
       >
-        {suggestions.map((suggestion, index) => (
-          <button
-            className={cn(
-              "flex w-full cursor-pointer items-center gap-2 rounded-lg px-3 py-1.5 text-left text-sm",
-              index === selectedIndex
-                ? "bg-accent text-accent-foreground"
-                : "text-popover-foreground hover:bg-accent/50",
-            )}
-            key={suggestion.id}
-            onMouseDown={(event) => {
-              event.preventDefault();
-              onSelect(suggestion);
-            }}
-            tabIndex={-1}
-            type="button"
-          >
-            {suggestion.url ? (
-              <img
-                alt={`:${suggestion.id}:`}
-                src={suggestion.url}
-                className="h-5 w-5 object-contain"
-                draggable={false}
-              />
-            ) : (
-              <span className="text-lg leading-none">{suggestion.native}</span>
-            )}
-            <span className="truncate text-muted-foreground">
-              :{suggestion.id}:
-            </span>
-          </button>
-        ))}
+        <VirtualizedList
+          className="max-h-48"
+          estimateSize={36}
+          getItemKey={(suggestion) => suggestion.id}
+          items={suggestions}
+          onVirtualizer={handleVirtualizer}
+          renderItem={(suggestion, index) => (
+            <button
+              className={cn(
+                "flex w-full cursor-pointer items-center gap-2 rounded-lg px-3 py-1.5 text-left text-sm",
+                index === selectedIndex
+                  ? "bg-accent text-accent-foreground"
+                  : "text-popover-foreground hover:bg-accent/50",
+              )}
+              onMouseDown={(event) => {
+                event.preventDefault();
+                onSelect(suggestion);
+              }}
+              tabIndex={-1}
+              type="button"
+            >
+              {suggestion.url ? (
+                <img
+                  alt={`:${suggestion.id}:`}
+                  src={suggestion.url}
+                  className="h-5 w-5 object-contain"
+                  draggable={false}
+                />
+              ) : (
+                <span className="text-lg leading-none">
+                  {suggestion.native}
+                </span>
+              )}
+              <span className="truncate text-muted-foreground">
+                :{suggestion.id}:
+              </span>
+            </button>
+          )}
+        />
       </div>
     </div>
   );

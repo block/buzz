@@ -14,7 +14,8 @@ export function coerceConfigValues(
   for (const [key, value] of Object.entries(config)) {
     const prop = properties[key] as Record<string, unknown> | undefined;
     const schemaType = prop?.type;
-    if ((schemaType === "integer" || schemaType === "number") && value !== "") {
+    if (schemaType === "integer" || schemaType === "number") {
+      if (value === "") continue;
       const num = Number(value);
       result[key] = Number.isNaN(num) ? value : num;
     } else if (schemaType === "boolean") {

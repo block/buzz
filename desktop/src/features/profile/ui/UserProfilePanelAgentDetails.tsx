@@ -116,11 +116,11 @@ export function AgentInstructionRow({
     trimmedInstruction.length > 0 && onOpenInstructions !== undefined;
   const rowContent = (
     <>
-      <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-muted/60">
-        <MessageSquare className="h-4 w-4 text-muted-foreground" />
-      </span>
+      <MessageSquare className="h-4 w-4 shrink-0 text-muted-foreground" />
       <div className="min-w-0 flex-1 text-left">
-        <div className="text-xs font-medium text-foreground">Instructions</div>
+        <div className="text-xs font-medium text-foreground">
+          Agent instructions
+        </div>
         {trimmedInstruction ? (
           canOpenInstructions ? (
             <span

@@ -1,10 +1,14 @@
 import type * as React from "react";
 
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
-import type { ChannelMember } from "@/shared/api/types";
+import type { ChannelMember, ChannelType } from "@/shared/api/types";
 
 export type ForumComposerProps = {
   channelId?: string | null;
+  /** Persistent source identity; changing it starts a new composer visit. */
+  draftKey?: string;
+  /** Known channel type for channel-backed composers; omitted uses fail closed. */
+  channelType?: ChannelType | null;
   /** Override mention source when no channel is available (e.g. Pulse). */
   members?: ChannelMember[];
   className?: string;

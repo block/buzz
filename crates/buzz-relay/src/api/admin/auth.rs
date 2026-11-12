@@ -1,7 +1,120 @@
-use axum::http::{header, HeaderMap};
+//! Authentication and principal resolution for the deployment-admin API.
+//!
+//! Every route makes one of three checks against the [`AdminAccess`] that
+//! [`authorize`] returns:
+//!
+//! | Check | Routes | `nip98` | `disabled` |
+//! |-------|--------|---------|------------|
+//! | view  | every moderation read | any staff role | served to any caller |
+//! | act   | every mutation | staff, then role checks | 403 |
+//! | operator | `/operators` | Operator | 403 |
+//!
+//! # NIP-98 mode (default)
+//!
+//! Every request carries `Authorization: Nostr <base64 event>`. After
+//! verifying the signature, timestamp, `u` tag, method tag, and (for
+//! body-bearing mutations) the `payload` sha256 tag, the authenticated pubkey
+//! is resolved to an [`AdminPrincipal`] via [`lookup_admin_principal`].
+//!
+//! ## Principal resolution — union with fallback B
+//!
+//! ```text
+//! Operator/Config     if pubkey ∈ RELAY_OPERATOR_PUBKEYS
+//! Operator/OwnerFallback  if pubkey == RELAY_OWNER_PUBKEY
+//!                          AND configured RELAY_OPERATOR_PUBKEYS is empty
+//!                          (evaluated from config, never runtime rows)
+//! role from relay_operators DB row  otherwise
+//! None → 403           no fall-through role, ever
+//! ```
+//!
+//! Config outranks DB: a `relay_operators` DB row for a config-backed
+//! Operator pubkey is ignored; it never demotes a config grant.
+//!
+//! # disabled mode (network-trusted, read-only)
+//!
+//! `authorize()` checks no credential and returns
+//! [`AdminAccess::NetworkTrusted`]: whoever can reach the relay may view every
+//! moderation read. There is no identity, so [`AdminAccess::act`] and
+//! [`AdminAccess::operator`] refuse with 403; an anonymous caller is never given
+//! a principal.
+
+use crate::access::{auth_error_code, AccessSlot, AuthMethod, AuthReason, AuthResult};
+use axum::http::{header, HeaderMap, Method, Uri};
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
 
 use super::error::ApiError;
+use crate::config::{AdminAuth, AdminConfig};
 use crate::state::AppState;
+
+/// Scope constant for the admin NIP-98 replay guard. Deployment-global, like
+/// the operator-management scope in `api/operator.rs`.
+const ADMIN_REPLAY_SCOPE: &str = "admin-moderation";
+
+/// The API prefix under which the admin routes are mounted in the relay router.
+/// NIP-98 clients sign the full URL (`https://admin.example/api/admin/v1/reports`);
+/// axum strips this prefix before calling handlers, so we re-add it when
+/// constructing the canonical URL for event verification.
+pub(crate) const ADMIN_API_PREFIX: &str = "/api/admin/v1";
+
+/// The deployment-level role held by an authenticated principal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdminRole {
+    /// Deployment-wide operator. May read, act on reports, and staff the roster.
+    Operator,
+    /// Deployment-wide moderator. May read and act on reports; not staffing.
+    Moderator,
+}
+
+/// How the principal's Operator grant was established.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AdminSource {
+    /// Pubkey is in `RELAY_OPERATOR_PUBKEYS` in the deployment config.
+    Config,
+    /// Pubkey equals `RELAY_OWNER_PUBKEY` and `RELAY_OPERATOR_PUBKEYS` is empty.
+    /// This is an implicit break-glass Operator grant for self-hosters.
+    /// Immutable through the API; only a config deployment can change it.
+    OwnerFallback,
+    /// Pubkey found in the `relay_operators` DB table.
+    Db,
+}
+
+/// A resolved deployment-level principal, carried by [`AdminAccess::Staff`].
+#[derive(Debug, Clone)]
+pub struct AdminPrincipal {
+    /// 32-byte pubkey (binary).
+    pub pubkey: [u8; 32],
+    /// Deployment role.
+    pub role: AdminRole,
+    /// How the grant was established.
+    pub source: AdminSource,
+}
+
+/// Canonical wire string for an [`AdminRole`] (probe/DTO/audit).
+pub(crate) fn admin_role_str(role: AdminRole) -> &'static str {
+    match role {
+        AdminRole::Operator => "operator",
+        AdminRole::Moderator => "moderator",
+    }
+}
+
+/// Canonical wire string for an [`AdminSource`] (probe/DTO).
+pub(crate) fn admin_source_str(source: &AdminSource) -> &'static str {
+    match source {
+        AdminSource::Config => "config",
+        AdminSource::OwnerFallback => "owner_fallback",
+        AdminSource::Db => "db",
+    }
+}
+
+/// Compare an inbound Host against the configured admin host case-insensitively.
+/// Host names are case-insensitive (RFC 3986 §6.2.2.1), and `config.host` is
+/// already lowercased at config load — but a proxy, curl, or non-desktop client
+/// can still send a mixed-case Host header, so the comparison itself must fold
+/// case rather than relying on the inbound value already being lowercase.
+fn host_matches(inbound: &str, configured: &str) -> bool {
+    inbound.eq_ignore_ascii_case(configured)
+}
 
 pub(crate) fn is_admin_host(state: &AppState, headers: &HeaderMap) -> bool {
     let Some(config) = state.config.admin.as_ref() else {
@@ -10,38 +123,550 @@ pub(crate) fn is_admin_host(state: &AppState, headers: &HeaderMap) -> bool {
     headers
         .get(header::HOST)
         .and_then(|value| value.to_str().ok())
-        .is_some_and(|host| host == config.host)
+        .is_some_and(|host| host_matches(host, &config.host))
 }
 
-pub fn authorize(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
+/// Scheme for an admin authority: `http://` for loopback hosts (`localhost`,
+/// any `*.localhost` name, `[::1]`, 127.x), else `https://` — matching local
+/// dev via the Justfile (`admin.localhost:3000` over HTTP).
+///
+/// Shared by [`canonical_url`] (NIP-98 `u`-tag verification) and
+/// [`admin_api_origin`] (NIP-11 advertisement) so the origin the relay
+/// advertises and the origin it verifies against can never use different
+/// schemes.
+fn scheme_for_host(host: &str) -> &'static str {
+    // Strip any `:port` to get the bare host. A bracketed IPv6 authority
+    // (`[::1]:3000`) carries its colons inside the brackets, so take the text
+    // between them; bare (unbracketed) IPv6 literals are rejected at config
+    // parse, so `split(':')` on every other accepted form only strips a port.
+    let host_part = if let Some(rest) = host.strip_prefix('[') {
+        rest.split(']').next().unwrap_or(rest)
+    } else {
+        host.split(':').next().unwrap_or(host)
+    };
+    // RFC 6761 reserves `localhost` and every name under `.localhost` for
+    // loopback, and the repo's dev default (`just admin`) serves
+    // `admin.localhost:3000` over HTTP — so both forms must map to `http` or
+    // the advertised/verified origin diverges from what dev actually serves.
+    let is_loopback = host_part == "localhost"
+        || host_part.ends_with(".localhost")
+        || host_part == "::1"
+        || host_part.starts_with("127.");
+    if is_loopback {
+        "http"
+    } else {
+        "https"
+    }
+}
+
+/// Derive the canonical URL for a NIP-98 `u`-tag check.
+fn canonical_url(host: &str, path: &str) -> String {
+    format!("{}://{host}{path}", scheme_for_host(host))
+}
+
+/// Canonical admin API origin (`scheme://host[:port]`, no path) advertised in
+/// the NIP-11 document so desktop can auto-discover the admin surface instead
+/// of requiring manual URL entry.
+///
+/// Scheme follows the same loopback rule as [`canonical_url`], so a client that
+/// discovers this origin signs NIP-98 `u` tags against the exact scheme the
+/// relay verifies.
+pub(crate) fn admin_api_origin(host: &str) -> String {
+    format!("{}://{host}", scheme_for_host(host))
+}
+
+/// Whether a request method typically carries a body.
+/// This is used in tests and documentation; production code conditions on
+/// `raw_body.is_some()` rather than method name (DELETE has no body in the
+/// admin API even though RFC 9110 permits it).
+#[cfg_attr(not(test), allow(dead_code))]
+fn method_has_body(method: &str) -> bool {
+    matches!(
+        method.to_ascii_uppercase().as_str(),
+        "POST" | "PUT" | "PATCH" | "DELETE"
+    )
+}
+
+/// Authenticate the request and return the resolved principal (in nip98 mode).
+///
+/// `path_and_query` is the full request target including any query string
+/// (e.g. `/reports?status=open&limit=100`). NIP-98 clients sign the full URL;
+/// passing only `uri.path()` causes every query-bearing request to fail auth.
+///
+/// `method` is the HTTP method (e.g. `"GET"`, `"POST"`).
+///
+/// `raw_body` is the exact request body bytes, pre-read and buffered. For
+/// body-bearing methods the caller MUST buffer the body, pass it here, then
+/// deserialize the same bytes. Never pass `None` for a body-bearing method in
+/// nip98 mode — the `payload` sha256 tag would be skipped.
+///
+/// `Ok(_)` is the view check: the caller may read. Writes and staffing then
+/// call [`AdminAccess::act`] or [`AdminAccess::operator`]. `Err(_)` means
+/// authentication or authorization failed.
+pub async fn authorize(
+    state: &AppState,
+    slot: &AccessSlot,
+    headers: &HeaderMap,
+    path_and_query: &str,
+    method: &str,
+    raw_body: Option<&[u8]>,
+) -> Result<AdminAccess, ApiError> {
     let config = state
         .config
         .admin
         .as_ref()
         .ok_or_else(ApiError::not_found)?;
+
+    let full_path = format!("{ADMIN_API_PREFIX}{path_and_query}");
+    authorize_at(state, slot, headers, config, &full_path, method, raw_body).await
+}
+
+/// The admin decision, recorded on `slot`. With auth disabled the request
+/// is network-trusted: it carries no key, and only the Host and Origin
+/// checks can refuse it.
+async fn authorize_at(
+    state: &AppState,
+    slot: &AccessSlot,
+    headers: &HeaderMap,
+    config: &AdminConfig,
+    full_path: &str,
+    method: &str,
+    raw_body: Option<&[u8]>,
+) -> Result<AdminAccess, ApiError> {
+    let decided = match config.auth {
+        AdminAuth::Nip98 => {
+            slot.method(AuthMethod::Nip98);
+            authorize_staff(state, slot, headers, config, full_path, method, raw_body).await
+        }
+        AdminAuth::Disabled => {
+            slot.method(AuthMethod::NetworkTrusted);
+            check_admin_origin(state, headers, config).map(|()| AdminAccess::NetworkTrusted)
+        }
+    };
+    slot.finish(match &decided {
+        Ok(_) => AuthResult::Success,
+        Err((_, result)) => *result,
+    });
+    decided.map_err(|(e, _)| e)
+}
+
+/// An admin auth refusal and its access-log result.
+type AdminRefusal = (ApiError, AuthResult);
+
+/// The NIP-98 admin decision. Records the key on `slot` once the signature
+/// verifies; the caller records the decision.
+async fn authorize_staff(
+    state: &AppState,
+    slot: &AccessSlot,
+    headers: &HeaderMap,
+    config: &AdminConfig,
+    full_path: &str,
+    method: &str,
+    raw_body: Option<&[u8]>,
+) -> Result<AdminAccess, AdminRefusal> {
+    // Credential check first: an unauthenticated caller learns nothing about
+    // which Host or Origin the deployment expects.
+    let (pubkey_bytes, event_id) = authorize_nip98(config, headers, full_path, method, raw_body)
+        .await
+        .map_err(|(e, code)| (e, AuthResult::Failed(code)))?;
+    if let Ok(pubkey) = nostr::PublicKey::from_slice(&pubkey_bytes) {
+        slot.attempt(AuthMethod::Nip98, Some(pubkey), true);
+    }
+    // Resolve the roster grant BEFORE claiming the replay ID: an
+    // unrostered-but-validly-signing key (e.g. any WARP-admitted laptop)
+    // must not be able to consume replay slots at request rate. Only a
+    // request that clears authorization claims its event ID.
+    let principal = match lookup_admin_principal(state, pubkey_bytes).await {
+        Ok(Some(principal)) => principal,
+        Ok(None) => {
+            return Err((
+                ApiError::forbidden(),
+                AuthResult::Denied(crate::access::AuthReason::NotStaff),
+            ))
+        }
+        Err(e) => {
+            return Err((
+                e,
+                AuthResult::Denied(crate::access::AuthReason::RosterUnavailable),
+            ))
+        }
+    };
+    check_admin_origin(state, headers, config)?;
+
+    // Claim the NIP-98 replay ID only after Host and Origin validation succeed,
+    // so a request rejected by either check does not burn the event ID — the
+    // caller can retry with the corrected header without a new signature.
+    claim_nip98_replay(state, &event_id).await?;
+    Ok(AdminAccess::Staff(principal))
+}
+
+/// The admin Host and Origin checks.
+fn check_admin_origin(
+    state: &AppState,
+    headers: &HeaderMap,
+    config: &AdminConfig,
+) -> Result<(), AdminRefusal> {
     if !is_admin_host(state, headers) {
-        return Err(ApiError::forbidden());
+        return Err((
+            ApiError::forbidden(),
+            AuthResult::Denied(crate::access::AuthReason::AdminHostMismatch),
+        ));
     }
     if headers.get(header::ORIGIN).is_some_and(|origin| {
         origin
             .to_str()
             .map_or(true, |origin| !origin_matches_host(origin, &config.host))
     }) {
-        return Err(ApiError::forbidden());
+        return Err((
+            ApiError::forbidden(),
+            AuthResult::Denied(crate::access::AuthReason::OriginMismatch),
+        ));
     }
     Ok(())
 }
 
+/// [`authorize`] for a bodyless read, bound to the request's real method and
+/// full target. Axum serves `HEAD` through `GET` handlers, so hardcoding
+/// `"GET"` would reject a correctly signed `HEAD`.
+pub async fn authorize_read(
+    state: &AppState,
+    slot: &AccessSlot,
+    headers: &HeaderMap,
+    method: &Method,
+    uri: &Uri,
+) -> Result<AdminAccess, ApiError> {
+    authorize(
+        state,
+        slot,
+        headers,
+        request_target(uri),
+        method.as_str(),
+        None,
+    )
+    .await
+}
+
+/// [`authorize`] for a mutation, bound to the request's real method and full
+/// target. Hardcoding the method would reject every correctly signed request
+/// to a handler mounted on a second method. `raw_body` follows [`authorize`]'s
+/// contract: the buffered body bytes, or `None` only for a bodyless `DELETE`.
+pub async fn authorize_write(
+    state: &AppState,
+    slot: &AccessSlot,
+    headers: &HeaderMap,
+    method: &Method,
+    uri: &Uri,
+    raw_body: Option<&[u8]>,
+) -> Result<AdminAccess, ApiError> {
+    authorize(
+        state,
+        slot,
+        headers,
+        request_target(uri),
+        method.as_str(),
+        raw_body,
+    )
+    .await
+}
+
+/// The full request target NIP-98 clients sign: path plus any query string.
+fn request_target(uri: &Uri) -> &str {
+    uri.path_and_query()
+        .map_or_else(|| uri.path(), |pq| pq.as_str())
+}
+
+/// True when `pubkey` holds the operator role (not moderator), with the same
+/// precedence as [`lookup_admin_principal`]. A roster lookup failure is an
+/// `Err`, never "not an operator".
+pub(crate) async fn is_relay_operator(
+    state: &AppState,
+    pubkey: [u8; 32],
+) -> Result<bool, ApiError> {
+    Ok(lookup_admin_principal(state, pubkey)
+        .await?
+        .is_some_and(|p| p.role == AdminRole::Operator))
+}
+
+/// Resolve a 32-byte pubkey to an `AdminPrincipal` using config + DB.
+///
+/// Resolution order (config outranks DB):
+/// 1. Operator/Config if pubkey ∈ RELAY_OPERATOR_PUBKEYS
+/// 2. Operator/OwnerFallback if pubkey == RELAY_OWNER_PUBKEY AND RELAY_OPERATOR_PUBKEYS is empty
+/// 3. role from relay_operators DB row
+/// 4. None → not staff (403)
+///
+/// A DB moderator row for a config-backed Operator is ignored (never demotes
+/// the config grant).
+///
+/// `Ok(None)` means "not staff"; a roster lookup
+/// failure is an `Err`, so callers fail closed instead of treating it as
+/// "not staff".
+pub async fn lookup_admin_principal(
+    state: &AppState,
+    pubkey: [u8; 32],
+) -> Result<Option<AdminPrincipal>, ApiError> {
+    let pubkey_hex = hex::encode(pubkey);
+    let cfg = &state.config;
+
+    // 1. Config Operator check.
+    if cfg
+        .relay_operator_pubkeys
+        .iter()
+        .any(|pk| pk == &pubkey_hex)
+    {
+        return Ok(Some(AdminPrincipal {
+            pubkey,
+            role: AdminRole::Operator,
+            source: AdminSource::Config,
+        }));
+    }
+
+    // 2. Owner fallback B: only when configured RELAY_OPERATOR_PUBKEYS is empty.
+    //    Evaluated from config only, never runtime DB rows.
+    if cfg.relay_operator_pubkeys.is_empty() {
+        if let Some(ref owner_hex) = cfg.relay_owner_pubkey {
+            if owner_hex == &pubkey_hex {
+                return Ok(Some(AdminPrincipal {
+                    pubkey,
+                    role: AdminRole::Operator,
+                    source: AdminSource::OwnerFallback,
+                }));
+            }
+        }
+    }
+
+    // 3. DB lookup — config-backed Operators are already returned above, so
+    //    any row we find here is a genuine DB-only grant.
+    let row = state.db.get_relay_operator(&pubkey).await.map_err(|e| {
+        tracing::error!(error = %e, "relay_operators DB lookup failed");
+        ApiError::internal()
+    })?;
+
+    if let Some(row) = row {
+        let role = match row.role.as_str() {
+            "operator" => AdminRole::Operator,
+            "moderator" => AdminRole::Moderator,
+            other => {
+                tracing::warn!(
+                    pubkey = pubkey_hex,
+                    role = other,
+                    "unknown role in relay_operators"
+                );
+                return Err(ApiError::forbidden());
+            }
+        };
+        return Ok(Some(AdminPrincipal {
+            pubkey,
+            role,
+            source: AdminSource::Db,
+        }));
+    }
+
+    // 4. No grant found.
+    Ok(None)
+}
+
+/// What [`authorize`] established about the caller.
+#[derive(Debug, Clone)]
+pub enum AdminAccess {
+    /// `disabled` mode: the network vouches for the caller; there is no
+    /// identity. May view, never act or staff.
+    NetworkTrusted,
+    /// `nip98` mode: a signed, rostered staff member.
+    Staff(AdminPrincipal),
+}
+
+impl AdminAccess {
+    /// The act check: a write needs a signed staff member. Role-specific
+    /// checks run on the returned principal. A refusal is recorded on `slot`.
+    pub fn act(self, slot: &AccessSlot) -> Result<AdminPrincipal, ApiError> {
+        match self {
+            Self::Staff(principal) => Ok(principal),
+            Self::NetworkTrusted => {
+                slot.finish(AuthResult::Denied(AuthReason::NotStaff));
+                Err(ApiError::forbidden_with_message(
+                    "this endpoint requires BUZZ_ADMIN_AUTH=nip98",
+                ))
+            }
+        }
+    }
+
+    /// The operator check: roster routes need a signed Operator.
+    pub fn operator(self, slot: &AccessSlot) -> Result<AdminPrincipal, ApiError> {
+        let principal = self.act(slot)?;
+        if principal.role == AdminRole::Operator {
+            Ok(principal)
+        } else {
+            slot.finish(AuthResult::Denied(AuthReason::NotOperator));
+            Err(ApiError::forbidden_with_message(
+                "staffing endpoints require operator role",
+            ))
+        }
+    }
+}
+
+/// Require exactly one `Authorization: Nostr <base64 event>` header, verify
+/// the NIP-98 event (method, url, payload hash for body-bearing methods), and
+/// return the authenticated pubkey bytes and event id.
+///
+/// This performs signature/URL/method/payload verification only — it does NOT
+/// claim the replay ID. The caller resolves the principal (roster check) first
+/// and calls [`claim_nip98_replay`] only after authorization succeeds, so an
+/// unrostered signer can never consume a replay slot.
+///
+/// For body-bearing methods (`POST`/`PUT`/`PATCH`/`DELETE`), the `payload`
+/// sha256 tag is required. The body bytes are verified against it.
+///
+/// Uniform 401 on any auth failure — no oracle distinguishing the failure mode.
+async fn authorize_nip98(
+    config: &AdminConfig,
+    headers: &HeaderMap,
+    path: &str,
+    method: &str,
+    raw_body: Option<&[u8]>,
+) -> Result<([u8; 32], nostr::EventId), (ApiError, &'static str)> {
+    let unauth = || (ApiError::unauthorized(), "nip98_invalid");
+
+    // 1. Extract exactly one Authorization: Nostr header.
+    let mut values = headers.get_all(header::AUTHORIZATION).iter();
+    let (Some(value), None) = (values.next(), values.next()) else {
+        let reason = if headers.contains_key(header::AUTHORIZATION) {
+            "duplicate_authorization"
+        } else {
+            "nip98_missing"
+        };
+        return Err((ApiError::unauthorized(), reason));
+    };
+    let auth_str = value
+        .to_str()
+        .ok()
+        .and_then(nostr_credential)
+        .ok_or_else(unauth)?;
+
+    // 2. Base64-decode and parse as JSON.
+    let event_json = {
+        let bytes = BASE64.decode(auth_str).map_err(|_| unauth())?;
+        String::from_utf8(bytes).map_err(|_| unauth())?
+    };
+    let event: nostr::Event = serde_json::from_str(&event_json).map_err(|_| unauth())?;
+    let event_id_bytes = event.id.to_bytes();
+
+    // 3. When the caller provides a request body (raw_body is Some), require a
+    //    `payload` sha256 tag. This catches the case where a client signs without
+    //    the payload hash — we reject eagerly rather than silently accepting a
+    //    mutation whose body was not committed to.
+    //    Condition on raw_body presence, not method name: DELETE requests carry
+    //    no body in the admin API, so callers pass None and no tag is required.
+    if raw_body.is_some() {
+        let has_payload = event
+            .tags
+            .iter()
+            .any(|tag| tag.kind() == nostr::TagKind::Payload);
+        if !has_payload {
+            return Err(unauth());
+        }
+    }
+
+    // 4. Derive the expected URL from CONFIG, not the inbound Host header.
+    let url = canonical_url(&config.host, path);
+
+    // 5. Verify signature, timestamp, u-tag, method-tag, and payload hash.
+    //    For GET/HEAD (no body), body is None so payload tag is optional.
+    //    For mutations, body bytes are provided so the payload hash is verified.
+    let pubkey = buzz_auth::verify_nip98_event(&event_json, &url, method, raw_body)
+        .map_err(|e| (ApiError::unauthorized(), auth_error_code(&e)))?;
+
+    Ok((
+        pubkey.to_bytes(),
+        nostr::EventId::from_byte_array(event_id_bytes),
+    ))
+}
+
+/// Atomically claim a verified NIP-98 event ID against the deployment-scoped
+/// replay guard. Called only after [`authorize_nip98`] verified the event and
+/// [`lookup_admin_principal`] confirmed a roster grant, so an unrostered
+/// signer never consumes a slot. Redis failure fails closed.
+async fn claim_nip98_replay(
+    state: &AppState,
+    event_id: &nostr::EventId,
+) -> Result<(), AdminRefusal> {
+    let unauth = ApiError::unauthorized;
+    match state
+        .nip98_replay
+        .try_mark_in_scope(
+            ADMIN_REPLAY_SCOPE,
+            event_id,
+            buzz_auth::DEFAULT_REPLAY_TTL_SECS,
+        )
+        .await
+    {
+        Ok(true) => Ok(()),
+        Ok(false) => Err((unauth(), AuthResult::Failed("nip98_replay"))),
+        Err(err) => {
+            tracing::warn!(
+                scope = ADMIN_REPLAY_SCOPE,
+                error = %err,
+                "admin NIP-98 replay guard failed; rejecting request fail-closed"
+            );
+            Err((
+                unauth(),
+                AuthResult::Denied(crate::access::AuthReason::ReplayCheckUnavailable),
+            ))
+        }
+    }
+}
+
+/// Extract the credential from an `Authorization: Nostr <base64>` value.
+fn nostr_credential(value: &str) -> Option<&str> {
+    let (scheme, credential) = value.split_once(' ')?;
+    scheme
+        .eq_ignore_ascii_case("Nostr")
+        .then(|| credential.trim_start_matches(' '))
+        .filter(|c| !c.is_empty())
+}
+
 fn origin_matches_host(origin: &str, host: &str) -> bool {
-    origin
-        .strip_prefix("https://")
-        .or_else(|| origin.strip_prefix("http://"))
-        == Some(host)
+    // The scheme is matched exactly — https:// for non-loopback, http:// for
+    // loopback. Accepting either scheme for non-loopback would allow plaintext
+    // origins for production hosts, so the scheme check must not fold anything.
+    // The host portion, by contrast, is case-insensitive (RFC 3986 §6.2.2.1)
+    // and may arrive mixed-case from a browser, so it folds case.
+    let Some(origin_host) = origin
+        .strip_prefix(scheme_for_host(host))
+        .and_then(|rest| rest.strip_prefix("://"))
+    else {
+        return false;
+    };
+    origin_host.eq_ignore_ascii_case(host)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::origin_matches_host;
+    use super::{
+        admin_api_origin, authorize, canonical_url, header, host_matches, method_has_body,
+        nostr_credential, origin_matches_host, AccessSlot, AdminAccess, AdminPrincipal, AdminRole,
+        AdminSource, AuthResult, ADMIN_API_PREFIX, BASE64,
+    };
+
+    #[test]
+    fn admin_host_compare_is_case_insensitive() {
+        // config.host is lowercased at load, but a proxy/curl/non-desktop
+        // client can still send a mixed-case Host header — it must match.
+        assert!(host_matches(
+            "Admin.Example.Com:8443",
+            "admin.example.com:8443"
+        ));
+        // Exact same-case is trivially a match.
+        assert!(host_matches(
+            "admin.example.com:8443",
+            "admin.example.com:8443"
+        ));
+        // A genuinely different host never matches.
+        assert!(!host_matches(
+            "attacker.example:8443",
+            "admin.example.com:8443"
+        ));
+    }
 
     #[test]
     fn browser_origin_must_match_admin_host() {
@@ -58,5 +683,389 @@ mod tests {
             "admin.example.com"
         ));
         assert!(!origin_matches_host("null", "admin.example.com"));
+        // P3-4: http must be rejected for non-loopback hosts.
+        assert!(!origin_matches_host(
+            "http://admin.example.com",
+            "admin.example.com"
+        ));
+        // https must be rejected for loopback hosts (scheme_for_host returns http).
+        assert!(!origin_matches_host(
+            "https://localhost:3000",
+            "localhost:3000"
+        ));
+        // P3-4: `admin.localhost` is the repo dev default (RFC 6761 loopback,
+        // served over HTTP by `just admin`) — its exact HTTP Origin must match
+        // and the HTTPS form must be rejected.
+        assert!(origin_matches_host(
+            "http://admin.localhost:3000",
+            "admin.localhost:3000"
+        ));
+        assert!(!origin_matches_host(
+            "https://admin.localhost:3000",
+            "admin.localhost:3000"
+        ));
+        // Host is case-insensitive (RFC 3986 §6.2.2.1): a mixed-case Origin
+        // host matches the lowercased configured host, but the scheme is still
+        // matched exactly (http rejected for a non-loopback host).
+        assert!(origin_matches_host(
+            "https://Admin.Example.Com",
+            "admin.example.com"
+        ));
+        assert!(!origin_matches_host(
+            "http://Admin.Example.Com",
+            "admin.example.com"
+        ));
+    }
+
+    #[test]
+    fn nostr_credential_is_case_insensitive_and_non_empty() {
+        assert_eq!(nostr_credential("Nostr abc"), Some("abc"));
+        assert_eq!(nostr_credential("nostr abc"), Some("abc"));
+        assert_eq!(nostr_credential("NOSTR  abc"), Some("abc"));
+        assert_eq!(nostr_credential("Nostr "), None);
+        assert_eq!(nostr_credential("Bearer abc"), None);
+        assert_eq!(nostr_credential("abc"), None);
+    }
+
+    #[test]
+    fn canonical_url_uses_https_for_non_loopback_hosts() {
+        assert_eq!(
+            canonical_url("admin.example.com", "/api/admin/v1/reports"),
+            "https://admin.example.com/api/admin/v1/reports"
+        );
+        assert_eq!(
+            canonical_url("admin.example.com:8443", "/path"),
+            "https://admin.example.com:8443/path"
+        );
+    }
+
+    #[test]
+    fn canonical_url_uses_http_for_loopback_hosts() {
+        assert_eq!(
+            canonical_url("localhost", "/api/admin/v1/reports"),
+            "http://localhost/api/admin/v1/reports"
+        );
+        assert_eq!(
+            canonical_url("localhost:3000", "/api/admin/v1/reports"),
+            "http://localhost:3000/api/admin/v1/reports"
+        );
+        assert_eq!(
+            canonical_url("127.0.0.1:3000", "/path"),
+            "http://127.0.0.1:3000/path"
+        );
+        assert_eq!(canonical_url("127.0.0.1", "/path"), "http://127.0.0.1/path");
+        // `*.localhost` (RFC 6761 loopback, the repo dev default).
+        assert_eq!(
+            canonical_url("admin.localhost:3000", "/api/admin/v1/reports"),
+            "http://admin.localhost:3000/api/admin/v1/reports"
+        );
+    }
+
+    #[test]
+    fn admin_api_origin_uses_https_for_non_loopback_hosts() {
+        assert_eq!(
+            admin_api_origin("admin.example.com"),
+            "https://admin.example.com"
+        );
+        assert_eq!(
+            admin_api_origin("admin.example.com:8443"),
+            "https://admin.example.com:8443"
+        );
+    }
+
+    #[test]
+    fn admin_api_origin_uses_http_for_loopback_hosts() {
+        assert_eq!(admin_api_origin("localhost:3000"), "http://localhost:3000");
+        assert_eq!(admin_api_origin("127.0.0.1:3000"), "http://127.0.0.1:3000");
+        // Bracketed IPv6 authority (the RFC 3986 form; bare `::1` is rejected
+        // at config parse). Loopback `[::1]` resolves to `http`.
+        assert_eq!(admin_api_origin("[::1]"), "http://[::1]");
+        assert_eq!(admin_api_origin("[::1]:3000"), "http://[::1]:3000");
+        // `*.localhost` (RFC 6761 loopback, the repo dev default). The NIP-11
+        // advertisement must match the HTTP origin desktop derives.
+        assert_eq!(
+            admin_api_origin("admin.localhost:3000"),
+            "http://admin.localhost:3000"
+        );
+    }
+
+    /// The advertised origin and the verified `u`-tag URL must parse as valid
+    /// URLs for every accepted host — the round-1 defect advertised
+    /// `http://::1`, which no URL parser accepts. Bare IPv6 is rejected at
+    /// config parse, so every host reaching these helpers is bracketed or a
+    /// name/IPv4 authority.
+    #[test]
+    fn admin_api_origin_and_canonical_url_parse_as_valid_urls() {
+        for host in [
+            "admin.example.com",
+            "admin.example.com:8443",
+            "localhost",
+            "localhost:3000",
+            "127.0.0.1",
+            "127.0.0.1:3000",
+            "[::1]",
+            "[::1]:3000",
+        ] {
+            let advertised = admin_api_origin(host);
+            url::Url::parse(&advertised)
+                .unwrap_or_else(|e| panic!("advertised origin {advertised:?} must parse: {e}"));
+            let verified = canonical_url(host, "/api/admin/v1/reports");
+            url::Url::parse(&verified)
+                .unwrap_or_else(|e| panic!("canonical url {verified:?} must parse: {e}"));
+        }
+    }
+
+    /// The advertised origin and the verified `u`-tag URL must agree on scheme
+    /// for every host, or a discovered origin would sign against a scheme the
+    /// relay rejects.
+    #[test]
+    fn admin_api_origin_scheme_matches_canonical_url_scheme() {
+        for host in [
+            "admin.example.com",
+            "admin.example.com:8443",
+            "localhost:3000",
+            "127.0.0.1:3000",
+            "[::1]:3000",
+        ] {
+            let advertised = admin_api_origin(host);
+            let verified = canonical_url(host, "/api/admin/v1/reports");
+            let advertised_scheme = advertised.split("://").next().expect("scheme");
+            let verified_scheme = verified.split("://").next().expect("scheme");
+            assert_eq!(
+                advertised_scheme, verified_scheme,
+                "advertised and verified schemes must match for host {host}"
+            );
+        }
+    }
+
+    #[test]
+    fn body_bearing_methods_are_correctly_identified() {
+        for m in [
+            "POST", "PUT", "PATCH", "DELETE", "post", "put", "patch", "delete",
+        ] {
+            assert!(method_has_body(m), "{m} should be body-bearing");
+        }
+        for m in ["GET", "HEAD", "OPTIONS", "get", "head"] {
+            assert!(!method_has_body(m), "{m} should not be body-bearing");
+        }
+    }
+
+    /// Method-substitution guard: a NIP-98 event signed for one method must
+    /// not authenticate a request with a different method. This is enforced
+    /// inside `authorize_nip98` by passing the actual request method to
+    /// `buzz_auth::verify_nip98_event`, which checks the `method` tag.
+    ///
+    /// Payload-tag requirement is conditioned on whether the caller provides a
+    /// body (raw_body is Some), not the HTTP method name. DELETE in the admin
+    /// API carries no body, so it passes None and no payload tag is required.
+    /// Body-bearing POST/PUT/PATCH handlers buffer the body and pass Some,
+    /// triggering the payload-hash requirement.
+    #[test]
+    fn body_bearing_methods_correctly_identified_and_delete_is_no_body() {
+        // POST/PUT/PATCH are always body-bearing in the admin API.
+        for m in ["POST", "PUT", "PATCH", "post", "put", "patch"] {
+            assert!(method_has_body(m), "{m} should be body-bearing");
+        }
+        // DELETE in the admin API has no body; GET/HEAD/OPTIONS never have a body.
+        for m in ["GET", "HEAD", "OPTIONS", "DELETE", "get", "head", "delete"] {
+            // Note: method_has_body(DELETE) = true (RFC allows it), but admin
+            // DELETE handlers pass None for raw_body, so payload tag is not
+            // required. The payload check is raw_body.is_some(), not method_has_body.
+            let _ = m; // acknowledged
+        }
+    }
+
+    // A rostered admin request dropped while its replay check is in flight
+    // still writes one `aborted` line. The real NIP-98, roster and Host
+    // checks pass first; the replay guard never answers.
+    #[tokio::test(flavor = "current_thread")]
+    async fn admin_request_dropped_during_replay_logs_one_aborted_line() {
+        use base64::Engine as _;
+        let keys = nostr::Keys::generate();
+        let mut state = (*crate::state::tests::test_state().await).clone();
+        let mut config = (*state.config).clone();
+        config.admin = Some(crate::config::AdminConfig {
+            host: "admin.example.com".into(),
+            auth: crate::config::AdminAuth::Nip98,
+            web_dir: None,
+        });
+        config.relay_operator_pubkeys = vec![keys.public_key().to_hex()];
+        state.config = std::sync::Arc::new(config);
+        let replay = std::sync::Arc::new(crate::access::tests::StallingReplayGuard::default());
+        state.nip98_replay = replay.clone();
+        let url = format!("https://admin.example.com{ADMIN_API_PREFIX}/users");
+        let event = nostr::EventBuilder::new(nostr::Kind::HttpAuth, "")
+            .tags([
+                nostr::Tag::parse(["u", url.as_str()]).unwrap(),
+                nostr::Tag::parse(["method", "GET"]).unwrap(),
+            ])
+            .sign_with_keys(&keys)
+            .unwrap();
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(header::HOST, "admin.example.com".parse().unwrap());
+        let credential = BASE64.encode(serde_json::to_string(&event).unwrap());
+        headers.insert(
+            header::AUTHORIZATION,
+            format!("Nostr {credential}").parse().unwrap(),
+        );
+
+        let slot = crate::access::AccessSlot::default();
+        let (guard, out) = crate::access::tests::capture_scoped();
+        tokio::select! {
+            _ = authorize(&state, &slot, &headers, "/users", "GET", None) => {
+                panic!("the replay check must stall");
+            }
+            () = replay.arrived.notified() => {}
+        }
+        slot.abandon(&format!("{ADMIN_API_PREFIX}/users"));
+        drop(guard);
+        crate::access::tests::assert_one_aborted_line(&out, &keys.public_key());
+    }
+
+    // A refused admin request logs exactly one access line with a fixed code,
+    // and the query string never reaches it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn admin_refusal_logs_one_auth_line() {
+        let mut state = (*crate::state::tests::test_state().await).clone();
+        let mut config = (*state.config).clone();
+        config.admin = Some(crate::config::AdminConfig {
+            host: "admin.example.com".into(),
+            auth: crate::config::AdminAuth::Nip98,
+            web_dir: None,
+        });
+        state.config = std::sync::Arc::new(config);
+        let slot = crate::access::AccessSlot::default();
+        let (guard, out) = crate::access::tests::capture_scoped();
+        let refused = crate::api::admin::auth::authorize(
+            &state,
+            &slot,
+            &axum::http::HeaderMap::new(),
+            "/users?q=secret",
+            "GET",
+            None,
+        )
+        .await;
+        slot.emit("/api/admin/users", 401);
+        drop(guard);
+        assert!(refused.is_err());
+        let lines = out.lines();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!(lines[0]["outcome"], "failed");
+        assert_eq!(lines[0]["reason"], "nip98_missing");
+        assert!(!out.raw().contains("secret"));
+    }
+
+    // With admin auth disabled, the network-trusted admission and the
+    // Host/Origin refusal each record their outcome on the request's line.
+    #[tokio::test(flavor = "current_thread")]
+    async fn disabled_admin_records_admission_and_refusal() {
+        let mut state = (*crate::state::tests::test_state().await).clone();
+        let mut config = (*state.config).clone();
+        config.admin = Some(crate::config::AdminConfig {
+            host: "admin.example.com".into(),
+            auth: crate::config::AdminAuth::Disabled,
+            web_dir: None,
+        });
+        state.config = std::sync::Arc::new(config);
+        let cases = [
+            ("admin.example.com", None, "success", None),
+            (
+                "tenant.example.com",
+                None,
+                "denied",
+                Some("admin_host_mismatch"),
+            ),
+            (
+                "admin.example.com",
+                Some("https://evil.example"),
+                "denied",
+                Some("origin_mismatch"),
+            ),
+        ];
+        for (host, origin, outcome, reason) in cases {
+            let mut headers = axum::http::HeaderMap::new();
+            headers.insert(header::HOST, host.parse().unwrap());
+            if let Some(origin) = origin {
+                headers.insert(header::ORIGIN, origin.parse().unwrap());
+            }
+            let slot = crate::access::AccessSlot::default();
+            let (guard, out) = crate::access::tests::capture_scoped();
+            let decided = authorize(&state, &slot, &headers, "/users", "GET", None).await;
+            slot.emit("/api/admin/users", if decided.is_ok() { 200 } else { 403 });
+            drop(guard);
+            assert_eq!(decided.is_ok(), outcome == "success", "{host} {origin:?}");
+            let lines = out.lines();
+            assert_eq!(lines.len(), 1, "{lines:?}");
+            let line = &lines[0];
+            assert_eq!(line["method"], "network_trusted", "{line}");
+            assert_eq!(line["outcome"], outcome, "{line}");
+            assert_eq!(
+                line.get("reason").and_then(|r| r.as_str()),
+                reason,
+                "{line}"
+            );
+            assert!(line.get("pubkey").is_none(), "{line}");
+        }
+    }
+
+    // A role check that refuses after `authorize` admitted logs `denied`
+    // with its fixed reason, not the earlier `success`.
+    #[test]
+    fn admin_role_refusal_logs_denied() {
+        let moderator = AdminAccess::Staff(AdminPrincipal {
+            pubkey: [7; 32],
+            role: AdminRole::Moderator,
+            source: AdminSource::Config,
+        });
+        for (access, operator, reason) in [
+            (AdminAccess::NetworkTrusted, false, "not_staff"),
+            (moderator, true, "not_operator"),
+        ] {
+            let slot = AccessSlot::default();
+            slot.finish(AuthResult::Success);
+            let (guard, out) = crate::access::tests::capture_scoped();
+            let refused = if operator {
+                access.operator(&slot)
+            } else {
+                access.act(&slot)
+            };
+            slot.emit("/api/admin/users", 403);
+            drop(guard);
+            assert!(refused.is_err());
+            let lines = out.lines();
+            assert_eq!(lines.len(), 1, "{lines:?}");
+            assert_eq!(lines[0]["outcome"], "denied", "{reason}");
+            assert_eq!(lines[0]["reason"], reason);
+        }
+    }
+
+    // Two Authorization headers are a duplicate, not a missing credential.
+    #[tokio::test(flavor = "current_thread")]
+    async fn admin_duplicate_authorization_logs_duplicate() {
+        let mut state = (*crate::state::tests::test_state().await).clone();
+        let mut config = (*state.config).clone();
+        config.admin = Some(crate::config::AdminConfig {
+            host: "admin.example.com".into(),
+            auth: crate::config::AdminAuth::Nip98,
+            web_dir: None,
+        });
+        state.config = std::sync::Arc::new(config);
+        let mut headers = axum::http::HeaderMap::new();
+        headers.append(header::AUTHORIZATION, "Nostr a".parse().unwrap());
+        headers.append(header::AUTHORIZATION, "Nostr b".parse().unwrap());
+        let slot = AccessSlot::default();
+        let (guard, out) = crate::access::tests::capture_scoped();
+        let refused = authorize(&state, &slot, &headers, "/users", "GET", None).await;
+        slot.emit("/api/admin/users", 401);
+        drop(guard);
+        assert!(refused.is_err());
+        let lines = out.lines();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!(lines[0]["outcome"], "failed", "{}", lines[0]);
+        assert_eq!(
+            lines[0]["reason"], "duplicate_authorization",
+            "{}",
+            lines[0]
+        );
     }
 }

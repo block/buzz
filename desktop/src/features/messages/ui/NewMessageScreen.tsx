@@ -257,22 +257,23 @@ export function NewMessageScreen() {
         );
       }
 
-      if (!isMountedRef.current) {
-        return;
-      }
-
       try {
         await sendMessageMutation.mutateAsync({
           targetChannel: directMessage,
           content,
           mentionPubkeys,
           mediaTags,
+          // A newly opened DM is not subscribed yet, so publish its first
+          // message through the acknowledged HTTP path. This avoids holding
+          // the entire navigation on a WebSocket OK frame that staging may
+          // never deliver.
+          transport: "http",
         });
       } catch (error) {
         preparedDirectMessageRef.current = null;
         const message =
           error instanceof Error ? error.message : "Failed to send message.";
-        setSubmitErrorMessage(message);
+        if (isMountedRef.current) setSubmitErrorMessage(message);
         throw error;
       }
 
@@ -327,7 +328,22 @@ export function NewMessageScreen() {
               <div
                 className="group/to-field flex min-h-9 min-w-0 flex-1 cursor-text flex-wrap items-center gap-1.5 py-1"
                 data-testid="new-message-to-field"
-                onClick={() => {
+                onClick={(event) => {
+                  // Portaled popovers (recipient inspection and its nested key
+                  // copy) still bubble through React's tree to this handler,
+                  // but their event targets are not DOM descendants of the
+                  // field. Those clicks belong to the popover's own controls
+                  // — they must not steal focus into the search input (which
+                  // dismisses the popover via focus-outside) or reopen the
+                  // picker. Only clicks physically within the recipient field
+                  // focus its input.
+                  const { currentTarget, target } = event;
+                  if (
+                    !(target instanceof Node) ||
+                    !currentTarget.contains(target)
+                  ) {
+                    return;
+                  }
                   setIsRecipientPickerOpen(true);
                   searchInputRef.current?.focus({ preventScroll: true });
                 }}
@@ -603,6 +619,7 @@ export function NewMessageScreen() {
         onPreparingMentionSendChange={setIsPreparingMentionSend}
         onSend={sendFirstMessage}
         placeholder={composerPlaceholder}
+        showBackgroundUploadProgress
       />
       <div aria-hidden="true" className="min-h-8 bg-background px-5 pb-1.5" />
     </div>

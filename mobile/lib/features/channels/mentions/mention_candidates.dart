@@ -1,58 +1,9 @@
-import 'dart:convert';
-
-import '../../../shared/relay/nostr_models.dart';
-import '../../profile/user_profile.dart';
+import '../../../shared/agents/owned_agent_directory.dart';
+import '../../../shared/mentions/agent_identity_provider.dart';
+import '../../../shared/profile/user_profile.dart';
+import '../../../shared/utils/string_utils.dart';
 import '../channel_management_provider.dart';
 import 'mention_ranking.dart';
-
-/// A relay agent parsed from its kind:10100 agent-profile event.
-///
-/// Mirrors the fields desktop's `RelayAgent` uses for mention eligibility
-/// (`agentAutocompleteEligibility.ts`): who the agent responds to and which
-/// channels it sits in.
-class AgentDirectoryEntry {
-  final String pubkey;
-  final String? displayName;
-  final String? respondTo;
-  final List<String> respondToAllowlist;
-  final List<String> channelIds;
-
-  const AgentDirectoryEntry({
-    required this.pubkey,
-    this.displayName,
-    this.respondTo,
-    this.respondToAllowlist = const [],
-    this.channelIds = const [],
-  });
-
-  factory AgentDirectoryEntry.fromEvent(NostrEvent event) {
-    final content = _tryDecodeJsonMap(event.content);
-    return AgentDirectoryEntry(
-      pubkey: event.pubkey.toLowerCase(),
-      displayName:
-          (content?['display_name'] as String?) ??
-          (content?['name'] as String?),
-      respondTo: content?['respond_to'] as String?,
-      respondToAllowlist: [
-        for (final value in (content?['respond_to_allowlist'] as List?) ?? [])
-          if (value is String) value.toLowerCase(),
-      ],
-      channelIds: [
-        for (final value in (content?['channel_ids'] as List?) ?? [])
-          if (value is String) value,
-      ],
-    );
-  }
-}
-
-Map<String, dynamic>? _tryDecodeJsonMap(String content) {
-  try {
-    final decoded = jsonDecode(content);
-    return decoded is Map<String, dynamic> ? decoded : null;
-  } catch (_) {
-    return null;
-  }
-}
 
 /// Whether a non-member relay agent should be mentionable by the current
 /// user. Mirrors desktop's `relayAgentIsSharedWithUser`:
@@ -86,15 +37,39 @@ String? formatOwnerLabel(
   if (name != null && name.isNotEmpty) return name;
   final handle = profile?.nip05Handle?.trim();
   if (handle != null && handle.isNotEmpty) return handle;
-  return '${ownerPubkey.substring(0, 8)}…';
+  return shortPubkey(ownerPubkey);
+}
+
+/// The detail line a recipient picker shows under [candidate], as the
+/// mention chooser's info line reads outside a channel: agents say who
+/// manages them; people have none.
+String? recipientRowDetail(
+  MentionCandidate candidate,
+  String? currentPubkey,
+  Map<String, UserProfile> userCache,
+) {
+  if (!candidate.isAgent) return null;
+  final owner = formatOwnerLabel(
+    candidate.ownerPubkey,
+    currentPubkey,
+    userCache,
+  );
+  return owner == null ? 'agent' : 'agent \u00b7 managed by $owner';
 }
 
 /// Assemble the full mention candidate list: channel members first-class,
-/// then eligible non-member relay agents, then global user-search results.
-/// Mirrors desktop's `useMentions` candidate assembly (minus personas and
-/// managed agents, which live in the desktop app's local store; the
-/// owner-check on search results below covers their mention-eligibility
-/// semantics).
+/// then the viewer's own agents where they can be invited, then eligible
+/// non-member relay agents, then global user-search results.
+///
+/// [ownedAgents] are the viewer's agents as desktop's Agents tab lists them
+/// (`ownedAgentDirectoryProvider`), or null while that list is unknown.
+/// Outside the channel, an agent the viewer owns is offered only when it is
+/// listed. An unlisted one is an agent of an earlier Buzz, which cannot
+/// answer until desktop imports it, and mobile cannot import. While the list
+/// is unknown, owned agents are not held back. [offerOwnedAgents] offers the
+/// listed agents unprompted, as desktop does in streams and forums.
+/// [offerUnsharedAgents] keeps searched agents that do not answer the
+/// viewer, for pickers that add them to a channel rather than address them.
 List<MentionCandidate> buildMentionCandidates({
   required List<ChannelMember> members,
   required List<AgentDirectoryEntry> relayAgents,
@@ -103,9 +78,21 @@ List<MentionCandidate> buildMentionCandidates({
   required Map<String, String> ownerByAgentPubkey,
   List<UserProfile> searchResults = const [],
   String? currentPubkey,
+  List<OwnedAgentDirectoryEntry>? ownedAgents,
+  bool offerOwnedAgents = false,
+  bool offerUnsharedAgents = false,
 }) {
   final candidates = <MentionCandidate>[];
   final seen = <String>{};
+  final currentLower = currentPubkey?.toLowerCase();
+  final listedOwned = ownedAgents == null
+      ? null
+      : {for (final agent in ownedAgents) agent.pubkey};
+  bool unlistedOwnAgent(String pubkey, String? ownerPubkey) =>
+      listedOwned != null &&
+      currentLower != null &&
+      ownerPubkey?.toLowerCase() == currentLower &&
+      !listedOwned.contains(pubkey);
 
   for (final member in members) {
     final pk = member.pubkey.toLowerCase();
@@ -129,6 +116,27 @@ List<MentionCandidate> buildMentionCandidates({
     );
   }
 
+  if (offerOwnedAgents) {
+    for (final agent in ownedAgents ?? const <OwnedAgentDirectoryEntry>[]) {
+      final pk = agent.pubkey;
+      if (!seen.add(pk)) continue;
+      final profile = userCache[pk];
+      candidates.add(
+        MentionCandidate(
+          pubkey: pk,
+          displayName: profile?.displayName?.trim().isNotEmpty == true
+              ? profile!.displayName!.trim()
+              : agent.displayName,
+          secondaryLabel: profile?.nip05Handle,
+          avatarUrl: profile?.avatarUrl ?? agent.avatarUrl,
+          isAgent: true,
+          isMember: false,
+          ownerPubkey: currentPubkey,
+        ),
+      );
+    }
+  }
+
   final directoryPubkeys = <String>{};
   final sharedAgentPubkeys = <String>{};
   for (final agent in relayAgents) {
@@ -142,8 +150,10 @@ List<MentionCandidate> buildMentionCandidates({
     final pk = agent.pubkey;
     if (seen.contains(pk)) continue;
     if (!sharedAgentPubkeys.contains(pk)) continue;
-    seen.add(pk);
     final profile = userCache[pk];
+    final ownerPubkey = ownerByAgentPubkey[pk] ?? profile?.ownerPubkey;
+    if (unlistedOwnAgent(pk, ownerPubkey)) continue;
+    seen.add(pk);
     candidates.add(
       MentionCandidate(
         pubkey: pk,
@@ -154,12 +164,11 @@ List<MentionCandidate> buildMentionCandidates({
         avatarUrl: profile?.avatarUrl,
         isAgent: true,
         isMember: false,
-        ownerPubkey: ownerByAgentPubkey[pk] ?? profile?.ownerPubkey,
+        ownerPubkey: ownerPubkey,
       ),
     );
   }
 
-  final currentLower = currentPubkey?.toLowerCase();
   for (final profile in searchResults) {
     final pk = profile.pubkey.toLowerCase();
     if (seen.contains(pk)) continue;
@@ -172,9 +181,12 @@ List<MentionCandidate> buildMentionCandidates({
       // verified NIP-OA owner) or shared via the relay agent directory.
       final ownedByCurrentUser =
           currentLower != null && ownerPubkey?.toLowerCase() == currentLower;
-      if (!ownedByCurrentUser && !sharedAgentPubkeys.contains(pk)) {
+      if (!offerUnsharedAgents &&
+          !ownedByCurrentUser &&
+          !sharedAgentPubkeys.contains(pk)) {
         continue;
       }
+      if (unlistedOwnAgent(pk, ownerPubkey)) continue;
     }
     seen.add(pk);
     candidates.add(

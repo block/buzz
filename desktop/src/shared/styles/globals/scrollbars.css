@@ -33,6 +33,27 @@
   );
 }
 
+/* Channel activity keeps its chrome outside the scrolling surface. The slim,
+ * low-contrast thumb belongs only to the activity list beneath the header. */
+.buzz-channel-activity-scrollbar {
+  scrollbar-gutter: stable;
+}
+
+.buzz-channel-activity-scrollbar::-webkit-scrollbar {
+  width: 8px;
+}
+
+.buzz-channel-activity-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.buzz-channel-activity-scrollbar::-webkit-scrollbar-thumb {
+  background-clip: content-box;
+  background-color: hsl(var(--foreground) / 0.15);
+  border: 2px solid transparent;
+  border-radius: 999px;
+}
+
 /*
  * Main-content scroll areas that have sticky blurred chrome inside them.
  * Native overlay scrollbars paint UNDER composited descendants

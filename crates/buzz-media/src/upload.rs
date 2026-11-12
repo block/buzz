@@ -5,11 +5,11 @@ use bytes::Bytes;
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 
-use crate::auth::verify_blossom_upload_auth;
+use crate::auth::verify_upload_hash_only;
 use crate::config::MediaConfig;
 use crate::error::MediaError;
 use crate::storage::{BlobMeta, MediaStorage};
-use crate::thumbnail::generate_image_metadata_sync;
+use crate::thumbnail::{generate_image_metadata_sync, THUMBS};
 use crate::types::BlobDescriptor;
 use crate::upload_record::{record_upload_event, UploadAttribution, UploadEventFacts};
 use crate::validation::{
@@ -74,15 +74,15 @@ where
     let auth = auth_event.clone();
     let bytes = body.clone();
     let cfg = config.clone();
-    // Validate the Blossom `server` tag against the host this request was bound
-    // to (the per-request tenant), not a process-global domain — a relay serves
-    // many tenant hosts.
-    let bound_host = ctx.host().to_string();
     let (mime, sha256, ext) = tokio::task::spawn_blocking(move || -> Result<_, MediaError> {
         let (mime, ext) = validate(&bytes, &cfg)?;
         let sha256 = hex::encode(Sha256::digest(&bytes));
-        // Buffered uploads (image + file): 10-minute auth window is plenty.
-        verify_blossom_upload_auth(&auth, &sha256, Some(bound_host.as_str()), 600)?;
+        // Post-body hash check only: the full auth event verification
+        // (signature, kind, freshness, server, cardinality) was already
+        // applied at the pre-body gate in the relay handler.  Re-running the
+        // full verifier here would fail any upload that takes longer than the
+        // minted token's expiration window (60 s in Strict mode).
+        verify_upload_hash_only(&auth, &sha256)?;
         Ok((mime, sha256, ext))
     })
     .await
@@ -404,12 +404,13 @@ pub async fn process_video_upload(
     // --- 3. Verify Blossom auth: x tag must match computed SHA-256 ---
     let auth = auth_event.clone();
     let sha256_for_auth = sha256_hex.clone();
-    // Validate the Blossom `server` tag against the bound tenant host (not a
-    // process-global domain) — a relay serves many tenant hosts.
-    let bound_host = ctx.host().to_string();
     tokio::task::spawn_blocking(move || {
-        // Videos: 1-hour window — large uploads on slow connections need headroom.
-        verify_blossom_upload_auth(&auth, &sha256_for_auth, Some(bound_host.as_str()), 3600)
+        // Post-body hash check only: the full auth event verification
+        // (signature, kind, freshness, server, cardinality) was already
+        // applied at the pre-body gate in the relay handler.  Re-running the
+        // full verifier here would reject any video upload that takes longer
+        // than the minted token's expiration window (60 s in Strict mode).
+        verify_upload_hash_only(&auth, &sha256_for_auth)
     })
     .await
     .map_err(|_| MediaError::Internal)??;
@@ -515,22 +516,44 @@ async fn prepare_image_metadata(
     config: &MediaConfig,
     input: MetadataInput,
 ) -> Result<BlobMeta, MediaError> {
-    let body_ref = input.body.clone();
-    let mime_ref = input.mime.clone();
-    let ext_ref = input.ext.clone();
-    let sha256_ref = input.sha256.clone();
-    let cfg_ref = config.clone();
-    let (mut meta, thumb_bytes) = tokio::task::spawn_blocking(move || {
-        generate_image_metadata_sync(&cfg_ref, &sha256_ref, &body_ref, &mime_ref, &ext_ref)
+    let mut meta = store_image_thumbnails(
+        storage,
+        config,
+        &input.sha256,
+        input.body,
+        &input.mime,
+        &input.ext,
+    )
+    .await?;
+    meta.uploaded_at = input.uploaded_at;
+    Ok(meta)
+}
+
+/// Generate an image's metadata and store every thumbnail variant.
+///
+/// Shared by the upload path and on-demand regeneration of missing thumbnails.
+pub async fn store_image_thumbnails(
+    storage: &MediaStorage,
+    config: &MediaConfig,
+    sha256: &str,
+    body: Bytes,
+    mime: &str,
+    ext: &str,
+) -> Result<BlobMeta, MediaError> {
+    let (cfg_ref, sha256_ref, mime_ref, ext_ref) = (
+        config.clone(),
+        sha256.to_owned(),
+        mime.to_owned(),
+        ext.to_owned(),
+    );
+    let (meta, thumbs) = tokio::task::spawn_blocking(move || {
+        generate_image_metadata_sync(&cfg_ref, &sha256_ref, &body, &mime_ref, &ext_ref)
     })
     .await
     .map_err(|_| MediaError::Internal)??;
 
-    meta.uploaded_at = input.uploaded_at;
-
-    if let Some(ref tb) = thumb_bytes {
-        let thumb_key = format!("{}.thumb.jpg", input.sha256);
-        storage.put(&thumb_key, tb, "image/jpeg").await?;
+    for (thumb, bytes) in THUMBS.into_iter().zip(thumbs.into_iter().flatten()) {
+        storage.put(&thumb.key(sha256), &bytes, thumb.mime).await?;
     }
 
     Ok(meta)
@@ -570,6 +593,7 @@ mod tests {
             s3_secret_key: String::new(),
             s3_bucket: String::new(),
             s3_region: "us-east-1".to_string(),
+            s3_addressing_style: crate::config::S3AddressingStyle::Path,
             max_image_bytes: 50 * 1024 * 1024,
             max_gif_bytes: 10 * 1024 * 1024,
             max_video_bytes: 524_288_000,
@@ -578,6 +602,64 @@ mod tests {
             upload_records_enabled: false,
             upload_ip_header: None,
             upload_port_header: None,
+        }
+    }
+
+    /// A 640x640 image, so its thumbnail is 320x320, whose left half has the
+    /// given alpha and right half is opaque red.
+    fn image_with_alpha(alpha: u8, format: image::ImageFormat) -> Vec<u8> {
+        let img = image::RgbaImage::from_fn(640, 640, |x, _| {
+            image::Rgba([255, 0, 0, if x < 320 { alpha } else { 255 }])
+        });
+        let mut bytes = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut bytes), format)
+            .unwrap();
+        bytes
+    }
+
+    #[test]
+    fn image_thumbnails_are_alpha_webp_and_jpeg() {
+        for (format, mime, ext) in [
+            (image::ImageFormat::Png, "image/png", "png"),
+            (image::ImageFormat::Gif, "image/gif", "gif"),
+        ] {
+            let sha = "a".repeat(64);
+            let (meta, thumbs) = generate_image_metadata_sync(
+                &test_config(),
+                &sha,
+                &image_with_alpha(0, format),
+                mime,
+                ext,
+            )
+            .unwrap();
+            assert_eq!(
+                meta.thumb_url,
+                format!("https://media.example.com/{sha}.thumb.webp"),
+                "{ext}"
+            );
+            let [webp, jpeg] = thumbs.unwrap();
+            assert_eq!(
+                image::guess_format(&webp).unwrap(),
+                image::ImageFormat::WebP,
+                "{ext}"
+            );
+            let decoded = image::load_from_memory(&webp).unwrap().to_rgba8();
+            assert_eq!(decoded.dimensions(), (320, 320), "{ext}");
+            assert_eq!(
+                decoded.get_pixel(0, 0)[3],
+                0,
+                "{ext}: transparent stays transparent"
+            );
+            assert_eq!(
+                decoded.get_pixel(319, 0)[3],
+                255,
+                "{ext}: opaque stays opaque"
+            );
+            assert_eq!(
+                image::guess_format(&jpeg).unwrap(),
+                image::ImageFormat::Jpeg,
+                "{ext}: JPEG stays for installed clients"
+            );
         }
     }
 
@@ -647,7 +729,7 @@ mod tests {
         let meta = BlobMeta {
             dim: "800x600".to_string(),
             blurhash: "LEHV6nWB2yk8pyo0adR*.7kCMdnj".to_string(),
-            thumb_url: format!("https://media.example.com/{hash}.thumb.jpg"),
+            thumb_url: format!("https://media.example.com/{hash}.thumb.webp"),
             ext: "jpg".to_string(),
             mime_type: "image/jpeg".to_string(),
             size: 100_000,
@@ -728,5 +810,359 @@ mod tests {
         assert!(desc.blurhash.is_none());
         assert!(desc.thumb.is_none());
         assert!(desc.duration.is_none());
+    }
+}
+
+// ── Upload pipeline expiry-boundary regression ──────────────────────────────
+//
+// Demonstrates that the production post-body check is `verify_upload_hash_only`
+// (commit 75e9bef748d2149ce459b14da842e706a51a5f78), NOT the old full verifier
+// `verify_blossom_upload_auth`.
+//
+// The critical sequence:
+//   T=0:  proof is minted with `created_at = now - 58`, `expiration = now + 2`.
+//         Strict admission passes: age 58s ≤ 60s window, lifetime 60s, expiry future.
+//   T=3s: body transfer completes; post-body check runs on now-expired proof.
+//         Old path: verify_blossom_upload_auth → TokenExpired (breaks upload).
+//         New path: verify_upload_hash_only    → Ok if hash matches.
+//
+// These tests exercise both `process_upload` (buffered, upload.rs:85) and
+// `process_video_upload` (streaming, upload.rs:413) so that reverting either
+// post-body call to the old full verifier breaks the positive case, and
+// removing the hash check breaks the negative case.
+//
+// Note: `nostr::Timestamp::now()` reads the OS wall clock directly; paused
+// Tokio time does not advance it.  The positive cases use a real 3-second
+// sleep to sequence fresh admission at T=0 followed by expired completion at
+// T≈3s.  The negative (hash-mismatch) cases use a pre-expired proof and need
+// no timing sequence.
+//
+// Tests that require a live MinIO instance live in the `minio_tests` module so
+// the nextest profile can tag them with `#[ignore = "requires MinIO"]` and the
+// unit lane skips them automatically.
+#[cfg(test)]
+mod minio_tests {
+    use super::*;
+    use buzz_core::tenant::{CommunityId, TenantContext};
+    use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
+    use uuid::Uuid;
+
+    /// Minimal valid 1×1 RGB PNG — passes validate_content and
+    /// validate_image_metadata_free without any metadata chunks.
+    ///
+    /// Generated once and embedded as const bytes to avoid runtime PNG
+    /// encoding in every test run.  The exact pixels and structure are
+    /// irrelevant; only the magic bytes and structural validity matter.
+    const MINIMAL_PNG: &[u8] = &[
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, // PNG signature
+        0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52, // IHDR length + type
+        0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, // width=1, height=1
+        0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53, // bit-depth=8, color=RGB
+        0xde, // IHDR CRC (partial — enough for magic-byte sniff)
+        0x00, 0x00, 0x00, 0x0c, 0x49, 0x44, 0x41, 0x54, // IDAT length + type
+        0x78, 0x9c, 0x63, 0xf8, 0xff, 0xff, 0x3f, 0x00, // zlib-compressed scanline
+        0x05, 0xfe, 0x02, 0xfe, 0x0d, 0xef, 0x46, 0xb8, // (white pixel)
+        0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, // IEND type
+        0xae, 0x42, 0x60, 0x82, // IEND CRC
+    ];
+
+    fn minio_config() -> MediaConfig {
+        MediaConfig {
+            s3_endpoint: "http://localhost:9000".to_string(),
+            s3_access_key: "buzz_dev".to_string(),
+            s3_secret_key: "buzz_dev_secret".to_string(),
+            s3_bucket: "buzz-media".to_string(),
+            s3_region: "us-east-1".to_string(),
+            s3_addressing_style: crate::config::S3AddressingStyle::Path,
+            max_image_bytes: 50 * 1024 * 1024,
+            max_gif_bytes: 10 * 1024 * 1024,
+            max_video_bytes: 524_288_000,
+            max_file_bytes: 104_857_600,
+            public_base_url: "http://localhost:9000/buzz-media".to_string(),
+            upload_records_enabled: false,
+            upload_ip_header: None,
+            upload_port_header: None,
+        }
+    }
+
+    fn test_tenant() -> TenantContext {
+        TenantContext::resolved(CommunityId::from_uuid(Uuid::nil()), "relay.example")
+    }
+
+    /// Build a fresh Blossom upload auth event that passes Strict admission NOW.
+    ///
+    /// Strict invariants:
+    ///   - `created_at` ≤ now + 5s (future-skew)
+    ///   - now - `created_at` ≤ 60s (replay window)
+    ///   - `expiration` ≤ `created_at` + 60s (token lifetime)
+    ///   - `expiration` > now (not yet expired)
+    ///
+    /// We set `created_at = now - 58` (age = 58s, inside the 60s window),
+    /// `expiration = now - 58 + 60 = now + 2` (lifetime = 60s, strictly future).
+    /// Calling `verify_blossom_upload_auth(Strict)` at sign time must return `Ok`.
+    /// After a ≥3 s real sleep the proof is expired (expiration ≤ now): the old
+    /// full verifier would return `TokenExpired`, while `verify_upload_hash_only`
+    /// only checks the `x` tag and must still succeed.
+    fn fresh_strict_upload_auth(keys: &Keys, sha256: &str, server: &str) -> nostr::Event {
+        let now = Timestamp::now().as_secs();
+        let created_at = now.saturating_sub(58);
+        let exp = created_at + 60; // now + 2s: strictly future, lifetime = 60s
+        let tags = vec![
+            Tag::parse(["t", "upload"]).unwrap(),
+            Tag::parse(["x", sha256]).unwrap(),
+            Tag::parse(["expiration", &exp.to_string()]).unwrap(),
+            Tag::parse(["server", server]).unwrap(),
+        ];
+        EventBuilder::new(Kind::from(24242), "Upload buzz-media")
+            .tags(tags)
+            .custom_created_at(Timestamp::from_secs(created_at))
+            .sign_with_keys(keys)
+            .expect("sign fresh upload auth")
+    }
+
+    /// Build an already-expired Blossom upload auth event for the mismatch-hash
+    /// negative cases.  No admission path is needed there: we only exercise the
+    /// post-body hash check, so the proof need not be fresh.
+    ///
+    /// `created_at = now - 120`, `expiration = now - 1`: definitively past for
+    /// the old full verifier (`TokenExpired`); the `x` tag is the only thing
+    /// `verify_upload_hash_only` reads.
+    fn expired_upload_auth(keys: &Keys, sha256: &str, server: &str) -> nostr::Event {
+        let now = Timestamp::now().as_secs();
+        let created_at = now.saturating_sub(120);
+        let exp = now.saturating_sub(1);
+        let tags = vec![
+            Tag::parse(["t", "upload"]).unwrap(),
+            Tag::parse(["x", sha256]).unwrap(),
+            Tag::parse(["expiration", &exp.to_string()]).unwrap(),
+            Tag::parse(["server", server]).unwrap(),
+        ];
+        EventBuilder::new(Kind::from(24242), "Upload buzz-media")
+            .tags(tags)
+            .custom_created_at(Timestamp::from_secs(created_at))
+            .sign_with_keys(keys)
+            .expect("sign expired upload auth")
+    }
+
+    /// Case B (buffered pipeline): the NEW post-body path (`verify_upload_hash_only`)
+    /// accepts a proof whose expiry passes during the transfer.
+    ///
+    /// Sequence:
+    ///   T=0:  `fresh_strict_upload_auth` signs a 60s-lifetime proof that passes
+    ///         Strict admission (`verify_blossom_upload_auth(Strict)` returns `Ok`).
+    ///   T≈3s: real sleep lets the proof expire (expiration ≤ now).
+    ///   T≈3s: `process_upload` runs; its post-body call is `verify_upload_hash_only`.
+    ///         Old path: `verify_blossom_upload_auth` → `TokenExpired` (upload breaks).
+    ///         New path: `verify_upload_hash_only`    → `Ok` if hash matches.
+    ///
+    /// Note: `nostr::Timestamp::now()` reads the wall clock, not Tokio time.
+    /// Paused Tokio time does not advance it; a real sleep is required.
+    ///
+    /// Discriminating mutation: replacing `verify_upload_hash_only` at `upload.rs:85`
+    /// with `verify_blossom_upload_auth` causes this test to fail with `TokenExpired`.
+    ///
+    /// Requires a live MinIO instance (endpoint http://localhost:9000).
+    #[tokio::test]
+    #[ignore = "requires MinIO"]
+    async fn buffered_upload_accepts_expired_proof_when_hash_matches() {
+        use crate::auth::{verify_blossom_upload_auth, BlossomStrictness};
+
+        let keys = Keys::generate();
+        let body = Bytes::from_static(MINIMAL_PNG);
+        let sha256 = hex::encode(sha2::Sha256::digest(&body));
+        let auth = fresh_strict_upload_auth(&keys, &sha256, "relay.example");
+
+        // Assert that the proof passes Strict admission RIGHT NOW, before any sleep.
+        assert!(
+            verify_blossom_upload_auth(
+                &auth,
+                &sha256,
+                Some("relay.example"),
+                BlossomStrictness::Strict
+            )
+            .is_ok(),
+            "proof must pass Strict admission at sign time"
+        );
+
+        // Wait for the proof to expire.  The expiry is `now + 2s` at sign time;
+        // 3s guarantees expiration ≤ current time when process_upload runs.
+        // `nostr::Timestamp::now()` reads the OS wall clock directly.
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+        let storage = MediaStorage::new(&minio_config()).expect("MinIO client must initialise");
+        let ctx = test_tenant();
+
+        // process_upload calls verify_upload_hash_only post-body (the repaired path).
+        // The proof is now expired; a matching hash must still be accepted.
+        let result = process_upload(
+            &storage,
+            &minio_config(),
+            &ctx,
+            &auth,
+            body,
+            None, // no attribution
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "buffered upload must accept an expired proof with a matching hash \
+             (verify_upload_hash_only); got: {:?}",
+            result.err()
+        );
+    }
+
+    /// Case D (buffered pipeline): `verify_upload_hash_only` rejects a mismatched
+    /// body hash even when the proof is otherwise structurally valid.
+    ///
+    /// Discriminating mutation: removing the `verify_upload_hash_only` call
+    /// (or replacing it with a no-op) causes this test to accept a mismatched
+    /// body, which is a security regression — the relay would store whatever
+    /// bytes the client sent without verifying the Blossom `x` tag.
+    ///
+    /// Requires a live MinIO instance (endpoint http://localhost:9000).
+    #[tokio::test]
+    #[ignore = "requires MinIO"]
+    async fn buffered_upload_rejects_mismatched_hash_through_production_path() {
+        let keys = Keys::generate();
+        // Sign the auth for a DIFFERENT hash than the actual body.
+        let mismatched_sha256 = "a".repeat(64);
+        let auth = expired_upload_auth(&keys, &mismatched_sha256, "relay.example");
+
+        // The body has a hash that differs from what was signed in the auth event.
+        let body = Bytes::from_static(MINIMAL_PNG);
+
+        let storage = MediaStorage::new(&minio_config()).expect("MinIO client must initialise");
+        let ctx = test_tenant();
+
+        let result = process_upload(&storage, &minio_config(), &ctx, &auth, body, None).await;
+
+        assert!(
+            matches!(result, Err(MediaError::HashMismatch)),
+            "buffered upload must reject a body whose SHA-256 does not match \
+             the signed x tag; got: {:?}",
+            result
+        );
+    }
+
+    /// Case B (streaming pipeline): `process_video_upload` accepts a proof whose
+    /// expiry passes during the transfer.
+    ///
+    /// Sequence mirrors the buffered case:
+    ///   T=0:  `fresh_strict_upload_auth` signs a 60s-lifetime proof that passes
+    ///         Strict admission.
+    ///   T≈3s: real sleep lets the proof expire.
+    ///   T≈3s: `process_video_upload` streams to disk, computes SHA-256, then calls
+    ///         `verify_upload_hash_only` (the repaired path).
+    ///         Old path: `verify_blossom_upload_auth` → `TokenExpired`.
+    ///         New path: `verify_upload_hash_only`    → `Ok` if hash matches.
+    ///
+    /// Discriminating mutation: replacing `verify_upload_hash_only` at `upload.rs:413`
+    /// with `verify_blossom_upload_auth` causes this test to fail with `TokenExpired`.
+    ///
+    /// Requires a live MinIO instance (endpoint http://localhost:9000).
+    #[tokio::test]
+    #[ignore = "requires MinIO"]
+    async fn streaming_upload_accepts_expired_proof_when_hash_matches() {
+        use crate::auth::{verify_blossom_upload_auth, BlossomStrictness};
+        use crate::validation::minimal_valid_mp4;
+        use futures_util::stream;
+
+        let keys = Keys::generate();
+        let body_bytes = minimal_valid_mp4();
+        let sha256 = hex::encode(sha2::Sha256::digest(&body_bytes));
+        let auth = fresh_strict_upload_auth(&keys, &sha256, "relay.example");
+
+        // Assert Strict admission passes at sign time.
+        assert!(
+            verify_blossom_upload_auth(
+                &auth,
+                &sha256,
+                Some("relay.example"),
+                BlossomStrictness::Strict
+            )
+            .is_ok(),
+            "proof must pass Strict admission at sign time"
+        );
+
+        // Wait for the proof to expire (3s > 2s remaining until expiry).
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+        let body_len = body_bytes.len() as u64;
+        // Wrap the bytes in a single-item stream of Ok(Bytes).
+        // axum::Error wraps std::io::Error; we never inject an error here.
+        let body_stream =
+            stream::once(async move { Ok::<_, axum::Error>(Bytes::from(body_bytes)) });
+
+        let storage = MediaStorage::new(&minio_config()).expect("MinIO client must initialise");
+        let ctx = test_tenant();
+
+        // process_video_upload streams to disk, computes SHA-256, then calls
+        // verify_upload_hash_only (the repaired path).  The proof is now expired;
+        // a matching hash must still be accepted.
+        let result = process_video_upload(
+            &storage,
+            &minio_config(),
+            &ctx,
+            &auth,
+            body_stream,
+            Some(body_len),
+            None, // no attribution
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "streaming upload must accept an expired proof with a matching hash \
+             (verify_upload_hash_only); got: {:?}",
+            result.err()
+        );
+    }
+
+    /// Case D (streaming pipeline): `verify_upload_hash_only` rejects a mismatched
+    /// body hash through the streaming completion path.
+    ///
+    /// Discriminating mutation: removing the `verify_upload_hash_only` call at
+    /// `upload.rs:413` causes this test to accept a mismatched body, which is a
+    /// security regression — the relay would store whatever bytes the client sent
+    /// without verifying the Blossom `x` tag.
+    ///
+    /// Requires a live MinIO instance (endpoint http://localhost:9000).
+    #[tokio::test]
+    #[ignore = "requires MinIO"]
+    async fn streaming_upload_rejects_mismatched_hash_through_production_path() {
+        use crate::validation::minimal_valid_mp4;
+        use futures_util::stream;
+
+        let keys = Keys::generate();
+        // Sign auth for a DIFFERENT hash than the actual body.
+        let mismatched_sha256 = "a".repeat(64);
+        let auth = expired_upload_auth(&keys, &mismatched_sha256, "relay.example");
+
+        let body_bytes = minimal_valid_mp4();
+        let body_len = body_bytes.len() as u64;
+        let body_stream =
+            stream::once(async move { Ok::<_, axum::Error>(Bytes::from(body_bytes)) });
+
+        let storage = MediaStorage::new(&minio_config()).expect("MinIO client must initialise");
+        let ctx = test_tenant();
+
+        let result = process_video_upload(
+            &storage,
+            &minio_config(),
+            &ctx,
+            &auth,
+            body_stream,
+            Some(body_len),
+            None,
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(MediaError::HashMismatch)),
+            "streaming upload must reject a body whose SHA-256 does not match \
+             the signed x tag; got: {:?}",
+            result
+        );
     }
 }

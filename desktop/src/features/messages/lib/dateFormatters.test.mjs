@@ -2,8 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  formatDayHeading,
-  formatShortMonthDayOrdinal,
+  formatShortMonthDay,
   formatThreadSummaryLastReplyTime,
   formatTimeWithoutDayPeriod,
   startOfLocalDaySeconds,
@@ -13,66 +12,16 @@ function localUnixSeconds(year, monthIndex, day) {
   return new Date(year, monthIndex, day, 12).getTime() / 1_000;
 }
 
-function weekday(date) {
-  return new Intl.DateTimeFormat("en-US", { weekday: "long" }).format(date);
-}
-
-function month(date) {
-  return new Intl.DateTimeFormat("en-US", { month: "long" }).format(date);
-}
-
-test("formatShortMonthDayOrdinal formats month before ordinal day", () => {
-  assert.equal(
-    formatShortMonthDayOrdinal(localUnixSeconds(2026, 4, 19)),
-    "May 19th",
-  );
+test("formatShortMonthDay abbreviates the month and omits the ordinal", () => {
+  assert.equal(formatShortMonthDay(localUnixSeconds(2026, 4, 19)), "May 19");
+  assert.equal(formatShortMonthDay(localUnixSeconds(2026, 4, 1)), "May 1");
 });
 
-test("formatShortMonthDayOrdinal handles ordinal suffixes", () => {
-  assert.equal(
-    formatShortMonthDayOrdinal(localUnixSeconds(2026, 4, 1)),
-    "May 1st",
-  );
-  assert.equal(
-    formatShortMonthDayOrdinal(localUnixSeconds(2026, 4, 2)),
-    "May 2nd",
-  );
-  assert.equal(
-    formatShortMonthDayOrdinal(localUnixSeconds(2026, 4, 3)),
-    "May 3rd",
-  );
-  assert.equal(
-    formatShortMonthDayOrdinal(localUnixSeconds(2026, 4, 4)),
-    "May 4th",
-  );
-  assert.equal(
-    formatShortMonthDayOrdinal(localUnixSeconds(2026, 4, 11)),
-    "May 11th",
-  );
-  assert.equal(
-    formatShortMonthDayOrdinal(localUnixSeconds(2026, 4, 12)),
-    "May 12th",
-  );
-  assert.equal(
-    formatShortMonthDayOrdinal(localUnixSeconds(2026, 4, 13)),
-    "May 13th",
-  );
-  assert.equal(
-    formatShortMonthDayOrdinal(localUnixSeconds(2026, 4, 21)),
-    "May 21st",
-  );
-  assert.equal(
-    formatShortMonthDayOrdinal(localUnixSeconds(2026, 4, 22)),
-    "May 22nd",
-  );
-  assert.equal(
-    formatShortMonthDayOrdinal(localUnixSeconds(2026, 4, 23)),
-    "May 23rd",
-  );
-  assert.equal(
-    formatShortMonthDayOrdinal(localUnixSeconds(2026, 4, 31)),
-    "May 31st",
-  );
+test("no day carries an ordinal suffix", () => {
+  for (const day of [1, 2, 3, 4, 11, 12, 13, 21, 22, 23, 31]) {
+    const label = formatShortMonthDay(localUnixSeconds(2026, 4, day));
+    assert.doesNotMatch(label, /\d(?:st|nd|rd|th)\b/, `ordinal in "${label}"`);
+  }
 });
 
 test("formatTimeWithoutDayPeriod removes AM/PM suffixes", () => {
@@ -108,31 +57,11 @@ test("formatThreadSummaryLastReplyTime expands relative units", () => {
   );
 });
 
-test("formatThreadSummaryLastReplyTime uses ordinal dates for older replies", () => {
+test("formatThreadSummaryLastReplyTime dates older replies without an ordinal", () => {
   const now = localUnixSeconds(2026, 5, 15);
   const replyAt = localUnixSeconds(2026, 4, 19);
 
-  assert.equal(formatThreadSummaryLastReplyTime(replyAt, now), "on May 19th");
-});
-
-test("formatDayHeading omits the year for current-year dates", () => {
-  const now = new Date();
-  const date = new Date(now.getFullYear(), (now.getMonth() + 6) % 12, 19, 12);
-
-  assert.equal(
-    formatDayHeading(date.getTime() / 1_000),
-    `${weekday(date)}, ${month(date)} 19th`,
-  );
-});
-
-test("formatDayHeading includes the year for other years", () => {
-  const year = new Date().getFullYear() - 1;
-  const date = new Date(year, 4, 19, 12);
-
-  assert.equal(
-    formatDayHeading(date.getTime() / 1_000),
-    `${weekday(date)}, May 19th, ${year}`,
-  );
+  assert.equal(formatThreadSummaryLastReplyTime(replyAt, now), "on May 19");
 });
 
 test("startOfLocalDaySeconds collapses a day's timestamps to one value", () => {

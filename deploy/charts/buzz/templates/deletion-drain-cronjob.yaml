@@ -1,0 +1,4 @@
+{{- include "buzz.validate" . -}}
+{{- if .Values.operatorJobs.deletionDrain.enabled }}
+{{- include "buzz.operatorCronJob" (dict "root" . "type" "deletionDrain") }}
+{{- end }}

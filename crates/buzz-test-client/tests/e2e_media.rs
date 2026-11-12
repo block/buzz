@@ -26,6 +26,17 @@ fn relay_http_url() -> String {
     std::env::var("RELAY_HTTP_URL").unwrap_or_else(|_| "http://localhost:3000".to_string())
 }
 
+/// Extract the host:port authority from the relay URL for use as the `server` tag.
+fn relay_server_authority() -> String {
+    let url = relay_http_url();
+    url.trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .split('/')
+        .next()
+        .unwrap_or("localhost:3000")
+        .to_string()
+}
+
 fn http_client() -> Client {
     Client::builder()
         .timeout(Duration::from_secs(15))
@@ -36,16 +47,40 @@ fn http_client() -> Client {
 /// Sign a kind:24242 Blossom upload auth event for the given sha256.
 fn sign_blossom_auth(keys: &Keys, sha256: &str) -> nostr::Event {
     let now = Timestamp::now().as_secs();
-    let exp_str = (now + 300).to_string();
+    let exp_str = (now + 55).to_string();
+    let server = relay_server_authority();
     let tags = vec![
         Tag::parse(["t", "upload"]).expect("t tag"),
         Tag::parse(["x", sha256]).expect("x tag"),
         Tag::parse(["expiration", &exp_str]).expect("expiration tag"),
+        Tag::parse(["server", &server]).expect("server tag"),
     ];
     EventBuilder::new(Kind::from(24242), "Upload test")
         .tags(tags)
         .sign_with_keys(keys)
         .expect("sign blossom auth")
+}
+
+/// Sign a kind:24242 Blossom *read* auth event for the given sha256.
+///
+/// Reads are authenticated unconditionally, so every successful GET/HEAD in this
+/// file has to present one of these. The `x` tag is hash-scoped and covers the
+/// derived paths too -- the relay matches on the sha256 before the extension, so
+/// one token serves `{sha}.jpg` and `{sha}.thumb.jpg` alike.
+fn sign_blossom_get_auth(keys: &Keys, sha256: &str) -> nostr::Event {
+    let now = Timestamp::now().as_secs();
+    let exp_str = (now + 55).to_string();
+    let server = relay_server_authority();
+    let tags = vec![
+        Tag::parse(["t", "get"]).expect("t tag"),
+        Tag::parse(["x", sha256]).expect("x tag"),
+        Tag::parse(["expiration", &exp_str]).expect("expiration tag"),
+        Tag::parse(["server", &server]).expect("server tag"),
+    ];
+    EventBuilder::new(Kind::from(24242), "Get test")
+        .tags(tags)
+        .sign_with_keys(keys)
+        .expect("sign blossom get auth")
 }
 
 /// Build `Authorization: Nostr <base64url(json)>` header value.
@@ -144,10 +179,14 @@ async fn test_upload_and_get() {
         descriptor["dim"], descriptor["blurhash"]
     );
 
+    // Reads are authenticated, so mint one hash-scoped token for all three below.
+    let read_auth = blossom_auth_header(&sign_blossom_get_auth(&keys, &sha256));
+
     // GET /media/{sha256}.jpg — bytes must match
     let get_url = format!("{}/media/{sha256}.jpg", relay_http_url());
     let get_resp = client
         .get(&get_url)
+        .header("Authorization", &read_auth)
         .send()
         .await
         .expect("GET /media/{sha256}.jpg failed");
@@ -162,6 +201,7 @@ async fn test_upload_and_get() {
     // HEAD /media/{sha256}.jpg — must return 200 with content-type
     let head_resp = client
         .head(&get_url)
+        .header("Authorization", &read_auth)
         .send()
         .await
         .expect("HEAD /media/{sha256}.jpg failed");
@@ -175,12 +215,101 @@ async fn test_upload_and_get() {
     let thumb_url = format!("{}/media/{sha256}.thumb.jpg", relay_http_url());
     let thumb_resp = client
         .get(&thumb_url)
+        .header("Authorization", &read_auth)
         .send()
         .await
         .expect("GET thumbnail failed");
     println!("GET thumbnail → {}", thumb_resp.status());
     // Thumbnail may be same as original for 1x1 images — just check 200
     assert_eq!(thumb_resp.status(), 200, "thumbnail should return 200");
+}
+
+/// An 8x8 PNG whose left half is transparent. A random opaque color keeps the
+/// bytes, and so the sha, unique per run.
+fn transparent_png() -> (Vec<u8>, [u8; 3]) {
+    let [r, g, b]: [u8; 3] = rand::random();
+    let mut png = Vec::new();
+    image::RgbaImage::from_fn(8, 8, |x, _| {
+        image::Rgba([r, g, b, if x < 4 { 0 } else { 255 }])
+    })
+    .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+    .expect("encode PNG");
+    (png, [r, g, b])
+}
+
+/// A transparent image's descriptor points at a WebP thumbnail that keeps its
+/// alpha, and the JPEG thumbnail installed clients derive is still served.
+#[tokio::test]
+#[ignore]
+async fn test_transparent_png_thumbnail_is_webp_with_alpha() {
+    let client = http_client();
+    let keys = Keys::generate();
+    let (png, [r, g, b]) = transparent_png();
+    let sha256 = hex::encode(Sha256::digest(&png));
+
+    let auth = sign_blossom_auth(&keys, &sha256);
+    let resp = client
+        .put(format!("{}/media/upload", relay_http_url()))
+        .header("Authorization", blossom_auth_header(&auth))
+        .header("Content-Type", "image/png")
+        .header("X-SHA-256", &sha256)
+        .body(png)
+        .send()
+        .await
+        .expect("upload PUT failed");
+    assert_eq!(resp.status(), 200, "upload should succeed");
+    let descriptor: serde_json::Value = resp.json().await.expect("BlobDescriptor JSON");
+    let thumb_url = descriptor["thumb"].as_str().expect("descriptor thumb");
+    assert!(
+        thumb_url.ends_with(&format!("/media/{sha256}.thumb.webp")),
+        "{thumb_url}"
+    );
+
+    let read_auth = blossom_auth_header(&sign_blossom_get_auth(&keys, &sha256));
+    let head = client
+        .head(thumb_url)
+        .header("Authorization", &read_auth)
+        .send()
+        .await
+        .expect("HEAD thumbnail failed");
+    assert_eq!(head.status(), 200);
+    assert_eq!(head.headers()["content-type"], "image/webp");
+
+    let get = client
+        .get(thumb_url)
+        .header("Authorization", &read_auth)
+        .send()
+        .await
+        .expect("GET thumbnail failed");
+    assert_eq!(get.status(), 200);
+    assert_eq!(get.headers()["content-type"], "image/webp");
+    let thumb = image::load_from_memory(&get.bytes().await.unwrap())
+        .expect("decode thumbnail")
+        .to_rgba8();
+    assert_eq!(
+        thumb.get_pixel(0, 0)[3],
+        0,
+        "transparent pixel stays transparent"
+    );
+    let [tr, tg, tb, ta] = thumb.get_pixel(thumb.width() - 1, 0).0;
+    assert_eq!(ta, 255, "opaque pixel stays opaque");
+    assert!(
+        [(tr, r), (tg, g), (tb, b)]
+            .iter()
+            .all(|(t, o)| t.abs_diff(*o) <= 16),
+        "opaque color survives lossy encoding: {:?} vs {:?}",
+        [tr, tg, tb],
+        [r, g, b]
+    );
+
+    let jpeg = client
+        .get(format!("{}/media/{sha256}.thumb.jpg", relay_http_url()))
+        .header("Authorization", &read_auth)
+        .send()
+        .await
+        .expect("GET JPEG thumbnail failed");
+    assert_eq!(jpeg.status(), 200, "installed clients' JPEG thumbnail");
+    assert_eq!(jpeg.headers()["content-type"], "image/jpeg");
 }
 
 /// Idempotency: uploading the same file twice returns the same BlobDescriptor.
@@ -293,17 +422,67 @@ async fn test_upload_hash_mismatch_returns_400() {
     assert_eq!(resp.status(), 401, "hash mismatch must be 401");
 }
 
-/// GET a sha256 that was never uploaded must return 404.
+/// GET an authenticated sha256 that was never uploaded must return 404.
+///
+/// The token has to be valid for the 404 to be reachable at all: authentication
+/// runs before the storage lookup, so a bare request is rejected with 401 and
+/// never distinguishes "missing" from "unauthorized" (see
+/// `test_unauthenticated_reads_are_rejected`).
 #[tokio::test]
 #[ignore]
 async fn test_get_nonexistent_returns_404() {
     let client = http_client();
+    let keys = Keys::generate();
     let missing_sha256 = "0".repeat(64);
     let url = format!("{}/media/{missing_sha256}.jpg", relay_http_url());
 
-    let resp = client.get(&url).send().await.expect("GET failed");
+    let resp = client
+        .get(&url)
+        .header(
+            "Authorization",
+            blossom_auth_header(&sign_blossom_get_auth(&keys, &missing_sha256)),
+        )
+        .send()
+        .await
+        .expect("GET failed");
     println!("missing blob → {}", resp.status());
     assert_eq!(resp.status(), 404, "missing blob must be 404");
+}
+
+/// Bare reads are rejected with 401 before any storage lookup.
+///
+/// This is the boundary PR #4610 made unconditional: there is no longer a config
+/// flag that lets an unauthenticated GET through, so the acceptance lane has to
+/// assert the rejection directly. Uses a never-uploaded hash deliberately -- a 401
+/// here rather than a 404 proves auth runs ahead of the storage lookup and that the
+/// endpoint does not leak blob existence to an unauthenticated caller.
+#[tokio::test]
+#[ignore]
+async fn test_unauthenticated_reads_are_rejected() {
+    let client = http_client();
+    let missing_sha256 = "0".repeat(64);
+    let blob_url = format!("{}/media/{missing_sha256}.jpg", relay_http_url());
+    let thumb_url = format!("{}/media/{missing_sha256}.thumb.jpg", relay_http_url());
+
+    let get_resp = client.get(&blob_url).send().await.expect("bare GET failed");
+    println!("bare GET → {}", get_resp.status());
+    assert_eq!(get_resp.status(), 401, "bare GET must be 401");
+
+    let head_resp = client
+        .head(&blob_url)
+        .send()
+        .await
+        .expect("bare HEAD failed");
+    println!("bare HEAD → {}", head_resp.status());
+    assert_eq!(head_resp.status(), 401, "bare HEAD must be 401");
+
+    let thumb_resp = client
+        .get(&thumb_url)
+        .send()
+        .await
+        .expect("bare thumbnail GET failed");
+    println!("bare thumbnail GET → {}", thumb_resp.status());
+    assert_eq!(thumb_resp.status(), 401, "bare thumbnail GET must be 401");
 }
 
 /// Upload a real image from the filesystem (set TEST_IMAGE_PATH env var).
@@ -363,7 +542,15 @@ async fn test_upload_real_image() {
 
     // GET bytes back and verify
     let get_url = descriptor["url"].as_str().unwrap();
-    let get_resp = client.get(get_url).send().await.expect("GET failed");
+    let get_resp = client
+        .get(get_url)
+        .header(
+            "Authorization",
+            blossom_auth_header(&sign_blossom_get_auth(&keys, &sha256)),
+        )
+        .send()
+        .await
+        .expect("GET failed");
     assert_eq!(get_resp.status(), 200);
     let returned = get_resp.bytes().await.unwrap();
     assert_eq!(

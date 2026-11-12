@@ -1,82 +1,74 @@
-import * as React from "react";
+import { toast } from "sonner";
 
 import { attachManagedAgentToChannel } from "./channelAgents";
-import type { AgentChannelAttachmentFailure } from "./channelAttachmentFailure";
 import type { Channel, CreateManagedAgentResponse } from "@/shared/api/types";
 
 type TargetChannel = Pick<Channel, "id" | "name">;
 
-/**
- * Keeps agent creation successful even when the follow-up channel attachment
- * fails, and retries only that attachment rather than recreating the agent.
- */
+async function attach(
+  created: CreateManagedAgentResponse,
+  targetChannel: TargetChannel,
+) {
+  const attached = await attachManagedAgentToChannel(targetChannel.id, {
+    agent: created.agent,
+    role: "bot",
+    ensureRunning: true,
+  });
+  created.agent = attached.agent;
+}
+
+function showAttachmentFailure(
+  created: CreateManagedAgentResponse,
+  targetChannel: TargetChannel,
+  cause: unknown,
+  toastId?: string | number,
+) {
+  const error = cause instanceof Error ? cause.message : "Failed to add agent.";
+  const id = toast.warning("Agent created", {
+    description: `${created.agent.name} couldn’t be added to #${targetChannel.name}. ${error}`,
+    id: toastId,
+    action: {
+      label: "Try again",
+      onClick: (event) => {
+        event.preventDefault();
+        toast.loading("Agent created", {
+          description: `Adding ${created.agent.name} to #${targetChannel.name}…`,
+          id,
+        });
+        void attach(created, targetChannel).then(
+          () => {
+            toast.success("Agent created", {
+              description: `Added ${created.agent.name} to #${targetChannel.name}`,
+              id,
+            });
+          },
+          (retryCause: unknown) => {
+            showAttachmentFailure(created, targetChannel, retryCause, id);
+          },
+        );
+      },
+    },
+  });
+}
+
+/** Keeps creation successful when its optional channel attachment fails. */
 export function useCreatedAgentChannelAttachment() {
-  const [createdAgent, setCreatedAgent] =
-    React.useState<CreateManagedAgentResponse | null>(null);
-  const [attachmentFailure, setAttachmentFailure] =
-    React.useState<AgentChannelAttachmentFailure | null>(null);
-  const targetChannelRef = React.useRef<TargetChannel | null>(null);
-  const [isRetryingAttachment, setIsRetryingAttachment] = React.useState(false);
-
-  async function attach(
-    created: CreateManagedAgentResponse,
-    targetChannel: TargetChannel,
-  ) {
-    targetChannelRef.current = targetChannel;
-    try {
-      const attached = await attachManagedAgentToChannel(targetChannel.id, {
-        agent: created.agent,
-        role: "bot",
-        ensureRunning: true,
-      });
-      created.agent = attached.agent;
-      targetChannelRef.current = null;
-      setAttachmentFailure(null);
-    } catch (cause) {
-      setAttachmentFailure({
-        channelName: targetChannel.name,
-        error: cause instanceof Error ? cause.message : "Failed to add agent.",
-      });
-    }
-  }
-
   async function presentCreatedAgent(
     created: CreateManagedAgentResponse,
     targetChannel?: TargetChannel | null,
   ) {
-    setAttachmentFailure(null);
-    targetChannelRef.current = null;
-    if (!created.spawnError && targetChannel) {
-      await attach(created, targetChannel);
+    if (created.spawnError || !targetChannel) {
+      toast.success("Agent created");
+      return;
     }
-    setCreatedAgent({ ...created });
-  }
 
-  async function retryAttachment() {
-    const targetChannel = targetChannelRef.current;
-    if (!createdAgent || !targetChannel || isRetryingAttachment) return;
-
-    setIsRetryingAttachment(true);
     try {
-      await attach(createdAgent, targetChannel);
-      setCreatedAgent({ ...createdAgent });
-    } finally {
-      setIsRetryingAttachment(false);
+      await attach(created, targetChannel);
+      toast.success("Agent created");
+    } catch (cause) {
+      showAttachmentFailure(created, targetChannel, cause);
     }
   }
 
-  function dismissCreatedAgent() {
-    setCreatedAgent(null);
-    setAttachmentFailure(null);
-    targetChannelRef.current = null;
-  }
-
-  return {
-    attachmentFailure,
-    createdAgent,
-    dismissCreatedAgent,
-    isRetryingAttachment,
-    presentCreatedAgent,
-    retryAttachment,
-  };
+  return { presentCreatedAgent };
 }

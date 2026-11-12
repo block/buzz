@@ -7,11 +7,11 @@ import {
   canManageCommunityMembers,
   shouldWarnMissingMembershipSnapshot,
 } from "@/shared/api/relayMembers";
-import { getFeature } from "@/shared/features/manifest";
 import {
+  getFeature,
   resolveEnabled,
   useFeatureSnapshot,
-} from "@/shared/features/useFeatureEnabled";
+} from "@/shared/features";
 import { topChromeBackdrop } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
 import {
@@ -48,7 +48,7 @@ type SettingsViewProps = SettingsPanelProps & {
   section: SettingsSection;
 };
 
-const settingsNavGroups: Array<{
+export const settingsNavGroups: Array<{
   label: string;
   sections: SettingsSection[];
 }> = [
@@ -58,14 +58,16 @@ const settingsNavGroups: Array<{
       "profile",
       "appearance",
       "notifications",
+      "voice",
       "shortcuts",
       "custom-emoji",
       "local-archive",
+      "channel-templates",
     ],
   },
   {
     label: "Communities",
-    sections: ["hosted-communities", "channel-templates", "community-members"],
+    sections: ["hosted-communities", "community-members", "relay-admin"],
   },
   {
     label: "App",
@@ -135,7 +137,10 @@ export function SettingsView({
       // stable and renders unconditionally (fail-open).
       if (s.featureGate) {
         const feature = getFeature(s.featureGate);
-        if (feature && !resolveEnabled(s.featureGate, featureState)) {
+        if (
+          feature &&
+          !resolveEnabled(s.featureGate, featureState, feature.defaultEnabled)
+        ) {
           return false;
         }
       }
@@ -143,6 +148,13 @@ export function SettingsView({
       // Open relays have no membership snapshot or invite controls.
       if (s.value === "community-members") {
         return canManageCommunityMembers(myMembershipQuery.data);
+      }
+      // Relay admin surfaces the relay admin console. Always reachable so an
+      // operator can enter a manual origin even when NIP-11 discovery is
+      // absent, invalid, or pending — hiding the entry would lock them out of
+      // the only place to configure one. Auth still gates the panel itself.
+      if (s.value === "relay-admin") {
+        return true;
       }
       return true;
     });
@@ -213,8 +225,12 @@ export function SettingsView({
       >
         <div
           aria-hidden="true"
-          className={cn("shrink-0", topChromeBackdrop.height)}
+          className={cn(
+            "shrink-0 cursor-default select-none",
+            topChromeBackdrop.height,
+          )}
           data-tauri-drag-region
+          data-testid="settings-sidebar-top-chrome"
         />
         <SidebarHeader
           className="cursor-default select-none pb-0 pt-3"
@@ -316,8 +332,12 @@ export function SettingsView({
       >
         <div
           aria-hidden="true"
-          className={cn("relative z-10 shrink-0", topChromeBackdrop.height)}
+          className={cn(
+            "relative z-10 shrink-0 cursor-default select-none",
+            topChromeBackdrop.height,
+          )}
           data-tauri-drag-region
+          data-testid="settings-top-chrome"
         />
         <div
           className="relative z-10 mb-2 ml-px mr-2 mt-px flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl bg-background shadow-content-edge"

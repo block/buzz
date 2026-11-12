@@ -16,6 +16,7 @@ import { Button } from "@/shared/ui/button";
 import { Checkbox } from "@/shared/ui/checkbox";
 import { Input } from "@/shared/ui/input";
 import { Spinner } from "@/shared/ui/spinner";
+import { SettingsOptionGroup, SettingsOptionRow } from "./SettingsOptionGroup";
 
 /**
  * The exact phrase the user must type before the destructive sign-out button
@@ -31,13 +32,13 @@ export const SIGNOUT_CONFIRM_PHRASE = "wipe all my data";
  * Signing out wipes the identity key and all local data, so the confirm
  * dialog gates the delete button behind two explicit steps:
  *
- * 1. Back up the key — the nsec is shown inline (masked, with reveal/copy);
- *    the "I have saved my private key" checkbox unlocks only after the user
- *    actually reveals or copies the key.
+ * 1. Confirm recovery — Settings offers a tested password-protected backup;
+ *    the dialog also shows the raw nsec as a last-chance fallback, and the
+ *    user checks a box confirming they can restore their identity.
  * 2. Typed confirmation — the user must type the exact phrase
  *    "wipe all my data".
  *
- * Only when both gates pass does "Delete My Data" become clickable.
+ * Only when both gates pass does "Delete my data" become clickable.
  */
 export function SignOutSection() {
   const [isOpen, setIsOpen] = React.useState(false);
@@ -47,7 +48,6 @@ export function SignOutSection() {
   const [nsec, setNsec] = React.useState<string | null>(null);
   const [nsecError, setNsecError] = React.useState<string | null>(null);
   const [isNsecLoading, setIsNsecLoading] = React.useState(false);
-  const [hasInteractedWithKey, setHasInteractedWithKey] = React.useState(false);
   const [hasConfirmedBackup, setHasConfirmedBackup] = React.useState(false);
   // Guards against a late-resolving getNsec() repopulating state after the
   // dialog closes.
@@ -58,20 +58,13 @@ export function SignOutSection() {
   const isPhraseConfirmed =
     confirmText.trim().toLowerCase() === SIGNOUT_CONFIRM_PHRASE;
 
-  // The backup checkbox unlocks after real interaction with the key
-  // (reveal or copy). If the key cannot be loaded at all there is nothing to
-  // interact with — let the user proceed past the backup step rather than
-  // locking them out of sign-out entirely.
-  const isBackupGateSatisfied = hasConfirmedBackup;
-  const canConfirmBackup = hasInteractedWithKey || nsecError !== null;
-  const canDelete = isBackupGateSatisfied && isPhraseConfirmed && !isPending;
+  const canDelete = hasConfirmedBackup && isPhraseConfirmed && !isPending;
 
   function resetDialogState() {
     fetchCancelledRef.current = true;
     setNsec(null);
     setNsecError(null);
     setIsNsecLoading(false);
-    setHasInteractedWithKey(false);
     setHasConfirmedBackup(false);
     setConfirmText("");
   }
@@ -128,32 +121,33 @@ export function SignOutSection() {
   }
 
   return (
-    <div
-      className="mt-8 border-t border-border/60 pb-6 pt-5"
-      data-testid="settings-signout"
-    >
-      <div className="flex items-center justify-between gap-4 px-1">
-        <div className="min-w-0 space-y-1">
-          <h2 className="text-lg font-semibold tracking-tight">Sign out</h2>
-          <p className="text-sm text-muted-foreground">
-            Removes your identity key and all local app data from this device.
-            Back up your private key (nsec) first — this cannot be undone.
-          </p>
-        </div>
-        <Button
-          className="shrink-0"
-          data-testid="signout-open-dialog"
-          disabled={isPending}
-          onClick={() => void openDialog()}
-          type="button"
-          variant="destructive"
-        >
-          {isPending ? (
-            <Spinner aria-label="Signing out" className="h-4 w-4 border-2" />
-          ) : null}
-          {isPending ? "Signing out…" : "Sign Out"}
-        </Button>
-      </div>
+    <div className="mt-12 pb-6" data-testid="settings-signout">
+      <SettingsOptionGroup title="Sign out">
+        <SettingsOptionRow>
+          <div className="min-w-0">
+            <p
+              className="text-sm font-normal text-muted-foreground/70"
+              data-settings-subcopy
+            >
+              Removes your identity key and all local app data from this device.
+              Before signing out, create and test a password-protected key
+              backup above — this cannot be undone.
+            </p>
+          </div>
+          <Button
+            data-testid="signout-open-dialog"
+            disabled={isPending}
+            onClick={() => void openDialog()}
+            type="button"
+            variant="destructive"
+          >
+            {isPending ? (
+              <Spinner aria-label="Signing out" className="h-4 w-4 border-2" />
+            ) : null}
+            {isPending ? "Signing out…" : "Delete my data"}
+          </Button>
+        </SettingsOptionRow>
+      </SettingsOptionGroup>
       <AlertDialog
         onOpenChange={(open) => {
           if (!open && !isPending) {
@@ -175,7 +169,7 @@ export function SignOutSection() {
 
           <div className="space-y-3">
             <p className="text-sm font-medium">
-              1. Back up your private key (nsec)
+              1. Confirm you can restore your identity
             </p>
             {isNsecLoading ? (
               <p className="text-sm text-muted-foreground">Loading…</p>
@@ -187,10 +181,7 @@ export function SignOutSection() {
                 {nsecError}
               </p>
             ) : nsec ? (
-              <NsecMaskedDisplay
-                nsec={nsec}
-                onKeyInteraction={() => setHasInteractedWithKey(true)}
-              />
+              <NsecMaskedDisplay nsec={nsec} />
             ) : null}
             <label
               className="flex cursor-pointer items-start gap-2.5 text-sm has-[button:disabled]:cursor-not-allowed has-[button:disabled]:opacity-60"
@@ -201,19 +192,15 @@ export function SignOutSection() {
                 checked={hasConfirmedBackup}
                 className="mt-0.5"
                 data-testid="signout-backup-confirm"
-                disabled={!canConfirmBackup || isPending}
+                disabled={isPending}
                 id="signout-backup-confirm"
                 onCheckedChange={(checked) =>
                   setHasConfirmedBackup(checked === true)
                 }
               />
               <span>
-                I have saved my private key somewhere safe.
-                {!canConfirmBackup ? (
-                  <span className="block text-xs text-muted-foreground">
-                    Reveal or copy the key above first.
-                  </span>
-                ) : null}
+                I have tested a key backup or saved this private key somewhere
+                safe.
               </span>
             </label>
           </div>
@@ -257,7 +244,7 @@ export function SignOutSection() {
                   className="h-4 w-4 border-2"
                 />
               ) : null}
-              {isPending ? "Signing out…" : "Delete My Data"}
+              {isPending ? "Signing out…" : "Delete my data"}
             </Button>
           </AlertDialogFooter>
         </AlertDialogContent>

@@ -12,6 +12,10 @@
       in tauri.conf.json. The body paints its own themed background once the app
       CSS loads, so this never shows through after boot.
 
+      The linked stylesheet (boot.css) applies the initial black background.
+      Kept as a <link> rather than an inline <style> to avoid Tauri's nonce
+      injection for style-src (see boot.css for the full rationale).
+
       The inline script below reads the cached theme background (same
       `buzz-theme-cache` entry ThemeProvider writes) and applies it synchronously
       so the boot color matches the themed loading gate — no black flash on light
@@ -20,11 +24,7 @@
       that ThemeProvider applies moments later — no wrong-scheme flash before
       it loads.
     -->
-    <style>
-      html {
-        background-color: #000;
-      }
-    </style>
+    <link rel="stylesheet" href="/boot.css" />
     <script>
       (() => {
         var cached, bg, parsed;

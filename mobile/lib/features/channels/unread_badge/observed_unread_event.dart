@@ -1,4 +1,5 @@
-import '../read_state/read_state_format.dart';
+import '../../../shared/read_state/read_state_format.dart';
+import '../../../shared/relay/nostr_models.dart';
 
 class ObservedUnreadEvent {
   final String id;
@@ -8,6 +9,13 @@ class ObservedUnreadEvent {
   final bool countsTowardBadge;
   final bool countsTowardAppBadge;
 
+  /// `activity:<channel>` reads this event (see `readByChannelCatchUp`).
+  final bool channelCatchUp;
+
+  /// Reply payload for Activity's existing thread rows. Retained in the same
+  /// bounded registry as its unread evidence, so eviction and deletion agree.
+  final NostrEvent? threadReply;
+
   const ObservedUnreadEvent({
     required this.id,
     required this.createdAt,
@@ -15,6 +23,8 @@ class ObservedUnreadEvent {
     required this.highPriority,
     required this.countsTowardBadge,
     required this.countsTowardAppBadge,
+    this.channelCatchUp = false,
+    this.threadReply,
   });
 }
 
@@ -25,6 +35,7 @@ ObservedUnreadEvent makeObservedUnreadEvent({
   required bool highPriority,
   required String? channelType,
   required bool isThreadedReply,
+  NostrEvent? threadReply,
 }) {
   final isDm = channelType == 'dm';
   return ObservedUnreadEvent(
@@ -34,6 +45,12 @@ ObservedUnreadEvent makeObservedUnreadEvent({
     highPriority: highPriority,
     countsTowardBadge: isDm || isThreadedReply || highPriority,
     countsTowardAppBadge: isDm || (!isThreadedReply && highPriority),
+    channelCatchUp: readByChannelCatchUp(
+      isDm: isDm,
+      isReply: isThreadedReply,
+      highPriority: highPriority,
+    ),
+    threadReply: threadReply,
   );
 }
 
@@ -118,16 +135,21 @@ int countUnreadHighPriorityObservedEvents(
   return count;
 }
 
+/// The newest marker that reads `event` in `channelId`. `markerOf` looks up
+/// a read-state context by key.
 int? observedUnreadEventReadAt(
   ObservedUnreadEvent event,
-  int? channelReadAt,
-  int? Function(String rootId) getThreadOwnMarker,
-  int? Function(String messageId) getMessageOwnMarker,
+  String channelId,
+  int? Function(String contextId) markerOf,
 ) {
-  final markers = <int?>[channelReadAt, getMessageOwnMarker(event.id)];
   final rootId = event.rootId;
-  if (rootId != null) {
-    markers.add(getThreadOwnMarker(rootId));
-  }
-  return maxReadAt(markers);
+  return maxReadAt([
+    markerOf(channelId),
+    markerOf(msgContextKey(event.id)),
+    if (rootId != null) ...[
+      markerOf(threadContextKey(rootId)),
+      markerOf(threadActivityContextKey(rootId)),
+    ],
+    if (event.channelCatchUp) markerOf(activityContextKey(channelId)),
+  ]);
 }

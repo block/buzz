@@ -1,5 +1,8 @@
 import 'package:flutter/material.dart';
 
+import 'app_colors.dart';
+import 'theme_extensions.dart';
+
 /// Name of the first-party Buzz theme. Buzz reuses the GitHub Light palette for
 /// every base color; the one thing that sets it apart is a branded gradient
 /// painted across the app's top section. Mirrors desktop, where the same
@@ -17,33 +20,68 @@ const buzzDarkThemeName = 'buzz-dark';
 bool isBuzzTheme(String themeName) =>
     themeName == buzzThemeName || themeName == buzzDarkThemeName;
 
-/// Gradient stops, matching desktop's `--buzz-gradient-*` custom properties.
-const _lightTop = Color(0xFFE6E6B6);
-const _lightBottom = Color(0xFFC4D0DA);
-const _darkTop = Color(0xFF4A4616);
-const _darkBottom = Color(0xFF0A1423);
+/// Whether the current widget tree is using the first-party Buzz treatment.
+bool isBuzzThemeContext(BuildContext context) =>
+    Theme.of(context).extension<AppColors>()?.topSectionGradient != null;
 
-/// The Buzz gradient for the app's top section, or null when [themeName] is not
-/// a Buzz theme — in which case the section keeps its default frosted fill.
+/// Primary foreground for the mobile top navigation.
 ///
-/// The stops are fully opaque: under Buzz the color replaces the frosted
-/// treatment rather than tinting it, matching desktop's solid sidebar canvas.
-///
-/// [brightness] comes from the applied color scheme rather than the theme name,
-/// so System mode picks the right stops as the OS switches.
-LinearGradient? buzzTopSectionGradient(
-  String themeName,
-  Brightness brightness,
-) {
-  if (!isBuzzTheme(themeName)) return null;
-
-  final isDark = brightness == Brightness.dark;
-  return LinearGradient(
-    begin: Alignment.topCenter,
-    end: Alignment.bottomCenter,
-    colors: [
-      isDark ? _darkTop : _lightTop,
-      isDark ? _darkBottom : _lightBottom,
-    ],
-  );
+/// Every theme uses its own [ColorScheme.onSurface]. Buzz is the exception:
+/// its desktop-matching top gradient needs a neutral black or white foreground
+/// rather than the accent-derived color scheme foreground.
+Color navigationPrimaryForeground(BuildContext context) {
+  final scheme = Theme.of(context).colorScheme;
+  if (!isBuzzThemeContext(context)) return scheme.onSurface;
+  return scheme.brightness == Brightness.dark ? Colors.white : Colors.black;
 }
+
+/// Secondary label and placeholder foreground for the mobile top navigation.
+Color navigationSecondaryForeground(BuildContext context) {
+  final scheme = Theme.of(context).colorScheme;
+  if (!isBuzzThemeContext(context)) return scheme.onSurfaceVariant;
+  return navigationPrimaryForeground(context).withValues(alpha: 0.4);
+}
+
+/// Channel-section label and icon foreground for the mobile side navigation.
+///
+/// Section labels need more hierarchy than a placeholder. Buzz therefore uses
+/// a stronger neutral over its gradient, while all other themes preserve their
+/// established secondary foreground token.
+Color navigationSectionForeground(BuildContext context) {
+  final scheme = Theme.of(context).colorScheme;
+  if (!isBuzzThemeContext(context)) return scheme.onSurfaceVariant;
+  return navigationPrimaryForeground(context).withValues(alpha: 0.8);
+}
+
+/// Search-field surface for the mobile top navigation.
+Color navigationSearchSurface(BuildContext context) {
+  return context.controlSurface;
+}
+
+/// A low-contrast navigation divider derived from the active theme foreground.
+Color navigationDivider(BuildContext context, double opacity) =>
+    navigationPrimaryForeground(context).withValues(alpha: opacity);
+
+/// Desktop navigation ink distinguishes read destinations from unread labels.
+Color channelNavigationForeground(BuildContext context, {bool unread = false}) {
+  final dark = Theme.of(context).brightness == Brightness.dark;
+  return unread
+      ? (dark ? const Color(0xFFFFFFFF) : const Color(0xFF262626))
+      : (dark ? const Color(0xFFC7C7C7) : const Color(0xFF404040));
+}
+
+/// Shared desktop section-heading ink.
+Color navigationHeadingForeground(BuildContext context) =>
+    Theme.of(context).brightness == Brightness.dark
+    ? const Color(0xFFC7C7C7)
+    : const Color(0xFF525252);
+
+/// Section disclosure controls share the heading's foreground role.
+Color navigationAccessoryForeground(BuildContext context) =>
+    navigationHeadingForeground(context);
+
+/// Muted destinations remain quieter than ordinary rows and section headings.
+Color navigationMetadataForeground(BuildContext context) =>
+    Theme.of(context).brightness == Brightness.dark
+    ? const Color(0xFFA4A4A4)
+    : const Color(0xFF5F5F5F);

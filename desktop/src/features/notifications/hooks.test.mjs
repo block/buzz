@@ -37,7 +37,7 @@ const homeFeed = (feed) => ({
   meta: { since: 0, total: 0, generatedAt: 0 },
 });
 
-test("home badge items include locally unread activity and agent rows", () => {
+test("home badge excludes thread activity already shown in a channel preview", () => {
   const items = buildHomeBadgeFeedItems(
     homeFeed({
       mentions: [feedItem("mention", "mention")],
@@ -51,7 +51,12 @@ test("home badge items include locally unread activity and agent rows", () => {
         feedItem("read-agent", "agent_activity"),
       ],
     }),
-    [feedItem("thread-activity")],
+    [
+      {
+        ...feedItem("thread-activity"),
+        tags: ROOT_TAGS,
+      },
+    ],
     new Set(["locally-unread-activity", "locally-unread-agent"]),
   );
 
@@ -60,7 +65,6 @@ test("home badge items include locally unread activity and agent rows", () => {
     [
       "mention",
       "needs-action",
-      "thread-activity",
       "locally-unread-activity",
       "locally-unread-agent",
     ],

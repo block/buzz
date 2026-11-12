@@ -34,18 +34,14 @@ void main() {
     );
     expectStyle(
       messageTimestampTextStyle,
-      fontSize: 15,
-      fontWeight: FontWeight.w400,
-      lineHeight: 17,
-      letterSpacing: 0,
-    );
-    expect(messageTimestampTextStyle, messageMetadataTextStyle);
-    expectStyle(
-      replyPreviewTextStyle,
       fontSize: 13.1,
       fontWeight: FontWeight.w400,
       lineHeight: 17,
       letterSpacing: 0,
+    );
+    expect(
+      messageTimestampTextStyle.fontSize,
+      lessThan(messageUsernameTextStyle.fontSize!),
     );
     expectStyle(
       reactionCountTextStyle,
@@ -61,20 +57,6 @@ void main() {
       lineHeight: 24,
       letterSpacing: 0,
     );
-    expectStyle(
-      systemMessageHeadingTextStyle,
-      fontSize: 15,
-      fontWeight: FontWeight.w600,
-      lineHeight: 17,
-      letterSpacing: 0,
-    );
-    expectStyle(
-      systemMessageBodyTextStyle,
-      fontSize: 15,
-      fontWeight: FontWeight.w400,
-      lineHeight: 20,
-      letterSpacing: 0,
-    );
   });
 
   test('activity typography matches the conversation row scale', () {
@@ -87,7 +69,7 @@ void main() {
     );
     expectStyle(
       activityTimestampTextStyle,
-      fontSize: 15,
+      fontSize: 13.1,
       fontWeight: FontWeight.w400,
       lineHeight: 17,
       letterSpacing: 0,
@@ -124,16 +106,16 @@ void main() {
       letterSpacing: 0,
     );
     expectStyle(
-      contentListTimestampTextStyle,
+      filterChipTextStyle,
       fontSize: 15,
       fontWeight: FontWeight.w400,
-      lineHeight: 17,
+      lineHeight: 15,
       letterSpacing: 0,
     );
   });
 
   test('message and activity avatars use their surface sizes', () {
-    expect(messageAvatarSize, 42);
+    expect(messageAvatarSize, 36);
     expect(activityAvatarSize, 42);
     expect(compactMessageAvatarSize, 42);
     expect(messageAvatarContentGap, Grid.twelve);

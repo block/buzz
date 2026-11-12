@@ -1,6 +1,8 @@
+import 'package:buzz/shared/crypto/event_signing.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
+import '../hosted/hosted_relay_auth.dart';
 import '../community/community_provider.dart';
 import 'relay_client.dart';
 
@@ -10,12 +12,50 @@ import 'relay_client.dart';
 ///   - `baseUrl` — where the relay lives (used for WS + media upload)
 ///   - `nsec`    — the user's signing key (drives NIP-42 AUTH and event sigs)
 class RelayConfig {
-  final String baseUrl;
+  const RelayConfig({required String baseUrl, String? nsec})
+    : _baseUrl = baseUrl,
+      _nsec = nsec;
 
-  /// Nostr secret key (bech32 nsec) for signing events and NIP-42 AUTH.
-  final String? nsec;
+  /// Relay origin exactly as the active community stored it.
+  final String _baseUrl;
 
-  const RelayConfig({required this.baseUrl, this.nsec});
+  /// Normalized Nostr secret key shared by identity, signing, and NIP-42 AUTH.
+  String? get nsec => _nsec?.trim();
+
+  final String? _nsec;
+
+  /// The origin as persisted, before scheme canonicalization.
+  ///
+  /// Exists solely so identity-scoped storage keys written before [baseUrl]
+  /// was canonicalized stay reachable — see [readMigratedPref]. Never use it
+  /// for network I/O; [baseUrl] and [wsUrl] are the addresses to connect to.
+  String get storedOrigin => _baseUrl;
+
+  /// Relay origin as an HTTP(S) URL.
+  ///
+  /// Communities are persisted with whichever scheme their onboarding flow
+  /// used: device pairing stores `https://` (it rejects anything else), while
+  /// an invite join stores the `wss://` relay URL carried by the invite link.
+  /// Every consumer treats this as an HTTP origin — [wsUrl], the `/query`
+  /// endpoint, media upload and Blossom auth — so a `wss://` base silently
+  /// degrades all of them. Folding the websocket schemes back here keeps both
+  /// onboarding paths equivalent, including for already-persisted communities.
+  ///
+  /// Derived rather than normalized in the constructor so that the constructor
+  /// stays `const`: the compile-time fallback below relies on canonicalization
+  /// to keep its identity stable across rebuilds, and Riverpod's default
+  /// `updateShouldNotify` is `previous != next`, which falls back to identity
+  /// here. A fresh instance per rebuild would resubscribe every listener.
+  String get baseUrl {
+    final uri = Uri.tryParse(_baseUrl);
+    if (uri == null) return _baseUrl;
+    final scheme = switch (uri.scheme) {
+      'wss' => 'https',
+      'ws' => 'http',
+      _ => null,
+    };
+    return scheme == null ? _baseUrl : uri.replace(scheme: scheme).toString();
+  }
 
   /// Derive the websocket URL from the HTTP base URL.
   String get wsUrl {
@@ -28,7 +68,8 @@ class RelayConfig {
 /// Compile-time environment config via --dart-define.
 ///
 /// Run with:
-///   flutter run --dart-define=BUZZ_RELAY_URL=http://localhost:3000
+///   flutter run --dart-define=BUZZ_RELAY_URL=http://localhost:3000 \
+///     --dart-define=BUZZ_PUSH_GATEWAY_URL=http://localhost:8080
 ///
 /// Or create a `.env.json` and use --dart-define-from-file=.env.json
 class Env {
@@ -36,17 +77,27 @@ class Env {
     'BUZZ_RELAY_URL',
     defaultValue: 'http://localhost:3000',
   );
+
+  /// Optional gateway origin. Without it this artifact has no push capability.
+  static const pushGatewayUrl = String.fromEnvironment('BUZZ_PUSH_GATEWAY_URL');
+
+  /// Whether this artifact can offer push notification enrollment.
+  static const pushGatewayConfigured = pushGatewayUrl != '';
 }
 
 class RelayConfigNotifier extends Notifier<RelayConfig> {
   @override
   RelayConfig build() {
-    // Watch the active community so that when it changes (community switch),
-    // the config rebuilds, triggering the full provider cascade.
-    final activeAsync = ref.watch(activeCommunityProvider);
-    final active = activeAsync.value;
-    if (active != null) {
-      return RelayConfig(baseUrl: active.relayUrl, nsec: active.nsec);
+    // Push lease bookkeeping updates the community while using its live
+    // session. Only connection-context changes may restart that session.
+    final context = ref.watch(
+      activeCommunityProvider.select((value) {
+        final active = value.value;
+        return (id: active?.id, relayUrl: active?.relayUrl, nsec: active?.nsec);
+      }),
+    );
+    if (context.relayUrl != null) {
+      return RelayConfig(baseUrl: context.relayUrl!, nsec: context.nsec);
     }
 
     // Fallback to compile-time env config (dev mode).
@@ -68,7 +119,7 @@ String? pubkeyFromNsec(String? nsec) {
   try {
     final privkeyHex = nostr.Nip19.decode(payload: nsec).data;
     if (privkeyHex.isEmpty) return null;
-    return nostr.Keys(privkeyHex).public;
+    return derivePublicKeyHex(privkeyHex);
   } catch (_) {
     return null;
   }
@@ -86,7 +137,10 @@ final myPubkeyProvider = Provider<String?>((ref) {
 /// through the relay WebSocket session.
 final relayClientProvider = Provider<RelayClient>((ref) {
   final config = ref.watch(relayConfigProvider);
-  final client = RelayClient(baseUrl: config.baseUrl);
+  final client = RelayClient(
+    baseUrl: config.baseUrl,
+    httpClient: ref.watch(hostedHttpClientFactoryProvider)(),
+  );
   ref.onDispose(client.dispose);
   return client;
 });

@@ -1,12 +1,19 @@
 use std::future::Future;
 use std::time::Duration;
 
-use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
-use nostr::{EventBuilder, JsonUtil, Keys, Kind, Tag};
+use nostr::{EventBuilder, JsonUtil, Kind, PublicKey, Tag};
 use sha2::{Digest, Sha256};
 
+use crate::credentials::{
+    Credentials, FEDERATED_IDENTITY_ADAPTER_ENV, FEDERATED_IDENTITY_TOKEN_ENV,
+};
 use crate::error::CliError;
+
+/// NIP-FI assertion header (`docs/nips/NIP-FI.md` §Client-attached transport).
+const FEDERATED_IDENTITY_HEADER: &str = "Nostr-Federated-Identity";
+/// `User-Agent` sent on every WebSocket upgrade.
+const USER_AGENT: &str = concat!("buzz-cli/", env!("CARGO_PKG_VERSION"));
 
 /// Descriptor returned by the relay after a successful upload.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -60,8 +67,9 @@ pub fn build_imeta_tag(d: &BlobDescriptor) -> Vec<String> {
     tag
 }
 
-/// MIME types accepted for upload.
-const ALLOWED_MIMES: &[&str] = &[
+/// MIME types the relay stores as inline media; everything else is a generic
+/// file it validates, stores and serves as a download.
+const MEDIA_MIMES: &[&str] = &[
     "image/jpeg",
     "image/png",
     "image/gif",
@@ -75,39 +83,8 @@ const MAX_IMAGE_BYTES: u64 = 50 * 1024 * 1024;
 /// Maximum file size for video uploads (500 MB).
 const MAX_VIDEO_BYTES: u64 = 500 * 1024 * 1024;
 
-/// Sign a NIP-98 HTTP auth event (kind:27235) and return the Authorization header value.
-///
-/// The event includes:
-/// - `u` tag: the full request URL
-/// - `method` tag: HTTP method (GET, POST, PUT, DELETE)
-/// - `payload` tag: SHA-256 hex of the request body (if present)
-fn sign_nip98(
-    keys: &Keys,
-    method: &str,
-    url: &str,
-    body: Option<&[u8]>,
-) -> Result<String, CliError> {
-    let mut tags = vec![
-        Tag::parse(["u", url]).map_err(|e| CliError::Other(format!("tag error: {e}")))?,
-        Tag::parse(["method", method]).map_err(|e| CliError::Other(format!("tag error: {e}")))?,
-        // Nonce prevents replay rejection for rapid-fire requests with identical bodies.
-        Tag::parse(["nonce", &uuid::Uuid::new_v4().to_string()])
-            .map_err(|e| CliError::Other(format!("tag error: {e}")))?,
-    ];
-    if let Some(b) = body {
-        let hash = hex::encode(Sha256::digest(b));
-        tags.push(
-            Tag::parse(["payload", &hash])
-                .map_err(|e| CliError::Other(format!("tag error: {e}")))?,
-        );
-    }
-    let event = EventBuilder::new(Kind::Custom(27235), "")
-        .tags(tags)
-        .sign_with_keys(keys)
-        .map_err(|e| CliError::Other(format!("NIP-98 signing failed: {e}")))?;
-    let json = event.as_json();
-    Ok(format!("Nostr {}", B64.encode(json.as_bytes())))
-}
+/// Maximum file size for generic file uploads (100 MB), the relay's default.
+const MAX_FILE_BYTES: u64 = 100 * 1024 * 1024;
 
 fn relay_server_tag(relay_url: &str) -> Option<String> {
     let authority = buzz_core::tenant::relay_url_authority(relay_url);
@@ -119,6 +96,14 @@ fn relay_server_tag(relay_url: &str) -> Option<String> {
 }
 
 /// Maximum number of attempts per request (initial attempt + two retries).
+/// The WebSocket connect and upgrade, before any NIP-42 wait.
+const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+/// Connections a WebSocket publish may open to complete NIP-42 sign-in.
+const WS_SIGN_IN_ATTEMPTS: u32 = 3;
+/// Times an HTTP proof is signed while its NIP-FI assertion keeps expiring.
+const AUTHORIZE_ROUNDS: u32 = 3;
+/// How old an HTTP proof may be when sent, well inside the relay's 60 s.
+const PROOF_MAX_AGE_SECS: u64 = 30;
 const RETRY_MAX_ATTEMPTS: u32 = 3;
 
 /// Base sleep durations for full-jitter exponential backoff.
@@ -252,7 +237,7 @@ fn is_safe_media_path_segment(sha256_ext: &str) -> bool {
     match segments.as_slice() {
         [hash] => is_lower_hex_sha256(hash),
         [hash, ext] => is_lower_hex_sha256(hash) && is_safe_media_ext(ext),
-        [hash, "thumb", "jpg"] => is_lower_hex_sha256(hash),
+        [hash, "thumb", "webp" | "jpg"] => is_lower_hex_sha256(hash),
         _ => false,
     }
 }
@@ -284,7 +269,7 @@ fn media_url_from_input(relay_url: &str, input: &str) -> Result<String, CliError
         };
         if !is_safe_media_path_segment(sha256_ext) {
             return Err(CliError::Usage(
-                "media path must be sha256, sha256.ext, or sha256.thumb.jpg".to_string(),
+                "media path must be sha256, sha256.ext, or sha256.thumb.{webp,jpg}".to_string(),
             ));
         }
         let relay = url::Url::parse(relay_url)
@@ -313,7 +298,7 @@ fn media_url_from_input(relay_url: &str, input: &str) -> Result<String, CliError
     }
     if !is_safe_media_path_segment(sha256_ext) {
         return Err(CliError::Usage(
-            "media input must be sha256, sha256.ext, or sha256.thumb.jpg".to_string(),
+            "media input must be sha256, sha256.ext, or sha256.thumb.{webp,jpg}".to_string(),
         ));
     }
     Ok(format!(
@@ -322,66 +307,45 @@ fn media_url_from_input(relay_url: &str, input: &str) -> Result<String, CliError
     ))
 }
 
-fn sign_blossom_get(keys: &Keys, media_url: &str) -> Result<String, CliError> {
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    use nostr::Timestamp;
-
-    let now = Timestamp::now().as_secs();
-    let exp_str = (now + 600).to_string();
-    let domain = relay_server_tag(media_url)
-        .ok_or_else(|| CliError::Usage(format!("invalid media URL: {media_url}")))?;
-    let tags = vec![
-        Tag::parse(["t", "get"]).map_err(|e| CliError::Other(e.to_string()))?,
-        Tag::parse(["expiration", &exp_str]).map_err(|e| CliError::Other(e.to_string()))?,
-        Tag::parse(["server", &domain]).map_err(|e| CliError::Other(e.to_string()))?,
-    ];
-
-    let auth_event = EventBuilder::new(Kind::from(24242), "Get media")
-        .tags(tags)
-        .sign_with_keys(keys)
-        .map_err(|e| CliError::Other(format!("signing failed: {e}")))?;
-
-    Ok(format!(
-        "Nostr {}",
-        URL_SAFE_NO_PAD.encode(auth_event.as_json().as_bytes())
-    ))
+/// Blossom (BUD-01) `t=get` proof for `media_url`, scoped to its server.
+fn blossom_get_event(media_url: &str) -> Result<EventBuilder, CliError> {
+    blossom_event(
+        "get",
+        None,
+        relay_server_tag(media_url)
+            .ok_or_else(|| CliError::Usage(format!("invalid media URL: {media_url}")))?,
+        "Get media",
+    )
 }
 
-fn sign_blossom_upload(
-    keys: &Keys,
-    sha256: &str,
-    mime: &str,
-    relay_url: &str,
-) -> Result<String, CliError> {
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    use nostr::Timestamp;
+/// Blossom (BUD-02) `t=upload` proof for blob `sha256` on this relay.
+fn blossom_upload_event(sha256: &str, relay_url: &str) -> Result<EventBuilder, CliError> {
+    blossom_event(
+        "upload",
+        Some(sha256),
+        relay_server_tag(relay_url)
+            .ok_or_else(|| CliError::Usage(format!("invalid relay URL: {relay_url}")))?,
+        "Upload file",
+    )
+}
 
-    let now = Timestamp::now().as_secs();
-    let expiry: u64 = if mime.starts_with("video/") {
-        3600
-    } else {
-        600
+fn blossom_event(
+    verb: &str,
+    sha256: Option<&str>,
+    server: String,
+    content: &str,
+) -> Result<EventBuilder, CliError> {
+    let exp = (nostr::Timestamp::now().as_secs() + 60).to_string();
+    let tag = |parts: &[&str]| {
+        Tag::parse(parts.iter().copied()).map_err(|e| CliError::Other(e.to_string()))
     };
-    let exp_str = (now + expiry).to_string();
-
-    let mut tags = vec![
-        Tag::parse(["t", "upload"]).map_err(|e| CliError::Other(e.to_string()))?,
-        Tag::parse(["x", sha256]).map_err(|e| CliError::Other(e.to_string()))?,
-        Tag::parse(["expiration", &exp_str]).map_err(|e| CliError::Other(e.to_string()))?,
-    ];
-    if let Some(domain) = relay_server_tag(relay_url) {
-        tags.push(Tag::parse(["server", &domain]).map_err(|e| CliError::Other(e.to_string()))?);
+    let mut tags = vec![tag(&["t", verb])?];
+    if let Some(sha256) = sha256 {
+        tags.push(tag(&["x", sha256])?);
     }
-
-    let auth_event = EventBuilder::new(Kind::from(24242), "Upload file")
-        .tags(tags)
-        .sign_with_keys(keys)
-        .map_err(|e| CliError::Other(format!("signing failed: {e}")))?;
-
-    Ok(format!(
-        "Nostr {}",
-        URL_SAFE_NO_PAD.encode(auth_event.as_json().as_bytes())
-    ))
+    tags.push(tag(&["expiration", &exp])?);
+    tags.push(tag(&["server", &server])?);
+    Ok(EventBuilder::new(Kind::from(24242), content).tags(tags))
 }
 
 #[cfg(test)]
@@ -451,19 +415,12 @@ mod media_download_tests {
 
     #[test]
     fn media_get_auth_header_is_server_scoped() {
-        let keys = Keys::generate();
+        let keys = nostr::Keys::generate();
         let hash = "a".repeat(64);
-        let header = sign_blossom_get(
-            &keys,
-            &format!("https://relay.example:443/media/{hash}.jpg"),
-        )
-        .unwrap();
-        let encoded = header.strip_prefix("Nostr ").unwrap();
-        let json = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode(encoded)
+        let event = blossom_get_event(&format!("https://relay.example:443/media/{hash}.jpg"))
+            .unwrap()
+            .sign_with_keys(&keys)
             .unwrap();
-        let event = nostr::Event::from_json(std::str::from_utf8(&json).unwrap()).unwrap();
-        event.verify().unwrap();
         assert_eq!(event.kind, Kind::from(24242));
 
         let tags: Vec<Vec<String>> = event
@@ -495,8 +452,21 @@ mod media_download_tests {
     }
 }
 
-const QUERY_PAGE_SIZE: u32 = 500;
+pub(crate) const QUERY_PAGE_SIZE: u32 = 500;
 
+/// The most pages one limited query reads before failing, so a relay that
+/// never runs out of events to skip cannot keep a command running forever.
+pub(crate) const MAX_QUERY_PAGES: usize = 100;
+
+fn stalled_query(detail: &str) -> CliError {
+    CliError::Relay {
+        status: 200,
+        body: format!("query pagination stopped: {detail}"),
+    }
+}
+
+/// Move the composite cursor to the page's last event, failing unless it
+/// lands strictly older than the current cursor.
 fn advance_query_cursor(
     filter: &mut serde_json::Value,
     page: &[serde_json::Value],
@@ -513,19 +483,67 @@ fn advance_query_cursor(
         .and_then(serde_json::Value::as_str)
         .filter(|id| id.len() == 64 && id.chars().all(|c| c.is_ascii_hexdigit()))
         .ok_or_else(|| CliError::Other("query event missing valid id".into()))?;
+    if let (Some(until), Some(before_id)) = (
+        filter.get("until").and_then(serde_json::Value::as_u64),
+        filter.get("before_id").and_then(serde_json::Value::as_str),
+    ) {
+        // The relay pages newest first, equal timestamps by ascending id:
+        // the next page lies at `created_at < until`, or at `until` past `before_id`.
+        let older = created_at < until
+            || (created_at == until && id.to_ascii_lowercase() > before_id.to_ascii_lowercase());
+        if !older {
+            return Err(stalled_query(
+                "the relay did not move the cursor to older events",
+            ));
+        }
+    }
     filter["until"] = serde_json::json!(created_at);
     filter["before_id"] = serde_json::json!(id);
     Ok(())
 }
 
+/// How a protected relay request proves key possession in `Authorization`.
+enum Proof<'a> {
+    /// NIP-98 over the request method, URL and body.
+    Nip98 {
+        method: &'a str,
+        url: &'a str,
+        body: Option<&'a [u8]>,
+    },
+    /// Blossom kind-24242 upload proof for blob `sha256`.
+    BlossomUpload { sha256: &'a str },
+    /// Blossom kind-24242 read proof for `url`.
+    BlossomGet { url: &'a str },
+}
+
+impl<'a> Proof<'a> {
+    fn post(url: &'a str, body: &'a [u8]) -> Self {
+        Self::Nip98 {
+            method: "POST",
+            url,
+            body: Some(body),
+        }
+    }
+}
+
 pub struct BuzzClient {
     http: reqwest::Client,
     relay_url: String, // base URL, no trailing slash, e.g. "https://relay.buzz.place"
-    keys: Keys,
-    /// Optional NIP-OA auth tag injected into every signed event.
-    auth_tag: Option<Tag>,
-    /// Raw JSON of the auth tag for the `x-auth-tag` HTTP header.
-    auth_tag_json: Option<String>,
+    /// The configured URL as a WebSocket URL, path and trailing slash kept,
+    /// as NIP-42 AUTH must name it.
+    ws_url: String,
+    /// Identity, signer, NIP-OA auth tag and NIP-FI evidence source.
+    credentials: Credentials,
+    /// Whether any request has carried a NIP-FI assertion, for error hints.
+    assertion_sent: std::sync::atomic::AtomicBool,
+}
+
+/// A credential header value, marked sensitive so `Debug` output redacts it.
+fn sensitive(value: String) -> Result<reqwest::header::HeaderValue, CliError> {
+    let mut value = reqwest::header::HeaderValue::try_from(value)
+        .map_err(|_| CliError::Auth("credential is not a valid header value".into()))?;
+    value.set_sensitive(true);
+    Ok(value)
 }
 
 impl BuzzClient {
@@ -538,29 +556,34 @@ impl BuzzClient {
     /// - `BUZZ_TIMEOUT_SECS` — per-request total timeout (default 30 s)
     ///
     /// A value of zero for either variable is treated as invalid and falls back to the default.
-    pub fn new(
-        relay_url: String,
-        keys: Keys,
-        auth_tag: Option<Tag>,
-        auth_tag_json: Option<String>,
-    ) -> Result<Self, CliError> {
+    /// A client for the relay at `relay_url`, as configured.
+    pub fn new(relay_url: String, credentials: Credentials) -> Result<Self, CliError> {
         let http = reqwest::Client::builder()
+            // Never replay credentials to a redirect target: reqwest strips
+            // `Authorization` across origins but not `x-auth-tag` or the
+            // NIP-FI assertion. A 3xx surfaces as a relay error instead.
+            .redirect(reqwest::redirect::Policy::none())
             .timeout(env_duration_secs("BUZZ_TIMEOUT_SECS", 30))
             .connect_timeout(env_duration_secs("BUZZ_CONNECT_TIMEOUT_SECS", 15))
             .build()
             .map_err(|e| CliError::Other(e.to_string()))?;
         Ok(Self {
             http,
-            relay_url,
-            keys,
-            auth_tag,
-            auth_tag_json,
+            ws_url: to_ws_url(&relay_url),
+            relay_url: normalize_relay_url(&relay_url),
+            credentials,
+            assertion_sent: Default::default(),
         })
     }
 
-    /// Get the keypair.
-    pub fn keys(&self) -> &Keys {
-        &self.keys
+    /// The public key this client acts as.
+    pub fn public_key(&self) -> PublicKey {
+        self.credentials.public_key()
+    }
+
+    /// The credentials this client acts with.
+    pub fn credentials(&self) -> &Credentials {
+        &self.credentials
     }
 
     /// Get the relay base URL.
@@ -574,9 +597,9 @@ impl BuzzClient {
     /// The auth tag is `["auth", owner_pubkey, conditions, sig]`; the
     /// owner pubkey lives at index 1.
     pub fn auth_tag_owner_hex(&self) -> Option<String> {
-        self.auth_tag
-            .as_ref()
-            .map(|t| t.as_slice())
+        self.credentials
+            .auth_tag()
+            .map(|t| t.tag.as_slice())
             .and_then(|slice| slice.get(1).cloned())
     }
 
@@ -585,23 +608,21 @@ impl BuzzClient {
     /// All event creation should go through this method to ensure consistent
     /// auth tag injection. Callers MUST NOT add `auth` tags to the builder
     /// before calling this method.
-    pub fn sign_event(&self, builder: EventBuilder) -> Result<nostr::Event, CliError> {
-        let builder = if let Some(ref tag) = self.auth_tag {
-            builder.tags([tag.clone()])
-        } else {
-            builder
+    pub async fn sign_event(&self, builder: EventBuilder) -> Result<nostr::Event, CliError> {
+        let auth_tag = self.credentials.auth_tag();
+        let builder = match auth_tag {
+            Some(tag) => builder.tags([tag.tag.clone()]),
+            None => builder,
         };
-        let event = builder
-            .sign_with_keys(&self.keys)
-            .map_err(|e| CliError::Other(format!("signing failed: {e}")))?;
+        let event = self.credentials.sign(builder).await?;
 
-        // Enforce: auth tags may only come from self.auth_tag injection.
+        // Enforce: auth tags may only come from the credentials' auth tag.
         let auth_count = event
             .tags
             .iter()
             .filter(|t| t.as_slice().first().map(|s| s.as_str()) == Some("auth"))
             .count();
-        let expected = if self.auth_tag.is_some() { 1 } else { 0 };
+        let expected = if auth_tag.is_some() { 1 } else { 0 };
         if auth_count != expected {
             return Err(CliError::Other(format!(
                 "event has {auth_count} auth tags — expected {expected}; \
@@ -612,11 +633,137 @@ impl BuzzClient {
         Ok(event)
     }
 
-    /// Attach the `x-auth-tag` header if configured (NIP-OA relay membership delegation).
-    fn with_auth_tag(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        match self.auth_tag_json {
-            Some(ref json) => req.header("x-auth-tag", json),
-            None => req,
+    /// The one place protected relay requests get their credentials:
+    /// `proof` in `Authorization`, the NIP-OA `x-auth-tag` (relay membership
+    /// delegation) when configured, and the NIP-FI `Nostr-Federated-Identity`
+    /// assertion when an evidence source is configured. Called once per
+    /// attempt so every retry carries a fresh proof.
+    async fn authorize(
+        &self,
+        req: reqwest::RequestBuilder,
+        proof: Proof<'_>,
+    ) -> Result<reqwest::RequestBuilder, CliError> {
+        // Evidence first: a refresh may wait out adapter retries, and the
+        // proof must be signed after it, just before sending, to stay fresh.
+        // Signing may wait out throttling in turn, so evidence that is due
+        // for refresh by then is fetched again, and the proof re-signed when
+        // the assertion changed or that fetch aged the proof.
+        let mut assertion = self.evidence().await?;
+        let mut round = 1;
+        let authorization = loop {
+            // The proof is dated before signing, which may be held for long.
+            let signed_at = crate::cached_assertion::unix_now();
+            let authorization = self.proof(&proof).await?;
+            let current = self.evidence().await?;
+            let age = crate::cached_assertion::unix_now().saturating_sub(signed_at);
+            if current == assertion && age < PROOF_MAX_AGE_SECS {
+                break authorization;
+            }
+            if round == AUTHORIZE_ROUNDS {
+                return Err(CliError::Unavailable(
+                    "the NIP-FI assertion kept expiring while the proof was signed".into(),
+                ));
+            }
+            (assertion, round) = (current, round + 1);
+        };
+        let mut req = req.header(reqwest::header::AUTHORIZATION, sensitive(authorization)?);
+        if let Some(tag) = self.credentials.auth_tag() {
+            req = req.header("x-auth-tag", sensitive(tag.json.clone())?);
+        }
+        if let Some(assertion) = assertion {
+            req = req.header(
+                FEDERATED_IDENTITY_HEADER,
+                sensitive(format!("Bearer {assertion}"))?,
+            );
+        }
+        Ok(req)
+    }
+
+    /// `proof`, signed now, as an `Authorization` value.
+    async fn proof(&self, proof: &Proof<'_>) -> Result<String, CliError> {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        Ok(match *proof {
+            Proof::Nip98 { method, url, body } => {
+                format!("Nostr {}", self.credentials.nip98(method, url, body).await?)
+            }
+            Proof::BlossomUpload { sha256 } => {
+                let event = self
+                    .credentials
+                    .sign(blossom_upload_event(sha256, &self.relay_url)?)
+                    .await?;
+                format!(
+                    "Nostr {}",
+                    URL_SAFE_NO_PAD.encode(event.as_json().as_bytes())
+                )
+            }
+            Proof::BlossomGet { url } => {
+                let event = self.credentials.sign(blossom_get_event(url)?).await?;
+                format!(
+                    "Nostr {}",
+                    URL_SAFE_NO_PAD.encode(event.as_json().as_bytes())
+                )
+            }
+        })
+    }
+
+    /// The WebSocket upgrade headers: the CLI's `User-Agent`, and the NIP-FI
+    /// assertion when there is an evidence source.
+    async fn upgrade_headers(&self) -> Result<buzz_ws_client::HeaderMap, CliError> {
+        let mut headers = buzz_ws_client::HeaderMap::new();
+        headers.insert(
+            "user-agent",
+            buzz_ws_client::HeaderValue::from_static(USER_AGENT),
+        );
+        if let Some(assertion) = self.evidence().await? {
+            let mut value =
+                buzz_ws_client::HeaderValue::from_str(&format!("Bearer {assertion}"))
+                    .map_err(|_| CliError::Auth("assertion is not a valid header value".into()))?;
+            value.set_sensitive(true);
+            headers.insert(FEDERATED_IDENTITY_HEADER, value);
+        }
+        Ok(headers)
+    }
+
+    /// The NIP-FI assertion for this relay, noting that one was sent.
+    async fn evidence(&self) -> Result<Option<String>, CliError> {
+        let assertion = self.credentials.evidence().await?;
+        if assertion.is_some() {
+            self.assertion_sent
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        Ok(assertion)
+    }
+
+    /// Map a non-2xx relay response to a `CliError`.
+    ///
+    /// The relay's `{"error": …}` / `{"message": …}` field becomes the
+    /// message. A 401 without a NIP-FI evidence source names the settings,
+    /// since an enforcing relay answers every request that way.
+    fn relay_error(&self, status: u16, body: String) -> CliError {
+        let message = extract_relay_message_field(&body).unwrap_or(body);
+        let message = message.trim_end().to_owned();
+        let sent = self
+            .assertion_sent
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let desktop = self.credentials.is_desktop();
+        if status == 401 && !sent && desktop {
+            return CliError::Auth(format!(
+                "relay requires authentication ({message}); if it enforces federated identity \
+                 (NIP-FI), the Buzz desktop has no assertion for this relay: sign in to this \
+                 community in Buzz, then retry"
+            ));
+        }
+        if status == 401 && !sent && !self.credentials.has_evidence_source() {
+            return CliError::Auth(format!(
+                "relay requires authentication ({message}); if it enforces federated identity \
+                 (NIP-FI), set {FEDERATED_IDENTITY_TOKEN_ENV} to your own NIP-FA sign-in session \
+                 (a human session for this key, not an agent grant) and \
+                 {FEDERATED_IDENTITY_ADAPTER_ENV} to its adapter, which mints the assertion"
+            ));
+        }
+        CliError::Relay {
+            status,
+            body: message,
         }
     }
 
@@ -682,15 +829,37 @@ impl BuzzClient {
 
     async fn query_pages(
         &self,
-        mut filter: serde_json::Value,
+        filter: serde_json::Value,
         limit: Option<u32>,
     ) -> Result<Vec<serde_json::Value>, CliError> {
+        self.query_pages_keeping(filter, limit, None).await
+    }
+
+    /// Like `query_pages`, but with `keep`, only events it accepts count
+    /// toward `limit`: paging continues past the ones it drops, always in
+    /// full pages, for at most `MAX_QUERY_PAGES` pages.
+    async fn query_pages_keeping(
+        &self,
+        mut filter: serde_json::Value,
+        limit: Option<u32>,
+        keep: Option<&dyn Fn(&serde_json::Value) -> bool>,
+    ) -> Result<Vec<serde_json::Value>, CliError> {
         let mut events = Vec::new();
+        let mut pages = 0;
 
         while limit.is_none_or(|limit| events.len() < limit as usize) {
-            let page_limit = limit
-                .map(|limit| (limit as usize - events.len()).min(QUERY_PAGE_SIZE as usize))
-                .unwrap_or(QUERY_PAGE_SIZE as usize);
+            if keep.is_some() && pages == MAX_QUERY_PAGES {
+                return Err(stalled_query(&format!(
+                    "read {MAX_QUERY_PAGES} pages without reaching the end of the results"
+                )));
+            }
+            pages += 1;
+            let page_limit = match (limit, keep) {
+                (Some(limit), None) => {
+                    (limit as usize - events.len()).min(QUERY_PAGE_SIZE as usize)
+                }
+                _ => QUERY_PAGE_SIZE as usize,
+            };
             filter["limit"] = serde_json::json!(page_limit);
 
             let raw = self.query(&filter).await?;
@@ -701,13 +870,28 @@ impl BuzzClient {
             if !done {
                 advance_query_cursor(&mut filter, &page)?;
             }
-            events.extend(page);
+            events.extend(page.into_iter().filter(|e| keep.is_none_or(|keep| keep(e))));
             if done {
                 break;
             }
         }
 
+        if let Some(limit) = limit {
+            events.truncate(limit as usize);
+        }
         Ok(events)
+    }
+
+    /// Query up to `limit` historical events that `keep` accepts, paging past
+    /// the rest until the limit is met or the history runs out.
+    pub async fn query_paginated_keeping(
+        &self,
+        filter: serde_json::Value,
+        limit: u32,
+        keep: impl Fn(&serde_json::Value) -> bool,
+    ) -> Result<Vec<serde_json::Value>, CliError> {
+        self.query_pages_keeping(filter, Some(limit), Some(&keep))
+            .await
     }
 
     /// Query up to `limit` historical events, following the relay bridge's
@@ -728,22 +912,44 @@ impl BuzzClient {
         self.query_pages(filter, None).await
     }
 
+    /// Query a filter exhaustively up to `max_events`.
+    ///
+    /// One extra event is requested so reaching the bound is reported as
+    /// truncation instead of being mistaken for authoritative absence.
+    pub async fn query_all_bounded(
+        &self,
+        filter: serde_json::Value,
+        max_events: u32,
+    ) -> Result<Vec<serde_json::Value>, CliError> {
+        let probe_limit = max_events
+            .checked_add(1)
+            .ok_or_else(|| CliError::Other("query bound is too large".into()))?;
+        let events = self.query_pages(filter, Some(probe_limit)).await?;
+        if events.len() > max_events as usize {
+            return Err(CliError::Other(format!(
+                "query exceeded the exhaustive {max_events}-event bound; narrow the query or retry"
+            )));
+        }
+        Ok(events)
+    }
+
     /// Sign an event builder verbatim: no NIP-OA auth-tag injection, and none
     /// of [`sign_event`]'s "callers must not add auth tags" enforcement.
     ///
     /// Used only for NIP-IA identity archive/unarchive requests (kind
     /// 9035/9036), whose optional `auth` tag is a *content-level*
     /// owner-of-agent attestation about the *target* identity — unrelated to
-    /// this client's own NIP-OA membership delegation (`self.auth_tag`,
+    /// this client's own NIP-OA membership delegation (the credentials' auth tag,
     /// which [`sign_event`] injects into every other event and which
     /// `submit_event` separately attaches via the `x-auth-tag` HTTP header).
     /// Routing an identity archive request through `sign_event` would either
     /// silently drop the caller's owner attestation or double up an
     /// unrelated tag.
-    pub fn sign_event_unchecked(&self, builder: EventBuilder) -> Result<nostr::Event, CliError> {
-        builder
-            .sign_with_keys(&self.keys)
-            .map_err(|e| CliError::Other(format!("signing failed: {e}")))
+    pub async fn sign_event_unchecked(
+        &self,
+        builder: EventBuilder,
+    ) -> Result<nostr::Event, CliError> {
+        self.credentials.sign(builder).await
     }
 
     /// GET a public, unauthenticated relay endpoint (e.g. the NIP-11 `/info`
@@ -780,17 +986,16 @@ impl BuzzClient {
             let body = body.clone();
             let url = url.clone();
             async move {
-                let auth = sign_nip98(&self.keys, "POST", &url, Some(&body))?;
-                let resp = self
-                    .with_auth_tag(
+                let req = self
+                    .authorize(
                         self.http
                             .post(&url)
-                            .header("Authorization", auth)
                             .header("Content-Type", "application/json")
-                            .body(body),
+                            .body(body.clone()),
+                        Proof::post(&url, &body),
                     )
-                    .send()
                     .await?;
+                let resp = req.send().await?;
                 self.handle_response(resp).await
             }
         })
@@ -810,17 +1015,16 @@ impl BuzzClient {
             let body = body.clone();
             let url = url.clone();
             async move {
-                let auth = sign_nip98(&self.keys, "POST", &url, Some(&body))?;
-                let resp = self
-                    .with_auth_tag(
+                let req = self
+                    .authorize(
                         self.http
                             .post(&url)
-                            .header("Authorization", auth)
                             .header("Content-Type", "application/json")
-                            .body(body),
+                            .body(body.clone()),
+                        Proof::post(&url, &body),
                     )
-                    .send()
                     .await?;
+                let resp = req.send().await?;
                 self.handle_response(resp).await
             }
         })
@@ -838,15 +1042,106 @@ impl BuzzClient {
         self.with_retry_body(|| {
             let url = url.clone();
             async move {
-                let auth = sign_nip98(&self.keys, "GET", &url, None)?;
-                let resp = self
-                    .with_auth_tag(self.http.get(&url).header("Authorization", auth))
-                    .send()
+                let req = self
+                    .authorize(
+                        self.http.get(&url),
+                        Proof::Nip98 {
+                            method: "GET",
+                            url: &url,
+                            body: None,
+                        },
+                    )
                     .await?;
+                let resp = req.send().await?;
                 self.handle_response(resp).await
             }
         })
         .await
+    }
+
+    /// POST a JSON body to a relay-relative path with NIP-98 authentication.
+    ///
+    /// Used by `buzz gifs search` and `buzz gifs share` to reach the relay's
+    /// KLIPY proxy endpoints.  Returns the raw response body as a string (may
+    /// be empty for 204 No Content responses).
+    pub async fn post_json_authed(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> Result<String, CliError> {
+        let url = format!("{}{path}", self.relay_url);
+        let body_bytes = bytes::Bytes::from(
+            serde_json::to_vec(body)
+                .map_err(|e| CliError::Other(format!("request serialization failed: {e}")))?,
+        );
+        self.with_retry_body(|| {
+            let body_bytes = body_bytes.clone();
+            let url = url.clone();
+            async move {
+                let req = self
+                    .authorize(
+                        self.http
+                            .post(&url)
+                            .header("Content-Type", "application/json")
+                            .body(body_bytes.clone()),
+                        Proof::post(&url, &body_bytes),
+                    )
+                    .await?;
+                let resp = req.send().await?;
+                // 204 No Content: return empty string rather than failing on
+                // an empty body that cannot be parsed as JSON.
+                if resp.status() == reqwest::StatusCode::NO_CONTENT {
+                    return Ok(String::new());
+                }
+                self.handle_response(resp).await
+            }
+        })
+        .await
+    }
+
+    /// Send a state-changing JSON command exactly once. Ambiguous delivery
+    /// never invites an automatic re-run with a newly observed version.
+    pub async fn post_json_once_authed(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> Result<String, CliError> {
+        let url = format!("{}{path}", self.relay_url);
+        let body = serde_json::to_vec(body).map_err(|e| CliError::Other(e.to_string()))?;
+        let unknown = |detail: String| CliError::DeliveryUnknown(detail);
+        let http = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(env_duration_secs("BUZZ_TIMEOUT_SECS", 30))
+            .connect_timeout(env_duration_secs("BUZZ_CONNECT_TIMEOUT_SECS", 15))
+            .build()?;
+        let req = self
+            .authorize(
+                http.post(&url)
+                    .header("Content-Type", "application/json")
+                    .body(body.clone()),
+                Proof::post(&url, &body),
+            )
+            .await?;
+        let response = req.send().await.map_err(|e| {
+            if e.is_connect() || e.is_builder() {
+                CliError::Network(e)
+            } else {
+                unknown(e.to_string())
+            }
+        })?;
+        let status = response.status();
+        let body = response.text().await.map_err(|e| unknown(e.to_string()))?;
+        let message = extract_relay_message_field(&body).unwrap_or_else(|| body.clone());
+        if status.is_server_error()
+            || status.is_redirection()
+            || (status.as_u16() == 429 && !message.starts_with("rate-limited:"))
+        {
+            return Err(unknown(format!("HTTP {}: {message}", status.as_u16())));
+        }
+        if !status.is_success() {
+            return Err(self.relay_error(status.as_u16(), body));
+        }
+        Ok(body)
     }
 
     /// Submit a signed Nostr event via POST /events.
@@ -882,18 +1177,17 @@ impl BuzzClient {
 
             // Re-sign NIP-98 each attempt: the nonce tag generates a fresh
             // event ID, keeping retries safe against the relay's replay guard.
-            let auth = sign_nip98(&self.keys, "POST", &url, Some(&body))?;
-            let send_result: Result<reqwest::Response, CliError> = self
-                .with_auth_tag(
+            let req = self
+                .authorize(
                     self.http
                         .post(&url)
-                        .header("Authorization", auth)
                         .header("Content-Type", "application/json")
                         .body(body.clone()),
+                    Proof::post(&url, &body),
                 )
-                .send()
-                .await
-                .map_err(CliError::from);
+                .await?;
+            let send_result: Result<reqwest::Response, CliError> =
+                req.send().await.map_err(CliError::from);
 
             match send_result {
                 Err(e) => {
@@ -979,26 +1273,7 @@ impl BuzzClient {
                     })?;
                     // Map the body through handle_response's error logic inline.
                     if !resp_was_success(status) {
-                        let message = serde_json::from_str::<serde_json::Value>(&body_text)
-                            .ok()
-                            .and_then(|v| {
-                                v.get("error")
-                                    .or_else(|| v.get("message"))
-                                    .and_then(|m| m.as_str())
-                                    .map(str::to_string)
-                            })
-                            .unwrap_or(body_text);
-                        let message = if status == 403 && std::env::var("BUZZ_AUTH_TAG").is_ok() {
-                            format!(
-                                "{message} (BUZZ_AUTH_TAG is set — it may be stale or revoked; try unsetting it)"
-                            )
-                        } else {
-                            message
-                        };
-                        return Err(CliError::Relay {
-                            status,
-                            body: message,
-                        });
+                        return Err(self.relay_error(status, body_text));
                     }
                     return Ok(body_text);
                 }
@@ -1027,25 +1302,36 @@ impl BuzzClient {
             serde_json::to_vec(&event)
                 .map_err(|e| CliError::Other(format!("event serialization failed: {e}")))?,
         );
+        // Whether any attempt reached the relay without an authoritative
+        // answer. A later failure, even one before sending, cannot clear it.
+        let maybe_delivered = std::sync::atomic::AtomicBool::new(false);
         let result = self
             .with_retry_body(|| {
                 let body = body.clone();
                 let url = url.clone();
+                let maybe_delivered = &maybe_delivered;
                 async move {
                     // Re-sign NIP-98 each attempt: the nonce tag generates a fresh
                     // event ID, keeping retries safe against the relay's replay guard.
-                    let auth = sign_nip98(&self.keys, "POST", &url, Some(&body))?;
-                    let resp = self
-                        .with_auth_tag(
+                    let req = self
+                        .authorize(
                             self.http
                                 .post(&url)
-                                .header("Authorization", auth)
                                 .header("Content-Type", "application/json")
-                                .body(body),
+                                .body(body.clone()),
+                            Proof::post(&url, &body),
                         )
-                        .send()
                         .await?;
-                    self.handle_response(resp).await
+                    let sent = match req.send().await {
+                        Ok(resp) => self.handle_response(resp).await,
+                        Err(e) => Err(e.into()),
+                    };
+                    if let Err(ref e) = sent {
+                        if is_stored_event_exhaustion_ambiguous(e) {
+                            maybe_delivered.store(true, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
+                    sent
                 }
             })
             .await;
@@ -1055,7 +1341,13 @@ impl BuzzClient {
         // Connect failures stay Network (retryable:true) — definitively never received.
         // Canonical pre-ingest 429 (Relay{429}) stays retryable — definitively not stored.
         if let Err(ref e) = result {
-            if is_stored_event_exhaustion_ambiguous(e) {
+            // Once an attempt may have been stored, no later answer settles
+            // the outcome, except a canvas 409, which the canvas command
+            // resolves by looking the canvas up.
+            let settled = matches!(e, CliError::Relay { status: 409, body } if body.contains("canvas changed"));
+            if is_stored_event_exhaustion_ambiguous(e)
+                || (maybe_delivered.load(std::sync::atomic::Ordering::Relaxed) && !settled)
+            {
                 let kind_u16 = event.kind.as_u16();
                 return Err(CliError::DeliveryUnknown(format!(
                     "stored event (kind {kind_u16}) outcome unknown after all attempts: {e}"
@@ -1067,19 +1359,75 @@ impl BuzzClient {
 
     /// Publish an ephemeral event via WebSocket with NIP-42 authentication.
     ///
-    /// The relay rejects ephemeral kinds (20000–29999) over HTTP. Delegates to
+    /// The relay accepts only typing (kind:20002) of the ephemeral kinds
+    /// (20000–29999) over HTTP. Delegates to
     /// `buzz_ws_client::publish_event` which handles connect, NIP-42 auth,
     /// EVENT send, OK wait, and graceful close.
     pub async fn publish_ephemeral_event(&self, event: nostr::Event) -> Result<String, CliError> {
-        let ws_url = to_ws_url(&self.relay_url);
-        // Hard cap — inner wait ceilings sum to 70 s; connect time and network RTT are
-        // additional overhead absorbed by this budget.
-        // See buzz_ws_client::{AUTH_CHALLENGE_TIMEOUT_SECS, AUTH_OK_TIMEOUT_SECS,
-        // PUBLISH_OK_TIMEOUT_SECS} for the inner ceilings.
-        let ok =
-            buzz_ws_client::publish_event(&ws_url, event, &self.keys, self.auth_tag.as_ref(), 75)
-                .await
-                .map_err(|e| CliError::Other(e.to_string()))?;
+        let ws_url = &self.ws_url;
+        // Two kinds of deadline: each network phase is capped as a whole,
+        // writes included (the connect below, then buzz_ws_client's challenge,
+        // AUTH, EVENT and close phases), and NIP-42 signing between them is
+        // bounded by the signer itself. A
+        // desktop provider may wait out throttling and hold `sign_event` for a
+        // person's decision, which no relay budget should cut short.
+        let signer = crate::credentials::CapturingSigner::new(&self.credentials);
+        let ws_error = |e: buzz_ws_client::WsClientError| match e.upgrade_rejection() {
+            // A denial decided on the upgrade is an HTTP response (NIP-FI).
+            Some((status, body)) => self.relay_error(status, body),
+            // A post-upgrade denial (e.g. a NIP-FI key mismatch) is a 1008 close.
+            None if matches!(e, buzz_ws_client::WsClientError::PolicyClose(_)) => {
+                CliError::Auth(e.to_string())
+            }
+            None => CliError::Other(e.to_string()),
+        };
+        //
+        // The relay closes a socket that has not signed in within seconds,
+        // so a slow or throttled sign-in signature reconnects and signs the
+        // new challenge, a bounded number of times, with current evidence:
+        // the old assertion may have expired meanwhile. A throttled sign-in
+        // is waited out between connections, never on one. EVENT, signed
+        // before any of this, is sent only once AUTH succeeds.
+        let mut attempt = 1;
+        let mut conn = loop {
+            let headers = self.upgrade_headers().await?;
+            let mut conn = tokio::time::timeout(
+                WS_CONNECT_TIMEOUT,
+                buzz_ws_client::NostrWsConnection::connect_with_headers(ws_url, headers),
+            )
+            .await
+            .map_err(|_| CliError::Other("relay WebSocket connect timed out".into()))?
+            .map_err(ws_error)?;
+            let signed_in = conn
+                .authenticate(&signer, self.credentials.auth_tag().map(|t| &t.tag))
+                .await;
+            let Err(e) = signed_in else { break conn };
+            let failure = signer.take_failure();
+            let lost = matches!(
+                e,
+                buzz_ws_client::WsClientError::ConnectionClosed
+                    | buzz_ws_client::WsClientError::WebSocket(_)
+            );
+            let (failure, wait) = failure.unzip();
+            let wait = wait.flatten();
+            let throttled = matches!(failure, Some(CliError::Throttled(_)));
+            let _ = conn.disconnect().await;
+            if !(lost || throttled) {
+                return Err(failure.unwrap_or_else(|| ws_error(e)));
+            }
+            if attempt == WS_SIGN_IN_ATTEMPTS {
+                return Err(failure.unwrap_or_else(|| {
+                    CliError::Unavailable(format!(
+                        "the relay closed the WebSocket before sign-in completed, \
+                         {WS_SIGN_IN_ATTEMPTS} times: {e}"
+                    ))
+                }));
+            }
+            tokio::time::sleep(wait.unwrap_or_else(|| jitter_delay(attempt - 1))).await;
+            attempt += 1;
+        };
+        let ok = conn.send_event(event).await.map_err(ws_error)?;
+        let _ = conn.disconnect().await;
 
         if !ok.accepted {
             return Err(CliError::Relay {
@@ -1100,28 +1448,26 @@ impl BuzzClient {
     pub async fn upload_file(&self, file_path: &str) -> Result<BlobDescriptor, CliError> {
         // 1. Read file — validate it exists and is a regular file
         let metadata = std::fs::metadata(file_path)
-            .map_err(|e| CliError::Other(format!("cannot access {file_path}: {e}")))?;
+            .map_err(|e| CliError::Usage(format!("cannot access {file_path}: {e}")))?;
         if !metadata.is_file() {
             return Err(CliError::Usage(format!("{file_path} is not a file")));
         }
 
         let bytes = std::fs::read(file_path)
-            .map_err(|e| CliError::Other(format!("failed to read {file_path}: {e}")))?;
+            .map_err(|e| CliError::Usage(format!("failed to read {file_path}: {e}")))?;
 
         // 2. Detect MIME from magic bytes
         let mime = infer::get(&bytes)
             .map(|t| t.mime_type().to_string())
             .unwrap_or_else(|| "application/octet-stream".to_string());
 
-        if !ALLOWED_MIMES.contains(&mime.as_str()) {
-            return Err(CliError::Usage(format!("unsupported file type: {mime}")));
-        }
-
-        // 3. Size check
-        let max = if mime.starts_with("video/") {
+        // 3. Size check. The relay decides which other types it accepts.
+        let max = if mime == "video/mp4" {
             MAX_VIDEO_BYTES
-        } else {
+        } else if MEDIA_MIMES.contains(&mime.as_str()) {
             MAX_IMAGE_BYTES
+        } else {
+            MAX_FILE_BYTES
         };
         if bytes.len() as u64 > max {
             return Err(CliError::Usage(format!(
@@ -1136,7 +1482,7 @@ impl BuzzClient {
 
         // 5. PUT request to the BUD-02 /upload endpoint with a generous timeout.
         // Auth is signed per attempt — matches the per-attempt signing pattern in download_media.
-        let upload_timeout = if mime.starts_with("video/") {
+        let upload_timeout = if max > MAX_IMAGE_BYTES {
             Duration::from_secs(600)
         } else {
             Duration::from_secs(120)
@@ -1154,25 +1500,23 @@ impl BuzzClient {
                 let mime = mime.clone();
                 let sha256 = sha256.clone();
                 async move {
-                    let auth_header =
-                        sign_blossom_upload(&self.keys, &sha256, &mime, &self.relay_url)?;
-                    let resp = self
-                        .with_auth_tag(
+                    let req = self
+                        .authorize(
                             self.http
                                 .put(&url)
                                 .timeout(upload_timeout)
-                                .header("Authorization", auth_header)
                                 .header("Content-Type", &mime)
                                 .header("X-SHA-256", &sha256)
                                 .body(upload_body),
+                            Proof::BlossomUpload { sha256: &sha256 },
                         )
-                        .send()
                         .await?;
+                    let resp = req.send().await?;
                     let status = resp.status();
                     if !status.is_success() {
                         let s = status.as_u16();
                         let body = resp.text().await.unwrap_or_default();
-                        return Err(CliError::Relay { status: s, body });
+                        return Err(self.relay_error(s, body));
                     }
                     resp.json::<BlobDescriptor>().await.map_err(CliError::from)
                 }
@@ -1201,23 +1545,22 @@ impl BuzzClient {
             let mime = mime.clone();
             let sha256 = sha256.clone();
             async move {
-                let auth_header = sign_blossom_upload(&self.keys, &sha256, &mime, &self.relay_url)?;
-                let resp = self
-                    .with_auth_tag(
+                let req = self
+                    .authorize(
                         self.http
                             .put(&legacy_url)
                             .timeout(upload_timeout)
-                            .header("Authorization", auth_header)
                             .header("Content-Type", &mime)
                             .header("X-SHA-256", &sha256)
                             .body(upload_body),
+                        Proof::BlossomUpload { sha256: &sha256 },
                     )
-                    .send()
                     .await?;
+                let resp = req.send().await?;
                 if !resp.status().is_success() {
                     let status = resp.status().as_u16();
                     let body = resp.text().await.unwrap_or_default();
-                    return Err(CliError::Relay { status, body });
+                    return Err(self.relay_error(status, body));
                 }
                 resp.json::<BlobDescriptor>().await.map_err(CliError::from)
             }
@@ -1239,15 +1582,14 @@ impl BuzzClient {
             let url = url.clone();
             let client = client.clone();
             async move {
-                let auth_header = sign_blossom_get(&self.keys, &url)?;
-                let resp = self
-                    .with_auth_tag(client.get(&url).header("Authorization", auth_header))
-                    .send()
+                let req = self
+                    .authorize(client.get(&url), Proof::BlossomGet { url: &url })
                     .await?;
+                let resp = req.send().await?;
                 if !resp.status().is_success() {
                     let status = resp.status().as_u16();
                     let body = resp.text().await.unwrap_or_default();
-                    return Err(CliError::Relay { status, body });
+                    return Err(self.relay_error(status, body));
                 }
                 resp.bytes().await.map_err(CliError::Network)
             }
@@ -1259,28 +1601,7 @@ impl BuzzClient {
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
             let body = resp.text().await.unwrap_or_default();
-            let message = serde_json::from_str::<serde_json::Value>(&body)
-                .ok()
-                .and_then(|v| {
-                    v.get("error")
-                        .or_else(|| v.get("message"))
-                        .and_then(|m| m.as_str())
-                        .map(|s| s.to_string())
-                })
-                .unwrap_or(body);
-            if status == 403 && std::env::var("BUZZ_AUTH_TAG").is_ok() {
-                let message = format!(
-                    "{message} (BUZZ_AUTH_TAG is set — it may be stale or revoked; try unsetting it)"
-                );
-                return Err(CliError::Relay {
-                    status,
-                    body: message,
-                });
-            }
-            return Err(CliError::Relay {
-                status,
-                body: message,
-            });
+            return Err(self.relay_error(status, body));
         }
         Ok(resp.text().await?)
     }
@@ -1302,20 +1623,24 @@ fn to_ws_url(http_url: &str) -> String {
         .replace("http://", "ws://")
 }
 
-/// Normalize raw event JSON array into consistent shape.
-/// Each event becomes: {id, pubkey, kind, content, created_at, tags}
+/// Normalize raw event JSON array into the canonical Nostr event shape.
+/// String signatures are preserved; absent or non-string signatures remain absent.
 pub fn normalize_events(events: &[serde_json::Value]) -> String {
     let normalized: Vec<serde_json::Value> = events
         .iter()
         .map(|e| {
-            serde_json::json!({
+            let mut event = serde_json::json!({
                 "id": e.get("id").and_then(|v| v.as_str()).unwrap_or(""),
                 "pubkey": e.get("pubkey").and_then(|v| v.as_str()).unwrap_or(""),
                 "kind": e.get("kind").and_then(|v| v.as_u64()).unwrap_or(0),
                 "content": e.get("content").and_then(|v| v.as_str()).unwrap_or(""),
                 "created_at": e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0),
                 "tags": e.get("tags").cloned().unwrap_or(serde_json::json!([])),
-            })
+            });
+            if let Some(sig) = e.get("sig").and_then(|v| v.as_str()) {
+                event["sig"] = serde_json::json!(sig);
+            }
+            event
         })
         .collect();
     serde_json::to_string(&normalized).unwrap_or_default()
@@ -1387,19 +1712,25 @@ pub fn extract_p_tags(event: &serde_json::Value) -> Vec<serde_json::Value> {
         .unwrap_or_default()
 }
 
-/// Return a create-command response with an entity ID injected.
-pub fn create_response_with_id(resp: &str, id_key: &str, id_val: &str) -> String {
+/// Return a create-command response, injecting the entity ID **only** when the
+/// relay accepted the event (`"accepted": true`). When the relay rejected the
+/// event, emitting the locally-computed link would be misleading — callers
+/// that copy or share the link would reference an event that was never stored.
+pub fn create_response_with_id_if_accepted(resp: &str, id_key: &str, id_val: &str) -> String {
     let mut v: serde_json::Value = serde_json::from_str(resp).unwrap_or(serde_json::json!({}));
-    v[id_key] = serde_json::json!(id_val);
-    if v.get("accepted").is_none() {
-        v["accepted"] = serde_json::json!(true);
+    let accepted = v.get("accepted").and_then(|a| a.as_bool()).unwrap_or(false);
+    if accepted {
+        v[id_key] = serde_json::json!(id_val);
     }
     v.to_string()
 }
 
 /// Print a create-command response, injecting the generated entity ID.
 pub fn print_create_response(resp: &str, id_key: &str, id_val: &str) {
-    println!("{}", create_response_with_id(resp, id_key, id_val));
+    println!(
+        "{}",
+        create_response_with_id_if_accepted(resp, id_key, id_val)
+    );
 }
 
 /// Extract a JSON field from relay write response messages shaped as
@@ -1636,8 +1967,15 @@ mod retry_policy_tests {
     }
 
     fn test_client(base_url: &str) -> BuzzClient {
-        let keys = Keys::generate();
-        BuzzClient::new(base_url.to_string(), keys, None, None).unwrap()
+        BuzzClient::new(
+            base_url.to_string(),
+            crate::credentials::Credentials::from_keys(Keys::generate()),
+        )
+        .unwrap()
+    }
+
+    fn client_keys(client: &BuzzClient) -> Keys {
+        client.credentials().test_keys()
     }
 
     fn make_moderation_event(keys: &Keys, kind: u16) -> nostr::Event {
@@ -1665,7 +2003,7 @@ mod retry_policy_tests {
         })
         .await;
         let client = test_client(&url);
-        let event = make_moderation_event(client.keys(), 9040);
+        let event = make_moderation_event(&client_keys(&client), 9040);
         let err = client.submit_event(event).await.unwrap_err();
         assert!(
             matches!(err, CliError::DeliveryUnknown(_)),
@@ -1705,7 +2043,7 @@ mod retry_policy_tests {
         })
         .await;
         let client = test_client(&url);
-        let event = make_moderation_event(client.keys(), 9041);
+        let event = make_moderation_event(&client_keys(&client), 9041);
         let t0 = std::time::Instant::now();
         let result = client.submit_event(event).await;
         let elapsed = t0.elapsed();
@@ -1738,7 +2076,7 @@ mod retry_policy_tests {
         })
         .await;
         let client = test_client(&url);
-        let event = make_moderation_event(client.keys(), 9040);
+        let event = make_moderation_event(&client_keys(&client), 9040);
         let err = client.submit_event(event).await.unwrap_err();
 
         // Must be Relay(429), not DeliveryUnknown.
@@ -1766,7 +2104,7 @@ mod retry_policy_tests {
         let (url, attempts) =
             test_server(|_n| (StatusCode::BAD_GATEWAY, "bad gateway".to_string())).await;
         let client = test_client(&url);
-        let event = make_moderation_event(client.keys(), 9042);
+        let event = make_moderation_event(&client_keys(&client), 9042);
         let err = client.submit_event(event).await.unwrap_err();
         assert!(
             matches!(err, CliError::DeliveryUnknown(_)),
@@ -1794,7 +2132,7 @@ mod retry_policy_tests {
 
         let base = format!("http://{addr}");
         let client = test_client(&base);
-        let event = make_moderation_event(client.keys(), 9040);
+        let event = make_moderation_event(&client_keys(&client), 9040);
         let err = client.submit_event(event).await.unwrap_err();
         // Must be Network (retryable), not DeliveryUnknown (retryable:false).
         assert!(
@@ -1825,7 +2163,7 @@ mod retry_policy_tests {
         })
         .await;
         let client = test_client(&url);
-        let event = make_stored_event(client.keys());
+        let event = make_stored_event(&client_keys(&client));
         let result = client.submit_event(event).await;
         assert!(
             result.is_ok(),
@@ -2085,7 +2423,7 @@ mod retry_policy_tests {
 
         let base = format!("http://{addr}");
         let client = test_client(&base);
-        let event = make_stored_event(client.keys());
+        let event = make_stored_event(&client_keys(&client));
         let result = client.submit_event(event).await;
         assert!(
             result.is_ok(),
@@ -2247,7 +2585,7 @@ mod retry_policy_tests {
 
         let base = format!("http://{addr}");
         let client = test_client(&base);
-        let event = make_stored_event(client.keys());
+        let event = make_stored_event(&client_keys(&client));
         let err = client.submit_event(event).await.unwrap_err();
 
         // Final error must be DeliveryUnknown — relay may have accepted any attempt.
@@ -2279,7 +2617,7 @@ mod retry_policy_tests {
         let (url, attempts) =
             test_server(|_n| (StatusCode::BAD_GATEWAY, "bad gateway".to_string())).await;
         let client = test_client(&url);
-        let event = make_stored_event(client.keys());
+        let event = make_stored_event(&client_keys(&client));
         let err = client.submit_event(event).await.unwrap_err();
 
         assert!(
@@ -2292,14 +2630,90 @@ mod retry_policy_tests {
             "all 3 attempts must fire before surfacing DeliveryUnknown"
         );
     }
+
+    /// The first send is stored but its answer is lost; the retry is then
+    /// refused before ingest. The refusal cannot undo the first send, so the
+    /// outcome stays unknown rather than a plain rejection.
+    #[tokio::test]
+    async fn a_403_after_a_lost_stored_send_stays_delivery_unknown() {
+        let (url, attempts) = test_server(|n| match n {
+            1 => (StatusCode::BAD_GATEWAY, "bad gateway".to_string()),
+            _ => (
+                StatusCode::FORBIDDEN,
+                r#"{"error":"restricted: not allowed"}"#.to_string(),
+            ),
+        })
+        .await;
+        let client = test_client(&url);
+        let event = make_stored_event(&client_keys(&client));
+        let err = client.submit_event(event).await.unwrap_err();
+
+        assert!(matches!(err, CliError::DeliveryUnknown(_)), "{err:?}");
+        assert!(!crate::error::is_retryable_error(&err));
+        assert_eq!(attempts.load(Ordering::SeqCst), 2, "no retry after the 403");
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_unreadable_file_is_bad_input() {
+        use std::os::unix::fs::PermissionsExt;
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::set_permissions(file.path(), std::fs::Permissions::from_mode(0o000)).unwrap();
+        let client = BuzzClient::new(
+            "http://127.0.0.1:9".into(),
+            crate::credentials::Credentials::from_keys(nostr::Keys::generate()),
+        )
+        .unwrap();
+        let err = client
+            .upload_file(file.path().to_str().unwrap())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, crate::error::CliError::Usage(ref m) if m.contains("failed to read")),
+            "{err:?}"
+        );
+    }
+
     use super::{
-        advance_query_cursor, create_response_with_id, extract_relay_response_field, BuzzClient,
+        advance_query_cursor, create_response_with_id_if_accepted, extract_relay_response_field,
+        normalize_events, BuzzClient, Credentials, Proof,
     };
     use nostr::{EventBuilder, Keys, Kind, Tag};
+
+    #[test]
+    fn normalize_events_preserves_the_complete_signed_event_shape() {
+        let signed_event = EventBuilder::new(Kind::TextNote, "signed content")
+            .tags([Tag::parse(["h", "channel-id"]).unwrap()])
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let mut event = serde_json::to_value(&signed_event).unwrap();
+        event["relay_internal"] = serde_json::json!("excluded");
+
+        let output: Vec<serde_json::Value> =
+            serde_json::from_str(&normalize_events(&[event])).unwrap();
+        let normalized = &output[0];
+        let round_tripped: nostr::Event = serde_json::from_value(normalized.clone()).unwrap();
+
+        assert_eq!(round_tripped, signed_event);
+        round_tripped.verify().unwrap();
+        assert!(normalized.get("sig").is_some());
+        assert!(normalized.get("relay_internal").is_none());
+    }
+
+    #[test]
+    fn normalize_events_omits_missing_or_non_string_signatures() {
+        let output: Vec<serde_json::Value> = serde_json::from_str(&normalize_events(&[
+            serde_json::json!({}),
+            serde_json::json!({"sig": 42}),
+        ]))
+        .unwrap();
+
+        assert!(output[0].get("sig").is_none());
+        assert!(output[1].get("sig").is_none());
+    }
 
     #[test]
     fn query_cursor_uses_last_events_composite_sort_key() {
@@ -2345,13 +2759,28 @@ mod tests {
     }
 
     #[test]
-    fn create_response_with_id_overrides_local_id_with_relay_id() {
+    fn create_response_with_id_if_accepted_injects_id_when_accepted() {
         let raw = r#"{"event_id":"abc","accepted":true,"message":"response:{\"workflow_id\":\"relay-id\"}"}"#;
-        let out = create_response_with_id(raw, "workflow_id", "relay-id");
+        let out = create_response_with_id_if_accepted(raw, "workflow_id", "relay-id");
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        // ID injected and original fields preserved when accepted.
         assert_eq!(v["workflow_id"].as_str(), Some("relay-id"));
         assert_eq!(v["event_id"].as_str(), Some("abc"));
         assert_eq!(v["accepted"].as_bool(), Some(true));
+    }
+
+    #[test]
+    fn create_response_with_id_if_accepted_omits_id_when_rejected() {
+        let raw = r#"{"event_id":"abc","accepted":false,"message":"duplicate"}"#;
+        let out = create_response_with_id_if_accepted(raw, "workflow_id", "local-id");
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        // ID must not be present when relay rejected the event; emitting a
+        // link to an event that was never stored would mislead callers.
+        assert!(
+            v.get("workflow_id").is_none(),
+            "link field must be absent on rejected create"
+        );
+        assert_eq!(v["accepted"].as_bool(), Some(false));
     }
 
     // --- (a) auth-suppression regression pair ---
@@ -2370,21 +2799,19 @@ mod tests {
         (tag, json)
     }
 
-    #[test]
-    fn sign_event_unchecked_does_not_inject_ambient_auth_tag() {
+    #[tokio::test]
+    async fn sign_event_unchecked_does_not_inject_ambient_auth_tag() {
         let keys = Keys::generate();
         let (auth_tag, auth_json) = make_auth_tag();
         let client = BuzzClient::new(
             "https://test.relay".into(),
-            keys,
-            Some(auth_tag),
-            Some(auth_json),
+            Credentials::from_keys(keys).with_auth_tag(auth_tag, auth_json),
         )
         .unwrap();
 
         let builder =
             EventBuilder::new(Kind::Custom(9035), "archive").tags([Tag::parse(["-"]).unwrap()]);
-        let event = client.sign_event_unchecked(builder).unwrap();
+        let event = client.sign_event_unchecked(builder).await.unwrap();
 
         let auth_tags: Vec<_> = event
             .tags
@@ -2398,15 +2825,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn sign_event_unchecked_preserves_callers_content_auth_tag() {
+    #[tokio::test]
+    async fn sign_event_unchecked_preserves_callers_content_auth_tag() {
         let keys = Keys::generate();
         let (auth_tag, auth_json) = make_auth_tag();
         let client = BuzzClient::new(
             "https://test.relay".into(),
-            keys,
-            Some(auth_tag),
-            Some(auth_json),
+            Credentials::from_keys(keys).with_auth_tag(auth_tag, auth_json),
         )
         .unwrap();
 
@@ -2420,7 +2845,7 @@ mod tests {
 
         let builder = EventBuilder::new(Kind::Custom(9035), "archive")
             .tags([Tag::parse(["-"]).unwrap(), content_auth]);
-        let event = client.sign_event_unchecked(builder).unwrap();
+        let event = client.sign_event_unchecked(builder).await.unwrap();
 
         let auth_tags: Vec<_> = event
             .tags
@@ -2435,21 +2860,23 @@ mod tests {
         assert_eq!(auth_tags[0].as_slice()[1], "c".repeat(64));
     }
 
-    #[test]
-    fn with_auth_tag_sets_header_when_configured() {
+    #[tokio::test]
+    async fn authorize_sets_auth_tag_header_when_configured() {
         let keys = Keys::generate();
         let (auth_tag, auth_json) = make_auth_tag();
         let client = BuzzClient::new(
             "https://test.relay".into(),
-            keys,
-            Some(auth_tag),
-            Some(auth_json.clone()),
+            Credentials::from_keys(keys).with_auth_tag(auth_tag, auth_json.clone()),
         )
         .unwrap();
 
-        let req = client.http.post("https://test.relay/events");
-        let req = client.with_auth_tag(req);
-        let built = req.build().unwrap();
+        let url = "https://test.relay/events";
+        let built = client
+            .authorize(client.http.post(url), Proof::post(url, b"{}"))
+            .await
+            .unwrap()
+            .build()
+            .unwrap();
         let header = built
             .headers()
             .get("x-auth-tag")
@@ -2461,17 +2888,1413 @@ mod tests {
         );
     }
 
-    #[test]
-    fn with_auth_tag_omits_header_when_not_configured() {
-        let keys = Keys::generate();
-        let client = BuzzClient::new("https://test.relay".into(), keys, None, None).unwrap();
+    #[tokio::test]
+    async fn authorize_omits_optional_headers_when_not_configured() {
+        let client = BuzzClient::new(
+            "https://test.relay".into(),
+            Credentials::from_keys(Keys::generate()),
+        )
+        .unwrap();
 
-        let req = client.http.post("https://test.relay/events");
-        let req = client.with_auth_tag(req);
-        let built = req.build().unwrap();
+        let url = "https://test.relay/events";
+        let built = client
+            .authorize(client.http.post(url), Proof::post(url, b"{}"))
+            .await
+            .unwrap()
+            .build()
+            .unwrap();
+        assert!(built.headers().get("authorization").is_some());
         assert!(
             built.headers().get("x-auth-tag").is_none(),
             "x-auth-tag header must not be present when no auth tag is configured"
         );
+        assert!(
+            built.headers().get("nostr-federated-identity").is_none(),
+            "no NIP-FI header without an evidence source"
+        );
+    }
+}
+
+/// NIP-FI evidence on every protected route (Review-Proven Rule #2: every
+/// request path that carries auth is enumerated here, plus the WebSocket
+/// upgrade). One mock origin serves both the NIP-FA adapter and the relay.
+#[cfg(test)]
+mod federated_identity_route_tests {
+    use std::sync::{Arc, Mutex};
+
+    use axum::extract::Request;
+    use axum::http::{HeaderMap, StatusCode};
+    use axum::response::IntoResponse;
+    use nostr::{EventBuilder, Keys, Kind};
+
+    use super::BuzzClient;
+    use crate::credentials::Credentials;
+    use crate::error::CliError;
+    use crate::federated_identity::AdapterSession;
+
+    use crate::federated_identity::test_support::{self, count, raw_adapter};
+
+    const HASH: &str = "4f2b5e7c1a9d3e6f8b0c2d4e6f8a0b1c3d5e7f9a1b3c5d7e9f0a2b4c6d8e0f1a";
+
+    #[derive(Default)]
+    struct Log {
+        mints: usize,
+        /// The last assertion the adapter issued.
+        assertion: String,
+        requests: Vec<(String, String, HeaderMap)>,
+    }
+
+    /// Serve the adapter and relay on one loopback origin. Relay routes
+    /// answer `deny` when set, otherwise a plausible success; `PUT /upload`
+    /// is 404 so the legacy `/media/upload` fallback runs too.
+    async fn origin(deny: Option<StatusCode>) -> (String, Arc<Mutex<Log>>) {
+        let log: Arc<Mutex<Log>> = Arc::default();
+        let state = log.clone();
+        let app = axum::Router::new()
+            .route(
+                "/v1/identity/assertions",
+                axum::routing::post({
+                    let log = log.clone();
+                    move |body: axum::body::Bytes| {
+                        let log = log.clone();
+                        async move {
+                            let req: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                            let pubkey = req["nostr_pubkey"].as_str().unwrap_or_default();
+                            let expires_at = nostr::Timestamp::now().as_secs() + 300;
+                            let assertion = test_support::assertion(pubkey, expires_at);
+                            let mut log = log.lock().unwrap();
+                            log.mints += 1;
+                            log.assertion = assertion.clone();
+                            axum::Json(serde_json::json!({
+                                "assertion": assertion,
+                                "nostr_pubkey": pubkey,
+                                "expires_at": expires_at,
+                            }))
+                        }
+                    }
+                }),
+            )
+            .fallback(move |req: Request| {
+                let log = state.clone();
+                async move {
+                    let method = req.method().to_string();
+                    let path = req.uri().path().to_owned();
+                    log.lock().unwrap().requests.push((
+                        method.clone(),
+                        path.clone(),
+                        req.headers().clone(),
+                    ));
+                    if let Some(status) = deny {
+                        return (status, r#"{"error":"authentication required"}"#).into_response();
+                    }
+                    let body = match (method.as_str(), path.as_str()) {
+                        ("PUT", "/upload") => return StatusCode::NOT_FOUND.into_response(),
+                        // No WebSocket server: the test only needs the upgrade's headers.
+                        ("GET", "/") => return StatusCode::FORBIDDEN.into_response(),
+                        ("PUT", "/media/upload") => serde_json::json!({
+                            "url": format!("http://x/media/{HASH}.png"),
+                            "sha256": HASH,
+                            "size": 8,
+                            "type": "image/png",
+                            "uploaded": 0,
+                        })
+                        .to_string(),
+                        ("POST", "/query") => "[]".to_owned(),
+                        ("POST", "/count") => r#"{"count":0}"#.to_owned(),
+                        _ => r#"{"accepted":true}"#.to_owned(),
+                    };
+                    (StatusCode::OK, body).into_response()
+                }
+            });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (base, log)
+    }
+
+    fn client(base: &str, evidence: bool) -> BuzzClient {
+        if evidence {
+            client_via(base, base)
+        } else {
+            BuzzClient::new(base.to_owned(), Credentials::from_keys(Keys::generate())).unwrap()
+        }
+    }
+
+    /// A client for the relay at `relay` that mints from the adapter at `adapter`.
+    fn client_via(relay: &str, adapter: &str) -> BuzzClient {
+        let credentials = Credentials::from_keys(Keys::generate())
+            .with_evidence(AdapterSession::new(adapter, "token", relay).unwrap());
+        BuzzClient::new(relay.to_owned(), credentials).unwrap()
+    }
+
+    /// Drive every protected request path once, ignoring results (the WS
+    /// publish fails by design once its upgrade headers are recorded).
+    async fn exercise_every_route(client: &BuzzClient) -> Vec<Result<String, CliError>> {
+        let keys = client.credentials().test_keys();
+        let png = tempfile::Builder::new().suffix(".png").tempfile().unwrap();
+        std::fs::write(png.path(), b"\x89PNG\r\n\x1a\n").unwrap();
+        let filter = serde_json::json!({"kinds": [1]});
+        let body = serde_json::json!({"k": "v"});
+        let event = |kind: u16| {
+            EventBuilder::new(Kind::Custom(kind), "")
+                .sign_with_keys(&keys)
+                .unwrap()
+        };
+        let mut results = vec![
+            client.query(&filter).await,
+            client.query_multi(&[filter.clone(), filter.clone()]).await,
+            client.count(&filter).await,
+            client.get_authed("/api/get").await,
+            client.post_json_authed("/api/post", &body).await,
+            client.post_json_once_authed("/api/post-once", &body).await,
+            client.submit_event(event(1)).await,
+            client.submit_event(event(9041)).await,
+            client.publish_ephemeral_event(event(20001)).await,
+        ];
+        results.push(
+            client
+                .upload_file(png.path().to_str().unwrap())
+                .await
+                .map(|d| d.url),
+        );
+        results.push(
+            client
+                .download_media(&format!("{HASH}.png"))
+                .await
+                .map(|_| String::new()),
+        );
+        results
+    }
+
+    /// Each `(method, path)` the CLI sends on a protected route.
+    const PROTECTED: &[(&str, &str)] = &[
+        ("POST", "/query"),
+        ("POST", "/count"),
+        ("GET", "/api/get"),
+        ("POST", "/api/post"),
+        ("POST", "/api/post-once"),
+        ("POST", "/events"),
+        ("GET", "/"),
+        ("PUT", "/upload"),
+        ("PUT", "/media/upload"),
+    ];
+
+    fn covered(log: &Log) -> Vec<(String, String)> {
+        let mut seen: Vec<(String, String)> = log
+            .requests
+            .iter()
+            .map(|(m, p, _)| (m.clone(), p.clone()))
+            .collect();
+        seen.sort();
+        seen.dedup();
+        seen
+    }
+
+    /// The relay proof is signed after the assertion arrives, so a slow
+    /// mint (adapter retries can exceed NIP-98's 60 s window) cannot age it.
+    #[tokio::test]
+    async fn the_relay_proof_is_signed_after_a_slow_mint() {
+        use base64::Engine;
+        let minted_at: Arc<Mutex<u64>> = Arc::default();
+        let proofs: Arc<Mutex<Vec<String>>> = Arc::default();
+        let app = axum::Router::new()
+            .route(
+                "/v1/identity/assertions",
+                axum::routing::post({
+                    let minted_at = minted_at.clone();
+                    move |body: axum::body::Bytes| {
+                        let minted_at = minted_at.clone();
+                        async move {
+                            tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+                            let req: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                            let pubkey = req["nostr_pubkey"].as_str().unwrap_or_default();
+                            let now = nostr::Timestamp::now().as_secs();
+                            *minted_at.lock().unwrap() = now;
+                            axum::Json(serde_json::json!({
+                                "assertion": test_support::assertion(pubkey, now + 300),
+                                "nostr_pubkey": pubkey,
+                                "expires_at": now + 300,
+                            }))
+                        }
+                    }
+                }),
+            )
+            .fallback({
+                let proofs = proofs.clone();
+                move |headers: HeaderMap| {
+                    let proofs = proofs.clone();
+                    async move {
+                        let auth = headers["authorization"].to_str().unwrap().to_owned();
+                        proofs.lock().unwrap().push(auth);
+                        (StatusCode::OK, "{}")
+                    }
+                }
+            });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        client(&base, true).get_authed("/api/get").await.unwrap();
+
+        let proof = proofs.lock().unwrap()[0].clone();
+        let json = base64::engine::general_purpose::STANDARD
+            .decode(proof.trim_start_matches("Nostr "))
+            .unwrap();
+        let event: nostr::Event = serde_json::from_slice(&json).unwrap();
+        assert!(
+            event.created_at.as_secs() >= *minted_at.lock().unwrap(),
+            "the proof was signed before the assertion arrived"
+        );
+    }
+
+    #[tokio::test]
+    async fn every_protected_route_and_the_upgrade_carry_the_assertion() {
+        let (base, log) = origin(None).await;
+        let results = exercise_every_route(&client(&base, true)).await;
+
+        let log = log.lock().unwrap();
+        for (method, path) in PROTECTED {
+            assert!(
+                covered(&log).contains(&(method.to_string(), path.to_string())),
+                "{method} {path} was not exercised"
+            );
+        }
+        assert!(
+            log.requests
+                .iter()
+                .any(|(_, p, _)| p.starts_with("/media/") && p != "/media/upload"),
+            "GET /media/<hash> was not exercised"
+        );
+        for (method, path, headers) in &log.requests {
+            assert_eq!(
+                headers
+                    .get("nostr-federated-identity")
+                    .and_then(|v| v.to_str().ok()),
+                Some(format!("Bearer {}", log.assertion).as_str()),
+                "{method} {path}"
+            );
+            if path != "/" {
+                assert!(
+                    headers
+                        .get("authorization")
+                        .and_then(|v| v.to_str().ok())
+                        .is_some_and(|v| v.starts_with("Nostr ")),
+                    "{method} {path}: Authorization proof"
+                );
+            }
+        }
+        assert_eq!(log.mints, 1, "one assertion serves the whole process");
+        // Everything but the WS publish (no WS server) succeeds.
+        for (i, result) in results.iter().enumerate() {
+            if i != 8 {
+                assert!(result.is_ok(), "route {i}: {result:?}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn exempt_routes_and_relays_without_a_source_get_no_assertion() {
+        let (base, log) = origin(None).await;
+        let plain = client(&base, false);
+        exercise_every_route(&plain).await;
+        plain.get_public("/info").await.unwrap();
+
+        {
+            let log = log.lock().unwrap();
+            assert_eq!(log.mints, 0);
+            assert!(log.requests.len() >= PROTECTED.len());
+            for (method, path, headers) in &log.requests {
+                assert!(
+                    headers.get("nostr-federated-identity").is_none(),
+                    "{method} {path}"
+                );
+            }
+        }
+
+        // An exempt route never mints or presents evidence, even with a source.
+        let (base, log) = origin(None).await;
+        client(&base, true).get_public("/info").await.unwrap();
+        let log = log.lock().unwrap();
+        assert_eq!(log.mints, 0);
+        assert!(log.requests[0].2.get("nostr-federated-identity").is_none());
+    }
+
+    /// An enforcing relay's 401 with no evidence source names the settings,
+    /// on HTTP and on the WebSocket upgrade, and is not retried.
+    #[tokio::test]
+    async fn a_401_without_a_source_names_the_evidence_settings() {
+        let (base, log) = origin(Some(StatusCode::UNAUTHORIZED)).await;
+        let plain = client(&base, false);
+        let keys = plain.credentials().test_keys();
+        let ws_event = EventBuilder::new(Kind::Custom(20001), "")
+            .sign_with_keys(&keys)
+            .unwrap();
+        for err in [
+            plain.query(&serde_json::json!({})).await.unwrap_err(),
+            plain.publish_ephemeral_event(ws_event).await.unwrap_err(),
+        ] {
+            assert!(
+                matches!(&err, CliError::Auth(m)
+                    if m.contains("BUZZ_FEDERATED_IDENTITY_TOKEN")
+                        && m.contains("BUZZ_FEDERATED_IDENTITY_ADAPTER")),
+                "{err:?}"
+            );
+        }
+        assert_eq!(log.lock().unwrap().requests.len(), 2, "401 is not retried");
+
+        // With a source configured, a 401 is the relay's verdict, not a hint.
+        let (base, _) = origin(Some(StatusCode::UNAUTHORIZED)).await;
+        let err = client(&base, true)
+            .query(&serde_json::json!({}))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, CliError::Relay { status: 401, .. }),
+            "{err:?}"
+        );
+    }
+
+    /// The paths a failed mint must stop before anything reaches the relay:
+    /// a read, a post-once write, a moderation command, a stored message
+    /// (`messages send`) and the WebSocket upgrade (`users set-presence`).
+    /// Returns each path's error and how many mints that one call made.
+    async fn every_path_once(
+        client: &BuzzClient,
+        mints: &std::sync::atomic::AtomicUsize,
+    ) -> Vec<(&'static str, CliError, usize)> {
+        let keys = client.credentials().test_keys();
+        let event = |kind: u16| {
+            EventBuilder::new(Kind::Custom(kind), "hi")
+                .sign_with_keys(&keys)
+                .unwrap()
+        };
+        let body = serde_json::json!({"k": "v"});
+        let mut out = Vec::new();
+        let mut record = |path, result: Result<String, CliError>, before| {
+            out.push((path, result.unwrap_err(), count(mints) - before));
+        };
+        let before = count(mints);
+        record(
+            "read",
+            client.query(&serde_json::json!({"kinds": [1]})).await,
+            before,
+        );
+        let before = count(mints);
+        record(
+            "post-once",
+            client.post_json_once_authed("/api/post-once", &body).await,
+            before,
+        );
+        let before = count(mints);
+        record("moderation", client.submit_event(event(9041)).await, before);
+        let before = count(mints);
+        record("message", client.submit_event(event(9)).await, before);
+        let before = count(mints);
+        record(
+            "websocket",
+            client.publish_ephemeral_event(event(20001)).await,
+            before,
+        );
+        out
+    }
+
+    /// An adapter 500 or 503 is retried a bounded number of times on every
+    /// path, then fails as a retryable adapter error. Nothing reaches the
+    /// relay, so a message is never reported as possibly delivered.
+    #[tokio::test]
+    async fn adapter_5xx_is_retried_on_every_path_and_never_reaches_the_relay() {
+        for response in [test_support::HTTP_500, test_support::HTTP_503] {
+            let (relay, log) = origin(None).await;
+            let (adapter, mints) = raw_adapter(response).await;
+            let client = client_via(&relay, &adapter);
+            for (path, err, attempts) in every_path_once(&client, &mints).await {
+                assert!(matches!(err, CliError::Adapter(_)), "{path}: {err:?}");
+                assert!(crate::error::is_retryable_error(&err), "{path}");
+                assert_eq!(attempts, 3, "{path}: three mints, no more");
+            }
+            assert!(
+                log.lock().unwrap().requests.is_empty(),
+                "the relay saw a request"
+            );
+        }
+    }
+
+    /// A first send whose outcome is lost, then an assertion refresh that
+    /// fails, is still possibly delivered: the adapter error must not invite
+    /// an outer re-sign.
+    #[tokio::test]
+    async fn a_refresh_failure_after_a_lost_send_stays_delivery_unknown() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let mints = Arc::new(AtomicUsize::new(0));
+        let sends = Arc::new(AtomicUsize::new(0));
+        let app = axum::Router::new()
+            .route(
+                "/v1/identity/assertions",
+                axum::routing::post({
+                    let mints = mints.clone();
+                    move |body: axum::body::Bytes| {
+                        let mints = mints.clone();
+                        async move {
+                            if mints.fetch_add(1, Ordering::SeqCst) > 0 {
+                                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                            }
+                            let req: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                            let pubkey = req["nostr_pubkey"].as_str().unwrap_or_default();
+                            let expires_at = nostr::Timestamp::now().as_secs() + 300;
+                            axum::Json(serde_json::json!({
+                                "assertion": test_support::assertion(pubkey, expires_at),
+                                "nostr_pubkey": pubkey,
+                                "expires_at": expires_at,
+                            }))
+                            .into_response()
+                        }
+                    }
+                }),
+            )
+            .fallback({
+                let sends = sends.clone();
+                move || {
+                    let sends = sends.clone();
+                    async move {
+                        sends.fetch_add(1, Ordering::SeqCst);
+                        // The relay may have stored it; the proxy lost the answer
+                        // after the assertion reached its refresh boundary.
+                        crate::cached_assertion::test_clock::advance(300);
+                        StatusCode::BAD_GATEWAY.into_response()
+                    }
+                }
+            });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let client = client_via(&base, &base);
+        let keys = client.credentials().test_keys();
+        let event = EventBuilder::new(Kind::Custom(9), "hi")
+            .sign_with_keys(&keys)
+            .unwrap();
+        let err = client.submit_event(event).await.unwrap_err();
+        assert!(matches!(err, CliError::DeliveryUnknown(_)), "{err:?}");
+        assert!(!crate::error::is_retryable_error(&err));
+        assert_eq!(
+            sends.load(Ordering::SeqCst),
+            1,
+            "one send reached the relay"
+        );
+        assert_eq!(
+            mints.load(Ordering::SeqCst),
+            4,
+            "one mint, then three failed refreshes"
+        );
+    }
+
+    /// A 403 whose body is cut off is one refusal on every path, not a
+    /// retryable network error, and nothing reaches the relay.
+    #[tokio::test]
+    async fn a_truncated_adapter_403_is_a_single_refusal_on_every_path() {
+        let (relay, log) = origin(None).await;
+        let (adapter, mints) = raw_adapter(test_support::TRUNCATED_403).await;
+        let client = client_via(&relay, &adapter);
+        for (path, err, attempts) in every_path_once(&client, &mints).await {
+            assert!(matches!(err, CliError::Auth(_)), "{path}: {err:?}");
+            assert!(!crate::error::is_retryable_error(&err), "{path}");
+            assert_eq!(attempts, 1, "{path}: one mint");
+        }
+        assert!(
+            log.lock().unwrap().requests.is_empty(),
+            "the relay saw a request"
+        );
+    }
+
+    /// A relay redirect to another origin is never followed: the assertion,
+    /// proof and auth tag stay with the relay that was asked.
+    #[tokio::test]
+    async fn a_cross_origin_relay_redirect_is_not_followed() {
+        let (target, target_log) = origin(None).await;
+        let location = format!("{target}/query");
+        let app = axum::Router::new().fallback(move || {
+            let location = location.clone();
+            async move { (StatusCode::TEMPORARY_REDIRECT, [("location", location)]) }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let relay = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        // Mint from the target origin's adapter so the client has an assertion to leak.
+        let client = client_via(&relay, &target);
+        let body = serde_json::json!({"k": "v"});
+        for err in [
+            client.query(&serde_json::json!({})).await.unwrap_err(),
+            client.get_authed("/api/get").await.unwrap_err(),
+            client
+                .post_json_authed("/api/post", &body)
+                .await
+                .unwrap_err(),
+        ] {
+            assert!(
+                matches!(err, CliError::Relay { status: 307, .. }),
+                "{err:?}"
+            );
+        }
+        let log = target_log.lock().unwrap();
+        assert_eq!(log.mints, 1);
+        assert!(
+            log.requests.is_empty(),
+            "redirect followed: {:?}",
+            covered(&log)
+        );
+    }
+
+    /// A WebSocket refused after NIP-42 with a policy close (a NIP-FI key
+    /// mismatch) is an auth error, exit 3, not a generic failure.
+    #[tokio::test]
+    async fn a_websocket_policy_close_is_an_auth_error() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::protocol::{frame::coding::CloseCode, CloseFrame};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let relay = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            ws.send(Message::Text(r#"["AUTH","challenge"]"#.into()))
+                .await
+                .unwrap();
+            let _auth = ws.next().await;
+            let _ = ws
+                .send(Message::Close(Some(CloseFrame {
+                    code: CloseCode::Policy,
+                    reason: "auth-required: key mismatch".into(),
+                })))
+                .await;
+        });
+        let client = client(&relay, false);
+        let event = EventBuilder::new(Kind::Custom(20001), "")
+            .sign_with_keys(&client.credentials().test_keys())
+            .unwrap();
+        let err = client.publish_ephemeral_event(event).await.unwrap_err();
+        assert!(
+            matches!(&err, CliError::Auth(m) if m.contains("key mismatch")),
+            "{err:?}"
+        );
+        assert_eq!(crate::error::exit_code(&err), 3);
+        assert!(!crate::error::is_retryable_error(&err));
+    }
+}
+
+/// A desktop that stays `rate_limited`, or throttles and then holds a
+/// signature, through every command path that signs or encrypts.
+#[cfg(all(test, unix))]
+mod desktop_throttle_tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    use nostr::{EventBuilder, Kind};
+
+    use super::ws_deadline_tests::ws_relay;
+    use super::BuzzClient;
+    use crate::desktop_provider::{tests as dp, Provider};
+    use crate::error::CliError;
+
+    /// A desktop holding `keys` that answers `rate_limited` to `throttled`.
+    async fn client(relay: &str, keys: &nostr::Keys, throttled: &'static str) -> BuzzClient {
+        let answer = dp::desktop_answers(keys.clone(), vec![relay.into()]);
+        let (endpoint, _) = dp::provider(move |version, request| {
+            if request["method"] == throttled {
+                return serde_json::json!({"result": "", "error": "rate_limited", "retry_after": 1});
+            }
+            answer(version, request)
+        })
+        .await;
+        let provider = Provider::open(endpoint, "t".into(), false, relay)
+            .await
+            .unwrap()
+            .ok()
+            .unwrap();
+        let credentials = crate::credentials::Credentials::from_desktop(provider)
+            .await
+            .unwrap();
+        BuzzClient::new(relay.into(), credentials).unwrap()
+    }
+
+    /// A desktop user's 401 and 403 hints name what they can act on in Buzz,
+    /// not the headless settings.
+    #[tokio::test]
+    async fn desktop_users_get_hints_for_the_desktop() {
+        let app = axum::Router::new().fallback(|req: axum::extract::Request| async move {
+            let status = if req.uri().path() == "/forbidden" {
+                403
+            } else {
+                401
+            };
+            (
+                axum::http::StatusCode::from_u16(status).unwrap(),
+                r#"{"error":"no"}"#,
+            )
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let relay = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let keys = nostr::Keys::generate();
+        let owner = nostr::Keys::generate();
+        let tag = buzz_sdk::nip_oa::compute_auth_tag(&owner, &keys.public_key(), "").unwrap();
+        let answer = dp::desktop_answers(keys.clone(), vec![relay.clone()]);
+        let (endpoint, _) =
+            dp::provider(move |version, request| match request["method"].as_str() {
+                Some("federated_identity") => serde_json::json!({"result": ""}),
+                Some("auth_tag") => serde_json::json!({"result": tag}),
+                Some("describe") => {
+                    let mut described = answer(version, request);
+                    let mut body: serde_json::Value =
+                        serde_json::from_str(described["result"].as_str().unwrap()).unwrap();
+                    body["methods"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push("auth_tag".into());
+                    described["result"] = body.to_string().into();
+                    described
+                }
+                _ => answer(version, request),
+            })
+            .await;
+        let provider = Provider::open(endpoint, "t".into(), false, &relay)
+            .await
+            .unwrap()
+            .ok()
+            .unwrap();
+        let credentials = crate::credentials::Credentials::from_desktop(provider)
+            .await
+            .unwrap();
+        let client = BuzzClient::new(relay, credentials).unwrap();
+
+        let err = client.get_authed("/api").await.unwrap_err();
+        assert!(
+            matches!(&err, CliError::Auth(m) if m.contains("in Buzz")),
+            "{err:?}"
+        );
+        let err = client.get_authed("/forbidden").await.unwrap_err();
+        let text = err.to_string();
+        assert!(
+            !text.contains("stale") && !text.contains("BUZZ_AUTH_TAG"),
+            "{text}"
+        );
+    }
+
+    /// A desktop holding `keys` whose assertions live `lifetime` s and
+    /// which answers `sign_event` with `sign` (`None`: sign it), logging the
+    /// sign-in challenges it signs.
+    async fn desktop(
+        relay: &str,
+        keys: &nostr::Keys,
+        assertion: impl Fn() -> String + Send + Sync + 'static,
+        sign: impl Fn(&nostr::UnsignedEvent) -> Option<serde_json::Value> + Send + Sync + 'static,
+    ) -> (BuzzClient, super::ws_deadline_tests::Log) {
+        let signed: super::ws_deadline_tests::Log = Default::default();
+        let log = signed.clone();
+        let answer = dp::desktop_answers(keys.clone(), vec![relay.into()]);
+        let (endpoint, _) =
+            dp::provider(move |version, request| match request["method"].as_str() {
+                Some("federated_identity") => {
+                    serde_json::json!({ "result": assertion() })
+                }
+                Some("sign_event") => {
+                    let unsigned = <nostr::UnsignedEvent as nostr::JsonUtil>::from_json(
+                        request["params"][0].as_str().unwrap(),
+                    )
+                    .unwrap();
+                    if let Some(refusal) = sign(&unsigned) {
+                        return refusal;
+                    }
+                    if let Some(c) = unsigned.tags.find(nostr::TagKind::Challenge) {
+                        log.lock().unwrap().push(c.content().unwrap().to_owned());
+                    }
+                    answer(version, request)
+                }
+                _ => answer(version, request),
+            })
+            .await;
+        let provider = Provider::open(endpoint, "t".into(), false, relay)
+            .await
+            .unwrap()
+            .ok()
+            .unwrap();
+        let credentials = crate::credentials::Credentials::from_desktop(provider)
+            .await
+            .unwrap();
+        (BuzzClient::new(relay.into(), credentials).unwrap(), signed)
+    }
+
+    /// A desktop that throttles the first sign-in signature: the throttle is
+    /// waited out between connections, so only the live challenge is signed,
+    /// with a fresh assertion on the reconnect after the old one expired.
+    ///
+    /// The throttle is decided by call count, not by time since the test
+    /// started: on a loaded runner the desktop setup alone could outlast a
+    /// wall-clock throttle window, leaving nothing to wait out. The relay's
+    /// sign-in deadline is long for the same reason; the client drops the
+    /// throttled socket itself.
+    #[tokio::test]
+    async fn a_throttled_sign_in_reconnects_with_fresh_evidence() {
+        use super::ws_deadline_tests::deadline_relay;
+        let keys = nostr::Keys::generate();
+        let (relay, conns, _, bearers) = deadline_relay(std::time::Duration::from_secs(5)).await;
+        let signs = AtomicUsize::new(0);
+        let (c, signed) = desktop(&relay, &keys, || dp::assertion(40), move |_| {
+            if signs.fetch_add(1, Ordering::SeqCst) == 0 {
+                crate::cached_assertion::test_clock::advance(60);
+                return Some(
+                    serde_json::json!({"result": "", "error": "rate_limited", "retry_after": 30}),
+                );
+            }
+            None
+        })
+        .await;
+        let event = EventBuilder::new(Kind::Custom(20001), "")
+            .sign_with_keys(&keys)
+            .unwrap();
+        c.publish_ephemeral_event(event).await.unwrap();
+        assert_eq!(conns.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            *signed.lock().unwrap(),
+            ["c1"],
+            "the dead challenge is never signed"
+        );
+        let bearers = bearers.lock().unwrap();
+        assert_ne!(
+            bearers[0], bearers[1],
+            "the reconnect brings a fresh assertion"
+        );
+    }
+
+    /// An HTTP relay logging each request's NIP-FI assertion.
+    async fn logging_relay() -> (String, super::ws_deadline_tests::Log) {
+        let seen: super::ws_deadline_tests::Log = Default::default();
+        let log = seen.clone();
+        let app = axum::Router::new().fallback(move |headers: axum::http::HeaderMap| {
+            let bearer = headers["nostr-federated-identity"].to_str().unwrap();
+            log.lock()
+                .unwrap()
+                .push(bearer.trim_start_matches("Bearer ").to_owned());
+            async { axum::Json(serde_json::json!([])) }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let relay = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (relay, seen)
+    }
+
+    /// A NIP-98 signature that outlives the assertion is signed again after
+    /// fresh evidence, and goes out with both current.
+    #[tokio::test]
+    async fn a_slow_http_signature_goes_out_with_fresh_evidence() {
+        let (relay, seen) = logging_relay().await;
+        let signs = Arc::new(AtomicUsize::new(0));
+        let n = signs.clone();
+        let (c, _) = desktop(
+            &relay,
+            &nostr::Keys::generate(),
+            || dp::assertion(40),
+            move |_| {
+                if n.fetch_add(1, Ordering::SeqCst) == 0 {
+                    crate::cached_assertion::test_clock::advance(60);
+                }
+                None
+            },
+        )
+        .await;
+        c.query(&serde_json::json!({})).await.unwrap();
+        assert_eq!(signs.load(Ordering::SeqCst), 2, "the proof is signed again");
+        let sent = crate::cached_assertion::jws_exp(&seen.lock().unwrap()[0]).unwrap();
+        assert!(
+            sent > crate::cached_assertion::unix_now(),
+            "the assertion sent is current"
+        );
+    }
+
+    /// A post-sign refresh that waits and returns the same assertion still
+    /// gets a proof signed after it.
+    #[tokio::test]
+    async fn a_slow_refresh_of_the_same_assertion_re_signs_the_proof() {
+        let (relay, seen) = logging_relay().await;
+        let exp = crate::cached_assertion::unix_now() + 600;
+        let fetches = AtomicUsize::new(0);
+        let same = move || {
+            if fetches.fetch_add(1, Ordering::SeqCst) == 1 {
+                // The desktop waits out throttling before it answers.
+                crate::cached_assertion::test_clock::advance(45);
+            }
+            dp::assertion(exp - crate::cached_assertion::unix_now())
+        };
+        let signs = Arc::new(AtomicUsize::new(0));
+        let n = signs.clone();
+        let (c, _) = desktop(&relay, &nostr::Keys::generate(), same, move |_| {
+            if n.fetch_add(1, Ordering::SeqCst) == 0 {
+                crate::cached_assertion::test_clock::advance(310);
+            }
+            None
+        })
+        .await;
+        c.query(&serde_json::json!({})).await.unwrap();
+        assert_eq!(
+            signs.load(Ordering::SeqCst),
+            2,
+            "the aged proof is signed again"
+        );
+        assert_eq!(seen.lock().unwrap().len(), 1);
+    }
+
+    /// A signature slower than a proof's lifetime is signed again even when
+    /// the evidence did not change.
+    #[tokio::test]
+    async fn a_slow_signature_with_unchanged_evidence_is_signed_again() {
+        let (relay, seen) = logging_relay().await;
+        let exp = crate::cached_assertion::unix_now() + 3600;
+        let signs = Arc::new(AtomicUsize::new(0));
+        let n = signs.clone();
+        let (c, _) = desktop(
+            &relay,
+            &nostr::Keys::generate(),
+            move || dp::assertion(exp - crate::cached_assertion::unix_now()),
+            move |_| {
+                if n.fetch_add(1, Ordering::SeqCst) == 0 {
+                    crate::cached_assertion::test_clock::advance(65);
+                }
+                None
+            },
+        )
+        .await;
+        c.query(&serde_json::json!({})).await.unwrap();
+        assert_eq!(
+            signs.load(Ordering::SeqCst),
+            2,
+            "the stale proof is signed again"
+        );
+        assert_eq!(seen.lock().unwrap().len(), 1);
+    }
+
+    /// Evidence that keeps expiring while the proof is signed ends retryable
+    /// after three rounds, sending nothing.
+    #[tokio::test]
+    async fn evidence_that_keeps_expiring_ends_retryable() {
+        let (relay, seen) = logging_relay().await;
+        let signs = Arc::new(AtomicUsize::new(0));
+        let n = signs.clone();
+        let (c, _) = desktop(
+            &relay,
+            &nostr::Keys::generate(),
+            || dp::assertion(40),
+            move |_| {
+                n.fetch_add(1, Ordering::SeqCst);
+                crate::cached_assertion::test_clock::advance(60);
+                None
+            },
+        )
+        .await;
+        let err = c.query(&serde_json::json!({})).await.unwrap_err();
+        assert!(matches!(err, CliError::Unavailable(_)), "{err:?}");
+        assert_eq!(signs.load(Ordering::SeqCst), 3);
+        assert!(seen.lock().unwrap().is_empty());
+    }
+
+    /// An HTTP relay answering every query with no events.
+    async fn http_relay() -> String {
+        let app = axum::Router::new().fallback(|| async { axum::Json(serde_json::json!([])) });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let relay = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        relay
+    }
+
+    fn assert_throttled(err: CliError) {
+        assert!(matches!(err, CliError::Throttled(_)), "{err:?}");
+        assert!(crate::error::is_retryable_error(&err));
+        assert_eq!(crate::error::exit_code(&err), 2);
+    }
+
+    #[tokio::test]
+    async fn persistent_throttling_is_retryable_on_every_signing_path() {
+        let keys = nostr::Keys::generate();
+        let relay = http_relay().await;
+        let c = client(&relay, &keys, "sign_event").await;
+
+        // NIP-98 on an ordinary request.
+        assert_throttled(c.query(&serde_json::json!({})).await.unwrap_err());
+        // Event signing.
+        assert_throttled(
+            c.sign_event(EventBuilder::new(Kind::TextNote, "x"))
+                .await
+                .unwrap_err(),
+        );
+
+        // Memory encryption.
+        let c = client(&relay, &keys, "nip44_encrypt").await;
+        let owner = nostr::Keys::generate().public_key().to_hex();
+        assert_throttled(
+            crate::commands::mem::cmd_set(&c, "mem/a", "v", Some(&owner), false)
+                .await
+                .unwrap_err(),
+        );
+    }
+
+    #[tokio::test]
+    async fn persistent_throttling_during_nip42_is_retryable() {
+        let keys = nostr::Keys::generate();
+        let (relay, auths, events) = ws_relay().await;
+        let c = client(&relay, &keys, "sign_event").await;
+        let event = EventBuilder::new(Kind::Custom(20001), "")
+            .sign_with_keys(&keys)
+            .unwrap();
+        assert_throttled(c.publish_ephemeral_event(event).await.unwrap_err());
+        assert_eq!(auths.load(Ordering::SeqCst), 0);
+        assert_eq!(events.load(Ordering::SeqCst), 0);
+    }
+
+    /// NIP-42 signing that is throttled, then held for a decision, completes
+    /// the publish: provider time is outside the relay's deadlines, and the
+    /// relay sees one AUTH and one EVENT.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_throttled_then_held_nip42_signature_completes_without_replay() {
+        let keys = nostr::Keys::generate();
+        let (relay, auths, events) = ws_relay().await;
+        let signs = Arc::new(AtomicUsize::new(0));
+        let counted = signs.clone();
+        let answer = dp::desktop_answers(keys.clone(), vec![relay.clone()]);
+        let (endpoint, _) = dp::provider(move |version, request| {
+            if request["method"] == "sign_event" {
+                if counted.fetch_add(1, Ordering::SeqCst) == 0 {
+                    return serde_json::json!({"result": "", "error": "rate_limited", "retry_after": 30});
+                }
+                // Held for a person's decision.
+                std::thread::sleep(std::time::Duration::from_secs(2));
+            }
+            answer(version, request)
+        })
+        .await;
+        let provider = Provider::open(endpoint, "t".into(), false, &relay)
+            .await
+            .unwrap()
+            .ok()
+            .unwrap();
+        let credentials = crate::credentials::Credentials::from_desktop(provider)
+            .await
+            .unwrap();
+        let c = BuzzClient::new(relay, credentials).unwrap();
+        let event = EventBuilder::new(Kind::Custom(20001), "")
+            .sign_with_keys(&keys)
+            .unwrap();
+        c.publish_ephemeral_event(event).await.unwrap();
+        assert_eq!(signs.load(Ordering::SeqCst), 2);
+        assert_eq!(auths.load(Ordering::SeqCst), 1);
+        assert_eq!(events.load(Ordering::SeqCst), 1);
+    }
+}
+
+/// WebSocket publish deadlines, on a paused clock: a signer may take as long
+/// as it needs, while each network phase, writes included, is capped.
+#[cfg(test)]
+mod ws_deadline_tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use futures_util::{SinkExt, StreamExt};
+    use nostr::{Event, EventBuilder, Keys, Kind, NostrSigner, PublicKey, UnsignedEvent};
+    use tokio_tungstenite::tungstenite::Message;
+
+    use super::BuzzClient;
+    use crate::credentials::Credentials;
+    use crate::error::CliError;
+
+    /// A WebSocket relay that sends a challenge, then OKs AUTH and one event.
+    /// Returns its URL and the count of AUTH and EVENT frames it received.
+    pub(super) async fn ws_relay() -> (String, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+        let (auths, events) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let (a, e) = (auths.clone(), events.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let relay = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let (a, e) = (a.clone(), e.clone());
+                tokio::spawn(async move {
+                    let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+                    let _ = ws
+                        .send(Message::Text(r#"["AUTH","challenge"]"#.into()))
+                        .await;
+                    while let Some(Ok(Message::Text(text))) = ws.next().await {
+                        let frame: serde_json::Value = serde_json::from_str(&text).unwrap();
+                        let counter = if frame[0] == "AUTH" { &a } else { &e };
+                        counter.fetch_add(1, Ordering::SeqCst);
+                        let ok = serde_json::json!(["OK", frame[1]["id"], true, ""]);
+                        let _ = ws.send(Message::Text(ok.to_string().into())).await;
+                    }
+                });
+            }
+        });
+        (relay, auths, events)
+    }
+
+    /// Keys that take `delay` to sign, like a signer held for a decision.
+    /// The clock is paused only while signing (after the real connect), so
+    /// the delay passes at once unless an earlier timer fires first.
+    #[derive(Debug)]
+    struct Slow(Keys, Duration);
+
+    /// Keys whose first signature takes `delay`, then sign at once.
+    #[derive(Debug)]
+    struct SlowFirst(Slow, std::sync::atomic::AtomicBool);
+
+    impl NostrSigner for Slow {
+        fn backend(&self) -> nostr::signer::SignerBackend<'_> {
+            nostr::signer::SignerBackend::Custom("slow".into())
+        }
+        fn get_public_key(
+            &self,
+        ) -> nostr::util::BoxedFuture<'_, Result<PublicKey, nostr::signer::SignerError>> {
+            self.0.get_public_key()
+        }
+        fn sign_event(
+            &self,
+            unsigned: UnsignedEvent,
+        ) -> nostr::util::BoxedFuture<'_, Result<Event, nostr::signer::SignerError>> {
+            Box::pin(async move {
+                tokio::time::pause();
+                tokio::time::sleep(self.1).await;
+                tokio::time::resume();
+                self.0.sign_event(unsigned).await
+            })
+        }
+        fn nip04_encrypt<'a>(
+            &'a self,
+            p: &'a PublicKey,
+            c: &'a str,
+        ) -> nostr::util::BoxedFuture<'a, Result<String, nostr::signer::SignerError>> {
+            self.0.nip04_encrypt(p, c)
+        }
+        fn nip04_decrypt<'a>(
+            &'a self,
+            p: &'a PublicKey,
+            c: &'a str,
+        ) -> nostr::util::BoxedFuture<'a, Result<String, nostr::signer::SignerError>> {
+            self.0.nip04_decrypt(p, c)
+        }
+        fn nip44_encrypt<'a>(
+            &'a self,
+            p: &'a PublicKey,
+            c: &'a str,
+        ) -> nostr::util::BoxedFuture<'a, Result<String, nostr::signer::SignerError>> {
+            self.0.nip44_encrypt(p, c)
+        }
+        fn nip44_decrypt<'a>(
+            &'a self,
+            p: &'a PublicKey,
+            c: &'a str,
+        ) -> nostr::util::BoxedFuture<'a, Result<String, nostr::signer::SignerError>> {
+            self.0.nip44_decrypt(p, c)
+        }
+    }
+
+    impl NostrSigner for SlowFirst {
+        fn backend(&self) -> nostr::signer::SignerBackend<'_> {
+            self.0.backend()
+        }
+        fn get_public_key(
+            &self,
+        ) -> nostr::util::BoxedFuture<'_, Result<PublicKey, nostr::signer::SignerError>> {
+            self.0.get_public_key()
+        }
+        fn sign_event(
+            &self,
+            unsigned: UnsignedEvent,
+        ) -> nostr::util::BoxedFuture<'_, Result<Event, nostr::signer::SignerError>> {
+            if self.1.swap(false, Ordering::SeqCst) {
+                self.0.sign_event(unsigned)
+            } else {
+                self.0 .0.sign_event(unsigned)
+            }
+        }
+        fn nip04_encrypt<'a>(
+            &'a self,
+            p: &'a PublicKey,
+            c: &'a str,
+        ) -> nostr::util::BoxedFuture<'a, Result<String, nostr::signer::SignerError>> {
+            self.0.nip04_encrypt(p, c)
+        }
+        fn nip04_decrypt<'a>(
+            &'a self,
+            p: &'a PublicKey,
+            c: &'a str,
+        ) -> nostr::util::BoxedFuture<'a, Result<String, nostr::signer::SignerError>> {
+            self.0.nip04_decrypt(p, c)
+        }
+        fn nip44_encrypt<'a>(
+            &'a self,
+            p: &'a PublicKey,
+            c: &'a str,
+        ) -> nostr::util::BoxedFuture<'a, Result<String, nostr::signer::SignerError>> {
+            self.0.nip44_encrypt(p, c)
+        }
+        fn nip44_decrypt<'a>(
+            &'a self,
+            p: &'a PublicKey,
+            c: &'a str,
+        ) -> nostr::util::BoxedFuture<'a, Result<String, nostr::signer::SignerError>> {
+            self.0.nip44_decrypt(p, c)
+        }
+    }
+
+    /// A relay that, like buzz-relay, drops a socket not signed in within
+    /// 5 s; otherwise as [`ws_relay`]. Returns its URL, its connection
+    /// count, and the challenges each AUTH answered.
+    /// A relay closing sockets not signed in within `deadline`: the
+    /// connection count, the challenges answered and each upgrade's NIP-FI
+    /// header.
+    #[allow(clippy::result_large_err)] // tungstenite's handshake callback type
+    pub(super) async fn deadline_relay(deadline: Duration) -> (String, Arc<AtomicUsize>, Log, Log) {
+        let conns = Arc::new(AtomicUsize::new(0));
+        let (answered, bearers): (Log, Log) = Default::default();
+        let (n, log, seen) = (conns.clone(), answered.clone(), bearers.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let relay = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let challenge = format!("c{}", n.fetch_add(1, Ordering::SeqCst));
+                let (log, seen) = (log.clone(), seen.clone());
+                tokio::spawn(async move {
+                    let record =
+                        |req: &tokio_tungstenite::tungstenite::handshake::server::Request, res| {
+                            let bearer = req.headers().get("nostr-federated-identity");
+                            let bearer = bearer.map(|v| v.to_str().unwrap().to_owned());
+                            seen.lock().unwrap().push(bearer.unwrap_or_default());
+                            Ok(res)
+                        };
+                    let mut ws = tokio_tungstenite::accept_hdr_async(stream, record)
+                        .await
+                        .unwrap();
+                    let hello = serde_json::json!(["AUTH", challenge]).to_string();
+                    let _ = ws.send(Message::Text(hello.into())).await;
+                    let deadline = tokio::time::sleep(deadline);
+                    tokio::pin!(deadline);
+                    let mut authed = false;
+                    loop {
+                        let next = tokio::select! {
+                            _ = &mut deadline, if !authed => return,
+                            next = ws.next() => next,
+                        };
+                        let Some(Ok(Message::Text(text))) = next else {
+                            return;
+                        };
+                        let frame: serde_json::Value = serde_json::from_str(&text).unwrap();
+                        if frame[0] == "AUTH" {
+                            let tags = frame[1]["tags"].as_array().unwrap();
+                            let c = tags.iter().find(|t| t[0] == "challenge").unwrap();
+                            log.lock().unwrap().push(c[1].as_str().unwrap().to_owned());
+                            authed = true;
+                        }
+                        let ok = serde_json::json!(["OK", frame[1]["id"], true, ""]);
+                        let _ = ws.send(Message::Text(ok.to_string().into())).await;
+                    }
+                });
+            }
+        });
+        (relay, conns, answered, bearers)
+    }
+
+    pub(super) type Log = Arc<std::sync::Mutex<Vec<String>>>;
+
+    /// Every upgrade names the CLI and its version.
+    #[tokio::test]
+    async fn upgrade_headers_carry_the_cli_user_agent() {
+        let keys = Keys::generate();
+        let c = BuzzClient::new(
+            "http://127.0.0.1:1".into(),
+            Credentials::from_signer(Arc::new(keys.clone()), keys.public_key()),
+        )
+        .unwrap();
+        let headers = c.upgrade_headers().await.unwrap();
+        assert_eq!(headers.get("user-agent").unwrap(), super::USER_AGENT);
+        assert!(super::USER_AGENT.starts_with("buzz-cli/"));
+    }
+
+    /// A sign-in signature that comes back after the relay's 5 s deadline
+    /// reconnects and signs the new challenge, never the old one.
+    #[tokio::test]
+    async fn a_late_sign_in_reconnects_and_signs_the_new_challenge() {
+        let keys = Keys::generate();
+        let (relay, conns, answered, _) = deadline_relay(Duration::from_secs(5)).await;
+        let signer = Arc::new(SlowFirst(
+            Slow(keys.clone(), Duration::from_secs(8)),
+            std::sync::atomic::AtomicBool::new(true),
+        ));
+        let c =
+            BuzzClient::new(relay, Credentials::from_signer(signer, keys.public_key())).unwrap();
+        let event = EventBuilder::new(Kind::Custom(20001), "")
+            .sign_with_keys(&keys)
+            .unwrap();
+        c.publish_ephemeral_event(event).await.unwrap();
+        assert_eq!(conns.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            *answered.lock().unwrap(),
+            ["c1"],
+            "only the new challenge is signed"
+        );
+    }
+
+    /// A signer that is always too slow ends retryable after the bound.
+    #[tokio::test]
+    async fn a_sign_in_always_too_late_ends_retryable() {
+        let keys = Keys::generate();
+        let (relay, conns, ..) = deadline_relay(Duration::from_secs(5)).await;
+        let c = client(relay, &keys, Duration::from_secs(8));
+        let event = EventBuilder::new(Kind::Custom(20001), "")
+            .sign_with_keys(&keys)
+            .unwrap();
+        let err = c.publish_ephemeral_event(event).await.unwrap_err();
+        assert!(crate::error::is_retryable_error(&err), "{err:?}");
+        assert_eq!(
+            conns.load(Ordering::SeqCst),
+            super::WS_SIGN_IN_ATTEMPTS as usize
+        );
+    }
+
+    fn client(relay: String, keys: &Keys, delay: Duration) -> BuzzClient {
+        let signer = Arc::new(Slow(keys.clone(), delay));
+        BuzzClient::new(relay, Credentials::from_signer(signer, keys.public_key())).unwrap()
+    }
+
+    /// Signing held for 300 s, past the old 225 s single cap, still publishes,
+    /// once.
+    #[tokio::test]
+    async fn a_signature_held_past_every_relay_cap_still_publishes_once() {
+        let keys = Keys::generate();
+        let (relay, auths, events) = ws_relay().await;
+        let c = client(relay, &keys, Duration::from_secs(300));
+        let event = EventBuilder::new(Kind::Custom(20001), "")
+            .sign_with_keys(&keys)
+            .unwrap();
+        let started = tokio::time::Instant::now();
+        c.publish_ephemeral_event(event).await.unwrap();
+        assert!(started.elapsed() >= Duration::from_secs(300));
+        assert!(
+            started.elapsed() < Duration::from_secs(330),
+            "real time stays short"
+        );
+        assert_eq!(auths.load(Ordering::SeqCst), 1);
+        assert_eq!(events.load(Ordering::SeqCst), 1);
+    }
+
+    /// A relay that OKs AUTH and then stops reading stalls the EVENT write;
+    /// the publish fails within its phase cap and is not sent again.
+    #[tokio::test]
+    async fn a_stalled_event_write_fails_within_its_phase_cap() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let relay = format!("http://{}", listener.local_addr().unwrap());
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let count = accepted.clone();
+        // The relay pauses the clock once it has OKed AUTH, so the EVENT
+        // phase runs on virtual time from that mark.
+        let authed = Arc::new(std::sync::Mutex::new(None));
+        let mark = authed.clone();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                count.fetch_add(1, Ordering::SeqCst);
+                let mark = mark.clone();
+                tokio::spawn(async move {
+                    let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+                    let _ = ws
+                        .send(Message::Text(r#"["AUTH","challenge"]"#.into()))
+                        .await;
+                    if let Some(Ok(Message::Text(text))) = ws.next().await {
+                        let frame: serde_json::Value = serde_json::from_str(&text).unwrap();
+                        let ok = serde_json::json!(["OK", frame[1]["id"], true, ""]);
+                        let _ = ws.send(Message::Text(ok.to_string().into())).await;
+                        tokio::time::pause();
+                        *mark.lock().unwrap() = Some(tokio::time::Instant::now());
+                    }
+                    // Hold the socket open without reading.
+                    std::future::pending::<()>().await;
+                    drop(ws);
+                });
+            }
+        });
+        let keys = Keys::generate();
+        let c = BuzzClient::new(relay, Credentials::from_keys(keys.clone())).unwrap();
+        let event = EventBuilder::new(Kind::Custom(20001), "x".repeat(32 * 1024 * 1024))
+            .sign_with_keys(&keys)
+            .unwrap();
+        // An unbounded write would wait here for the hour, not forever.
+        let err = tokio::time::timeout(Duration::from_secs(3600), c.publish_ephemeral_event(event))
+            .await
+            .expect("the stalled write is bounded")
+            .unwrap_err();
+        let stalled = authed.lock().unwrap().expect("AUTH was OKed").elapsed();
+        // From the OK the client has at most the rest of the AUTH phase (the
+        // paused clock jumps to its read deadline before the OK is read) and
+        // the whole EVENT phase.
+        use buzz_ws_client::connection::{AUTH_OK_TIMEOUT_SECS, PUBLISH_OK_TIMEOUT_SECS};
+        let cap = Duration::from_secs(AUTH_OK_TIMEOUT_SECS + 1 + PUBLISH_OK_TIMEOUT_SECS + 1);
+        assert!(stalled <= cap, "{stalled:?} {err:?}");
+        assert!(
+            matches!(err, CliError::Other(ref m) if m.contains("Timeout")),
+            "{err:?}"
+        );
+        assert_eq!(accepted.load(Ordering::SeqCst), 1);
+    }
+
+    /// The NIP-42 AUTH event names the configured community URL, path and
+    /// trailing slash kept, as the relay checks it.
+    #[tokio::test]
+    async fn the_auth_event_names_the_relay_with_its_trailing_slash() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let named = Arc::new(std::sync::Mutex::new(None::<String>));
+        let log = named.clone();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let _ = ws
+                .send(Message::Text(r#"["AUTH","challenge"]"#.into()))
+                .await;
+            while let Some(Ok(Message::Text(text))) = ws.next().await {
+                let frame: serde_json::Value = serde_json::from_str(&text).unwrap();
+                if frame[0] == "AUTH" {
+                    let relay = frame[1]["tags"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|t| t[0] == "relay")
+                        .map(|t| t[1].as_str().unwrap().to_owned());
+                    *log.lock().unwrap() = relay;
+                }
+                let ok = serde_json::json!(["OK", frame[1]["id"], true, ""]);
+                let _ = ws.send(Message::Text(ok.to_string().into())).await;
+            }
+        });
+        let keys = Keys::generate();
+        let c = BuzzClient::new(
+            format!("http://{addr}/team/"),
+            Credentials::from_keys(keys.clone()),
+        )
+        .unwrap();
+        let event = EventBuilder::new(Kind::Custom(20001), "")
+            .sign_with_keys(&keys)
+            .unwrap();
+        c.publish_ephemeral_event(event).await.unwrap();
+        assert_eq!(
+            named.lock().unwrap().as_deref(),
+            Some(format!("ws://{addr}/team/").as_str())
+        );
+    }
+
+    #[test]
+    fn auth_keeps_the_configured_relay_path() {
+        let client = BuzzClient::new(
+            "wss://host.example/team/".into(),
+            Credentials::from_keys(Keys::generate()),
+        )
+        .unwrap();
+        assert_eq!(client.ws_url, "wss://host.example/team/");
+        assert_eq!(client.relay_url, "https://host.example/team");
     }
 }

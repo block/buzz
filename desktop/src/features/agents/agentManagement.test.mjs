@@ -6,7 +6,12 @@ import {
   createInputFromRequest,
   requestTargetsEditablePersona,
   parseAgentManagementRequest,
+  updateInputFromRequest,
 } from "./agentManagement.ts";
+import {
+  behaviorForSubmit,
+  draftFromBehavior,
+} from "./ui/personaBehaviorDraft.ts";
 
 const CHANNEL_ID = "7c07e659-3610-42f4-9a5e-1e9973c09da9";
 
@@ -103,4 +108,39 @@ test("allows agents to update only personal, editable profiles", () => {
     requestTargetsEditablePersona({ isBuiltIn: false, sourceTeam: "team" }),
     false,
   );
+});
+
+test("agent-requested access edits preserve thread-scoped conversation context", () => {
+  const request = {
+    type: AGENT_MANAGEMENT_REQUEST,
+    action: "update",
+    requestId: "request-4",
+    request: {
+      channelId: CHANNEL_ID,
+      agentName: "Review helper",
+      respondTo: "anyone",
+    },
+  };
+  const updated = updateInputFromRequest(request, {
+    id: "review-helper",
+    displayName: "Review helper",
+    systemPrompt: "Review changes concisely.",
+    behavior: {
+      respondTo: "owner-only",
+      respondToAllowlist: [],
+      parallelism: 2,
+      sessionPolicy: "thread",
+    },
+  });
+
+  assert.equal(updated.behavior?.sessionPolicy, "thread");
+
+  const seed = draftFromBehavior(updated.behavior);
+  const edited = { ...seed, parallelism: "3" };
+  assert.deepEqual(behaviorForSubmit(edited, seed, true), {
+    respondTo: "anyone",
+    respondToAllowlist: undefined,
+    parallelism: 3,
+    sessionPolicy: "thread",
+  });
 });

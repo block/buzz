@@ -25,34 +25,63 @@ import {
  */
 export function PersonaProviderApiKeyField({
   disabled,
+  envVarName,
   isInherited,
   inheritedLabel,
   isRequired,
+  isValidating = false,
   label,
   onValueChange,
+  validationMessage,
   value,
 }: {
   disabled: boolean;
+  /**
+   * The backing environment variable name, e.g. `OPENAI_COMPAT_API_KEY`.
+   * Rendered as a monospace hint beneath the label so users can distinguish
+   * this field from other keys with similar names (e.g. `OPENAI_API_KEY`).
+   * When present, the input's `aria-describedby` points at the hint element.
+   */
+  envVarName?: string;
   /** True when the key is satisfied by an inherited layer. */
   isInherited: boolean;
   /** Human-readable source of the inherited value. */
   inheritedLabel: string;
   /** True when the key is required and not satisfied anywhere. */
   isRequired: boolean;
+  /** True while the provider is checking the current key. */
+  isValidating?: boolean;
   /** Display label, e.g. "Anthropic API Key". */
   label: string;
   onValueChange: (next: string) => void;
+  /** User-facing validation error for the current key. */
+  validationMessage?: string | null;
   /** Current agent-local value of the secret env var. */
   value: string;
 }) {
   const [showValue, setShowValue] = React.useState(false);
-  const inputId = "persona-provider-api-key";
+  const uid = React.useId();
+  const inputId = `persona-provider-api-key-${uid}`;
+  const hintId = envVarName
+    ? `persona-provider-api-key-hint-${uid}`
+    : undefined;
+  const validationId =
+    isValidating || validationMessage
+      ? `persona-provider-api-key-validation-${uid}`
+      : undefined;
+  const describedBy =
+    [hintId, validationId].filter(Boolean).join(" ") || undefined;
 
   return (
     <div className="space-y-1.5">
       <RequiredFieldLabel htmlFor={inputId} isRequired={isRequired}>
         {label}
       </RequiredFieldLabel>
+      {envVarName ? (
+        <p className="text-xs text-muted-foreground font-mono" id={hintId}>
+          {envVarName}
+        </p>
+      ) : null}
       <div
         className={cn(
           "flex min-h-11 items-center gap-2 px-3",
@@ -60,6 +89,8 @@ export function PersonaProviderApiKeyField({
         )}
       >
         <Input
+          aria-describedby={describedBy}
+          aria-invalid={validationMessage ? true : undefined}
           autoComplete="off"
           className={cn(
             "h-8 flex-1 px-0 py-0 leading-6",
@@ -86,6 +117,15 @@ export function PersonaProviderApiKeyField({
           )}
         </button>
       </div>
+      {isValidating ? (
+        <p className="text-xs text-muted-foreground" id={validationId}>
+          Checking API key…
+        </p>
+      ) : validationMessage ? (
+        <p className="text-xs text-destructive" id={validationId} role="alert">
+          {validationMessage}
+        </p>
+      ) : null}
     </div>
   );
 }

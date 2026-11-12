@@ -28,3 +28,12 @@ test("fromRawPersona maps source_team to sourceTeam", () => {
 
   assert.equal(persona.sourceTeam, "team-research");
 });
+
+test("fromRawPersona maps authored description and defaults absence to null", () => {
+  assert.equal(
+    fromRawPersona(rawPersona({ description: "A careful analyst." }))
+      .description,
+    "A careful analyst.",
+  );
+  assert.equal(fromRawPersona(rawPersona()).description, null);
+});

@@ -4,11 +4,15 @@ class _PhotoGalleryPicker extends StatelessWidget {
   final VoidCallback onBack;
   final Future<List<XFile>> Function() onPickAllPhotos;
   final Future<void> Function(List<XFile> photos) onChoosePhotos;
+  final Future<void> Function(List<XFile> photos) onChooseAllPhotos;
+  final Future<void> Function(Future<void> Function()) preparePhotos;
 
   const _PhotoGalleryPicker({
     required this.onBack,
     required this.onPickAllPhotos,
     required this.onChoosePhotos,
+    required this.onChooseAllPhotos,
+    required this.preparePhotos,
   });
 
   @override
@@ -17,12 +21,16 @@ class _PhotoGalleryPicker extends StatelessWidget {
       onBack: onBack,
       onPickAllPhotos: onPickAllPhotos,
       onChoosePhotos: onChoosePhotos,
+      onChooseAllPhotos: onChooseAllPhotos,
+      preparePhotos: preparePhotos,
     );
     if (defaultTargetPlatform != TargetPlatform.iOS) return fallback;
     return _IOSInlinePhotoPicker(
       onBack: onBack,
       onPickAllPhotos: onPickAllPhotos,
       onChoosePhotos: onChoosePhotos,
+      onChooseAllPhotos: onChooseAllPhotos,
+      preparePhotos: preparePhotos,
       fallback: fallback,
     );
   }
@@ -32,11 +40,15 @@ class _RecentPhotoGalleryPicker extends HookConsumerWidget {
   final VoidCallback onBack;
   final Future<List<XFile>> Function() onPickAllPhotos;
   final Future<void> Function(List<XFile> photos) onChoosePhotos;
+  final Future<void> Function(List<XFile> photos) onChooseAllPhotos;
+  final Future<void> Function(Future<void> Function()) preparePhotos;
 
   const _RecentPhotoGalleryPicker({
     required this.onBack,
     required this.onPickAllPhotos,
     required this.onChoosePhotos,
+    required this.onChooseAllPhotos,
+    required this.preparePhotos,
   });
 
   @override
@@ -62,7 +74,7 @@ class _RecentPhotoGalleryPicker extends HookConsumerWidget {
             ];
     }
 
-    Future<void> choosePhotos() async {
+    Future<void> choosePhotos() => preparePhotos(() async {
       if (isResolving.value) return;
       isResolving.value = true;
       actionError.value = null;
@@ -73,25 +85,29 @@ class _RecentPhotoGalleryPicker extends HookConsumerWidget {
                   .read(photoLibraryProvider)
                   .resolveSelectedPhotos(selection.value);
         if (photos.isNotEmpty && context.mounted) {
-          await onChoosePhotos(photos);
+          await (selection.value.isEmpty ? onChooseAllPhotos : onChoosePhotos)(
+            photos,
+          );
         }
       } catch (_) {
         if (context.mounted) {
           actionError.value = selection.value.isEmpty
-              ? 'Unable to open your photo library.'
-              : 'Unable to prepare the selected photos.';
+              ? 'Couldn’t open photo library'
+              : 'Couldn’t prepare photos';
         }
       } finally {
         if (context.mounted) isResolving.value = false;
       }
-    }
+    });
 
     final selectedCount = selection.value.length;
+    final hasVideos = selection.value.any((photo) => photo.isVideo);
+    final selectionNoun = hasVideos ? 'item' : 'photo';
     final actionLabel = selectedCount == 0
         ? 'All photos'
         : selectedCount == 1
-        ? 'Add 1 photo'
-        : 'Add $selectedCount photos';
+        ? 'Add 1 $selectionNoun'
+        : 'Add $selectedCount ${selectionNoun}s';
 
     Widget buildGalleryBody() {
       if (recentSnapshot.connectionState != ConnectionState.done) {
@@ -104,7 +120,7 @@ class _RecentPhotoGalleryPicker extends HookConsumerWidget {
       }
       if (recentSnapshot.hasError) {
         return const _PhotoGalleryMessage(
-          icon: LucideIcons.images,
+          icon: BuzzIcons.images,
           title: 'Recent photos aren’t available',
           message: 'Use All photos to choose with the system photo picker.',
         );
@@ -113,7 +129,7 @@ class _RecentPhotoGalleryPicker extends HookConsumerWidget {
       final photos = recentSnapshot.data ?? const <RecentPhoto>[];
       if (photos.isEmpty) {
         return const _PhotoGalleryMessage(
-          icon: LucideIcons.images,
+          icon: BuzzIcons.images,
           title: 'No recent photos',
           message: 'Use All photos to browse your photo library.',
         );
@@ -136,7 +152,7 @@ class _RecentPhotoGalleryPicker extends HookConsumerWidget {
             photo: photo,
             selectionIndex: selectionIndex,
             reducedMotion: reducedMotion,
-            onTap: () => togglePhoto(photo),
+            onTap: () => _runComposerAction(() => togglePhoto(photo)),
           );
         },
       );
@@ -152,13 +168,27 @@ class _RecentPhotoGalleryPicker extends HookConsumerWidget {
             height: 40,
             child: Row(
               children: [
-                IconButton(
-                  key: const ValueKey('photo-gallery-back'),
-                  onPressed: isResolving.value ? null : onBack,
-                  tooltip: 'Back to attachment options',
-                  visualDensity: VisualDensity.compact,
-                  icon: const Icon(LucideIcons.arrowLeft, size: 20),
-                ),
+                if (Theme.of(context).platform == TargetPlatform.iOS)
+                  IosGlassNavigationButton(
+                    key: const ValueKey('photo-gallery-back'),
+                    icon: IosGlassNavigationIcon.back,
+                    semanticLabel: 'Back to attachment options',
+                    onPressed: isResolving.value
+                        ? null
+                        : () => _runComposerAction(onBack),
+                    width: 40,
+                    height: 40,
+                  )
+                else
+                  IconButton(
+                    key: const ValueKey('photo-gallery-back'),
+                    onPressed: isResolving.value
+                        ? null
+                        : () => _runComposerAction(onBack),
+                    tooltip: 'Back to attachment options',
+                    visualDensity: VisualDensity.compact,
+                    icon: const Icon(BuzzIcons.arrowLeft, size: 24),
+                  ),
                 const SizedBox(width: Grid.quarter),
                 Expanded(
                   child: Text(
@@ -212,26 +242,34 @@ class _RecentPhotoGalleryPicker extends HookConsumerWidget {
             child: selectedCount == 0
                 ? OutlinedButton.icon(
                     key: const ValueKey('photo-gallery-action'),
-                    onPressed: isResolving.value ? null : choosePhotos,
+                    onPressed: isResolving.value
+                        ? null
+                        : () => _runComposerAction(
+                            () => unawaited(choosePhotos()),
+                          ),
                     icon: isResolving.value
                         ? BuzzLoadingIndicator(
                             size: 22,
                             color: context.colors.primary,
                             semanticLabel: 'Opening all photos',
                           )
-                        : const Icon(LucideIcons.images, size: 18),
+                        : const Icon(BuzzIcons.images, size: 18),
                     label: Text(actionLabel),
                   )
                 : FilledButton.icon(
                     key: const ValueKey('photo-gallery-action'),
-                    onPressed: isResolving.value ? null : choosePhotos,
+                    onPressed: isResolving.value
+                        ? null
+                        : () => _runComposerAction(
+                            () => unawaited(choosePhotos()),
+                          ),
                     icon: isResolving.value
                         ? const BuzzLoadingIndicator(
                             size: 22,
                             color: Colors.white,
                             semanticLabel: 'Preparing selected photos',
                           )
-                        : const Icon(LucideIcons.plus, size: 18),
+                        : const Icon(BuzzIcons.plus, size: 18),
                     label: Text(actionLabel),
                   ),
           ),
@@ -257,12 +295,13 @@ class _RecentPhotoTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final isSelected = selectionIndex >= 0;
+    final mediaName = photo.isVideo ? 'Video' : 'Photo';
     return Semantics(
       button: true,
       selected: isSelected,
       label: isSelected
-          ? 'Photo ${selectionIndex + 1} selected'
-          : 'Select photo',
+          ? '$mediaName ${selectionIndex + 1} selected'
+          : 'Select ${mediaName.toLowerCase()}',
       child: GestureDetector(
         key: ValueKey('recent-photo-${photo.id}'),
         behavior: HitTestBehavior.opaque,
@@ -278,6 +317,12 @@ class _RecentPhotoTile extends StatelessWidget {
                 gaplessPlayback: true,
               ),
             ),
+            if (photo.isVideo)
+              const Positioned(
+                left: Grid.half,
+                bottom: Grid.half,
+                child: Icon(BuzzIcons.video, color: Colors.white, size: 20),
+              ),
             AnimatedContainer(
               duration: reducedMotion
                   ? Duration.zero

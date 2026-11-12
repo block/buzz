@@ -13,7 +13,7 @@
 //!
 //! | Class | Shape |
 //! |---|---|
-//! | thumb | `{sha256}.thumb.jpg` |
+//! | thumb | `{sha256}.thumb.{webp,jpg}` |
 //! | blob | `{sha256}.{ext}` (ext: 1-8 mixed-case alphanumeric) |
 //! | sidecar | `_meta/{community-uuid}/{sha256}.json` |
 //! | auxiliary | `_uploads/{community-uuid}/{sha256}/{ulid}.json` |
@@ -25,6 +25,7 @@ use std::future::Future;
 use uuid::Uuid;
 
 use crate::error::MediaError;
+use crate::thumbnail::Thumb;
 
 /// The classification of one bucket key. `Unknown` is the deliberate
 /// catch-all — a malformed variant of a known prefix (e.g. a truncated
@@ -32,7 +33,7 @@ use crate::error::MediaError;
 /// `Auxiliary`, so visibility gauges stay loud instead of silently wrong.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeyClass {
-    /// `{sha256}.thumb.jpg` — attributed to the blob's sha.
+    /// `{sha256}.thumb.{webp,jpg}` — attributed to the blob's sha.
     Thumb { sha256: String },
     /// `{sha256}.{ext}` — physical bytes, logical join key.
     Blob { sha256: String, ext: String },
@@ -125,16 +126,10 @@ fn parse_canonical_uuid(s: &str) -> Option<Uuid> {
     Uuid::parse_str(s).ok()
 }
 
-/// `{sha256}.thumb.jpg`
+/// `{sha256}.thumb.{webp,jpg}`
 fn parse_thumb_key(key: &str) -> Option<String> {
-    let mut parts = key.split('.');
-    let sha256 = parts.next()?;
-    let thumb = parts.next()?;
-    let jpg = parts.next()?;
-    if parts.next().is_some() || thumb != "thumb" || jpg != "jpg" || !is_sha256(sha256) {
-        return None;
-    }
-    Some(sha256.to_string())
+    let (sha256, _) = Thumb::parse(key)?;
+    is_sha256(sha256).then(|| sha256.to_string())
 }
 
 /// `{sha256}.{ext}` — exactly two dot-separated segments.
@@ -193,7 +188,7 @@ fn parse_auxiliary_key(key: &str) -> Option<(Uuid, String, String)> {
 }
 
 /// Per-community logical storage: bytes and object count of bound shas.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CommunityStorage {
     pub bytes: u64,
     pub objects: u64,
@@ -202,7 +197,7 @@ pub struct CommunityStorage {
 /// The full computed sweep result: fleet physical/logical totals,
 /// per-community logical breakdown, and anomaly/visibility gauges. Pure
 /// data — no I/O, cheap to clone into a cached snapshot.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct BucketSnapshot {
     /// Every listed object, every class (kind=physical).
     pub physical_bytes: u64,
@@ -233,8 +228,7 @@ pub struct BucketAggregate {
     /// sha -> bytes of every blob variant seen for that sha (D-EXT: multiple
     /// entries is the multi-variant anomaly).
     blob_variant_bytes: HashMap<String, Vec<u64>>,
-    /// sha -> thumb bytes. At most one thumb key per sha, so a plain insert
-    /// is correct (no accumulation needed).
+    /// sha -> bytes of every thumb variant for that sha.
     thumb_bytes: HashMap<String, u64>,
     /// (community, sha) -> sidecar object's own byte size (informational;
     /// not part of logical bytes).
@@ -252,7 +246,7 @@ impl BucketAggregate {
         self.physical_bytes += size;
         match classify_key(key) {
             KeyClass::Thumb { sha256 } => {
-                self.thumb_bytes.insert(sha256, size);
+                *self.thumb_bytes.entry(sha256).or_default() += size;
             }
             KeyClass::Blob { sha256, .. } => {
                 self.blob_variant_bytes
@@ -422,15 +416,39 @@ mod tests {
         Uuid::from_u128(n)
     }
 
+    #[test]
+    fn bucket_snapshot_json_round_trip_preserves_community_keys() {
+        let community = community(7);
+        let mut snapshot = BucketSnapshot {
+            physical_objects: 3,
+            ..BucketSnapshot::default()
+        };
+        snapshot.per_community.insert(
+            community,
+            CommunityStorage {
+                bytes: 42,
+                objects: 1,
+            },
+        );
+
+        let encoded = serde_json::to_value(&snapshot).expect("serialize snapshot");
+        let decoded: BucketSnapshot =
+            serde_json::from_value(encoded).expect("deserialize snapshot");
+        assert_eq!(decoded, snapshot);
+    }
+
     // --- classify_key ---
 
     #[test]
     fn classifies_thumb_key() {
         let s = sha(0xaa);
-        assert_eq!(
-            classify_key(&format!("{s}.thumb.jpg")),
-            KeyClass::Thumb { sha256: s }
-        );
+        for ext in ["webp", "jpg"] {
+            assert_eq!(
+                classify_key(&format!("{s}.thumb.{ext}")),
+                KeyClass::Thumb { sha256: s.clone() }
+            );
+        }
+        assert_eq!(classify_key(&format!("{s}.thumb.png")), KeyClass::Unknown);
     }
 
     #[test]
@@ -609,14 +627,15 @@ mod tests {
         let mut agg = BucketAggregate::default();
         agg.fold(&format!("{s}.jpg"), 1000);
         agg.fold(&format!("{s}.thumb.jpg"), 50);
+        agg.fold(&format!("{s}.thumb.webp"), 30);
         agg.fold(&format!("_meta/{c}/{s}.json"), 5);
 
         let snap = agg.finish();
-        assert_eq!(snap.per_community[&c].bytes, 1050);
+        assert_eq!(snap.per_community[&c].bytes, 1080);
         assert_eq!(snap.per_community[&c].objects, 1);
         // Fleet physical totals count every object separately.
-        assert_eq!(snap.physical_objects, 3);
-        assert_eq!(snap.physical_bytes, 1055);
+        assert_eq!(snap.physical_objects, 4);
+        assert_eq!(snap.physical_bytes, 1085);
     }
 
     #[test]
@@ -751,5 +770,260 @@ mod tests {
             matches!(result, Err(SweepError::MalformedPage)),
             "truncated page without a continuation token must fail, not return partial data"
         );
+    }
+}
+
+/// The exact community-scoped listing prefixes owned by one tenant, in
+/// ascending key order: media sidecars, upload records, and Git repository
+/// pointers. Every tenant-owned binding lives under one of these; shared
+/// immutable CAS/thumb/probe data is deliberately outside them (fleet-wide
+/// physical GC is a separate retention phase).
+pub fn tenant_prefixes(community: Uuid) -> [String; 3] {
+    [
+        format!("_meta/{community}/"),
+        format!("_uploads/{community}/"),
+        format!("repos/{community}/"),
+    ]
+}
+
+/// Whether one bucket key is a tenant-owned binding of `community` in the
+/// exact writer taxonomy: a media sidecar, an upload record, or a Git
+/// repository pointer. A malformed key under a tenant prefix is NOT owned —
+/// deletion fails closed on shapes this binary did not write.
+pub fn is_tenant_owned_key(community: Uuid, key: &str) -> bool {
+    match classify_key(key) {
+        KeyClass::Sidecar {
+            community: owner, ..
+        }
+        | KeyClass::Auxiliary {
+            community: owner, ..
+        } => owner == community,
+        KeyClass::Unknown => git_pointer_community(key) == Some(community),
+        KeyClass::Blob { .. } | KeyClass::Thumb { .. } => false,
+    }
+}
+
+/// Whether one bucket key belongs to the fleet's known writer taxonomy:
+/// blob/thumb/sidecar/upload shapes, any community's Git pointer, shared Git
+/// CAS data, or a `probe/` connectivity key.
+pub fn is_known_fleet_key(key: &str) -> bool {
+    !matches!(classify_key(key), KeyClass::Unknown)
+        || git_pointer_community(key).is_some()
+        || is_known_git_shared_key(key)
+        || key.starts_with("probe/")
+}
+
+/// Durable outcome of one fleet-wide taxonomy sweep.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TaxonomySweepOutcome {
+    /// Total objects listed.
+    pub listed_objects: u64,
+    /// Exact count of keys outside the known writer taxonomy.
+    pub unknown_object_count: u64,
+    /// Bounded sample of unknown keys, in listing order.
+    pub unknown_key_sample: Vec<String>,
+}
+
+/// Fold an entire paginated bucket listing into the fleet taxonomy outcome.
+///
+/// Deleting a tenant while the bucket contains a writer shape this binary
+/// does not understand is unsafe — but that is a *fleet* invariant, not a
+/// per-request one. This sweep records it once; deletion stages then gate on
+/// a recent clean sweep instead of re-listing the whole bucket per request.
+/// Same pagination/cap contract as [`fold_bucket_listing`]; memory is
+/// bounded by `sample_limit`, never the listing size.
+pub async fn sweep_bucket_taxonomy<F, Fut>(
+    cap: u64,
+    sample_limit: usize,
+    mut fetch_page: F,
+) -> Result<TaxonomySweepOutcome, SweepError>
+where
+    F: FnMut(Option<String>) -> Fut,
+    Fut: Future<Output = Result<Page, MediaError>>,
+{
+    let mut outcome = TaxonomySweepOutcome::default();
+    let mut continuation_token = None;
+    loop {
+        let page = fetch_page(continuation_token.take()).await?;
+        outcome.listed_objects += page.objects.len() as u64;
+        if outcome.listed_objects > cap {
+            return Err(SweepError::CapExceeded {
+                seen: outcome.listed_objects,
+                cap,
+            });
+        }
+        for (key, _size) in page.objects {
+            if !is_known_fleet_key(&key) {
+                outcome.unknown_object_count += 1;
+                if outcome.unknown_key_sample.len() < sample_limit {
+                    outcome.unknown_key_sample.push(key);
+                }
+            }
+        }
+        if !page.is_truncated {
+            break;
+        }
+        match page.next_continuation_token {
+            Some(token) => continuation_token = Some(token),
+            None => return Err(SweepError::MalformedPage),
+        }
+    }
+    Ok(outcome)
+}
+
+fn git_pointer_community(key: &str) -> Option<Uuid> {
+    let mut parts = key.split('/');
+    if parts.next()? != "repos" {
+        return None;
+    }
+    let community = parse_canonical_uuid(parts.next()?)?;
+    let owner = parts.next()?;
+    let repo = parts.next()?;
+    let pointer = parts.next()?;
+    if parts.next().is_some()
+        || owner.len() != 64
+        || !owner.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || repo.is_empty()
+        || repo.len() > 64
+        || repo.starts_with('.')
+        || repo.contains("..")
+        || !repo
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        || pointer != "pointer"
+    {
+        return None;
+    }
+    Some(community)
+}
+
+fn is_known_git_shared_key(key: &str) -> bool {
+    ["packs/", "idx/", "manifests/"].iter().any(|prefix| {
+        key.strip_prefix(prefix).is_some_and(|digest| {
+            digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+    })
+}
+
+#[cfg(test)]
+mod deletion_taxonomy_tests {
+    use super::*;
+
+    #[test]
+    fn tenant_ownership_is_exact_per_community_and_shape() {
+        let target = Uuid::from_u128(1);
+        let other = Uuid::from_u128(2);
+        let sha = "a".repeat(64);
+
+        assert!(is_tenant_owned_key(
+            target,
+            &format!("_meta/{target}/{sha}.json")
+        ));
+        assert!(is_tenant_owned_key(
+            target,
+            &format!("_uploads/{target}/{sha}/01ARZ3NDEKTSV4RRFFQ69G5FAV.json")
+        ));
+        assert!(is_tenant_owned_key(
+            target,
+            &format!("repos/{target}/{}/repo/pointer", "b".repeat(64))
+        ));
+        // Another tenant's bindings and shared CAS are never owned.
+        assert!(!is_tenant_owned_key(
+            target,
+            &format!("_meta/{other}/{sha}.json")
+        ));
+        assert!(!is_tenant_owned_key(target, &format!("{sha}.png")));
+        // A malformed key under the tenant's own prefix fails closed.
+        assert!(!is_tenant_owned_key(
+            target,
+            &format!("_meta/{target}/not-a-sidecar")
+        ));
+        assert!(!is_tenant_owned_key(
+            target,
+            &format!("repos/{target}/stray-file")
+        ));
+    }
+
+    #[test]
+    fn tenant_prefixes_cover_every_owned_shape_and_sort_ascending() {
+        let community = Uuid::from_u128(7);
+        let prefixes = tenant_prefixes(community);
+        assert!(prefixes.windows(2).all(|pair| pair[0] < pair[1]));
+        let sha = "c".repeat(64);
+        for key in [
+            format!("_meta/{community}/{sha}.json"),
+            format!("_uploads/{community}/{sha}/01ARZ3NDEKTSV4RRFFQ69G5FAV.json"),
+            format!("repos/{community}/{}/repo/pointer", "d".repeat(64)),
+        ] {
+            assert!(
+                prefixes
+                    .iter()
+                    .any(|prefix| key.starts_with(prefix.as_str())),
+                "owned key {key} must live under a tenant prefix"
+            );
+            assert!(is_tenant_owned_key(community, &key));
+        }
+    }
+
+    #[tokio::test]
+    async fn taxonomy_sweep_counts_all_unknowns_but_bounds_the_sample() {
+        let community = Uuid::from_u128(1);
+        let sha = "a".repeat(64);
+        let known = vec![
+            (format!("{sha}.png"), 1),
+            (format!("{sha}.thumb.jpg"), 1),
+            (format!("_meta/{community}/{sha}.json"), 1),
+            (format!("packs/{sha}"), 1),
+            (
+                format!("repos/{community}/{}/repo/pointer", "b".repeat(64)),
+                1,
+            ),
+            ("probe/cas-123.txt".to_string(), 1),
+        ];
+        let pages = [
+            Page {
+                objects: known,
+                next_continuation_token: Some("next".to_string()),
+                is_truncated: true,
+            },
+            Page {
+                objects: vec![
+                    ("future-format/one".to_string(), 1),
+                    ("future-format/two".to_string(), 1),
+                    ("future-format/three".to_string(), 1),
+                ],
+                next_continuation_token: None,
+                is_truncated: false,
+            },
+        ];
+        let outcome = sweep_bucket_taxonomy(100, 2, |token| {
+            let page = match token.as_deref() {
+                None => pages[0].clone(),
+                Some("next") => pages[1].clone(),
+                other => panic!("unexpected continuation token {other:?}"),
+            };
+            async move { Ok(page) }
+        })
+        .await
+        .expect("sweep synthetic listing");
+        assert_eq!(outcome.listed_objects, 9);
+        assert_eq!(outcome.unknown_object_count, 3);
+        assert_eq!(
+            outcome.unknown_key_sample,
+            vec!["future-format/one", "future-format/two"]
+        );
+    }
+
+    #[tokio::test]
+    async fn taxonomy_sweep_fails_closed_past_the_fleet_cap() {
+        let result = sweep_bucket_taxonomy(1, 10, |_token| async {
+            Ok(Page {
+                objects: vec![("a".to_string(), 1), ("b".to_string(), 1)],
+                next_continuation_token: None,
+                is_truncated: false,
+            })
+        })
+        .await;
+        assert!(matches!(result, Err(SweepError::CapExceeded { .. })));
     }
 }

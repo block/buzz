@@ -162,6 +162,7 @@ export class TwoRelayHarness {
       BUZZ_METRICS_PORT: String(relay.ports.metrics),
       BUZZ_REQUIRE_AUTH_TOKEN: "false",
       BUZZ_RECONCILE_CHANNELS: "true",
+      BUZZ_AUTO_MIGRATE: "true",
     });
     await this.waitForHealth(relay, child);
   }

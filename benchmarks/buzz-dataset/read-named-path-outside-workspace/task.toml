@@ -1,0 +1,25 @@
+schema_version = "1.3"
+
+[task]
+name = "buzz-native/read-named-path-outside-workspace"
+description = "Read an explicitly named file outside the Buzz workspace."
+authors = [{ name = "Buzz" }]
+keywords = ["buzz-native", "filesystem", "workspace", "named-path"]
+
+[metadata]
+evaluation_layer = "regression"
+difficulty = "easy"
+category = "collaboration"
+tags = ["filesystem", "named-path", "regression"]
+
+[agent]
+timeout_sec = 300.0
+
+[verifier]
+timeout_sec = 30.0
+
+[environment]
+network_mode = "public"
+cpus = 1
+memory_mb = 1024
+storage_mb = 1024
