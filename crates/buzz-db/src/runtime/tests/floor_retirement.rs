@@ -113,7 +113,7 @@ async fn floor_retirement_desired_state_has_no_floor_objects() {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn floor_retirement_writer_and_probe_run_on_retired_schema() {
+async fn cluster_global_floor_retirement_writer_and_probe_run_on_retired_schema() {
     let url = crate::test_support::database_url();
     let db = Db::new(&DbConfig {
         database_url: url.clone(),
