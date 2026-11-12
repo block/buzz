@@ -256,6 +256,33 @@ pub(crate) async fn lock_admission(
     Ok(())
 }
 
+/// Record that `pubkey` accepted `policy_version`, on the claim's transaction.
+///
+/// The member row is locked `FOR KEY SHARE` first (`NotFound` when it is gone),
+/// so a concurrent removal of the member, which locks it `FOR UPDATE` and then
+/// deletes the member's acceptances, either waits for this transaction and
+/// deletes the acceptance with the member, or commits first and this write
+/// fails. A membership `INSERT ... ON CONFLICT DO NOTHING` locks nothing when
+/// the member already exists, so it cannot stand in for this lock.
+async fn record_join_policy_acceptance(
+    conn: &mut sqlx::PgConnection,
+    community: CommunityId,
+    pubkey: &str,
+    policy_version: &str,
+) -> Result<()> {
+    crate::store::reference_check::require_relay_member(conn, community, pubkey).await?;
+    sqlx::query(
+        "INSERT INTO join_policy_acceptances (community_id, pubkey, policy_version) \
+         VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+    )
+    .bind(community.as_uuid())
+    .bind(pubkey)
+    .bind(policy_version)
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
 /// Authoritative, transaction-local lookup; nonmembers need no user row.
 pub(crate) async fn principal_restricted(
     tx: &mut sqlx::PgConnection,
@@ -598,24 +625,21 @@ pub async fn claim_relay_invite_with_owner(
     }
 
     let uses_remaining = || max_uses.map(|mu| mu - use_count);
-    let existing =
-        sqlx::query("SELECT 1 FROM relay_members WHERE community_id = $1 AND pubkey = $2")
-            .bind(community.as_uuid())
-            .bind(claimer_pubkey)
-            .fetch_optional(tx.conn())
-            .await?;
+    // `FOR KEY SHARE` holds the member row to commit. A removal locks it
+    // `FOR UPDATE` before it deletes the member's acceptances, so it either
+    // waits for this claim and then deletes the acceptance written below, or
+    // commits first and this read finds no member.
+    let existing = sqlx::query(
+        "SELECT 1 FROM relay_members WHERE community_id = $1 AND pubkey = $2 FOR KEY SHARE",
+    )
+    .bind(community.as_uuid())
+    .bind(claimer_pubkey)
+    .fetch_optional(tx.conn())
+    .await?;
 
     if existing.is_some() {
         if let Some(version) = policy_version {
-            sqlx::query(
-                "INSERT INTO join_policy_acceptances (community_id, pubkey, policy_version) \
-                 VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
-            )
-            .bind(community.as_uuid())
-            .bind(claimer_pubkey)
-            .bind(version)
-            .execute(tx.conn())
-            .await?;
+            record_join_policy_acceptance(tx.conn(), community, claimer_pubkey, version).await?;
         }
         let owner =
             claim_owner::persist_claim_owner(tx.conn(), community, claimer_pubkey, verified_owner)
@@ -663,15 +687,9 @@ pub async fn claim_relay_invite_with_owner(
         > 0;
 
     if let Some(version) = policy_version {
-        sqlx::query(
-            "INSERT INTO join_policy_acceptances (community_id, pubkey, policy_version) \
-             VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
-        )
-        .bind(community.as_uuid())
-        .bind(claimer_pubkey)
-        .bind(version)
-        .execute(tx.conn())
-        .await?;
+        // When the insert above hit a conflict, the member row is another
+        // transaction's, which nothing here has locked yet.
+        record_join_policy_acceptance(tx.conn(), community, claimer_pubkey, version).await?;
     }
 
     if !inserted {
