@@ -902,7 +902,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 86);
+        assert_eq!(migrations.len(), 87);
         assert!(migrations[83]
             .sql
             .as_str()
@@ -3042,6 +3042,8 @@ mod postgres_tests {
             .expect("apply migrations for schema parity");
 
         for table in [
+            "operator_listener_threads",
+            "operator_listener_outbox",
             "media_uploaders",
             "media_publications",
             "relay_members",

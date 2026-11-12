@@ -5,6 +5,7 @@ CREATE TABLE operator_listener_outbox (
     community_id      UUID NOT NULL,
     event_id          BYTEA NOT NULL CHECK (length(event_id) = 32),
     event_kind        INTEGER NOT NULL,
+    thread_root_event_id BYTEA,
     event_created_at  TIMESTAMPTZ NOT NULL,
     state             TEXT NOT NULL DEFAULT 'pending'
                       CHECK (state IN ('pending', 'sending')),
