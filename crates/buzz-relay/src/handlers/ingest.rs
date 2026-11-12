@@ -977,7 +977,7 @@ pub(crate) fn agent_dm_allowed(agent: &[u8], owner: &[u8], participants: &[Vec<u
 
 /// Agents never write in a DM, except one whose members are exactly the agent
 /// and its owner. Humans and non-DM channels pass untouched.
-async fn check_agent_dm_write(
+pub(crate) async fn check_agent_dm_write(
     community_id: CommunityId,
     state: &AppState,
     ch_id: Uuid,
