@@ -358,6 +358,8 @@ system channels out of these reads unless the filter asks for them (see
 [evalexpr](https://docs.rs/evalexpr) for condition evaluation. Keep expressions
 simple and testable.
 
+**Workflow schedules**: Keep calendar recurrence and compatibility checks in `buzz-workflow`. See [the calendar contract and offline test lanes](docs/workflows.md), including mixed-version rollout and scan-population limits.
+
 **Thread counters**: `reply_count` and `descendant_count` are materialized on
 thread root events. Any code that inserts replies must update these counters —
 check existing reply handlers for the pattern.

@@ -1,0 +1,13 @@
+name: Fortnightly reminder
+enabled: false
+trigger:
+  on: schedule
+  calendar:
+    every_weeks: 2
+    start_date: "2026-11-17"
+    time: "18:00"
+    timezone: UTC
+steps:
+  - id: remind
+    action: send_message
+    text: Review the meeting agenda.

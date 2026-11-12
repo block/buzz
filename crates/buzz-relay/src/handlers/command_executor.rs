@@ -1472,6 +1472,108 @@ mod postgres_tests {
         }
     }
 
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn calendar_definition_signed_updates_preserve_recurrence_and_invalid_updates_preserve_head(
+    ) {
+        let (db, tenant) = persistence_test_context().await;
+        let pool = sqlx::PgPool::connect(&std::env::var("BUZZ_TEST_DATABASE_URL").unwrap())
+            .await
+            .unwrap();
+        let state = crate::state::tests::test_state_with_database_pool(pool).await;
+        let keys = Keys::generate();
+        let owner = keys.public_key().to_bytes();
+        db.ensure_user(tenant.community(), &owner).await.unwrap();
+        let channel = Uuid::new_v4();
+        db.create_channel_with_id(
+            tenant.community(),
+            channel,
+            "example",
+            buzz_db::channel::ChannelType::Stream,
+            buzz_db::channel::ChannelVisibility::Open,
+            None,
+            &owner,
+            None,
+        )
+        .await
+        .unwrap();
+        let auth = IngestAuth::Nip42 {
+            pubkey: keys.public_key(),
+            scopes: vec![],
+            channel_ids: None,
+            conn_id: Uuid::new_v4(),
+        };
+        let workflow = Uuid::new_v4();
+        let yaml = include_str!("../../../buzz-workflow/tests/fixtures/fortnightly.yaml");
+        let signed = |content: &str, timestamp: u64, revision: Option<String>| {
+            let mut tags = vec![
+                Tag::parse(["d", &workflow.to_string()]).unwrap(),
+                Tag::parse(["h", &channel.to_string()]).unwrap(),
+            ];
+            if let Some(revision) = revision {
+                tags.push(Tag::parse(["expected-revision", &revision]).unwrap());
+            }
+            EventBuilder::new(Kind::Custom(KIND_WORKFLOW_DEF as u16), content)
+                .tags(tags)
+                .custom_created_at(Timestamp::from(timestamp))
+                .sign_with_keys(&keys)
+                .unwrap()
+        };
+        let created_at = Timestamp::now().as_secs() - 3;
+        let first = signed(yaml, created_at, None);
+        assert!(
+            handle_workflow_def(&tenant, &state, &first, &auth)
+                .await
+                .unwrap()
+                .accepted
+        );
+        let original = db
+            .get_workflow(tenant.community(), workflow)
+            .await
+            .unwrap()
+            .definition["trigger"]
+            .clone();
+        let renamed = yaml.replace("Fortnightly reminder", "Agenda reminder");
+        let updated = signed(&renamed, created_at + 1, Some(first.id.to_hex()));
+        assert!(
+            handle_workflow_def(&tenant, &state, &updated, &auth)
+                .await
+                .unwrap()
+                .accepted
+        );
+        let invalid = signed(
+            &renamed.replace("every_weeks: 2", "every_weeks: 1"),
+            created_at + 2,
+            Some(updated.id.to_hex()),
+        );
+        assert!(matches!(
+            handle_workflow_def(&tenant, &state, &invalid, &auth).await,
+            Err(IngestError::Rejected(_))
+        ));
+        let stored = db.get_workflow(tenant.community(), workflow).await.unwrap();
+        assert_eq!(stored.definition["name"], "Agenda reminder");
+        assert_eq!(stored.definition["trigger"], original);
+        assert_eq!(stored.definition["enabled"], false);
+        let enabled = signed(
+            &renamed.replace("enabled: false", "enabled: true"),
+            created_at + 3,
+            Some(updated.id.to_hex()),
+        );
+        assert!(
+            handle_workflow_def(&tenant, &state, &enabled, &auth)
+                .await
+                .unwrap()
+                .accepted
+        );
+        assert_eq!(
+            db.get_workflow(tenant.community(), workflow)
+                .await
+                .unwrap()
+                .definition["trigger"],
+            original
+        );
+    }
+
     #[test]
     fn workflow_revision_parser_accepts_create_and_valid_update() {
         let revision = [0x42; 32];

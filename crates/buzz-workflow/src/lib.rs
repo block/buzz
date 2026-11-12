@@ -31,6 +31,7 @@
 //! ```
 
 pub mod action_sink;
+mod calendar;
 pub mod error;
 pub mod executor;
 pub mod schema;
@@ -523,7 +524,7 @@ impl WorkflowEngine {
     /// Background loop for scheduled (cron/interval) triggers.
     ///
     /// Ticks every 60 seconds. For each active workflow with a `Schedule`
-    /// trigger, checks whether the cron expression or interval has elapsed
+    /// trigger, checks whether the cron, interval, or calendar schedule is due
     /// and spawns execution if so.
     ///
     /// Uses window-based matching for cron expressions to handle tick drift:
@@ -597,6 +598,8 @@ impl WorkflowEngine {
                 schema::TriggerDef::Schedule {
                     cron: Some(expr),
                     interval: None,
+                    calendar: None,
+                    ..
                 } => match cron_fire_instant(expr, now, 60, workflow.id) {
                     Some(instant) => (instant, "cron"),
                     None => continue,
@@ -604,6 +607,8 @@ impl WorkflowEngine {
                 schema::TriggerDef::Schedule {
                     cron: None,
                     interval: Some(dur),
+                    calendar: None,
+                    ..
                 } => {
                     // Cheap pre-filter: skip the claim attempt when the
                     // in-memory clock says we're clearly mid-interval. The
@@ -650,6 +655,19 @@ impl WorkflowEngine {
                         None => continue,
                     }
                 }
+                schema::TriggerDef::Schedule {
+                    cron: None,
+                    interval: None,
+                    calendar: Some(calendar),
+                    extra,
+                } if extra.is_empty() => match calendar.fire_instant(now) {
+                    Ok(Some(instant)) => (instant, "calendar"),
+                    Ok(None) => continue,
+                    Err(e) => {
+                        tracing::warn!(workflow_id = %workflow.id, "Invalid calendar schedule: {e}");
+                        continue;
+                    }
+                },
                 _ => continue, // Non-schedule triggers handled by on_event()
             };
 
@@ -1490,6 +1508,8 @@ steps:
         let trigger = TriggerDef::Schedule {
             cron: Some("0 9 * * 1-5".to_owned()),
             interval: None,
+            calendar: None,
+            extra: HashMap::new(),
         };
         // Schedule triggers are fired by the cron loop, not by events.
         assert!(!trigger_matches_event(
@@ -1602,6 +1622,8 @@ steps:
         let sched_trigger = TriggerDef::Schedule {
             cron: None,
             interval: Some("1h".to_owned()),
+            calendar: None,
+            extra: HashMap::new(),
         };
         let webhook_trigger = TriggerDef::Webhook;
 
@@ -2288,6 +2310,164 @@ steps:
             !should_warn_owner_denial(&warned, community, wf_a, &banned),
             "and is suppressed again for the next interval"
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn calendar_tick_claims_once_across_pods_and_restarts_and_executes_in_its_community() {
+        struct Sink(tokio::sync::mpsc::UnboundedSender<(CommunityId, String)>);
+        impl ActionSink for Sink {
+            fn send_message(
+                &self,
+                community: CommunityId,
+                _channel: &str,
+                text: &str,
+                _authored: &str,
+                _author: &str,
+                _reply: Option<&str>,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<Output = Result<String, action_sink::ActionSinkError>>
+                        + Send
+                        + '_,
+                >,
+            > {
+                let result = self.0.send((community, text.to_owned()));
+                Box::pin(async move {
+                    result.unwrap();
+                    Ok("fake-event".into())
+                })
+            }
+        }
+        let db = setup_db().await;
+        let pool = sqlx::PgPool::connect(&test_database_url()).await.unwrap();
+        let creator = nostr::Keys::generate().public_key().to_bytes().to_vec();
+        let member = nostr::Keys::generate().public_key().to_bytes().to_vec();
+        let mut communities = Vec::new();
+        let workflow = Uuid::new_v4();
+        let (_, canonical) =
+            WorkflowEngine::parse_yaml(include_str!("../tests/fixtures/fortnightly.yaml")).unwrap();
+        let mut definition: serde_json::Value = serde_json::from_str(&canonical).unwrap();
+        definition["enabled"] = true.into();
+        for _ in 0..2 {
+            let (community, channel) = setup_channel(&db, &creator, &member).await;
+            db.upsert_workflow(
+                community,
+                workflow,
+                Some(channel),
+                &member,
+                "Calendar",
+                &definition.to_string(),
+                &[0; 32],
+            )
+            .await
+            .unwrap();
+            communities.push(community);
+        }
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let new_engine = || {
+            let engine = Arc::new(WorkflowEngine::new(db.clone(), WorkflowConfig::default()));
+            engine.set_action_sink(Arc::new(Sink(sender.clone())));
+            engine
+        };
+        let now = DateTime::parse_from_rfc3339("2026-11-17T18:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let first = new_engine();
+        first.cron_tick(now - chrono::Duration::seconds(1)).await;
+        db.ban_community_member(communities[0], &member, &creator, None, None)
+            .await
+            .unwrap();
+        first.cron_tick(now).await;
+        assert_eq!(
+            db.latest_scheduled_workflow_fire(communities[0], workflow)
+                .await
+                .unwrap(),
+            None
+        );
+        db.unban_community_member(communities[0], &member, &creator)
+            .await
+            .unwrap();
+        let second = new_engine();
+        tokio::join!(
+            first.cron_tick(now + chrono::Duration::seconds(1)),
+            second.cron_tick(now + chrono::Duration::seconds(59))
+        );
+        new_engine()
+            .cron_tick(now + chrono::Duration::seconds(2))
+            .await;
+        new_engine()
+            .cron_tick(now + chrono::Duration::days(7))
+            .await;
+        new_engine()
+            .cron_tick(now + chrono::Duration::days(14) + chrono::Duration::seconds(60))
+            .await;
+        let mut sent = Vec::new();
+        for _ in 0..2 {
+            sent.push(
+                tokio::time::timeout(std::time::Duration::from_secs(5), receiver.recv())
+                    .await
+                    .unwrap()
+                    .unwrap(),
+            );
+        }
+        for community in &communities {
+            assert!(sent.contains(&(*community, "Review the meeting agenda.".into())));
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    let runs = db.list_workflow_runs(*community, workflow, 10).await.unwrap();
+                    assert_eq!(runs.len(), 1);
+                    if runs[0].status == buzz_db::workflow::RunStatus::Completed {
+                        assert_eq!(runs[0].execution_trace[0]["status"], "completed");
+                        let linked: Option<Uuid> = sqlx::query_scalar("SELECT workflow_run_id FROM scheduled_workflow_fires WHERE community_id = $1 AND workflow_id = $2 AND scheduled_for = $3")
+                            .bind(community.as_uuid()).bind(workflow).bind(now).fetch_one(&pool).await.unwrap();
+                        assert_eq!(linked, Some(runs[0].id));
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            }).await.unwrap();
+        }
+        assert!(receiver.try_recv().is_err());
+
+        let failed = Uuid::from_u128(0xcafe);
+        let channel = db
+            .get_workflow(communities[0], workflow)
+            .await
+            .unwrap()
+            .channel_id;
+        db.upsert_workflow(
+            communities[0],
+            failed,
+            channel,
+            &member,
+            "Insert failure",
+            &definition.to_string(),
+            &[0; 32],
+        )
+        .await
+        .unwrap();
+        sqlx::query("ALTER TABLE workflow_runs ADD CONSTRAINT reject_calendar_run CHECK (workflow_id <> '00000000-0000-0000-0000-00000000cafe')").execute(&pool).await.unwrap();
+        new_engine().cron_tick(now).await;
+        sqlx::query("ALTER TABLE workflow_runs DROP CONSTRAINT reject_calendar_run")
+            .execute(&pool)
+            .await
+            .unwrap();
+        new_engine()
+            .cron_tick(now + chrono::Duration::seconds(1))
+            .await;
+        assert_eq!(
+            db.latest_scheduled_workflow_fire(communities[0], failed)
+                .await
+                .unwrap(),
+            Some(now)
+        );
+        assert!(db
+            .list_workflow_runs(communities[0], failed, 10)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(receiver.try_recv().is_err());
     }
 
     fn schedule_def(name: &str) -> String {

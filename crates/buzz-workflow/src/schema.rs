@@ -57,17 +57,38 @@ pub enum TriggerDef {
         #[serde(default)]
         filter: Option<String>,
     },
-    /// Fires on a cron schedule.
+    /// Fires on a cron, elapsed interval, or anchored calendar schedule.
     Schedule {
-        /// Cron expression (UTC). Mutually exclusive with `interval`.
+        /// Cron expression (UTC). Exactly one schedule arm is required.
         #[serde(default)]
         cron: Option<String>,
-        /// Simple interval string (e.g. "1h", "30m"). Mutually exclusive with `cron`.
+        /// Simple elapsed interval string (e.g. "1h", "30m").
         #[serde(default)]
         interval: Option<String>,
+        /// Anchored local-calendar recurrence, never a fallback cron.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        calendar: Option<CalendarSchedule>,
+        /// Older cron/interval definitions historically ignore unknown fields.
+        /// Calendar definitions reject them, including a competing outer timezone.
+        #[serde(flatten, skip_serializing)]
+        extra: HashMap<String, serde_json::Value>,
     },
     /// Fires when HTTP POST arrives at `/hooks/{id}`.
     Webhook,
+}
+
+/// A fortnightly recurrence whose phase is part of the signed definition.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CalendarSchedule {
+    /// Currently only two-week recurrence is supported.
+    pub every_weeks: u32,
+    /// First eligible local date, strictly YYYY-MM-DD.
+    pub start_date: String,
+    /// Local wall time, strictly HH:MM with seconds zero.
+    pub time: String,
+    /// Case-sensitive IANA name supported by the relay's pinned timezone data.
+    pub timezone: String,
 }
 
 /// A single step in a workflow definition.
@@ -241,17 +262,32 @@ impl WorkflowDef {
             }
         }
 
-        if let TriggerDef::Schedule { cron, interval } = &self.trigger {
-            if cron.is_none() && interval.is_none() {
+        if let TriggerDef::Schedule {
+            cron,
+            interval,
+            calendar,
+            extra,
+        } = &self.trigger
+        {
+            if [cron.is_some(), interval.is_some(), calendar.is_some()]
+                .into_iter()
+                .filter(|present| *present)
+                .count()
+                != 1
+            {
                 return Err(WorkflowError::InvalidDefinition(
-                    "schedule trigger requires either 'cron' or 'interval'".into(),
+                    "schedule trigger requires exactly one of 'cron', 'interval', or 'calendar'"
+                        .into(),
                 ));
             }
 
-            if cron.is_some() && interval.is_some() {
-                return Err(WorkflowError::InvalidDefinition(
-                    "schedule trigger cannot specify both 'cron' and 'interval'; use one or the other".into(),
-                ));
+            if let Some(calendar) = calendar {
+                if !extra.is_empty() {
+                    return Err(WorkflowError::InvalidDefinition(
+                        "calendar schedule has unsupported trigger fields (timezone belongs inside calendar)".into(),
+                    ));
+                }
+                calendar.parse()?;
             }
 
             if let Some(expr) = cron {
@@ -319,6 +355,90 @@ pub fn parse_yaml(yaml: &str) -> Result<(WorkflowDef, String), WorkflowError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn editor_timezone_names_match_the_pinned_relay_parser() {
+        let expected: Vec<String> =
+            serde_json::from_str(include_str!("../tests/fixtures/calendar-timezones.json"))
+                .unwrap();
+        let mut actual: Vec<_> = chrono_tz::TZ_VARIANTS
+            .iter()
+            .map(|zone| zone.name())
+            .collect();
+        actual.sort_unstable();
+        assert_eq!(expected, actual);
+    }
+
+    #[test]
+    fn calendar_contract_round_trips_and_rejects_ambiguous_or_incomplete_definitions() {
+        let base = serde_json::json!({
+            "name": "Fortnightly reminder", "enabled": false,
+            "trigger": { "on": "schedule", "calendar": {
+                "every_weeks": 2, "start_date": "2026-11-17", "time": "18:00", "timezone": "UTC"
+            }},
+            "steps": [{"id": "remind", "action": "send_message", "text": "Review the agenda."}]
+        });
+        for zone in ["UTC", "US/Eastern", "Etc/GMT+5", "Australia/Melbourne"] {
+            let mut value = base.clone();
+            value["trigger"]["calendar"]["timezone"] = zone.into();
+            let (def, json) = parse_yaml(&serde_yaml::to_string(&value).unwrap()).unwrap();
+            let restored: WorkflowDef = serde_json::from_str(&json).unwrap();
+            restored.validate().unwrap();
+            assert_eq!(
+                serde_json::to_value(&def).unwrap()["trigger"]["calendar"],
+                value["trigger"]["calendar"]
+            );
+            assert_eq!(serde_json::to_string(&restored).unwrap(), json);
+        }
+        for (key, bad) in [
+            ("every_weeks", serde_json::json!(1)),
+            ("every_weeks", serde_json::json!(3)),
+            ("every_weeks", serde_json::json!("2")),
+            ("start_date", serde_json::json!("2027-02-29")),
+            ("start_date", serde_json::json!("2026-1-01")),
+            ("time", serde_json::json!("9:00")),
+            ("time", serde_json::json!("24:00")),
+            ("time", serde_json::json!("09:00:00")),
+            ("timezone", serde_json::json!("+05:00")),
+            ("timezone", serde_json::json!("utc")),
+            ("timezone", serde_json::json!("")),
+            ("unsupported", serde_json::json!(true)),
+        ] {
+            let mut value = base.clone();
+            value["trigger"]["calendar"][key] = bad;
+            assert!(
+                parse_yaml(&serde_yaml::to_string(&value).unwrap()).is_err(),
+                "{value}"
+            );
+        }
+        for key in ["every_weeks", "start_date", "time", "timezone"] {
+            let mut value = base.clone();
+            value["trigger"]["calendar"]
+                .as_object_mut()
+                .unwrap()
+                .remove(key);
+            assert!(parse_yaml(&serde_yaml::to_string(&value).unwrap()).is_err());
+        }
+        for (key, value) in [
+            ("cron", "0 18 * * 3"),
+            ("interval", "336h"),
+            ("timezone", "UTC"),
+        ] {
+            let mut mixed = base.clone();
+            mixed["trigger"][key] = value.into();
+            assert!(parse_yaml(&serde_yaml::to_string(&mixed).unwrap()).is_err());
+        }
+        for arm in [
+            serde_json::json!({"on": "schedule", "cron": "0 9 * * 1", "future": true}),
+            serde_json::json!({"on": "schedule", "interval": "336h", "future": true}),
+        ] {
+            let mut legacy = base.clone();
+            legacy["trigger"] = arm;
+            let (_, canonical) = parse_yaml(&serde_yaml::to_string(&legacy).unwrap()).unwrap();
+            assert!(!canonical.contains("calendar"));
+            assert!(!canonical.contains("future"));
+        }
+    }
 
     #[test]
     fn parse_simple_message_posted_workflow() {
@@ -622,7 +742,7 @@ mod tests {
         let yaml = "name: Interval Schedule\ntrigger:\n  on: schedule\n  interval: 30m\nsteps:\n  - id: s1\n    action: send_message\n    text: tick\n";
         let (def, _) = parse_yaml(yaml).expect("parse failed");
         match &def.trigger {
-            TriggerDef::Schedule { cron, interval } => {
+            TriggerDef::Schedule { cron, interval, .. } => {
                 assert!(cron.is_none());
                 assert_eq!(interval.as_deref(), Some("30m"));
             }
