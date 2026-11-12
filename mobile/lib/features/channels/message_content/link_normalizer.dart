@@ -65,10 +65,11 @@ class _DefinitionScan {
   }
 
   bool _counts(int index) {
+    // A candidate mid-line, after code, is not a definition and leaves the
+    // memo for the line it sits on alone.
+    if (index > 0 && content[index - 1] != '\n') return false;
     final bool counted;
-    if (index > 0 && content[index - 1] != '\n') {
-      counted = false;
-    } else if (index == _lastEnd + 1) {
+    if (index == _lastEnd + 1) {
       counted = _lastCounted;
     } else {
       final previousEnd = index - 1;

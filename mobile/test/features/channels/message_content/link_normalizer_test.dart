@@ -33,6 +33,10 @@ void main() {
         '[a]: $site "`code`"\n[b]: $site\n\n[b]',
       ),
       (
+        '[a]: $site "`code` [fake]: x"\n[b]: $site\n\n[b]',
+        '[a]: $site "`code` [fake]: x"\n[b]: $site\n\n[b]',
+      ),
+      (
         'text\n[a]: $site\n[b]: $site',
         'text\n[a]: [$site]($site)\n[b]: [$site]($site)',
       ),
