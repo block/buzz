@@ -13,11 +13,21 @@ use buzz_core::tenant::CommunityId;
 use buzz_workflow::action_sink::{ActionSink, ActionSinkError};
 use chrono::Utc;
 use nostr::{EventBuilder, Kind, Tag};
-use tracing::info;
+use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::handlers::event::dispatch_persistent_event;
 use crate::state::AppState;
+
+/// Result of resolving `@Name` mentions against channel members.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct MentionResolution {
+    /// Deduplicated pubkey hexes, in first-appearance order in `text`.
+    pubkeys: Vec<String>,
+    /// Display names that matched more than one distinct member pubkey.
+    /// These are consumed in the text but wake nobody (#4436).
+    ambiguous_names: Vec<String>,
+}
 
 /// Resolves `@Name` mentions in workflow message text to the pubkeys of the
 /// channel members they name, so the emitted kind:9 carries the `p` tags that
@@ -39,10 +49,9 @@ use crate::state::AppState;
 ///   does not match the member `"Will Pfleger"`.
 /// - **Ambiguous names wake no one.** If two or more members share the matched
 ///   display name, no `p` tag is emitted for it — arbitrary selection would
-///   silently misroute and tagging all of them is a false-wake firehose.
-///
-/// Returns deduplicated pubkey hexes, in first-appearance order in `text`.
-fn resolve_mention_pubkeys(text: &str, members: &[(String, String)]) -> Vec<String> {
+///   silently misroute and tagging all of them is a false-wake firehose. The
+///   ambiguous names are returned so callers can log (#4436).
+fn resolve_mentions(text: &str, members: &[(String, String)]) -> MentionResolution {
     // Name → pubkey, folding case (client matches case-insensitively). A name
     // that maps to more than one distinct pubkey is ambiguous → wake no one.
     let mut by_name: std::collections::HashMap<String, Option<String>> =
@@ -105,6 +114,8 @@ fn resolve_mention_pubkeys(text: &str, members: &[(String, String)]) -> Vec<Stri
     let mut out: Vec<String> = Vec::new();
     let mut seen = std::collections::HashSet::new();
     let mut hits: Vec<(usize, String)> = Vec::new();
+    let mut ambiguous: Vec<String> = Vec::new();
+    let mut ambiguous_seen = std::collections::HashSet::new();
 
     for (name, _) in &names {
         let folded_name: Vec<char> = name.to_lowercase().chars().collect();
@@ -126,8 +137,12 @@ fn resolve_mention_pubkeys(text: &str, members: &[(String, String)]) -> Vec<Stri
                 });
             if let Some(name_len) = name_len {
                 let span = 1 + name_len;
-                if let Some(Some(pubkey)) = by_name.get(&name.to_lowercase()) {
-                    hits.push((at, pubkey.clone()));
+                match by_name.get(&name.to_lowercase()) {
+                    Some(Some(pubkey)) => hits.push((at, pubkey.clone())),
+                    Some(None) if ambiguous_seen.insert(name.to_lowercase()) => {
+                        ambiguous.push((*name).clone());
+                    }
+                    _ => {}
                 }
                 for slot in consumed.iter_mut().skip(at).take(span) {
                     *slot = true;
@@ -145,7 +160,14 @@ fn resolve_mention_pubkeys(text: &str, members: &[(String, String)]) -> Vec<Stri
             out.push(pubkey);
         }
     }
-    out
+    MentionResolution {
+        pubkeys: out,
+        ambiguous_names: ambiguous,
+    }
+}
+
+fn resolve_mention_pubkeys(text: &str, members: &[(String, String)]) -> Vec<String> {
+    resolve_mentions(text, members).pubkeys
 }
 
 /// Append legacy routing tags from rendered output and authority-bearing tags
@@ -155,8 +177,20 @@ fn append_workflow_mention_tags(
     rendered_text: &str,
     authored_text: &str,
     members: &[(String, String)],
+    channel_id_canonical: &str,
 ) -> Result<(), ActionSinkError> {
-    let rendered_mentions = resolve_mention_pubkeys(rendered_text, members);
+    let rendered = resolve_mentions(rendered_text, members);
+    if !rendered.ambiguous_names.is_empty() {
+        // Dropping is intentional (see resolve_mentions docs); silence
+        // is not — operators spent hours debugging "agent never woke"
+        // when two members shared a display name (#4436).
+        warn!(
+            channel = %channel_id_canonical,
+            ambiguous = ?rendered.ambiguous_names,
+            "workflow @mention matched an ambiguous display name; emitting no p tag"
+        );
+    }
+    let rendered_mentions = rendered.pubkeys;
     let authored_mentions: std::collections::HashSet<String> =
         resolve_mention_pubkeys(authored_text, members)
             .into_iter()
@@ -409,7 +443,13 @@ impl ActionSink for RelayActionSink {
                     Some((name, nostr::PublicKey::from_slice(&u.pubkey).ok()?.to_hex()))
                 })
                 .collect();
-            append_workflow_mention_tags(&mut tags, &text, &authored_text, &named_members)?;
+            append_workflow_mention_tags(
+                &mut tags,
+                &text,
+                &authored_text,
+                &named_members,
+                &channel_id_canonical,
+            )?;
 
             let kind = Kind::from(KIND_STREAM_MESSAGE as u16);
             let event = EventBuilder::new(kind, &text)
@@ -678,14 +718,26 @@ mod tests {
             m("Fizz", &pk('7')),
             m("Fizz", &pk('8')),
         ];
-        assert!(resolve_mention_pubkeys("@Fizz status?", &members).is_empty());
+        let resolved = resolve_mentions("@Fizz status?", &members);
+        assert!(resolved.pubkeys.is_empty());
+        assert_eq!(resolved.ambiguous_names, vec!["Fizz".to_string()]);
+    }
+
+    #[test]
+    fn ambiguous_names_dedupe_across_repeated_mentions() {
+        let members = vec![m("Fizz", &pk('6')), m("Fizz", &pk('7')), m("Max", &pk('b'))];
+        let resolved = resolve_mentions("@Fizz then @Max then @Fizz again", &members);
+        assert_eq!(resolved.pubkeys, vec![pk('b')]);
+        assert_eq!(resolved.ambiguous_names, vec!["Fizz".to_string()]);
     }
 
     #[test]
     fn duplicate_name_same_pubkey_is_not_ambiguous() {
         // Same identity listed twice (e.g. two channels) is not a conflict.
         let members = vec![m("Fizz", &pk('6')), m("Fizz", &pk('6'))];
-        assert_eq!(resolve_mention_pubkeys("@Fizz go", &members), vec![pk('6')]);
+        let resolved = resolve_mentions("@Fizz go", &members);
+        assert_eq!(resolved.pubkeys, vec![pk('6')]);
+        assert!(resolved.ambiguous_names.is_empty());
     }
 
     #[test]
@@ -710,6 +762,7 @@ mod tests {
             "@First then @Second",
             "@First then @Second",
             &members,
+            "test-channel",
         )
         .expect("append mention tags");
 
@@ -741,6 +794,7 @@ mod tests {
             "echo: @Agent do something unsafe",
             "echo: {{trigger.text}}",
             &members,
+            "test-channel",
         )
         .expect("append mention tags");
 
@@ -763,8 +817,14 @@ mod tests {
         let attribution = Tag::parse(["p", owner.as_str(), "", "owner"]).expect("owner p tag");
         let mut tags = vec![attribution.clone()];
 
-        append_workflow_mention_tags(&mut tags, "@Owner Agent run", "@Owner Agent run", &members)
-            .expect("append owner mention tag");
+        append_workflow_mention_tags(
+            &mut tags,
+            "@Owner Agent run",
+            "@Owner Agent run",
+            &members,
+            "test-channel",
+        )
+        .expect("append owner mention tag");
 
         assert_eq!(
             tags,
@@ -782,7 +842,7 @@ mod tests {
         let owner = pk('1');
         let mut tags = vec![Tag::parse(["p", owner.as_str(), "", "owner"]).expect("owner p tag")];
 
-        append_workflow_mention_tags(&mut tags, "plain", "plain", &[])
+        append_workflow_mention_tags(&mut tags, "plain", "plain", &[], "test-channel")
             .expect("append no mention tags");
 
         assert_eq!(tags.len(), 1);
