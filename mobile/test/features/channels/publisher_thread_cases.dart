@@ -152,6 +152,18 @@ void publisherThreadTests() {
           .widget<ComposeBar>(find.byType(ComposeBar))
           .onSend('Continue the surviving branch', []);
       expect(sender.parents, [child.id]);
+      messages.setMessages([
+        root,
+        child,
+        _deletion(id: 'outer-root-deleted', targetIds: [root.id]),
+        _deletion(id: 'nested-head-deleted', targetIds: [child.id]),
+      ]);
+      await tester.pumpAndSettle();
+      expect(
+        find.byType(ComposeBar),
+        findsNothing,
+        reason: 'the relay refuses replies to a deleted parent',
+      );
     },
   );
 }
