@@ -36,6 +36,16 @@ void main() {
     }
   });
 
+  test('a long run of definitions takes linear time', () {
+    // Rechecking every earlier definition for each one took seconds here.
+    final body = [
+      for (var i = 0; i < 4000; i++) '[d$i]: https://example.com/$i',
+    ].join('\n');
+    final timer = Stopwatch()..start();
+    expect(normalizeBareLinks(body), body);
+    expect(timer.elapsedMilliseconds, lessThan(500));
+  });
+
   test('keeps punctuation and open Markdown delimiters outside links', () {
     expect(
       normalizeBareLinks('**open $url**. and **_${url}_**!'),

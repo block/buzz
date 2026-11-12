@@ -20,10 +20,10 @@ final _codeRunPattern = RegExp(r'`+|~{3,}');
 /// links while leaving inline and fenced code and link reference definitions
 /// untouched. Punctuation peeling is limited to Buzz URLs so existing HTTP(S)
 /// destinations stay unchanged.
-String normalizeBareLinks(String content) => _mapMarkdownProseAt(
-  content,
-  (prose, start) => _normalizeOutsideDefinitions(content, prose, start),
-);
+String normalizeBareLinks(String content) {
+  final definitions = _DefinitionScan(content);
+  return _mapMarkdownProseAt(content, definitions.normalize);
+}
 
 // A link reference definition line, `[label]: destination`. Wrapping its
 // destination in a Markdown link would make the wrapped text the destination.
@@ -34,34 +34,55 @@ final _definitionLine = RegExp(
   multiLine: true,
 );
 
-String _normalizeOutsideDefinitions(String content, String prose, int start) {
-  final result = StringBuffer();
-  var offset = 0;
-  for (final line in _definitionLine.allMatches(prose)) {
-    if (!_startsBlock(content, start + line.start)) continue;
-    result
-      ..write(_normalizeLinkSegment(prose.substring(offset, line.start)))
-      ..write(line[0]);
-    offset = line.end;
-  }
-  result.write(_normalizeLinkSegment(prose.substring(offset)));
-  return result.toString();
-}
+/// Finds the link reference definitions in one message, in order, in time
+/// linear in its length. A definition cannot interrupt a paragraph, so a
+/// definition line counts only when the line above it is absent, blank, or
+/// itself a counted definition. That last answer is remembered, so a run of
+/// definitions is never rescanned.
+class _DefinitionScan {
+  _DefinitionScan(this.content);
 
-/// Whether a definition may start at [index] of [content]: a line starts
-/// there, and the lines above it, back to the message start or a blank line,
-/// are all definitions. A definition cannot interrupt a paragraph.
-bool _startsBlock(String content, int index) {
-  if (index > 0 && content[index - 1] != '\n') return false;
-  var end = index - 1;
-  while (end >= 0) {
-    final start = end == 0 ? 0 : content.lastIndexOf('\n', end - 1) + 1;
-    final previous = content.substring(start, end);
-    if (previous.trim().isEmpty) return true;
-    if (!_definitionLine.hasMatch(previous)) return false;
-    end = start - 1;
+  final String content;
+  // Content offset where the last definition-shaped line ended, and whether
+  // it counted.
+  int _lastEnd = -2;
+  bool _lastCounted = false;
+
+  /// [prose], the run of [content] at [start], with bare links normalized
+  /// outside the definitions that count.
+  String normalize(String prose, int start) {
+    final result = StringBuffer();
+    var offset = 0;
+    for (final line in _definitionLine.allMatches(prose)) {
+      if (!_counts(start + line.start, start + line.end)) continue;
+      result
+        ..write(_normalizeLinkSegment(prose.substring(offset, line.start)))
+        ..write(line[0]);
+      offset = line.end;
+    }
+    result.write(_normalizeLinkSegment(prose.substring(offset)));
+    return result.toString();
   }
-  return true;
+
+  bool _counts(int index, int end) {
+    final bool counted;
+    if (index > 0 && content[index - 1] != '\n') {
+      counted = false;
+    } else if (index == _lastEnd + 1) {
+      counted = _lastCounted;
+    } else {
+      final previousEnd = index - 1;
+      final previousStart = previousEnd <= 0
+          ? 0
+          : content.lastIndexOf('\n', previousEnd - 1) + 1;
+      counted =
+          index == 0 ||
+          content.substring(previousStart, previousEnd).trim().isEmpty;
+    }
+    _lastEnd = end;
+    _lastCounted = counted;
+    return counted;
+  }
 }
 
 /// Applies [transform] to each run of [content] outside inline and fenced
