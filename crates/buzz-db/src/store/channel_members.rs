@@ -503,6 +503,12 @@ impl LockedMemberSnapshot {
         }
         let tags = serde_json::to_value(&event.tags)?;
         validate_channel_roster_snapshot(&mut self.tx, channel_id, &tags).await?;
+        crate::replica_fence::guard_event_created_at_floor(
+            &mut self.tx,
+            created_at,
+            Some(channel_id),
+        )
+        .await?;
         sqlx::query(superseded_with_mentions_sql!(
             "UPDATE events SET deleted_at = NOW() WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND channel_id = $4 AND deleted_at IS NULL"
         ))

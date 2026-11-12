@@ -1,5 +1,4 @@
 import 'package:buzz/shared/widgets/buzz_agent_icon.dart';
-import 'package:buzz/features/channels/video_poster.dart';
 import 'package:buzz/features/channels/local_send_bubble_surface.dart';
 import 'dart:async';
 import 'dart:convert';

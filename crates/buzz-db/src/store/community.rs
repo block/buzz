@@ -500,6 +500,50 @@ impl Db {
         Ok(())
     }
 
+    /// Look up an existing host for legacy operator convergence without creating.
+    ///
+    /// Matches ensure's lifecycle rules, including archived rows. Returns None
+    /// for missing hosts and rejects tombstones. No row or issuer is inserted.
+    /// Release this short transaction before calling `provision_owner`, which
+    /// acquires its own lifecycle locks in the established order.
+    #[datastore_span(name = "existing_configured_community", system = "postgresql")]
+    pub async fn existing_configured_community(
+        &self,
+        normalized_host: &str,
+    ) -> Result<Option<EnsuredCommunityRecord>> {
+        let connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::Authorization,
+        )
+        .await?;
+        let mut tx = sqlx::Transaction::begin(connection, None).await?;
+        let row = sqlx::query(
+            "SELECT id, host, deletion_state, deleted_at FROM communities \
+             WHERE lower(host) = lower($1) FOR NO KEY UPDATE",
+        )
+        .bind(normalized_host)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let record = row
+            .map(|row| {
+                let state: String = row.try_get("deletion_state")?;
+                let deleted_at: Option<DateTime<Utc>> = row.try_get("deleted_at")?;
+                if state != "active" || deleted_at.is_some() {
+                    return Err(DbError::AccessDenied(format!(
+                        "community host {normalized_host:?} is permanently tombstoned"
+                    )));
+                }
+                Ok(EnsuredCommunityRecord {
+                    id: CommunityId::from_uuid(row.try_get("id")?),
+                    host: row.try_get("host")?,
+                    created: false,
+                })
+            })
+            .transpose()?;
+        tx.commit().await?;
+        Ok(record)
+    }
+
     /// Ensure a configured community host exists and return its row.
     ///
     /// This is the startup/config seeding path for N=1 deployments. Migrations

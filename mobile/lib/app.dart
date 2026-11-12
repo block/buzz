@@ -1,4 +1,5 @@
 import 'features/activity/activity_provider.dart';
+import 'features/channels/bestie_conversation.dart';
 import 'features/channels/default_agent_launcher.dart';
 import 'features/agents/agents_page.dart';
 
@@ -482,6 +483,7 @@ class App extends HookConsumerWidget {
                 defaultAgentBuilder: (context) => DefaultAgentLauncher(
                   onChooseAgent: () => showAgents(context, createOnOpen: true),
                 ),
+                openBestieConversation: openBestieConversation,
                 mePageBuilder: (_, chat, workspace) => MePage(
                   sliver: true,
                   newChatAction: chat,

@@ -70,10 +70,8 @@ impl World {
             .custom_created_at(Timestamp::from(at))
             .sign_with_keys(author)
             .unwrap();
-        self.db
-            .insert_event(self.community, &event, Some(channel))
-            .await
-            .unwrap();
+        crate::test_support::insert_historical_event(&self.pool, self.community, &event, channel)
+            .await;
         event
     }
 
