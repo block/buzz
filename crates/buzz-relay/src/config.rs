@@ -291,6 +291,13 @@ pub struct Config {
     /// skipped — a typo must not silently disable an operator.
     pub relay_operator_pubkeys: Vec<String>,
 
+    /// Serve multiple communities (default true). When false, only the
+    /// normalized `relay_url` authority serves ordinary traffic; existing extra
+    /// communities remain available to authenticated management and cleanup.
+    /// Canonical startup bootstrap is preserved. Changes require a restart.
+    /// Set via `BUZZ_MULTI_COMMUNITY_RELAY=true|false`.
+    pub multi_community_relay: bool,
+
     /// Configured operator-listener identities and their HTTP(S) delivery URLs.
     pub operator_listener_delivery_urls: HashMap<String, url::Url>,
 
@@ -911,6 +918,24 @@ impl Config {
             .map(|raw| parse_operator_api_origin(&raw))
             .transpose()?;
 
+        let multi_community_relay = match std::env::var("BUZZ_MULTI_COMMUNITY_RELAY") {
+            Ok(value) => value.parse::<bool>().map_err(|_| {
+                ConfigError::InvalidValue(
+                    "BUZZ_MULTI_COMMUNITY_RELAY must be true or false".to_string(),
+                )
+            })?,
+            Err(std::env::VarError::NotPresent) => true,
+            Err(std::env::VarError::NotUnicode(_)) => {
+                return Err(ConfigError::InvalidValue(
+                    "BUZZ_MULTI_COMMUNITY_RELAY must be true or false".to_string(),
+                ))
+            }
+        };
+        if !multi_community_relay && crate::tenant::relay_url_authority(&relay_url).is_empty() {
+            return Err(ConfigError::InvalidValue(
+                "RELAY_URL must have a host when BUZZ_MULTI_COMMUNITY_RELAY=false".to_owned(),
+            ));
+        }
         let relay_operator_pubkeys = match std::env::var("RELAY_OPERATOR_PUBKEYS") {
             Ok(raw) => {
                 let mut pubkeys = Vec::new();
@@ -1517,6 +1542,7 @@ impl Config {
             relay_owner_pubkey,
             relay_operator_api_origin,
             relay_operator_pubkeys,
+            multi_community_relay,
             operator_listener_delivery_urls,
             storage_usage_delivery_url,
             allow_nip_oa_auth,
@@ -1774,6 +1800,29 @@ mod tests {
         );
 
         assert!(found.is_empty(), "unrelated vars must not warn: {found:?}");
+    }
+
+    #[test]
+    fn multi_community_relay_is_strict_and_default_enabled() {
+        let _guards = env_guards();
+        std::env::remove_var("BUZZ_MULTI_COMMUNITY_RELAY");
+        assert!(Config::from_env().expect("unset").multi_community_relay);
+        for (value, expected) in [("false", false), ("true", true)] {
+            std::env::set_var("BUZZ_MULTI_COMMUNITY_RELAY", value);
+            let config = Config::from_env();
+            std::env::remove_var("BUZZ_MULTI_COMMUNITY_RELAY");
+            assert_eq!(
+                config.expect("valid policy").multi_community_relay,
+                expected
+            );
+        }
+        for value in ["", "FALSE", "1", "typo"] {
+            std::env::set_var("BUZZ_MULTI_COMMUNITY_RELAY", value);
+            let result = Config::from_env();
+            std::env::remove_var("BUZZ_MULTI_COMMUNITY_RELAY");
+            assert!(matches!(result, Err(ConfigError::InvalidValue(ref message))
+                if message.contains("BUZZ_MULTI_COMMUNITY_RELAY")));
+        }
     }
 
     #[test]

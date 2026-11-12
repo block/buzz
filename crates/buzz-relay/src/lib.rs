@@ -105,3 +105,5 @@ pub use state::AppState;
 
 /// Optional relay-signed verified profiles.
 pub mod verified_profiles;
+
+mod single_community;
