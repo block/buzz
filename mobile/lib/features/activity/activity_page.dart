@@ -419,6 +419,7 @@ class ActivityPage extends HookConsumerWidget {
               ? InitialThreadRouteBehavior.replaceCurrentRoute
               : InitialThreadRouteBehavior.push,
         ),
+        reopen: true,
       );
     }
 
