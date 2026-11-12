@@ -27,6 +27,11 @@ void main() {
       ('\n[a]: $site', '\n[a]: $site'),
       ('`code` [x]: $site', '`code` [x]: [$site]($site)'),
       ('`x`\n\n[a]: $site', '`x`\n\n[a]: $site'),
+      // A title holding code doesn't end the definition run.
+      (
+        '[a]: $site "`code`"\n[b]: $site\n\n[b]',
+        '[a]: $site "`code`"\n[b]: $site\n\n[b]',
+      ),
       (
         'text\n[a]: $site\n[b]: $site',
         'text\n[a]: [$site]($site)\n[b]: [$site]($site)',

@@ -43,8 +43,8 @@ class _DefinitionScan {
   _DefinitionScan(this.content);
 
   final String content;
-  // Content offset where the last definition-shaped line ended, and whether
-  // it counted.
+  // Content offset where the last definition-shaped source line ended, and
+  // whether it counted.
   int _lastEnd = -2;
   bool _lastCounted = false;
 
@@ -54,7 +54,7 @@ class _DefinitionScan {
     final result = StringBuffer();
     var offset = 0;
     for (final line in _definitionLine.allMatches(prose)) {
-      if (!_counts(start + line.start, start + line.end)) continue;
+      if (!_counts(start + line.start)) continue;
       result
         ..write(_normalizeLinkSegment(prose.substring(offset, line.start)))
         ..write(line[0]);
@@ -64,7 +64,7 @@ class _DefinitionScan {
     return result.toString();
   }
 
-  bool _counts(int index, int end) {
+  bool _counts(int index) {
     final bool counted;
     if (index > 0 && content[index - 1] != '\n') {
       counted = false;
@@ -79,7 +79,10 @@ class _DefinitionScan {
           index == 0 ||
           content.substring(previousStart, previousEnd).trim().isEmpty;
     }
-    _lastEnd = end;
+    // The source line's end: a definition's title may hold code, which ends
+    // this prose run early.
+    final lineEnd = content.indexOf('\n', index);
+    _lastEnd = lineEnd < 0 ? content.length : lineEnd;
     _lastCounted = counted;
     return counted;
   }
