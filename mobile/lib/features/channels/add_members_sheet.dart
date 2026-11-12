@@ -29,6 +29,7 @@ Future<bool?> showAddChannelMembersSheet({
   required BuildContext context,
   required String channelId,
   required Set<String> existingPubkeys,
+  Future<void> Function(List<MentionCandidate>)? onAddMembers,
 }) async {
   if (!kIsWeb && defaultTargetPlatform == TargetPlatform.iOS) {
     if (_nativePickerOpen) return null;
@@ -42,6 +43,7 @@ Future<bool?> showAddChannelMembersSheet({
           channelId: channelId,
           existingPubkeys: existingPubkeys,
           nativePresentation: true,
+          onAddMembers: onAddMembers,
         ),
       );
     } finally {
@@ -61,6 +63,7 @@ Future<bool?> showAddChannelMembersSheet({
     builder: (_) => AddChannelMembersSheet(
       channelId: channelId,
       existingPubkeys: existingPubkeys,
+      onAddMembers: onAddMembers,
     ),
   );
 }
@@ -72,11 +75,15 @@ class AddChannelMembersSheet extends HookConsumerWidget {
     required this.channelId,
     required this.existingPubkeys,
     this.nativePresentation = false,
+    this.onAddMembers,
   });
 
   final String channelId;
   final Set<String> existingPubkeys;
   final bool nativePresentation;
+
+  /// Optional scoped admission, retaining the picker's partial-failure retry.
+  final Future<void> Function(List<MentionCandidate>)? onAddMembers;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -191,10 +198,14 @@ class AddChannelMembersSheet extends HookConsumerWidget {
       isSubmitting.value = true;
       submitError.value = null;
       try {
-        await actions.addMembers(
-          channelId: channelId,
-          pubkeys: submittedUsers.map((user) => user.pubkey).toList(),
-        );
+        if (onAddMembers case final add?) {
+          await add(submittedUsers);
+        } else {
+          await actions.addMembers(
+            channelId: channelId,
+            pubkeys: submittedUsers.map((user) => user.pubkey).toList(),
+          );
+        }
         if (context.mounted) Navigator.of(context).pop(true);
       } on AddMembersException catch (error) {
         if (!context.mounted) return;

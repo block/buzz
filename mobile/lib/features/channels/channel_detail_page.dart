@@ -93,6 +93,7 @@ import 'jump_to_latest_switcher.dart';
 import 'local_message_send_animation_provider.dart';
 import 'local_message_send_transition.dart';
 import 'mobile_huddle_controller.dart';
+import 'add_members_sheet.dart';
 import 'dm_voice_agent_provider.dart';
 import 'message_actions.dart';
 import 'message_action_backdrop_state.dart';
@@ -128,6 +129,7 @@ part 'channel_detail_page/thread_working.dart';
 part 'channel_detail_page/activity_members_sheet.dart';
 part 'channel_detail_page/huddle_sheet.dart';
 part 'channel_detail_page/huddle_agent_connection.dart';
+part 'channel_detail_page/huddle_members.dart';
 part 'channel_detail_page/huddle_call_avatar.dart';
 part 'channel_detail_page/huddle_participant_cluster.dart';
 part 'channel_detail_page/huddle_call_participants.dart';
@@ -711,8 +713,8 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
               label: 'Chat settings',
               icon: BuzzIcons.ellipsis,
               onPressed: openChatSettings,
-            )
-          else if (resolvedChannel.isDm ? showsHuddleAction : showsComposer)
+            ),
+          if (resolvedChannel.isDm ? showsHuddleAction : showsComposer)
             _huddleNavigationAction(context, ref, resolvedChannel, [
               ...messagesState.value ?? const [],
               ...huddleLifecycle,
@@ -737,8 +739,8 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
               tooltip: 'Chat settings',
               icon: const Icon(BuzzIcons.ellipsis),
               onPressed: openChatSettings,
-            )
-          else if (resolvedChannel.isDm ? showsHuddleAction : showsComposer)
+            ),
+          if (resolvedChannel.isDm ? showsHuddleAction : showsComposer)
             _HuddleButton(
               voiceAgent: voiceAgent,
               channel: resolvedChannel,

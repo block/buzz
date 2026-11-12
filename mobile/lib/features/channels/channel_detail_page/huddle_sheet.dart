@@ -691,6 +691,13 @@ class _MobileHuddleCallPage extends ConsumerWidget {
               children: [
                 _HuddleCallHeader(
                   isLeaving: session.phase == HuddleSessionPhase.leaving,
+                  onAddMembers:
+                      connected &&
+                          session.wasAdmitted &&
+                          ref.watch(relaySessionProvider).status ==
+                              SessionStatus.connected
+                      ? () => _showHuddleMembers(context, ref, invite)
+                      : null,
                   onMinimize: () {
                     presentationController.minimize();
                     Navigator.of(context).pop();
@@ -813,11 +820,13 @@ class _HuddleCallHeader extends StatelessWidget {
     required this.isLeaving,
     required this.onMinimize,
     required this.onLeave,
+    this.onAddMembers,
   });
 
   final bool isLeaving;
   final VoidCallback onMinimize;
   final VoidCallback onLeave;
+  final VoidCallback? onAddMembers;
 
   @override
   Widget build(BuildContext context) {
@@ -835,6 +844,15 @@ class _HuddleCallHeader extends StatelessWidget {
             icon: const Icon(BuzzIcons.chevronDown, size: 32),
           ),
           const Spacer(),
+          Flexible(
+            child: TextButton.icon(
+              key: const ValueKey('huddle-add-members'),
+              onPressed: onAddMembers,
+              icon: const Icon(BuzzIcons.userPlus),
+              label: const Text('Add members'),
+            ),
+          ),
+          const SizedBox(width: Grid.xxs),
           _HuddleRoundControl(
             key: const ValueKey('huddle-leave'),
             tooltip: 'Leave Huddle',

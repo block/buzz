@@ -107,6 +107,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../../helpers/thread_ids.dart';
 import '../../helpers/widget_helpers.dart';
 
+part 'channel_detail_page_test/huddle_members_tests.dart';
 part 'thread_reply_refresh_cases.dart';
 part 'thread_title_capsule_cases.dart';
 part 'channel_detail_page_test/loading_review_tests.dart';
@@ -1192,6 +1193,7 @@ void main() {
     },
   );
 
+  huddleMembersTests();
   _loadingReviewTests();
   threadReplyRefreshTests();
   threadTitleCapsuleTests();
@@ -8488,28 +8490,6 @@ void main() {
         find.byKey(const ValueKey('system-message-timestamp-alice')),
         findsNothing,
       );
-    });
-
-    testWidgets('top action discovers a Huddle outside the timeline window', (
-      tester,
-    ) async {
-      final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-      await tester.pumpWidget(
-        _buildTestable(
-          messages: const [],
-          huddleLifecycle: [
-            _huddleMsg(
-              id: 'off-window-huddle',
-              kind: EventKind.huddleStarted,
-              createdAt: now,
-            ),
-          ],
-        ),
-      );
-      await tester.pumpAndSettle();
-
-      expect(find.byTooltip('Open Huddle'), findsOneWidget);
-      expect(find.text('Huddle in progress'), findsNothing);
     });
 
     testWidgets('offers Join for a recent desktop-started huddle', (
