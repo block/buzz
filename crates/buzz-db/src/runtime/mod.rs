@@ -867,7 +867,7 @@ impl Db {
     ///
     /// Two single-connection side pools deliberately do not, so serving-pool
     /// saturation cannot delay their work. Neither inserts into `events`, so
-    /// neither needs the `buzz.created_at_floor` guard, and each installs
+    /// neither needs the app-side floor check, and each installs
     /// its own shorter timeouts so it fails fast instead of queueing:
     /// - [`replica_fence::connect_probe_pool`]: the fence probe takes the
     ///   floor lock itself (exclusive) and writes only `replica_heartbeat`.

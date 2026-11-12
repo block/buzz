@@ -1635,19 +1635,29 @@ fn normalized_sql(source: &str) -> String {
     normalized
 }
 
-/// The normalized SQL that follows each `INSERT INTO events` in `source`.
+/// Whether an unqualified table name is `events` or one of its partitions
+/// (`events_p_past`, `events_p2026_01`, …): a direct partition write skips
+/// nothing the parent's writers must do.
+fn is_events_table(table: &str) -> bool {
+    table == "events"
+        || table
+            .strip_prefix("events_p")
+            .is_some_and(|rest| rest.starts_with(|ch: char| ch == '_' || ch.is_ascii_digit()))
+}
+
+/// The normalized SQL that follows each `INSERT INTO events` (or one of its
+/// partitions) in `source`.
 fn events_insert_tails(source: &str) -> Vec<String> {
     let normalized = normalized_sql(source);
     let mut tails = Vec::new();
     for marker in ["insert into events", "insert into public.events"] {
         for (index, marker) in normalized.match_indices(marker) {
-            let tail = &normalized[index + marker.len()..];
-            if tail
-                .chars()
-                .next()
-                .is_none_or(|next| !(next.is_ascii_alphanumeric() || next == '_'))
-            {
-                tails.push(tail.to_owned());
+            let table_start = index + marker.len() - "events".len();
+            let table_len = normalized[table_start..]
+                .find(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+                .unwrap_or(normalized.len() - table_start);
+            if is_events_table(&normalized[table_start..table_start + table_len]) {
+                tails.push(normalized[table_start + table_len..].to_owned());
             }
         }
     }
@@ -2253,18 +2263,33 @@ fn is_channel_null_event_writer(function: &str) -> bool {
     false
 }
 
-/// Whether a `SET` list assigns `created_at` or `channel_id`, including the
-/// row form `(a, b) = (...)`, or a column it cannot read (a `{…}`
-/// placeholder). Stops at the first `WHERE`.
-/// The assignments of a `SET` list: it ends at `WHERE` or, for an upsert
-/// with no `WHERE`, at `RETURNING`.
-fn set_list(assignments: &str) -> &str {
-    let assignments = assignments.split(" where ").next().expect("first part");
-    assignments.split(" returning ").next().expect("first part")
+/// The assignments of a `SET` list, and whether this literal ends them: the
+/// list stops at the first `WHERE` or (for an upsert with no `WHERE`)
+/// `RETURNING` outside parentheses, so a subquery's `WHERE` does not hide
+/// the assignments after it.
+fn set_list(assignments: &str) -> (&str, bool) {
+    let mut depth = 0usize;
+    for (index, ch) in assignments.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            ' ' if depth == 0 => {
+                let rest = &assignments[index..];
+                if rest.starts_with(" where ") || rest.starts_with(" returning ") {
+                    return (&assignments[..index], true);
+                }
+            }
+            _ => {}
+        }
+    }
+    (assignments, false)
 }
 
+/// Whether a `SET` list assigns `created_at` or `channel_id`, including the
+/// row form `(a, b) = (...)`, or a column it cannot read (a `{…}`
+/// placeholder).
 fn assigns_event_floor_column(assignments: &str) -> bool {
-    let assignments = set_list(assignments);
+    let (assignments, _) = set_list(assignments);
     let mut depth = 0usize;
     assignments
         .split(|ch| {
@@ -2290,11 +2315,11 @@ fn assigns_event_floor_column(assignments: &str) -> bool {
         })
 }
 
-/// Whether a `SET` list (up to the first `WHERE`) is missing from its
-/// literal: empty, or holding an item with no `=`, such as a `{…}`
-/// placeholder or a column whose value follows in another literal.
+/// Whether a `SET` list (see [`set_list`]) is missing from its literal:
+/// empty, or holding an item with no `=`, such as a `{…}` placeholder or a
+/// column whose value follows in another literal.
 fn set_list_is_unreadable(assignments: &str) -> bool {
-    let assignments = set_list(assignments);
+    let (assignments, _) = set_list(assignments);
     let mut depth = 0usize;
     assignments.trim().is_empty()
         || assignments
@@ -2315,29 +2340,58 @@ fn unqualified_table(target: &str) -> &str {
     target.rsplit_once('.').map_or(target, |(_, table)| table)
 }
 
+/// The table the last `INSERT INTO` in `sql` (normalized) targets, without
+/// its schema.
+fn last_insert_target(sql: &str) -> Option<&str> {
+    let index = sql.rfind("insert into ")?;
+    let target = sql[index + "insert into ".len()..]
+        .split(|ch: char| !(ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | '{' | '}')))
+        .next()?;
+    Some(unqualified_table(target))
+}
+
 /// Whether one SQL literal (normalized) assigns a floor column through a
 /// direct `UPDATE` of `events`, or of a target it does not spell: a
 /// placeholder, or a `SET` list whose `UPDATE` lies in another literal.
-/// A `SET` list it cannot read counts as assigning one.
-fn literal_updates_event_floor_columns(sql: &str) -> bool {
+/// A `SET` list it cannot read counts as assigning one, and so does an
+/// `UPDATE` list that runs to the end of the literal, since a later literal
+/// (a `QueryBuilder` push) may continue it. An events upsert list that runs
+/// to the end is read on through `later`, the function's later literals.
+/// `prior_insert` is the target of the last `INSERT` in an earlier literal
+/// of the same function, which an upsert continued here belongs to.
+fn literal_updates_event_floor_columns(sql: &str, prior_insert: Option<&str>, later: &str) -> bool {
     // `SET(` with no space is still a row assignment.
     let sql = format!(" {} ", sql.trim()).replace(" set(", " set (");
     sql.match_indices(" set ").any(|(index, marker)| {
-        let assignments = &sql[index + marker.len()..];
+        let (assignments, terminated) = set_list(&sql[index + marker.len()..]);
         // A SET list continued in another literal or argument cannot be read.
         let unreadable = set_list_is_unreadable(assignments);
-        if !unreadable && !assigns_event_floor_column(assignments) {
-            return false;
-        }
+        let assigns = !unreadable && assigns_event_floor_column(assignments);
         let before = &sql[..index];
         if before.ends_with(" do update") {
-            // The upsert check resolves the INSERT, which may be in another
-            // literal of the same builder, but only from a readable SET list.
-            return unreadable;
+            // The upsert check resolves a readable, complete list's INSERT,
+            // which may be in another literal of the same builder. An open
+            // events (or unresolved) upsert list is read on through the
+            // later literals, where a push may append a floor column.
+            if unreadable {
+                return true;
+            }
+            if terminated
+                || !last_insert_target(before)
+                    .or(prior_insert)
+                    .is_none_or(is_events_table)
+            {
+                return false;
+            }
+            let continued = format!("{assignments} {later}");
+            return set_list_is_unreadable(&continued) || assigns_event_floor_column(&continued);
+        }
+        if !unreadable && !assigns && terminated {
+            return false;
         }
         let Some(update) = before.rfind(" update ") else {
             // A bare SET (Redis `SET`, prose) is not SQL unless it assigns.
-            return !unreadable;
+            return assigns;
         };
         let mut target = before[update + " update ".len()..].split_whitespace();
         let mut table = target.next();
@@ -2349,32 +2403,33 @@ fn literal_updates_event_floor_columns(sql: &str) -> bool {
         let (Some(table), [] | [_] | ["as", _]) = (table, alias.as_slice()) else {
             // An unreadable target is a violation only when it assigns a
             // floor column; prose ("update … is set") assigns nothing.
-            return !unreadable;
+            return assigns;
         };
         let table = unqualified_table(table);
-        table == "events" || table.contains('{')
+        is_events_table(table) || table.contains('{')
     })
 }
 
 fn updates_event_floor_columns(function: &str) -> bool {
-    let direct_update = source_spans(function)
+    let literals = source_spans(function)
         .iter()
         .filter_map(|span| span.string_body(function))
-        .any(|body| literal_updates_event_floor_columns(&normalized_sql(body)));
+        .map(normalized_sql)
+        .collect::<Vec<_>>();
+    let direct_update = literals.iter().enumerate().any(|(index, sql)| {
+        let prior_insert = literals[..index]
+            .iter()
+            .rev()
+            .find_map(|earlier| last_insert_target(earlier));
+        literal_updates_event_floor_columns(sql, prior_insert, &literals[index + 1..].join(" "))
+    });
     // `ON CONFLICT ... DO UPDATE SET` names no table: it updates the target of
     // the INSERT it belongs to, so an events upsert can re-home an existing row.
     let normalized = normalized_sql(function).replace(" set(", " set (");
     let events_upsert = normalized
         .match_indices("do update set ")
         .any(|(index, marker)| {
-            normalized[..index]
-                .rfind("insert into ")
-                .is_some_and(|insert| {
-                    let table = normalized[insert + "insert into ".len()..]
-                        .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '.'))
-                        .next();
-                    matches!(table, Some("events" | "public.events"))
-                })
+            last_insert_target(&normalized[..index]).is_some_and(is_events_table)
                 && assigns_event_floor_column(&normalized[index + marker.len()..])
         });
     direct_update || events_upsert
@@ -2393,16 +2448,16 @@ fn literal_sql_violations(sql: &str) -> Vec<&'static str> {
         if sql[..index].ends_with(" insert") {
             if target.is_empty() || table.contains('{') {
                 violations.push("INSERT target is not a literal table");
-            } else if table == "events" && rest.contains('{') {
+            } else if is_events_table(table) && rest.contains('{') {
                 violations.push("events INSERT with a non-literal part");
             }
-        } else if table == "events" {
+        } else if is_events_table(table) {
             violations.push("events written by a statement other than INSERT");
         }
     }
     if sql.match_indices(" copy ").any(|(index, marker)| {
         let target = sql[index + marker.len()..].split([' ', '(']).next();
-        target.is_some_and(|target| unqualified_table(target) == "events")
+        target.is_some_and(|target| is_events_table(unqualified_table(target)))
     }) {
         violations.push("events written by a statement other than INSERT");
     }
@@ -2760,6 +2815,46 @@ async fn guarded_insert_then_other_table_upsert(tx: &mut AdmittedTx) {
 async fn other_table_upsert_returning(tx: &mut AdmittedTx) {
     sqlx::query("INSERT INTO channel_members (pubkey, role) VALUES ($1, $2) ON CONFLICT (pubkey) DO UPDATE SET removed_at = NULL, role = EXCLUDED.role RETURNING pubkey, role, removed_at");
 }
+async fn subquery_where_then_channel(tx: &mut AdmittedTx) {
+    sqlx::query("UPDATE events SET tags = (SELECT tags FROM events e2 WHERE e2.id = $1), channel_id = $2 WHERE id = $3");
+}
+async fn subquery_where_only(tx: &mut AdmittedTx) {
+    sqlx::query("UPDATE events SET tags = (SELECT tags FROM events e2 WHERE e2.id = $1) WHERE id = $2");
+}
+async fn guarded_upsert_subquery_then_rehome(tx: &mut AdmittedTx) {
+    crate::replica_fence::guard_event_created_at_floor(tx, created_at, channel).await?;
+    sqlx::query("INSERT INTO events (id) VALUES ($1) ON CONFLICT (id) DO UPDATE SET content = (SELECT content FROM events e2 WHERE e2.id = $1), channel_id = EXCLUDED.channel_id");
+}
+async fn builder_continues_set_list(tx: &mut AdmittedTx) {
+    QueryBuilder::new("UPDATE events SET tags = ").push_bind(t).push(", created_at = ").push_bind(c).push(" WHERE id = ").push_bind(id);
+}
+async fn builder_other_table_open_set_list(tx: &mut AdmittedTx) {
+    QueryBuilder::new("UPDATE channels SET name = ").push_bind(n).push(" WHERE id = ").push_bind(id);
+}
+async fn guarded_builder_upsert_continues_set_list(tx: &mut AdmittedTx) {
+    crate::replica_fence::guard_event_created_at_floor(tx, created_at, channel).await?;
+    QueryBuilder::new("INSERT INTO events (id) VALUES ($1) ON CONFLICT (id) DO UPDATE SET tags = EXCLUDED.tags").push(", channel_id = EXCLUDED.channel_id");
+}
+async fn guarded_builder_upsert_continues_other_column(tx: &mut AdmittedTx) {
+    crate::replica_fence::guard_event_created_at_floor(tx, created_at, channel).await?;
+    QueryBuilder::new("INSERT INTO events (id) VALUES ($1) ON CONFLICT (id) DO UPDATE SET tags = EXCLUDED.tags").push(", kind = EXCLUDED.kind");
+}
+async fn partition_update(tx: &mut AdmittedTx) {
+    sqlx::query("UPDATE events_p_past SET created_at = $1 WHERE id = $2");
+}
+async fn partition_insert(tx: &mut AdmittedTx) {
+    sqlx::query("INSERT INTO events_p_past (id) VALUES ($1)");
+}
+async fn public_partition_insert(tx: &mut AdmittedTx) {
+    sqlx::query("INSERT INTO public.events_p2026_01 (id) VALUES ($1)");
+}
+async fn guarded_partition_upsert_rehome(tx: &mut AdmittedTx) {
+    crate::replica_fence::guard_event_created_at_floor(tx, created_at, channel).await?;
+    sqlx::query("INSERT INTO events_p_future (id, channel_id) VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET channel_id = EXCLUDED.channel_id");
+}
+async fn events_prefixed_table(tx: &mut AdmittedTx) {
+    sqlx::query("UPDATE events_per_domain SET created_at = $1 WHERE id = $2");
+}
 "#;
     assert_eq!(
         event_floor_policy_violations(source),
@@ -2781,6 +2876,14 @@ async fn other_table_upsert_returning(tx: &mut AdmittedTx) {
             "async fn guarded_upsert_rehome(tx: &mut AdmittedTx) {",
             "async fn guarded_upsert_row_time(tx: &mut AdmittedTx) {",
             "async fn guarded_upsert_rehome_returning(tx: &mut AdmittedTx) {",
+            "async fn subquery_where_then_channel(tx: &mut AdmittedTx) {",
+            "async fn guarded_upsert_subquery_then_rehome(tx: &mut AdmittedTx) {",
+            "async fn builder_continues_set_list(tx: &mut AdmittedTx) {",
+            "async fn guarded_builder_upsert_continues_set_list(tx: &mut AdmittedTx) {",
+            "async fn partition_update(tx: &mut AdmittedTx) {",
+            "async fn partition_insert(tx: &mut AdmittedTx) {",
+            "async fn public_partition_insert(tx: &mut AdmittedTx) {",
+            "async fn guarded_partition_upsert_rehome(tx: &mut AdmittedTx) {",
         ]
     );
 }

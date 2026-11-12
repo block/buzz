@@ -220,9 +220,10 @@ holding a write-blocking lock. Scans that do not block writes, such as
   before taking the lock races with deletion.
 - A repair script that writes a channel-bearing `events` row older than the
   floor (inserting one, moving `created_at` backward, or setting `channel_id`
-  on an old row) is outside the replica-floor proof: an
-  operator session does not set `buzz.created_at_floor`, so the commit-time
-  floor guard lets it through (`migrations/0021`). Its PR MUST document a
+  on an old row) is outside the replica-floor proof: only the relay's
+  app-side floor check (`replica_fence::guard_event_created_at_floor`)
+  enforces the floor, and an operator session runs none of it, so nothing
+  in the database stops the write. Its PR MUST document a
   reviewed procedure that keeps replica routing closed from before the first
   batch until its WAL has replayed on every replica.
 - A script MUST NOT disable triggers or set `session_replication_role`.
@@ -283,8 +284,8 @@ Every migration MUST be safe for the currently deployed release to read and
 write against.
 
 The relay has no general schema-version compatibility check. It verifies only
-specific catalog surfaces, such as the deletion serving fence and the replica
-floor guard, so the ordering below is the main protection. When
+specific catalog surfaces, such as the deletion serving fence, so the ordering
+below is the main protection. When
 `BUZZ_AUTO_MIGRATE` is on, an older binary refuses a database that has
 migrations it does not know (sqlx `VersionMissing`), so `helm rollback` with
 auto-migration on fails at startup, and so does any old pod that restarts

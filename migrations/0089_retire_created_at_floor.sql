@@ -1,7 +1,8 @@
 SET LOCAL lock_timeout = '5s';
 
 -- DESTRUCTIVE CONTRACT: deploy phase 1's application floor check to every
--- writer pod/job first, with no rollback expected. Stop out-of-band writers
+-- writer pod/job first, with no rollback expected. The first relay release
+-- with it is a required stop (docs/trigger-retirement-deployment.md). Stop out-of-band writers
 -- and hold the replica breaker closed through this drop until replay catches
 -- up. Old pods that already started do not recheck the guard on each probe.
 -- Keep the 960-second application floor and the ordered heartbeat handshake.

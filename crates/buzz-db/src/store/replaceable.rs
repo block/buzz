@@ -341,7 +341,9 @@ async fn replace_parameterized_event_in_transaction_impl(
     ))
 }
 
-/// The `WHERE` scope of one replaceable coordinate's head read and supersede.
+/// The `WHERE` predicate (after the keyword, which each caller spells so the
+/// floor policy can see where a `SET` list ends) of one replaceable
+/// coordinate's head read and supersede.
 /// `in_channel` binds the channel as `$4`; `global` binds three parameters.
 ///
 /// The channel predicate is spelled per case, never `IS NOT DISTINCT FROM $4`:
@@ -351,11 +353,11 @@ async fn replace_parameterized_event_in_transaction_impl(
 /// write would scan the whole community's.
 macro_rules! replacement_scope {
     (in_channel) => {
-        "WHERE community_id = $1 AND kind = $2 AND pubkey = $3 \
+        "community_id = $1 AND kind = $2 AND pubkey = $3 \
          AND channel_id = $4 AND deleted_at IS NULL"
     };
     (global) => {
-        "WHERE community_id = $1 AND kind = $2 AND pubkey = $3 \
+        "community_id = $1 AND kind = $2 AND pubkey = $3 \
          AND channel_id IS NULL AND deleted_at IS NULL"
     };
 }
@@ -364,7 +366,7 @@ macro_rules! replacement_scope {
 macro_rules! replacement_head_sql {
     ($scope:tt) => {
         concat!(
-            "SELECT created_at, id FROM events ",
+            "SELECT created_at, id FROM events WHERE ",
             replacement_scope!($scope),
             " ORDER BY created_at DESC, id ASC LIMIT 1"
         )
@@ -424,7 +426,7 @@ pub(crate) async fn replace_addressable_event_under_lock(
         (
             replacement_head_sql!(in_channel),
             superseded_with_mentions_sql!(concat!(
-                "UPDATE events SET deleted_at = NOW() ",
+                "UPDATE events SET deleted_at = NOW() WHERE ",
                 replacement_scope!(in_channel)
             )),
         )
@@ -432,7 +434,7 @@ pub(crate) async fn replace_addressable_event_under_lock(
         (
             replacement_head_sql!(global),
             superseded_with_mentions_sql!(concat!(
-                "UPDATE events SET deleted_at = NOW() ",
+                "UPDATE events SET deleted_at = NOW() WHERE ",
                 replacement_scope!(global)
             )),
         )
@@ -955,7 +957,7 @@ mod postgres_tests {
                 true,
                 replacement_head_sql!(in_channel),
                 superseded_with_mentions_sql!(concat!(
-                    "UPDATE events SET deleted_at = NOW() ",
+                    "UPDATE events SET deleted_at = NOW() WHERE ",
                     replacement_scope!(in_channel)
                 )),
             ),
@@ -963,7 +965,7 @@ mod postgres_tests {
                 false,
                 replacement_head_sql!(global),
                 superseded_with_mentions_sql!(concat!(
-                    "UPDATE events SET deleted_at = NOW() ",
+                    "UPDATE events SET deleted_at = NOW() WHERE ",
                     replacement_scope!(global)
                 )),
             ),
