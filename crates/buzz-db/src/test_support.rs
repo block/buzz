@@ -186,7 +186,7 @@ fn drop_cluster_object(admin_url: &str, object: &str, statement: String) {
 
 /// One-session fixture with ordinary triggers disabled, so application
 /// admission is the only community write fence it exercises (as it is in
-/// production after migration 0088). Communities are active, quiescing, fenced.
+/// production after migration 0090). Communities are active, quiescing, fenced.
 pub(crate) async fn admission_fixture() -> (crate::Db, [buzz_core::CommunityId; 3]) {
     use buzz_core::CommunityId;
     use uuid::Uuid;

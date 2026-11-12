@@ -1481,8 +1481,8 @@ mod postgres_tests {
         assert!(deletion.contains("CREATE FUNCTION enforce_community_tombstone"));
         let retirement = migrations
             .iter()
-            .find(|migration| migration.version == 88)
-            .expect("retirement migration 0088")
+            .find(|migration| migration.version == 90)
+            .expect("retirement migration 0090")
             .sql
             .as_str();
         assert!(retirement.starts_with("SET LOCAL lock_timeout = '5s';"));
@@ -1500,7 +1500,7 @@ mod postgres_tests {
                 retirement.contains(&format!(
                     "DROP TRIGGER IF EXISTS community_write_fence_{table} ON {table};"
                 )),
-                "0088 must retire the universal fence on {table}"
+                "0090 must retire the universal fence on {table}"
             );
         }
         for signature in [
