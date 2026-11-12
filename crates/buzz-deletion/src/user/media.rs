@@ -6,6 +6,7 @@ use buzz_media::{
     ObjectVersionsPage, UploadRecord, UPLOAD_RECORD_VERSION,
 };
 use serde_json::{json, Value};
+use std::collections::HashSet;
 #[path = "media_inventory.rs"]
 mod inventory;
 use inventory::{Inventory, PAGE_SIZE};
@@ -15,7 +16,7 @@ const MAX_STORAGE_PAGES: usize = 100_000;
 /// Direct media-handler arguments; no workflow request is needed.
 #[derive(Debug, clap::Args)]
 pub struct Args {
-    /// Human public key (hex or npub), across all communities.
+    /// Human public key (hex or npub). Includes owned agents across all communities.
     #[arg(long, value_parser = buzz_db::user_deletion::normalize_user_deletion_pubkey)]
     pub pubkey: String,
     /// Print selected files without changing the database or storage (default).
@@ -55,19 +56,25 @@ pub async fn handle(db: &Db, pubkey: &str, delete: bool) -> Result<Value> {
 // Fakes replace only external DB/storage boundaries; the tests run the same
 // candidate collection, two passes, disk inventory and deletion loop.
 trait Database {
-    async fn candidates(&self, pubkey: &str, after: &str) -> Result<Vec<String>>;
-    async fn shared(&self, pubkey: &str, hashes: &[String]) -> Result<Vec<String>>;
-    async fn remove(&self, pubkey: &str, hash: &str) -> Result<u64>;
+    async fn targets(&self, pubkey: &str) -> Result<Vec<String>>;
+    async fn candidates(&self, pubkeys: &[String], after: &str) -> Result<Vec<String>>;
+    async fn shared(&self, pubkeys: &[String], hashes: &[String]) -> Result<Vec<String>>;
+    async fn remove(&self, pubkeys: &[String], hash: &str) -> Result<u64>;
 }
 impl Database for Db {
-    async fn candidates(&self, pubkey: &str, after: &str) -> Result<Vec<String>> {
-        Ok(self.user_media_candidates(pubkey, after, PAGE_SIZE).await?)
+    async fn targets(&self, pubkey: &str) -> Result<Vec<String>> {
+        Ok(self.user_media_targets(pubkey).await?)
     }
-    async fn shared(&self, pubkey: &str, hashes: &[String]) -> Result<Vec<String>> {
-        Ok(self.user_media_shared_hashes(pubkey, hashes).await?)
+    async fn candidates(&self, pubkeys: &[String], after: &str) -> Result<Vec<String>> {
+        Ok(self
+            .user_media_candidates(pubkeys, after, PAGE_SIZE)
+            .await?)
     }
-    async fn remove(&self, pubkey: &str, hash: &str) -> Result<u64> {
-        Ok(self.remove_user_media_uploader(pubkey, hash).await?)
+    async fn shared(&self, pubkeys: &[String], hashes: &[String]) -> Result<Vec<String>> {
+        Ok(self.user_media_shared_hashes(pubkeys, hashes).await?)
+    }
+    async fn remove(&self, pubkeys: &[String], hash: &str) -> Result<u64> {
+        Ok(self.remove_user_media_uploader(pubkeys, hash).await?)
     }
 }
 trait Storage {
@@ -116,10 +123,14 @@ async fn run_handler(
     pubkey: &str,
     delete: bool,
 ) -> Result<Value> {
+    let keys = db.targets(pubkey).await?;
+    let keys_set: HashSet<_> = keys.iter().cloned().collect();
+    crate::print_json(&json!({"target_pubkeys": keys,
+        "mode": if delete { "delete" } else { "read-only" }}))?;
     let mut inventory = Inventory::new().await?;
     let mut after = String::new();
     loop {
-        let page = db.candidates(pubkey, &after).await?;
+        let page = db.candidates(&keys, &after).await?;
         let Some(last) = page.last() else {
             break;
         };
@@ -130,7 +141,7 @@ async fn run_handler(
         inventory.add_candidates(&page).await?;
     }
     // Pass one finishes candidate discovery before any sharing decisions.
-    scan_storage(media, pubkey, &mut inventory, true).await?;
+    scan_storage(media, &keys_set, &mut inventory, true).await?;
     after.clear();
     loop {
         let page = inventory.candidates(&after).await?;
@@ -140,21 +151,21 @@ async fn run_handler(
         after = last.clone();
         let hashes: Vec<_> = page.into_iter().map(|(hash, _)| hash).collect();
         inventory
-            .mark_shared(&db.shared(pubkey, &hashes).await?)
+            .mark_shared(&db.shared(&keys, &hashes).await?)
             .await?;
     }
     // Pass two can now recognize another uploader seen before Alice in pass one.
     // It also spools exact candidate versions, without retaining the whole bucket.
-    scan_storage(media, pubkey, &mut inventory, false).await?;
+    scan_storage(media, &keys_set, &mut inventory, false).await?;
     inventory.require_immutable_versions().await?;
-    let result = execute(db, media, pubkey, delete, &mut inventory).await?;
+    let result = execute(db, media, &keys, delete, &mut inventory).await?;
     inventory.close().await?;
     Ok(result)
 }
 
 async fn scan_storage(
     media: &impl Storage,
-    pubkey: &str,
+    keys_set: &HashSet<String>,
     inventory: &mut Inventory,
     candidates_only: bool,
 ) -> Result<()> {
@@ -205,10 +216,10 @@ async fn scan_storage(
                     let owner = buzz_db::user_deletion::normalize_user_deletion_pubkey(
                         &record.uploader_id,
                     )?;
-                    if candidates_only && owner == pubkey {
+                    if candidates_only && keys_set.contains(&owner) {
                         candidates.push(hash.clone());
                     }
-                    if !candidates_only && owner != pubkey {
+                    if !candidates_only && !keys_set.contains(&owner) {
                         shared.push(hash.clone());
                     }
                 }
@@ -248,7 +259,7 @@ async fn scan_storage(
 async fn execute(
     db: &impl Database,
     media: &impl Storage,
-    pubkey: &str,
+    pubkeys: &[String],
     delete: bool,
     inventory: &mut Inventory,
 ) -> Result<Value> {
@@ -287,7 +298,7 @@ async fn execute(
                 }
             }
             if delete {
-                let removed = db.remove(pubkey, &hash).await?;
+                let removed = db.remove(pubkeys, &hash).await?;
                 crate::print_json(&json!({"file_hash": hash, "deleted_versions": handled,
                     "removed_uploader_rows": removed}))?;
             }
@@ -362,13 +373,26 @@ mod tests {
 
     #[derive(Default)]
     struct FakeDb {
+        targets: Vec<String>,
+        target_calls: RefCell<usize>,
         candidates: Vec<String>,
         shared: Vec<String>,
         checked: RefCell<Vec<String>>,
         removed: RefCell<Vec<String>>,
     }
     impl Database for FakeDb {
-        async fn candidates(&self, _: &str, after: &str) -> Result<Vec<String>> {
+        async fn targets(&self, pubkey: &str) -> Result<Vec<String>> {
+            *self.target_calls.borrow_mut() += 1;
+            Ok(if self.targets.is_empty() {
+                vec![pubkey.to_owned()]
+            } else {
+                self.targets.clone()
+            })
+        }
+        async fn candidates(&self, keys: &[String], after: &str) -> Result<Vec<String>> {
+            if !self.targets.is_empty() {
+                assert_eq!(keys, self.targets);
+            }
             Ok(self
                 .candidates
                 .iter()
@@ -377,7 +401,10 @@ mod tests {
                 .cloned()
                 .collect())
         }
-        async fn shared(&self, _: &str, hashes: &[String]) -> Result<Vec<String>> {
+        async fn shared(&self, keys: &[String], hashes: &[String]) -> Result<Vec<String>> {
+            if !self.targets.is_empty() {
+                assert_eq!(keys, self.targets);
+            }
             self.checked.borrow_mut().extend_from_slice(hashes);
             Ok(hashes
                 .iter()
@@ -385,7 +412,10 @@ mod tests {
                 .cloned()
                 .collect())
         }
-        async fn remove(&self, _: &str, hash: &str) -> Result<u64> {
+        async fn remove(&self, keys: &[String], hash: &str) -> Result<u64> {
+            if !self.targets.is_empty() {
+                assert_eq!(keys, self.targets);
+            }
             self.removed.borrow_mut().push(hash.into());
             Ok(1)
         }
@@ -397,6 +427,7 @@ mod tests {
         deleted: RefCell<Vec<ObjectVersionEntry>>,
         fail_delete: RefCell<Option<String>>,
         fail_second_pass: bool,
+        passes: RefCell<Vec<String>>,
     }
     impl FakeStorage {
         fn object(&mut self, key: String, kind: ObjectVersionKind) {
@@ -432,6 +463,9 @@ mod tests {
             key: Option<String>,
             version: Option<String>,
         ) -> Result<ObjectVersionsPage> {
+            if key.is_none() {
+                self.passes.borrow_mut().push(prefix.to_owned());
+            }
             if prefix.is_empty() && self.fail_second_pass {
                 bail!("injected listing failure");
             }
@@ -593,5 +627,54 @@ mod tests {
             assert!(media.deleted.borrow().is_empty());
             assert!(db.removed.borrow().is_empty());
         }
+    }
+
+    const AGENT: &str = "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5";
+
+    #[tokio::test]
+    async fn combined_targets_share_one_inventory_and_preserve_outside_uploaders() {
+        let hashes: Vec<_> = (1..=5).map(|n| format!("{n:064x}")).collect();
+        let db = FakeDb {
+            targets: vec![ALICE.into(), AGENT.into()],
+            candidates: vec![hashes[0].clone()],
+            shared: vec![hashes[3].clone()], // Outside uploader found only in DB.
+            ..Default::default()
+        };
+        let mut media = FakeStorage::default();
+        media.upload(&hashes[0], ALICE, 1);
+        media.upload(&hashes[0], AGENT, 2); // Internal sharing must not protect it.
+        media.upload(&hashes[1], AGENT, 1); // Agent-only, storage-only candidate.
+        media.upload(&hashes[2], BOB, 1); // Outside claim sorts before target claim.
+        media.upload(&hashes[2], AGENT, 2);
+        media.upload(&hashes[3], AGENT, 1);
+        media.upload(&hashes[4], BOB, 1); // Unrelated file is never selected.
+        for hash in &hashes {
+            media.object(format!("{hash}.png"), ObjectVersionKind::Object);
+        }
+        let preview = run_handler(&db, &media, ALICE, false).await.unwrap();
+        assert_eq!(preview["selected_files"], 4);
+        assert_eq!(preview["kept_files"], 2);
+        assert_eq!(preview["deleted_versions"], 0);
+        assert_eq!(*db.target_calls.borrow(), 1);
+        assert_eq!(*media.passes.borrow(), vec!["_uploads/", ""]);
+        assert!(db.removed.borrow().is_empty());
+        assert!(media.deleted.borrow().is_empty());
+
+        let result = run_handler(&db, &media, ALICE, true).await.unwrap();
+        assert_eq!(result["selected_files"], 4);
+        assert_eq!(result["kept_files"], 2);
+        assert_eq!(result["deleted_versions"], 5);
+        assert_eq!(*db.target_calls.borrow(), 2);
+        assert_eq!(
+            *media.passes.borrow(),
+            vec!["_uploads/", "", "_uploads/", ""]
+        );
+        assert_eq!(*db.removed.borrow(), hashes[..4]);
+        assert!(media
+            .deleted
+            .borrow()
+            .iter()
+            .all(|entry| entry.key.contains(&hashes[0]) || entry.key.contains(&hashes[1])));
+        assert_eq!(media.entries.borrow().len(), 7);
     }
 }
