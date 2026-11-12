@@ -76,10 +76,12 @@ One rule applies to every channel, whatever the disclosure level: no private-to-
 | Disclosure level | Reads (W) | Writes to (R) | Safety |
 |---|---|---|---|
 | Unrestricted | Every channel anyone adds it to, and every DM anyone opens with it | Anywhere it can write | Not safe. It is today's behavior, and the public label is the only protection. For information flow, a person is at this level. |
-| Restricted | Open channels, and only the private channels and DMs the owner chose | Only the readers of the channels the owner chose | The owner controls both W and R, so the owner decides every flow. |
+| Restricted | Open channels, and only the private channels and DMs the owner chose | Only the readers of the channels the owner chose. It cannot write in a channel where it is not a member. | The owner controls both W and R, so the owner decides every flow. |
 | Owner-trusted *(tentative)* | Open channels, and only the private channels and DMs the owner chose | Anywhere it can write | Nobody but the owner can put information in W, so the owner decides what is at risk. Other members of the owner's channels still carry that risk. This is the same as unrestricted, except that only the owner can add it to private channels or open DMs with it. |
 | Public *(tentative)* | Only open channels, and the DMs that people open with it | Anyone | It reads nothing private. Anyone can open a DM with it, so one person's DM can reach another person. Clients tell people to treat what they tell it as public. |
-| Personal *(tentative)* | Everything the owner can read | Only the owner, in its DM with the owner | The owner can already read everything it reads. To reach anyone else, it drafts and the owner sends, or the owner approves each send. |
+| Personal *(tentative)* | Everything the owner can read | Only the owner, in its DM with the owner. It cannot write in a channel where it is not a member. | The owner can already read everything it reads. To reach anyone else, it drafts and the owner sends, or the owner approves each send. |
+
+In an open channel with `join_role = member`, a person can write without joining, and so can an unrestricted, owner-trusted or public agent. A restricted or personal agent cannot: the relay refuses its writes in any channel where it is not a member.
 
 A personal agent reads with the owner's authority, so the app gives the owner's read tools only to agents at that disclosure level. Buzz cannot see what either level sends outside Buzz, through other tools or through model inference on another member's node (see [What this doesn't stop](#what-this-doesnt-stop)).
 
@@ -113,7 +115,7 @@ This is the largest cost of the restricted disclosure level. A restricted agent 
 
 R depends on where the agent can write, so the owner controls that separately from where it can read. When the owner adds the agent to a channel, it joins as a guest unless the owner picks member. (The channel's `join_role` still applies to people.) Only the owner can raise the agent's role later. Raising the agent to member in an open channel sets R to the whole community, so everything in W, including other people's content, can reach everyone. Clients say so when the owner raises it. Anyone who can change roles in the channel can lower it, because a lower role only makes R smaller.
 
-In an open channel with `join_role = member`, a person can write without joining. If an agent could do the same, it could post in a community-wide channel without anyone adding it. So an agent cannot.
+In an open channel with `join_role = member`, a person can write without joining. If an agent could do the same, it could post in a community-wide channel without anyone adding it. So a restricted or personal agent cannot.
 
 An agent can join an open channel by itself, as a guest. That adds only public content to W and nothing to R, so it needs no decision from the owner. The relay checks this locally: the channel is open, the role is guest, and the event is the agent's. The same holds for a community's default channels. A restricted agent joins a community only through its owner's add or its own invite claim. Either way, it joins the default channels as a guest.
 
@@ -197,7 +199,7 @@ The owner is whichever key signed the agent's NIP-OA attestation. It need not be
 
 1. ✅ Announce channels: guests are read-only everywhere ([#8143](https://github.com/block/buzz/pull/8143)).
 2. Add the disclosure level, with every agent unrestricted. Owners can't choose restricted until steps 3 to 5 are live; the relay pieces can ship separately before that.
-3. For restricted agents: only the owner can add the agent to a channel or open a DM that includes it. The agent can join open channels by itself, as a guest only. The agent is a guest by default. Only the owner raises its role. Anyone with role authority can lower it. The agent creates only private channels, and adds only its owner to them. Default-channel joins make it a guest.
+3. For restricted agents: only the owner can add the agent to a channel or open a DM that includes it. The agent can join open channels by itself, as a guest only. It cannot write in a channel where it is not a member. The agent is a guest by default. Only the owner raises its role. Anyone with role authority can lower it. The agent creates only private channels, and adds only its owner to them. Default-channel joins make it a guest.
 4. Refuse private-to-open visibility changes, except in a channel where every current and former member is the person opening it or one of that person's agents, no restricted agent has posted there, and every restricted agent in it is a guest.
 5. For restricted agents: refuse events that the relay would store outside a channel, after checking what agents publish now, and require profile approval.
 6. Decide the default disclosure level for new agents.
