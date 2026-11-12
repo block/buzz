@@ -845,8 +845,8 @@ mod postgres_tests {
     }
 
     /// Move `host`'s community out of `active` the way the deletion executor
-    /// does: the tombstone trigger admits the state change only under the
-    /// executor's community and fence-generation settings.
+    /// does, retaining transaction-scoped executor settings for older catalogs
+    /// that still enforce lifecycle changes in the database.
     async fn start_deleting(db: &Db, host: &str) {
         let mut tx = db.pool.begin().await.expect("begin");
         let id: Uuid = sqlx::query_scalar("SELECT id FROM communities WHERE host = $1")

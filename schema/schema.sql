@@ -45,7 +45,7 @@
 --   2. No UNIQUE / PRIMARY KEY / FK on a scoped table is observable across
 --      communities: each leads with `community_id` (or, for child rows whose
 --      parent already pins the community, joins carry the community tuple).
---   3. `channels.community_id` is immutable (triggers/channels.sql; no UPDATE path).
+--   3. `channels.community_id` is immutable (application writers; no UPDATE path).
 --   4. Operator-global tables are named in the explicit allowlist, not implied.
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
@@ -63,18 +63,13 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 \i types/channel_add_policy.sql
 
 -- functions
-\i functions/channels_community_id_immutable.sql
 \i functions/guard_channel_roster_snapshot.sql
 \i functions/events_created_at_floor_guard.sql
-\i functions/prevent_community_deletion_request_retargeting.sql
-\i functions/prevent_community_deletion_approval_removal.sql
-\i functions/protect_community_deletion_manifest_keys.sql
 \i functions/community_deletion_lock_key.sql
 \i functions/community_write_fence_excluded_table.sql
 \i functions/community_write_allowed.sql
 \i functions/assert_community_write_allowed.sql
 \i functions/enforce_community_write_fence.sql
-\i functions/enforce_community_tombstone.sql
 \i functions/attach_community_write_fence.sql
 \i functions/profile_name_fields.sql
 
@@ -149,10 +144,6 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 -- triggers
 \i triggers/channels.sql
 \i triggers/events.sql
-\i triggers/community_deletion_requests.sql
-\i triggers/community_deletion_approvals.sql
-\i triggers/community_deletion_manifest_keys.sql
-\i triggers/communities.sql
 \i triggers/api_tokens.sql
 \i triggers/archived_identities.sql
 \i triggers/audit_log.sql

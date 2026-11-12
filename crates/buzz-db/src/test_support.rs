@@ -400,9 +400,8 @@ pub(crate) async fn insert_historical_event_with_thread_metadata(
 }
 
 /// Move a community fixture into a deletion lifecycle state the way the
-/// executor does: the tombstone trigger only accepts lifecycle changes from a
-/// transaction carrying the executor GUCs for that community, including its
-/// current fence generation.
+/// executor does. Retain transaction-scoped executor GUCs for older catalogs
+/// with a tombstone guard and fixtures that also write through universal fences.
 pub(crate) async fn set_deletion_state(pool: &sqlx::PgPool, id: uuid::Uuid, state: &str) {
     let mut tx = pool.begin().await.expect("begin lifecycle fixture");
     set_deletion_state_in_transaction(&mut tx, id, state).await;
