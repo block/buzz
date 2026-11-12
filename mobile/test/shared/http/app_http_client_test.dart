@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:buzz/shared/http/app_http_client.dart';
+import 'package:buzz/shared/utils/bounded_fetch.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -63,17 +64,27 @@ void main() {
     final client = SharedSessionClient(
       MockClient.streaming((request, _) async {
         (request as http.Abortable).abortTrigger?.then((_) => fired++);
-        return http.StreamedResponse(Stream.value([1]), 200);
+        final status = request.url.path == '/missing' ? 404 : 200;
+        return http.StreamedResponse(Stream.value([1]), status);
       }),
     );
     for (var i = 0; i < 3; i++) {
       await client.get(Uri.parse('https://relay.example/$i'));
     }
+    // A non-200 body is never read, and boundedGet fires its own trigger.
+    final missing = await boundedGet(
+      client,
+      Uri.parse('https://relay.example/missing'),
+      maxBytes: 10,
+    );
+    expect(missing.statusCode, 404);
+    await pumpEventQueue();
+    final ownAborts = fired;
 
     client.close();
     await pumpEventQueue();
 
-    expect(fired, 0);
+    expect(fired, ownAborts);
   });
 
   test('a request\'s own abort trigger still cancels it', () async {

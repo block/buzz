@@ -78,6 +78,7 @@ class SharedSessionClient extends http.BaseClient {
     }
     final abort = Completer<void>();
     void fire() {
+      _inFlight.remove(abort);
       if (!abort.isCompleted) abort.complete();
     }
 
@@ -152,7 +153,7 @@ class SharedSessionClient extends http.BaseClient {
   void close() {
     _closed = true;
     for (final abort in _inFlight.toList()) {
-      abort.complete();
+      if (!abort.isCompleted) abort.complete();
     }
     _inFlight.clear();
     _cleartext?.close();
