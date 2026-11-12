@@ -2610,16 +2610,28 @@ pub(crate) mod tests {
             drop(listener);
             Endpoint::parse(&format!("http://127.0.0.1:{port}/rpc")).unwrap()
         };
-        let (throttled, seen) = provider(
-            |_, _| serde_json::json!({"result": "", "error": "rate_limited", "retry_after": 300}),
-        )
+        // Timed from the desktop's first answer, so waiting for a turn on the
+        // same-user check is not counted.
+        let answered = Arc::new(StdMutex::new(None));
+        let (throttled, seen) = provider({
+            let answered = answered.clone();
+            move |_, _| {
+                answered
+                    .lock()
+                    .unwrap()
+                    .get_or_insert_with(std::time::Instant::now);
+                serde_json::json!({"result": "", "error": "rate_limited", "retry_after": 30})
+            }
+        })
         .await;
         let store = MemoryStore::with(&[("a", "ta", &[RELAY]), ("b", "tb", &[RELAY])]);
         let ads = vec![("a".to_owned(), closed), ("b".to_owned(), throttled)];
-        let started = std::time::Instant::now();
         let listed = list_with(&store, ads).await.unwrap();
-        // Well under `retry_after`, with room to wait for same-user turns.
-        assert!(started.elapsed() < Duration::from_secs(60));
+        let answered = answered.lock().unwrap().expect("b was asked");
+        assert!(
+            answered.elapsed() < Duration::from_secs(5),
+            "waited out retry_after"
+        );
         assert_eq!(listed[0]["status"], "not running");
         assert_eq!(listed[1]["status"], "rate limited");
         assert_eq!(seen.lock().unwrap().len(), 1, "no retries");

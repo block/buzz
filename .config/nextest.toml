@@ -55,9 +55,10 @@ fail-fast = false
 path = "junit.xml"
 
 [test-groups.desktop-same-user-check]
-# These tests reach the CLI's real same-user check, which runs `lsof` with a
-# 5-second limit. Run all at once on a busy Mac, they starve each other past
-# that limit, so they take turns.
+# Most of buzz-cli's `desktop_provider::` tests reach the real same-user
+# check, which runs `lsof` with a 5-second limit. Run all at once on a busy
+# Mac, they starve each other past that limit, so the whole module takes
+# turns; the few that never reach the check run serially too.
 max-threads = 1
 
 [[profile.default.overrides]]
