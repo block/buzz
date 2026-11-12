@@ -1,7 +1,7 @@
 //! User-specific submission and inventory preparation over the shared deletion tables.
 use crate::Db;
 use sqlx::PgPool;
-/// Ordered human-content cleanup in read-only and delete modes.
+/// Ordered user and owned-agent content cleanup in read-only and delete modes.
 pub mod content_batches;
 mod discovery;
 mod inventory;

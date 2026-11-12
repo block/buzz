@@ -20,11 +20,19 @@ async fn preview_delete_and_retry_preserve_other_users_contributions() {
         .id;
     let alice = Keys::generate();
     let bob = Keys::generate();
-    for author in [&alice, &bob] {
+    let agent = Keys::generate();
+    for author in [&alice, &agent, &bob] {
         db.ensure_user(community, author.public_key().as_bytes())
             .await
             .unwrap();
     }
+    sqlx::query("UPDATE users SET agent_owner_pubkey=$2 WHERE community_id=$1 AND pubkey=$3")
+        .bind(community.as_uuid())
+        .bind(alice.public_key().as_bytes().as_slice())
+        .bind(agent.public_key().as_bytes().as_slice())
+        .execute(&pool)
+        .await
+        .unwrap();
     let channel = db
         .create_channel(
             community,
@@ -48,7 +56,7 @@ async fn preview_delete_and_retry_preserve_other_users_contributions() {
     let mut authored = vec![original.clone()];
     let mut preserved = Vec::new();
     // Each author has a reaction, edit, vote and reply targeting the same root.
-    for (index, author) in [&alice, &bob].into_iter().enumerate() {
+    for (index, author) in [&alice, &agent, &bob].into_iter().enumerate() {
         for kind in [7, 40003, 45002, 9] {
             let event = EventBuilder::new(Kind::Custom(kind), format!("{index}:{kind}"))
                 .tags([
@@ -69,7 +77,7 @@ async fn preview_delete_and_retry_preserve_other_users_contributions() {
                     .bind(original.id.as_bytes().as_slice()).bind(author.public_key().as_bytes().as_slice())
                     .bind(event.id.as_bytes().as_slice()).execute(&pool).await.unwrap();
             }
-            if index == 0 {
+            if index < 2 {
                 authored.push(event);
             } else {
                 preserved.push(event);
@@ -89,7 +97,11 @@ async fn preview_delete_and_retry_preserve_other_users_contributions() {
     .execute(&pool)
     .await
     .unwrap();
-    for (name, author) in [("alice-sub", &alice), ("bob-sub", &bob)] {
+    for (name, author) in [
+        ("alice-sub", &alice),
+        ("agent-sub", &agent),
+        ("bob-sub", &bob),
+    ] {
         sqlx::query("INSERT INTO subscriptions (community_id,id,owner_pubkey) VALUES ($1,$2,$3)")
             .bind(community.as_uuid())
             .bind(name)
@@ -124,7 +136,7 @@ async fn preview_delete_and_retry_preserve_other_users_contributions() {
     }
     // Even an owned workflow can contain someone else's approval. Neither its
     // ownership nor Alice's trigger message authorizes deleting that history.
-    for author in [&alice, &bob] {
+    for author in [&alice, &agent, &bob] {
         let workflow = Uuid::new_v4();
         let run = Uuid::new_v4();
         sqlx::query(
@@ -244,7 +256,7 @@ async fn preview_delete_and_retry_preserve_other_users_contributions() {
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(count, 2, "{table} must be retained");
+        assert_eq!(count, 3, "{table} must be retained");
     }
     let retry = store
         .run_message_batches(&options, ExecutionMode::Delete, None, &mut Vec::new())

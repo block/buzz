@@ -11,7 +11,7 @@ pub(super) async fn rows(
     output: &mut Output<'_, impl Write>,
     table: &str,
     select: &str,
-    anchor: &str,
+    anchors: &[Vec<u8>],
     reason: &Value,
     action: &str,
 ) -> Result<()> {
@@ -23,7 +23,7 @@ pub(super) async fn rows(
     loop {
         let page: Vec<(Value, Option<String>)> = sqlx::query_as(sqlx::AssertSqlSafe(query.clone()))
             .bind(output.community)
-            .bind(anchor)
+            .bind(anchors)
             .bind(&cursor)
             .fetch_all(&mut *conn)
             .await?;
@@ -73,9 +73,9 @@ pub(super) async fn event_rows(
             table,
             &format!(
                 "SELECT {key} AS row_key,{warning} AS warning
-            FROM {table} WHERE community_id=$1 AND event_id=decode($2,'hex')"
+            FROM {table} WHERE community_id=$1 AND event_id=ANY($2::bytea[])"
             ),
-            &id,
+            std::slice::from_ref(&event.id),
             &reason,
             "would_delete",
         )
@@ -86,7 +86,7 @@ pub(super) async fn event_rows(
 
 pub(super) async fn authored_reactions(
     conn: &mut PgConnection,
-    subject: &str,
+    targets: &[Vec<u8>],
     output: &mut Output<'_, impl Write>,
 ) -> Result<()> {
     rows(
@@ -95,10 +95,10 @@ pub(super) async fn authored_reactions(
         "reactions",
         &format!(
             "SELECT {REACTION_KEY} AS row_key,NULL::text AS warning
-        FROM reactions WHERE community_id=$1 AND pubkey=decode($2,'hex')"
+        FROM reactions WHERE community_id=$1 AND pubkey=ANY($2::bytea[])"
         ),
-        subject,
-        &json!({"type": "reaction_author", "pubkey": subject}),
+        targets,
+        &json!({"type": "reaction_author"}),
         "would_delete",
     )
     .await
