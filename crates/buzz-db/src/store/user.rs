@@ -201,6 +201,8 @@ pub async fn update_user_profile(
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
+    tx.guard_media(&serde_json::json!([avatar_url, about]))
+        .await?;
     query.execute(tx.conn()).await?;
     tx.commit().await?;
     Ok(())

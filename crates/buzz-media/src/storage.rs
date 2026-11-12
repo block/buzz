@@ -16,6 +16,9 @@ use s3::request::Request as _;
 use s3::{Bucket, Region};
 use serde::{Deserialize, Serialize};
 
+mod retention;
+pub use retention::VersionRetention;
+
 /// A stream of byte chunks from S3, usable with `axum::body::Body::from_stream()`.
 pub type ByteStream = Pin<Box<dyn futures_core::Stream<Item = Result<Bytes, MediaError>> + Send>>;
 
@@ -204,6 +207,19 @@ fn parse_object_versions_page(xml: &[u8]) -> Result<ObjectVersionsPage, MediaErr
 /// S3-compatible object storage client.
 pub struct MediaStorage {
     bucket: Box<Bucket>,
+    upload_admission: Option<std::sync::Arc<dyn UploadAdmission>>,
+}
+
+/// Record a verified uploader claim and reject deletion restrictions before any
+/// upload storage writes, including the idempotent existing-blob path.
+pub trait UploadAdmission: Send + Sync {
+    /// Admission runs after computing and verifying the actual content hash.
+    fn admit<'a>(
+        &'a self,
+        community: CommunityId,
+        hash: &'a str,
+        uploader: &'a [u8],
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<(), MediaError>> + Send + 'a>>;
 }
 
 impl MediaStorage {
@@ -252,7 +268,28 @@ impl MediaStorage {
             S3AddressingStyle::Path => bucket.with_path_style(),
             S3AddressingStyle::Virtual => bucket,
         };
-        Ok(Self { bucket })
+        Ok(Self {
+            bucket,
+            upload_admission: None,
+        })
+    }
+
+    /// Install the relay's database admission before accepting uploads.
+    pub fn with_upload_admission(mut self, admission: std::sync::Arc<dyn UploadAdmission>) -> Self {
+        self.upload_admission = Some(admission);
+        self
+    }
+
+    pub(crate) async fn admit_upload(
+        &self,
+        community: CommunityId,
+        hash: &str,
+        uploader: &[u8],
+    ) -> Result<(), MediaError> {
+        if let Some(admission) = &self.upload_admission {
+            admission.admit(community, hash, uploader).await?;
+        }
+        Ok(())
     }
 
     /// Store an object from a byte slice.
@@ -1118,4 +1155,39 @@ pub struct BlobMeta {
     /// Video duration in seconds. `None` for non-video blobs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_secs: Option<f64>,
+}
+
+impl MediaStorage {
+    /// Read a small attribution record at its exact immutable version. A bounded
+    /// Range request avoids fetching arbitrary media bytes as upload metadata.
+    pub async fn get_small_version(
+        &self,
+        key: &str,
+        version_id: &str,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, MediaError> {
+        let bucket = self
+            .bucket
+            .with_extra_query(HashMap::from([(
+                "versionId".to_owned(),
+                version_id.to_owned(),
+            )]))
+            .map_err(|e| MediaError::StorageError(e.to_string()))?;
+        let response = bucket
+            .get_object_range(key, 0, Some(max_bytes as u64))
+            .await
+            .map_err(|e| MediaError::StorageError(e.to_string()))?;
+        if response.status_code() != 200 && response.status_code() != 206 {
+            return Err(MediaError::StorageError(format!(
+                "version read failed: {}",
+                response.status_code()
+            )));
+        }
+        if response.as_slice().len() > max_bytes {
+            return Err(MediaError::StorageError(
+                "upload record exceeds size bound".into(),
+            ));
+        }
+        Ok(response.to_vec())
+    }
 }

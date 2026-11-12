@@ -124,3 +124,6 @@ pub mod media;
 mod media_postgres_tests;
 #[cfg(test)]
 mod message_edit_state_postgres_tests;
+
+/// Operator media inventory and deletion journal.
+pub mod media_deletion;

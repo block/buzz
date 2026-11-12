@@ -7,6 +7,8 @@ use uuid::Uuid;
 /// Preview real memberships or prepare and execute synthetic deletion requests.
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Direct media discovery and inventory; print-only stops after step 2.
+    Media(media::Options),
     /// Print real current memberships as JSON; does not save or execute a request.
     Inventory {
         /// Demo fixture (default), hex public key, or npub. Current memberships only.
@@ -74,6 +76,10 @@ pub enum Command {
 
 /// Run inventory discovery or synthetic workflow commands against PostgreSQL.
 pub async fn run(command: Command) -> Result<i32> {
+    let command = match command {
+        Command::Media(options) => return media::run(options).await,
+        other => other,
+    };
     let db = if matches!(command, Command::Inventory { .. }) {
         buzz_db::Db::connect_cold_start(
             buzz_db::DbConfig {
@@ -91,6 +97,7 @@ pub async fn run(command: Command) -> Result<i32> {
     };
     let store = db.entity_deletion_store();
     match command {
+        Command::Media(_) => anyhow::bail!("media command was already dispatched"),
         Command::Inventory { pubkey } => {
             crate::print_json(&inventory::generate(&db, &pubkey).await?)?;
         }
@@ -159,3 +166,6 @@ pub mod summary;
 mod transition;
 mod worker;
 mod workflow;
+
+/// Media discovery, classification and protected execution.
+pub mod media;

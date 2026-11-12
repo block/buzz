@@ -296,6 +296,7 @@ pub async fn create_workflow(
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
+    tx.guard_media(&serde_json::json!(definition_json)).await?;
     let id = Uuid::new_v4();
 
     sqlx::query(
@@ -341,6 +342,7 @@ pub async fn upsert_workflow(
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
+    tx.guard_media(&serde_json::json!(definition_json)).await?;
     let row = sqlx::query(
         r#"
         INSERT INTO workflows
@@ -681,6 +683,7 @@ pub async fn update_workflow(
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
+    tx.guard_media(&serde_json::json!(definition_json)).await?;
     let affected = sqlx::query(
         r#"
         UPDATE workflows
@@ -869,6 +872,7 @@ pub async fn create_workflow_run(
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
+    tx.guard_media(&serde_json::json!(trigger_context)).await?;
     let id = Uuid::new_v4();
 
     sqlx::query(
@@ -998,6 +1002,7 @@ pub async fn update_workflow_run(
     let (error_code, error) = failure
         .map(|failure| (Some(failure.code), Some(failure.message)))
         .unwrap_or((None, None));
+    tx.guard_media(&serde_json::json!(trace)).await?;
     let affected = sqlx::query(
         r#"
         UPDATE workflow_runs
@@ -1077,6 +1082,7 @@ pub async fn create_approval(pool: &PgPool, params: CreateApprovalParams<'_>) ->
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
+    tx.guard_media(&serde_json::json!(approver_spec)).await?;
 
     sqlx::query(
         r#"
@@ -1221,6 +1227,7 @@ pub async fn update_approval_by_stored_hash(
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
+    tx.guard_media(&serde_json::json!(note)).await?;
     let status_str = status.to_string();
     let affected = sqlx::query(
         r#"

@@ -1,0 +1,266 @@
+//! Default read-only inventory, or explicit execution of an approved media stage.
+use super::*;
+use buzz_db::{Db, DbConfig};
+use serde_json::Value;
+
+/// Direct command arguments. The mode is bound to the run and cannot change on retry.
+#[derive(Debug, clap::Args)]
+pub struct Options {
+    /// Human public key (hex or npub); demo input is not accepted.
+    #[arg(long,value_parser=buzz_db::user_deletion::normalize_user_deletion_pubkey)]
+    pub pubkey: String,
+    /// Stable UUID for retries. Omit to begin a fresh observation.
+    #[arg(long, conflicts_with = "delete")]
+    pub run_id: Option<Uuid>,
+    /// Include agents currently owned by this person, separately in each community.
+    #[arg(long)]
+    pub include_owned_agents: bool,
+    /// Print the inventory without deleting anything (the default).
+    #[arg(long, visible_alias = "read-only", conflicts_with = "delete")]
+    pub print_only: bool,
+    /// Delete eligible versions for an approved request's current media stage.
+    #[arg(long, requires = "request_id")]
+    pub delete: bool,
+    /// Approved account request whose current stage is purge_media; required with --delete.
+    #[arg(long, requires = "delete")]
+    pub request_id: Option<Uuid>,
+    /// Additional canonical media base URLs (including /media) for deployment aliases.
+    #[arg(long)]
+    pub media_base: Vec<String>,
+    /// Maximum source records to inspect; exceeding it publishes no inventory.
+    #[arg(long, default_value_t = 1_000_000)]
+    pub max_source_rows: usize,
+    /// Per-statement timeout for the read-only source scan.
+    #[arg(long, default_value_t = 120)]
+    pub scan_timeout_secs: u64,
+}
+
+/// Run the direct command. Only explicit --delete can invoke storage deletion.
+pub async fn run(options: Options) -> Result<i32> {
+    if options.delete && (options.print_only || options.run_id.is_some()) {
+        bail!("--delete conflicts with --print-only and --run-id");
+    }
+    if options.delete != options.request_id.is_some() {
+        bail!("--delete and --request-id must be supplied together");
+    }
+    if options.max_source_rows == 0 || options.scan_timeout_secs == 0 {
+        bail!("media scan budgets must be positive");
+    }
+    let budget = buzz_db::media_deletion::MediaScanBudget {
+        max_source_rows: options.max_source_rows,
+        statement_timeout_secs: options.scan_timeout_secs,
+    };
+    let journal_url = crate::required_env("DATABASE_URL")?;
+    let source_url = if options.delete {
+        // Execution reads and reserves through the same writable database. Never
+        // silently ignore a preview's separately configured source connection.
+        if std::env::var("BUZZ_MEDIA_SOURCE_DATABASE_URL").is_ok_and(|source| source != journal_url)
+        {
+            bail!("--delete requires BUZZ_MEDIA_SOURCE_DATABASE_URL to be unset or identical to DATABASE_URL");
+        }
+        journal_url.clone()
+    } else {
+        crate::required_env("BUZZ_MEDIA_SOURCE_DATABASE_URL")?
+    };
+    let (media, namespace) = configured_storage()?;
+    let source_identity = source_identity(&source_url)?;
+    let journal = Db::connect_cold_start(
+        DbConfig {
+            database_url: journal_url,
+            ..DbConfig::default()
+        },
+        "media_journal",
+    )
+    .await?;
+    if let Some(request) = options.request_id {
+        return super::execute::run(
+            &journal,
+            &media,
+            request,
+            StageOptions {
+                human: options.pubkey,
+                include_owned_agents: options.include_owned_agents,
+                storage_namespace: namespace,
+                media_bases: options.media_base,
+                scan_budget: budget,
+                mode: Mode::Delete,
+            },
+        )
+        .await;
+    }
+    let run_id = options.run_id.unwrap_or_else(Uuid::new_v4);
+    eprintln!("media inventory run {run_id}; retry with --run-id {run_id}");
+    let store = journal.media_deletion_store();
+    let binding = json!({"version":3,"mode":"print-only","human":options.pubkey,"include_owned_agents":options.include_owned_agents,"source":source_identity,"namespace":namespace,"media_bases":options.media_base,"scan_budget":budget});
+    let run = store.open_preview(run_id, binding).await?;
+    if store.load(&run).await?.is_none() {
+        let source = Db::connect_cold_start(
+            DbConfig {
+                database_url: source_url,
+                max_connections: 1,
+                min_connections: 0,
+                default_transaction_read_only: true,
+                ..DbConfig::default()
+            },
+            "media_source",
+        )
+        .await?;
+        let mut scan = source
+            .scan_user_media_with_budget(
+                &options.pubkey,
+                options.include_owned_agents,
+                &namespace,
+                &options.media_base,
+                budget,
+            )
+            .await?;
+        storage::supplement(&mut scan, &media, &namespace).await?;
+        store
+            .publish(
+                &run,
+                &scan.files,
+                json!({"tables":scan.scanned,"scope":scan.scope,"unresolved":scan.unresolved,"database_snapshot_at":scan.database_snapshot_at,"storage_listing_finished_at":chrono::Utc::now()}),
+            )
+            .await?;
+    }
+    let files = store
+        .load(&run)
+        .await?
+        .context("discovery did not publish")?;
+    for file in files.into_iter().filter(|f| f.status == "unknown") {
+        let decided = match decision::decide(&media, file.clone()).await {
+            Ok(decided) => decided,
+            Err(error) => {
+                let mut pending = file;
+                pending.last_error = Some(format!("{error:#}"));
+                pending
+            }
+        };
+        store.save_preview_decision(&run, &decided).await?;
+    }
+    let files = store.load(&run).await?.context("discovery missing")?;
+    let unknown = files.iter().filter(|f| f.status == "unknown").count();
+    let discovery = store.receipt(&run).await?;
+    let output: Value = json!({"discovery":discovery,"run_id":run_id,"mode":"print-only","discovery_complete":true,"candidate_count":files.len(),"decision_complete":unknown==0,"execution_authorized":false,"unknown_count":unknown,"files":files});
+    crate::print_json(&output)?;
+    Ok(if unknown == 0 { 0 } else { 2 })
+}
+
+/// Build the shared storage client and stable namespace from BUZZ_S3_* settings.
+/// Workflow callers use the returned namespace in StageOptions and must use the
+/// serving database for execution, never a separate preview journal database.
+pub fn configured_storage() -> Result<(MediaStorage, String)> {
+    let endpoint = crate::required_env("BUZZ_S3_ENDPOINT")?;
+    let bucket = crate::required_env("BUZZ_S3_BUCKET")?;
+    let namespace =
+        buzz_db::entity_deletion::inventory_digest(&json!({"endpoint":endpoint,"bucket":bucket}))?;
+    let (s3_access_key, s3_secret_key) = crate::s3_key_pair_from_env();
+    let media = MediaStorage::new(&buzz_media::MediaConfig {
+        s3_endpoint: endpoint,
+        s3_bucket: bucket,
+        s3_access_key,
+        s3_secret_key,
+        s3_region: crate::s3_region_from_env(),
+        s3_addressing_style: std::env::var("BUZZ_S3_ADDRESSING_STYLE")
+            .unwrap_or_else(|_| "path".into())
+            .parse()
+            .map_err(anyhow::Error::msg)?,
+        max_image_bytes: 1,
+        max_gif_bytes: 1,
+        max_video_bytes: 1,
+        max_file_bytes: 1,
+        public_base_url: "https://example.org/media".into(),
+        upload_records_enabled: false,
+        upload_ip_header: None,
+        upload_port_header: None,
+    })?;
+    Ok((media, namespace))
+}
+
+// Credentials rotate independently of the database whose observation is saved.
+fn source_identity(connection: &str) -> Result<String> {
+    let mut url = url::Url::parse(connection).context("invalid media source connection URL")?;
+    url.set_password(None)
+        .map_err(|_| anyhow::anyhow!("invalid database URL authority"))?;
+    let query: Vec<_> = url
+        .query_pairs()
+        .filter(|(key, _)| !matches!(key.as_ref(), "password" | "passfile"))
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    url.set_query(None);
+    if !query.is_empty() {
+        url.query_pairs_mut().extend_pairs(query);
+    }
+    Ok(buzz_db::entity_deletion::inventory_digest(&json!(
+        url.as_str()
+    ))?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct Cli {
+        #[command(flatten)]
+        options: Options,
+    }
+
+    #[test]
+    fn modes_default_to_preview_and_require_explicit_execution_context() {
+        let key = "a".repeat(64);
+        let parse = |extra: &[&str]| {
+            Cli::try_parse_from(
+                ["media", "--pubkey", &key]
+                    .into_iter()
+                    .chain(extra.iter().copied()),
+            )
+        };
+        let default = parse(&[]).unwrap().options;
+        assert!(!default.delete);
+        assert!(!parse(&["--print-only"]).unwrap().options.delete);
+        assert!(parse(&["--read-only"]).unwrap().options.print_only);
+        let request = Uuid::new_v4().to_string();
+        assert!(
+            parse(&["--delete", "--request-id", &request])
+                .unwrap()
+                .options
+                .delete
+        );
+        for flags in [
+            vec!["--delete"],
+            vec!["--request-id", &request],
+            vec!["--print-only", "--delete", "--request-id", &request],
+            vec!["--read-only", "--delete", "--request-id", &request],
+            vec!["--delete", "--request-id", &request, "--run-id", &request],
+            vec!["--mode", "print"],
+        ] {
+            assert!(parse(&flags).is_err(), "accepted invalid flags: {flags:?}");
+        }
+    }
+
+    #[test]
+    fn saved_source_survives_credential_rotation_but_not_database_changes() {
+        let mut connection =
+            url::Url::parse("postgres://reader@example.org/buzz?sslmode=require").unwrap();
+        // Generate throwaway credentials; no connection or authentication occurs.
+        connection
+            .set_password(Some(&Uuid::new_v4().to_string()))
+            .unwrap();
+        let first = source_identity(connection.as_str()).unwrap();
+        connection
+            .set_password(Some(&Uuid::new_v4().to_string()))
+            .unwrap();
+        assert_eq!(first, source_identity(connection.as_str()).unwrap());
+        connection
+            .query_pairs_mut()
+            .append_pair("password", &Uuid::new_v4().to_string());
+        assert_eq!(first, source_identity(connection.as_str()).unwrap());
+        connection.set_path("/other");
+        assert_ne!(first, source_identity(connection.as_str()).unwrap());
+        connection.set_path("/buzz");
+        connection.set_host(Some("other.example.org")).unwrap();
+        assert_ne!(first, source_identity(connection.as_str()).unwrap());
+    }
+}
