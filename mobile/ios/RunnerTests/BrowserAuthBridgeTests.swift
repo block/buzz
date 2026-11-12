@@ -47,20 +47,15 @@ final class BrowserAuthBridgeTests: XCTestCase {
     for allowed in [
       "https://app.builderlab.xyz/auth/native?state=s",
       "https://app.builderlabstaging.xyz/auth/native",
-      "https://block.builderlab.xyz/api/goose/v1/auth/login?type=cli",
-      "https://block.builderlabstaging.xyz/api/goose/v1/auth/login",
+      "https://acme.builderlab.xyz/api/goose/v1/auth/login?type=cli",
+      "https://id.example.org/api/goose/v1/auth/login",
     ] {
       XCTAssertTrue(BuzzBrowserAuthBridge.allowsLogin(URL(string: allowed)!), allowed)
     }
     for refused in [
-      "http://block.builderlab.xyz/api/goose/v1/auth/login",
-      "https://builderlab.xyz/auth/native",
-      "https://evilbuilderlab.xyz/api/goose/v1/auth/login",
-      "https://block.builderlab.xyz.example.com/api/goose/v1/auth/login",
-      "https://block.builderlab.xyz/api/goose/v1/auth/me",
-      "https://app.builderlab.xyz/api/goose/v1/auth/login",
-      "https://block.builderlab.xyz/auth/native",
-      "https://a.block.builderlab.xyz/api/goose/v1/auth/login",
+      "http://id.example.org/api/goose/v1/auth/login",
+      "https://id.example.org/api/goose/v1/auth/me",
+      "https://id.example.org/",
       "https://app.builderlab.xyz:8443/auth/native",
       "https://user@app.builderlab.xyz/auth/native",
       "https://app.builderlab.xyz/auth/native#fragment",

@@ -126,7 +126,8 @@ class OrganizationSignIn extends ChangeNotifier {
   }
 
   /// Ends the organization session, so the next sign-in goes through single
-  /// sign-on again.
+  /// sign-on again. Throws this call's [AccountFailure] when the saved
+  /// session could not be cleared, even if a newer attempt has started.
   Future<void> signOut() async {
     if (_disposed) return;
     final attempt = ++_attempt;
@@ -137,8 +138,11 @@ class OrganizationSignIn extends ChangeNotifier {
       _retiring = false;
     } on AccountFailure catch (error) {
       _retiring = true;
-      if (attempt != _attempt) return;
-      failure = error;
+      if (attempt == _attempt) {
+        failure = error;
+        _set(_currentStatus());
+      }
+      rethrow;
     }
     if (attempt != _attempt) return;
     _set(_currentStatus());

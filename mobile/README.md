@@ -22,10 +22,7 @@ flutter run \
   [public build](../CONTEXT.md#public-build) and
   [internal build](../CONTEXT.md#internal-build), and
   [ADR 0001](../docs/adr/0001-internal-and-public-mobile-builds.md).
-- `BUZZ_BUILDERLAB_URL`: the build's Builderlab HTTPS origin. On iOS, sign-in
-  currently opens only Builderlab's own hosts (`app.builderlab.xyz`, or a
-  `<tenant>.builderlab.xyz` organization) and their staging equivalents; the
-  native browser bridge refuses any other origin.
+- `BUZZ_BUILDERLAB_URL`: the build's Builderlab HTTPS origin.
 - `BUZZ_BUILDERLAB_RELAYS`: comma-separated DNS domains whose relays use that
   Builderlab's session. Entries match the domain itself and its subdomains,
   case-insensitively. Use DNS names, not URLs or wildcards.
