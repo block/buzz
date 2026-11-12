@@ -944,8 +944,9 @@ pub(crate) const AGENT_DM_REFUSED: &str =
     "restricted: agents cannot post in direct messages; start a Solo chat that includes your owner instead";
 
 /// The stored owner of `pubkey` when it is an agent (`users.agent_owner_pubkey`),
-/// or `None` for a human or unknown key. The link is first-write-wins and set
-/// during auth before an agent's first event, so the answer is cached.
+/// or `None` for a human or unknown key. Only a confirmed owner is cached: the
+/// link is first-write-wins and never changes once set, but a missing link can
+/// be written later, possibly by another relay process.
 pub(crate) async fn agent_owner_cached(
     state: &AppState,
     community_id: CommunityId,
@@ -953,14 +954,16 @@ pub(crate) async fn agent_owner_cached(
 ) -> Result<Option<Vec<u8>>, buzz_db::DbError> {
     let key = (community_id, pubkey_bytes.to_vec());
     if let Some(owner) = state.agent_owner_cache.get(&key) {
-        return Ok(owner);
+        return Ok(Some(owner));
     }
     let owner = state
         .db
         .get_agent_channel_policy(community_id, pubkey_bytes)
         .await?
         .and_then(|(_, owner)| owner);
-    state.agent_owner_cache.insert(key, owner.clone());
+    if let Some(owner) = &owner {
+        state.agent_owner_cache.insert(key, owner.clone());
+    }
     Ok(owner)
 }
 
@@ -7152,6 +7155,43 @@ mod postgres_tests {
             Err(IngestError::Rejected(reason)) => assert_eq!(reason, AGENT_DM_REFUSED),
             other => panic!("agent DM write must be refused, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn agent_owner_lookup_does_not_cache_a_missing_link() {
+        let f = agent_dm_fixture().await;
+        let community = f.tenant.community();
+        let late = nostr::Keys::generate();
+        let late_bytes = late.public_key().to_bytes();
+        f.state
+            .db
+            .ensure_user(community, &late_bytes)
+            .await
+            .expect("ensure user");
+
+        assert_eq!(
+            agent_owner_cached(&f.state, community, &late_bytes)
+                .await
+                .expect("lookup"),
+            None
+        );
+        f.state
+            .db
+            .set_agent_owner_for_authorization(
+                community,
+                &late_bytes,
+                f.owner.public_key().as_bytes(),
+            )
+            .await
+            .expect("link agent owner");
+        assert_eq!(
+            agent_owner_cached(&f.state, community, &late_bytes)
+                .await
+                .expect("lookup"),
+            Some(f.owner.public_key().to_bytes().to_vec()),
+            "an owner linked after a miss must be seen at once"
+        );
     }
 
     #[tokio::test]

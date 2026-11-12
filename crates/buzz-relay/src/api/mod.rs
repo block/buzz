@@ -647,7 +647,7 @@ pub mod relay_members {
                 .insert((tenant.community(), agent.to_bytes().to_vec()), true);
             state.agent_owner_cache.insert(
                 (tenant.community(), agent.to_bytes().to_vec()),
-                Some(owner.to_bytes().to_vec()),
+                owner.to_bytes().to_vec(),
             );
             state.observer_owner_cache.insert(owner_key, true);
         }
