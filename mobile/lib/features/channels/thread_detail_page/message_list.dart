@@ -1,6 +1,7 @@
 part of '../thread_detail_page.dart';
 
 class _ThreadMessageList extends HookWidget {
+  final ActivityTimeline activity;
   final DateHeaderScrollActivity dateScrollActivity;
   final double headHeight;
   final ValueChanged<double> onHeadHeightChanged;
@@ -33,6 +34,7 @@ class _ThreadMessageList extends HookWidget {
   final Map<String, List<TimelineMessage>> childrenByParent;
 
   const _ThreadMessageList({
+    required this.activity,
     required this.dateScrollActivity,
     required this.headHeight,
     required this.onHeadHeightChanged,
@@ -260,6 +262,7 @@ class _ThreadMessageList extends HookWidget {
                             previousReply?.hasAttachments == true ||
                             previousReply == null ||
                             showDayDivider ||
+                            activity[previousReply.id] != activity[reply.id] ||
                             previousReply.pubkey.toLowerCase() !=
                                 reply.pubkey.toLowerCase() ||
                             (reply.createdAt - previousReply.createdAt) > 300;
@@ -273,14 +276,19 @@ class _ThreadMessageList extends HookWidget {
                             nextReply?.hasAttachments == true ||
                             nextReply == null ||
                             !isSameDay(reply.createdAt, nextReply.createdAt) ||
+                            activity[nextReply.id] != activity[reply.id] ||
                             nextReply.pubkey.toLowerCase() !=
                                 reply.pubkey.toLowerCase() ||
                             nextReply.createdAt - reply.createdAt > 300;
 
                         // Check if this reply itself has children (nested thread).
                         final nestedChildren = childrenByParent[reply.id];
+                        // A collapsed run hides its steps' nested threads too.
                         final nestedSummary =
-                            nestedChildren != null && nestedChildren.isNotEmpty
+                            nestedChildren != null &&
+                                nestedChildren.isNotEmpty &&
+                                (activity[reply.id] == null ||
+                                    activity.isExpanded(reply.id))
                             ? _buildNestedSummary(reply.id, nestedChildren)
                             : null;
 
@@ -313,27 +321,31 @@ class _ThreadMessageList extends HookWidget {
                                       stickyDayTimestamp: stickyDayTimestamp,
                                       scrollVisible: dateScrollActivity,
                                     ),
-                                  _ThreadMessage(
-                                    message: reply,
-                                    startsDay: showDayDivider,
-                                    endsDay:
-                                        nextReply != null &&
-                                        !isSameDay(
-                                          reply.createdAt,
-                                          nextReply.createdAt,
-                                        ),
-                                    channelNames: channelNames,
-                                    channelId: channelId,
-                                    currentPubkey: currentPubkey,
-                                    showAuthor: showAuthor,
-                                    showAvatar: showAvatar,
-                                    isHighlighted:
-                                        reply.id == highlightedMessageId,
-                                    allMessages: allMessages,
-                                    isMember: isMember,
-                                    isArchived: isArchived,
-                                    composerFocusNode: composerFocusNode,
-                                    restoreComposerFocus: restoreComposerFocus,
+                                  activity.item(
+                                    reply,
+                                    _ThreadMessage(
+                                      message: reply,
+                                      startsDay: showDayDivider,
+                                      endsDay:
+                                          nextReply != null &&
+                                          !isSameDay(
+                                            reply.createdAt,
+                                            nextReply.createdAt,
+                                          ),
+                                      channelNames: channelNames,
+                                      channelId: channelId,
+                                      currentPubkey: currentPubkey,
+                                      showAuthor: showAuthor,
+                                      showAvatar: showAvatar,
+                                      isHighlighted:
+                                          reply.id == highlightedMessageId,
+                                      allMessages: allMessages,
+                                      isMember: isMember,
+                                      isArchived: isArchived,
+                                      composerFocusNode: composerFocusNode,
+                                      restoreComposerFocus:
+                                          restoreComposerFocus,
+                                    ),
                                   ),
                                   if (nestedSummary != null)
                                     _NestedThreadSummaryRow(

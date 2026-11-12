@@ -4,6 +4,7 @@ class _MessageList extends HookConsumerWidget {
   final DateHeaderScrollActivity dateScrollActivity;
   final ValueNotifier<StickyDateHeaderState> stickyDateHeaderState;
   final List<MainTimelineEntry> entries;
+  final ActivityTimeline activity;
   final List<TypingEntry> inlineTyping;
 
   /// Agents typing in each thread, by lowercase root message ID.
@@ -32,6 +33,7 @@ class _MessageList extends HookConsumerWidget {
   const _MessageList({
     required this.dateScrollActivity,
     required this.entries,
+    required this.activity,
     this.inlineTyping = const [],
     this.threadWorking = const {},
     required this.stickyDateHeaderState,
@@ -1017,6 +1019,7 @@ class _MessageList extends HookConsumerWidget {
                         prevMessage == null ||
                         prevMessage.isSystem ||
                         showDayDivider ||
+                        activity[prevMessage.id] != activity[message.id] ||
                         prevMessage.pubkey.toLowerCase() !=
                             message.pubkey.toLowerCase() ||
                         (message.createdAt - prevMessage.createdAt) > 300);
@@ -1029,6 +1032,7 @@ class _MessageList extends HookConsumerWidget {
                     nextMessage == null ||
                     nextMessage.isSystem ||
                     nextMessage.hasAttachments ||
+                    activity[nextMessage.id] != activity[message.id] ||
                     !isSameDay(message.createdAt, nextMessage.createdAt) ||
                     nextMessage.pubkey.toLowerCase() !=
                         message.pubkey.toLowerCase() ||
@@ -1050,6 +1054,7 @@ class _MessageList extends HookConsumerWidget {
                   animate,
                   isHandoff,
                   threadWorking[message.id.toLowerCase()],
+                  (activity[message.id], activity.isExpanded(message.id)),
                   if (index == 0) ...[displayedTyping, workingAgents],
                 ]);
                 if (rowCache.reuse(message, inputs) case final row?) return row;
@@ -1100,44 +1105,46 @@ class _MessageList extends HookConsumerWidget {
                             isMember: isMember,
                             isArchived: isArchived,
                           )
-                        else ...[
-                          _MessageBubble(
-                            message: message,
-                            startsDay: showDayDivider,
-                            endsDay: endsDay,
-                            showAuthor: showAuthor || isHandoff,
-                            typingHandoff: isHandoff,
-                            showAvatar: showAvatar,
-                            hasReplies: entry.summary != null,
-                            replyFooter:
-                                entry.summary == null &&
-                                    !threadWorking.containsKey(
-                                      message.id.toLowerCase(),
-                                    )
-                                ? null
-                                : _ThreadSummaryRow(
-                                    summary: entry.summary,
-                                    working:
-                                        threadWorking[message.id
-                                            .toLowerCase()] ??
-                                        const [],
-                                    message: message,
-                                    allMessages: allMessages,
-                                    channelId: channelId,
-                                    currentPubkey: currentPubkey,
-                                    isMember: isMember,
-                                    isArchived: isArchived,
-                                  ),
-                            channelNames: channelNamesMap,
-                            currentChannelId: channelId,
-                            currentPubkey: currentPubkey,
-                            allMessages: allMessages,
-                            isMember: isMember,
-                            isArchived: isArchived,
-                            composerFocusNode: composerFocusNode,
-                            restoreComposerFocus: restoreComposerFocus,
+                        else
+                          activity.item(
+                            message,
+                            _MessageBubble(
+                              message: message,
+                              startsDay: showDayDivider,
+                              endsDay: endsDay,
+                              showAuthor: showAuthor || isHandoff,
+                              typingHandoff: isHandoff,
+                              showAvatar: showAvatar,
+                              hasReplies: entry.summary != null,
+                              replyFooter:
+                                  entry.summary == null &&
+                                      !threadWorking.containsKey(
+                                        message.id.toLowerCase(),
+                                      )
+                                  ? null
+                                  : _ThreadSummaryRow(
+                                      summary: entry.summary,
+                                      working:
+                                          threadWorking[message.id
+                                              .toLowerCase()] ??
+                                          const [],
+                                      message: message,
+                                      allMessages: allMessages,
+                                      channelId: channelId,
+                                      currentPubkey: currentPubkey,
+                                      isMember: isMember,
+                                      isArchived: isArchived,
+                                    ),
+                              channelNames: channelNamesMap,
+                              currentChannelId: channelId,
+                              currentPubkey: currentPubkey,
+                              allMessages: allMessages,
+                              isMember: isMember,
+                              isArchived: isArchived,
+                              composerFocusNode: composerFocusNode,
+                              restoreComposerFocus: restoreComposerFocus,
+                            ),
                           ),
-                        ],
                         if (index == 0 &&
                             (displayedTyping.isNotEmpty ||
                                 TypingMotionPreview.enabled))

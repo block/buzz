@@ -8,6 +8,7 @@ import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
 import 'message_swipe_reply.dart';
 import 'bestie_welcome.dart';
 import 'bestie_welcome_storage.dart';
+import 'agent_activity_row.dart';
 import 'agent_reply_handoff.dart';
 import 'huddle_timeline.dart';
 import '../../shared/widgets/confirmation_dialog.dart';
@@ -667,6 +668,13 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
       flat: personalChat,
       relaySummaries: ref.read(messagesProvider.notifier).threadSummaries,
     );
+    final activity = useActivityTimeline(
+      ref,
+      channel.id,
+      () => [for (final entry in timelineEntries) entry.message],
+      loaded: timelineMessages,
+      keys: [timelineMessages, personalChat],
+    );
 
     return FrostedScaffold(
       extendHeaderUnderRail: true,
@@ -854,6 +862,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                               stickyDateHeaderState: stickyDateHeaderState,
                               dateScrollActivity: dateScrollActivity,
                               entries: timelineEntries,
+                              activity: activity,
                               allMessages: timelineMessages,
                               initialMessageId: personalChat
                                   ? initialMessageId ?? initialThreadRootId
