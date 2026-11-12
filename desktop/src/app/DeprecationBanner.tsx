@@ -10,6 +10,8 @@ import { Button } from "@/shared/ui/button";
 
 const BUZZ_APP_RELEASES_URL =
   "https://github.com/block/buzz-app/releases/latest";
+const BUZZ_APP_UPGRADE_GUIDE_URL =
+  "https://github.com/block/buzz-app/blob/main/docs/upgrading.md";
 
 function readDismissedAt(): string | null {
   try {
@@ -47,23 +49,44 @@ export function DeprecationBanner() {
       role="status"
     >
       <Sparkles aria-hidden className="size-4 shrink-0 text-primary" />
-      <p className="min-w-0 flex-1">
-        A new Buzz app is here! This version is being retired, so grab the new
-        one whenever you get a chance.
-      </p>
-      <Button
-        className="h-7 shrink-0 gap-1.5"
-        data-testid="deprecation-banner-download"
-        onClick={() => {
-          void openUrl(BUZZ_APP_RELEASES_URL);
-        }}
-        size="sm"
-        type="button"
-        variant="outline"
-      >
-        Get the new app
-        <ExternalLink aria-hidden className="size-3.5" />
-      </Button>
+      {/* The actions wrap under the message when the row gets too narrow. */}
+      <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-3 gap-y-1.5">
+        <p
+          className="min-w-0 grow basis-64"
+          data-testid="deprecation-banner-message"
+        >
+          A new Buzz app is here! This version is being retired, so grab the new
+          one whenever you get a chance.
+        </p>
+        <div className="flex shrink-0 items-center gap-2">
+          <Button
+            className="h-7 shrink-0 gap-1.5"
+            data-testid="deprecation-banner-upgrade-guide"
+            onClick={() => {
+              void openUrl(BUZZ_APP_UPGRADE_GUIDE_URL);
+            }}
+            size="sm"
+            type="button"
+            variant="ghost"
+          >
+            How to upgrade
+            <ExternalLink aria-hidden className="size-3.5" />
+          </Button>
+          <Button
+            className="h-7 shrink-0 gap-1.5"
+            data-testid="deprecation-banner-download"
+            onClick={() => {
+              void openUrl(BUZZ_APP_RELEASES_URL);
+            }}
+            size="sm"
+            type="button"
+            variant="outline"
+          >
+            Get the new app
+            <ExternalLink aria-hidden className="size-3.5" />
+          </Button>
+        </div>
+      </div>
       <Button
         aria-label="Remind me later"
         className="size-7 shrink-0 text-muted-foreground"

@@ -669,6 +669,12 @@ type BridgeOptions = {
    * that exercise the Experiments toggle UI itself.
    */
   seedPreviewFeatures?: boolean;
+  /**
+   * When true (default), seed the deprecation banner as just dismissed so it
+   * stays out of existing layout and visual baselines. Set to false in specs
+   * that exercise the banner itself.
+   */
+  seedDeprecationBannerDismissed?: boolean;
   user?: keyof typeof TEST_IDENTITIES;
 };
 
@@ -874,7 +880,6 @@ async function seedDefaultCommunity(
   );
 }
 
-// Keep the deprecation banner out of existing layout and visual baselines.
 async function seedDeprecationBannerDismissed(page: Page) {
   await page.addInitScript((key) => {
     window.localStorage.setItem(key, String(Date.now()));
@@ -916,7 +921,9 @@ export async function installBridge(page: Page, options: BridgeOptions) {
   if (options.seedPreviewFeatures !== false) {
     await seedPreviewFeaturesEnabled(page);
   }
-  await seedDeprecationBannerDismissed(page);
+  if (options.seedDeprecationBannerDismissed !== false) {
+    await seedDeprecationBannerDismissed(page);
+  }
 
   await page.addInitScript(
     ({
@@ -1021,6 +1028,7 @@ export async function installMockBridge(
     skipOnboardingSeed?: boolean;
     skipCommunitySeed?: boolean;
     seedPreviewFeatures?: boolean;
+    seedDeprecationBannerDismissed?: boolean;
   },
 ) {
   await installBridge(page, {
@@ -1031,6 +1039,7 @@ export async function installMockBridge(
     skipOnboardingSeed: options?.skipOnboardingSeed,
     skipCommunitySeed: options?.skipCommunitySeed,
     seedPreviewFeatures: options?.seedPreviewFeatures,
+    seedDeprecationBannerDismissed: options?.seedDeprecationBannerDismissed,
   });
 }
 
