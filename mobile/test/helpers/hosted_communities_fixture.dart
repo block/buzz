@@ -7,6 +7,7 @@ import 'package:buzz/shared/hosted/browser_auth.dart';
 import 'package:buzz/shared/hosted/builderlab_account.dart';
 import 'package:buzz/shared/hosted/hosted_flow.dart';
 import 'package:buzz/shared/hosted/hosted_identity_service.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:nostr/nostr.dart' as nostr;
@@ -101,13 +102,18 @@ class HostedCommunitiesFixture {
     'community_url': 'wss://$name.communities.buzz.xyz',
   };
 
-  Future<void> initialize({bool backup = true, bool widget = false}) async {
+  Future<void> initialize({
+    bool backup = true,
+    bool widget = false,
+    FlutterSecureStorage? accountStorage,
+  }) async {
     bound = keys.public;
     final expiry = DateTime.now()
         .toUtc()
         .add(const Duration(hours: 1))
         .toIso8601String();
     account = BuilderlabAccountClient(
+      storage: accountStorage,
       httpClient: MockClient((request) async {
         final path = request.url.path;
         requests.add(path);

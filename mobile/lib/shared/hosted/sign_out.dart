@@ -4,14 +4,11 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import '../community/community.dart';
 import '../community/community_provider.dart';
 import 'account_identity_store.dart';
+import 'builderlab_account.dart';
 import 'hosted_environment.dart';
 import 'hosted_flow_provider.dart';
 import '../widgets/confirmation_dialog.dart';
 import '../widgets/feedback_snackbar.dart';
-
-/// How long sign-out waits for removed communities' push leases to be revoked
-/// before it ends the Builderlab session those revocations authenticate with.
-const _pushLeaseRevocationGrace = Duration(seconds: 10);
 
 /// Signs this device out: removes every community, and in a public build ends
 /// the Builderlab session. Each community's key goes to this device's saved
@@ -23,9 +20,6 @@ Future<void> confirmSignOut(BuildContext context, WidgetRef ref) async {
   final navigator = Navigator.of(context);
   final list = ref.read(communityListProvider.notifier);
   final flow = HostedEnvironment.enabled ? ref.read(hostedFlowProvider) : null;
-  final revokePushLeases = ref.read(
-    communityPushLeaseRevocationTriggerProvider,
-  );
   try {
     final communities = await ref.read(communityListProvider.future);
     final active = await ref.read(activeCommunityProvider.future);
@@ -44,6 +38,13 @@ Future<void> confirmSignOut(BuildContext context, WidgetRef ref) async {
     for (final community in communities) {
       await keepCommunityKey(community);
     }
+    // The session ends before any community is removed, so the Sign in
+    // landing never shows it and nothing started there can be cancelled by
+    // it. Removed communities' push-lease revocations authenticate with the
+    // push-stop credential it leaves behind.
+    await flow?.signOutAccount();
+    // A failed clear leaves the flow blocked rather than throwing.
+    if (flow?.account.account != null) throw AccountFailure.storage;
     // The active community goes last, so removing the others never switches
     // to and connects another one.
     for (final community in [
@@ -59,16 +60,7 @@ Future<void> confirmSignOut(BuildContext context, WidgetRef ref) async {
       SnackBar(content: Text('Failed to sign out: $e')),
       kind: ToastKind.error,
     );
-    return;
   }
-  if (flow == null) return;
-  // A hosted relay accepts the tombstones that stop this device's
-  // notifications only with the session's assertion. A revocation still
-  // outstanding stays journaled and retries on its own schedule.
-  try {
-    await revokePushLeases().timeout(_pushLeaseRevocationGrace);
-  } catch (_) {}
-  await flow.signOutAccount();
 }
 
 /// Copies [community]'s key into this device's saved identities, where

@@ -249,12 +249,16 @@ class SettingsPage extends HookConsumerWidget {
                   AppListCard(
                     verticalPadding: Grid.twelve,
                     children: [
-                      AppListRow(
-                        key: const Key('settings-sign-out'),
-                        icon: BuzzIcons.logOut,
-                        title: 'Sign out',
-                        titleColor: context.colors.error,
-                        onTap: () => confirmSignOut(context, ref),
+                      // Below Settings' own messenger, so a failure shows
+                      // here rather than on the page underneath.
+                      Builder(
+                        builder: (rowContext) => AppListRow(
+                          key: const Key('settings-sign-out'),
+                          icon: BuzzIcons.logOut,
+                          title: 'Sign out',
+                          titleColor: context.colors.error,
+                          onTap: () => confirmSignOut(rowContext, ref),
+                        ),
                       ),
                     ],
                   ),
