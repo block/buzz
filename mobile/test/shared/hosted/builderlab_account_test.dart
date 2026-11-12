@@ -1,3 +1,5 @@
+import 'package:buzz/shared/hosted/known_community_sync.dart';
+import '../community/community_storage_test.dart' show FakeSecureStorage;
 import 'dart:async';
 
 import 'hosted_http_fixture.dart';
@@ -18,6 +20,70 @@ void main() {
       .toIso8601String();
   final verifier = List.filled(43, 'a').join();
   setUp(() => FlutterSecureStorage.setMockInitialValues({}));
+
+  test(
+    'same-subject setup completion resumes a parked account removal',
+    () async {
+      var needsSetup = true;
+      var removals = 0;
+      final client = BuilderlabAccountClient(
+        storage: FakeSecureStorage(),
+        httpClient: MockClient((request) async {
+          if (request.url.path.endsWith('/exchange')) {
+            return http.Response(
+              jsonEncode({
+                'session_credential': 'same-credential',
+                'expires_at': expiry,
+              }),
+              200,
+            );
+          }
+          if (request.url.path.endsWith('/me')) {
+            return http.Response(
+              jsonEncode({
+                'subject': 'same-owner',
+                'expires_at': expiry,
+                'account_status': needsSetup
+                    ? 'ACCOUNT_STATUS_NEEDS_DETAILS'
+                    : 'ACCOUNT_STATUS_ACTIVE',
+              }),
+              200,
+            );
+          }
+          removals++;
+          return http.Response('{}', needsSetup ? 403 : 200);
+        }),
+      );
+      await client.exchange(code: 'first', verifier: verifier);
+      final sync = KnownCommunitySync(
+        account: client,
+        storage: FakeSecureStorage(),
+        localCommunities: () async => [],
+      );
+      addTearDown(() {
+        sync.dispose();
+        client.dispose();
+      });
+      await sync.remove('wss://team.example');
+      await sync.synchronize();
+      expect(sync.failure, AccountFailure.accountSetupRequired);
+      expect(removals, 1);
+      await client.restore();
+      await sync.synchronize();
+      expect(
+        removals,
+        1,
+        reason: 'ordinary restore must not bypass the parked session',
+      );
+      needsSetup = false;
+      await client.exchange(code: 'setup-completed', verifier: verifier);
+      await sync.synchronize();
+      expect(client.account!.subject, 'same-owner');
+      expect(removals, 2);
+      expect(await sync.pendingRemovals('same-owner'), isEmpty);
+      expect(sync.failure, isNull);
+    },
+  );
 
   test(
     'real client exchanges PKCE code, verifies, persists and restores session',

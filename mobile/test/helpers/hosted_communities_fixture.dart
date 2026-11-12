@@ -101,8 +101,12 @@ class HostedCommunitiesFixture {
     'community_url': 'wss://$name.communities.buzz.xyz',
   };
 
-  Future<void> initialize({bool backup = true, bool widget = false}) async {
-    bound = keys.public;
+  Future<void> initialize({
+    bool backup = true,
+    bool widget = false,
+    bool withIdentity = true,
+  }) async {
+    bound = withIdentity ? keys.public : null;
     final expiry = DateTime.now()
         .toUtc()
         .add(const Duration(hours: 1))
@@ -131,7 +135,16 @@ class HostedCommunitiesFixture {
         if (path.endsWith('/current')) {
           return http.Response(
             jsonEncode({
-              'identity': {'pubkey_hex': bound},
+              'identity': bound == null ? null : {'pubkey_hex': bound},
+            }),
+            200,
+          );
+        }
+        if (path.endsWith('/nsec-backups/status')) {
+          return http.Response(
+            jsonEncode({
+              'backup_nostr_pubkeys': <String>[],
+              'current_nostr_pubkey': bound,
             }),
             200,
           );
@@ -159,8 +172,8 @@ class HostedCommunitiesFixture {
     } else {
       await account.exchange(code: 'code', verifier: 'a' * 43);
     }
-    await store.create(keys.nsec);
-    if (backup) {
+    if (withIdentity) await store.create(keys.nsec);
+    if (backup && withIdentity) {
       await store.confirmBackup(
         BackupReceipt(
           backend: BuilderlabAccountClient.origin.toString(),

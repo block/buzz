@@ -167,6 +167,11 @@ jobs:
           test/features/onboarding/hosted_journeys_test.dart
           test/features/onboarding/onboarding_sign_out_test.dart
           test/features/onboarding/hosted_communities_test.dart
+          test/features/onboarding/account_community_entry_test.dart
+          test/features/onboarding/account_sync_recovery_test.dart
+          test/features/onboarding/known_community_sync_integration_test.dart
+          test/features/onboarding/known_community_sync_test.dart
+          test/shared/hosted/builderlab_account_test.dart
           test/features/pairing/pairing_hosted_handoff_test.dart
           test/shared/agents/remote_agents_test.dart
           test/features/agents

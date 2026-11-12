@@ -84,19 +84,40 @@ Future<void> _confirmRemoveCommunity(
   required bool closeSheetAfterRemoval,
 }) async {
   final messenger = ScaffoldMessenger.of(context);
+  final account = ref.read(builderlabAccountProvider);
+  final sync = ref.read(knownCommunitySyncProvider);
   try {
+    final subject = sync == null ? null : await account.retainedSubject();
+    if (!context.mounted) return;
+    final retainsDestination = (ref.read(communityListProvider).value ?? [])
+        .any(
+          (item) =>
+              item.id != community.id &&
+              knownCommunityAddress(item.relayUrl) ==
+                  knownCommunityAddress(community.relayUrl),
+        );
     final confirmed = await showDestructiveConfirmation(
       context: context,
       title: 'Remove community?',
-      message:
-          'Are you sure you want to remove “${community.name}”? '
-          'You can pair with it again later.',
+      message: subject == null
+          ? 'Are you sure you want to remove “${community.pickerName}”? You can pair with it again later.'
+          : retainsDestination
+          ? 'Remove this identity for “${community.pickerName}” from this device? Another saved identity still uses this community, so it stays in your account list.'
+          : 'Remove “${community.pickerName}” from this device and request removal from your Builder Lab community list? Account removal syncs when connected.',
       confirmLabel: 'Remove',
     );
-    if (!confirmed || !context.mounted) return;
+    if (!confirmed ||
+        !context.mounted ||
+        (sync != null && await account.retainedSubject() != subject)) {
+      return;
+    }
     await ref
         .read(communityListProvider.notifier)
-        .removeCommunity(community.id);
+        .removeCommunity(
+          community.id,
+          confirmedSubject: subject,
+          accountConfirmed: true,
+        );
     if (closeSheetAfterRemoval && context.mounted) {
       Navigator.of(context).pop();
     }
@@ -105,6 +126,43 @@ Future<void> _confirmRemoveCommunity(
       SnackBar(content: Text('Failed to remove community: $e')),
       kind: ToastKind.error,
     );
+  }
+}
+
+Future<void> _confirmRemoveAccountCommunity(
+  BuildContext context,
+  WidgetRef ref,
+  AddCommunityDeepLink community,
+) async {
+  final account = ref.read(builderlabAccountProvider);
+  final sync = ref.read(knownCommunitySyncProvider);
+  if (sync == null) return;
+  try {
+    final subject = await account.retainedSubject();
+    if (!context.mounted || subject == null) return;
+    final confirmed = await showDestructiveConfirmation(
+      context: context,
+      title: 'Remove community?',
+      message:
+          'Remove “${community.name}” from your Builder Lab community list? Removal syncs when connected.',
+      confirmLabel: 'Remove',
+    );
+    if (!confirmed ||
+        !context.mounted ||
+        await account.retainedSubject() != subject) {
+      return;
+    }
+    await sync.remove(community.relayUrl, expectedSubject: subject);
+    sync.trigger();
+  } catch (_) {
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showFeedbackSnackBar(
+        const SnackBar(
+          content: Text('Could not save this removal. Please try again.'),
+        ),
+        kind: ToastKind.error,
+      );
+    }
   }
 }
 

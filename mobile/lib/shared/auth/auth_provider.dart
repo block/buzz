@@ -1,3 +1,4 @@
+import '../hosted/known_community_sync_provider.dart';
 import '../hosted/hosted_relay_auth.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
@@ -62,7 +63,9 @@ class AuthNotifier extends AsyncNotifier<AuthState> {
     Community community, {
     bool Function()? shouldContinue,
     bool activate = true,
-  }) {
+  }) async {
+    final sync = ref.read(knownCommunitySyncProvider);
+    community = await sync?.prepareAddition(community) ?? community;
     return ref.read(communityTransitionProvider).runExclusive(() async {
       if (shouldContinue != null && !shouldContinue()) return;
       await CommunityEntryRequirements.verify(
@@ -75,6 +78,7 @@ class AuthNotifier extends AsyncNotifier<AuthState> {
       final storage = ref.read(communityStorageProvider);
       await storage.save(community);
       if (activate) await storage.saveActiveId(community.id);
+      sync?.trigger();
       await syncStoredCommunitySnapshot(ref);
 
       // Invalidate community providers so other consumers pick up the new data.

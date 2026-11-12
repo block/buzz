@@ -253,7 +253,10 @@ void main() {
         await tester.pump();
         await tester.pump(const Duration(milliseconds: 300));
         expect(f.flow.stage, HostedFlowStage.signIn);
-        expect(f.browser.startedIntent, {'type': 'account'});
+        expect(f.browser.startedIntent, {
+          'type': 'account',
+          'discover_only': 'true',
+        });
         expect(find.byType(HostedConnectPage), findsNothing);
         expect(
           find.bySemanticsLabel('Cancel sign-in').hitTestable(),

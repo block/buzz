@@ -1,14 +1,19 @@
 import '../deeplink/deep_link.dart';
 import 'builderlab_account.dart';
 import 'hosted_environment.dart';
+import 'known_community_address.dart';
 
-/// Account-saved destinations, not evidence that this identity is a member.
-/// Keep the existing hosted environment boundary and normal relay admission.
-Future<List<AddCommunityDeepLink>> loadKnownHostedCommunities(
+/// Account-saved destinations this client can enter. These are saved addresses,
+/// not evidence of membership; hosted and external entry retain admission checks.
+Future<List<AddCommunityDeepLink>> loadKnownAccountCommunities(
   BuilderlabAccountClient account,
 ) async {
-  final response = await account.post('/v1/buzz/known-communities/list', {});
-  // Protobuf JSON omits an empty repeated field.
+  final subject = account.account?.subject;
+  final response = await account.post(
+    '/v1/buzz/known-communities/list',
+    {},
+    expectedSubject: subject,
+  );
   final rows = response['communities'] ?? <dynamic>[];
   if (response['error'] != null || rows is! List) {
     throw AccountFailure.invalidResponse;
@@ -18,20 +23,22 @@ Future<List<AddCommunityDeepLink>> loadKnownHostedCommunities(
     if (row is! Map<String, dynamic> || row['community_url'] is! String) {
       throw AccountFailure.invalidResponse;
     }
-    final relay = Uri.tryParse(row['community_url'] as String);
-    // The account can also save destinations this hosted build cannot enter.
-    if (relay == null ||
-        relay.scheme != 'wss' ||
-        !RegExp(r'^[a-z0-9]+(?:[.-][a-z0-9]+)*$').hasMatch(relay.host) ||
-        !HostedEnvironment.supportsRelay(relay)) {
+    final raw = row['community_url'] as String;
+    if (Uri.tryParse(raw)?.scheme != 'wss') continue;
+    final relay = knownCommunityAddress(raw);
+    if (relay == null) continue;
+    final uri = Uri.parse(relay);
+    // Hosted domains require their configured HTTPS origin. They cannot use
+    // self-hosted entry to bypass the build's account/admission boundary.
+    if (HostedEnvironment.requiresAuth(uri.host) &&
+        !HostedEnvironment.supportsRelay(uri)) {
       continue;
     }
-    final canonical = Uri(scheme: 'wss', host: relay.host);
     communities.putIfAbsent(
-      canonical.host,
+      relay,
       () => AddCommunityDeepLink(
-        relayUrl: canonical.toString(),
-        name: canonical.host,
+        relayUrl: relay,
+        name: uri.hasPort ? uri.authority : uri.host,
       ),
     );
   }

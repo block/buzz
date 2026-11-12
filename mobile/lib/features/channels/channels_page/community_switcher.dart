@@ -90,8 +90,10 @@ class CommunitySwitcherPage extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final communitiesAsync = ref.watch(communityListProvider);
+    final knownAsync = ref.watch(knownCommunitiesProvider).unwrapPrevious();
     final activeId = ref.watch(activeCommunityProvider).value?.id;
     final isEditing = useState(false);
+    final openingAccountCommunity = useState(false);
     final flight = useState<_CommunityFlight?>(
       arrivingCommunity == null
           ? null
@@ -299,10 +301,45 @@ class CommunitySwitcherPage extends HookConsumerWidget {
       unawaited(
         navigator.push(
           MaterialPageRoute<void>(
-            builder: (_) => const OnboardingAppEntry(addingCommunity: true),
+            builder: (_) => const OnboardingAppEntry(
+              addingCommunity: true,
+              showFindCommunities: false,
+            ),
           ),
         ),
       );
+    }
+
+    Future<void> openAccountCommunity(AddCommunityDeepLink community) async {
+      if (openingAccountCommunity.value) return;
+      openingAccountCommunity.value = true;
+      final hosted = HostedEnvironment.supportsRelay(
+        Uri.parse(community.relayUrl),
+      );
+      final flow = hosted ? ref.read(hostedFlowProvider) : null;
+      final pending = hosted
+          ? null
+          : ref.read(pendingDeepLinkProvider.notifier);
+      final route = ModalRoute.of(context);
+      Navigator.of(context).pop();
+      if (route != null) await route.completed;
+      // The app's hosted gate presents any required sign-in, identity recovery,
+      // or admission failure. Merely listing a destination grants no access.
+      if (flow != null) {
+        await flow.start(community);
+      } else {
+        // The app gate owns the existing self-hosted identity-choice flow.
+        pending!.open(
+          Uri(
+            scheme: 'buzz',
+            host: 'add-community',
+            queryParameters: {
+              'relay': community.relayUrl,
+              'name': community.name,
+            },
+          ),
+        );
+      }
     }
 
     final header = FrostedAppBar(
@@ -364,6 +401,25 @@ class CommunitySwitcherPage extends HookConsumerWidget {
                     ),
                   ),
                 ),
+              const AccountCommunitySyncStatus(),
+              if (knownAsync.isLoading)
+                const Padding(
+                  padding: EdgeInsets.only(bottom: Grid.sm),
+                  child: BuzzLoadingIndicator(
+                    size: 18,
+                    semanticLabel: 'Loading account communities',
+                  ),
+                ),
+              if (knownAsync.hasError)
+                Column(
+                  children: [
+                    const Text('Could not load your account communities.'),
+                    TextButton(
+                      onPressed: () => ref.invalidate(knownCommunitiesProvider),
+                      child: const Text('Try again'),
+                    ),
+                  ],
+                ),
               communitiesAsync.when(
                 loading: () => const Center(
                   child: BuzzLoadingIndicator(
@@ -377,7 +433,7 @@ class CommunitySwitcherPage extends HookConsumerWidget {
                     for (final community in communities)
                       CommunityGridOption(
                         id: community.id,
-                        name: community.name,
+                        name: community.pickerName,
                         relayUrl: community.relayUrl,
                         // Keep the current-community marker stable
                         // while the selected avatar leaves the grid.
@@ -391,7 +447,8 @@ class CommunitySwitcherPage extends HookConsumerWidget {
                         onSelect: (origin) =>
                             selectCommunity(community, origin),
                         badge: _CommunityGridAction(
-                          community: community,
+                          id: community.id,
+                          name: community.pickerName,
                           isActive:
                               community.id ==
                               (flight.value == null
@@ -406,6 +463,31 @@ class CommunitySwitcherPage extends HookConsumerWidget {
                           ),
                         ),
                       ),
+                    for (final community
+                        in knownAsync.value ?? <AddCommunityDeepLink>[])
+                      if (!communities.any(
+                        (saved) =>
+                            relayIdentity(saved.relayUrl) ==
+                            relayIdentity(community.relayUrl),
+                      ))
+                        CommunityGridOption(
+                          id: community.relayUrl,
+                          name: community.name,
+                          relayUrl: community.relayUrl,
+                          enabled: !isEditing.value,
+                          onSelect: (_) => openAccountCommunity(community),
+                          badge: _CommunityGridAction(
+                            id: community.relayUrl,
+                            name: community.name,
+                            isActive: false,
+                            isEditing: isEditing.value,
+                            onRemove: () => _confirmRemoveAccountCommunity(
+                              context,
+                              ref,
+                              community,
+                            ),
+                          ),
+                        ),
                     CommunityGridAdd(onTap: addCommunity),
                   ],
                 ),
@@ -424,7 +506,7 @@ class CommunitySwitcherPage extends HookConsumerWidget {
     return PopScope(
       canPop: flight.value == null,
       child: IgnorePointer(
-        ignoring: flight.value != null,
+        ignoring: flight.value != null || openingAccountCommunity.value,
         child: AnimatedBuilder(
           animation: Listenable.merge([centering, controller, reveal]),
           child: RepaintBoundary(child: surface),
