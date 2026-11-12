@@ -5,6 +5,18 @@ void archiveNavigationTests() {
     tester,
   ) async {
     final archive = Completer<void>();
+    final dm = Channel(
+      id: 'dm-peer',
+      name: 'Peer',
+      channelType: 'dm',
+      visibility: 'private',
+      description: '',
+      createdBy: 'self',
+      createdAt: DateTime(2025),
+      memberCount: 2,
+      isMember: true,
+    );
+    var dmOpened = false;
     await tester.pumpWidget(
       _buildTestable(
         messages: const [],
@@ -23,7 +35,7 @@ void archiveNavigationTests() {
           ),
         ],
         createChannelActions: (ref) =>
-            _FakeChannelActions(ref, onArchiveChannel: (_) => archive.future),
+            _ArchiveDmActions(ref, archive, dm, () => dmOpened = true),
         home: Builder(
           builder: (context) => Scaffold(
             body: TextButton(
@@ -80,7 +92,43 @@ void archiveNavigationTests() {
     expect(find.byType(UserProfileSheet), findsOneWidget);
     expect(profileRoute.isActive, isTrue);
     expect(profileRoute.isCurrent, isTrue);
+    // Settings stays open beneath the profile, as before this change.
+    expect(
+      find.byType(ChannelDetailsPage, skipOffstage: false),
+      findsOneWidget,
+    );
+
+    // The profile still works: Message opens the DM.
+    await tester.ensureVisible(find.text('Message'));
+    await tester.tap(find.text('Message'));
+    await tester.pumpAndSettle();
+    expect(dmOpened, isTrue);
+    expect(find.byType(UserProfileSheet), findsNothing);
+    expect(
+      tester
+          .widget<ChannelDetailPage>(find.byType(ChannelDetailPage))
+          .channel
+          .id,
+      dm.id,
+    );
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pumpAndSettle();
   });
+}
+
+class _ArchiveDmActions extends _FakeChannelActions {
+  _ArchiveDmActions(super.ref, Completer<void> archive, this.dm, this.onOpened)
+    : super(onArchiveChannel: (_) => archive.future);
+
+  final Channel dm;
+  final VoidCallback onOpened;
+
+  @override
+  Future<Channel> openDm({
+    required List<String> pubkeys,
+    bool waitForChannelList = true,
+  }) async {
+    onOpened();
+    return dm;
+  }
 }

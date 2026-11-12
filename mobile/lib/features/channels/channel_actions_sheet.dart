@@ -484,7 +484,7 @@ Future<void> _confirmAndRun(
 }) async {
   final pageContext = Navigator.of(sheetContext, rootNavigator: true).context;
   // The action can take a relay round trip. Close only the sheet or page that
-  // offered it, and only if it is still open: popping whatever is on top
+  // offered it, and only if it is still on top: popping whatever is on top
   // would close Home if the user dismissed this route meanwhile.
   final ownRoute = ModalRoute.of(sheetContext);
   final confirmed = await showBuzzDialog<bool>(
@@ -507,12 +507,10 @@ Future<void> _confirmAndRun(
   if (confirmed != true) return;
   try {
     await action();
+    // Left alone when covered: routes the user opened over it may still
+    // depend on its context.
     if (ownRoute != null && ownRoute.isCurrent) {
       ownRoute.navigator!.pop(true);
-    } else if (ownRoute != null && ownRoute.isActive) {
-      // Covered by a route the user opened meanwhile. No result, so the caller
-      // doesn't go on to pop what is now on top.
-      ownRoute.navigator!.removeRoute(ownRoute);
     }
   } catch (error) {
     if (!pageContext.mounted) return;
