@@ -2441,6 +2441,31 @@ fn idle_pool_sleep_due(
         && inactivity_expired(last_activity, now, bound, turn_in_flight)
 }
 
+/// Most agent stdout lines handled per idle-pool tick, per agent. Bounds the
+/// time one tick can spend servicing a chatty agent; the remainder is read on
+/// the next tick (any line read already counts as traffic).
+const IDLE_POOL_DRAIN_MAX_LINES: usize = 1024;
+
+/// Whether an otherwise-due idle pool sleep must wait because an agent process
+/// is still working outside a buzz-acp turn.
+///
+/// `last_agent_traffic` is when an idle-pool tick last read agent stdout
+/// between turns (see `AcpClient::drain_between_turns`). Traffic within the
+/// idle bound defers the sleep, so the pool sleeps one full bound after the
+/// agent goes quiet. The deferral is capped at `max_deferral` (the configured
+/// max turn duration) since the last buzz-acp activity, so an agent that
+/// never stops writing cannot keep the pool awake forever.
+fn agent_traffic_defers_idle_sleep(
+    last_agent_traffic: Option<tokio::time::Instant>,
+    last_activity: tokio::time::Instant,
+    now: tokio::time::Instant,
+    bound: Duration,
+    max_deferral: Duration,
+) -> bool {
+    last_agent_traffic.is_some_and(|traffic| now.duration_since(traffic) < bound)
+        && now.duration_since(last_activity) < max_deferral
+}
+
 #[cfg(test)]
 mod inactivity_tests {
     use super::*;
@@ -2631,6 +2656,83 @@ mod idle_pool_sleep_tests {
             false,
             false,
             any_respawn_in_flight(&quiet),
+        ));
+    }
+
+    // Incident timeline (900s bound, 2h max turn duration): the last buzz-acp
+    // activity ends a turn, the agent keeps working on its own and the next
+    // idle-pool tick reads its stdout traffic. The sleep that would have torn
+    // the pool down at activity+900s must wait until the agent goes quiet.
+    #[test]
+    fn recent_agent_traffic_defers_due_sleep() {
+        let bound = Duration::from_secs(900);
+        let cap = Duration::from_secs(7200);
+        let last_activity = tokio::time::Instant::now();
+        let traffic = last_activity + Duration::from_secs(875);
+        let due = last_activity + Duration::from_secs(900);
+
+        assert!(idle_pool_sleep_due(
+            true,
+            last_activity,
+            due,
+            bound,
+            false,
+            false,
+            false,
+            false
+        ));
+        assert!(agent_traffic_defers_idle_sleep(
+            Some(traffic),
+            last_activity,
+            due,
+            bound,
+            cap
+        ));
+        // One full bound after the agent went quiet, the sleep proceeds.
+        assert!(!agent_traffic_defers_idle_sleep(
+            Some(traffic),
+            last_activity,
+            traffic + bound,
+            bound,
+            cap
+        ));
+    }
+
+    #[test]
+    fn no_agent_traffic_never_defers() {
+        let (last, now, bound) = ready_after_bound();
+        assert!(!agent_traffic_defers_idle_sleep(
+            None,
+            last,
+            now,
+            bound,
+            Duration::from_secs(7200)
+        ));
+    }
+
+    #[test]
+    fn agent_traffic_deferral_is_capped() {
+        // An agent that never stops writing cannot keep the pool awake past
+        // the cap, measured from the last buzz-acp activity.
+        let bound = Duration::from_secs(900);
+        let cap = Duration::from_secs(7200);
+        let last_activity = tokio::time::Instant::now();
+        let just_before_cap = last_activity + cap - Duration::from_secs(1);
+        let at_cap = last_activity + cap;
+
+        assert!(agent_traffic_defers_idle_sleep(
+            Some(just_before_cap),
+            last_activity,
+            just_before_cap,
+            bound,
+            cap
+        ));
+        assert!(!agent_traffic_defers_idle_sleep(
+            Some(at_cap),
+            last_activity,
+            at_cap,
+            bound,
+            cap
         ));
     }
 
@@ -3140,6 +3242,11 @@ async fn run_harness(
             interval,
         ))
     };
+    // When an idle-pool tick last read agent stdout between turns, and whether
+    // the current deferral episode was already logged.
+    let mut last_agent_traffic: Option<tokio::time::Instant> = None;
+    let mut idle_pool_sleep_deferral_logged = false;
+    let idle_pool_sleep_max_deferral = Duration::from_secs(config.max_turn_duration_secs);
 
     // Runs at the TOP of every loop iteration via Instant check — cannot be
     // starved by the biased select. Slot refill spawns background tasks so
@@ -3826,17 +3933,51 @@ async fn run_harness(
                     // keeps `work_queued` true for a retry-throttled batch too,
                     // so a failed turn awaiting backoff is never stranded — the
                     // next iteration dispatches or re-wakes it.
-                    if idle_pool_sleep_due(
+                    //
+                    // Agents parked in the pool are outside any turn, so nothing
+                    // else reads their stdout. An agent that keeps working on its
+                    // own (e.g. after a background-task notification) still
+                    // streams session/update traffic; read it here and treat it
+                    // as activity so the pool is never torn down mid-work.
+                    let mut drained = 0;
+                    for agent in pool.agents_mut().iter_mut().flatten() {
+                        drained += agent.acp.drain_between_turns(IDLE_POOL_DRAIN_MAX_LINES).await;
+                    }
+                    let now = tokio::time::Instant::now();
+                    if drained > 0 {
+                        tracing::debug!(lines = drained, "agent stdout traffic between turns");
+                        last_agent_traffic = Some(now);
+                    }
+                    let sleep_due = idle_pool_sleep_due(
                         pool_ready,
                         last_activity,
-                        tokio::time::Instant::now(),
+                        now,
                         idle_pool_sleep_bound,
                         queue.has_in_flight() || heartbeat_in_flight,
                         !pool.join_set.is_empty(),
                         queue.has_undispatched_work(),
                         !wake_tasks.is_empty()
                             || any_respawn_in_flight(&crash_history),
+                    );
+                    if !sleep_due {
+                        idle_pool_sleep_deferral_logged = false;
+                    } else if agent_traffic_defers_idle_sleep(
+                        last_agent_traffic,
+                        last_activity,
+                        now,
+                        idle_pool_sleep_bound,
+                        idle_pool_sleep_max_deferral,
                     ) {
+                        if !idle_pool_sleep_deferral_logged {
+                            idle_pool_sleep_deferral_logged = true;
+                            tracing::info!(
+                                idle_pool_sleep_seconds = config.idle_pool_sleep_secs,
+                                "idle pool sleep deferred — agent process still busy"
+                            );
+                        }
+                    } else {
+                        idle_pool_sleep_deferral_logged = false;
+                        last_agent_traffic = None;
                         tracing::info!(
                             idle_pool_sleep_seconds = config.idle_pool_sleep_secs,
                             "idle pool sleep bound reached — tearing pool back to lazy state"

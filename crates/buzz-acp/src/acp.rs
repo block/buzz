@@ -1330,35 +1330,97 @@ impl AcpClient {
 
             // Dispatch by method name (notifications and agent-initiated requests).
             if let Some(method) = msg.get("method").and_then(|v| v.as_str()) {
-                match method {
-                    "session/update" => {
-                        let _ = self.handle_session_update(&msg);
-                    }
-                    "_goose/unstable/session/update" => {
-                        self.handle_goose_usage_update(&msg);
-                    }
-                    "session/request_permission" => {
-                        self.handle_permission_request(&msg).await?;
-                    }
-                    other => {
-                        // If the unknown message has an id, it's a request expecting a reply.
-                        // Silence would cause the agent to hang waiting for a response.
-                        // Send a JSON-RPC -32601 "Method not found" error.
-                        if msg.get("id").is_some() {
-                            let err_resp = serde_json::json!({
-                                "jsonrpc": "2.0",
-                                "id": msg["id"],
-                                "error": {"code": -32601, "message": format!("Method not found: {other}")}
-                            });
-                            // Surface write failures — a broken pipe means the
-                            // agent process is dead and continuing would hang.
-                            self.write_ndjson(&err_resp).await?;
-                        }
-                        tracing::debug!(target: "acp::wire", "ignoring unknown method: {other}");
-                    }
+                self.handle_agent_method(method, &msg).await?;
+            }
+        }
+    }
+
+    /// Handle an agent-initiated notification or request.
+    ///
+    /// Shared by the turn read loops and
+    /// [`drain_between_turns`](Self::drain_between_turns) so agent traffic is
+    /// handled the same inside and outside a turn:
+    /// - `session/update` notifications → logged via tracing
+    /// - `session/request_permission` requests → auto-approved with `allow_once`
+    /// - any other request (has an `id`) → JSON-RPC -32601, so the agent never
+    ///   hangs waiting for a reply; other notifications are ignored.
+    ///
+    /// Returns `true` when a `session/update` started a tool call (the idle
+    /// read loop resets its idle clock on that signal).
+    async fn handle_agent_method(
+        &mut self,
+        method: &str,
+        msg: &serde_json::Value,
+    ) -> Result<bool, AcpError> {
+        match method {
+            "session/update" => return Ok(self.handle_session_update(msg)),
+            "_goose/unstable/session/update" => {
+                self.handle_goose_usage_update(msg);
+            }
+            "session/request_permission" => {
+                self.handle_permission_request(msg).await?;
+            }
+            other => {
+                // If the unknown message has an id, it's a request expecting a reply.
+                // Silence would cause the agent to hang waiting for a response.
+                // Send a JSON-RPC -32601 "Method not found" error.
+                if msg.get("id").is_some() {
+                    let err_resp = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": msg["id"],
+                        "error": {"code": -32601, "message": format!("Method not found: {other}")}
+                    });
+                    // Surface write failures — a broken pipe means the
+                    // agent process is dead and continuing would hang.
+                    self.write_ndjson(&err_resp).await?;
+                }
+                tracing::debug!(target: "acp::wire", "ignoring unknown method: {other}");
+            }
+        }
+        Ok(false)
+    }
+
+    /// Read and handle agent stdout that arrived outside a turn, without
+    /// blocking. Returns the number of non-empty lines read (0 = quiet).
+    ///
+    /// Outside a turn nothing else reads the agent's stdout. Adapters that keep
+    /// working on their own after a turn ends (claude-agent-acp continuing after
+    /// a background-task notification, for example) still stream
+    /// `session/update` traffic, so a non-zero count means the agent process is
+    /// busy although no buzz-acp turn is in flight. Messages go through
+    /// [`handle_agent_method`](Self::handle_agent_method) exactly as the next
+    /// turn's read loop would have handled them; stale responses are dropped.
+    ///
+    /// Reads at most `max_lines` lines. Stops at the first pending read, EOF,
+    /// read error, or failed reply write: a dead or wedged agent surfaces on
+    /// its next turn as before.
+    pub async fn drain_between_turns(&mut self, max_lines: usize) -> usize {
+        use futures_util::FutureExt;
+
+        let mut read = 0;
+        while read < max_lines {
+            let line = match self.reader.next().now_or_never() {
+                Some(Some(Ok(line))) => line,
+                _ => break,
+            };
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            read += 1;
+            tracing::debug!(target: "acp::wire", "← (between turns) {trimmed}");
+            let Ok(msg) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+                continue;
+            };
+            self.observe("acp_read", msg.clone());
+            if let Some(method) = msg.get("method").and_then(|v| v.as_str()) {
+                if let Err(e) = self.handle_agent_method(method, &msg).await {
+                    tracing::warn!("between-turn agent message handling failed: {e}");
+                    break;
                 }
             }
         }
+        read
     }
 
     /// Idle-aware message loop: like [`read_until_response`] but resets an idle
@@ -1773,37 +1835,11 @@ impl AcpClient {
 
                     // Dispatch notifications and agent-initiated requests.
                     if let Some(method) = msg.get("method").and_then(|v| v.as_str()) {
-                        match method {
-                            "session/update" => {
-                                if self.handle_session_update(&msg) {
-                                    let activity_now = Instant::now();
-                                    idle_deadline = activity_now + idle_timeout;
-                                    last_activity_at = activity_now;
-                                    tracing::debug!("idle clock reset: tool call started");
-                                }
-                            }
-                            "_goose/unstable/session/update" => {
-                                self.handle_goose_usage_update(&msg);
-                            }
-                            "session/request_permission" => {
-                                self.handle_permission_request(&msg).await?;
-                            }
-                            other => {
-                                // If the unknown message has an id, it's a request expecting a reply.
-                                // Silence would cause the agent to hang waiting for a response.
-                                // Send a JSON-RPC -32601 "Method not found" error.
-                                if msg.get("id").is_some() {
-                                    let err_resp = serde_json::json!({
-                                        "jsonrpc": "2.0",
-                                        "id": msg["id"],
-                                        "error": {"code": -32601, "message": format!("Method not found: {other}")}
-                                    });
-                                    // Surface write failures — a broken pipe means the
-                                    // agent process is dead and continuing would hang.
-                                    self.write_ndjson(&err_resp).await?;
-                                }
-                                tracing::debug!(target: "acp::wire", "ignoring unknown method: {other}");
-                            }
+                        if self.handle_agent_method(method, &msg).await? {
+                            let activity_now = Instant::now();
+                            idle_deadline = activity_now + idle_timeout;
+                            last_activity_at = activity_now;
+                            tracing::debug!("idle clock reset: tool call started");
                         }
                     }
                 }
@@ -1811,20 +1847,6 @@ impl AcpClient {
         }
     }
 
-    /// Log a `session/update` notification via tracing.
-    ///
-    /// The discriminator field is `sessionUpdate` (not `type`) per the ACP schema.
-    /// Returns `true` if the update indicates a tool call started, signaling that
-    /// the idle clock should be explicitly reset (the agent will be silent while
-    /// the tool executes).
-    ///
-    /// Takes `&mut self` (not `&self`) because some updates carry agent state
-    /// the client must observe — notably goose's `session_info_update` with
-    /// `_meta.goose.activeRunId`, which seeds [`active_run_id`](Self::active_run_id)
-    /// so the steer arm can target `_goose/unstable/session/steer` at the
-    /// correct run. Agents that never emit it (claude-agent-acp, codex-acp)
-    /// leave it `None` and are steered via `_session/steering` instead, which
-    /// needs no run id.
     fn handle_session_update(&mut self, msg: &serde_json::Value) -> bool {
         let update = &msg["params"]["update"];
         let update_type = update
@@ -3462,6 +3484,82 @@ mod tests {
             assert!(matches!(read.await, Err(AcpError::IdleTimeout(duration)) if duration == idle));
         }
         tokio::time::resume();
+        client.shutdown().await;
+    }
+
+    /// Drain repeatedly until at least `want` lines were read or 5s pass.
+    async fn drain_until(client: &mut AcpClient, want: usize) -> usize {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut total = 0;
+        while total < want && tokio::time::Instant::now() < deadline {
+            total += client.drain_between_turns(1024).await;
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        total
+    }
+
+    const BETWEEN_TURN_UPDATE: &str = r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"tool_call","title":"Terminal","kind":"execute"}}}"#;
+
+    #[tokio::test]
+    async fn drain_between_turns_reports_quiet_agent_without_blocking() {
+        let mut client = spawn_script("sleep 10").await;
+        let drained = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            client.drain_between_turns(1024),
+        )
+        .await
+        .expect("drain must not block on a quiet agent");
+        assert_eq!(drained, 0);
+        client.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn drain_between_turns_counts_self_continued_agent_traffic() {
+        let mut client = spawn_script(&format!(
+            "echo '{BETWEEN_TURN_UPDATE}'; echo '{BETWEEN_TURN_UPDATE}'; sleep 10"
+        ))
+        .await;
+        assert_eq!(drain_until(&mut client, 2).await, 2);
+        assert_eq!(
+            client.drain_between_turns(1024).await,
+            0,
+            "lines are consumed"
+        );
+        client.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn drain_between_turns_respects_line_cap() {
+        let mut client = spawn_script(&format!(
+            "for i in 1 2 3 4 5; do echo '{BETWEEN_TURN_UPDATE}'; done; sleep 10"
+        ))
+        .await;
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert_eq!(client.drain_between_turns(2).await, 2);
+        assert_eq!(drain_until(&mut client, 3).await, 3);
+        client.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn drain_between_turns_answers_permission_requests() {
+        // A permission request raised by self-continued work must be answered
+        // between turns, as the turn loop would, so the agent does not hang.
+        let request = r#"{"jsonrpc":"2.0","id":"perm-1","method":"session/request_permission","params":{"sessionId":"s","options":[{"optionId":"yes","kind":"allow_once","name":"Allow"}]}}"#;
+        let mut client = spawn_script(&format!(
+            r#"echo '{request}'; IFS= read -r reply; sleep 0.5; printf 'echo:%s\n' "$reply"; sleep 10"#
+        ))
+        .await;
+        assert_eq!(drain_until(&mut client, 1).await, 1);
+        let echoed = tokio::time::timeout(std::time::Duration::from_secs(5), client.reader.next())
+            .await
+            .expect("agent should echo the permission reply")
+            .expect("stdout open")
+            .expect("readable line");
+        let reply: serde_json::Value =
+            serde_json::from_str(echoed.strip_prefix("echo:").expect("echo prefix"))
+                .expect("reply is JSON");
+        assert_eq!(reply["id"], "perm-1");
+        assert_eq!(reply["result"]["outcome"]["optionId"], "yes");
         client.shutdown().await;
     }
 
