@@ -460,14 +460,18 @@ async fn workflow_deletion_removes_children_without_cascades() {
 }
 
 /// A run inserted concurrently with the delete holds the workflow's key-share
-/// lock. The delete must wait for it at its row lock and then remove the run;
-/// with no cascade, a delete that took its child snapshot first would fail the
-/// foreign-key check on the workflow.
+/// lock, taken by the run writer's reference check. The delete must wait for it
+/// at its row lock and then remove the run; if it took its child snapshot
+/// first, the run would commit after the child delete and dangle. The
+/// run-to-workflow foreign key is dropped, so only the explicit lock can make
+/// the delete wait.
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn workflow_deletion_waits_for_and_removes_concurrent_run() {
     let (db, community) = setup().await;
     crate::test_support::retire_foreign_key_delete_actions(&db.pool).await;
+    crate::test_support::drop_foreign_keys_between(&db.pool, &[("workflow_runs", "workflows")])
+        .await;
     let keys = Keys::generate();
     let owner = keys.public_key().to_bytes();
     let id = Uuid::new_v4();
@@ -476,6 +480,9 @@ async fn workflow_deletion_waits_for_and_removes_concurrent_run() {
     seed(&db, community, &keys, id, &d_tag, now).await;
 
     let mut inserter = db.pool.begin().await.expect("begin run insert");
+    super::super::require_workflow(&mut inserter, community, id)
+        .await
+        .expect("lock workflow as the run writer does");
     sqlx::query(
         "INSERT INTO workflow_runs (community_id, id, workflow_id, status, current_step, execution_trace) \
          VALUES ($1, $2, $3, 'pending', 0, '[]')",
@@ -509,15 +516,24 @@ async fn workflow_deletion_waits_for_and_removes_concurrent_run() {
 }
 
 /// An approval naming another workflow but one of this workflow's runs only
-/// key-share locks that run, so the workflow lock does not exclude it. The
-/// delete must lock the runs, wait for the insert, and then remove it; with no
-/// cascade, committing it between the approval and run deletes would fail the
-/// run delete's foreign-key check.
+/// key-share locks that run (in its reference check), so the workflow lock does
+/// not exclude it. The delete must lock the runs, wait for the insert, and then
+/// remove it; if the approval committed between the approval and run deletes it
+/// would dangle. The approval foreign keys are dropped, so only the explicit
+/// locks can make the delete wait.
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn workflow_deletion_waits_for_and_removes_concurrent_cross_workflow_approval() {
     let (db, community) = setup().await;
     crate::test_support::retire_foreign_key_delete_actions(&db.pool).await;
+    crate::test_support::drop_foreign_keys_between(
+        &db.pool,
+        &[
+            ("workflow_approvals", "workflows"),
+            ("workflow_approvals", "workflow_runs"),
+        ],
+    )
+    .await;
     let keys = Keys::generate();
     let owner = keys.public_key().to_bytes();
     let id = Uuid::new_v4();
@@ -538,6 +554,12 @@ async fn workflow_deletion_waits_for_and_removes_concurrent_cross_workflow_appro
     .expect("run");
 
     let mut inserter = db.pool.begin().await.expect("begin approval insert");
+    super::super::require_workflow(&mut inserter, community, other)
+        .await
+        .expect("lock workflow as the approval writer does");
+    super::super::require_workflow_run(&mut inserter, community, run_id)
+        .await
+        .expect("lock run as the approval writer does");
     sqlx::query(
         "INSERT INTO workflow_approvals (community_id, token, workflow_id, run_id, step_id, \
          step_index, approver_spec, status, expires_at) \
@@ -580,9 +602,10 @@ async fn workflow_deletion_waits_for_and_removes_concurrent_cross_workflow_appro
 }
 
 /// Attaching a run to a scheduled fire locks the fire row, then key-share
-/// locks the run for its foreign key. The delete must take those two in the
-/// same order (fire before run), so an attach in flight when the delete
-/// starts completes and is then removed, rather than deadlocking with it.
+/// locks the run for the fire's run foreign key, which this test keeps (the
+/// attach writer is unchanged). The delete must take those two in the same
+/// order (fire before run), so an attach in flight when the delete starts
+/// completes and is then removed, rather than deadlocking with it.
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn workflow_deletion_waits_for_concurrent_fire_attach_without_deadlock() {
@@ -664,4 +687,210 @@ async fn workflow_deletion_waits_for_concurrent_fire_attach_without_deadlock() {
             "{table}"
         );
     }
+}
+
+/// Take the locks a workflow delete takes first: the workflow row and its
+/// runs, `FOR UPDATE`. The caller finishes the delete with
+/// [`delete_workflow_with_children`] and commits.
+async fn begin_delete_holding_locks(db: &Db, community: CommunityId, id: Uuid) -> AdmittedTx {
+    let mut tx = db
+        .begin_event_write_transaction(community)
+        .await
+        .expect("begin delete");
+    sqlx::query("SELECT id FROM workflows WHERE community_id = $1 AND id = $2 FOR UPDATE")
+        .bind(community.as_uuid())
+        .bind(id)
+        .execute(tx.conn())
+        .await
+        .expect("lock workflow");
+    sqlx::query(
+        "SELECT id FROM workflow_runs WHERE community_id = $1 AND workflow_id = $2 \
+         ORDER BY id FOR UPDATE",
+    )
+    .bind(community.as_uuid())
+    .bind(id)
+    .execute(tx.conn())
+    .await
+    .expect("lock runs");
+    tx
+}
+
+/// Run `writer` on its own connection while `holder` has the workflow locked,
+/// wait until it is blocked on a lock, then finish the delete and commit.
+/// Returns the writer's result, which ran strictly after the delete.
+async fn write_while_delete_holds_locks<T: Send + 'static>(
+    db: &Db,
+    mut holder: AdmittedTx,
+    workflow_id: Uuid,
+    writer: impl FnOnce(Db) -> std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send>>,
+) -> T {
+    let name = format!("workflow-writer-{}", Uuid::new_v4().simple());
+    let writer_db = Db::from_pool(crate::test_support::named_pool(&name).await);
+    let write = tokio::spawn(writer(writer_db));
+    crate::test_support::wait_for_lock_wait(&db.pool, &name).await;
+    delete_workflow_with_children(&mut holder, workflow_id)
+        .await
+        .expect("delete workflow");
+    holder.commit().await.expect("commit delete");
+    write.await.expect("join writer")
+}
+
+/// With the fire-to-workflow foreign key dropped, a fire claim racing a
+/// workflow delete must wait on the workflow row (its `FOR KEY SHARE`) and then
+/// find no workflow. Without that lock the claim reads its snapshot while the
+/// delete is uncommitted, inserts after the delete removed the fires, and leaves
+/// an orphan fire nothing cleans up.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn fire_claim_waits_for_workflow_delete_and_leaves_no_orphan_fire() {
+    let (db, community) = setup().await;
+    crate::test_support::drop_foreign_keys_between(
+        &db.pool,
+        &[("scheduled_workflow_fires", "workflows")],
+    )
+    .await;
+    let keys = Keys::generate();
+    let id = Uuid::new_v4();
+    seed(
+        &db,
+        community,
+        &keys,
+        id,
+        &id.to_string(),
+        Timestamp::now().as_secs(),
+    )
+    .await;
+
+    let holder = begin_delete_holding_locks(&db, community, id).await;
+    let claim = write_while_delete_holds_locks(&db, holder, id, move |writer| {
+        Box::pin(async move {
+            writer
+                .claim_scheduled_workflow_fire(community, id, chrono::Utc::now())
+                .await
+        })
+    })
+    .await;
+
+    assert!(
+        matches!(claim, Ok(None)),
+        "a claim after the delete must lose, got {claim:?}"
+    );
+    assert_eq!(
+        count_where(
+            &db,
+            "scheduled_workflow_fires",
+            "workflow_id",
+            community,
+            id
+        )
+        .await,
+        0,
+        "no orphan fire may survive the delete"
+    );
+}
+
+/// A run writer racing a workflow delete waits on the workflow row and then
+/// fails, instead of committing a run for a workflow that is gone.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn run_create_waits_for_workflow_delete_and_leaves_no_orphan_run() {
+    let (db, community) = setup().await;
+    crate::test_support::drop_foreign_keys_between(&db.pool, &[("workflow_runs", "workflows")])
+        .await;
+    let keys = Keys::generate();
+    let id = Uuid::new_v4();
+    seed(
+        &db,
+        community,
+        &keys,
+        id,
+        &id.to_string(),
+        Timestamp::now().as_secs(),
+    )
+    .await;
+
+    let holder = begin_delete_holding_locks(&db, community, id).await;
+    let created = write_while_delete_holds_locks(&db, holder, id, move |writer| {
+        Box::pin(async move { writer.create_workflow_run(community, id, None, None).await })
+    })
+    .await;
+
+    assert!(
+        matches!(created, Err(DbError::NotFound(_))),
+        "a run created after the delete must be rejected, got {created:?}"
+    );
+    assert_eq!(
+        count_where(&db, "workflow_runs", "workflow_id", community, id).await,
+        0,
+        "no orphan run may survive the delete"
+    );
+}
+
+/// An approval racing the delete of the workflow it names, or of the run it
+/// names under another workflow, waits on that parent's lock and then fails.
+async fn approval_waits_for_delete_and_leaves_no_orphan_approval(names_deleted_workflow: bool) {
+    let (db, community) = setup().await;
+    crate::test_support::drop_foreign_keys_between(
+        &db.pool,
+        &[
+            ("workflow_runs", "workflows"),
+            ("workflow_approvals", "workflows"),
+            ("workflow_approvals", "workflow_runs"),
+        ],
+    )
+    .await;
+    let keys = Keys::generate();
+    let now = Timestamp::now().as_secs();
+    let id = Uuid::new_v4();
+    seed(&db, community, &keys, id, &id.to_string(), now).await;
+    let other = Uuid::new_v4();
+    seed(&db, community, &keys, other, &other.to_string(), now).await;
+    let run_id = create_workflow_run(&db.pool, community, id, None, None)
+        .await
+        .expect("run");
+    // Either the approval names the workflow being deleted, or it names the
+    // surviving workflow and only its run belongs to the deleted one.
+    let approval_workflow = if names_deleted_workflow { id } else { other };
+
+    let holder = begin_delete_holding_locks(&db, community, id).await;
+    let approved = write_while_delete_holds_locks(&db, holder, id, move |writer| {
+        Box::pin(async move {
+            writer
+                .create_approval(crate::workflow::CreateApprovalParams {
+                    community_id: community,
+                    token: "racing-approval",
+                    workflow_id: approval_workflow,
+                    run_id,
+                    step_id: "gate",
+                    step_index: 0,
+                    approver_spec: "@anyone",
+                    expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+                })
+                .await
+        })
+    })
+    .await;
+
+    assert!(
+        matches!(approved, Err(DbError::NotFound(_))),
+        "an approval after the delete must be rejected, got {approved:?}"
+    );
+    assert_eq!(
+        count_where(&db, "workflow_approvals", "run_id", community, run_id).await,
+        0,
+        "no orphan approval may survive the delete"
+    );
+    assert!(get_workflow(&db.pool, community, other).await.is_ok());
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn approval_create_waits_for_workflow_delete_and_leaves_no_orphan_approval() {
+    approval_waits_for_delete_and_leaves_no_orphan_approval(true).await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn cross_workflow_approval_create_waits_for_run_delete_and_leaves_no_orphan_approval() {
+    approval_waits_for_delete_and_leaves_no_orphan_approval(false).await;
 }
