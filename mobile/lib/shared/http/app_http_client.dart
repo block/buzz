@@ -106,12 +106,9 @@ class SharedSessionClient extends http.BaseClient {
           ..followRedirects = request.followRedirects
           ..maxRedirects = request.maxRedirects
           ..persistentConnection = request.persistentConnection;
-    body.listen(
-      copy.sink.add,
-      onError: copy.sink.addError,
-      onDone: copy.sink.close,
-      cancelOnError: true,
-    );
+    // addStream keeps backpressure: the body is read only as the session
+    // reads the copy, so upload progress still tracks bytes actually sent.
+    unawaited(copy.sink.addStream(body).whenComplete(copy.sink.close));
     return copy;
   }
 

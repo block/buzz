@@ -117,6 +117,35 @@ void main() {
     expect(received[1].body, contains('value'));
   });
 
+  test(
+    'a streamed body is read only as fast as the session reads it',
+    () async {
+      var produced = 0;
+      Stream<List<int>> chunks() async* {
+        for (var i = 0; i < 100; i++) {
+          produced++;
+          yield [i];
+        }
+      }
+
+      final request = http.StreamedRequest(
+        'PUT',
+        Uri.parse('https://relay.example/upload'),
+      )..contentLength = 100;
+      unawaited(
+        request.sink.addStream(chunks()).whenComplete(request.sink.close),
+      );
+      final client = SharedSessionClient(_AbortRecorder());
+      unawaited(client.send(request).then<void>((_) {}, onError: (_) {}));
+      await pumpEventQueue();
+
+      // Upload progress counts bytes as they are produced, so a copy that
+      // drained the body ahead of the transport would report it sent.
+      expect(produced, lessThan(10));
+      client.close();
+    },
+  );
+
   test('cleartext requests use the handle\'s own client', () async {
     final sessionUrls = <Uri>[];
     final cleartextUrls = <Uri>[];
