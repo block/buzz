@@ -1,4 +1,4 @@
-//! Shared human-content batch planning with explicit preview and execution APIs.
+//! Shared user and owned-agent content batch planning with explicit preview and execution APIs.
 //!
 //! A repeatable-read, read-only snapshot supplies rows. An in-memory set models
 //! rows already emitted without changing the source data during planning.
@@ -23,13 +23,14 @@ const KINDS: &[i32] = &[
     7, 9, 30023, 40001, 40002, 40003, 40004, 40005, 40006, 40007, 40008, 45001, 45002, 45003,
 ];
 const PAGE_SIZE: i64 = 100;
+const MAX_TARGETS: usize = 10_000;
 const EVENT_COLUMNS: &str = "e.id,e.created_at,e.channel_id,e.kind";
 
 /// Scope and bounds for standalone preview or explicitly requested deletion.
 pub struct ContentBatchOptions {
     /// Explicit tenant scope, including content from former memberships.
     pub community: Uuid,
-    /// Human public key, as npub or hex.
+    /// Human public key, as npub or hex; includes directly owned agents.
     pub pubkey: String,
     /// Optional trusted relay public key for historical actor/p attribution.
     pub relay_pubkey: Option<String>,
@@ -212,6 +213,28 @@ async fn plan(
             "the human and trusted relay public keys must differ",
         ));
     }
+    // Same ownership lookup as media cleanup: discover directly owned keys
+    // across communities, but select content only in options.community.
+    let targets: Vec<Vec<u8>> = sqlx::query_scalar(
+        "SELECT key FROM (
+            SELECT decode($1, 'hex') AS key
+            UNION SELECT pubkey FROM users WHERE agent_owner_pubkey=decode($1, 'hex')
+         ) targets ORDER BY key LIMIT $2",
+    )
+    .bind(&subject)
+    .bind((MAX_TARGETS + 1) as i64)
+    .fetch_all(&mut *conn)
+    .await?;
+    if targets.len() > MAX_TARGETS {
+        return Err(invalid("content target key limit exceeded (10,000)"));
+    }
+    let target_pubkeys: Vec<String> = targets.iter().map(hex::encode).collect();
+    if relay
+        .as_ref()
+        .is_some_and(|key| target_pubkeys.contains(key))
+    {
+        return Err(invalid("target and trusted relay public keys must differ"));
+    }
     let host: String = sqlx::query_scalar("SELECT host FROM communities WHERE id=$1")
         .bind(options.community)
         .fetch_optional(&mut *conn)
@@ -220,9 +243,9 @@ async fn plan(
     let start = json!({
         "record": "preview_start", "version": 1, "read_only": true,
         "community_id": options.community, "host": host, "pubkey": subject,
-        "trusted_relay_pubkey": relay, "included_event_kinds": KINDS,
+        "target_pubkeys": target_pubkeys, "trusted_relay_pubkey": relay, "included_event_kinds": KINDS,
         "batch_size": options.batch_size, "max_items": options.max_items,
-        "scope": "human-attributed events and reactions, owned subscriptions and notification delivery",
+        "scope": "user- and owned-agent-attributed events and reactions, owned subscriptions and notification delivery",
         "preserved": "other users' events and reactions; workflow database records and other owners' delivery logs",
         "relay_attribution": if relay.is_some() { "enabled" } else { "not included; supply --relay-pubkey for relay-authored history" },
         "execution": "preview only; --delete prints and commits batches after execution checks",
@@ -243,7 +266,7 @@ async fn plan(
         warnings: 0,
         collected: collect.then(Vec::new),
     };
-    owned::plan(conn, &subject, &mut output).await?;
+    owned::plan(conn, &targets, &mut output).await?;
     let mut cursor = Cursor::default();
     loop {
         let query = format!(
@@ -255,7 +278,7 @@ async fn plan(
         // Only static SQL fragments are interpolated; every value is bound.
         let events: Vec<Event> = sqlx::query_as(sqlx::AssertSqlSafe(query))
             .bind(options.community)
-            .bind(&subject)
+            .bind(&targets)
             .bind(&relay)
             .bind(KINDS)
             .bind(cursor.0)
@@ -270,7 +293,7 @@ async fn plan(
             plan_event(conn, &event, &mut output).await?;
         }
     }
-    rows::authored_reactions(conn, &subject, &mut output).await?;
+    rows::authored_reactions(conn, &targets, &mut output).await?;
     let query = format!(
         "WITH authored AS ({}) SELECT jsonb_build_object('kind',kind,'count',count(*))
             FROM authored WHERE NOT(kind=ANY($4)) GROUP BY kind ORDER BY kind",
@@ -278,7 +301,7 @@ async fn plan(
     );
     let excluded: Vec<Value> = sqlx::query_scalar(sqlx::AssertSqlSafe(query))
         .bind(options.community)
-        .bind(&subject)
+        .bind(&targets)
         .bind(&relay)
         .bind(KINDS)
         .fetch_all(&mut *conn)
@@ -332,3 +355,6 @@ async fn plan_event(
 
 #[cfg(test)]
 mod postgres_tests;
+
+#[cfg(test)]
+mod agents_postgres_tests;

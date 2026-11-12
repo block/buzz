@@ -9,7 +9,7 @@ use uuid::Uuid;
 /// Arguments for direct offline content cleanup.
 #[derive(Debug, clap::Args)]
 pub struct Args {
-    /// Human public key, as npub or hex.
+    /// Human public key, as npub or hex. Includes directly owned agents.
     #[arg(long, value_parser = parse_pubkey)]
     pubkey: String,
     /// Community whose content to inspect or delete.
