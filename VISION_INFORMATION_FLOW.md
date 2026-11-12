@@ -71,12 +71,15 @@ One rule applies to every channel, whatever the disclosure level: no private-to-
 
 **Possible alternative to a stored disclosure level:** the relay skips the agent rules while the agent is a member of any open channel. In that state R is already the whole community, so the rules have nothing left to protect. This is one existence check on the agent's memberships, not a calculation of R. It removes the stored disclosure level and the owner's signed command, and the public label follows from memberships. The cost: the owner no longer chooses the disclosure level; the agent drifts into it. While the rules are off, the agent can create channels and add anyone, and those people stay in R after the owner demotes the agent in the open channel.
 
-**Possible further disclosure levels.** A restricted agent is safe because the owner controls both W and R. Two more disclosure levels could be safe for other reasons. Neither is part of this design yet.
+**All disclosure levels.** Restricted and unrestricted are part of this design. The levels marked *tentative* are not part of it yet: each could be safe for a different reason, and each needs more thought before it is.
 
-| Disclosure level | Reads (W) | Writes to (R) | Why it is safe |
+| Disclosure level | Reads (W) | Writes to (R) | Safety |
 |---|---|---|---|
-| Public | Only open channels, and the DMs that people open with it | Anyone | It reads nothing private. Anyone can open a DM with it, so one person's DM can reach another person. Clients tell people to treat what they tell it as public. |
-| Personal | Everything the owner can read | Only the owner, in its DM with the owner | The owner can already read everything it reads. To reach anyone else, it drafts and the owner sends, or the owner approves each send. |
+| Unrestricted | Every channel anyone adds it to, and every DM anyone opens with it | Anywhere it can write | Not safe. It is today's behavior, and the public label is the only protection. For information flow, a person is at this level. |
+| Restricted | Open channels, and only the private channels and DMs the owner chose | Only the readers of the channels the owner chose | The owner controls both W and R, so the owner decides every flow. |
+| Owner-trusted *(tentative)* | Open channels, and only the private channels and DMs the owner chose | Anywhere it can write | Nobody but the owner can put information in W, so the owner decides what is at risk. Other members of the owner's channels still carry that risk. This is the same as unrestricted, except that only the owner can add it to private channels or open DMs with it. |
+| Public *(tentative)* | Only open channels, and the DMs that people open with it | Anyone | It reads nothing private. Anyone can open a DM with it, so one person's DM can reach another person. Clients tell people to treat what they tell it as public. |
+| Personal *(tentative)* | Everything the owner can read | Only the owner, in its DM with the owner | The owner can already read everything it reads. To reach anyone else, it drafts and the owner sends, or the owner approves each send. |
 
 A personal agent reads with the owner's authority, so the app gives the owner's read tools only to agents at that disclosure level. Buzz cannot see what either level sends outside Buzz, through other tools or through model inference on another member's node (see [What this doesn't stop](#what-this-doesnt-stop)).
 
