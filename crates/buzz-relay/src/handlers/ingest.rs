@@ -975,6 +975,36 @@ pub(crate) fn agent_dm_allowed(agent: &[u8], owner: &[u8], participants: &[Vec<u
         && participants.iter().any(|p| p == owner)
 }
 
+/// The DM rule for kinds that bypass the generic `Post` gate: an agent may
+/// change metadata (kind:9002, which also posts a system message) only in its
+/// owner-only DM, and may never add DM members (kind:9000), since an addition
+/// to an owner-only DM always widens it.
+async fn check_agent_dm_admin_write(
+    community_id: CommunityId,
+    state: &AppState,
+    ch_id: Uuid,
+    pubkey_bytes: &[u8],
+    channel: &buzz_db::channel::ChannelRecord,
+    kind: u32,
+) -> Result<(), String> {
+    if channel.channel_type != buzz_core::channel::ChannelType::Dm.as_str() {
+        return Ok(());
+    }
+    match kind {
+        KIND_NIP29_EDIT_METADATA => {
+            check_agent_dm_write(community_id, state, ch_id, pubkey_bytes, channel).await
+        }
+        KIND_NIP29_PUT_USER => match agent_owner_cached(state, community_id, pubkey_bytes)
+            .await
+            .map_err(|e| format!("error: database error: {e}"))?
+        {
+            Some(_) => Err(AGENT_DM_REFUSED.to_string()),
+            None => Ok(()),
+        },
+        _ => Ok(()),
+    }
+}
+
 /// Agents never write in a DM, except one whose members are exactly the agent
 /// and its owner. Humans and non-DM channels pass untouched.
 pub(crate) async fn check_agent_dm_write(
@@ -2984,6 +3014,24 @@ async fn ingest_event_inner(
     // row is missing (global event, kind:9007 pre-create) this is `None` and
     // fan-out performs its own fresh fail-closed lookup — `None` is never
     // "assume open" (fence 1).
+    if let (Some(ch_id), Some(row)) = (channel_id, &channel_row) {
+        check_agent_dm_admin_write(
+            tenant.community(),
+            state,
+            ch_id,
+            &pubkey_bytes,
+            row,
+            kind_u32,
+        )
+        .await
+        .map_err(|e| {
+            if e == AGENT_DM_REFUSED {
+                IngestError::Rejected(e)
+            } else {
+                IngestError::Internal(e)
+            }
+        })?;
+    }
     let threaded_visibility = match (channel_id, &channel_row) {
         (Some(ch_id), Some(row)) => state
             .channel_visibility_cached(tenant.community(), ch_id, Some(row))
@@ -7131,7 +7179,7 @@ mod postgres_tests {
                 .expect("sign");
             let auth = IngestAuth::Http {
                 pubkey: author.public_key(),
-                scopes: vec![Scope::MessagesWrite],
+                scopes: Scope::all_known(),
                 auth_method: HttpAuthMethod::Nip98,
             };
             let tracer: Arc<dyn buzz_conformance::Tracer> = Arc::new(VecTracer::default());
@@ -7246,6 +7294,47 @@ mod postgres_tests {
         f.ingest(&f.stranger, KIND_DM_OPEN as u16, vec![p(&f.agent)])
             .await
             .expect("a human may still open a DM that includes an agent");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn agent_cannot_put_users_into_its_owner_dm() {
+        let f = agent_dm_fixture().await;
+        let owner_dm = f.open_dm(&[&f.owner, &f.agent]).await;
+
+        assert_agent_dm_refused(
+            f.ingest(
+                &f.agent,
+                KIND_NIP29_PUT_USER as u16,
+                vec![
+                    nostr::Tag::parse(["h", &owner_dm.to_string()]).unwrap(),
+                    nostr::Tag::parse(["p", &f.stranger.public_key().to_hex(), "member"]).unwrap(),
+                ],
+            )
+            .await,
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn agent_cannot_set_metadata_in_a_dm_with_someone_other_than_its_owner() {
+        let f = agent_dm_fixture().await;
+        let with_stranger = f.open_dm(&[&f.agent, &f.stranger]).await;
+        let topic = |channel: Uuid| {
+            vec![
+                nostr::Tag::parse(["h", &channel.to_string()]).unwrap(),
+                nostr::Tag::parse(["topic", "hello"]).unwrap(),
+            ]
+        };
+
+        assert_agent_dm_refused(
+            f.ingest(
+                &f.agent,
+                KIND_NIP29_EDIT_METADATA as u16,
+                topic(with_stranger),
+            )
+            .await,
+        );
     }
 
     #[tokio::test]
