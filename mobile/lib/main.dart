@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -22,6 +23,10 @@ void main() => runBuzzApp(const App());
 Future<void> runBuzzApp(Widget app) async {
   WidgetsFlutterBinding.ensureInitialized();
   installBuzzPushMethodHandler();
+  // Spike: lets a background App Intent check that Dart is running.
+  const MethodChannel('buzz/quick_send').setMethodCallHandler(
+    (call) async => call.method == 'ping' ? 'dart-ok' : null,
+  );
   // Relay upgrades name the app version, so learn it before any socket opens.
   final userAgent = loadRelayUserAgent(
     () async => (await PackageInfo.fromPlatform()).version,
