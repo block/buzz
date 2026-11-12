@@ -413,6 +413,191 @@ async fn test_invite_claim_auto_joins_default_channel() {
     );
 }
 
+/// NIP-11 `landing_channel` of the shared community, if designated.
+async fn advertised_landing_channel() -> (Option<String>, serde_json::Value) {
+    let info: serde_json::Value = reqwest::Client::new()
+        .get(format!("{}/info", relay_http_url()))
+        .send()
+        .await
+        .expect("GET /info")
+        .json()
+        .await
+        .expect("NIP-11 JSON");
+    let landing = info
+        .get("landing_channel")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    (landing, info)
+}
+
+/// Submit the client's full-state landing kind:9002 (`landing` plus
+/// `welcome` and `welcome_title`, `""` for a default) and return the OK
+/// frame.
+async fn set_landing_ws(
+    url: &str,
+    channel_id: &str,
+    signer: &Keys,
+    welcome: &str,
+    title: &str,
+) -> (bool, String) {
+    let event = EventBuilder::new(Kind::Custom(9002), "")
+        .tags([
+            Tag::parse(["h", channel_id]).unwrap(),
+            Tag::parse(["landing", "true"]).unwrap(),
+            Tag::parse(["welcome", welcome]).unwrap(),
+            Tag::parse(["welcome_title", title]).unwrap(),
+            Tag::parse(["nonce", &uuid::Uuid::new_v4().to_string()]).unwrap(),
+        ])
+        .sign_with_keys(signer)
+        .unwrap();
+    let mut client = BuzzTestClient::connect(url, signer)
+        .await
+        .expect("connect kind:9002 actor");
+    let ok = client.send_event(event).await.expect("send kind:9002");
+    client.disconnect().await.ok();
+    (ok.accepted, ok.message)
+}
+
+/// Whether `tags` includes one named `name`.
+fn has_tag(tags: &[Vec<String>], name: &str) -> bool {
+    tags.iter()
+        .any(|t| t.first().map(String::as_str) == Some(name))
+}
+
+/// The text of the tag named `name` (`welcome`, `welcome_title`), if present.
+fn text_tag(tags: &[Vec<String>], name: &str) -> Option<String> {
+    tags.iter()
+        .find(|t| t.first().map(String::as_str) == Some(name))
+        .and_then(|t| t.get(1).cloned())
+}
+
+/// The landing channel journey on the shared relay. A fresh person's AUTH
+/// joins them to the advertised landing channel, whose kind:39000 carries
+/// `["landing"]`. A relay owner moves the designation with the client's
+/// full-state kind:9002 (twice: it is idempotent), carrying a Markdown
+/// welcome and a title; NIP-11 and both channels' kind:39000 follow. The
+/// landing channel refuses an archive, a non-admin is refused, and the
+/// designation moves back.
+///
+/// The relay is shared with the other e2e tests, so the part that moves the
+/// designation runs under `catch_unwind` and the original designation,
+/// welcome and title are restored before any failure is reported.
+#[tokio::test]
+#[ignore]
+async fn test_landing_channel_journey() {
+    use futures_util::FutureExt;
+    let url = relay_url();
+    let owner = Keys::generate();
+    seed_relay_owner(&owner).await;
+
+    let person = Keys::generate();
+    let person_hex = person.public_key().to_hex();
+    let person_client = BuzzTestClient::connect(&url, &person)
+        .await
+        .expect("connect person");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let original = loop {
+        if let (Some(landing), _) = advertised_landing_channel().await {
+            if member_role(&url, &owner, &landing, &person_hex)
+                .await
+                .as_deref()
+                == Some("member")
+            {
+                break landing;
+            }
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the person's AUTH did not join them to an advertised landing channel"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+    person_client.disconnect().await.ok();
+    let (_, info) = advertised_landing_channel().await;
+    assert!(
+        info["supported_extensions"]
+            .as_array()
+            .is_some_and(|extensions| extensions.iter().any(|e| e == "buzz-landing-channel")),
+        "NIP-11 advertises the extension: {info}"
+    );
+    let original_tags = group_metadata_tags(&url, &owner, &original).await;
+    assert!(has_tag(&original_tags, "landing"), "{original_tags:?}");
+    let original_welcome = text_tag(&original_tags, "welcome").unwrap_or_default();
+    let original_title = text_tag(&original_tags, "welcome_title").unwrap_or_default();
+
+    let target = create_test_channel(&owner).await;
+    let moved =
+        std::panic::AssertUnwindSafe(landing_move_journey(&url, &owner, &original, &target))
+            .catch_unwind()
+            .await;
+
+    // Leave the shared relay as found, even after a failed assertion.
+    let restored =
+        set_landing_ws(&url, &original, &owner, &original_welcome, &original_title).await;
+    let advertised = advertised_landing_channel().await.0;
+    let archived = set_metadata_ws(&url, &target, &owner, "archived", "true").await;
+    if let Err(panic) = moved {
+        eprintln!(
+            "landing journey failed; restore: {restored:?}, advertised: {advertised:?}, \
+             target archived: {archived:?}"
+        );
+        std::panic::resume_unwind(panic);
+    }
+    assert_eq!(restored, (true, String::new()));
+    assert_eq!(advertised.as_deref(), Some(original.as_str()));
+    assert_eq!(
+        archived,
+        (true, String::new()),
+        "the previous landing channel can be archived"
+    );
+}
+
+/// The part of [`test_landing_channel_journey`] that moves the designation
+/// from `original` to `target`; the caller restores it.
+async fn landing_move_journey(url: &str, owner: &Keys, original: &str, target: &str) {
+    const PROTECTED: &str = "invalid: this is the community's landing channel; make another channel the landing channel first";
+    let welcome = "Welcome to the **e2e** community.\n\n- Say hello\n\tindented";
+    let title = "Welcome, testers";
+    for attempt in ["move", "idempotent resend"] {
+        assert_eq!(
+            set_landing_ws(url, target, owner, welcome, title).await,
+            (true, String::new()),
+            "{attempt}"
+        );
+    }
+    assert_eq!(
+        advertised_landing_channel().await.0.as_deref(),
+        Some(target)
+    );
+    let target_tags = group_metadata_tags(url, owner, target).await;
+    assert!(has_tag(&target_tags, "landing"), "{target_tags:?}");
+    assert_eq!(text_tag(&target_tags, "welcome").as_deref(), Some(welcome));
+    assert_eq!(
+        text_tag(&target_tags, "welcome_title").as_deref(),
+        Some(title)
+    );
+    let previous_tags = group_metadata_tags(url, owner, original).await;
+    assert!(
+        ["landing", "welcome", "welcome_title"]
+            .iter()
+            .all(|name| !has_tag(&previous_tags, name)),
+        "the previous landing channel drops all three tags: {previous_tags:?}"
+    );
+
+    assert_eq!(
+        set_metadata_ws(url, target, owner, "archived", "true").await,
+        (false, PROTECTED.to_string())
+    );
+    assert_eq!(
+        set_landing_ws(url, original, &Keys::generate(), "", "").await,
+        (
+            false,
+            "invalid: actor not authorized: landing, welcome and welcome_title require a relay owner or admin"
+                .to_string()
+        )
+    );
+}
+
 #[tokio::test]
 #[ignore]
 async fn test_invite_claim_rejects_invalid_code() {
@@ -1925,6 +2110,35 @@ async fn test_membership_notification_kind_rejected() {
     client.disconnect().await.expect("disconnect");
 }
 
+/// Receive the next membership notification whose `h` tag is `channel_id`.
+/// The relay may also enroll a fresh key into the landing channel; its notice
+/// (a different `h`) is skipped.
+async fn recv_membership_notice_for(client: &mut BuzzTestClient, channel_id: &str) -> nostr::Event {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let remaining = deadline
+            .checked_duration_since(tokio::time::Instant::now())
+            .filter(|d| !d.is_zero())
+            .expect("timed out waiting for membership notification for our channel");
+        match client
+            .recv_event(remaining)
+            .await
+            .expect("recv membership notification")
+        {
+            RelayMessage::Event { event, .. } => {
+                let for_channel = event.tags.iter().any(|t| {
+                    let s = t.as_slice();
+                    s.len() >= 2 && s[0] == "h" && s[1] == channel_id
+                });
+                if for_channel {
+                    return *event;
+                }
+            }
+            other => panic!("expected EVENT membership notification, got {other:?}"),
+        }
+    }
+}
+
 /// When a member is added via REST, the relay must emit a kind:44100 notification
 /// to any subscriber filtering on `#p` = that member's pubkey.
 #[tokio::test]
@@ -1988,45 +2202,29 @@ async fn test_membership_notification_emitted_on_add() {
         resp.status()
     );
 
-    // Wait for the kind:44100 notification.
-    let msg = agent_client
-        .recv_event(Duration::from_secs(5))
-        .await
-        .expect("recv kind:44100 notification");
+    // Wait for the kind:44100 notification for our channel.
+    let event = recv_membership_notice_for(&mut agent_client, &channel_id).await;
 
-    match msg {
-        RelayMessage::Event { event, .. } => {
-            assert_eq!(
-                event.kind,
-                Kind::Custom(44100),
-                "expected kind:44100, got {}",
-                event.kind.as_u16()
-            );
+    assert_eq!(
+        event.kind,
+        Kind::Custom(44100),
+        "expected kind:44100, got {}",
+        event.kind.as_u16()
+    );
 
-            let tags: Vec<Vec<String>> = event
-                .tags
-                .iter()
-                .map(|t| t.as_slice().iter().map(|s| s.to_string()).collect())
-                .collect();
+    let tags: Vec<Vec<String>> = event
+        .tags
+        .iter()
+        .map(|t| t.as_slice().iter().map(|s| s.to_string()).collect())
+        .collect();
 
-            let has_p = tags
-                .iter()
-                .any(|t| t.len() >= 2 && t[0] == "p" && t[1] == agent_pubkey_hex);
-            assert!(
-                has_p,
-                "kind:44100 missing p tag = agent pubkey. tags: {tags:?}"
-            );
-
-            let has_h = tags
-                .iter()
-                .any(|t| t.len() >= 2 && t[0] == "h" && t[1] == channel_id);
-            assert!(
-                has_h,
-                "kind:44100 missing h tag = channel uuid. tags: {tags:?}"
-            );
-        }
-        other => panic!("expected EVENT kind:44100, got {other:?}"),
-    }
+    let has_p = tags
+        .iter()
+        .any(|t| t.len() >= 2 && t[0] == "p" && t[1] == agent_pubkey_hex);
+    assert!(
+        has_p,
+        "kind:44100 missing p tag = agent pubkey. tags: {tags:?}"
+    );
 
     agent_client.disconnect().await.expect("disconnect");
 }
@@ -2261,21 +2459,13 @@ async fn test_membership_notification_emitted_on_remove() {
     );
 
     // Consume the kind:44100 add notification before waiting for the remove.
-    let add_msg = agent_client
-        .recv_event(Duration::from_secs(5))
-        .await
-        .expect("recv kind:44100 notification");
-    match add_msg {
-        RelayMessage::Event { ref event, .. } => {
-            assert_eq!(
-                event.kind,
-                Kind::Custom(44100),
-                "expected kind:44100 add notification, got {}",
-                event.kind.as_u16()
-            );
-        }
-        other => panic!("expected EVENT kind:44100, got {other:?}"),
-    }
+    let add_event_notice = recv_membership_notice_for(&mut agent_client, &channel_id).await;
+    assert_eq!(
+        add_event_notice.kind,
+        Kind::Custom(44100),
+        "expected kind:44100 add notification, got {}",
+        add_event_notice.kind.as_u16()
+    );
 
     // Remove agent from the channel via signed kind:9001 event.
     let remove_event = EventBuilder::new(Kind::Custom(9001), "")
@@ -2300,44 +2490,27 @@ async fn test_membership_notification_emitted_on_remove() {
     );
 
     // Wait for the kind:44101 remove notification.
-    let msg = agent_client
-        .recv_event(Duration::from_secs(5))
-        .await
-        .expect("recv kind:44101 notification");
+    let event = recv_membership_notice_for(&mut agent_client, &channel_id).await;
+    assert_eq!(
+        event.kind,
+        Kind::Custom(44101),
+        "expected kind:44101, got {}",
+        event.kind.as_u16()
+    );
 
-    match msg {
-        RelayMessage::Event { event, .. } => {
-            assert_eq!(
-                event.kind,
-                Kind::Custom(44101),
-                "expected kind:44101, got {}",
-                event.kind.as_u16()
-            );
+    let tags: Vec<Vec<String>> = event
+        .tags
+        .iter()
+        .map(|t| t.as_slice().iter().map(|s| s.to_string()).collect())
+        .collect();
 
-            let tags: Vec<Vec<String>> = event
-                .tags
-                .iter()
-                .map(|t| t.as_slice().iter().map(|s| s.to_string()).collect())
-                .collect();
-
-            let has_p = tags
-                .iter()
-                .any(|t| t.len() >= 2 && t[0] == "p" && t[1] == agent_pubkey_hex);
-            assert!(
-                has_p,
-                "kind:44101 missing p tag = agent pubkey. tags: {tags:?}"
-            );
-
-            let has_h = tags
-                .iter()
-                .any(|t| t.len() >= 2 && t[0] == "h" && t[1] == channel_id);
-            assert!(
-                has_h,
-                "kind:44101 missing h tag = channel uuid. tags: {tags:?}"
-            );
-        }
-        other => panic!("expected EVENT kind:44101, got {other:?}"),
-    }
+    let has_p = tags
+        .iter()
+        .any(|t| t.len() >= 2 && t[0] == "p" && t[1] == agent_pubkey_hex);
+    assert!(
+        has_p,
+        "kind:44101 missing p tag = agent pubkey. tags: {tags:?}"
+    );
 
     agent_client.disconnect().await.expect("disconnect");
 }

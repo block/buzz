@@ -29,6 +29,8 @@ mod event_deletion;
 /// App-owned push enqueue and channel TTL refresh for inserted events.
 pub(crate) mod event_follow_up;
 mod event_hydration;
+/// The community's landing channel and welcome message.
+pub mod landing;
 /// Per-community NIP-FI issuer bindings.
 pub mod nip_fi_binding;
 /// Recent-first passes for newest-first `events` page reads.

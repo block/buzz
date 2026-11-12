@@ -1299,7 +1299,7 @@ void main() {
     session.debugHandleMessage([
       'CLOSED',
       'l-1',
-      'restricted: p-gated events require #p matching your pubkey',
+      'restricted: p-gated events require #p or authors matching only your pubkey',
     ]);
 
     await expectLater(

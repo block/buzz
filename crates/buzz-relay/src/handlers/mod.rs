@@ -34,6 +34,11 @@ pub mod identity_archive;
 pub mod imeta;
 /// Transport-neutral event ingestion pipeline.
 pub mod ingest;
+/// The community landing channel: adoption, admission joins and kind:9002
+/// `landing`/`welcome`/`welcome_title` validation.
+pub mod landing;
+#[cfg(test)]
+mod landing_postgres_tests;
 /// Local media publication authorization.
 pub mod media_access;
 #[cfg(test)]

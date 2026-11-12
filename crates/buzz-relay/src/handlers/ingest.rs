@@ -666,11 +666,14 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         // profile-publishing user already holds.
         KIND_IA_ARCHIVE_REQUEST | KIND_IA_UNARCHIVE_REQUEST => Ok(Scope::UsersWrite),
         KIND_NIP29_EDIT_METADATA => {
-            // kind:9002 scope split: archived or auto_join tag → AdminChannels,
-            // else ChannelsWrite
+            // kind:9002 scope split: archived, auto_join, landing, welcome or
+            // welcome_title tag → AdminChannels, else ChannelsWrite
             let has_admin_tag = event.tags.iter().any(|t| {
                 let k = t.kind().to_string();
-                k == "archived" || k == "auto_join"
+                matches!(
+                    k.as_str(),
+                    "archived" | "auto_join" | "landing" | "welcome" | "welcome_title"
+                )
             });
             if has_admin_tag {
                 Ok(Scope::AdminChannels)
@@ -4853,6 +4856,39 @@ mod postgres_tests {
     fn long_form_is_global_only() {
         // kind:30023 is always global — ingest nulls channel_id even if an h-tag is present
         assert!(is_global_only_kind(KIND_LONG_FORM));
+    }
+
+    /// kind:9002 needs `AdminChannels` for any community-setting tag and
+    /// `ChannelsWrite` otherwise.
+    ///
+    /// Mutation: drop `welcome_title` from the split → the title-only row
+    /// asks for `ChannelsWrite` (RED).
+    #[test]
+    fn edit_metadata_scope_split() {
+        let cases: &[(&[&[&str]], Scope)] = &[
+            (&[&["h", "x"], &["name", "n"]], Scope::ChannelsWrite),
+            (&[&["h", "x"], &["topic", "t"]], Scope::ChannelsWrite),
+            (&[&["h", "x"], &["archived", "true"]], Scope::AdminChannels),
+            (&[&["h", "x"], &["auto_join", "true"]], Scope::AdminChannels),
+            (&[&["h", "x"], &["landing", "true"]], Scope::AdminChannels),
+            (&[&["h", "x"], &["welcome", "Hi"]], Scope::AdminChannels),
+            (
+                &[&["h", "x"], &["welcome_title", "Hi"]],
+                Scope::AdminChannels,
+            ),
+            (
+                &[&["h", "x"], &["name", "n"], &["welcome_title", ""]],
+                Scope::AdminChannels,
+            ),
+        ];
+        for (tags, expected) in cases {
+            let event = make_event_with_tags(KIND_NIP29_EDIT_METADATA, "", tags);
+            assert_eq!(
+                required_scope_for_kind(KIND_NIP29_EDIT_METADATA, &event),
+                Ok(expected.clone()),
+                "tags {tags:?}"
+            );
+        }
     }
 
     #[test]

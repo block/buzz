@@ -767,6 +767,15 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
             startup_membership_list,
         )
         .await;
+        // Converge the deployment community to a landing `general` at boot,
+        // owned by its bootstrap owner, so a fresh local relay has one before
+        // anyone connects. Off the boot path: a failure leaves the NULL
+        // designation for the next human admission to retry.
+        let tenant = tenant.clone();
+        let landing_state = Arc::clone(&state);
+        tokio::spawn(async move {
+            buzz_relay::handlers::landing::converge_landing_channel(&tenant, &landing_state).await;
+        });
     }
     let startup_partition_attempt = startup_partition_audit
         .as_ref()

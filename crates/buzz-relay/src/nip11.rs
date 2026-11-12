@@ -34,6 +34,11 @@ pub struct RelayInfo {
     /// admins/owners via the kind:9033 command. Omitted when no icon is set.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
+    /// The community's landing channel (lowercase hyphenated UUID), read
+    /// live from the committed designation. Omitted when none is designated.
+    /// The `buzz-landing-channel` extension advertises the contract.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub landing_channel: Option<String>,
     /// Host-bound atomic read-state snapshot capability; absent on unresolved hosts.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub read_state_snapshot: Option<serde_json::Value>,
@@ -211,7 +216,7 @@ impl RelayInfo {
     /// `self`. Pass `Some` whenever the relay has a stable signing key.
     ///
     /// `icon` is the community's workspace icon (see
-    /// [`workspace_icon_for_tenant`]) — a host-scoped scalar, pre-fetched by
+    /// [`community_discovery_for_tenant`]) — a host-scoped scalar, pre-fetched by
     /// the caller so `build` itself stays static-input.
     ///
     /// `advertise_nip43` controls whether NIP-43 (relay membership) is added
@@ -262,6 +267,10 @@ impl RelayInfo {
             // without it ignores the tag beside `visibility`, so a client
             // checks this before opening a channel as unlisted.
             "buzz-unlisted-channels".to_string(),
+            // NIP-11 `landing_channel`, kind:9002 `landing`/`welcome`/
+            // `welcome_title` and the landing kind:39000 tags (NOSTR.md,
+            // Landing channel).
+            "buzz-landing-channel".to_string(),
         ];
         let gif = gif_provider.map(|provider| {
             supported_extensions.push("buzz-gif".to_string());
@@ -290,6 +299,7 @@ impl RelayInfo {
             name: "Buzz Relay".to_string(),
             description: "Buzz — private team communication relay".to_string(),
             icon: icon.filter(|s| !s.is_empty()).map(|s| s.to_string()),
+            landing_channel: None,
             read_state_snapshot: None,
             membership_snapshot: None,
             membership_public: None,
@@ -453,15 +463,15 @@ pub(crate) async fn nip11_document(
     }
     let (relay_self, advertise_nip43) = nip11_facts(state);
     let tenant = policy.tenant(raw_host);
-    let icon = match tenant.as_ref() {
-        Some(tenant) => workspace_icon_for_tenant(state, tenant).await,
-        None => None,
+    let discovery = match tenant.as_ref() {
+        Some(tenant) => community_discovery_for_tenant(state, tenant).await,
+        None => Default::default(),
     };
     let admin_api = admin_api_advertisement(state.config.admin.as_ref());
     let advertise_fi = state.config.nip_fi.mode.evaluates() || policy.required;
     let mut info = RelayInfo::build(
         relay_self.as_deref(),
-        icon.as_deref(),
+        discovery.icon.as_deref(),
         RelayCapabilityFlags {
             advertise_nip43,
             advertise_fi,
@@ -472,6 +482,9 @@ pub(crate) async fn nip11_document(
         state.config.klipy.as_ref().map(|_| "klipy"),
     );
     info.requires_nip_fi = policy.required;
+    info.landing_channel = discovery
+        .landing_channel_id
+        .map(|id| id.hyphenated().to_string());
     info.artifacts["incremental"] = crate::api::artifact_sync::capability();
     if let Some(tenant) = tenant.as_ref() {
         if let Some(profile) = crate::verified_profiles::discovery(state, tenant).await {
@@ -537,18 +550,17 @@ pub(crate) async fn nip11_document(
     Ok(info)
 }
 
-/// Fetch the icon for the same immutable tenant that supplied NIP-11 policy.
-/// A decoration lookup failure omits the icon.
-async fn workspace_icon_for_tenant(
+/// Fetch the icon and landing channel for the same immutable tenant that
+/// supplied NIP-11 policy. A decoration lookup failure omits both.
+async fn community_discovery_for_tenant(
     state: &crate::state::AppState,
     tenant: &buzz_core::TenantContext,
-) -> Option<String> {
+) -> buzz_db::community::CommunityDiscovery {
     state
         .db
-        .get_community_icon(tenant.community())
+        .get_community_discovery(tenant.community())
         .await
-        .ok()
-        .flatten()
+        .unwrap_or_default()
 }
 
 /// Derives the two NIP-11 facts that depend on runtime config:
@@ -783,10 +795,12 @@ mod tests {
     }
 
     /// Clients refuse NIP-CL labels and system channels, newest-first
-    /// search, and unlisted channels unless the relay says it supports them,
-    /// so every document must advertise all three.
+    /// search, unlisted channels and the landing channel unless the relay
+    /// says it supports them, so every document must advertise all four.
+    /// No `landing_channel` is serialized until one is designated: never
+    /// `null`, never `""`.
     #[test]
-    fn advertises_nip_cl_search_sort_and_unlisted_extensions() {
+    fn advertises_nip_cl_search_sort_unlisted_and_landing_extensions() {
         let info = RelayInfo::build(
             None,
             None,
@@ -800,6 +814,23 @@ mod tests {
         assert!(extensions.contains(&"nip-cl".to_string()));
         assert!(extensions.contains(&"buzz-search-sort".to_string()));
         assert!(extensions.contains(&"buzz-unlisted-channels".to_string()));
+        assert!(extensions.contains(&"buzz-landing-channel".to_string()));
+
+        let mut info = RelayInfo::build(
+            None,
+            None,
+            RelayCapabilityFlags::default(),
+            DEFAULT_MAX_FRAME_BYTES,
+            None,
+            None,
+            None,
+        );
+        let json = serde_json::to_value(&info).expect("serialize");
+        assert!(json.get("landing_channel").is_none(), "omitted, not null");
+        let landing = uuid::Uuid::new_v4();
+        info.landing_channel = Some(landing.hyphenated().to_string());
+        let json = serde_json::to_value(&info).expect("serialize");
+        assert_eq!(json["landing_channel"], landing.to_string());
     }
 
     /// NIP-WP → NIP-11 mirror: a set workspace icon is served in the standard
