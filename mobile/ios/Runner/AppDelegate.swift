@@ -64,6 +64,7 @@ import os.log
   ) -> Bool {
     // Age checking and notification restoration run asynchronously from
     // Flutter. No age-related storage or platform request may delay launch.
+    QuickSendBridge.log.notice("didFinishLaunching, appState=\(application.applicationState.rawValue, privacy: .public)")
     UNUserNotificationCenter.current().delegate = self
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
   }
@@ -99,6 +100,7 @@ import os.log
       }
     }
     shareSuggestions?.attach(messenger: messenger)
+    QuickSendBridge.shared.attach(messenger: messenger)
     browserAuthBridge = BuzzBrowserAuthBridge(messenger: messenger)
     hostedHpkeChannel = FlutterMethodChannel(name: "buzz/hosted_hpke", binaryMessenger: messenger)
     hostedHpkeChannel?.setMethodCallHandler { call, result in
