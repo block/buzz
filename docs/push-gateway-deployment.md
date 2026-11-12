@@ -95,6 +95,14 @@ The service reaps expired challenges and replay rows, idle quota rows, expired/r
 
 ## Metrics and alerting
 
+Each non-200 APNs response emits an `APNs rejected push delivery` warning with
+`apns_status` (HTTP status) and `apns_reason` (an allowlisted Apple reason name).
+Unrecognized reasons become `unknown`; absent or unreadable reasons become
+`missing`. These warnings contain no device token, request identifier, topic,
+credential, payload, or raw provider body. They also exclude the caller's tracing
+span context. The default log filter keeps gateway warnings; an explicit
+`RUST_LOG` setting must also enable them.
+
 The gateway serves Prometheus metrics at `GET /metrics` on the **private health listener** (`BUZZ_PUSH_HEALTH_ADDR`, default `0.0.0.0:8081`) — the same port as the probes, never on the public `8080`. All series are sanitized and bounded-cardinality: label values are drawn only from closed sets (the five APNs outcome classes, the fixed admission results, the static error codes already returned to callers, and the readiness causes). No endpoint, device token, relay pubkey, request id, or any request-scoped identifier is ever used as a label.
 
 | Metric | Type | Labels | Meaning |
