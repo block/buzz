@@ -23,6 +23,7 @@ class _CustomChannelSection extends StatelessWidget {
   final void Function(Channel channel) onMarkChannelRead;
 
   const _CustomChannelSection({
+    super.key,
     required this.section,
     required this.channels,
     required this.unreadChannelIds,
@@ -44,11 +45,10 @@ class _CustomChannelSection extends StatelessWidget {
   });
 
   @override
-  Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        _CustomSectionHeader(
+  Widget build(BuildContext context) => SliverMainAxisGroup(
+    slivers: [
+      SliverToBoxAdapter(
+        child: _CustomSectionHeader(
           section: section,
           expanded: expanded,
           isFirst: isFirst,
@@ -61,28 +61,33 @@ class _CustomChannelSection extends StatelessWidget {
           sortMode: sortMode,
           onSortModeChange: onSortModeChange,
         ),
-        CollapsibleSectionBody(
-          expanded: expanded,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              for (final channel in channels)
-                _ChannelTile(
-                  channel: channel,
-                  isUnread: unreadChannelIds.contains(channel.id),
-                  hasAttention: attentionChannelIds.contains(channel.id),
-                  isMuted: mutedChannelIds.contains(channel.id),
-                  currentPubkey: currentPubkey,
-                  onTap: () => onSelectChannel(channel),
-                  onMarkRead: () => onMarkChannelRead(channel),
-                  sectionId: section.id,
-                ),
-            ],
-          ),
+      ),
+      CollapsibleSliverBody(
+        expanded: expanded,
+        sliver: SliverList.builder(
+          itemCount: channels.length,
+          findChildIndexCallback: (key) {
+            final index = channels.indexWhere((c) => ValueKey(c.id) == key);
+            return index < 0 ? null : index;
+          },
+          itemBuilder: (context, index) {
+            final channel = channels[index];
+            return _ChannelTile(
+              key: ValueKey(channel.id),
+              channel: channel,
+              isUnread: unreadChannelIds.contains(channel.id),
+              hasAttention: attentionChannelIds.contains(channel.id),
+              isMuted: mutedChannelIds.contains(channel.id),
+              currentPubkey: currentPubkey,
+              onTap: () => onSelectChannel(channel),
+              onMarkRead: () => onMarkChannelRead(channel),
+              sectionId: section.id,
+            );
+          },
         ),
-      ],
-    );
-  }
+      ),
+    ],
+  );
 }
 
 class _CustomSectionHeader extends StatelessWidget {
@@ -369,6 +374,7 @@ class _ChannelSection extends StatelessWidget {
   final Future<void> Function(Channel channel) onSelectChannel;
 
   const _ChannelSection({
+    super.key,
     required this.title,
     required this.expanded,
     required this.onToggle,
@@ -384,24 +390,22 @@ class _ChannelSection extends StatelessWidget {
   });
 
   @override
-  Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        _SectionHeader(
+  Widget build(BuildContext context) => SliverMainAxisGroup(
+    slivers: [
+      SliverToBoxAdapter(
+        child: _SectionHeader(
           label: title,
           expanded: expanded,
           onToggle: onToggle,
           sortMode: sortMode,
           onSortModeChange: onSortModeChange,
         ),
-        CollapsibleSectionBody(
-          expanded: expanded,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              if (channels.isEmpty)
-                Padding(
+      ),
+      CollapsibleSliverBody(
+        expanded: expanded,
+        sliver: channels.isEmpty
+            ? SliverToBoxAdapter(
+                child: Padding(
                   padding: const EdgeInsets.only(
                     left: _kChannelLabelInset,
                     right: _kChannelSectionInset,
@@ -419,10 +423,20 @@ class _ChannelSection extends StatelessWidget {
                       ),
                     ),
                   ),
-                )
-              else
-                for (final channel in channels)
-                  _ChannelTile(
+                ),
+              )
+            : SliverList.builder(
+                itemCount: channels.length,
+                findChildIndexCallback: (key) {
+                  final index = channels.indexWhere(
+                    (c) => ValueKey(c.id) == key,
+                  );
+                  return index < 0 ? null : index;
+                },
+                itemBuilder: (context, index) {
+                  final channel = channels[index];
+                  return _ChannelTile(
+                    key: ValueKey(channel.id),
                     channel: channel,
                     isUnread: unreadChannelIds.contains(channel.id),
                     hasAttention: attentionChannelIds.contains(channel.id),
@@ -431,13 +445,12 @@ class _ChannelSection extends StatelessWidget {
                     onTap: () => onSelectChannel(channel),
                     onMarkRead: null,
                     sectionId: null,
-                  ),
-            ],
-          ),
-        ),
-      ],
-    );
-  }
+                  );
+                },
+              ),
+      ),
+    ],
+  );
 }
 
 class _EmptyState extends StatelessWidget {
