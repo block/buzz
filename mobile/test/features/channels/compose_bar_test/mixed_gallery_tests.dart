@@ -42,7 +42,13 @@ class _MixedGalleryService extends _FakeVideoUploadService {
 }
 
 void _mixedGalleryTests() {
-  for (final filename in ['camera.MOV', 'clip.mp4', 'clip.m4v']) {
+  for (final filename in [
+    'camera.MOV',
+    'clip.mp4',
+    'clip.m4v',
+    'clip.3gpp',
+    'clip.3g2',
+  ]) {
     testWidgets('Photos queues $filename as a video alongside photos', (
       tester,
     ) async {

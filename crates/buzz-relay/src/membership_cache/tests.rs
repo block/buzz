@@ -510,6 +510,16 @@ async fn ttl_reclaims_idle_snapshots_and_invalidation_preserves_only_active_read
         "an active reader owns the old allocation"
     );
     drop(entry);
+    // Moka reclaims invalidated entries through epoch-based maintenance;
+    // dropping the reader does not synchronously collect the cache's copy.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while weak.upgrade().is_some() {
+            cache.entries.run_pending_tasks();
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("invalidated snapshot must be reclaimed after its last reader");
     assert!(
         weak.upgrade().is_none(),
         "last reader must release the allocation"

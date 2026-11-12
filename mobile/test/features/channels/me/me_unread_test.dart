@@ -328,6 +328,7 @@ void main() {
                   ref.listen(meUnreadChannelIdsProvider, (_, _) {});
                   return HomePage(
                     onAgents: showAgents,
+                    openBestieConversation: (_, _, _) async {},
                     defaultAgentBuilder: (context) => DefaultAgentLauncher(
                       onChooseAgent: () => showAgents(context),
                     ),

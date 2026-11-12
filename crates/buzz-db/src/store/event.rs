@@ -462,7 +462,8 @@ pub async fn insert_event(
 ///
 /// This is the transaction-composition seam for callers that must keep the
 /// event insert open while performing related work. The caller owns commit or
-/// rollback.
+/// rollback. On error, roll back or drop the transaction: the event row may
+/// already have been inserted before the app floor check rejected it.
 pub async fn insert_event_in_transaction(
     tx: &mut AdmittedTx,
     event: &Event,
@@ -529,6 +530,7 @@ async fn insert_event_on(
 
     let was_inserted = result.rows_affected() > 0;
     if was_inserted {
+        crate::replica_fence::guard_event_created_at_floor(tx, created_at, channel_id).await?;
         crate::store::event_follow_up::after_admitted_insert(
             tx,
             id_bytes.as_slice(),
@@ -2021,6 +2023,7 @@ pub(crate) async fn insert_event_with_thread_metadata_tx(
     let was_inserted = result.rows_affected() > 0;
 
     if was_inserted {
+        crate::replica_fence::guard_event_created_at_floor(tx, created_at, channel_id).await?;
         crate::store::event_follow_up::after_admitted_insert(
             tx,
             id_bytes.as_slice(),
@@ -3607,7 +3610,6 @@ mod postgres_tests {
             channels.push(make_test_channel(&pool, community_uuid, None).await);
         }
         let (busy, quiet, empty, outside) = (channels[0], channels[1], channels[2], channels[3]);
-        let db = crate::Db::from_pool(pool.clone());
         let author = Keys::generate();
         let now = Utc::now().timestamp() as u64;
         let floor = crate::store::recent_pass::floor_at(Utc::now()).timestamp() as u64;
@@ -3638,9 +3640,8 @@ mod postgres_tests {
         events.push(insert(busy, 9, floor - 86_400, true));
         events.push(insert(quiet, 9, floor - 2 * 86_400, true));
         for (channel, event) in &events {
-            db.insert_event(community, event, Some(*channel))
-                .await
-                .expect("insert");
+            // Rows already in storage: the floor rejects the aged ones.
+            crate::test_support::insert_historical_event(&pool, community, event, *channel).await;
         }
         matching.sort_by(|a, b| {
             b.0.cmp(&a.0)
@@ -3777,9 +3778,7 @@ mod postgres_tests {
                 .custom_created_at(nostr::Timestamp::from(at.timestamp() as u64))
                 .sign_with_keys(&author)
                 .expect("sign");
-            db.insert_event(community, &event, Some(channel))
-                .await
-                .expect("insert");
+            crate::test_support::insert_historical_event(&pool, community, &event, channel).await;
             let partition: String =
                 sqlx::query_scalar("SELECT tableoid::regclass::text FROM events WHERE id = $1")
                     .bind(event.id.as_bytes().to_vec())
@@ -3849,9 +3848,7 @@ mod postgres_tests {
                 .custom_created_at(nostr::Timestamp::from(at.timestamp() as u64))
                 .sign_with_keys(&author)
                 .expect("sign");
-            db.insert_event(community, &event, Some(channel))
-                .await
-                .expect("insert");
+            crate::test_support::insert_historical_event(&pool, community, &event, channel).await;
             if at >= floor {
                 recent.push(event.id);
                 let partition: String =
@@ -3933,7 +3930,6 @@ mod postgres_tests {
         let community_uuid = make_test_community(&pool).await;
         let community = CommunityId::from_uuid(community_uuid);
         let channel = make_test_channel(&pool, community_uuid, None).await;
-        let db = crate::Db::from_pool(pool.clone());
         let author = Keys::generate();
         let now = Utc::now().timestamp() as u64;
         let floor = crate::store::recent_pass::floor_at(Utc::now()).timestamp() as u64;
@@ -3950,9 +3946,7 @@ mod postgres_tests {
                 .custom_created_at(nostr::Timestamp::from(at))
                 .sign_with_keys(&author)
                 .expect("sign");
-            db.insert_event(community, &event, Some(channel))
-                .await
-                .expect("insert");
+            crate::test_support::insert_historical_event(&pool, community, &event, channel).await;
             newest_first.push(event.id);
         }
 
@@ -4027,9 +4021,7 @@ mod postgres_tests {
             .custom_created_at(nostr::Timestamp::from(1_748_736_000)) // 2025-06-01
             .sign_with_keys(&author)
             .expect("sign");
-        db.insert_event(community, &ancient, Some(channel))
-            .await
-            .expect("insert ancient");
+        crate::test_support::insert_historical_event(&pool, community, &ancient, channel).await;
         let partition_of = |id: nostr::EventId| {
             let pool = pool.clone();
             async move {
@@ -4313,7 +4305,8 @@ mod postgres_tests {
         let community = CommunityId::from_uuid(community_uuid);
         let channel = make_test_channel(&pool, community_uuid, None).await;
         let keys = Keys::generate();
-        let now = nostr::Timestamp::now().as_secs() - 1_000;
+        // Inside the `created_at` floor (960 s) even with the later offsets.
+        let now = nostr::Timestamp::now().as_secs() - 600;
         let h = channel.to_string();
         let message = |kind: u16, tags: Vec<Vec<String>>, at: u64| {
             EventBuilder::new(Kind::Custom(kind), "")
@@ -5822,21 +5815,40 @@ mod postgres_tests {
 
     // ─── canvas CAS tests ─────────────────────────────────────────────────────
 
-    fn make_canvas_event_at(content: &str, created_at: u64) -> nostr::Event {
-        make_event_at(buzz_core::kind::KIND_CANVAS as u16, content, created_at)
+    fn make_canvas_event_at(base: u64, content: &str, created_at: u64) -> nostr::Event {
+        // Each test owns its fresh base; logical seconds and ties stay explicit.
+        make_event_at(
+            buzz_core::kind::KIND_CANVAS as u16,
+            content,
+            base + created_at,
+        )
     }
 
     /// Build two canvas events sharing `created_at`, returned `(lower, higher)`
     /// by event id. Regenerates until the ids differ (always, since keys differ)
     /// so tests can assert deterministic head ordering on the id tiebreak.
-    fn same_second_ordered_pair(created_at: u64) -> (nostr::Event, nostr::Event) {
-        let a = make_canvas_event_at("# A", created_at);
-        let b = make_canvas_event_at("# B", created_at);
+    fn same_second_ordered_pair(base: u64, created_at: u64) -> (nostr::Event, nostr::Event) {
+        let a = make_canvas_event_at(base, "# A", created_at);
+        let b = make_canvas_event_at(base, "# B", created_at);
         if a.id.as_bytes() <= b.id.as_bytes() {
             (a, b)
         } else {
             (b, a)
         }
+    }
+
+    #[test]
+    fn canvas_fixture_base_is_owned_by_each_test() {
+        let first_base = 1_700_000_000;
+        let second_base = first_base + crate::replica_fence::CREATED_AT_FLOOR_SECS as u64 * 2;
+        let first = make_canvas_event_at(first_base, "first test", 1000);
+        let second = make_canvas_event_at(second_base, "later test", 1000);
+        assert_eq!(first.created_at.as_secs(), first_base + 1000);
+        assert_eq!(second.created_at.as_secs(), second_base + 1000);
+        let (lower, higher) = same_second_ordered_pair(second_base, 1000);
+        assert_eq!(lower.created_at, higher.created_at);
+        assert_eq!(lower.created_at.as_secs(), second_base + 1000);
+        assert!(lower.id.as_bytes() < higher.id.as_bytes());
     }
 
     #[tokio::test]
@@ -5866,10 +5878,11 @@ mod postgres_tests {
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn channel_head_checked_expect_no_head_creates_first_canvas() {
+        let canvas_base = nostr::Timestamp::now().as_secs() - 1000;
         let pool = setup_pool().await;
         let community = CommunityId::from_uuid(make_test_community(&pool).await);
         let channel = make_test_channel(&pool, community.as_uuid().to_owned(), None).await;
-        let event = make_canvas_event_at("# First", 1000);
+        let event = make_canvas_event_at(canvas_base, "# First", 1000);
 
         let (_, status) = insert_canvas_head_checked(
             &pool,
@@ -5886,10 +5899,11 @@ mod postgres_tests {
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn channel_head_checked_expect_no_head_rejects_when_head_exists() {
+        let canvas_base = nostr::Timestamp::now().as_secs() - 1000;
         let pool = setup_pool().await;
         let community = CommunityId::from_uuid(make_test_community(&pool).await);
         let channel = make_test_channel(&pool, community.as_uuid().to_owned(), None).await;
-        let first = make_canvas_event_at("# First", 1000);
+        let first = make_canvas_event_at(canvas_base, "# First", 1000);
         insert_canvas_head_checked(
             &pool,
             community,
@@ -5900,7 +5914,7 @@ mod postgres_tests {
         .await
         .expect("first canvas");
 
-        let second = make_canvas_event_at("# Racing create", 1001);
+        let second = make_canvas_event_at(canvas_base, "# Racing create", 1001);
         let (_, status) = insert_canvas_head_checked(
             &pool,
             community,
@@ -5926,10 +5940,11 @@ mod postgres_tests {
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn channel_head_checked_expected_head_matches_and_advances() {
+        let canvas_base = nostr::Timestamp::now().as_secs() - 1000;
         let pool = setup_pool().await;
         let community = CommunityId::from_uuid(make_test_community(&pool).await);
         let channel = make_test_channel(&pool, community.as_uuid().to_owned(), None).await;
-        let first = make_canvas_event_at("# First", 1000);
+        let first = make_canvas_event_at(canvas_base, "# First", 1000);
         insert_canvas_head_checked(
             &pool,
             community,
@@ -5940,7 +5955,7 @@ mod postgres_tests {
         .await
         .expect("first canvas");
 
-        let second = make_canvas_event_at("# Second", 1001);
+        let second = make_canvas_event_at(canvas_base, "# Second", 1001);
         let head = first.id.as_bytes();
         let (_, status) = insert_canvas_head_checked(
             &pool,
@@ -5957,10 +5972,11 @@ mod postgres_tests {
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn channel_head_checked_expected_head_mismatch_rejects() {
+        let canvas_base = nostr::Timestamp::now().as_secs() - 1000;
         let pool = setup_pool().await;
         let community = CommunityId::from_uuid(make_test_community(&pool).await);
         let channel = make_test_channel(&pool, community.as_uuid().to_owned(), None).await;
-        let first = make_canvas_event_at("# First", 1000);
+        let first = make_canvas_event_at(canvas_base, "# First", 1000);
         insert_canvas_head_checked(
             &pool,
             community,
@@ -5971,7 +5987,7 @@ mod postgres_tests {
         .await
         .expect("first canvas");
 
-        let stale = make_canvas_event_at("# Stale edit", 1002);
+        let stale = make_canvas_event_at(canvas_base, "# Stale edit", 1002);
         let wrong_head = [0u8; 32];
         let (_, status) = insert_canvas_head_checked(
             &pool,
@@ -5988,10 +6004,11 @@ mod postgres_tests {
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn channel_head_checked_expected_head_missing_rejects() {
+        let canvas_base = nostr::Timestamp::now().as_secs() - 1000;
         let pool = setup_pool().await;
         let community = CommunityId::from_uuid(make_test_community(&pool).await);
         let channel = make_test_channel(&pool, community.as_uuid().to_owned(), None).await;
-        let event = make_canvas_event_at("# Edit with no head", 1000);
+        let event = make_canvas_event_at(canvas_base, "# Edit with no head", 1000);
         let some_head = [1u8; 32];
 
         let (_, status) = insert_canvas_head_checked(
@@ -6009,10 +6026,11 @@ mod postgres_tests {
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn channel_head_checked_replay_of_head_is_duplicate() {
+        let canvas_base = nostr::Timestamp::now().as_secs() - 1000;
         let pool = setup_pool().await;
         let community = CommunityId::from_uuid(make_test_community(&pool).await);
         let channel = make_test_channel(&pool, community.as_uuid().to_owned(), None).await;
-        let event = make_canvas_event_at("# First", 1000);
+        let event = make_canvas_event_at(canvas_base, "# First", 1000);
         insert_canvas_head_checked(
             &pool,
             community,
@@ -6044,10 +6062,11 @@ mod postgres_tests {
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn channel_head_checked_replay_skips_stale_precondition() {
+        let canvas_base = nostr::Timestamp::now().as_secs() - 1000;
         let pool = setup_pool().await;
         let community = CommunityId::from_uuid(make_test_community(&pool).await);
         let channel = make_test_channel(&pool, community.as_uuid().to_owned(), None).await;
-        let event = make_canvas_event_at("# First", 1000);
+        let event = make_canvas_event_at(canvas_base, "# First", 1000);
         insert_canvas_head_checked(
             &pool,
             community,
@@ -6079,11 +6098,12 @@ mod postgres_tests {
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn channel_head_checked_rejects_same_second_higher_id() {
+        let canvas_base = nostr::Timestamp::now().as_secs() - 1000;
         let pool = setup_pool().await;
         let community = CommunityId::from_uuid(make_test_community(&pool).await);
         let channel = make_test_channel(&pool, community.as_uuid().to_owned(), None).await;
 
-        let (lower, higher) = same_second_ordered_pair(1000);
+        let (lower, higher) = same_second_ordered_pair(canvas_base, 1000);
         insert_canvas_head_checked(
             &pool,
             community,
@@ -6122,11 +6142,12 @@ mod postgres_tests {
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn channel_head_checked_accepts_same_second_lower_id() {
+        let canvas_base = nostr::Timestamp::now().as_secs() - 1000;
         let pool = setup_pool().await;
         let community = CommunityId::from_uuid(make_test_community(&pool).await);
         let channel = make_test_channel(&pool, community.as_uuid().to_owned(), None).await;
 
-        let (lower, higher) = same_second_ordered_pair(1000);
+        let (lower, higher) = same_second_ordered_pair(canvas_base, 1000);
         // Seed the higher-id event as the head first.
         insert_canvas_head_checked(
             &pool,
@@ -6156,10 +6177,11 @@ mod postgres_tests {
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn channel_head_checked_rejects_behind_clock_writer() {
+        let canvas_base = nostr::Timestamp::now().as_secs() - 1000;
         let pool = setup_pool().await;
         let community = CommunityId::from_uuid(make_test_community(&pool).await);
         let channel = make_test_channel(&pool, community.as_uuid().to_owned(), None).await;
-        let head = make_canvas_event_at("# Head", 2000);
+        let head = make_canvas_event_at(canvas_base, "# Head", 2000);
         insert_canvas_head_checked(
             &pool,
             community,
@@ -6171,7 +6193,7 @@ mod postgres_tests {
         .expect("head at t=2000");
 
         // Writer's clock is behind — created_at earlier than head.
-        let behind = make_canvas_event_at("# Behind clock", 1100);
+        let behind = make_canvas_event_at(canvas_base, "# Behind clock", 1100);
         let (_, status) = insert_canvas_head_checked(
             &pool,
             community,
@@ -6255,12 +6277,13 @@ mod postgres_tests {
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn channel_head_checked_deleted_replay_returns_revision_mismatch() {
+        let canvas_base = nostr::Timestamp::now().as_secs() - 1000;
         let pool = setup_pool().await;
         let community = CommunityId::from_uuid(make_test_community(&pool).await);
         let channel = make_test_channel(&pool, community.as_uuid().to_owned(), None).await;
 
         // H: seed the initial head.
-        let head = make_canvas_event_at("# Head", 1000);
+        let head = make_canvas_event_at(canvas_base, "# Head", 1000);
         insert_canvas_head_checked(
             &pool,
             community,
@@ -6273,7 +6296,7 @@ mod postgres_tests {
         let head_id = head.id.to_bytes().to_vec();
 
         // A: insert a second revision.
-        let a = make_canvas_event_at("# A", 1001);
+        let a = make_canvas_event_at(canvas_base, "# A", 1001);
         insert_canvas_head_checked(
             &pool,
             community,
@@ -6378,11 +6401,12 @@ mod postgres_tests {
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn channel_head_checked_concurrent_authors_only_one_advances() {
+        let canvas_base = nostr::Timestamp::now().as_secs() - 1000;
         let pool = setup_pool().await;
         let community = CommunityId::from_uuid(make_test_community(&pool).await);
         let channel = make_test_channel(&pool, community.as_uuid().to_owned(), None).await;
 
-        let base = make_canvas_event_at("# Base", 1000);
+        let base = make_canvas_event_at(canvas_base, "# Base", 1000);
         insert_canvas_head_checked(
             &pool,
             community,
@@ -6407,8 +6431,8 @@ mod postgres_tests {
         // Both edits assert `base` as their head and are timestamped strictly
         // ahead of it (writer discipline), so neither trips SupersedeFailed —
         // only the advisory-lock serialization decides the winner.
-        let a = make_canvas_event_at("# Author A", 1001);
-        let b = make_canvas_event_at("# Author B", 1002);
+        let a = make_canvas_event_at(canvas_base, "# Author A", 1001);
+        let b = make_canvas_event_at(canvas_base, "# Author B", 1002);
 
         let (pool_a, pool_b) = (pool.clone(), pool.clone());
         let (id_a, id_b) = (base_id.clone(), base_id.clone());
@@ -6519,6 +6543,7 @@ mod postgres_tests {
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn channel_head_checked_concurrent_first_create_only_one_wins() {
+        let canvas_base = nostr::Timestamp::now().as_secs() - 1000;
         let pool = setup_pool().await;
         let community = CommunityId::from_uuid(make_test_community(&pool).await);
         let channel = make_test_channel(&pool, community.as_uuid().to_owned(), None).await;
@@ -6532,8 +6557,8 @@ mod postgres_tests {
             .await
             .expect("blocker acquires key");
 
-        let a = make_canvas_event_at("# First A", 1000);
-        let b = make_canvas_event_at("# First B", 1001);
+        let a = make_canvas_event_at(canvas_base, "# First A", 1000);
+        let b = make_canvas_event_at(canvas_base, "# First B", 1001);
 
         let (pool_a, pool_b) = (pool.clone(), pool.clone());
         let ta = tokio::spawn(async move {
@@ -6640,6 +6665,7 @@ mod postgres_tests {
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn db_untagged_canvas_append_serializes_on_advisory_key() {
+        let canvas_base = nostr::Timestamp::now().as_secs() - 1000;
         let pool = setup_pool().await;
         let db = crate::Db::from_pool(pool.clone());
         let community = CommunityId::from_uuid(make_test_community(&pool).await);
@@ -6653,7 +6679,7 @@ mod postgres_tests {
             .await
             .expect("holder acquires key");
 
-        let event = make_canvas_event_at("# Untagged", 1000);
+        let event = make_canvas_event_at(canvas_base, "# Untagged", 1000);
         let write_task = tokio::spawn(async move {
             db.insert_event_with_thread_metadata(community, &event, Some(channel), None)
                 .await
@@ -6695,13 +6721,14 @@ mod postgres_tests {
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn channel_head_canvas_deletion_serializes_on_advisory_key() {
+        let canvas_base = nostr::Timestamp::now().as_secs() - 1000;
         let pool = setup_pool().await;
         let community = CommunityId::from_uuid(make_test_community(&pool).await);
         let channel = make_test_channel(&pool, community.as_uuid().to_owned(), None).await;
         let lock_key = canvas_lock_key(community, channel);
 
         // Insert a canvas event to delete.
-        let event = make_canvas_event_at("# To delete", 1000);
+        let event = make_canvas_event_at(canvas_base, "# To delete", 1000);
         insert_canvas_head_checked(
             &pool,
             community,
