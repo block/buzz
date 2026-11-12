@@ -110,8 +110,10 @@ final class NavigationTitleView: UIVisualEffectView, UIGestureRecognizerDelegate
   private let contentStack = UIStackView()
   private let textStack = UIStackView()
   private let subtitleStack = UIStackView()
+  private let maximumWidth: CGFloat?
 
-  init(title: String?, subtitle: String, color: UIColor) {
+  init(title: String?, subtitle: String, color: UIColor, maximumWidth: CGFloat? = nil) {
+    self.maximumWidth = maximumWidth
     if #available(iOS 26.0, *) {
       super.init(effect: UIGlassEffect(style: .regular))
     } else {
@@ -121,6 +123,7 @@ final class NavigationTitleView: UIVisualEffectView, UIGestureRecognizerDelegate
     layer.cornerCurve = .continuous
     titleLabel.text = title
     titleLabel.textColor = color
+    subtitleStack.isHidden = subtitle.isEmpty
     subtitleLabel.text = subtitle
     subtitleLabel.textColor = .secondaryLabel
     for label in [titleLabel, subtitleLabel] {
@@ -147,8 +150,13 @@ final class NavigationTitleView: UIVisualEffectView, UIGestureRecognizerDelegate
       contentStack.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 12),
       contentStack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -12),
       contentStack.centerYAnchor.constraint(equalTo: contentView.centerYAnchor),
+      titleLabel.widthAnchor.constraint(lessThanOrEqualTo: contentView.widthAnchor, constant: -24),
+      subtitleStack.widthAnchor.constraint(lessThanOrEqualTo: contentView.widthAnchor, constant: -24),
     ])
     translatesAutoresizingMaskIntoConstraints = false
+    if let maximumWidth {
+      widthAnchor.constraint(lessThanOrEqualToConstant: max(0, maximumWidth)).isActive = true
+    }
     updateFonts()
     // Flutter creates platform views with a zero frame. Keep a nonzero
     // intrinsic width and let UINavigationBar compress it between its items.
@@ -257,7 +265,8 @@ final class NavigationTitleView: UIVisualEffectView, UIGestureRecognizerDelegate
 
   override var intrinsicContentSize: CGSize {
     let contentSize = contentStack.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize)
-    return CGSize(width: contentSize.width + 24, height: max(44, contentSize.height))
+    return CGSize(width: min(contentSize.width + 24, maximumWidth ?? .greatestFiniteMagnitude),
+                  height: max(44, contentSize.height))
   }
 
   override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
@@ -350,6 +359,9 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
   private var reportedAvatarFrame: CGRect?
   private var flutterSafeTop: CGFloat = 0
   private let refreshBar = NavigationRefreshBar()
+  private var floatingTitle: NavigationTitleView?
+  private var titleMaxWidth: CGFloat?
+  private var floatingTitleLift: CGFloat = 0
 
   init(frame: CGRect, id: Int64, args: Any?, messenger: FlutterBinaryMessenger, parent: UIViewController?) {
     container = NavigationClipView(frame: frame)
@@ -427,7 +439,7 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     // beneath the entire control area, not just the status indicators.
     let glassBackedControls: Bool
     if #available(iOS 26.0, *) {
-      glassBackedControls = content.navigationItem.titleView is NavigationTitleView
+      glassBackedControls = content.navigationItem.titleView is NavigationTitleView || floatingTitle != nil
     } else {
       glassBackedControls = false
     }
@@ -443,6 +455,16 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
       ? [0, NSNumber(value: Double(max(0, height - 12) / max(1, height))), 1]
       : (navigation.navigationBar.prefersLargeTitles ? [0, 0.55, 1] : [0, 0.85, 1])
     CATransaction.commit()
+    if let title = floatingTitle {
+      let available = max(0, container.bounds.width - 48)
+      let width = min(title.intrinsicContentSize.width, min(available, titleMaxWidth ?? available))
+      title.frame = CGRect(x: (container.bounds.width - width) / 2,
+                           y: flutterSafeTop + 56 - floatingTitleLift, width: width, height: 44)
+      // This overlay is outside UINavigationBar, which normally lays out the
+      // effect content after constraining its title. Apply that pass here too.
+      title.layoutIfNeeded()
+
+    }
     reportAvatarBounds()
   }
 
@@ -464,7 +486,10 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
   private func configure(_ args: [String: Any]) {
     controlBackground = Self.color(args["controlBackground"])
     flutterSafeTop = (args["safeTop"] as? NSNumber)?.doubleValue ?? 0
+    floatingTitleLift = args["titleHasAnimatedPortrait"] as? Bool == true ? 14 : 0
+    titleMaxWidth = (args["titleMaxWidth"] as? NSNumber).map { max(0, CGFloat($0.doubleValue)) }
     navigation.overrideUserInterfaceStyle = args["dark"] as? Bool == true ? .dark : .light
+    container.overrideUserInterfaceStyle = navigation.overrideUserInterfaceStyle
     material.overrideUserInterfaceStyle = navigation.overrideUserInterfaceStyle
     // Let the ultra-thin system material provide its own adaptive tint.
     material.contentView.backgroundColor = .clear
@@ -512,15 +537,16 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     // Conversations request a stable backdrop from the first frame, including
     // loading/empty timelines. Other pages retain their scroll-edge treatment.
     material.alpha = alwaysFrosted ? 1 : min(1, offset / 12)
+    floatingTitle?.removeFromSuperview()
+    floatingTitle = nil
     let item = content.navigationItem
     item.title = args["title"] as? String
     if let subtitle = args["subtitle"] as? String {
-      let button = NavigationTitleView(title: item.title, subtitle: subtitle, color: color)
+      let button = NavigationTitleView(title: item.title, subtitle: subtitle, color: color, maximumWidth: titleMaxWidth)
       button.accessibilityIdentifier = "channel-navigation-title"
       let enabled = args["titleEnabled"] as? Bool == true
-      button.accessibilityLabel = enabled
-        ? "Open settings for \(item.title ?? ""), \(subtitle)"
-        : "\(item.title ?? ""), \(subtitle)"
+      let accessibleTitle = [item.title ?? "", subtitle].filter { !$0.isEmpty }.joined(separator: ", ")
+      button.accessibilityLabel = enabled ? "Open settings for \(accessibleTitle)" : accessibleTitle
       button.accessibilityTraits = enabled ? .button : .header
       button.isUserInteractionEnabled = enabled
       if enabled {
@@ -539,7 +565,18 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
       refreshBar.color = args["titleRefreshColor"] is NSNumber ? Self.color(args["titleRefreshColor"]) : color
       button.attachRefreshBar(refreshBar)
       button.frame.size = button.intrinsicContentSize
-      item.titleView = button
+      let portraits = args["titleAvatars"] as? [[String: Any]] ?? []
+      if portraits.isEmpty {
+        item.titleView = button
+      } else {
+        item.title = nil
+        item.titleView = nil
+        // Floating titles use explicit frames rather than UINavigationBar constraints.
+        button.translatesAutoresizingMaskIntoConstraints = true
+        floatingTitle = button
+        container.addSubview(button)
+
+      }
       refreshBar.setRefreshing(args["titleRefreshing"] as? Bool == true)
     } else if largeTitle {
       compactTitle.text = item.title

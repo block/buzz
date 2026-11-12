@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:async';
 import 'dart:io';
 import 'dart:ui' as ui;
+
 import 'package:flutter/services.dart';
 
 import 'package:buzz/features/channels/native_photo_zoom_preview.dart';
@@ -483,9 +484,11 @@ void main() {
     debugDefaultTargetPlatformOverride = null;
   }, skip: !NativePhotoZoomPreview.enabled);
 
-  testWidgets(
-    'video opens from its rendered source and only loads the selected video',
-    (tester) async {
+  for (final posterMode in ['none', 'cached', 'pending']) {
+    final usePoster = posterMode != 'none';
+    testWidgets('video uses $posterMode poster without delaying presentation', (
+      tester,
+    ) async {
       debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
       final key = GlobalKey();
       late BuildContext context;
@@ -509,6 +512,8 @@ void main() {
         ),
       );
       final image = _PendingPreview();
+      final pendingPoster = _PendingPreview();
+      late Completer<void> posterUpdated;
       final videos = <int>[];
       const codec = StandardMethodCodec();
       Future<Object?> nativeCall(String method, int session, int index) async {
@@ -527,9 +532,39 @@ void main() {
         call,
       ) async {
         if (call.method == 'isSupported') return true;
+        if (call.method == 'imageFrame') {
+          posterUpdated.complete();
+          return null;
+        }
         final args = call.arguments as Map;
+        if (posterMode == 'pending') {
+          expect(
+            pendingPoster.frame.isCompleted,
+            isFalse,
+            reason: 'Presentation must not wait for the remote poster',
+          );
+          final decoder = await ui.instantiateImageCodec(provider.bytes);
+          pendingPoster.frame.complete(
+            ImageInfo(image: (await decoder.getNextFrame()).image),
+          );
+          decoder.dispose();
+          await posterUpdated.future.timeout(const Duration(seconds: 5));
+        }
         expect(args['videoIndices'], [0, 2]);
         expect(args['bytes'], isA<Uint8List>());
+        if (posterMode == 'cached') {
+          final codec = await ui.instantiateImageCodec(
+            args['bytes'] as Uint8List,
+          );
+          final frame = await codec.getNextFrame();
+          expect(
+            frame.image.width,
+            2,
+            reason: 'Use the poster, not the 100-pixel source snapshot',
+          );
+          frame.image.dispose();
+          codec.dispose();
+        }
         final session = args['session'] as int;
         expect(await nativeCall('image', session, 0), isNull);
         expect(await nativeCall('video', session, 1), isNull);
@@ -542,11 +577,20 @@ void main() {
         return 'closed';
       });
       await tester.runAsync(() async {
+        posterUpdated = Completer<void>();
+        if (posterMode == 'cached') await precacheImage(provider, context);
         expect(
           await NativePhotoZoomPreview.open(
             context: context,
             sourceKeys: [key, key, key],
             providers: [image, provider, image],
+            previewProviders: usePoster
+                ? [
+                    posterMode == 'pending' ? pendingPoster : provider,
+                    provider,
+                    provider,
+                  ]
+                : null,
             urls: [
               'https://example.org/clip.mp4',
               'https://example.org/photo.jpg',
@@ -571,9 +615,8 @@ void main() {
         reason: 'A video URL must never enter the image decoder',
       );
       debugDefaultTargetPlatformOverride = null;
-    },
-    skip: !NativePhotoZoomPreview.enabled,
-  );
+    }, skip: !NativePhotoZoomPreview.enabled);
+  }
 
   testWidgets(
     'unsupported platform preserves existing gallery without decoding',

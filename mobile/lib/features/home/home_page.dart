@@ -20,6 +20,7 @@ import '../activity/activity_page.dart';
 import '../activity/inbox_unread_provider.dart';
 import '../channels/channels_page.dart';
 import '../search/search_page.dart';
+import 'home_screen_shortcut_host.dart';
 import 'messages_filters.dart';
 import 'messages_navigation_bar.dart';
 import '../../shared/widgets/covered_route_keyboard_insets.dart';
@@ -29,6 +30,7 @@ class HomePage extends HookConsumerWidget {
     required this.settingsPageBuilder,
     required this.onAgents,
     required this.defaultAgentBuilder,
+    required this.openBestieConversation,
     this.communityInvitePageBuilder,
     this.mePageBuilder,
     this.communityAppearancePageBuilder,
@@ -38,6 +40,10 @@ class HomePage extends HookConsumerWidget {
   final WidgetBuilder settingsPageBuilder;
   final ValueChanged<BuildContext> onAgents;
   final WidgetBuilder defaultAgentBuilder;
+
+  /// Opens the direct conversation with the Bestie, for the app shortcut.
+  final Future<void> Function(BuildContext, WidgetRef, String pubkey)
+  openBestieConversation;
 
   /// Builds a sliver inventory and publishes its two creation actions.
   final Widget Function(
@@ -315,6 +321,13 @@ class HomePage extends HookConsumerWidget {
       ),
       body: Stack(
         children: [
+          if (defaultTargetPlatform == TargetPlatform.iOS)
+            HomeScreenShortcutHost(
+              newChat: newChat,
+              newDm: newDm,
+              onAgents: onAgents,
+              openBestieConversation: openBestieConversation,
+            ),
           MediaQuery(
             data: MediaQuery.of(context).copyWith(
               padding: MediaQuery.paddingOf(context).copyWith(

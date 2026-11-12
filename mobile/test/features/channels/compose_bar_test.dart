@@ -43,6 +43,7 @@ import 'package:buzz/shared/widgets/mobile_tab_footer_backdrop.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 part 'compose_bar_test/exact_mention_tests.dart';
+part 'compose_bar_test/mixed_gallery_tests.dart';
 part 'compose_bar_test/solo_draft_tests.dart';
 part 'compose_bar_test/durable_mention_tests.dart';
 part 'compose_bar_test/agent_prefill_tests.dart';
@@ -415,6 +416,9 @@ class _FakeVideoUploadService extends MediaUploadService {
   Future<XFile?> pickGalleryVideo() async => video;
 
   @override
+  Future<List<XFile>> pickGalleryImages() async => [video];
+
+  @override
   Future<BlobDescriptor> uploadVideo(
     XFile pickedVideo, {
     ValueChanged<double>? onProgress,
@@ -735,6 +739,7 @@ class _IterationCountingChannels extends ListBase<Channel> {
 }
 
 void main() {
+  _mixedGalleryTests();
   soloDraftTests();
   exactMentionTests();
   durableMentionTests();
@@ -3122,15 +3127,10 @@ void main() {
       final menu = find.byKey(const ValueKey('attachment-menu'));
       final surface = find.byKey(const ValueKey('attachment-surface-popover'));
       final rows = [
-        for (final label in [
-          'camera',
-          'photos',
-          'video',
-          'voice note',
-          'files',
-        ])
+        for (final label in ['camera', 'photos', 'voice note', 'files'])
           find.byKey(ValueKey('attachment-menu-item-$label')),
       ];
+      expect(find.text('Video'), findsNothing);
       final menuRect = tester.getRect(menu);
 
       final material = tester.widget<Material>(surface);
@@ -3142,41 +3142,23 @@ void main() {
         material.shadowColor,
         appPopoverShadowColor(tester.element(surface)),
       );
-      expect(menuRect.size, const Size(216, 324));
+      expect(menuRect.size, const Size(216, 264));
       for (final row in rows) {
         expect(tester.getSize(row).height, 52);
         expect(tester.getRect(row).left - menuRect.left, Grid.xs);
         expect(menuRect.right - tester.getRect(row).right, Grid.xs);
       }
-      for (final label in [
-        'Camera',
-        'Photos',
-        'Video',
-        'Voice note',
-        'Files',
-      ]) {
+      for (final label in ['Camera', 'Photos', 'Voice note', 'Files']) {
         final text = tester.widget<Text>(find.text(label));
         expect(text.style?.fontSize, 20);
         expect(text.style?.fontFamily, 'Inter');
       }
       final icons = [
-        for (final label in [
-          'camera',
-          'photos',
-          'video',
-          'voice note',
-          'files',
-        ])
+        for (final label in ['camera', 'photos', 'voice note', 'files'])
           find.byKey(ValueKey('attachment-menu-icon-$label')),
       ];
       final labels = [
-        for (final label in [
-          'camera',
-          'photos',
-          'video',
-          'voice note',
-          'files',
-        ])
+        for (final label in ['camera', 'photos', 'voice note', 'files'])
           find.byKey(ValueKey('attachment-menu-label-$label')),
       ];
       for (final icon in icons) {
@@ -3271,13 +3253,7 @@ void main() {
 
         final menu = find.byKey(const ValueKey('attachment-menu'));
         final rows = [
-          for (final label in [
-            'camera',
-            'photos',
-            'video',
-            'voice note',
-            'files',
-          ])
+          for (final label in ['camera', 'photos', 'voice note', 'files'])
             find.byKey(ValueKey('attachment-menu-item-$label')),
         ];
         final scrollView = tester.widget<ListView>(
@@ -5962,7 +5938,7 @@ void main() {
       expect(find.byTooltip('Remove attachment'), findsOneWidget);
     });
 
-    testWidgets('taps Video in chooser sheet and uploads video', (
+    testWidgets('selects a video through Photos and uploads video', (
       tester,
     ) async {
       final pickedVideo = XFile.fromData(
@@ -5987,8 +5963,7 @@ void main() {
         ),
       );
 
-      await _openAttachmentMenu(tester);
-      await tester.tap(find.text('Video'));
+      await _openSystemPhotoPicker(tester);
       await tester.pumpAndSettle();
 
       expect(find.byIcon(BuzzIcons.video), findsOneWidget);
