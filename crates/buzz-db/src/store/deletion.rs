@@ -105,6 +105,7 @@ pub const EXPECTED_SCOPED_TABLES: &[&str] = &[
     "push_match_queue",
     "push_wake_outbox",
     "reactions",
+    "relay_invite_claims",
     "relay_invites",
     "relay_members",
     "scheduled_workflow_fires",
@@ -153,6 +154,7 @@ pub const PURGE_SCOPED_TABLES: &[&str] = &[
     "reactions",
     "push_match_queue",
     "push_leases",
+    "relay_invite_claims",
     "relay_invites",
     "delivery_log",
     "artifact_heads",
@@ -4740,6 +4742,115 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
                 empty_prefix_manifest(format!("repos/{community}/")),
             ],
         }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn invite_claim_queue_is_fenced_and_purged() {
+        assert_invite_claim_queue_deletion().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn migration_schema_invite_claim_queue_is_fenced_and_purged() {
+        assert_invite_claim_queue_deletion().await;
+    }
+
+    async fn assert_invite_claim_queue_deletion() {
+        let (db, store) = store().await;
+        let (request, inventory) = inventoried_request(&db, &store).await;
+        let queued_claim = crate::relay_invite::ClaimRequest {
+            pubkey: nostr::Keys::generate().public_key().to_hex(),
+            policy_version: None,
+            verified_owner: None,
+            credential: crate::relay_invite::ClaimCredential::Legacy {
+                role: "member".into(),
+            },
+        };
+        assert!(matches!(
+            db.enqueue_invite_claim(request.community_id, &queued_claim)
+                .await
+                .unwrap(),
+            crate::relay_invite::EnqueuedClaim::Queued(_)
+        ));
+        let bystander = db
+            .ensure_configured_community(&format!(
+                "queue-bystander-{}.example",
+                Uuid::new_v4().simple()
+            ))
+            .await
+            .unwrap()
+            .id;
+        db.enqueue_invite_claim(bystander, &queued_claim)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE relay_invite_claims SET expires_at=clock_timestamp()-interval '1 second' WHERE community_id=$1")
+            .bind(request.community_id.as_uuid()).execute(&db.pool).await.unwrap();
+        store.approve(request.id, "approver", None).await.unwrap();
+        let claim = store
+            .claim_specific(request.id, "executor", DEFAULT_LEASE_DURATION)
+            .await
+            .unwrap()
+            .unwrap();
+        store.begin_quiescing(&claim.lease).await.unwrap();
+        assert!(matches!(
+            db.enqueue_invite_claim(request.community_id, &queued_claim)
+                .await,
+            Err(DbError::AccessDenied(_))
+        ));
+        assert!(matches!(
+            db.try_admit_invite_claims(request.community_id, &nostr::Keys::generate())
+                .await,
+            Err(DbError::AccessDenied(_))
+        ));
+        assert!(matches!(
+            db.try_finish_invite_claims(request.community_id).await,
+            Err(DbError::AccessDenied(_))
+        ));
+        assert!(matches!(
+            db.acknowledge_invite_claim_results(request.community_id, &[])
+                .await,
+            Err(DbError::AccessDenied(_))
+        ));
+        db.reap_expired_invite_claims().await.unwrap();
+        let retained: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM relay_invite_claims WHERE community_id=$1")
+                .bind(request.community_id.as_uuid())
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+        assert_eq!(retained, 1, "maintenance skips a quiescing tenant");
+        let generation = store.fence(&claim.lease).await.unwrap();
+        let token = LeaseToken {
+            fence_generation: Some(generation),
+            ..claim.lease
+        };
+        store
+            .freeze_destructive_storage_manifest(&token, &inventory.storage)
+            .await
+            .unwrap();
+        store.mark_drained(&token).await.unwrap();
+        store
+            .mark_bindings_removed(&token, serde_json::json!({"keys":0}))
+            .await
+            .unwrap();
+        let purged = store.purge_postgres(&token).await.unwrap();
+        assert_eq!(purged["relay_invite_claims"], 1);
+        let bystander_rows: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM relay_invite_claims WHERE community_id=$1")
+                .bind(bystander.as_uuid())
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+        assert_eq!(bystander_rows, 1);
+        store
+            .mark_cache_purged(&token, serde_json::json!({"test_cache":"empty"}))
+            .await
+            .unwrap();
+        store
+            .verify_postgres_logically_deleted(&token)
+            .await
+            .unwrap();
     }
 
     async fn inventoried_request(

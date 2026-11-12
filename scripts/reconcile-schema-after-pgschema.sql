@@ -253,6 +253,36 @@ BEGIN
     END IF;
 END $$;
 
+-- pgschema also drops the claim queue's multi-column completion CHECK.
+DO $$
+DECLARE
+    previous_lock_timeout text := current_setting('lock_timeout');
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'relay_invite_claims'::regclass
+          AND conname = 'relay_invite_claims_check'
+    ) THEN
+        PERFORM set_config('lock_timeout', '1s', true);
+        ALTER TABLE relay_invite_claims
+            ADD CONSTRAINT relay_invite_claims_check
+            CHECK (completed_at IS NULL OR result IS NOT NULL);
+        PERFORM set_config('lock_timeout', previous_lock_timeout, true);
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'relay_invite_claims'::regclass
+          AND conname = 'relay_invite_claims_check'
+          AND contype = 'c'
+          AND convalidated
+          AND pg_get_constraintdef(oid)
+              = 'CHECK (((completed_at IS NULL) OR (result IS NOT NULL)))'
+    ) THEN
+        RAISE EXCEPTION 'relay_invite_claims must require a result for completed claims';
+    END IF;
+END $$;
+
 -- pgschema reconciles DDL but does not apply seed DML or table storage
 -- parameters from schema/schema.sql. Restore those parts of the desired-state
 -- contract explicitly and fail the bootstrap if the live catalog disagrees.

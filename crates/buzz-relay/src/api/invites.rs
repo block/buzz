@@ -25,9 +25,6 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::access::{AccessSlot, AuthReason, AuthResult};
-use crate::handlers::side_effects::{
-    auto_join_default_channels, fan_out_nip43_membership_list, publish_nip43_member_added,
-};
 use crate::nip_fi_http::admit_nip_fi_http_on_state;
 use buzz_core::invite::{
     hash_v2_code, validate_v2_code, DEFAULT_INVITE_TTL_SECS, MAX_INVITE_TTL_SECS, MAX_INVITE_USES,
@@ -39,7 +36,9 @@ use crate::state::AppState;
 
 use super::{api_error, bridge, internal_error};
 mod claim_auth;
+mod claim_batches;
 use claim_auth::{authenticate, map_claim_error};
+pub(crate) use claim_batches::ClaimBatches;
 
 /// Fixed-window size for the per-pubkey claim rate limiter.
 pub(crate) const CLAIM_RATE_WINDOW: Duration = Duration::from_secs(60);
@@ -487,126 +486,46 @@ async fn claim_invite_authed(
     verified_owner: Option<nostr::PublicKey>,
     body: &[u8],
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    use buzz_db::relay_invite::{ClaimCredential, ClaimOutcome, ClaimRequest, ClaimResult};
+
     if claim_rate_limited(state, tenant.community(), &pubkey) {
         return Err(api_error(
             StatusCode::TOO_MANY_REQUESTS,
             "too many invite claim attempts, slow down",
         ));
     }
-
     let request: ClaimInviteRequest = serde_json::from_slice(body)
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("invalid claim JSON: {e}")))?;
-
-    let claimer_hex = pubkey.to_hex();
-    let owner_hex = verified_owner.map(|owner| owner.to_hex());
     let key = invite_token::derive_invite_key(&state.relay_keypair);
-
-    // --- v2 database-backed path ---
-    //
-    // Route by exact prefix: v2. codes use the durable invite table. No
-    // fallback to v1 HMAC verification for malformed v2 input.
-    if request.code.starts_with(V2_PREFIX) {
+    let (credential, role) = if request.code.starts_with(V2_PREFIX) {
         validate_v2_code(&request.code)
             .map_err(|_| api_error(StatusCode::FORBIDDEN, "invite_invalid"))?;
-
-        // Join-policy receipt verification, same mechanism as v1: the receipt
-        // is bound to the code string by SHA-256, so it works for v2 codes.
-        if let Some(policy) = &state.config.join_policy {
-            let receipt = request
-                .policy_receipt
-                .as_deref()
-                .ok_or_else(|| api_error(StatusCode::FORBIDDEN, "join_policy_required"))?;
-            invite_token::verify_policy_acceptance(&key, receipt, &request.code, &policy.version)
-                .map_err(|_| api_error(StatusCode::FORBIDDEN, "join_policy_required"))?;
-        }
-
-        let token_hash = hash_v2_code(&request.code);
-        let write = state
-            .db
-            .claim_relay_invite_with_owner(
-                tenant.community(),
-                &token_hash,
-                &claimer_hex,
-                state
-                    .config
-                    .join_policy
-                    .as_ref()
-                    .map(|policy| policy.version.as_str()),
-                owner_hex.as_deref(),
-                &state.relay_keypair,
-            )
-            .await
-            .map_err(|e| map_claim_error(slot, e))?;
-        metrics::counter!("buzz_users_created_total", "community" => tenant.host().to_owned())
-            .increment(write.outcome.users_created);
-        if write.outcome.owner_link_created {
-            state.disconnect_unowned_agent_clusterwide(&tenant, pubkey.as_bytes());
-        }
-        // Publish the member-added delta only on Joined; successful repeated
-        // claims may still have durable default-channel work to finish.
-        let joined = matches!(
-            write.outcome.outcome,
-            buzz_db::relay_invite::ClaimOutcome::Joined { .. }
-        );
-        if matches!(
-            write.outcome.outcome,
-            buzz_db::relay_invite::ClaimOutcome::Joined { .. }
-                | buzz_db::relay_invite::ClaimOutcome::AlreadyMember { .. }
-        ) {
-            finish_committed_claim(&tenant, state, &claimer_hex, write.snapshot, joined).await;
-        }
-        return match write.outcome.outcome {
-            buzz_db::relay_invite::ClaimOutcome::Joined { .. } => Ok(Json(serde_json::json!({
-                "status": "joined",
-                "community_id": tenant.community().to_string(),
-                "host": tenant.host(),
-                "role": "member",
-            }))),
-            buzz_db::relay_invite::ClaimOutcome::AlreadyMember { .. } => {
-                Ok(Json(serde_json::json!({
-                    "status": "already_member",
-                    "community_id": tenant.community().to_string(),
-                    "host": tenant.host(),
-                    "role": "member",
-                })))
+        (
+            ClaimCredential::V2 {
+                token_hash: hash_v2_code(&request.code),
+            },
+            "member".to_owned(),
+        )
+    } else {
+        let payload = invite_token::verify_invite_with_cutoff(
+            &key,
+            tenant.community(),
+            &request.code,
+            state.config.invite_v1_invalid_after,
+        )
+        .map_err(|error| match error {
+            invite_token::InviteError::Expired => {
+                api_error(StatusCode::FORBIDDEN, "invite_expired")
             }
-            buzz_db::relay_invite::ClaimOutcome::Expired => {
-                Err(api_error(StatusCode::FORBIDDEN, "invite_expired"))
-            }
-            buzz_db::relay_invite::ClaimOutcome::Exhausted => {
-                Err(api_error(StatusCode::FORBIDDEN, "invite_exhausted"))
-            }
-            // Deliberately indistinguishable, even for an issuer timeout whose
-            // link works again later: a claim never reveals the issuer's
-            // moderation state.
-            buzz_db::relay_invite::ClaimOutcome::Revoked
-            | buzz_db::relay_invite::ClaimOutcome::IssuerRestricted => {
-                Err(api_error(StatusCode::FORBIDDEN, "invite_invalid"))
-            }
-            buzz_db::relay_invite::ClaimOutcome::Restricted => {
-                slot.finish(AuthResult::Denied(AuthReason::Restricted));
-                Err(api_error(StatusCode::FORBIDDEN, "invite_restricted"))
-            }
-            buzz_db::relay_invite::ClaimOutcome::Invalid => {
-                Err(api_error(StatusCode::FORBIDDEN, "invite_invalid"))
-            }
-        };
-    }
-
-    // --- v1 HMAC path (stateless tokens, drain window) ---
-    let payload = invite_token::verify_invite_with_cutoff(
-        &key,
-        tenant.community(),
-        &request.code,
-        state.config.invite_v1_invalid_after,
-    )
-    .map_err(|e| match e {
-        // Expired is post-MAC: revealing it helps the UX without helping a forger.
-        invite_token::InviteError::Expired => api_error(StatusCode::FORBIDDEN, "invite_expired"),
-        // Everything else stays coarse so the endpoint is a poor oracle.
-        _ => api_error(StatusCode::FORBIDDEN, "invite_invalid"),
-    })?;
-
+            _ => api_error(StatusCode::FORBIDDEN, "invite_invalid"),
+        })?;
+        (
+            ClaimCredential::Legacy {
+                role: payload.r.clone(),
+            },
+            payload.r,
+        )
+    };
     if let Some(policy) = &state.config.join_policy {
         let receipt = request
             .policy_receipt
@@ -615,70 +534,57 @@ async fn claim_invite_authed(
         invite_token::verify_policy_acceptance(&key, receipt, &request.code, &policy.version)
             .map_err(|_| api_error(StatusCode::FORBIDDEN, "join_policy_required"))?;
     }
-
-    let write = state
-        .db
-        .claim_relay_membership_with_owner(
-            tenant.community(),
-            &claimer_hex,
-            &payload.r,
-            state
-                .config
-                .join_policy
-                .as_ref()
-                .map(|policy| policy.version.as_str()),
-            owner_hex.as_deref(),
-            &state.relay_keypair,
+    let result = state
+        .invite_claim_batches
+        .submit(
+            state,
+            &tenant,
+            ClaimRequest {
+                pubkey: pubkey.to_hex(),
+                verified_owner: verified_owner.map(|owner| owner.to_hex()),
+                policy_version: state
+                    .config
+                    .join_policy
+                    .as_ref()
+                    .map(|policy| policy.version.clone()),
+                credential,
+            },
         )
         .await
-        .map_err(|e| map_claim_error(slot, e))?;
-    metrics::counter!("buzz_users_created_total", "community" => tenant.host().to_owned())
-        .increment(write.outcome.users_created);
-    if write.outcome.owner_link_created {
-        state.disconnect_unowned_agent_clusterwide(&tenant, pubkey.as_bytes());
-    }
-    let was_inserted = write.outcome.inserted;
-    finish_committed_claim(&tenant, state, &claimer_hex, write.snapshot, was_inserted).await;
-
+        .map_err(|error| match error {
+            claim_batches::ClaimError::Unavailable => api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "invite claim unavailable, retry shortly",
+            ),
+            claim_batches::ClaimError::Database(error) => map_claim_error(slot, &error),
+        })?;
+    let joined = match result {
+        ClaimResult::Legacy(result) => result.inserted,
+        ClaimResult::V2(result) => match result.outcome {
+            ClaimOutcome::Joined { .. } => true,
+            ClaimOutcome::AlreadyMember { .. } => false,
+            ClaimOutcome::Expired => {
+                return Err(api_error(StatusCode::FORBIDDEN, "invite_expired"))
+            }
+            ClaimOutcome::Exhausted => {
+                return Err(api_error(StatusCode::FORBIDDEN, "invite_exhausted"))
+            }
+            ClaimOutcome::Restricted => {
+                slot.finish(AuthResult::Denied(AuthReason::Restricted));
+                return Err(api_error(StatusCode::FORBIDDEN, "invite_restricted"));
+            }
+            // Do not reveal an invitation issuer's moderation state.
+            ClaimOutcome::Invalid | ClaimOutcome::Revoked | ClaimOutcome::IssuerRestricted => {
+                return Err(api_error(StatusCode::FORBIDDEN, "invite_invalid"));
+            }
+        },
+    };
     Ok(Json(serde_json::json!({
-        "status": if was_inserted { "joined" } else { "already_member" },
+        "status": if joined { "joined" } else { "already_member" },
         "community_id": tenant.community().to_string(),
         "host": tenant.host(),
-        "role": payload.r,
+        "role": role,
     })))
-}
-
-/// The follow-up of a claim whose roster write committed: the NIP-43
-/// membership-list fan-out, the member-added delta for new members, and
-/// any unfinished default-channel joins (including on a repeated claim).
-///
-/// It runs on its own task, which the handler awaits, so the response still
-/// waits for the joins. A client that disconnects first makes the server
-/// drop the handler's future: that detaches the task rather than cancelling
-/// it partway. The durable token also survives a relay restart.
-async fn finish_committed_claim(
-    tenant: &buzz_core::TenantContext,
-    state: &Arc<AppState>,
-    claimer_hex: &str,
-    snapshot: Option<buzz_core::StoredEvent>,
-    joined: bool,
-) {
-    let follow_up = tokio::spawn({
-        let (tenant, state, claimer_hex) =
-            (tenant.clone(), Arc::clone(state), claimer_hex.to_owned());
-        async move {
-            fan_out_nip43_membership_list(&tenant, &state, snapshot).await;
-            if joined {
-                if let Err(e) = publish_nip43_member_added(&tenant, &state, &claimer_hex).await {
-                    tracing::warn!("failed to publish NIP-43 member-added delta after claim: {e}");
-                }
-            }
-            auto_join_default_channels(&tenant, &state, &claimer_hex, None).await;
-        }
-    });
-    if let Err(e) = follow_up.await {
-        tracing::error!(member = %claimer_hex, error = %e, "invite claim follow-up task failed");
-    }
 }
 
 /// Fixed-window rate limit on claim attempts, keyed by community and claimer
@@ -709,6 +615,7 @@ fn claim_key_rate_limited(
 
 #[cfg(test)]
 mod postgres_tests {
+    mod batching_postgres_tests;
     mod owner_admission_tests;
     mod recovery_postgres_tests;
     mod restriction_tests;

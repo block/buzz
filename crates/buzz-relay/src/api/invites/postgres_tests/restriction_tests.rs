@@ -315,6 +315,14 @@ pub(super) mod postgres_tests {
             .status(),
             StatusCode::OK
         );
+        let uses_before_failure: i32 = sqlx::query_scalar(
+            "SELECT use_count FROM relay_invites WHERE community_id=$1 AND token_hash=$2",
+        )
+        .bind(community.as_uuid())
+        .bind(buzz_core::invite::hash_v2_code(&code).as_slice())
+        .fetch_one(state.db.pool())
+        .await
+        .unwrap();
         // This test owns its per-process database; never alters a shared fixture.
         sqlx::query("ALTER TABLE community_bans RENAME TO unavailable_restrictions")
             .execute(state.db.pool())
@@ -338,8 +346,33 @@ pub(super) mod postgres_tests {
             .execute(state.db.pool())
             .await
             .unwrap();
-        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            read_json(response).await["error"],
+            "invite claim unavailable, retry shortly"
+        );
         assert!(!membership.unwrap());
+        // The expired request must stay refused after restriction reads recover.
+        assert!(state
+            .db
+            .try_admit_invite_claims(community, &state.relay_keypair)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(!state
+            .db
+            .is_relay_member(community, &claimant.public_key().to_hex())
+            .await
+            .unwrap());
+        let uses_after_failure: i32 = sqlx::query_scalar(
+            "SELECT use_count FROM relay_invites WHERE community_id=$1 AND token_hash=$2",
+        )
+        .bind(community.as_uuid())
+        .bind(buzz_core::invite::hash_v2_code(&code).as_slice())
+        .fetch_one(state.db.pool())
+        .await
+        .unwrap();
+        assert_eq!(uses_after_failure, uses_before_failure);
 
         // Fail specifically inside owner materialization, after membership and
         // ban reads succeed. This fixture is wrapper-owned, as checked above.

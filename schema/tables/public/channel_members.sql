@@ -12,6 +12,8 @@ CREATE TABLE channel_members (
     removed_by  BYTEA,
     hidden_at   TIMESTAMPTZ,
     sync_modified_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    auto_join_token UUID,
+    auto_join_version TIMESTAMPTZ,
     PRIMARY KEY (community_id, channel_id, pubkey),
     FOREIGN KEY (community_id, channel_id)
         REFERENCES channels (community_id, id) ON DELETE CASCADE

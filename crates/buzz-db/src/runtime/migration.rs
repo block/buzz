@@ -898,11 +898,44 @@ mod postgres_tests {
     }
 
     #[test]
+    fn invite_claim_queue_migration_matches_desired_schema() {
+        let migration = MIGRATOR
+            .iter()
+            .find(|migration| migration.version == 87)
+            .unwrap();
+        let desired = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../schema/tables/public/relay_invite_claims.sql"
+        ));
+        let definitions = |sql: &str| -> BTreeSet<String> {
+            split_sql_statements(sql)
+                .into_iter()
+                .map(|statement| normalize_sql(&statement))
+                .filter(|statement| {
+                    statement.starts_with("create table") || statement.starts_with("create index")
+                })
+                .collect()
+        };
+        assert_eq!(definitions(migration.sql.as_str()), definitions(desired));
+        let normalized = normalize_sql(migration.sql.as_str());
+        for forbidden in [
+            "references ",
+            "create trigger",
+            "create function",
+            "attach_community_write_fence",
+        ] {
+            assert!(!normalized.contains(forbidden));
+        }
+        assert!(crate::deletion::EXPECTED_SCOPED_TABLES.contains(&"relay_invite_claims"));
+        assert!(crate::deletion::PURGE_SCOPED_TABLES.contains(&"relay_invite_claims"));
+    }
+
+    #[test]
     fn embedded_migrator_contains_consolidated_initial_schema() {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 86);
+        assert_eq!(migrations.len(), 87);
         assert!(migrations[83]
             .sql
             .as_str()
@@ -3692,6 +3725,160 @@ mod postgres_tests {
         run_migrations(&pool).await.expect("run migrations");
 
         crate::store::deletion::owner_provenance_contract::assert_contract(&pool).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn migration_schema_invite_claim_queue_has_admitted_catalog_surface() {
+        async fn queue_catalog(pool: &PgPool) -> serde_json::Value {
+            sqlx::query_scalar(
+                "SELECT jsonb_build_object( \
+                   'columns', (SELECT jsonb_agg(jsonb_build_array( \
+                     a.attname, format_type(a.atttypid, a.atttypmod), a.attnotnull, \
+                     pg_get_expr(d.adbin, d.adrelid), a.attidentity::text) ORDER BY a.attname) \
+                     FROM pg_attribute a LEFT JOIN pg_attrdef d \
+                       ON d.adrelid=a.attrelid AND d.adnum=a.attnum \
+                     WHERE a.attrelid='relay_invite_claims'::regclass \
+                       AND a.attnum>0 AND NOT a.attisdropped), \
+                   'default_join_columns', (SELECT jsonb_agg(jsonb_build_array( \
+                     a.attname, format_type(a.atttypid, a.atttypmod), a.attnotnull, \
+                     pg_get_expr(d.adbin, d.adrelid), a.attidentity::text, \
+                     a.attgenerated::text) ORDER BY a.attname) \
+                     FROM pg_attribute a LEFT JOIN pg_attrdef d \
+                       ON d.adrelid=a.attrelid AND d.adnum=a.attnum \
+                     WHERE a.attrelid='channel_members'::regclass \
+                       AND a.attname IN ('auto_join_token', 'auto_join_version') \
+                       AND a.attnum>0 AND NOT a.attisdropped), \
+                   'constraints', (SELECT jsonb_agg(jsonb_build_array( \
+                     conname, contype::text, pg_get_constraintdef(oid), convalidated) ORDER BY conname) \
+                     FROM pg_constraint WHERE conrelid='relay_invite_claims'::regclass), \
+                   'indexes', (SELECT jsonb_agg(jsonb_build_array( \
+                     c.relname, pg_get_indexdef(i.indexrelid), i.indoption::int2[]::text, \
+                     i.indisunique, i.indisvalid, i.indisready) ORDER BY c.relname) \
+                     FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid \
+                     WHERE i.indrelid='relay_invite_claims'::regclass), \
+                   'foreign_keys', (SELECT count(*) FROM pg_constraint \
+                     WHERE conrelid='relay_invite_claims'::regclass AND contype='f'), \
+                   'triggers', (SELECT count(*) FROM pg_trigger \
+                     WHERE tgrelid='relay_invite_claims'::regclass AND NOT tgisinternal), \
+                   'invalid_indexes', (SELECT count(*) FROM pg_index \
+                     WHERE indrelid='relay_invite_claims'::regclass \
+                       AND (NOT indisvalid OR NOT indisready)))",
+            )
+            .fetch_one(pool)
+            .await
+            .expect("read live invitation queue catalog")
+        }
+
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+        run_migrations(&pool).await.expect("migrate queue catalog");
+
+        // Compare the actual deployment bootstrap, including pgschema's index
+        // rendering, rather than assuming matching source DDL produces parity.
+        let base_url = crate::test_support::database_url();
+        let desired_db = ScratchDb::create(&base_url, "invite_queue_desired").await;
+        let conn = parse_pg_url(&base_url);
+        let apply = pgschema(&conn, desired_db.name(), &["apply", "--auto-approve"]);
+        assert!(
+            apply.status.success(),
+            "pgschema apply failed: {}\n{}",
+            String::from_utf8_lossy(&apply.stdout),
+            String::from_utf8_lossy(&apply.stderr),
+        );
+        let desired = PgPool::connect(desired_db.url()).await.unwrap();
+        sqlx::raw_sql(include_str!(
+            "../../../../scripts/reconcile-schema-after-pgschema.sql"
+        ))
+        .execute(&desired)
+        .await
+        .expect("reconcile desired invitation queue schema");
+        let desired_catalog = queue_catalog(&desired).await;
+        let migrated_catalog = queue_catalog(&pool).await;
+        assert_eq!(
+            desired_catalog, migrated_catalog,
+            "invitation queue schema parity"
+        );
+        for catalog in [&desired_catalog, &migrated_catalog] {
+            assert_eq!(
+                catalog["default_join_columns"].as_array().map(Vec::len),
+                Some(2),
+                "both default-join marker columns must exist"
+            );
+            assert_eq!(
+                catalog["default_join_columns"],
+                serde_json::json!([
+                    ["auto_join_token", "uuid", false, null, "", ""],
+                    [
+                        "auto_join_version",
+                        "timestamp with time zone",
+                        false,
+                        null,
+                        "",
+                        ""
+                    ]
+                ]),
+                "default-join markers are nullable plain columns without defaults"
+            );
+            for absent in ["foreign_keys", "triggers", "invalid_indexes"] {
+                assert_eq!(catalog[absent], serde_json::json!(0), "{absent}");
+            }
+        }
+        desired.close().await;
+
+        let identity: bool = sqlx::query_scalar(
+            "SELECT is_identity='YES' AND identity_generation='ALWAYS' FROM information_schema.columns WHERE table_schema='public' AND table_name='relay_invite_claims' AND column_name='queue_order'",
+        ).fetch_one(&pool).await.unwrap();
+        assert!(identity);
+        let db = crate::Db::from_pool(pool);
+        db.deletion_store()
+            .validate_catalog()
+            .await
+            .expect("queue registered for deletion");
+        let community = db
+            .ensure_configured_community("invite-queue-migration.example")
+            .await
+            .unwrap()
+            .id;
+        let claim = crate::relay_invite::ClaimRequest {
+            pubkey: nostr::Keys::generate().public_key().to_hex(),
+            policy_version: None,
+            verified_owner: None,
+            credential: crate::relay_invite::ClaimCredential::Legacy {
+                role: "member".into(),
+            },
+        };
+        let crate::relay_invite::EnqueuedClaim::Queued(id) =
+            db.enqueue_invite_claim(community, &claim).await.unwrap()
+        else {
+            panic!("enqueue on migrated schema");
+        };
+        let write = db
+            .try_admit_invite_claims(community, &nostr::Keys::generate())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(write.outcome.len(), 1);
+        assert!(write.snapshot.is_some());
+        assert!(db
+            .invite_claim_results(community, &[id])
+            .await
+            .unwrap()
+            .is_empty());
+        db.try_finish_invite_claims(community)
+            .await
+            .unwrap()
+            .unwrap()
+            .complete()
+            .await
+            .unwrap();
+        assert_eq!(
+            db.invite_claim_results(community, &[id])
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[tokio::test]

@@ -101,6 +101,7 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 \i tables/public/relay_members.sql
 \i tables/public/join_policy_acceptances.sql
 \i tables/public/relay_invites.sql
+\i tables/public/relay_invite_claims.sql
 \i tables/public/archived_identities.sql
 \i tables/public/audit_log.sql
 \i tables/public/moderation_actions.sql

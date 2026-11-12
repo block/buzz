@@ -19,7 +19,7 @@ use crate::{deletion, event, DbError, EventQuery, Result};
 use buzz_datastore_tracing::datastore_span;
 use chrono::{DateTime, Utc};
 use sqlx::postgres::PgPoolOptions;
-use sqlx::{PgPool, QueryBuilder};
+use sqlx::PgPool;
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -108,31 +108,21 @@ pub(crate) async fn insert_mentions_in_transaction(
         return Ok(());
     }
 
-    // Multi-row INSERT ... ON CONFLICT DO NOTHING, chunked to stay under
-    // Postgres's 65,535 bind-parameter statement cap (6 binds per row caps a
-    // single statement at ~10.9k rows). Relay-signed kind 39002 rosters carry
-    // one p-tag per channel member and can exceed that. The caller owns the
-    // transaction so all chunks share its commit boundary.
-    const MENTION_INSERT_CHUNK_ROWS: usize = 5_000;
-    for chunk in valid_pubkeys.chunks(MENTION_INSERT_CHUNK_ROWS) {
-        let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
-            "INSERT INTO event_mentions \
-             (community_id, pubkey_hex, event_id, event_created_at, channel_id, event_kind) ",
-        );
-
-        qb.push_values(chunk, |mut b, pubkey| {
-            b.push_bind(community_id.as_uuid())
-                .push_bind(pubkey.as_str())
-                .push_bind(event_id_bytes.as_slice())
-                .push_bind(created_at)
-                .push_bind(channel_id)
-                .push_bind(kind as i32);
-        });
-
-        qb.push(" ON CONFLICT DO NOTHING");
-
-        qb.build().execute(tx.conn()).await?;
-    }
+    // One pubkey array keeps the bind count constant for large roster events.
+    sqlx::query(
+        "INSERT INTO event_mentions \
+         (community_id, pubkey_hex, event_id, event_created_at, channel_id, event_kind) \
+         SELECT $1, pubkey, $3, $4, $5, $6 FROM unnest($2::text[]) AS pubkey \
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(community_id.as_uuid())
+    .bind(&valid_pubkeys)
+    .bind(event_id_bytes.as_slice())
+    .bind(created_at)
+    .bind(channel_id)
+    .bind(kind as i32)
+    .execute(tx.conn())
+    .await?;
     Ok(())
 }
 
