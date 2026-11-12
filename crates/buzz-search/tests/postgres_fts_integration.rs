@@ -840,6 +840,77 @@ async fn prefix_relevance_ranks_only_the_newest_matches() {
     teardown(pool, &schema).await;
 }
 
+/// A number of three or more digits also finds it after a hyphen, as in a
+/// ticket id, in both modes; a two-digit number does not match a date's month
+/// or day, and a quoted identifier still matches as a phrase.
+/// Mutation: drop the rewrite → `1234` misses the ticket; lower the minimum to
+/// two digits → `11` finds the timestamp.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn numbers_also_match_after_a_hyphen() {
+    let (pool, schema) = setup().await;
+    let c = mk_community(&pool, "hyphen-number.example").await;
+    let (ticket, plain, timestamp) = (rand_bytes32(), rand_bytes32(), rand_bytes32());
+    for (i, (id, content)) in [
+        (ticket, "shipped ABC-1234 today"),
+        (plain, "plain 1234 here"),
+        (timestamp, "deployed at 2026-11-12T10:30:00Z"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        insert_event(
+            &pool,
+            c,
+            id,
+            rand_bytes32(),
+            9,
+            content,
+            None,
+            1_700_000_000 + i as i64,
+        )
+        .await;
+    }
+
+    let svc = SearchService::new(pool.clone());
+    let query = |q: &str, mode| SearchQuery {
+        community: c,
+        q: q.into(),
+        channel_scope: ChannelScope::Any,
+        kinds: None,
+        authors: None,
+        since: None,
+        until: None,
+        page: 1,
+        per_page: 10,
+        mode,
+        sort: buzz_search::SearchSort::Newest,
+    };
+    let ids = |r: buzz_search::SearchResult| {
+        let mut ids = r.hits.iter().map(|h| h.event_id).collect::<Vec<_>>();
+        ids.sort();
+        ids
+    };
+    let mut both = vec![ticket, plain];
+    both.sort();
+
+    for (q, mode, want) in [
+        ("1234", buzz_search::SearchMode::FullText, both.clone()),
+        ("123", buzz_search::SearchMode::Prefix, both),
+        ("11", buzz_search::SearchMode::FullText, vec![]),
+        (
+            "\"ABC-1234\"",
+            buzz_search::SearchMode::FullText,
+            vec![ticket],
+        ),
+    ] {
+        let result = svc.search(&query(q, mode)).await.expect("search");
+        assert_eq!(ids(result), want, "{q} ({mode:?})");
+    }
+
+    teardown(pool, &schema).await;
+}
+
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn channel_scope_restricts_results() {

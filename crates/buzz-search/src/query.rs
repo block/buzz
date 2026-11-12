@@ -173,6 +173,12 @@ const PREFIX_RANK_WINDOW: i64 = 1000;
 /// sends one on every typing pause. Profiles are few enough to stay
 /// one-character typeahead.
 const PREFIX_MIN_CHARS: i32 = 3;
+/// Shortest number a search also matches after a hyphen. The `simple` parser
+/// keeps the hyphen as a sign (`ABC-123` is stored as `abc`, `-123`), so `123`
+/// alone would miss it. Dates store their month and day the same way
+/// (`2026-11-12` is `2026`, `-11`, `-12`), so matching shorter numbers would
+/// make `11` or `12` match every timestamp; three digits never come from a date.
+const HYPHENATED_NUMBER_MIN_DIGITS: usize = 3;
 
 /// `min_prefix_chars` applies to [`SearchMode::Prefix`] only; 0 disables it.
 fn push_tsquery(
@@ -225,6 +231,65 @@ fn push_tsquery(
         }
     }
 }
+
+/// Rewrites each lexeme of at least [`HYPHENATED_NUMBER_MIN_DIGITS`] digits in
+/// a tsquery's text form to also match its hyphenated form, keeping any `:*`
+/// or weight suffix: `'123':*` becomes `( '123':* | '-123':* )`.
+fn expand_hyphenated_numbers(tsquery: &str) -> String {
+    let mut out = String::with_capacity(tsquery.len());
+    let mut rest = tsquery;
+    while let Some(open) = rest.find('\'') {
+        let tail = &rest[open..];
+        let Some(close) = closing_quote(tail) else {
+            break;
+        };
+        out.push_str(&rest[..open]);
+        let suffix = suffix_len(&tail[close + 1..]);
+        let (quoted, suffix) = (&tail[..=close], &tail[close + 1..close + 1 + suffix]);
+        let lexeme = &quoted[1..close];
+        if lexeme.len() >= HYPHENATED_NUMBER_MIN_DIGITS
+            && lexeme.bytes().all(|b| b.is_ascii_digit())
+        {
+            out.push_str(&format!("( {quoted}{suffix} | '-{lexeme}'{suffix} )"));
+        } else {
+            out.push_str(quoted);
+            out.push_str(suffix);
+        }
+        rest = &tail[close + 1 + suffix.len()..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Byte index of the quote that closes the lexeme `quoted` starts with.
+/// Postgres writes a quote in a lexeme as `''` and a backslash as `\\`.
+fn closing_quote(quoted: &str) -> Option<usize> {
+    let bytes = quoted.as_bytes();
+    let mut i = 1;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => i += 2,
+            b'\'' if bytes.get(i + 1) == Some(&b'\'') => i += 2,
+            b'\'' => return Some(i),
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// Length of the `:*` / weight suffix (`:*AB`) at the start of `s`, if any.
+fn suffix_len(s: &str) -> usize {
+    match s.strip_prefix(':') {
+        Some(flags) => {
+            1 + flags
+                .bytes()
+                .take_while(|b| b"*ABCDabcd".contains(b))
+                .count()
+        }
+        None => 0,
+    }
+}
+
 fn normalized_search_text(q: &str) -> Option<String> {
     let trimmed = q.trim();
     if trimmed.is_empty() {
@@ -312,6 +377,7 @@ pub async fn search(pool: &PgPool, query: &SearchQuery) -> Result<SearchResult, 
             page,
         });
     };
+    let tsquery = expand_hyphenated_numbers(&tsquery);
 
     let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
         "SELECT id, kind, pubkey, channel_id, \
@@ -688,6 +754,34 @@ mod tests {
             normalized_search_text("foo\0bar").as_deref(),
             Some("foo bar")
         );
+    }
+
+    #[test]
+    fn numbers_of_three_or_more_digits_also_match_after_a_hyphen() {
+        for (tsquery, expanded) in [
+            ("'123'", "( '123' | '-123' )"),
+            ("'123':*", "( '123':* | '-123':* )"),
+            ("'pr' <-> '3267':AB", "'pr' <-> ( '3267':AB | '-3267':AB )"),
+            ("!'4567' & 'x'", "!( '4567' | '-4567' ) & 'x'"),
+            ("'café' & '123'", "'café' & ( '123' | '-123' )"),
+        ] {
+            assert_eq!(expand_hyphenated_numbers(tsquery), expanded);
+        }
+    }
+
+    #[test]
+    fn short_numbers_and_other_lexemes_are_unchanged() {
+        for tsquery in [
+            "'11' & '12'",
+            "'abc' <-> '-123'",
+            "'abc123'",
+            "'x''123''y'",
+            "'a\\\\' & 'b'",
+            "'unterminated 123",
+            "'a' & 'unterminated 123",
+        ] {
+            assert_eq!(expand_hyphenated_numbers(tsquery), tsquery);
+        }
     }
 
     #[test]
