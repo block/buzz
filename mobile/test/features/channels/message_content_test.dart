@@ -549,6 +549,9 @@ void main() {
         // Escaped mention and channel sigils stay text, not pills.
         (r'hi \@Alice there', 'hi @Alice there'),
         (r'hi \#general there', 'hi #general there'),
+        // Authored stand-in characters stay themselves and don't stop
+        // escapes.
+        ('\uE0A0\uE0A1 \uE0A0 \\@Alice', '\uE0A0\uE0A1 \uE0A0 @Alice'),
         (r'**bold \#x** \[not math\](y)', '[not math](y)'),
         (r'[\#buzz-mobile](https://example.com/x)', '#buzz-mobile'),
         (

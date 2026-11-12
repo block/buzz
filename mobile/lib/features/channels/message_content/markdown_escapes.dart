@@ -62,46 +62,56 @@ final _escape = RegExp(r'\\([!-/:-@\[-`{-~])|\u2060');
 /// CommonMark, and on desktop, all of them are escapes for the literal
 /// character. So `\[not a link\](x)` shows `[not a link](x)`, not a formula,
 /// and `\@alice` shows `@alice`, not a mention. `\\` stays an escaped
-/// backslash. A body that already holds a stand-in keeps its sigil escapes,
-/// so authored text is never drawn as a sigil.
+/// backslash.
+///
+/// A stand-in is [_standInMark] followed by a second character. An authored
+/// [_standInMark] is written as two, so authored text is never drawn as a
+/// sigil.
 String escapeMarkdownLiterals(String content) {
-  if (!_literalEscape.hasMatch(content)) return content;
-  final sigils = !content.contains(_standIn);
+  if (!_literalEscape.hasMatch(content) && !content.contains(_standInMark)) {
+    return content;
+  }
   return mapMarkdownProse(
     content,
     (prose) => prose.replaceAllMapped(
       _backslashPair,
       (m) => switch (m[1]) {
+        null => '$_standInMark$_standInMark',
         '[' => '&#91;',
         ']' => '&#93;',
         '(' => '&#40;',
         ')' => '&#41;',
-        final sigil? when sigils && _sigils.contains(sigil) =>
-          String.fromCharCode(_standInBase + _sigils.indexOf(sigil)),
+        final sigil when _sigils.contains(sigil) =>
+          _standInMark +
+              String.fromCharCode(_standInBase + 1 + _sigils.indexOf(sigil)),
+        _standInMark => '\\$_standInMark$_standInMark',
         _ => m[0]!,
       },
     ),
   );
 }
 
-/// Draws the stand-ins [escapeMarkdownLiterals] writes for `\@`, `\#` and
-/// `\:` as those characters, in every scope, so no pattern claims them.
+/// Draws the stand-ins [escapeMarkdownLiterals] writes as the characters they
+/// hold, in every scope, so no pattern claims them.
 final escapedSigilPattern = InlinePattern(
   pattern: _standIn,
   scopes: MarkdownComponent.allScopes,
   builder: (context, match, style) =>
-      TextSpan(text: _sigilFor(match[0]!), style: style),
+      TextSpan(text: _heldBy(match[0]!), style: style),
 );
 
-String _sigilFor(String standIn) =>
-    _sigils[standIn.codeUnitAt(0) - _standInBase];
+String _heldBy(String standIn) {
+  final held = standIn.codeUnitAt(1) - _standInBase;
+  return held == 0 ? _standInMark : _sigils[held - 1];
+}
 
 const _sigils = '@#:';
-// Private-use characters, one per sigil.
+// Private-use characters: the mark, then one per sigil.
 const _standInBase = 0xE0A0;
-final _standIn = RegExp('[\u{E0A0}-\u{E0A2}]');
+const _standInMark = '\u{E0A0}';
+final _standIn = RegExp('\u{E0A0}[\u{E0A0}-\u{E0A3}]');
 final _literalEscape = RegExp(r'\\[\[\]()@#:]');
-final _backslashPair = RegExp(r'\\(.)', dotAll: true);
+final _backslashPair = RegExp('\\\\(.)|\u{E0A0}', dotAll: true);
 
 /// [text] with gpt_markdown's inline-pattern placeholders put back as the
 /// source they replaced.
@@ -125,7 +135,7 @@ String unmaskInlinePatterns(String text) {
           }
         })
       : text;
-  return unmasked.replaceAllMapped(_standIn, (m) => _sigilFor(m[0]!));
+  return unmasked.replaceAllMapped(_standIn, (m) => _heldBy(m[0]!));
 }
 
 final _patternMask = RegExp('\u{E012}\\d+:([A-Za-z0-9+/=]*)\u{E013}');
