@@ -427,4 +427,87 @@ void main() {
       expect(records.single.accountSyncRevision, isNull);
     },
   );
+
+  test(
+    'a session record that becomes unreadable mid-removal still fences the account',
+    () async {
+      if (!HostedEnvironment.enabled) return;
+      final sessionKey =
+          'buzz_hosted_session_${HostedEnvironment.origin.host.replaceAll('.', '_')}_v1';
+      final sessions = FakeSecureStorage();
+      final expiry = DateTime.now()
+          .add(const Duration(days: 1))
+          .toUtc()
+          .toIso8601String();
+      BuilderlabAccountClient client() => BuilderlabAccountClient(
+        storage: sessions,
+        httpClient: MockClient((request) async {
+          if (request.url.path.endsWith('/exchange')) {
+            return http.Response(
+              jsonEncode({'session_credential': 'A', 'expires_at': expiry}),
+              200,
+            );
+          }
+          if (request.url.path.endsWith('/me')) {
+            return http.Response(
+              jsonEncode({'subject': 'A', 'expires_at': expiry}),
+              200,
+            );
+          }
+          return http.Response('{}', 503);
+        }),
+      );
+      // Retain A's session without adopting it, so each read uses the record.
+      final signIn = client();
+      await signIn.exchange(code: 'code', verifier: 'a' * 43);
+      signIn.dispose();
+      final account = client();
+      final storage = CommunityStorage(secure: FakeSecureStorage());
+      await storage.save(
+        Community(
+          id: 'existing',
+          name: 'existing',
+          relayUrl: 'wss://existing.example',
+          addedAt: DateTime(2025),
+          nsec: nostr.Keys('1'.padLeft(64, '0')).nsec,
+        ),
+      );
+      final sync = KnownCommunitySync(
+        account: account,
+        storage: FakeSecureStorage(),
+        localCommunities: storage.loadForAccountSync,
+        acknowledgeRemoval: storage.acknowledgeRemoval,
+      )..setActive(false);
+      final container = ProviderContainer(
+        overrides: [
+          builderlabAccountProvider.overrideWithValue(account),
+          communityStorageProvider.overrideWithValue(storage),
+          knownCommunitySyncProvider.overrideWithValue(sync),
+          communitySnapshotWriterProvider.overrideWithValue((_) async {}),
+          // The record breaks after the removal captured A, before its recheck.
+          communityPushLeaseRevocationEnqueuerProvider.overrideWithValue((
+            _,
+          ) async {
+            await sessions.write(key: sessionKey, value: 'not json');
+            return false;
+          }),
+        ],
+      );
+      addTearDown(() {
+        container.dispose();
+        sync.dispose();
+        account.dispose();
+      });
+      expect(account.account, isNull);
+      expect(await account.retainedSubject(), 'A');
+      await container.read(communityListProvider.future);
+      await expectLater(
+        container
+            .read(communityListProvider.notifier)
+            .removeCommunity('existing'),
+        throwsA(AccountFailure.differentAccount),
+      );
+      expect((await storage.loadAll()).map((c) => c.id), ['existing']);
+    },
+  );
 }
