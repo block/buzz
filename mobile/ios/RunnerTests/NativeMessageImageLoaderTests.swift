@@ -128,6 +128,13 @@ final class NativeReactionDetailsTests: XCTestCase {
     XCTAssertEqual(updatedRow.arrangedSubviews[0].subviews.compactMap { $0 as? UILabel }.first?.text, "🎉")
   }
 
+  @MainActor func testShortcodeReactionWithoutImageNeverShowsText() {
+    let glyph = NativeMessageGlyph(
+      data: ["emoji": ":ghost:", "isShortcode": true], size: 26, isReaction: true)
+    XCTAssertNil(glyph.subviews.compactMap { $0 as? UILabel }.first?.text)
+    XCTAssertNotNil(glyph.subviews.compactMap { $0 as? UIImageView }.first?.image)
+  }
+
   @MainActor func testTogglesListEveryReactorAndRelabelUpdatedProfiles() {
     let controller = NativeReactionDetailsViewController(data: [
       "reactions": [
