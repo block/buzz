@@ -1282,21 +1282,8 @@ impl DeletionStore {
             )));
         }
 
-        let tombstone_trigger_present: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM pg_trigger t \
-                    JOIN pg_class c ON c.oid = t.tgrelid \
-                    JOIN pg_proc p ON p.oid = t.tgfoid \
-                    WHERE c.relname = 'communities' \
-                      AND p.proname = 'enforce_community_tombstone' \
-                      AND NOT t.tgisinternal AND t.tgenabled = 'O')",
-        )
-        .fetch_one(&mut *conn)
-        .await?;
-        if !tombstone_trigger_present {
-            return Err(DbError::DeletionSafety(
-                "community tombstone trigger is missing".to_string(),
-            ));
-        }
+        // The five single-table guards and the deletion lock key are
+        // application-owned, so serving needs no trigger or SQL function.
         Ok(())
     }
 
@@ -4952,6 +4939,106 @@ DROP FUNCTION community_deletion_lock_key(UUID);
                     .await
                     .expect("hash lock keys");
             assert_eq!(rust_lock, sql_lock, "lock key drifted for {id}");
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn migration_schema_single_table_guards_are_optional_for_serving_and_deletion() {
+        let db = Db::new(&DbConfig {
+            database_url: crate::test_support::database_url(),
+            max_connections: 5,
+            min_connections: 0,
+            ..DbConfig::default()
+        })
+        .await
+        .expect("isolated migration database");
+        // Pin the pre-contract schema so this expand regression also covers
+        // the old catalog after the contract migration has been added.
+        crate::migration::run_migrations_through(&db.pool, 86)
+            .await
+            .expect("phase-one schema");
+        let community = db
+            .ensure_configured_community("optional-guards.example")
+            .await
+            .expect("active community")
+            .id;
+        let store = db.deletion_store();
+        for objects_present in [true, false] {
+            if !objects_present {
+                sqlx::raw_sql(
+                    r#"
+DROP TRIGGER trg_channels_community_id_immutable ON channels;
+DROP TRIGGER communities_deletion_tombstone ON communities;
+DROP TRIGGER community_deletion_request_retargeting_guard ON community_deletion_requests;
+DROP TRIGGER community_deletion_approval_removal_guard ON community_deletion_approvals;
+DROP TRIGGER community_deletion_manifest_keys_guard ON community_deletion_manifest_keys;
+DROP FUNCTION channels_community_id_immutable();
+DROP FUNCTION enforce_community_tombstone();
+DROP FUNCTION prevent_community_deletion_request_retargeting();
+DROP FUNCTION prevent_community_deletion_approval_removal();
+DROP FUNCTION protect_community_deletion_manifest_keys();
+"#,
+                )
+                .execute(&db.pool)
+                .await
+                .expect("retire only the five single-table guards");
+            }
+            store
+                .validate_serving_catalog()
+                .await
+                .expect("startup catalog");
+            db.validate_deletion_serving_catalog_for_readiness(
+                tokio::time::Instant::now() + Duration::from_secs(5),
+            )
+            .await
+            .expect("readiness catalog");
+            store.validate_catalog().await.expect("destruction catalog");
+            let lease = store
+                .acquire_serving_write_lease(
+                    community,
+                    "optional-guards",
+                    "test-owner",
+                    DEFAULT_LEASE_DURATION,
+                )
+                .await
+                .expect("active admission");
+            store
+                .release_serving_write_lease(&lease)
+                .await
+                .expect("release admission");
+            let (request, _) = inventoried_request(&db, &store).await;
+            store
+                .approve(request.id, "approver", None)
+                .await
+                .expect("approval");
+            let claim = store
+                .claim_specific(request.id, "executor", DEFAULT_LEASE_DURATION)
+                .await
+                .expect("claim")
+                .expect("approved claim");
+            store
+                .begin_quiescing(&claim.lease)
+                .await
+                .expect("quiesce before fence");
+            store
+                .fence(&claim.lease)
+                .await
+                .expect("app lifecycle transition");
+            assert!(
+                matches!(
+                    store
+                        .acquire_serving_write_lease(
+                            request.community_id,
+                            "fenced",
+                            "test-owner",
+                            DEFAULT_LEASE_DURATION,
+                        )
+                        .await,
+                    Err(DbError::AccessDenied(_))
+                ),
+                "fenced admission with objects_present={objects_present}"
+            );
         }
     }
 
