@@ -615,7 +615,9 @@ pub async fn search_profile_names(
 ///   ten thousand levels at the default `max_stack_depth`). That raises an
 ///   error `pg_input_is_valid` does not catch, so content with more than 4096
 ///   `[` and `{` is never parsed. The count bounds the depth; ingest already
-///   rejects kind:0 content nested deeper than 128 levels.
+///   rejects kind:0 content nested deeper than 128 levels. The bound assumes
+///   the default 2 MB `max_stack_depth`; well below that, content stored
+///   outside ingest with fewer than 4096 levels can still fail the search.
 ///
 /// `OFFSET 0` keeps the planner from copying the parse into each use of `doc`.
 const PROFILE_NAME_FIELDS: &str = " CROSS JOIN LATERAL (SELECT CASE \
