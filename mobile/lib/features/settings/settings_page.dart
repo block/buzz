@@ -30,7 +30,13 @@ import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
 import '../../shared/widgets/ios_glass_navigation_button.dart';
 import '../../shared/widgets/immediate_page_route.dart';
+import '../../shared/agents/owned_agent_directory.dart';
+import '../../shared/community/community_provider.dart';
+import '../../shared/identity_names/identity_names_provider.dart';
+import '../../shared/me/default_agent.dart';
+import '../agents/agents_page.dart';
 
+part 'settings_page/agents_section.dart';
 part 'settings_page/profile_section.dart';
 part 'settings_page/status_section.dart';
 part 'settings_page/connection_section.dart';
@@ -49,6 +55,8 @@ class SettingsPage extends HookConsumerWidget {
     this.onSetStatus,
     this.onEditDisplayName,
     this.onEditProfileDescription,
+    this.onAgents,
+    this.onCreateAgent,
   });
 
   /// Header widget displayed at the top of settings.
@@ -68,6 +76,12 @@ class SettingsPage extends HookConsumerWidget {
 
   /// Opens the profile-description editor from the settings section.
   final Future<void> Function(BuildContext context)? onEditProfileDescription;
+
+  /// Opens the agents management view.
+  final void Function(BuildContext context)? onAgents;
+
+  /// Opens the agent creation view directly.
+  final void Function(BuildContext context)? onCreateAgent;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -130,6 +144,10 @@ class SettingsPage extends HookConsumerWidget {
               profileEditPageBuilder: profileEditPageBuilder,
               onEditDisplayName: onEditDisplayName,
               onEditProfileDescription: onEditProfileDescription,
+            ),
+            _AgentsSection(
+              onAgents: onAgents,
+              onCreateAgent: onCreateAgent,
             ),
             const _NotificationsSection(),
             _ConnectionSection(

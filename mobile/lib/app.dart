@@ -524,6 +524,8 @@ class _SettingsPageContent extends ConsumerWidget {
       onEditProfileDescription: showProfileDescriptionEditor,
       identityRecoveryPageBuilder: (_) =>
           const PairingPage(addingCommunity: true, identityRecoveryOnly: true),
+      onAgents: showAgents,
+      onCreateAgent: (context) => showAgents(context, createOnOpen: true),
     );
   }
 }
