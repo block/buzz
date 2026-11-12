@@ -684,11 +684,15 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
   /// whitespace in the prefix exceed about 3.8K units.
   static let previewInputLimit = 4096
 
-  /// A fenced code block (with an optional language line) or an inline code
-  /// span. A fence with no closing fence runs to the end of the text, as in
-  /// CommonMark, which also covers a block cut by `previewInputLimit`.
+  /// A fenced span on one line, a fenced code block, or an inline code span.
+  /// A block's opening line (a fence of three or more backticks, then an
+  /// optional language) is dropped, and the block closes only at a fence at
+  /// least as long that ends its line, so backticks inside the code (a "```"
+  /// string literal) don't end it. A fence with no closing fence runs to the
+  /// end of the text, as in CommonMark, which also covers a block cut by
+  /// `previewInputLimit`. Group 2 is the block's fence; the others hold code.
   private static let previewCode = try! NSRegularExpression(
-    pattern: #"```(?:[^\n`]*\n)?([\s\S]*?)(?:\n?```|\z)|`([^`\n]*)`"#)
+    pattern: #"```([^\n]*?)(?:```|\z)|(`{3,})[^\n]*\n([\s\S]*?)(?:\n?\2`*[ \t]*(?=\n|\z)|\z)|`([^`\n]*)`"#)
 
   /// Stands in for a code span while the prose rules run over the whole
   /// text, so a link label or a bold run can contain code. Private-use
@@ -725,7 +729,7 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
     var position = 0
     for match in previewCode.matches(in: input, range: NSRange(location: 0, length: text.length)) {
       prose += text.substring(with: NSRange(location: position, length: match.range.location - position))
-      let body = match.range(at: 1).location != NSNotFound ? match.range(at: 1) : match.range(at: 2)
+      let body = [1, 3, 4].map(match.range(at:)).first { $0.location != NSNotFound }!
       prose += previewCodeOpen + String(codes.count) + previewCodeClose
       codes.append(text.substring(with: body))
       position = NSMaxRange(match.range)
