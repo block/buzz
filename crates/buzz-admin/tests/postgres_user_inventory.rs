@@ -216,13 +216,13 @@ async fn workflow_cli(url: &str, args: &[&str], success: bool) -> Value {
     if success {
         serde_json::from_slice(&output.stdout).unwrap()
     } else {
-        Value::Null
+        Value::String(String::from_utf8(output.stderr).unwrap())
     }
 }
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn inventory_submission_runs_demo_and_public_key_workflows_end_to_end() {
+async fn inventory_submission_completes_demo_and_blocks_unimplemented_real_workflow() {
     let url = std::env::var("BUZZ_TEST_DATABASE_URL").unwrap();
     let pool = PgPool::connect(&url).await.unwrap();
     let key = "ab".repeat(32);
@@ -292,17 +292,50 @@ async fn inventory_submission_runs_demo_and_public_key_workflows_end_to_end() {
         )
         .await;
         assert!(approved["stage_history"].as_array().unwrap().is_empty());
-        let stepped = workflow_cli(&url, &["run", id, "--next-step"], true).await;
-        assert_eq!(stepped["stage_history"][0]["status"], "completed");
-        let first_id = stepped["stage_history"][0]["id"].clone();
-        let done = workflow_cli(&url, &["run", id], true).await;
-        assert_eq!(done["status"], "completed");
-        assert_eq!(done["stage_history"][0]["id"], first_id);
-        let stages = done["stage_history"].as_array().unwrap();
-        assert_eq!(stages.len(), if subject == "demo" { 5 } else { 3 });
-        assert!(stages
-            .iter()
-            .all(|s| s["status"] == "completed" && s["is_current"] == false));
+        let done = if subject == "demo" {
+            let stepped = workflow_cli(&url, &["run", id, "--next-step"], true).await;
+            assert_eq!(stepped["stage_history"][0]["status"], "completed");
+            let first_id = stepped["stage_history"][0]["id"].clone();
+            let done = workflow_cli(&url, &["run", id], true).await;
+            assert_eq!(done["status"], "completed");
+            assert_eq!(done["stage_history"][0]["id"], first_id);
+            let stages = done["stage_history"].as_array().unwrap();
+            assert_eq!(stages.len(), 5);
+            assert!(stages
+                .iter()
+                .all(|s| s["status"] == "completed" && s["is_current"] == false));
+            done
+        } else {
+            let error = workflow_cli(&url, &["run", id, "--next-step"], false).await;
+            assert!(
+                error
+                    .as_str()
+                    .unwrap()
+                    .contains("real workflow requires --delete"),
+                "{error}"
+            );
+            for args in [
+                vec!["run", id, "--delete", "--next-step"],
+                vec!["run", id, "--delete"],
+            ] {
+                let error = workflow_cli(&url, &args, false).await;
+                assert!(
+                    error
+                        .as_str()
+                        .unwrap()
+                        .contains("real handler for gate_user is not implemented"),
+                    "{error}"
+                );
+            }
+            let blocked = workflow_cli(&url, &["inspect", id], true).await;
+            let stages = blocked["stage_history"].as_array().unwrap();
+            assert_eq!(stages.len(), 1);
+            assert_eq!(stages[0]["stage"], "gate_user");
+            assert_eq!(stages[0]["status"], "pending");
+            assert_eq!(stages[0]["is_current"], true);
+            assert_ne!(blocked["status"], "completed");
+            blocked
+        };
         let inspected = workflow_cli(&url, &["inspect", id], true).await;
         assert_eq!(inspected, done);
         // Hex and npub converge on the same saved request without rediscovery.
@@ -334,7 +367,7 @@ async fn inventory_submission_runs_demo_and_public_key_workflows_end_to_end() {
         )
         .await;
     }
-    // Real membership data remains unchanged after all dummy handlers execute.
+    // Real membership remains unchanged after demo execution and blocked real runs.
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM channel_members WHERE community_id = $1 AND pubkey = decode($2, 'hex')")
         .bind(community).bind(&key).fetch_one(&pool).await.unwrap();
     assert_eq!(count, 1);
@@ -380,15 +413,43 @@ async fn inventory_approval_and_resume_use_saved_account_identity_without_resolu
         true,
     )
     .await;
-    let stepped = workflow_cli(&url, &["run", id, "--next-step"], true).await;
+    let error = workflow_cli(&url, &["run", id, "--next-step"], false).await;
+    assert!(
+        error
+            .as_str()
+            .unwrap()
+            .contains("real workflow requires --delete"),
+        "{error}"
+    );
+    let unstarted = workflow_cli(&url, &["inspect", id], true).await;
+    assert!(unstarted["stage_history"].as_array().unwrap().is_empty());
+    let error = workflow_cli(&url, &["run", id, "--delete", "--next-step"], false).await;
+    assert!(
+        error
+            .as_str()
+            .unwrap()
+            .contains("real handler for gate_user is not implemented"),
+        "{error}"
+    );
+    let stepped = workflow_cli(&url, &["inspect", id], true).await;
     let first_stage = stepped["stage_history"][0]["id"].clone();
-    let completed = workflow_cli(&url, &["run", id], true).await;
-    assert_eq!(completed["target"], account);
-    assert_eq!(completed["inventory_manifest"], saved["inventory_manifest"]);
-    assert_eq!(completed["status"], "completed");
-    assert_eq!(completed["stage_history"][0]["id"], first_stage);
-    for stage in completed["stage_history"].as_array().unwrap() {
+    let error = workflow_cli(&url, &["run", id, "--delete"], false).await;
+    assert!(
+        error
+            .as_str()
+            .unwrap()
+            .contains("real handler for gate_user is not implemented"),
+        "{error}"
+    );
+    let blocked = workflow_cli(&url, &["inspect", id], true).await;
+    assert_eq!(blocked["target"], account);
+    assert_eq!(blocked["inventory_manifest"], saved["inventory_manifest"]);
+    assert_ne!(blocked["status"], "completed");
+    assert_eq!(blocked["stage_history"][0]["id"], first_stage);
+    assert_eq!(blocked["stage_history"].as_array().unwrap().len(), 1);
+    for stage in blocked["stage_history"].as_array().unwrap() {
         assert_eq!(stage["metadata_json"]["inputs"]["target"], account);
-        assert_eq!(stage["status"], "completed");
+        assert_eq!(stage["stage"], "gate_user");
+        assert_eq!(stage["status"], "pending");
     }
 }
