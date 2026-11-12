@@ -10,6 +10,7 @@ import '../../shared/hosted/hosted_flow_provider.dart';
 import '../../shared/deeplink/deep_link.dart';
 import '../../shared/deeplink/pending_deep_link_provider.dart';
 import '../../shared/hosted/hosted_environment.dart';
+import '../../shared/hosted/known_community_sync.dart';
 import '../../shared/hosted/known_community_sync_provider.dart';
 import '../../shared/hosted/known_community_address.dart';
 import '../../shared/hosted/account_community_sync_status.dart';

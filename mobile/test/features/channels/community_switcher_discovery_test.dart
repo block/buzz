@@ -55,6 +55,10 @@ void main() {
     await tester.pumpWidget(_page(() => discovery.future));
     await tester.pump();
     expect(find.text('Saved community'), findsOneWidget);
+    // Loading adds nothing above the grid, so the grid does not move when the
+    // account list arrives.
+    expect(find.bySemanticsLabel('Loading account communities'), findsNothing);
+    final savedTop = tester.getTopLeft(find.text('Saved community'));
     expect(find.byKey(const Key('community-switcher-add')), findsOneWidget);
     discovery.complete([
       AddCommunityDeepLink(name: 'Duplicate', relayUrl: '${_saved.relayUrl}/'),
@@ -64,6 +68,7 @@ void main() {
     expect(find.text('Saved community'), findsOneWidget);
     expect(find.text('Account community'), findsOneWidget);
     expect(find.text('Duplicate'), findsNothing);
+    expect(tester.getTopLeft(find.text('Saved community')), savedTop);
     expect(find.text('Find my communities'), findsNothing);
     await tester.tap(find.text('Edit'));
     await tester.pumpAndSettle();

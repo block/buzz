@@ -12,6 +12,22 @@ import '../storage/serial_queue.dart';
 import 'builderlab_account.dart';
 import 'known_community_address.dart';
 
+/// Retained account for a local add or removal only.
+extension LocalEditSubject on BuilderlabAccountClient {
+  /// An unreadable session record makes a local add or removal behave as
+  /// signed out: no owner stamp and no tombstone, so the device edit still
+  /// succeeds as it did before account sync. Account sync itself stays strict:
+  /// it requires a verified session and never reads this fallback.
+  Future<String?> localEditSubject() async {
+    try {
+      return await retainedSubject();
+    } on AccountFailure catch (failure) {
+      if (failure == AccountFailure.storage) return null;
+      rethrow;
+    }
+  }
+}
+
 /// Durable account-list edits. Community credentials and relay membership never
 /// enter this queue. Each account keeps its own snapshot and latest URL intents.
 class KnownCommunitySync extends ChangeNotifier {
@@ -86,8 +102,8 @@ class KnownCommunitySync extends ChangeNotifier {
   /// once the local record is absent, so failed local deletion cannot forget it
   /// remotely. Signed-out edits never borrow another account's credentials.
   Future<void> remove(String relay, {String? expectedSubject}) async {
-    final subject = expectedSubject ?? await account.retainedSubject();
-    if (await account.retainedSubject() != subject) {
+    final subject = expectedSubject ?? await account.localEditSubject();
+    if (await account.localEditSubject() != subject) {
       throw AccountFailure.differentAccount;
     }
     final url = knownCommunityAddress(relay);
@@ -117,7 +133,7 @@ class KnownCommunitySync extends ChangeNotifier {
   /// a completed join into an authentication failure. Unclaimed legacy records
   /// and another account's retained records are never automatically uploaded.
   Future<Community> prepareAddition(Community community) async {
-    final subject = await account.retainedSubject();
+    final subject = await account.localEditSubject();
     if (subject == null &&
         community.accountSyncOwner == null &&
         community.accountSyncRevision == null) {

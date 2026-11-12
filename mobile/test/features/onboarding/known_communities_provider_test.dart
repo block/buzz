@@ -5,9 +5,13 @@ import 'package:buzz/shared/hosted/builderlab_account.dart';
 import 'package:buzz/shared/hosted/hosted_environment.dart';
 import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
 import 'package:buzz/shared/hosted/known_communities_provider.dart';
+import 'package:buzz/shared/hosted/known_community_sync.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+
+import '../../shared/community/community_storage_test.dart'
+    show FakeSecureStorage;
 
 class _Account extends BuilderlabAccountClient {
   final subject = ValueNotifier<String?>('first');
@@ -87,4 +91,43 @@ void main() {
       expect(await container.read(knownCommunitiesProvider.future), isEmpty);
     },
   );
+
+  test('sync changes keep the shown list; account changes clear it', () async {
+    if (!HostedEnvironment.enabled) return;
+    final account = _Account()..subject.value = 'second';
+    final sync = KnownCommunitySync(
+      account: account,
+      storage: FakeSecureStorage(),
+      localCommunities: () async => [],
+    )..setActive(false);
+    final container = ProviderContainer(
+      overrides: [
+        builderlabAccountProvider.overrideWithValue(account),
+        knownCommunitySyncProvider.overrideWithValue(sync),
+      ],
+    );
+    addTearDown(() {
+      container.dispose();
+      sync.dispose();
+      account.subject.dispose();
+      account.dispose();
+    });
+    container.listen(knownCommunitiesProvider, (_, _) {});
+    final shown = await container.read(knownCommunitiesProvider.future);
+    expect(shown.single.relayUrl, 'wss://second.communities.buzz.xyz');
+    // A sync change refetches behind the current list.
+    sync.retry();
+    final refreshing = container.read(knownCommunitiesProvider);
+    expect(refreshing.isRefreshing, isTrue);
+    expect(refreshing.value, shown);
+    await container.pump();
+    expect(account.requested, hasLength(2));
+    // The adopted session is reused, so listing never re-verifies it.
+    expect(account.restores, 0);
+    // A different account never sees the previous account's list.
+    account.subject.value = 'first';
+    final reloading = container.read(knownCommunitiesProvider);
+    expect(reloading.isReloading, isTrue);
+    expect(reloading.unwrapPrevious().hasValue, isFalse);
+  });
 }

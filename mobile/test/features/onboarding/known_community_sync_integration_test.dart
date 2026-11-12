@@ -20,6 +20,8 @@ import 'package:buzz/shared/hosted/known_community_sync_provider.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
 import '../../shared/community/community_storage_test.dart'
@@ -354,6 +356,75 @@ void main() {
       await sync.synchronize();
       expect(account.calls, ['add', 'remove']);
       expect(await storage.loadAll(), isEmpty);
+    },
+  );
+
+  test(
+    'an unreadable account session leaves local add and removal local-only',
+    () async {
+      if (!HostedEnvironment.enabled) return;
+      final sessions = FakeSecureStorage();
+      await sessions.write(
+        key:
+            'buzz_hosted_session_${HostedEnvironment.origin.host.replaceAll('.', '_')}_v1',
+        value: 'not json',
+      );
+      final account = BuilderlabAccountClient(
+        storage: sessions,
+        httpClient: MockClient((_) async => http.Response('{}', 503)),
+      );
+      // Any journal write would throw, so success proves nothing was queued.
+      final journal = _JournalStorage()..failWrites = true;
+      final storage = CommunityStorage(secure: FakeSecureStorage());
+      Community local(String id) => Community(
+        id: id,
+        name: id,
+        relayUrl: 'wss://$id.example',
+        addedAt: DateTime(2025),
+        nsec: nostr.Keys('1'.padLeft(64, '0')).nsec,
+      );
+      await storage.save(local('existing'));
+      final sync = KnownCommunitySync(
+        account: account,
+        storage: journal,
+        localCommunities: storage.loadForAccountSync,
+        acknowledgeRemoval: storage.acknowledgeRemoval,
+      )..setActive(false);
+      final container = ProviderContainer(
+        overrides: [
+          builderlabAccountProvider.overrideWithValue(account),
+          communityStorageProvider.overrideWithValue(storage),
+          knownCommunitySyncProvider.overrideWithValue(sync),
+          communitySnapshotWriterProvider.overrideWithValue((_) async {}),
+          communityPushLeaseRevocationEnqueuerProvider.overrideWithValue(
+            (_) async => false,
+          ),
+        ],
+      );
+      addTearDown(() {
+        container.dispose();
+        sync.dispose();
+        account.dispose();
+      });
+      await expectLater(
+        account.retainedSubject(),
+        throwsA(AccountFailure.storage),
+      );
+      await container.read(authProvider.future);
+      await container.read(communityListProvider.future);
+      final added = local('added');
+      expect(await sync.prepareAddition(added), same(added));
+      await container
+          .read(authProvider.notifier)
+          .authenticateWithCommunity(added, activate: false);
+      await container.read(communityListProvider.future);
+      await container
+          .read(communityListProvider.notifier)
+          .removeCommunity('existing');
+      final records = await storage.loadForAccountSync();
+      expect(records.map((c) => c.id), ['added']);
+      expect(records.single.accountSyncOwner, isNull);
+      expect(records.single.accountSyncRevision, isNull);
     },
   );
 }

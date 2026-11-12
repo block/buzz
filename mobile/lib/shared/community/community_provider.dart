@@ -1,3 +1,4 @@
+import '../hosted/known_community_sync.dart';
 import '../hosted/known_community_sync_provider.dart';
 import '../hosted/builderlab_account.dart';
 import '../hosted/hosted_relay_auth.dart';
@@ -342,7 +343,7 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
         ? null
         : accountConfirmed
         ? confirmedSubject
-        : await account.retainedSubject();
+        : await account.localEditSubject();
     return ref.read(communityTransitionProvider).runExclusive(() async {
       var revocationJournaled = false;
       final storage = ref.read(communityStorageProvider);
@@ -363,7 +364,7 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
           communityPushLeaseRevocationEnqueuerProvider,
         )(current[removedIndex]);
       }
-      if (sync != null && await account.retainedSubject() != subject) {
+      if (sync != null && await account.localEditSubject() != subject) {
         throw AccountFailure.differentAccount;
       }
       await storage.remove(
