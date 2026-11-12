@@ -25,6 +25,7 @@ void main() {
         'look at `this`\n[note]: [$site]($site)',
       ),
       ('\n[a]: $site', '\n[a]: $site'),
+      ('`code` [x]: $site', '`code` [x]: [$site]($site)'),
       ('`x`\n\n[a]: $site', '`x`\n\n[a]: $site'),
       (
         'text\n[a]: $site\n[b]: $site',

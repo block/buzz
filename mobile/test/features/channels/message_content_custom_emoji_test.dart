@@ -63,6 +63,11 @@ void main() {
     await tester.pumpWidget(_testable('Say :wave: now'));
 
     expect(find.byType(CustomEmojiImage), findsOneWidget);
+
+    // An escaped shortcode is text, without its backslash.
+    await tester.pumpWidget(_testable(r'Say \:wave: now'));
+    expect(find.byType(CustomEmojiImage), findsNothing);
+    expect(find.text('Say :wave: now', findRichText: true), findsOneWidget);
   });
 
   testWidgets('message wiring excludes unrelated emoji from the regex', (

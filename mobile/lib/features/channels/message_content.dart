@@ -331,7 +331,7 @@ class MessageContent extends HookConsumerWidget {
         : null;
     final galleryText = trailingGallery?.content ?? normalizedContent;
     final markdownContent = useMemoized(
-      () => separateMarkdownTables(escapeMarkdownMathDelimiters(galleryText)),
+      () => separateMarkdownTables(escapeMarkdownLiterals(galleryText)),
       [galleryText],
     );
     final customEmoji = _mergeCustomEmoji(
@@ -418,6 +418,7 @@ class MessageContent extends HookConsumerWidget {
       () => [
         if (markerSlot) editedMarkerPattern(editedStyle),
         ...inlinePatterns,
+        escapedSigilPattern,
       ],
       [inlinePatterns, editedStyle, markerSlot],
     );
@@ -454,26 +455,32 @@ class MessageContent extends HookConsumerWidget {
         ),
         // Same widget-shaped link as before: chips, media links and taps
         // are handled in _buildLink, so the package's own tap is not used.
-        inlineLinkBuilder: (link) => link.asWidgetSpan(
-          _buildLink(
-            link.context,
-            ref,
-            TextSpan(children: link.labelSpans),
-            link.url,
-            imetaByUrl[link.url],
-            link.style,
-            style,
-            resolvedChannelTap,
-            resolvedChannelNames,
-          ),
-        ),
-        imageBuilder: (context, imageUrl, _, _) => _buildMedia(
-          context,
-          imageUrl,
-          imetaByUrl[imageUrl],
-          onReply: onMediaReply == null ? null : mediaReply,
-          onMore: onMediaMore == null ? null : mediaMore,
-        ),
+        inlineLinkBuilder: (link) {
+          final url = unmaskInlinePatterns(link.url);
+          return link.asWidgetSpan(
+            _buildLink(
+              link.context,
+              ref,
+              TextSpan(children: link.labelSpans),
+              url,
+              imetaByUrl[url],
+              link.style,
+              style,
+              resolvedChannelTap,
+              resolvedChannelNames,
+            ),
+          );
+        },
+        imageBuilder: (context, maskedUrl, _, _) {
+          final imageUrl = unmaskInlinePatterns(maskedUrl);
+          return _buildMedia(
+            context,
+            imageUrl,
+            imetaByUrl[imageUrl],
+            onReply: onMediaReply == null ? null : mediaReply,
+            onMore: onMediaMore == null ? null : mediaMore,
+          );
+        },
         textAlign: textAlign ?? (bubble ? TextAlign.start : null),
         maxLines: maxLines,
         inlinePatterns: components,

@@ -546,6 +546,9 @@ void main() {
 
       for (final (content, shown) in [
         (r'plain \# \* \_ \\ end', r'plain # * _ \ end'),
+        // Escaped mention and channel sigils stay text, not pills.
+        (r'hi \@Alice there', 'hi @Alice there'),
+        (r'hi \#general there', 'hi #general there'),
         (r'**bold \#x** \[not math\](y)', '[not math](y)'),
         (r'[\#buzz-mobile](https://example.com/x)', '#buzz-mobile'),
         (
@@ -585,7 +588,14 @@ void main() {
       ]) {
         for (final bubble in [false, true]) {
           await tester.pumpWidget(
-            _testable(MessageContent(content: content, bubble: bubble)),
+            _testable(
+              MessageContent(
+                content: content,
+                bubble: bubble,
+                mentionNames: const {'pk1': 'Alice'},
+                channelNames: const {'general': 'general-id'},
+              ),
+            ),
           );
           final reason = '$content (bubble: $bubble) showed ${visible()}';
           if (shown != null) {
@@ -678,17 +688,25 @@ void main() {
         nsec: nostr.Keys.generate().nsec,
       );
 
-      // An inline link, then reference links, whose definitions must keep
-      // their destination as written.
-      for (final content in [
-        '[report.pdf]($url)',
-        'See [report.pdf]\n\n[report.pdf]: $url',
-        'See [report.pdf][r]\n\n[r]: $url "Report"',
+      // An inline link, reference links, whose definitions must keep their
+      // destination as written, and destinations holding text a mention or
+      // channel pattern would match.
+      for (final (content, url) in [
+        ('[report.pdf]($url)', url),
+        ('See [report.pdf]\n\n[report.pdf]: $url', url),
+        ('See [report.pdf][r]\n\n[r]: $url "Report"', url),
+        ('[report.pdf]($url?u=@Alice)', '$url?u=@Alice'),
+        ('[report.pdf]($url?c=#general)', '$url?c=#general'),
+        ('See <$url?u=@Alice> or [report.pdf]($url?u=@Alice)', '$url?u=@Alice'),
       ]) {
         openedUrl = null;
         await tester.pumpWidget(
           _testable(
-            MessageContent(content: content),
+            MessageContent(
+              content: content,
+              mentionNames: const {'pk1': 'Alice'},
+              channelNames: const {'general': 'general-id'},
+            ),
             overrides: [
               mediaGetAuthServiceProvider.overrideWithValue(auth),
               openDownloadedFileProvider.overrideWithValue((
