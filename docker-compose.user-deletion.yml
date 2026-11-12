@@ -1,0 +1,29 @@
+# Disposable local user-deletion lab. Never shares the desktop database.
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: buzz
+      POSTGRES_PASSWORD: buzz_lab
+      POSTGRES_DB: buzz_deletion_lab
+    ports: ["127.0.0.1:57431:5432"]
+    volumes: ["postgres:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U buzz -d buzz_deletion_lab"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+  redis:
+    image: redis:7
+    ports: ["127.0.0.1:57432:6379"]
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address :9001
+    environment:
+      MINIO_ROOT_USER: buzz_lab
+      MINIO_ROOT_PASSWORD: buzz_lab_password
+    ports: ["127.0.0.1:59010:9000", "127.0.0.1:59011:9001"]
+    volumes: ["media:/data"]
+volumes:
+  postgres:
+  media:

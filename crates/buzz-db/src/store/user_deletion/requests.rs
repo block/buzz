@@ -19,6 +19,33 @@ impl UserDeletionStore {
         reason: Option<&str>,
     ) -> Result<EntityRequest> {
         let target = normalize_target(target)?;
+        self.submit_mode(&target, requested_by, reason, false).await
+    }
+
+    /// Save an independently approved print rehearsal for a real public key.
+    /// Its opaque request target cannot be accepted by destructive handlers.
+    pub async fn submit_rehearsal(
+        &self,
+        pubkey: &str,
+        requested_by: &str,
+        reason: Option<&str>,
+    ) -> Result<EntityRequest> {
+        let target = super::normalize_user_deletion_pubkey(pubkey)?;
+        self.submit_mode(&target, requested_by, reason, true).await
+    }
+
+    async fn submit_mode(
+        &self,
+        subject: &str,
+        requested_by: &str,
+        reason: Option<&str>,
+        rehearsal: bool,
+    ) -> Result<EntityRequest> {
+        let target = if rehearsal {
+            format!("rehearsal:{subject}")
+        } else {
+            subject.to_owned()
+        };
         validate_operator(requested_by)?;
         if reason.is_some_and(|r| r.len() > 4096) {
             return Err(DbError::DeletionSafety("reason exceeds 4096 bytes".into()));
@@ -47,7 +74,10 @@ impl UserDeletionStore {
             )));
         }
         if request.status == "submitted" {
-            let inventory = super::discovery::generate_inventory_on(&mut tx, &target).await?;
+            let mut inventory = super::discovery::generate_inventory_on(&mut tx, subject).await?;
+            if rehearsal {
+                inventory["execution_mode"] = "rehearsal".into();
+            }
             let digest = inventory_digest(&inventory)?;
             request = sqlx::query_as(sqlx::AssertSqlSafe(format!(
                 "UPDATE entity_deletion_requests

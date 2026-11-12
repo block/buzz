@@ -12,6 +12,15 @@ pub(super) async fn dispatch(
     row: &EntityStage,
     options: &RunOptions,
 ) -> Result<()> {
+    if let Some(real) = &options.real {
+        return super::real::dispatch(real, store, lease, row).await;
+    }
+    if !row.metadata_json["inputs"]["target"]
+        .as_str()
+        .is_some_and(|s| s.starts_with("demo:"))
+    {
+        bail!("dummy handlers accept only demo targets");
+    }
     match row.stage.as_str() {
         "gate_user" => gate_user(store, lease, row, options).await,
         "purge_db" => purge_db(store, lease, row, options).await,

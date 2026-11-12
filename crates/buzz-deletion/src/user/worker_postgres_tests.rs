@@ -34,6 +34,7 @@ async fn fixture() -> (EntityDeletionStore, Uuid, sqlx::PgPool) {
 fn options() -> RunOptions {
     RunOptions {
         next_step: false,
+        real: None,
         fail_stage: None,
         stage_delay: Duration::ZERO,
         no_agents_in: Vec::new(),

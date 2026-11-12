@@ -3463,7 +3463,7 @@ async fn lock_schema_destruction_shared(conn: &mut PgConnection) -> Result<()> {
 /// Destructive transactions call this on their own transaction after taking
 /// the shared schema/destruction lock, so the validated surface cannot change
 /// before the transaction commits.
-async fn validate_catalog_on(conn: &mut PgConnection) -> Result<()> {
+pub(crate) async fn validate_catalog_on(conn: &mut PgConnection) -> Result<()> {
     let expected = EXPECTED_SCOPED_TABLES
         .iter()
         .copied()
@@ -8703,6 +8703,8 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
         .fetch_one(&db.pool)
         .await
         .unwrap();
+        sqlx::query("INSERT INTO entity_deletion_media_files (stage_id,storage_namespace,file_hash,evidence_json) VALUES ($1,'fixture',repeat('a',64),$2)")
+            .bind(history_id).bind(serde_json::json!({"source_community":community})).execute(&db.pool).await.unwrap();
         let live = store
             .inventory_schema(request.community_id)
             .await
@@ -8751,6 +8753,15 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
         .await
         .unwrap();
         assert_eq!(retained, community);
+        let media_evidence: serde_json::Value = sqlx::query_scalar(
+            "SELECT evidence_json FROM entity_deletion_media_files WHERE stage_id=$1",
+        )
+        .bind(history_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(media_evidence["source_community"], community.to_string());
+
         let approvals_after = db
             .entity_deletion_store()
             .inspect(entity.id)

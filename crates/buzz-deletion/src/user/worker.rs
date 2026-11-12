@@ -10,9 +10,10 @@ use uuid::Uuid;
 use super::{handlers, transition::UserDeletionTransition};
 use crate::{StageOutcome, DEFAULT_LEASE_DURATION, HEARTBEAT_INTERVAL};
 
-/// Controls for a synthetic run. Delays and failures never invoke real deletion.
+/// Worker modes. Delay/failure injection is restricted to synthetic requests.
 pub(super) struct RunOptions {
     pub next_step: bool,
+    pub real: Option<super::real::Execution>,
     pub fail_stage: Option<String>,
     pub stage_delay: Duration,
     pub no_agents_in: Vec<Uuid>,
@@ -32,6 +33,18 @@ pub(super) async fn run(
             "user-deletions run does not support entity type {}",
             request.entity_type
         );
+    }
+    if !request.target.starts_with("demo:") && options.real.is_none() {
+        bail!("real user requests require the explicit offline deletion mode");
+    }
+    if let Some(execution) = &options.real {
+        execution.args.validate_execution(&request)?;
+        if options.fail_stage.is_some()
+            || !options.stage_delay.is_zero()
+            || !options.no_agents_in.is_empty()
+        {
+            bail!("dummy controls cannot be used with real handlers");
+        }
     }
     let Some(lease) = store.claim(id, owner, DEFAULT_LEASE_DURATION).await? else {
         if store.get(id).await?.status == "completed" {
@@ -99,6 +112,9 @@ async fn execute_claim(
                     StageOutcome::Shutdown => return Ok(0),
                     StageOutcome::Failed(error) => return Err(error),
                 }
+                if row.stage == "remaining_cleanup" {
+                    return Ok(2);
+                }
                 previous_stage_id = Some(row.id);
                 executed += 1;
             }
@@ -145,6 +161,10 @@ async fn run_stage_with_heartbeat(
 #[cfg(test)]
 #[path = "worker_postgres_tests.rs"]
 mod postgres_tests;
+
+#[cfg(test)]
+#[path = "rehearsal_postgres_tests.rs"]
+mod rehearsal_postgres_tests;
 
 #[cfg(test)]
 mod tests {

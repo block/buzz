@@ -1,0 +1,24 @@
+SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '30s';
+
+-- Operator-global recovery evidence, retained after community deletion.
+-- One logical file per stage; JSON is bounded per file by the application.
+CREATE TABLE entity_deletion_media_files (
+    stage_id UUID NOT NULL,
+    storage_namespace TEXT NOT NULL,
+    file_hash TEXT NOT NULL CHECK (file_hash ~ '^[0-9a-f]{64}$'),
+    status TEXT NOT NULL DEFAULT 'unknown'
+        CHECK (status IN ('unknown', 'dont_delete', 'to_be_deleted', 'deleted')),
+    evidence_json JSONB NOT NULL,
+    delete_targets_json JSONB NOT NULL DEFAULT '[]'::jsonb
+        CHECK (jsonb_typeof(delete_targets_json) = 'array'),
+    reason TEXT,
+    last_error TEXT,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (stage_id, storage_namespace, file_hash),
+    CHECK (status NOT IN ('to_be_deleted', 'deleted') OR jsonb_array_length(delete_targets_json) > 0)
+);
+
+INSERT INTO _operator_global_tables (table_name, reason) VALUES
+    ('entity_deletion_media_files', 'Operator-global media inventory and recovery evidence; retained after community deletion')
+ON CONFLICT (table_name) DO NOTHING;

@@ -2,6 +2,58 @@ use super::*;
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
+async fn rehearsal_intake_is_separate_idempotent_and_bound_to_inventory_approval() {
+    let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
+        .await
+        .unwrap();
+    let users = Db::from_pool(pool).user_deletion_store();
+    let target = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+    let deletion = users.submit(target, "operator", None).await.unwrap();
+    let mut rehearsal = users
+        .submit_rehearsal(target, "operator", None)
+        .await
+        .unwrap();
+    assert_ne!(deletion.id, rehearsal.id);
+    assert_eq!(
+        users
+            .submit_rehearsal(target, "operator", None)
+            .await
+            .unwrap()
+            .id,
+        rehearsal.id
+    );
+    assert_eq!(UserDeletionInventory::subject(&rehearsal).unwrap(), target);
+    assert!(UserDeletionInventory::is_rehearsal(&rehearsal).unwrap());
+    assert!(!UserDeletionInventory::is_rehearsal(&deletion).unwrap());
+    assert_ne!(rehearsal.inventory_digest, deletion.inventory_digest);
+    assert!(users
+        .approve(
+            rehearsal.id,
+            "operator",
+            deletion.inventory_digest.as_deref().unwrap()
+        )
+        .await
+        .is_err());
+    assert!(users
+        .submit(&rehearsal.target, "operator", None)
+        .await
+        .is_err());
+    assert!(users
+        .submit_rehearsal("demo:example", "operator", None)
+        .await
+        .is_err());
+    rehearsal
+        .inventory_manifest
+        .as_mut()
+        .unwrap()
+        .as_object_mut()
+        .unwrap()
+        .remove("execution_mode");
+    assert!(UserDeletionInventory::read(&rehearsal).is_err());
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
 async fn user_approval_validates_inventory_shape_before_saving_evidence() {
     let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
         .await
