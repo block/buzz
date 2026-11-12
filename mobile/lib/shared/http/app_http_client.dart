@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io' show Platform;
 
 import 'package:cupertino_http/cupertino_http.dart';
@@ -41,9 +42,10 @@ http.Client _openUrlSession() {
   return CupertinoClient.fromSessionConfiguration(config);
 }
 
-/// A caller's handle on an app-wide session. [close] leaves the session open
-/// for other callers; closing a `CupertinoClient` while any of its requests
-/// run would also throw.
+/// A caller's handle on an app-wide session. Like closing a `dart:io` client,
+/// [close] cancels the handle's requests still in flight and refuses later
+/// ones, but leaves the session open for other handles. Closing a
+/// `CupertinoClient` while any of its requests run would also throw.
 ///
 /// App Transport Security blocks cleartext `URLSession` loads from public
 /// hosts, while saved community icons and remote media may still use
@@ -55,16 +57,69 @@ class SharedSessionClient extends http.BaseClient {
 
   final http.Client _session;
   final http.Client Function() _newCleartext;
+  final _closed = Completer<void>();
   http.Client? _cleartext;
 
   @override
-  Future<http.StreamedResponse> send(http.BaseRequest request) =>
-      request.url.scheme == 'https'
-      ? _session.send(request)
-      : (_cleartext ??= _newCleartext()).send(request);
+  Future<http.StreamedResponse> send(http.BaseRequest request) async {
+    if (_closed.isCompleted) {
+      throw http.ClientException(
+        'HTTP request failed. Client is already closed.',
+        request.url,
+      );
+    }
+    if (request.url.scheme != 'https') {
+      return (_cleartext ??= _newCleartext()).send(request);
+    }
+    return _session.send(_abortedOnClose(request));
+  }
+
+  /// [request] as a copy that the session cancels when this handle closes, or
+  /// when [request]'s own abort trigger fires.
+  http.BaseRequest _abortedOnClose(http.BaseRequest request) {
+    final own = request is http.Abortable ? request.abortTrigger : null;
+    final trigger = own == null
+        ? _closed.future
+        : Future.any([_closed.future, own]);
+    if (request is http.Request) {
+      return http.AbortableRequest(
+          request.method,
+          request.url,
+          abortTrigger: trigger,
+        )
+        ..bodyBytes = request.bodyBytes
+        ..headers.addAll(request.headers)
+        ..followRedirects = request.followRedirects
+        ..maxRedirects = request.maxRedirects
+        ..persistentConnection = request.persistentConnection;
+    }
+    // Finalizing first lets a multipart request set its content type.
+    final body = request.finalize();
+    final copy =
+        http.AbortableStreamedRequest(
+            request.method,
+            request.url,
+            abortTrigger: trigger,
+          )
+          ..headers.addAll(request.headers)
+          ..contentLength = request.contentLength
+          ..followRedirects = request.followRedirects
+          ..maxRedirects = request.maxRedirects
+          ..persistentConnection = request.persistentConnection;
+    body.listen(
+      copy.sink.add,
+      onError: copy.sink.addError,
+      onDone: copy.sink.close,
+      cancelOnError: true,
+    );
+    return copy;
+  }
 
   @override
-  void close() => _cleartext?.close();
+  void close() {
+    if (!_closed.isCompleted) _closed.complete();
+    _cleartext?.close();
+  }
 }
 
 /// How an iOS transport request failed, for user-facing messages. `dart:io`

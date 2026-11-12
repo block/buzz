@@ -516,7 +516,14 @@ String _friendlyInviteError(Object error) {
   if (message.contains('join_policy_required')) {
     return 'Review this community’s join requirements in your browser, then return to Buzz.';
   }
-  if (urlSessionFailure(error) == TransportFailure.unreachable ||
+  final transportFailure = urlSessionFailure(error);
+  if (transportFailure == TransportFailure.insecure) {
+    return 'Secure connection failed. Check your network settings and try again.';
+  }
+  if (transportFailure == TransportFailure.timedOut) {
+    return 'Connection timed out. Check your internet connection and try again.';
+  }
+  if (transportFailure == TransportFailure.unreachable ||
       message.contains('SocketException') ||
       message.contains('Connection refused') ||
       message.contains('Network is unreachable') ||

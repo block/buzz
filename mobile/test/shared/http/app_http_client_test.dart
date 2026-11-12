@@ -1,3 +1,6 @@
+import 'dart:async';
+import 'dart:convert';
+
 import 'package:buzz/shared/http/app_http_client.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -27,6 +30,91 @@ void main() {
 
     expect(sessionClosed, isFalse);
     expect((await second.get(Uri.parse('https://relay.example/'))).body, 'ok');
+  });
+
+  test('closing a handle cancels its own in-flight requests only', () async {
+    final session = _AbortRecorder();
+    final first = SharedSessionClient(session);
+    final second = SharedSessionClient(session);
+    unawaited(
+      first
+          .get(Uri.parse('https://relay.example/a'))
+          .then<void>((_) {}, onError: (_) {}),
+    );
+    unawaited(
+      second
+          .get(Uri.parse('https://relay.example/b'))
+          .then<void>((_) {}, onError: (_) {}),
+    );
+    await pumpEventQueue();
+
+    first.close();
+    await pumpEventQueue();
+
+    expect(session.aborted, [Uri.parse('https://relay.example/a')]);
+    await expectLater(
+      first.get(Uri.parse('https://relay.example/c')),
+      throwsA(isA<http.ClientException>()),
+    );
+  });
+
+  test('a request\'s own abort trigger still cancels it', () async {
+    final session = _AbortRecorder();
+    final client = SharedSessionClient(session);
+    final abort = Completer<void>();
+    unawaited(
+      client
+          .send(
+            http.AbortableRequest(
+              'GET',
+              Uri.parse('https://relay.example/a'),
+              abortTrigger: abort.future,
+            ),
+          )
+          .then<void>((_) {}, onError: (_) {}),
+    );
+    await pumpEventQueue();
+
+    abort.complete();
+    await pumpEventQueue();
+
+    expect(session.aborted, [Uri.parse('https://relay.example/a')]);
+  });
+
+  test('requests reach the session with their headers and body', () async {
+    final received =
+        <({String method, Map<String, String> headers, String body})>[];
+    final client = SharedSessionClient(
+      MockClient.streaming((request, body) async {
+        received.add((
+          method: request.method,
+          headers: request.headers,
+          body: utf8.decode(await body.toBytes()),
+        ));
+        return http.StreamedResponse(const Stream.empty(), 200);
+      }),
+    );
+
+    await client.post(
+      Uri.parse('https://relay.example/query'),
+      headers: {'authorization': 'Nostr x'},
+      body: '[]',
+    );
+    final upload = http.MultipartRequest(
+      'PUT',
+      Uri.parse('https://relay.example/upload'),
+    )..fields['name'] = 'value';
+    await client.send(upload);
+
+    expect(received[0].method, 'POST');
+    expect(received[0].headers['authorization'], 'Nostr x');
+    expect(received[0].body, '[]');
+    expect(received[1].method, 'PUT');
+    expect(
+      received[1].headers['content-type'],
+      startsWith('multipart/form-data'),
+    );
+    expect(received[1].body, contains('value'));
   });
 
   test('cleartext requests use the handle\'s own client', () async {
@@ -73,5 +161,20 @@ class _ClosingMock extends MockClient {
   void close() {
     onClose();
     super.close();
+  }
+}
+
+/// Never responds; records which requests were aborted.
+class _AbortRecorder extends http.BaseClient {
+  final aborted = <Uri>[];
+
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) {
+    final response = Completer<http.StreamedResponse>();
+    (request as http.Abortable).abortTrigger?.then((_) {
+      aborted.add(request.url);
+      response.completeError(http.RequestAbortedException(request.url));
+    });
+    return response.future;
   }
 }
