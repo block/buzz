@@ -51,6 +51,22 @@ Rect? bookDivisionOf(BuildContext context) {
   return native.windowSize == geometry.size ? native.bookDivision : null;
 }
 
+final _compactPaneNavigators = Expando<GlobalKey<NavigatorState>>();
+
+/// Unwinds a compact destination for a shortcut, without bypassing page vetoes.
+/// Returns false for other layouts or when a nested page refuses to close.
+bool popCompactConversationDestination(Route<dynamic> route) {
+  final navigator = _compactPaneNavigators[route]?.currentState;
+  if (navigator == null) return false;
+  var cleared = false;
+  navigator.popUntil((nested) {
+    if (nested.popDisposition == RoutePopDisposition.doNotPop) return true;
+    cleared = nested.isFirst;
+    return cleared;
+  });
+  return cleared;
+}
+
 /// Selection belongs to the workspace, rather than to a particular display pose.
 class ConversationPaneController extends ChangeNotifier {
   String? selectedId;
@@ -158,6 +174,15 @@ class AdaptiveConversationPane extends HookConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final routeObserver = useMemoized(appRouteObserver.createNestedObserver);
     final navigator = useMemoized(() => GlobalKey<NavigatorState>());
+    final ownerRoute = ModalRoute.of(context);
+    useEffect(() {
+      return () {
+        if (ownerRoute != null &&
+            _compactPaneNavigators[ownerRoute] == navigator) {
+          _compactPaneNavigators[ownerRoute] = null;
+        }
+      };
+    }, [ownerRoute, navigator]);
     // The compact detail route that fully covers the list. While a detail
     // pushes, pops or follows a back swipe, the list stays painted beneath it.
     final coveringDetail = useValueNotifier<Route<Object?>?>(null);
@@ -179,6 +204,10 @@ class AdaptiveConversationPane extends HookConsumerWidget {
             final wide = usesConversationPanes(context, strip: strip);
             final book = wide ? bookDivisionOf(context) : null;
             final selected = controller.selectedId;
+            if (ownerRoute != null) {
+              _compactPaneNavigators[ownerRoute] =
+                  active && !wide && selected != null ? navigator : null;
+            }
             // Pane surfaces meet at the fold so their header backdrops remain
             // continuous. Content insets below keep controls out of its bounds.
             final listWidth = book != null
