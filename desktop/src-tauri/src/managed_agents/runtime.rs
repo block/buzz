@@ -170,6 +170,56 @@ pub(crate) fn resolve_workspace_pair_key(
     ManagedAgentRuntimeKey::new(pubkey.to_string(), &effective_relay).ok()
 }
 
+fn agent_identity(command: &str) -> String {
+    let identity = crate::managed_agents::discovery::normalize_command_identity(command);
+    identity
+        .strip_suffix(".cmd")
+        .or_else(|| identity.strip_suffix(".bat"))
+        .unwrap_or(&identity)
+        .to_string()
+}
+
+pub(super) fn mcp_command_for_agent(command: &str) -> &'static str {
+    if matches!(
+        agent_identity(command).as_str(),
+        "hermes" | "hermes-agent" | "hermes-acp"
+    ) {
+        "buzz-dev-mcp"
+    } else {
+        known_acp_runtime(command)
+            .and_then(|runtime| runtime.mcp_command)
+            .unwrap_or("")
+    }
+}
+
+fn set_mcp_command_env(
+    command: &mut std::process::Command,
+    agent: &str,
+    resolve: impl FnOnce(&str) -> Option<std::path::PathBuf>,
+) -> Result<(), String> {
+    let mcp_command = mcp_command_for_agent(agent);
+    let mcp = if mcp_command.is_empty() {
+        None
+    } else {
+        resolve(mcp_command)
+    };
+    if mcp.is_none()
+        && matches!(
+            agent_identity(agent).as_str(),
+            "hermes" | "hermes-agent" | "hermes-acp"
+        )
+    {
+        return Err(format!(
+            "buzz-desktop: required MCP command {mcp_command:?} not found"
+        ));
+    }
+    command.env(
+        "BUZZ_ACP_MCP_COMMAND",
+        mcp.as_deref().unwrap_or(std::path::Path::new("")),
+    );
+    Ok(())
+}
+
 pub fn build_managed_agent_summary<R: tauri::Runtime>(
     app: &AppHandle<R>,
     record: &ManagedAgentRecord,
@@ -323,10 +373,7 @@ pub fn build_managed_agent_summary<R: tauri::Runtime>(
             env: Default::default(),
         }
     });
-    let effective_mcp_command = known_acp_runtime(&descriptor.command)
-        .and_then(|r| r.mcp_command)
-        .unwrap_or("")
-        .to_string();
+    let effective_mcp_command = mcp_command_for_agent(&descriptor.command).to_string();
 
     Ok(ManagedAgentSummary {
         pubkey: record.pubkey.clone(),
@@ -540,6 +587,10 @@ pub fn spawn_agent_child<R: tauri::Runtime>(
             })?;
     let effective_command = &descriptor.command;
     let agent_args = &descriptor.args;
+    let resolved_acp_command = resolve_command(&record.acp_command)
+        .ok_or_else(|| missing_command_message(&record.acp_command, "ACP harness command"))?;
+    let mut command = std::process::Command::new(&resolved_acp_command);
+    set_mcp_command_env(&mut command, effective_command, resolve_command)?;
 
     let log_path = super::managed_agent_runtime_log_path(app, &runtime_key)?;
     append_log_marker(
@@ -556,24 +607,6 @@ pub fn spawn_agent_child<R: tauri::Runtime>(
     let stderr = stdout
         .try_clone()
         .map_err(|error| format!("failed to clone log handle: {error}"))?;
-    let resolved_acp_command = resolve_command(&record.acp_command)
-        .ok_or_else(|| missing_command_message(&record.acp_command, "ACP harness command"))?;
-    let effective_mcp_command = known_acp_runtime(effective_command)
-        .and_then(|r| r.mcp_command)
-        .unwrap_or("");
-    let resolved_mcp_command: Option<std::path::PathBuf> = if effective_mcp_command.is_empty() {
-        None
-    } else {
-        match resolve_command(effective_mcp_command) {
-            Some(path) => Some(path),
-            None => {
-                eprintln!(
-                    "buzz-desktop: mcp_command {effective_mcp_command:?} not found, skipping"
-                );
-                None
-            }
-        }
-    };
     // Resolve agent command to a full path (DMG launches have minimal PATH).
     let resolved_agent_command = resolve_command(effective_command)
         .map(|p| p.display().to_string())
@@ -599,7 +632,6 @@ pub fn spawn_agent_child<R: tauri::Runtime>(
         nvm_bin,
     );
 
-    let mut command = std::process::Command::new(&resolved_acp_command);
     if let Some(home) = super::default_agent_workdir() {
         command.current_dir(home);
     }
@@ -622,14 +654,6 @@ pub fn spawn_agent_child<R: tauri::Runtime>(
     command.env_remove(REPLAY_FLOOR_ENV_VAR);
     command.env("BUZZ_ACP_AGENT_COMMAND", &resolved_agent_command);
     command.env("BUZZ_ACP_AGENT_ARGS", agent_args.join(","));
-    match &resolved_mcp_command {
-        Some(mcp_cmd) => {
-            command.env("BUZZ_ACP_MCP_COMMAND", mcp_cmd);
-        }
-        None => {
-            command.env("BUZZ_ACP_MCP_COMMAND", "");
-        }
-    }
     // Enable MCP hook tools (_Stop, _PostCompact) for agents that need them.
     // Uses "*" because build_mcp_servers() hard-codes the server name to "buzz-mcp".
     let runtime_meta = known_acp_runtime(effective_command);

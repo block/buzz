@@ -40,6 +40,14 @@ fn snap(record: &ManagedAgentRecord) -> serde_json::Value {
     snapshot(record, &[], &[], "wss://ws.example", &Default::default())
 }
 
+#[test]
+fn hermes_snapshot_records_buzz_mcp_bridge() {
+    let mut agent = record();
+    agent.agent_command_override = Some("hermes-acp".into());
+    assert_eq!(snap(&agent)["command"], "hermes-acp");
+    assert_eq!(snap(&agent)["mcp_command"], "buzz-dev-mcp");
+}
+
 fn record() -> ManagedAgentRecord {
     ManagedAgentRecord {
         session_policy: Default::default(),

@@ -106,6 +106,86 @@ fn codex_has_mcp_command() {
 }
 
 #[test]
+fn hermes_command_variants_use_buzz_mcp_bridge() {
+    for agent in [
+        "hermes-acp",
+        "/Users/agent/.local/bin/hermes-acp",
+        r"C:\Users\agent\AppData\Roaming\npm\hermes-acp.cmd",
+        r"C:\Tools\HERMES-AGENT.BAT",
+        "hermes",
+        "hermes-agent",
+    ] {
+        let mut command = std::process::Command::new("buzz-acp");
+        super::set_mcp_command_env(&mut command, agent, |name| {
+            assert_eq!(name, "buzz-dev-mcp");
+            Some("/bundle/buzz-dev-mcp".into())
+        })
+        .unwrap();
+        assert!(command.get_envs().any(|(key, value)| {
+            key == "BUZZ_ACP_MCP_COMMAND"
+                && value == Some(std::ffi::OsStr::new("/bundle/buzz-dev-mcp"))
+        }));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn hermes_spawn_passes_session_mcp_to_acp_child() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let data = tempfile::tempdir().unwrap();
+    let script = data.path().join("capture-acp-env");
+    std::fs::write(
+        &script,
+        "#!/bin/sh\nprintf 'MCP=%s\\n' \"$BUZZ_ACP_MCP_COMMAND\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    let mut context = tauri::test::mock_context(tauri::test::noop_assets());
+    context.config_mut().identifier = data.path().to_str().unwrap().to_owned();
+    let app = tauri::test::mock_builder()
+        .manage(crate::app_state::build_app_state())
+        .build(context)
+        .unwrap();
+    let mut record = super::test_fixtures::fixture(Default::default(), vec![], None);
+    record.pubkey = "a".repeat(64);
+    record.acp_command = script.to_str().unwrap().into();
+    record.agent_command_override = Some("hermes-acp".into());
+    let relay = "wss://relay.example";
+    let admissions = crate::managed_agents::RelayAdmissions::default();
+    let admitted = admissions.admit(&admissions.snapshot(), relay).unwrap();
+    let resolved_mcp = crate::managed_agents::resolve_command("buzz-dev-mcp");
+    let spawned =
+        super::spawn_agent_child(app.handle(), &record, relay, &admitted, false, None, None);
+    let Some(mcp) = resolved_mcp else {
+        assert!(spawned.err().unwrap().contains("buzz-dev-mcp"));
+        let key = crate::managed_agents::ManagedAgentRuntimeKey::new(record.pubkey, relay).unwrap();
+        let log_path =
+            crate::managed_agents::managed_agent_runtime_log_path(app.handle(), &key).unwrap();
+        assert!(
+            !log_path.exists(),
+            "refused spawn must not create a log or marker"
+        );
+        return;
+    };
+    let mut process = spawned.unwrap();
+    assert!(process.child.wait().unwrap().success());
+    let output = std::fs::read_to_string(&process.log_path).unwrap();
+    assert!(
+        output.contains(&format!("MCP={}\n", mcp.display())),
+        "ACP child must receive resolved session MCP command"
+    );
+}
+
+#[test]
+fn hermes_without_mcp_bridge_refuses_spawn() {
+    let mut command = std::process::Command::new("buzz-acp");
+    let error = super::set_mcp_command_env(&mut command, "hermes-acp", |_| None).unwrap_err();
+    assert!(error.contains("buzz-dev-mcp"));
+}
+
+#[test]
 fn goose_has_no_mcp_hooks() {
     let p = known_acp_runtime("goose").expect("should resolve");
     assert!(!p.mcp_hooks);
