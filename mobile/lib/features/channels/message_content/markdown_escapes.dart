@@ -17,12 +17,6 @@ String shieldMarkdownEscapes(String text) => _needsShield(text)
       )
     : text;
 
-/// [shieldMarkdownEscapes] applied outside inline and fenced code, where a
-/// backslash is literal.
-String shieldMarkdownProseEscapes(String content) => _needsShield(content)
-    ? mapMarkdownProse(content, shieldMarkdownEscapes)
-    : content;
-
 /// The characters [shieldMarkdownEscapes] held, as displayed.
 String unshieldMarkdownEscapes(String text) =>
     text.replaceAllMapped(shieldedMarkdownEscape, (m) => _held(m[0]!));
