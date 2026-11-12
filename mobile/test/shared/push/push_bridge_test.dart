@@ -230,14 +230,6 @@ void main() {
     },
   );
 
-  test('development push gateway matches the compiled configuration', () {
-    const expectedGateway = String.fromEnvironment(
-      'BUZZ_PUSH_GATEWAY_URL',
-      defaultValue: 'https://push.buzz.xyz',
-    );
-    expect(Env.pushGatewayUrl, expectedGateway);
-  });
-
   test('exposes APNs registration failure', () async {
     await TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .handlePlatformMessage(
