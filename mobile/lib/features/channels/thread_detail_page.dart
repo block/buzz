@@ -195,7 +195,8 @@ class ThreadDetailPage extends HookConsumerWidget {
         ? null
         : ref.watch(publisherThreadRootProvider(repliesArgs)).value;
     final canReply =
-        !_isDeletedBy(liveChannelEvents, queryRootId) &&
+        !liveDeletionHidesHead &&
+        (publisher == null || !_isDeletedBy(liveChannelEvents, queryRootId)) &&
         !(channel?.isArchived ?? isArchived) &&
         ref.watch(channelStartsThreadsProvider(channelId)) &&
         (publisher == null

@@ -86,4 +86,84 @@ void publisherThreadTests() {
       },
     );
   }
+
+  testWidgets(
+    'ordinary nested replies remain usable after the outer root is deleted',
+    (tester) async {
+      final root = _textMsg(
+        id: threadIdRoot,
+        pubkey: 'alice',
+        content: 'Outer root',
+      );
+      final child = _textMsg(
+        id: threadIdA,
+        pubkey: 'bob',
+        content: 'Still-existing nested head',
+        createdAt: 1001,
+        extraTags: const [
+          ['e', threadIdRoot, '', 'reply'],
+        ],
+      );
+      final messages = _FakeMessagesNotifier([root, child]);
+      final sender = _RecordingOrdinarySender();
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [root, child],
+          messagesNotifier: messages,
+          sender: sender,
+          threadReplies: {
+            root.id: [child],
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+      final context = tester.element(find.byType(ChannelDetailPage));
+      final timeline = formatTimeline([root, child]);
+      Navigator.of(context).push(
+        MaterialPageRoute<void>(
+          builder: (_) => ThreadDetailPage(
+            threadHead: timeline.singleWhere(
+              (message) => message.id == child.id,
+            ),
+            allMessages: timeline,
+            channelId: _channelId,
+            currentPubkey: 'self',
+            isMember: true,
+            isArchived: false,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byType(ComposeBar), findsOneWidget);
+      messages.setMessages([
+        root,
+        child,
+        _deletion(id: 'outer-root-deleted', targetIds: [root.id]),
+      ]);
+      await tester.pumpAndSettle();
+      expect(find.text('Still-existing nested head'), findsOneWidget);
+      expect(
+        find.byType(ComposeBar),
+        findsOneWidget,
+        reason:
+            'ordinary channels only require the immediate parent to survive',
+      );
+      await tester
+          .widget<ComposeBar>(find.byType(ComposeBar))
+          .onSend('Continue the surviving branch', []);
+      expect(sender.parents, [child.id]);
+      messages.setMessages([
+        root,
+        child,
+        _deletion(id: 'outer-root-deleted', targetIds: [root.id]),
+        _deletion(id: 'nested-head-deleted', targetIds: [child.id]),
+      ]);
+      await tester.pumpAndSettle();
+      expect(
+        find.byType(ComposeBar),
+        findsNothing,
+        reason: 'the relay refuses replies to a deleted parent',
+      );
+    },
+  );
 }
