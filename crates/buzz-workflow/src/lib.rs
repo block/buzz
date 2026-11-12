@@ -2618,4 +2618,80 @@ steps:
             run.error_message
         );
     }
+
+    /// PostgreSQL `jsonb` rejects `\u0000`. A `call_webhook` body carrying
+    /// U+0000 must still persist in the trace, or the final status update
+    /// fails and the run stays `running`.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn webhook_output_with_nul_completes_run() {
+        let db = setup_db().await;
+        let creator = nostr::Keys::generate().public_key().to_bytes().to_vec();
+        let member = nostr::Keys::generate().public_key().to_bytes().to_vec();
+        let (community, channel_id) = setup_channel(&db, &creator, &member).await;
+        let def = serde_json::json!({
+            "name": "nul-webhook",
+            "trigger": {"on": "webhook"},
+            "steps": [{"id": "hook", "action": "call_webhook", "url": "https://example.com/x"}],
+            "enabled": true,
+        })
+        .to_string();
+        let workflow_id = db
+            .create_workflow(
+                community,
+                Some(channel_id),
+                &creator,
+                "nul-webhook",
+                &def,
+                &[7u8; 32],
+            )
+            .await
+            .expect("create workflow");
+
+        let run_id = db
+            .create_workflow_run(community, workflow_id, None, None)
+            .await
+            .expect("create run");
+        db.update_workflow_run(
+            community,
+            run_id,
+            RunStatus::Running,
+            0,
+            &serde_json::json!([]),
+            None,
+        )
+        .await
+        .expect("mark run running");
+
+        let engine = WorkflowEngine::new(db.clone(), WorkflowConfig::default());
+        let trace = vec![serde_json::json!({
+            "step_id": "hook",
+            "status": "completed",
+            "output": executor::webhook_output(200, b"ok\0tail"),
+        })];
+        engine
+            .finalize_run(
+                community,
+                run_id,
+                Ok(ExecutionResult {
+                    approval_token: None,
+                    step_index: 1,
+                    step_outputs: HashMap::new(),
+                    trace,
+                }),
+                None,
+            )
+            .await;
+
+        let run = db
+            .get_workflow_run(community, run_id)
+            .await
+            .expect("get run");
+        assert_eq!(
+            run.status,
+            RunStatus::Completed,
+            "a NUL in the webhook body must not strand the run"
+        );
+        assert_eq!(run.execution_trace[0]["output"]["body"], "ok\u{FFFD}tail");
+    }
 }
