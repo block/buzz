@@ -59,3 +59,26 @@ Goose and uses its provider to invoke the native developer shell. Both operate
 only on temporary local repositories, verify commit/tag signatures and identity,
 check unrelated-remote credential scoping, and assert keyfile removal. They do
 not replace authenticated relay clone/push/readback testing.
+
+## Observer performance measurement
+
+An ignored local probe exercises the production publish queue and its JSON
+fitter. The default workload is 200 events, each with 1 MiB across 64 string
+leaves. It prints elapsed milliseconds and retained queue bytes/events; there
+is no timing threshold or additional CI job.
+
+```sh
+cargo test --release -p buzz-acp --lib observer::perf_tests::publish_queue_probe -- \
+  --exact --ignored --nocapture
+
+# Under-budget control:
+BUZZ_OBSERVER_PROBE_EVENTS=10000 BUZZ_OBSERVER_PROBE_BYTES=1024 \
+  BUZZ_OBSERVER_PROBE_FIELDS=1 \
+  cargo test --release -p buzz-acp --lib observer::perf_tests::publish_queue_probe -- \
+  --exact --ignored --nocapture
+```
+
+Elapsed time includes cloning the template payload and queue ingestion; it
+excludes template construction and later publication/encryption. Use release
+builds, fresh processes, identical workloads, and repeated alternating runs
+when comparing revisions. Queue bytes are serialized JSON, not heap or RSS.

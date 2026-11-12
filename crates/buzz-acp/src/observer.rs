@@ -15,6 +15,9 @@ use std::{
 use serde::Serialize;
 use tokio::sync::broadcast;
 
+#[cfg(test)]
+mod perf_tests;
+
 const OBSERVER_BUFFER_CAP: usize = 1_000;
 
 /// Best-effort metadata attached to observer events.
@@ -38,7 +41,7 @@ pub struct ObserverHandle {
 
 struct ObserverInner {
     tx: broadcast::Sender<ObserverEvent>,
-    buffer: Mutex<VecDeque<ObserverEvent>>,
+    buffer: Mutex<VecDeque<Arc<ObserverEvent>>>,
     seq: AtomicU64,
 }
 
@@ -91,13 +94,15 @@ impl ObserverHandle {
 
     /// Return the current replay buffer.
     pub fn snapshot(&self) -> Vec<ObserverEvent> {
-        match self.inner.buffer.lock() {
+        // Pin the replay window under the lock, then copy JSON after releasing it.
+        let events: Vec<_> = match self.inner.buffer.lock() {
             Ok(buffer) => buffer.iter().cloned().collect(),
             Err(error) => {
                 tracing::warn!(target: "observer", "observer replay buffer lock poisoned: {error}");
                 Vec::new()
             }
-        }
+        };
+        events.into_iter().map(|event| (*event).clone()).collect()
     }
 
     /// Emit a local observer event.
@@ -108,9 +113,9 @@ impl ObserverHandle {
         context: &ObserverContext,
         payload: serde_json::Value,
     ) {
-        let event = ObserverEvent {
-            seq: self.inner.seq.fetch_add(1, Ordering::Relaxed),
-            timestamp: chrono::Utc::now().to_rfc3339(),
+        let mut event = ObserverEvent {
+            seq: 0,
+            timestamp: String::new(),
             kind: kind.into(),
             agent_index,
             channel_id: context.channel_id.clone(),
@@ -120,17 +125,25 @@ impl ObserverHandle {
             payload,
         };
 
-        match self.inner.buffer.lock() {
-            Ok(mut buffer) => {
-                if buffer.len() >= OBSERVER_BUFFER_CAP {
-                    buffer.pop_front();
-                }
-                buffer.push_back(event.clone());
-            }
+        // Copy the payload before locking so other emitters can proceed.
+        let mut replay = event.clone();
+        let mut buffer = match self.inner.buffer.lock() {
+            Ok(buffer) => buffer,
             Err(error) => {
                 tracing::warn!(target: "observer", "observer replay buffer lock poisoned: {error}");
+                return;
             }
+        };
+        // Assign both fields with publication: desktop sorts by timestamp,
+        // and the publisher deduplicates snapshots by sequence high-water mark.
+        event.seq = self.inner.seq.fetch_add(1, Ordering::Relaxed);
+        event.timestamp = chrono::Utc::now().to_rfc3339();
+        replay.seq = event.seq;
+        replay.timestamp.clone_from(&event.timestamp);
+        if buffer.len() >= OBSERVER_BUFFER_CAP {
+            buffer.pop_front();
         }
+        buffer.push_back(Arc::new(replay));
 
         let _ = self.inner.tx.send(event);
     }

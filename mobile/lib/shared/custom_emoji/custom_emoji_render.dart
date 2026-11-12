@@ -49,13 +49,36 @@ final customEmojiBytesCacheProvider = Provider<CustomEmojiBytesCache>((ref) {
   return CustomEmojiBytesCache();
 });
 
+/// The neutral glyph that stands in for a custom emoji with no image: a muted
+/// sparkles icon, because a truncated `:shortcode:` is illegible at glyph size.
+/// The shortcode survives only as the semantics label.
+class CustomEmojiPlaceholder extends StatelessWidget {
+  final String shortcode;
+  final double size;
+
+  const CustomEmojiPlaceholder({
+    super.key,
+    required this.shortcode,
+    required this.size,
+  });
+
+  @override
+  Widget build(BuildContext context) => Icon(
+    BuzzIcons.sparkles,
+    size: size,
+    color: DefaultTextStyle.of(context).style.color?.withValues(alpha: 0.6),
+    semanticLabel: ':$shortcode:',
+  );
+}
+
 /// A single custom-emoji image rendered as a square, network-loaded glyph.
 ///
 /// Reused everywhere a `:shortcode:` resolves to an image: inline in message
 /// bodies, reaction pills, status, and the picker. If the image fails to load,
 /// it falls back to the literal `:shortcode:` text, so a broken URL never
 /// leaves a blank gap in prose; a [compact] glyph, such as a reaction pill,
-/// shows a sparkles icon instead, because a truncated shortcode is illegible.
+/// shows the [CustomEmojiPlaceholder] instead. A reaction slot is always
+/// [compact]: it never renders shortcode text.
 class CustomEmojiImage extends ConsumerWidget {
   final String shortcode;
   final String url;
@@ -84,12 +107,7 @@ class CustomEmojiImage extends ConsumerWidget {
       semanticLabel: ':$shortcode:',
       onBytesLoaded: (bytes) => bytesCache.remember(url, bytes),
       errorBuilder: (_, _, _) => compact
-          ? Icon(
-              BuzzIcons.sparkles,
-              size: size,
-              color: fallbackStyle.color?.withValues(alpha: 0.6),
-              semanticLabel: ':$shortcode:',
-            )
+          ? CustomEmojiPlaceholder(shortcode: shortcode, size: size)
           : Text(':$shortcode:', style: fallbackStyle),
     );
   }
