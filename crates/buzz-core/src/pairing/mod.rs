@@ -25,7 +25,7 @@ pub mod session;
 pub mod types;
 
 pub use qr::QrPayload;
-pub use session::{PairingSession, Role, SessionState};
+pub use session::{PairingBinding, PairingSession, Role, SessionState};
 pub use types::{AbortReason, PairingMessage, PayloadType};
 
 use thiserror::Error;

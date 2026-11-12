@@ -1,4 +1,6 @@
-import 'dart:ui';
+import 'package:duo_kit/duo_kit.dart';
+import 'duo_toolbar.dart';
+import 'dart:math' show max;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
@@ -11,11 +13,11 @@ import 'frosted_scroll_under_scope.dart';
 import 'ios_glass_navigation_button.dart';
 import 'ios_glass_navigation_action.dart';
 import 'ios_navigation_bar.dart';
+import 'navigation_backdrop.dart';
 export 'ios_navigation_bar.dart' show IosNavigationAction;
 
 /// Minimum height of the frosted app bar content area below the safe area.
 const _kBarContentMinHeight = buzzNavigationRowHeight;
-const _kBottomBorderWidth = 1.0;
 
 TextStyle _effectiveTitleStyle(BuildContext context, TextStyle? titleStyle) {
   final baseStyle =
@@ -38,9 +40,15 @@ double _barContentHeight(
       ? titleContentHeight
       : scaledTitleHeight;
   final accessibleHeight = Grid.xxs + effectiveTitleHeight + Grid.xxs;
-  return accessibleHeight > _kBarContentMinHeight
-      ? accessibleHeight
+  final strip =
+      DuoToolbarScope.maybeOf(context)?.strip ?? FoldGeometry.of(context).strip;
+  final minimumHeight =
+      defaultTargetPlatform == TargetPlatform.iOS &&
+          strip != null &&
+          !isCompactDuoWindow(context)
+      ? _nativeCompactHeight(context)
       : _kBarContentMinHeight;
+  return accessibleHeight > minimumHeight ? accessibleHeight : minimumHeight;
 }
 
 /// Height for a compact title rail below the app bar's action row.
@@ -59,6 +67,17 @@ double frostedAppBarLowerTitleHeight(
   return titleHeight > 40 ? titleHeight : 40;
 }
 
+// Duo has no top status inset in the content panes. Reserve breathing room
+// around the native 44-point controls instead of collapsing the header to them.
+double _nativeCompactHeight(BuildContext context, [double titleHeight = 0]) {
+  final scope = DuoToolbarScope.maybeOf(context);
+  final strip = scope == null ? FoldGeometry.of(context).strip : scope.strip;
+  final height = IosNavigationMetrics.of(context).compactHeight;
+  return strip == null
+      ? max(height, titleHeight)
+      : max(height.clamp(44.0, double.infinity), titleHeight) + 24;
+}
+
 /// Returns the total height of the [FrostedAppBar] including safe area padding.
 ///
 /// Use this to add top spacing to body content so it starts below the bar.
@@ -74,7 +93,7 @@ double frostedAppBarHeight(
 }) {
   if (useNativeNavigation && defaultTargetPlatform == TargetPlatform.iOS) {
     return MediaQuery.paddingOf(context).top +
-        IosNavigationMetrics.of(context).compactHeight +
+        _nativeCompactHeight(context, titleContentHeight) +
         (nativeLargeTitle
             ? IosNavigationMetrics.of(context).largeTitleHeight
             : 0) +
@@ -82,8 +101,7 @@ double frostedAppBarHeight(
   }
   return MediaQuery.paddingOf(context).top +
       _barContentHeight(context, titleStyle, titleContentHeight) +
-      bottomHeight +
-      _kBottomBorderWidth;
+      bottomHeight;
 }
 
 /// A frosted-glass floating app bar designed to sit inside a [Stack].
@@ -134,11 +152,6 @@ class FrostedAppBar extends StatelessWidget {
   /// Color applied to icons in the app bar.
   final Color? iconColor;
 
-  /// Paints over the frosted fill instead of the default translucent surface.
-  /// Used by the Buzz themes to carry their branded gradient across the app's
-  /// top section — see [buzzTopSectionGradient].
-  final Gradient? gradient;
-
   /// Whether to apply the translucent blur treatment behind the app bar.
   ///
   /// The backdrop stays clear at rest. This enables the treatment when the
@@ -148,18 +161,6 @@ class FrostedAppBar extends StatelessWidget {
   /// Keeps the backdrop stable regardless of scroll state on both platforms.
   /// Conversation headers use this while their timeline and composer resize.
   final bool alwaysFrosted;
-
-  /// Opacity of the frosted surface above the blurred backdrop.
-  final double frostedSurfaceOpacity;
-
-  /// Blur strength of the frosted backdrop.
-  final double frostedBlurSigma;
-
-  /// Whether to draw a divider below the app bar.
-  final bool showBottomDivider;
-
-  /// Opacity of the divider below the app bar.
-  final double bottomDividerOpacity;
 
   /// Explicit UIKit title for headers whose Flutter title is a custom widget.
   final String? nativeTitle;
@@ -172,13 +173,24 @@ class FrostedAppBar extends StatelessWidget {
 
   /// Reactive counterpart avatar and presence badge for a native DM title.
   final IosNavigationAction? nativeTitleAvatar;
+
+  /// Portraits floating above a DM title; empty for ordinary channel headers.
+  final List<IosNavigationAction> nativeTitleAvatars;
+  final double? nativeTitleMaxWidth;
   final Color? nativeTitlePresenceColor;
+
+  /// Shows a refresh bar in the native iOS title capsule.
+  final bool nativeTitleRefreshing;
   final VoidCallback? onNativeTitlePressed;
 
   /// Whether UIKit should expand the title at the top of the page.
   final bool nativeLargeTitle;
 
-  /// Use the composable frosted header for custom title and filter layouts.
+  /// Aligns a full-width native backdrop title with the inset page content.
+  final EdgeInsets nativeTitleInsets;
+
+  /// Whether UIKit owns the title and actions. Custom Flutter layouts still
+  /// use the native soft backdrop on iOS.
   final bool useNativeNavigation;
 
   /// Duration for coordinated native header and overlapping control movement.
@@ -196,21 +208,29 @@ class FrostedAppBar extends StatelessWidget {
   /// Uses a composable Flutter header while a backdrop covers the native view.
   final ValueListenable<bool>? nativeViewSuppressed;
 
+  /// Projects controls into Duo's rail without a header over the content.
+  final bool railOnly;
+
   const FrostedAppBar({
     super.key,
     this.nativeTitle,
     this.nativeSubtitle,
     this.nativeEphemeralLabel,
     this.nativeTitleAvatar,
+    this.nativeTitleAvatars = const [],
+    this.nativeTitleMaxWidth,
     this.nativeTitlePresenceColor,
+    this.nativeTitleRefreshing = false,
     this.onNativeTitlePressed,
     this.nativeLargeTitle = false,
+    this.nativeTitleInsets = EdgeInsets.zero,
     this.useNativeNavigation = true,
     this.nativeLayoutDuration = Duration.zero,
     this.nativeLeading,
     this.nativeActions,
     this.onNativeReadyChanged,
     this.nativeViewSuppressed,
+    this.railOnly = false,
     this.leading,
     this.automaticallyImplyLeading = true,
     this.title,
@@ -223,18 +243,11 @@ class FrostedAppBar extends StatelessWidget {
     this.actions = const [],
     this.horizontalInset = Grid.xxs,
     this.iconColor,
-    this.gradient,
     this.frosted = true,
     this.alwaysFrosted = false,
-    this.frostedSurfaceOpacity = 0.5,
-    this.frostedBlurSigma = 20,
-    this.showBottomDivider = true,
-    this.bottomDividerOpacity = 0.05,
   }) : assert(bottom == null || bottomHeight + bottomOverlap > 0),
        assert(bottomOverlap >= 0),
-       assert(bottom != null || bottomOverlap == 0),
-       assert(frostedBlurSigma >= 0),
-       assert(bottomDividerOpacity >= 0 && bottomDividerOpacity <= 1);
+       assert(bottom != null || bottomOverlap == 0);
 
   @override
   Widget build(BuildContext context) {
@@ -249,9 +262,55 @@ class FrostedAppBar extends StatelessWidget {
   }
 
   Widget _build(BuildContext context, bool nativeSuppressed) {
+    final railInsets = duoContentInsetsOf(context);
     if (useNativeNavigation &&
         defaultTargetPlatform == TargetPlatform.iOS &&
         !nativeSuppressed) {
+      final toolbarScope = DuoToolbarScope.maybeOf(context);
+      final strip = toolbarScope == null
+          ? FoldGeometry.of(context).strip
+          : toolbarScope.strip;
+      final leadingAction = nativeLeading ?? _nativeAction(leading);
+      final onBack =
+          automaticallyImplyLeading &&
+              leading == null &&
+              Navigator.canPop(context)
+          ? () {
+              Navigator.of(context).maybePop();
+            }
+          : null;
+      final trailingActions =
+          nativeActions ??
+          actions.map(_nativeAction).whereType<IosNavigationAction>().toList();
+      final stripActions = <IosNavigationAction>[
+        if (leadingAction != null && !leadingAction.keepInHeaderOnDuo)
+          leadingAction
+        else if (leadingAction == null && onBack != null)
+          IosNavigationAction(
+            label: 'Back',
+            symbol: 'chevron.backward',
+            onPressed: onBack,
+          ),
+        ...trailingActions.where((action) => !action.keepInHeaderOnDuo),
+      ];
+      final toolbarActive =
+          (toolbarScope?.active ?? true) &&
+          (ModalRoute.isCurrentOf(context) ?? true);
+      if (railOnly && strip != null) {
+        return Positioned(
+          top: 0,
+          left: 0,
+          right: 0,
+          child: DuoToolbarPortal(
+            strip: strip,
+            active: toolbarActive,
+            actions: stripActions,
+            child: NavigationBackdrop(
+              child: SizedBox(height: MediaQuery.paddingOf(context).top),
+            ),
+          ),
+        );
+      }
       final offset = IosNavigationScrollScope.maybeOf(context);
       Widget buildNative(double scrollOffset) {
         // Scrolling tracks the finger directly; only the search focus change
@@ -265,7 +324,7 @@ class FrostedAppBar extends StatelessWidget {
             : 0.0;
         final barHeight =
             MediaQuery.paddingOf(context).top +
-            IosNavigationMetrics.of(context).compactHeight +
+            _nativeCompactHeight(context, titleContentHeight) +
             extra;
         return AnimatedPositioned(
           duration: layoutDuration,
@@ -274,57 +333,79 @@ class FrostedAppBar extends StatelessWidget {
           left: 0,
           right: 0,
           height: barHeight + bottomHeight,
-          child: Stack(
-            children: [
-              Positioned(
-                top: 0,
-                left: 0,
-                right: 0,
-                height: barHeight,
-                child: IosNavigationBar(
-                  onReadyChanged: onNativeReadyChanged,
-                  title:
-                      nativeTitle ??
-                      (title is Text ? (title as Text).data ?? '' : ''),
-                  subtitle: nativeSubtitle,
-                  ephemeralLabel: nativeEphemeralLabel,
-                  titleAvatar: nativeTitleAvatar,
-                  titlePresenceColor: nativeTitlePresenceColor,
-                  onTitlePressed: onNativeTitlePressed,
-                  largeTitle: nativeLargeTitle,
-                  alwaysFrosted: alwaysFrosted,
-                  foregroundColor: iconColor,
-                  leading: nativeLeading ?? _nativeAction(leading),
-                  onBack:
-                      automaticallyImplyLeading &&
-                          leading == null &&
-                          Navigator.canPop(context)
-                      ? () => Navigator.of(context).maybePop()
-                      : null,
-                  actions:
-                      nativeActions ??
-                      actions
-                          .map(_nativeAction)
-                          .whereType<IosNavigationAction>()
-                          .toList(),
-                ),
-              ),
-              if (bottom != null)
-                AnimatedPositioned(
-                  duration: layoutDuration,
-                  curve: Curves.easeInOutCubic,
-                  top: barHeight - bottomOverlap,
+          child: DuoToolbarPortal(
+            strip: strip,
+            active: toolbarActive,
+            actions: stripActions,
+            child: Stack(
+              clipBehavior: Clip.none,
+              children: [
+                Positioned(
+                  top: 0,
                   left: 0,
                   right: 0,
-                  height: bottomHeight + bottomOverlap,
-                  child: bottomOverlap > 0 || bottom is SizedBox
-                      ? bottom!
-                      : ColoredBox(
-                          color: context.colors.surface,
-                          child: bottom!,
-                        ),
+                  height: barHeight,
+                  child: IosNavigationBar(
+                    centerTitleInPane: strip != null && !nativeLargeTitle,
+                    titleInsets: nativeTitleInsets == EdgeInsets.zero
+                        ? railInsets
+                        : nativeTitleInsets,
+                    alignCollapsedTitleToLeading:
+                        strip != null && nativeLargeTitle,
+                    horizontalControls:
+                        strip != null &&
+                        ((leadingAction?.keepInHeaderOnDuo ?? false) ||
+                            trailingActions.any(
+                              (action) => action.keepInHeaderOnDuo,
+                            )),
+                    onReadyChanged: onNativeReadyChanged,
+                    title:
+                        nativeTitle ??
+                        (title is Text ? (title as Text).data ?? '' : ''),
+                    subtitle: nativeSubtitle,
+                    ephemeralLabel: nativeEphemeralLabel,
+                    titleAvatar: nativeTitleAvatar,
+                    titleAvatars: nativeTitleAvatars,
+                    titleMaxWidth: nativeTitleMaxWidth,
+                    titlePresenceColor: nativeTitlePresenceColor,
+                    titleRefreshing: nativeTitleRefreshing,
+                    onTitlePressed: onNativeTitlePressed,
+                    largeTitle: nativeLargeTitle,
+                    alwaysFrosted: alwaysFrosted || strip != null,
+                    foregroundColor: iconColor,
+                    leading:
+                        strip == null ||
+                            (leadingAction?.keepInHeaderOnDuo ?? false)
+                        ? leadingAction
+                        : null,
+                    onBack: strip == null ? onBack : null,
+                    actions: strip == null
+                        ? trailingActions
+                        : trailingActions
+                              .where((action) => action.keepInHeaderOnDuo)
+                              .toList(),
+                  ),
                 ),
-            ],
+                if (bottom != null)
+                  AnimatedPositioned(
+                    duration: layoutDuration,
+                    curve: Curves.easeInOutCubic,
+                    top: barHeight - bottomOverlap,
+                    left: 0,
+                    right: 0,
+                    height: bottomHeight + bottomOverlap,
+                    child: Padding(
+                      padding: railInsets,
+                      child: bottomOverlap > 0 || bottom is SizedBox
+                          ? bottom!
+                          : ColoredBox(
+                              color: context.colors.surface,
+                              child: bottom!,
+                            ),
+                    ),
+                  ),
+              ],
+            ),
           ),
         );
       }
@@ -341,7 +422,6 @@ class FrostedAppBar extends StatelessWidget {
     final isScrolledUnder =
         alwaysFrosted || (scrollUnder?.isScrolledUnder ?? false);
     final paintsFrost = frosted && isScrolledUnder;
-    final paintsBottomDivider = showBottomDivider && isScrolledUnder;
     final canPop = Navigator.canPop(context);
     final effectiveTitleStyle = _effectiveTitleStyle(context, titleStyle);
     final barContentHeight = _barContentHeight(
@@ -389,6 +469,7 @@ class FrostedAppBar extends StatelessWidget {
           data: IconThemeData(color: effectiveIconColor),
           child: _CenteredNavigationLayout(
             leading: effectiveLeading,
+            topAlignedActions: nativeTitleAvatars.isNotEmpty,
             title: title == null
                 ? null
                 : DefaultTextStyle.merge(
@@ -403,6 +484,10 @@ class FrostedAppBar extends StatelessWidget {
                               left: effectiveLeading != null
                                   ? usesAutomaticIosGlassBackButton
                                         ? iosGlassChannelHeaderTitleSpacing
+                                        : defaultTargetPlatform ==
+                                                  TargetPlatform.android &&
+                                              nativeTitleAvatars.isNotEmpty
+                                        ? 16
                                         : 0
                                   : horizontalInset < Grid.gutter
                                   ? Grid.gutter - horizontalInset
@@ -452,38 +537,41 @@ class FrostedAppBar extends StatelessWidget {
 
     final background = Container(
       key: const ValueKey('frosted-app-bar-background'),
-      padding: EdgeInsets.only(top: topPadding),
-      decoration: BoxDecoration(
-        color: gradient != null
-            ? null
-            : paintsFrost
-            ? context.colors.surface.withValues(alpha: frostedSurfaceOpacity)
-            : Colors.transparent,
-        gradient: gradient,
-        border: showBottomDivider
-            ? Border(
-                bottom: BorderSide(
-                  color: paintsBottomDivider
-                      ? navigationDivider(context, bottomDividerOpacity)
-                      : Colors.transparent,
-                  width: _kBottomBorderWidth,
-                ),
-              )
-            : null,
-      ),
+      padding: railInsets.copyWith(top: topPadding),
+      decoration: const BoxDecoration(),
       child: content,
     );
 
-    final child = ClipRect(
-      child: paintsFrost
-          ? BackdropFilter(
-              filter: ImageFilter.blur(
-                sigmaX: frostedBlurSigma,
-                sigmaY: frostedBlurSigma,
+    if (defaultTargetPlatform == TargetPlatform.android &&
+        nativeTitleAvatars.isNotEmpty) {
+      return Positioned(
+        top: 0,
+        left: 0,
+        right: 0,
+        child: Stack(
+          children: [
+            Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              height: topPadding + _barContentHeight(context, titleStyle, 0),
+              child: IgnorePointer(
+                child: NavigationBackdrop(
+                  active: paintsFrost,
+                  child: const SizedBox.expand(),
+                ),
               ),
-              child: background,
-            )
-          : background,
+            ),
+            background,
+          ],
+        ),
+      );
+    }
+
+    final child = NavigationBackdrop(
+      active: paintsFrost,
+      suppressNativeView: nativeSuppressed,
+      child: background,
     );
 
     return Positioned(top: 0, left: 0, right: 0, child: child);
@@ -498,12 +586,14 @@ class _CenteredNavigationLayout extends StatelessWidget {
     this.title,
     this.actions,
     required this.centered,
+    this.topAlignedActions = false,
   });
 
   final Widget? leading;
   final Widget? title;
   final Widget? actions;
   final bool centered;
+  final bool topAlignedActions;
 
   @override
   Widget build(BuildContext context) {
@@ -517,7 +607,7 @@ class _CenteredNavigationLayout extends StatelessWidget {
       );
     }
     return CustomMultiChildLayout(
-      delegate: _CenteredNavigationLayoutDelegate(),
+      delegate: _CenteredNavigationLayoutDelegate(topAlignedActions),
       children: [
         if (leading != null)
           LayoutId(id: _NavigationSlot.leading, child: leading!),
@@ -530,6 +620,8 @@ class _CenteredNavigationLayout extends StatelessWidget {
 }
 
 class _CenteredNavigationLayoutDelegate extends MultiChildLayoutDelegate {
+  _CenteredNavigationLayoutDelegate(this.topAlignedActions);
+  final bool topAlignedActions;
   @override
   void performLayout(Size size) {
     Size leadingSize = Size.zero;
@@ -540,7 +632,10 @@ class _CenteredNavigationLayoutDelegate extends MultiChildLayoutDelegate {
       );
       positionChild(
         _NavigationSlot.leading,
-        Offset(0, (size.height - leadingSize.height) / 2),
+        Offset(
+          0,
+          topAlignedActions ? Grid.xxs : (size.height - leadingSize.height) / 2,
+        ),
       );
     }
 
@@ -554,7 +649,7 @@ class _CenteredNavigationLayoutDelegate extends MultiChildLayoutDelegate {
         _NavigationSlot.actions,
         Offset(
           size.width - actionsSize.width,
-          (size.height - actionsSize.height) / 2,
+          topAlignedActions ? Grid.xxs : (size.height - actionsSize.height) / 2,
         ),
       );
     }
@@ -584,7 +679,7 @@ class _CenteredNavigationLayoutDelegate extends MultiChildLayoutDelegate {
   @override
   bool shouldRelayout(
     covariant _CenteredNavigationLayoutDelegate oldDelegate,
-  ) => false;
+  ) => topAlignedActions != oldDelegate.topAlignedActions;
 }
 
 IosNavigationAction? _nativeAction(Widget? widget) {
@@ -599,10 +694,12 @@ IosNavigationAction? _nativeAction(Widget? widget) {
   if (widget is IosGlassNavigationButton) {
     final symbol = switch (widget.icon) {
       IosGlassNavigationIcon.more => 'ellipsis',
+      IosGlassNavigationIcon.bell => 'bell',
       IosGlassNavigationIcon.trash => 'trash',
       IosGlassNavigationIcon.reply => 'arrowshape.turn.up.left',
       IosGlassNavigationIcon.back => 'chevron.backward',
       IosGlassNavigationIcon.close => 'xmark',
+      IosGlassNavigationIcon.check => 'checkmark',
       IosGlassNavigationIcon.camera => 'camera',
       IosGlassNavigationIcon.photoLibrary => 'photo.on.rectangle',
       IosGlassNavigationIcon.palette => 'paintpalette',

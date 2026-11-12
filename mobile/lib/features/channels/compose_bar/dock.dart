@@ -59,8 +59,8 @@ class _ComposerDockFrame extends HookWidget {
         ),
         Padding(
           padding: EdgeInsets.only(
-            left: Grid.twelve,
-            right: Grid.twelve,
+            left: composerHorizontalGutter,
+            right: composerHorizontalGutter,
             bottom: MediaQuery.viewPaddingOf(context).bottom + Grid.xxs,
           ),
           child: Align(
@@ -96,7 +96,9 @@ class _ComposerDockFrame extends HookWidget {
                     ),
                     child: FractionallySizedBox(
                       key: const ValueKey('composer-width-transition'),
-                      widthFactor: 0.85 + 0.15 * widthProgress,
+                      widthFactor:
+                          collapsedComposerWidthFactor +
+                          (1 - collapsedComposerWidthFactor) * widthProgress,
                       child: child,
                     ),
                   ),
@@ -188,10 +190,25 @@ class _ComposerOverlayPortal extends StatelessWidget {
                   left: surfaceLeft,
                   bottom: layoutInfo.overlaySize.height - overlayAnchorY,
                   width: surfaceWidth,
-                  child: ClipRect(
-                    child: Padding(
-                      padding: const EdgeInsets.only(bottom: Grid.xxs),
-                      child: buildOverlayPanel(surface),
+                  child: ConstrainedBox(
+                    // The suggestions grow upward from the composer, so cap
+                    // them at the space above it. A short view, such as
+                    // landscape with the keyboard up, then keeps the top row
+                    // on screen instead of honoring a reserved height.
+                    constraints: BoxConstraints(
+                      maxHeight: surface == _AttachmentSurface.closed
+                          ? math.max(
+                              0,
+                              overlayAnchorY -
+                                  MediaQuery.paddingOf(context).top,
+                            )
+                          : double.infinity,
+                    ),
+                    child: ClipRect(
+                      child: Padding(
+                        padding: const EdgeInsets.only(bottom: Grid.xxs),
+                        child: buildOverlayPanel(surface),
+                      ),
                     ),
                   ),
                 ),

@@ -41,23 +41,28 @@ class ChannelDetailPage extends ConsumerWidget {
         placement != ChannelRoutePlacement.ordinary &&
         groups == null &&
         lookup.isLoading) {
-      return Scaffold(
-        appBar: AppBar(title: Text(channel.name)),
+      return FrostedScaffold(
+        appBar: FrostedAppBar(title: Text(channel.name)),
         body: const Center(child: BuzzLoadingIndicator()),
       );
     }
-    return _ResolvedChannelDetailPage(
-      key: ValueKey((channel.id, placed)),
-      channel: current,
-      personalChat: placed,
-      placementKnown:
-          placed ||
-          groups != null ||
-          placement != ChannelRoutePlacement.unresolved,
-      initialAssistant: initialAssistant,
-      initialMessageId: initialMessageId,
-      initialThreadRootId: initialThreadRootId,
-      initialThreadRouteBehavior: initialThreadRouteBehavior,
+    return CoveredRouteKeyboardInsets(
+      child: _ResolvedChannelDetailPage(
+        key: ValueKey((channel.id, placed)),
+        channel: current,
+        personalChat: placed,
+        welcomeAgent: current.isDm
+            ? ref.watch(bestieWelcomeProvider(channel.id))
+            : null,
+        placementKnown:
+            placed ||
+            groups != null ||
+            placement != ChannelRoutePlacement.unresolved,
+        initialAssistant: initialAssistant,
+        initialMessageId: initialMessageId,
+        initialThreadRootId: initialThreadRootId,
+        initialThreadRouteBehavior: initialThreadRouteBehavior,
+      ),
     );
   }
 }

@@ -8,6 +8,8 @@ class IosCommunityLinkInput extends StatelessWidget {
     super.key,
     required this.controller,
     this.focusNode,
+    this.inputKey = const Key('community-link-input'),
+    this.placeholder = 'Community link or address',
     this.autofocus = false,
     this.enabled = true,
     this.onChanged,
@@ -16,6 +18,8 @@ class IosCommunityLinkInput extends StatelessWidget {
 
   final TextEditingController controller;
   final FocusNode? focusNode;
+  final Key inputKey;
+  final String placeholder;
   final bool autofocus;
   final bool enabled;
   final ValueChanged<String>? onChanged;
@@ -23,12 +27,12 @@ class IosCommunityLinkInput extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => CupertinoTextField(
-    key: const Key('community-link-input'),
+    key: inputKey,
     controller: controller,
     focusNode: focusNode,
     autofocus: autofocus,
     enabled: enabled,
-    placeholder: 'Community link or address',
+    placeholder: placeholder,
     placeholderStyle: context.textTheme.titleLarge?.copyWith(
       color: CupertinoColors.placeholderText.resolveFrom(context),
     ),

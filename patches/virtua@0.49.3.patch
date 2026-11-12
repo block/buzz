@@ -1,5 +1,5 @@
 diff --git a/lib/index.cjs b/lib/index.cjs
-index e02dfd0b3db60faff2cc705d7ce0aa51cb958f5a..b12677a356f748ebccf6e16cb781efe1315bb55b 100644
+index e02dfd0b3db60faff2cc705d7ce0aa51cb958f5a..c1f84bac4349fa3d0148eac9a7815111b35ce3fb 100644
 --- a/lib/index.cjs
 +++ b/lib/index.cjs
 @@ -35,10 +35,18 @@ const r = null, {min: n, max: s, abs: i, floor: l} = Math, c = (e, t, o) => n(o,
@@ -64,16 +64,37 @@ index e02dfd0b3db60faff2cc705d7ce0aa51cb958f5a..b12677a356f748ebccf6e16cb781efe1
          const r = l() - c;
          150 > r && 50 < r && (o ? t.deltaX : t.deltaY) && (f = !0);
      }, v = () => {
-@@ -266,7 +279,7 @@ const r = null, {min: n, max: s, abs: i, floor: l} = Math, c = (e, t, o) => n(o,
+@@ -250,23 +264,24 @@ const r = null, {min: n, max: s, abs: i, floor: l} = Math, c = (e, t, o) => n(o,
+         r && r();
+     } ];
+ }, M = (e, t) => {
+-    let o, r, n = d(), s = !1;
+-    const i = t ? "scrollLeft" : "scrollTop", l = t ? "overflowX" : "overflowY", [f, u] = C(e, () => n[0], (e, r) => {
++    let o, r, n = d(), s = !1, kk = 0;
++    const i = t ? "scrollLeft" : "scrollTop", l = t ? "overflowX" : "overflowY", ss = t ? "scrollWidth" : "scrollHeight", cc = t ? "clientWidth" : "clientHeight", [f, u] = C(e, () => n[0], (e, r) => {
+         e = R(e, s), r ? o.scrollTo({
+             [t ? "left" : "top"]: e,
+             behavior: "smooth"
+-        }) : o[i] = e;
++        }) : (o[i] = e, kk = R(o[i], s));
+     });
+     return {
+         L(c, f) {
+-            o = f, t && (s = "rtl" === getComputedStyle(f).direction), r = T(e, f, t, () => R(f[i], s), (t, o, r) => {
++            o = f, t && (s = "rtl" === getComputedStyle(f).direction), r = T(e, f, t, () => kk = R(f[i], s), (t, o, r) => {
+                 if (r) {
+                     const e = f.style, t = e[l];
+                     e[l] = "hidden", k(() => {
                          e[l] = t;
                      });
                  }
 -                f[i] = R(e.C() + t, s), o && u();
-+                f[i] = R((o ? R(f[i], s) : e.C()) + t, s), o && u();
++                const dd = R(f[i], s);
++                f[i] = R((o ? dd < kk && dd >= f[ss] - f[cc] - 1 ? kk : dd : e.C()) + t, s), kk = R(f[i], s), o && u();
              }), n[1](!0);
          },
          v() {
-@@ -519,11 +532,11 @@ const r = null, {min: n, max: s, abs: i, floor: l} = Math, c = (e, t, o) => n(o,
+@@ -519,11 +534,11 @@ const r = null, {min: n, max: s, abs: i, floor: l} = Math, c = (e, t, o) => n(o,
      })(e);
      return [ e => t[e], t.length ];
  }, [ e, o ]), j = /*#__PURE__*/ t.forwardRef(({children: r, data: n, bufferSize: s, itemSize: i, shift: l, horizontal: c, keepMounted: d, cache: a, startMargin: h = 0, ssrCount: g, as: p = "div", item: v = "div", scrollRef: _, onScroll: w, onScrollEnd: S}, m) => {
@@ -89,7 +110,7 @@ index e02dfd0b3db60faff2cc705d7ce0aa51cb958f5a..b12677a356f748ebccf6e16cb781efe1
          const o = $(t);
          return e.jsx(Y, {
 diff --git a/lib/index.js b/lib/index.js
-index 110ac3858a002a6cdb698da2b56350bc1bf609d2..db83efc83fb3b6d7aa07d83b7463d6ed7746287e 100644
+index 110ac3858a002a6cdb698da2b56350bc1bf609d2..5ccbaee734c167b2df98e9fe8233dd467fed8ff1 100644
 --- a/lib/index.js
 +++ b/lib/index.js
 @@ -1,7 +1,7 @@
@@ -162,16 +183,37 @@ index 110ac3858a002a6cdb698da2b56350bc1bf609d2..db83efc83fb3b6d7aa07d83b7463d6ed
          const n = i() - l;
          150 > n && 50 < n && (o ? t.deltaX : t.deltaY) && (c = !0);
      }, v = () => {
-@@ -270,7 +283,7 @@ const u = null, {min: d, max: a, abs: h, floor: g} = Math, p = (e, t, o) => d(o,
+@@ -254,23 +268,24 @@ const u = null, {min: d, max: a, abs: h, floor: g} = Math, p = (e, t, o) => d(o,
+         n && n();
+     } ];
+ }, A = (e, t) => {
+-    let o, n, r = _(), s = !1;
+-    const i = t ? "scrollLeft" : "scrollTop", l = t ? "overflowX" : "overflowY", [c, f] = J(e, () => r[0], (e, n) => {
++    let o, n, r = _(), s = !1, kk = 0;
++    const i = t ? "scrollLeft" : "scrollTop", l = t ? "overflowX" : "overflowY", ss = t ? "scrollWidth" : "scrollHeight", cc = t ? "clientWidth" : "clientHeight", [c, f] = J(e, () => r[0], (e, n) => {
+         e = W(e, s), n ? o.scrollTo({
+             [t ? "left" : "top"]: e,
+             behavior: "smooth"
+-        }) : o[i] = e;
++        }) : (o[i] = e, kk = W(o[i], s));
+     });
+     return {
+         N(c, u) {
+-            o = u, t && (s = "rtl" === getComputedStyle(u).direction), n = B(e, u, t, () => W(u[i], s), (t, o, n) => {
++            o = u, t && (s = "rtl" === getComputedStyle(u).direction), n = B(e, u, t, () => kk = W(u[i], s), (t, o, n) => {
+                 if (n) {
+                     const e = u.style, t = e[l];
+                     e[l] = "hidden", H(() => {
                          e[l] = t;
                      });
                  }
 -                u[i] = W(e.C() + t, s), o && f();
-+                u[i] = W((o ? W(u[i], s) : e.C()) + t, s), o && f();
++                const dd = W(u[i], s);
++                u[i] = W((o ? dd < kk && dd >= u[ss] - u[cc] - 1 ? kk : dd : e.C()) + t, s), kk = W(u[i], s), o && f();
              }), r[1](!0);
          },
          v() {
-@@ -523,11 +536,11 @@ const u = null, {min: d, max: a, abs: h, floor: g} = Math, p = (e, t, o) => d(o,
+@@ -523,11 +538,11 @@ const u = null, {min: d, max: a, abs: h, floor: g} = Math, p = (e, t, o) => d(o,
      })(e);
      return [ e => o[e], o.length ];
  }, [ e, t ]), Z = /*#__PURE__*/ i(({children: t, data: o, bufferSize: r, itemSize: s, shift: i, horizontal: u, keepMounted: d, cache: a, startMargin: h = 0, ssrCount: g, as: p = "div", item: _ = "div", scrollRef: w, onScroll: S, onScrollEnd: $}, z) => {

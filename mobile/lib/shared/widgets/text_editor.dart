@@ -1,3 +1,4 @@
+import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
@@ -68,8 +69,9 @@ Future<void> showTextEditor({
 }
 
 void _showSaveError(BuildContext context) {
-  ScaffoldMessenger.of(context).showSnackBar(
-    const SnackBar(content: Text("We couldn't save this change. Try again.")),
+  ScaffoldMessenger.of(context).showFeedbackSnackBar(
+    const SnackBar(content: Text('Couldn’t save changes')),
+    kind: ToastKind.error,
   );
 }
 
@@ -111,7 +113,7 @@ class _TextEditSheet extends HookWidget {
           Navigator.of(context).pop();
           return;
         }
-        error.value = "We couldn't save this change. Try again.";
+        error.value = 'Couldn’t save changes';
       } finally {
         if (context.mounted) isSaving.value = false;
       }

@@ -143,6 +143,33 @@ pub async fn mint_relay_invite(
     ttl_secs: u64,
     max_uses: Option<i32>,
 ) -> Result<MintedInvite> {
+    mint(pool, community, created_by, ttl_secs, max_uses, false).await
+}
+
+/// Like [`mint_relay_invite`], but refuses with
+/// [`DbError::InviteIssuerNotAdmin`](crate::DbError::InviteIssuerNotAdmin)
+/// unless `created_by` is an owner or admin inside the mint transaction. The
+/// role row is held `FOR SHARE` through commit, so a concurrent demotion,
+/// removal or ownership transfer either lands first and refuses this mint or
+/// waits for it.
+pub async fn mint_relay_invite_as_admin(
+    pool: &PgPool,
+    community: CommunityId,
+    created_by: &str,
+    ttl_secs: u64,
+    max_uses: Option<i32>,
+) -> Result<MintedInvite> {
+    mint(pool, community, created_by, ttl_secs, max_uses, true).await
+}
+
+async fn mint(
+    pool: &PgPool,
+    community: CommunityId,
+    created_by: &str,
+    ttl_secs: u64,
+    max_uses: Option<i32>,
+    require_admin: bool,
+) -> Result<MintedInvite> {
     validate_mint_inputs(ttl_secs, max_uses)?;
     if !is_canonical_invite_pubkey(created_by) {
         return Err(crate::error::DbError::InvalidData(
@@ -168,6 +195,19 @@ pub async fn mint_relay_invite(
     )
     .await?;
     lock_admission(tx.conn(), community).await?;
+    if require_admin {
+        let role: Option<String> = sqlx::query_scalar(
+            "SELECT role FROM relay_members \
+             WHERE community_id = $1 AND pubkey = $2 FOR SHARE",
+        )
+        .bind(community.as_uuid())
+        .bind(created_by)
+        .fetch_optional(tx.conn())
+        .await?;
+        if !matches!(role.as_deref(), Some("owner" | "admin")) {
+            return Err(crate::DbError::InviteIssuerNotAdmin);
+        }
+    }
     if principal_restricted(tx.conn(), community, created_by).await? {
         return Err(crate::DbError::InviteRestricted);
     }
@@ -611,8 +651,8 @@ pub async fn claim_relay_invite_with_owner(
     }
 
     let inserted = sqlx::query(
-        "INSERT INTO relay_members (community_id, pubkey, role, added_by) \
-         VALUES ($1, $2, 'member', 'invite') \
+        "INSERT INTO relay_members (community_id, pubkey, role, added_by, auto_join_pending) \
+         VALUES ($1, $2, 'member', 'invite', gen_random_uuid()) \
          ON CONFLICT (community_id, pubkey) DO NOTHING",
     )
     .bind(community.as_uuid())
@@ -693,20 +733,21 @@ pub async fn claim_relay_invite_with_owner(
 }
 
 impl Db {
-    /// Mints a v2 use-limited relay invite. The plaintext code is returned
-    /// exactly once; only its SHA-256 hash is persisted.
+    /// Mints a v2 use-limited relay invite for an owner or admin; see
+    /// [`mint_relay_invite_as_admin`]. The plaintext code is returned exactly
+    /// once; only its SHA-256 hash is persisted.
     ///
     /// `max_uses` is `None` for unlimited or `Some(1..=10000)`.
     /// `ttl_secs` must be in the shared invite lifetime range.
     #[datastore_span(name = "mint_relay_invite", system = "postgresql")]
-    pub async fn mint_relay_invite(
+    pub async fn mint_relay_invite_as_admin(
         &self,
         community: CommunityId,
         created_by: &str,
         ttl_secs: u64,
         max_uses: Option<i32>,
     ) -> Result<MintedInvite> {
-        mint_relay_invite(&self.pool, community, created_by, ttl_secs, max_uses).await
+        mint_relay_invite_as_admin(&self.pool, community, created_by, ttl_secs, max_uses).await
     }
 
     /// Claim an invite and persist caller-verified ownership atomically.
@@ -768,6 +809,7 @@ impl Db {
 mod postgres_tests {
     use super::*;
     use crate::relay_members::is_relay_member;
+    use crate::test_support::ScratchDb;
     use sha2::Digest;
     use sqlx::PgPool;
     use uuid::Uuid;
@@ -776,35 +818,6 @@ mod postgres_tests {
         PgPool::connect(&crate::test_support::database_url())
             .await
             .expect("connect to test DB")
-    }
-
-    async fn create_scratch_database(prefix: &str) -> (PgPool, String, String) {
-        let admin_url = crate::test_support::database_url();
-        let admin = PgPool::connect(&admin_url)
-            .await
-            .expect("connect to test database server");
-        let name = format!("{}_{}", prefix, Uuid::new_v4().simple());
-        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {name}")))
-            .execute(&admin)
-            .await
-            .expect("create scratch database");
-        let path_start = admin_url
-            .rfind('/')
-            .expect("database URL has a path segment");
-        let scratch_url = format!("{}/{}", &admin_url[..path_start], name);
-        (admin, name, scratch_url)
-    }
-
-    async fn drop_scratch_database(admin: PgPool, db: crate::Db, name: &str) {
-        db.pool.close().await;
-        drop(db);
-        sqlx::query(sqlx::AssertSqlSafe(format!(
-            "DROP DATABASE IF EXISTS {name} WITH (FORCE)"
-        )))
-        .execute(&admin)
-        .await
-        .expect("drop scratch database");
-        admin.close().await;
     }
 
     pub(super) async fn make_test_community(pool: &PgPool) -> CommunityId {
@@ -876,10 +889,10 @@ mod postgres_tests {
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn mint_after_quiescing_returns_typed_fence_without_persisting() {
-        let (admin, database_name, database_url) =
-            create_scratch_database("relay_invite_fence").await;
+        let scratch =
+            ScratchDb::create(&crate::test_support::database_url(), "relay_invite_fence").await;
         let db = crate::Db::new(&crate::DbConfig {
-            database_url,
+            database_url: scratch.url().to_owned(),
             max_connections: 5,
             min_connections: 0,
             ..crate::DbConfig::default()
@@ -956,10 +969,6 @@ mod postgres_tests {
                 .await
                 .expect("count relay invites");
         assert_eq!(invite_count, 0, "rejected mint must not persist an invite");
-
-        drop(store);
-        drop(pool);
-        drop_scratch_database(admin, db, &database_name).await;
     }
 
     #[tokio::test]
@@ -1178,10 +1187,13 @@ mod postgres_tests {
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn retention_sweep_skips_quiescing_tenant_while_active_bystanders_progress() {
-        let (admin, database_name, database_url) =
-            create_scratch_database("relay_invite_liveness").await;
+        let scratch = ScratchDb::create(
+            &crate::test_support::database_url(),
+            "relay_invite_liveness",
+        )
+        .await;
         let db = crate::Db::new(&crate::DbConfig {
-            database_url,
+            database_url: scratch.url().to_owned(),
             max_connections: 5,
             min_connections: 0,
             ..crate::DbConfig::default()
@@ -1237,9 +1249,6 @@ mod postgres_tests {
                 .await
                 .expect("read remaining invite attribution");
         assert_eq!(remaining, vec![*target.as_uuid()]);
-
-        drop(pool);
-        drop_scratch_database(admin, db, &database_name).await;
     }
 
     #[tokio::test]

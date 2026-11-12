@@ -30,6 +30,7 @@ final class ConcentricSheetSurfaceFactory: NSObject, FlutterPlatformViewFactory 
 final class ConcentricSheetSurfacePlatformView: NSObject, FlutterPlatformView {
   private let rootView: UIView
   private let surfaceView: UIView
+  private let independentCorners: Bool
   private let channel: FlutterMethodChannel
   private let corners: String
   private let usesGlass: Bool
@@ -47,9 +48,10 @@ final class ConcentricSheetSurfacePlatformView: NSObject, FlutterPlatformView {
     let minimumRadius = (arguments?["minimumRadius"] as? NSNumber)?.doubleValue ?? 24
     corners = arguments?["corners"] as? String ?? "all"
     topRadius = (arguments?["topRadius"] as? NSNumber)?.doubleValue
+    independentCorners = (arguments?["independentCorners"] as? NSNumber)?.boolValue == true
     usesGlass = (arguments?["usesGlass"] as? NSNumber)?.boolValue == true
 
-    rootView = UIView(frame: frame)
+    rootView = ConcentricSurfaceRootView(frame: frame)
     rootView.isUserInteractionEnabled = false
     rootView.isOpaque = !usesGlass && backdropColorValue != nil
     rootView.backgroundColor = backdropColorValue.map { Self.color(from: $0) } ?? .clear
@@ -82,7 +84,12 @@ final class ConcentricSheetSurfacePlatformView: NSObject, FlutterPlatformView {
       glassTintColorValue: (arguments?["glassTintColor"] as? NSNumber)?.uint32Value
     )
     applyInterfaceStyle(from: arguments?["brightness"])
-    applyCornerConfiguration(minimumRadius: minimumRadius)
+    applyCornerConfiguration(minimumRadius: minimumRadius, capsule: arguments?["capsule"] as? Bool == true)
+
+    (rootView as? ConcentricSurfaceRootView)?.onLayout = { [weak self] in
+      guard let self else { return }
+      self.channel.invokeMethod("cornerRadiiChanged", arguments: self.cornerRadii())
+    }
 
     channel.setMethodCallHandler { [weak self] call, result in
       guard let self else {
@@ -90,6 +97,9 @@ final class ConcentricSheetSurfacePlatformView: NSObject, FlutterPlatformView {
         return
       }
       switch call.method {
+      case "getCornerRadii":
+        self.rootView.layoutIfNeeded()
+        result(self.cornerRadii())
       case "updateColors":
         guard
           let arguments = call.arguments as? [String: Any],
@@ -127,7 +137,8 @@ final class ConcentricSheetSurfacePlatformView: NSObject, FlutterPlatformView {
         }
         self.applyInterfaceStyle(from: arguments["brightness"])
         self.applyCornerConfiguration(
-          minimumRadius: minimumRadius.doubleValue
+          minimumRadius: minimumRadius.doubleValue,
+          capsule: arguments["capsule"] as? Bool == true
         )
         result(nil)
       default:
@@ -164,9 +175,22 @@ final class ConcentricSheetSurfacePlatformView: NSObject, FlutterPlatformView {
     rootView.backgroundColor = backdropColorValue.map { Self.color(from: $0) } ?? .clear
   }
 
-  private func applyCornerConfiguration(minimumRadius: CGFloat) {
+  private func applyCornerConfiguration(minimumRadius: CGFloat, capsule: Bool) {
     if #available(iOS 26.0, *) {
+      if capsule {
+        surfaceView.cornerConfiguration = .capsule()
+        return
+      }
       let radius = UICornerRadius.containerConcentric(minimum: minimumRadius)
+      if independentCorners {
+        surfaceView.cornerConfiguration = .corners(
+          topLeftRadius: corners == "bottom" ? nil : topRadius.map { .fixed($0) } ?? radius,
+          topRightRadius: corners == "bottom" ? nil : topRadius.map { .fixed($0) } ?? radius,
+          bottomLeftRadius: radius,
+          bottomRightRadius: radius
+        )
+        return
+      }
       surfaceView.cornerConfiguration =
         corners == "bottom"
         ? .uniformBottomRadius(
@@ -192,6 +216,24 @@ final class ConcentricSheetSurfacePlatformView: NSObject, FlutterPlatformView {
     }
   }
 
+  private func cornerRadii() -> [String: CGFloat] {
+    if #available(iOS 26.0, *) {
+      return [
+        "topLeft": surfaceView.effectiveRadius(corner: .topLeft),
+        "topRight": surfaceView.effectiveRadius(corner: .topRight),
+        "bottomLeft": surfaceView.effectiveRadius(corner: .bottomLeft),
+        "bottomRight": surfaceView.effectiveRadius(corner: .bottomRight),
+      ]
+    }
+    let radius = surfaceView.layer.cornerRadius
+    return [
+      "topLeft": corners == "bottom" ? 0 : radius,
+      "topRight": corners == "bottom" ? 0 : radius,
+      "bottomLeft": radius,
+      "bottomRight": radius,
+    ]
+  }
+
   private func applyInterfaceStyle(from value: Any?) {
     switch value as? String {
     case "dark":
@@ -209,5 +251,16 @@ final class ConcentricSheetSurfacePlatformView: NSObject, FlutterPlatformView {
     let green = CGFloat((value >> 8) & 0xFF) / 255
     let blue = CGFloat(value & 0xFF) / 255
     return UIColor(red: red, green: green, blue: blue, alpha: alpha)
+  }
+}
+
+/// Reading effective radii during layout lets UIKit invalidate the geometry
+/// when the enclosing display or presentation changes.
+private final class ConcentricSurfaceRootView: UIView {
+  var onLayout: (() -> Void)?
+
+  override func layoutSubviews() {
+    super.layoutSubviews()
+    onLayout?()
   }
 }

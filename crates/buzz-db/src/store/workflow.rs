@@ -192,6 +192,48 @@ pub struct WorkflowRecord {
     pub updated_at: DateTime<Utc>,
 }
 
+/// What caused a workflow run, recorded when the run is created.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunCause {
+    /// A signed event: the message, reaction or diff signer's pubkey.
+    Event(Vec<u8>),
+    /// A cron or interval timer.
+    Schedule,
+    /// A webhook call. The caller is unknown.
+    Webhook,
+    /// A manual trigger: the invoking pubkey.
+    Manual(Vec<u8>),
+}
+
+impl RunCause {
+    fn source(&self) -> &'static str {
+        match self {
+            Self::Event(_) => "event",
+            Self::Schedule => "schedule",
+            Self::Webhook => "webhook",
+            Self::Manual(_) => "manual",
+        }
+    }
+
+    fn pubkey(&self) -> Option<&[u8]> {
+        match self {
+            Self::Event(pubkey) | Self::Manual(pubkey) => Some(pubkey),
+            Self::Schedule | Self::Webhook => None,
+        }
+    }
+
+    /// Rebuild a stored cause. Missing or inconsistent values give `None`.
+    fn from_columns(source: Option<&str>, pubkey: Option<Vec<u8>>) -> Option<Self> {
+        match (source?, pubkey) {
+            ("event", Some(pubkey)) => Some(Self::Event(pubkey)),
+            ("manual", Some(pubkey)) => Some(Self::Manual(pubkey)),
+            ("schedule", None) => Some(Self::Schedule),
+            ("webhook", None) => Some(Self::Webhook),
+            _ => None,
+        }
+    }
+}
+
 /// A single execution of a workflow.
 #[derive(Debug, Clone)]
 pub struct WorkflowRunRecord {
@@ -217,6 +259,8 @@ pub struct WorkflowRunRecord {
     /// Serialized `TriggerContext` captured at workflow start.
     /// NULL for runs created before this column was added (backwards-compatible).
     pub trigger_context: Option<serde_json::Value>,
+    /// What caused this run. `None` for runs created before causes were recorded.
+    pub cause: Option<RunCause>,
     /// When execution began.
     pub started_at: Option<DateTime<Utc>>,
     /// When execution finished (success or failure).
@@ -589,6 +633,11 @@ pub async fn latest_scheduled_workflow_fire(
 /// boundary. If run creation succeeds, callers should attach the run id before
 /// spawning execution. If run creation fails, leaving `workflow_run_id` NULL is
 /// intentional: the schedule instant was claimed and must not duplicate later.
+///
+/// Returns `false` when no unlinked claim matches, or the run is missing or
+/// belongs to another workflow. Workflow delete removes only its own fires
+/// before its runs, and the fire→run FK is NO ACTION, so a cross-workflow link
+/// would block that delete.
 pub async fn attach_scheduled_workflow_run(
     pool: &PgPool,
     community_id: CommunityId,
@@ -610,6 +659,10 @@ pub async fn attach_scheduled_workflow_run(
           AND workflow_id = $2
           AND scheduled_for = $3
           AND workflow_run_id IS NULL
+          AND EXISTS (
+              SELECT 1 FROM workflow_runs
+              WHERE community_id = $1 AND workflow_id = $2 AND id = $4
+          )
         "#,
     )
     .bind(community_id.as_uuid())
@@ -862,6 +915,7 @@ pub async fn create_workflow_run(
     workflow_id: Uuid,
     trigger_event_id: Option<&[u8]>,
     trigger_context: Option<&serde_json::Value>,
+    cause: &RunCause,
 ) -> Result<Uuid> {
     let mut tx = crate::begin_community_write_transaction(
         pool,
@@ -874,8 +928,9 @@ pub async fn create_workflow_run(
     sqlx::query(
         r#"
         INSERT INTO workflow_runs
-            (community_id, id, workflow_id, status, trigger_event_id, current_step, execution_trace, trigger_context)
-        VALUES ($1, $2, $3, 'pending', $4, 0, '[]', $5)
+            (community_id, id, workflow_id, status, trigger_event_id, current_step, execution_trace,
+             trigger_context, cause_source, cause_pubkey)
+        VALUES ($1, $2, $3, 'pending', $4, 0, '[]', $5, $6, $7)
         "#,
     )
     .bind(community_id.as_uuid())
@@ -883,6 +938,8 @@ pub async fn create_workflow_run(
     .bind(workflow_id)
     .bind(trigger_event_id)
     .bind(trigger_context)
+    .bind(cause.source())
+    .bind(cause.pubkey())
     .execute(tx.conn())
     .await?;
     tx.commit().await?;
@@ -899,7 +956,8 @@ pub async fn get_workflow_run(
     let row = sqlx::query(
         r#"
         SELECT community_id, id, workflow_id, status::text AS status, trigger_event_id, current_step,
-               execution_trace, trigger_context, started_at, completed_at, error_message, error_code, created_at
+               execution_trace, trigger_context, cause_source, cause_pubkey, started_at, completed_at,
+               error_message, error_code, created_at
         FROM workflow_runs
         WHERE community_id = $1 AND id = $2
         "#,
@@ -931,7 +989,8 @@ pub async fn list_workflow_runs_page(
     let rows = sqlx::query(
         r#"
         SELECT community_id, id, workflow_id, status::text AS status, trigger_event_id, current_step,
-               execution_trace, trigger_context, started_at, completed_at, error_message, error_code, created_at
+               execution_trace, trigger_context, cause_source, cause_pubkey, started_at, completed_at,
+               error_message, error_code, created_at
         FROM workflow_runs
         WHERE community_id = $1 AND workflow_id = $2
           AND (
@@ -1293,6 +1352,10 @@ fn row_to_run_record(row: sqlx::postgres::PgRow) -> Result<WorkflowRunRecord> {
         current_step: row.try_get("current_step")?,
         execution_trace: row.try_get("execution_trace")?,
         trigger_context: row.try_get("trigger_context")?,
+        cause: RunCause::from_columns(
+            row.try_get::<Option<String>, _>("cause_source")?.as_deref(),
+            row.try_get("cause_pubkey")?,
+        ),
         started_at: row.try_get("started_at")?,
         completed_at: row.try_get("completed_at")?,
         error_message: row.try_get("error_message")?,
@@ -1363,6 +1426,7 @@ impl Db {
         workflow_id: Uuid,
         trigger_event_id: Option<&[u8]>,
         trigger_context: Option<&serde_json::Value>,
+        cause: &RunCause,
     ) -> Result<Uuid> {
         crate::workflow::create_workflow_run(
             &self.pool,
@@ -1370,6 +1434,7 @@ impl Db {
             workflow_id,
             trigger_event_id,
             trigger_context,
+            cause,
         )
         .await
     }
@@ -1753,6 +1818,30 @@ impl Db {
 
 #[cfg(test)]
 mod postgres_tests {
+    #[test]
+    fn stored_cause_requires_a_consistent_source_and_pubkey() {
+        let pubkey = vec![1u8; 32];
+        assert_eq!(
+            RunCause::from_columns(Some("event"), Some(pubkey.clone())),
+            Some(RunCause::Event(pubkey.clone()))
+        );
+        assert_eq!(
+            RunCause::from_columns(Some("schedule"), None),
+            Some(RunCause::Schedule)
+        );
+        for (source, key) in [
+            (Some("event"), None),
+            (Some("manual"), None),
+            (Some("schedule"), Some(pubkey.clone())),
+            (Some("webhook"), Some(pubkey.clone())),
+            (Some("unknown"), None),
+            (None, Some(pubkey.clone())),
+            (None, None),
+        ] {
+            assert_eq!(RunCause::from_columns(source, key), None, "{source:?}");
+        }
+    }
+
     use super::*;
     use chrono::TimeZone;
 
@@ -1995,6 +2084,7 @@ mod postgres_tests {
                 { "step": "s1", "status": "completed" }
             ]),
             trigger_context: None,
+            cause: None,
             started_at: Some(now),
             completed_at: None,
             error_message: None,
@@ -2024,6 +2114,7 @@ mod postgres_tests {
             current_step: 0,
             execution_trace: serde_json::json!([]),
             trigger_context: None,
+            cause: None,
             started_at: None,
             completed_at: None,
             error_message: None,
@@ -2048,6 +2139,7 @@ mod postgres_tests {
             current_step: 1,
             execution_trace: serde_json::json!([]),
             trigger_context: None,
+            cause: None,
             started_at: Some(now),
             completed_at: Some(now),
             error_message: Some("step timeout exceeded".to_owned()),
@@ -2080,6 +2172,7 @@ mod postgres_tests {
             current_step: 2,
             execution_trace: trace.clone(),
             trigger_context: None,
+            cause: None,
             started_at: Some(now),
             completed_at: Some(now),
             error_message: None,
@@ -2103,6 +2196,7 @@ mod postgres_tests {
             current_step: 0,
             execution_trace: serde_json::json!([]),
             trigger_context: None,
+            cause: None,
             started_at: None,
             completed_at: None,
             error_message: None,
@@ -2446,9 +2540,16 @@ mod postgres_tests {
             .expect("claim wins");
 
         // Create the run the won claim is responsible for, then attach it.
-        let run_id = create_workflow_run(&pool, community, workflow_id, None, None)
-            .await
-            .expect("create run ok");
+        let run_id = create_workflow_run(
+            &pool,
+            community,
+            workflow_id,
+            None,
+            None,
+            &RunCause::Schedule,
+        )
+        .await
+        .expect("create run ok");
 
         let attached =
             attach_scheduled_workflow_run(&pool, community, workflow_id, scheduled_for, run_id)
@@ -2475,9 +2576,16 @@ mod postgres_tests {
 
         // A second attach is a no-op: the `workflow_run_id IS NULL` guard means
         // an already-linked claim is never re-pointed to a different run.
-        let other_run = create_workflow_run(&pool, community, workflow_id, None, None)
-            .await
-            .expect("create second run ok");
+        let other_run = create_workflow_run(
+            &pool,
+            community,
+            workflow_id,
+            None,
+            None,
+            &RunCause::Schedule,
+        )
+        .await
+        .expect("create second run ok");
         let reattached =
             attach_scheduled_workflow_run(&pool, community, workflow_id, scheduled_for, other_run)
                 .await
@@ -2486,6 +2594,43 @@ mod postgres_tests {
             !reattached,
             "attach must not overwrite an already-linked claim row"
         );
+    }
+
+    /// A claim for workflow B cannot point at A's run. Such a link has a valid
+    /// run FK but would block A's explicit run delete with no FK action.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn attach_rejects_run_from_another_workflow() {
+        let pool = setup_pool().await;
+        let community = make_community(&pool).await;
+        let (workflow_a, _) = make_workflow_in(&pool, community).await;
+        let (workflow_b, _) = make_workflow_in(&pool, community).await;
+        let scheduled_for = Utc.with_ymd_and_hms(2026, 6, 27, 0, 3, 0).unwrap();
+        claim_scheduled_workflow_fire(&pool, community, workflow_b, scheduled_for)
+            .await
+            .expect("claim B")
+            .expect("claim wins");
+        let run_a = create_workflow_run(&pool, community, workflow_a, None, None)
+            .await
+            .expect("create A run");
+
+        assert!(
+            !attach_scheduled_workflow_run(&pool, community, workflow_b, scheduled_for, run_a)
+                .await
+                .expect("reject cross-workflow link"),
+            "B's fire must not reference A's run"
+        );
+        let linked: Option<Uuid> = sqlx::query_scalar(
+            "SELECT workflow_run_id FROM scheduled_workflow_fires \
+             WHERE community_id = $1 AND workflow_id = $2 AND scheduled_for = $3",
+        )
+        .bind(community.as_uuid())
+        .bind(workflow_b)
+        .bind(scheduled_for)
+        .fetch_one(&pool)
+        .await
+        .expect("read B fire");
+        assert_eq!(linked, None);
     }
 
     /// Documents the retention-vs-interval coupling Sami flagged for §5c:
@@ -2762,12 +2907,26 @@ mod postgres_tests {
         insert_workflow_with_ids(&pool, community_a, workflow_id, channel_id, "wf-A").await;
         insert_workflow_with_ids(&pool, community_b, workflow_id, Uuid::new_v4(), "wf-B").await;
 
-        let run_a = create_workflow_run(&pool, community_a, workflow_id, None, None)
-            .await
-            .expect("run A");
-        let run_b = create_workflow_run(&pool, community_b, workflow_id, None, None)
-            .await
-            .expect("run B");
+        let run_a = create_workflow_run(
+            &pool,
+            community_a,
+            workflow_id,
+            None,
+            None,
+            &RunCause::Schedule,
+        )
+        .await
+        .expect("run A");
+        let run_b = create_workflow_run(
+            &pool,
+            community_b,
+            workflow_id,
+            None,
+            None,
+            &RunCause::Schedule,
+        )
+        .await
+        .expect("run B");
 
         let token = "shared-approval-token";
         let expires = Utc::now() + chrono::Duration::hours(1);

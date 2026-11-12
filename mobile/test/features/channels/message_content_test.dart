@@ -25,6 +25,8 @@ import 'package:nostr/nostr.dart' as nostr;
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/message_content.dart';
+import 'package:buzz/features/channels/message_long_press_region.dart';
+import 'package:buzz/features/channels/message_content/edited_marker.dart';
 import 'package:buzz/features/channels/media_viewer_page.dart';
 import 'package:buzz/features/channels/voice_note_attachment.dart';
 import 'package:buzz/features/channels/voice_note_waveform.dart';
@@ -32,12 +34,15 @@ import 'package:buzz/features/channels/voice_note_recording.dart';
 import 'package:buzz/shared/deeplink/deep_link.dart';
 import 'package:buzz/shared/deeplink/pending_deep_link_provider.dart';
 import 'package:buzz/shared/emoji/emoji_only.dart';
+import 'package:buzz/shared/hosted/builderlab_account.dart';
+import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/buzz_loading_indicator.dart';
 
 part 'message_content_bubble_cases.dart';
 part 'message_carousel_preview_cases.dart';
+part 'message_stack_cases.dart';
 
 Widget _testable(
   Widget child, {
@@ -45,15 +50,9 @@ Widget _testable(
   bool disableAnimations = false,
   bool dark = false,
   ThemeData? theme,
-  VideoPreviewFrameLoader? videoPreviewFrameLoader,
 }) {
   return ProviderScope(
-    overrides: [
-      videoPreviewFrameLoaderProvider.overrideWithValue(
-        videoPreviewFrameLoader ?? (_) async => null,
-      ),
-      ...overrides,
-    ],
+    overrides: overrides,
     child: MaterialApp(
       theme: theme ?? (dark ? AppTheme.dark() : AppTheme.light()),
       // Use MaterialApp.builder so the MediaQuery override (including
@@ -97,7 +96,7 @@ class _FakeVoiceNotePlayer extends VoiceNotePlayerController {
   @override
   Future<void> loadRemote(
     String url, {
-    required Map<String, String> Function() headers,
+    required FutureOr<Map<String, String>> Function() headers,
     required Duration fallbackDuration,
   }) => loadLocal(url, fallbackDuration: fallbackDuration);
 
@@ -123,6 +122,48 @@ class _FakeVoiceNotePlayer extends VoiceNotePlayerController {
   }
 }
 
+class _HeadersVoiceNotePlayer extends _FakeVoiceNotePlayer {
+  FutureOr<Map<String, String>> Function()? headers;
+
+  @override
+  Future<void> loadRemote(
+    String url, {
+    required FutureOr<Map<String, String>> Function() headers,
+    required Duration fallbackDuration,
+  }) {
+    this.headers = headers;
+    return super.loadRemote(
+      url,
+      headers: headers,
+      fallbackDuration: fallbackDuration,
+    );
+  }
+}
+
+class _FixedRelayConfig extends RelayConfigNotifier {
+  _FixedRelayConfig(this.config);
+
+  final RelayConfig config;
+
+  @override
+  RelayConfig build() => config;
+}
+
+/// A hosted relay whose cached assertion has expired, so only a fresh
+/// request carries one.
+class _ExpiredHostedRelayAuth extends HostedRelayAuth {
+  _ExpiredHostedRelayAuth() : super(BuilderlabAccountClient(), enabled: false);
+
+  @override
+  Map<String, String>? cachedHeaders(RelayConfig config) => null;
+
+  @override
+  Future<Map<String, String>> headersForUrl(
+    RelayConfig config,
+    Uri url,
+  ) async => {'Nostr-Federated-Identity': 'Bearer fresh-token'};
+}
+
 class _LoadingVoiceNotePlayer extends _FakeVoiceNotePlayer {
   @override
   VoiceNotePlaybackState get state =>
@@ -131,7 +172,7 @@ class _LoadingVoiceNotePlayer extends _FakeVoiceNotePlayer {
   @override
   Future<void> loadRemote(
     String url, {
-    required Map<String, String> Function() headers,
+    required FutureOr<Map<String, String>> Function() headers,
     required Duration fallbackDuration,
   }) async {}
 }
@@ -173,7 +214,7 @@ class _BufferingVoiceNotePlayer extends _FakeVoiceNotePlayer {
   @override
   Future<void> loadRemote(
     String url, {
-    required Map<String, String> Function() headers,
+    required FutureOr<Map<String, String>> Function() headers,
     required Duration fallbackDuration,
   }) async {}
 
@@ -244,7 +285,7 @@ class _RetryableVoiceNotePlayer extends _FakeVoiceNotePlayer {
   @override
   Future<void> loadRemote(
     String url, {
-    required Map<String, String> Function() headers,
+    required FutureOr<Map<String, String>> Function() headers,
     required Duration fallbackDuration,
   }) async {}
 
@@ -421,7 +462,9 @@ class _TestChannelsNotifier extends ChannelsNotifier {
 
 void main() {
   carouselPreviewTests();
+  stackJourneyTests();
   bubbleContentTests();
+  editedMarkerTests();
   test('wide voice-note waveforms distribute bars across their full width', () {
     const width = 320.0;
     const sampleCount = 48;
@@ -492,6 +535,88 @@ void main() {
   });
 
   group('MessageContent', () {
+    testWidgets('renders backslash escapes as the escaped character', (
+      tester,
+    ) async {
+      final semantics = tester.ensureSemantics();
+      String visible() => [
+        for (final element in find.byType(RichText).evaluate())
+          (element.widget as RichText).text.toPlainText(),
+      ].join('|');
+
+      for (final (content, shown) in [
+        (r'plain \# \* \_ \\ end', r'plain # * _ \ end'),
+        (r'**bold \#x** \[not math\](y)', '[not math](y)'),
+        (r'[\#buzz-mobile](https://example.com/x)', '#buzz-mobile'),
+        (
+          r'[\#buzz-mobile](buzz://channel/9f18f3c6-b5e5-453d-b36d-65487913be0b)',
+          '#buzz-mobile',
+        ),
+        ('```\nx \\# y\n```', r'x \# y'),
+        (r'code `a\#b`', r'a\#b'),
+        (r'\`literal\` then `a\#b`', '`literal` then '),
+        // Authored stand-in characters are not mistaken for escapes.
+        ('\uFF0A \u2060\uFF0A \\#', '\uFF0A \u2060\uFF0A #'),
+        ('~~~\nx \\# y\n~~~', r'x \# y'),
+        // A fence that never closes is still code inside a quote or list.
+        ('> ```sh\n> echo \\#x', r'echo \#x'),
+        ('- item\n\n      ```\n      echo \\#x', r'echo \#x'),
+        // A fence closes only at the quote depth it opened at.
+        ('```md\n> ```\necho \\#g\n```', r'echo \#g'),
+        ('> ```sh\n> x\n\n```\necho \\#g\n```', r'echo \#g'),
+        // A quoted fence ends with its quote, so later prose is parsed.
+        ('> ```sh\n> echo x\n\nplain \\#text', 'plain #text'),
+        // Known limitation: gpt_markdown's raw-text fallback for this
+        // unclaimed strike skips inline components, so the stand-in shows.
+        // Its fullwidth form still reads as #.
+        ('~~a\nb \\#c~~', '\uFF03c'),
+        // A bare link's trailing backslash stays outside the link.
+        (r'see https://example.com/a\', 'see '),
+        (r'in buzz://channel/9f18f3c6-b5e5-453d-b36d-65487913be0b.\', r'.\'),
+        (r'*https://example.com/a\**', '*'),
+        (r'see \<https://example.com/b>', 'see <'),
+        (r'see \https://example.com/c', r'see \'),
+        (r'see <https://example.com/a\>', r'https://example.com/a\'),
+        (
+          '![shot \\#1](https://example.com/a.png)\n'
+              '![shot \\#2](https://example.com/b.png)',
+          null,
+        ),
+      ]) {
+        for (final bubble in [false, true]) {
+          await tester.pumpWidget(
+            _testable(MessageContent(content: content, bubble: bubble)),
+          );
+          final reason = '$content (bubble: $bubble) showed ${visible()}';
+          if (shown != null) {
+            expect(
+              find.textContaining(shown, findRichText: true),
+              findsWidgets,
+              reason: reason,
+            );
+          }
+          // No stand-in or leaked link syntax reaches text or semantics.
+          if (content.contains('\u2060') || shown == '\uFF03c') continue;
+          expect(
+            find.textContaining(
+              RegExp('\u2060|\\]\\(http'),
+              findRichText: true,
+            ),
+            findsNothing,
+            reason: reason,
+          );
+          expect(
+            find.bySemanticsLabel(RegExp('\u2060')),
+            findsNothing,
+            reason: reason,
+          );
+        }
+      }
+      // Gallery labels drop their escapes too.
+      expect(find.bySemanticsLabel(RegExp(r'shot #1')), findsWidgets);
+      semantics.dispose();
+    });
+
     testWidgets('forwards text alignment to markdown rendering', (
       tester,
     ) async {
@@ -547,6 +672,142 @@ void main() {
       expect(openedFilename, 'report.pdf');
       expect(openedHeaders?['Authorization'], startsWith('Nostr '));
     });
+
+    testWidgets('a link nothing can open offers only copy and share', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _testable(
+          const MessageContent(
+            content: 'Write to [support](mailto:support@example.com)',
+          ),
+        ),
+      );
+      await tester.longPress(find.text('support'));
+      await tester.pumpAndSettle();
+      expect(find.text('mailto:support@example.com'), findsOneWidget);
+      expect(find.text('Copy link'), findsOneWidget);
+      expect(find.text('Share link'), findsOneWidget);
+      expect(find.text('Open link'), findsNothing);
+    });
+
+    for (final platform in [TargetPlatform.iOS, TargetPlatform.android]) {
+      testWidgets('holding a link opens link actions on ${platform.name}', (
+        tester,
+      ) async {
+        debugDefaultTargetPlatformOverride = platform;
+        addTearDown(() => debugDefaultTargetPlatformOverride = null);
+        const url = 'https://relay.example/media/report.pdf';
+        final opened = <String>[];
+        final clipboard = <String>[];
+        var messageMenus = 0;
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          (call) async {
+            if (call.method == 'Clipboard.setData') {
+              clipboard.add((call.arguments as Map)['text'] as String);
+            }
+            return null;
+          },
+        );
+        addTearDown(
+          () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            SystemChannels.platform,
+            null,
+          ),
+        );
+        final auth = MediaGetAuthService(
+          baseUrl: 'https://relay.example',
+          nsec: nostr.Keys.generate().nsec,
+        );
+
+        await tester.pumpWidget(
+          _testable(
+            MessageLongPressInkWell(
+              onLongPress: (_) => messageMenus++,
+              child: const MessageContent(
+                content: 'See the [report]($url) before standup',
+              ),
+            ),
+            overrides: [
+              mediaGetAuthServiceProvider.overrideWithValue(auth),
+              openDownloadedFileProvider.overrideWithValue(
+                (url, headers, filename) async => opened.add(url),
+              ),
+            ],
+          ),
+        );
+
+        // A hold on the surrounding text still opens the message menu.
+        await tester.longPress(find.textContaining('before standup'));
+        await tester.pumpAndSettle();
+        expect(messageMenus, 1);
+        expect(find.text('Copy link'), findsNothing);
+
+        // A finger on the link tints it until the pointer moves away.
+        Color? linkTint() =>
+            (tester
+                        .widget<DecoratedBox>(
+                          find
+                              .ancestor(
+                                of: find.text('report'),
+                                matching: find.byType(DecoratedBox),
+                              )
+                              .first,
+                        )
+                        .decoration
+                    as BoxDecoration)
+                .color;
+        expect(linkTint(), isNull);
+        final press = await tester.startGesture(
+          tester.getCenter(find.text('report')),
+        );
+        await tester.pump();
+        expect(linkTint(), isNotNull);
+        await press.moveBy(const Offset(0, 40));
+        await tester.pump();
+        expect(linkTint(), isNull);
+        await press.up();
+        await tester.pumpAndSettle();
+        expect(messageMenus, 1);
+        expect(opened, isEmpty);
+
+        // A hold on the link opens its own actions instead.
+        await tester.longPress(find.text('report'));
+        await tester.pumpAndSettle();
+        expect(messageMenus, 1);
+        expect(find.text(url), findsOneWidget);
+        expect(find.text('Share link'), findsOneWidget);
+
+        await tester.tap(find.text('Copy link'));
+        await tester.pumpAndSettle();
+        expect(clipboard, [url]);
+        expect(find.text('Copy link'), findsNothing);
+
+        await tester.longPress(find.text('report'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Open link'));
+        await tester.pumpAndSettle();
+        expect(opened, [url]);
+
+        // An ordinary tap still opens the link directly.
+        await tester.tap(find.text('report'));
+        await tester.pumpAndSettle();
+        expect(opened, [url, url]);
+        expect(messageMenus, 1);
+
+        // A short landscape sheet still reaches every action.
+        _setSurfaceSize(tester, const Size(640, 260));
+        addTearDown(tester.view.reset);
+        await tester.pumpAndSettle();
+        await tester.longPress(find.text('report'));
+        await tester.pumpAndSettle();
+        await tester.ensureVisible(find.text('Share link'));
+        await tester.pumpAndSettle();
+        expect(find.text('Share link').hitTestable(), findsOneWidget);
+        debugDefaultTargetPlatformOverride = null;
+      });
+    }
 
     test('buildImageViewerRoute uses modal-style page route builder', () {
       final route = buildImageViewerRoute(
@@ -1187,41 +1448,6 @@ void main() {
         expect(tester.takeException(), isNull);
       });
 
-      testWidgets('keeps video loading and decoded frame the same size', (
-        tester,
-      ) async {
-        final frame = Completer<LoadedVideoPreviewFrame?>();
-        const url = 'https://example.com/loading-video.mp4';
-        await tester.pumpWidget(
-          _testable(
-            const MessageContent(
-              content: '![video]($url)',
-              channelNames: {'general': 'general-id'},
-              tags: [
-                ['imeta', 'url $url', 'm video/mp4', 'dim 1920x1080'],
-              ],
-            ),
-            disableAnimations: true,
-            videoPreviewFrameLoader: (_) => frame.future,
-          ),
-        );
-        final preview = find.byKey(
-          const ValueKey('message-media-video-preview:$url'),
-        );
-        final before = tester.getSize(preview);
-        expect(find.byType(MediaLoadingPlaceholder), findsOneWidget);
-        frame.complete(
-          LoadedVideoPreviewFrame(
-            child: const ColoredBox(color: Colors.black),
-            aspectRatio: 16 / 9,
-            dispose: () async {},
-          ),
-        );
-        await tester.pumpAndSettle();
-        expect(find.byType(MediaLoadingPlaceholder), findsNothing);
-        expect(tester.getSize(preview), before);
-      });
-
       testWidgets('uses the shared Buzz loader while a voice note loads', (
         tester,
       ) async {
@@ -1316,6 +1542,44 @@ void main() {
           semantics.dispose();
         },
       );
+
+      testWidgets('remote voice notes renew an expired relay assertion', (
+        tester,
+      ) async {
+        final player = _HeadersVoiceNotePlayer();
+        final hosted = _ExpiredHostedRelayAuth();
+        addTearDown(hosted.dispose);
+        final nsec = nostr.Keys.generate().nsec;
+        await tester.pumpWidget(
+          _testable(
+            const VoiceNoteAttachment.remote(
+              url: 'https://relay.example/media/voice.m4a',
+              duration: Duration(seconds: 3),
+              waveform: [],
+            ),
+            overrides: [
+              voiceNotePlayerFactoryProvider.overrideWithValue(() => player),
+              relayConfigProvider.overrideWith(
+                () => _FixedRelayConfig(
+                  RelayConfig(baseUrl: 'https://relay.example', nsec: nsec),
+                ),
+              ),
+              mediaGetAuthServiceProvider.overrideWithValue(
+                MediaGetAuthService(
+                  baseUrl: 'https://relay.example',
+                  nsec: nsec,
+                ),
+              ),
+              hostedRelayAuthProvider.overrideWithValue(hosted),
+            ],
+          ),
+        );
+        await tester.pump();
+
+        final headers = await player.headers!();
+        expect(headers['Authorization'], startsWith('Nostr '));
+        expect(headers['Nostr-Federated-Identity'], 'Bearer fresh-token');
+      });
 
       testWidgets('routes repeated loading-control taps through toggle', (
         tester,
@@ -1842,7 +2106,8 @@ void main() {
         'groups uploaded photos into a carousel and opens the full gallery',
         (tester) async {
           const first = 'https://example.com/media/one.png';
-          const second = 'https://example.com/media/two.png';
+          // The second destination is escaped; the carousel must unescape it.
+          const second = 'https://example.com/media/two_2.png';
           const third = 'https://example.com/media/three.png';
           await tester.pumpWidget(
             _testable(
@@ -1851,7 +2116,7 @@ void main() {
                     '''
 Photos
 ![image]($first)
-![image]($second)
+![image](https://example.com/media/two\\_2.png)
 ![image]($third)
 ''',
                 tags: [
@@ -2455,52 +2720,6 @@ Photos
         expect(find.byIcon(BuzzIcons.play), findsOneWidget);
       });
 
-      testWidgets('derives a first frame for a posterless video event', (
-        tester,
-      ) async {
-        const videoUrl = 'https://example.com/media/legacy-video.mp4';
-        var disposed = false;
-
-        await tester.pumpWidget(
-          _testable(
-            const MessageContent(
-              content: '![video]($videoUrl)',
-              tags: [
-                ['imeta', 'url $videoUrl', 'm video/mp4', 'dim 1080x1920'],
-              ],
-            ),
-            videoPreviewFrameLoader: (url) async {
-              expect(url, videoUrl);
-              return LoadedVideoPreviewFrame(
-                aspectRatio: 9 / 16,
-                child: const ColoredBox(
-                  key: ValueKey('derived-video-frame'),
-                  color: Colors.blue,
-                ),
-                dispose: () async => disposed = true,
-              );
-            },
-          ),
-        );
-        await tester.pumpAndSettle();
-
-        expect(
-          find.byKey(
-            const ValueKey('message-media-video-first-frame:$videoUrl'),
-          ),
-          findsOneWidget,
-        );
-        expect(
-          find.byKey(const ValueKey('derived-video-frame')),
-          findsOneWidget,
-        );
-        expect(find.text('Video attachment'), findsNothing);
-
-        await tester.pumpWidget(const SizedBox.shrink());
-        await tester.pump();
-        expect(disposed, isTrue);
-      });
-
       testWidgets(
         'tapping video preview opens overlay viewer with close button',
         (tester) async {
@@ -2795,20 +3014,31 @@ Photos
             find.bySemanticsLabel('Pull request cdcdcdcd in repository buzz'),
             findsOneWidget,
           );
+          // Repo, PR and issue chips have no destination, so a hold offers
+          // only Copy and Share for the exact URL.
+          final clipboard = <String>[];
+          tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            SystemChannels.platform,
+            (call) async {
+              if (call.method == 'Clipboard.setData') {
+                clipboard.add((call.arguments as Map)['text'] as String);
+              }
+              return null;
+            },
+          );
+          addTearDown(
+            () => tester.binding.defaultBinaryMessenger
+                .setMockMethodCallHandler(SystemChannels.platform, null),
+          );
           for (final url in urls.skip(2)) {
-            final chipKey = ValueKey('buzz-link-chip:$url');
-            final ignoredChip = find.ancestor(
-              of: find.byKey(chipKey),
-              matching: find.byWidgetPredicate(
-                (widget) => widget is IgnorePointer && widget.ignoring,
-              ),
-            );
-            expect(ignoredChip, findsOneWidget, reason: url);
-            expect(
-              tester.widget<IgnorePointer>(ignoredChip).ignoring,
-              isTrue,
-              reason: url,
-            );
+            await tester.longPress(find.byKey(ValueKey('buzz-link-chip:$url')));
+            await tester.pumpAndSettle();
+            expect(find.text(url), findsOneWidget, reason: url);
+            expect(find.text('Share link'), findsOneWidget, reason: url);
+            expect(find.text('Open link'), findsNothing, reason: url);
+            await tester.tap(find.text('Copy link'));
+            await tester.pumpAndSettle();
+            expect(clipboard.last, url);
           }
         },
       );
@@ -3056,16 +3286,49 @@ Photos
         );
       });
 
-      testWidgets('unknown channel renders without tap', (tester) async {
+      testWidgets('unknown #token stays text', (tester) async {
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: 'Took over #8700 from #general',
+              channelNames: {'general': 'ch-id-1'},
+            ),
+          ),
+        );
+
+        expect(find.byIcon(BuzzIcons.hash), findsOneWidget);
+        expect(find.text('general'), findsOneWidget);
+        expect(_allRichText(tester), contains('Took over #8700 from'));
+      });
+
+      testWidgets('no #token becomes a chip before channel names load', (
+        tester,
+      ) async {
         await tester.pumpWidget(
           _testable(
             const MessageContent(content: 'Check #unknown', channelNames: {}),
           ),
         );
 
+        expect(find.byIcon(BuzzIcons.hash), findsNothing);
+        expect(_allRichText(tester), contains('Check #unknown'));
+      });
+
+      testWidgets('possessive #channel keeps the pill and the suffix', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: "See #general's pinned plan",
+              channelNames: {'general': 'ch-id-1'},
+            ),
+          ),
+        );
+
         expect(find.byIcon(BuzzIcons.hash), findsOneWidget);
-        expect(find.text('unknown'), findsOneWidget);
-        expect(find.text('#unknown'), findsNothing);
+        expect(find.text('general'), findsOneWidget);
+        expect(_allRichText(tester), contains("'s pinned plan"));
       });
 
       testWidgets('does not treat URL fragments as channel links', (

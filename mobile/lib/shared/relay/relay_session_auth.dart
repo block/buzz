@@ -16,10 +16,7 @@ String buildNip98AuthHeader({
   if (privkeyHex.isEmpty) {
     throw Exception('Invalid nsec');
   }
-  final payloadHash = SHA256Digest()
-      .process(Uint8List.fromList(bodyBytes))
-      .map((byte) => byte.toRadixString(16).padLeft(2, '0'))
-      .join();
+  final payloadHash = crypto.sha256.convert(bodyBytes).toString();
   final event = signNostrEvent(
     kind: 27235,
     content: '',

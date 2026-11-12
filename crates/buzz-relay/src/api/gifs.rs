@@ -217,15 +217,19 @@ fn successful_search_payload(upstream: &Value) -> Result<Value, (StatusCode, Jso
 /// Search or browse trending KLIPY GIF metadata for an authenticated member.
 pub async fn search(
     State(state): State<Arc<AppState>>,
+    slot: crate::access::AccessSlot,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
-    search_inner(state, headers, body).await.into_response()
+    search_inner(state, slot, headers, body)
+        .await
+        .into_response()
 }
 
 #[allow(clippy::result_large_err)] // Response is the natural error type for axum handlers
 async fn search_inner(
     state: Arc<AppState>,
+    slot: crate::access::AccessSlot,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Json<Value>, Response> {
@@ -233,7 +237,7 @@ async fn search_inner(
     // check (including provider availability) so the denial contract wins over
     // config or request-validation errors. [FI-TRACE-HTTP-INGRESS]
     let (tenant, pubkey) =
-        bridge::authenticate_member_post(&state, &headers, SEARCH_PATH, &body).await?;
+        bridge::authenticate_member_post(&state, &slot, &headers, SEARCH_PATH, &body).await?;
 
     let Some(config) = state.config.klipy.as_ref() else {
         return Err(
@@ -294,21 +298,25 @@ async fn search_inner(
 /// Report a selected GIF to KLIPY so the provider can update Recents.
 pub async fn share(
     State(state): State<Arc<AppState>>,
+    slot: crate::access::AccessSlot,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
-    share_inner(state, headers, body).await.into_response()
+    share_inner(state, slot, headers, body)
+        .await
+        .into_response()
 }
 
 #[allow(clippy::result_large_err)] // Response is the natural error type for axum handlers
 async fn share_inner(
     state: Arc<AppState>,
+    slot: crate::access::AccessSlot,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<StatusCode, Response> {
     // Admission first: NIP-98 + NIP-FI must fire before provider availability
     // check. [FI-TRACE-HTTP-INGRESS]
-    bridge::authenticate_member_post(&state, &headers, SHARE_PATH, &body).await?;
+    bridge::authenticate_member_post(&state, &slot, &headers, SHARE_PATH, &body).await?;
 
     let Some(config) = state.config.klipy.as_ref() else {
         return Err(
@@ -360,9 +368,8 @@ mod tests {
             .connect_lazy("postgres://buzz:buzz_dev@127.0.0.1:1/buzz") // sadscan:disable np.postgres.1
             .expect("lazy test database pool");
         let db = buzz_db::Db::from_pool(pool.clone());
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("lazy test Redis pool");
+        let redis_pool =
+            buzz_pubsub::redis_connection(&config.redis_url).expect("lazy test Redis pool");
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await

@@ -91,11 +91,6 @@ void main() {
                     relayUrl: 'wss://relay.example',
                   ).copyWith(pushNotificationsEnabled: enabled),
                 ),
-                buzzPushAuthorizationStatusReaderProvider.overrideWithValue(
-                  () async => throw StateError(
-                    'must not query notification permission',
-                  ),
-                ),
               ],
               child: MaterialApp(
                 theme: AppTheme.light(),
@@ -113,6 +108,8 @@ void main() {
           );
           expect(find.text('Push notifications'), findsNothing);
           if (enabled) {
+            await tester.tap(find.text('Notifications'));
+            await tester.pumpAndSettle();
             final toggle = tester.widget<Switch>(find.byType(Switch));
             expect(toggle.value, isTrue);
             expect(toggle.onChanged, isNotNull);

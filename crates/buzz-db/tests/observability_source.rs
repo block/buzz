@@ -264,7 +264,9 @@ fn p0_pool_acquisitions_use_typed_operation_pairs_without_other() {
         .expect("channel lookup helper must precede canvas reads")
         .0;
     assert!(get_channel.contains("acquire_writer(pool, operation)"));
-    assert!(get_channel.contains("fetch_optional(&mut *connection)"));
+    assert!(get_channel.contains("select_channel(&mut connection, community_id, channel_id)"));
+    assert!(get_channel.contains("conn: &mut sqlx::PgConnection"));
+    assert!(get_channel.contains("fetch_optional(conn)"));
     assert!(!get_channel.contains("fetch_optional(pool)"));
     assert!(channel.contains("pub async fn get_channel_for_event_write("));
     let list_channels = channel
@@ -452,42 +454,27 @@ fn p0_pool_acquisitions_use_typed_operation_pairs_without_other() {
         .next()
         .expect("replica-fence production source");
     assert!(replica_fence_production.contains("WriterOperation::Bootstrap"));
-    assert!(replica_fence_production.contains("WriterOperation::Maintenance"));
+    // The heartbeat probe runs on its own pool, never a serving writer
+    // checkout: queued behind request traffic, its beat goes stale exactly
+    // when the writer is saturated.
+    assert!(!replica_fence_production.contains("WriterOperation::Maintenance"));
+    assert!(replica_fence_production.contains("pub fn connect_probe_pool("));
+    assert!(runtime.contains("replica_fence::connect_probe_pool(&self.pool)"));
     assert!(!replica_fence_production.contains("pool.begin().await"));
     assert!(!replica_fence_production.contains("writer.acquire().await"));
     assert!(!replica_fence_production.contains("fetch_optional(writer)"));
 
-    let usage = include_str!("../src/store/usage.rs");
-    let usage_production = usage
+    let leader_lock = include_str!("../src/store/leader_lock.rs");
+    let leader_lock_production = leader_lock
         .split("\n#[cfg(test)]")
         .next()
-        .expect("usage production source");
-    let usage_leader_lock = usage_production
+        .expect("leader-lock production source");
+    let leader_lock_acquisition = leader_lock_production
         .split_once("pub async fn try_lock_session_leader(")
-        .expect("usage store must expose the legacy leader-lock acquisition")
-        .1
-        .split_once("pub async fn usage_community_count(")
-        .expect("usage leader lock must precede counter reads")
-        .0;
-    assert!(usage_leader_lock.contains("acquire_writer_with_legacy_metrics("));
-    assert!(
-        usage_production
-            .matches("WriterOperation::Maintenance")
-            .count()
-            >= 11,
-        "every periodic usage checkout must be maintenance-attributed"
-    );
-    for bypass in [
-        ".fetch_one(pool)",
-        ".fetch_all(pool)",
-        ".fetch_optional(pool)",
-        ".execute(pool)",
-    ] {
-        assert!(
-            !usage_production.contains(bypass),
-            "usage production path bypasses operation attribution with {bypass}"
-        );
-    }
+        .expect("leader-lock store must expose the legacy leader-lock acquisition")
+        .1;
+    assert!(leader_lock_acquisition.contains("acquire_writer_with_legacy_metrics("));
+    assert!(leader_lock_acquisition.contains("WriterOperation::Maintenance"));
 
     let channel_reaper = channel
         .split_once("pub async fn reap_expired_ephemeral_channels(pool:")
@@ -594,6 +581,10 @@ fn p0_pool_acquisitions_use_typed_operation_pairs_without_other() {
         ),
         ("archived_identities", archived_identities),
         ("event", event),
+        (
+            "event_hydration",
+            include_str!("../src/store/event_hydration.rs"),
+        ),
         ("git_repo", include_str!("../src/store/git_repo.rs")),
         ("push", include_str!("../src/store/push.rs")),
         ("replica_fence", replica_fence),
@@ -608,7 +599,7 @@ fn p0_pool_acquisitions_use_typed_operation_pairs_without_other() {
             "relay_operators",
             include_str!("../src/store/relay_operators.rs"),
         ),
-        ("usage", usage),
+        ("leader_lock", leader_lock),
     ] {
         let production = source.split("\n#[cfg(test)]").next().unwrap_or(source);
         for bypass in [
@@ -1595,12 +1586,20 @@ fn inserts_events_row(source: &str) -> bool {
     !events_insert_tails(source).is_empty()
 }
 
-/// `source` lowercased, with every run of whitespace, `\` line continuations,
-/// and `\n`/`\t`/`\r` escapes collapsed to one space.
+/// `source` lowercased, with identifier quotes removed and every run of
+/// whitespace, `\` line continuations, and `\n`/`\t`/`\r` escapes collapsed
+/// to one space.
 fn normalized_sql(source: &str) -> String {
     let mut normalized = String::with_capacity(source.len());
     let mut chars = source.chars().peekable();
     while let Some(ch) = chars.next() {
+        if ch == '"' {
+            continue;
+        }
+        if ch == '\\' && chars.peek() == Some(&'"') {
+            chars.next();
+            continue;
+        }
         if ch.is_whitespace() || ch == '\\' {
             if ch == '\\' && matches!(chars.peek(), Some('n' | 't' | 'r')) {
                 chars.next();
@@ -1670,6 +1669,9 @@ pub(crate) async fn unhooked_writer(tx: &mut AdmittedTx) {
         .await
         .expect("write");
 }
+pub(crate) async fn quoted_writer(tx: &mut AdmittedTx) {
+    sqlx::query("INSERT INTO \"public\".\"events\" (id) VALUES ($1)");
+}
 pub(crate) async fn push_only_writer(tx: &mut AdmittedTx) {
     sqlx::query("INSERT INTO events \
                  (community_id, id) VALUES ($1, $2)")
@@ -1685,7 +1687,7 @@ pub(crate) async fn hooked_writer(tx: &mut AdmittedTx) {
         .execute(tx.conn())
         .await
         .expect("write");
-    crate::store::event_follow_up::after_admitted_insert(tx, id, kind, channel)
+    crate::store::event_follow_up::after_admitted_insert(tx, id, created_at, kind, channel)
         .await
         .expect("follow up");
 }
@@ -1750,7 +1752,7 @@ pub(crate) async fn writer_with_commented_out_hook(tx: &mut AdmittedTx) {
         .execute(tx.conn())
         .await
         .expect("write");
-    // crate::store::event_follow_up::after_admitted_insert(tx, id, kind, channel)
+    // crate::store::event_follow_up::after_admitted_insert(tx, id, created_at, kind, channel)
 }
 pub(crate) async fn writer_with_block_commented_hook(tx: &mut AdmittedTx) {
     sqlx::query("INSERT INTO events (community_id, id) VALUES ($1, $2)")
@@ -1772,7 +1774,7 @@ pub(crate) async fn writer_with_nested_block_commented_hook(tx: &mut AdmittedTx)
         .execute(tx.conn())
         .await
         .expect("write");
-    /* /* inner */ crate::store::event_follow_up::after_admitted_insert(tx, id, kind, channel) */
+    /* /* inner */ crate::store::event_follow_up::after_admitted_insert(tx, id, created_at, kind, channel) */
 }
 pub(crate) async fn writer_with_hook_after_escaped_quote(tx: &mut AdmittedTx) {
     sqlx::query("INSERT INTO events (community_id, id) VALUES ($1, $2)")
@@ -1800,7 +1802,7 @@ pub(crate) async fn writer_after_block_commented_cfg_test(tx: &mut AdmittedTx) {
 pub(crate) async fn writer_after_raw_string_example(tx: &mut AdmittedTx) {
     let _example = r#"
 fn example() {
-    crate::store::event_follow_up::after_admitted_insert(tx, id, kind, channel)
+    crate::store::event_follow_up::after_admitted_insert(tx, id, created_at, kind, channel)
 }
 "#;
     sqlx::query("INSERT INTO events (community_id, id) VALUES ($1, $2)")
@@ -1834,6 +1836,7 @@ mod tests {
         event_insert_follow_up_violations(&strip_cfg_test_items(source)),
         [
             "pub(crate) async fn unhooked_writer(tx: &mut AdmittedTx) {",
+            "pub(crate) async fn quoted_writer(tx: &mut AdmittedTx) {",
             "pub(crate) async fn push_only_writer(tx: &mut AdmittedTx) {",
             "pub(crate) async fn lowercase_writer(tx: &mut AdmittedTx) {",
             "pub(crate) async fn continued_writer(tx: &mut AdmittedTx) {",
@@ -1916,6 +1919,59 @@ fn every_production_event_insert_runs_the_follow_up_hook() {
         hooked_writers >= 7,
         "expected at least seven hooked event writers, found {hooked_writers}"
     );
+}
+
+// Explicit inventory complements the generic insert scanner: every direct
+// production hook must forward the same created_at local bound by its INSERT.
+#[test]
+fn event_insert_hook_inventory_carries_the_insert_timestamp() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/store");
+    let mut actual = Vec::new();
+    for file in [
+        "event.rs",
+        "replaceable.rs",
+        "channel_members.rs",
+        "relay_members.rs",
+        "push.rs",
+    ] {
+        let source = std::fs::read_to_string(root.join(file)).expect("read writer");
+        let production = strip_cfg_test_items(&source);
+        for function in function_slices(&production) {
+            let code = mask_comments_and_literals(function);
+            let Some((_, arguments)) = code.split_once("event_follow_up::after_admitted_insert(")
+            else {
+                continue;
+            };
+            let compact: String = arguments.chars().filter(|c| !c.is_whitespace()).collect();
+            assert!(
+                compact.starts_with("tx,id_bytes.as_slice(),created_at,")
+                    || compact.starts_with("tx,incoming_id,created_at,")
+                    || compact.starts_with("&muttx,event.id.as_bytes().as_slice(),created_at,")
+                    || compact
+                        .starts_with("&mutself.tx,event.id.as_bytes().as_slice(),created_at,")
+                    || compact.starts_with("tx,event.id.as_bytes().as_slice(),created_at,"),
+                "{file}: {} must pass the INSERT's signed created_at",
+                function_header(function)
+            );
+            assert!(
+                code.contains(".bind(created_at)"),
+                "{file}: timestamp must match INSERT bind"
+            );
+            actual.push(format!("{file}: {}", function_header(function)));
+        }
+    }
+    actual.sort();
+    let mut expected = [
+        "event.rs: async fn insert_event_on(",
+        "event.rs: pub(crate) async fn insert_event_with_thread_metadata_tx(",
+        "replaceable.rs: async fn replace_parameterized_event_in_transaction_impl(",
+        "replaceable.rs: pub(crate) async fn replace_addressable_event_under_lock(",
+        "channel_members.rs: pub async fn replace_member_event(",
+        "relay_members.rs: pub(crate) async fn write_nip43_membership_snapshot(",
+        "push.rs: pub async fn accept_lease_event(",
+    ];
+    expected.sort();
+    assert_eq!(actual, expected);
 }
 
 // Fixed channel-less kinds cannot be channel rosters, and the replica-floor
@@ -2152,4 +2208,385 @@ fn every_production_event_insert_names_d_tag() {
         checked_writers >= 8,
         "expected at least eight event writers, found {checked_writers}"
     );
+}
+
+/// Search-hit hydration must keep each hit's exact `created_at`: the paired
+/// `(id, created_at)` key is what lets PostgreSQL prune `events` partitions.
+/// This supplements the real PostgreSQL seam tests in `event_hydration`.
+#[test]
+fn every_search_hydrator_preserves_the_exact_hit_timestamp() {
+    for (source, path) in [
+        (
+            include_str!("../../buzz-relay/src/handlers/req.rs"),
+            "req_search_hydrate",
+        ),
+        (
+            include_str!("../../buzz-relay/src/api/bridge.rs"),
+            "bridge_search_hydrate",
+        ),
+        (
+            include_str!("../../buzz-relay/src/api/profiles.rs"),
+            "profile_search_hydrate",
+        ),
+    ] {
+        let compact: String = source.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(
+            compact.contains(&format!(".get_events_by_ids_at_routed(\"{path}\"")),
+            "{path}: must use exact-key hydration"
+        );
+        assert!(
+            source.contains("(h.event_id, h.created_at)")
+                || source.contains("(hit.event_id, hit.created_at)"),
+            "{path}: retain timestamp"
+        );
+    }
+}
+
+// These startup probes always roll back; they deliberately exercise the DB
+// backstops rather than the app check. The two serving writers are exempt only
+// while their INSERT remains structurally channel-NULL (checked below).
+const EVENT_FLOOR_PROBE_EXCEPTIONS: [&str; 2] = [
+    "pub async fn verify_floor_guard_behavior(",
+    "pub async fn verify_channel_roster_fence_behavior(",
+];
+
+fn is_channel_null_event_writer(function: &str) -> bool {
+    let header = function_header(function);
+    let sql = normalized_sql(function).replace(' ', "");
+    if header.starts_with("pub(crate) async fn write_nip43_membership_snapshot(") {
+        // Kind 13534: channel_id is the tenth value, a literal NULL.
+        return sql.contains("values($1,$2,$3,$4,$5,$6,$7,$8,$9,null,$10)");
+    }
+    if header.starts_with("pub async fn accept_lease_event(") {
+        // Kind 30350: channel_id is the literal NULL after received_at.
+        return sql.contains("now(),null,$8)");
+    }
+    false
+}
+
+fn updates_event_floor_columns(function: &str) -> bool {
+    let normalized = normalized_sql(function);
+    normalized.match_indices("update ").any(|(index, marker)| {
+        let Some((target, assignments)) = normalized[index + marker.len()..].split_once(" set ")
+        else {
+            return false;
+        };
+        let mut target = target.split_whitespace();
+        let mut table = target.next();
+        if table == Some("only") {
+            table = target.next();
+        }
+        if !matches!(table, Some("events" | "public.events")) {
+            return false;
+        }
+        // The target may have an alias, with or without AS.
+        let alias = target.collect::<Vec<_>>();
+        if !matches!(alias.as_slice(), [] | [_] | ["as", _]) {
+            return false;
+        }
+        let assignments = assignments.split(" where ").next().expect("first part");
+        let mut depth = 0usize;
+        assignments
+            .split(|ch| {
+                match ch {
+                    '(' => depth += 1,
+                    ')' => depth = depth.saturating_sub(1),
+                    _ => {}
+                }
+                ch == ',' && depth == 0
+            })
+            .any(|assignment| {
+                assignment.split_once('=').is_some_and(|(columns, _)| {
+                    columns
+                        .trim()
+                        .trim_start_matches('(')
+                        .trim_end_matches(')')
+                        .split(',')
+                        .any(|column| matches!(column.trim(), "created_at" | "channel_id"))
+                })
+            })
+    })
+}
+
+fn event_floor_policy_violations(production: &str) -> Vec<String> {
+    function_slices(production)
+        .into_iter()
+        .filter(|function| {
+            let header = function_header(function);
+            if EVENT_FLOOR_PROBE_EXCEPTIONS
+                .iter()
+                .any(|exception| header.starts_with(exception))
+            {
+                return false;
+            }
+            updates_event_floor_columns(function)
+                || (inserts_events_row(function)
+                    && !is_channel_null_event_writer(function)
+                    && !mask_comments_and_literals(function)
+                        .contains("replica_fence::guard_event_created_at_floor("))
+        })
+        .map(|function| function_header(function).to_owned())
+        .collect()
+}
+
+#[test]
+fn event_floor_policy_rejects_unguarded_inserts_and_floor_column_updates() {
+    let source = r#"
+async fn missing_guard(tx: &mut AdmittedTx) {
+    sqlx::query("INSERT INTO events (id) VALUES ($1)");
+    // replica_fence::guard_event_created_at_floor(tx, created_at, channel).await?;
+}
+async fn guarded(tx: &mut AdmittedTx) {
+    crate::replica_fence::guard_event_created_at_floor(tx, created_at, channel).await?;
+    sqlx::query("INSERT INTO public.events (id) VALUES ($1)");
+}
+async fn rewrite_time(tx: &mut AdmittedTx) {
+    sqlx::query("UPDATE events SET tags = $1, created_at = $2 WHERE id = $3");
+}
+async fn attach_channel(tx: &mut AdmittedTx) {
+    sqlx::query("uPdAtE public.events\nSET channel_id=$1 WHERE id=$2");
+}
+async fn alias_time(tx: &mut AdmittedTx) {
+    sqlx::query("UPDATE events e SET created_at = $1 WHERE e.id = $2");
+}
+async fn as_alias_time(tx: &mut AdmittedTx) {
+    sqlx::query("UPDATE events AS e SET created_at = $1 WHERE e.id = $2");
+}
+async fn only_channel(tx: &mut AdmittedTx) {
+    sqlx::query("UPDATE ONLY events SET channel_id = $1 WHERE id = $2");
+}
+async fn only_public_alias(tx: &mut AdmittedTx) {
+    sqlx::query("UPDATE ONLY public.events AS e SET channel_id = $1 WHERE e.id = $2");
+}
+async fn row_time(tx: &mut AdmittedTx) {
+    sqlx::query("UPDATE events SET (created_at, kind) = ($1, 1) WHERE id = $2");
+}
+async fn row_channel(tx: &mut AdmittedTx) {
+    sqlx::query("UPDATE events SET (kind, channel_id) = (1, $1) WHERE id = $2");
+}
+async fn quoted_insert(tx: &mut AdmittedTx) {
+    sqlx::query("INSERT INTO \"events\" (id) VALUES ($1)");
+}
+async fn quoted_schema_insert(tx: &mut AdmittedTx) {
+    sqlx::query("INSERT INTO \"public\".\"events\" (id) VALUES ($1)");
+}
+async fn quoted_update(tx: &mut AdmittedTx) {
+    sqlx::query("UPDATE \"events\" SET created_at = $1 WHERE id = $2");
+}
+async fn quoted_schema_update(tx: &mut AdmittedTx) {
+    sqlx::query("UPDATE \"public\".\"events\" SET channel_id = $1 WHERE id = $2");
+}
+async fn delete_only(tx: &mut AdmittedTx) {
+    sqlx::query("UPDATE events SET deleted_at=now() WHERE channel_id=$1 AND created_at<$2");
+}
+"#;
+    assert_eq!(
+        event_floor_policy_violations(source),
+        [
+            "async fn missing_guard(tx: &mut AdmittedTx) {",
+            "async fn rewrite_time(tx: &mut AdmittedTx) {",
+            "async fn attach_channel(tx: &mut AdmittedTx) {",
+            "async fn alias_time(tx: &mut AdmittedTx) {",
+            "async fn as_alias_time(tx: &mut AdmittedTx) {",
+            "async fn only_channel(tx: &mut AdmittedTx) {",
+            "async fn only_public_alias(tx: &mut AdmittedTx) {",
+            "async fn row_time(tx: &mut AdmittedTx) {",
+            "async fn row_channel(tx: &mut AdmittedTx) {",
+            "async fn quoted_insert(tx: &mut AdmittedTx) {",
+            "async fn quoted_schema_insert(tx: &mut AdmittedTx) {",
+            "async fn quoted_update(tx: &mut AdmittedTx) {",
+            "async fn quoted_schema_update(tx: &mut AdmittedTx) {",
+        ]
+    );
+}
+
+#[test]
+fn event_floor_policy_requires_nip43_channel_null_at_its_insert_position() {
+    let literal_null = r#"
+pub(crate) async fn write_nip43_membership_snapshot(tx: &mut AdmittedTx) {
+    sqlx::query("INSERT INTO events (community_id,id,pubkey,kind,content,tags,sig,created_at,received_at,channel_id,d_tag) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NULL,$10)");
+}
+"#;
+    assert!(event_floor_policy_violations(literal_null).is_empty());
+    let unrelated_null_bind = literal_null.replace("$9,NULL,$10", "$9,$10,$11").replace(
+        "sqlx::query(",
+        "let unrelated = query.bind::<Option<Uuid>>(None); sqlx::query(",
+    );
+    assert_eq!(
+        event_floor_policy_violations(&unrelated_null_bind).len(),
+        1,
+        "an unrelated NULL bind must not exempt a channel-bearing INSERT"
+    );
+}
+
+#[test]
+fn every_production_channel_event_insert_checks_the_floor_and_never_rewrites_it() {
+    let files = production_event_writer_source_files();
+    let crates_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crates root");
+    assert!(
+        files.contains(&crates_root.join("buzz-relay/src/state.rs")),
+        "floor policy must scan the workspace, including relay writers"
+    );
+    let mut guarded_writers = 0;
+    let mut violations = Vec::new();
+    for path in files {
+        let production = strip_cfg_test_items(&std::fs::read_to_string(&path).expect("source"));
+        guarded_writers += function_slices(&production)
+            .into_iter()
+            .filter(|function| {
+                inserts_events_row(function)
+                    && mask_comments_and_literals(function)
+                        .contains("replica_fence::guard_event_created_at_floor(")
+            })
+            .count();
+        violations.extend(
+            event_floor_policy_violations(&production)
+                .into_iter()
+                .map(|header| format!("{}: {header}", path.display())),
+        );
+    }
+    assert!(
+        violations.is_empty(),
+        "event floor policy violations: {violations:?}"
+    );
+    assert!(
+        guarded_writers >= 5,
+        "expected five channel-bearing event writers, found {guarded_writers}"
+    );
+}
+
+#[test]
+fn event_floor_guard_uses_the_database_statement_clock_and_shared_floor() {
+    let source = strip_cfg_test_items(include_str!("../src/runtime/replica_fence.rs"));
+    let guard = function_slices(&source)
+        .into_iter()
+        .find(|function| function_header(function).contains("fn guard_event_created_at_floor("))
+        .expect("app floor guard");
+    assert!(
+        guard.contains("SELECT $1::timestamptz < clock_timestamp()"),
+        "the guard must sample the database statement clock, after BEGIN"
+    );
+    assert!(
+        guard.contains(".bind(CREATED_AT_FLOOR_SECS as f64)"),
+        "app check, GUC and fence wall must share the same floor constant"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn admin_seed_refuses_remote_database_before_invoking_psql() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = std::env::temp_dir().join(format!("buzz-seed-policy-{}", uuid::Uuid::new_v4()));
+    let scripts = root.join("scripts");
+    std::fs::create_dir_all(&scripts).expect("scratch scripts directory");
+    let script = scripts.join("seed-admin-dashboard.sh");
+    std::fs::write(
+        &script,
+        include_str!("../../../scripts/seed-admin-dashboard.sh"),
+    )
+    .expect("copy script without developer .env");
+    let psql = root.join("psql");
+    std::fs::write(
+        &psql,
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$SEED_PSQL_WITNESS\"\nexit 1\n",
+    )
+    .expect("stub psql");
+    std::fs::set_permissions(&psql, std::fs::Permissions::from_mode(0o755))
+        .expect("executable stub");
+    let witness = root.join("psql-was-invoked");
+    let run = |host: &str, address: &str, service: &str, database: &str| {
+        let output = std::process::Command::new("/bin/bash")
+            .arg(&script)
+            .env("PGHOST", host)
+            .env("PGHOSTADDR", address)
+            .env("PGSERVICE", service)
+            .env("PGDATABASE", database)
+            .env("PATH", format!("{}:/usr/bin:/bin", root.display()))
+            .env("SEED_PSQL_WITNESS", &witness)
+            .output()
+            .expect("run local seed guard");
+        let args = std::fs::read_to_string(&witness).ok();
+        if args.is_some() {
+            std::fs::remove_file(&witness).expect("clear witness");
+        }
+        (output, args)
+    };
+    // Control: a local host with a plain database name reaches psql, so the
+    // refusals below come from the guard rather than an unrunnable fixture.
+    // It must also pass -X so a psqlrc cannot \connect after the guard.
+    let (_, control_args) = run("localhost", "", "", "buzz");
+    let cases = [
+        ("remote host", "shared-db.example.invalid", "", "", ""),
+        ("address override", "localhost", "192.0.2.1", "", ""),
+        ("service override", "localhost", "", "production", ""),
+        (
+            "socket-prefixed host list",
+            "/tmp,shared-db.example.invalid",
+            "",
+            "",
+            "",
+        ),
+        (
+            "host list",
+            "localhost,shared-db.example.invalid",
+            "",
+            "",
+            "",
+        ),
+        (
+            "database URI",
+            "localhost",
+            "",
+            "",
+            "postgresql://buzz@shared-db.example.invalid/buzz",
+        ),
+        (
+            "short database URI",
+            "localhost",
+            "",
+            "",
+            "postgres://shared-db.example.invalid/buzz",
+        ),
+        (
+            "database key/value host",
+            "localhost",
+            "",
+            "",
+            "host=shared-db.example.invalid dbname=buzz",
+        ),
+        (
+            "database key/value hostaddr",
+            "localhost",
+            "",
+            "",
+            "hostaddr=192.0.2.1 dbname=buzz",
+        ),
+        (
+            "database key/value service",
+            "localhost",
+            "",
+            "",
+            "service=production",
+        ),
+    ];
+    let results = cases.map(|(name, host, address, service, database)| {
+        let (output, args) = run(host, address, service, database);
+        (name, output, args.is_some())
+    });
+    std::fs::remove_dir_all(root).expect("remove scratch fixture");
+    let control_args = control_args.expect("plain local target did not reach psql");
+    assert!(
+        control_args.lines().any(|arg| arg == "-X"),
+        "psql invoked without -X: {control_args:?}"
+    );
+    for (name, output, invoked) in results {
+        assert!(!invoked, "{name} reached psql");
+        assert!(!output.status.success(), "{name} accepted");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("requires a local PostgreSQL target"),
+            "{name}: missing refusal"
+        );
+    }
 }

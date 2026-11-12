@@ -5,7 +5,6 @@ class _ChannelsBody extends StatelessWidget {
   final bool showTeam;
   final bool showTeamHeading;
   final VoidCallback? onInbox;
-  final bool hasUnreadInbox;
   final List<Channel>? channels;
   final AsyncValue<List<Channel>> channelsAsync;
   final bool showError;
@@ -23,7 +22,6 @@ class _ChannelsBody extends StatelessWidget {
     this.showTeam = true,
     this.showTeamHeading = false,
     required this.onInbox,
-    required this.hasUnreadInbox,
     required this.channels,
     required this.channelsAsync,
     required this.showError,
@@ -40,7 +38,7 @@ class _ChannelsBody extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final inbox = Semantics(
-      label: hasUnreadInbox ? 'Inbox, unread' : 'Inbox',
+      label: 'Activity',
       button: true,
       onTap: onInbox,
       excludeSemantics: true,
@@ -58,30 +56,23 @@ class _ChannelsBody extends StatelessWidget {
                 width: _kChannelLeadingWidth,
                 child: Align(
                   alignment: Alignment.centerLeft,
-                  child: Badge(
-                    isLabelVisible: hasUnreadInbox,
-                    child: Icon(
-                      BuzzIcons.bell,
-                      size: _kChannelIconSize,
-                      color: channelNavigationForeground(context),
-                    ),
+                  child: Icon(
+                    BuzzIcons.bell,
+                    size: _kChannelIconSize,
+                    color: navigationPrimaryForeground(context),
                   ),
                 ),
               ),
               const SizedBox(width: _kChannelLabelGap),
               Expanded(
                 child: Text(
-                  'Inbox',
+                  'Activity',
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: navigationChatTitleTextStyle.copyWith(
-                    color: channelNavigationForeground(
-                      context,
-                      unread: hasUnreadInbox,
-                    ),
-                    fontWeight: hasUnreadInbox
-                        ? FontWeight.w700
-                        : FontWeight.w500,
+                  style: navigationSectionTextStyle.copyWith(
+                    fontSize: 17,
+                    height: 22 / 17,
+                    color: navigationPrimaryForeground(context),
                   ),
                 ),
               ),
@@ -121,7 +112,7 @@ class _ChannelsBody extends StatelessWidget {
                     child: Padding(
                       padding: const EdgeInsets.fromLTRB(
                         Grid.gutter,
-                        Grid.xs,
+                        Grid.lg,
                         Grid.gutter,
                         0,
                       ),
@@ -144,7 +135,7 @@ class _ChannelsBody extends StatelessWidget {
                     child: Padding(
                       padding: const EdgeInsets.fromLTRB(
                         Grid.gutter,
-                        Grid.sm,
+                        Grid.lg,
                         Grid.gutter,
                         0,
                       ),
@@ -296,7 +287,7 @@ class _SliverChannelsList extends HookConsumerWidget {
 
         final seeds = <String, int>{};
         for (final channel in visibleChannels) {
-          if (readState.effectiveTimestamp(channel.id) != null) {
+          if (readState.contexts.containsKey(channel.id)) {
             continue;
           }
 
@@ -310,17 +301,16 @@ class _SliverChannelsList extends HookConsumerWidget {
       });
     }, [readState.isReady, readState.pubkey, visibleChannels]);
 
-    final unreadState = computeUnreadChannelIds(
+    final highlights = computeChannelListHighlights(
       channels: visibleChannels,
       readState: readState,
       channelsNotifier: ref.read(channelsProvider.notifier),
     );
-    final unreadChannelIds = {
-      for (final channelId in unreadState)
-        if (seedCompleteForPubkey ||
-            readState.effectiveTimestamp(channelId) != null)
-          channelId,
-    };
+    bool seeded(String channelId) =>
+        seedCompleteForPubkey ||
+        readState.effectiveTimestamp(channelId) != null;
+    final unreadChannelIds = highlights.unread.where(seeded).toSet();
+    final attentionChannelIds = highlights.attention.where(seeded).toSet();
     // Build sorted user-defined sections and compute which stream channels
     // belong to each section. Channels not assigned to any valid section fall
     // through to the built-in "Channels" list.
@@ -376,19 +366,21 @@ class _SliverChannelsList extends HookConsumerWidget {
 
     return SliverPadding(
       padding: EdgeInsets.zero,
-      sliver: SliverList.list(
-        children: [
+      sliver: SliverMainAxisGroup(
+        slivers: [
           if (visibleChannels.isEmpty)
-            const _EmptyState()
+            const SliverToBoxAdapter(child: _EmptyState())
           else ...[
             // Starred channels (exclusive — pinned above all sections).
             if (starredStreamChannels.isNotEmpty)
               _ChannelSection(
+                key: const ValueKey('starred'),
                 title: 'Starred',
                 expanded: starredExpanded.value,
                 onToggle: () => starredExpanded.value = !starredExpanded.value,
                 channels: starredStreamChannels,
                 unreadChannelIds: unreadChannelIds,
+                attentionChannelIds: attentionChannelIds,
                 mutedChannelIds: mutedChannelIds,
                 currentPubkey: currentPubkey,
                 emptyLabel: '',
@@ -400,8 +392,9 @@ class _SliverChannelsList extends HookConsumerWidget {
             for (final section in userSections) ...[
               if (section != userSections.first ||
                   starredStreamChannels.isNotEmpty)
-                const SizedBox(height: Grid.twelve),
+                const SliverToBoxAdapter(child: SizedBox(height: Grid.xxs)),
               _CustomChannelSection(
+                key: ValueKey(section.id),
                 section: section,
                 channels: sortChannelsForList(
                   streamChannels
@@ -414,6 +407,7 @@ class _SliverChannelsList extends HookConsumerWidget {
                   sortState.sortModeFor(sectionSortGroupKey(section.id)),
                 ),
                 unreadChannelIds: unreadChannelIds,
+                attentionChannelIds: attentionChannelIds,
                 mutedChannelIds: mutedChannelIds,
                 currentPubkey: currentPubkey,
                 expanded: sectionExpanded(section.id),
@@ -494,13 +488,15 @@ class _SliverChannelsList extends HookConsumerWidget {
               ),
             ],
             if (userSections.isNotEmpty || starredStreamChannels.isNotEmpty)
-              const SizedBox(height: Grid.twelve),
+              const SliverToBoxAdapter(child: SizedBox(height: Grid.xxs)),
             _ChannelSection(
+              key: const ValueKey('channels'),
               title: 'Channels',
               expanded: channelsExpanded.value,
               onToggle: () => channelsExpanded.value = !channelsExpanded.value,
               channels: ungroupedStreamChannels,
               unreadChannelIds: unreadChannelIds,
+              attentionChannelIds: attentionChannelIds,
               mutedChannelIds: mutedChannelIds,
               currentPubkey: currentPubkey,
               emptyLabel: 'No stream channels yet',
@@ -508,13 +504,15 @@ class _SliverChannelsList extends HookConsumerWidget {
               onSortModeChange: (mode) => setSortMode('channels', mode),
               onSelectChannel: onSelectChannel,
             ),
-            const SizedBox(height: Grid.twelve),
+            const SliverToBoxAdapter(child: SizedBox(height: Grid.xxs)),
             _ChannelSection(
+              key: const ValueKey('dms'),
               title: 'DMs',
               expanded: dmsExpanded.value,
               onToggle: () => dmsExpanded.value = !dmsExpanded.value,
               channels: sortedDmChannels,
               unreadChannelIds: unreadChannelIds,
+              attentionChannelIds: attentionChannelIds,
               mutedChannelIds: mutedChannelIds,
               currentPubkey: currentPubkey,
               emptyLabel: 'No direct messages yet',

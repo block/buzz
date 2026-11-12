@@ -26,9 +26,7 @@ async fn app_state(db: buzz_db::Db, pool: &PgPool) -> (Arc<AppState>, AuditShutd
     config.require_auth_token = false;
     config.require_relay_membership = false;
 
-    let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-        .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-        .expect("create Redis pool");
+    let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("create Redis pool");
     let pubsub = Arc::new(
         buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
             .await

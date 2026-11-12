@@ -506,13 +506,12 @@ async fn apply_pgschema_to_existing_database(pool: &PgPool) {
 async fn migration_schema_0075_adds_invite_columns_without_rewriting_history() {
     let (pool, cases) = legacy_fixture().await;
     crate::migration::run_migrations(&pool).await.unwrap();
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT max(version) FROM _sqlx_migrations WHERE success")
-            .fetch_one(&pool)
-            .await
-            .unwrap(),
-        75
-    );
+    assert!(sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version=75 AND success)"
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap());
     assert_admission_column(&pool).await;
     assert_join_role_preserved(&pool, cases[0].community).await;
     assert_eq!(
@@ -638,6 +637,9 @@ async fn migration_schema_desired_pgschema_reconcile_matches_populated_upgrade()
 
     // Exercise the deployment path against populated data at the complete
     // pinned-main schema through 0074, rather than reproducing its DDL by hand.
+    // Existing partitioned tables require the operator prebuild before pgschema,
+    // which otherwise tries unsupported CREATE INDEX CONCURRENTLY on the parent.
+    crate::test_support::prebuild_media_edit_index(&pool).await;
     apply_pgschema_to_existing_database(&pool).await;
     assert_admission_column(&pool).await;
     assert_join_role_preserved(&pool, cases[0].community).await;

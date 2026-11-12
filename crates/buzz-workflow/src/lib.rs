@@ -35,10 +35,14 @@ pub mod error;
 pub mod executor;
 pub mod schema;
 
-pub use action_sink::{ActionSink, ActionSinkError};
+pub use action_sink::{ActionSink, ActionSinkError, SentMessage};
 pub use error::{PartialProgress, WorkflowError};
 pub use executor::ExecutionResult;
 pub use schema::{ActionDef, Step, TriggerDef, WorkflowDef};
+
+/// Tracing target for withheld agent mentions. It sits under `buzz_relay` so
+/// the relay's default log filter shows it without enabling other workflow logs.
+pub const AGENT_MENTIONS_LOG_TARGET: &str = "buzz_relay::workflow_agent_mentions";
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -60,6 +64,33 @@ pub struct WorkflowConfig {
     pub max_concurrent: usize,
     /// Default per-step timeout in seconds. Default: 300 (5 minutes).
     pub default_timeout_secs: u64,
+    /// Which workflow runs may direct agents. Default: [`AgentMentions::Any`].
+    pub agent_mentions: AgentMentions,
+}
+
+/// Which workflow runs' messages carry agent-directing `buzz:workflow-mention`
+/// tags. Set relay-wide by `BUZZ_WORKFLOW_AGENT_MENTIONS`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentMentions {
+    /// Every run may direct the agents its owner's step text names.
+    #[default]
+    Any,
+    /// Owner-only agent mentions: only runs the owner or a timer started, on a
+    /// definition of only `send_message` and `delay` steps, may direct agents.
+    Owner,
+}
+
+impl std::str::FromStr for AgentMentions {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "any" => Ok(Self::Any),
+            "owner" => Ok(Self::Owner),
+            other => Err(format!("expected `any` or `owner`, got `{other}`")),
+        }
+    }
 }
 
 impl Default for WorkflowConfig {
@@ -67,6 +98,7 @@ impl Default for WorkflowConfig {
         Self {
             max_concurrent: 100,
             default_timeout_secs: 300,
+            agent_mentions: AgentMentions::Any,
         }
     }
 }
@@ -329,7 +361,7 @@ impl WorkflowEngine {
                 }
             }
             Err((e, progress)) => {
-                tracing::error!(run_id = %run_id, "Workflow run failed: {e}");
+                tracing::error!(run_id = %run_id, error = %e.log_text(), "Workflow run failed");
                 let mut full_trace = prefix;
                 full_trace.extend(progress.trace);
                 let trace_json = serde_json::Value::Array(full_trace);
@@ -459,6 +491,9 @@ impl WorkflowEngine {
                     workflow.id,
                     Some(&trigger_event_id_bytes),
                     Some(&trigger_ctx_json),
+                    // The signer of the triggering event: for a reaction, the
+                    // reactor, never the author of the reacted-to message.
+                    &buzz_db::workflow::RunCause::Event(event.event.pubkey.to_bytes().to_vec()),
                 )
                 .await
             {
@@ -723,6 +758,7 @@ impl WorkflowEngine {
                     workflow.id,
                     None, // no trigger event for cron
                     trigger_ctx_json.as_ref(),
+                    &buzz_db::workflow::RunCause::Schedule,
                 )
                 .await
             {
@@ -996,7 +1032,8 @@ async fn should_fire_workflow(
             Err(e) => {
                 tracing::warn!(
                     workflow_id = %workflow_id,
-                    "Trigger filter error: {e} — skipping workflow"
+                    error_kind = e.code(),
+                    "Trigger filter error — skipping workflow"
                 );
                 return false;
             }
@@ -1404,6 +1441,7 @@ mod postgres_tests {
         let cfg = WorkflowConfig::default();
         assert_eq!(cfg.max_concurrent, 100);
         assert_eq!(cfg.default_timeout_secs, 300);
+        assert_eq!(cfg.agent_mentions, AgentMentions::Any);
     }
 
     #[test]
@@ -1626,13 +1664,24 @@ steps:
     }
 
     #[test]
+    fn agent_mentions_parses_only_any_and_owner() {
+        assert_eq!("any".parse(), Ok(AgentMentions::Any));
+        assert_eq!("owner".parse(), Ok(AgentMentions::Owner));
+        for invalid in ["", "true", "Owner", "all"] {
+            assert!(invalid.parse::<AgentMentions>().is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
     fn workflow_config_custom_values() {
         let cfg = WorkflowConfig {
             max_concurrent: 50,
             default_timeout_secs: 600,
+            agent_mentions: AgentMentions::Owner,
         };
         assert_eq!(cfg.max_concurrent, 50);
         assert_eq!(cfg.default_timeout_secs, 600);
+        assert_eq!(cfg.agent_mentions, AgentMentions::Owner);
     }
 
     fn make_message_event() -> buzz_core::StoredEvent {
@@ -2491,5 +2540,253 @@ steps:
             .execute(db.pool())
             .await
             .expect("drop failing restriction schema");
+    }
+
+    /// Condition errors quote the message they evaluated. The trigger-filter
+    /// WARN, the step-condition WARN and the run-failure ERROR log a fixed
+    /// code; the run keeps the full diagnostic for its owner.
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires Postgres"]
+    async fn condition_errors_log_a_fixed_code_without_message_text() {
+        #[derive(Clone, Default)]
+        struct Captured(Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Captured {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let db = setup_db().await;
+        let creator = nostr::Keys::generate().public_key().to_bytes().to_vec();
+        let member = nostr::Keys::generate().public_key().to_bytes().to_vec();
+        let (community, channel_id) = setup_channel(&db, &creator, &member).await;
+        let mut workflow_ids = Vec::new();
+        for (name, trigger, steps) in [
+            (
+                "filter-error",
+                serde_json::json!({"on": "message_posted", "filter": "trigger_text > 5"}),
+                serde_json::json!([{"id": "s1", "action": "send_message", "text": "hi"}]),
+            ),
+            (
+                "step-error",
+                serde_json::json!({"on": "message_posted"}),
+                serde_json::json!([{
+                    "id": "guarded", "if": "trigger_text > 5",
+                    "action": "send_message", "text": "hi",
+                }]),
+            ),
+        ] {
+            let def = serde_json::json!({
+                "name": name, "trigger": trigger, "steps": steps, "enabled": true,
+            })
+            .to_string();
+            let hash = [workflow_ids.len() as u8; 32];
+            let id = db
+                .create_workflow(community, Some(channel_id), &member, name, &def, &hash)
+                .await
+                .expect("create workflow");
+            workflow_ids.push(id);
+        }
+        let (filter_wf, step_wf) = (workflow_ids[0], workflow_ids[1]);
+
+        let marker = format!("wf-marker-{}", Uuid::new_v4().simple());
+        let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), &marker)
+            .sign_with_keys(&nostr::Keys::generate())
+            .expect("sign");
+        let event = buzz_core::StoredEvent::new(event, Some(channel_id));
+
+        let out = Captured::default();
+        let writer = out.clone();
+        let _guard = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .json()
+                .flatten_event(true)
+                .with_max_level(tracing::Level::DEBUG)
+                .with_writer(move || writer.clone())
+                .finish(),
+        );
+        let engine = Arc::new(WorkflowEngine::new(db.clone(), WorkflowConfig::default()));
+        engine.on_event(community, &event).await.expect("on_event");
+        let run = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let runs = db
+                    .list_workflow_runs(community, step_wf, 10)
+                    .await
+                    .expect("list runs");
+                if let Some(run) = runs.into_iter().find(|r| r.status == RunStatus::Failed) {
+                    break run;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the step-condition run must fail");
+        let filter_runs = db
+            .list_workflow_runs(community, filter_wf, 10)
+            .await
+            .expect("list filter runs");
+        assert!(
+            filter_runs.is_empty(),
+            "a failed filter must skip the workflow"
+        );
+
+        let raw = String::from_utf8(out.0.lock().unwrap().clone()).unwrap();
+        let lines: Vec<serde_json::Value> = raw
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let line = |message: &str| {
+            lines
+                .iter()
+                .find(|l| l["message"] == message)
+                .unwrap_or_else(|| panic!("no {message:?} line in {raw}"))
+        };
+        assert_eq!(
+            line("Trigger filter error — skipping workflow")["error_kind"],
+            "condition_evaluation_failed"
+        );
+        assert_eq!(
+            line("Condition error")["error_kind"],
+            "condition_evaluation_failed"
+        );
+        assert_eq!(
+            line("Workflow run failed")["error"],
+            "condition_evaluation_failed"
+        );
+        assert!(!raw.contains(&marker), "marker leaked: {raw}");
+        assert!(
+            run.error_message
+                .as_deref()
+                .is_some_and(|m| m.contains(&marker)),
+            "the stored run error keeps the diagnostic: {:?}",
+            run.error_message
+        );
+    }
+
+    /// Every run records what caused it: the signer of the triggering message,
+    /// reaction or diff (for a reaction, the reactor, not the author of the
+    /// message reacted to), or the timer for cron and interval schedules.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn runs_record_their_cause() {
+        use buzz_core::kind::{KIND_REACTION, KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_DIFF};
+        use buzz_db::workflow::RunCause;
+
+        let db = setup_db().await;
+        let creator = nostr::Keys::generate().public_key().to_bytes().to_vec();
+        let owner = nostr::Keys::generate();
+        let outsider = nostr::Keys::generate();
+        let owner_bytes = owner.public_key().to_bytes().to_vec();
+        let outsider_bytes = outsider.public_key().to_bytes().to_vec();
+        let (community, channel_id) = setup_channel(&db, &creator, &owner_bytes).await;
+
+        let mut workflows = Vec::new();
+        for (name, trigger) in [
+            ("cause-message", serde_json::json!({"on": "message_posted"})),
+            (
+                "cause-reaction",
+                serde_json::json!({"on": "reaction_added"}),
+            ),
+            ("cause-diff", serde_json::json!({"on": "diff_posted"})),
+            (
+                "cause-cron",
+                serde_json::json!({"on": "schedule", "cron": "* * * * *"}),
+            ),
+            (
+                "cause-interval",
+                serde_json::json!({"on": "schedule", "interval": "1m"}),
+            ),
+        ] {
+            let def = serde_json::json!({
+                "name": name,
+                "trigger": trigger,
+                "steps": [{"id": "s1", "action": "send_message", "text": "hi"}],
+                "enabled": true,
+            });
+            let id = db
+                .create_workflow(
+                    community,
+                    Some(channel_id),
+                    &owner_bytes,
+                    name,
+                    &def.to_string(),
+                    &[workflows.len() as u8; 32],
+                )
+                .await
+                .expect("create workflow");
+            workflows.push(id);
+        }
+        let [message_wf, reaction_wf, diff_wf, cron_wf, interval_wf] =
+            <[Uuid; 5]>::try_from(workflows).expect("five workflows created");
+        let engine = Arc::new(WorkflowEngine::new(db.clone(), WorkflowConfig::default()));
+
+        let event = |keys: &nostr::Keys, kind: u32, tags: Vec<nostr::Tag>| {
+            let event = nostr::EventBuilder::new(nostr::Kind::Custom(kind as u16), "+")
+                .tags(tags)
+                .sign_with_keys(keys)
+                .expect("sign");
+            buzz_core::StoredEvent::new(event, Some(channel_id))
+        };
+        let latest_cause = |workflow_id| {
+            let db = db.clone();
+            async move {
+                db.list_workflow_runs(community, workflow_id, 10)
+                    .await
+                    .expect("list runs")
+                    .into_iter()
+                    .max_by_key(|run| run.created_at)
+                    .expect("a run was created")
+                    .cause
+            }
+        };
+
+        let owner_message = event(&owner, KIND_STREAM_MESSAGE, vec![]);
+        let outsider_message = event(&outsider, KIND_STREAM_MESSAGE, vec![]);
+        for (message, signer) in [
+            (&owner_message, &owner_bytes),
+            (&outsider_message, &outsider_bytes),
+        ] {
+            engine.on_event(community, message).await.expect("message");
+            assert_eq!(
+                latest_cause(message_wf).await,
+                Some(RunCause::Event(signer.clone()))
+            );
+        }
+
+        for (reactor, target, signer) in [
+            (&owner, &outsider_message, &owner_bytes),
+            (&outsider, &owner_message, &outsider_bytes),
+        ] {
+            let target_tag = nostr::Tag::parse(["e", &target.event.id.to_hex()]).expect("e tag");
+            let reaction = event(reactor, KIND_REACTION, vec![target_tag]);
+            engine
+                .on_event(community, &reaction)
+                .await
+                .expect("reaction");
+            assert_eq!(
+                latest_cause(reaction_wf).await,
+                Some(RunCause::Event(signer.clone())),
+                "a reaction's cause is its signer, not the reacted-to author"
+            );
+        }
+
+        let diff = event(&outsider, KIND_STREAM_MESSAGE_DIFF, vec![]);
+        engine.on_event(community, &diff).await.expect("diff");
+        assert_eq!(
+            latest_cause(diff_wf).await,
+            Some(RunCause::Event(outsider_bytes.clone()))
+        );
+
+        // The first tick fires the cron and seeds the interval anchor; the
+        // interval fires once a full interval has elapsed.
+        let now = Utc::now();
+        engine.cron_tick(now).await;
+        assert_eq!(latest_cause(cron_wf).await, Some(RunCause::Schedule));
+        engine.cron_tick(now + chrono::Duration::seconds(61)).await;
+        assert_eq!(latest_cause(interval_wf).await, Some(RunCause::Schedule));
     }
 }

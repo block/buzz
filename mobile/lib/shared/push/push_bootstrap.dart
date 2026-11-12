@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
@@ -18,14 +19,27 @@ import 'push_subscription_provider.dart';
 import 'push_setup_recovery.dart';
 
 const _pushBootstrapRetryDelay = Duration(seconds: 5);
+const _pushBootstrapMaxRetryDelay = Duration(minutes: 15);
 
 @visibleForTesting
 class BuzzPushAttemptGate {
-  BuzzPushAttemptGate({this.retryDelay = _pushBootstrapRetryDelay});
+  BuzzPushAttemptGate({
+    this.retryDelay = _pushBootstrapRetryDelay,
+    this.maxRetryDelay = _pushBootstrapMaxRetryDelay,
+    double Function()? jitter,
+  }) : _jitter = jitter ?? Random().nextDouble;
 
+  /// Delay before the first retry of a failing attempt. Each further
+  /// consecutive failure of the same attempt doubles it, up to
+  /// [maxRetryDelay], so a persistent refusal (for example a gateway that
+  /// blocks this device) is not retried every few seconds forever.
   final Duration retryDelay;
+  final Duration maxRetryDelay;
+  final double Function() _jitter;
   String? _attempt;
   Timer? _retryTimer;
+  String? _failingAttempt;
+  int _consecutiveFailures = 0;
 
   bool tryBegin(String attempt) {
     if (_attempt == attempt) return false;
@@ -37,21 +51,27 @@ class BuzzPushAttemptGate {
 
   void failed(String attempt, {required VoidCallback retry}) {
     if (_attempt != attempt) return;
-    _retryTimer?.cancel();
-    _retryTimer = Timer(retryDelay, () {
-      _retryTimer = null;
-      if (_attempt != attempt) return;
-      _attempt = null;
-      retry();
-    });
+    if (_failingAttempt != attempt) {
+      _failingAttempt = attempt;
+      _consecutiveFailures = 0;
+    }
+    _schedule(attempt, _backoff(_consecutiveFailures++), retry);
   }
 
-  void retryAfter(
-    String attempt, {
-    required Duration delay,
-    required VoidCallback retry,
-  }) {
-    if (_attempt != attempt) return;
+  /// Between half and all of the capped exponential delay, so devices that
+  /// failed together do not retry together.
+  Duration _backoff(int priorFailures) {
+    final ceiling = min(
+      maxRetryDelay.inMilliseconds,
+      retryDelay.inMilliseconds * (1 << min(priorFailures, 20)),
+    );
+    final half = ceiling ~/ 2;
+    return Duration(
+      milliseconds: half + (_jitter() * (ceiling - half)).floor(),
+    );
+  }
+
+  void _schedule(String attempt, Duration delay, VoidCallback retry) {
     _retryTimer?.cancel();
     _retryTimer = Timer(delay, () {
       _retryTimer = null;
@@ -61,11 +81,35 @@ class BuzzPushAttemptGate {
     });
   }
 
+  /// Schedules a retry after a success (for example a renewal) or after a
+  /// failure that picks its own delay. Ends any failure streak.
+  void retryAfter(
+    String attempt, {
+    required Duration delay,
+    required VoidCallback retry,
+  }) {
+    if (_attempt != attempt) return;
+    _endFailureStreak();
+    _schedule(attempt, delay, retry);
+  }
+
   void complete(String attempt) {
     if (_attempt != attempt) return;
     _retryTimer?.cancel();
     _retryTimer = null;
     _attempt = null;
+    _endFailureStreak();
+  }
+
+  /// Records that [attempt] succeeded without making it runnable again, so a
+  /// later failure starts from the first retry delay.
+  void succeeded(String attempt) {
+    if (_attempt == attempt) _endFailureStreak();
+  }
+
+  void _endFailureStreak() {
+    _failingAttempt = null;
+    _consecutiveFailures = 0;
   }
 
   void dispose() => _retryTimer?.cancel();
@@ -87,6 +131,14 @@ String buzzPushPublicationAttemptKey({
   descriptor.hGrammar,
   buzzPushSubscriptionsFingerprint(subscriptions),
 ].join('|');
+
+/// Identifies a pass over pending opt-out tombstones by the communities it
+/// covers, so a community whose tombstone appears while another is backing
+/// off runs now instead of waiting out that delay. Not by generation: each
+/// pass advances it, and that must not restart the backoff.
+@visibleForTesting
+String buzzPushTombstoneAttemptKey(Iterable<Community> pending) =>
+    [for (final community in pending) community.id].join('|');
 
 @visibleForTesting
 bool buzzPushLifecycleEnabled({
@@ -123,6 +175,7 @@ class BuzzPushRegistrationBootstrap extends HookWidget {
       unawaited(() async {
         try {
           await startRegistration();
+          attemptGate.succeeded(attemptKey);
         } catch (error, stack) {
           attemptGate.failed(
             attemptKey,
@@ -331,7 +384,7 @@ class _BuzzPushLifecycle extends HookConsumerWidget {
             pendingCommunities.isEmpty) {
           return null;
         }
-        const attempt = 'pending-tombstones';
+        final attempt = buzzPushTombstoneAttemptKey(pendingCommunities);
         if (!tombstoneAttempt.tryBegin(attempt)) return null;
         unawaited(() async {
           try {
@@ -429,17 +482,21 @@ class _BuzzPushLifecycle extends HookConsumerWidget {
               },
             );
           } catch (error, stack) {
-            publicationAttempt.retryAfter(
-              attempt,
+            void retry() {
+              if (context.mounted) publicationRetry.value += 1;
+            }
+
+            if (error is BuzzPushChannelGrammarException) {
               // Re-fetch capabilities after a relay upgrade without repeatedly
               // enrolling or publishing a lease the old relay cannot accept.
-              delay: error is BuzzPushChannelGrammarException
-                  ? const Duration(minutes: 5)
-                  : _pushBootstrapRetryDelay,
-              retry: () {
-                if (context.mounted) publicationRetry.value += 1;
-              },
-            );
+              publicationAttempt.retryAfter(
+                attempt,
+                delay: const Duration(minutes: 5),
+                retry: retry,
+              );
+            } else {
+              publicationAttempt.failed(attempt, retry: retry);
+            }
             debugPrint('Push lease bootstrap failed: $error');
             debugPrintStack(stackTrace: stack);
           }

@@ -429,6 +429,9 @@ void main() {
         ];
         expect(sentToSecond, everyElement(isNot(contains('chan-a'))));
         expect(values(c), {'chan-b'});
+        if (dTag == 'read-state') {
+          expect(relay.snapshotHosts, contains('second.example'));
+        }
 
         config.switchTo('https://relay.example');
         clock.elapse(const Duration(seconds: 1));

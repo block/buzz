@@ -137,8 +137,14 @@ class CommunitySwitcherPage extends HookConsumerWidget {
         MediaQuery.disableAnimationsOf(context) ||
         FocusManager.instance.highlightMode == FocusHighlightMode.traditional;
 
-    Future<void> waitForContent() async {
+    Future<void> waitForContent({Future<void>? abandon}) async {
       final ready = Completer<void>();
+      // Stop listening once the caller no longer needs the content.
+      unawaited(
+        abandon?.then((_) {
+          if (!ready.isCompleted) ready.complete();
+        }),
+      );
       final subscription = ref.listenManual(_communityContentReadyProvider, (
         _,
         next,
@@ -192,16 +198,54 @@ class CommunitySwitcherPage extends HookConsumerWidget {
         if (!context.mounted) return;
         await ref.read(activeCommunityProvider.future);
         if (!context.mounted) return;
-        // Refresh this scope before awaiting its content. ChannelsNotifier
-        // fences cached snapshots to the destination relay and identity.
-        if (!arriving) ref.invalidate(channelsProvider);
-        await (() async {
-          await waitForContent();
-          if (!context.mounted) return;
-          final bounds = await prepareLanding();
-          if (context.mounted) landingBounds.value = bounds;
-        })().timeout(const Duration(seconds: 20));
+        // Organization sign-in can be needed before content loads, or only
+        // once the relay refuses this key. Close for either, so the Home
+        // banner's action is reachable instead of covered until the timeout.
+        final signIn = ref.read(organizationSignInProvider);
+        final auth = ref.read(hostedRelayAuthProvider);
+        // The picker can close while this waits, so check before using ref.
+        bool promptVisible() =>
+            context.mounted &&
+            organizationSignInPromptVisible(
+              signIn,
+              auth,
+              ref.read(relayConfigProvider),
+            );
+        if (promptVisible()) {
+          Navigator.of(context).pop();
+          return;
+        }
+        final prompt = Completer<bool>();
+        void checkPrompt() {
+          if (!prompt.isCompleted && promptVisible()) prompt.complete(true);
+        }
+
+        signIn?.addListener(checkPrompt);
+        auth.addListener(checkPrompt);
+        final bool prompted;
+        try {
+          // Refresh this scope before awaiting its content. ChannelsNotifier
+          // fences cached snapshots to the destination relay and identity.
+          if (!arriving) ref.invalidate(channelsProvider);
+          prompted = await Future.any([
+            prompt.future,
+            (() async {
+              await waitForContent(abandon: prompt.future);
+              if (!context.mounted || prompt.isCompleted) return false;
+              final bounds = await prepareLanding();
+              if (context.mounted) landingBounds.value = bounds;
+              return false;
+            })(),
+          ]).timeout(const Duration(seconds: 20));
+        } finally {
+          signIn?.removeListener(checkPrompt);
+          auth.removeListener(checkPrompt);
+        }
         if (!context.mounted) return;
+        if (prompted) {
+          Navigator.of(context).pop();
+          return;
+        }
         if (animate) {
           await controller.forward(from: 0).orCancel;
           if (!context.mounted) return;
@@ -262,46 +306,46 @@ class CommunitySwitcherPage extends HookConsumerWidget {
     }
 
     final ios = defaultTargetPlatform == TargetPlatform.iOS;
-    final header = ios
-        ? SizedBox(
-            height: frostedAppBarHeight(context),
-            child: IosNavigationBar(
-              title: '',
-              leading: IosNavigationAction(
-                label: 'Close community switcher',
-                symbol: 'xmark',
-                onPressed: () => Navigator.of(context).pop(),
-              ),
-              actions: [
-                IosNavigationAction(
-                  label: isEditing.value ? 'Done' : 'Edit',
-                  onPressed: () => isEditing.value = !isEditing.value,
-                ),
-              ],
+    final toolbarScope = DuoToolbarScope.maybeOf(context);
+    final strip = ios
+        ? (toolbarScope == null
+              ? FoldGeometry.of(context).strip
+              : toolbarScope.strip)
+        : null;
+    final closeAction = IosNavigationAction(
+      label: 'Close community switcher',
+      symbol: 'xmark',
+      onPressed: () => Navigator.of(context).pop(),
+    );
+    final editAction = IosNavigationAction(
+      label: isEditing.value ? 'Done' : 'Edit',
+      symbol: strip == null ? null : (isEditing.value ? 'checkmark' : 'pencil'),
+      onPressed: () => isEditing.value = !isEditing.value,
+    );
+    final header = FrostedAppBar(
+      nativeTitle: '',
+      automaticallyImplyLeading: false,
+      nativeLeading: strip == null ? closeAction : null,
+      nativeActions: strip == null ? [editAction] : [],
+      leading: strip != null
+          ? null
+          : IconButton(
+              tooltip: 'Close community switcher',
+              onPressed: () => Navigator.of(context).pop(),
+              icon: const Icon(BuzzIcons.x),
             ),
-          )
-        : Padding(
-            padding: const EdgeInsets.all(Grid.xxs),
-            child: Row(
-              children: [
-                IconButton(
-                  tooltip: 'Close community switcher',
-                  onPressed: () => Navigator.of(context).pop(),
-                  icon: const Icon(BuzzIcons.x),
-                ),
-                const Spacer(),
-                TextButton(
-                  key: const Key('community-switcher-edit'),
-                  onPressed: () => isEditing.value = !isEditing.value,
-                  child: Text(isEditing.value ? 'Done' : 'Edit'),
-                ),
-              ],
-            ),
-          );
+      actions: [
+        TextButton(
+          key: const Key('community-switcher-edit'),
+          onPressed: () => isEditing.value = !isEditing.value,
+          child: Text(isEditing.value ? 'Done' : 'Edit'),
+        ),
+      ],
+    );
     final body = SingleChildScrollView(
-      padding: const EdgeInsets.fromLTRB(
+      padding: EdgeInsets.fromLTRB(
         Grid.gutter,
-        Grid.xs,
+        frostedAppBarHeight(context) + Grid.xs,
         Grid.gutter,
         Grid.md,
       ),
@@ -381,102 +425,107 @@ class CommunitySwitcherPage extends HookConsumerWidget {
         ),
       ),
     );
-    final surface = Material(
+    final surface = FrostedScaffold(
       key: const Key('community-switcher-page'),
-      color: context.colors.surface,
-      child: SafeArea(
-        top: !ios,
-        child: ios
-            ? Stack(
-                children: [
-                  Positioned.fill(
-                    top: frostedAppBarHeight(context),
-                    child: body,
-                  ),
-                  // Paint the native bar last, as in FrostedScaffold. Painting
-                  // Flutter content after a UIKit view can hide that content
-                  // during this route's opacity/scale composition on iOS.
-                  Positioned(top: 0, left: 0, right: 0, child: header),
-                ],
-              )
-            : Column(
-                children: [
-                  header,
-                  Expanded(child: body),
-                ],
-              ),
+      appBar: header,
+      body: SafeArea(
+        top: false,
+        left: strip == null,
+        right: strip == null,
+        child: body,
       ),
     );
 
-    return PopScope(
-      canPop: flight.value == null,
-      child: IgnorePointer(
-        ignoring: flight.value != null,
-        child: AnimatedBuilder(
-          animation: Listenable.merge([centering, controller, reveal]),
-          child: RepaintBoundary(child: surface),
-          builder: (context, child) {
-            final selected = flight.value;
-            final departure = _communityDepartureCurve.transform(
-              controller.value,
-            );
-            final surfaceExit = Curves.easeOutCubic.transform(centering.value);
-            final centerProgress = _communityCenterCurve.transform(
-              centering.value,
-            );
-            final screen = MediaQuery.sizeOf(context);
-            final center = Offset(screen.width / 2, screen.height / 2);
-            final destinationRect = landingBounds.value;
-            return Stack(
-              fit: StackFit.expand,
-              children: [
-                if (selected != null)
+    return DuoToolbarPortal(
+      strip: strip,
+      active:
+          (toolbarScope?.active ?? true) &&
+          (ModalRoute.isCurrentOf(context) ?? true) &&
+          flight.value == null,
+      actions: [closeAction, editAction],
+      child: PopScope(
+        canPop: flight.value == null,
+        child: IgnorePointer(
+          ignoring: flight.value != null,
+          child: AnimatedBuilder(
+            animation: Listenable.merge([centering, controller, reveal]),
+            child: RepaintBoundary(
+              child: strip == null
+                  ? surface
+                  : DuoToolbarScope(
+                      strip: strip,
+                      active: toolbarScope?.active ?? true,
+                      child: surface,
+                    ),
+            ),
+            builder: (context, child) {
+              final selected = flight.value;
+              final departure = _communityDepartureCurve.transform(
+                controller.value,
+              );
+              final surfaceExit = Curves.easeOutCubic.transform(
+                centering.value,
+              );
+              final centerProgress = _communityCenterCurve.transform(
+                centering.value,
+              );
+              final screen = MediaQuery.sizeOf(context);
+              final center = Offset(screen.width / 2, screen.height / 2);
+              final destinationRect = landingBounds.value;
+              return Stack(
+                fit: StackFit.expand,
+                children: [
+                  if (selected != null)
+                    Opacity(
+                      key: const Key('community-loading-backdrop'),
+                      opacity: 1 - Curves.easeOutCubic.transform(reveal.value),
+                      child: ColoredBox(color: context.colors.surface),
+                    ),
                   Opacity(
-                    key: const Key('community-loading-backdrop'),
-                    opacity: 1 - Curves.easeOutCubic.transform(reveal.value),
-                    child: ColoredBox(color: context.colors.surface),
+                    key: const Key('community-picker-opacity'),
+                    opacity: 1 - surfaceExit,
+                    child: Transform.scale(
+                      scale: 1 + 0.04 * surfaceExit,
+                      child: child,
+                    ),
                   ),
-                Opacity(
-                  key: const Key('community-picker-opacity'),
-                  opacity: 1 - surfaceExit,
-                  child: Transform.scale(
-                    scale: 1 + 0.04 * surfaceExit,
-                    child: child,
-                  ),
-                ),
-                if (selected != null && controller.value == 0)
-                  Positioned(
-                    top: center.dy + _communityCenteredAvatarSize / 2 + Grid.md,
-                    left: 0,
-                    right: 0,
-                    child: Center(
-                      child: RepaintBoundary(
-                        child: BuzzLoadingIndicator(
-                          key: const Key('community-switch-loading'),
-                          size: 18,
-                          color: context.colors.onSecondaryContainer,
-                          semanticLabel: 'Loading ${selected.community.name}',
+                  if (selected != null && controller.value == 0)
+                    Positioned(
+                      top:
+                          center.dy +
+                          _communityCenteredAvatarSize / 2 +
+                          Grid.md,
+                      left: 0,
+                      right: 0,
+                      child: Center(
+                        child: RepaintBoundary(
+                          child: BuzzLoadingIndicator(
+                            key: const Key('community-switch-loading'),
+                            size: 18,
+                            color: context.colors.onSecondaryContainer,
+                            semanticLabel: 'Loading ${selected.community.name}',
+                          ),
                         ),
                       ),
                     ),
-                  ),
-                if (selected != null)
-                  _CommunityFlyingAvatar(
-                    avatar: flightAvatar,
-                    origin: selected.origin.center,
-                    destination:
-                        destinationRect ??
-                        Rect.fromCenter(
-                          center: center,
-                          width: _communityCenteredAvatarSize,
-                          height: _communityCenteredAvatarSize,
-                        ),
-                    centerProgress: centerProgress,
-                    departure: departure,
-                  ),
-              ],
-            );
-          },
+                  if (selected != null)
+                    _CommunityFlyingAvatar(
+                      avatar: flightAvatar,
+                      origin: selected.origin.center,
+                      destination:
+                          destinationRect ??
+                          Rect.fromCenter(
+                            center: center,
+                            width: _communityCenteredAvatarSize,
+                            height: _communityCenteredAvatarSize,
+                          ),
+                      centerProgress: centerProgress,
+                      departure: departure,
+                    ),
+                ],
+              );
+            },
+          ),
         ),
       ),
     );
@@ -513,14 +562,14 @@ class _CommunityFlyingAvatar extends StatelessWidget {
     final end = destination.center;
     final delta = end - start;
     // A quadratic Bezier bends perpendicular to travel, like Motion's arc.
-    // Bow outward first, then settle into the header. Clamp the control point
+    // Bow left first, then settle into the header. Clamp the control point
     // so the larger avatar stays inside narrow screens throughout the swoop.
-    final bend = (start + end) / 2 + Offset(-delta.dy, delta.dx) * 0.75;
+    final bend = (start + end) / 2 + Offset(delta.dy, -delta.dx) * 0.75;
     final margin = _communityCenteredAvatarSize / 2 + Grid.xs;
     final width = screen.width;
     final control = Offset(
       bend.dx.clamp(margin, max(margin, width - margin)),
-      bend.dy,
+      bend.dy.clamp(margin, max(margin, screen.height - margin)),
     );
     final t = departure;
     final position =

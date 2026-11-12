@@ -2,12 +2,6 @@ import 'package:flutter/foundation.dart';
 
 import '../utils/string_utils.dart';
 
-/// Pinned version of the portable identity-name contract implemented here.
-///
-/// Spec and fixtures:
-/// https://github.com/block/buzz-app/blob/92c2fb2/src/bundled/identity-naming/README.md
-const identityNamePolicyVersion = 1;
-
 /// One naming fact for an identity. [pubkey] and [ownerPubkey] must be valid
 /// 64-character hex public keys (either case); callers choose names and
 /// fallbacks first.
@@ -86,10 +80,8 @@ String trimIdentityName(String value) {
   return value.substring(start, end);
 }
 
-final RegExp _hexKey = RegExp(r'^[0-9a-fA-F]{64}$');
-
 void _requireKey(String key, String name) {
-  if (!_hexKey.hasMatch(key)) {
+  if (!isHexPubkey(key)) {
     throw ArgumentError.value(key, name, 'not a 64-character hex public key');
   }
 }
@@ -118,7 +110,8 @@ class _Row {
 /// Resolves distinct display labels for the selected identities.
 ///
 /// Display policy only: a readable owner or key suffix grants no authority.
-/// Implements contextual identity names v1 (see [identityNamePolicyVersion]).
+/// Implements contextual identity names v1. Spec and fixtures:
+/// https://github.com/block/buzz-app/blob/92c2fb2/src/bundled/identity-naming/README.md
 /// Omitting [candidates] selects every supplied fact; an empty set selects
 /// none.
 ///
