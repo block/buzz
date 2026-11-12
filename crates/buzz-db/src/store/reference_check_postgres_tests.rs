@@ -191,9 +191,8 @@ async fn lock_channel_archived_at_distinguishes_missing_from_not_archived() {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn set_agent_owner_rejects_missing_owner_without_foreign_key() {
+async fn set_agent_owner_rejects_missing_owner_with_and_without_foreign_key() {
     let (db, community) = setup().await;
-    crate::test_support::drop_foreign_keys_between(&db.pool, &[("users", "users")]).await;
     let agent = [0x51; 32];
     let owner = [0x52; 32];
     ensure_user(&db.pool, community, &agent)
@@ -209,6 +208,22 @@ async fn set_agent_owner_rejects_missing_owner_without_foreign_key() {
         .await
         .expect("read owner")
     };
+
+    // With the owner foreign key intact the contract is the same: the check
+    // runs before the UPDATE, so a missing owner is `NotFound` rather than a
+    // foreign key violation, and the agent keeps no owner.
+    assert_not_found(
+        set_agent_owner(&db.pool, community, &agent, &owner).await,
+        "owner",
+    );
+    assert_eq!(stored_owner(db.pool.clone(), agent).await, None);
+    assert_not_found(
+        set_agent_owner(&db.pool, community, &[0x53; 32], &owner).await,
+        "agent pubkey",
+    );
+
+    // Now the foreign key is gone and the application check stands alone.
+    crate::test_support::drop_foreign_keys_between(&db.pool, &[("users", "users")]).await;
 
     // Unknown owner: refused, and the agent keeps no owner.
     assert_not_found(

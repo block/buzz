@@ -32,6 +32,58 @@ use crate::{CommunityId, Db};
 
 mod claim_owner;
 mod revocation;
+
+/// Test-only pause point in the invite claim, keyed by community so
+/// concurrent tests arm independent gates. Compiled out of non-test builds.
+#[cfg(test)]
+pub(crate) mod test_hook {
+    use std::collections::HashMap;
+    use std::sync::{Arc, LazyLock, Mutex};
+
+    use tokio::sync::{oneshot, Notify};
+
+    use crate::CommunityId;
+
+    struct Gate {
+        arrived: oneshot::Sender<()>,
+        release: Arc<Notify>,
+    }
+
+    static BEFORE_MEMBERSHIP_INSERT: LazyLock<Mutex<HashMap<CommunityId, Gate>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    /// Arm a one-shot pause for `community`'s next claim, just before its
+    /// membership INSERT. Await the receiver to know the claim got there;
+    /// `notify_one` on the release lets it continue.
+    pub(crate) fn arm_before_membership_insert(
+        community: CommunityId,
+    ) -> (oneshot::Receiver<()>, Arc<Notify>) {
+        let (arrived, rx) = oneshot::channel();
+        let release = Arc::new(Notify::new());
+        BEFORE_MEMBERSHIP_INSERT
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                community,
+                Gate {
+                    arrived,
+                    release: release.clone(),
+                },
+            );
+        (rx, release)
+    }
+
+    pub(super) async fn before_membership_insert(community: CommunityId) {
+        let gate = BEFORE_MEMBERSHIP_INSERT
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&community);
+        if let Some(gate) = gate {
+            let _ = gate.arrived.send(());
+            gate.release.notified().await;
+        }
+    }
+}
 pub use claim_owner::{claim_relay_membership_with_owner, MembershipClaimResult};
 pub(crate) use revocation::{revoke_banned_issuer_invites, revoke_restricted_agent_invites};
 
@@ -673,6 +725,11 @@ pub async fn claim_relay_invite_with_owner(
         );
         return Ok(MembershipWrite::unchanged(ClaimOutcome::Exhausted.into()));
     }
+
+    // Test hook: pauses after the member lookup above found nothing, so a test
+    // can add the member before this insert and hit its conflict branch.
+    #[cfg(test)]
+    test_hook::before_membership_insert(community).await;
 
     let inserted = sqlx::query(
         "INSERT INTO relay_members (community_id, pubkey, role, added_by, auto_join_pending) \
