@@ -984,7 +984,7 @@ impl Db {
                     // Mid-request replica failure (e.g. a hot-standby
                     // recovery conflict) fails closed to the writer.
                     tracing::warn!(
-                        error = %e,
+                        error_kind = %e.kind(),
                         path,
                         "replica thread query failed; re-running on writer"
                     );
@@ -1166,7 +1166,7 @@ impl Db {
                         // answered. Dropping `tx` rolls the reader
                         // transaction back.
                         tracing::warn!(
-                            error = %e,
+                            error_kind = %e.kind(),
                             path,
                             "replica window query failed; re-running on writer"
                         );

@@ -388,7 +388,7 @@ impl Db {
                     Err(e)
                 }
                 Err(e) => {
-                    tracing::warn!(path, "replica read failed; re-running on writer: {e}");
+                    tracing::warn!(path, error_kind = %e.kind(), "replica read failed; re-running on writer");
                     Self::record_route(path, "writer", "replica_error");
                     // Release the reader and its history permit before the
                     // writer re-run, so a replica-error burst can't fill the cap.
@@ -482,7 +482,7 @@ impl Db {
                         Err(e)
                     }
                     Err(e) => {
-                        tracing::warn!(path, "replica read failed; re-running on writer: {e}");
+                        tracing::warn!(path, error_kind = %e.kind(), "replica read failed; re-running on writer");
                         Self::record_route(path, "writer", "replica_error");
                         // Release the reader and its history permit before the
                         // writer re-run, so a replica-error burst can't fill the cap.
@@ -566,7 +566,7 @@ impl Db {
                     Err(e)
                 }
                 Err(e) => {
-                    tracing::warn!(path, "replica read failed; re-running on writer: {e}");
+                    tracing::warn!(path, error_kind = %e.kind(), "replica read failed; re-running on writer");
                     Self::record_route(path, "writer", "replica_error");
                     // Release the reader and its history permit before the
                     // writer re-run, so a replica-error burst can't fill the cap.

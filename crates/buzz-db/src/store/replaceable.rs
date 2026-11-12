@@ -372,7 +372,7 @@ async fn replace_parameterized_event_in_transaction_impl(
                 .execute(tx.conn())
                 .await
             {
-                tracing::warn!(error = %rollback_error, "parameterized replacement savepoint rollback failed");
+                tracing::warn!(error_kind = %crate::error::sqlx_error_kind(&rollback_error), "parameterized replacement savepoint rollback failed");
             }
             return Err(error);
         }

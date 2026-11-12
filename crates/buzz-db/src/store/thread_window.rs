@@ -258,7 +258,7 @@ impl Db {
                     return Err(error);
                 }
                 Err(error) => {
-                    tracing::warn!(%error, path, "replica thread window failed; re-running on writer");
+                    tracing::warn!(error_kind = %error.kind(), path, "replica thread window failed; re-running on writer");
                     Self::record_route(path, "writer", "replica_error");
                 }
             }
@@ -473,7 +473,7 @@ impl ReadSession {
                 }
                 Err(error) => {
                     crate::datastore_span::set_route(DbPoolRole::Writer, "writer", "replica_error");
-                    tracing::warn!(%error, "thread auxiliary read failed; degrading to writer");
+                    tracing::warn!(error_kind = %error.kind(), "thread auxiliary read failed; degrading to writer");
                     metrics::counter!("buzz_db_read_session_degraded").increment(1);
                     writer.clone()
                 }

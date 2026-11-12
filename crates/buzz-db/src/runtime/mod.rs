@@ -249,11 +249,11 @@ where
         match result {
             Ok(value) => committed.push(value),
             Err(error) if error.is_connection_unavailable() => {
-                tracing::warn!(sweep, community_id = %id, error = %error,
+                tracing::warn!(sweep, community_id = %id, error_kind = %error.kind(),
                     "Fleet sweep stopped: database unavailable; remaining tenants retry next tick");
                 break;
             }
-            Err(error) => tracing::warn!(sweep, community_id = %id, error = %error,
+            Err(error) => tracing::warn!(sweep, community_id = %id, error_kind = %error.kind(),
                 "Fleet sweep tenant failed; retained rows retry next tick"),
         }
     }
@@ -382,7 +382,7 @@ impl ReadSession {
                             "replica_error",
                         );
                         tracing::warn!(
-                            error = %e,
+                            error_kind = %e.kind(),
                             "replica session query failed mid-request; degrading to writer"
                         );
                         // Deliberately not a `buzz_db_route_decision` event:
@@ -1942,7 +1942,7 @@ impl Db {
                     sqlx::query("ROLLBACK TO SAVEPOINT serving_write_mentions")
                         .execute(tx.conn())
                         .await?;
-                    tracing::warn!(event_id = %event.id, "Failed to insert mentions: {e}");
+                    tracing::warn!(event_id = %event.id, error_kind = %e.kind(), "Failed to insert mentions");
                 }
             }
         }

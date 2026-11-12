@@ -2590,3 +2590,72 @@ fn admin_seed_refuses_remote_database_before_invoking_psql() {
         );
     }
 }
+
+/// Store log lines name an error by its fixed kind (`error_kind = %e.kind()`),
+/// never by its text: a Postgres message can repeat a bound value
+/// (`invalid input syntax for type uuid: "<value>"`), and domain errors carry
+/// tenant data such as a channel name.
+#[test]
+fn store_logs_never_format_error_text() {
+    fn rust_sources(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).expect("read store dir") {
+            let path = entry.expect("store entry").path();
+            if path.is_dir() {
+                rust_sources(&path, out);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    let store = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/store");
+    let mut files = Vec::new();
+    rust_sources(&store, &mut files);
+    let forbidden = [
+        "%e,",
+        "%e)",
+        "?e,",
+        "?e)",
+        "%err,",
+        "%err)",
+        "%error,",
+        "%error)",
+        "?error,",
+        "?error)",
+        "{e}",
+        "{e:?}",
+        "{err}",
+        "{err:?}",
+        "{error}",
+        "{error:?}",
+    ];
+    let mut violations = Vec::new();
+    for file in files {
+        let name = file.display().to_string();
+        if name.contains("test") {
+            continue;
+        }
+        let source = std::fs::read_to_string(&file).expect("read store source");
+        let source = source.split("\n#[cfg(test)]").next().unwrap_or_default();
+        for (start, _) in source.match_indices("tracing::") {
+            let call = &source[start..];
+            let Some(bang) = call.find("!(") else {
+                continue;
+            };
+            let level = &call["tracing::".len()..bang];
+            if !matches!(level, "trace" | "debug" | "info" | "warn" | "error") {
+                continue;
+            }
+            let end = call.find(");").unwrap_or(call.len());
+            let invocation = call[..end].replace(char::is_whitespace, "");
+            if let Some(pattern) = forbidden.iter().find(|p| invocation.contains(*p)) {
+                violations.push(format!("{name}: `{pattern}` in {invocation}"));
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "store logs format error text:\n{}",
+        violations.join("\n")
+    );
+}
