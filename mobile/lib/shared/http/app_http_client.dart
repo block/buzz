@@ -57,12 +57,17 @@ class SharedSessionClient extends http.BaseClient {
 
   final http.Client _session;
   final http.Client Function() _newCleartext;
-  final _closed = Completer<void>();
+
+  /// One abort trigger per request still running, so [close] can cancel it.
+  /// A request leaves the set once its response body is done, failed or
+  /// cancelled, so a long-lived handle holds nothing for finished requests.
+  final _inFlight = <Completer<void>>{};
+  var _closed = false;
   http.Client? _cleartext;
 
   @override
   Future<http.StreamedResponse> send(http.BaseRequest request) async {
-    if (_closed.isCompleted) {
+    if (_closed) {
       throw http.ClientException(
         'HTTP request failed. Client is already closed.',
         request.url,
@@ -71,16 +76,47 @@ class SharedSessionClient extends http.BaseClient {
     if (request.url.scheme != 'https') {
       return (_cleartext ??= _newCleartext()).send(request);
     }
-    return _session.send(_abortedOnClose(request));
+    final abort = Completer<void>();
+    void fire() {
+      if (!abort.isCompleted) abort.complete();
+    }
+
+    _inFlight.add(abort);
+    if (request case http.Abortable(:final abortTrigger?)) {
+      abortTrigger.then<void>((_) => fire(), onError: (_) => fire());
+    }
+    final http.StreamedResponse response;
+    try {
+      response = await _session.send(_withAbortTrigger(request, abort.future));
+    } catch (_) {
+      _inFlight.remove(abort);
+      rethrow;
+    }
+    Stream<List<int>> body() async* {
+      try {
+        yield* response.stream;
+      } finally {
+        _inFlight.remove(abort);
+      }
+    }
+
+    return http.StreamedResponse(
+      http.ByteStream(body()),
+      response.statusCode,
+      contentLength: response.contentLength,
+      request: response.request,
+      headers: response.headers,
+      isRedirect: response.isRedirect,
+      persistentConnection: response.persistentConnection,
+      reasonPhrase: response.reasonPhrase,
+    );
   }
 
-  /// [request] as a copy that the session cancels when this handle closes, or
-  /// when [request]'s own abort trigger fires.
-  http.BaseRequest _abortedOnClose(http.BaseRequest request) {
-    final own = request is http.Abortable ? request.abortTrigger : null;
-    final trigger = own == null
-        ? _closed.future
-        : Future.any([_closed.future, own]);
+  /// A copy of [request] that the session cancels when [trigger] completes.
+  http.BaseRequest _withAbortTrigger(
+    http.BaseRequest request,
+    Future<void> trigger,
+  ) {
     if (request is http.Request) {
       return http.AbortableRequest(
           request.method,
@@ -114,7 +150,11 @@ class SharedSessionClient extends http.BaseClient {
 
   @override
   void close() {
-    if (!_closed.isCompleted) _closed.complete();
+    _closed = true;
+    for (final abort in _inFlight.toList()) {
+      abort.complete();
+    }
+    _inFlight.clear();
     _cleartext?.close();
   }
 }

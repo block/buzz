@@ -58,6 +58,24 @@ void main() {
     );
   });
 
+  test('finished requests hold no abort trigger until close', () async {
+    var fired = 0;
+    final client = SharedSessionClient(
+      MockClient.streaming((request, _) async {
+        (request as http.Abortable).abortTrigger?.then((_) => fired++);
+        return http.StreamedResponse(Stream.value([1]), 200);
+      }),
+    );
+    for (var i = 0; i < 3; i++) {
+      await client.get(Uri.parse('https://relay.example/$i'));
+    }
+
+    client.close();
+    await pumpEventQueue();
+
+    expect(fired, 0);
+  });
+
   test('a request\'s own abort trigger still cancels it', () async {
     final session = _AbortRecorder();
     final client = SharedSessionClient(session);
