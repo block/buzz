@@ -93,16 +93,31 @@ class SharedSessionClient extends http.BaseClient {
       _inFlight.remove(abort);
       rethrow;
     }
-    Stream<List<int>> body() async* {
-      try {
-        yield* response.stream;
-      } finally {
-        _inFlight.remove(abort);
+    // A controller, not an async* wrapper: async* never listens to the
+    // session's stream when cancelled before its first event, so the
+    // session would keep downloading a body nobody reads.
+    late final StreamSubscription<List<int>> inner;
+    final body = StreamController<List<int>>(sync: true);
+    body
+      ..onListen = () {
+        inner = response.stream.listen(
+          body.add,
+          onError: body.addError,
+          onDone: () {
+            _inFlight.remove(abort);
+            body.close();
+          },
+        );
       }
-    }
+      ..onPause = (() => inner.pause())
+      ..onResume = (() => inner.resume())
+      ..onCancel = () {
+        _inFlight.remove(abort);
+        return inner.cancel();
+      };
 
     return http.StreamedResponse(
-      http.ByteStream(body()),
+      http.ByteStream(body.stream),
       response.statusCode,
       contentLength: response.contentLength,
       request: response.request,

@@ -61,9 +61,16 @@ void main() {
 
   test('finished requests hold no abort trigger until close', () async {
     var fired = 0;
+    var sessionBodyCancelled = false;
     final client = SharedSessionClient(
       MockClient.streaming((request, _) async {
         (request as http.Abortable).abortTrigger?.then((_) => fired++);
+        if (request.url.path == '/video') {
+          final body = StreamController<List<int>>(
+            onCancel: () => sessionBodyCancelled = true,
+          );
+          return http.StreamedResponse(body.stream, 500);
+        }
         final status = request.url.path == '/missing' ? 404 : 200;
         return http.StreamedResponse(Stream.value([1]), status);
       }),
@@ -79,6 +86,13 @@ void main() {
     );
     expect(missing.statusCode, 404);
     await pumpEventQueue();
+    // A body cancelled before its first event still cancels the session's
+    // download.
+    final video = await client.send(
+      http.Request('GET', Uri.parse('https://relay.example/video')),
+    );
+    await video.stream.listen(null).cancel();
+    expect(sessionBodyCancelled, isTrue);
     final ownAborts = fired;
 
     client.close();
