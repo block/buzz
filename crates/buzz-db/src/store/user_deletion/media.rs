@@ -111,6 +111,35 @@ impl Db {
         Ok(shared)
     }
 
+    /// Page all known uploaders for a file, including outside uploaders and audit-only claims.
+    pub async fn user_media_owners(&self, hash: &str, after: &str) -> Result<Vec<String>> {
+        validate_hash(hash)?;
+        if !after.is_empty() {
+            super::normalize_user_deletion_pubkey(after)?;
+        }
+        let mut tx = self.pool().begin().await?;
+        sqlx::query("SET LOCAL statement_timeout = '120s'")
+            .execute(&mut *tx)
+            .await?;
+        let owners: Vec<String> = sqlx::query_scalar(
+            r#"SELECT encode(pubkey, 'hex') FROM (
+                SELECT pubkey FROM media_uploaders WHERE sha256 = $1
+                UNION
+                SELECT actor_pubkey FROM audit_log
+                WHERE action = 'media_uploaded' AND object_id = $1 AND actor_pubkey IS NOT NULL
+            ) owners WHERE pubkey > decode($2, 'hex') ORDER BY pubkey LIMIT 500"#,
+        )
+        .bind(hash)
+        .bind(after)
+        .fetch_all(&mut *tx)
+        .await?;
+        for owner in &owners {
+            super::normalize_user_deletion_pubkey(owner)?;
+        }
+        tx.commit().await?;
+        Ok(owners)
+    }
+
     /// Remove the target set's ownership rows only after storage cleanup succeeds.
     /// Audit history and publication moderation records are retained.
     pub async fn remove_user_media_uploader(&self, pubkeys: &[String], hash: &str) -> Result<u64> {
@@ -350,6 +379,30 @@ mod postgres_tests {
                 .unwrap(),
             hashes[1..3]
         );
+        let mut expected_owners = vec![alice.clone(), agent.clone()];
+        expected_owners.sort();
+        assert_eq!(
+            db.user_media_owners(&hashes[0], "").await.unwrap(),
+            expected_owners
+        );
+        assert_eq!(
+            db.user_media_owners(&hashes[0], &expected_owners[0])
+                .await
+                .unwrap(),
+            expected_owners[1..]
+        );
+        assert!(db
+            .user_media_owners(&hashes[0], &expected_owners[1])
+            .await
+            .unwrap()
+            .is_empty());
+        let mut expected_owners = vec![agent.clone(), bob.clone()];
+        expected_owners.sort();
+        assert_eq!(
+            db.user_media_owners(&hashes[1], "").await.unwrap(),
+            expected_owners
+        );
+        assert!(db.user_media_owners("invalid", "").await.is_err());
         assert_eq!(
             db.remove_user_media_uploader(&keys, &hashes[0])
                 .await

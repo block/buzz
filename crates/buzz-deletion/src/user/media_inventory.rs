@@ -40,6 +40,8 @@ impl Inventory {
         // throughout collection. No application DB schema is changed.
         sqlx::raw_sql(
             "CREATE TABLE candidates (hash TEXT PRIMARY KEY, shared INTEGER NOT NULL DEFAULT 0) WITHOUT ROWID;
+             CREATE TABLE owners (hash TEXT, pubkey TEXT, PRIMARY KEY(hash, pubkey)) WITHOUT ROWID;
+             CREATE TABLE filenames (hash TEXT, name TEXT, PRIMARY KEY(hash, name)) WITHOUT ROWID;
              CREATE TABLE versions (id INTEGER PRIMARY KEY, hash TEXT NOT NULL,
                  priority INTEGER NOT NULL, unversioned INTEGER NOT NULL, entry TEXT NOT NULL);
              CREATE INDEX versions_by_hash ON versions(hash, priority, id);
@@ -123,6 +125,49 @@ impl Inventory {
         }
         tx.commit().await?;
         Ok(())
+    }
+
+    pub async fn add_owner(&mut self, hash: &str, owner: &str) -> Result<()> {
+        sqlx::query("INSERT OR IGNORE INTO owners(hash, pubkey) VALUES (?, ?)")
+            .bind(hash)
+            .bind(owner)
+            .execute(&mut self.conn)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn owners(&mut self, hash: &str, after: &str) -> Result<Vec<String>> {
+        Ok(sqlx::query_scalar(
+            "SELECT pubkey FROM owners WHERE hash = ? AND pubkey > ? ORDER BY pubkey LIMIT ?",
+        )
+        .bind(hash)
+        .bind(after)
+        .bind(i64::from(PAGE_SIZE))
+        .fetch_all(&mut self.conn)
+        .await?)
+    }
+
+    pub async fn add_filename(&mut self, hash: &str, name: &str) -> Result<()> {
+        if name.len() > MAX_ENTRY_BYTES {
+            bail!("stored filename exceeds 16 KiB");
+        }
+        sqlx::query("INSERT OR IGNORE INTO filenames(hash, name) VALUES (?, ?)")
+            .bind(hash)
+            .bind(name)
+            .execute(&mut self.conn)
+            .await?;
+        Ok(())
+    }
+
+    // A hash may have several stored extensions. Use the first for the display
+    // name; every actual key remains available in the file's versions array.
+    pub async fn filename(&mut self, hash: &str) -> Result<Option<String>> {
+        Ok(
+            sqlx::query_scalar("SELECT name FROM filenames WHERE hash = ? ORDER BY name LIMIT 1")
+                .bind(hash)
+                .fetch_optional(&mut self.conn)
+                .await?,
+        )
     }
 
     pub async fn require_immutable_versions(&mut self) -> Result<()> {
