@@ -2174,9 +2174,11 @@ pub(crate) mod tests {
                 pair_with(store.as_ref(), "b".into(), slow, Some(RELAY), "cli").await
             })
         };
-        tokio::task::spawn_blocking(move || started.recv().unwrap())
+        // Fail, not hang, if the pair request never reaches the desktop.
+        tokio::task::spawn_blocking(move || started.recv_timeout(Duration::from_secs(60)))
             .await
-            .unwrap();
+            .unwrap()
+            .expect("the pair request never reached the desktop");
         unpair_with(store.as_ref(), Some("a")).unwrap();
         update(store.as_ref(), |p| {
             assert!(!p.0.contains_key("b"));
