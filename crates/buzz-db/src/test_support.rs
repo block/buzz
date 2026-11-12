@@ -494,20 +494,7 @@ pub(crate) fn desired_state_schema_dir() -> std::path::PathBuf {
 /// which excludes the run's `_desired` template. The name is the only check:
 /// a manually created database with that shape would pass.
 pub(crate) async fn retire_foreign_key_delete_actions(pool: &sqlx::PgPool) {
-    let database: String = sqlx::query_scalar("SELECT current_database()")
-        .fetch_one(pool)
-        .await
-        .expect("read current database");
-    assert!(
-        database
-            .strip_prefix("buzz_nt_")
-            .is_some_and(|hash| hash.len() == 24
-                && hash
-                    .bytes()
-                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))),
-        "refusing to rewrite foreign keys in shared database {database}; \
-         run this test through scripts/postgres-test-run.sh"
-    );
+    assert_per_test_database(pool).await;
     sqlx::raw_sql(
         r#"DO $$
         DECLARE c record;
@@ -532,6 +519,74 @@ pub(crate) async fn retire_foreign_key_delete_actions(pool: &sqlx::PgPool) {
     .await
     .expect("count foreign-key delete actions");
     assert_eq!(remaining, 0, "every foreign-key delete action is retired");
+}
+
+/// Refuse to continue unless `pool` is this test process's own database (named
+/// `buzz_nt_` plus 24 hex digits by the per-test wrapper), so a schema rewrite
+/// cannot reach a shared database or the run's `_desired` template.
+async fn assert_per_test_database(pool: &sqlx::PgPool) {
+    let database: String = sqlx::query_scalar("SELECT current_database()")
+        .fetch_one(pool)
+        .await
+        .expect("read current database");
+    assert!(
+        database
+            .strip_prefix("buzz_nt_")
+            .is_some_and(|hash| hash.len() == 24
+                && hash
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))),
+        "refusing to rewrite foreign keys in shared database {database}; \
+         run this test through scripts/postgres-test-run.sh"
+    );
+}
+
+/// Drop every foreign key from `child` to `parent` in this test's database, for
+/// each `(child, parent)` pair: the schema a foreign-key retirement targets.
+/// A test that then expects the writer to reject a missing parent proves the
+/// application check, because the constraint can no longer do the work.
+///
+/// Refuses databases that are not the per-test wrapper's, like
+/// [`retire_foreign_key_delete_actions`]. Panics if a pair has no foreign key,
+/// so a renamed table cannot turn the test into a silent no-op.
+pub(crate) async fn drop_foreign_keys_between(pool: &sqlx::PgPool, pairs: &[(&str, &str)]) {
+    assert_per_test_database(pool).await;
+    for (child, parent) in pairs {
+        let constraints: Vec<String> = sqlx::query_scalar(
+            "SELECT conname FROM pg_constraint \
+             WHERE contype = 'f' AND conrelid = $1::text::regclass AND confrelid = $2::text::regclass",
+        )
+        .bind(child)
+        .bind(parent)
+        .fetch_all(pool)
+        .await
+        .expect("list foreign keys");
+        assert!(
+            !constraints.is_empty(),
+            "no foreign key from {child} to {parent} to drop"
+        );
+        for name in constraints {
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "ALTER TABLE {child} DROP CONSTRAINT \"{name}\""
+            )))
+            .execute(pool)
+            .await
+            .expect("drop foreign key");
+        }
+        let remaining: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_constraint \
+             WHERE contype = 'f' AND conrelid = $1::text::regclass AND confrelid = $2::text::regclass",
+        )
+        .bind(child)
+        .bind(parent)
+        .fetch_one(pool)
+        .await
+        .expect("recount foreign keys");
+        assert_eq!(
+            remaining, 0,
+            "foreign keys from {child} to {parent} dropped"
+        );
+    }
 }
 
 /// A single-connection pool whose session carries `application_name`, so
