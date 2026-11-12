@@ -1,8 +1,7 @@
-import 'package:buzz/shared/widgets/feedback_snackbar.dart';
-
 import 'dart:async';
 
 import '../../shared/me/hold_to_talk.dart';
+import '../../shared/relay/relay.dart';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -15,7 +14,6 @@ import '../../shared/me/default_agent.dart';
 import '../../shared/animated_avatar.dart';
 import '../../shared/me/me_sync.dart';
 import '../../shared/profile/user_cache_provider.dart';
-import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/agent_navigation_icon.dart';
 import '../../shared/widgets/avatar_image.dart';
@@ -24,6 +22,7 @@ import '../../shared/widgets/preset_agent_avatar.dart';
 import '../../shared/widgets/buzz_callout.dart';
 import 'first_agent_callout.dart';
 import 'empty_bestie_avatar.dart';
+import 'bestie_conversation.dart';
 import 'channel.dart';
 import 'default_agent_voice_control.dart';
 import 'default_agent_voice_draft.dart';
@@ -116,6 +115,15 @@ class DefaultAgentLauncher extends HookConsumerWidget {
       }
       opening.value = true;
       try {
+        if (recording == null) {
+          await openBestieConversation(
+            context,
+            ref,
+            pubkey,
+            onResolving: (value) => resolving.value = value,
+          );
+          return;
+        }
         final channelState = ref.read(channelsProvider);
         // AsyncValue may retain the previous community's list during reload.
         final channels = channelState.isLoading || channelState.hasError
@@ -142,7 +150,6 @@ class DefaultAgentLauncher extends HookConsumerWidget {
               ? Future.value(cached)
               : ref.read(channelActionsProvider).openDm(pubkeys: [pubkey]),
           () async {
-            if (recording == null) return (null, null);
             final event = await draft.readEvent();
             if (event != null) return (event, null);
             final descriptor = await uploadService.uploadVoiceNote(
@@ -156,41 +163,37 @@ class DefaultAgentLauncher extends HookConsumerWidget {
         if (!context.mounted) throw StateError('The conversation was closed.');
         // A community switch invalidates an in-flight destination.
         if (!destinationIsCurrent()) {
-          if (recording != null) throw StateError('The agent changed.');
-          return;
+          throw StateError('The agent changed.');
         }
-        if (recording != null) {
-          final session = ref.read(relaySessionProvider.notifier);
-          final previousEvent = prepared.$1;
-          if (previousEvent != null) {
-            if (!context.mounted || !destinationIsCurrent()) {
-              throw StateError('The community changed.');
-            }
-            await session.publish(previousEvent);
-          } else {
-            final sender = ref.read(sendMessageProvider);
-            final descriptor = prepared.$2!;
-            if (!context.mounted || !destinationIsCurrent()) {
-              throw StateError('The agent or community changed.');
-            }
-            await sender.call(
-              channelId: channel.id,
-              channel: channel,
-              content: descriptor.toMarkdownImage(),
-              mentionPubkeys: [pubkey],
-              mediaTags: [descriptor.toImetaTag()],
-              beforePublish: (event) async {
-                if (!context.mounted || !destinationIsCurrent()) {
-                  throw StateError('The agent or community changed.');
-                }
-                await draft.saveEvent(
-                  event,
-                  generation: recording.draftGeneration,
-                );
-              },
-            );
+        final session = ref.read(relaySessionProvider.notifier);
+        final previousEvent = prepared.$1;
+        if (previousEvent != null) {
+          if (!context.mounted || !destinationIsCurrent()) {
+            throw StateError('The community changed.');
           }
-          if (!context.mounted) return;
+          await session.publish(previousEvent);
+        } else {
+          final sender = ref.read(sendMessageProvider);
+          final descriptor = prepared.$2!;
+          if (!context.mounted || !destinationIsCurrent()) {
+            throw StateError('The agent or community changed.');
+          }
+          await sender.call(
+            channelId: channel.id,
+            channel: channel,
+            content: descriptor.toMarkdownImage(),
+            mentionPubkeys: [pubkey],
+            mediaTags: [descriptor.toImetaTag()],
+            beforePublish: (event) async {
+              if (!context.mounted || !destinationIsCurrent()) {
+                throw StateError('The agent or community changed.');
+              }
+              await draft.saveEvent(
+                event,
+                generation: recording.draftGeneration,
+              );
+            },
+          );
         }
         if (!context.mounted || !destinationIsCurrent()) {
           return;
@@ -204,21 +207,8 @@ class DefaultAgentLauncher extends HookConsumerWidget {
             ),
           ),
         );
-      } catch (error) {
-        if (recording != null) rethrow;
-        if (context.mounted) {
-          ScaffoldMessenger.of(context).showFeedbackSnackBar(
-            SnackBar(
-              content: Text('Could not open the agent conversation. $error'),
-            ),
-            kind: ToastKind.error,
-          );
-        }
       } finally {
-        if (context.mounted) {
-          opening.value = false;
-          resolving.value = false;
-        }
+        if (context.mounted) opening.value = false;
       }
     }
 

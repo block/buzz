@@ -1588,6 +1588,11 @@ pub struct AppState {
     /// first-write-wins and set during auth before an agent's first event,
     /// so a short TTL only bounds staleness for the rare backfill race.
     pub author_type_cache: Arc<moka::sync::Cache<(CommunityId, Vec<u8>), bool>>,
+    /// Confirmed agent owners for the DM write gate. Key: (community_id,
+    /// agent pubkey bytes). Value: `users.agent_owner_pubkey`. Absence is
+    /// never cached, because another process may link the owner later.
+    #[allow(clippy::type_complexity)]
+    pub agent_owner_cache: Arc<moka::sync::Cache<(CommunityId, Vec<u8>), Vec<u8>>>,
     /// Community lifecycle answers for socket admission and the ephemeral
     /// write fence, served for
     /// [`crate::community_active::COMMUNITY_ACTIVE_MAX_AGE`] after their read's
@@ -1900,6 +1905,12 @@ impl AppState {
                     .build(),
             ),
             author_type_cache: Arc::new(
+                moka::sync::Cache::builder()
+                    .max_capacity(10_000)
+                    .time_to_live(std::time::Duration::from_secs(300))
+                    .build(),
+            ),
+            agent_owner_cache: Arc::new(
                 moka::sync::Cache::builder()
                     .max_capacity(10_000)
                     .time_to_live(std::time::Duration::from_secs(300))

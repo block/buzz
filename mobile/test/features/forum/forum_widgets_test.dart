@@ -1,3 +1,4 @@
+import 'package:buzz/shared/widgets/frosted_app_bar.dart';
 import 'dart:async';
 
 import 'package:flutter/material.dart';
@@ -95,6 +96,7 @@ Widget _buildPostCard({
 Widget _buildPostsView({
   required ForumPostsResponse postsResponse,
   Channel? channel,
+  double titleContentHeight = 0,
   Map<String, UserProfile> users = const {},
 }) {
   final ch = channel ?? _forumChannel;
@@ -110,7 +112,11 @@ Widget _buildPostsView({
     child: MaterialApp(
       theme: AppTheme.light(),
       home: Scaffold(
-        body: ForumPostsView(channel: ch, currentPubkey: 'self'),
+        body: ForumPostsView(
+          channel: ch,
+          currentPubkey: 'self',
+          titleContentHeight: titleContentHeight,
+        ),
       ),
     ),
   );
@@ -744,6 +750,7 @@ void main() {
     testWidgets('renders post list', (tester) async {
       await tester.pumpWidget(
         _buildPostsView(
+          titleContentHeight: 104,
           postsResponse: ForumPostsResponse(
             posts: [
               _makePost(content: 'First post'),
@@ -755,6 +762,12 @@ void main() {
       );
       await tester.pumpAndSettle();
 
+      final first = find.byType(ForumPostCard).first;
+      final list = find.byType(ListView).first;
+      expect(
+        tester.getTopLeft(first).dy - tester.getTopLeft(list).dy,
+        frostedAppBarHeight(tester.element(list), titleContentHeight: 104),
+      );
       expect(find.text('First post'), findsOneWidget);
       expect(find.text('Second post'), findsOneWidget);
     });
