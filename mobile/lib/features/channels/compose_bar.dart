@@ -9,6 +9,8 @@ import 'dart:math' as math;
 import 'dart:ui' show FlutterView;
 
 import 'package:camera/camera.dart' as camera;
+import 'package:duo_kit/duo_kit.dart';
+import '../../shared/widgets/duo_toolbar.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/physics.dart';

@@ -467,7 +467,75 @@ import os.log
     result: @escaping FlutterResult
   ) {
     switch call.method {
+    case "cameraCutoutFrame":
+      #if canImport(UIKit, _version: 9127.0.85)
+      if #available(iOS 27.1, *),
+         let scene = UIApplication.shared.connectedScenes
+           .compactMap({ $0 as? UIWindowScene })
+           .first(where: { $0.activationState == .foregroundActive }),
+         let window = scene.windows.first(where: { $0.isKeyWindow }) {
+        if window.reservedRegions(kind: .division).contains(where: { $0.isActive }) {
+          result(nil)
+          return
+        }
+        let bounds = window.bounds
+        // Closed Duo displays may omit Flutter display features. UIKit still
+        // owns the physical occlusion; remove its interactive clearance.
+        for region in window.reservedRegions(kind: .occlusion) where region.isActive {
+          let rect = region.frame.inset(by: region.margins)
+          let isCamera = abs(rect.width - rect.height) < 1
+            && rect.minX > 0 && rect.minY > 0
+            && rect.maxX < bounds.width && rect.maxY < bounds.height
+            && rect.width < bounds.width / 4
+          guard rect.width > 0, rect.height > 0, isCamera else { continue }
+          let values: [Double] = [
+            Double(rect.minX), Double(rect.minY), Double(rect.width),
+            Double(rect.height), Double(bounds.width), Double(bounds.height)
+          ]
+          result(values)
+          return
+        }
+      }
+      #endif
+      result(nil)
+    case "previewRotationQuarterTurns":
+      // The plugin reads connectedScenes.first, which can be the inactive
+      // cover scene on Duo. Resolve the angle against the visible preview host.
+      if #available(iOS 17.0, *),
+         let scene = UIApplication.shared.connectedScenes
+           .compactMap({ $0 as? UIWindowScene })
+           .first(where: { $0.activationState == .foregroundActive }),
+         let window = scene.windows.first(where: { $0.isKeyWindow }),
+         let camera = AVCaptureDevice.DiscoverySession(
+           deviceTypes: [.builtInTripleCamera, .builtInDualCamera, .builtInWideAngleCamera],
+           mediaType: .video, position: .back
+         ).devices.first {
+        let coordinator = AVCaptureDevice.RotationCoordinator(device: camera, previewLayer: window.layer)
+        let angle = coordinator.videoRotationAngleForHorizonLevelPreview
+        let orientation = call.arguments as? String
+        let legacyAngle: CGFloat
+        switch orientation {
+        case "landscapeLeft": legacyAngle = 180
+        case "landscapeRight": legacyAngle = 0
+        case "portraitDown": legacyAngle = 270
+        default: legacyAngle = 90
+        }
+        result(Int(((angle - legacyAngle) / 90).rounded()))
+        return
+      }
+      result(0)
     case "usesDynamicIslandQrScannerPortal":
+      #if canImport(UIKit, _version: 9127.0.85)
+      if #available(iOS 27.1, *),
+         let scene = UIApplication.shared.connectedScenes
+           .compactMap({ $0 as? UIWindowScene })
+           .first(where: { $0.activationState == .foregroundActive }),
+         let window = scene.windows.first(where: { $0.isKeyWindow }),
+         window.reservedRegions(kind: .division).contains(where: { $0.isActive }) {
+        result(false)
+        return
+      }
+      #endif
       result(
         UIDevice.current.userInterfaceIdiom == .phone
           && usesDynamicIslandQrScannerPortal(

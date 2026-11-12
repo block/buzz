@@ -1,3 +1,6 @@
+import 'package:buzz/shared/widgets/frosted_app_bar.dart';
+import 'package:buzz/shared/widgets/frosted_scaffold.dart';
+import 'package:buzz/shared/widgets/ios_navigation_bar.dart';
 import 'dart:async';
 import 'dart:io';
 import 'dart:ui' as ui;
@@ -5,10 +8,12 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 
 import 'package:buzz/features/settings/settings_page.dart';
+import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
 import 'package:buzz/shared/community/community_membership_provider.dart';
 import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/community/community_provider.dart';
 import 'package:buzz/shared/theme/theme.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:buzz/shared/push/dev_push_lease.dart';
 import 'package:buzz/shared/push/push_relay_capability_provider.dart';
 import 'package:buzz/shared/relay/app_lifecycle_provider.dart';
@@ -32,6 +37,184 @@ void main() {
     );
   });
 
+  testWidgets('wide Settings opens categories and editors in the detail pane', (
+    tester,
+  ) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(1000, 800);
+    addTearDown(tester.view.reset);
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [savedPrefsProvider.overrideWithValue(prefs)],
+        child: MaterialApp(
+          theme: AppTheme.light(),
+          home: SettingsPage(
+            profileHeader: const SizedBox.shrink(),
+            identityRecoveryPageBuilder: (_) => const SizedBox.shrink(),
+            profileEditPageBuilder: (context) => FrostedScaffold(
+              body: const Text('Photo editor'),
+              appBar: FrostedAppBar(
+                nativeTitle: 'Photo editor',
+                leading: IconButton(
+                  tooltip: 'Back to profile',
+                  onPressed: () => Navigator.of(context).pop(),
+                  icon: const Icon(Icons.arrow_back),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Select a setting'), findsNothing);
+    expect(find.text('Set status'), findsOneWidget);
+    expect(
+      Navigator.of(tester.element(find.text('Set status'))).canPop(),
+      isFalse,
+    );
+    final workspaceTheme = Theme.of(
+      tester.element(find.byType(AdaptiveConversationDestination)),
+    );
+    expect(
+      workspaceTheme.colorScheme.surface,
+      utilitySurfaceThemeData(AppTheme.light()).colorScheme.surface,
+    );
+    expect(
+      workspaceTheme.scaffoldBackgroundColor,
+      workspaceTheme.colorScheme.surface,
+    );
+
+    final categoryRows = find.byWidgetPredicate(
+      (w) =>
+          w is AppListRow &&
+          [
+            'Status',
+            'Profile',
+            'Notifications',
+            'Connection',
+          ].contains(w.title),
+    );
+    final categoryBounds = <String, Rect>{
+      for (final element in categoryRows.evaluate())
+        (element.widget as AppListRow).title: tester.getRect(
+          find.byWidget(element.widget),
+        ),
+    };
+    expect(categoryBounds.length, greaterThanOrEqualTo(3));
+    for (final element in categoryRows.evaluate()) {
+      expect(
+        find.descendant(
+          of: find.byWidget(element.widget),
+          matching: find.byIcon(BuzzIcons.chevronRight),
+        ),
+        findsOneWidget,
+      );
+    }
+    expect(find.byIcon(Icons.check), findsNothing);
+
+    await tester.tap(find.text('Profile'));
+    await tester.pumpAndSettle();
+    for (final entry in categoryBounds.entries) {
+      final row = find.byWidgetPredicate(
+        (w) => w is AppListRow && w.title == entry.key,
+      );
+      expect(tester.getRect(row), entry.value);
+    }
+    expect(find.byIcon(Icons.check), findsNothing);
+    await tester.tap(find.text('Status'));
+    await tester.pumpAndSettle();
+    expect(find.text('Set status'), findsOneWidget);
+    expect(
+      Navigator.of(tester.element(find.text('Set status'))).canPop(),
+      isFalse,
+    );
+    await tester.tap(find.text('Profile'));
+    await tester.pumpAndSettle();
+    expect(
+      tester.getCenter(find.text('Edit photo')).dx,
+      greaterThan(tester.getCenter(find.text('Status')).dx),
+    );
+    expect(
+      Navigator.of(tester.element(find.text('Edit photo'))).canPop(),
+      isFalse,
+    );
+    await tester.tap(find.text('Edit photo'));
+    await tester.pumpAndSettle();
+    expect(find.text('Photo editor'), findsOneWidget);
+    await tester.binding.handlePopRoute();
+    await tester.pumpAndSettle();
+    expect(find.text('Edit photo'), findsOneWidget);
+    await tester.tap(find.text('Edit photo'));
+    await tester.pumpAndSettle();
+    expect(find.text('Status'), findsOneWidget);
+    tester.view.physicalSize = const Size(390, 800);
+    await tester.pumpAndSettle();
+    expect(find.text('Photo editor'), findsOneWidget);
+    await tester.binding.handlePopRoute();
+    await tester.pumpAndSettle();
+    expect(find.text('Edit photo'), findsOneWidget);
+    await tester.binding.handlePopRoute();
+    await tester.pumpAndSettle();
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    tester.view.physicalSize = const Size(678, 466);
+    tester.view.viewPadding = const FakeViewPadding(right: 84);
+    tester.view.padding = const FakeViewPadding(right: 84);
+    await tester.pumpAndSettle();
+    expect(find.text('Profile'), findsNothing);
+    expect(find.text('Display name'), findsOneWidget);
+    expect(
+      find.byWidgetPredicate(
+        (widget) => widget is FrostedAppBar && widget.railOnly,
+      ),
+      findsOneWidget,
+    );
+    expect(find.text('Settings'), findsNothing);
+    // Book-mode Duo keeps Profile underneath the pushed photo editor.
+    tester.view.physicalSize = const Size(874, 402);
+    tester.view.viewPadding = const FakeViewPadding(right: 76);
+    tester.view.padding = tester.view.viewPadding;
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Profile'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Edit photo'));
+    await tester.pumpAndSettle();
+    expect(find.text('Photo editor'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('duo-toolbar-Close settings')),
+      findsOneWidget,
+    );
+    final closeSettings = find.byKey(
+      const ValueKey('duo-toolbar-Close settings'),
+    );
+    final backToProfile = find.byKey(
+      const ValueKey('duo-toolbar-Back to profile'),
+    );
+    expect(backToProfile, findsOneWidget);
+    expect(
+      tester.getRect(closeSettings).overlaps(tester.getRect(backToProfile)),
+      isFalse,
+    );
+    tester
+        .widget<IosNavigationBar>(
+          find.descendant(
+            of: backToProfile,
+            matching: find.byType(IosNavigationBar),
+          ),
+        )
+        .leading!
+        .onPressed!();
+    await tester.pumpAndSettle();
+    expect(find.text('Edit photo'), findsOneWidget);
+    expect(find.text('Set status'), findsNothing);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    debugDefaultTargetPlatformOverride = null;
+  });
+
   for (final buildNumber in ['432', '', '2147483647']) {
     testWidgets('shows version with build number "$buildNumber"', (
       tester,
@@ -49,6 +232,7 @@ void main() {
       );
       SharedPreferences.setMockInitialValues({});
       final prefs = await SharedPreferences.getInstance();
+      _usePhoneViewport(tester);
       await tester.pumpWidget(
         ProviderScope(
           overrides: [
@@ -76,7 +260,11 @@ void main() {
       await tester.pumpAndSettle();
       final label = buildNumber.isEmpty ? 'v0.16.0' : 'v0.16.0 ($buildNumber)';
       final version = find.text(label);
-      await tester.scrollUntilVisible(version, 200);
+      await tester.scrollUntilVisible(
+        version,
+        200,
+        scrollable: find.byType(Scrollable).first,
+      );
       await tester.pumpAndSettle();
       expect(version.hitTestable(), findsOneWidget);
       expect(
@@ -131,7 +319,11 @@ void main() {
         );
         await tester.pumpAndSettle();
         final version = find.text('v0.16.0 (432)');
-        await tester.scrollUntilVisible(version, 200);
+        await tester.scrollUntilVisible(
+          version,
+          200,
+          scrollable: find.byType(Scrollable).first,
+        );
         await tester.pumpAndSettle();
         final target = find.ancestor(
           of: version,
@@ -177,6 +369,7 @@ void main() {
       SharedPreferences.setMockInitialValues({});
       final prefs = await SharedPreferences.getInstance();
       final capability = Completer<BuzzPushLeaseDescriptor?>();
+      _usePhoneViewport(tester);
       await tester.pumpWidget(
         ProviderScope(
           overrides: [
@@ -231,6 +424,7 @@ void main() {
 
     final capability = Future<BuzzPushLeaseDescriptor?>.value(_pushDescriptor);
 
+    _usePhoneViewport(tester);
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
@@ -280,6 +474,7 @@ void main() {
         SharedPreferences.setMockInitialValues({});
         final prefs = await SharedPreferences.getInstance();
 
+        _usePhoneViewport(tester);
         await tester.pumpWidget(
           ProviderScope(
             overrides: [savedPrefsProvider.overrideWithValue(prefs)],
@@ -359,6 +554,7 @@ void main() {
     final prefs = await SharedPreferences.getInstance();
     final opened = <String>[];
 
+    _usePhoneViewport(tester);
     await tester.pumpWidget(
       ProviderScope(
         overrides: [savedPrefsProvider.overrideWithValue(prefs)],
@@ -400,6 +596,7 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
 
+    _usePhoneViewport(tester);
     await tester.pumpWidget(
       ProviderScope(
         overrides: [savedPrefsProvider.overrideWithValue(prefs)],
@@ -432,6 +629,7 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
 
+    _usePhoneViewport(tester);
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
@@ -464,6 +662,7 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
 
+    _usePhoneViewport(tester);
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
@@ -495,6 +694,7 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
 
+    _usePhoneViewport(tester);
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
@@ -526,6 +726,7 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
 
+    _usePhoneViewport(tester);
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
@@ -570,3 +771,11 @@ const _pushDescriptor = BuzzPushLeaseDescriptor(
   maxEndpointLength: 2048,
   maxStringLength: 512,
 );
+
+void _usePhoneViewport(WidgetTester tester) {
+  if (tester.view.physicalSize.width / tester.view.devicePixelRatio >= 640) {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(390, 1200);
+    addTearDown(tester.view.reset);
+  }
+}

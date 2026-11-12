@@ -170,11 +170,15 @@ void _showInviteOptionSheet<T>({
   showBuzzModalBottomSheet<void>(
     context: context,
     showDragHandle: true,
-    builder: (_) => _InviteOptionSheet<T>(
-      title: title,
-      value: value,
-      options: options,
-      onSelected: onSelected,
+    useDuoFullWidth: false,
+    isScrollControlled: true,
+    builder: (_) => SingleChildScrollView(
+      child: _InviteOptionSheet<T>(
+        title: title,
+        value: value,
+        options: options,
+        onSelected: onSelected,
+      ),
     ),
   );
 }
