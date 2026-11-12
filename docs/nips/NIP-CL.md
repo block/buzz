@@ -768,3 +768,28 @@ created a channel.
 - NIP-29: the group-state events that this NIP adds tags to.
 - NIP-01: the filters that find channels.
 - NIP-22, NIP-34 and NIP-72: the convention for uppercase `P`.
+
+### Optional single-publisher streams
+
+A relay advertising `buzz-message-publisher` accepts an owner/admin kind-9002
+`["message_publisher", "<64-hex-pubkey>"]` on a stream channel. The tag sets one
+publisher; an empty command value clears the policy. Omission preserves it.
+Duplicate or malformed tags are rejected. Kind 39000 publishes the tag only
+while the policy is set. Admission defaults and existing roles are unchanged.
+
+Only the configured identity may start messages. All authenticated readers of
+the channel, including channel guests and non-members of an open channel, may
+reply to a genuine root by that publisher. Normal community, token, archive and
+moderation checks still apply. The relay validates the full stored ancestry in
+the same community and channel, rejecting missing, deleted, foreign,
+non-message or other-author roots. Pre-existing publisher roots remain usable;
+other history stays visible but accepts no further replies. Other authors may
+not broadcast replies to the channel. The same checks cover workflow messages
+and edits of an author's own eligible messages; other content permissions do
+not change.
+
+Deploy the additive schema before the relay. All serving relay instances must
+support enforcement before an administrator enables a policy. Older clients
+may show a composer that the relay rejects, or require joining before replying;
+updated desktop and mobile clients distinguish root posting from replying.
+Clients must verify the extension before configuring this setting.

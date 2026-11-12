@@ -801,6 +801,18 @@ pub async fn validate_admin_event(
                 }
             }
 
+            super::message_policy::publisher_update(event).map_err(anyhow::Error::msg)?;
+            if event
+                .tags
+                .iter()
+                .any(|t| t.kind().to_string() == "message_publisher")
+                && channel.channel_type != "stream"
+            {
+                return Err(anyhow::anyhow!(
+                    "message_publisher requires a stream channel"
+                ));
+            }
+
             // `auto_join` is a community setting, not a channel one: the
             // relay joins every new community member into the channel. So it
             // takes the actor's *relay* role (owner or admin), not a channel
@@ -873,8 +885,8 @@ pub async fn validate_admin_event(
                 labels.map_err(|e| anyhow::anyhow!("{e}"))?;
             }
 
-            // name/about/archived/visibility/ttl/labels/join_role/unlisted
-            // require owner/admin; topic/purpose allow any member who may
+            // name/about/archived/visibility/ttl/labels/join_role/
+            // message_publisher/unlisted require owner/admin; topic/purpose allow any member who may
             // post; auto_join was decided above by relay role, so an event
             // carrying only that tag needs neither.
             let has_member_tag = event
@@ -901,7 +913,7 @@ pub async fn validate_admin_event(
                     return Ok(());
                 }
                 Err(anyhow::anyhow!(
-                    "actor not authorized for name/about/archived/visibility/ttl/label/join_role/unlisted changes"
+                    "actor not authorized for name/about/archived/visibility/ttl/label/join_role/message_publisher/unlisted changes"
                 ))
             } else if has_member_tag {
                 // topic/purpose: any member whose role may post (never a
@@ -1465,6 +1477,7 @@ const PRIVILEGED_METADATA_TAGS: &[&str] = &[
     "ttl",
     "t",
     "join_role",
+    "message_publisher",
     "unlisted",
 ];
 
@@ -2392,6 +2405,8 @@ pub(crate) async fn persist_edit_metadata(
             _ => {}
         }
     }
+    edit.columns.message_publisher =
+        super::message_policy::publisher_update(event).map_err(anyhow::Error::msg)?;
     // All `t` tags together form the new label set. `["t", ""]` alone clears it.
     if let Some(labels) = channel_labels_from_tags(event) {
         edit.columns.labels = Some(labels.map_err(|e| anyhow::anyhow!("{e}"))?);

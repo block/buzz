@@ -22,6 +22,8 @@ fn extract_channel_metadata(e: &serde_json::Value) -> serde_json::Value {
         "channel_id": extract_d_tag(e),
         "name": extract_tag_value(e, "name"),
         "description": extract_tag_value(e, "about"),
+        "join_role": extract_tag_value(e, "join_role"),
+        "message_publisher": extract_tag_value(e, "message_publisher"),
         "created_at": e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0),
     })
 }
@@ -2030,6 +2032,37 @@ pub async fn dispatch(
                 auto_join,
             )
             .await
+        }
+        ChannelsCmd::MessagePublisher { channel, pubkey } => {
+            let info: serde_json::Value = serde_json::from_str(&client.get_public("/info").await?)
+                .map_err(|e| CliError::Other(format!("invalid NIP-11 response: {e}")))?;
+            if !info
+                .get("supported_extensions")
+                .and_then(|v| v.as_array())
+                .is_some_and(|extensions| {
+                    extensions
+                        .iter()
+                        .any(|v| v.as_str() == Some("buzz-message-publisher"))
+                })
+            {
+                return Err(CliError::Other(
+                    "relay does not support publisher channels".into(),
+                ));
+            }
+            let publisher = if pubkey.is_empty() {
+                None
+            } else {
+                Some(
+                    nostr::PublicKey::from_hex(&pubkey)
+                        .map_err(|e| CliError::Usage(e.to_string()))?,
+                )
+            };
+            let builder = buzz_sdk::build_set_message_publisher(parse_uuid(&channel)?, publisher)
+                .map_err(|e| CliError::Other(e.to_string()))?;
+            let event = client.sign_event(builder).await?;
+            let response = client.submit_event(event).await?;
+            println!("{}", normalize_write_response(&response));
+            Ok(())
         }
         ChannelsCmd::Topic { channel, topic } => {
             cmd_set_channel_topic(client, &channel, &topic).await

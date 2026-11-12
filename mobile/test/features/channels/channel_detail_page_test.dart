@@ -1,6 +1,7 @@
 import 'package:buzz/features/forum/forum_posts_view.dart';
 import 'package:buzz/features/channels/me/me_chat_settings.dart';
 import 'package:buzz/shared/widgets/dm_header_portrait.dart';
+import 'package:buzz/features/channels/publisher_policy.dart';
 import 'package:buzz/features/channels/dm_voice_agent_provider.dart';
 import 'package:buzz/features/channels/default_agent_launcher.dart';
 import 'package:buzz/features/channels/bestie_welcome.dart';
@@ -109,6 +110,7 @@ import '../../helpers/thread_ids.dart';
 import '../../helpers/widget_helpers.dart';
 
 part 'thread_reply_refresh_cases.dart';
+part 'publisher_thread_cases.dart';
 part 'thread_title_capsule_cases.dart';
 part 'channel_detail_page_test/loading_review_tests.dart';
 part 'channel_detail_page_test/presence_tests.dart';
@@ -303,6 +305,7 @@ Widget _buildTestable({
   Map<String, Future<List<NostrEvent>>> pendingThreadReplies = const {},
   Map<String, Future<List<NostrEvent>> Function()> threadReplyLoaders =
       const {},
+  Map<String, ({NostrEvent event, String author})> publisherRoots = const {},
   Map<String, List<NostrEvent>> localThreadReplies = const {},
   TextScaler textScaler = TextScaler.noScaling,
   bool disableAnimations = false,
@@ -505,6 +508,10 @@ Widget _buildTestable({
       if (huddleCurrentPubkey != null)
         currentPubkeyProvider.overrideWith((ref) => huddleCurrentPubkey),
       appLifecycleProvider.overrideWith(_TestAppLifecycleNotifier.new),
+      for (final entry in publisherRoots.entries)
+        publisherThreadRootProvider(
+          ThreadRepliesArgs(channelId: resolvedChannel.id, rootId: entry.key),
+        ).overrideWith((ref) async => entry.value),
       // Compose bar drafts persist through SharedPreferences.
       savedPrefsProvider.overrideWithValue(_testPrefs),
     ],
@@ -1195,6 +1202,7 @@ void main() {
 
   _loadingReviewTests();
   threadReplyRefreshTests();
+  publisherThreadTests();
   threadTitleCapsuleTests();
   presenceTests();
   actionRowTests();

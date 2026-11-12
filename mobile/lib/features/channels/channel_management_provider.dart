@@ -331,6 +331,7 @@ ChannelDetails channelDetailsFromEvent(NostrEvent event) {
     isUtc: true,
   );
   return ChannelDetails(
+    messagePublisher: data.messagePublisher,
     id: data.id,
     name: data.name,
     channelType: data.channelType,

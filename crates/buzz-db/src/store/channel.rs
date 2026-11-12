@@ -93,6 +93,8 @@ pub struct ChannelRecord {
     /// effective while the channel is open and unarchived; see
     /// [`group_metadata_tags`] and [`list_auto_join_channels`].
     pub auto_join: bool,
+    /// Optional sole publisher; readers may reply to validated roots by this identity.
+    pub message_publisher: Option<Vec<u8>>,
 }
 
 impl ChannelRecord {
@@ -188,7 +190,7 @@ pub async fn create_channel(
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
                purpose, purpose_set_by, purpose_set_at,
-               ttl_seconds, ttl_deadline, labels, join_role, unlisted, auto_join
+               ttl_seconds, ttl_deadline, labels, join_role, unlisted, auto_join, message_publisher
         FROM channels WHERE community_id = $1 AND id = $2
         "#,
     )
@@ -251,7 +253,7 @@ pub async fn create_channel_with_id(
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
                purpose, purpose_set_by, purpose_set_at,
-               ttl_seconds, ttl_deadline, labels, join_role, unlisted, auto_join
+               ttl_seconds, ttl_deadline, labels, join_role, unlisted, auto_join, message_publisher
         FROM channels WHERE community_id = $1 AND id = $2
         "#,
     )
@@ -541,7 +543,7 @@ async fn select_channel(
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
                purpose, purpose_set_by, purpose_set_at,
-               ttl_seconds, ttl_deadline, labels, join_role, unlisted, auto_join
+               ttl_seconds, ttl_deadline, labels, join_role, unlisted, auto_join, message_publisher
         FROM channels WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL
         "#,
     )
@@ -630,7 +632,7 @@ async fn list_channels_with_operation(
                    nip29_group_id, topic_required, max_members,
                    topic, topic_set_by, topic_set_at,
                    purpose, purpose_set_by, purpose_set_at,
-                   ttl_seconds, ttl_deadline, labels, join_role, unlisted, auto_join
+                   ttl_seconds, ttl_deadline, labels, join_role, unlisted, auto_join, message_publisher
             FROM channels
             WHERE community_id = $1 AND deleted_at IS NULL AND visibility::text = $2
             ORDER BY created_at DESC
@@ -650,7 +652,7 @@ async fn list_channels_with_operation(
                    nip29_group_id, topic_required, max_members,
                    topic, topic_set_by, topic_set_at,
                    purpose, purpose_set_by, purpose_set_at,
-                   ttl_seconds, ttl_deadline, labels, join_role, unlisted, auto_join
+                   ttl_seconds, ttl_deadline, labels, join_role, unlisted, auto_join, message_publisher
             FROM channels
             WHERE community_id = $1 AND deleted_at IS NULL
             ORDER BY created_at DESC
@@ -691,7 +693,7 @@ pub async fn list_auto_join_channels(
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
                purpose, purpose_set_by, purpose_set_at,
-               ttl_seconds, ttl_deadline, labels, join_role, unlisted, auto_join
+               ttl_seconds, ttl_deadline, labels, join_role, unlisted, auto_join, message_publisher
         FROM channels
         WHERE community_id = $1 AND auto_join AND channel_type = 'stream'
           AND visibility = 'open' AND archived_at IS NULL AND deleted_at IS NULL
@@ -798,6 +800,7 @@ pub(crate) fn row_to_channel_record(row: sqlx::postgres::PgRow) -> Result<Channe
         // Selected by every channel-record query, like `join_role`.
         unlisted: row.try_get("unlisted")?,
         auto_join: row.try_get("auto_join")?,
+        message_publisher: row.try_get("message_publisher")?,
     })
 }
 
@@ -893,6 +896,9 @@ pub fn group_metadata_tags(channel: &ChannelRecord, members: &[MemberRecord]) ->
         &channel.created_at.timestamp().to_string(),
     ]));
     tags.push(tag(&["join_role", join_role.as_str()]));
+    if let Some(publisher) = &channel.message_publisher {
+        tags.push(tag(&["message_publisher", &hex::encode(publisher)]));
+    }
     if channel.auto_join && open && channel.archived_at.is_none() {
         tags.push(tag(&["auto_join"]));
     }
@@ -1076,6 +1082,8 @@ pub struct ChannelUpdate {
     /// `None` to leave unchanged. `Some(true)` needs an open, unarchived
     /// channel; `apply_channel_metadata_event` refuses it otherwise.
     pub auto_join: Option<bool>,
+    /// Outer None preserves policy; Some(None) clears it.
+    pub message_publisher: Option<Option<Vec<u8>>>,
 }
 
 impl ChannelUpdate {
@@ -1089,6 +1097,7 @@ impl ChannelUpdate {
             && self.join_role.is_none()
             && self.unlisted.is_none()
             && self.auto_join.is_none()
+            && self.message_publisher.is_none()
     }
 
     /// True when the update changes a setting that decides admission:
@@ -1344,6 +1353,10 @@ async fn update_channel_on(
         set_parts.push(format!("auto_join = ${param_idx}"));
         param_idx += 1;
     }
+    if updates.message_publisher.is_some() {
+        set_parts.push(format!("message_publisher = ${param_idx}"));
+        param_idx += 1;
+    }
     if let Some(ref ttl) = updates.ttl_seconds {
         // Set ttl_seconds, then reset the deadline from now (or clear both).
         set_parts.push(format!("ttl_seconds = ${param_idx}"));
@@ -1384,6 +1397,9 @@ async fn update_channel_on(
     }
     if let Some(auto_join) = updates.auto_join {
         q = q.bind(auto_join);
+    }
+    if let Some(ref publisher) = updates.message_publisher {
+        q = q.bind(publisher);
     }
     if let Some(ref ttl) = updates.ttl_seconds {
         q = q.bind(*ttl);
@@ -2286,6 +2302,7 @@ mod group_metadata_tag_tests {
             join_role: join_role.into(),
             unlisted: false,
             auto_join: false,
+            message_publisher: None,
         }
     }
 

@@ -308,8 +308,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
     final memberProfilesPreloadState = useFuture(memberProfilesPreload);
     final showsComposer =
         !resolvedChannel.isForum &&
-        resolvedChannel.isMember &&
-        !resolvedChannel.isArchived;
+        resolvedChannel.canStartMessage(currentPubkey);
     final profileOwnedAgentPubkeys = <String>[];
     for (final participantPubkey in resolvedChannel.participantPubkeys) {
       final normalized = participantPubkey.trim().toLowerCase();
@@ -881,8 +880,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                       ),
               ),
               if (!resolvedChannel.isForum &&
-                  (!resolvedChannel.isMember ||
-                      resolvedChannel.isArchived)) ...[
+                  (!resolvedChannel.canStartMessage(currentPubkey))) ...[
                 if (!resolvedChannel.isDm)
                   _ReadOnlyNotice(channel: resolvedChannel),
               ],

@@ -283,16 +283,17 @@ impl ActionSink for RelayActionSink {
                     "workflow owner does not have access to destination channel".into(),
                 ));
             }
-            if !crate::handlers::ingest::may_post(
-                &state,
-                tenant.community(),
-                channel_uuid,
-                &author_pubkey_bytes,
-                &channel,
-                is_member,
-            )
-            .await
-            .map_err(|e| ActionSinkError::Database(e.to_string()))?
+            if channel.message_publisher.is_none()
+                && !crate::handlers::ingest::may_post(
+                    &state,
+                    tenant.community(),
+                    channel_uuid,
+                    &author_pubkey_bytes,
+                    &channel,
+                    is_member,
+                )
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?
             {
                 return Err(ActionSinkError::InvalidInput(
                     "workflow owner cannot post in destination channel".into(),
@@ -416,6 +417,16 @@ impl ActionSink for RelayActionSink {
                 .tags(tags)
                 .sign_with_keys(&state.relay_keypair)
                 .map_err(|e| ActionSinkError::EventBuild(format!("signing: {e}")))?;
+
+            crate::handlers::message_policy::validate(
+                &state,
+                tenant.community(),
+                &channel,
+                &event,
+                &author_pubkey_bytes,
+            )
+            .await
+            .map_err(ActionSinkError::InvalidInput)?;
 
             crate::handlers::media_access::validate_media_references(&tenant, &state, &event)
                 .await
@@ -1641,5 +1652,100 @@ mod postgres_tests {
         reply(owner_hex.clone(), owner_only)
             .await
             .expect("owner replies to a parent only they can read");
+    }
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn publisher_policy_covers_the_workflow_writer() {
+        use crate::handlers::group_state_postgres_tests::{
+            community, create_channel, edit_channel,
+        };
+        let state = test_state().await;
+        let tenant = community(&state, "workflow-publisher").await;
+        let publisher = nostr::Keys::generate();
+        let reader = nostr::Keys::generate();
+        let channel = create_channel(&state, &tenant, &publisher, &[]).await;
+        edit_channel(
+            &state,
+            &tenant,
+            &publisher,
+            channel,
+            &[
+                &["message_publisher", &publisher.public_key().to_hex()],
+                &["join_role", "guest"],
+            ],
+        )
+        .await
+        .unwrap();
+        let sink = RelayActionSink::new(&state);
+        let root = sink
+            .send_message(
+                tenant.community(),
+                &channel.to_string(),
+                "update",
+                "update",
+                &publisher.public_key().to_hex(),
+                None,
+            )
+            .await
+            .unwrap();
+        let error = sink
+            .send_message(
+                tenant.community(),
+                &channel.to_string(),
+                "other root",
+                "other root",
+                &reader.public_key().to_hex(),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(format!("{error:?}")
+            .contains("restricted: reply to a post by this channel's publisher"));
+        let stored = state
+            .db
+            .get_event_by_id(tenant.community(), &hex::decode(&root).unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            crate::handlers::ingest::effective_message_author(
+                &stored.event,
+                &state.relay_keypair.public_key()
+            ),
+            publisher.public_key().to_bytes()
+        );
+        let reply = sink
+            .send_message(
+                tenant.community(),
+                &channel.to_string(),
+                "reply",
+                "reply",
+                &reader.public_key().to_hex(),
+                Some(&root),
+            )
+            .await
+            .unwrap();
+        assert!(sink
+            .send_message(
+                tenant.community(),
+                &channel.to_string(),
+                "nested",
+                "nested",
+                &reader.public_key().to_hex(),
+                Some(&reply)
+            )
+            .await
+            .is_ok());
+        assert!(sink
+            .send_message(
+                tenant.community(),
+                &channel.to_string(),
+                "missing",
+                "missing",
+                &reader.public_key().to_hex(),
+                Some(&"a".repeat(64))
+            )
+            .await
+            .is_err());
     }
 }

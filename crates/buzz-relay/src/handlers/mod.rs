@@ -38,6 +38,10 @@ pub mod ingest;
 pub mod media_access;
 #[cfg(test)]
 mod membership_notice_postgres_tests;
+/// Publisher/reply message authorization.
+pub(crate) mod message_policy;
+#[cfg(test)]
+mod message_policy_postgres_tests;
 /// Community moderation authorization seam (capability helper).
 pub mod moderation_authz;
 /// Community moderation command handler (kinds 9040–9044).
