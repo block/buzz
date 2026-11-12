@@ -518,6 +518,11 @@ shape is an explicit transition, not a flag day:
   remain authoritative during this phase. Removing those backstops is a separate
   gated migration, after every pod tolerates their absence and no rollback below
   that version is expected.
+- **Single-table guards:** channel tenant binding, community lifecycle,
+  request/approval evidence and manifest chunks are owned by application writers.
+  Serving/deletion catalog validation tolerates the five legacy guards being
+  absent. Their contract migration is gated on the writer and catalog-expand
+  release being deployed fleet-wide.
 - **Role separation:** relay/runtime code owns admission and lock protocols;
   operator maintenance/backfill workflows must either use those protocols or run
   under explicit reviewed procedures that keep routing fences closed.
