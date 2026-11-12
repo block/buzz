@@ -1005,8 +1005,33 @@ async fn check_agent_dm_admin_write(
     }
 }
 
-/// Agents never write in a DM, except one whose members are exactly the agent
-/// and its owner. Humans and non-DM channels pass untouched.
+/// Whether `pubkey` may write in `channel` under the agent DM rule: agents
+/// never write in a DM, except one whose members are exactly the agent and
+/// its owner. Humans and non-DM channels are always allowed.
+pub(crate) async fn agent_dm_write_allowed(
+    community_id: CommunityId,
+    state: &AppState,
+    ch_id: Uuid,
+    pubkey_bytes: &[u8],
+    channel: &buzz_db::channel::ChannelRecord,
+) -> Result<bool, buzz_db::DbError> {
+    if channel.channel_type != buzz_core::channel::ChannelType::Dm.as_str() {
+        return Ok(true);
+    }
+    let Some(owner) = agent_owner_cached(state, community_id, pubkey_bytes).await? else {
+        return Ok(true);
+    };
+    let members: Vec<Vec<u8>> = state
+        .db
+        .get_members_for_event_write(community_id, ch_id)
+        .await?
+        .into_iter()
+        .map(|m| m.pubkey)
+        .collect();
+    Ok(agent_dm_allowed(pubkey_bytes, &owner, &members))
+}
+
+/// [`agent_dm_write_allowed`] as a channel-gate verdict.
 pub(crate) async fn check_agent_dm_write(
     community_id: CommunityId,
     state: &AppState,
@@ -1014,24 +1039,10 @@ pub(crate) async fn check_agent_dm_write(
     pubkey_bytes: &[u8],
     channel: &buzz_db::channel::ChannelRecord,
 ) -> Result<(), String> {
-    if channel.channel_type != buzz_core::channel::ChannelType::Dm.as_str() {
-        return Ok(());
-    }
-    let Some(owner) = agent_owner_cached(state, community_id, pubkey_bytes)
+    if agent_dm_write_allowed(community_id, state, ch_id, pubkey_bytes, channel)
         .await
         .map_err(|e| format!("error: database error: {e}"))?
-    else {
-        return Ok(());
-    };
-    let members: Vec<Vec<u8>> = state
-        .db
-        .get_members_for_event_write(community_id, ch_id)
-        .await
-        .map_err(|e| format!("error: database error: {e}"))?
-        .into_iter()
-        .map(|m| m.pubkey)
-        .collect();
-    if agent_dm_allowed(pubkey_bytes, &owner, &members) {
+    {
         Ok(())
     } else {
         Err(AGENT_DM_REFUSED.to_string())
