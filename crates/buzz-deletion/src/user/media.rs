@@ -263,9 +263,13 @@ async fn scan_storage(
         if !page.is_truncated {
             return Ok(());
         }
-        let next = (page.next_key_marker, page.next_version_id_marker);
-        if next.0.is_none()
-            || next == (key_marker.clone(), version_marker.clone())
+        let (next_key, next_version) = crate::require_truncated_version_markers(
+            page.next_key_marker.filter(|marker| !marker.is_empty()),
+            page.next_version_id_marker
+                .filter(|marker| !marker.is_empty()),
+        )?;
+        let next = (Some(next_key), Some(next_version));
+        if next == (key_marker.clone(), version_marker.clone())
             || next.0.as_ref() < key_marker.as_ref()
         {
             bail!("invalid storage listing continuation");
