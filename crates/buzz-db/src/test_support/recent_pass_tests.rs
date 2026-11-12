@@ -27,7 +27,6 @@ where
 {
     use nostr::{EventBuilder, Keys, Kind, Timestamp};
 
-    let db = crate::Db::from_pool(pool.clone());
     let author = Keys::generate();
     let now = chrono::Utc::now();
     let floor = crate::store::recent_pass::floor_at(now).timestamp() as u64;
@@ -37,11 +36,9 @@ where
             .custom_created_at(Timestamp::from(at))
             .sign_with_keys(&author)
             .expect("sign");
-        let db = db.clone();
         async move {
-            db.insert_event(community, &event, Some(channel))
-                .await
-                .expect("insert");
+            // Seeded as stored rows: the serving writers reject the aged ones.
+            crate::test_support::insert_historical_event(pool, community, &event, channel).await;
             event.id
         }
     };
