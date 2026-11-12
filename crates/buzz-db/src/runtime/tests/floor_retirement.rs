@@ -37,7 +37,7 @@ async fn migration_schema_floor_retirement_drops_parent_and_partition_clones() {
     let pool = PgPool::connect(&crate::test_support::database_url())
         .await
         .expect("connect isolated migration database");
-    crate::migration::run_migrations_through(&pool, 86)
+    crate::migration::run_migrations_through(&pool, 88)
         .await
         .expect("apply pre-contract schema");
     let partitions: i64 =
@@ -47,7 +47,7 @@ async fn migration_schema_floor_retirement_drops_parent_and_partition_clones() {
             .expect("count parent and partitions");
     assert_eq!(floor_objects(&pool).await, (partitions, 1));
     let before = retained_guards(&pool).await;
-    crate::migration::run_migrations_through(&pool, 87)
+    crate::migration::run_migrations_through(&pool, 89)
         .await
         .expect("apply contract migration");
     assert_eq!(floor_objects(&pool).await, (0, 0));
@@ -65,7 +65,7 @@ async fn migration_schema_floor_retirement_cleans_child_copies_idempotently() {
     let pool = PgPool::connect(&crate::test_support::database_url())
         .await
         .expect("connect isolated migration database");
-    crate::migration::run_migrations_through(&pool, 86)
+    crate::migration::run_migrations_through(&pool, 88)
         .await
         .expect("apply pre-contract schema");
     // Model independently attached copies after the parent guard was removed.
@@ -81,13 +81,13 @@ async fn migration_schema_floor_retirement_cleans_child_copies_idempotently() {
     .expect("install independent child copy");
     assert_eq!(floor_objects(&pool).await, (1, 1));
     let before = retained_guards(&pool).await;
-    crate::migration::run_migrations_through(&pool, 87)
+    crate::migration::run_migrations_through(&pool, 89)
         .await
         .expect("retire independent copy");
     assert_eq!(floor_objects(&pool).await, (0, 0));
     let mut tx = pool.begin().await.expect("begin idempotence check");
     sqlx::raw_sql(include_str!(
-        "../../../../../migrations/0087_retire_created_at_floor.sql"
+        "../../../../../migrations/0089_retire_created_at_floor.sql"
     ))
     .execute(&mut *tx)
     .await

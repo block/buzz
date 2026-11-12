@@ -6,7 +6,7 @@
 //! 1. **Insert-time floor**: supported channel-event writers check `created_at`
 //!    against database `clock_timestamp()` on their admitted transaction for
 //!    each new row. Duplicate INSERTs need no floor check. This is the only
-//!    guard: migration 0087 retired 0021's deferred trigger and the
+//!    guard: migration 0089 retired 0021's deferred trigger and the
 //!    writer-pool `buzz.created_at_floor` GUC.
 //! 2. **Ordered heartbeat handshake** (this module): on one pinned writer
 //!    connection, one transaction first takes the exclusive replica-floor
