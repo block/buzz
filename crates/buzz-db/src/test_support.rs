@@ -279,8 +279,8 @@ where
         .await
         .expect("connect deletion executor pool");
     let mut tx = pool.begin().await.expect("begin deletion executor");
-    sqlx::query("SELECT pg_advisory_xact_lock(community_deletion_lock_key($1))")
-        .bind(community.as_uuid())
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(crate::deletion::community_deletion_lock_key(community))
         .execute(&mut *tx)
         .await
         .expect("hold exclusive deletion lock");

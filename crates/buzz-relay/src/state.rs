@@ -3777,8 +3777,10 @@ pub(crate) mod tests {
                     .await
             }
             HeldAuditLock::CommunityDeletion => {
-                sqlx::query("SELECT pg_advisory_lock(community_deletion_lock_key($1))")
-                    .bind(community_id)
+                sqlx::query("SELECT pg_advisory_lock(hashtextextended($1, 0))")
+                    .bind(buzz_db::deletion::community_deletion_lock_key(
+                        buzz_core::CommunityId::from_uuid(community_id),
+                    ))
                     .execute(&mut *holder)
                     .await
             }
@@ -3832,8 +3834,10 @@ pub(crate) mod tests {
                     .await
             }
             HeldAuditLock::CommunityDeletion => {
-                sqlx::query("SELECT pg_advisory_unlock(community_deletion_lock_key($1))")
-                    .bind(community_id)
+                sqlx::query("SELECT pg_advisory_unlock(hashtextextended($1, 0))")
+                    .bind(buzz_db::deletion::community_deletion_lock_key(
+                        buzz_core::CommunityId::from_uuid(community_id),
+                    ))
                     .execute(&mut *holder)
                     .await
             }
