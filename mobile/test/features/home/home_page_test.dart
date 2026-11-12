@@ -10,6 +10,8 @@ import 'package:buzz/features/channels/me/me_section.dart';
 import 'package:buzz/features/activity/activity_page.dart';
 import 'package:buzz/features/activity/inbox_unread_provider.dart';
 import 'package:buzz/features/channels/channel.dart';
+import 'package:buzz/features/channels/channel_detail_page.dart';
+import 'package:buzz/features/profile/profile_edit_page.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/shared/me/default_agent.dart';
 import 'package:buzz/shared/relay/app_lifecycle_provider.dart';
@@ -125,6 +127,36 @@ void main() {
       expect(ConversationPaneScope.maybeOf(launcherContext), same(controller));
       await tester.pumpWidget(const SizedBox.shrink());
     }
+  });
+
+  testWidgets('keyboard in a phone conversation does not rebuild Home', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(402, 874);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    var homeBuilds = 0;
+    await tester.pumpWidget(
+      await buildHome(onNewChatAction: (_) => homeBuilds++),
+    );
+    await tester.pumpAndSettle();
+    tester
+        .widget<AdaptiveConversationPane>(find.byType(AdaptiveConversationPane))
+        .controller
+        .open(
+          'sample',
+          (_) => const Scaffold(body: Text('Conversation content')),
+        );
+    await tester.pumpAndSettle();
+    expect(find.text('Conversation content'), findsOneWidget);
+    homeBuilds = 0;
+
+    for (var frame = 1; frame <= 20; frame++) {
+      tester.view.viewInsets = FakeViewPadding(bottom: frame * 15.0);
+      await tester.pump(const Duration(milliseconds: 16));
+    }
+
+    expect(homeBuilds, 0);
   });
 
   testWidgets('feedback clears floating navigation and wraps large text', (
@@ -646,6 +678,10 @@ void main() {
   testWidgets('app icon shortcuts name the Bestie and open each destination', (
     tester,
   ) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(402, 874);
+    addTearDown(tester.view.reset);
+    addTearDown(() => pendingHomeScreenShortcut.value = null);
     const channel = MethodChannel('buzz/home_screen_shortcuts');
     final published = <List<String>>[];
     tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(channel, (
@@ -678,7 +714,10 @@ void main() {
 
     final bestie = 'b' * 64;
     final bestieUpdates = StreamController<String?>();
-    addTearDown(bestieUpdates.close);
+    addTearDown(() async {
+      await tester.pumpWidget(const SizedBox());
+      await bestieUpdates.close();
+    });
     bestieUpdates.add(bestie);
     ValueNotifier<VoidCallback?>? chat;
     var homeBuilds = 0;
@@ -786,6 +825,87 @@ void main() {
       reason: dmCalls.join(', '),
     );
 
+    // Search uses a pane even on an ordinary phone. Drive the real search
+    // result and channel page, then dispatch each shortcut through the bridge.
+    Future<void> openSearchResult() async {
+      tester
+          .widget<MessagesNavigationBar>(find.byType(MessagesNavigationBar))
+          .onSearch();
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField), '#');
+      // Advance the production search debounce, then settle its results.
+      await tester.pump(const Duration(milliseconds: 300));
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.byKey(const ValueKey('search-channel-row-channel')),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byType(ChannelDetailPage), findsOneWidget);
+    }
+
+    for (final shortcut in HomeScreenShortcut.values) {
+      await openSearchResult();
+      final beforeChat = created;
+      final beforeBestie = opened.length;
+      final beforeDm = dmStates.length;
+      await tap(shortcut.type);
+      expect(find.byType(ChannelDetailPage), findsNothing);
+      expect(find.byType(SearchPage), findsNothing);
+      expect(pendingHomeScreenShortcut.value, isNull);
+      switch (shortcut) {
+        case HomeScreenShortcut.newChat:
+          expect(created, beforeChat + 1);
+        case HomeScreenShortcut.messageBestie:
+          expect(opened, hasLength(beforeBestie + 1));
+          expect(opened.last, bestie);
+        case HomeScreenShortcut.newDm:
+          expect(dmStates.length, greaterThan(beforeDm));
+          expect(nativeSession, isNotNull);
+          await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+            dmBridge.name,
+            const StandardMethodCodec().encodeMethodCall(
+              MethodCall('closed', {'session': nativeSession}),
+            ),
+            (_) {},
+          );
+          await tester.pumpAndSettle();
+      }
+    }
+
+    // A real page veto, including one under another nested page, must not be
+    // mistaken for the pane's navigation-only Back interception.
+    await openSearchResult();
+    final nested = Navigator.of(tester.element(find.byType(ChannelDetailPage)));
+    nested.push(
+      MaterialPageRoute<void>(
+        builder: (_) => const ProfileEditPage(startInPhotoEditor: true),
+      ),
+    );
+    await tester.pumpAndSettle();
+    nested.push(
+      MaterialPageRoute<void>(
+        builder: (_) => const Scaffold(body: Text('Above editor')),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final beforeVeto = opened.length;
+    await tap('message-bestie');
+    expect(find.text('Above editor'), findsNothing);
+    expect(
+      find.byKey(const ValueKey('profile-avatar-editor-page')),
+      findsOneWidget,
+    );
+    expect(opened, hasLength(beforeVeto));
+    expect(pendingHomeScreenShortcut.value, isNull);
+    await nested.maybePop();
+    await tester.pumpAndSettle();
+    expect(find.byType(ProfileEditPage), findsNothing);
+    await tap('message-bestie');
+    expect(find.byType(ChannelDetailPage), findsNothing);
+    expect(find.byType(SearchPage), findsNothing);
+    expect(opened, hasLength(beforeVeto + 1));
+    final completedOpens = List<String>.of(opened);
+
     // Shortcut state rebuilds only its own leaf, never Home.
     final builds = homeBuilds;
     tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
@@ -817,7 +937,7 @@ void main() {
       tester.element(find.byType(HomePage, skipOffstage: false)),
     ).pop();
     await tester.pumpAndSettle();
-    expect(opened, [bestie]);
+    expect(opened, completedOpens);
     expect(pendingHomeScreenShortcut.value, isNull);
 
     await tester.pumpWidget(const SizedBox());

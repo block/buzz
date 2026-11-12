@@ -524,6 +524,117 @@ void main() {
     expect(listTaps, 1);
     debugDefaultTargetPlatformOverride = null;
   });
+
+  group('compact keyboard', () {
+    Future<void> raiseKeyboard(WidgetTester tester) async {
+      for (var frame = 1; frame <= 20; frame++) {
+        tester.view.viewInsets = FakeViewPadding(bottom: frame * 15.0);
+        await tester.pump(const Duration(milliseconds: 16));
+      }
+    }
+
+    testWidgets('does not rebuild the covered list or detail routes', (
+      tester,
+    ) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      tester.view.devicePixelRatio = 1;
+      tester.view.physicalSize = const Size(402, 874);
+      addTearDown(tester.view.reset);
+      final controller = ConversationPaneController();
+      addTearDown(controller.dispose);
+      var listBuilds = 0;
+      var channelBuilds = 0;
+      var threadBuilds = 0;
+      await tester.pumpWidget(
+        ProviderScope(
+          child: MaterialApp(
+            home: AdaptiveConversationPane(
+              controller: controller,
+              list: _CountedInsets('List', () => listBuilds++),
+            ),
+          ),
+        ),
+      );
+      controller.open(
+        'c',
+        (_) => _CountedSize('Channel', () => channelBuilds++),
+      );
+      await tester.pumpAndSettle();
+      listBuilds = 0;
+      channelBuilds = 0;
+
+      await raiseKeyboard(tester);
+
+      expect(listBuilds, 0, reason: 'covered list');
+      expect(channelBuilds, 0, reason: 'channel detail');
+
+      Navigator.of(tester.element(find.text('Channel'))).push(
+        MaterialPageRoute<void>(
+          builder: (_) => _CountedSize('Thread', () => threadBuilds++),
+        ),
+      );
+      await tester.pumpAndSettle();
+      tester.view.viewInsets = FakeViewPadding.zero;
+      await tester.pump();
+      channelBuilds = 0;
+      threadBuilds = 0;
+
+      await raiseKeyboard(tester);
+
+      expect(threadBuilds, 0, reason: 'thread on top');
+      expect(channelBuilds, 0, reason: 'covered channel');
+      debugDefaultTargetPlatformOverride = null;
+    });
+
+    testWidgets('list keeps its insets while a popped detail keyboard lowers', (
+      tester,
+    ) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      tester.view.devicePixelRatio = 1;
+      tester.view.physicalSize = const Size(402, 874);
+      addTearDown(tester.view.reset);
+      final controller = ConversationPaneController();
+      addTearDown(controller.dispose);
+      final listInsets = <double>[];
+      await tester.pumpWidget(
+        ProviderScope(
+          child: MaterialApp(
+            home: AdaptiveConversationPane(
+              controller: controller,
+              list: Builder(
+                builder: (context) {
+                  listInsets.add(MediaQuery.viewInsetsOf(context).bottom);
+                  return const Text('List');
+                },
+              ),
+            ),
+          ),
+        ),
+      );
+      controller.open(
+        'c',
+        (_) => const Material(
+          child: Column(
+            children: [Text('Channel'), TextField(autofocus: true)],
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+      await tester.pump();
+      listInsets.clear();
+
+      Navigator.of(tester.element(find.text('Channel'))).pop();
+      await tester.pumpAndSettle();
+      for (var bottom = 280.0; bottom >= 0; bottom -= 40) {
+        tester.view.viewInsets = FakeViewPadding(bottom: bottom);
+        await tester.pump(const Duration(milliseconds: 16));
+      }
+
+      expect(listInsets.where((bottom) => bottom != 0), isEmpty);
+      debugDefaultTargetPlatformOverride = null;
+    });
+  });
 }
 
 class _Conversation extends StatelessWidget {
@@ -578,4 +689,28 @@ class _DeepLinkState extends State<_DeepLink> {
   @override
   Widget build(BuildContext context) =>
       const Scaffold(body: Text('Selected channel'));
+}
+
+class _CountedInsets extends StatelessWidget {
+  const _CountedInsets(this.label, this.onBuild);
+  final String label;
+  final VoidCallback onBuild;
+  @override
+  Widget build(BuildContext context) {
+    onBuild();
+    MediaQuery.viewInsetsOf(context);
+    return Text(label);
+  }
+}
+
+class _CountedSize extends StatelessWidget {
+  const _CountedSize(this.label, this.onBuild);
+  final String label;
+  final VoidCallback onBuild;
+  @override
+  Widget build(BuildContext context) {
+    onBuild();
+    MediaQuery.sizeOf(context);
+    return Text(label);
+  }
 }
