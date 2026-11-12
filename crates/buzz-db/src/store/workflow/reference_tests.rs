@@ -180,6 +180,51 @@ async fn upsert_workflow_rejects_missing_owner_or_channel_without_foreign_keys()
         .expect("valid parents");
     }
     assert_eq!(count(&db, "workflows", community).await, 1);
+
+    // An existing ID: a different valid owner or channel is the overwrite
+    // boundary (`AccessDenied`); a missing owner or channel fails the reference
+    // check first (`NotFound`). Neither attempt touches the stored row.
+    let other_owner = [0x22; 32];
+    ensure_user(&db.pool, community, &other_owner)
+        .await
+        .expect("other owner");
+    let other_channel = new_channel(&db, community, &owner).await;
+    let overwrite = |channel: Option<Uuid>, owner: [u8; 32]| {
+        let pool = db.pool.clone();
+        async move {
+            upsert_workflow(
+                &pool,
+                community,
+                id,
+                channel,
+                &owner,
+                "hijack",
+                r#"{"trigger":{"on":"manual"},"steps":[{"id":"x"}]}"#,
+                &[1; 32],
+            )
+            .await
+        }
+    };
+    for (label, result) in [
+        ("other owner", overwrite(Some(channel), other_owner).await),
+        ("other channel", overwrite(Some(other_channel), owner).await),
+    ] {
+        assert!(
+            matches!(result, Err(DbError::AccessDenied(_))),
+            "{label}: expected AccessDenied, got {result:?}"
+        );
+    }
+    assert_not_found(overwrite(Some(channel), [0x23; 32]).await, "owner");
+    assert_not_found(overwrite(Some(Uuid::new_v4()), owner).await, "channel");
+
+    let stored = get_workflow(&db.pool, community, id)
+        .await
+        .expect("stored workflow");
+    assert_eq!(stored.owner_pubkey, owner.to_vec());
+    assert_eq!(stored.channel_id, Some(channel));
+    assert_eq!(stored.name, "wf");
+    assert_eq!(stored.definition_hash, vec![0; 32]);
+    assert_eq!(count(&db, "workflows", community).await, 1);
 }
 
 #[tokio::test]
