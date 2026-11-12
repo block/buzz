@@ -22,6 +22,10 @@ use crate::error::CliError;
 mod ownership;
 use ownership::{connect, current_uid};
 
+/// Serializes same-user checks across in-process tests; see [`call`].
+#[cfg(test)]
+static SAME_USER_TURN: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 pub const PROVIDER_ENV: &str = "BUZZ_CREDENTIAL_PROVIDER";
 
 /// The protocol version this caller speaks.
@@ -345,8 +349,15 @@ async fn call_with(
         } else {
             QUICK_TIMEOUT
         };
+        // In `cargo test`, the real same-user checks take turns, as the
+        // nextest group `desktop-same-user-check` makes them there. Waiting
+        // for a turn does not count against the request's timeout.
+        #[cfg(test)]
+        let turn = SAME_USER_TURN.lock().await;
         let attempt = async {
             let stream = connect(endpoint.port, same_user).await?;
+            #[cfg(test)]
+            drop(turn);
             exchange(stream, endpoint, token, version, &body).await
         };
         let (_, raw) = tokio::time::timeout(timeout, attempt)
@@ -2600,14 +2611,15 @@ pub(crate) mod tests {
             Endpoint::parse(&format!("http://127.0.0.1:{port}/rpc")).unwrap()
         };
         let (throttled, seen) = provider(
-            |_, _| serde_json::json!({"result": "", "error": "rate_limited", "retry_after": 30}),
+            |_, _| serde_json::json!({"result": "", "error": "rate_limited", "retry_after": 300}),
         )
         .await;
         let store = MemoryStore::with(&[("a", "ta", &[RELAY]), ("b", "tb", &[RELAY])]);
         let ads = vec![("a".to_owned(), closed), ("b".to_owned(), throttled)];
         let started = std::time::Instant::now();
         let listed = list_with(&store, ads).await.unwrap();
-        assert!(started.elapsed() < Duration::from_secs(5));
+        // Well under `retry_after`, with room to wait for same-user turns.
+        assert!(started.elapsed() < Duration::from_secs(60));
         assert_eq!(listed[0]["status"], "not running");
         assert_eq!(listed[1]["status"], "rate limited");
         assert_eq!(seen.lock().unwrap().len(), 1, "no retries");
