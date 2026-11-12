@@ -131,7 +131,7 @@ class _MessageTimelineSkeleton extends StatelessWidget {
       physics: const NeverScrollableScrollPhysics(),
       padding: EdgeInsets.fromLTRB(
         Grid.gutter,
-        frostedAppBarHeight(
+        _conversationHeaderHeight(
               context,
               titleContentHeight: appBarTitleContentHeight,
             ) +

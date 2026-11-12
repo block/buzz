@@ -110,6 +110,12 @@ void main() {
       await tester.scrollUntilVisible(
         find.byKey(const Key('settings-sign-out')),
         200,
+        scrollable: find
+            .descendant(
+              of: find.byType(SettingsPage),
+              matching: find.byType(Scrollable),
+            )
+            .first,
       );
       await tester.tap(find.byKey(const Key('settings-sign-out')));
       await tester.pumpAndSettle();

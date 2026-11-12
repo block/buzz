@@ -39,7 +39,11 @@ class IosNavigationAction {
 
     this.plain = false,
     this.sharesBackground = true,
+    this.keepInHeaderOnDuo = false,
   });
+
+  /// Keeps list controls beside their content when a Duo rail is present.
+  final bool keepInHeaderOnDuo;
 
   final String label;
   final String? symbol;
@@ -85,6 +89,7 @@ class IosNavigationAction {
 
     'plain': plain,
     'sharesBackground': sharesBackground,
+    'keepInHeaderOnDuo': keepInHeaderOnDuo,
     'children': [
       for (var i = 0; i < children.length; i++) children[i]._encode('$id.$i'),
     ],
@@ -138,6 +143,12 @@ class IosNavigationBar extends HookConsumerWidget {
     this.largeTitle = false,
     this.alwaysFrosted = false,
     this.backdropOnly = false,
+    this.standaloneControl = false,
+    this.standaloneLargeTitle = false,
+    this.horizontalControls = false,
+    this.centerTitleInPane = false,
+    this.titleInsets = EdgeInsets.zero,
+    this.alignCollapsedTitleToLeading = false,
     this.leading,
     this.actions = const [],
     this.onBack,
@@ -167,6 +178,20 @@ class IosNavigationBar extends HookConsumerWidget {
 
   /// Paints only the native edge beneath custom Flutter header controls.
   final bool backdropOnly;
+
+  /// Renders one glass control without navigation-bar overflow or safe areas.
+  final bool standaloneControl;
+
+  /// A wrapping native large title for a static title pane.
+  final bool standaloneLargeTitle;
+  final bool horizontalControls;
+
+  /// Centers compact titles within a pane that already excludes the Duo rail.
+  final bool centerTitleInPane;
+
+  /// Content-area insets for a title whose backdrop spans the whole window.
+  final EdgeInsets titleInsets;
+  final bool alignCollapsedTitleToLeading;
   final IosNavigationAction? leading;
   final List<IosNavigationAction> actions;
   final VoidCallback? onBack;
@@ -323,9 +348,11 @@ class IosNavigationBar extends HookConsumerWidget {
       };
     }
 
+    final portraitTopPadding = centerTitleInPane ? 12.0 : 0.0;
     final payload = <String, Object?>{
       'title': title,
       'titleMaxWidth': titleMaxWidth,
+      'portraitTopPadding': portraitTopPadding,
       'titleHasAnimatedPortrait':
           titleAvatars.length == 1 &&
           DmHeaderPortrait.playsAnimation(
@@ -348,6 +375,13 @@ class IosNavigationBar extends HookConsumerWidget {
       'largeTitle': largeTitle,
       'alwaysFrosted': alwaysFrosted,
       'backdropOnly': backdropOnly,
+      'standaloneControl': standaloneControl,
+      'standaloneLargeTitle': standaloneLargeTitle,
+      'horizontalControls': horizontalControls,
+      'centerTitleInPane': centerTitleInPane,
+      'titleInsetLeft': titleInsets.left,
+      'titleInsetRight': titleInsets.right,
+      'alignCollapsedTitleToLeading': alignCollapsedTitleToLeading,
       'back': onBack != null,
       'leading': leading == null ? null : encodeAction(leading!, 'leading'),
       'actions': [
@@ -365,6 +399,15 @@ class IosNavigationBar extends HookConsumerWidget {
       final current = channel.value;
       if (current == null) return null;
       current.setMethodCallHandler((call) async {
+        if (call.method == 'railGeometry') {
+          if (context.mounted) {
+            IosNavigationMetrics.updateRail(
+              context,
+              call.arguments as Map<Object?, Object?>,
+            );
+          }
+          return;
+        }
         if (call.method == 'avatarBounds') {
           final values = call.arguments as Map<Object?, Object?>;
           final box = viewKey.currentContext?.findRenderObject();
@@ -526,7 +569,8 @@ class IosNavigationBar extends HookConsumerWidget {
         if (titleAvatars.isNotEmpty)
           Positioned(
             top:
-                MediaQuery.viewPaddingOf(context).top -
+                MediaQuery.viewPaddingOf(context).top +
+                portraitTopPadding -
                 (payload['titleHasAnimatedPortrait'] == true ? 4 : 0),
             left: 0,
             right: 0,

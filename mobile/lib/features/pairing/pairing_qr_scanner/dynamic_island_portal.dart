@@ -3,10 +3,17 @@ part of '../pairing_qr_scanner.dart';
 // A smooth, non-bouncy spring inspired by Apple's public motion guidance;
 // these are our timings, not private Dynamic Island animation constants.
 const _dynamicIslandOpenDuration = Duration(milliseconds: 230);
-const _dynamicIslandCloseDuration = Duration(milliseconds: 230);
+const _dynamicIslandCloseDuration = Duration(milliseconds: 180);
 
 class _DynamicIslandQrScannerPortal extends HookWidget {
-  const _DynamicIslandQrScannerPortal({this.onProgress});
+  const _DynamicIslandQrScannerPortal({
+    this.onProgress,
+    this.cameraFrame,
+    required this.sourceSize,
+  });
+
+  final Rect? cameraFrame;
+  final Size sourceSize;
 
   final ValueChanged<double>? onProgress;
 
@@ -85,7 +92,9 @@ class _DynamicIslandQrScannerPortal extends HookWidget {
                 )
                 .orCancel;
           }
-          if (closing && context.mounted) await finish(null);
+          if (closing && context.mounted) {
+            await finish(null);
+          }
         } on TickerCanceled {
           // A dismissal, motion-setting change, or unmount can retarget the spring.
         }
@@ -98,7 +107,6 @@ class _DynamicIslandQrScannerPortal extends HookWidget {
     void closePortal() {
       if (isClosing.value || hasHandledResult.value) return;
       hasHandledResult.value = true;
-      unawaited(_setDynamicIslandScannerStatusBarHidden(false));
       isClosing.value = true;
     }
 
@@ -133,6 +141,9 @@ class _DynamicIslandQrScannerPortal extends HookWidget {
               final geometry = DynamicIslandQrScannerGeometry(
                 viewport: constraints.biggest,
                 safeAreaTop: MediaQuery.viewPaddingOf(context).top,
+                cameraFrame:
+                    duoQrScannerCameraFrame(context) ??
+                    (constraints.biggest == sourceSize ? cameraFrame : null),
               );
 
               return Stack(
@@ -163,16 +174,14 @@ class _DynamicIslandQrScannerPortal extends HookWidget {
                           key: const ValueKey(
                             'dynamic-island-qr-scanner-portal',
                           ),
-                          borderRadius: BorderRadius.circular(
-                            geometry.cornerRadiusAt(progress),
-                          ),
+                          borderRadius: geometry.borderRadiusAt(progress),
                           child: ColoredBox(
                             color: Colors.black,
                             child: Stack(
                               fit: StackFit.expand,
                               children: [
-                                // Start warming the camera on the first frame,
-                                // and keep it mounted throughout dismissal.
+                                // Warm the camera during opening; dispose only
+                                // after the closing morph has finished.
                                 Opacity(
                                   opacity: scannerOpacity,
                                   child: _QrScannerCamera(

@@ -68,6 +68,12 @@ final class NativePhotoZoomCoordinator {
         canDelete: args["canDelete"] as? Bool ?? false,
         videoIndices: Set(args["videoIndices"] as? [Int] ?? [])
       )
+      if let center = args["railCenterX"] as? Double,
+         let width = args["railWindowWidth"] as? Double,
+         let height = args["railWindowHeight"] as? Double,
+         [center, width, height].allSatisfy({ $0.isFinite }), width > 0, height > 0 {
+        controller.sourceRailGeometry = (CGSize(width: width, height: height), CGFloat(center))
+      }
       controller.request = { [weak self] method, index, action, completion in
         var payload: [String: Any] = ["session": session, "index": index]
         if let action { payload["action"] = action }
@@ -149,7 +155,7 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
   private let indicator = UIPageControl()
   private let close = UIButton(type: .system)
   private let navigationSizingBar = UINavigationBar()
-  private var closeCenterConstraint: NSLayoutConstraint?
+  private let pageContainer = UIView()
   private let reply = UIButton(type: .system)
   private let more = UIButton(type: .system)
   private let labels: [String]
@@ -167,6 +173,7 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
   var selectionFeedback = UISelectionFeedbackGenerator()
   private var paging = false
   private var acting = false
+  var sourceRailGeometry: (size: CGSize, centerX: CGFloat)?
   var onClose: ((String) -> Void)?
   var request: ((String, Int, String?, @escaping FlutterResult) -> Void)?
   var onSelection: ((UIImage?, [String: Any]?) -> Void)?
@@ -211,7 +218,6 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
     indicator.pageIndicatorTintColor = .gray
     indicator.accessibilityLabel = videoIndices.isEmpty ? "Photo" : "Attachment"
     indicator.addTarget(self, action: #selector(selectPage), for: .valueChanged)
-    let pageContainer = UIView()
     let pageSurface: UIVisualEffectView
     if #available(iOS 26.0, *) {
       let glass = UIGlassEffect(style: .regular)
@@ -240,36 +246,72 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
       indicator.topAnchor.constraint(equalTo: pageSurface.contentView.topAnchor),
       indicator.bottomAnchor.constraint(equalTo: pageSurface.contentView.bottomAnchor),
     ])
-    let controls = UIStackView(arrangedSubviews: [reply, pageContainer, more])
-    controls.axis = .horizontal; controls.alignment = .center; controls.spacing = 8
-    view.addSubview(close); view.addSubview(controls)
-    pager.view.translatesAutoresizingMaskIntoConstraints = false
+    // Keep all controls in one hierarchy while the window folds or rotates.
+    // The photo surface can extend behind the rail without moving its pages.
+    for control in [close, reply, more, pageContainer] { view.addSubview(control) }
     pager.view.clipsToBounds = true
-    close.translatesAutoresizingMaskIntoConstraints = false
-    controls.translatesAutoresizingMaskIntoConstraints = false
-    let closeCenter = close.centerYAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor)
-    closeCenterConstraint = closeCenter
-    NSLayoutConstraint.activate([
-      // Match the existing gallery: fit photos between the toolbar bands.
-      pager.view.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 56),
-      pager.view.bottomAnchor.constraint(equalTo: controls.topAnchor, constant: -16),
-      pager.view.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor),
-      pager.view.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor),
-      closeCenter,
-      close.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -16),
-      close.widthAnchor.constraint(equalToConstant: 44), close.heightAnchor.constraint(equalToConstant: 44),
-      reply.widthAnchor.constraint(equalToConstant: 44), reply.heightAnchor.constraint(equalToConstant: 44),
-      more.widthAnchor.constraint(equalToConstant: 44), more.heightAnchor.constraint(equalToConstant: 44),
-      indicator.heightAnchor.constraint(greaterThanOrEqualToConstant: 44),
-      controls.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 16),
-      controls.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -16),
-      controls.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -12),
-    ])
   }
   override func viewDidLayoutSubviews() {
     super.viewDidLayoutSubviews()
-    // Ask UIKit for its compact navigation height, including the current OS metrics.
-    closeCenterConstraint?.constant = navigationSizingBar.sizeThatFits(view.bounds.size).height / 2
+    layoutGallery(insets: view.safeAreaInsets)
+  }
+  func layoutGallery(insets: UIEdgeInsets) {
+    let bounds = view.bounds
+    let right = insets.right > 0 && insets.left == 0
+    let left = insets.left > 0 && insets.right == 0
+    let inRail = insets.top == 0 && (right || left)
+    let safe = bounds.inset(by: insets)
+    let bottom = safe.maxY - 56
+    let indicatorBounds = inRail ? bounds : safe
+    pageContainer.frame = CGRect(x: indicatorBounds.minX + 68, y: bottom,
+                                 width: max(0, indicatorBounds.width - 136), height: 44)
+    if inRail {
+      pager.view.frame = bounds
+      let width = right ? insets.right : insets.left
+      var centerX = right ? bounds.maxX - width / 2 : width / 2
+      var top: CGFloat = min(bounds.width, bounds.height) >= 600 ? 110 : 170
+      var railBottom = bounds.maxY - max(insets.bottom, 12)
+      #if canImport(UIKit, _version: 9127.0.85)
+      if #available(iOS 27.1, *), let window = view.window {
+        let strip = CGRect(x: right ? window.bounds.maxX - width : 0, y: 0,
+                           width: width, height: window.bounds.height)
+        let occlusions = window.reservedRegions(kind: .occlusion)
+          .filter { $0.isActive && $0.frame.intersects(strip) }
+        let regions = occlusions.filter { $0.frame.midY < window.bounds.midY }
+          .sorted { $0.frame.minY < $1.frame.minY }
+        let margins = window.rootViewController?.view.layoutMargins ?? .zero
+        let margin = right ? margins.left : margins.right
+        let axis = regions.first.map { $0.frame.inset(by: $0.margins).midX }
+          ?? (right ? window.bounds.maxX - margin - 28 : margin + 28)
+        centerX = view.convert(CGPoint(x: axis, y: 0), from: window).x
+        if let edge = occlusions.filter({ $0.frame.midY >= window.bounds.midY }).map({ $0.frame.minY }).min() {
+          railBottom = min(railBottom, view.convert(CGPoint(x: 0, y: edge), from: window).y - 12)
+        }
+        if let edge = regions.map({ $0.frame.maxY }).max() {
+          top = view.convert(CGPoint(x: 0, y: edge), from: window).y + 12
+        }
+      }
+      #endif
+      // Reuse the app rail's measured axis while its window/side still match.
+      // Presentation can change UIKit's fallback margins under the modal.
+      if let source = sourceRailGeometry, source.size == bounds.size,
+         (left && (0...width).contains(source.centerX)) ||
+         (right && (bounds.maxX - width...bounds.maxX).contains(source.centerX)) {
+        centerX = source.centerX
+      }
+      // Match IosNavigationMetrics.railCenter's inward optical alignment.
+      centerX += left ? 6 : -6
+      close.frame = CGRect(x: centerX - 24, y: top + 6, width: 48, height: 48)
+      reply.frame = CGRect(x: centerX - 24, y: railBottom - 108, width: 48, height: 48)
+      more.frame = CGRect(x: centerX - 24, y: railBottom - 48, width: 48, height: 48)
+    } else {
+      pager.view.frame = CGRect(x: safe.minX, y: safe.minY + 56,
+                                width: safe.width, height: max(0, bottom - 16 - safe.minY - 56))
+      let centerY = safe.minY + navigationSizingBar.sizeThatFits(bounds.size).height / 2
+      close.frame = CGRect(x: safe.maxX - 60, y: centerY - 22, width: 44, height: 44)
+      reply.frame = CGRect(x: safe.minX + 16, y: bottom, width: 44, height: 44)
+      more.frame = CGRect(x: safe.maxX - 60, y: bottom, width: 44, height: 44)
+    }
   }
   func shouldBeginDismissal(location: CGPoint, velocity: CGVector) -> Bool {
     !paging && !finishing && pager.view.frame.contains(location)

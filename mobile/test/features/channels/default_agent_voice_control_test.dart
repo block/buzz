@@ -114,6 +114,7 @@ void main() {
   Future<void> mount(
     WidgetTester tester, {
     bool nativeAvatar = false,
+    Axis axis = Axis.horizontal,
     DefaultAgentVoiceDraft? storage,
     Future<void> Function(VoiceNoteRecording)? onRecorded,
   }) async {
@@ -130,6 +131,7 @@ void main() {
           home: Scaffold(
             body: Center(
               child: MessagesNavigationBar(
+                axis: axis,
                 onSearch: () {},
                 onRecordingChanged: recordingStates.add,
                 creationActions: const [],
@@ -236,6 +238,8 @@ void main() {
       tester.element(find.byType(DefaultAgentVoiceControl)).controlSurface,
     );
     expect(tester.element(surface.first), same(touchedSurface));
+    await mount(tester, nativeAvatar: true, axis: Axis.vertical);
+    await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('Discard voice note'));
     await tester.pumpAndSettle();
     expect(draft.note, isNull);

@@ -28,6 +28,7 @@ import 'dart:io';
 import 'dart:ui' as ui;
 
 import 'package:buzz/shared/widgets/buzz_sheet_header.dart';
+import 'package:buzz/shared/widgets/concentric_sheet_surface.dart';
 import 'package:flutter/rendering.dart';
 import 'package:buzz/shared/community/community_membership_provider.dart';
 
@@ -495,11 +496,22 @@ void main() {
       find.descendant(of: popover, matching: find.byType(PopupMenuDivider)),
       findsNothing,
     );
-    final selectedCheck = find.byKey(const ValueKey('sort-selected-check'));
+    final selectedItem = find.ancestor(
+      of: find.text('Sort: A–Z'),
+      matching: find.byType(CheckedPopupMenuItem<String>),
+    );
+    expect(
+      tester.widget<CheckedPopupMenuItem<String>>(selectedItem).checked,
+      isTrue,
+    );
+    final selectedCheck = find.descendant(
+      of: selectedItem,
+      matching: find.byIcon(Icons.done),
+    );
     expect(selectedCheck, findsOneWidget);
     expect(
       tester.getCenter(selectedCheck).dx,
-      greaterThan(tester.getCenter(find.text('Sort: A–Z')).dx),
+      lessThan(tester.getTopLeft(find.text('Sort: A–Z')).dx),
     );
 
     for (final label in ['general', 'Alice']) {
@@ -1190,6 +1202,67 @@ void main() {
     );
     expect(deleteText.style?.color, error);
     expect(deleteIcon.color, error);
+    Navigator.of(tester.element(popover)).pop();
+    await tester.pumpAndSettle();
+
+    try {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      tester.view.devicePixelRatio = 1;
+      tester.view.physicalSize = const Size(951, 669);
+      tester.view.padding = const FakeViewPadding(right: 76);
+      tester.view.viewPadding = const FakeViewPadding(right: 76);
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(const SizedBox.shrink());
+      SharedPreferences.setMockInitialValues({});
+      final duoPrefs = await SharedPreferences.getInstance();
+      await tester.pumpWidget(
+        buildTestable(
+          realHome: true,
+          overrides: [
+            savedPrefsProvider.overrideWithValue(duoPrefs),
+            channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+            channelSectionsProvider.overrideWith(
+              () => _FakeChannelSectionsNotifier(
+                const ChannelSectionStore(
+                  sections: [
+                    ChannelSection(id: 'section-1', name: 'Design', order: 0),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+      IosMessageCreateButton nativeMenu() =>
+          tester.widget<IosMessageCreateButton>(
+            find.byKey(const Key('section-menu-section-1')),
+          );
+      expect(nativeMenu().plain, isTrue);
+      expect(nativeMenu().iconSize, 14);
+      expect(nativeMenu().actions.map((action) => action.label), [
+        'Rename section',
+        'Move up',
+        'Move down',
+        'Sort: Recent',
+        'Sort: A–Z',
+        'Delete section',
+      ]);
+      expect(nativeMenu().actions[1].onPressed, isNull);
+      expect(nativeMenu().actions[2].onPressed, isNull);
+      expect(nativeMenu().destructiveIndices, {5});
+      final newMenu = find.byKey(const ValueKey('horizontal-create-menu'));
+      expect(newMenu, findsOneWidget);
+      nativeMenu().actions[4].onPressed!();
+      await tester.pumpAndSettle();
+      expect(nativeMenu().selectedIndex, 4);
+      expect(newMenu, findsOneWidget);
+      expect(find.byKey(const Key('section-popover-section-1')), findsNothing);
+      expect(ModalRoute.of(tester.element(newMenu))!.isCurrent, isTrue);
+      expect(tester.takeException(), isNull);
+    } finally {
+      debugDefaultTargetPlatformOverride = null;
+    }
   });
 
   testWidgets('aligns the top, section, row, and skeleton label columns', (
@@ -1591,6 +1664,97 @@ void main() {
       );
     }
   }
+
+  testWidgets(
+    'community menu is a bounded bottom sheet when open and full width when compact',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetDevicePixelRatio);
+      addTearDown(tester.view.resetPhysicalSize);
+      tester.view.padding = const FakeViewPadding(right: 76, bottom: 21);
+      tester.view.viewPadding = const FakeViewPadding(right: 76, bottom: 21);
+      addTearDown(tester.view.resetPadding);
+      addTearDown(tester.view.resetViewPadding);
+      final community = Community(
+        id: 'alpha',
+        name: 'Alpha',
+        relayUrl: 'wss://alpha.example.com',
+        addedAt: DateTime(2025),
+      );
+      await tester.pumpWidget(
+        buildTestable(
+          overrides: [
+            channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+            communityListProvider.overrideWith(
+              () => _FakeCommunityListNotifier([community]),
+            ),
+            activeCommunityProvider.overrideWith((ref) async => community),
+          ],
+        ),
+      );
+      for (final size in [
+        const Size(951, 669),
+        const Size(669, 951),
+        const Size(466, 678),
+      ]) {
+        tester.view.physicalSize = size;
+        await tester.pumpAndSettle();
+        void openMenu() => tester
+            .widget<FrostedAppBar>(find.byType(FrostedAppBar))
+            .nativeLeading!
+            .onPressed!();
+        openMenu();
+        await tester.pumpAndSettle();
+        final dialog = find.byType(BottomSheet);
+        if (size.shortestSide >= 600) {
+          expect(dialog, findsOneWidget);
+          final surface = find.descendant(
+            of: dialog,
+            matching: find.byType(ConcentricSheetSurface),
+          );
+          final rect = tester.getRect(surface);
+          final menuContext = tester.element(
+            find.byKey(const Key('community-switcher-sheet')),
+          );
+          expect(MediaQuery.paddingOf(menuContext).right, 0);
+          final menu = tester.getRect(
+            find.byKey(const Key('community-switcher-sheet')),
+          );
+          expect(menu.center.dx, closeTo(size.width / 2, 1));
+          expect(rect.width, lessThanOrEqualTo(480));
+          expect(rect.height, lessThan(size.height - 48));
+          expect(rect.center.dx, closeTo(size.width / 2, 1));
+          expect(rect.bottom, closeTo(size.height, 1));
+        } else {
+          expect(dialog, findsOneWidget);
+          expect(
+            find.byKey(const Key('community-switcher-sheet')),
+            findsOneWidget,
+          );
+        }
+        await tester.tapAt(const Offset(5, 5));
+        await tester.pumpAndSettle();
+        expect(find.byKey(const Key('community-switcher-sheet')), findsNothing);
+        openMenu();
+        await tester.pumpAndSettle();
+        await tester.drag(find.byType(BottomSheet), const Offset(0, 500));
+        await tester.pumpAndSettle();
+        expect(find.byType(BottomSheet), findsNothing);
+        openMenu();
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Appearance'));
+        await tester.pumpAndSettle();
+        expect(find.text('Appearance destination'), findsOneWidget);
+        expect(dialog, findsNothing);
+        Navigator.of(tester.element(find.text('Appearance destination'))).pop();
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+      }
+      debugDefaultTargetPlatformOverride = null;
+    },
+  );
 
   testWidgets('community settings hides invite for members', (tester) async {
     final community = Community(
@@ -2115,16 +2279,31 @@ void main() {
     );
   }
 
-  for (final nativeHeader in [false, true]) {
+  for (final (nativeHeader, duo) in [
+    (false, false),
+    (true, false),
+    (true, true),
+  ]) {
     for (final reduceMotion in [false, true]) {
       testWidgets(
-        'community selection holds enlarged until content loads (native header: $nativeHeader, reduced motion: $reduceMotion)',
+        'community selection holds enlarged until content loads (native header: $nativeHeader, Duo: $duo, reduced motion: $reduceMotion)',
         (tester) async {
           debugDefaultTargetPlatformOverride = nativeHeader
               ? TargetPlatform.iOS
               : TargetPlatform.android;
           addTearDown(() => debugDefaultTargetPlatformOverride = null);
-          tester.view.physicalSize = const Size(390, 844);
+          tester.view.physicalSize = duo
+              ? const Size(466, 678)
+              : const Size(390, 844);
+          if (duo) {
+            tester.view.viewPadding = const FakeViewPadding(
+              right: 76,
+              bottom: 21,
+            );
+            tester.view.padding = const FakeViewPadding(right: 76, bottom: 21);
+            addTearDown(tester.view.resetViewPadding);
+            addTearDown(tester.view.resetPadding);
+          }
           tester.view.devicePixelRatio = 1;
           addTearDown(tester.view.resetPhysicalSize);
           addTearDown(tester.view.resetDevicePixelRatio);
@@ -2229,7 +2408,33 @@ void main() {
           await tester.tap(find.byKey(const Key('community-menu-switch')));
           await tester.pumpAndSettle();
           expect(progress.last, 1);
-          if (nativeHeader) {
+          if (duo) {
+            expect(
+              tester
+                  .getCenter(find.byKey(const Key('community-switcher-title')))
+                  .dx,
+              233,
+            );
+            IosNavigationAction railAction(String label) => tester
+                .widget<IosNavigationBar>(
+                  find.descendant(
+                    of: find.byKey(ValueKey('duo-toolbar-$label')),
+                    matching: find.byType(IosNavigationBar),
+                  ),
+                )
+                .leading!;
+            expect(railAction('Close community switcher').symbol, 'xmark');
+            expect(railAction('Edit').symbol, 'pencil');
+            railAction('Edit').onPressed!();
+            await tester.pumpAndSettle();
+            expect(
+              find.byKey(const Key('community-switcher-remove-bravo')),
+              findsOneWidget,
+            );
+            expect(railAction('Done').symbol, 'checkmark');
+            railAction('Done').onPressed!();
+            await tester.pumpAndSettle();
+          } else if (nativeHeader) {
             var navigation = tester.widget<IosNavigationBar>(
               find.byType(IosNavigationBar).last,
             );
@@ -2271,11 +2476,23 @@ void main() {
               isTrue,
             );
           }
+          if (duo) {
+            expect(
+              find.byKey(const ValueKey('duo-toolbar-Edit')),
+              findsNothing,
+            );
+            expect(
+              find.byKey(
+                const ValueKey('duo-toolbar-Close community switcher'),
+              ),
+              findsNothing,
+            );
+          }
           final origin = tester.getCenter(flyingAvatar);
           await tester.pump(const Duration(milliseconds: 105));
           if (!reduceMotion) {
             final inFlight = tester.getCenter(flyingAvatar);
-            const center = Offset(195, 422);
+            final center = tester.view.physicalSize.center(Offset.zero);
             expect(
               (inFlight - center).distance,
               lessThan((origin - center).distance),
@@ -2319,7 +2536,10 @@ void main() {
             initial.text.style?.decoration,
             anyOf(isNull, TextDecoration.none),
           );
-          expect(tester.getCenter(flyingAvatar), const Offset(195, 422));
+          expect(
+            tester.getCenter(flyingAvatar),
+            tester.view.physicalSize.center(Offset.zero),
+          );
           expect(
             tester.widget<Transform>(flyingAvatar).transform.storage[0],
             1.5,
@@ -2350,7 +2570,10 @@ void main() {
               id == 'alpha' ? findsOneWidget : findsNothing,
             );
           }
-          expect(tester.getCenter(flyingAvatar), const Offset(195, 422));
+          expect(
+            tester.getCenter(flyingAvatar),
+            tester.view.physicalSize.center(Offset.zero),
+          );
           expect(
             tester.widget<Transform>(flyingAvatar).transform.storage[0],
             1.5,
@@ -2368,7 +2591,10 @@ void main() {
           await tester.pump();
           await tester.pump(const Duration(milliseconds: 200));
           if (!reduceMotion || nativeHeader) {
-            expect(tester.getCenter(flyingAvatar), const Offset(195, 422));
+            expect(
+              tester.getCenter(flyingAvatar),
+              tester.view.physicalSize.center(Offset.zero),
+            );
             expect(
               find.byKey(const Key('community-switch-loading')),
               findsOneWidget,
@@ -2378,7 +2604,10 @@ void main() {
           if (nativeHeader) {
             // Native images/layout may finish after the Flutter body. Keep the
             // hold, and use fresh bounds rather than the old community's slot.
-            expect(tester.getCenter(flyingAvatar), const Offset(195, 422));
+            expect(
+              tester.getCenter(flyingAvatar),
+              tester.view.physicalSize.center(Offset.zero),
+            );
             final header = tester.widget<FrostedAppBar>(
               find.byWidgetPredicate(
                 (widget) =>
@@ -2397,7 +2626,10 @@ void main() {
           await tester.pump();
           // The loaded list and header are ready, but unread history and DM
           // labels must also settle before the background can be revealed.
-          expect(tester.getCenter(flyingAvatar), const Offset(195, 422));
+          expect(
+            tester.getCenter(flyingAvatar),
+            tester.view.physicalSize.center(Offset.zero),
+          );
           final container = ProviderScope.containerOf(
             tester.element(find.byType(ChannelsPage)),
           );
@@ -2406,7 +2638,10 @@ void main() {
           unreadCatchUp.complete();
           await tester.pump();
           await tester.pump(const Duration(milliseconds: 100));
-          expect(tester.getCenter(flyingAvatar), const Offset(195, 422));
+          expect(
+            tester.getCenter(flyingAvatar),
+            tester.view.physicalSize.center(Offset.zero),
+          );
           expect(
             tester
                 .widget<Opacity>(
@@ -2430,7 +2665,10 @@ void main() {
             await tester.pump(const Duration(milliseconds: 65));
             expect(tester.getCenter(flyingAvatar).dx, lessThan(195));
             await tester.pump(const Duration(milliseconds: 195));
-            expect(tester.getCenter(flyingAvatar).dy, lessThan(422));
+            expect(
+              tester.getCenter(flyingAvatar).dy,
+              lessThan(tester.view.physicalSize.height / 2),
+            );
             expect(
               tester.getCenter(flyingAvatar).dy,
               greaterThan(destination.dy),

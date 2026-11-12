@@ -64,6 +64,31 @@ void main() {
         find.byKey(const ValueKey('navigation-header-avatar-settings')),
       );
       expect(settingsOpened, 1);
+      await tester.pumpWidget(
+        _testApp(
+          home: const MediaQuery(
+            data: MediaQueryData(),
+            child: SizedBox(
+              width: 951,
+              height: 128,
+              child: IosNavigationBar(
+                title: 'Alice',
+                centerTitleInPane: true,
+                titleAvatars: [IosNavigationAction(label: 'Alice')],
+              ),
+            ),
+          ),
+        ),
+      );
+      final paneParams =
+          tester.widget<UiKitView>(find.byType(UiKitView)).creationParams!
+              as Map;
+      expect(paneParams['portraitTopPadding'], 12);
+      expect(
+        tester.getTopLeft(find.byType(DmHeaderPortrait)).dy -
+            tester.getTopLeft(find.byType(UiKitView)).dy,
+        12,
+      );
       await tester.pumpWidget(const SizedBox());
       debugDefaultTargetPlatformOverride = null;
     },

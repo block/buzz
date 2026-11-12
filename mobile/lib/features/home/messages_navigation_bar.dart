@@ -1,4 +1,5 @@
 import 'dart:async';
+
 import '../../shared/widgets/agent_navigation_overlay.dart';
 
 import 'package:flutter/foundation.dart';
@@ -20,7 +21,9 @@ class MessagesNavigationBar extends HookWidget {
     required this.creationActions,
     required this.agent,
     this.onRecordingChanged,
+    this.axis = Axis.horizontal,
   });
+  final Axis axis;
   final VoidCallback onSearch;
   final Widget agent;
   final ValueChanged<bool>? onRecordingChanged;
@@ -30,6 +33,10 @@ class MessagesNavigationBar extends HookWidget {
   @override
   Widget build(BuildContext context) {
     final menuOpen = useState(false);
+    useEffect(() {
+      menuOpen.value = false;
+      return null;
+    }, [axis]);
     final overlay = useState(false);
     Widget hideDuringVoice(Widget child) => ExcludeSemantics(
       excluding: overlay.value,
@@ -43,6 +50,76 @@ class MessagesNavigationBar extends HookWidget {
       onRecordingChanged: onRecordingChanged,
       child: Builder(
         builder: (context) {
+          if (axis == Axis.vertical) {
+            return SizedBox(
+              width: 256,
+              height: 168 + Grid.xs * 2,
+              child: Stack(
+                clipBehavior: Clip.none,
+                children: [
+                  Positioned(
+                    right: 0,
+                    child: hideDuringVoice(
+                      IosMessageCreateButton(
+                        key: const ValueKey('vertical-create-menu'),
+                        mergingNavigation: true,
+                        navigationAxis: Axis.vertical,
+                        onMenuVisibilityChanged: (visible) =>
+                            menuOpen.value = visible,
+                        actions: creationActions,
+                        dividerBefore: const {2},
+                        sectionTitles: const {0: 'Solo', 2: 'Team'},
+                        accessibilityLabel: 'New',
+                        width: 56,
+                        height: 168 + Grid.xs * 2,
+                        plain: false,
+                      ),
+                    ),
+                  ),
+                  Positioned(
+                    right: 0,
+                    top: 0,
+                    width: 56,
+                    height: 56 + Grid.xs / 2,
+                    child: ClipRect(
+                      child: Align(
+                        alignment: Alignment.topCenter,
+                        child: _MenuNudge(
+                          axis: Axis.vertical,
+                          offset: menuOpen.value ? 56 + Grid.xs : 0,
+                          menuOpen: menuOpen.value,
+                          alignment: Alignment.center,
+                          child: hideDuringVoice(_search(context)),
+                        ),
+                      ),
+                    ),
+                  ),
+                  Positioned(
+                    bottom: 0,
+                    right: 0,
+                    width: 256,
+                    height: 56,
+                    child: OverflowBox(
+                      alignment: Alignment.centerRight,
+                      minWidth: 0,
+                      maxWidth: 256,
+                      child: Align(
+                        widthFactor: 1,
+                        alignment: Alignment.centerRight,
+                        child: _MenuNudge(
+                          axis: Axis.vertical,
+                          offset: menuOpen.value ? -56 - Grid.xs : 0,
+                          menuOpen: menuOpen.value,
+                          alignment: Alignment.center,
+                          child: NavigationGlassGroup(child: agent),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            );
+          }
           if (defaultTargetPlatform == TargetPlatform.iOS) {
             return SizedBox(
               width: 256,
@@ -52,6 +129,7 @@ class MessagesNavigationBar extends HookWidget {
                 children: [
                   hideDuringVoice(
                     IosMessageCreateButton(
+                      key: const ValueKey('horizontal-create-menu'),
                       mergingNavigation: true,
                       onMenuVisibilityChanged: (visible) =>
                           menuOpen.value = visible,
@@ -159,11 +237,13 @@ class MessagesNavigationBar extends HookWidget {
 class _MenuNudge extends StatelessWidget {
   const _MenuNudge({
     required this.offset,
+    this.axis = Axis.horizontal,
     required this.menuOpen,
     required this.alignment,
     required this.child,
   });
   final double offset;
+  final Axis axis;
   final bool menuOpen;
   final Alignment alignment;
   final Widget child;
@@ -182,8 +262,11 @@ class _MenuNudge extends StatelessWidget {
           duration: duration,
           curve: Curves.easeOutCubic,
           transformAlignment: alignment,
-          transform: Matrix4.translationValues(offset, 0, 0)
-            ..scaleByDouble(scale, scale, 1, 1),
+          transform: Matrix4.translationValues(
+            axis == Axis.horizontal ? offset : 0,
+            axis == Axis.vertical ? offset : 0,
+            0,
+          )..scaleByDouble(scale, scale, 1, 1),
           child: child,
         ),
       ),

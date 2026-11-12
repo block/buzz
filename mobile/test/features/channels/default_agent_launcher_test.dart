@@ -19,6 +19,7 @@ import 'package:buzz/shared/me/default_agent_writer.dart';
 import 'package:buzz/shared/me/me_sync.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
+import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -154,6 +155,8 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('Retry voice note'), findsOneWidget);
       await tester.tap(find.text('Settings'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Voice notes'));
       await tester.pumpAndSettle();
       await tester.ensureVisible(find.text('Hold to talk to Bestie'));
       await tester.tap(find.text('Hold to talk to Bestie'));
@@ -304,6 +307,7 @@ void main() {
     },
   );
 
+  final paneVariant = ValueVariant<bool>({false, true});
   testWidgets('a slow Bestie lookup does not open over a newer screen', (
     tester,
   ) async {
@@ -318,6 +322,8 @@ void main() {
     );
     await saveDefaultAgent(scope, 'a' * 64);
     final actions = _SlowDmActions();
+    final pane = ConversationPaneController();
+    addTearDown(pane.dispose);
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
     await tester.pumpWidget(
@@ -332,7 +338,14 @@ void main() {
         ],
         child: MaterialApp(
           theme: AppTheme.light(),
-          home: Scaffold(body: DefaultAgentLauncher(onChooseAgent: () {})),
+          home: Scaffold(
+            body: paneVariant.currentValue!
+                ? ConversationPaneScope(
+                    controller: pane,
+                    child: DefaultAgentLauncher(onChooseAgent: () {}),
+                  )
+                : DefaultAgentLauncher(onChooseAgent: () {}),
+          ),
         ),
       ),
     );
@@ -374,9 +387,15 @@ void main() {
     await tester.tap(find.byType(IconButton));
     await tester.pumpAndSettle();
     expect(actions.calls, 2);
-    expect(find.byType(ChannelDetailPage), findsOneWidget);
+    if (paneVariant.currentValue!) {
+      expect(pane.selectedId, 'dm');
+      expect(find.byType(ChannelDetailPage), findsNothing);
+      expect(find.byType(DefaultAgentLauncher), findsOneWidget);
+    } else {
+      expect(find.byType(ChannelDetailPage), findsOneWidget);
+    }
     await tester.pumpWidget(const SizedBox());
-  });
+  }, variant: paneVariant);
 }
 
 class _NoChannels extends ChannelsNotifier {

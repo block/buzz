@@ -62,7 +62,7 @@ void main() {
       'buildSignature': '',
     });
     await tester.pumpAndSettle();
-    await tester.scrollUntilVisible(find.text('v0.16.0 (432)'), 200);
+    await tester.ensureVisible(find.text('v0.16.0 (432)'));
     expect(find.text('v0.16.0 (432)'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
