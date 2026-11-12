@@ -419,7 +419,7 @@ async fn assert_admission_column(pool: &PgPool) {
 
 async fn apply_pgschema_to_existing_database(pool: &PgPool) {
     // The pinned migration history has retired triggers on partitioned
-    // parents (events, delivery_log), including the floor trigger 0087
+    // parents (events, delivery_log), including the floor trigger 0089
     // drops, and auto-named deletion-request checks that the desired schema
     // replaces. pgschema orders child-trigger drops
     // before their parent (Postgres refuses with 2BP01) and schedules a

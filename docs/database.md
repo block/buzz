@@ -76,7 +76,7 @@ transaction that owns the write:
 Dropping or narrowing an existing trigger or function is welcome. Follow the
 retirement sequence below.
 
-**No exception for the community write fence.** Migration 0088 dropped the
+**No exception for the community write fence.** Migration 0090 dropped the
 universal fence triggers and their helper functions; a new table MUST NOT bring
 a fence trigger back. Writers of a new tenant-owned table MUST be
 fenced in the application instead, by community admission. New serving work,
