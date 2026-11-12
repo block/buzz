@@ -49,6 +49,7 @@ impl AuditService {
     #[datastore_span(
         name = "audit_log",
         system = "postgresql",
+        pool = "audit",
         fields(action = %entry.action)
     )]
     pub async fn log(&self, entry: NewAuditEntry) -> Result<AuditEntry, AuditError> {
@@ -135,6 +136,7 @@ impl AuditService {
     #[datastore_span(
         name = "audit_verify_chain",
         system = "postgresql",
+        pool = "audit",
         fields(from_seq = from_seq, to_seq = to_seq)
     )]
     pub async fn verify_chain(
@@ -191,6 +193,7 @@ impl AuditService {
     #[datastore_span(
         name = "audit_get_entries",
         system = "postgresql",
+        pool = "audit",
         fields(from_seq = from_seq, limit = limit)
     )]
     pub async fn get_entries(

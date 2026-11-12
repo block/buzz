@@ -43,6 +43,9 @@ macro_rules! superseded_with_mentions_sql {
     };
 }
 
+// `#[datastore_span]` names `::buzz_db::datastore_span`, including inside this crate.
+extern crate self as buzz_db;
+
 mod runtime;
 mod store;
 
@@ -51,6 +54,9 @@ pub mod concurrency_gate;
 
 /// Database error types.
 pub mod error;
+
+#[doc(hidden)]
+pub mod datastore_span;
 
 #[cfg(test)]
 mod test_support;

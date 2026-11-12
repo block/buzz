@@ -11,8 +11,8 @@ use sqlx::{PgConnection, PgPool, QueryBuilder, Row};
 use uuid::Uuid;
 
 use crate::{
-    event::row_to_stored_event, Db, DbError, ReadSession, ReadSessionInner, Result, RouteDecision,
-    RoutePredicate,
+    event::row_to_stored_event, Db, DbError, DbPoolRole, ReadSession, ReadSessionInner, Result,
+    RouteDecision, RoutePredicate,
 };
 use buzz_datastore_tracing::datastore_span;
 
@@ -452,15 +452,27 @@ impl ReadSession {
     ) -> Result<AuxPage> {
         let writer = match &mut self.inner {
             ReadSessionInner::Replica { tx, writer } => match select_aux(tx, query, budget).await {
-                Ok(page) => return Ok(page),
+                Ok(page) => {
+                    crate::datastore_span::set_route(DbPoolRole::Reader, "replica", "session");
+                    return Ok(page);
+                }
                 Err(error @ (DbError::InvalidData(_) | DbError::ThreadWindowBudgetExceeded(_))) => {
+                    crate::datastore_span::set_route(DbPoolRole::Reader, "replica", "session");
                     return Err(error);
                 }
                 // Surface a cancel instead of re-running it on the writer (see
                 // `DbError::is_statement_cancelled`) and keep the proved
                 // replica session.
-                Err(error) if error.is_statement_cancelled() => return Err(error),
+                Err(error) if error.is_statement_cancelled() => {
+                    crate::datastore_span::set_route(
+                        DbPoolRole::Reader,
+                        "replica",
+                        "statement_cancelled",
+                    );
+                    return Err(error);
+                }
                 Err(error) => {
+                    crate::datastore_span::set_route(DbPoolRole::Writer, "writer", "replica_error");
                     tracing::warn!(%error, "thread auxiliary read failed; degrading to writer");
                     metrics::counter!("buzz_db_read_session_degraded").increment(1);
                     writer.clone()

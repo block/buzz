@@ -265,7 +265,7 @@ fn normalized_search_text(q: &str) -> Option<String> {
 ///
 /// `community_id = $ctx` is the first predicate and is non-negotiable. There
 /// is no code path through this function that omits it.
-#[datastore_span(name = "search", system = "postgresql")]
+#[datastore_span(name = "search", system = "postgresql", pool = "search")]
 pub async fn search(pool: &PgPool, query: &SearchQuery) -> Result<SearchResult, SearchError> {
     let profile_only = query.kinds.as_deref() == Some(&[0][..]);
     let Some(search_text) = normalized_search_text(&query.q) else {
@@ -465,7 +465,7 @@ pub const PROFILE_NAMES_PER_PAGE_MAX: u32 = 100;
 /// Each person yields their current kind:0, when they have one, then, with
 /// `verified_by`, their current verified profile, when they have one,
 /// whichever of the two matched.
-#[datastore_span(name = "search_profile_names", system = "postgresql")]
+#[datastore_span(name = "search_profile_names", system = "postgresql", pool = "search")]
 pub async fn search_profile_names(
     pool: &PgPool,
     community: CommunityId,

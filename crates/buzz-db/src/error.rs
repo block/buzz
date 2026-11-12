@@ -167,21 +167,122 @@ pub type Result<T> = std::result::Result<T, DbError>;
 /// messages can repeat a bound value (`invalid input syntax for type uuid:
 /// "<value>"`), so only the SQLSTATE code is kept.
 pub fn sqlx_error_kind(e: &sqlx::Error) -> String {
-    let kind = match e {
+    match e {
         sqlx::Error::Database(db) => {
-            return format!("database:{}", db.code().as_deref().unwrap_or("unknown"))
+            format!("database:{}", db.code().as_deref().unwrap_or("unknown"))
         }
+        sqlx::Error::Io(_) => "io".to_owned(),
+        _ => sqlx_error_type(e).to_owned(),
+    }
+}
+
+/// A fixed name for a driver error's class. Socket errors keep their
+/// [`std::io::ErrorKind`], which tells a refused or reset connection from a
+/// timeout; the rest of an error, including any message, is dropped.
+fn sqlx_error_type(e: &sqlx::Error) -> &'static str {
+    use std::io::ErrorKind as Io;
+    match e {
+        sqlx::Error::Database(_) => "database",
         sqlx::Error::RowNotFound => "row_not_found",
         sqlx::Error::PoolTimedOut => "pool_timed_out",
         sqlx::Error::PoolClosed => "pool_closed",
-        sqlx::Error::Io(_) => "io",
+        sqlx::Error::Io(io) => match io.kind() {
+            Io::ConnectionRefused => "io_connection_refused",
+            Io::ConnectionReset => "io_connection_reset",
+            Io::ConnectionAborted => "io_connection_aborted",
+            Io::NotConnected => "io_not_connected",
+            Io::BrokenPipe => "io_broken_pipe",
+            Io::TimedOut => "io_timed_out",
+            Io::UnexpectedEof => "io_unexpected_eof",
+            _ => "io",
+        },
         sqlx::Error::Tls(_) => "tls",
         sqlx::Error::Protocol(_) => "protocol",
+        sqlx::Error::Configuration(_) | sqlx::Error::ConfigFile(_) => "configuration",
+        sqlx::Error::InvalidArgument(_) => "invalid_argument",
         sqlx::Error::ColumnDecode { .. } | sqlx::Error::Decode(_) => "decode",
         sqlx::Error::Encode(_) => "encode",
+        sqlx::Error::TypeNotFound { .. } => "type_not_found",
+        sqlx::Error::ColumnIndexOutOfBounds { .. } | sqlx::Error::ColumnNotFound(_) => {
+            "column_not_found"
+        }
+        sqlx::Error::WorkerCrashed => "worker_crashed",
+        sqlx::Error::Migrate(_) => "migrate",
+        sqlx::Error::InvalidSavePointStatement => "invalid_savepoint_statement",
+        sqlx::Error::BeginFailed => "begin_failed",
         _ => "other",
-    };
-    kind.to_owned()
+    }
+}
+
+/// An error a `#[datastore_span]` function can return.
+///
+/// Spans record only what this trait yields: a fixed class name, and for a
+/// driver error its SQLSTATE and constraint name. Error text never reaches a
+/// span, because driver messages and details can repeat bound values
+/// (`Key (name)=(<value>) already exists`) and domain errors can carry tenant
+/// data (`ChannelNameTaken(String)`).
+pub trait DatastoreSpanError {
+    /// A constant name for this failure, recorded as `error.type`. It must
+    /// never be derived from the error's payload or message.
+    fn span_error_type(&self) -> &'static str;
+
+    /// The driver error underneath, if any, whose SQLSTATE and constraint
+    /// name the span records.
+    fn span_sqlx_error(&self) -> Option<&sqlx::Error> {
+        None
+    }
+}
+
+impl DatastoreSpanError for sqlx::Error {
+    fn span_error_type(&self) -> &'static str {
+        sqlx_error_type(self)
+    }
+
+    fn span_sqlx_error(&self) -> Option<&sqlx::Error> {
+        Some(self)
+    }
+}
+
+impl DatastoreSpanError for DbError {
+    fn span_error_type(&self) -> &'static str {
+        use DbError as E;
+        // Exhaustive on purpose: a new variant must choose its own name.
+        match self {
+            E::MediaAuthorizationCapacity => "media_authorization_capacity",
+            E::Sqlx(e) => sqlx_error_type(e),
+            E::Migrate(_) => "migrate",
+            E::AuthEventRejected => "auth_event_rejected",
+            E::EphemeralEventRejected(_) => "ephemeral_event_rejected",
+            E::ChannelNotFound(_) => "channel_not_found",
+            E::ChannelNameTaken(_) => "channel_name_taken",
+            E::MemberNotFound(_) => "member_not_found",
+            E::NotFound(_) => "not_found",
+            E::AccessDenied(_) => "access_denied",
+            E::NipFiBindingRequired => "nip_fi_binding_required",
+            E::InviteRestricted => "invite_restricted",
+            E::InviteIssuerNotAdmin => "invite_issuer_not_admin",
+            E::InviteOwnerMismatch => "invite_owner_mismatch",
+            E::Serde(_) => "serde",
+            E::InvalidData(_) => "invalid_data",
+            E::PartitionDroppedMidAudit(_) => "partition_dropped_mid_audit",
+            E::ServingWritesNotDrained { .. } => "serving_writes_not_drained",
+            E::DeletionSafety(_) => "deletion_safety",
+            E::ArtifactSyncLimit => "artifact_sync_limit",
+            E::ReadStateSnapshotTooLarge => "read_state_snapshot_too_large",
+            E::MembershipSnapshotTooLarge => "membership_snapshot_too_large",
+            E::ThreadWindowBudgetExceeded(_) => "thread_window_budget_exceeded",
+            E::InvalidTimestamp(_) => "invalid_timestamp",
+            E::CreatedAtFloorRejected => "created_at_floor_rejected",
+            E::LastOperator => "last_operator",
+        }
+    }
+
+    fn span_sqlx_error(&self) -> Option<&sqlx::Error> {
+        match self {
+            DbError::Sqlx(e) => Some(e),
+            _ => None,
+        }
+    }
 }
 
 impl DbError {

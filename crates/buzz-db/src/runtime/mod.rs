@@ -362,12 +362,25 @@ impl ReadSession {
     pub async fn query_events(&mut self, q: &EventQuery) -> Result<Vec<StoredEvent>> {
         let degraded = match &mut self.inner {
             ReadSessionInner::Replica { tx, writer } => {
+                crate::datastore_span::set_route(DbPoolRole::Reader, "replica", "session");
                 match event::query_events_on(tx, q, event::ReadDeadline::Session).await {
                     Ok(rows) => return Ok(rows),
                     // Surface a cancel instead of re-running it on the writer; see
                     // `DbError::is_statement_cancelled` for the trade-off.
-                    Err(e) if e.is_statement_cancelled() => return Err(e),
+                    Err(e) if e.is_statement_cancelled() => {
+                        crate::datastore_span::set_route(
+                            DbPoolRole::Reader,
+                            "replica",
+                            "statement_cancelled",
+                        );
+                        return Err(e);
+                    }
                     Err(e) => {
+                        crate::datastore_span::set_route(
+                            DbPoolRole::Writer,
+                            "writer",
+                            "replica_error",
+                        );
                         tracing::warn!(
                             error = %e,
                             "replica session query failed mid-request; degrading to writer"
@@ -1709,6 +1722,11 @@ impl Db {
 
     /// Record one route decision (Rev 2 observability): which path, where it
     /// went, and why.
+    ///
+    /// The enclosing `#[datastore_span]` gets the same decision and reason,
+    /// and the pool that served (or, for `rejected`, refused) the read. A
+    /// later call within the same span, such as a writer re-run after a
+    /// replica failure, replaces an earlier one.
     pub(crate) fn record_route(path: &'static str, decision: &'static str, reason: &'static str) {
         metrics::counter!(
             "buzz_db_route_decision",
@@ -1717,6 +1735,11 @@ impl Db {
             "reason" => reason,
         )
         .increment(1);
+        let pool = match decision {
+            "writer" => DbPoolRole::Writer,
+            _ => DbPoolRole::Reader,
+        };
+        crate::datastore_span::set_route(pool, decision, reason);
     }
 
     /// Run pending database migrations.
@@ -2038,11 +2061,17 @@ impl Db {
                     }
                 };
                 match verdict {
-                    Some(reason) => Ok(RouteDecision::Replica(
-                        history_reads::ReaderTx::new(tx, permit),
-                        entry,
-                        reason,
-                    )),
+                    Some(reason) => {
+                        // Span only: the caller records the metric once the
+                        // page is served. Until then, an early return from
+                        // replica work is still attributed to the reader.
+                        crate::datastore_span::set_route(DbPoolRole::Reader, "replica", reason);
+                        Ok(RouteDecision::Replica(
+                            history_reads::ReaderTx::new(tx, permit),
+                            entry,
+                            reason,
+                        ))
+                    }
                     None => {
                         // The session proves an older entry than the
                         // predicate needs (replication lag) — fail closed.
@@ -2258,4 +2287,147 @@ fn media_authorization_slots(pool: &PgPool) -> std::sync::Arc<tokio::sync::Semap
     std::sync::Arc::new(tokio::sync::Semaphore::new(
         (pool.options().get_max_connections() as usize / 4).clamp(1, 8),
     ))
+}
+
+#[cfg(test)]
+mod span_route_tests {
+    use super::{Db, DbPoolRole};
+    use buzz_datastore_tracing::datastore_span;
+    use std::sync::{Arc, Mutex};
+    use tracing::field::{Field, Visit};
+    use tracing_subscriber::layer::{Context, Layer};
+    use tracing_subscriber::prelude::*;
+
+    /// Every value a span field was given, in order. An exported OTel span
+    /// carries one attribute per record, so a field recorded twice would
+    /// export two conflicting values.
+    type Records = Arc<Mutex<Vec<(String, String)>>>;
+
+    struct Capture(Records);
+
+    impl Visit for Capture {
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            self.record_str(field, &format!("{value:?}"));
+        }
+
+        fn record_str(&mut self, field: &Field, value: &str) {
+            let mut records = self.0.lock().expect("capture lock");
+            records.push((field.name().to_owned(), value.to_owned()));
+        }
+    }
+
+    struct SpanRecords(Records);
+
+    impl<S: tracing::Subscriber> Layer<S> for SpanRecords {
+        fn on_new_span(
+            &self,
+            attrs: &tracing::span::Attributes<'_>,
+            _: &tracing::span::Id,
+            _: Context<'_, S>,
+        ) {
+            attrs.record(&mut Capture(Arc::clone(&self.0)));
+        }
+
+        fn on_record(
+            &self,
+            _: &tracing::span::Id,
+            values: &tracing::span::Record<'_>,
+            _: Context<'_, S>,
+        ) {
+            values.record(&mut Capture(Arc::clone(&self.0)));
+        }
+    }
+
+    #[datastore_span(name = "routed_test", system = "postgresql")]
+    async fn routed(decisions: &[(&'static str, &'static str)]) -> crate::Result<()> {
+        for (decision, reason) in decisions {
+            Db::record_route("test", decision, reason);
+        }
+        Ok(())
+    }
+
+    #[datastore_span(name = "session_test", system = "postgresql")]
+    async fn degraded_session() -> crate::Result<()> {
+        crate::datastore_span::set_route(DbPoolRole::Reader, "replica", "session");
+        crate::datastore_span::set_route(DbPoolRole::Writer, "writer", "replica_error");
+        Ok(())
+    }
+
+    #[datastore_span(name = "outer_test", system = "postgresql")]
+    async fn outer_with_routed_child() -> crate::Result<()> {
+        routed(&[("replica", "covered")]).await
+    }
+
+    async fn records<F: std::future::Future<Output = crate::Result<()>>>(
+        operation: F,
+    ) -> Vec<(String, String)> {
+        let records = Records::default();
+        let subscriber = tracing_subscriber::registry().with(SpanRecords(Arc::clone(&records)));
+        let _guard = tracing::subscriber::set_default(subscriber);
+        operation.await.expect("operation");
+        let records = records.lock().expect("capture lock").clone();
+        records
+    }
+
+    /// The single value `field` was given; panics if it was recorded twice.
+    fn once<'a>(records: &'a [(String, String)], field: &str) -> Option<&'a str> {
+        let mut values = records
+            .iter()
+            .filter(|(name, _)| name == field)
+            .map(|(_, value)| value.as_str());
+        let value = values.next();
+        assert!(
+            values.next().is_none(),
+            "{field} recorded twice: {records:?}"
+        );
+        value
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn route_decisions_name_the_pool_once_on_the_datastore_span() {
+        let unrouted = records(routed(&[])).await;
+        assert_eq!(once(&unrouted, "db.pool.role"), Some("writer"));
+        assert_eq!(once(&unrouted, "db.route.decision"), None);
+
+        for (decision, reason, pool) in [
+            ("replica", "covered", "reader"),
+            ("replica", "statement_cancelled", "reader"),
+            ("writer", "reader_acquire_timeout", "writer"),
+            ("rejected", "history_read_cap", "reader"),
+        ] {
+            let fields = records(routed(&[(decision, reason)])).await;
+            assert_eq!(
+                once(&fields, "db.pool.role"),
+                Some(pool),
+                "{decision}/{reason}"
+            );
+            assert_eq!(once(&fields, "db.route.decision"), Some(decision));
+            assert_eq!(once(&fields, "db.route.reason"), Some(reason));
+        }
+
+        // A writer re-run after a replica failure replaces the replica.
+        let rerun = records(routed(&[
+            ("replica", "covered"),
+            ("writer", "replica_error"),
+        ]))
+        .await;
+        assert_eq!(once(&rerun, "db.pool.role"), Some("writer"));
+        assert_eq!(once(&rerun, "db.route.reason"), Some("replica_error"));
+
+        let degraded = records(degraded_session()).await;
+        assert_eq!(once(&degraded, "db.pool.role"), Some("writer"));
+        assert_eq!(once(&degraded, "db.route.decision"), Some("writer"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_child_span_route_stays_on_the_child() {
+        let fields = records(outer_with_routed_child()).await;
+        let roles = fields
+            .iter()
+            .filter(|(name, _)| name == "db.pool.role")
+            .map(|(_, value)| value.as_str())
+            .collect::<Vec<_>>();
+        // The child finishes first.
+        assert_eq!(roles, ["reader", "writer"]);
+    }
 }
