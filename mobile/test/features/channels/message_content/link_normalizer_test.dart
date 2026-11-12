@@ -20,6 +20,16 @@ void main() {
         'See [a]\n\n[a]: $site\n[b]: $site "B"',
       ),
       ('look at this\n[note]: $site', 'look at this\n[note]: [$site]($site)'),
+      (
+        'look at `this`\n[note]: $site',
+        'look at `this`\n[note]: [$site]($site)',
+      ),
+      ('\n[a]: $site', '\n[a]: $site'),
+      ('`x`\n\n[a]: $site', '`x`\n\n[a]: $site'),
+      (
+        'text\n[a]: $site\n[b]: $site',
+        'text\n[a]: [$site]($site)\n[b]: [$site]($site)',
+      ),
     ]) {
       expect(normalizeBareLinks(markdown), expected, reason: markdown);
     }

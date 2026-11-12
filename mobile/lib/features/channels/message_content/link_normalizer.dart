@@ -20,8 +20,10 @@ final _codeRunPattern = RegExp(r'`+|~{3,}');
 /// links while leaving inline and fenced code and link reference definitions
 /// untouched. Punctuation peeling is limited to Buzz URLs so existing HTTP(S)
 /// destinations stay unchanged.
-String normalizeBareLinks(String content) =>
-    mapMarkdownProse(content, _normalizeOutsideDefinitions);
+String normalizeBareLinks(String content) => _mapMarkdownProseAt(
+  content,
+  (prose, start) => _normalizeOutsideDefinitions(content, prose, start),
+);
 
 // A link reference definition line, `[label]: destination`. Wrapping its
 // destination in a Markdown link would make the wrapped text the destination.
@@ -32,35 +34,46 @@ final _definitionLine = RegExp(
   multiLine: true,
 );
 
-String _normalizeOutsideDefinitions(String segment) {
+String _normalizeOutsideDefinitions(String content, String prose, int start) {
   final result = StringBuffer();
   var offset = 0;
-  var lastDefinitionEnd = -1;
-  for (final line in _definitionLine.allMatches(segment)) {
-    if (!_startsBlock(segment, line.start, lastDefinitionEnd)) continue;
+  for (final line in _definitionLine.allMatches(prose)) {
+    if (!_startsBlock(content, start + line.start)) continue;
     result
-      ..write(_normalizeLinkSegment(segment.substring(offset, line.start)))
+      ..write(_normalizeLinkSegment(prose.substring(offset, line.start)))
       ..write(line[0]);
-    offset = lastDefinitionEnd = line.end;
+    offset = line.end;
   }
-  result.write(_normalizeLinkSegment(segment.substring(offset)));
+  result.write(_normalizeLinkSegment(prose.substring(offset)));
   return result.toString();
 }
 
-/// Whether the line at [start] begins a block: it is the first line, the
-/// line before it is blank, or that line is a definition ending at
-/// [lastDefinitionEnd].
-bool _startsBlock(String segment, int start, int lastDefinitionEnd) {
-  if (start == 0) return true;
-  final previousEnd = start - 1;
-  if (previousEnd == lastDefinitionEnd) return true;
-  final previousStart = segment.lastIndexOf('\n', previousEnd - 1) + 1;
-  return segment.substring(previousStart, previousEnd).trim().isEmpty;
+/// Whether a definition may start at [index] of [content]: a line starts
+/// there, and the lines above it, back to the message start or a blank line,
+/// are all definitions. A definition cannot interrupt a paragraph.
+bool _startsBlock(String content, int index) {
+  if (index > 0 && content[index - 1] != '\n') return false;
+  var end = index - 1;
+  while (end >= 0) {
+    final start = end == 0 ? 0 : content.lastIndexOf('\n', end - 1) + 1;
+    final previous = content.substring(start, end);
+    if (previous.trim().isEmpty) return true;
+    if (!_definitionLine.hasMatch(previous)) return false;
+    end = start - 1;
+  }
+  return true;
 }
 
 /// Applies [transform] to each run of [content] outside inline and fenced
 /// code, leaving code untouched. Fences may use backticks or tildes.
-String mapMarkdownProse(String content, String Function(String) transform) {
+String mapMarkdownProse(String content, String Function(String) transform) =>
+    _mapMarkdownProseAt(content, (prose, _) => transform(prose));
+
+/// [mapMarkdownProse], with each run's start offset in [content].
+String _mapMarkdownProseAt(
+  String content,
+  String Function(String prose, int start) transform,
+) {
   final buffer = StringBuffer();
   var offset = 0;
   var proseStart = 0;
@@ -110,7 +123,9 @@ String mapMarkdownProse(String content, String Function(String) transform) {
     } else if (runChar == '~') {
       // Tildes only fence code; shorter runs are strikethrough.
       if (_isOpeningFence(content, run.start, runLength)) {
-        buffer.write(transform(content.substring(proseStart, run.start)));
+        buffer.write(
+          transform(content.substring(proseStart, run.start), proseStart),
+        );
         codeStart = run.start;
         fenceDelimiterLength = runLength;
         fenceChar = runChar;
@@ -123,11 +138,15 @@ String mapMarkdownProse(String content, String Function(String) transform) {
     } else if (_hasInlineCloserOnLine(content, run.end, runLength) ||
         (!_isOpeningFence(content, run.start, runLength) &&
             _hasInlineCloser(content, run.end, runLength))) {
-      buffer.write(transform(content.substring(proseStart, run.start)));
+      buffer.write(
+        transform(content.substring(proseStart, run.start), proseStart),
+      );
       codeStart = run.start;
       inlineDelimiterLength = runLength;
     } else if (_isOpeningFence(content, run.start, runLength)) {
-      buffer.write(transform(content.substring(proseStart, run.start)));
+      buffer.write(
+        transform(content.substring(proseStart, run.start), proseStart),
+      );
       codeStart = run.start;
       fenceDelimiterLength = runLength;
       fenceChar = runChar;
@@ -140,7 +159,7 @@ String mapMarkdownProse(String content, String Function(String) transform) {
   if (inlineDelimiterLength > 0 || fenceDelimiterLength > 0) {
     buffer.write(content.substring(codeStart));
   } else {
-    buffer.write(transform(content.substring(proseStart)));
+    buffer.write(transform(content.substring(proseStart), proseStart));
   }
   return buffer.toString();
 }
