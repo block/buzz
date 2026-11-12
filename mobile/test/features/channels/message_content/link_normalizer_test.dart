@@ -11,6 +11,20 @@ void main() {
     );
   });
 
+  test('leaves link reference definitions, but not lazy lines, as written', () {
+    const site = 'https://example.com';
+    for (final (markdown, expected) in [
+      ('[a]: $site', '[a]: $site'),
+      (
+        'See [a]\n\n[a]: $site\n[b]: $site "B"',
+        'See [a]\n\n[a]: $site\n[b]: $site "B"',
+      ),
+      ('look at this\n[note]: $site', 'look at this\n[note]: [$site]($site)'),
+    ]) {
+      expect(normalizeBareLinks(markdown), expected, reason: markdown);
+    }
+  });
+
   test('keeps punctuation and open Markdown delimiters outside links', () {
     expect(
       normalizeBareLinks('**open $url**. and **_${url}_**!'),

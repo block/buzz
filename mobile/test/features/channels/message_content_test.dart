@@ -678,30 +678,39 @@ void main() {
         nsec: nostr.Keys.generate().nsec,
       );
 
-      await tester.pumpWidget(
-        _testable(
-          const MessageContent(content: '[report.pdf]($url)'),
-          overrides: [
-            mediaGetAuthServiceProvider.overrideWithValue(auth),
-            openDownloadedFileProvider.overrideWithValue((
-              url,
-              headers,
-              filename,
-            ) async {
-              openedUrl = url;
-              openedHeaders = headers;
-              openedFilename = filename;
-            }),
-          ],
-        ),
-      );
+      // An inline link, then reference links, whose definitions must keep
+      // their destination as written.
+      for (final content in [
+        '[report.pdf]($url)',
+        'See [report.pdf]\n\n[report.pdf]: $url',
+        'See [report.pdf][r]\n\n[r]: $url "Report"',
+      ]) {
+        openedUrl = null;
+        await tester.pumpWidget(
+          _testable(
+            MessageContent(content: content),
+            overrides: [
+              mediaGetAuthServiceProvider.overrideWithValue(auth),
+              openDownloadedFileProvider.overrideWithValue((
+                url,
+                headers,
+                filename,
+              ) async {
+                openedUrl = url;
+                openedHeaders = headers;
+                openedFilename = filename;
+              }),
+            ],
+          ),
+        );
 
-      await tester.tap(find.text('report.pdf'));
-      await tester.pump();
+        await tester.tap(find.text('report.pdf'));
+        await tester.pump();
 
-      expect(openedUrl, url);
-      expect(openedFilename, 'report.pdf');
-      expect(openedHeaders?['Authorization'], startsWith('Nostr '));
+        expect(openedUrl, url, reason: content);
+        expect(openedFilename, 'report.pdf');
+        expect(openedHeaders?['Authorization'], startsWith('Nostr '));
+      }
     });
 
     testWidgets('a link nothing can open offers only copy and share', (

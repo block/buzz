@@ -17,10 +17,46 @@ final _backtickRunPattern = RegExp(r'`+');
 final _codeRunPattern = RegExp(r'`+|~{3,}');
 
 /// Converts supported Buzz and HTTP(S) autolinks and bare links into Markdown
-/// links while leaving inline and fenced code untouched. Punctuation peeling
-/// is limited to Buzz URLs so existing HTTP(S) destinations stay unchanged.
+/// links while leaving inline and fenced code and link reference definitions
+/// untouched. Punctuation peeling is limited to Buzz URLs so existing HTTP(S)
+/// destinations stay unchanged.
 String normalizeBareLinks(String content) =>
-    mapMarkdownProse(content, _normalizeLinkSegment);
+    mapMarkdownProse(content, _normalizeOutsideDefinitions);
+
+// A link reference definition line, `[label]: destination`. Wrapping its
+// destination in a Markdown link would make the wrapped text the destination.
+// A definition cannot interrupt a paragraph, so it counts only at a block
+// start: the first line, after a blank line, or after another definition.
+final _definitionLine = RegExp(
+  r'^ {0,3}\[[^\]\n]+\]:[ \t]*\S.*$',
+  multiLine: true,
+);
+
+String _normalizeOutsideDefinitions(String segment) {
+  final result = StringBuffer();
+  var offset = 0;
+  var lastDefinitionEnd = -1;
+  for (final line in _definitionLine.allMatches(segment)) {
+    if (!_startsBlock(segment, line.start, lastDefinitionEnd)) continue;
+    result
+      ..write(_normalizeLinkSegment(segment.substring(offset, line.start)))
+      ..write(line[0]);
+    offset = lastDefinitionEnd = line.end;
+  }
+  result.write(_normalizeLinkSegment(segment.substring(offset)));
+  return result.toString();
+}
+
+/// Whether the line at [start] begins a block: it is the first line, the
+/// line before it is blank, or that line is a definition ending at
+/// [lastDefinitionEnd].
+bool _startsBlock(String segment, int start, int lastDefinitionEnd) {
+  if (start == 0) return true;
+  final previousEnd = start - 1;
+  if (previousEnd == lastDefinitionEnd) return true;
+  final previousStart = segment.lastIndexOf('\n', previousEnd - 1) + 1;
+  return segment.substring(previousStart, previousEnd).trim().isEmpty;
+}
 
 /// Applies [transform] to each run of [content] outside inline and fenced
 /// code, leaving code untouched. Fences may use backticks or tildes.
