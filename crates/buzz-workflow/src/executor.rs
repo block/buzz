@@ -29,6 +29,9 @@ pub struct TriggerContext {
     pub text: String,
     /// Pubkey of the event author (hex string).
     pub author: String,
+    /// Display name of the event author, when known (empty otherwise).
+    #[serde(default)]
+    pub author_name: String,
     /// Channel UUID as string.
     pub channel_id: String,
     /// Unix timestamp of the triggering event (as string for template use).
@@ -54,6 +57,7 @@ impl TriggerContext {
         match name {
             "text" => Some(&self.text),
             "author" => Some(&self.author),
+            "author_name" => Some(&self.author_name),
             "channel_id" => Some(&self.channel_id),
             "timestamp" => Some(&self.timestamp),
             "emoji" => Some(&self.emoji),
@@ -425,6 +429,10 @@ pub fn resolve_step_templates(
             channel: t_opt(channel)?,
             reply_in_thread: *reply_in_thread,
         }),
+        EditMessage { message_id, text } => Ok(EditMessage {
+            message_id: t(message_id)?,
+            text: t(text)?,
+        }),
         SendDm { to, text } => Ok(SendDm {
             to: t(to)?,
             text: t(text)?,
@@ -467,6 +475,40 @@ pub fn resolve_step_templates(
             duration: duration.clone(),
         }),
     }
+}
+
+/// Load the workflow a run belongs to, scoped to the run's community — the
+/// same run/workflow UUID may exist in another community, so a bare-id lookup
+/// could load the wrong row and drive a side effect under it.
+async fn load_run_workflow(
+    engine: &WorkflowEngine,
+    community_id: CommunityId,
+    run_id: Uuid,
+) -> Result<buzz_db::workflow::WorkflowRecord, WorkflowError> {
+    let run = engine
+        .db
+        .get_workflow_run(community_id, run_id)
+        .await
+        .map_err(|e| {
+            WorkflowError::WebhookError(format!("failed to load workflow run {run_id}: {e}"))
+        })?;
+    engine
+        .db
+        .get_workflow(community_id, run.workflow_id)
+        .await
+        .map_err(|e| {
+            WorkflowError::WebhookError(format!("failed to load workflow {}: {e}", run.workflow_id))
+        })
+}
+
+/// Normalize the `SendDm` `to` field (hex or npub) into a lowercase hex pubkey.
+/// Unresolved `{{...}}` placeholders stay literal and are rejected here.
+fn resolve_dm_recipient(to: &str) -> Result<String, WorkflowError> {
+    let to = to.trim();
+    let pubkey = nostr::PublicKey::parse(to).map_err(|e| {
+        WorkflowError::InvalidDefinition(format!("SendDm: invalid recipient pubkey '{to}': {e}"))
+    })?;
+    Ok(pubkey.to_hex())
 }
 
 /// Result of dispatching a single step action.
@@ -575,25 +617,7 @@ pub async fn dispatch_action(
                     // attribution, scoped to the run's community — the same run/workflow
                     // UUID may exist in another community, so a bare-id lookup could
                     // load the wrong row and drive a side effect under it.
-                    let wf_run = engine
-                        .db
-                        .get_workflow_run(community_id, run_id)
-                        .await
-                        .map_err(|e| {
-                            WorkflowError::WebhookError(format!(
-                                "SendMessage: failed to load workflow run {run_id}: {e}"
-                            ))
-                        })?;
-                    let workflow = engine
-                        .db
-                        .get_workflow(community_id, wf_run.workflow_id)
-                        .await
-                        .map_err(|e| {
-                            WorkflowError::WebhookError(format!(
-                                "SendMessage: failed to load workflow {}: {e}",
-                                wf_run.workflow_id
-                            ))
-                        })?;
+                    let workflow = load_run_workflow(engine, community_id, run_id).await?;
                     let channel_id = resolve_send_message_channel(
                         channel.as_deref(),
                         &trigger_ctx.channel_id,
@@ -652,10 +676,54 @@ pub async fn dispatch_action(
                     })))
                 }
 
-                SendDm { to, text: _ } => {
-                    warn!(run_id = %run_id, step = step_id, "SendDm not yet implemented (to={to})");
-                    // TODO (WF-07): emit DM event.
-                    Err(WorkflowError::NotImplemented("SendDm".into()))
+                EditMessage { message_id, text } => {
+                    let workflow = load_run_workflow(engine, community_id, run_id).await?;
+                    let owner_pubkey_hex = hex::encode(&workflow.owner_pubkey);
+                    let EditMessage {
+                        text: authored_text,
+                        ..
+                    } = &step.action
+                    else {
+                        return Err(WorkflowError::InvalidDefinition(
+                            "EditMessage: resolved action does not match its authored step".into(),
+                        ));
+                    };
+                    let event_id = engine
+                        .action_sink()?
+                        .edit_message(
+                            community_id,
+                            message_id.trim(),
+                            text,
+                            authored_text,
+                            &owner_pubkey_hex,
+                        )
+                        .await
+                        .map_err(WorkflowError::from)?;
+
+                    Ok(StepResult::Completed(serde_json::json!({
+                        "edited": true,
+                        "event_id": event_id,
+                    })))
+                }
+
+                SendDm { to, text } => {
+                    let workflow = load_run_workflow(engine, community_id, run_id).await?;
+                    let recipient = resolve_dm_recipient(to)?;
+                    let owner_pubkey_hex = hex::encode(&workflow.owner_pubkey);
+
+                    // The body is deliberately not logged: DMs are private.
+                    info!(run_id = %run_id, step = step_id, "SendDm → {recipient}");
+
+                    let event_id = engine
+                        .action_sink()?
+                        .send_dm(community_id, &recipient, text, &owner_pubkey_hex)
+                        .await
+                        .map_err(WorkflowError::from)?;
+
+                    Ok(StepResult::Completed(serde_json::json!({
+                        "sent": true,
+                        "event_id": event_id,
+                    })))
                 }
 
                 SetChannelTopic { topic: _ } => {
@@ -1323,6 +1391,7 @@ mod tests {
         TriggerContext {
             text: "P1 incident in production".to_owned(),
             author: "abc123def456".to_owned(),
+            author_name: String::new(),
             channel_id: "channel-uuid-here".to_owned(),
             timestamp: "1700000000".to_owned(),
             emoji: "fire".to_owned(),
@@ -1982,5 +2051,45 @@ mod tests {
             resolve_send_message_channel(Some(&override_channel_id.to_string()), "", None)
                 .expect("override should be accepted");
         assert_eq!(resolved, override_channel_id.to_string());
+    }
+
+    #[test]
+    fn send_dm_recipient_normalizes_hex_and_npub_and_rejects_the_rest() {
+        let hex = "e17e5abf7b1dbd363f0ed6fbda2455609727b2555428dea251388c542cd2f03f";
+        let npub = "npub1u9l940mmrk7nv0cw6maa5fz4vztj0vj42s5dagj38zx9gtxj7qls94fpux";
+        for ok in [
+            hex.to_owned(),
+            hex.to_uppercase(),
+            format!(" {hex}\n"),
+            npub.to_owned(),
+        ] {
+            assert_eq!(resolve_dm_recipient(&ok).expect("valid"), hex);
+        }
+        for bad in ["", "  ", "abc123", "{{steps.offer.output.claimer}}"] {
+            assert!(
+                matches!(
+                    resolve_dm_recipient(bad),
+                    Err(WorkflowError::InvalidDefinition(_))
+                ),
+                "{bad:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn edit_message_resolves_target_and_reactor_name() {
+        let mut ctx = make_trigger();
+        ctx.author_name = "Robby".to_owned();
+        let step: Step = serde_yaml::from_str(
+            "id: mark\naction: edit_message\nmessage_id: '{{trigger.message_id}}'\ntext: 'claimed by @{{trigger.author_name}}'\n",
+        )
+        .expect("step parses");
+        match resolve_step_templates(&step, &ctx, &HashMap::new()).expect("resolves") {
+            ActionDef::EditMessage { message_id, text } => {
+                assert_eq!(message_id, "event-id-hex");
+                assert_eq!(text, "claimed by @Robby");
+            }
+            other => panic!("expected EditMessage, got {other:?}"),
+        }
     }
 }

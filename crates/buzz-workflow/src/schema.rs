@@ -106,6 +106,13 @@ pub enum ActionDef {
         #[serde(default)]
         reply_in_thread: bool,
     },
+    /// Replace the text of a message this workflow owner's workflows posted.
+    EditMessage {
+        /// Event ID (hex) of the message to edit, e.g. `{{trigger.message_id}}`.
+        message_id: String,
+        /// New message text (supports template variables).
+        text: String,
+    },
     /// Send a direct message to a user.
     SendDm {
         /// Recipient — pubkey hex or `{{trigger.author}}`.
@@ -422,6 +429,17 @@ mod tests {
             ActionDef::RequestApproval { .. }
         ));
         assert!(matches!(&def.steps[6].action, ActionDef::Delay { .. }));
+    }
+
+    #[test]
+    fn parse_edit_message_requires_message_id_and_text() {
+        let yaml = "name: E\ntrigger:\n  on: reaction_added\nsteps:\n  - id: mark\n    action: edit_message\n    message_id: '{{trigger.message_id}}'\n    text: claimed\n";
+        let (def, _) = parse_yaml(yaml).expect("parse");
+        assert!(
+            matches!(&def.steps[0].action, ActionDef::EditMessage { message_id, .. } if message_id == "{{trigger.message_id}}")
+        );
+        let missing = "name: E\ntrigger:\n  on: reaction_added\nsteps:\n  - id: mark\n    action: edit_message\n    text: claimed\n";
+        assert!(parse_yaml(missing).is_err());
     }
 
     #[test]
