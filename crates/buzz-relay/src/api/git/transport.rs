@@ -33,7 +33,10 @@ use tower_http::limit::RequestBodyLimitLayer;
 use tracing::{error, info, warn};
 
 use super::binding::{resolve_repo_binding, RepoBinding};
-use super::cas_publish::{cas_publish, CasError, ParentState, PublishLimits};
+use super::cas_publish::{
+    cas_publish, push_disposition, snapshot_workspace, CasError, ParentState, PublishLimits,
+    PushDisposition, WorkspaceState,
+};
 use super::hook::install_hook;
 use super::hydrate::{
     hydrate_for_read, hydrate_for_write, load_manifest_for_read, HydrateError, HydratedRepo,
@@ -1368,9 +1371,10 @@ pub async fn upload_pack(
 /// 4. Run `receive-pack --stateless-rpc` against the tempdir. The hook
 ///    enforces fast-forward + branch protection in-process.
 /// 5. `finalize_push(PushContext { pack, parent_state, repo, ... })` is
-///    the only path that builds a push `Response`. It calls
-///    `cas_publish` (§Push steps 2–7) and emits kind:30618 on `Won`,
-///    *only then* builds the 2xx.
+///    the only path that builds a push `Response`. It compares the
+///    workspace refs with the hydrated ones (§Push step 3); if they
+///    changed it calls `cas_publish` (§Push steps 4–7) and emits
+///    kind:30618 on `Won`, and *only then* builds the 2xx.
 pub async fn receive_pack(
     State(state): State<Arc<AppState>>,
     auth: GitAuth,
@@ -1384,19 +1388,18 @@ pub async fn receive_pack(
     let _permit = acquire_git_permit(&state, "receive_pack")?;
 
     // **No per-repo advisory lock — by design.** Writer serialization is
-    // the pointer CAS at `cas_publish` step 7 (`Inv_NoFork` proves this
-    // sufficient). The previous code held a per-repo `tokio::Mutex`, but
-    // that only spanned one process; once we run >1 relay instance
-    // (which is the point of "no local stateful disk"), it spans nothing
-    // and CAS is the only serialization that holds. The named tradeoff:
-    // two concurrent same-repo pushes each hydrate + run receive-pack,
-    // and the loser's CPU/IO is thrown away on `Conflict`. **Accepted
-    // for v1** — same-ref contention is rare, and a cross-instance lock
-    // would be a distributed-lock service we explicitly don't want.
-    // If contention shows up in metrics, the fix is a short local
-    // best-effort lock as a *latency optimization*, never a correctness
-    // dependency. (Eva's call, on record in #proj-git-on-s3 with the
-    // ParentState seam review.)
+    // the pointer CAS at `cas_publish` step 7 (the `Refines` check in
+    // `docs/spec/GitOnObjectStore.tla` shows this is sufficient). The
+    // previous code held a per-repo `tokio::Mutex`, but that only spanned
+    // one process; once we run >1 relay instance (which is the point of
+    // "no local stateful disk"), it spans nothing and CAS is the only
+    // serialization that holds. The named tradeoff: two concurrent
+    // same-repo pushes each hydrate + run receive-pack, and the loser's
+    // CPU/IO is thrown away on `Conflict`. **Accepted for v1** — same-ref
+    // contention is rare, and a cross-instance lock would be a
+    // distributed-lock service we explicitly don't want. If contention
+    // shows up in metrics, the fix is a short local best-effort lock as a
+    // *latency optimization*, never a correctness dependency.
 
     // Hydrate parent state + workspace in one round-trip. ParentState
     // travels with the workspace into finalize_push so the CAS predicates
@@ -1498,26 +1501,15 @@ fn receive_pack_git_config(hooks_dir: String) -> Vec<(&'static str, String)> {
 /// [`finalize_push`] has decided to build a `Response` from these bytes.
 pub(crate) struct PackOutput {
     pub stdout: Vec<u8>,
-    /// Whether the push must be published: the `git receive-pack` subprocess
-    /// exited 0 **and** its report-status either accepted (`ok`) at least one
-    /// ref or rejected (`ng`) none.
+    /// Whether the git subprocess exited with status 0.
     ///
-    /// A pre-receive hook decline (authorization denied) does NOT surface as a
-    /// non-zero exit — `git receive-pack --stateless-rpc` exits 0 and reports
-    /// the rejection only in-band as report-status. So `ok` must fold in the
-    /// report-status scan (`scan_receive_pack_report`), not the exit code
-    /// alone. A hook decline rejects every ref, so `finalize_push` treats
-    /// `false` as "push did not happen": skip the CAS publish and the derived
-    /// kind:30618 so a rejected push leaves **no published state**. The
-    /// buffered stdout still carries git's in-band report-status so the client
-    /// prints the rejection.
-    ///
-    /// A non-atomic push can also be *partially* accepted: git applies each
-    /// ref update independently, so a stale old value or a ref-name conflict
-    /// rejects one ref while the others land in the workspace and are reported
-    /// `ok` to the client. Those accepted refs must be published, or the client
-    /// records a ref update the relay silently discarded.
-    pub ok: bool,
+    /// For `receive-pack` this says nothing about whether the push was
+    /// accepted: git exits 0 when a pre-receive hook declines the push, when
+    /// some ref updates are refused, and when the request carries no commands
+    /// at all. [`finalize_push`] therefore decides from the refs the workspace
+    /// holds afterwards (`push_disposition`), and uses this flag only to
+    /// refuse to publish the result of a run that failed part-way.
+    pub exited_ok: bool,
 }
 
 /// Spawn a `git --stateless-rpc <service>` subprocess against the given
@@ -1645,41 +1637,16 @@ async fn run_git_at(
         warn!(service = %service, ?status, "git subprocess exited with error");
         tracing::debug!(stderr = %stderr, service = %service, "git subprocess stderr");
         // Still return output — git protocol errors are communicated in-band.
-        // A non-zero exit feeds `PackOutput.ok` below, but it is NOT the signal
-        // for a pre-receive hook decline: `git receive-pack --stateless-rpc`
-        // exits 0 on a hook decline, reporting the rejection only in-band as
-        // report-status (see `scan_receive_pack_report`). The exit code
-        // still guards genuine subprocess failures (spawn/IO/abort).
     }
 
-    // Primary fence for a denied push: scan the report-status for `ng`
-    // (rejected) and `ok` (accepted) ref updates. `git receive-pack` exits 0
-    // on a pre-receive hook decline, so the exit code alone is insufficient —
-    // the rejection lives in the in-band report-status. A push with only `ng`
-    // lines applied nothing, so `finalize_push` skips CAS publish +
-    // kind:30618. A push with any `ok` line advanced the workspace and must be
-    // published, even if a sibling ref was rejected.
     let stdout = tokio::fs::read(stdout_tmp.path()).await.map_err(|e| {
         error!(error = %e, service = %service, "git stdout read failed");
         (StatusCode::INTERNAL_SERVER_ERROR, "git error").into_response()
     })?;
 
-    let report = if service == "receive-pack" {
-        scan_receive_pack_report(&stdout)
-    } else {
-        ReceivePackReport::default()
-    };
-    if report.rejected {
-        warn!(
-            service = %service,
-            partially_accepted = report.accepted,
-            "git receive-pack report-status contains a rejected (ng) ref update"
-        );
-    }
-
     Ok(PackOutput {
         stdout,
-        ok: status.success() && report.should_publish(),
+        exited_ok: status.success(),
     })
 }
 
@@ -1695,124 +1662,6 @@ async fn read_log_prefix(path: &Path, max_bytes: u64) -> String {
         return "<stderr unavailable>".to_string();
     }
     String::from_utf8_lossy(&bytes).to_string()
-}
-
-/// Per-ref outcomes found in a `git receive-pack` report-status stream.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-struct ReceivePackReport {
-    /// At least one `ok <ref>` line: git applied that ref update.
-    accepted: bool,
-    /// At least one `ng <ref> <reason>` line: git rejected that ref update.
-    rejected: bool,
-}
-
-impl ReceivePackReport {
-    fn record(&mut self, line: &[u8]) {
-        if line.starts_with(b"ok ") {
-            self.accepted = true;
-        } else if line.starts_with(b"ng ") {
-            self.rejected = true;
-        }
-    }
-
-    /// Whether the workspace may hold accepted ref updates that must be
-    /// published. Only a report that rejected every ref (for example a
-    /// pre-receive hook decline) proves that nothing was applied.
-    fn should_publish(self) -> bool {
-        self.accepted || !self.rejected
-    }
-}
-
-/// Scans a `git receive-pack` report-status stream for accepted (`ok <ref>`)
-/// and rejected (`ng <ref> <reason>`) ref updates.
-///
-/// Both can appear in one report: without `--atomic`, git applies each ref
-/// update independently, so a stale old value or a ref-name conflict rejects
-/// one ref while its siblings land.
-///
-/// Empirically, `git receive-pack --stateless-rpc` exits **0** even when a
-/// pre-receive hook rejects a push: the rejection is communicated only in-band
-/// to the client as report-status (`unpack ok` followed by `ng refs/...
-/// pre-receive hook declined`). The relay must therefore treat an `ng` status
-/// as "push did not happen" for the publish fence, not rely on the exit code.
-///
-/// ## Wire format
-///
-/// The report-status is a pkt-line stream. When side-band-64k is negotiated
-/// (which the stock client does), the status pkt-lines are **nested**: each
-/// outer pkt-line's payload begins with a channel byte (`1` = data, `2`/`3` =
-/// progress/error text), and the band-1 payload carries its *own* inner
-/// pkt-line stream:
-///
-/// ```text
-/// <outer-len>\x01<inner-len>unpack ok\n<inner-len>ng refs/heads/main ...\n0000
-/// ```
-///
-/// A naive "strip the band byte then split on \n" misses this: the rejection
-/// line surfaces as `0031ng refs/...` (inner length prefix glued on), which
-/// does not start with `ng `. So we de-frame one level deeper — for a band-1
-/// payload we parse the inner pkt-lines before matching. Without side-band the
-/// status pkt-lines appear directly at the outer level, which we also match.
-fn scan_receive_pack_report(stdout: &[u8]) -> ReceivePackReport {
-    let mut report = ReceivePackReport::default();
-    for payload in PktLineIter::new(stdout) {
-        match payload.first() {
-            // Side-band channel 1 (data): carries a nested pkt-line stream.
-            Some(1) => {
-                for line in PktLineIter::new(&payload[1..]) {
-                    report.record(line);
-                }
-            }
-            // Side-band channel 2/3 (progress/error text): never status lines.
-            Some(2 | 3) => {}
-            // No side-band: the status pkt-line payload is the line itself.
-            _ => report.record(payload),
-        }
-    }
-    report
-}
-
-/// Iterator over the payloads of a pkt-line stream.
-///
-/// Yields the bytes between the 4-hex length prefix and the end of each
-/// pkt-line. Skips flush (`0000`) / delim (`0001`) / response-end (`0002`)
-/// control pkts. Stops on the first malformed length or truncated frame
-/// (defensive: a corrupt stream simply produces no further matches rather
-/// than panicking).
-struct PktLineIter<'a> {
-    buf: &'a [u8],
-    i: usize,
-}
-
-impl<'a> PktLineIter<'a> {
-    fn new(buf: &'a [u8]) -> Self {
-        Self { buf, i: 0 }
-    }
-}
-
-impl<'a> Iterator for PktLineIter<'a> {
-    type Item = &'a [u8];
-
-    fn next(&mut self) -> Option<&'a [u8]> {
-        loop {
-            if self.i + 4 > self.buf.len() {
-                return None;
-            }
-            let len_hex = std::str::from_utf8(&self.buf[self.i..self.i + 4]).ok()?;
-            let len = usize::from_str_radix(len_hex, 16).ok()?;
-            // 0000 (flush), 0001 (delim), 0002 (response-end): no payload.
-            if len < 4 {
-                self.i += 4;
-                continue;
-            }
-            if self.i + len > self.buf.len() {
-                return None;
-            }
-            let payload = &self.buf[self.i + 4..self.i + len];
-            self.i += len;
-            return Some(payload);
-        }
-    }
 }
 
 /// Keeps the git subprocess and its hydrated workspace alive for exactly as
@@ -2140,6 +1989,19 @@ async fn finalize_push(state: &Arc<AppState>, ctx: PushContext) -> Response {
     finalize_push_inner(state, ctx, &FinalizePushHooks::default()).await
 }
 
+/// Read what a finished `receive-pack` run left in the workspace and decide
+/// what the relay owes the client: git's answer alone, a publication, or a
+/// failure. The returned snapshot is the one a publication must use.
+async fn observe_push(
+    pack: &PackOutput,
+    parent_state: &ParentState,
+    repo_path: &Path,
+) -> Result<(PushDisposition, WorkspaceState), CasError> {
+    let workspace = snapshot_workspace(repo_path).await?;
+    let disposition = push_disposition(pack.exited_ok, &parent_state.parent.refs, &workspace.refs);
+    Ok((disposition, workspace))
+}
+
 async fn finalize_push_inner(
     state: &Arc<AppState>,
     ctx: PushContext,
@@ -2148,36 +2010,59 @@ async fn finalize_push_inner(
     #[cfg(not(test))]
     let _ = hooks;
 
-    // The push fence, part 0 — **a rejected push publishes nothing.**
+    // The push fence, part 0 — **publish exactly what the push changed.**
     //
-    // `ctx.pack.ok` is false when git aborted the ref updates: either the
-    // subprocess exited non-zero (genuine failure) OR — the important case —
-    // a pre-receive hook declined the push. A hook decline does NOT yield a
-    // non-zero exit; `git receive-pack --stateless-rpc` exits 0 and reports
-    // the rejection only in-band as report-status (`ng <ref> <reason>` for
-    // every ref), which `run_git_at` folds into `ok` via
-    // `scan_receive_pack_report`. In either case the workspace refs were NOT
-    // advanced, so there is no committed state to publish: skip the CAS
-    // pointer write AND the derived kind:30618. (A partially accepted push is
-    // `ok`: its accepted refs did advance, and `cas_publish` snapshots the
-    // workspace refs, so only those refs are published.) Otherwise a denied push would emit a relay-signed, fanned-out
-    // 30618 falsely attributing the ref state to the *denied* pusher
-    // (`actor = ctx.pusher`), breaking the invariant "rejected push → no
-    // published state".
+    // The workspace refs are the only evidence of what receive-pack did, so
+    // the decision is taken from them (`push_disposition`), not from git's
+    // exit status or its report to the client:
     //
-    // git's in-band report-status (already buffered in `ctx.pack.stdout`)
-    // still streams back so the client prints `! [remote rejected]` / the
-    // hook's decline message; only the publish side effects are suppressed.
-    if !ctx.pack.ok {
-        warn!(
-            owner = %ctx.owner,
-            repo = %ctx.repo_id,
-            "receive-pack applied no ref update (e.g. pre-receive hook decline); \
-             skipping CAS publish and kind:30618 — no state published"
-        );
-        let response = build_git_response("receive-pack", ctx.pack);
-        drop(ctx.repo_handle);
-        return response;
+    // - Refs unchanged: nothing was accepted. This covers a hook decline, a
+    //   request with no commands, and a push whose every command was refused.
+    //   Publishing here would move the pointer and emit a relay-signed
+    //   kind:30618 naming a pusher the policy never approved.
+    // - Refs changed, git exited 0: at least one command was applied, and git
+    //   reports `ok` for it even if it reports `ng` for others. Those refs must
+    //   be published before the client sees that report.
+    // - Refs changed, git exited non-zero: the run failed part-way and its
+    //   report may be incomplete. Nothing is published and the request fails.
+    let (disposition, workspace) =
+        match observe_push(&ctx.pack, &ctx.parent_state, ctx.repo_handle.path()).await {
+            Ok(observed) => observed,
+            Err(error) => {
+                error!(
+                    owner = %ctx.owner,
+                    repo = %ctx.repo_id,
+                    %error,
+                    "could not read workspace refs after receive-pack; nothing published"
+                );
+                return (StatusCode::INTERNAL_SERVER_ERROR, "git backend error").into_response();
+            }
+        };
+    match disposition {
+        PushDisposition::Publish => {}
+        PushDisposition::RelayOnly => {
+            info!(
+                owner = %ctx.owner,
+                repo = %ctx.repo_id,
+                exited_ok = ctx.pack.exited_ok,
+                "receive-pack changed no ref; nothing published"
+            );
+            let response = build_git_response("receive-pack", ctx.pack);
+            drop(ctx.repo_handle);
+            return response;
+        }
+        PushDisposition::Abort => {
+            error!(
+                owner = %ctx.owner,
+                repo = %ctx.repo_id,
+                "receive-pack exited non-zero after changing refs; nothing published"
+            );
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "git receive-pack failed; nothing was published",
+            )
+                .into_response();
+        }
     }
 
     // An already-running receive-pack may cross the durable fence after
@@ -2221,6 +2106,7 @@ async fn finalize_push_inner(
         &ctx.owner,
         &ctx.repo,
         &ctx.parent_state,
+        &workspace,
         PublishLimits {
             parent_hydrated_bytes: ctx.repo_handle.hydrated_bytes(),
             max_pack_bytes: state.config.git_max_pack_bytes,
@@ -2338,29 +2224,10 @@ async fn finalize_push_inner(
     }
 
     // Derived after CAS: kind:30618 ref-state event over the *committed*
-    // manifest's refs/head. Spec §Implementation Correspondence:
-    // "kind:30618 is derived after CAS, never the commit." We emit only
-    // when the committed manifest differs from the parent — a true no-op
-    // push pays no 30618 cost.
-    //
-    // **Strict no-op detection.** We emit unless the canonical manifest
-    // is byte-identical to the parent (Dawn's `canonical_bytes` is
-    // deterministic, so equal published state ⇒ equal digest by
-    // construction). The cases this differs from "refs+head equality":
-    // pack-only changes (rare; internal recompaction, or a push that
-    // produces a new pack covering existing tips with different deltas)
-    // would emit a 30618 with identical `(refs, head)`. The relay DB's
-    // `Ok((_, false))` arm below dedups it for free — one extra DB
-    // round-trip per pack-only push, which clients don't normally
-    // generate. Tightening to refs+head equality is a future
-    // micro-optimization only if that dedup cost becomes visible.
-    let parent_digest_str: Option<&str> = ctx.parent_state.parent_digest.as_deref();
-    let after_digest = success.manifest_key.strip_prefix("manifests/");
-    let manifest_changed = match (parent_digest_str, after_digest) {
-        (Some(before), Some(after)) => before != after,
-        _ => true, // first push (parent None) or impossible-shape after key → publish
-    };
-    let publication_result: Result<(), String> = if manifest_changed {
+    // manifest's refs/head. The event is derived from the commit and is never
+    // the commit itself. Every publication reaches this point with changed
+    // refs (`PushDisposition::Publish`), so there is always an event to emit.
+    let publication_result: Result<(), String> = {
         let inputs = RefStateInputs {
             repo_id: &ctx.repo_id,
             head: &success.manifest.head,
@@ -2420,8 +2287,6 @@ async fn finalize_push_inner(
             }
             Err(error) => Err(format!("kind:30618 build failed: {error}")),
         }
-    } else {
-        Ok(())
     };
 
     // The admitted serving write spans the complete publication attempt. Fence
@@ -2612,14 +2477,284 @@ mod track_c_tests {
             "receive-pack failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        assert!(
-            !scan_receive_pack_report(&output.stdout).rejected,
-            "receive-pack rejected the deletion: {}",
-            String::from_utf8_lossy(&output.stdout)
-        );
-
         assert!(!remote.join("refs/heads/main").exists());
         assert!(remote.join("refs/heads/master").exists());
+    }
+
+    /// A pack with no objects, which a client sends when the refs it pushes
+    /// name objects the remote already has.
+    #[cfg(unix)]
+    const EMPTY_PACK: &[u8] = &[
+        b'P', b'A', b'C', b'K', 0, 0, 0, 2, 0, 0, 0, 0, 0x02, 0x9d, 0x08, 0x82, 0x3b, 0xd8, 0xa8,
+        0xea, 0xb5, 0x10, 0xad, 0x6a, 0xc7, 0x5c, 0x82, 0x3c, 0xfd, 0x3e, 0xd3, 0x1e,
+    ];
+
+    /// A `receive-pack` request body: one pkt-line per `(old, new, ref)`
+    /// command, the capability list on the first, a flush, and an empty pack
+    /// when there is a command.
+    #[cfg(unix)]
+    fn push_request(commands: &[(&str, &str, &str)], capabilities: &str) -> Vec<u8> {
+        let mut request = Vec::new();
+        for (index, (old, new, name)) in commands.iter().enumerate() {
+            let line = if index == 0 {
+                format!("{old} {new} {name}\0{capabilities}\n")
+            } else {
+                format!("{old} {new} {name}\n")
+            };
+            request.extend_from_slice(format!("{:04x}", line.len() + 4).as_bytes());
+            request.extend_from_slice(line.as_bytes());
+        }
+        request.extend_from_slice(b"0000");
+        if !commands.is_empty() {
+            request.extend_from_slice(EMPTY_PACK);
+        }
+        request
+    }
+
+    /// A hydrated workspace stand-in: a bare repository whose `main` is the
+    /// second of two commits, with a pre-receive hook that accepts or declines
+    /// every push. Returns the scratch root, the repository path, and the two
+    /// commit ids, oldest first. Unix only: the hook is a shell script made
+    /// executable through its file mode.
+    #[cfg(unix)]
+    fn push_fixture(hook_accepts: bool) -> (TempDir, std::path::PathBuf, String, String) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = TempDir::new().expect("tempdir");
+        let remote = root.path().join("remote.git");
+        let source = root.path().join("source");
+        let remote_arg = remote.to_str().expect("utf-8 remote path");
+        let source_arg = source.to_str().expect("utf-8 source path");
+        let setup: [(&Path, &[&str]); 9] = [
+            (root.path(), &["init", "--bare", "--quiet", remote_arg]),
+            (
+                root.path(),
+                &["init", "--quiet", "--initial-branch=main", source_arg],
+            ),
+            (&source, &["config", "user.name", "Buzz Test"]),
+            (&source, &["config", "user.email", "buzz-test@example.com"]),
+            (
+                &source,
+                &["commit", "--quiet", "--allow-empty", "-m", "first"],
+            ),
+            (
+                &source,
+                &["commit", "--quiet", "--allow-empty", "-m", "second"],
+            ),
+            (&source, &["push", "--quiet", remote_arg, "main"]),
+            (&source, &["rev-parse", "HEAD~1"]),
+            (&source, &["rev-parse", "HEAD"]),
+        ];
+        let mut oids = Vec::new();
+        for (cwd, args) in setup {
+            let output = run_test_git(cwd, args, &[]);
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            if args[0] == "rev-parse" {
+                oids.push(String::from_utf8(output.stdout).expect("utf-8 oid"));
+            }
+        }
+        let hook = remote.join("hooks").join("pre-receive");
+        std::fs::create_dir_all(remote.join("hooks")).expect("hooks directory");
+        let exit_code = if hook_accepts { 0 } else { 1 };
+        std::fs::write(
+            &hook,
+            format!("#!/bin/sh\ncat >/dev/null\nexit {exit_code}\n"),
+        )
+        .expect("write hook");
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))
+            .expect("make hook executable");
+        (
+            root,
+            remote,
+            oids[0].trim().to_string(),
+            oids[1].trim().to_string(),
+        )
+    }
+
+    /// The publish decision is taken from what `git receive-pack` did to the
+    /// workspace, for each way a push can end. Every case runs real git through
+    /// the production `run_git_at` and decides with the production
+    /// `observe_push`.
+    ///
+    /// The first two cases are the ones the earlier rule (publish when git
+    /// exits 0 and reports no `ng`) got wrong in the permissive direction: git
+    /// exits 0 and reports nothing, yet no push was accepted. A rule that
+    /// publishes when the report has an `ok` line or no `ng` line gets them
+    /// wrong in the same way. The last two cases are the ones the earlier rule
+    /// got wrong in the other direction: git reports `ok` for a ref it
+    /// updated, and the rule dropped that update because another ref was
+    /// refused, for a stale old value or for a name that conflicts with
+    /// another ref in the same push. The case before them shows that an `ok` line does not by itself
+    /// mean a ref changed.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn push_is_published_exactly_when_receive_pack_changed_refs() {
+        /// One ref-update command: `(old, new, ref)`.
+        type RefCommand = (String, String, &'static str);
+        struct Case {
+            name: &'static str,
+            hook_accepts: bool,
+            capabilities: &'static str,
+            /// Builds the commands from the two fixture commits.
+            commands: fn(&str, &str) -> Vec<RefCommand>,
+            expect: PushDisposition,
+            /// Status lines git must have reported to the client.
+            reported: &'static [&'static str],
+        }
+        let create_feature = |first: &str, _second: &str| {
+            vec![("0".repeat(40), first.to_string(), "refs/heads/feature")]
+        };
+        let cases = [
+            Case {
+                name: "request with no commands, hook would decline",
+                hook_accepts: false,
+                capabilities: "",
+                commands: |_, _| Vec::new(),
+                expect: PushDisposition::RelayOnly,
+                reported: &[],
+            },
+            Case {
+                name: "declined push from a client that asked for no status report",
+                hook_accepts: false,
+                capabilities: "",
+                commands: create_feature,
+                expect: PushDisposition::RelayOnly,
+                reported: &[],
+            },
+            Case {
+                name: "declined push with a status report",
+                hook_accepts: false,
+                capabilities: "report-status",
+                commands: create_feature,
+                expect: PushDisposition::RelayOnly,
+                reported: &["ng refs/heads/feature"],
+            },
+            Case {
+                name: "accepted push",
+                hook_accepts: true,
+                capabilities: "report-status",
+                commands: create_feature,
+                expect: PushDisposition::Publish,
+                reported: &["ok refs/heads/feature"],
+            },
+            Case {
+                name: "accepted command that asks for the value the ref already has",
+                hook_accepts: true,
+                capabilities: "report-status",
+                // git reports `ok` and changes nothing, so there is nothing
+                // to publish and the report is true of the published state.
+                commands: |_, second| {
+                    vec![(second.to_string(), second.to_string(), "refs/heads/main")]
+                },
+                expect: PushDisposition::RelayOnly,
+                reported: &["ok refs/heads/main"],
+            },
+            Case {
+                name: "accepted push, one ref updated and one refused",
+                hook_accepts: true,
+                capabilities: "report-status",
+                // `main` is at the second commit, so an update that names the
+                // first commit as its old value is refused.
+                commands: |first, second| {
+                    vec![
+                        ("0".repeat(40), first.to_string(), "refs/heads/feature"),
+                        (first.to_string(), second.to_string(), "refs/heads/main"),
+                    ]
+                },
+                expect: PushDisposition::Publish,
+                reported: &["ok refs/heads/feature", "ng refs/heads/main"],
+            },
+            Case {
+                name: "accepted push, two refs whose names conflict",
+                hook_accepts: true,
+                capabilities: "report-status",
+                // A ref name cannot be both a file and a directory, so git
+                // creates one of `feature` and `feature/x` and refuses the
+                // other. Which one it creates depends on the git version, so
+                // the expected lines match either outcome and the check below
+                // ties each ref's presence to its own `ok` line.
+                commands: |first, second| {
+                    vec![
+                        ("0".repeat(40), first.to_string(), "refs/heads/feature"),
+                        ("0".repeat(40), second.to_string(), "refs/heads/feature/x"),
+                    ]
+                },
+                expect: PushDisposition::Publish,
+                reported: &["ok refs/heads/feature", "ng refs/heads/feature"],
+            },
+        ];
+
+        for case in cases {
+            let (root, remote, first, second) = push_fixture(case.hook_accepts);
+            let before = snapshot_workspace(&remote).await.expect("snapshot before");
+            assert_eq!(before.refs.get("refs/heads/main"), Some(&second));
+            let mut parent_state = ParentState::fresh();
+            parent_state.parent.refs = before.refs.clone();
+
+            let commands = (case.commands)(&first, &second);
+            let borrowed: Vec<(&str, &str, &str)> = commands
+                .iter()
+                .map(|(old, new, name)| (old.as_str(), new.as_str(), *name))
+                .collect();
+            let request = push_request(&borrowed, case.capabilities);
+            let git_config = receive_pack_git_config(remote.join("hooks").display().to_string());
+            let pack = match run_git_at(
+                &remote,
+                "receive-pack",
+                Body::from(request),
+                &git_config,
+                root.path(),
+                RECEIVE_PACK_MAX_OUTPUT_BYTES,
+            )
+            .await
+            {
+                Ok(pack) => pack,
+                Err(response) => panic!("{}: run_git_at failed: {}", case.name, response.status()),
+            };
+            // git exits 0 in every case, so the exit status cannot be what
+            // separates an accepted push from a declined or empty one.
+            assert!(pack.exited_ok, "{}: receive-pack exit status", case.name);
+            let stdout = String::from_utf8_lossy(&pack.stdout).to_string();
+            for line in case.reported {
+                assert!(
+                    stdout.contains(line),
+                    "{}: expected {line:?} in {stdout:?}",
+                    case.name
+                );
+            }
+            if case.reported.is_empty() {
+                assert!(
+                    !stdout.contains("ng ") && !stdout.contains("ok "),
+                    "{}: expected no status report, got {stdout:?}",
+                    case.name
+                );
+            }
+
+            let (disposition, after) = observe_push(&pack, &parent_state, &remote)
+                .await
+                .expect("observe push");
+            assert_eq!(disposition, case.expect, "{}", case.name);
+            // The snapshot handed to the publication holds exactly the refs
+            // git reported as created.
+            for created in ["refs/heads/feature", "refs/heads/feature/x"] {
+                assert_eq!(
+                    after.refs.contains_key(created),
+                    stdout.contains(&format!("ok {created}\n")),
+                    "{}: {created} in snapshot",
+                    case.name
+                );
+            }
+            assert_eq!(
+                after.refs.get("refs/heads/main"),
+                Some(&second),
+                "{}",
+                case.name
+            );
+        }
     }
 
     async fn run_finalize_git(repo: &Path, args: &[&str]) -> std::process::Output {
@@ -2733,7 +2868,10 @@ mod track_c_tests {
         (request, claim)
     }
 
-    async fn pushed_context(
+    /// A push context whose workspace is exactly as hydrated: what
+    /// `finalize_push` receives when `receive-pack` exited 0 without applying
+    /// a command (a declined push, or a request with no commands).
+    async fn unchanged_context(
         state: &AppState,
         community: CommunityId,
         host: &str,
@@ -2757,6 +2895,32 @@ mod track_c_tests {
         )
         .await
         .expect("hydrate empty test repo");
+        PushContext {
+            pack: PackOutput {
+                stdout: b"git-answer".to_vec(),
+                exited_ok: true,
+            },
+            parent_state,
+            owner,
+            repo: repo.clone(),
+            repo_id: repo,
+            pusher,
+            tenant,
+            repo_handle: hydrated,
+        }
+    }
+
+    /// A push context whose workspace gained a commit on `main`.
+    async fn pushed_context(
+        state: &AppState,
+        community: CommunityId,
+        host: &str,
+        owner: String,
+        repo: String,
+        pusher: nostr::PublicKey,
+        scratch: &Path,
+    ) -> PushContext {
+        let mut ctx = unchanged_context(state, community, host, owner, repo, pusher, scratch).await;
         let source = scratch.join("source");
         tokio::fs::create_dir(&source)
             .await
@@ -2769,22 +2933,15 @@ mod track_c_tests {
             .expect("write source file");
         run_finalize_git(&source, &["add", "file.txt"]).await;
         run_finalize_git(&source, &["commit", "--quiet", "-m", "committed"]).await;
-        let remote = hydrated.path().to_str().expect("hydrated path utf8");
-        run_finalize_git(&source, &["push", "--quiet", remote, "main"]).await;
-
-        PushContext {
-            pack: PackOutput {
-                stdout: b"push-ok".to_vec(),
-                ok: true,
-            },
-            parent_state,
-            owner,
-            repo: repo.clone(),
-            repo_id: repo,
-            pusher,
-            tenant,
-            repo_handle: hydrated,
-        }
+        let remote = ctx
+            .repo_handle
+            .path()
+            .to_str()
+            .expect("hydrated path utf8")
+            .to_string();
+        run_finalize_git(&source, &["push", "--quiet", &remote, "main"]).await;
+        ctx.pack.stdout = b"push-ok".to_vec();
+        ctx
     }
 
     async fn repo_announcement_holds_serving_lease_until_pointer_is_seeded() {
@@ -3082,6 +3239,65 @@ mod track_c_tests {
         pool.close().await;
     }
 
+    /// git exits 0 for a push the hook declined and for a request with no
+    /// commands. Neither changes a ref, so the relay must answer with git's
+    /// output and publish nothing: no pointer write, and no kind:30618 naming
+    /// the caller as the pusher of a state they were not allowed to push.
+    async fn finalize_push_publishes_nothing_when_receive_pack_changed_no_ref() {
+        let (state, pool) = finalize_test_state().await;
+        let host = format!(
+            "git-finalize-unchanged-{}.example",
+            uuid::Uuid::new_v4().simple()
+        );
+        let community = state
+            .db
+            .ensure_configured_community(&host)
+            .await
+            .expect("create test community")
+            .id;
+        let scratch = TempDir::new().expect("scratch");
+        let owner = format!("owner-{}", uuid::Uuid::new_v4().simple());
+        let repo = format!("repo-{}", uuid::Uuid::new_v4().simple());
+        let ctx = unchanged_context(
+            &state,
+            community,
+            &host,
+            owner.clone(),
+            repo.clone(),
+            Keys::generate().public_key(),
+            scratch.path(),
+        )
+        .await;
+
+        let response = finalize_push_inner(&state, ctx, &FinalizePushHooks::default()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        assert_eq!(&body[..], b"git-answer", "git's own answer is relayed");
+
+        let pointer = crate::api::git::manifest::pointer_key(community, &owner, &repo);
+        assert!(
+            state
+                .git_store
+                .get_pointer(&pointer)
+                .await
+                .expect("read pointer")
+                .is_none(),
+            "a push that changed no ref must not write the pointer"
+        );
+        let mut query = buzz_db::event::EventQuery::for_community(community);
+        query.kinds = Some(vec![30_618]);
+        query.d_tag = Some(repo);
+        let events = state.db.query_events(&query).await.expect("query 30618");
+        assert!(
+            events.is_empty(),
+            "a push that changed no ref must not be attributed to the caller"
+        );
+        drop(state);
+        pool.close().await;
+    }
+
     mod external_infra_minio_tests {
         #[tokio::test]
         #[ignore = "requires Postgres and MinIO"]
@@ -3105,6 +3321,12 @@ mod track_c_tests {
         #[ignore = "requires Postgres and MinIO"]
         async fn finalize_push_lease_signal_after_landed_cas_still_publishes() {
             super::finalize_push_lease_signal_after_landed_cas_still_publishes().await;
+        }
+
+        #[tokio::test]
+        #[ignore = "requires Postgres and MinIO"]
+        async fn finalize_push_publishes_nothing_when_receive_pack_changed_no_ref() {
+            super::finalize_push_publishes_nothing_when_receive_pack_changed_no_ref().await;
         }
     }
 
@@ -3248,12 +3470,6 @@ mod track_c_tests {
         serde_json::to_string(&event).expect("serialize")
     }
 
-    fn pkt(payload: &[u8]) -> Vec<u8> {
-        let mut out = Vec::new();
-        super::pkt_line(&mut out, payload);
-        out
-    }
-
     #[test]
     fn streaming_body_holds_git_permit_until_drop() {
         let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
@@ -3305,252 +3521,6 @@ mod track_c_tests {
         while stream.next().await.is_some() {}
 
         assert_eq!(stream.streamed_bytes, 5);
-    }
-
-    /// Wrap inner status pkt-lines in one side-band-64k band-1 (data) outer
-    /// pkt-line — the real shape git emits when side-band is negotiated:
-    /// `<outer-len>\x01<inner-pkt-lines>`.
-    fn sideband_data(inner_pkts: &[&[u8]]) -> Vec<u8> {
-        let mut inner = vec![0x01u8]; // band 1 = data channel
-        for p in inner_pkts {
-            inner.extend(pkt(p));
-        }
-        pkt(&inner)
-    }
-
-    #[test]
-    fn receive_pack_report_rejected_detects_plain_ng_line() {
-        // No side-band: status pkt-lines at the outer level.
-        let mut out = Vec::new();
-        out.extend(pkt(b"unpack ok\n"));
-        out.extend(pkt(b"ng refs/heads/main pre-receive hook declined\n"));
-        out.extend_from_slice(b"0000");
-
-        assert!(scan_receive_pack_report(&out).rejected);
-    }
-
-    #[test]
-    fn receive_pack_report_rejected_detects_sideband_ng_line() {
-        // Real side-band-64k shape: status pkt-lines NESTED inside a band-1
-        // outer pkt-line. A naive "strip band byte, split on \n" parser misses
-        // this — the rejection surfaces as `0031ng refs/...`.
-        let mut out = sideband_data(&[
-            b"unpack ok\n",
-            b"ng refs/heads/main pre-receive hook declined\n",
-        ]);
-        out.extend_from_slice(b"0000");
-
-        assert!(scan_receive_pack_report(&out).rejected);
-    }
-
-    #[test]
-    fn receive_pack_report_rejected_ignores_ok_status() {
-        // Real side-band-64k success shape — nested `ok` pkt-lines, no `ng`.
-        let mut out = sideband_data(&[b"unpack ok\n", b"ok refs/heads/main\n"]);
-        out.extend_from_slice(b"0000");
-
-        assert!(!scan_receive_pack_report(&out).rejected);
-    }
-
-    #[test]
-    fn receive_pack_report_rejected_matches_real_git_deny_shape() {
-        // Mirrors report-status captured from `git receive-pack` (2.50.1) on a
-        // pre-receive hook decline:
-        //   <band2>policy: denied\n                 (progress/error text)
-        //   <band1>000eunpack ok\n0031ng refs/heads/main pre-receive hook declined\n
-        //   0000
-        // The band-1 payload carries its OWN inner pkt stream — the exact case
-        // a flat parser returns `false` on.
-        let mut out = Vec::new();
-        out.extend(pkt(b"\x02policy: denied\n")); // band 2 = progress/error
-        out.extend(sideband_data(&[
-            b"unpack ok\n",
-            b"ng refs/heads/main pre-receive hook declined\n",
-        ]));
-        out.extend_from_slice(b"0000");
-
-        assert!(
-            scan_receive_pack_report(&out).rejected,
-            "must detect the nested band-1 ng line on a real deny"
-        );
-    }
-
-    #[test]
-    fn receive_pack_report_rejected_ignores_progress_channel_noise() {
-        // A band-2 (progress) line must never be mistaken for a status line,
-        // even if it contained bytes resembling a status — only band-1 counts.
-        let mut out = Vec::new();
-        out.extend(pkt(b"\x02ng-looking progress noise\n")); // band 2 noise
-        out.extend(sideband_data(&[b"unpack ok\n", b"ok refs/heads/main\n"]));
-        out.extend_from_slice(b"0000");
-
-        assert!(!scan_receive_pack_report(&out).rejected);
-    }
-
-    #[test]
-    fn receive_pack_report_publishes_partially_accepted_push() {
-        // A non-atomic push can accept one ref and reject a sibling. The
-        // accepted ref is applied and reported `ok`, so it must be published.
-        let mut out = sideband_data(&[
-            b"unpack ok\n",
-            b"ok refs/heads/main\n",
-            b"ng refs/heads/feature/x failed to update ref\n",
-        ]);
-        out.extend_from_slice(b"0000");
-
-        let report = scan_receive_pack_report(&out);
-        assert_eq!(
-            report,
-            ReceivePackReport {
-                accepted: true,
-                rejected: true,
-            }
-        );
-        assert!(report.should_publish());
-    }
-
-    #[test]
-    fn receive_pack_report_skips_publish_only_when_every_ref_is_rejected() {
-        let mut declined = sideband_data(&[
-            b"unpack ok\n",
-            b"ng refs/heads/main pre-receive hook declined\n",
-            b"ng refs/heads/next pre-receive hook declined\n",
-        ]);
-        declined.extend_from_slice(b"0000");
-        assert!(!scan_receive_pack_report(&declined).should_publish());
-
-        let mut accepted = sideband_data(&[b"unpack ok\n", b"ok refs/heads/main\n"]);
-        accepted.extend_from_slice(b"0000");
-        assert!(scan_receive_pack_report(&accepted).should_publish());
-    }
-
-    #[test]
-    fn receive_pack_partial_rejection_applies_and_publishes_accepted_ref() {
-        // Real git: without `--atomic`, a ref-name conflict rejects
-        // `feature/x` while the fast-forward of `main` lands and is reported
-        // `ok` to the client.
-        let root = tempfile::TempDir::new().expect("tempdir");
-        let remote = root.path().join("remote.git");
-        let source = root.path().join("source");
-        let remote_arg = remote.to_str().expect("utf-8 remote path");
-        let source_arg = source.to_str().expect("utf-8 source path");
-
-        assert_git_success(
-            run_test_git(
-                root.path(),
-                &["init", "--bare", "--initial-branch=main", remote_arg],
-                &[],
-            ),
-            "initialize bare remote",
-        );
-        assert_git_success(
-            run_test_git(
-                root.path(),
-                &["init", "--initial-branch=main", source_arg],
-                &[],
-            ),
-            "initialize source repository",
-        );
-        for (key, value) in [
-            ("user.name", "Buzz Test"),
-            ("user.email", "buzz-test@example.com"),
-        ] {
-            assert_git_success(
-                run_test_git(source.as_path(), &["config", key, value], &[]),
-                "configure identity",
-            );
-        }
-        for message in ["first", "second"] {
-            assert_git_success(
-                run_test_git(
-                    source.as_path(),
-                    &["commit", "--allow-empty", "-m", message],
-                    &[],
-                ),
-                "commit fixture",
-            );
-        }
-        // The remote holds both commits, so the push needs no new objects.
-        assert_git_success(
-            run_test_git(
-                source.as_path(),
-                &[
-                    "push",
-                    remote_arg,
-                    "main~1:refs/heads/main",
-                    "main~1:refs/heads/feature",
-                    "main:refs/heads/next",
-                ],
-                &[],
-            ),
-            "seed remote refs",
-        );
-        let rev_parse = |rev: &str| {
-            let output = run_test_git(source.as_path(), &["rev-parse", rev], &[]);
-            assert!(output.status.success());
-            String::from_utf8(output.stdout)
-                .expect("utf-8 oid")
-                .trim()
-                .to_string()
-        };
-        let first = rev_parse("main~1");
-        let second = rev_parse("main");
-
-        let mut request = Vec::new();
-        for command in [
-            format!("{first} {second} refs/heads/main\0report-status side-band-64k\n"),
-            format!("{} {second} refs/heads/feature/x\n", "0".repeat(40)),
-        ] {
-            request.extend(format!("{:04x}", command.len() + 4).into_bytes());
-            request.extend_from_slice(command.as_bytes());
-        }
-        request.extend_from_slice(b"0000");
-        let empty_pack = std::process::Command::new("git")
-            .args(["pack-objects", "--stdout"])
-            .stdin(std::process::Stdio::null())
-            .output()
-            .expect("build empty pack");
-        assert!(empty_pack.status.success());
-        request.extend_from_slice(&empty_pack.stdout);
-
-        let git_config = receive_pack_git_config(remote.join("hooks").display().to_string());
-        let output = run_test_receive_pack(remote.as_path(), &request, &git_config);
-        assert!(
-            output.status.success(),
-            "receive-pack failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-
-        let report = scan_receive_pack_report(&output.stdout);
-        assert_eq!(
-            report,
-            ReceivePackReport {
-                accepted: true,
-                rejected: true,
-            },
-            "expected one accepted and one rejected ref: {}",
-            String::from_utf8_lossy(&output.stdout)
-        );
-        assert!(report.should_publish());
-
-        let remote_main = run_test_git(remote.as_path(), &["rev-parse", "refs/heads/main"], &[]);
-        assert_eq!(
-            String::from_utf8(remote_main.stdout)
-                .expect("utf-8 oid")
-                .trim(),
-            second,
-            "the accepted ref advanced in the workspace"
-        );
-        assert!(!remote.join("refs/heads/feature/x").exists());
-    }
-
-    #[test]
-    fn receive_pack_report_rejected_handles_truncated_and_malformed() {
-        // Defensive: malformed length / truncated frame yields no match, never
-        // a panic.
-        assert!(!scan_receive_pack_report(b"").rejected);
-        assert!(!scan_receive_pack_report(b"zzzz").rejected);
-        assert!(!scan_receive_pack_report(b"0048").rejected); // length, no payload
     }
 
     #[test]

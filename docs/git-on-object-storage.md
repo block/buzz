@@ -631,10 +631,18 @@ transfer:
   `push_is_published_exactly_when_receive_pack_changed_refs` runs real `git`
   through the production `run_git_at` and `observe_push` for a request with no
   commands, a declined push with and without a status report, an accepted push,
-  a command that asks for the value a ref already has, and a push in which one
-  ref is updated and another refused. That last case is also exercised end to
-  end by `e2e_git::git_partial_push_publishes_accepted_refs`, which needs a
-  live relay and an object store.
+  a command that asks for the value a ref already has, a push in which one ref
+  is updated and another refused for its old value, and a push that creates
+  two refs whose names conflict, of which git creates one and refuses the
+  other. Which of the two git creates differs between git versions; the test
+  accepts either and requires that each ref is in the snapshot exactly when
+  git reported `ok` for it. The test is Unix-only because its hook fixture
+  sets file modes. Two
+  tests cover `finalize_push` itself and need Postgres and an object store:
+  `finalize_push_publishes_nothing_when_receive_pack_changed_no_ref` checks
+  that an unchanged workspace leaves the pointer unwritten and stores no
+  kind:30618 event, and `e2e_git::git_partial_push_publishes_accepted_refs`
+  drives a partially refused push through a live relay.
 - **kind:30618 derived after CAS.** `cas_publish` is reached only for a push
   that changed refs, so every successful publication is followed by one
   kind:30618 event and a push that changed nothing emits none. The event is
@@ -983,12 +991,20 @@ The models are about the design. Three things connect them to the code. The
 publish decision is a pure function, `push_disposition`, whose three outcomes
 are the three branches of the model's `Disposition`, and a unit test covers its
 cases. The test `push_is_published_exactly_when_receive_pack_changed_refs` runs
-the production subprocess path against real git for six ways a push can
+the production subprocess path against real git for seven ways a push can
 end, and fails if the decision is changed to depend on the exit status alone.
-The remaining correspondence (one pointer observation per request, uploads
-before the conditional write, the response built only in `finalize_push`) is by
-the structure described in §Implementation Correspondence and by the end-to-end
-tests, which need Postgres and an object store.
+The test `finalize_push_publishes_nothing_when_receive_pack_changed_no_ref`
+calls `finalize_push` with an unchanged workspace against Postgres and an
+object store, and fails in the same way under that change. The remaining
+correspondence (one pointer observation per request, uploads before the
+conditional write, the response built only in `finalize_push`) is by the
+structure described in §Implementation Correspondence and by the other
+storage-backed tests.
+
+The storage-backed tests of `finalize_push` and `e2e_git` are marked ignored
+and are not selected by any CI job at the time of writing, so they are evidence
+only when someone runs them. The seven-case test needs no services and runs in
+the Unix unit-test jobs.
 
 ### Assumptions and limitations
 
@@ -1054,6 +1070,10 @@ the next push, and the pointer is unaffected.
   unstamped manifest read the `created_at` of the stored event and exceed it,
   and model the unstamped case in Quint.
 - Run the Quint checks in CI with a pinned Quint and Apalache.
+- Run the storage-backed `finalize_push` tests in CI. Their fixture applies the
+  migrations itself, which the CI database (built from the desired-state
+  schema) does not expect, so the fixture needs the schema-mode switch the
+  other storage-backed suites use.
 - A mechanical link between the Lean model and the TLA+ model, or a proof of
   the full refinement for unbounded parameters.
 
