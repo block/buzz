@@ -2,6 +2,7 @@ import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 
 import 'channel_unread.dart';
 import '../../shared/widgets/collapsible_section_body.dart';
+import '../../shared/widgets/collapsible_sliver_body.dart';
 import '../../shared/me/me_sync.dart';
 import '../../shared/hosted/hosted_relay_auth.dart';
 import '../../shared/hosted/organization_environment.dart';

@@ -214,27 +214,32 @@ class MePage extends HookConsumerWidget {
                     ? 0
                     : MediaQuery.viewPaddingOf(context).bottom + Grid.gutter,
               ),
-              sliver: SliverList.list(
-                children: [
+              sliver: SliverMainAxisGroup(
+                slivers: [
                   if (offlineSaveFailed)
-                    Semantics(
-                      liveRegion: true,
-                      child: Column(
-                        children: [
-                          const Text(
-                            'Your chats are available, but couldn’t be saved for offline use.',
-                          ),
-                          TextButton(
-                            onPressed: () => ref.invalidate(meGroupsProvider),
-                            child: const Text('Retry offline save'),
-                          ),
-                        ],
+                    SliverToBoxAdapter(
+                      child: Semantics(
+                        liveRegion: true,
+                        child: Column(
+                          children: [
+                            const Text(
+                              'Your chats are available, but couldn’t be saved for offline use.',
+                            ),
+                            TextButton(
+                              onPressed: () => ref.invalidate(meGroupsProvider),
+                              child: const Text('Retry offline save'),
+                            ),
+                          ],
+                        ),
                       ),
                     ),
                   for (final group in organization.groups) ...[
                     if (group != organization.groups.first)
-                      const SizedBox(height: Grid.xxs),
+                      const SliverToBoxAdapter(
+                        child: SizedBox(height: Grid.xxs),
+                      ),
                     MeSection(
+                      sliver: true,
                       key: ValueKey(group['id']),
                       label: group['name'] as String,
                       children: [
@@ -252,9 +257,10 @@ class MePage extends HookConsumerWidget {
                     ),
                   ],
                   if (organization.groups.isNotEmpty)
-                    const SizedBox(height: Grid.xxs),
+                    const SliverToBoxAdapter(child: SizedBox(height: Grid.xxs)),
                   if (visible.isNotEmpty || organization.groups.isNotEmpty)
                     MeSection(
+                      sliver: true,
                       key: const ValueKey('me-ungrouped-chats'),
                       label: 'Chats',
                       children: [
