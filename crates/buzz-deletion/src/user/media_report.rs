@@ -41,27 +41,10 @@ pub(super) async fn execute(
                 "has_other_uploader": shared,
             });
             // Serialize scalar fields normally, then stream potentially large
-            // owner/version arrays without collecting them into a Value.
+            // version arrays without collecting them into a Value.
             let fields = serde_json::to_string_pretty(&fields)?;
             write!(output, "\n{}", fields.trim_end_matches('}').trim_end())?;
-            write!(output, ",\n  \"owners\": [")?;
-            let mut owner_cursor = String::new();
-            let mut first_owner = true;
-            loop {
-                let owners = inventory.owners(&hash, &owner_cursor).await?;
-                if owners.is_empty() {
-                    break;
-                }
-                for owner in owners {
-                    if !first_owner {
-                        write!(output, ", ")?;
-                    }
-                    serde_json::to_writer(&mut *output, &owner)?;
-                    first_owner = false;
-                    owner_cursor = owner;
-                }
-            }
-            write!(output, "],\n  \"versions\": [")?;
+            write!(output, ",\n  \"versions\": [")?;
             if shared {
                 kept += 1;
             }

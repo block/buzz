@@ -3,6 +3,23 @@ use crate::{Db, DbError, Result};
 
 const MAX_MEDIA_TARGETS: usize = 10_000;
 
+const CANDIDATES_SQL: &str = r#"WITH candidates AS MATERIALIZED (SELECT sha256 FROM (
+                SELECT sha256 COLLATE "C" AS sha256 FROM media_uploaders
+                WHERE pubkey = ANY($1::bytea[]) AND sha256 COLLATE "C" > $2
+                UNION
+                SELECT object_id COLLATE "C" AS sha256 FROM audit_log
+                WHERE action = 'media_uploaded' AND actor_pubkey = ANY($1::bytea[])
+                  AND object_id COLLATE "C" > $2
+             ) uploads ORDER BY sha256 COLLATE "C" LIMIT $3)
+             SELECT sha256, EXISTS (
+                 SELECT 1 FROM media_uploaders m
+                 WHERE m.sha256 = candidates.sha256 COLLATE "default" AND m.pubkey <> ALL($1::bytea[])
+             ) OR EXISTS (
+                 SELECT 1 FROM audit_log a
+                 WHERE a.action = 'media_uploaded' AND a.object_id = candidates.sha256 COLLATE "default"
+                   AND a.actor_pubkey <> ALL($1::bytea[])
+             ) AS shared FROM candidates ORDER BY sha256 COLLATE "C""#;
+
 impl Db {
     /// Resolve the human and their directly owned agents once across communities.
     /// Every returned key is a global media target, including its uploads elsewhere.
@@ -29,14 +46,14 @@ impl Db {
         Ok(keys)
     }
 
-    /// Page through the target set's distinct upload hashes across communities.
+    /// Page through target upload hashes and classify sharing across all communities.
     /// An empty cursor starts the scan. Storage-only claims are discovered separately.
     pub async fn user_media_candidates(
         &self,
         pubkeys: &[String],
         after: &str,
         limit: u16,
-    ) -> Result<Vec<String>> {
+    ) -> Result<Vec<(String, bool)>> {
         let keys = validate_keys(pubkeys)?;
         if !(1..=500).contains(&limit) {
             return Err(DbError::InvalidData(
@@ -50,22 +67,13 @@ impl Db {
         sqlx::query("SET LOCAL statement_timeout = '120s'")
             .execute(&mut *tx)
             .await?;
-        let hashes: Vec<String> = sqlx::query_scalar(
-            r#"SELECT sha256 FROM (
-                SELECT sha256 COLLATE "C" AS sha256 FROM media_uploaders
-                WHERE pubkey = ANY($1::bytea[]) AND sha256 COLLATE "C" > $2
-                UNION
-                SELECT object_id COLLATE "C" AS sha256 FROM audit_log
-                WHERE action = 'media_uploaded' AND actor_pubkey = ANY($1::bytea[])
-                  AND object_id COLLATE "C" > $2
-             ) candidates ORDER BY sha256 COLLATE "C" LIMIT $3"#,
-        )
-        .bind(keys)
-        .bind(after)
-        .bind(i64::from(limit))
-        .fetch_all(&mut *tx)
-        .await?;
-        for hash in &hashes {
+        let hashes: Vec<(String, bool)> = sqlx::query_as(CANDIDATES_SQL)
+            .bind(keys)
+            .bind(after)
+            .bind(i64::from(limit))
+            .fetch_all(&mut *tx)
+            .await?;
+        for (hash, _) in &hashes {
             validate_hash(hash)?;
         }
         tx.commit().await?;
@@ -109,35 +117,6 @@ impl Db {
         .await?;
         tx.commit().await?;
         Ok(shared)
-    }
-
-    /// Page all known uploaders for a file, including outside uploaders and audit-only claims.
-    pub async fn user_media_owners(&self, hash: &str, after: &str) -> Result<Vec<String>> {
-        validate_hash(hash)?;
-        if !after.is_empty() {
-            super::normalize_user_deletion_pubkey(after)?;
-        }
-        let mut tx = self.pool().begin().await?;
-        sqlx::query("SET LOCAL statement_timeout = '120s'")
-            .execute(&mut *tx)
-            .await?;
-        let owners: Vec<String> = sqlx::query_scalar(
-            r#"SELECT encode(pubkey, 'hex') FROM (
-                SELECT pubkey FROM media_uploaders WHERE sha256 = $1
-                UNION
-                SELECT actor_pubkey FROM audit_log
-                WHERE action = 'media_uploaded' AND object_id = $1 AND actor_pubkey IS NOT NULL
-            ) owners WHERE pubkey > decode($2, 'hex') ORDER BY pubkey LIMIT 500"#,
-        )
-        .bind(hash)
-        .bind(after)
-        .fetch_all(&mut *tx)
-        .await?;
-        for owner in &owners {
-            super::normalize_user_deletion_pubkey(owner)?;
-        }
-        tx.commit().await?;
-        Ok(owners)
     }
 
     /// Remove the target set's ownership rows only after storage cleanup succeeds.
@@ -239,17 +218,21 @@ mod postgres_tests {
         let keys = vec![alice.clone()];
         let first = db.user_media_candidates(&keys, "", 500).await.unwrap();
         assert_eq!(first.len(), 500);
-        assert_eq!(first[0], format!("{:064x}", 1));
+        assert_eq!(first[0], (format!("{:064x}", 1), false));
+        assert!(first[1].1);
         let second = db
-            .user_media_candidates(&keys, &first[499], 500)
+            .user_media_candidates(&keys, &first[499].0, 500)
             .await
             .unwrap();
         assert_eq!(
             second,
-            vec![format!("{:064x}", 501), format!("{:064x}", 502)]
+            vec![
+                (format!("{:064x}", 501), false),
+                (format!("{:064x}", 502), true)
+            ]
         );
         assert!(db
-            .user_media_candidates(&keys, &second[1], 500)
+            .user_media_candidates(&keys, &second[1].0, 500)
             .await
             .unwrap()
             .is_empty());
@@ -372,6 +355,9 @@ mod postgres_tests {
         assert_eq!(
             db.user_media_candidates(&keys, "", 500).await.unwrap(),
             candidates
+                .iter()
+                .map(|h| (h.clone(), hashes[1..3].contains(h)))
+                .collect::<Vec<_>>()
         );
         assert_eq!(
             db.user_media_shared_hashes(&keys, &candidates)
@@ -379,30 +365,6 @@ mod postgres_tests {
                 .unwrap(),
             hashes[1..3]
         );
-        let mut expected_owners = vec![alice.clone(), agent.clone()];
-        expected_owners.sort();
-        assert_eq!(
-            db.user_media_owners(&hashes[0], "").await.unwrap(),
-            expected_owners
-        );
-        assert_eq!(
-            db.user_media_owners(&hashes[0], &expected_owners[0])
-                .await
-                .unwrap(),
-            expected_owners[1..]
-        );
-        assert!(db
-            .user_media_owners(&hashes[0], &expected_owners[1])
-            .await
-            .unwrap()
-            .is_empty());
-        let mut expected_owners = vec![agent.clone(), bob.clone()];
-        expected_owners.sort();
-        assert_eq!(
-            db.user_media_owners(&hashes[1], "").await.unwrap(),
-            expected_owners
-        );
-        assert!(db.user_media_owners("invalid", "").await.is_err());
         assert_eq!(
             db.remove_user_media_uploader(&keys, &hashes[0])
                 .await
@@ -434,7 +396,7 @@ mod postgres_tests {
             .user_media_candidates(&keys, "", 500)
             .await
             .unwrap()
-            .contains(&hashes[0]));
+            .contains(&(hashes[0].clone(), false)));
         assert!(db.user_media_candidates(&[], "", 500).await.is_err());
         assert!(db
             .remove_user_media_uploader(&["invalid".into()], &hashes[0])
@@ -442,3 +404,7 @@ mod postgres_tests {
             .is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "media_query_plan_postgres_tests.rs"]
+mod query_plan_postgres_tests;

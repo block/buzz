@@ -350,7 +350,7 @@ async fn inventory_submission_routes_all_targets_through_gate_then_real_media() 
             assert_eq!(repeated, done);
             assert_eq!(
                 storage.requests.load(std::sync::atomic::Ordering::SeqCst),
-                2
+                1 // Empty discovery needs no subsequent version listings.
             );
             done
         };

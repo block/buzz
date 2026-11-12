@@ -27,4 +27,5 @@ tokio-util = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+url = { workspace = true }
 nostr = { workspace = true }

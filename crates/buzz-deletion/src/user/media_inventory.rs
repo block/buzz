@@ -39,8 +39,7 @@ impl Inventory {
         // persisted decision is trusted after a restart. Source data stays intact
         // throughout collection. No application DB schema is changed.
         sqlx::raw_sql(
-            "CREATE TABLE candidates (hash TEXT PRIMARY KEY, shared INTEGER NOT NULL DEFAULT 0) WITHOUT ROWID;
-             CREATE TABLE owners (hash TEXT, pubkey TEXT, PRIMARY KEY(hash, pubkey)) WITHOUT ROWID;
+            "CREATE TABLE candidates (hash TEXT PRIMARY KEY, shared INTEGER NOT NULL DEFAULT 0, db_checked INTEGER NOT NULL DEFAULT 0) WITHOUT ROWID;
              CREATE TABLE filenames (hash TEXT, name TEXT, PRIMARY KEY(hash, name)) WITHOUT ROWID;
              CREATE TABLE versions (id INTEGER PRIMARY KEY, hash TEXT NOT NULL,
                  priority INTEGER NOT NULL, unversioned INTEGER NOT NULL, entry TEXT NOT NULL);
@@ -72,6 +71,27 @@ impl Inventory {
     pub async fn candidates(&mut self, after: &str) -> Result<Vec<(String, bool)>> {
         Ok(sqlx::query_as(
             "SELECT hash, shared FROM candidates WHERE hash > ? ORDER BY hash LIMIT ?",
+        )
+        .bind(after)
+        .bind(i64::from(PAGE_SIZE))
+        .fetch_all(&mut self.conn)
+        .await?)
+    }
+
+    pub async fn add_classified_candidates(&mut self, page: &[(String, bool)]) -> Result<()> {
+        let mut tx = self.conn.begin().await?;
+        for (hash, shared) in page {
+            sqlx::query("INSERT INTO candidates(hash, shared, db_checked) VALUES (?, ?, 1)
+                ON CONFLICT(hash) DO UPDATE SET shared = MAX(shared, excluded.shared), db_checked = 1")
+                .bind(hash).bind(shared).execute(&mut *tx).await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn unchecked_candidates(&mut self, after: &str) -> Result<Vec<String>> {
+        Ok(sqlx::query_scalar(
+            "SELECT hash FROM candidates WHERE db_checked = 0 AND hash > ? ORDER BY hash LIMIT ?",
         )
         .bind(after)
         .bind(i64::from(PAGE_SIZE))
@@ -125,26 +145,6 @@ impl Inventory {
         }
         tx.commit().await?;
         Ok(())
-    }
-
-    pub async fn add_owner(&mut self, hash: &str, owner: &str) -> Result<()> {
-        sqlx::query("INSERT OR IGNORE INTO owners(hash, pubkey) VALUES (?, ?)")
-            .bind(hash)
-            .bind(owner)
-            .execute(&mut self.conn)
-            .await?;
-        Ok(())
-    }
-
-    pub async fn owners(&mut self, hash: &str, after: &str) -> Result<Vec<String>> {
-        Ok(sqlx::query_scalar(
-            "SELECT pubkey FROM owners WHERE hash = ? AND pubkey > ? ORDER BY pubkey LIMIT ?",
-        )
-        .bind(hash)
-        .bind(after)
-        .bind(i64::from(PAGE_SIZE))
-        .fetch_all(&mut self.conn)
-        .await?)
     }
 
     pub async fn add_filename(&mut self, hash: &str, name: &str) -> Result<()> {

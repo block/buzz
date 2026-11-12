@@ -11,6 +11,16 @@ async fn run_listing_case(
 ) {
     let paginated = continuation.is_some();
     let hash = "a".repeat(64);
+    // First-pass cursor tests need entries inside the requested namespace.
+    // Delete markers exercise listing continuation without a claim-body GET.
+    let listing = if fail_first_pass {
+        listing
+            .replace(&format!("{hash}.png"), "_uploads/cursor-marker")
+            .replace("<Version>", "<DeleteMarker>")
+            .replace("</Version>", "</DeleteMarker>")
+    } else {
+        listing
+    };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     let deletion_response = format!("<DeleteResult><Deleted><Key>{hash}.png</Key><VersionId>v1</VersionId></Deleted></DeleteResult>");
@@ -55,7 +65,8 @@ async fn run_listing_case(
                             assert!(request.contains("version-id-marker=v2"));
                         }
                         continuation.as_deref().unwrap_or("<ListVersionsResult><IsTruncated>false</IsTruncated></ListVersionsResult>")
-                    } else if requests.is_empty() && !fail_first_pass {
+                    } else if (request.contains("prefix=_uploads") || request.contains("prefix=_meta"))
+                        && !(requests.is_empty() && fail_first_pass) {
                         "<ListVersionsResult><IsTruncated>false</IsTruncated></ListVersionsResult>"
                     } else {
                         &listing
@@ -115,15 +126,18 @@ async fn run_listing_case(
         mutations.sort();
         if paginated {
             assert_eq!(mutations, ["v1", "v2"]);
-            assert_eq!(requests, ["GET", "GET", "GET", "POST", "POST"]);
+            assert_eq!(
+                requests,
+                ["GET", "GET", "GET", "GET", "GET", "POST", "POST"]
+            );
         } else {
             assert_eq!(mutations, ["v1"]);
-            assert_eq!(requests, ["GET", "GET", "POST"]);
+            assert_eq!(requests, ["GET", "GET", "GET", "GET", "POST"]);
         }
     } else {
         assert!(result.is_err(), "malformed listing must fail");
         assert!(db.removed.borrow().is_empty());
-        assert_eq!(requests.len(), if fail_first_pass { 1 } else { 2 });
+        assert_eq!(requests.len(), if fail_first_pass { 1 } else { 4 });
         assert!(
             requests.iter().all(|method| method == "GET"),
             "mutating requests: {requests:?}"

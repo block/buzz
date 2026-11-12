@@ -4,7 +4,7 @@ use buzz_db::Db;
 #[path = "worker_postgres_tests/fixture.rs"]
 mod fixture;
 #[path = "worker_postgres_tests/media_retry.rs"]
-mod media_retry;
+mod media_retry_postgres_tests;
 use fixture::fixture;
 
 async fn assert_completed(store: &EntityDeletionStore, id: Uuid) {

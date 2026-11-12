@@ -69,28 +69,24 @@ pub(super) async fn handle_with_storage(
 }
 
 // Fakes replace only external DB/storage boundaries; the tests run the same
-// candidate collection, two passes, disk inventory and deletion loop.
+// candidate collection, prefix scans, disk inventory and deletion loop.
 trait Database {
     async fn targets(&self, pubkey: &str) -> Result<Vec<String>>;
-    async fn candidates(&self, pubkeys: &[String], after: &str) -> Result<Vec<String>>;
+    async fn candidates(&self, pubkeys: &[String], after: &str) -> Result<Vec<(String, bool)>>;
     async fn shared(&self, pubkeys: &[String], hashes: &[String]) -> Result<Vec<String>>;
-    async fn owners(&self, hash: &str, after: &str) -> Result<Vec<String>>;
     async fn remove(&self, pubkeys: &[String], hash: &str) -> Result<u64>;
 }
 impl Database for Db {
     async fn targets(&self, pubkey: &str) -> Result<Vec<String>> {
         Ok(self.user_media_targets(pubkey).await?)
     }
-    async fn candidates(&self, pubkeys: &[String], after: &str) -> Result<Vec<String>> {
+    async fn candidates(&self, pubkeys: &[String], after: &str) -> Result<Vec<(String, bool)>> {
         Ok(self
             .user_media_candidates(pubkeys, after, PAGE_SIZE)
             .await?)
     }
     async fn shared(&self, pubkeys: &[String], hashes: &[String]) -> Result<Vec<String>> {
         Ok(self.user_media_shared_hashes(pubkeys, hashes).await?)
-    }
-    async fn owners(&self, hash: &str, after: &str) -> Result<Vec<String>> {
-        Ok(self.user_media_owners(hash, after).await?)
     }
     async fn remove(&self, pubkeys: &[String], hash: &str) -> Result<u64> {
         Ok(self.remove_user_media_uploader(pubkeys, hash).await?)
@@ -149,17 +145,35 @@ async fn run_handler(
     let mut after = String::new();
     loop {
         let page = db.candidates(&keys, &after).await?;
-        let Some(last) = page.last() else {
+        let Some((last, _)) = page.last() else {
             break;
         };
         if page.len() > usize::from(PAGE_SIZE) || last <= &after {
             bail!("invalid database candidate page");
         }
         after = last.clone();
-        inventory.add_candidates(&page).await?;
+        inventory.add_classified_candidates(&page).await?;
     }
-    // Pass one finishes candidate discovery before any sharing decisions.
-    scan_storage(media, &keys_set, &mut inventory, true).await?;
+    // Finish discovery before classifying storage-only candidates. Historical
+    // upload claims may precede the target's claim in the listing.
+    scan_storage(media, &keys_set, &mut inventory, "_uploads/", true).await?;
+    after.clear();
+    loop {
+        let hashes = inventory.unchecked_candidates(&after).await?;
+        let Some(last) = hashes.last() else {
+            break;
+        };
+        after = last.clone();
+        inventory
+            .mark_shared(&db.shared(&keys, &hashes).await?)
+            .await?;
+    }
+    if !inventory.candidates("").await?.is_empty() {
+        // These community-first namespaces cannot be looked up by hash alone.
+        // Keep complete historical coverage, including removed communities.
+        scan_storage(media, &keys_set, &mut inventory, "_uploads/", false).await?;
+        scan_storage(media, &keys_set, &mut inventory, "_meta/", false).await?;
+    }
     after.clear();
     loop {
         let page = inventory.candidates(&after).await?;
@@ -167,30 +181,12 @@ async fn run_handler(
             break;
         };
         after = last.clone();
-        let hashes: Vec<_> = page.into_iter().map(|(hash, _)| hash).collect();
-        inventory
-            .mark_shared(&db.shared(&keys, &hashes).await?)
-            .await?;
-        for hash in hashes {
-            let mut owner_cursor = String::new();
-            loop {
-                let owners = db.owners(&hash, &owner_cursor).await?;
-                if owners.is_empty() {
-                    break;
-                }
-                if owners.len() > usize::from(PAGE_SIZE) || owners[0] <= owner_cursor {
-                    bail!("invalid database owner page");
-                }
-                for owner in owners {
-                    inventory.add_owner(&hash, &owner).await?;
-                    owner_cursor = owner;
-                }
-            }
+        for (hash, _) in page {
+            // The dot excludes other hash families while covering all blob
+            // extensions, thumbnails, historical versions and delete markers.
+            scan_storage(media, &keys_set, &mut inventory, &format!("{hash}."), false).await?;
         }
     }
-    // Pass two can now recognize another uploader seen before Alice in pass one.
-    // It also spools exact candidate versions, without retaining the whole bucket.
-    scan_storage(media, &keys_set, &mut inventory, false).await?;
     inventory.require_immutable_versions().await?;
     let result = report::execute(db, media, &keys, delete, &mut inventory, output).await?;
     inventory.close().await?;
@@ -201,9 +197,10 @@ async fn scan_storage(
     media: &impl Storage,
     keys_set: &HashSet<String>,
     inventory: &mut Inventory,
+    prefix: &str,
     candidates_only: bool,
 ) -> Result<()> {
-    let prefix = if candidates_only { "_uploads/" } else { "" };
+    let marker_scope = format!("{candidates_only}:{prefix}");
     let (mut key_marker, mut version_marker) = (None, None);
     for _ in 0..MAX_STORAGE_PAGES {
         let page = media
@@ -216,6 +213,9 @@ async fn scan_storage(
         let mut shared = Vec::new();
         let mut versions = Vec::new();
         for entry in page.entries {
+            if !entry.key.starts_with(prefix) {
+                bail!("storage returned an entry outside the requested prefix");
+            }
             let class = classify_key(&entry.key);
             let hash = match &class {
                 KeyClass::Blob { sha256, .. }
@@ -253,11 +253,8 @@ async fn scan_storage(
                     if candidates_only && keys_set.contains(&owner) {
                         candidates.push(hash.clone());
                     }
-                    if !candidates_only {
-                        inventory.add_owner(hash, &owner).await?;
-                        if !keys_set.contains(&owner) {
-                            shared.push(hash.clone());
-                        }
+                    if !candidates_only && !keys_set.contains(&owner) {
+                        shared.push(hash.clone());
                     }
                 }
             }
@@ -287,7 +284,7 @@ async fn scan_storage(
         }
         if !inventory
             .remember_marker(
-                prefix,
+                &marker_scope,
                 next.0.as_deref().unwrap_or_default(),
                 next.1.as_deref().unwrap_or_default(),
             )
@@ -325,6 +322,7 @@ pub(super) fn configured_storage() -> Result<MediaStorage> {
 
 #[cfg(test)]
 mod tests {
+    mod claim_versions;
     mod s3;
     use super::*;
     use clap::Parser;
@@ -380,7 +378,7 @@ mod tests {
                 self.targets.clone()
             })
         }
-        async fn candidates(&self, keys: &[String], after: &str) -> Result<Vec<String>> {
+        async fn candidates(&self, keys: &[String], after: &str) -> Result<Vec<(String, bool)>> {
             if !self.targets.is_empty() {
                 assert_eq!(keys, self.targets);
             }
@@ -389,7 +387,7 @@ mod tests {
                 .iter()
                 .filter(|hash| hash.as_str() > after)
                 .take(usize::from(PAGE_SIZE))
-                .cloned()
+                .map(|hash| (hash.clone(), self.shared.contains(hash)))
                 .collect())
         }
         async fn shared(&self, keys: &[String], hashes: &[String]) -> Result<Vec<String>> {
@@ -401,20 +399,6 @@ mod tests {
                 .iter()
                 .filter(|hash| self.shared.contains(hash))
                 .cloned()
-                .collect())
-        }
-        async fn owners(&self, hash: &str, after: &str) -> Result<Vec<String>> {
-            let mut owners = Vec::new();
-            if self.candidates.iter().any(|candidate| candidate == hash) {
-                owners.push(ALICE.to_owned());
-            }
-            if self.shared.iter().any(|candidate| candidate == hash) {
-                owners.push(BOB.to_owned());
-            }
-            owners.sort();
-            Ok(owners
-                .into_iter()
-                .filter(|owner| owner.as_str() > after)
                 .collect())
         }
         async fn remove(&self, keys: &[String], hash: &str) -> Result<u64> {
@@ -471,7 +455,7 @@ mod tests {
             if key.is_none() {
                 self.passes.borrow_mut().push(prefix.to_owned());
             }
-            if prefix.is_empty() && self.fail_second_pass {
+            if prefix == "_meta/" && self.fail_second_pass {
                 bail!("injected listing failure");
             }
             let mut entries: Vec<_> = self
@@ -551,7 +535,11 @@ mod tests {
         media.object(format!("{a}.png"), ObjectVersionKind::Object); // Historical version too.
         media.object(format!("{a}.png"), ObjectVersionKind::DeleteMarker);
         media.object(
-            format!("_meta/{}/{a}.json", uuid::Uuid::from_u128(2)),
+            format!("_meta/{}/{a}.json", uuid::Uuid::from_u128(999)), // No claim or membership for this sidecar community.
+            ObjectVersionKind::Object,
+        );
+        media.object(
+            "git/unrelated/objects/pack".into(),
             ObjectVersionKind::Object,
         );
         let preview = run_handler(&db, &media, ALICE, false, &mut Vec::new())
@@ -562,6 +550,7 @@ mod tests {
         assert!(db.removed.borrow().is_empty());
         assert!(media.deleted.borrow().is_empty());
         assert!(db.checked.borrow().contains(&c));
+        assert!(!db.checked.borrow().contains(&a));
         assert!(!db.checked.borrow().contains(&d));
         let result = run_handler(&db, &media, ALICE, true, &mut Vec::new())
             .await
@@ -577,6 +566,12 @@ mod tests {
             .unwrap()
             .key
             .starts_with("_uploads/"));
+        assert!(media
+            .passes
+            .borrow()
+            .iter()
+            .all(|prefix| !prefix.is_empty()));
+        assert!(!media.passes.borrow().contains(&format!("{d}.")));
         assert_eq!(*db.removed.borrow(), vec![a, b, c]);
     }
 
@@ -675,14 +670,7 @@ mod tests {
         assert_eq!(report["summary"], preview);
         let files = report["files"].as_array().unwrap();
         assert_eq!(files.len(), 4);
-        let mut internal = vec![ALICE, AGENT];
-        internal.sort();
-        let mut external = vec![BOB, AGENT];
-        external.sort();
-        assert_eq!(files[0]["owners"], json!(internal));
-        assert_eq!(files[1]["owners"], json!([AGENT]));
-        assert_eq!(files[2]["owners"], json!(external));
-        assert_eq!(files[3]["owners"], json!(external)); // Includes DB-only outside evidence.
+        assert!(files.iter().all(|file| file.get("owners").is_none()));
         let mut reported_versions = Vec::new();
         for (index, file) in files.iter().enumerate() {
             assert_eq!(file["filename"], format!("{}.png", hashes[index]));
@@ -707,7 +695,12 @@ mod tests {
         assert_eq!(preview["kept_files"], 2);
         assert_eq!(preview["deleted_versions"], 0);
         assert_eq!(*db.target_calls.borrow(), 1);
-        assert_eq!(*media.passes.borrow(), vec!["_uploads/", ""]);
+        let expected_passes: Vec<String> =
+            ["_uploads/".into(), "_uploads/".into(), "_meta/".into()]
+                .into_iter()
+                .chain(hashes[..4].iter().map(|hash| format!("{hash}.")))
+                .collect();
+        assert_eq!(*media.passes.borrow(), expected_passes);
         assert!(db.removed.borrow().is_empty());
         assert!(media.deleted.borrow().is_empty());
 
@@ -726,7 +719,11 @@ mod tests {
         assert_eq!(*db.target_calls.borrow(), 2);
         assert_eq!(
             *media.passes.borrow(),
-            vec!["_uploads/", "", "_uploads/", ""]
+            expected_passes
+                .iter()
+                .chain(&expected_passes)
+                .cloned()
+                .collect::<Vec<_>>()
         );
         assert_eq!(*db.removed.borrow(), hashes[..4]);
         assert!(media
@@ -763,7 +760,7 @@ mod tests {
         assert_eq!(files.len(), 2);
         assert_eq!(files[0]["versions"].as_array().unwrap().len(), 501);
         assert_eq!(files[1]["filename"], Value::Null);
-        assert_eq!(files[1]["owners"], json!([ALICE]));
+        assert!(files[1].get("owners").is_none());
         assert_eq!(files[1]["versions"], json!([]));
         assert_eq!(
             files[0].as_object().unwrap().keys().collect::<Vec<_>>(),

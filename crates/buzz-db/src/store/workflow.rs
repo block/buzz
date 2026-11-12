@@ -2610,9 +2610,16 @@ mod postgres_tests {
             .await
             .expect("claim B")
             .expect("claim wins");
-        let run_a = create_workflow_run(&pool, community, workflow_a, None, None)
-            .await
-            .expect("create A run");
+        let run_a = create_workflow_run(
+            &pool,
+            community,
+            workflow_a,
+            None,
+            None,
+            &RunCause::Schedule,
+        )
+        .await
+        .expect("create A run");
 
         assert!(
             !attach_scheduled_workflow_run(&pool, community, workflow_b, scheduled_for, run_a)
