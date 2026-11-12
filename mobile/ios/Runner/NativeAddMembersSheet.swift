@@ -86,13 +86,32 @@ final class NativeAddMembersSheetCoordinator: NSObject, UIAdaptivePresentationCo
     self.navigation = nil
     picker = nil
     afterClose = afterClose ?? []
-    navigation.dismiss(animated: !UIAccessibility.isReduceMotionEnabled) { [weak self] in
+    Self.dismiss(navigation) { [weak self] in
       if notify { self?.channel.invokeMethod("closed", arguments: ["session": request]) }
       completion?()
       let queued = self?.afterClose ?? []
       self?.afterClose = nil
       queued.forEach { $0() }
     }
+  }
+
+  /// UIKit ignores a dismiss that arrives mid-transition (the sheet still
+  /// animating in, or an interactive swipe-down) and never runs its
+  /// completion, which would hold every later present forever. Waits for the
+  /// transition to end, then dismisses whatever is still presented.
+  private static func dismiss(_ navigation: UINavigationController, completion: @escaping () -> Void) {
+    if let transition = navigation.transitionCoordinator {
+      // The coordinator is still attached while its completion runs.
+      transition.animate(alongsideTransition: nil) { _ in
+        DispatchQueue.main.async { dismiss(navigation, completion: completion) }
+      }
+      return
+    }
+    guard navigation.presentingViewController != nil else {
+      completion()
+      return
+    }
+    navigation.dismiss(animated: !UIAccessibility.isReduceMotionEnabled, completion: completion)
   }
 
   func presentationControllerDidDismiss(_ presentationController: UIPresentationController) {
