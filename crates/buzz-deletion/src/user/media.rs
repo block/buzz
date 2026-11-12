@@ -310,6 +310,7 @@ fn configured_storage() -> Result<MediaStorage> {
 
 #[cfg(test)]
 mod tests {
+    mod s3;
     use super::*;
     use clap::Parser;
     use serde_json::json;
