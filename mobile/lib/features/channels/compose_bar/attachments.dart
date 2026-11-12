@@ -45,7 +45,7 @@ bool _queueComposerAttachment(
 }
 
 final _pickedVideoExtension = RegExp(
-  r'\.(mp4|mov|m4v|webm|3gp|avi|mkv)$',
+  r'\.(mp4|mov|m4v|webm|3gp|3gpp|3g2|avi|mkv)$',
   caseSensitive: false,
 );
 

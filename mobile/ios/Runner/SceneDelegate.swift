@@ -19,6 +19,21 @@ class SceneDelegate: FlutterSceneDelegate {
       .first(where: { $0.activityType == NSUserActivityTypeBrowsingWeb })?.webpageURL {
       AppLinks.shared.handleLink(url: url)
     }
+    if let item = connectionOptions.shortcutItem {
+      HomeScreenShortcuts.shared.handle(item)
+    }
+  }
+
+  override func windowScene(
+    _ windowScene: UIWindowScene,
+    performActionFor shortcutItem: UIApplicationShortcutItem,
+    completionHandler: @escaping (Bool) -> Void
+  ) {
+    if HomeScreenShortcuts.shared.handle(shortcutItem) {
+      completionHandler(true)
+    } else {
+      super.windowScene(windowScene, performActionFor: shortcutItem, completionHandler: completionHandler)
+    }
   }
 }
 

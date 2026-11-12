@@ -1,5 +1,10 @@
 import 'dart:async';
 
+import 'package:buzz/features/channels/bestie_conversation.dart';
+import 'package:buzz/features/channels/channel.dart';
+import 'package:buzz/features/channels/channel_detail_page.dart';
+import 'package:buzz/features/channels/channel_management_provider.dart';
+import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/default_agent_launcher.dart';
 import 'package:buzz/features/channels/first_agent_callout.dart';
 import 'package:buzz/shared/agents/remote_agents.dart';
@@ -8,6 +13,7 @@ import 'package:buzz/shared/me/default_agent_writer.dart';
 import 'package:buzz/shared/me/me_sync.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
+import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -87,4 +93,116 @@ void main() {
       await tester.pumpWidget(const SizedBox());
     },
   );
+
+  final paneVariant = ValueVariant<bool>({false, true});
+  testWidgets('a slow Bestie lookup does not open over a newer screen', (
+    tester,
+  ) async {
+    final nsec = nostr.Nip19.encode(
+      prefix: nostr.Nip19Prefix.nsec,
+      data: '0' * 63 + '1',
+    );
+    final relay = FakeRelay();
+    final scope = MeSync(
+      relay,
+      RelayConfig(baseUrl: 'https://a.test', nsec: nsec),
+    );
+    await saveDefaultAgent(scope, 'a' * 64);
+    final actions = _SlowDmActions();
+    final pane = ConversationPaneController();
+    addTearDown(pane.dispose);
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          savedPrefsProvider.overrideWithValue(prefs),
+          meSyncProvider.overrideWithValue(scope),
+          relaySessionProvider.overrideWith(() => relay),
+          remoteAgentsEnabledProvider.overrideWithValue(true),
+          channelsProvider.overrideWith(_NoChannels.new),
+          channelActionsProvider.overrideWithValue(actions),
+        ],
+        child: MaterialApp(
+          theme: AppTheme.light(),
+          home: Scaffold(
+            body: paneVariant.currentValue!
+                ? ConversationPaneScope(
+                    controller: pane,
+                    child: DefaultAgentLauncher(onChooseAgent: () {}),
+                  )
+                : DefaultAgentLauncher(onChooseAgent: () {}),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byType(IconButton));
+    await tester.pump();
+    // The app shortcut asking for the same conversation meanwhile waits on
+    // the same lookup instead of starting a second one.
+    final launcher = tester.element(find.byType(DefaultAgentLauncher));
+    unawaited(
+      openBestieConversation(launcher, launcher as WidgetRef, 'a' * 64),
+    );
+    await tester.pump();
+    expect(actions.calls, 1);
+    Navigator.of(
+      tester.element(find.byType(DefaultAgentLauncher)),
+    ).push(MaterialPageRoute<void>(builder: (_) => const Text('Elsewhere')));
+    await tester.pumpAndSettle();
+    actions.dm.complete(
+      Channel(
+        id: 'dm',
+        name: 'Bestie',
+        description: '',
+        createdBy: 'self',
+        createdAt: DateTime(2026),
+        memberCount: 2,
+        visibility: 'private',
+        channelType: 'dm',
+        isMember: true,
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Elsewhere'), findsOneWidget);
+    expect(find.byType(ChannelDetailPage), findsNothing);
+
+    // The next open starts a fresh lookup.
+    Navigator.of(launcher).pop();
+    await tester.pumpAndSettle();
+    await tester.tap(find.byType(IconButton));
+    await tester.pumpAndSettle();
+    expect(actions.calls, 2);
+    if (paneVariant.currentValue!) {
+      expect(pane.selectedId, 'dm');
+      expect(find.byType(ChannelDetailPage), findsNothing);
+      expect(find.byType(DefaultAgentLauncher), findsOneWidget);
+    } else {
+      expect(find.byType(ChannelDetailPage), findsOneWidget);
+    }
+    await tester.pumpWidget(const SizedBox());
+  }, variant: paneVariant);
+}
+
+class _NoChannels extends ChannelsNotifier {
+  @override
+  Future<List<Channel>> build() async => const [];
+}
+
+class _SlowDmActions implements ChannelActions {
+  final dm = Completer<Channel>();
+  var calls = 0;
+
+  @override
+  Future<Channel> openDm({
+    required List<String> pubkeys,
+    bool waitForChannelList = true,
+  }) {
+    calls++;
+    return dm.future;
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }

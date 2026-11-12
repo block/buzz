@@ -1342,6 +1342,13 @@ fn filter_to_query_params(
             ks.iter().map(|k| k.as_u16() as i32).collect()
         }
     });
+    // An empty `authors`, `ids` or tag set also matches nothing (NIP-01), but
+    // the conversions below drop or ignore it, so COUNT would count without
+    // it. Use the same sentinel, so every read answers it without a query.
+    let matches_nothing = filter.authors.as_ref().is_some_and(|a| a.is_empty())
+        || filter.ids.as_ref().is_some_and(|i| i.is_empty())
+        || filter.generic_tags.values().any(|values| values.is_empty());
+    let kinds = if matches_nothing { Some(vec![]) } else { kinds };
 
     let since = filter
         .since
@@ -3479,6 +3486,34 @@ mod tests {
         assert!(
             !filter_fully_pushable(&with_k),
             "#k is still a post-filter, so COUNT must not take the fast path"
+        );
+    }
+
+    #[test]
+    fn empty_filter_sets_match_nothing_in_sql() {
+        let community = buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::nil());
+        let addr = format!("30175:{}:persona", "ab".repeat(32));
+        for key in ["authors", "ids", "#e", "#p", "#d", "#h", "#k", "#t"] {
+            for with_a in [false, true] {
+                let mut json = serde_json::json!({"kinds": [7], key: []});
+                if with_a {
+                    json["#a"] = serde_json::json!([addr]);
+                }
+                let filter: Filter = serde_json::from_value(json).unwrap();
+                assert_eq!(
+                    filter_to_query_params(&filter, None, community).kinds,
+                    Some(vec![]),
+                    "empty {key} (with #a: {with_a}) must match nothing"
+                );
+            }
+        }
+
+        let empty_d_value: Filter =
+            serde_json::from_value(serde_json::json!({"kinds": [30175], "#d": [""]})).unwrap();
+        assert_eq!(
+            filter_to_query_params(&empty_d_value, None, community).kinds,
+            Some(vec![30175]),
+            "an empty string is a real #d value, not an empty set"
         );
     }
 

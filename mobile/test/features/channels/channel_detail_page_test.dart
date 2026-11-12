@@ -69,6 +69,7 @@ import 'package:buzz/features/channels/ime_metrics_settle_observer.dart';
 import 'package:buzz/features/channels/local_message_send_animation_provider.dart';
 import 'package:buzz/features/channels/local_send_bubble_surface.dart';
 import 'package:buzz/features/channels/message_action_backdrop_state.dart';
+import 'package:buzz/features/channels/message_author_visibility.dart';
 import 'package:buzz/features/channels/message_content.dart';
 import 'package:buzz/features/channels/mobile_huddle_controller.dart';
 import 'package:buzz/features/channels/reaction_row.dart';
@@ -4363,6 +4364,125 @@ void main() {
         debugDefaultTargetPlatformOverride = previousPlatform;
       }
     });
+
+    testWidgets(
+      'a thread tail behind the Android keyboard is not read at the bottom',
+      (tester) async {
+        final previousPlatform = debugDefaultTargetPlatformOverride;
+        debugDefaultTargetPlatformOverride = TargetPlatform.android;
+        try {
+          tester.view.physicalSize = const Size(400, 800);
+          tester.view.devicePixelRatio = 1;
+          tester.view.viewPadding = const FakeViewPadding(bottom: 24);
+          tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+          addTearDown(tester.view.reset);
+          tester.binding.handleAppLifecycleStateChanged(
+            AppLifecycleState.inactive,
+          );
+          addTearDown(
+            () => tester.binding.handleAppLifecycleStateChanged(
+              AppLifecycleState.resumed,
+            ),
+          );
+          final readState = _SynchronousReadStateNotifier(
+            const ReadStateState(
+              isReady: true,
+              pubkey: 'self',
+              contexts: {},
+              version: 0,
+            ),
+          );
+          final root = _textMsg(
+            id: threadIdRoot,
+            pubkey: 'self',
+            content: 'Outer root',
+            createdAt: 1000,
+          );
+          final branch = _textMsg(
+            id: threadIdReplyZero,
+            pubkey: 'self',
+            content: 'Branch head',
+            createdAt: 1001,
+            extraTags: const [
+              ['e', threadIdRoot, '', 'reply'],
+            ],
+          );
+          final replies = [
+            for (var i = 0; i < 20; i++)
+              _textMsg(
+                id: indexedThreadId('hidden-tail-$i'),
+                pubkey: 'alice',
+                content: 'Nested reply $i',
+                createdAt: 1100 + i,
+                extraTags: const [
+                  ['e', threadIdRoot, '', 'root'],
+                  ['e', threadIdReplyZero, '', 'reply'],
+                  ['p', 'self'],
+                ],
+              ),
+          ];
+          await tester.pumpWidget(
+            _buildTestable(
+              messages: [root, branch, ...replies],
+              threadReplies: {
+                threadIdRoot: [branch, ...replies],
+              },
+              readStateNotifier: readState,
+              home: ThreadDetailPage(
+                threadHead: formatTimeline([branch]).single,
+                allMessages: formatTimeline([root, branch, ...replies]),
+                channelId: _channelId,
+                currentPubkey: 'self',
+                isMember: true,
+                isArchived: false,
+                initialMessageId: replies.first.id,
+              ),
+            ),
+          );
+          await tester.pumpAndSettle();
+          final list = find.byKey(const ValueKey('thread-message-list'));
+          final lifecycle = tester.widget<KeyboardDismissOnDrag>(
+            find.byType(KeyboardDismissOnDrag),
+          );
+          lifecycle.onUserScrollStart!();
+          tester
+              .widget<ScrollablePositionedList>(list)
+              .itemScrollController!
+              .jumpTo(index: replies.length, alignment: 0.8);
+          await tester.pumpAndSettle();
+          lifecycle.onUserScrollEnd!();
+          await tester.pumpAndSettle();
+          final tail = find.byKey(
+            ValueKey('thread-message-group-${replies.last.id}'),
+          );
+          final row = tester.getRect(tail);
+          final coveredTop = tester
+              .getTopLeft(find.byKey(const ValueKey('thread-composer-dock')))
+              .dy;
+          expect(
+            row.top,
+            greaterThan(coveredTop),
+            reason: 'No part of the reply is in the reading area.',
+          );
+          expect(row.bottom, lessThan(tester.getRect(list).bottom));
+          expect(readState.markedContexts, isEmpty);
+          tester.binding.handleAppLifecycleStateChanged(
+            AppLifecycleState.resumed,
+          );
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 350));
+          expect(
+            readState.markedContexts,
+            isNot(contains('msg:${replies.last.id}')),
+          );
+        } finally {
+          debugDefaultTargetPlatformOverride = previousPlatform;
+          tester.binding.handleAppLifecycleStateChanged(
+            AppLifecycleState.resumed,
+          );
+        }
+      },
+    );
 
     testWidgets('thread rows under the Android keyboard are not read', (
       tester,
@@ -15124,9 +15244,7 @@ void main() {
       },
     );
 
-    testWidgets('Android private channel header shows name without lock', (
-      tester,
-    ) async {
+    testWidgets('shows lock icon for private channel', (tester) async {
       final privateChannel = Channel(
         id: _channelId,
         name: 'secret',
@@ -15145,7 +15263,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('secret'), findsOneWidget);
-      expect(find.byIcon(BuzzIcons.lock), findsNothing);
+      expect(find.byIcon(BuzzIcons.lock), findsOneWidget);
     });
   });
 

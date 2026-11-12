@@ -17,7 +17,7 @@ class MessageGalleryItem {
   /// Whether this item opens video playback rather than an image decoder.
   final bool isVideo;
 
-  /// Optional video poster; absent posters are generated lazily by the stack.
+  /// Optional video poster; absent posters use a static video placeholder.
   final String? posterUrl;
 
   const MessageGalleryItem({
