@@ -12,30 +12,29 @@ const editedSlot = '';
 const editedMarkerText = '(edited)';
 
 // Last lines that a following " (edited)" would join or turn into Markdown
-// structure: indented code, a table row, a rule or setext underline, `$$`
-// display math, or a bare list, quote, checkbox or radio marker. A heading
-// takes its own line as on desktop. Escapes are already shielded here, so
-// `\]` is text, not math. Each pattern starts at the line start or at a
-// fixed character, so no run of text is rescanned and a match stays linear in
-// the line, whatever an author puts in it.
+// structure: indented code, a table row (any unescaped `|`: a GFM row needs
+// no edge pipe), a rule or setext underline, `$$` display math, or a bare
+// list, quote, checkbox or radio marker. A heading takes its own line as on
+// desktop. Each pattern starts at the line start or at a fixed character, so
+// no run of text is rescanned and a match stays linear in the line, whatever
+// an author puts in it.
 final _block = RegExp(
-  r'^(?:\s{4}|\t)|^\s*\||\|\s*$|\$\$\s*$'
+  r'^(?:\s{4}|\t)|(?<!\\)\||\$\$\s*$'
   r'|^\s*(?:([-*_])(?:\s*\1){2,}|=+)\s*$'
   r'|^\s*#{1,6}(?:\s|$)'
-  r'|^\s*(?:[-*+]|>|\d+\.|\[[ xX]\]|\([ xX]\))\s*$',
+  r'|^\s*(?:[-*+]|>|\d+[.)]|\[[ xX]\]|\([ xX]\))\s*$',
 );
 
 /// [markdown] with the edited slot joined to its last line, or null when the
 /// marker must take its own line instead. It joins prose (a paragraph, list
-/// item or quote). Bodies with a code fence anywhere never get the
-/// slot: gpt_markdown's fence rules differ from CommonMark, so the slot could
-/// land inside code or open a new block. Bodies with an authored slot never
-/// get one either, so that character is not drawn as the marker.
+/// item or quote). Bodies with a code fence (backtick or tilde) or an HTML
+/// comment anywhere never get the slot: a closing fence followed by the slot
+/// opens a new fence, and an unclosed fence or comment runs to the end, so the
+/// slot would land inside code or be hidden. Bodies with an authored slot
+/// never get one either, so that character is not drawn as the marker.
 String? withEditedSlot(String markdown) {
   final body = markdown.trimRight();
-  if (body.isEmpty || body.contains('```') || body.contains(editedSlot)) {
-    return null;
-  }
+  if (body.isEmpty || _unsafe.any(body.contains)) return null;
   final last = body.substring(body.lastIndexOf('\n') + 1);
   if (_block.hasMatch(last) || _endsInLink(last)) return null;
   return '$body $editedSlot';
@@ -63,6 +62,8 @@ bool _endsInLink(String line) {
   }
   return false;
 }
+
+const _unsafe = ['```', '~~~', '<!--', editedSlot];
 
 final _space = RegExp(r'\s');
 final _schemeChar = RegExp(r'[a-zA-Z0-9+.-]');
