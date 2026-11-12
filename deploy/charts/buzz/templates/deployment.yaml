@@ -114,8 +114,8 @@ spec:
           env:
             # ── Networking ───────────────────────────────────────────
             - { name: BUZZ_BIND_ADDR,     value: {{ .Values.relay.bindAddr | quote }} }
-            - { name: BUZZ_HEALTH_PORT,   value: {{ .Values.service.healthPort | quote }} }
-            - { name: BUZZ_METRICS_PORT,  value: {{ .Values.service.metricsPort | quote }} }
+            - { name: BUZZ_HEALTH_PORT,   value: {{ .Values.service.healthPort | int64 | quote }} }
+            - { name: BUZZ_METRICS_PORT,  value: {{ .Values.service.metricsPort | int64 | quote }} }
             - { name: RELAY_URL,          value: {{ .Values.relayUrl | quote }} }
             {{- if .Values.pairingRelay.url }}
             - { name: BUZZ_PAIRING_RELAY_URL, value: {{ .Values.pairingRelay.url | quote }} }
@@ -123,10 +123,10 @@ spec:
             - { name: BUZZ_MEDIA_BASE_URL, value: {{ include "buzz.mediaBaseUrl" . | quote }} }
 
             # ── Behavior ─────────────────────────────────────────────
-            - { name: BUZZ_MAX_CONNECTIONS,        value: {{ .Values.relay.maxConnections | quote }} }
-            - { name: BUZZ_MAX_CONCURRENT_HANDLERS, value: {{ .Values.relay.maxConcurrentHandlers | quote }} }
-            - { name: BUZZ_SEND_BUFFER,            value: {{ .Values.relay.sendBuffer | quote }} }
-            - { name: BUZZ_DRAIN_JITTER_MS,        value: {{ .Values.relay.drainJitterMs | quote }} }
+            - { name: BUZZ_MAX_CONNECTIONS,        value: {{ .Values.relay.maxConnections | int64 | quote }} }
+            - { name: BUZZ_MAX_CONCURRENT_HANDLERS, value: {{ .Values.relay.maxConcurrentHandlers | int64 | quote }} }
+            - { name: BUZZ_SEND_BUFFER,            value: {{ .Values.relay.sendBuffer | int64 | quote }} }
+            - { name: BUZZ_DRAIN_JITTER_MS,        value: {{ .Values.relay.drainJitterMs | int64 | quote }} }
             - { name: BUZZ_REQUIRE_AUTH_TOKEN,     value: {{ .Values.relay.requireAuthToken | quote }} }
             - { name: BUZZ_REQUIRE_RELAY_MEMBERSHIP, value: {{ .Values.relay.requireRelayMembership | quote }} }
             - { name: BUZZ_ALLOW_NIP_OA_AUTH,      value: {{ .Values.relay.allowNipOaAuth | quote }} }
@@ -135,7 +135,7 @@ spec:
             - { name: BUZZ_CORS_ORIGINS, value: {{ join "," .Values.relay.corsOrigins | quote }} }
             {{- end }}
             {{- if gt (.Values.relay.ephemeralTtlOverride | int) 0 }}
-            - { name: BUZZ_EPHEMERAL_TTL_OVERRIDE, value: {{ .Values.relay.ephemeralTtlOverride | quote }} }
+            - { name: BUZZ_EPHEMERAL_TTL_OVERRIDE, value: {{ .Values.relay.ephemeralTtlOverride | int64 | quote }} }
             {{- end }}
             {{- if .Values.relay.uploadRecords }}
             - { name: BUZZ_MEDIA_UPLOAD_RECORDS, value: "true" }
@@ -155,12 +155,12 @@ spec:
 
             # ── Git ──────────────────────────────────────────────────
             - { name: BUZZ_GIT_REPO_PATH,         value: {{ .Values.persistence.git.mountPath | quote }} }
-            - { name: BUZZ_GIT_MAX_PACK_BYTES,    value: {{ .Values.git.maxPackBytes | quote }} }
+            - { name: BUZZ_GIT_MAX_PACK_BYTES,    value: {{ .Values.git.maxPackBytes | int64 | quote }} }
             - { name: BUZZ_GIT_PACK_CACHE_PATH,   value: {{ .Values.git.packCachePath | quote }} }
-            - { name: BUZZ_GIT_PACK_CACHE_MAX_BYTES, value: {{ .Values.git.packCacheMaxBytes | quote }} }
-            - { name: BUZZ_GIT_PACK_CACHE_MAX_CONCURRENT_POPULATIONS, value: {{ .Values.git.packCacheMaxConcurrentPopulations | quote }} }
-            - { name: BUZZ_GIT_MAX_REPOS_PER_PUBKEY, value: {{ .Values.git.maxReposPerPubkey | quote }} }
-            - { name: BUZZ_GIT_MAX_CONCURRENT_OPS, value: {{ .Values.git.maxConcurrentOps | quote }} }
+            - { name: BUZZ_GIT_PACK_CACHE_MAX_BYTES, value: {{ .Values.git.packCacheMaxBytes | int64 | quote }} }
+            - { name: BUZZ_GIT_PACK_CACHE_MAX_CONCURRENT_POPULATIONS, value: {{ .Values.git.packCacheMaxConcurrentPopulations | int64 | quote }} }
+            - { name: BUZZ_GIT_MAX_REPOS_PER_PUBKEY, value: {{ .Values.git.maxReposPerPubkey | int64 | quote }} }
+            - { name: BUZZ_GIT_MAX_CONCURRENT_OPS, value: {{ .Values.git.maxConcurrentOps | int64 | quote }} }
 
             # ── S3 (non-secret) ──────────────────────────────────────
             {{- $s3Endpoint := include "buzz.s3Endpoint" . }}

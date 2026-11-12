@@ -48,6 +48,37 @@ tests:
             name: BUZZ_HUDDLE_AUDIO_AVAILABLE
             value: "true"
         template: templates/deployment.yaml
+  # The relay parses integer settings strictly; Helm renders numbers of a
+  # million or more as floats ("5.24288e+08") unless the template casts them.
+  - it: renders large integer settings as plain integers
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      externalRedis.url: redis://h:6379
+      s3.endpoint: http://minio:9000
+      s3.accessKey: a
+      s3.secretKey: s
+      relay.maxConnections: 1000000
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: BUZZ_GIT_MAX_PACK_BYTES
+            value: "524288000"
+        template: templates/deployment.yaml
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: BUZZ_GIT_PACK_CACHE_MAX_BYTES
+            value: "5368709120"
+        template: templates/deployment.yaml
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: BUZZ_MAX_CONNECTIONS
+            value: "1000000"
+        template: templates/deployment.yaml
   - it: renders virtual-hosted S3 addressing for providers that require it
     set:
       relayUrl: wss://buzz.example.com
