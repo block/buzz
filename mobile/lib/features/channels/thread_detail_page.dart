@@ -1,3 +1,4 @@
+import 'agent_activity_row.dart';
 import 'message_author_visibility.dart';
 import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
 import 'message_swipe_reply.dart';
@@ -268,6 +269,14 @@ class ThreadDetailPage extends HookConsumerWidget {
     }
 
     final replies = childrenByParent[threadHead.id] ?? const [];
+    final activity = useActivityTimeline(
+      ref,
+      channelId,
+      () => replies,
+      loaded: allMsgs,
+      rootId: threadHead.id,
+      keys: [replies],
+    );
     final liveHead =
         allMsgs.where((m) => m.id == threadHead.id).firstOrNull ?? threadHead;
     final itemScrollController = useMemoized(ItemScrollController.new);
@@ -1006,6 +1015,7 @@ class ThreadDetailPage extends HookConsumerWidget {
                     return false;
                   },
                   child: _ThreadMessageList(
+                    activity: activity,
                     dateScrollActivity: dateScrollActivity,
                     headHeight: headHeight.value ?? 0,
                     onHeadHeightChanged: (height) {

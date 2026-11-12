@@ -15,6 +15,20 @@ class _HuddleHistoryPage extends HookConsumerWidget {
     final stickyDateHeaderState = useValueNotifier(
       StickyDateHeaderState.hidden,
     );
+    final timeline = useMemoized(
+      () => formatTimeline(
+        messages.value ?? const [],
+        currentPubkey: currentPubkey,
+      ).where((message) => !message.isSystem).toList(),
+      [messages.value, currentPubkey],
+    );
+    final activity = useActivityTimeline(
+      ref,
+      channelId,
+      () => timeline,
+      loaded: timeline,
+      keys: [timeline],
+    );
     return FrostedScaffold(
       appBar: const FrostedAppBar(title: Text('Huddle')),
       body: messages.when(
@@ -23,11 +37,7 @@ class _HuddleHistoryPage extends HookConsumerWidget {
           message: 'Couldn’t load this Huddle conversation.',
           onRetry: () => ref.invalidate(provider),
         ),
-        data: (events) {
-          final timeline = formatTimeline(
-            events,
-            currentPubkey: currentPubkey,
-          ).where((message) => !message.isSystem).toList();
+        data: (_) {
           if (timeline.isEmpty) {
             return const Center(child: Text('No messages in this Huddle.'));
           }
@@ -38,6 +48,7 @@ class _HuddleHistoryPage extends HookConsumerWidget {
               timeline,
               relaySummaries: ref.read(provider.notifier).threadSummaries,
             ),
+            activity: activity,
             allMessages: timeline,
             initialMessageId: null,
             initialThreadRootId: null,
