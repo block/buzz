@@ -54,7 +54,18 @@ pub async fn handle(db: &Db, pubkey: &str, delete: bool) -> Result<Value> {
     let pubkey = buzz_db::user_deletion::normalize_user_deletion_pubkey(pubkey)?;
     let media = configured_storage()?;
     let mut output = BufWriter::new(std::io::stdout());
-    run_handler(db, &media, &pubkey, delete, &mut output).await
+    handle_with_storage(db, &media, &pubkey, delete, &mut output).await
+}
+
+pub(super) async fn handle_with_storage(
+    db: &Db,
+    media: &MediaStorage,
+    pubkey: &str,
+    delete: bool,
+    output: &mut impl Write,
+) -> Result<Value> {
+    let pubkey = buzz_db::user_deletion::normalize_user_deletion_pubkey(pubkey)?;
+    run_handler(db, media, &pubkey, delete, output).await
 }
 
 // Fakes replace only external DB/storage boundaries; the tests run the same
@@ -289,7 +300,7 @@ async fn scan_storage(
     bail!("media scan exceeds 100000 storage pages")
 }
 
-fn configured_storage() -> Result<MediaStorage> {
+pub(super) fn configured_storage() -> Result<MediaStorage> {
     let (s3_access_key, s3_secret_key) = crate::s3_key_pair_from_env();
     Ok(MediaStorage::new(&buzz_media::MediaConfig {
         s3_endpoint: crate::required_env("BUZZ_S3_ENDPOINT")?,

@@ -169,7 +169,7 @@ async fn expired_and_superseded_workers_cannot_change_any_execution_state() {
         .await
         .unwrap();
     let next = next(&store, &new, Some(stage.id)).await;
-    assert_eq!(next.stage, "purge_db");
+    assert_eq!(next.stage, "purge_media");
     assert_eq!(store.inspect(id).await.unwrap().stage_history.len(), 2);
 }
 
@@ -249,7 +249,7 @@ async fn transition_recovers_on_both_sides_of_commit_and_repeated_previous_id_is
     // Restart before transition: None finds the completed current row and advances.
     let second = claim(&store, id, "worker-b").await;
     let db_stage = next(&store, &second, None).await;
-    assert_eq!(db_stage.stage, "purge_db");
+    assert_eq!(db_stage.stage, "purge_media");
     assert_eq!(
         db_stage.metadata_json["previous_stage_id"],
         gate.id.to_string()
@@ -288,7 +288,7 @@ async fn failed_transition_keeps_completed_current_row_and_retry_creates_only_on
         .save_stage_success(&lease, gate.id, serde_json::json!({"dummy":true}))
         .await
         .unwrap();
-    sqlx::query("ALTER TABLE entity_deletion_stage_history ADD CONSTRAINT reject_successor CHECK (stage <> 'purge_db') NOT VALID")
+    sqlx::query("ALTER TABLE entity_deletion_stage_history ADD CONSTRAINT reject_successor CHECK (stage <> 'purge_media') NOT VALID")
         .execute(&store.pool).await.unwrap();
     let before = snapshot(&store, id).await;
     assert!(store.get_next_stage(&lease, Some(gate.id)).await.is_err());
@@ -396,7 +396,7 @@ async fn routing_rebuilds_variable_community_progress_and_obeys_saved_branch_res
             previous = None;
         }
         assert_eq!(store.get(request.id).await.unwrap().status, "completed");
-        assert_eq!(stages.len(), 1 + count as usize + (count / 2) as usize);
+        assert_eq!(stages.len(), 2 + count as usize + (count / 2) as usize);
         assert_eq!(
             stages.iter().filter(|(s, _)| s == "purge_agents").count(),
             (count / 2) as usize
@@ -439,7 +439,7 @@ async fn corrupt_inventory_history_and_results_fail_without_inventing_progress()
         .save_stage_success(&lease, gate.id, serde_json::json!({}))
         .await
         .unwrap();
-    let db = next(&store, &lease, Some(gate.id)).await;
+    let media = next(&store, &lease, Some(gate.id)).await;
     let saved_transition =
         store.inspect(id).await.unwrap().stage_history[0].metadata_json["transition"].clone();
     sqlx::query("UPDATE entity_deletion_stage_history SET metadata_json = jsonb_set(metadata_json, '{transition}', $2) WHERE id = $1")
@@ -456,6 +456,12 @@ async fn corrupt_inventory_history_and_results_fail_without_inventing_progress()
     assert_eq!(snapshot(&store, id).await, corrupted);
     sqlx::query("UPDATE entity_deletion_stage_history SET metadata_json = jsonb_set(metadata_json, '{transition}', $2) WHERE id = $1")
         .bind(gate.id).bind(saved_transition).execute(&store.pool).await.unwrap();
+    store.start_stage(&lease, media.id).await.unwrap();
+    store
+        .save_stage_success(&lease, media.id, serde_json::json!({}))
+        .await
+        .unwrap();
+    let db = next(&store, &lease, Some(media.id)).await;
     store.start_stage(&lease, db.id).await.unwrap();
     store
         .save_stage_success(&lease, db.id, serde_json::json!({}))
@@ -470,7 +476,7 @@ async fn corrupt_inventory_history_and_results_fail_without_inventing_progress()
         .await
         .unwrap();
     assert!(store.get_next_stage(&lease, None).await.is_err()); // never reinitialize gate
-    assert_eq!(store.inspect(id).await.unwrap().stage_history.len(), 1);
+    assert_eq!(store.inspect(id).await.unwrap().stage_history.len(), 2);
     sqlx::query("DELETE FROM entity_deletion_approvals WHERE request_id = $1")
         .bind(id)
         .execute(&store.pool)
@@ -514,31 +520,21 @@ async fn real_user_requires_gate_then_global_media_before_community_cleanup() {
     assert_eq!(gate.target_community_id, None);
     let options = super::super::worker::RunOptions {
         db: None,
+        media: None,
         delete: true,
         next_step: true,
         fail_stage: None,
         stage_delay: Duration::ZERO,
         no_agents_in: vec![],
     };
-    // The real gate is intentionally unimplemented; it must never run the dummy
-    // gate or start media. This error occurs before DB/storage configuration.
-    let error = super::super::handlers::dispatch(&store, &lease, &gate, &options)
-        .await
-        .unwrap_err();
-    assert!(error
-        .to_string()
-        .contains("real handler for gate_user is not implemented"));
-    let NextStage::Stage(pending) = store.get_next_stage(&lease, None).await.unwrap() else {
-        panic!("expected pending gate");
-    };
-    assert_eq!(pending.id, gate.id);
-    assert_eq!(pending.status, "pending");
-    // Simulate a future real gate's successful outcome through the production store.
-    store.start_stage(&lease, gate.id).await.unwrap();
-    store
-        .save_stage_success(&lease, gate.id, serde_json::json!({"gated": true}))
+    super::super::handlers::dispatch(&store, &lease, &gate, &options)
         .await
         .unwrap();
+    let saved = store.inspect(request.id).await.unwrap();
+    assert_eq!(
+        saved.stage_history[0].metadata_json["result"]["dummy"],
+        true
+    );
     let NextStage::Stage(media) = store.get_next_stage(&lease, Some(gate.id)).await.unwrap() else {
         panic!("expected media");
     };

@@ -1,46 +1,11 @@
 use super::*;
 use buzz_db::Db;
 
-async fn fixture() -> (EntityDeletionStore, Uuid, sqlx::PgPool) {
-    let url = std::env::var("BUZZ_TEST_DATABASE_URL")
-        .or_else(|_| std::env::var("DATABASE_URL"))
-        .unwrap();
-    let pool = sqlx::PgPool::connect(&url).await.unwrap();
-    let db = Db::from_pool(pool.clone());
-    if std::env::var("BUZZ_TEST_SCHEMA_MODE").as_deref() != Ok("desired") {
-        db.migrate().await.unwrap();
-    }
-    let store = db.entity_deletion_store();
-    let request = db
-        .user_deletion_store()
-        .submit("demo:runner", "submitter", None)
-        .await
-        .unwrap();
-    store
-        .approve(
-            request.id,
-            "approver",
-            request.inventory_digest.as_deref().unwrap(),
-        )
-        .await
-        .unwrap();
-    (
-        store,
-        request.id,
-        sqlx::PgPool::connect(&url).await.unwrap(),
-    )
-}
-
-fn options() -> RunOptions {
-    RunOptions {
-        db: None,
-        delete: false,
-        next_step: false,
-        fail_stage: None,
-        stage_delay: Duration::ZERO,
-        no_agents_in: Vec::new(),
-    }
-}
+#[path = "worker_postgres_tests/fixture.rs"]
+mod fixture;
+#[path = "worker_postgres_tests/media_retry.rs"]
+mod media_retry;
+use fixture::fixture;
 
 async fn assert_completed(store: &EntityDeletionStore, id: Uuid) {
     let inspection = store.inspect(id).await.unwrap();
@@ -64,6 +29,7 @@ async fn assert_completed(store: &EntityDeletionStore, id: Uuid) {
         actual,
         vec![
             ("gate_user", None),
+            ("purge_media", None),
             ("purge_db", b.clone()),
             ("purge_agents", b),
             ("purge_db", c.clone()),
@@ -75,30 +41,47 @@ async fn assert_completed(store: &EntityDeletionStore, id: Uuid) {
         assert!(!stage.is_current);
         assert!(stage.started_at.is_some());
         assert!(stage.finished_at >= stage.started_at);
-        assert_eq!(stage.metadata_json["result"]["dummy"], true);
+        if stage.stage == "purge_media" {
+            assert_eq!(stage.metadata_json["result"]["deleted_versions"], 1);
+        } else {
+            assert_eq!(stage.metadata_json["result"]["dummy"], true);
+        }
     }
 }
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn dummy_executor_completes_two_communities_and_completed_rerun_is_read_only() {
-    let (store, id, _) = fixture().await;
+async fn executor_completes_media_and_two_communities_and_rerun_is_read_only() {
+    let fixture = fixture().await;
+    let (store, id) = (&fixture.store, fixture.id);
     assert_eq!(
         tokio::time::timeout(
             Duration::from_secs(15),
-            run(&store, id, "worker", &options(), &CancellationToken::new())
+            run(
+                store,
+                id,
+                "worker",
+                &fixture.options(),
+                &CancellationToken::new()
+            )
         )
         .await
         .unwrap()
         .unwrap(),
         0
     );
-    assert_completed(&store, id).await;
+    assert_completed(store, id).await;
     let before = serde_json::to_value(store.inspect(id).await.unwrap()).unwrap();
     assert_eq!(
-        run(&store, id, "worker", &options(), &CancellationToken::new())
-            .await
-            .unwrap(),
+        run(
+            store,
+            id,
+            "worker",
+            &fixture.options(),
+            &CancellationToken::new()
+        )
+        .await
+        .unwrap(),
         0
     );
     assert_eq!(
@@ -110,23 +93,24 @@ async fn dummy_executor_completes_two_communities_and_completed_rerun_is_read_on
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn next_step_advances_one_handler_at_a_time_through_completion() {
-    let (store, id, _) = fixture().await;
+    let fixture = fixture().await;
+    let (store, id) = (&fixture.store, fixture.id);
     let one = RunOptions {
         next_step: true,
-        ..options()
+        ..fixture.options()
     };
-    run(&store, id, "worker-a", &one, &CancellationToken::new())
+    run(store, id, "worker-a", &one, &CancellationToken::new())
         .await
         .unwrap();
     let paused = store.inspect(id).await.unwrap();
     assert_eq!(paused.request.status, "running");
     assert!(paused.execution.lease_owner.is_none());
     assert_eq!(paused.stage_history.len(), 2);
-    assert_eq!(paused.stage_history[1].stage, "purge_db");
+    assert_eq!(paused.stage_history[1].stage, "purge_media");
     assert_eq!(paused.stage_history[1].status, "pending");
     let gate = serde_json::to_value(&paused.stage_history[0]).unwrap();
-    for completed_handlers in 2..=5 {
-        run(&store, id, "worker-b", &one, &CancellationToken::new())
+    for completed_handlers in 2..=6 {
+        run(store, id, "worker-b", &one, &CancellationToken::new())
             .await
             .unwrap();
         let after = store.inspect(id).await.unwrap();
@@ -139,17 +123,17 @@ async fn next_step_advances_one_handler_at_a_time_through_completion() {
                 .count(),
             completed_handlers
         );
-        if completed_handlers < 5 {
+        if completed_handlers < 6 {
             assert_eq!(after.stage_history.len(), completed_handlers + 1);
             let current = after.stage_history.iter().find(|s| s.is_current).unwrap();
             assert_eq!(current.status, "pending");
             assert!(current.started_at.is_none());
         } else {
-            assert_eq!(after.stage_history.len(), 5);
+            assert_eq!(after.stage_history.len(), 6);
             assert!(!after.stage_history.iter().any(|s| s.is_current));
         }
     }
-    assert_completed(&store, id).await;
+    assert_completed(store, id).await;
     assert_eq!(
         serde_json::to_value(&store.inspect(id).await.unwrap().stage_history[0]).unwrap(),
         gate
@@ -159,13 +143,14 @@ async fn next_step_advances_one_handler_at_a_time_through_completion() {
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn dummy_executor_failure_retries_same_community_stage() {
-    let (store, id, pool) = fixture().await;
+    let fixture = fixture().await;
+    let (store, id, pool) = (&fixture.store, fixture.id, fixture.pool.clone());
     let fail = RunOptions {
         fail_stage: Some("purge_db".to_owned()),
-        ..options()
+        ..fixture.options()
     };
     assert_eq!(
-        run(&store, id, "worker-a", &fail, &CancellationToken::new())
+        run(store, id, "worker-a", &fail, &CancellationToken::new())
             .await
             .unwrap(),
         1
@@ -179,15 +164,15 @@ async fn dummy_executor_failure_retries_same_community_stage() {
         .as_deref()
         .unwrap()
         .contains("injected dummy failure"));
-    assert_eq!(failed.stage_history.len(), 2);
-    let stage_id = failed.stage_history[1].id;
-    let started = failed.stage_history[1].started_at;
-    assert_eq!(failed.stage_history[1].status, "failed");
+    assert_eq!(failed.stage_history.len(), 3);
+    let stage_id = failed.stage_history[2].id;
+    let started = failed.stage_history[2].started_at;
+    assert_eq!(failed.stage_history[2].status, "failed");
     assert!(run(
-        &store,
+        store,
         id,
         "worker-b",
-        &options(),
+        &fixture.options(),
         &CancellationToken::new()
     )
     .await
@@ -195,30 +180,31 @@ async fn dummy_executor_failure_retries_same_community_stage() {
     sqlx::query("UPDATE entity_deletion_requests SET next_attempt_at = clock_timestamp() - interval '1 second' WHERE id = $1")
         .bind(id).execute(&pool).await.unwrap();
     run(
-        &store,
+        store,
         id,
         "worker-b",
-        &options(),
+        &fixture.options(),
         &CancellationToken::new(),
     )
     .await
     .unwrap();
-    assert_completed(&store, id).await;
+    assert_completed(store, id).await;
     let after = store.inspect(id).await.unwrap();
-    assert_eq!(after.stage_history[1].id, stage_id);
-    assert_eq!(after.stage_history[1].started_at, started);
+    assert_eq!(after.stage_history[2].id, stage_id);
+    assert_eq!(after.stage_history[2].started_at, started);
 }
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn dummy_executor_shutdown_keeps_running_stage_for_next_worker() {
-    let (store, id, _) = fixture().await;
+    let fixture = fixture().await;
+    let (store, id) = (&fixture.store, fixture.id);
     let shutdown = CancellationToken::new();
     let delayed = RunOptions {
         stage_delay: Duration::from_secs(60),
-        ..options()
+        ..fixture.options()
     };
-    let work = run(&store, id, "worker-a", &delayed, &shutdown);
+    let work = run(store, id, "worker-a", &delayed, &shutdown);
     tokio::pin!(work);
     // Poll the production executor until its durable running row is visible.
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -238,15 +224,15 @@ async fn dummy_executor_shutdown_keeps_running_stage_for_next_worker() {
     assert!(paused.execution.lease_owner.is_none());
     let stage_id = paused.stage_history[0].id;
     run(
-        &store,
+        store,
         id,
         "worker-b",
-        &options(),
+        &fixture.options(),
         &CancellationToken::new(),
     )
     .await
     .unwrap();
-    assert_completed(&store, id).await;
+    assert_completed(store, id).await;
     assert_eq!(
         store.inspect(id).await.unwrap().stage_history[0].id,
         stage_id
@@ -256,13 +242,14 @@ async fn dummy_executor_shutdown_keeps_running_stage_for_next_worker() {
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn dummy_handler_is_heartbeated_and_lease_loss_prevents_completion() {
-    let (store, id, pool) = fixture().await;
+    let fixture = fixture().await;
+    let (store, id, pool) = (&fixture.store, fixture.id, fixture.pool.clone());
     let lease = store
         .claim(id, "worker", Duration::from_secs(1))
         .await
         .unwrap()
         .unwrap();
-    let stage = match UserDeletionTransition::new(&store)
+    let stage = match UserDeletionTransition::new(store)
         .get_next_stage(&lease, None)
         .await
         .unwrap()
@@ -273,11 +260,11 @@ async fn dummy_handler_is_heartbeated_and_lease_loss_prevents_completion() {
     let before = store.inspect(id).await.unwrap().execution;
     let delayed = RunOptions {
         stage_delay: Duration::from_millis(1100),
-        ..options()
+        ..fixture.options()
     };
     assert!(matches!(
         run_stage_with_heartbeat(
-            &store,
+            store,
             &lease,
             &stage,
             &delayed,
@@ -297,7 +284,7 @@ async fn dummy_handler_is_heartbeated_and_lease_loss_prevents_completion() {
     assert!(after.stage_history[0].is_current);
     assert_eq!(after.stage_history[0].status, "completed");
 
-    let stage = match UserDeletionTransition::new(&store)
+    let stage = match UserDeletionTransition::new(store)
         .get_next_stage(&lease, None)
         .await
         .unwrap()
@@ -305,13 +292,23 @@ async fn dummy_handler_is_heartbeated_and_lease_loss_prevents_completion() {
         NextStage::Stage(row) => row,
         other => panic!("{other:?}"),
     };
+    handlers::dispatch(store, &lease, &stage, &fixture.options())
+        .await
+        .unwrap();
+    let NextStage::Stage(stage) = UserDeletionTransition::new(store)
+        .get_next_stage(&lease, None)
+        .await
+        .unwrap()
+    else {
+        panic!("community stage");
+    };
     let delayed = RunOptions {
         stage_delay: Duration::from_secs(60),
-        ..options()
+        ..fixture.options()
     };
     let shutdown = CancellationToken::new();
     let work = run_stage_with_heartbeat(
-        &store,
+        store,
         &lease,
         &stage,
         &delayed,
@@ -325,7 +322,7 @@ async fn dummy_handler_is_heartbeated_and_lease_loss_prevents_completion() {
             tokio::select! {
                 _ = &mut work => panic!("handler finished before takeover"),
                 _ = tokio::time::sleep(Duration::from_millis(10)) => {
-                    if store.inspect(id).await.unwrap().stage_history[1].status == "running" {
+                    if store.inspect(id).await.unwrap().stage_history[2].status == "running" {
                         break;
                     }
                 }
@@ -360,9 +357,9 @@ async fn dummy_handler_is_heartbeated_and_lease_loss_prevents_completion() {
     assert_eq!(replacement.generation, lease.generation + 1);
     assert!(matches!(outcome, StageOutcome::Failed(_)));
     let after = store.inspect(id).await.unwrap();
-    assert_eq!(after.stage_history.len(), 2);
-    assert_eq!(after.stage_history[1].status, "running");
-    assert!(after.stage_history[1].finished_at.is_none());
+    assert_eq!(after.stage_history.len(), 3);
+    assert_eq!(after.stage_history[2].status, "running");
+    assert!(after.stage_history[2].finished_at.is_none());
     assert_eq!(after.execution.lease_generation, replacement.generation);
     assert_eq!(after.execution.lease_owner.as_deref(), Some("worker"));
     assert!(store.release(&replacement).await.unwrap());
@@ -370,55 +367,74 @@ async fn dummy_handler_is_heartbeated_and_lease_loss_prevents_completion() {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn migration_schema_dummy_executor_completes_two_communities() {
-    let (store, id, _) = fixture().await;
-    run(&store, id, "worker", &options(), &CancellationToken::new())
-        .await
-        .unwrap();
-    assert_completed(&store, id).await;
+async fn migration_schema_executor_completes_media_and_two_communities() {
+    let fixture = fixture().await;
+    let (store, id) = (&fixture.store, fixture.id);
+    run(
+        store,
+        id,
+        "worker",
+        &fixture.options(),
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert_completed(store, id).await;
 }
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn restart_after_handler_resumes_saved_branch_without_rerunning_action() {
-    let (store, id, _) = fixture().await;
+    let fixture = fixture().await;
+    let (store, id) = (&fixture.store, fixture.id);
     assert!(store.inspect(id).await.unwrap().stage_history.is_empty());
-    execute_without_transition(&store, id, &options()).await;
+    execute_without_transition(store, id, &fixture.options()).await;
     let after_gate = store.inspect(id).await.unwrap();
     assert_eq!(after_gate.stage_history.len(), 1);
     assert_eq!(after_gate.stage_history[0].status, "completed");
     assert!(after_gate.stage_history[0].is_current);
     let gate_finished = after_gate.stage_history[0].finished_at;
 
+    execute_without_transition(store, id, &fixture.options()).await;
+    let media_finished = store.inspect(id).await.unwrap().stage_history[1].finished_at;
+    let calls = fixture.requests.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(fixture.deleted.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(fixture.uploader_count().await, 0);
+
     let branch = RunOptions {
         no_agents_in: vec![Uuid::from_u128(11)],
-        ..options()
+        ..fixture.options()
     };
-    execute_without_transition(&store, id, &branch).await;
+    execute_without_transition(store, id, &branch).await;
     let after_db = store.inspect(id).await.unwrap();
-    assert_eq!(after_db.stage_history.len(), 2);
+    assert_eq!(after_db.stage_history.len(), 3);
     assert_eq!(
-        after_db.stage_history[1].metadata_json["result"]["has_agents"],
+        after_db.stage_history[2].metadata_json["result"]["has_agents"],
         false
     );
-    let db_finished = after_db.stage_history[1].finished_at;
+    let db_finished = after_db.stage_history[2].finished_at;
     // No skip flag on restart: routing must use the persisted result, not new options.
     run(
-        &store,
+        store,
         id,
         "worker-c",
-        &options(),
+        &fixture.options(),
         &CancellationToken::new(),
     )
     .await
     .unwrap();
     let completed = store.inspect(id).await.unwrap();
-    assert_eq!(completed.request.status, "completed");
-    assert_eq!(completed.stage_history.len(), 4);
-    assert_eq!(completed.stage_history[0].finished_at, gate_finished);
-    assert_eq!(completed.stage_history[1].finished_at, db_finished);
     assert_eq!(
-        completed.stage_history[1].metadata_json["transition"]["kind"],
+        fixture.requests.load(std::sync::atomic::Ordering::SeqCst),
+        calls
+    );
+    assert_eq!(completed.stage_history[1].finished_at, media_finished);
+    assert_eq!(completed.request.status, "completed");
+    assert_eq!(completed.stage_history.len(), 5);
+    assert_eq!(completed.stage_history[0].finished_at, gate_finished);
+    assert_eq!(completed.stage_history[2].finished_at, db_finished);
+    assert_eq!(
+        completed.stage_history[2].metadata_json["transition"]["kind"],
         "community_complete"
     );
     assert!(!completed

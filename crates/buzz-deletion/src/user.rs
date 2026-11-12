@@ -41,9 +41,9 @@ pub enum Command {
         #[arg(long)]
         inventory_digest: String,
     },
-    /// Run the implemented handler for a real request, or synthetic demo stages.
+    /// Run the workflow: placeholder gate, real media cleanup, then community placeholders.
     Run {
-        /// Execute real deletion; required for non-demo workflow requests.
+        /// Execute real media deletion; required when the media stage is reached.
         #[arg(long)]
         delete: bool,
         /// Approved request UUID.
@@ -139,16 +139,13 @@ pub async fn run(command: Command) -> Result<i32> {
             stage_delay_ms,
             demo_no_agents_in,
         } => {
-            let real = !store.get(id).await?.target.starts_with("demo:");
-            if real && !delete {
-                bail!("real workflow requires --delete; use media-batches --read-only for observation");
-            }
             let code = worker::run(
                 &store,
                 id,
                 &executor_id.unwrap_or_else(crate::default_executor_id),
                 &worker::RunOptions {
-                    db: real.then(|| db.clone()),
+                    db: Some(db.clone()),
+                    media: None,
                     delete,
                     next_step,
                     fail_stage,

@@ -13,6 +13,8 @@ use crate::{StageOutcome, DEFAULT_LEASE_DURATION, HEARTBEAT_INTERVAL};
 /// Real execution context plus synthetic-only delay and failure controls.
 pub(super) struct RunOptions {
     pub db: Option<buzz_db::Db>,
+    // Optional preconfigured storage client; otherwise load BUZZ_S3_* at media execution.
+    pub media: Option<std::sync::Arc<buzz_media::MediaStorage>>,
     pub delete: bool,
     pub next_step: bool,
     pub fail_stage: Option<String>,
