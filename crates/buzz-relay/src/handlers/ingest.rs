@@ -7598,7 +7598,7 @@ mod postgres_tests {
     #[ignore = "requires Postgres"]
     async fn subject_cannot_delete_relay_verified_profile() {
         use buzz_core::kind::KIND_VERIFIED_PROFILE;
-        use buzz_db::verified_profiles::ProfileAdmission;
+        use buzz_db::verified_profiles::ProfileVerification;
         use nostr::Tag;
         let f = ScopedTargetFixture::new("verified-profile-deletion").await;
         let subject = f.author.public_key().to_hex();
@@ -7607,12 +7607,12 @@ mod postgres_tests {
             .state
             .db
             .publish_verified_profile(
-                ProfileAdmission {
+                ProfileVerification {
                     community: f.tenant.community(),
                     issuer: "https://issuer.test",
                     pubkey: &subject,
                     issued_at: now,
-                    admitted_at: now,
+                    verified_at: now,
                     display_name: "Alice",
                     username: "alice",
                     full_name: Some("Alice Example"),

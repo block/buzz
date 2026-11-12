@@ -28,18 +28,19 @@ impl std::fmt::Debug for ProfilePolicy {
     }
 }
 
-/// Verified input from a successful human WebSocket admission.
-pub struct ProfileAdmission<'a> {
-    /// Community resolved for this connection.
+/// Verified human issuer input, from device admission or operator delivery.
+pub struct ProfileVerification<'a> {
+    /// Community resolved for this verification.
     pub community: CommunityId,
     /// Issuer authenticated by the assertion verifier.
     pub issuer: &'a str,
-    /// NIP-42-proven key, equal to the assertion key.
+    /// Target key authenticated by the issuer assertion. This output never proves
+    /// possession, enrolls the key or grants membership.
     pub pubkey: &'a str,
     /// Authenticated iat; retains fractional ordering.
     pub issued_at: DateTime<Utc>,
-    /// Actual successful admission time.
-    pub admitted_at: DateTime<Utc>,
+    /// Time the relay successfully verified this assertion.
+    pub verified_at: DateTime<Utc>,
     /// Validated public display name.
     pub display_name: &'a str,
     /// Validated public username.
@@ -68,14 +69,15 @@ impl Db {
     /// Publish or refresh a verified profile in one admitted transaction.
     ///
     /// Skips banned keys, keys without a member row where the relay requires
-    /// one, assertions older than the issuer's last recorded one, and
-    /// admissions earlier than the published `verified_at`. Signs a new event
+    /// one, assertions older than the issuer's last recorded one, ambiguous
+    /// equal-issuance name changes, and
+    /// verifications earlier than the published `verified_at`. Signs a new event
     /// only when the issuer, names or label changed or the refresh interval
     /// passed, so the latest verification from any issuer wins. Returns the
     /// new event for delivery, or `None` when nothing was written.
     pub async fn publish_verified_profile(
         &self,
-        input: ProfileAdmission<'_>,
+        input: ProfileVerification<'_>,
         keys: &Keys,
     ) -> Result<Option<Event>> {
         let mut tx = crate::begin_community_write_transaction(
@@ -135,8 +137,20 @@ impl Db {
                 let event =
                     Event::from_json(row.try_get::<serde_json::Value, _>("event")?.to_string())
                         .map_err(|_| DbError::InvalidData("profile event".into()))?;
+                // Two different name snapshots at the same issuer timestamp
+                // have no trustworthy ordering. Keep the first; callers must
+                // obtain a strictly newer assertion to change its names.
+                // Policy labels may still change for the same signed snapshot.
+                if same_issuer
+                    && nanos(input.issued_at) == parse_nanos(row.try_get("issued_at")?)?
+                    && (tag(&event, "display_name") != Some(input.display_name)
+                        || tag(&event, "username") != Some(input.username)
+                        || tag(&event, "full_name") != input.full_name)
+                {
+                    return Ok(None);
+                }
                 // Public verified_at never moves backwards.
-                if verified_at(&event).is_some_and(|at| input.admitted_at.timestamp() < at) {
+                if verified_at(&event).is_some_and(|at| input.verified_at.timestamp() < at) {
                     return Ok(None);
                 }
                 (Some(event), same_issuer)
@@ -152,7 +166,7 @@ impl Db {
                     || tag(event, "full_name") != input.full_name
                     || tag(event, "issuer_label") != Some(input.label)
                     || verified_at(event).is_none_or(|at| {
-                        input.admitted_at.timestamp() - at >= input.refresh_seconds
+                        input.verified_at.timestamp() - at >= input.refresh_seconds
                     })
             });
         if !changed {
@@ -228,10 +242,10 @@ fn verified_at(event: &Event) -> Option<i64> {
 
 fn profile_event(
     keys: &Keys,
-    input: &ProfileAdmission<'_>,
+    input: &ProfileVerification<'_>,
     previous: Option<&Event>,
 ) -> Result<Event> {
-    let verified_at = input.admitted_at.timestamp().to_string();
+    let verified_at = input.verified_at.timestamp().to_string();
     let mut values = vec![
         ("d", input.pubkey),
         ("p", input.pubkey),

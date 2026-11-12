@@ -526,6 +526,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/operator/communities/invites",
             post(api::operator::mint_community_invite),
         )
+        .route(
+            "/operator/communities/verified-profile",
+            post(api::operator::publish_verified_profile),
+        )
         // Relay invites: mint (owner/admin) + claim (membership-gate exempt)
         .route("/api/invites", post(api::invites::mint_invite))
         .route("/api/join-policy", get(api::invites::join_policy))
