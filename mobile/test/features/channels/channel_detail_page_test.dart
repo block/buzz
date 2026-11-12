@@ -1,3 +1,5 @@
+import 'package:buzz/features/activity/activity_page.dart';
+import 'package:buzz/features/activity/compose_drafts_provider.dart';
 import 'package:buzz/shared/widgets/ios_navigation_bar.dart';
 import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
 import 'package:buzz/features/forum/forum_posts_view.dart';
@@ -5758,6 +5760,80 @@ void main() {
         findsNothing,
       );
     });
+
+    testWidgets(
+      'Leave from details in the conversation pane keeps the list',
+      (tester) async {
+        tester.view.devicePixelRatio = 1;
+        tester.view.physicalSize = const Size(402, 874);
+        addTearDown(tester.view.reset);
+        final pane = ConversationPaneController();
+        addTearDown(pane.dispose);
+        final navigator = _RecordingNavigatorObserver();
+        String? leftChannel;
+        final list = Builder(
+          builder: (_) => Scaffold(
+            body: Center(
+              child: TextButton(
+                onPressed: () => pane.open(
+                  _testChannel.id,
+                  (_) => ChannelDetailPage(channel: _testChannel),
+                ),
+                child: const Text('Open conversation'),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: const [],
+            createChannelActions: (ref) => _FakeChannelActions(
+              ref,
+              onLeaveChannel: (id) async => leftChannel = id,
+            ),
+            navigatorObservers: [navigator],
+            home: AdaptiveConversationPane(controller: pane, list: list),
+          ),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Open conversation'));
+        await tester.pumpAndSettle();
+        if (defaultTargetPlatform == TargetPlatform.iOS) {
+          tester
+              .widget<IosNavigationBar>(find.byType(IosNavigationBar))
+              .onTitlePressed!();
+        } else {
+          await tester.tap(
+            find.byKey(const ValueKey('channel-header-settings-trigger')),
+          );
+        }
+        await tester.pumpAndSettle();
+        await tester.drag(
+          find.byKey(const ValueKey('channel-details-page-list')),
+          const Offset(0, -300),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Leave channel').last);
+        await tester.pumpAndSettle();
+        await tester.tap(find.widgetWithText(FilledButton, 'Leave'));
+        await tester.pumpAndSettle();
+        expect(leftChannel, _testChannel.id);
+        expect(tester.takeException(), isNull);
+        expect(
+          navigator.poppedRoutes.contains(navigator.pushedRoutes.first),
+          isFalse,
+          reason:
+              'A channel lifecycle action must never pop the workspace root',
+        );
+        expect(find.byType(ChannelDetailsPage), findsNothing);
+        expect(find.text('Open conversation'), findsOneWidget);
+        expect(find.byType(ChannelDetailPage), findsNothing);
+      },
+      variant: TargetPlatformVariant({
+        TargetPlatform.android,
+        TargetPlatform.iOS,
+      }),
+    );
 
     testWidgets('keeps manage sheet dismissible with a long canvas', (
       tester,
@@ -16476,6 +16552,74 @@ void main() {
       expect(find.byType(ThreadDetailPage), findsNothing);
     });
 
+    testWidgets('Activity reopens a thread draft after Back', (tester) async {
+      tester.view.devicePixelRatio = 1;
+      tester.view.physicalSize = const Size(1100, 800);
+      addTearDown(tester.view.reset);
+      final root = _textMsg(
+        id: threadIdRoot,
+        pubkey: 'alice',
+        content: 'Draft thread root',
+      );
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [root],
+          relaySessionNotifier: _ReconnectingRelaySession(
+            initialStatus: SessionStatus.disconnected,
+          ),
+          threadReplies: const {threadIdRoot: []},
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+          home: const AdaptiveConversationDestination(child: ActivityPage()),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final drafts = ProviderScope.containerOf(
+        tester.element(find.byType(ActivityPage)),
+      ).read(composeDraftsProvider.notifier);
+      drafts.save(
+        key: '$_channelId:$threadIdRoot',
+        channelId: _channelId,
+        threadHeadId: threadIdRoot,
+        text: 'Retained thread draft',
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('activity-type-menu')));
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.ancestor(
+          of: find.descendant(
+            of: find.byKey(const ValueKey('activity-type-popover')),
+            matching: find.text('Drafts'),
+          ),
+          matching: find.byWidgetPredicate(
+            (widget) => widget is CheckedPopupMenuItem,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final draftRow = find.byKey(
+        ValueKey('draft-row-$_channelId:$threadIdRoot'),
+      );
+      for (var attempt = 0; attempt < 2; attempt++) {
+        await tester.tap(draftRow);
+        await tester.pumpAndSettle();
+        expect(
+          find.byType(ThreadDetailPage),
+          findsOneWidget,
+          reason:
+              'Opening draft attempt $attempt must reach the thread composer',
+        );
+        expect(find.text('Retained thread draft'), findsNWidgets(2));
+        Navigator.of(tester.element(find.byType(ThreadDetailPage))).pop();
+        await tester.pumpAndSettle();
+        expect(find.byType(ThreadDetailPage), findsNothing);
+        expect(draftRow, findsOneWidget);
+      }
+      expect(tester.takeException(), isNull);
+    });
+
     testWidgets('replaces a temporary channel route for an initial thread', (
       tester,
     ) async {
@@ -21232,11 +21376,18 @@ class _FakeChannelActions extends ChannelActions {
 
 class _RecordingNavigatorObserver extends NavigatorObserver {
   final List<Route<dynamic>> pushedRoutes = [];
+  final List<Route<dynamic>> poppedRoutes = [];
 
   @override
   void didPush(Route<dynamic> route, Route<dynamic>? previousRoute) {
     super.didPush(route, previousRoute);
     pushedRoutes.add(route);
+  }
+
+  @override
+  void didPop(Route<dynamic> route, Route<dynamic>? previousRoute) {
+    super.didPop(route, previousRoute);
+    poppedRoutes.add(route);
   }
 }
 

@@ -72,7 +72,6 @@ class HomePage extends HookConsumerWidget {
     useEffect(() => conversations.dispose, [conversations]);
     useListenable(conversations);
     final strip = FoldGeometry.of(context).strip;
-    final windowData = MediaQuery.of(context);
     final wide = usesConversationPanes(context, strip: strip);
     final sidebarWidth =
         defaultTargetPlatform == TargetPlatform.iOS && strip != null
@@ -339,9 +338,10 @@ class HomePage extends HookConsumerWidget {
           ? const SizedBox.shrink()
           : Transform.translate(
               offset: Offset(
-                IosNavigationMetrics.of(
-                      context,
-                    ).railCenter(windowData.size, strip!.rect.center.dx) -
+                IosNavigationMetrics.of(context).railCenter(
+                      MediaQuery.sizeOf(context),
+                      strip!.rect.center.dx,
+                    ) -
                     strip.rect.center.dx,
                 0,
               ),
@@ -352,7 +352,7 @@ class HomePage extends HookConsumerWidget {
                   // downward resting offset in _ComposerDockFrame.
                   padding: EdgeInsets.only(
                     bottom:
-                        (windowData.viewPadding.bottom +
+                        (MediaQuery.viewPaddingOf(context).bottom +
                                 Grid.xxs -
                                 Grid.twelve -
                                 Grid.quarter)
@@ -393,18 +393,18 @@ class HomePage extends HookConsumerWidget {
                   openBestieConversation: openBestieConversation,
                 ),
               ),
-            MediaQuery(
-              data: MediaQuery.of(context).copyWith(
-                padding: MediaQuery.paddingOf(context).copyWith(
+            MediaQueryOverride(
+              transform: (media) => media.copyWith(
+                padding: media.padding.copyWith(
                   bottom:
-                      MediaQuery.paddingOf(context).bottom +
+                      media.padding.bottom +
                       (strip == null && showWorkspaceNavigation
                           ? mobileTabBarHeight + mobileTabBarBottomGap
                           : 0),
                 ),
-                viewPadding: MediaQuery.viewPaddingOf(context).copyWith(
+                viewPadding: media.viewPadding.copyWith(
                   bottom:
-                      MediaQuery.viewPaddingOf(context).bottom +
+                      media.viewPadding.bottom +
                       (strip == null && showWorkspaceNavigation
                           ? mobileTabBarHeight + mobileTabBarBottomGap
                           : 0),
