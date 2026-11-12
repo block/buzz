@@ -27,6 +27,105 @@ async fn publisher_policy_applies_to_existing_roles_threads_and_edits() {
     let publisher = Keys::generate();
     let other = Keys::generate();
     let channel = create_channel(&state, &tenant, &publisher, &[]).await;
+    let publisher_hex = publisher.public_key().to_hex();
+    for role in ["member", "guest"] {
+        let actor = Keys::generate();
+        state
+            .db
+            .add_member(
+                tenant.community(),
+                channel,
+                &actor.public_key().to_bytes(),
+                role.parse().unwrap(),
+                Some(&publisher.public_key().to_bytes()),
+            )
+            .await
+            .unwrap();
+        let actor_hex = actor.public_key().to_hex();
+        let error = edit_channel(
+            &state,
+            &tenant,
+            &actor,
+            channel,
+            &[
+                &["topic", "a member-editable tag cannot authorize this edit"],
+                &["message_publisher", &actor_hex],
+            ],
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error.contains(
+                "actor not authorized for name/about/archived/visibility/ttl/label/join_role/message_publisher/unlisted changes"
+            ),
+            "{role}: {error}"
+        );
+        assert!(
+            state
+                .db
+                .get_channel(tenant.community(), channel)
+                .await
+                .unwrap()
+                .message_publisher
+                .is_none(),
+            "{role} changed publisher"
+        );
+    }
+    let one_tag = "invalid: expected one message_publisher tag with one value";
+    for (label, tags, expected) in [
+        (
+            "duplicate",
+            vec![
+                vec!["message_publisher", publisher_hex.as_str()],
+                vec!["message_publisher", publisher_hex.as_str()],
+            ],
+            one_tag,
+        ),
+        (
+            "extra value",
+            vec![vec!["message_publisher", publisher_hex.as_str(), "extra"]],
+            one_tag,
+        ),
+        (
+            "malformed key",
+            vec![vec!["message_publisher", "not-a-public-key"]],
+            "invalid: message_publisher must be a public key or empty to clear",
+        ),
+    ] {
+        let tags: Vec<&[&str]> = tags.iter().map(Vec::as_slice).collect();
+        let error = edit_channel(&state, &tenant, &publisher, channel, &tags)
+            .await
+            .unwrap_err();
+        assert!(error.contains(expected), "{label}: {error}");
+        assert!(
+            state
+                .db
+                .get_channel(tenant.community(), channel)
+                .await
+                .unwrap()
+                .message_publisher
+                .is_none(),
+            "{label} changed publisher"
+        );
+    }
+    let forum = create_channel(&state, &tenant, &publisher, &[&["channel_type", "forum"]]).await;
+    let error = edit_channel(
+        &state,
+        &tenant,
+        &publisher,
+        forum,
+        &[&["message_publisher", &publisher_hex]],
+    )
+    .await
+    .unwrap_err();
+    assert!(error.contains("message_publisher requires a stream channel"));
+    assert!(state
+        .db
+        .get_channel(tenant.community(), forum)
+        .await
+        .unwrap()
+        .message_publisher
+        .is_none());
     let root = message(&publisher, channel, 9, &[]);
     let old_other_root = message(&other, channel, 9, &[]);
     for (event, key) in [(&root, &publisher), (&old_other_root, &other)] {
@@ -43,12 +142,31 @@ async fn publisher_policy_applies_to_existing_roles_threads_and_edits() {
         &publisher,
         channel,
         &[
-            &["message_publisher", &publisher.public_key().to_hex()],
+            &["message_publisher", &publisher_hex],
             &["join_role", "guest"],
         ],
     )
     .await
     .unwrap();
+    edit_channel(
+        &state,
+        &tenant,
+        &publisher,
+        channel,
+        &[&["name", "renamed without changing the publisher"]],
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        state
+            .db
+            .get_channel(tenant.community(), channel)
+            .await
+            .unwrap()
+            .message_publisher,
+        Some(publisher.public_key().to_bytes().to_vec()),
+        "omission preserves the publisher"
+    );
     assert!(group_state_tags(&state, &tenant, channel, 39000)
         .await
         .contains(&vec![

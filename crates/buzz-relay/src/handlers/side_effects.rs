@@ -885,8 +885,8 @@ pub async fn validate_admin_event(
                 labels.map_err(|e| anyhow::anyhow!("{e}"))?;
             }
 
-            // name/about/archived/visibility/ttl/labels/join_role/unlisted
-            // require owner/admin; topic/purpose allow any member who may
+            // name/about/archived/visibility/ttl/labels/join_role/
+            // message_publisher/unlisted require owner/admin; topic/purpose allow any member who may
             // post; auto_join was decided above by relay role, so an event
             // carrying only that tag needs neither.
             let has_member_tag = event
@@ -913,7 +913,7 @@ pub async fn validate_admin_event(
                     return Ok(());
                 }
                 Err(anyhow::anyhow!(
-                    "actor not authorized for name/about/archived/visibility/ttl/label/join_role/unlisted changes"
+                    "actor not authorized for name/about/archived/visibility/ttl/label/join_role/message_publisher/unlisted changes"
                 ))
             } else if has_member_tag {
                 // topic/purpose: any member whose role may post (never a
