@@ -1223,7 +1223,7 @@ mod postgres_tests {
                     text,
                     text,
                     true,
-                    &owner.public_key().to_hex(),
+                    crate::workflow_sink::test_sender(&owner.public_key().to_hex()),
                     None,
                 )
                 .await

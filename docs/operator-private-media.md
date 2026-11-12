@@ -23,7 +23,8 @@ cannot supply hidden attachment references.
 
 Counted references are imeta `url` and `image` fields, link-preview snapshot image/favicon fields, profile `picture` (or `image` when
 `picture` is absent) and `banner` fields, group metadata `picture` tags, and emoji tags on emoji lists
-and sets and per-emoji entries (kind 30180). Persona definitions (kind 30175)
+and sets and per-emoji entries (kind 30180), and `buzz:workflow-avatar` tags on
+channel messages (kind 9). Persona definitions (kind 30175)
 count `avatar_url`, with the same owner-only/shared visibility as their events.
 Root-relative paths and the tenant's HTTP/HTTPS media bases count.
 Animated profile descriptors count their poster and decoded animation URL

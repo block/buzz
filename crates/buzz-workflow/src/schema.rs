@@ -17,6 +17,10 @@ pub struct WorkflowDef {
     /// Optional description shown in the UI.
     #[serde(default)]
     pub description: Option<String>,
+    /// Optional https image shown as the sender avatar on this workflow's
+    /// messages. Set by the owner only; never templated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar: Option<String>,
     /// The event trigger that starts this workflow.
     pub trigger: TriggerDef,
     /// Ordered list of steps to execute when triggered.
@@ -183,6 +187,10 @@ impl WorkflowDef {
             ));
         }
 
+        if let Some(avatar) = &self.avatar {
+            validate_avatar(avatar)?;
+        }
+
         // Validate step IDs are safe for use in evalexpr variable names.
         // Step IDs become variable names like `steps_{id}_output_{field}`,
         // so they must only contain alphanumeric chars and underscores.
@@ -276,6 +284,32 @@ impl WorkflowDef {
 
         Ok(())
     }
+}
+
+/// Clients load the avatar like a profile picture: https only, without
+/// credentials, and short enough to repeat on every message.
+fn validate_avatar(avatar: &str) -> Result<(), WorkflowError> {
+    let invalid = || {
+        WorkflowError::InvalidDefinition(
+            "avatar must be an https URL of at most 2048 characters without credentials".into(),
+        )
+    };
+    // URL parsers silently drop embedded tabs/newlines and read `\` as `/`,
+    // so a string they accept can still differ from what clients parse. Reject
+    // those forms outright: the raw string is what every message carries.
+    if avatar.len() > 2048
+        || !avatar.starts_with("https://")
+        || avatar
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control() || c == '\\')
+    {
+        return Err(invalid());
+    }
+    let url = nostr::Url::parse(avatar).map_err(|_| invalid())?;
+    if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some() {
+        return Err(invalid());
+    }
+    Ok(())
 }
 
 /// Validate a cron expression using the `cron` crate.
@@ -450,6 +484,54 @@ mod tests {
             matches!(err, WorkflowError::InvalidDefinition(_)),
             "expected InvalidDefinition, got: {err}"
         );
+    }
+
+    fn yaml_with_avatar(avatar: &str) -> String {
+        format!(
+            "name: Alerts\navatar: '{avatar}'\ntrigger:\n  on: webhook\nsteps:\n  - id: s1\n    action: send_message\n    text: hi\n"
+        )
+    }
+
+    #[test]
+    fn avatar_is_optional_and_omitted_from_canonical_json_when_absent() {
+        let yaml =
+            "name: Alerts\ntrigger:\n  on: webhook\nsteps:\n  - id: s1\n    action: send_message\n    text: hi\n";
+        let (def, json) = parse_yaml(yaml).expect("parse failed");
+        assert_eq!(def.avatar, None);
+        assert!(!json.contains("avatar"), "canonical JSON changed: {json}");
+    }
+
+    #[test]
+    fn validate_accepts_https_avatar() {
+        let (def, json) =
+            parse_yaml(&yaml_with_avatar("https://example.org/icon.png")).expect("parse failed");
+        assert_eq!(def.avatar.as_deref(), Some("https://example.org/icon.png"));
+        let reparsed: WorkflowDef = serde_json::from_str(&json).expect("json round-trip");
+        assert_eq!(reparsed.avatar, def.avatar);
+    }
+
+    #[test]
+    fn validate_rejects_unsafe_avatars() {
+        let too_long = format!("https://example.org/{}", "a".repeat(2048));
+        for avatar in [
+            "http://example.org/icon.png",
+            "https://user:pass@example.org/icon.png",
+            "https://user@example.org/icon.png",
+            "data:image/png;base64,AAAA",
+            " https://example.org/icon.png",
+            "https://exa\tmple.org/icon.png",
+            "https:\\\\example.org\\icon.png",
+            "https:example.org/icon.png",
+            "not a url",
+            "",
+            too_long.as_str(),
+        ] {
+            let err = parse_yaml(&yaml_with_avatar(avatar)).unwrap_err();
+            assert!(
+                matches!(err, WorkflowError::InvalidDefinition(_)),
+                "expected InvalidDefinition for {avatar:?}, got: {err}"
+            );
+        }
     }
 
     #[test]

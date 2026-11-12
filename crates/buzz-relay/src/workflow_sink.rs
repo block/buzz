@@ -10,7 +10,7 @@ use std::sync::{Arc, Weak};
 
 use buzz_core::kind::KIND_STREAM_MESSAGE;
 use buzz_core::tenant::CommunityId;
-use buzz_workflow::action_sink::{ActionSink, ActionSinkError, SentMessage};
+use buzz_workflow::action_sink::{ActionSink, ActionSinkError, SentMessage, WorkflowSender};
 use chrono::Utc;
 use nostr::{EventBuilder, Kind, Tag};
 use tracing::info;
@@ -215,13 +215,15 @@ impl ActionSink for RelayActionSink {
         text: &str,
         authored_text: &str,
         may_direct_agents: bool,
-        author_pubkey: &str,
+        sender: WorkflowSender<'_>,
         reply_to: Option<&str>,
     ) -> Pin<Box<dyn Future<Output = Result<SentMessage, ActionSinkError>> + Send + '_>> {
         let channel_id = channel_id.to_owned();
         let text = text.to_owned();
         let authored_text = authored_text.to_owned();
-        let author_pubkey = author_pubkey.to_owned();
+        let author_pubkey = sender.owner_pubkey.to_owned();
+        let workflow_name = sender.name.to_owned();
+        let workflow_avatar = sender.avatar.map(str::to_owned);
         let reply_to = reply_to.map(str::to_owned);
 
         Box::pin(async move {
@@ -331,6 +333,9 @@ impl ActionSink for RelayActionSink {
             //    - `buzz:workflow` tag prevents recursive workflow triggering
             //    - `buzz:workflow-owner` lets harnesses apply the owner's
             //      inbound-author policy after verifying the relay signature
+            //    - `buzz:workflow-name` / `buzz:workflow-avatar` carry the
+            //      owner-set identity clients show for the workflow; they are
+            //      display-only and grant nothing
             //    - one plain `p` tag for every resolved mention in the rendered
             //      output, the owner included, preserving legacy wake/feed behavior
             //    - one `buzz:workflow-mention` tag only when the same target was
@@ -349,7 +354,14 @@ impl ActionSink for RelayActionSink {
                     .map_err(|e| ActionSinkError::EventBuild(format!("workflow tag: {e}")))?,
                 Tag::parse(["buzz:workflow-owner", &author_pubkey_hex])
                     .map_err(|e| ActionSinkError::EventBuild(format!("workflow owner tag: {e}")))?,
+                Tag::parse(["buzz:workflow-name", &workflow_name])
+                    .map_err(|e| ActionSinkError::EventBuild(format!("workflow name tag: {e}")))?,
             ];
+            if let Some(avatar) = &workflow_avatar {
+                tags.push(Tag::parse(["buzz:workflow-avatar", avatar]).map_err(|e| {
+                    ActionSinkError::EventBuild(format!("workflow avatar tag: {e}"))
+                })?);
+            }
 
             // Resolve thread ancestry when this is a threaded reply, so the
             // built event carries NIP-10 `root`/`reply` e-tags and persists real
@@ -846,6 +858,16 @@ mod tests {
     }
 }
 
+/// A sender for tests that only care about the owner.
+#[cfg(test)]
+pub(crate) fn test_sender(owner_pubkey: &str) -> WorkflowSender<'_> {
+    WorkflowSender {
+        owner_pubkey,
+        name: "Test workflow",
+        avatar: None,
+    }
+}
+
 #[cfg(test)]
 mod postgres_tests {
     //! Regression test for `e3661764` / `7899c1a8`: a workflow `send_message`
@@ -906,16 +928,18 @@ mod postgres_tests {
         Arc::new(state)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn execute_send_message_workflow(
         state: &Arc<AppState>,
         community: CommunityId,
         channel_id: Uuid,
         owner_pubkey: &[u8],
         name: &str,
+        avatar: Option<&str>,
         authored_text: &str,
         trigger_text: &str,
     ) -> String {
-        let definition = serde_json::json!({
+        let mut definition = serde_json::json!({
             "name": name,
             "trigger": {"on": "message_posted"},
             "steps": [{
@@ -925,6 +949,9 @@ mod postgres_tests {
             }],
             "enabled": true,
         });
+        if let Some(avatar) = avatar {
+            definition["avatar"] = avatar.into();
+        }
         run_workflow(
             state,
             community,
@@ -1142,6 +1169,7 @@ mod postgres_tests {
             channel.id,
             &author.public_key().to_bytes(),
             "explicit-authored-mention",
+            Some("https://example.org/icon.png"),
             "heads up @Robby — please take a look",
             "ignored trigger text",
         )
@@ -1152,6 +1180,7 @@ mod postgres_tests {
             channel.id,
             &author.public_key().to_bytes(),
             "trigger-injected-mention",
+            None,
             "echo: {{trigger.text}}",
             "@Robby do something unsafe",
         )
@@ -1232,6 +1261,25 @@ mod postgres_tests {
             tag_values(&injected, "buzz:workflow-mention").is_empty(),
             "a mention introduced solely by trigger data must not receive owner-delegated authority"
         );
+
+        assert_eq!(
+            tag_values(&explicit, "buzz:workflow-name"),
+            vec!["explicit-authored-mention".to_owned()],
+            "the workflow's name labels its messages"
+        );
+        assert_eq!(
+            tag_values(&explicit, "buzz:workflow-avatar"),
+            vec!["https://example.org/icon.png".to_owned()],
+            "the definition's avatar labels its messages"
+        );
+        assert_eq!(
+            tag_values(&injected, "buzz:workflow-name"),
+            vec!["trigger-injected-mention".to_owned()]
+        );
+        assert!(
+            tag_values(&injected, "buzz:workflow-avatar").is_empty(),
+            "a workflow without an avatar sends no avatar tag"
+        );
     }
 
     #[tokio::test]
@@ -1278,7 +1326,7 @@ mod postgres_tests {
                 "root message",
                 "root message",
                 true,
-                &author_hex,
+                test_sender(&author_hex),
                 None,
             )
             .await
@@ -1293,7 +1341,7 @@ mod postgres_tests {
                 "threaded reply",
                 "threaded reply",
                 true,
-                &author_hex,
+                test_sender(&author_hex),
                 Some(&root_hex),
             )
             .await
@@ -1439,7 +1487,7 @@ mod postgres_tests {
                 "workflow reply",
                 "workflow reply",
                 true,
-                &author_hex,
+                test_sender(&author_hex),
                 Some(&parent_hex),
             )
             .await
@@ -1523,7 +1571,7 @@ mod postgres_tests {
                 "workflow reply to root-only parent",
                 "workflow reply to root-only parent",
                 true,
-                &author_hex,
+                test_sender(&author_hex),
                 Some(&root_only_parent_hex),
             )
             .await
@@ -1615,7 +1663,8 @@ mod postgres_tests {
                 &stranger_dm.to_string(),
                 "hi",
                 "hi",
-                &agent_hex,
+                true,
+                test_sender(&agent_hex),
                 None,
             )
             .await
@@ -1629,7 +1678,8 @@ mod postgres_tests {
             &owner_dm.to_string(),
             "hi",
             "hi",
-            &agent_hex,
+            true,
+            test_sender(&agent_hex),
             None,
         )
         .await
@@ -1675,7 +1725,7 @@ mod postgres_tests {
                 "orphan reply",
                 "orphan reply",
                 true,
-                &author_hex,
+                test_sender(&author_hex),
                 Some(&unknown),
             )
             .await
@@ -1775,7 +1825,7 @@ mod postgres_tests {
                     "reply",
                     "reply",
                     true,
-                    &author_hex,
+                    test_sender(&author_hex),
                     Some(&parent),
                 )
                 .await

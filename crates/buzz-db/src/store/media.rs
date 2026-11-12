@@ -366,9 +366,15 @@ pub(super) fn media_reference_query(
         } else {
             &needles[1..]
         };
-        for (i, tag) in ["imeta", "picture", "emoji", "link-preview"]
-            .into_iter()
-            .enumerate()
+        for (i, tag) in [
+            "imeta",
+            "picture",
+            "emoji",
+            "link-preview",
+            "buzz:workflow-avatar",
+        ]
+        .into_iter()
+        .enumerate()
         {
             let matching: Vec<serde_json::Value> = selected
                 .iter()
@@ -386,6 +392,9 @@ pub(super) fn media_reference_query(
             }
             if tag == "emoji" {
                 query.push("e.kind IN (10030,30030,30180) AND ");
+            }
+            if tag == "buzz:workflow-avatar" {
+                query.push("e.kind=9 AND ");
             }
             let preview_urls = (tag == "link-preview").then(|| {
                 matching
@@ -504,6 +513,7 @@ pub(super) fn media_reference_needles(
             needles.push(serde_json::json!([["link-preview", url]]));
             needles.push(serde_json::json!([["picture", url]]));
             needles.push(serde_json::json!([["emoji", url]]));
+            needles.push(serde_json::json!([["buzz:workflow-avatar", url]]));
         }
     }
     needles

@@ -708,7 +708,11 @@ async fn handle_workflow_def(
     // 3. Parse YAML from event.content
     let (def, definition_json_str) = buzz_workflow::WorkflowEngine::parse_yaml(&event.content)
         .map_err(|e| IngestError::Rejected(format!("invalid: workflow YAML parse error: {e}")))?;
-    let workflow_name = extract_tag(event, "name").unwrap_or_else(|| def.name.clone());
+    // The saved name labels every message the workflow sends, so a blank `name`
+    // tag falls back to the definition's validated, non-empty name.
+    let workflow_name = extract_tag(event, "name")
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| def.name.clone());
 
     // SEC-006: definitions with exfiltration-capable actions (call_webhook)
     // require elevated channel authority to save — plain membership is not

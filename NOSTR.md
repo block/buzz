@@ -375,6 +375,14 @@ of the channel's messages: `buzz:workflow-owner` also names the owner. A
 marked `p` tag on any other event, for example a kind:39002 member list role,
 matches `#p` normally. See `docs/buzz-push.md` for the push rules.
 
+Workflow messages also carry `["buzz:workflow-name", <name>]`, the workflow's
+saved name, and, when the definition sets an `avatar`,
+`["buzz:workflow-avatar", <https URL>]`. The owner sets both; trigger data
+cannot change them. They grant no authority, though a relay-hosted avatar
+counts as a media reference, so channel readers can load it. A client
+that shows them should do so only on messages the relay signed, and should
+still mark the message as coming from a workflow and name its owner.
+
 ### Workflow Mentions
 
 A workflow message may carry `["buzz:workflow-mention", <pubkey>]` tags. Each
