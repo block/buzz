@@ -25,6 +25,7 @@ import '../../shared/widgets/mobile_tab_footer_backdrop.dart';
 import '../activity/activity_page.dart';
 import '../activity/inbox_unread_provider.dart';
 import '../channels/channels_page.dart';
+import '../channels/me/me_page.dart';
 import '../search/search_page.dart';
 import 'home_screen_shortcut_host.dart';
 import 'messages_filters.dart';
@@ -393,6 +394,8 @@ class HomePage extends HookConsumerWidget {
                   openBestieConversation: openBestieConversation,
                 ),
               ),
+            if (defaultTargetPlatform == TargetPlatform.iOS)
+              const QuickSendHost(),
             MediaQueryOverride(
               transform: (media) => media.copyWith(
                 padding: media.padding.copyWith(
