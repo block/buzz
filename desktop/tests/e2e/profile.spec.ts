@@ -140,6 +140,21 @@ async function readVisibleProfileSurface(page: Page) {
   });
 }
 
+// The owned-agent action row conceals itself (aria-hidden + inert) once the
+// profile body scrolls. If a click lands while the panel is still settling,
+// Playwright's scroll-into-view retries scroll the body and the row never
+// becomes clickable again, so pin the body to the top before clicking.
+async function clickProfileMessageAction(page: Page) {
+  await page.getByTestId("user-profile-scroll-body").evaluate((element) => {
+    element.scrollTop = 0;
+  });
+  await expect(
+    page.getByTestId("user-profile-primary-actions"),
+  ).not.toHaveAttribute("aria-hidden", "true");
+  await waitForAnimations(page);
+  await page.getByTestId("user-profile-message").click();
+}
+
 async function readOwnedAgentProfileContract(page: Page) {
   const tabs = ["info", "runtime", "channels", "memories"] as const;
   const contract: Partial<
@@ -371,7 +386,7 @@ test("owned agent profile stays in parity between Agents and its DM", async ({
   await page
     .getByRole("button", { name: `${agentName} agent profile` })
     .click();
-  await page.getByTestId("user-profile-message").click();
+  await clickProfileMessageAction(page);
   await expect(page.getByTestId("chat-header-dm-avatar")).toBeVisible();
   const dmChannelId = await page.evaluate(() => {
     const match = window.location.hash.match(/\/channels\/([^?]+)/);
@@ -414,7 +429,7 @@ test("owned agent profile stays in parity between Agents and its DM", async ({
     .click();
   const agentsSurface = await readOwnedAgentProfileContract(page);
 
-  await page.getByTestId("user-profile-message").click();
+  await clickProfileMessageAction(page);
   await expect(page.getByTestId("chat-header-dm-avatar")).toBeVisible();
   await page
     .getByTestId("chat-header")
