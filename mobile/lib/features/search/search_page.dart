@@ -1,8 +1,13 @@
+import '../../shared/widgets/top_edge_fade.dart';
+import 'dart:async';
+
+import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
+import '../../shared/identity_archives/identity_archives.dart';
 import '../../shared/identity_names/identity_names_provider.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/mentions/mention_tags.dart';
@@ -17,6 +22,7 @@ import '../../shared/widgets/message_author_meta.dart';
 import '../channels/channel.dart';
 import '../channels/channel_detail_page.dart';
 import '../channels/channel_identity_names_provider.dart';
+import '../channels/channel_link_navigation.dart';
 import '../channels/channel_management_provider.dart';
 import '../channels/channels_provider.dart';
 import '../channels/small_avatar.dart';
@@ -96,6 +102,16 @@ class SearchPage extends HookConsumerWidget {
         : _searchHeaderFiltersHeight(context);
 
     void activateSearch() => focusNode.requestFocus();
+
+    // Opening search as its own route means the user wants to type, so raise
+    // the keyboard right away instead of waiting for a tap on the field.
+    useEffect(() {
+      if (embedded) return null;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (context.mounted) focusNode.requestFocus();
+      });
+      return null;
+    }, const []);
 
     useEffect(() {
       final reselection = tabReselection;
@@ -235,11 +251,13 @@ class SearchPage extends HookConsumerWidget {
             ),
             const SizedBox(height: Grid.xxs),
             Expanded(
-              child: _SearchBody(
-                state: searchState,
-                filter: activeFilter.value,
-                currentPubkey: currentPubkey,
-                onRecentSearchSelected: runRecentSearch,
+              child: TopEdgeFade(
+                child: _SearchBody(
+                  state: searchState,
+                  filter: activeFilter.value,
+                  currentPubkey: currentPubkey,
+                  onRecentSearchSelected: runRecentSearch,
+                ),
               ),
             ),
           ],
@@ -310,13 +328,35 @@ class _SearchBody extends ConsumerWidget {
         filter == _SearchFilter.all || filter == _SearchFilter.people;
     final showMessages =
         filter == _SearchFilter.all || filter == _SearchFilter.messages;
+    // Known-archived people leave the results. The search asks for more
+    // people than are shown, so they do not push live people out.
+    final archived = ref.watch(hiddenArchivedIdentitiesProvider);
+    final people = state.userResults
+        .where((user) => !archived.contains(user.pubkey.toLowerCase()))
+        .take(searchPeopleShown)
+        .toList();
 
+    // Only the active tab's results count, so a tab with none of its own
+    // says so rather than showing a blank list.
     final hasAnyResults =
-        state.channelResults.isNotEmpty ||
-        state.userResults.isNotEmpty ||
-        state.messageResults.isNotEmpty;
+        (showChannels && state.channelResults.isNotEmpty) ||
+        (showPeople && people.isNotEmpty) ||
+        (showMessages && state.messageResults.isNotEmpty);
     void recordResultSelection() =>
         ref.read(recentSearchesProvider.notifier).record(state.query);
+    // A failed directory means unjoined open channels may be missing, so the
+    // page must not claim there are no results.
+    final channelsFailed = showChannels && state.channelSearchFailed;
+    void retryChannels() => ref.read(searchProvider.notifier).retryChannels();
+
+    if (!state.isLoading && !hasAnyResults && channelsFailed) {
+      return Padding(
+        padding: EdgeInsets.only(
+          bottom: MediaQuery.viewInsetsOf(context).bottom,
+        ),
+        child: Center(child: _ChannelSearchFailed(onRetry: retryChannels)),
+      );
+    }
 
     if (!state.isLoading && !hasAnyResults) {
       return Padding(
@@ -352,9 +392,13 @@ class _SearchBody extends ConsumerWidget {
                   channels: state.channelResults,
                   onResultSelected: recordResultSelection,
                 ),
-              if (showPeople && state.userResults.isNotEmpty)
+              if (channelsFailed)
+                SliverToBoxAdapter(
+                  child: _ChannelSearchFailed(onRetry: retryChannels),
+                ),
+              if (showPeople && people.isNotEmpty)
                 _PeopleSection(
-                  users: state.userResults,
+                  users: people,
                   onResultSelected: recordResultSelection,
                 ),
               if (showMessages && state.messageResults.isNotEmpty)
@@ -379,6 +423,40 @@ class _SearchBody extends ConsumerWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+/// Tells the user open-channel search failed, with desktop's Retry channels.
+class _ChannelSearchFailed extends StatelessWidget {
+  final VoidCallback onRetry;
+
+  const _ChannelSearchFailed({required this.onRetry});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      key: const Key('search-channels-failed'),
+      padding: const EdgeInsets.symmetric(
+        horizontal: Grid.gutter,
+        vertical: Grid.xs,
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Semantics(
+            liveRegion: true,
+            child: Text(
+              "Open channel search couldn't finish.",
+              textAlign: TextAlign.center,
+              style: context.textTheme.bodyMedium?.copyWith(
+                color: context.colors.onSurfaceVariant,
+              ),
+            ),
+          ),
+          TextButton(onPressed: onRetry, child: const Text('Retry channels')),
+        ],
+      ),
     );
   }
 }
@@ -672,10 +750,9 @@ Future<void> _openSearchChannel(BuildContext context, Channel channel) async {
     );
   } catch (_) {
     if (!context.mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Couldn’t open this conversation. Try again.'),
-      ),
+    ScaffoldMessenger.of(context).showFeedbackSnackBar(
+      const SnackBar(content: Text('Couldn’t open conversation')),
+      kind: ToastKind.error,
     );
   }
 }

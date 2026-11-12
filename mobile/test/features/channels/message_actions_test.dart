@@ -46,10 +46,18 @@ TimelineMessage _message({
 
 class _RecordingReactionActions implements ChannelActions {
   final added = <String>[];
+  final targetAuthors = <String>[];
   final removed = <String>[];
   @override
-  Future<void> addReaction(String eventId, String emoji) async =>
-      added.add(emoji);
+  Future<void> addReaction(
+    String eventId,
+    String emoji, {
+    required String targetAuthor,
+  }) async {
+    added.add(emoji);
+    targetAuthors.add(targetAuthor);
+  }
+
   @override
   Future<void> removeReaction(String eventId, String emoji) async =>
       removed.add(eventId);
@@ -457,6 +465,7 @@ void main() {
     await second.up();
     await tester.pumpAndSettle();
     expect(actions.added, ['👍']);
+    expect(actions.targetAuthors, ['alice']);
     expect(
       find.byKey(const ValueKey('message-actions-underlying-page')),
       findsOneWidget,
@@ -476,7 +485,7 @@ void main() {
   });
 
   testWidgets(
-    'message long press keeps taps and scrolling while repeated holds win',
+    'message long press keeps taps and delayed scrolling while repeated holds win',
     (tester) async {
       var parentTaps = 0;
       var nestedTaps = 0;
@@ -536,6 +545,8 @@ void main() {
       final drag = await tester.startGesture(
         tester.getCenter(find.byKey(const ValueKey('parent-gesture-target'))),
       );
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(longPresses, 5);
       await drag.moveBy(const Offset(0, -30));
       await tester.pump();
       await drag.moveBy(const Offset(0, -70));
@@ -547,9 +558,13 @@ void main() {
       expect(longPresses, 5);
       expect(scrollController.offset, greaterThan(0));
     },
+    variant: TargetPlatformVariant({
+      TargetPlatform.iOS,
+      TargetPlatform.android,
+    }),
   );
 
-  testWidgets('iOS message long press recognizes at 200 ms', (tester) async {
+  testWidgets('iOS message long press recognizes at 500 ms', (tester) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
     try {
       var longPresses = 0;
@@ -571,7 +586,7 @@ void main() {
       final gesture = await tester.startGesture(
         tester.getCenter(find.byKey(const ValueKey('ios-long-press-target'))),
       );
-      await tester.pump(const Duration(milliseconds: 199));
+      await tester.pump(const Duration(milliseconds: 499));
       expect(longPresses, 0);
       await tester.pump(const Duration(milliseconds: 2));
       expect(longPresses, 1);

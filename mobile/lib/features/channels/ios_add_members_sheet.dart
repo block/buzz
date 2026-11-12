@@ -1,3 +1,4 @@
+import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 import 'dart:async';
 import 'dart:collection';
 
@@ -33,6 +34,10 @@ class IosAddMembersSheet extends StatefulWidget {
 
 class _IosAddMembersSheetState extends State<IosAddMembersSheet> {
   static const _channel = MethodChannel('buzz/add_members_sheet');
+
+  /// The session whose handler is installed. A replacement picker can start
+  /// before the one it replaces is disposed.
+  static String? _handlerOwner;
   final _session = UniqueKey().toString();
   bool _presented = false;
   bool _closed = false;
@@ -95,6 +100,7 @@ class _IosAddMembersSheetState extends State<IosAddMembersSheet> {
   @override
   void initState() {
     super.initState();
+    _handlerOwner = _session;
     _channel.setMethodCallHandler((call) async {
       if (!mounted || _closed) return null;
       final args = Map<Object?, Object?>.from(call.arguments as Map);
@@ -149,8 +155,13 @@ class _IosAddMembersSheetState extends State<IosAddMembersSheet> {
   void _failed() {
     if (!mounted || _closed) return;
     _closed = true;
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text("Couldn't open Add members. Try again.")),
+    ScaffoldMessenger.of(context).showFeedbackSnackBar(
+      SnackBar(
+        content: Text(
+          'Couldn’t open ${widget.state['title'] ?? 'Add members'}',
+        ),
+      ),
+      kind: ToastKind.error,
     );
     widget.onClose();
   }
@@ -158,6 +169,12 @@ class _IosAddMembersSheetState extends State<IosAddMembersSheet> {
   Future<void> _update() async {
     if (!_presented || !mounted || _closed) return;
     try {
+      if (widget.state['completed'] == true) {
+        _closed = true;
+        await _channel.invokeMethod<void>('dismiss', {'session': _session});
+        if (mounted) widget.onClose();
+        return;
+      }
       await _channel.invokeMethod<void>('update', _state);
     } on PlatformException {
       _failed();
@@ -172,7 +189,10 @@ class _IosAddMembersSheetState extends State<IosAddMembersSheet> {
 
   @override
   void dispose() {
-    _channel.setMethodCallHandler(null);
+    if (_handlerOwner == _session) {
+      _handlerOwner = null;
+      _channel.setMethodCallHandler(null);
+    }
     for (final job in _avatarQueue) {
       job.result.complete(null);
     }

@@ -716,7 +716,7 @@ mod postgres_tests {
     }
 
     /// Redis is required for pub/sub fan-out, presence, and typing, but nothing
-    /// in boot ever opened a command connection: `deadpool_redis` pools dial
+    /// in boot ever opened a command connection: the shared Redis connection dials
     /// lazily and `PubSubManager::new` only allocates channels, so "Redis
     /// pub/sub connected" was logged against a dead port. A relay could
     /// therefore boot with Redis unreachable, bind its health listener, and —
@@ -774,7 +774,7 @@ mod postgres_tests {
     }
 
     /// A peer that accepts the socket but withholds its Redis response exercises
-    /// the outer timeout around both lazy pool checkout and PING. Removing or
+    /// the outer timeout around connect, handshake, and PING. Removing or
     /// narrowing that timeout makes this test kill a still-running relay at the
     /// deadline instead of observing a startup failure.
     #[test]

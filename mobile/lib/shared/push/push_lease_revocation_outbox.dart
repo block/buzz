@@ -12,6 +12,8 @@ import 'package:nostr/nostr.dart' as nostr;
 import '../storage/secure_storage.dart';
 
 import '../community/community.dart';
+import '../hosted/hosted_relay_auth.dart';
+import '../relay/relay_provider.dart';
 import '../relay/signed_event_relay.dart';
 import 'dev_push_lease.dart';
 import 'push_bridge.dart';
@@ -34,7 +36,7 @@ typedef BuzzPushLeaseRevocationWakeScheduler =
 /// Durable state for retracting one precise NIP-PL lease address.
 ///
 /// The signing key is intentionally retained in secure storage only until the
-/// relay accepts the tombstone or the old endpoint grant expires.
+/// relay accepts the tombstone or the old endpoint grant is known to expire.
 @immutable
 class BuzzPushLeaseRevocationRecord {
   final String relayUrl;
@@ -45,7 +47,9 @@ class BuzzPushLeaseRevocationRecord {
 
   /// Generation reserved for the next relay attempt.
   final int generation;
-  final int expiresAt;
+
+  /// Null when the grant is unavailable and its expiry cannot be established.
+  final int? expiresAt;
   final int attemptCount;
   final int nextAttemptAt;
 
@@ -86,7 +90,9 @@ class BuzzPushLeaseRevocationRecord {
     if (generation <= 0 || generation > _maxSafeJsonInteger) {
       throw const FormatException('Push revocation generation is invalid.');
     }
-    if (expiresAt <= 0 || attemptCount < 0 || nextAttemptAt < 0) {
+    if ((expiresAt != null && expiresAt! <= 0) ||
+        attemptCount < 0 ||
+        nextAttemptAt < 0) {
       throw const FormatException('Push revocation retry state is invalid.');
     }
   }
@@ -145,7 +151,7 @@ class BuzzPushLeaseRevocationRecord {
         json['nsec'] is! String ||
         json['installationId'] is! String ||
         json['generation'] is! int ||
-        json['expiresAt'] is! int ||
+        (json['expiresAt'] != null && json['expiresAt'] is! int) ||
         json['attemptCount'] is! int ||
         json['nextAttemptAt'] is! int) {
       throw const FormatException('Invalid push revocation record.');
@@ -157,7 +163,7 @@ class BuzzPushLeaseRevocationRecord {
       nsec: json['nsec'] as String,
       installationId: json['installationId'] as String,
       generation: json['generation'] as int,
-      expiresAt: json['expiresAt'] as int,
+      expiresAt: json['expiresAt'] as int?,
       attemptCount: json['attemptCount'] as int,
       nextAttemptAt: json['nextAttemptAt'] as int,
     );
@@ -298,14 +304,15 @@ class BuzzPushLeaseRevocationOutbox {
     final matching = grants
         .where((grant) => grant.relayOrigin == relayOrigin)
         .toList();
-    if (matching.length != 1) {
+    if (matching.length > 1 ||
+        (matching.isEmpty && community.pushLeaseInstallationId == null)) {
       throw StateError(
         'Expected exactly one endpoint grant for push lease revocation.',
       );
     }
     final currentSeconds = now().millisecondsSinceEpoch ~/ 1000;
-    final grant = matching.single;
-    if (grant.expiresAt <= currentSeconds) return false;
+    final grant = matching.singleOrNull;
+    if (grant != null && grant.expiresAt <= currentSeconds) return false;
     if (highestGeneration + 2 > _maxSafeJsonInteger) {
       throw StateError('Push lease generation is exhausted.');
     }
@@ -316,9 +323,9 @@ class BuzzPushLeaseRevocationOutbox {
         memberPubkey: memberPubkey,
         nsec: nsec,
         installationId:
-            community.pushLeaseInstallationId ?? grant.installationId,
+            community.pushLeaseInstallationId ?? grant!.installationId,
         generation: highestGeneration + 2,
-        expiresAt: grant.expiresAt,
+        expiresAt: grant?.expiresAt,
         attemptCount: 0,
         nextAttemptAt: currentSeconds,
       ),
@@ -367,7 +374,10 @@ class BuzzPushLeaseRevocationOutbox {
       final currentSeconds = now().millisecondsSinceEpoch ~/ 1000;
       final records = await storage.loadAll();
       final active = records
-          .where((record) => record.expiresAt > currentSeconds)
+          .where(
+            (record) =>
+                record.expiresAt == null || record.expiresAt! > currentSeconds,
+          )
           .toList();
       final due =
           active
@@ -440,7 +450,11 @@ class BuzzPushLeaseRevocationOutbox {
         final currentSeconds = now().millisecondsSinceEpoch ~/ 1000;
         final records = await storage.loadAll();
         final active = records
-            .where((record) => record.expiresAt > currentSeconds)
+            .where(
+              (record) =>
+                  record.expiresAt == null ||
+                  record.expiresAt! > currentSeconds,
+            )
             .toList();
         if (active.length != records.length) {
           await storage.replaceAll(active);
@@ -449,7 +463,12 @@ class BuzzPushLeaseRevocationOutbox {
           return;
         }
         final wakeAt = active
-            .map((record) => min(record.nextAttemptAt, record.expiresAt))
+            .map(
+              (record) => min(
+                record.nextAttemptAt,
+                record.expiresAt ?? record.nextAttemptAt,
+              ),
+            )
             .reduce(min);
         final delay = Duration(seconds: max(0, wakeAt - currentSeconds));
         _cancelWake = scheduleWake(delay, () {
@@ -509,8 +528,9 @@ Uri _buzzPushRelayUri(String relayUrl) {
 }
 
 Future<void> publishBuzzPushLeaseRevocation(
-  BuzzPushLeaseRevocationRecord record,
-) async {
+  BuzzPushLeaseRevocationRecord record, {
+  required HostedRelayAuth relayAuth,
+}) async {
   final descriptor = await fetchBuzzPushLeaseDescriptor(record.relayUrl);
   if (descriptor.origin != record.relayOrigin) {
     throw StateError('Relay push origin changed while revocation was pending.');
@@ -525,15 +545,22 @@ Future<void> publishBuzzPushLeaseRevocation(
     generation: record.generation,
     nsec: record.nsec,
     memberPubkey: record.memberPubkey,
-    submit: ({required kind, required content, required tags, createdAt}) =>
-        submitSignedEventOnce(
-          wsUrl: wsUrl,
-          nsec: record.nsec,
-          kind: kind,
-          content: content,
-          tags: tags,
-          createdAt: createdAt,
-        ),
+    submit:
+        ({required kind, required content, required tags, createdAt}) async =>
+            submitSignedEventOnce(
+              wsUrl: wsUrl,
+              // A hosted relay refuses the socket upgrade without an assertion.
+              headers: await relayAuth.headers(
+                RelayConfig(baseUrl: record.relayUrl, nsec: record.nsec),
+                background: true,
+                fresh: true,
+              ),
+              nsec: record.nsec,
+              kind: kind,
+              content: content,
+              tags: tags,
+              createdAt: createdAt,
+            ),
   );
 }
 
@@ -546,7 +573,10 @@ final buzzPushLeaseRevocationOutboxProvider =
     Provider<BuzzPushLeaseRevocationOutbox>((ref) {
       final outbox = BuzzPushLeaseRevocationOutbox(
         storage: ref.read(buzzPushLeaseRevocationStorageProvider),
-        publisher: publishBuzzPushLeaseRevocation,
+        publisher: (record) => publishBuzzPushLeaseRevocation(
+          record,
+          relayAuth: ref.read(hostedRelayAuthProvider),
+        ),
       );
       ref.onDispose(outbox.dispose);
       return outbox;

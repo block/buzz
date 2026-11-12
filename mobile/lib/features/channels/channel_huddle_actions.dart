@@ -11,7 +11,7 @@ String _clampHuddleReactionName(String name) {
 /// Canonical Huddle lifecycle operations built on the shared channel actions.
 extension HuddleChannelActions on ChannelActions {
   /// Creates the private, one-hour stream used only by Huddle media.
-  Future<String> createHuddleBackingChannel() async {
+  Future<String> createHuddleBackingChannel({String? parentChannelId}) async {
     final channelId = _newUuidV4();
     await _signedEventRelay.submit(
       kind: 9007,
@@ -22,6 +22,9 @@ extension HuddleChannelActions on ChannelActions {
         channelType: 'stream',
         visibility: 'private',
         ttlSeconds: 3600,
+        description: parentChannelId == null
+            ? null
+            : 'Buzz Huddle (buzz.huddles/v1)\nparent:$parentChannelId',
       ),
     );
     // The accepted kind:9007 write has already committed creator membership

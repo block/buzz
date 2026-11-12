@@ -21,6 +21,8 @@ pub mod count;
 #[cfg(test)]
 mod create_with_members_postgres_tests;
 #[cfg(test)]
+mod deletion_postgres_tests;
+#[cfg(test)]
 mod edit_metadata_postgres_tests;
 /// EVENT handler — WS dispatcher → ingest pipeline → fan-out.
 pub mod event;
@@ -32,12 +34,18 @@ pub mod identity_archive;
 pub mod imeta;
 /// Transport-neutral event ingestion pipeline.
 pub mod ingest;
+/// Local media publication authorization.
+pub mod media_access;
+#[cfg(test)]
+mod membership_notice_postgres_tests;
 /// Community moderation authorization seam (capability helper).
 pub mod moderation_authz;
 /// Community moderation command handler (kinds 9040–9044).
 pub mod moderation_commands;
 /// Relay-signed moderation notice DMs.
 pub mod moderation_notices;
+/// Multi-node fan-out: Redis events to local subscribers, with lossless lag handling.
+pub mod multinode_fanout;
 /// Product-feedback validation + deployment sidecar persistence.
 pub mod product_feedback;
 #[allow(dead_code, missing_docs)]
@@ -58,6 +66,8 @@ pub mod side_effects;
 mod system_channel_postgres_tests;
 /// Per-filter query scope for system channels.
 pub(crate) mod system_channels;
+#[cfg(test)]
+mod tag_pushdown_postgres_tests;
 
 /// Extract an optional TTL (in seconds) from a Nostr event's `ttl` tag,
 /// applying the server-side override when configured.

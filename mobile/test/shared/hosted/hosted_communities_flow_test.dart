@@ -20,6 +20,30 @@ void main() {
     return result;
   }
 
+  for (final changedAccount in [false, true]) {
+    test(
+      'picker snapshot rejects ${changedAccount ? "changed" : "expired"} account',
+      () async {
+        final f = HostedCommunitiesFixture();
+        await f.initialize(widget: true);
+        addTearDown(f.dispose);
+        f.rows = [f.row('one')];
+        await f.flow.signInAccount();
+        final choices = f.flow.captureCommunityChoices()!;
+        await f.flow.leave();
+        if (changedAccount) {
+          f.subject = 'other-owner';
+        } else {
+          f.expired = true;
+        }
+        expect(f.flow.restoreCommunityChoices(choices), isFalse);
+        expect(f.flow.stage, HostedFlowStage.idle);
+        expect(f.flow.communities, isEmpty);
+        expect(f.admitted, isEmpty);
+      },
+    );
+  }
+
   for (final failure in ['binding', 'backup']) {
     test(
       '$failure proof failure blocks discovery and preserves saved identity',
@@ -46,32 +70,28 @@ void main() {
     );
   }
 
-  test(
-    'selecting a skipped relay retries it as the landing community',
-    () async {
-      final f = await fixture();
-      f.rows = [f.row('one'), f.row('two'), f.row('three')];
-      f.beforeAdmission = (name) async {
-        if (name != 'one.communities.buzz.xyz') {
-          throw AccountFailure.unavailable;
-        }
-      };
-      await f.flow.signInAccount();
-      await f.flow.addSelectedCommunities();
-      await f.flow.skipFailedCommunity();
-      expect(f.flow.stage, HostedFlowStage.blocked);
-      f.flow.backToCommunityChoices();
-      f.flow.chooseLandingCommunity('wss://two.communities.buzz.xyz');
-      f.beforeAdmission = null;
-      await f.flow.addSelectedCommunities();
-      expect(f.admitted, [
-        'one.communities.buzz.xyz',
-        'two.communities.buzz.xyz',
-        'three.communities.buzz.xyz',
-      ]);
-      expect(f.openedCommunity, 'wss://two.communities.buzz.xyz');
-    },
-  );
+  test('selecting a skipped relay retries only that community', () async {
+    final f = await fixture();
+    f.rows = [f.row('one'), f.row('two'), f.row('three')];
+    f.beforeAdmission = (name) async {
+      if (name != 'one.communities.buzz.xyz') {
+        throw AccountFailure.unavailable;
+      }
+    };
+    await f.flow.signInAccount();
+    await f.flow.addSelectedCommunities();
+    await f.flow.skipFailedCommunity();
+    expect(f.flow.stage, HostedFlowStage.blocked);
+    f.flow.backToCommunityChoices();
+    f.flow.chooseLandingCommunity('wss://two.communities.buzz.xyz');
+    f.beforeAdmission = null;
+    await f.flow.addSelectedCommunities();
+    expect(f.admitted, [
+      'one.communities.buzz.xyz',
+      'two.communities.buzz.xyz',
+    ]);
+    expect(f.openedCommunity, 'wss://two.communities.buzz.xyz');
+  });
 
   test('malformed list targets cannot authorize admission', () async {
     final f = await fixture();

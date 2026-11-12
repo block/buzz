@@ -22,6 +22,87 @@ final class IosNavigationBarFactory: NSObject, FlutterPlatformViewFactory {
   }
 }
 
+/// A thin bar along the bottom inner edge of the title capsule while the page
+/// reconnects or catches up. Its duration is unknown, so it sweeps in and then
+/// pulses until the refresh ends, then fades. The navigation view owns it so
+/// it survives title rebuilds.
+final class NavigationRefreshBar: UIView {
+  private static let pulseKey = "refresh-pulse"
+  private let fill = UIView()
+  private(set) var isRefreshing = false
+
+  override init(frame: CGRect) {
+    super.init(frame: frame)
+    isUserInteractionEnabled = false
+    isAccessibilityElement = false
+    accessibilityIdentifier = "channel-navigation-refresh"
+    fill.layer.anchorPoint = CGPoint(x: 0, y: 0.5)
+    addSubview(fill)
+    alpha = 0
+  }
+
+  required init?(coder: NSCoder) { return nil }
+
+  var color: UIColor? {
+    get { fill.backgroundColor }
+    set { fill.backgroundColor = newValue }
+  }
+
+  override func layoutSubviews() {
+    super.layoutSubviews()
+    let transform = fill.transform
+    fill.transform = .identity
+    fill.frame = bounds
+    fill.transform = transform
+  }
+
+  // Moving between title views drops layer animations; restart the pulse.
+  override func didMoveToWindow() {
+    super.didMoveToWindow()
+    if window != nil, isRefreshing { startPulse() }
+  }
+
+  func setRefreshing(_ refreshing: Bool) {
+    guard refreshing != isRefreshing else { return }
+    isRefreshing = refreshing
+    let reduceMotion = UIAccessibility.isReduceMotionEnabled
+    layer.removeAllAnimations()
+    fill.layer.removeAllAnimations()
+    if refreshing {
+      alpha = 1
+      guard !reduceMotion else {
+        fill.transform = .identity
+        return
+      }
+      fill.transform = CGAffineTransform(scaleX: 0.001, y: 1)
+      UIView.animate(withDuration: 0.35, delay: 0, options: [.curveEaseOut]) {
+        self.fill.transform = .identity
+      }
+      startPulse()
+    } else {
+      fill.transform = .identity
+      UIView.animate(withDuration: reduceMotion ? 0 : 0.25, delay: 0, options: [.beginFromCurrentState]) {
+        self.alpha = 0
+      }
+    }
+  }
+
+  private func startPulse() {
+    guard !UIAccessibility.isReduceMotionEnabled,
+          fill.layer.animation(forKey: Self.pulseKey) == nil else { return }
+    let pulse = CABasicAnimation(keyPath: "opacity")
+    pulse.fromValue = 1
+    pulse.toValue = 0.3
+    pulse.duration = 0.75
+    pulse.autoreverses = true
+    pulse.repeatCount = .infinity
+    pulse.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+    pulse.beginTime = CACurrentMediaTime() + 0.35
+    pulse.fillMode = .backwards
+    fill.layer.add(pulse, forKey: Self.pulseKey)
+  }
+}
+
 final class NavigationTitleView: UIVisualEffectView, UIGestureRecognizerDelegate {
   var onActivate: (() -> Void)?
   private let titleLabel = UILabel()
@@ -29,8 +110,10 @@ final class NavigationTitleView: UIVisualEffectView, UIGestureRecognizerDelegate
   private let contentStack = UIStackView()
   private let textStack = UIStackView()
   private let subtitleStack = UIStackView()
+  private let maximumWidth: CGFloat?
 
-  init(title: String?, subtitle: String, color: UIColor) {
+  init(title: String?, subtitle: String, color: UIColor, maximumWidth: CGFloat? = nil) {
+    self.maximumWidth = maximumWidth
     if #available(iOS 26.0, *) {
       super.init(effect: UIGlassEffect(style: .regular))
     } else {
@@ -40,6 +123,7 @@ final class NavigationTitleView: UIVisualEffectView, UIGestureRecognizerDelegate
     layer.cornerCurve = .continuous
     titleLabel.text = title
     titleLabel.textColor = color
+    subtitleStack.isHidden = subtitle.isEmpty
     subtitleLabel.text = subtitle
     subtitleLabel.textColor = .secondaryLabel
     for label in [titleLabel, subtitleLabel] {
@@ -66,8 +150,13 @@ final class NavigationTitleView: UIVisualEffectView, UIGestureRecognizerDelegate
       contentStack.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 12),
       contentStack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -12),
       contentStack.centerYAnchor.constraint(equalTo: contentView.centerYAnchor),
+      titleLabel.widthAnchor.constraint(lessThanOrEqualTo: contentView.widthAnchor, constant: -24),
+      subtitleStack.widthAnchor.constraint(lessThanOrEqualTo: contentView.widthAnchor, constant: -24),
     ])
     translatesAutoresizingMaskIntoConstraints = false
+    if let maximumWidth {
+      widthAnchor.constraint(lessThanOrEqualToConstant: max(0, maximumWidth)).isActive = true
+    }
     updateFonts()
     // Flutter creates platform views with a zero frame. Keep a nonzero
     // intrinsic width and let UINavigationBar compress it between its items.
@@ -137,6 +226,18 @@ final class NavigationTitleView: UIVisualEffectView, UIGestureRecognizerDelegate
     accessibilityLabel = [accessibilityLabel, label].compactMap { $0 }.joined(separator: ", ")
   }
 
+  func attachRefreshBar(_ bar: NavigationRefreshBar) {
+    bar.removeFromSuperview()
+    bar.translatesAutoresizingMaskIntoConstraints = false
+    contentView.addSubview(bar)
+    NSLayoutConstraint.activate([
+      bar.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
+      bar.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
+      bar.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
+      bar.heightAnchor.constraint(equalToConstant: 2),
+    ])
+  }
+
   func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
     acceptsTitleTouch(in: touch.view)
   }
@@ -164,7 +265,8 @@ final class NavigationTitleView: UIVisualEffectView, UIGestureRecognizerDelegate
 
   override var intrinsicContentSize: CGSize {
     let contentSize = contentStack.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize)
-    return CGSize(width: contentSize.width + 24, height: max(44, contentSize.height))
+    return CGSize(width: min(contentSize.width + 24, maximumWidth ?? .greatestFiniteMagnitude),
+                  height: max(44, contentSize.height))
   }
 
   override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
@@ -228,18 +330,18 @@ private final class NavigationContentController: UIViewController {
 }
 
 private final class IosNavigationBarView: NSObject, FlutterPlatformView {
+  /// Far beyond any title collapse range, well within the mirror's content.
+  private static let maxTrackedDepth: CGFloat = 1000
   private let container: NavigationClipView
   private let material = UIVisualEffectView(effect: UIBlurEffect(style: .systemUltraThinMaterial))
   private let materialFade = CAGradientLayer()
-  // A transparent, noninteractive viewport provides the system status fade
-  // independently of the layout-only scroll view that collapses large titles.
-  private let edgeScrollView = UIScrollView()
   private let content = NavigationContentController()
   private let navigation: UINavigationController
   private let channel: FlutterMethodChannel
   private var offset: CGFloat = 0
   private var controlBackground = UIColor.secondarySystemBackground
   private var alwaysFrosted = false
+  private var backdropOnly = false
   private var usesSystemScrollEdge = false
   private var expandedBarHeight: CGFloat = 0
   private var titleIsCollapsed: Bool?
@@ -256,6 +358,10 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
   private weak var trackedAvatar: UIButton?
   private var reportedAvatarFrame: CGRect?
   private var flutterSafeTop: CGFloat = 0
+  private let refreshBar = NavigationRefreshBar()
+  private var floatingTitle: NavigationTitleView?
+  private var titleMaxWidth: CGFloat?
+  private var floatingTitleLift: CGFloat = 0
 
   init(frame: CGRect, id: Int64, args: Any?, messenger: FlutterBinaryMessenger, parent: UIViewController?) {
     container = NavigationClipView(frame: frame)
@@ -273,18 +379,6 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     materialFade.locations = [0, 0.55, 1]
     material.layer.mask = materialFade
     container.addSubview(material)
-    if #available(iOS 27.0, *) {
-      edgeScrollView.accessibilityIdentifier = "navigation-status-edge"
-      edgeScrollView.isUserInteractionEnabled = false
-      edgeScrollView.scrollsToTop = false
-      edgeScrollView.accessibilityElementsHidden = true
-      edgeScrollView.backgroundColor = .clear
-      edgeScrollView.contentInsetAdjustmentBehavior = .never
-      edgeScrollView.contentSize = CGSize(width: 1, height: 10000)
-      edgeScrollView.topEdgeEffect.style = .soft
-      edgeScrollView.bottomEdgeEffect.isHidden = true
-      container.addSubview(edgeScrollView)
-    }
     navigation.view.backgroundColor = .clear
     navigation.navigationBar.isTranslucent = true
     parent?.addChild(navigation)
@@ -317,14 +411,19 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     // needed for UIKit's scroll-edge and large-title calculations.
     guard !measuring else { return }
     let viewportHeight = container.window?.bounds.height ?? container.bounds.height
-    edgeScrollView.frame = CGRect(x: 0, y: 0, width: container.bounds.width, height: viewportHeight)
-    navigation.view.frame = edgeScrollView.frame
+    navigation.view.frame = CGRect(x: 0, y: 0, width: container.bounds.width, height: viewportHeight)
     // Flutter's route can begin offscreen, where UIKit infers a zero safe area.
     // Keep the toolbar below the status region throughout that transition.
     // Read the unmodified host inset, never the inset we are adjusting.
     // During a slide UIKit may not yet have applied the previous adjustment.
     let automaticTop = container.safeAreaInsets.top
-    let requiredTop = max(0, flutterSafeTop - automaticTop)
+    // An empty native bar supplies the same edge geometry beneath a custom
+    // Flutter header. Place its lower edge at the end of that header so the
+    // system fade protects the filters as well as the status area.
+    let protectedTop = backdropOnly
+      ? max(flutterSafeTop, container.bounds.height - max(44, navigation.navigationBar.bounds.height))
+      : flutterSafeTop
+    let requiredTop = max(0, protectedTop - automaticTop)
     if abs(navigation.additionalSafeAreaInsets.top - requiredTop) > 0.5 {
       navigation.additionalSafeAreaInsets.top = requiredTop
     }
@@ -340,7 +439,7 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     // beneath the entire control area, not just the status indicators.
     let glassBackedControls: Bool
     if #available(iOS 26.0, *) {
-      glassBackedControls = content.navigationItem.titleView is NavigationTitleView
+      glassBackedControls = content.navigationItem.titleView is NavigationTitleView || floatingTitle != nil
     } else {
       glassBackedControls = false
     }
@@ -356,6 +455,16 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
       ? [0, NSNumber(value: Double(max(0, height - 12) / max(1, height))), 1]
       : (navigation.navigationBar.prefersLargeTitles ? [0, 0.55, 1] : [0, 0.85, 1])
     CATransaction.commit()
+    if let title = floatingTitle {
+      let available = max(0, container.bounds.width - 48)
+      let width = min(title.intrinsicContentSize.width, min(available, titleMaxWidth ?? available))
+      title.frame = CGRect(x: (container.bounds.width - width) / 2,
+                           y: flutterSafeTop + 56 - floatingTitleLift, width: width, height: 44)
+      // This overlay is outside UINavigationBar, which normally lays out the
+      // effect content after constraining its title. Apply that pass here too.
+      title.layoutIfNeeded()
+
+    }
     reportAvatarBounds()
   }
 
@@ -377,9 +486,11 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
   private func configure(_ args: [String: Any]) {
     controlBackground = Self.color(args["controlBackground"])
     flutterSafeTop = (args["safeTop"] as? NSNumber)?.doubleValue ?? 0
+    floatingTitleLift = args["titleHasAnimatedPortrait"] as? Bool == true ? 14 : 0
+    titleMaxWidth = (args["titleMaxWidth"] as? NSNumber).map { max(0, CGFloat($0.doubleValue)) }
     navigation.overrideUserInterfaceStyle = args["dark"] as? Bool == true ? .dark : .light
+    container.overrideUserInterfaceStyle = navigation.overrideUserInterfaceStyle
     material.overrideUserInterfaceStyle = navigation.overrideUserInterfaceStyle
-    edgeScrollView.overrideUserInterfaceStyle = navigation.overrideUserInterfaceStyle
     // Let the ultra-thin system material provide its own adaptive tint.
     material.contentView.backgroundColor = .clear
     let bar = navigation.navigationBar
@@ -387,27 +498,28 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     bar.tintColor = color
     titleColor = color
     largeTitleOpacity = -1
+    backdropOnly = args["backdropOnly"] as? Bool == true
+    container.isUserInteractionEnabled = !backdropOnly
+    navigation.view.isUserInteractionEnabled = !backdropOnly
+    navigation.view.accessibilityElementsHidden = backdropOnly
     let largeTitle = args["largeTitle"] as? Bool == true
     alwaysFrosted = args["alwaysFrosted"] as? Bool == true
     if #available(iOS 26.0, *) {
       if #available(iOS 27.0, *) { usesSystemScrollEdge = true }
       content.scrollView.topEdgeEffect.style = .soft
-      content.scrollView.topEdgeEffect.isHidden = !usesSystemScrollEdge || !alwaysFrosted || largeTitle
-      edgeScrollView.isHidden = alwaysFrosted && !largeTitle
+      content.scrollView.topEdgeEffect.isHidden = !usesSystemScrollEdge
     }
-    // Large-title pages need material across the whole header: the stationary
-    // system edge only blurs the status area, leaving expanded text over rows.
-    // iOS 26 does not composite this native edge over sibling Flutter content
-    // in our embedding, so retain the ultra-thin material fallback there.
-    // Conversations use the navigation controller's native edge. Other pages
-    // use a stationary native edge so UIKit's large-title inset adjustments
-    // cannot hide the status-area fade when the title expands or collapses.
+    // Older embedded views retain material because their native edge cannot
+    // sample Flutter content. On iOS 27, UIKit also suppresses its native
+    // edge while the large-title inset is collapsing.
+    // Keep the graduated material throughout that transition so partial
+    // scrolling never leaves the title and status area unprotected.
     material.isHidden = usesSystemScrollEdge && !largeTitle
     // Let the native fade extend past the bar without enlarging its hit area.
     // The mirrored content is transparent and the bottom edge is hidden.
     container.clipsToBounds = !usesSystemScrollEdge
     let appearance = UINavigationBarAppearance()
-    if usesSystemScrollEdge && !largeTitle {
+    if usesSystemScrollEdge {
       appearance.configureWithDefaultBackground()
     } else {
       appearance.configureWithTransparentBackground()
@@ -425,15 +537,16 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     // Conversations request a stable backdrop from the first frame, including
     // loading/empty timelines. Other pages retain their scroll-edge treatment.
     material.alpha = alwaysFrosted ? 1 : min(1, offset / 12)
+    floatingTitle?.removeFromSuperview()
+    floatingTitle = nil
     let item = content.navigationItem
     item.title = args["title"] as? String
     if let subtitle = args["subtitle"] as? String {
-      let button = NavigationTitleView(title: item.title, subtitle: subtitle, color: color)
+      let button = NavigationTitleView(title: item.title, subtitle: subtitle, color: color, maximumWidth: titleMaxWidth)
       button.accessibilityIdentifier = "channel-navigation-title"
       let enabled = args["titleEnabled"] as? Bool == true
-      button.accessibilityLabel = enabled
-        ? "Open settings for \(item.title ?? ""), \(subtitle)"
-        : "\(item.title ?? ""), \(subtitle)"
+      let accessibleTitle = [item.title ?? "", subtitle].filter { !$0.isEmpty }.joined(separator: ", ")
+      button.accessibilityLabel = enabled ? "Open settings for \(accessibleTitle)" : accessibleTitle
       button.accessibilityTraits = enabled ? .button : .header
       button.isUserInteractionEnabled = enabled
       if enabled {
@@ -449,8 +562,22 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
       if let label = args["ephemeralLabel"] as? String {
         button.setEphemeralStatus(label)
       }
+      refreshBar.color = args["titleRefreshColor"] is NSNumber ? Self.color(args["titleRefreshColor"]) : color
+      button.attachRefreshBar(refreshBar)
       button.frame.size = button.intrinsicContentSize
-      item.titleView = button
+      let portraits = args["titleAvatars"] as? [[String: Any]] ?? []
+      if portraits.isEmpty {
+        item.titleView = button
+      } else {
+        item.title = nil
+        item.titleView = nil
+        // Floating titles use explicit frames rather than UINavigationBar constraints.
+        button.translatesAutoresizingMaskIntoConstraints = true
+        floatingTitle = button
+        container.addSubview(button)
+
+      }
+      refreshBar.setRefreshing(args["titleRefreshing"] as? Bool == true)
     } else if largeTitle {
       compactTitle.text = item.title
       compactTitle.font = .preferredFont(forTextStyle: .headline)
@@ -531,7 +658,11 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
 
   private func setScrollOffset(_ value: CGFloat) {
     guard value.isFinite else { return }
-    offset = max(0, value)
+    // The mirror scroll view is finite. Past its end UIKit sees no content
+    // under the bar and drops the scroll-edge blur, so a long chat whose
+    // estimated history depth crosses that end flickers between blurred and
+    // sharp. Only the first few hundred points affect the bar's appearance.
+    offset = min(max(0, value), Self.maxTrackedDepth)
     material.alpha = alwaysFrosted ? 1 : min(1, offset / 12)
     applyScroll()
     reportAvatarBounds()

@@ -2,9 +2,9 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 
+import 'package:crypto/crypto.dart' as crypto;
 import 'package:http/http.dart' as http;
 import 'package:nostr/nostr.dart' as nostr;
-import 'package:pointycastle/digests/sha256.dart';
 import 'package:uuid/uuid.dart';
 
 import 'package:flutter/foundation.dart';
@@ -23,6 +23,8 @@ import 'relay_provider.dart';
 import 'relay_query_response.dart';
 import 'relay_rate_limit_gate.dart';
 import 'relay_reconnect_policy.dart';
+import 'read_state_snapshot.dart';
+import '../verified_profiles/verified_profile.dart';
 import 'relay_session_types.dart';
 import 'relay_socket.dart';
 import 'package:buzz/shared/crypto/event_signing.dart';
@@ -31,6 +33,7 @@ export 'relay_session_types.dart';
 
 part 'relay_session_auth.dart';
 part 'relay_session_subscriptions.dart';
+part 'relay_session_snapshot.dart';
 
 class RelaySessionNotifier extends Notifier<SessionState> {
   RelaySessionNotifier({
@@ -44,6 +47,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     RelayTimerFactory reconnectTimerFactory = Timer.new,
     Random? random,
     RelayQueryDecoder queryDecoder = decodeRelayQueryResponse,
+    ReadStateSnapshotDecoder snapshotDecoder = decodeReadStateSnapshot,
   }) : _httpQueryClient = RelayHttpQueryClient(
          client: httpClient,
          clientFactory: httpClientFactory,
@@ -55,7 +59,8 @@ class RelaySessionNotifier extends Notifier<SessionState> {
        _replayDelay = replayDelay,
        _reconnectTimerFactory = reconnectTimerFactory,
        _random = random ?? Random(),
-       _queryDecoder = queryDecoder;
+       _queryDecoder = queryDecoder,
+       _snapshotDecoder = snapshotDecoder;
 
   final RelayHttpQueryClient _httpQueryClient;
   final RelaySocketFactory _socketFactory;
@@ -66,6 +71,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   final RelayTimerFactory _reconnectTimerFactory;
   final Random _random;
   final RelayQueryDecoder _queryDecoder;
+  final ReadStateSnapshotDecoder _snapshotDecoder;
 
   static const _baseReconnectDelayMs = relayReconnectBaseDelayMs;
   static const _maxReconnectDelayMs = relayReconnectMaxDelayMs;
@@ -143,6 +149,15 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     timeout: timeout,
   );
 
+  RelayConfig get _snapshotConfig => ref.read(relayConfigProvider);
+  HostedRelayAuth get _snapshotAuth => ref.read(hostedRelayAuthProvider);
+
+  /// Fetches a complete, validated own-author kind-30078 snapshot.
+  /// Throws if discovery, completeness, scope or event validation fails.
+  Future<List<NostrEvent>> fetchReadStateSnapshot({
+    Duration timeout = const Duration(seconds: 8),
+  }) => _fetchReadStateSnapshot(timeout: timeout);
+
   /// Finds people by profile name, for typeahead surfaces.
   ///
   /// NIP-50 search over kind:0 matches the whole profile JSON, so text in
@@ -154,7 +169,9 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   /// A relay without that endpoint answers 404 or 405. The search then uses
   /// NIP-50 ([NostrFilters.searchUsers]), and so do later searches on that
   /// relay for [profileSearchRetry]; after that the endpoint is tried again.
-  /// A query or limit the endpoint does not accept also uses NIP-50.
+  /// A query or limit the endpoint does not accept also uses NIP-50. The
+  /// endpoint's verified heads (kind:30382) are kept: [searchedPeople] finds
+  /// people with no kind:0 by them.
   Future<List<NostrEvent>> searchProfiles(
     String query, {
     int limit = 50,
@@ -177,7 +194,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
         }, timeout: timeout);
         return [
           for (final event in events)
-            if (event.kind == 0) event,
+            if (event.kind == 0 || event.kind == verifiedProfileKind) event,
         ];
       } on RelayException catch (error) {
         if (error.statusCode != 404 && error.statusCode != 405) rethrow;
@@ -385,6 +402,18 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     }
 
     return () => _unsubscribe(subId);
+  }
+
+  /// Capture a fence for work whose authority must not cross a reconnect.
+  /// Invoke it after awaited work and immediately before publication.
+  void Function() captureConnectionFence() {
+    final generation = _connectionGeneration;
+    final context = _contextGeneration;
+    return () {
+      if (!_isActiveConnection(generation) || context != _contextGeneration) {
+        throw StateError('Relay connection changed; fresh snapshot required');
+      }
+    };
   }
 
   Future<NostrEvent> publish(
@@ -598,7 +627,9 @@ class RelaySessionNotifier extends Notifier<SessionState> {
 
     try {
       final auth = ref.read(hostedRelayAuthProvider);
-      if (auth.protects(config)) socket.headers = await auth.headers(config);
+      if (auth.protects(config)) {
+        socket.headers = await auth.headers(config, fresh: true);
+      }
       if (_disposed || generation != _connectionGeneration) return;
       await socket.connect();
     } on AccountFailure catch (error) {

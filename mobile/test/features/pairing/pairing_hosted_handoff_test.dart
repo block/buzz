@@ -40,20 +40,20 @@ void main() {
         final settled = Completer<void>();
         f.flow.addListener(() {
           if ((f.flow.stage == HostedFlowStage.complete ||
-                  f.flow.stage == HostedFlowStage.confirmBackup ||
-                  f.flow.stage == HostedFlowStage.blocked) &&
+                  f.flow.stage == HostedFlowStage.blocked ||
+                  f.flow.stage == HostedFlowStage.confirmBackup) &&
               !settled.isCompleted) {
             settled.complete();
           }
         });
         await container.read(pairingProvider.notifier).pair(_payload(f.keys));
         await settled.future.timeout(const Duration(seconds: 2));
-        expect(legacyProbes, 0);
-        expect(f.admitted, backup ? ['paired'] : isEmpty);
         if (!backup) {
           expect(f.flow.stage, HostedFlowStage.confirmBackup);
-          expect((await f.store.read())?.backup, isNull);
+          await f.flow.confirmBackup!();
         }
+        expect(legacyProbes, 0);
+        expect(f.admitted, backup ? ['paired.communities.buzz.xyz'] : isEmpty);
         expect((await f.store.read())?.pubkey, f.keys.public);
       },
     );

@@ -17,6 +17,11 @@ use sha2::{Digest, Sha256};
 use crate::{MeshError, RuntimeId};
 
 pub const READY_KEY_PREFIX: &str = "mesh:ready:";
+/// Sorted set of live ready-record keys, scored by expiry (unix seconds).
+/// Reconcile reads this instead of SCANning the whole keyspace, so its cost
+/// scales with the number of peers rather than with every key in Redis. The
+/// name deliberately does not match `mesh:ready:*`.
+pub const READY_INDEX_KEY: &str = "mesh:ready-index";
 pub const DEFAULT_REGISTRY_REFRESH: Duration = Duration::from_secs(15);
 pub const REGISTRY_EXPIRY_MULTIPLIER: u64 = 3;
 pub const ATTESTATION_CONTEXT: &str = "buzz-relay-mesh-ready-v1";
@@ -155,16 +160,54 @@ pub fn expiry_for(refresh: Duration) -> Duration {
     refresh.saturating_mul(REGISTRY_EXPIRY_MULTIPLIER as u32)
 }
 
+fn unix_now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Decode and authenticate the value stored at `key`; `None` (with a warn)
+/// for anything a peer must not dial.
+fn decode_ready_record(key: &str, raw: &str) -> Option<ReadyRecord> {
+    match serde_json::from_str::<ReadyRecord>(raw) {
+        Ok(record) if record.key() == key => match record.verify_attestation() {
+            Ok(()) => Some(record),
+            Err(err) => {
+                tracing::warn!(
+                    key,
+                    runtime_id = %record.runtime_id,
+                    %err,
+                    "mesh ready registry attestation failed — skipping"
+                );
+                None
+            }
+        },
+        Ok(record) => {
+            tracing::warn!(
+                key,
+                runtime_id = %record.runtime_id,
+                "mesh ready registry key/runtime mismatch — skipping"
+            );
+            None
+        }
+        Err(err) => {
+            tracing::warn!(key, %err, "mesh ready registry decode failed — skipping");
+            None
+        }
+    }
+}
+
 /// Redis-backed mesh bootstrap registry.
 #[derive(Clone)]
 pub struct ReadyRegistry {
-    pool: deadpool_redis::Pool,
+    redis: buzz_pubsub::RedisConnection,
     refresh: Duration,
 }
 
 impl ReadyRegistry {
-    pub fn new(pool: deadpool_redis::Pool, refresh: Duration) -> Self {
-        Self { pool, refresh }
+    pub fn new(redis: buzz_pubsub::RedisConnection, refresh: Duration) -> Self {
+        Self { redis, refresh }
     }
 
     pub fn refresh_interval(&self) -> Duration {
@@ -181,15 +224,37 @@ impl ReadyRegistry {
     /// rule stays explicit at the relay boundary.
     pub async fn publish_ready(&self, record: &ReadyRecord) -> Result<(), MeshError> {
         record.verify_attestation()?;
-        let mut conn = self.conn().await?;
+        let mut conn = self.redis.clone();
         let payload = serde_json::to_string(record)
             .map_err(|e| MeshError::Transport(format!("ready registry encode: {e}")))?;
         let ttl_secs = self.expiry().as_secs().max(1);
-        redis::cmd("SET")
-            .arg(record.key())
+        let now = unix_now_secs();
+        let key = record.key();
+        // One MULTI: the record, its index entry, pruning of entries whose
+        // owners stopped refreshing, and an index TTL so a fully stopped fleet
+        // leaves nothing behind.
+        redis::pipe()
+            .atomic()
+            .cmd("SET")
+            .arg(&key)
             .arg(payload)
             .arg("EX")
             .arg(ttl_secs)
+            .ignore()
+            .cmd("ZADD")
+            .arg(READY_INDEX_KEY)
+            .arg(now + ttl_secs)
+            .arg(&key)
+            .ignore()
+            .cmd("ZREMRANGEBYSCORE")
+            .arg(READY_INDEX_KEY)
+            .arg("-inf")
+            .arg(format!("({now}"))
+            .ignore()
+            .cmd("EXPIRE")
+            .arg(READY_INDEX_KEY)
+            .arg(ttl_secs)
+            .ignore()
             .query_async::<()>(&mut conn)
             .await?;
         Ok(())
@@ -197,19 +262,56 @@ impl ReadyRegistry {
 
     /// Remove this runtime on clean shutdown. A crash is handled by TTL expiry.
     pub async fn clear_ready(&self, runtime_id: RuntimeId) -> Result<(), MeshError> {
-        let mut conn = self.conn().await?;
-        redis::cmd("DEL")
-            .arg(ready_key(runtime_id))
+        let mut conn = self.redis.clone();
+        let key = ready_key(runtime_id);
+        redis::pipe()
+            .atomic()
+            .cmd("DEL")
+            .arg(&key)
+            .ignore()
+            .cmd("ZREM")
+            .arg(READY_INDEX_KEY)
+            .arg(&key)
+            .ignore()
             .query_async::<()>(&mut conn)
             .await?;
         Ok(())
     }
 
-    /// Scan all ready records. Malformed/stale/unauthenticated values are
-    /// skipped with a warn: a bad registry entry must not prevent bootstrap
-    /// from healthy peers.
-    pub async fn scan_ready(&self) -> Result<Vec<ReadyRecord>, MeshError> {
-        let mut conn = self.conn().await?;
+    /// Read every indexed ready record: one ZRANGE plus one pipelined GET
+    /// round trip, independent of the size of the Redis keyspace.
+    /// Malformed/stale/unauthenticated values are skipped with a warn: a bad
+    /// registry entry must not prevent bootstrap from healthy peers.
+    pub async fn ready_records(&self) -> Result<Vec<ReadyRecord>, MeshError> {
+        let mut conn = self.redis.clone();
+        let keys: Vec<String> = redis::cmd("ZRANGE")
+            .arg(READY_INDEX_KEY)
+            .arg(0)
+            .arg(-1)
+            .query_async(&mut conn)
+            .await?;
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut pipe = redis::pipe();
+        for key in &keys {
+            pipe.cmd("GET").arg(key);
+        }
+        let raws: Vec<Option<String>> = pipe.query_async(&mut conn).await?;
+        Ok(keys
+            .iter()
+            .zip(raws)
+            .filter_map(|(key, raw)| decode_ready_record(key, &raw?))
+            .collect())
+    }
+
+    /// Full-keyspace SCAN for ready records, including those published by
+    /// relays that predate [`READY_INDEX_KEY`]. Cost is O(total Redis keys),
+    /// so the runtime runs it only at boot, on an unknown inbound peer, and
+    /// once every [`crate::runtime::LEGACY_SCAN_INTERVAL`]. Mixed-version compatibility only: delete it (and those call
+    /// sites) once every deployed relay writes the index.
+    pub async fn legacy_scan_ready(&self) -> Result<Vec<ReadyRecord>, MeshError> {
+        let mut conn = self.redis.clone();
         let mut cursor = 0u64;
         let mut out = Vec::new();
 
@@ -226,25 +328,8 @@ impl ReadyRegistry {
             for key in keys {
                 let raw: Option<String> =
                     redis::cmd("GET").arg(&key).query_async(&mut conn).await?;
-                let Some(raw) = raw else { continue };
-                match serde_json::from_str::<ReadyRecord>(&raw) {
-                    Ok(record) if record.key() == key => match record.verify_attestation() {
-                        Ok(()) => out.push(record),
-                        Err(err) => tracing::warn!(
-                            key,
-                            runtime_id = %record.runtime_id,
-                            %err,
-                            "mesh ready registry attestation failed — skipping"
-                        ),
-                    },
-                    Ok(record) => tracing::warn!(
-                        key,
-                        runtime_id = %record.runtime_id,
-                        "mesh ready registry key/runtime mismatch — skipping"
-                    ),
-                    Err(err) => {
-                        tracing::warn!(key, %err, "mesh ready registry decode failed — skipping")
-                    }
+                if let Some(record) = raw.and_then(|raw| decode_ready_record(&key, &raw)) {
+                    out.push(record);
                 }
             }
 
@@ -263,13 +348,6 @@ impl ReadyRegistry {
             record,
             published: false,
         }
-    }
-
-    async fn conn(&self) -> Result<deadpool_redis::Connection, MeshError> {
-        self.pool
-            .get()
-            .await
-            .map_err(|e| MeshError::Transport(format!("redis pool: {e}")))
     }
 }
 
@@ -324,6 +402,10 @@ mod tests {
         nostr::Keys::generate()
     }
 
+    fn lazy_redis(url: &str) -> buzz_pubsub::RedisConnection {
+        buzz_pubsub::redis_connection(url).expect("redis connection")
+    }
+
     fn ready_record(byte: u8) -> ReadyRecord {
         ReadyRecord::new(rid(byte), &relay_keys(), vec![], 1, vec![])
     }
@@ -341,12 +423,12 @@ mod tests {
         assert_eq!(expiry_for(Duration::from_secs(15)), Duration::from_secs(45));
     }
 
-    #[test]
-    fn heartbeat_starts_unpublished() {
-        let pool = deadpool_redis::Config::from_url("redis://127.0.0.1:6379")
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .unwrap();
-        let registry = ReadyRegistry::new(pool, Duration::from_secs(15));
+    #[tokio::test]
+    async fn heartbeat_starts_unpublished() {
+        let registry = ReadyRegistry::new(
+            lazy_redis("redis://127.0.0.1:6379"),
+            Duration::from_secs(15),
+        );
         let heartbeat = registry.heartbeat(ready_record(1));
         assert!(!heartbeat.published());
         assert_eq!(heartbeat.record().runtime_id, rid(1));
@@ -381,5 +463,145 @@ mod tests {
         record.runtime_id = rid(12);
         record.runtime_pubkey = rid(12).to_hex();
         assert!(record.verify_attestation().is_err());
+    }
+
+    /// Redis-backed registry tests. CI runs them in the relay integration lane
+    /// (`--run-ignored ignored-only`, `BUZZ_TEST_REDIS_URL`). They share the
+    /// fleet-wide index key, so they assert only on their own records.
+    mod external_infra_redis {
+        use super::*;
+
+        fn pool() -> buzz_pubsub::RedisConnection {
+            let url = std::env::var("BUZZ_TEST_REDIS_URL")
+                .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
+            lazy_redis(&url)
+        }
+
+        fn fresh_record() -> ReadyRecord {
+            let runtime_id = RuntimeId(nostr::Keys::generate().public_key().to_bytes());
+            ReadyRecord::new(runtime_id, &relay_keys(), vec![], 1, vec![])
+        }
+
+        fn ids(records: &[ReadyRecord]) -> Vec<RuntimeId> {
+            records.iter().map(|r| r.runtime_id).collect()
+        }
+
+        async fn index_score(pool: &buzz_pubsub::RedisConnection, member: &str) -> Option<f64> {
+            let mut conn = pool.clone();
+            redis::cmd("ZSCORE")
+                .arg(READY_INDEX_KEY)
+                .arg(member)
+                .query_async(&mut conn)
+                .await
+                .expect("zscore")
+        }
+
+        #[tokio::test]
+        #[ignore = "requires Redis"]
+        async fn published_records_are_read_from_the_index_and_cleared_from_it() {
+            let pool = pool();
+            let registry = ReadyRegistry::new(pool.clone(), Duration::from_secs(15));
+            let (a, b) = (fresh_record(), fresh_record());
+            registry.publish_ready(&a).await.unwrap();
+            registry.publish_ready(&b).await.unwrap();
+
+            let indexed = ids(&registry.ready_records().await.unwrap());
+            assert!(indexed.contains(&a.runtime_id) && indexed.contains(&b.runtime_id));
+            let scanned = ids(&registry.legacy_scan_ready().await.unwrap());
+            assert!(scanned.contains(&a.runtime_id) && scanned.contains(&b.runtime_id));
+
+            registry.clear_ready(a.runtime_id).await.unwrap();
+            assert_eq!(index_score(&pool, &a.key()).await, None);
+            let indexed = ids(&registry.ready_records().await.unwrap());
+            assert!(!indexed.contains(&a.runtime_id));
+            assert!(indexed.contains(&b.runtime_id));
+            assert!(!ids(&registry.legacy_scan_ready().await.unwrap()).contains(&a.runtime_id));
+
+            registry.clear_ready(b.runtime_id).await.unwrap();
+        }
+
+        #[tokio::test]
+        #[ignore = "requires Redis"]
+        async fn pre_index_records_are_found_only_by_the_legacy_scan() {
+            let pool = pool();
+            let registry = ReadyRegistry::new(pool.clone(), Duration::from_secs(15));
+            let legacy = fresh_record();
+            {
+                // What a relay that predates the index writes.
+                let mut conn = pool.clone();
+                redis::cmd("SET")
+                    .arg(legacy.key())
+                    .arg(serde_json::to_string(&legacy).unwrap())
+                    .arg("EX")
+                    .arg(45)
+                    .query_async::<()>(&mut conn)
+                    .await
+                    .unwrap();
+            }
+
+            assert!(!ids(&registry.ready_records().await.unwrap()).contains(&legacy.runtime_id));
+            assert!(ids(&registry.legacy_scan_ready().await.unwrap()).contains(&legacy.runtime_id));
+
+            registry.clear_ready(legacy.runtime_id).await.unwrap();
+        }
+
+        #[tokio::test]
+        #[ignore = "requires Redis"]
+        async fn publish_prunes_expired_index_entries_and_bounds_the_index() {
+            let pool = pool();
+            let registry = ReadyRegistry::new(pool.clone(), Duration::from_secs(15));
+            // An owner that stopped refreshing: its key has expired, its
+            // index entry's score is in the past.
+            let gone = ready_key(fresh_record().runtime_id);
+            {
+                let mut conn = pool.clone();
+                redis::cmd("ZADD")
+                    .arg(READY_INDEX_KEY)
+                    .arg(unix_now_secs() - 1)
+                    .arg(&gone)
+                    .query_async::<()>(&mut conn)
+                    .await
+                    .unwrap();
+            }
+            // Indexed but expired: skipped, not an error.
+            registry.ready_records().await.unwrap();
+
+            let fresh = fresh_record();
+            registry.publish_ready(&fresh).await.unwrap();
+            assert_eq!(index_score(&pool, &gone).await, None);
+            let score = index_score(&pool, &fresh.key()).await.expect("indexed");
+            assert!(score > unix_now_secs() as f64);
+
+            let mut conn = pool.clone();
+            let ttl: i64 = redis::cmd("TTL")
+                .arg(READY_INDEX_KEY)
+                .query_async(&mut conn)
+                .await
+                .unwrap();
+            assert!(ttl > 0 && ttl <= 45, "index TTL {ttl}");
+            drop(conn);
+
+            registry.clear_ready(fresh.runtime_id).await.unwrap();
+        }
+
+        #[tokio::test]
+        #[ignore = "requires Redis"]
+        async fn indexed_entry_whose_record_expired_is_skipped() {
+            let pool = pool();
+            let registry = ReadyRegistry::new(pool.clone(), Duration::from_secs(15));
+            let record = fresh_record();
+            registry.publish_ready(&record).await.unwrap();
+            {
+                let mut conn = pool.clone();
+                redis::cmd("DEL")
+                    .arg(record.key())
+                    .query_async::<()>(&mut conn)
+                    .await
+                    .unwrap();
+            }
+            assert!(index_score(&pool, &record.key()).await.is_some());
+            assert!(!ids(&registry.ready_records().await.unwrap()).contains(&record.runtime_id));
+            registry.clear_ready(record.runtime_id).await.unwrap();
+        }
     }
 }

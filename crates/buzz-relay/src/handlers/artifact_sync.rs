@@ -20,7 +20,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::warn;
 use uuid::Uuid;
 
-use super::close::refuse;
+use crate::access::ReadLog;
 use crate::connection::{AuthState, ConnectionState};
 use crate::protocol::RelayMessage;
 use crate::state::AppState;
@@ -343,7 +343,7 @@ async fn publish_once(
 }
 
 /// The fan-out filter a sync registers: every change signal in its channels.
-fn live_filter(channels: &[Uuid]) -> Filter {
+pub(crate) fn live_filter(channels: &[Uuid]) -> Filter {
     Filter::new()
         .kinds(LIVE_KINDS.map(Kind::Custom))
         .custom_tags(
@@ -352,10 +352,14 @@ fn live_filter(channels: &[Uuid]) -> Filter {
         )
 }
 
-/// Serve one sync `REQ`. `permit` is the handler slot; it is held only for
-/// the initial read.
+/// Serve one sync `REQ` that `close::admit` admitted with `owner`. `permit`
+/// is the handler slot; it is held only for the initial read. Every exit
+/// before the claim refuses through `close_if_owner`, so a sync that a newer
+/// same-ID request or a `CLOSE` superseded sends nothing and registers
+/// nothing.
 pub async fn handle_sync(
     sub_id: String,
+    owner: u64,
     filter: Result<ArtifactSyncFilter, &'static str>,
     conn: Arc<ConnectionState>,
     state: Arc<AppState>,
@@ -364,35 +368,71 @@ pub async fn handle_sync(
     let filter = match filter {
         Ok(filter) => filter,
         Err(reason) => {
-            refuse(&sub_id, &format!("invalid: {reason}"), &conn, &state).await;
+            super::close::close_if_owner(
+                &sub_id,
+                owner,
+                Some(&format!("invalid: {reason}")),
+                &conn,
+                &state,
+            )
+            .await;
+            ReadLog::refused_sync(&conn, &sub_id, None, "invalid_filter");
             return;
         }
     };
+    // Written when the initial set ends, not when live delivery does.
+    let mut access = ReadLog::sync(&conn, &sub_id, &filter.channels);
     let (reader, bound) = match conn.auth_state_snapshot() {
         AuthState::Authenticated(ctx) => {
             if !ctx.scopes.is_empty() && !ctx.scopes.contains(&Scope::MessagesRead) {
-                refuse(&sub_id, "restricted: insufficient scope", &conn, &state).await;
+                super::close::close_if_owner(
+                    &sub_id,
+                    owner,
+                    Some("restricted: insufficient scope"),
+                    &conn,
+                    &state,
+                )
+                .await;
+                access.deny("insufficient_scope");
                 return;
             }
             // A channel-scoped token reaches only its own channels; outside
             // them the answer matches an unreadable channel.
             if let Some(allowed) = ctx.channel_ids.as_deref() {
                 if filter.channels.iter().any(|id| !allowed.contains(id)) {
-                    refuse(&sub_id, RESTRICTED, &conn, &state).await;
+                    super::close::close_if_owner(&sub_id, owner, Some(RESTRICTED), &conn, &state)
+                        .await;
+                    access.deny("not_channel_member");
                     return;
                 }
             }
             (ctx.pubkey.to_bytes().to_vec(), ctx.channel_ids)
         }
         _ => {
-            refuse(&sub_id, "auth-required: not authenticated", &conn, &state).await;
+            super::close::close_if_owner(
+                &sub_id,
+                owner,
+                Some("auth-required: not authenticated"),
+                &conn,
+                &state,
+            )
+            .await;
+            access.deny("auth_required");
             return;
         }
     };
     let _effect = match conn.nip_fi_gate.acquire_effect().await {
         Ok(permit) => permit,
         Err(crate::nip_fi_gate::SessionExpired) => {
-            refuse(&sub_id, "restricted: authorization denied", &conn, &state).await;
+            super::close::close_if_owner(
+                &sub_id,
+                owner,
+                Some("restricted: authorization denied"),
+                &conn,
+                &state,
+            )
+            .await;
+            access.deny("session_expired");
             return;
         }
     };
@@ -400,7 +440,7 @@ pub async fn handle_sync(
     // Rule 1: live interest first, confirmed by Redis on an unbroken link.
     let start = *state.pubsub.link_state().borrow();
     let handle = Arc::new(SyncHandle::new());
-    let Some(owner) = claim(&sub_id, &filter.channels, &handle, &conn, &state).await else {
+    let Some(owner) = claim(&sub_id, owner, &filter.channels, &handle, &conn, &state).await else {
         return;
     };
     if !start.up || !confirm(&filter.channels, start.epoch, &conn, &state).await {
@@ -412,6 +452,7 @@ pub async fn handle_sync(
             &state,
         )
         .await;
+        access.error("live_delivery_unavailable");
         return;
     }
 
@@ -419,7 +460,8 @@ pub async fn handle_sync(
     // time budget and the cancellation race, so a slow reader cannot hold
     // the handler slot past the budget or get EOSE after retirement.
     let initial = async {
-        let sent = send_initial_set(&sub_id, owner, &filter, &reader, &conn, &state).await?;
+        let sent =
+            send_initial_set(&sub_id, owner, &filter, &reader, &mut access, &conn, &state).await?;
         // A resync requested before EOSE is queued ends the sync without it.
         send_eose(&sub_id, owner, &handle, &conn).await?;
         Ok::<_, Stop>(sent)
@@ -438,15 +480,25 @@ pub async fn handle_sync(
         Some(Err(_)) => {
             let reason = "error: sync snapshot budget exceeded";
             close(&sub_id, owner, reason, &conn, &state).await;
+            access.error("query_timed_out");
             return;
         }
         Some(Ok(Err(Stop::Retired))) => return,
         Some(Ok(Err(Stop::Close(reason)))) => {
             close(&sub_id, owner, reason, &conn, &state).await;
+            match reason {
+                RESTRICTED => access.deny("not_channel_member"),
+                OVER_MAX_EVENTS => access.deny("sync_set_too_large"),
+                READ_FAILED => access.error("database_error"),
+                // A resync or a closed connection: the client retries.
+                _ => {}
+            }
             return;
         }
         Some(Ok(Ok(sent))) => sent,
     };
+    access.served();
+    drop(access);
     drop(_effect);
     drop(permit);
 
@@ -466,6 +518,7 @@ pub async fn handle_sync(
 
 const RESTRICTED: &str = "restricted: channel not readable";
 const OVER_MAX_EVENTS: &str = "error: sync set exceeds max_events";
+const READ_FAILED: &str = "error: sync read failed";
 
 /// Why a sync stops sending.
 enum Stop {
@@ -475,33 +528,23 @@ enum Stop {
     Retired,
 }
 
-/// Claim `sub_id` under the lifecycle lock. The sync's inbox is installed
-/// before fan-out registration, so no event frame is ever sent to it.
+/// Claim `sub_id` for the sync admitted with `owner`, under the lifecycle
+/// lock, retiring the previous holder. The sync's inbox is installed before
+/// fan-out registration, so no event frame is ever sent to it. `None` once the
+/// connection is closing or this sync was superseded.
 async fn claim(
     sub_id: &str,
+    owner: u64,
     channels: &[Uuid],
     handle: &Arc<SyncHandle>,
     conn: &ConnectionState,
     state: &AppState,
 ) -> Option<u64> {
     let mut subs = conn.subscriptions.lock().await;
-    if conn.cancel.is_cancelled() {
+    if !super::close::claim_locked(&mut subs, sub_id, owner, conn) {
         return None;
     }
-    if !subs.contains_key(sub_id) && subs.len() >= super::req::MAX_SUBSCRIPTIONS {
-        // A new ID has no old holder to retire, but a lost CLOSED would leave
-        // the client waiting on a refused sync.
-        if !conn.send(RelayMessage::closed(
-            sub_id,
-            "error: too many subscriptions",
-        )) {
-            conn.cancel.cancel();
-        }
-        return None;
-    }
-    super::close::retire_locked(&mut subs, sub_id, conn, state).await;
-    let owner = super::close::next_owner();
-    subs.insert(sub_id.to_owned(), owner);
+    super::close::retire_holder_locked(sub_id, conn, state).await;
     state
         .artifact_syncs
         .insert(conn.conn_id, sub_id, Arc::clone(handle));
@@ -549,6 +592,7 @@ async fn send_initial_set(
     owner: u64,
     filter: &ArtifactSyncFilter,
     reader: &[u8],
+    access: &mut ReadLog,
     conn: &ConnectionState,
     state: &AppState,
 ) -> Result<HashSet<Uuid>, Stop> {
@@ -560,8 +604,8 @@ async fn send_initial_set(
         Ok(Ok(snapshot)) => snapshot,
         Ok(Err(buzz_db::SnapshotDenied::Restricted)) => return Err(Stop::Close(RESTRICTED)),
         Err(e) => {
-            warn!(conn_id = %conn.conn_id, "artifact sync snapshot failed: {e}");
-            return Err(Stop::Close("error: sync read failed"));
+            warn!(conn_id = %conn.conn_id, error_kind = %e.kind(), "artifact sync snapshot failed");
+            return Err(Stop::Close(READ_FAILED));
         }
     };
     let mut sent = HashSet::new();
@@ -570,8 +614,8 @@ async fn send_initial_set(
             .next_page(&filter.tags, SNAPSHOT_PAGE)
             .await
             .map_err(|e| {
-                warn!(conn_id = %conn.conn_id, "artifact sync page failed: {e}");
-                Stop::Close("error: sync read failed")
+                warn!(conn_id = %conn.conn_id, error_kind = %e.kind(), "artifact sync page failed");
+                Stop::Close(READ_FAILED)
             })?;
         if page.is_empty() {
             break;
@@ -588,12 +632,13 @@ async fn send_initial_set(
                 conn,
             )
             .await?;
+            access.queued_one();
         }
     }
     snapshot
         .finish()
         .await
-        .map_err(|_| Stop::Close("error: sync read failed"))?;
+        .map_err(|_| Stop::Close(READ_FAILED))?;
     Ok(sent)
 }
 
@@ -644,7 +689,7 @@ async fn send_reserved(
         .await
         .map_err(|_| Stop::Close("error: connection closed"))?;
     let subs = conn.subscriptions.lock().await;
-    if subs.get(sub_id) != Some(&owner) {
+    if !super::close::owns(&subs, sub_id, owner) {
         return Err(Stop::Retired);
     }
     let pending = unless_resync.map(|handle| {
@@ -669,7 +714,7 @@ async fn try_send_owned(
     conn: &ConnectionState,
 ) -> Result<(), Stop> {
     let subs = conn.subscriptions.lock().await;
-    if subs.get(sub_id) != Some(&owner) {
+    if !super::close::owns(&subs, sub_id, owner) {
         return Err(Stop::Retired);
     }
     conn.send_tx
@@ -716,7 +761,7 @@ async fn run_live(
                     })
                 }),
                 Err(e) => {
-                    warn!(conn_id = %conn.conn_id, "artifact sync head read failed: {e}");
+                    warn!(conn_id = %conn.conn_id, error_kind = %e.kind(), "artifact sync head read failed");
                     close(sub_id, owner, "error: sync read failed", conn, state).await;
                     return;
                 }
@@ -932,8 +977,15 @@ mod tests {
         conn.subscriptions
             .try_lock()
             .unwrap()
-            .insert("s".into(), owner);
+            .insert("s".into(), held(owner));
         (conn, rx)
+    }
+
+    fn held(owner: u64) -> super::super::close::SubOwner {
+        super::super::close::SubOwner {
+            owner,
+            claimed: true,
+        }
     }
 
     /// A live frame goes out only while its request still owns the ID.
@@ -951,7 +1003,7 @@ mod tests {
             Err(Stop::Retired)
         ));
         assert!(rx.try_recv().is_err());
-        conn.subscriptions.lock().await.insert("s".into(), 1);
+        conn.subscriptions.lock().await.insert("s".into(), held(1));
         assert!(try_send_owned("s", 1, "x".into(), &conn).await.is_ok());
         assert!(rx.try_recv().is_ok());
     }
@@ -972,7 +1024,7 @@ mod tests {
         // Polled once, the frame is now waiting in `reserve`.
         assert!(futures_util::poll!(&mut waiting).is_pending());
         // A replacing REQ takes the ID while the frame waits.
-        conn.subscriptions.lock().await.insert("s".into(), 2);
+        conn.subscriptions.lock().await.insert("s".into(), held(2));
         rx.recv().await.unwrap();
         assert!(matches!(waiting.await, Err(Stop::Retired)));
         let mut rest = 0;

@@ -1,18 +1,19 @@
 //! Creates the scenario's fixture: communities, channels, history and deep threads.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use futures_util::stream::{self, StreamExt};
-use nostr::{Event, EventBuilder, Keys, Kind, Tag};
+use nostr::{Event, EventBuilder, JsonUtil, Keys, Kind, Tag};
 use reqwest::StatusCode;
 use serde_json::json;
 
 use super::identity::{self, Role};
-use super::net::{http_reason, Net};
-use super::scenario::{Community, Scenario};
-use super::stats::{Op, Snapshot, Stats};
+use super::net::{http_reason, truncate, Net};
+use super::scenario::{Community, Member, Members, Scenario};
+use super::stats::{is_throttle, Op, Snapshot, Stats};
 
 /// Content prefix of seeded thread roots; `run` finds roots by it.
 pub const ROOT_PREFIX: &str = "lg-root";
@@ -24,17 +25,100 @@ pub fn hot_root_keys(run_id: &str) -> Keys {
     identity::keys(run_id, Role::HotRoot, 0)
 }
 
+/// Most people one kind:9000 may name, the relay's limit.
+const MAX_ADDS_PER_EVENT: usize = 100;
+
+/// Channels each creator creates and seeds; see [`channel_creator`].
+pub const CHANNELS_PER_CREATOR: usize = 8;
+
+/// Creator of channel `channel` in community `community`: the community
+/// owner for its first [`CHANNELS_PER_CREATOR`] channels, then one
+/// [`Role::Creator`] identity per further block of that many. The creator
+/// signs its channels' kind:9007 and kind:9000 events and their thread roots.
+/// The relay limits HTTP calls per pubkey, so one signer for a community's
+/// tens of thousands of channels is throttled for hours; blocks of 8 keep
+/// those writes spread out, and [`paced`] absorbs what still bunches up.
+pub fn channel_creator(scenario: &Scenario, community: usize, channel: usize) -> Keys {
+    let run_id = &scenario.run_id;
+    let block = channel / CHANNELS_PER_CREATOR;
+    if block == 0 {
+        return identity::keys(run_id, Role::Owner, community);
+    }
+    let blocks = scenario
+        .shape
+        .channels_per_community
+        .div_ceil(CHANNELS_PER_CREATOR);
+    identity::keys(run_id, Role::Creator, community * blocks + block)
+}
+
+/// Most times one seed write is retried after the relay throttles its signer.
+const MAX_THROTTLED_RETRIES: usize = 10;
+
+/// Runs `write` until it succeeds or fails other than by the relay's
+/// per-pubkey quota. A throttled write waits out the window the relay names
+/// (`retry in <n>s`) and tries again, at most [`MAX_THROTTLED_RETRIES`] times,
+/// so a signer whose writes bunch up slows down instead of failing the seed.
+/// With `stats`, each retried rejection counts as a throttled seed write.
+/// Returns how long the accepted attempt took, without the waits before it.
+async fn paced<F, Fut>(stats: Option<&Stats>, mut write: F) -> anyhow::Result<Duration>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = anyhow::Result<()>>,
+{
+    let mut retries = 0;
+    loop {
+        let t0 = Instant::now();
+        match write().await {
+            Ok(()) => return Ok(t0.elapsed()),
+            Err(e) if retries < MAX_THROTTLED_RETRIES && is_throttle(&e.to_string()) => {
+                let reason = e.to_string();
+                if let Some(stats) = stats {
+                    stats.err(Op::Seed, &reason);
+                }
+                retries += 1;
+                tokio::time::sleep(retry_after(&reason)).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// How long to wait after a quota rejection: the `retry in <n>s` the relay
+/// names, capped at a minute, plus a quarter second for clock skew.
+fn retry_after(reason: &str) -> Duration {
+    let secs = reason
+        .split("retry in ")
+        .nth(1)
+        .and_then(|rest| rest.split('s').next())
+        .and_then(|n| n.trim().parse::<u64>().ok())
+        .unwrap_or(1)
+        .min(60);
+    Duration::from_secs(secs) + Duration::from_millis(250)
+}
+
 /// Seeds every community. Idempotent for communities this run's fixture
-/// owner owns, and for channels; history and threads are appended on every
-/// call. Fails unless every planned post
-/// was accepted.
+/// owner owns, for channels and for memberships (each signed by its
+/// [`channel_creator`]); history and threads are
+/// appended on every call. Fails unless every planned post was accepted and,
+/// with private channels, every member was added.
 pub async fn seed(scenario: &Scenario, net: &Net, stats: &Arc<Stats>) -> anyhow::Result<()> {
+    let members = scenario
+        .shape
+        .private_channels
+        .then(|| scenario.channel_members());
     for community in scenario.communities() {
         let owner = identity::keys(&scenario.run_id, Role::Owner, community.index);
         if let Some(host) = &community.host {
             provision(scenario, net, host, &owner).await?;
         }
-        create_channels(scenario, net, &community, &owner).await?;
+        create_channels(scenario, net, &community).await?;
+        if let Some(members) = &members {
+            let ensured = add_members(scenario, net, &community, members).await?;
+            eprintln!(
+                "seed: community {} memberships ensured ({ensured} people)",
+                community.index
+            );
+        }
         eprintln!(
             "seed: community {} ready ({} channels)",
             community.index, scenario.shape.channels_per_community
@@ -46,8 +130,18 @@ pub async fn seed(scenario: &Scenario, net: &Net, stats: &Arc<Stats>) -> anyhow:
     let before = stats.snapshot();
     let (roots, rest) = plan_posts(scenario);
     let planned: usize = roots.iter().chain(&rest).map(Vec::len).sum();
-    let root_ids = post_all(scenario, net, stats, &communities, roots, &RootIds::new()).await;
-    post_all(scenario, net, stats, &communities, rest, &root_ids).await;
+    let members = members.as_ref();
+    let root_ids = post_all(
+        scenario,
+        net,
+        stats,
+        &communities,
+        members,
+        roots,
+        &RootIds::new(),
+    )
+    .await;
+    post_all(scenario, net, stats, &communities, members, rest, &root_ids).await;
     let accepted = seeded(&stats.snapshot(), &before);
     eprintln!(
         "seed: {accepted} of {planned} posts accepted in {:.1}s",
@@ -82,6 +176,7 @@ async fn post_all(
     net: &Net,
     stats: &Stats,
     communities: &[Community],
+    members: Option<&Members>,
     chains: Vec<Chain>,
     roots: &RootIds,
 ) -> RootIds {
@@ -91,15 +186,15 @@ async fn post_all(
             let mut previous: Option<String> = None;
             for post in chain {
                 let community = &communities[post.community];
-                let Some((keys, event)) = post.build(scenario, roots, previous.as_deref()) else {
+                let Some((keys, event)) = post.build(scenario, members, roots, previous.as_deref())
+                else {
                     stats.err(Op::Seed, "thread parent missing");
                     previous = None;
                     continue;
                 };
-                let t0 = Instant::now();
-                match net.submit(&keys, community, &event, None).await {
-                    Ok(()) => {
-                        stats.ok(Op::Seed, t0.elapsed());
+                match paced(Some(stats), || net.submit(&keys, community, &event, None)).await {
+                    Ok(latency) => {
+                        stats.ok(Op::Seed, latency);
                         let id = event.id.to_hex();
                         accepted.push(((post.community, post.channel, post.seq), id.clone()));
                         previous = Some(id);
@@ -187,24 +282,30 @@ async fn provision_host(
     Ok(())
 }
 
+/// Creates every channel of `community`, each signed by its [`channel_creator`].
 async fn create_channels(
     scenario: &Scenario,
     net: &Net,
     community: &Community,
-    owner: &Keys,
 ) -> anyhow::Result<()> {
+    let visibility = if scenario.shape.private_channels {
+        "private"
+    } else {
+        "open"
+    };
     let results: Vec<anyhow::Result<()>> = stream::iter(scenario.channel_ids(community.index))
         .enumerate()
         .map(|(i, channel)| async move {
+            let creator = channel_creator(scenario, community.index, i);
             let event = EventBuilder::new(Kind::Custom(9007), "")
                 .tags([
                     tag(["h", &channel]),
                     tag(["name", &format!("lg-{}-{i}", scenario.run_id)]),
                     tag(["channel_type", "stream"]),
-                    tag(["visibility", "open"]),
+                    tag(["visibility", visibility]),
                 ])
-                .sign_with_keys(owner)?;
-            match net.submit(owner, community, &event, None).await {
+                .sign_with_keys(&creator)?;
+            match paced(None, || net.submit(&creator, community, &event, None)).await {
                 Err(e) if !e.to_string().contains("already exists") => Err(e),
                 _ => Ok(()),
             }
@@ -213,6 +314,103 @@ async fn create_channels(
         .collect()
         .await;
     results.into_iter().collect()
+}
+
+/// Adds every member of `community`'s channels with kind:9000 events from
+/// the channel's [`channel_creator`], at most [`MAX_ADDS_PER_EVENT`] people each and
+/// `seed_concurrency` at a time. Channel 0 of community 0 also gets the
+/// hot-thread root author and authors. Adding a current member at its role
+/// changes nothing, so re-running is safe. Returns how many people were
+/// named; fails if any event, or any person in one, was refused.
+async fn add_members(
+    scenario: &Scenario,
+    net: &Net,
+    community: &Community,
+    members: &Members,
+) -> anyhow::Result<usize> {
+    let run_id = &scenario.run_id;
+    let mut adds = Vec::new();
+    for (channel, list) in members[community.index].iter().enumerate() {
+        let mut people: Vec<Keys> = list
+            .iter()
+            .map(|m| identity::keys(run_id, m.role, m.index))
+            .collect();
+        if community.index == 0 && channel == 0 && scenario.hot_thread.enabled() {
+            people.push(hot_root_keys(run_id));
+            people.extend(
+                (0..scenario.peak().hot_authors)
+                    .map(|i| identity::keys(run_id, Role::HotAuthor, i)),
+            );
+        }
+        let id = identity::channel_id(run_id, community.index, channel);
+        let creator = channel_creator(scenario, community.index, channel);
+        for chunk in people.chunks(MAX_ADDS_PER_EVENT) {
+            adds.push((
+                creator.clone(),
+                id.clone(),
+                chunk.iter().map(|k| k.public_key().to_hex()).collect(),
+            ));
+        }
+    }
+    let named: usize = adds
+        .iter()
+        .map(|(_, _, p): &(Keys, String, Vec<String>)| p.len())
+        .sum();
+    let failures: Vec<String> = stream::iter(adds)
+        .map(|(creator, channel, people)| async move {
+            paced(None, || {
+                put_users(net, community, &creator, &channel, &people)
+            })
+            .await
+            .err()
+            .map(|e| format!("{channel}: {e}"))
+        })
+        .buffer_unordered(scenario.shape.seed_concurrency)
+        .filter_map(|failure| async move { failure })
+        .collect()
+        .await;
+    if let Some(first) = failures.first() {
+        anyhow::bail!(
+            "{} membership events failed in community {}; first: {first}",
+            failures.len(),
+            community.index
+        );
+    }
+    Ok(named)
+}
+
+/// Submits one kind:9000 naming `people` in `channel`. The relay accepts an
+/// event that adds some people and refuses others, listing the refused ones
+/// under `rejected` in its message, so that counts as a failure too.
+async fn put_users(
+    net: &Net,
+    community: &Community,
+    owner: &Keys,
+    channel: &str,
+    people: &[String],
+) -> anyhow::Result<()> {
+    let tags = std::iter::once(tag(["h", channel])).chain(people.iter().map(|p| tag(["p", p])));
+    let event = EventBuilder::new(Kind::Custom(9000), "")
+        .tags(tags)
+        .sign_with_keys(owner)?;
+    let (status, body) = net
+        .post(
+            owner,
+            &community.http_url,
+            "/events",
+            event.as_json().into_bytes(),
+            None,
+        )
+        .await?;
+    if !status.is_success() {
+        anyhow::bail!("{}", http_reason(status, &body));
+    }
+    let reply: serde_json::Value = serde_json::from_str(&body)?;
+    let message = reply["message"].as_str().unwrap_or_default();
+    if reply["accepted"].as_bool() != Some(true) || message.contains("\"rejected\"") {
+        anyhow::bail!("rejected: {}", truncate(message));
+    }
+    Ok(())
 }
 
 /// One seeded post: history message, thread root, or thread reply.
@@ -299,25 +497,21 @@ fn plan_posts(scenario: &Scenario) -> (Vec<Chain>, Vec<Chain>) {
 impl Post {
     /// Builds the event. A reply attaches to `previous`, the accepted reply
     /// before it in its thread; the first reply attaches to the thread root.
+    /// With `members` (private channels), authors are the channel's humans.
     fn build(
         &self,
         scenario: &Scenario,
+        members: Option<&Members>,
         roots: &RootIds,
         previous: Option<&str>,
     ) -> Option<(Keys, Event)> {
         let channel = identity::channel_id(&scenario.run_id, self.community, self.channel);
-        // Rotate authors across humans to stay under per-pubkey rate limits.
-        let humans = scenario.population.humans.max(1);
-        let author = identity::keys(
-            &scenario.run_id,
-            Role::Human,
-            (self.seq * scenario.shape.communities + self.community) % humans,
-        );
+        let author = self.author(scenario, members);
         let mut tags = vec![tag(["h", &channel])];
         let (keys, content) = match self.kind {
             PostKind::History => (author, format!("lg-history {}", self.seq)),
             PostKind::Root => (
-                identity::keys(&scenario.run_id, Role::Owner, self.community),
+                channel_creator(scenario, self.community, self.channel),
                 format!("{ROOT_PREFIX} {}", self.seq),
             ),
             PostKind::Reply { root } => {
@@ -355,20 +549,20 @@ pub fn reply_tags(root: &str, parent: &str) -> [Tag; 2] {
     ]
 }
 
-/// Ids of `owner`'s seeded roots in `channel` whose content starts with
+/// Ids of `author`'s seeded roots in `channel` whose content starts with
 /// `prefix`, oldest first, among its 100 newest posts there. `run` replies
 /// into these; a sample of roots is enough load.
 pub async fn find_roots(
     net: &Net,
     community: &Community,
     reader: &Keys,
-    owner: &Keys,
+    author: &Keys,
     channel: &str,
     prefix: &str,
 ) -> anyhow::Result<Vec<String>> {
     let filter = json!([{
         "kinds": [9],
-        "authors": [owner.public_key().to_hex()],
+        "authors": [author.public_key().to_hex()],
         "#h": [channel],
         "limit": 100,
     }]);
@@ -396,6 +590,31 @@ pub async fn find_roots(
     Ok(roots.into_iter().map(|(_, id)| id).collect())
 }
 
+impl Post {
+    /// Rotates authors across humans to stay under per-pubkey rate limits:
+    /// across all humans for open channels, across the channel's own human
+    /// members for private ones, falling back to the channel's
+    /// [`channel_creator`] when it has none. Only humans look roots up, so in
+    /// their channels the creator signs nothing but roots, and no volume of
+    /// history or replies crowds roots out of that lookup's newest 100.
+    fn author(&self, scenario: &Scenario, members: Option<&Members>) -> Keys {
+        let run_id = &scenario.run_id;
+        let Some(members) = members else {
+            let humans = scenario.population.humans.max(1);
+            let index = (self.seq * scenario.shape.communities + self.community) % humans;
+            return identity::keys(run_id, Role::Human, index);
+        };
+        let humans: Vec<&Member> = members[self.community][self.channel]
+            .iter()
+            .filter(|m| m.role == Role::Human)
+            .collect();
+        match humans.get(self.seq % humans.len().max(1)) {
+            Some(m) => identity::keys(run_id, Role::Human, m.index),
+            None => channel_creator(scenario, self.community, self.channel),
+        }
+    }
+}
+
 fn tag<const N: usize>(parts: [&str; N]) -> Tag {
     Tag::parse(parts).expect("static tag shape")
 }
@@ -403,6 +622,7 @@ fn tag<const N: usize>(parts: [&str; N]) -> Tag {
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
+    use std::collections::HashSet;
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
     /// Serves HTTP/1.1 on loopback. `handler(method, target, body)` returns
@@ -604,6 +824,341 @@ hold_secs = 1
         assert!(err.to_string().contains("seeded 10 of 15"), "{err}");
     }
 
+    /// Seeds `scenario` against a relay that accepts everything, answering
+    /// kind:9000 with `put_user_message`. Returns the outcome and every
+    /// event submitted, in order.
+    async fn seed_logged(
+        scenario: &str,
+        put_user_message: &'static str,
+    ) -> (anyhow::Result<()>, Scenario, Vec<Event>) {
+        let log: Arc<std::sync::Mutex<Vec<Event>>> = Default::default();
+        let logged = log.clone();
+        let addr = fake_http(move |_, _, body| {
+            let event: Event = serde_json::from_slice(body).unwrap();
+            let message = if event.kind == Kind::Custom(9000) {
+                put_user_message
+            } else {
+                ""
+            };
+            logged.lock().unwrap().push(event);
+            (
+                200,
+                json!({"accepted": true, "message": message}).to_string(),
+            )
+        })
+        .await;
+        let scenario = Scenario::parse(&scenario.replace("{addr}", &addr)).unwrap();
+        let net = Net::new(&scenario).await.unwrap();
+        let stats = Arc::new(Stats::default());
+        let outcome = seed(&scenario, &net, &stats).await;
+        let events = log.lock().unwrap().clone();
+        (outcome, scenario, events)
+    }
+
+    fn values(event: &Event, name: &str) -> Vec<String> {
+        event
+            .tags
+            .iter()
+            .filter(|t| t.kind().as_str() == name)
+            .filter_map(|t| t.content().map(str::to_string))
+            .collect()
+    }
+
+    const PRIVATE: &str = r#"
+run_id = "t"
+[target]
+ws_url = "ws://{addr}"
+http_url = "http://{addr}"
+[shape]
+communities = 1
+channels_per_community = 20
+history_messages_per_channel = 3
+thread_roots_per_channel = 1
+thread_depth = 3
+private_channels = true
+wide_channels = 1
+[population]
+humans = 150
+agents = 2
+channels_per_member = 1
+wide_member_fraction = 1.0
+[hot_thread]
+seed_replies = 2
+authors = 2
+[[ramp]]
+users = 1.0
+hold_secs = 1
+[[ramp]]
+users = 1.5
+hold_secs = 1
+"#;
+
+    #[tokio::test]
+    async fn private_channels_add_every_member_before_anything_is_posted() {
+        let (outcome, scenario, events) = seed_logged(PRIVATE, "").await;
+        outcome.expect("seed passes");
+        let kind = |e: &Event| e.kind.as_u16();
+        let creates: Vec<&Event> = events.iter().filter(|e| kind(e) == 9007).collect();
+        assert_eq!(creates.len(), 20);
+        assert!(creates
+            .iter()
+            .all(|e| values(e, "visibility") == ["private"]));
+        let index = |e: &Event| {
+            let [channel] = values(e, "h").try_into().unwrap();
+            (0..20)
+                .find(|c| identity::channel_id("t", 0, *c) == channel)
+                .unwrap()
+        };
+        let creator = |c| channel_creator(&scenario, 0, c).public_key();
+        // The owner creates channels 0-7; each further block of 8 has its own creator.
+        for create in &creates {
+            assert_eq!(create.pubkey, creator(index(create)));
+        }
+        let owner = identity::keys("t", Role::Owner, 0).public_key();
+        assert_eq!(creator(7), owner);
+        assert_ne!(creator(8), owner);
+        assert_eq!(creator(8), creator(15));
+        assert_ne!(creator(16), creator(8));
+        let first_put = events.iter().position(|e| kind(e) == 9000).unwrap();
+        let last_put = events.iter().rposition(|e| kind(e) == 9000).unwrap();
+        let first_post = events.iter().position(|e| kind(e) == 9).unwrap();
+        let last_create = events.iter().rposition(|e| kind(e) == 9007).unwrap();
+        assert!(last_create < first_put && last_put < first_post);
+
+        let members = scenario.channel_members();
+        let mut added: HashMap<String, Vec<String>> = HashMap::new();
+        for put in events.iter().filter(|e| kind(e) == 9000) {
+            assert_eq!(put.pubkey, creator(index(put)));
+            let people = values(put, "p");
+            assert!(!people.is_empty() && people.len() <= MAX_ADDS_PER_EVENT);
+            let [channel] = values(put, "h").try_into().unwrap();
+            added.entry(channel).or_default().extend(people);
+        }
+        // Every human up to the peak (225) joins the wide channel 0, and so do
+        // the hot thread's root author and its 3 peak authors.
+        for (c, list) in members[0].iter().enumerate() {
+            let mut want: Vec<String> = list
+                .iter()
+                .map(|m| identity::keys("t", m.role, m.index).public_key().to_hex())
+                .collect();
+            if c == 0 {
+                want.push(hot_root_keys("t").public_key().to_hex());
+                want.extend((0..3).map(|i| {
+                    identity::keys("t", Role::HotAuthor, i)
+                        .public_key()
+                        .to_hex()
+                }));
+                assert_eq!(want.len(), 225 + 4);
+            }
+            let mut got = added.remove(&identity::channel_id("t", 0, c)).unwrap();
+            got.sort();
+            want.sort();
+            assert_eq!(got, want, "channel {c}");
+        }
+        assert!(added.is_empty());
+
+        // The creator signs each channel's roots; every other post is by a
+        // human member of its channel, so none crowds a root out of `run`'s
+        // newest-100 lookup.
+        for post in events.iter().filter(|e| kind(e) == 9) {
+            let c = index(post);
+            let author = post.pubkey.to_hex();
+            if post.content.starts_with(ROOT_PREFIX) {
+                assert_eq!(post.pubkey, creator(c));
+                continue;
+            }
+            let member = members[0][c].iter().any(|m| {
+                m.role == Role::Human
+                    && identity::keys("t", Role::Human, m.index)
+                        .public_key()
+                        .to_hex()
+                        == author
+            });
+            let hot_root = author == hot_root_keys("t").public_key().to_hex();
+            let hot_author = (0..3).any(|i| {
+                identity::keys("t", Role::HotAuthor, i)
+                    .public_key()
+                    .to_hex()
+                    == author
+            });
+            assert!(
+                member || hot_root || hot_author,
+                "{author} posted in channel {c}"
+            );
+        }
+    }
+
+    /// One community of many private channels, wide channels and a tier of
+    /// humans in most channels, at 2x.
+    const MANY_CHANNELS: &str = r#"
+run_id = "t"
+[target]
+ws_url = "ws://{addr}"
+http_url = "http://{addr}"
+[shape]
+communities = 1
+channels_per_community = 400
+history_messages_per_channel = 10
+thread_roots_per_channel = 1
+thread_depth = 5
+seed_concurrency = 64
+private_channels = true
+wide_channels = 3
+[population]
+humans = 300
+agents = 30
+channels_per_member = 3
+wide_member_fraction = 0.75
+tiers = [{ fraction = 0.1, channels = 280 }]
+[[ramp]]
+users = 2.0
+hold_secs = 1
+"#;
+
+    /// The relay's default HTTP calls a minute for one pubkey.
+    const HTTP_CALLS_PER_MIN: usize = 300;
+
+    #[tokio::test]
+    async fn no_channel_creator_signs_more_seed_writes_than_one_minute_of_its_quota() {
+        let (outcome, scenario, events) = seed_logged(MANY_CHANNELS, "").await;
+        outcome.expect("seed passes");
+        let creators: HashSet<String> = (0..400)
+            .map(|c| channel_creator(&scenario, 0, c).public_key().to_hex())
+            .collect();
+        assert_eq!(creators.len(), 400 / CHANNELS_PER_CREATOR);
+        let mut writes: HashMap<String, usize> = HashMap::new();
+        for event in events
+            .iter()
+            .filter(|e| creators.contains(&e.pubkey.to_hex()))
+        {
+            *writes.entry(event.pubkey.to_hex()).or_default() += 1;
+        }
+        // Creators sign every create, member add and root. Under one minute's
+        // quota in total, a creator is never throttled, however its writes
+        // bunch up; humans' posts are paced instead.
+        let (busiest, most) = writes.iter().max_by_key(|(_, n)| **n).unwrap();
+        assert!(
+            *most < HTTP_CALLS_PER_MIN,
+            "{busiest} signed {most} of {} seed writes",
+            events.len()
+        );
+    }
+
+    /// When each write was submitted, keyed by what it says: a kind:9000 is
+    /// re-signed on each try, so its id changes.
+    type Tries = HashMap<String, Vec<Instant>>;
+
+    /// Seeds `scenario` against a relay that answers each write's first
+    /// `throttles` submissions with the relay's HTTP 429, naming a
+    /// `retry_secs` window. Returns the outcome and every write's submissions.
+    async fn seed_throttled(
+        scenario: &str,
+        throttles: usize,
+        retry_secs: u64,
+    ) -> (anyhow::Result<()>, Tries, Arc<Stats>) {
+        let tries: Arc<std::sync::Mutex<Tries>> = Default::default();
+        let seen = tries.clone();
+        let addr = fake_http(move |_, _, body| {
+            let event: Event = serde_json::from_slice(body).unwrap();
+            let write = format!("{} {} {:?}", event.pubkey, event.content, event.tags);
+            let mut seen = seen.lock().unwrap();
+            let at = seen.entry(write).or_default();
+            at.push(Instant::now());
+            if at.len() <= throttles {
+                let error = format!("rate-limited: quota exceeded; retry in {retry_secs}s");
+                return (429, json!({ "error": error }).to_string());
+            }
+            (200, json!({"accepted": true, "message": ""}).to_string())
+        })
+        .await;
+        let scenario = Scenario::parse(&scenario.replace("{addr}", &addr)).unwrap();
+        let net = Net::new(&scenario).await.unwrap();
+        let stats = Arc::new(Stats::default());
+        let outcome = seed(&scenario, &net, &stats).await;
+        let tries = tries.lock().unwrap().clone();
+        (outcome, tries, stats)
+    }
+
+    #[tokio::test]
+    async fn throttled_writes_wait_out_the_quota_and_a_lasting_quota_fails_the_seed() {
+        let (outcome, tries, _) = seed_throttled(PRIVATE, 2, 0).await;
+        outcome.expect("throttled writes are retried");
+        assert!(tries.values().all(|at| at.len() == 3), "{tries:?}");
+
+        let (outcome, tries, _) = seed_throttled(PRIVATE, usize::MAX, 0).await;
+        let err = outcome.expect_err("a quota that never clears fails the seed");
+        assert!(err.to_string().contains("quota exceeded"), "{err}");
+        let most = MAX_THROTTLED_RETRIES + 1;
+        assert!(tries.values().all(|at| at.len() == most), "{tries:?}");
+
+        // A retry waits out the window the relay names, and the post's
+        // rejection counts as throttled without its wait counting as latency;
+        // one channel and one post keep the wait short.
+        let one = r#"
+run_id = "t"
+[target]
+ws_url = "ws://{addr}"
+http_url = "http://{addr}"
+[shape]
+communities = 1
+channels_per_community = 1
+history_messages_per_channel = 1
+[population]
+humans = 1
+agents = 0
+channels_per_member = 1
+[[ramp]]
+users = 1.0
+hold_secs = 1
+"#;
+        let (outcome, tries, stats) = seed_throttled(one, 1, 1).await;
+        outcome.expect("throttled writes are retried");
+        assert_eq!(tries.len(), 2, "{tries:?}");
+        for at in tries.values() {
+            let [first, retry] = at[..] else {
+                panic!("{at:?}");
+            };
+            assert!(retry - first >= Duration::from_secs(1), "{at:?}");
+        }
+        let posts = stats.snapshot().since(&Snapshot::default());
+        let (_, posts) = posts.iter().find(|(op, _)| *op == Op::Seed).unwrap();
+        assert_eq!((posts.count, posts.throttled, posts.errors), (1, 1, 0));
+        assert!(posts.max_ms < 1000.0, "{posts:?}");
+    }
+
+    #[test]
+    fn retry_after_waits_the_named_window_capped_at_a_minute() {
+        let quarter = Duration::from_millis(250);
+        let wait = |reason: &str| retry_after(reason) - quarter;
+        let body = |n: &str| {
+            format!("HTTP 429 Too Many Requests: {{\"error\":\"rate-limited: quota exceeded; retry in {n}s\"}}")
+        };
+        assert_eq!(wait(&body("7")), Duration::from_secs(7));
+        assert_eq!(wait(&body("0")), Duration::ZERO);
+        assert_eq!(wait(&body("3600")), Duration::from_secs(60));
+        assert_eq!(wait("HTTP 429 Too Many Requests: "), Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn refused_members_fail_the_seed_and_open_channels_add_nobody() {
+        // The relay accepts an event that refuses some of the people it names.
+        let refused =
+            r#"members: {"added":["aa"],"rejected":[{"reason":"blocked","pubkeys":["bb"]}]}"#;
+        let (outcome, _, _) = seed_logged(PRIVATE, refused).await;
+        let err = outcome.expect_err("a refused member fails the seed");
+        assert!(err.to_string().contains("membership"), "{err}");
+        // Re-adding current members changes nothing and passes.
+        let (outcome, _, _) = seed_logged(PRIVATE, r#"members: {"already_member":["aa"]}"#).await;
+        outcome.expect("re-running the seed passes");
+
+        let open = PRIVATE.replace("private_channels = true", "");
+        let (outcome, _, events) = seed_logged(&open, "").await;
+        outcome.expect("seed passes");
+        assert!(!events.iter().any(|e| e.kind.as_u16() == 9000));
+        let creates: Vec<&Event> = events.iter().filter(|e| e.kind.as_u16() == 9007).collect();
+        assert!(creates.iter().all(|e| values(e, "visibility") == ["open"]));
+    }
+
     #[test]
     fn reply_k_points_reply_at_reply_k_minus_one_and_root_at_the_root() {
         let scenario = Scenario::parse(
@@ -636,7 +1191,7 @@ hold_secs = 1
         let mut previous: Option<String> = None;
         for (k, post) in rest[0].iter().enumerate() {
             let (_, event) = post
-                .build(&scenario, &known, previous.as_deref())
+                .build(&scenario, None, &known, previous.as_deref())
                 .expect("reply builds once its parent is known");
             let markers = buzz_core::nip10::parse_thread_markers(&event.tags);
             assert_eq!(markers.root.as_deref(), Some(root_id.as_str()), "reply {k}");
@@ -645,7 +1200,7 @@ hold_secs = 1
             previous = Some(event.id.to_hex());
         }
         // A reply cannot be placed without its predecessor.
-        assert!(rest[0][2].build(&scenario, &known, None).is_none());
+        assert!(rest[0][2].build(&scenario, None, &known, None).is_none());
     }
 
     /// An operator endpoint that lists hosts by owner, as `GET
@@ -761,8 +1316,7 @@ hold_secs = 1
             .unwrap();
             let net = Net::new(&scenario).await.unwrap();
             let community = &scenario.communities()[0];
-            let owner = identity::keys("t", Role::Owner, 0);
-            create_channels(&scenario, &net, community, &owner).await
+            create_channels(&scenario, &net, community).await
         };
         outcome("duplicate: channel already exists")
             .await

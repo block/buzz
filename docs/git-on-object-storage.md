@@ -411,13 +411,21 @@ conditional writes cannot admit a backend against it.
    returns the written value.
 2. **N-way `If-Match` race (required).** Write key with body `base`; read its
    ETag `E` via the *same code path production uses for the pointer*. Spawn N
-   (e.g. 32–64) concurrent `PUT key If-Match: E` with unique bodies. **Pass** iff
-   exactly one succeeds, the other N−1 classify as precondition-failed, a
-   subsequent read returns the winner's body and a new ETag, and the final body is
-   never one of the *failed* payloads. Repeat for R rounds (configurable; default
-   trades boot time against confidence).
-3. **N-way `If-None-Match: *` race (required).** Same shape on a missing key:
-   exactly one create wins, N−1 precondition failures, final body is the winner.
+   (e.g. 32–64) concurrent `PUT key If-Match: E` with unique bodies. A racer
+   whose outcome is *unknown* (a socket or send failure, or a 5xx answer) is
+   dropped from the
+   round; every other answer is *classified*. **Pass** iff at least two racers
+   classify, exactly one classified racer succeeds, every other classified racer
+   is precondition-failed (any other answer, such as a 403, fails the probe),
+   and a read right after the round returns the winner's body under the
+   winner's ETag. That read is what keeps a dropped racer's write from passing:
+   its outcome is unknown, so a backend that committed it and then answered 5xx
+   must still leave the winner as the stored pointer. Repeat for R rounds
+   (configurable; default trades boot time against confidence).
+3. **N-way `If-None-Match: *` race (required).** Same shape on a missing key,
+   with the same drop rule: at least two classified racers, exactly one create
+   wins among them, the rest are precondition failures, and the final body is
+   the racers' (identical, content-addressed) bytes.
 4. **ETag-token consistency.** Verify HEAD-path and GET-path ETag extraction
    agree byte-for-byte (quoting included). `If-Match` compares tokens literally;
    a quote mismatch between the read path and the write path silently tests the

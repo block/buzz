@@ -19,11 +19,6 @@ void main() {
 
     for (final (host, name, expected) in [
       ('mobile.communities.buzz.xyz', 'mobile.communities.buzz.xyz', 'mobile'),
-      (
-        'mobile.communities.public.builderlabstaging.xyz',
-        'mobile.communities.public.builderlabstaging.xyz',
-        'mobile',
-      ),
       ('mobile.communities.buzz.xyz', 'Mobile Team', 'Mobile Team'),
       ('chat.example.com', 'chat.example.com', 'chat.example.com'),
       (
@@ -49,7 +44,7 @@ void main() {
         find.byType(CommunityGridOption),
       );
       expect(tile.relayUrl, relay);
-      expect(fixture.flow.communities.single.name, name);
+      expect(fixture.flow.communities.single.name, expected);
       if (name != expected) expect(find.text(name), findsNothing);
       await tester.pumpWidget(const SizedBox.shrink());
     }

@@ -70,6 +70,8 @@ pub use sharing::set_persona_shared;
 pub use sharing::update_persona_and_publish;
 mod update;
 pub use update::update_persona;
+#[cfg(test)]
+pub(crate) use update::update_persona_with;
 mod inbound;
 pub use inbound::reconcile_inbound_persona_event;
 #[cfg(test)]

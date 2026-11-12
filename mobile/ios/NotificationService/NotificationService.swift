@@ -56,8 +56,49 @@ final class NotificationService: UNNotificationServiceExtension {
         )
       },
       notificationCache: notificationCache,
-      avatarLoader: notificationAvatarLoader
+      avatarLoader: notificationAvatarLoader,
+      assertionIssuer: Self.assertionIssuer
     )
+  }
+
+  /// Process-wide, so consecutive notifications reuse an assertion until it nears expiry.
+  private static let assertionIssuer: BuzzRelayAssertionIssuer = {
+    let keychainAccessGroup =
+      Bundle.main.object(forInfoDictionaryKey: "BuzzKeychainAccessGroup") as? String
+    return BuzzRelayAssertionIssuer(
+      session: URLSession(configuration: .ephemeral),
+      loadSession: {
+        loadSharedSession(
+          account: BuzzOrganizationSession.keychainAccount,
+          keychainAccessGroup: keychainAccessGroup)
+      },
+      loadHostedSession: {
+        loadSharedSession(
+          account: BuzzOrganizationSession.hostedKeychainAccount,
+          keychainAccessGroup: keychainAccessGroup)
+      }
+    )
+  }()
+
+  /// An account session the app shares for NIP-FI assertion issuance.
+  private static func loadSharedSession(
+    account: String, keychainAccessGroup: String?
+  ) -> BuzzOrganizationSession? {
+    var query: [String: Any] = [
+      kSecClass as String: kSecClassGenericPassword,
+      kSecAttrService as String: BuzzOrganizationSession.keychainService,
+      kSecAttrAccount as String: account,
+      kSecReturnData as String: true,
+      kSecMatchLimit as String: kSecMatchLimitOne,
+    ]
+    if let keychainAccessGroup, !keychainAccessGroup.isEmpty {
+      query[kSecAttrAccessGroup as String] = keychainAccessGroup
+    }
+    var item: CFTypeRef?
+    guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
+      let data = item as? Data
+    else { return nil }
+    return try? JSONDecoder().decode(BuzzOrganizationSession.self, from: data)
   }
 
   private var notificationCacheRoot: URL? {
@@ -82,7 +123,8 @@ final class NotificationService: UNNotificationServiceExtension {
     let accessGroup = Bundle.main.object(forInfoDictionaryKey: "BuzzKeychainAccessGroup") as? String
     return BuzzNotificationAvatarLoader(directory: directory,
       privateKey: { Self.loadPrivateKey(communityID: $0, keychainAccessGroup: accessGroup) },
-      isCurrent: { [weak self] in self?.isCurrent($0) == true })
+      isCurrent: { [weak self] in self?.isCurrent($0) == true },
+      assertionIssuer: Self.assertionIssuer)
   }()
 
   private func isCurrent(_ scope: BuzzNotificationCacheScope) -> Bool {
@@ -128,7 +170,9 @@ final class NotificationService: UNNotificationServiceExtension {
     resolver.resolve { [weak self] resolution in
       guard let self else { return }
       if let resolution {
-        guard let scope = resolution.notificationScope, self.isCurrent(scope) else {
+        guard let scope = resolution.notificationScope, self.isCurrent(scope),
+          self.resolver?.isStillAuthorized() == true
+        else {
           self.finish(Self.restrictedFallback(from: content))
           return
         }
@@ -152,7 +196,8 @@ final class NotificationService: UNNotificationServiceExtension {
           resolution: resolution,
           isStillAllowed: { [weak self] in
             guard let self else { return false }
-            return self.isCurrent(scope) && !self.isAgeRestricted()
+            return self.isCurrent(scope) && self.resolver?.isStillAuthorized() == true
+              && !self.isAgeRestricted()
           },
           onDeletionFailure: { error in
             NSLog("Notification cleanup retry failed: %@", String(describing: error))
@@ -178,7 +223,7 @@ final class NotificationService: UNNotificationServiceExtension {
     session?.invalidateAndCancel()
     session = nil
     handoff?.finish(
-      resolvedScope.map { isCurrent($0) } == false
+      resolvedScope.map { isCurrent($0) && resolver?.isStillAuthorized() != false } == false
         ? Self.restrictedFallback(from: content) : content,
       restrictedFallback: restrictedFallbackContent ?? Self.restrictedFallback(from: content),
       handoffIfAllowed: { deliver in

@@ -12,6 +12,8 @@ import '../../shared/crypto/nip_oa.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/utils/string_utils.dart';
+import '../../shared/verified_profiles/verified_profile.dart';
+import '../../shared/verified_profiles/verified_profile_directory.dart';
 import '../profile/profile_provider.dart';
 import 'channel.dart';
 import 'channel_metadata_updates.dart';
@@ -229,67 +231,6 @@ class DirectoryUser {
   }
 }
 
-/// Whether the mobile DM directory should show local preview identities.
-const bool mockDmDirectoryEnabled =
-    kDebugMode && bool.fromEnvironment('BUZZ_MOCK_DM_DIRECTORY');
-
-/// Whether the new-DM picker should use local preview identities.
-///
-/// Debug builds fall back automatically while disconnected. Production builds
-/// always use the active relay directory.
-final dmDirectoryPreviewEnabledProvider = Provider<bool>((ref) {
-  if (mockDmDirectoryEnabled) {
-    return true;
-  }
-  final relayStatus = ref.watch(
-    relaySessionProvider.select((session) => session.status),
-  );
-  return kDebugMode && relayStatus != SessionStatus.connected;
-});
-
-String _mockEmojiAvatar(String emoji, String color) {
-  return Uri.dataFromString(
-    '<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128">'
-    '<rect width="128" height="128" fill="$color"/>'
-    '<text x="64" y="80" text-anchor="middle" font-size="58">$emoji</text>'
-    '</svg>',
-    mimeType: 'image/svg+xml',
-    encoding: utf8,
-  ).toString();
-}
-
-/// Local identities used to preview the new-DM picker without a relay.
-final dmDirectoryPreviewUsers = List<DirectoryUser>.unmodifiable([
-  DirectoryUser(
-    pubkey: '1111111111111111111111111111111111111111111111111111111111111111',
-    displayName: 'Maya Chen',
-    avatarUrl: _mockEmojiAvatar('🎨', '#8AADF4'),
-    nip05Handle: 'maya@demo.buzz',
-  ),
-  DirectoryUser(
-    pubkey: '2222222222222222222222222222222222222222222222222222222222222222',
-    displayName: 'Jordan Brooks',
-    avatarUrl: _mockEmojiAvatar('🌱', '#A6DA95'),
-    nip05Handle: 'jordan@demo.buzz',
-  ),
-  const DirectoryUser(
-    pubkey: '3333333333333333333333333333333333333333333333333333333333333333',
-    displayName: 'Priya Shah',
-    nip05Handle: 'priya@demo.buzz',
-  ),
-  DirectoryUser(
-    pubkey: '4444444444444444444444444444444444444444444444444444444444444444',
-    displayName: 'Theo Martin',
-    avatarUrl: _mockEmojiAvatar('💻', '#C6A0F6'),
-    nip05Handle: 'theo@demo.buzz',
-  ),
-  const DirectoryUser(
-    pubkey: '5555555555555555555555555555555555555555555555555555555555555555',
-    displayName: 'Sam Rivera',
-    nip05Handle: 'sam@demo.buzz',
-  ),
-]);
-
 final currentPubkeyProvider = Provider<String?>((ref) {
   // Prefer the explicitly-derived pubkey from nsec — this is the signing
   // identity used for events.
@@ -332,37 +273,35 @@ List<String> relayMemberPubkeysFromEvents(List<NostrEvent> events) {
   return pubkeys.toList();
 }
 
-/// Converts kind:0 events into a deduplicated people directory.
+/// Converts the people a profile search found into a directory.
 ///
 /// The directory listing is alphabetized. Search results pass
 /// [alphabetize] false to keep the relay's order, which ranks the best name
-/// match first; each person keeps the place of their first result.
+/// match first.
 @visibleForTesting
-List<DirectoryUser> directoryUsersFromProfileEvents(
-  List<NostrEvent> events, {
+List<DirectoryUser> directoryUsersFromSearch(
+  List<SearchedPerson> people, {
   bool alphabetize = true,
 }) {
-  final latestByPubkey = <String, NostrEvent>{};
-  for (final event in events) {
-    if (event.kind != 0) {
-      continue;
-    }
-    final pubkey = event.pubkey.toLowerCase();
-    final current = latestByPubkey[pubkey];
-    if (current == null || event.createdAt > current.createdAt) {
-      latestByPubkey[pubkey] = event;
-    }
+  DirectoryUser fromProfile(String pubkey, NostrEvent event) {
+    final profile = ProfileData.fromEvent(event);
+    return DirectoryUser(
+      pubkey: pubkey,
+      displayName: profile.displayName,
+      avatarUrl: profile.avatarUrl,
+      nip05Handle: profile.nip05,
+      isAgent: verifiedOaOwnerPubkey(event.tags, event.pubkey) != null,
+    );
   }
 
   final users = [
-    for (final event in latestByPubkey.values)
-      if (ProfileData.fromEvent(event) case final profile)
+    for (final person in people)
+      if (person.profile case final event?)
+        fromProfile(person.pubkey, event)
+      else
         DirectoryUser(
-          pubkey: profile.pubkey.toLowerCase(),
-          displayName: profile.displayName,
-          avatarUrl: profile.avatarUrl,
-          nip05Handle: profile.nip05,
-          isAgent: verifiedOaOwnerPubkey(event.tags, event.pubkey) != null,
+          pubkey: person.pubkey,
+          displayName: person.verified?.displayName,
         ),
   ];
   if (alphabetize) {
@@ -377,121 +316,6 @@ List<DirectoryUser> directoryUsersFromProfileEvents(
   }
   return users;
 }
-
-/// People and agents discoverable on the active relay.
-///
-/// This mirrors desktop's empty-query people directory by listing kind:0
-/// profiles through the HTTP bridge. The relay membership snapshot remains a
-/// fallback for older relays that do not support directory listing.
-///
-/// autoDispose so the cached listing is dropped when the New message sheet
-/// closes, and the [relayConfigProvider] watch invalidates it at the
-/// community boundary. [relaySessionProvider.notifier] is a stable Notifier
-/// instance and [currentPubkeyProvider] keeps its value when two communities
-/// share a signing key, so neither triggers a refetch on its own.
-final relayDirectoryUsersProvider =
-    FutureProvider.autoDispose<List<DirectoryUser>>((ref) async {
-      if (mockDmDirectoryEnabled) {
-        return dmDirectoryPreviewUsers;
-      }
-
-      // Rebuild whenever the active relay/community configuration changes.
-      ref.watch(relayConfigProvider);
-      final session = ref.watch(relaySessionProvider.notifier);
-      final currentPubkey = ref.watch(currentPubkeyProvider)?.toLowerCase();
-      final directoryEvents = await session.queryRelay([
-        const NostrFilter(kinds: [0], limit: 50, extensions: {'page': 1}),
-      ]);
-      var users = directoryUsersFromProfileEvents(directoryEvents);
-      if (users.isNotEmpty) {
-        return users
-            .where((user) => user.pubkey.toLowerCase() != currentPubkey)
-            .toList();
-      }
-
-      final membershipEvents = await session.fetchHistory(
-        NostrFilters.relayMembers(),
-      );
-      final memberPubkeys = relayMemberPubkeysFromEvents(
-        membershipEvents,
-      ).where((pubkey) => pubkey != currentPubkey).toList();
-      if (memberPubkeys.isEmpty) {
-        return const [];
-      }
-
-      final profileEvents = await session.queryRelay([
-        NostrFilters.profilesBatch(memberPubkeys),
-      ]);
-      final profilesByPubkey = {
-        for (final event in profileEvents)
-          event.pubkey.toLowerCase(): ProfileData.fromEvent(event),
-      };
-      users =
-          [
-            for (final pubkey in memberPubkeys)
-              if (profilesByPubkey[pubkey] case final profile?)
-                DirectoryUser(
-                  pubkey: pubkey,
-                  displayName: profile.displayName,
-                  avatarUrl: profile.avatarUrl,
-                  nip05Handle: profile.nip05,
-                  isAgent:
-                      verifiedOaOwnerPubkey(
-                        profileEvents
-                            .firstWhere(
-                              (event) => event.pubkey.toLowerCase() == pubkey,
-                            )
-                            .tags,
-                        pubkey,
-                      ) !=
-                      null,
-                )
-              else
-                DirectoryUser(pubkey: pubkey),
-          ]..sort((a, b) {
-            final labelComparison = a.label.toLowerCase().compareTo(
-              b.label.toLowerCase(),
-            );
-            return labelComparison != 0
-                ? labelComparison
-                : a.pubkey.compareTo(b.pubkey);
-          });
-      return users;
-    });
-
-/// Prefix-searches the active relay's kind:0 people directory.
-///
-/// autoDispose family: each distinct query would otherwise cache a provider
-/// instance for the whole session (the mention search provider is autoDispose
-/// for the same reason). The [relayConfigProvider] watch invalidates cached
-/// results at the community boundary.
-final relayDirectorySearchProvider = FutureProvider.autoDispose
-    .family<List<DirectoryUser>, String>((ref, query) async {
-      final trimmed = query.trim();
-      if (mockDmDirectoryEnabled) {
-        final normalizedQuery = trimmed.toLowerCase();
-        return dmDirectoryPreviewUsers
-            .where(
-              (user) =>
-                  user.label.toLowerCase().contains(normalizedQuery) ||
-                  user.secondaryLabel.toLowerCase().contains(normalizedQuery),
-            )
-            .toList();
-      }
-      if (trimmed.isEmpty) {
-        return ref.watch(relayDirectoryUsersProvider.future);
-      }
-
-      // Rebuild whenever the active relay/community configuration changes.
-      ref.watch(relayConfigProvider);
-      final session = ref.watch(relaySessionProvider.notifier);
-      final currentPubkey = ref.watch(currentPubkeyProvider)?.toLowerCase();
-      final events = await session.searchProfiles(trimmed, limit: 50);
-      return directoryUsersFromProfileEvents(
-        events,
-        alphabetize: false,
-      ).where((user) => user.pubkey.toLowerCase() != currentPubkey).toList();
-    });
 
 /// Build [ChannelDetails] from a kind:39000 metadata event.
 ///

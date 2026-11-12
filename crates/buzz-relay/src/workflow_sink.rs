@@ -298,6 +298,21 @@ impl ActionSink for RelayActionSink {
                     "workflow owner cannot post in destination channel".into(),
                 ));
             }
+            crate::handlers::ingest::check_agent_dm_write(
+                tenant.community(),
+                &state,
+                channel_uuid,
+                &author_pubkey_bytes,
+                &channel,
+            )
+            .await
+            .map_err(|e| {
+                if e == crate::handlers::ingest::AGENT_DM_REFUSED {
+                    ActionSinkError::InvalidInput(e)
+                } else {
+                    ActionSinkError::Database(e)
+                }
+            })?;
 
             // 3. Build kind:9 Nostr event
             //    - Signed by relay keypair (event.pubkey = relay pubkey)
@@ -401,6 +416,12 @@ impl ActionSink for RelayActionSink {
                 .tags(tags)
                 .sign_with_keys(&state.relay_keypair)
                 .map_err(|e| ActionSinkError::EventBuild(format!("signing: {e}")))?;
+
+            crate::handlers::media_access::validate_media_references(&tenant, &state, &event)
+                .await
+                .map_err(|error| {
+                    ActionSinkError::InvalidInput(format!("media reference denied: {error:?}"))
+                })?;
 
             let event_id_hex = event.id.to_hex();
             let event_id_bytes = event.id.as_bytes().to_vec();
@@ -791,9 +812,7 @@ mod postgres_tests {
         config.redis_url = "redis://127.0.0.1:1".to_string();
         let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
         let db = buzz_db::Db::from_pool(pool.clone());
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("redis pool");
+        let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await
@@ -1366,6 +1385,92 @@ mod postgres_tests {
             root_only_meta.root_event_id.as_deref(),
             Some(root_only_parent_bytes.as_slice())
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn workflow_send_message_keeps_agents_out_of_dms() {
+        let state = test_state().await;
+        let (owner, agent, stranger) = (
+            nostr::Keys::generate(),
+            nostr::Keys::generate(),
+            nostr::Keys::generate(),
+        );
+        let host = format!("wf-agent-dm-{}.example", uuid::Uuid::new_v4().simple());
+        let community = match state
+            .db
+            .create_community_with_owner(
+                &host,
+                &owner.public_key().to_hex(),
+                &nostr::Keys::generate(),
+            )
+            .await
+            .map(|write| write.outcome)
+            .expect("create community")
+        {
+            CreateCommunityWithOwnerResult::Created(rec) => rec.id,
+            other => panic!("expected fresh community, got {other:?}"),
+        };
+        for keys in [&owner, &agent, &stranger] {
+            state
+                .db
+                .ensure_user(community, &keys.public_key().to_bytes())
+                .await
+                .expect("ensure user");
+        }
+        state
+            .db
+            .set_agent_owner_for_authorization(
+                community,
+                &agent.public_key().to_bytes(),
+                &owner.public_key().to_bytes(),
+            )
+            .await
+            .expect("link agent owner");
+        let open_dm = |members: [&nostr::Keys; 2]| {
+            let state = state.clone();
+            let keys: Vec<[u8; 32]> = members.iter().map(|k| k.public_key().to_bytes()).collect();
+            async move {
+                let refs: Vec<&[u8]> = keys.iter().map(|k| k.as_slice()).collect();
+                state
+                    .db
+                    .open_dm(community, &refs, refs[0])
+                    .await
+                    .expect("open dm")
+                    .0
+                    .id
+            }
+        };
+        let stranger_dm = open_dm([&agent, &stranger]).await;
+        let owner_dm = open_dm([&agent, &owner]).await;
+        let sink = RelayActionSink::new(&state);
+        let agent_hex = agent.public_key().to_hex();
+
+        let err = sink
+            .send_message(
+                community,
+                &stranger_dm.to_string(),
+                "hi",
+                "hi",
+                &agent_hex,
+                None,
+            )
+            .await
+            .expect_err("an agent's workflow must not post in a DM with a stranger");
+        assert!(
+            matches!(&err, ActionSinkError::InvalidInput(m) if m == crate::handlers::ingest::AGENT_DM_REFUSED),
+            "{err:?}"
+        );
+        sink.send_message(
+            community,
+            &owner_dm.to_string(),
+            "hi",
+            "hi",
+            &agent_hex,
+            None,
+        )
+        .await
+        .expect("an agent's workflow may post in its owner-only DM");
     }
 
     #[tokio::test]
