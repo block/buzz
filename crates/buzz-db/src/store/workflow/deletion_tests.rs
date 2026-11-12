@@ -811,7 +811,17 @@ async fn run_create_waits_for_workflow_delete_and_leaves_no_orphan_run() {
 
     let holder = begin_delete_holding_locks(&db, community, id).await;
     let created = write_while_delete_holds_locks(&db, holder, id, move |writer| {
-        Box::pin(async move { writer.create_workflow_run(community, id, None, None).await })
+        Box::pin(async move {
+            writer
+                .create_workflow_run(
+                    community,
+                    id,
+                    None,
+                    None,
+                    &crate::workflow::RunCause::Schedule,
+                )
+                .await
+        })
     })
     .await;
 
@@ -845,9 +855,16 @@ async fn approval_waits_for_delete_and_leaves_no_orphan_approval(names_deleted_w
     seed(&db, community, &keys, id, &id.to_string(), now).await;
     let other = Uuid::new_v4();
     seed(&db, community, &keys, other, &other.to_string(), now).await;
-    let run_id = create_workflow_run(&db.pool, community, id, None, None)
-        .await
-        .expect("run");
+    let run_id = create_workflow_run(
+        &db.pool,
+        community,
+        id,
+        None,
+        None,
+        &crate::workflow::RunCause::Schedule,
+    )
+    .await
+    .expect("run");
     // Either the approval names the workflow being deleted, or it names the
     // surviving workflow and only its run belongs to the deleted one.
     let approval_workflow = if names_deleted_workflow { id } else { other };

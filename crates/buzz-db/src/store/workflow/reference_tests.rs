@@ -236,23 +236,46 @@ async fn create_workflow_run_rejects_missing_workflow_without_foreign_key() {
     let owner = [0x13; 32];
 
     assert_not_found(
-        create_workflow_run(&db.pool, community, Uuid::new_v4(), None, None).await,
+        create_workflow_run(
+            &db.pool,
+            community,
+            Uuid::new_v4(),
+            None,
+            None,
+            &RunCause::Schedule,
+        )
+        .await,
         "workflow",
     );
     // The workflow exists only in another community.
     let other = new_community(&db).await;
     let elsewhere = new_workflow(&db, other, &owner).await;
     assert_not_found(
-        create_workflow_run(&db.pool, community, elsewhere, None, None).await,
+        create_workflow_run(
+            &db.pool,
+            community,
+            elsewhere,
+            None,
+            None,
+            &RunCause::Schedule,
+        )
+        .await,
         "workflow",
     );
     assert_eq!(count(&db, "workflow_runs", community).await, 0);
     assert_eq!(count(&db, "workflow_runs", other).await, 0);
 
     let workflow = new_workflow(&db, community, &owner).await;
-    create_workflow_run(&db.pool, community, workflow, None, None)
-        .await
-        .expect("existing workflow");
+    create_workflow_run(
+        &db.pool,
+        community,
+        workflow,
+        None,
+        None,
+        &RunCause::Schedule,
+    )
+    .await
+    .expect("existing workflow");
     assert_eq!(count(&db, "workflow_runs", community).await, 1);
 }
 
@@ -270,9 +293,16 @@ async fn create_approval_rejects_missing_workflow_or_run_without_foreign_keys() 
     .await;
     let owner = [0x14; 32];
     let workflow = new_workflow(&db, community, &owner).await;
-    let run = create_workflow_run(&db.pool, community, workflow, None, None)
-        .await
-        .expect("run");
+    let run = create_workflow_run(
+        &db.pool,
+        community,
+        workflow,
+        None,
+        None,
+        &RunCause::Schedule,
+    )
+    .await
+    .expect("run");
     let approve = |workflow_id: Uuid, run_id: Uuid, token: &'static str| {
         let pool = db.pool.clone();
         async move {
@@ -305,9 +335,16 @@ async fn create_approval_rejects_missing_workflow_or_run_without_foreign_keys() 
     // Both exist, but only in another community.
     let other = new_community(&db).await;
     let other_workflow = new_workflow(&db, other, &owner).await;
-    let other_run = create_workflow_run(&db.pool, other, other_workflow, None, None)
-        .await
-        .expect("other run");
+    let other_run = create_workflow_run(
+        &db.pool,
+        other,
+        other_workflow,
+        None,
+        None,
+        &RunCause::Schedule,
+    )
+    .await
+    .expect("other run");
     assert_not_found(
         approve(other_workflow, run, "workflow-elsewhere").await,
         "workflow",
