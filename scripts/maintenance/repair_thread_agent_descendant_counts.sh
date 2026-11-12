@@ -57,6 +57,14 @@ agent_replies_sql='
              '\''strict $[*] ? (@[0] == "audience" && @[1] == "agents")'\'',
              '\''{}'\'', true)'
 
+# Roots the repair covers: any with replies, and any with no replies left
+# but a stored count, which an older relay's delete can leave behind.
+needs_count_sql='(root.descendant_count > 0 OR EXISTS (
+            SELECT 1 FROM thread_agent_reply_counts stored
+             WHERE stored.community_id = root.community_id
+               AND stored.root_event_id = root.event_id
+               AND stored.agent_descendant_count <> 0))'
+
 # Prints `more|last_created_at|last_event_id_hex|changed`.
 run_batch() {
     local community=$1 after_created_at=$2 after_event_id=$3
@@ -80,7 +88,7 @@ SELECT count(*) > 0 AS more,
           FROM thread_metadata root
          WHERE root.community_id = :'community'::UUID
            AND root.depth = 0
-           AND root.descendant_count > 0
+           AND ${needs_count_sql}
            AND (root.event_created_at, root.event_id)
                > (:'after_created_at'::TIMESTAMPTZ, decode(:'after_event_id', 'hex'))
            AND EXISTS (
@@ -122,8 +130,12 @@ COMMIT;
 SQL
 }
 
+# Read before the loop: a failed query in a process substitution would not
+# stop the script under set -e.
+communities=$("${psql_base[@]}" -c "SELECT id FROM communities ORDER BY id")
 total=0
 while IFS= read -r community; do
+    [[ -n $community ]] || continue
     after_created_at=-infinity
     after_event_id=
     repaired=0
@@ -147,7 +159,7 @@ while IFS= read -r community; do
         echo "community $community: repaired $repaired thread roots"
     fi
     total=$((total + repaired))
-done < <("${psql_base[@]}" -c "SELECT id FROM communities ORDER BY id")
+done <<<"$communities"
 echo "repaired $total thread roots"
 
 # Unbounded check over the active communities' roots, run once at the end.
@@ -161,6 +173,6 @@ SELECT count(*)
     ON current.community_id = root.community_id
    AND current.root_event_id = root.event_id
  WHERE root.depth = 0
-   AND root.descendant_count > 0
+   AND ${needs_count_sql}
    AND coalesce(current.agent_descendant_count, 0) <> (${agent_replies_sql})")
 echo "validation: $mismatched thread roots still differ (expected 0)"
