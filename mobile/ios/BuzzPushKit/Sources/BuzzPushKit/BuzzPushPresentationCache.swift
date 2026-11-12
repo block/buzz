@@ -799,10 +799,15 @@ public final class BuzzPushPresentationCacheStore: @unchecked Sendable {
   }
 }
 
-/// Stable, privacy-preserving identifiers used only after the NSE resolves an event.
+/// Stable identifiers used only after the NSE resolves an event.
 public enum BuzzPushPresentationIdentity {
+  /// The conversation's real community and channel IDs, which the share
+  /// extension hands back to the app to open that conversation. It must match
+  /// `shareConversationIdentifier` in the Dart app, which donates outgoing
+  /// messages under the same identifier.
   public static func conversation(communityID: String, channelID: String) -> String {
-    scoped(namespace: "conversation", values: [communityID, channelID])
+    // A JSON array of two strings always encodes.
+    String(decoding: try! JSONEncoder().encode([communityID, channelID]), as: UTF8.self)
   }
 
   public static func sender(communityID: String, pubkey: String) -> String {

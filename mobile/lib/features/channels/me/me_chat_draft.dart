@@ -135,6 +135,13 @@ class _MeChatDraft extends HookConsumerWidget {
               : saved.initialMessage?.content,
           initialMediaTags: mediaTags,
         );
+        // The first message is a top-level send in the new Solo chat.
+        donateActiveShareSuggestion(
+          ref,
+          channelId: result.id,
+          displayName: result.name,
+          recipientCount: 1,
+        );
         if (context.mounted) {
           manualAgent.value = recipient;
           created.value = result;

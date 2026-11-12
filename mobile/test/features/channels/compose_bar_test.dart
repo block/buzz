@@ -32,6 +32,7 @@ import 'package:buzz/shared/custom_emoji/custom_emoji_provider.dart';
 import 'package:buzz/shared/agents/owned_agent_directory.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
+import 'package:buzz/shared/share/pending_share.dart';
 import 'package:buzz/features/activity/compose_drafts_provider.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
@@ -47,6 +48,7 @@ part 'compose_bar_test/mixed_gallery_tests.dart';
 part 'compose_bar_test/solo_draft_tests.dart';
 part 'compose_bar_test/durable_mention_tests.dart';
 part 'compose_bar_test/agent_prefill_tests.dart';
+part 'compose_bar_test/share_delivery_tests.dart';
 
 final _pngBytes = Uint8List.fromList([
   0x89,
@@ -744,6 +746,7 @@ void main() {
   exactMentionTests();
   durableMentionTests();
   agentPrefillTests();
+  shareDeliveryTests();
   TestWidgetsFlutterBinding.ensureInitialized();
 
   setUp(() async {

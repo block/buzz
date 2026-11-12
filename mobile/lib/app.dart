@@ -8,6 +8,7 @@ import 'dart:async';
 import 'hosted_app_gate.dart';
 import 'onboarding_app_entry.dart';
 import 'organization_app_entry.dart';
+import 'shared/share/signed_out_share_notice.dart';
 import 'shared/hosted/organization_environment.dart';
 import 'shared/widgets/ios_navigation_metrics.dart';
 import 'shared/community/paired_community_landing.dart';
@@ -455,7 +456,7 @@ class App extends HookConsumerWidget {
         ),
         _ => const HostedAppGate(
           authenticated: false,
-          child: OnboardingAppEntry(),
+          child: SignedOutShareNotice(child: OnboardingAppEntry()),
         ),
       },
     );
