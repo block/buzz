@@ -1305,21 +1305,29 @@ impl ObserverPublishQueue {
         let channel = self.events.front()?.2.channel_id.clone();
 
         let mut picked: Vec<observer::ObserverEvent> = Vec::new();
+        let mut picked_bytes = 0;
         let mut kept: VecDeque<(usize, u64, observer::ObserverEvent)> =
             VecDeque::with_capacity(self.events.len());
         let mut gathering = true;
         while let Some((bytes, source_events, event)) = self.events.pop_front() {
             if gathering && event.channel_id == channel {
-                picked.push(event);
-                if picked.len() > 1
-                    && serialized_len(&batch_envelope(&picked)) > OBSERVER_MAX_PLAINTEXT_LEN
+                // The empty envelope already includes the array brackets.
+                // Add cached event sizes and one comma per preceding event;
+                // only the newest event's envelope metadata needs measuring.
+                if !picked.is_empty()
+                    && serialized_len(&empty_batch_envelope(&event))
+                        + picked_bytes
+                        + bytes
+                        + picked.len()
+                        > OBSERVER_MAX_PLAINTEXT_LEN
                 {
                     // Frame full: the overflow event stays queued and leads
                     // its channel's next slot.
-                    let event = picked.pop().expect("len > 1");
                     kept.push_back((bytes, source_events, event));
                     gathering = false;
                 } else {
+                    picked.push(event);
+                    picked_bytes += bytes;
                     self.pending_bytes -= bytes;
                 }
             } else {
@@ -1353,6 +1361,12 @@ fn batch_envelope(events: &[observer::ObserverEvent]) -> observer::ObserverEvent
     let last = events
         .last()
         .expect("batch envelope needs at least 1 event");
+    let mut envelope = empty_batch_envelope(last);
+    envelope.payload["events"] = serde_json::to_value(events).unwrap_or_default();
+    envelope
+}
+
+fn empty_batch_envelope(last: &observer::ObserverEvent) -> observer::ObserverEvent {
     observer::ObserverEvent {
         seq: last.seq,
         timestamp: last.timestamp.clone(),
@@ -1362,9 +1376,7 @@ fn batch_envelope(events: &[observer::ObserverEvent]) -> observer::ObserverEvent
         session_id: last.session_id.clone(),
         turn_id: last.turn_id.clone(),
         started_at: last.started_at.clone(),
-        payload: serde_json::json!({
-            "events": serde_json::to_value(events).unwrap_or_default(),
-        }),
+        payload: serde_json::json!({ "events": [] }),
     }
 }
 
@@ -9425,6 +9437,70 @@ mod observer_publish_queue_tests {
             [1, 2, 3, 4, 5, 6],
             "no event lost or reordered by splitting"
         );
+    }
+
+    #[test]
+    fn batch_packing_matches_wire_bytes_at_the_exact_limit() {
+        for count in [2, 3, 16] {
+            for channel in [None, Some("channel\"🐝\n")] {
+                for delta in [-1isize, 0, 1] {
+                    let mut events: Vec<_> = (0..count)
+                        .map(|i| {
+                            let mut e = event(9 + i, "marker", channel);
+                            e.agent_index = (i % 2 == 0).then_some(123);
+                            e.session_id = Some("session\"\\\n🐝".into());
+                            e.turn_id = None;
+                            e.started_at = (i % 2 == 1).then(|| "2026-11-01T00:00:00Z".into());
+                            e.payload = serde_json::json!({"text": ""});
+                            e
+                        })
+                        .collect();
+                    // Independent wire oracle, including the newest metadata,
+                    // escaped strings, optional fields, array commas and UTF-8.
+                    let wire_batch = |events: &[observer::ObserverEvent]| {
+                        let mut value = serde_json::to_value(events.last().unwrap()).unwrap();
+                        value["kind"] = serde_json::json!("batch");
+                        value["payload"] = serde_json::json!({"events": events});
+                        value
+                    };
+                    let overhead = serde_json::to_vec(&wire_batch(&events)).unwrap().len();
+                    let padding = (OBSERVER_MAX_PLAINTEXT_LEN as isize + delta) as usize - overhead;
+                    events.last_mut().unwrap().payload["text"] =
+                        serde_json::json!("x".repeat(padding));
+                    let expected = wire_batch(&events);
+                    assert_eq!(
+                        serde_json::to_vec(&expected).unwrap().len(),
+                        (OBSERVER_MAX_PLAINTEXT_LEN as isize + delta) as usize
+                    );
+                    let mut queue = queue_of(events.clone());
+                    let frames = drain_frames(&mut queue);
+                    assert_eq!(frames.len(), if delta <= 0 { 1 } else { 2 });
+                    if delta <= 0 {
+                        assert_eq!(serde_json::to_value(&frames[0]).unwrap(), expected);
+                    }
+                    let mut delivered = Vec::new();
+                    for frame in frames {
+                        assert!(
+                            serde_json::to_vec(&frame).unwrap().len() <= OBSERVER_MAX_PLAINTEXT_LEN
+                        );
+                        if let Some(inner) = frame.payload["events"].as_array() {
+                            delivered.extend(inner.iter().cloned());
+                        } else {
+                            delivered.push(serde_json::to_value(frame).unwrap());
+                        }
+                    }
+                    assert_eq!(
+                        delivered,
+                        serde_json::to_value(events)
+                            .unwrap()
+                            .as_array()
+                            .unwrap()
+                            .clone()
+                    );
+                    assert_eq!(queue.pending_bytes, 0);
+                }
+            }
+        }
     }
 
     /// The queue preserves the coalescer's ordering rule: a non-chunk event

@@ -59,3 +59,19 @@ Goose and uses its provider to invoke the native developer shell. Both operate
 only on temporary local repositories, verify commit/tag signatures and identity,
 check unrelated-remote credential scoping, and assert keyfile removal. They do
 not replace authenticated relay clone/push/readback testing.
+
+## Observer frame packing measurement
+
+To isolate frame packing, the drain probe queues 10,000 small events before
+starting its clock, then packs every event into frames. It checks complete FIFO
+delivery, frame byte limits and empty byte accounting, and reports elapsed
+milliseconds and frame count. `BUZZ_OBSERVER_PROBE_EVENTS` changes the count;
+the workload must fit the existing queue budget.
+
+```sh
+cargo test --release -p buzz-acp --lib observer::packing_tests::publish_queue_drain_probe -- \
+  --exact --ignored --nocapture
+```
+
+This measures packing only, excluding ingestion, publish pacing, encryption,
+relay delivery and rendering. It does not estimate overall app latency.

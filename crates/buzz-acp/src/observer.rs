@@ -15,6 +15,9 @@ use std::{
 use serde::Serialize;
 use tokio::sync::broadcast;
 
+#[cfg(test)]
+mod packing_tests;
+
 const OBSERVER_BUFFER_CAP: usize = 1_000;
 
 /// Best-effort metadata attached to observer events.
