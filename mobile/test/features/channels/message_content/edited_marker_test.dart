@@ -13,7 +13,6 @@ void main() {
         ('# Title\nbody', '# Title\nbody $editedSlot'),
         ('Visit https://x.io today', 'Visit https://x.io today $editedSlot'),
         ('#######', '####### $editedSlot'),
-        ('ok\n--', 'ok\n-- $editedSlot'),
         ('a \\| b', 'a \\| b $editedSlot'),
         ('Read [docs](x) now', 'Read [docs](x) now $editedSlot'),
         ('done :)', 'done :) $editedSlot'),
@@ -43,6 +42,7 @@ void main() {
         'Above\n\n---',
         'Above\n\n* * *',
         'Title\n===',
+        'Title\n--',
         r'$$x^2$$',
         for (final marker in [
           '-',
