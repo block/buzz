@@ -3043,6 +3043,109 @@ mod postgres_tests {
         assert_eq!(orphan_acceptances(&pool, community).await, 0);
     }
 
+    /// An invitation claim that found no member can still lose the race to
+    /// another writer adding one before its membership INSERT. That INSERT
+    /// then hits `ON CONFLICT DO NOTHING`, which locks nothing, so the claim
+    /// must lock the member row before it writes the acceptance. The claim is
+    /// paused before the INSERT while the member is added and a removal
+    /// takes the member `FOR UPDATE`; with the acceptance foreign key dropped
+    /// the claim then waits on that lock, and once the removal commits it
+    /// refuses with no acceptance, no orphan and no invite use consumed.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn invite_claim_conflicting_with_a_member_added_mid_claim_waits_for_removal() {
+        let pool = setup_pool().await;
+        crate::test_support::drop_foreign_keys_between(
+            &pool,
+            &[("join_policy_acceptances", "relay_members")],
+        )
+        .await;
+        let (community, owner) = owned_community(&pool).await;
+        let member = test_pubkey();
+        let keys = nostr::Keys::generate();
+        let invite = crate::relay_invite::mint_relay_invite(&pool, community, &owner, 3600, None)
+            .await
+            .expect("mint invite");
+        let hash = buzz_core::invite::hash_v2_code(&invite.code);
+        let uses = |pool: PgPool| async move {
+            sqlx::query_scalar::<_, i32>(
+                "SELECT use_count FROM relay_invites WHERE community_id = $1",
+            )
+            .bind(community.as_uuid())
+            .fetch_one(&pool)
+            .await
+            .expect("invite use count")
+        };
+
+        // The claim looks the member up (none yet), then pauses before its INSERT.
+        let (arrived, release) =
+            crate::relay_invite::test_hook::arm_before_membership_insert(community);
+        let name = format!("member-claim-{}", Uuid::new_v4().simple());
+        let claim_pool = crate::test_support::named_pool(&name).await;
+        let claim = tokio::spawn({
+            let member = member.clone();
+            let keys = keys.clone();
+            async move {
+                crate::relay_invite::claim_relay_invite(
+                    &claim_pool,
+                    community,
+                    &hash,
+                    &member,
+                    Some(&"d".repeat(64)),
+                    &keys,
+                )
+                .await
+                .map(|write| write.outcome)
+            }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(30), arrived)
+            .await
+            .expect("claim reaches the hook")
+            .expect("hook fires");
+
+        // Another writer adds the member, and a removal then holds it locked.
+        assert!(
+            add_relay_member(&pool, community, &member, "member", None, &keys)
+                .await
+                .expect("add member")
+                .outcome
+        );
+        let mut removal = crate::begin_community_write_transaction(
+            &pool,
+            community,
+            observability::WriterOperation::Authorization,
+        )
+        .await
+        .expect("begin removal");
+        sqlx::query(
+            "SELECT 1 FROM relay_members WHERE community_id = $1 AND pubkey = $2 FOR UPDATE",
+        )
+        .bind(community.as_uuid())
+        .bind(&member)
+        .execute(removal.conn())
+        .await
+        .expect("lock member");
+
+        // The resumed claim conflicts on the live row and has to wait for the lock.
+        release.notify_one();
+        crate::test_support::wait_for_lock_wait(&pool, &name).await;
+        assert!(delete_member_with_acceptances(&mut removal, &member, None)
+            .await
+            .expect("delete member"));
+        removal.commit().await.expect("commit removal");
+
+        match claim.await.expect("join claim") {
+            Err(crate::DbError::NotFound(message)) => assert!(message.contains("relay member")),
+            other => panic!("claim after the member was removed: {other:?}"),
+        }
+        assert!(!is_relay_member(&pool, community, &member)
+            .await
+            .expect("membership"));
+        assert_eq!(acceptances(&pool, community, &member).await, 0);
+        assert_eq!(orphan_acceptances(&pool, community).await, 0);
+        assert_eq!(uses(pool.clone()).await, 0, "no invite use consumed");
+    }
+
     /// Returning to an earlier membership within the same second yields a new
     /// list with a later `created_at`, never the earlier list's id.
     #[tokio::test]

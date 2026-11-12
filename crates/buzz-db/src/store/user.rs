@@ -332,7 +332,8 @@ pub async fn search_users(
 /// `DbError::NotFound` if the agent pubkey doesn't exist in the users table, or
 /// if the agent has no owner yet and `owner_pubkey` doesn't exist there. An
 /// agent that already has an owner returns `Ok(false)` without looking at
-/// `owner_pubkey`, and a failed owner check writes nothing.
+/// `owner_pubkey`. The owner is checked before anything is written, so the
+/// error is the same whether or not the owner foreign key is installed.
 pub async fn set_agent_owner(
     pool: &PgPool,
     community_id: CommunityId,
@@ -379,43 +380,49 @@ async fn set_agent_owner_with_operation(
     drop(connection);
     let mut tx = crate::begin_community_write_transaction(pool, community_id, operation).await?;
     crate::relay_invite::lock_admission(tx.conn(), community_id).await?;
-    // Conditional UPDATE: only set owner if currently NULL. This makes
-    // "first mint wins" atomic — no TOCTOU race between concurrent mints.
-    let result = sqlx::query(
-        r#"UPDATE users SET agent_owner_pubkey = $1 WHERE community_id = $2 AND pubkey = $3 AND agent_owner_pubkey IS NULL"#,
+    // Lock order: admission, then the agent row, then the owner row. The agent
+    // row is read `FOR NO KEY UPDATE` (the lock the UPDATE below takes), so the
+    // outcomes below are decided on a row nothing else can change, and the
+    // owner is checked before the UPDATE: with the owner foreign key still
+    // installed the UPDATE itself would fail on a missing owner with a foreign
+    // key error instead of the `NotFound` this function promises.
+    let locked: Option<Option<Vec<u8>>> = sqlx::query_scalar(
+        "SELECT agent_owner_pubkey FROM users \
+         WHERE community_id = $1 AND pubkey = $2 FOR NO KEY UPDATE",
     )
-    .bind(owner_pubkey)
     .bind(community_id.as_uuid())
     .bind(agent_pubkey)
-    .execute(tx.conn())
+    .fetch_optional(tx.conn())
     .await?;
-
-    if result.rows_affected() == 0 {
-        // Could be: (a) pubkey not found, or (b) owner already set.
-        // Check which case by querying the row.
-        let exists = sqlx::query(r#"SELECT 1 FROM users WHERE community_id = $1 AND pubkey = $2"#)
-            .bind(community_id.as_uuid())
-            .bind(agent_pubkey)
-            .fetch_optional(tx.conn())
-            .await?;
-        if exists.is_none() {
+    match locked {
+        None => {
             return Err(crate::error::DbError::NotFound(
                 "agent pubkey not found in users table".into(),
-            ));
+            ))
         }
-        // Row exists but owner already set — return false (not an error).
-        tx.commit().await?;
-        return Ok(false);
+        // Owner already set: not an error, and the proposed owner is not examined.
+        Some(Some(_)) => {
+            tx.commit().await?;
+            return Ok(false);
+        }
+        Some(None) => {}
     }
-    // The update above is the only write so far. A missing owner fails after
-    // the "agent not found" and "owner already set" outcomes, and dropping the
-    // error's transaction rolls the update back.
     crate::store::reference_check::require_user(
         tx.conn(),
         community_id,
         owner_pubkey,
         "agent owner user",
     )
+    .await?;
+    // First mint wins: the locked read above saw no owner, and the lock keeps
+    // it that way until this transaction ends.
+    sqlx::query(
+        r#"UPDATE users SET agent_owner_pubkey = $1 WHERE community_id = $2 AND pubkey = $3 AND agent_owner_pubkey IS NULL"#,
+    )
+    .bind(owner_pubkey)
+    .bind(community_id.as_uuid())
+    .bind(agent_pubkey)
+    .execute(tx.conn())
     .await?;
     crate::relay_invite::revoke_restricted_agent_invites(
         tx.conn(),
