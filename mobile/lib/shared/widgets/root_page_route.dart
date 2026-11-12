@@ -15,6 +15,8 @@ class RootPageRoute<T> extends MaterialPageRoute<T> {
   @override
   // ignore: must_call_super
   bool didPop(T? result) {
+    // A drawer or persistent sheet on the root route closes through this pop.
+    if (willHandlePopInternally) return super.didPop(result);
     FlutterError.reportError(
       FlutterErrorDetails(
         exception: StateError('Ignored a pop of the root route.'),

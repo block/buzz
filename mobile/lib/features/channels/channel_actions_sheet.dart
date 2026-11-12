@@ -1,5 +1,4 @@
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
-
 import 'dart:async';
 
 import 'package:flutter/material.dart';
@@ -511,7 +510,9 @@ Future<void> _confirmAndRun(
     if (ownRoute != null && ownRoute.isCurrent) {
       ownRoute.navigator!.pop(true);
     } else if (ownRoute != null && ownRoute.isActive) {
-      ownRoute.navigator!.removeRoute(ownRoute, true);
+      // Covered by a route the user opened meanwhile. No result, so the caller
+      // doesn't go on to pop what is now on top.
+      ownRoute.navigator!.removeRoute(ownRoute);
     }
   } catch (error) {
     if (!pageContext.mounted) return;

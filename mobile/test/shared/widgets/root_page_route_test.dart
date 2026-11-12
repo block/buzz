@@ -5,12 +5,17 @@ import 'package:flutter_test/flutter_test.dart';
 void main() {
   testWidgets('a stray pop never empties the navigator', (tester) async {
     final navigator = GlobalKey<NavigatorState>();
+    final scaffold = GlobalKey<ScaffoldState>();
     await tester.pumpWidget(
       MaterialApp(
         navigatorKey: navigator,
         onGenerateRoute: (settings) => RootPageRoute<void>(
           settings: settings,
-          builder: (_) => const Scaffold(body: Text('Home')),
+          builder: (_) => Scaffold(
+            key: scaffold,
+            drawer: const Drawer(child: Text('Drawer')),
+            body: const Text('Home'),
+          ),
         ),
       ),
     );
@@ -26,6 +31,14 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Chat'), findsNothing);
     expect(find.text('Home'), findsOneWidget);
+
+    // A drawer on Home still closes on back.
+    scaffold.currentState!.openDrawer();
+    await tester.pumpAndSettle();
+    await navigator.currentState!.maybePop();
+    await tester.pumpAndSettle();
+    expect(find.text('Drawer'), findsNothing);
+    expect(tester.takeException(), isNull);
 
     // A pop that reaches Home is reported and ignored.
     navigator.currentState!.pop();
