@@ -196,6 +196,10 @@ pub async fn insert_thread_metadata(
     )
     .await?;
 
+    // Every row written below names `channel_id`. A missing channel returns
+    // `DbError::NotFound` and writes nothing.
+    crate::store::reference_check::require_channel(tx.conn(), community_id, channel_id).await?;
+
     let result = sqlx::query(
         r#"
         INSERT INTO thread_metadata

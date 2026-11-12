@@ -3503,11 +3503,23 @@ async fn commit_participant_join(
     // is held only for the duration of the join transaction (typically
     // sub-millisecond). See `lock_channel_archived_at_in_transaction` for why
     // the lock is `FOR NO KEY UPDATE` rather than `FOR UPDATE`.
-    let channel_archived = buzz_db::channel_members::lock_channel_archived_at_in_transaction(
+    let channel_archived = match buzz_db::channel_members::lock_channel_archived_at_in_transaction(
         membership.tx(),
         channel_id,
     )
-    .await?;
+    .await
+    {
+        Ok(archived_at) => archived_at,
+        // The channel row is gone (purged since the pre-join check). There is
+        // nothing to join and nothing to auto-add the joiner to: refuse like a
+        // joiner who lost their membership, before any write.
+        Err(buzz_db::DbError::ChannelNotFound(_)) => {
+            retire_shadow();
+            let _ = tx.rollback().await;
+            return Err(JoinCommitError::MembershipLost);
+        }
+        Err(e) => return Err(e.into()),
+    };
 
     // Test hook: fires after the FOR UPDATE lock is acquired but before the
     // archived check / any write. A test can attempt a concurrent archive here

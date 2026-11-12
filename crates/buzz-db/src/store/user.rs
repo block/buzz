@@ -323,13 +323,16 @@ pub async fn search_users(
 }
 
 /// Set the owner pubkey for an agent user.
-/// The owner pubkey must already exist in the users table (FK constraint).
-/// Returns an error if the agent pubkey is not found (rows_affected == 0).
+/// The owner pubkey must already exist in the same community's users table;
+/// it is checked (and locked `FOR KEY SHARE`) in the writing transaction.
 /// Atomically set agent owner — only if no owner is currently assigned.
 ///
 /// Returns Ok(true) if ownership was set, Ok(false) if an owner already exists
-/// (caller should check whether the existing owner matches). Returns Err if the
-/// agent pubkey doesn't exist in the users table.
+/// (caller should check whether the existing owner matches). Returns
+/// `DbError::NotFound` if the agent pubkey doesn't exist in the users table, or
+/// if the agent has no owner yet and `owner_pubkey` doesn't exist there. An
+/// agent that already has an owner returns `Ok(false)` without looking at
+/// `owner_pubkey`, and a failed owner check writes nothing.
 pub async fn set_agent_owner(
     pool: &PgPool,
     community_id: CommunityId,
@@ -404,6 +407,16 @@ async fn set_agent_owner_with_operation(
         tx.commit().await?;
         return Ok(false);
     }
+    // The update above is the only write so far. A missing owner fails after
+    // the "agent not found" and "owner already set" outcomes, and dropping the
+    // error's transaction rolls the update back.
+    crate::store::reference_check::require_user(
+        tx.conn(),
+        community_id,
+        owner_pubkey,
+        "agent owner user",
+    )
+    .await?;
     crate::relay_invite::revoke_restricted_agent_invites(
         tx.conn(),
         community_id,

@@ -2034,6 +2034,15 @@ pub(crate) async fn insert_event_with_thread_metadata_tx(
         .await?;
 
         if let Some(ref meta) = thread_meta {
+            // The metadata rows below (the reply's and the parent and root
+            // stubs) all name this channel. The check runs first, so a missing
+            // channel fails the whole transaction, event insert included.
+            crate::store::reference_check::require_channel(
+                tx.conn(),
+                community_id,
+                meta.channel_id,
+            )
+            .await?;
             let broadcast_val: bool = meta.broadcast;
 
             let tm_result = sqlx::query(
