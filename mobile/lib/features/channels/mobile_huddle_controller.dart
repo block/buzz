@@ -299,6 +299,7 @@ final class MobileHuddleController extends Notifier<bool> {
   }
 
   Future<void> _finishBackgroundLeave() async {
+    final generation = _lifecycleGeneration;
     Object? leaveFailure;
     StackTrace? leaveFailureStackTrace;
     try {
@@ -308,8 +309,10 @@ final class MobileHuddleController extends Notifier<bool> {
       leaveFailureStackTrace = stackTrace;
     }
 
+    if (generation != _lifecycleGeneration) return;
     final failureCleanup = _failureCleanup;
     if (failureCleanup != null) await failureCleanup;
+    if (generation != _lifecycleGeneration) return;
     if (_lifecycleCleanups.isNotEmpty) {
       await Future.wait(_lifecycleCleanups.toList());
     }
@@ -328,7 +331,24 @@ final class MobileHuddleController extends Notifier<bool> {
     );
   }
 
+  int _lifecycleGeneration = 0;
+  Future<void>? _localLeave;
+
+  Future<void> _leaveLocalAudio() {
+    return _localLeave ??= ref
+        .read(huddleSessionProvider.notifier)
+        .leave()
+        .whenComplete(() => _localLeave = null);
+  }
+
   Future<void> _leaveForTransition() async {
+    // Retire remote finalization before rebinding the community. In-flight
+    // writes may finish in their original scope, but cannot launch another.
+    ++_lifecycleGeneration;
+    _backgroundLeave = null;
+    _failureCleanup = null;
+    _lifecycleCleanups.clear();
+    _admissionToken = null;
     final startFuture = _startFuture;
     if (startFuture != null) {
       ++_generation;
@@ -340,19 +360,13 @@ final class MobileHuddleController extends Notifier<bool> {
         // settle before the relay is rebound to the next community.
       }
     }
-    final failureCleanup = _failureCleanup;
-    if (failureCleanup != null) await failureCleanup;
-    final backgroundLeave = _backgroundLeave;
-    if (backgroundLeave != null) await backgroundLeave;
-    if (ref.read(huddleSessionProvider).isInSession) {
-      await leave();
-    }
-    if (_lifecycleCleanups.isNotEmpty) {
-      await Future.wait(_lifecycleCleanups.toList());
-    }
+    ++_generation;
+    state = false;
+    await _leaveLocalAudio();
   }
 
   Future<void> leave() async {
+    final lifecycleGeneration = _lifecycleGeneration;
     ++_generation;
     state = false;
     final session = ref.read(huddleSessionProvider);
@@ -376,7 +390,7 @@ final class MobileHuddleController extends Notifier<bool> {
     Object? localFailure;
     StackTrace? localFailureStackTrace;
     try {
-      await ref.read(huddleSessionProvider.notifier).leave();
+      await _leaveLocalAudio();
     } catch (error, stackTrace) {
       localFailure = error;
       localFailureStackTrace = stackTrace;
@@ -387,6 +401,7 @@ final class MobileHuddleController extends Notifier<bool> {
         admissionToken != null) {
       await _trackLifecycleCleanup(
         _finishLeaveLifecycle(
+          generation: lifecycleGeneration,
           admissionToken: admissionToken,
           parentChannelId: parentChannelId,
           backingChannelId: backingChannelId,
@@ -400,6 +415,7 @@ final class MobileHuddleController extends Notifier<bool> {
   }
 
   Future<void> _cleanupAfterLocalTeardown(HuddleSessionState session) async {
+    final lifecycleGeneration = _lifecycleGeneration;
     final backingChannelId = session.ephemeralChannelId;
     final admissionToken = session.wasAdmitted ? _admissionToken : null;
     if (admissionToken == null || backingChannelId == null) return;
@@ -413,6 +429,7 @@ final class MobileHuddleController extends Notifier<bool> {
         .catchError((_) => 2);
     await _trackLifecycleCleanup(
       _finishLeaveLifecycle(
+        generation: lifecycleGeneration,
         admissionToken: admissionToken,
         parentChannelId: session.parentChannelId,
         backingChannelId: backingChannelId,
@@ -431,13 +448,16 @@ final class MobileHuddleController extends Notifier<bool> {
   }
 
   Future<void> _finishLeaveLifecycle({
+    required int generation,
     required _HuddleAdmissionToken admissionToken,
     required String? parentChannelId,
     required String backingChannelId,
     required Future<int> humanCount,
   }) async {
+    if (!ref.mounted || generation != _lifecycleGeneration) return;
     final actions = ref.read(channelActionsProvider);
     final humansRemaining = await humanCount;
+    if (!ref.mounted || generation != _lifecycleGeneration) return;
     if (_newerAdmissionTargetsSameHuddle(admissionToken)) return;
     final currentSession = ref.read(huddleSessionProvider);
     if (currentSession.isInSession &&
@@ -454,6 +474,7 @@ final class MobileHuddleController extends Notifier<bool> {
           ephemeralChannelId: backingChannelId,
         );
       } catch (_) {}
+      if (!ref.mounted || generation != _lifecycleGeneration) return;
       if (_newerAdmissionTargetsSameHuddle(admissionToken)) return;
       final resumedSession = ref.read(huddleSessionProvider);
       if (resumedSession.isInSession &&
@@ -509,7 +530,7 @@ final class MobileHuddleController extends Notifier<bool> {
     if (!_finishedLifecycleAdmissions.add(admissionToken)) return;
     Object? failure;
     try {
-      await ref.read(huddleSessionProvider.notifier).leave();
+      await _leaveLocalAudio();
     } catch (error) {
       failure = error;
     }

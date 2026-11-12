@@ -350,7 +350,10 @@ class _HuddleJoinSurface extends ConsumerWidget {
     final canJoin =
         isMember && !isArchived && !ended && !stale && !blockedByOtherHuddle;
 
-    final viewHistory = ended || (stale && !isThisSession);
+    final historyState = (ended || stale) && !isThisSession;
+    final viewHistory =
+        historyState &&
+        ref.watch(channelViewerIsMemberProvider(ephemeralChannelId));
     final label = viewHistory
         ? 'View'
         : unavailable
@@ -361,7 +364,7 @@ class _HuddleJoinSurface extends ConsumerWidget {
             (true, HuddleSessionPhase.reconnecting, _) => 'Reconnecting',
             (true, HuddleSessionPhase.failed, _) => 'Retry',
             (true, _, _) => 'Joining',
-            (_, _, true) => 'View',
+            (_, _, true) => 'Ended',
             _ => 'Join',
           };
 
@@ -386,7 +389,7 @@ class _HuddleJoinSurface extends ConsumerWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    viewHistory || unavailable
+                    historyState || unavailable
                         ? 'Huddle ended'
                         : 'Huddle in progress',
                     style: context.textTheme.labelLarge?.copyWith(
