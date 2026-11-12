@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:buzz/features/channels/channel_typing_provider.dart';
 import 'package:buzz/features/channels/me/solo_working_dots.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
@@ -419,4 +421,42 @@ void main() {
       },
     );
   }
+
+  test('labelled shared chats badge before the filing record loads', () async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final channels = _Channels();
+    final record = StreamController<MeGroups>();
+    addTearDown(() => unawaited(record.close()));
+    final container = ProviderContainer(
+      overrides: [
+        savedPrefsProvider.overrideWithValue(prefs),
+        channelsProvider.overrideWith(() => channels),
+        readStateProvider.overrideWith(() => _Reads(empty: true)),
+        meGroupsProvider.overrideWith((ref) => record.stream),
+      ],
+    );
+    addTearDown(container.dispose);
+    container.listen(channelsProvider, (_, _) {});
+    container.listen(meGroupsProvider, (_, _) {});
+    container.listen(meUnreadChannelIdsProvider, (_, _) {});
+    await container.read(channelsProvider.future);
+    expect(container.read(meGroupsProvider).hasValue, isFalse);
+    expect(container.read(meUnreadChannelIdsProvider), isEmpty);
+    await container.pump();
+    expect(container.read(readStateProvider).effectiveTimestamp('solo'), 20);
+    channels.reply();
+    await container.pump();
+    expect(container.read(meUnreadChannelIdsProvider), {'solo'});
+
+    // Legacy ids join once the record arrives, seeded at their history.
+    record.add(const MeGroups(channels: ['ordinary']));
+    await container.read(meGroupsProvider.future);
+    expect(container.read(meUnreadChannelIdsProvider), {'solo'});
+    await container.pump();
+    expect(container.read(meUnreadChannelIdsProvider), {'solo'});
+    channels.reply();
+    await container.pump();
+    expect(container.read(meUnreadChannelIdsProvider), {'solo', 'ordinary'});
+  });
 }

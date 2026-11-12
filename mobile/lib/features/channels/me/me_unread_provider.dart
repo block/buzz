@@ -16,19 +16,19 @@ final meUnreadChannelIdsProvider =
 class MeUnreadChannelIds extends Notifier<Set<String>> {
   @override
   Set<String> build() {
-    final organization = ref.watch(meGroupsProvider).value;
+    // Labelled chats are known from the channel list alone; legacy ids from
+    // the filing record join once it loads.
+    final legacyChannels =
+        ref.watch(meGroupsProvider).value?.channels ?? const <String>[];
     final channels = ref.watch(channelsProvider).value ?? [];
     final reads = ref.watch(readStateProvider);
     final seeds = ref.watch(_initialSeedsProvider);
     final baselines = seeds.baselines;
     final seeded = seeds.completed;
-    if (reads.pubkey == null || organization == null) return const {};
+    if (reads.pubkey == null) return const {};
     final active = channels
         .where(
-          (c) =>
-              c.isMember &&
-              !c.isArchived &&
-              c.isSoloChat(organization.channels),
+          (c) => c.isMember && !c.isArchived && c.isSoloChat(legacyChannels),
         )
         .toList();
     final pending = active.where((c) => !seeded.contains(c.id)).toList();
