@@ -2169,25 +2169,14 @@ pub async fn get_users_bulk(
     community_id: CommunityId,
     pubkeys: &[Vec<u8>],
 ) -> Result<Vec<UserRecord>> {
-    get_users_bulk_with_operation(
-        pool,
-        community_id,
-        pubkeys,
-        crate::observability::WriterOperation::SubscriptionHistory,
-    )
-    .await
-}
-
-async fn get_users_bulk_with_operation(
-    pool: &PgPool,
-    community_id: CommunityId,
-    pubkeys: &[Vec<u8>],
-    operation: crate::observability::WriterOperation,
-) -> Result<Vec<UserRecord>> {
     if pubkeys.is_empty() {
         return Ok(Vec::new());
     }
-    let mut connection = crate::observability::acquire_writer(pool, operation).await?;
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::SubscriptionHistory,
+    )
+    .await?;
 
     // Build a parameterised IN clause: ($2, $3, ...); $1 is community_id.
     let placeholders = (2..(pubkeys.len() + 2))
@@ -2216,6 +2205,87 @@ async fn get_users_bulk_with_operation(
         });
     }
     Ok(out)
+}
+
+/// Which display names [`get_named_members_for_event_write`] returns when a
+/// filter is given.
+///
+/// The caller decides what to send (it owns the case folding of the text
+/// being matched); this type only says how the database applies it. A name is
+/// returned when either rule admits it:
+///
+/// - an ASCII-only name whose ASCII-lowercased form is a prefix of one of
+///   `lowercase_tails`;
+/// - a name with any non-ASCII character whose first character is one of
+///   `first_chars`.
+///
+/// Both rules compare code points exactly. The ASCII fold is a `translate` of
+/// `A`–`Z`, never `lower()`, and the comparisons use the `C` collation, so the
+/// database's locale cannot change which names are returned.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MentionNameFilter {
+    /// Already-lowercased text that ASCII names are matched as prefixes of.
+    pub lowercase_tails: Vec<String>,
+    /// One-character strings that a non-ASCII name may start with.
+    pub first_chars: Vec<String>,
+}
+
+/// Active members of a live channel that have a display name, as
+/// `(pubkey, display_name)`, oldest member first, read while building an
+/// event's mention tags.
+///
+/// `None` returns every named member. `Some(filter)` returns only the names
+/// the [`MentionNameFilter`] admits, so a mention lookup in a large channel
+/// reads the few members a mention could name instead of the whole roster.
+/// Returns an empty list if the channel has been soft-deleted.
+pub async fn get_named_members_for_event_write(
+    pool: &PgPool,
+    community_id: CommunityId,
+    channel_id: Uuid,
+    filter: Option<&MentionNameFilter>,
+) -> Result<Vec<(Vec<u8>, String)>> {
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
+    let rows = sqlx::query(
+        r#"
+        SELECT cm.pubkey, u.display_name
+        FROM channel_members cm
+        JOIN channels c ON cm.community_id = c.community_id AND cm.channel_id = c.id AND c.deleted_at IS NULL
+        JOIN users u ON u.community_id = cm.community_id AND u.pubkey = cm.pubkey
+        WHERE cm.community_id = $1 AND cm.channel_id = $2 AND cm.removed_at IS NULL
+          AND u.display_name IS NOT NULL
+          AND (
+            $3::text[] IS NULL
+            OR (
+              octet_length(u.display_name) = char_length(u.display_name)
+              AND EXISTS (
+                SELECT 1 FROM unnest($3::text[]) AS tail(text)
+                WHERE starts_with(
+                  tail.text COLLATE "C",
+                  translate(u.display_name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')
+                )
+              )
+            )
+            OR (
+              octet_length(u.display_name) <> char_length(u.display_name)
+              AND left(u.display_name, 1) COLLATE "C" = ANY($4::text[])
+            )
+          )
+        ORDER BY cm.joined_at ASC, cm.pubkey ASC
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .bind(filter.map(|f| &f.lowercase_tails))
+    .bind(filter.map(|f| &f.first_chars))
+    .fetch_all(&mut *connection)
+    .await?;
+    rows.into_iter()
+        .map(|row| Ok((row.try_get("pubkey")?, row.try_get("display_name")?)))
+        .collect()
 }
 
 fn row_to_member_record(row: sqlx::postgres::PgRow) -> Result<MemberRecord> {
@@ -2683,20 +2753,16 @@ impl Db {
         get_users_bulk(&self.pool, community_id, pubkeys).await
     }
 
-    /// Bulk-fetch user names while constructing an event and its mention tags.
-    #[datastore_span(name = "get_users_bulk_for_event_write", system = "postgresql")]
-    pub async fn get_users_bulk_for_event_write(
+    /// Read a channel's named members, optionally only the names a mention
+    /// filter admits, while constructing an event and its mention tags.
+    #[datastore_span(name = "get_named_members_for_event_write", system = "postgresql")]
+    pub async fn get_named_members_for_event_write(
         &self,
         community_id: CommunityId,
-        pubkeys: &[Vec<u8>],
-    ) -> Result<Vec<UserRecord>> {
-        get_users_bulk_with_operation(
-            &self.pool,
-            community_id,
-            pubkeys,
-            crate::observability::WriterOperation::EventWrite,
-        )
-        .await
+        channel_id: Uuid,
+        filter: Option<&MentionNameFilter>,
+    ) -> Result<Vec<(Vec<u8>, String)>> {
+        get_named_members_for_event_write(&self.pool, community_id, channel_id, filter).await
     }
 
     /// Returns the count of active members in a channel.
@@ -3224,6 +3290,164 @@ mod postgres_tests {
             late.role, "owner",
             "role of a late-joining owner must resolve correctly"
         );
+    }
+
+    /// A filtered named-member read over a 1,000-member channel returns only
+    /// the names the filter admits, by exact code point (no `lower()`, no
+    /// `LIKE` wildcards), and never removed members, other channels' members
+    /// or nameless members. `None` returns the whole named roster.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn named_members_filter_returns_only_admitted_names() {
+        let pool = setup_pool().await;
+        let community_id = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_id);
+        let creator = random_pubkey();
+        let channel = create_test_channel(
+            &pool,
+            community_id,
+            "mention-candidates",
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            &creator,
+            None,
+        )
+        .await
+        .expect("create channel");
+        let other_channel = create_test_channel(
+            &pool,
+            community_id,
+            "mention-candidates-other",
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            &creator,
+            None,
+        )
+        .await
+        .expect("create other channel");
+
+        let roster_size = 1_000;
+        sqlx::query(
+            "INSERT INTO users (community_id, pubkey, display_name) \
+             SELECT $1, decode(lpad(to_hex(n), 64, '0'), 'hex'), 'Member ' || n \
+             FROM generate_series(1, $2) n",
+        )
+        .bind(community_id)
+        .bind(roster_size)
+        .execute(&pool)
+        .await
+        .expect("insert roster users");
+        sqlx::query(
+            "INSERT INTO channel_members (community_id, channel_id, pubkey, joined_at) \
+             SELECT $1, $2, decode(lpad(to_hex(n), 64, '0'), 'hex'), NOW() + (n || ' seconds')::interval \
+             FROM generate_series(1, $3) n",
+        )
+        .bind(community_id)
+        .bind(channel.id)
+        .bind(roster_size)
+        .execute(&pool)
+        .await
+        .expect("insert roster members");
+
+        // (display name, admitted by the filter below)
+        let named: &[(Option<&str>, bool)] = &[
+            (Some("Robby"), true),
+            (Some("ROBBY"), true),
+            (Some("Rob"), true),
+            (Some("Robert"), false),
+            (Some("Robby please look"), false),
+            (Some("R_b%"), false),
+            (Some("İlker"), true),
+            // ASCII "ilker" is not a prefix of "i\u{307}lker" code point by
+            // code point, whatever lower() would do in the database locale.
+            (Some("Ilker"), false),
+            (Some("rené"), true),
+            (Some("Řehoř"), false),
+            (Some("Zoë"), false),
+            (None, false),
+        ];
+        let mut named_members = Vec::new();
+        for (name, admitted) in named {
+            let pubkey = random_pubkey();
+            sqlx::query(
+                "INSERT INTO users (community_id, pubkey, display_name) VALUES ($1, $2, $3)",
+            )
+            .bind(community_id)
+            .bind(&pubkey)
+            .bind(name)
+            .execute(&pool)
+            .await
+            .expect("insert named user");
+            sqlx::query(
+                "INSERT INTO channel_members (community_id, channel_id, pubkey) VALUES ($1, $2, $3)",
+            )
+            .bind(community_id)
+            .bind(channel.id)
+            .bind(&pubkey)
+            .execute(&pool)
+            .await
+            .expect("insert named member");
+            named_members.push((pubkey, *name, *admitted));
+        }
+
+        // Same name as an admitted member, but not an active member here.
+        for (channel_id, removed) in [(channel.id, true), (other_channel.id, false)] {
+            let pubkey = random_pubkey();
+            sqlx::query(
+                "INSERT INTO users (community_id, pubkey, display_name) VALUES ($1, $2, 'Robby')",
+            )
+            .bind(community_id)
+            .bind(&pubkey)
+            .execute(&pool)
+            .await
+            .expect("insert excluded user");
+            sqlx::query(
+                "INSERT INTO channel_members (community_id, channel_id, pubkey, removed_at) \
+                 VALUES ($1, $2, $3, CASE WHEN $4 THEN NOW() END)",
+            )
+            .bind(community_id)
+            .bind(channel_id)
+            .bind(&pubkey)
+            .bind(removed)
+            .execute(&pool)
+            .await
+            .expect("insert excluded member");
+        }
+
+        let filter = MentionNameFilter {
+            lowercase_tails: vec!["robby please".to_owned(), "i\u{307}lker".to_owned()],
+            first_chars: ["r", "R", "i", "I", "İ"].map(str::to_owned).to_vec(),
+        };
+        let filtered =
+            get_named_members_for_event_write(&pool, community, channel.id, Some(&filter))
+                .await
+                .expect("filtered named members");
+        let expected: Vec<(Vec<u8>, String)> = named_members
+            .iter()
+            .filter(|(_, _, admitted)| *admitted)
+            .map(|(pubkey, name, _)| {
+                (
+                    pubkey.clone(),
+                    name.expect("admitted names exist").to_owned(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            filtered, expected,
+            "only admitted names, in roster order, out of {roster_size} members"
+        );
+
+        let all = get_named_members_for_event_write(&pool, community, channel.id, None)
+            .await
+            .expect("all named members");
+        let named_count = named_members
+            .iter()
+            .filter(|(_, name, _)| name.is_some())
+            .count();
+        assert_eq!(all.len(), roster_size as usize + named_count);
+        assert_eq!(all.iter().filter(|(_, name)| name == "Robby").count(), 1);
     }
 
     #[tokio::test]

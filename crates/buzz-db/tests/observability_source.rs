@@ -284,8 +284,16 @@ fn p0_pool_acquisitions_use_typed_operation_pairs_without_other() {
     let channel_members = include_str!("../src/store/channel_members.rs");
     assert!(channel_members.contains("async fn get_members_with_operation("));
     assert!(channel_members.contains("pub async fn get_members_for_event_write("));
-    assert!(channel_members.contains("async fn get_users_bulk_with_operation("));
-    assert!(channel_members.contains("pub async fn get_users_bulk_for_event_write("));
+    let named_members = channel_members
+        .split_once("pub async fn get_named_members_for_event_write(")
+        .expect("mention candidates must be read through the event-write helper")
+        .1
+        .split_once("fn row_to_member_record(")
+        .expect("named-member read must precede row mapping")
+        .0;
+    assert!(named_members.contains("WriterOperation::EventWrite"));
+    assert!(named_members.contains("fetch_all(&mut *connection)"));
+    assert!(!named_members.contains("fetch_all(pool)"));
 
     let huddle_link = event
         .split_once("async fn huddle_started_link_exists_with_operation(")
@@ -302,8 +310,8 @@ fn p0_pool_acquisitions_use_typed_operation_pairs_without_other() {
     assert!(audio.contains(".huddle_started_link_exists("));
 
     let workflow_sink = include_str!("../../buzz-relay/src/workflow_sink.rs");
-    assert!(workflow_sink.contains(".get_members_for_event_write("));
-    assert!(workflow_sink.contains(".get_users_bulk_for_event_write("));
+    assert!(workflow_sink.contains(".get_named_members_for_event_write("));
+    assert!(!workflow_sink.contains(".get_users_bulk"));
 
     for write_caller in [
         include_str!("../../buzz-relay/src/handlers/side_effects.rs"),

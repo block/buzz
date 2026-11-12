@@ -1527,7 +1527,7 @@ mod tests {
             .get_members_for_event_write(test_scope, Uuid::new_v4())
             .await;
         let _ = writer_db
-            .get_users_bulk_for_event_write(test_scope, &[vec![11; 32]])
+            .get_named_members_for_event_write(test_scope, Uuid::new_v4(), None)
             .await;
         let _ = writer_db
             .huddle_started_link_exists_for_event_write(
