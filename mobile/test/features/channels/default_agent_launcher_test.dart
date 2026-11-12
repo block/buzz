@@ -1,5 +1,10 @@
 import 'dart:async';
 
+import 'package:buzz/features/channels/bestie_conversation.dart';
+import 'package:buzz/features/channels/channel.dart';
+import 'package:buzz/features/channels/channel_detail_page.dart';
+import 'package:buzz/features/channels/channel_management_provider.dart';
+import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/default_agent_launcher.dart';
 import 'package:buzz/features/channels/first_agent_callout.dart';
 import 'package:buzz/shared/agents/remote_agents.dart';
@@ -87,4 +92,100 @@ void main() {
       await tester.pumpWidget(const SizedBox());
     },
   );
+
+  testWidgets('a slow Bestie lookup does not open over a newer screen', (
+    tester,
+  ) async {
+    final nsec = nostr.Nip19.encode(
+      prefix: nostr.Nip19Prefix.nsec,
+      data: '0' * 63 + '1',
+    );
+    final relay = FakeRelay();
+    final scope = MeSync(
+      relay,
+      RelayConfig(baseUrl: 'https://a.test', nsec: nsec),
+    );
+    await saveDefaultAgent(scope, 'a' * 64);
+    final actions = _SlowDmActions();
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          savedPrefsProvider.overrideWithValue(prefs),
+          meSyncProvider.overrideWithValue(scope),
+          relaySessionProvider.overrideWith(() => relay),
+          remoteAgentsEnabledProvider.overrideWithValue(true),
+          channelsProvider.overrideWith(_NoChannels.new),
+          channelActionsProvider.overrideWithValue(actions),
+        ],
+        child: MaterialApp(
+          theme: AppTheme.light(),
+          home: Scaffold(body: DefaultAgentLauncher(onChooseAgent: () {})),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byType(IconButton));
+    await tester.pump();
+    // The app shortcut asking for the same conversation meanwhile waits on
+    // the same lookup instead of starting a second one.
+    final launcher = tester.element(find.byType(DefaultAgentLauncher));
+    unawaited(
+      openBestieConversation(launcher, launcher as WidgetRef, 'a' * 64),
+    );
+    await tester.pump();
+    expect(actions.calls, 1);
+    Navigator.of(
+      tester.element(find.byType(DefaultAgentLauncher)),
+    ).push(MaterialPageRoute<void>(builder: (_) => const Text('Elsewhere')));
+    await tester.pumpAndSettle();
+    actions.dm.complete(
+      Channel(
+        id: 'dm',
+        name: 'Bestie',
+        description: '',
+        createdBy: 'self',
+        createdAt: DateTime(2026),
+        memberCount: 2,
+        visibility: 'private',
+        channelType: 'dm',
+        isMember: true,
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Elsewhere'), findsOneWidget);
+    expect(find.byType(ChannelDetailPage), findsNothing);
+
+    // The next open starts a fresh lookup.
+    Navigator.of(launcher).pop();
+    await tester.pumpAndSettle();
+    await tester.tap(find.byType(IconButton));
+    await tester.pumpAndSettle();
+    expect(actions.calls, 2);
+    expect(find.byType(ChannelDetailPage), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+  });
+}
+
+class _NoChannels extends ChannelsNotifier {
+  @override
+  Future<List<Channel>> build() async => const [];
+}
+
+class _SlowDmActions implements ChannelActions {
+  final dm = Completer<Channel>();
+  var calls = 0;
+
+  @override
+  Future<Channel> openDm({
+    required List<String> pubkeys,
+    bool waitForChannelList = true,
+  }) {
+    calls++;
+    return dm.future;
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
