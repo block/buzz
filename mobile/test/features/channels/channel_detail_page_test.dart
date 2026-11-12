@@ -67,6 +67,7 @@ import 'package:buzz/features/channels/ime_metrics_settle_observer.dart';
 import 'package:buzz/features/channels/local_message_send_animation_provider.dart';
 import 'package:buzz/features/channels/local_send_bubble_surface.dart';
 import 'package:buzz/features/channels/message_action_backdrop_state.dart';
+import 'package:buzz/features/channels/message_author_visibility.dart';
 import 'package:buzz/features/channels/message_content.dart';
 import 'package:buzz/features/channels/mobile_huddle_controller.dart';
 import 'package:buzz/features/channels/reaction_row.dart';
@@ -14971,9 +14972,7 @@ void main() {
       },
     );
 
-    testWidgets('Android private channel header shows name without lock', (
-      tester,
-    ) async {
+    testWidgets('shows lock icon for private channel', (tester) async {
       final privateChannel = Channel(
         id: _channelId,
         name: 'secret',
@@ -14992,7 +14991,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('secret'), findsOneWidget);
-      expect(find.byIcon(BuzzIcons.lock), findsNothing);
+      expect(find.byIcon(BuzzIcons.lock), findsOneWidget);
     });
   });
 
