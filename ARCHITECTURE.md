@@ -509,7 +509,7 @@ shape is an explicit transition, not a flag day:
 - **Replica floor:** supported channel-event insertions check `created_at`
   against `clock_timestamp()` on their admitted transaction using the shared
   960-second floor. The ordered heartbeat handshake and activity scan retain
-  the same fence-wall calculation. Migration 0087 retires only the deferred
+  the same fence-wall calculation. Migration 0089 retires only the deferred
   floor trigger/function; writer connections no longer arm its GUC and probe
   startup no longer requires those objects.
 - **Floor retirement deploy gate:** phase 1 must be deployed to every writer
