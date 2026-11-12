@@ -2452,17 +2452,21 @@ const IDLE_POOL_DRAIN_MAX_LINES: usize = 1024;
 /// `last_agent_traffic` is when an idle-pool tick last read agent stdout
 /// between turns (see `AcpClient::drain_between_turns`). Traffic within the
 /// idle bound defers the sleep, so the pool sleeps one full bound after the
-/// agent goes quiet. The deferral is capped at `max_deferral` (the configured
-/// max turn duration) since the last buzz-acp activity, so an agent that
-/// never stops writing cannot keep the pool awake forever.
+/// agent goes quiet. `tool_calls_open` (see `AcpClient::has_open_tool_calls`)
+/// covers a tool step that runs silently for longer than the bound. The
+/// deferral is capped at `max_deferral` (the configured max turn duration)
+/// since the last buzz-acp activity, so an agent that never goes quiet or
+/// never reports a tool call finished cannot keep the pool awake forever.
 fn agent_traffic_defers_idle_sleep(
     last_agent_traffic: Option<tokio::time::Instant>,
+    tool_calls_open: bool,
     last_activity: tokio::time::Instant,
     now: tokio::time::Instant,
     bound: Duration,
     max_deferral: Duration,
 ) -> bool {
-    last_agent_traffic.is_some_and(|traffic| now.duration_since(traffic) < bound)
+    (tool_calls_open
+        || last_agent_traffic.is_some_and(|traffic| now.duration_since(traffic) < bound))
         && now.duration_since(last_activity) < max_deferral
 }
 
@@ -2683,6 +2687,7 @@ mod idle_pool_sleep_tests {
         ));
         assert!(agent_traffic_defers_idle_sleep(
             Some(traffic),
+            false,
             last_activity,
             due,
             bound,
@@ -2691,6 +2696,7 @@ mod idle_pool_sleep_tests {
         // One full bound after the agent went quiet, the sleep proceeds.
         assert!(!agent_traffic_defers_idle_sleep(
             Some(traffic),
+            false,
             last_activity,
             traffic + bound,
             bound,
@@ -2703,6 +2709,7 @@ mod idle_pool_sleep_tests {
         let (last, now, bound) = ready_after_bound();
         assert!(!agent_traffic_defers_idle_sleep(
             None,
+            false,
             last,
             now,
             bound,
@@ -2722,6 +2729,7 @@ mod idle_pool_sleep_tests {
 
         assert!(agent_traffic_defers_idle_sleep(
             Some(just_before_cap),
+            false,
             last_activity,
             just_before_cap,
             bound,
@@ -2729,8 +2737,44 @@ mod idle_pool_sleep_tests {
         ));
         assert!(!agent_traffic_defers_idle_sleep(
             Some(at_cap),
+            false,
             last_activity,
             at_cap,
+            bound,
+            cap
+        ));
+    }
+
+    #[test]
+    fn open_tool_call_defers_without_traffic() {
+        // A silent tool step longer than the bound: no stdout since the
+        // tool_call, but the call is still open.
+        let bound = Duration::from_secs(900);
+        let cap = Duration::from_secs(7200);
+        let last_activity = tokio::time::Instant::now();
+        let due = last_activity + Duration::from_secs(1800);
+        assert!(agent_traffic_defers_idle_sleep(
+            Some(last_activity),
+            true,
+            last_activity,
+            due,
+            bound,
+            cap
+        ));
+        assert!(!agent_traffic_defers_idle_sleep(
+            Some(last_activity),
+            false,
+            last_activity,
+            due,
+            bound,
+            cap
+        ));
+        // A tool call that never reports completion is still bounded.
+        assert!(!agent_traffic_defers_idle_sleep(
+            None,
+            true,
+            last_activity,
+            last_activity + cap,
             bound,
             cap
         ));
@@ -3939,9 +3983,16 @@ async fn run_harness(
                     // own (e.g. after a background-task notification) still
                     // streams session/update traffic; read it here and treat it
                     // as activity so the pool is never torn down mid-work.
+                    // `unconstrained`: a spent coop budget must not make a
+                    // ready pipe read as pending (and the agent as quiet).
                     let mut drained = 0;
+                    let mut tool_calls_open = false;
                     for agent in pool.agents_mut().iter_mut().flatten() {
-                        drained += agent.acp.drain_between_turns(IDLE_POOL_DRAIN_MAX_LINES).await;
+                        drained += tokio::task::unconstrained(
+                            agent.acp.drain_between_turns(IDLE_POOL_DRAIN_MAX_LINES),
+                        )
+                        .await;
+                        tool_calls_open |= agent.acp.has_open_tool_calls();
                     }
                     let now = tokio::time::Instant::now();
                     if drained > 0 {
@@ -3963,6 +4014,7 @@ async fn run_harness(
                         idle_pool_sleep_deferral_logged = false;
                     } else if agent_traffic_defers_idle_sleep(
                         last_agent_traffic,
+                        tool_calls_open,
                         last_activity,
                         now,
                         idle_pool_sleep_bound,

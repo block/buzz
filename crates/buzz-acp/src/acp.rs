@@ -26,6 +26,11 @@ mod frame_writer;
 /// Lines exceeding this limit are rejected to prevent OOM from rogue agents.
 const MAX_LINE_SIZE: usize = 10_000_000; // 10 MB
 
+/// Upper bound on tracked open tool calls per agent process. Beyond it the
+/// agent already counts as busy; the bound only caps memory for an agent that
+/// never reports tool completion.
+const MAX_OPEN_TOOL_CALLS: usize = 256;
+
 /// Package and binary name used by Buzz's Pi ACP fork.
 pub(crate) const BUZZ_PI_ACP_NAME: &str = "buzz-pi-acp";
 
@@ -215,6 +220,13 @@ pub struct AcpClient {
     /// outside of a goose-native turn — the read loop's steer arm is
     /// disabled in that case.
     steer_rx: Option<tokio::sync::mpsc::Receiver<crate::pool::SteerRequest>>,
+    /// `toolCallId`s of tool calls the agent started (`tool_call`) and has not
+    /// yet finished (`tool_call_update` with status `completed`/`failed`).
+    /// A long tool step is silent on stdout, so the idle-pool sleep gate reads
+    /// this through [`has_open_tool_calls`](Self::has_open_tool_calls).
+    /// Cleared on `session/new` and on cancel; a respawned agent starts empty.
+    /// Bounded by [`MAX_OPEN_TOOL_CALLS`].
+    open_tool_calls: std::collections::HashSet<String>,
     /// Usage tracker for goose/buzz-agent's cumulative notification format.
     goose_usage: UsageTracker,
     /// Per-turn prompt-response usage and Claude's optional cumulative cost.
@@ -630,6 +642,7 @@ impl AcpClient {
             active_run_id: None,
             steering_supported: false,
             steer_rx: None,
+            open_tool_calls: std::collections::HashSet::new(),
             goose_usage: UsageTracker::default(),
             standard_usage: StandardUsageTracker::default(),
             standard_adapter,
@@ -761,6 +774,7 @@ impl AcpClient {
             .ok_or_else(|| AcpError::Protocol("session/new response missing sessionId".into()))?
             .to_owned();
         tracing::info!(target: "acp::session", "session created: {session_id}");
+        self.open_tool_calls.clear();
         Ok(SessionNewResponse {
             session_id,
             raw: result,
@@ -1120,6 +1134,9 @@ impl AcpClient {
             self.permission_responded = false;
         }
 
+        // A cancelled turn's tool calls may never get a terminal update.
+        self.open_tool_calls.clear();
+
         // Step 2: send session/cancel notification (no id)
         self.session_cancel(session_id).await?;
         tracing::info!(target: "acp::cancel", "sent session/cancel for {session_id}");
@@ -1413,14 +1430,40 @@ impl AcpClient {
                 continue;
             };
             self.observe("acp_read", msg.clone());
-            if let Some(method) = msg.get("method").and_then(|v| v.as_str()) {
-                if let Err(e) = self.handle_agent_method(method, &msg).await {
-                    tracing::warn!("between-turn agent message handling failed: {e}");
-                    break;
+            let Some(method) = msg.get("method").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            // Usage notifications only count as traffic here. Recording a
+            // cumulative snapshot with no turn in flight would advance the
+            // baseline and drop those tokens from the next turn's usage
+            // record; the next in-turn snapshot carries them instead.
+            if is_usage_notification(method, &msg) {
+                continue;
+            }
+            if let Err(e) = self.handle_agent_method(method, &msg).await {
+                tracing::warn!("between-turn agent message handling failed: {e}");
+                if method == "session/request_permission" {
+                    self.cancel_unanswered_permission().await;
                 }
+                break;
             }
         }
         read
+    }
+
+    /// Answer a permission request that [`handle_permission_request`]
+    /// accepted but could not answer (no usable option) with a `cancelled`
+    /// outcome, as `cancel_with_cleanup` does, so the agent does not wait on it.
+    async fn cancel_unanswered_permission(&mut self) {
+        let Some(perm_id) = self.pending_permission_id.take() else {
+            return;
+        };
+        if !std::mem::take(&mut self.permission_responded) {
+            let response = permission_response_cancelled(&perm_id);
+            if let Err(e) = self.write_ndjson(&response).await {
+                tracing::warn!("failed to cancel permission request id={perm_id}: {e}");
+            }
+        }
     }
 
     /// Idle-aware message loop: like [`read_until_response`] but resets an idle
@@ -1847,7 +1890,23 @@ impl AcpClient {
         }
     }
 
+    /// Log a `session/update` notification via tracing.
+    ///
+    /// The discriminator field is `sessionUpdate` (not `type`) per the ACP schema.
+    /// Returns `true` if the update indicates a tool call started, signaling that
+    /// the idle clock should be explicitly reset (the agent will be silent while
+    /// the tool executes).
+    ///
+    /// Takes `&mut self` (not `&self`) because some updates carry agent state
+    /// the client must observe — notably goose's `session_info_update` with
+    /// `_meta.goose.activeRunId`, which seeds [`active_run_id`](Self::active_run_id)
+    /// so the steer arm can target `_goose/unstable/session/steer` at the
+    /// correct run. Agents that never emit it (claude-agent-acp, codex-acp)
+    /// leave it `None` and are steered via `_session/steering` instead, which
+    /// needs no run id. Tool-call start/finish updates also maintain
+    /// [`open_tool_calls`](Self::open_tool_calls).
     fn handle_session_update(&mut self, msg: &serde_json::Value) -> bool {
+        self.track_tool_call(&msg["params"]["update"]);
         let update = &msg["params"]["update"];
         let update_type = update
             .get("sessionUpdate")
@@ -1953,6 +2012,37 @@ impl AcpClient {
                 false
             }
         }
+    }
+
+    /// Maintain [`open_tool_calls`](Self::open_tool_calls) from a
+    /// `session/update` payload: `tool_call` opens an entry unless it is
+    /// already terminal, `tool_call_update` with a terminal status closes it.
+    fn track_tool_call(&mut self, update: &serde_json::Value) {
+        let Some(id) = update.get("toolCallId").and_then(|v| v.as_str()) else {
+            return;
+        };
+        let terminal = matches!(
+            update.get("status").and_then(|v| v.as_str()),
+            Some("completed" | "failed")
+        );
+        match update.get("sessionUpdate").and_then(|v| v.as_str()) {
+            Some("tool_call") if !terminal => {
+                if self.open_tool_calls.len() < MAX_OPEN_TOOL_CALLS {
+                    self.open_tool_calls.insert(id.to_owned());
+                }
+            }
+            Some("tool_call" | "tool_call_update") if terminal => {
+                self.open_tool_calls.remove(id);
+            }
+            _ => {}
+        }
+    }
+
+    /// Whether the agent has started a tool call it has not finished yet.
+    /// A tool step can run silently for longer than the idle-pool sleep
+    /// bound, so the sleep gate treats an open tool call as a busy agent.
+    pub fn has_open_tool_calls(&self) -> bool {
+        !self.open_tool_calls.is_empty()
     }
 
     /// Record the standard ACP cumulative cost notification when emitted by
@@ -2211,6 +2301,17 @@ fn permission_response_selected(id: &serde_json::Value, option_id: &str) -> serd
         "id": id,
         "result": { "outcome": { "outcome": "selected", "optionId": option_id } }
     })
+}
+
+/// Whether `msg` only reports cumulative usage: goose's
+/// `_goose/unstable/session/update` or a standard `usage_update`.
+fn is_usage_notification(method: &str, msg: &serde_json::Value) -> bool {
+    method == "_goose/unstable/session/update"
+        || (method == "session/update"
+            && msg
+                .pointer("/params/update/sessionUpdate")
+                .and_then(|v| v.as_str())
+                == Some("usage_update"))
 }
 
 /// Build a JSON-RPC permission response with `outcome: "cancelled"`.
@@ -5085,6 +5186,111 @@ sleep 1"#,
         assert!(usage.delta_reliable);
         assert_eq!(usage.turn_input_tokens, Some(800));
         assert_eq!(usage.turn_output_tokens, Some(250));
+    }
+
+    #[tokio::test]
+    async fn drain_between_turns_leaves_usage_for_the_next_turn() {
+        // A cumulative goose snapshot read between turns must not advance the
+        // baseline, or its tokens would never reach a turn's usage record.
+        let between = goose_usage_update_msg("s", 1500, 300, None).to_string();
+        let mut client = spawn_script(&format!("echo '{between}'; sleep 10")).await;
+        client.goose_usage.begin_turn("s");
+        client.handle_goose_usage_update(&goose_usage_update_msg("s", 1000, 200, None));
+        let _ = client.take_turn_usage();
+
+        assert_eq!(
+            drain_until(&mut client, 1).await,
+            1,
+            "usage still counts as traffic"
+        );
+
+        client.goose_usage.begin_turn("s");
+        client.handle_goose_usage_update(&goose_usage_update_msg("s", 1800, 450, None));
+        let usage = client.take_turn_usage().expect("turn 2 usage");
+        assert_eq!(usage.turn_input_tokens, Some(800));
+        assert_eq!(usage.turn_output_tokens, Some(250));
+        client.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn drain_between_turns_cancels_unanswerable_permission_requests() {
+        // Neither allow_once nor reject_once: reply `cancelled` instead of
+        // leaving the agent waiting.
+        let request = r#"{"jsonrpc":"2.0","id":"perm-2","method":"session/request_permission","params":{"sessionId":"s","options":[{"optionId":"always","kind":"allow_always","name":"Always"}]}}"#;
+        let mut client = spawn_script(&format!(
+            r#"echo '{request}'; IFS= read -r reply; sleep 0.5; printf 'echo:%s\n' "$reply"; sleep 10"#
+        ))
+        .await;
+        assert_eq!(drain_until(&mut client, 1).await, 1);
+        let echoed = tokio::time::timeout(std::time::Duration::from_secs(5), client.reader.next())
+            .await
+            .expect("agent should echo the permission reply")
+            .expect("stdout open")
+            .expect("readable line");
+        let reply: serde_json::Value =
+            serde_json::from_str(echoed.strip_prefix("echo:").expect("echo prefix"))
+                .expect("reply is JSON");
+        assert_eq!(reply["id"], "perm-2");
+        assert_eq!(reply["result"]["outcome"]["outcome"], "cancelled");
+        client.shutdown().await;
+    }
+
+    fn tool_update(kind: &str, id: &str, status: Option<&str>) -> serde_json::Value {
+        let mut update = serde_json::json!({"sessionUpdate": kind, "toolCallId": id});
+        if let Some(status) = status {
+            update["status"] = serde_json::json!(status);
+        }
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {"sessionId": "s", "update": update}
+        })
+    }
+
+    #[tokio::test]
+    async fn open_tool_calls_track_start_and_terminal_updates() {
+        let mut client = spawn_inert_client().await;
+        assert!(!client.has_open_tool_calls());
+
+        client.handle_session_update(&tool_update("tool_call", "a", Some("pending")));
+        client.handle_session_update(&tool_update("tool_call", "b", None));
+        client.handle_session_update(&tool_update("tool_call_update", "a", Some("in_progress")));
+        assert!(client.has_open_tool_calls());
+        client.handle_session_update(&tool_update("tool_call_update", "a", Some("completed")));
+        assert!(client.has_open_tool_calls(), "b is still running");
+        client.handle_session_update(&tool_update("tool_call_update", "b", Some("failed")));
+        assert!(!client.has_open_tool_calls());
+
+        // A tool call reported already finished never opens.
+        client.handle_session_update(&tool_update("tool_call", "c", Some("completed")));
+        assert!(!client.has_open_tool_calls());
+    }
+
+    #[tokio::test]
+    async fn open_tool_call_seen_between_turns_is_cleared_by_new_session() {
+        let started = tool_update("tool_call", "long", Some("in_progress")).to_string();
+        let script = format!(
+            r#"echo '{started}'
+            read -t 5 _init
+            echo '{{"jsonrpc":"2.0","id":0,"result":{{"protocolVersion":1,"agentCapabilities":{{}}}}}}'
+            read -t 5 _new
+            echo '{{"jsonrpc":"2.0","id":1,"result":{{"sessionId":"fresh"}}}}'
+            sleep 10"#
+        );
+        let mut client = spawn_script(&script).await;
+        assert_eq!(drain_until(&mut client, 1).await, 1);
+        assert!(
+            client.has_open_tool_calls(),
+            "silent tool step keeps the agent busy"
+        );
+
+        client.initialize().await.expect("initialize");
+        client
+            .session_new("/tmp", vec![], None, None)
+            .await
+            .expect("session/new");
+        assert!(!client.has_open_tool_calls(), "a new session starts clean");
+        client.shutdown().await;
     }
 
     #[tokio::test]
