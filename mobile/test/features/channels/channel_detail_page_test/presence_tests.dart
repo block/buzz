@@ -2,7 +2,7 @@ part of '../channel_detail_page_test.dart';
 
 void presenceTests() {
   testWidgets(
-    'hosted agent DM stays Online when its worker socket is offline',
+    'agent DM header omits presence when its worker socket is offline',
     (tester) async {
       final cache = _PresenceFixture();
       final channel = Channel(
@@ -39,19 +39,18 @@ void presenceTests() {
         ),
       );
       await tester.pumpAndSettle();
+      final subscription = ProviderScope.containerOf(
+        tester.element(find.byType(ChannelDetailPage)),
+      ).listen(presenceCacheProvider, (_, _) {});
+      addTearDown(subscription.close);
       cache.setPresence('offline');
       await tester.pumpAndSettle();
-      expect(
-        tester
-            .widget<Text>(find.byKey(const ValueKey('dm-header-presence')))
-            .data,
-        'Online',
-      );
+      expect(find.byKey(const ValueKey('dm-header-presence')), findsNothing);
       expect(find.text('Offline'), findsNothing);
     },
   );
 
-  testWidgets('DM header never substitutes offline for unknown presence', (
+  testWidgets('DM header stays name-only through presence updates', (
     tester,
   ) async {
     await _loadPresenceFonts(tester);
@@ -84,6 +83,10 @@ void presenceTests() {
       ),
     );
     await tester.pumpAndSettle();
+    final subscription = ProviderScope.containerOf(
+      tester.element(find.byType(ChannelDetailPage)),
+    ).listen(presenceCacheProvider, (_, _) {});
+    addTearDown(subscription.close);
     final header = find.byKey(const ValueKey('dm-header-text-stack'));
     final center = tester.getCenter(header).dx;
     for (final entry in <String?, String>{
@@ -94,17 +97,12 @@ void presenceTests() {
     }.entries) {
       cache.setPresence(entry.key);
       await tester.pumpAndSettle();
-      expect(
-        tester
-            .widget<Text>(find.byKey(const ValueKey('dm-header-presence')))
-            .data,
-        entry.value,
-      );
+      expect(find.byKey(const ValueKey('dm-header-presence')), findsNothing);
       expect(
         find.byKey(const ValueKey('dm-header-presence-dot')),
-        entry.key == null ? findsNothing : findsOneWidget,
+        findsNothing,
       );
-      expect(find.byKey(const ValueKey('dm-header-avatar')), findsNothing);
+      expect(find.byKey(const ValueKey('dm-header-avatar')), findsOneWidget);
       expect(tester.getCenter(header).dx, center);
       await _capturePresence(tester, 'dm-${entry.value}');
     }

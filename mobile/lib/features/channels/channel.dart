@@ -34,6 +34,10 @@ class Channel {
   /// relay's listed-name rule.
   final bool isUnlisted;
 
+  /// Whether joining gives the read-only `guest` role (see
+  /// [ChannelData.joinsAsGuest]).
+  final bool joinsAsGuest;
+
   const Channel({
     required this.id,
     required this.name,
@@ -54,6 +58,7 @@ class Channel {
     this.ttlSeconds,
     this.ttlDeadline,
     this.isUnlisted = false,
+    this.joinsAsGuest = false,
   });
 
   factory Channel.fromJson(Map<String, dynamic> json) => Channel(
@@ -85,6 +90,7 @@ class Channel {
         ? DateTime.parse(json['ttl_deadline'] as String)
         : null,
     isUnlisted: json['unlisted'] as bool? ?? false,
+    joinsAsGuest: json['joins_as_guest'] as bool? ?? false,
   );
 
   /// Inverse of [Channel.fromJson].
@@ -108,6 +114,7 @@ class Channel {
     'ttl_seconds': ttlSeconds,
     'ttl_deadline': ttlDeadline?.toIso8601String(),
     'unlisted': isUnlisted,
+    'joins_as_guest': joinsAsGuest,
   };
 
   bool get isEphemeral => ttlSeconds != null || ttlDeadline != null;
@@ -189,6 +196,7 @@ class Channel {
     ttlSeconds: details.ttlSeconds,
     ttlDeadline: details.ttlDeadline,
     isUnlisted: isUnlisted,
+    joinsAsGuest: joinsAsGuest,
   );
 
   Channel copyWith({
@@ -198,6 +206,7 @@ class Channel {
     Object? archivedAt = _sentinel,
     int? memberCount,
     bool? isMember,
+    bool? joinsAsGuest,
   }) => Channel(
     id: id,
     name: name ?? this.name,
@@ -222,6 +231,7 @@ class Channel {
     ttlSeconds: ttlSeconds,
     ttlDeadline: ttlDeadline,
     isUnlisted: isUnlisted,
+    joinsAsGuest: joinsAsGuest ?? this.joinsAsGuest,
   );
 }
 

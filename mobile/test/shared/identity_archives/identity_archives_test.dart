@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
-import 'package:buzz/shared/me/me_archived_agents.dart';
+import 'package:buzz/shared/identity_archives/identity_archives.dart';
 import 'package:buzz/shared/me/me_sync.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -47,12 +47,12 @@ void main() {
               RelayConfig(baseUrl: 'https://relay.test', nsec: owner.nsec),
             ),
           ),
-          meRelayInformationClientProvider.overrideWithValue(client),
+          relayInformationClientProvider.overrideWithValue(client),
         ],
       );
       addTearDown(container.dispose);
       addTearDown(client.close);
-      expect(await container.read(meArchivedAgentsProvider.future), {target});
+      expect(await container.read(identityArchivesProvider.future), {target});
       expect(relay.author, authority.public);
       for (final invalid in [
         snapshot(impostor),
@@ -60,12 +60,79 @@ void main() {
         NostrEvent.fromJson(snapshot(authority).toJson()..['sig'] = '0' * 128),
       ]) {
         relay.event = invalid;
-        container.invalidate(meArchivedAgentsProvider);
-        expect(await container.read(meArchivedAgentsProvider.future), isEmpty);
+        container.invalidate(identityArchivesProvider);
+        expect(await container.read(identityArchivesProvider.future), isEmpty);
       }
       relay.event = snapshot(authority);
-      container.invalidate(meArchivedAgentsProvider);
-      expect(await container.read(meArchivedAgentsProvider.future), {target});
+      container.invalidate(identityArchivesProvider);
+      expect(await container.read(identityArchivesProvider.future), {target});
+    },
+  );
+
+  test(
+    'hides archived identities for the current community only, never the viewer',
+    () async {
+      final viewer = nostr.Keys.generate();
+      final other = nostr.Keys.generate();
+      final authority = nostr.Keys.generate();
+      final archivedInA = 'a' * 64;
+      final archivedInB = 'b' * 64;
+      NostrEvent snapshot(List<String> keys) => NostrEvent.fromJson(
+        nostr.Event.from(
+          kind: 13535,
+          content: '',
+          secretKey: authority.secret,
+          tags: [
+            ['-'],
+            for (final key in keys) ['p', key],
+          ],
+        ).toMap(),
+      );
+      // Community A's list also names the viewer, who must stay visible.
+      final relay = _ArchiveRelay(snapshot([archivedInA, viewer.public]));
+      final communityB = Completer<void>();
+      final client = MockClient((request) async {
+        if (request.url.host == 'b.test') await communityB.future;
+        return http.Response(jsonEncode({'self': authority.public}), 200);
+      });
+      final container = ProviderContainer(
+        overrides: [
+          relayConfigProvider.overrideWith(
+            () => _Config(
+              RelayConfig(baseUrl: 'https://a.test', nsec: viewer.nsec),
+            ),
+          ),
+          meSyncProvider.overrideWith(
+            (ref) => MeSync(relay, ref.watch(relayConfigProvider)),
+          ),
+          relayInformationClientProvider.overrideWithValue(client),
+        ],
+      );
+      addTearDown(container.dispose);
+      addTearDown(client.close);
+      container.listen(hiddenArchivedIdentitiesProvider, (_, _) {});
+      Future<Set<String>> settled() async {
+        await container.read(identityArchivesProvider.future);
+        await pumpEventQueue();
+        return container.read(hiddenArchivedIdentitiesProvider);
+      }
+
+      expect(await settled(), {archivedInA});
+      // A refresh in the same community keeps the known set meanwhile.
+      container.invalidate(identityArchivesProvider);
+      expect(container.read(hiddenArchivedIdentitiesProvider), {archivedInA});
+      expect(await settled(), {archivedInA});
+
+      // Switch community and account: A's list no longer applies, so nobody
+      // is hidden until B's list arrives.
+      relay.event = snapshot([archivedInB]);
+      container
+          .read(relayConfigProvider.notifier)
+          .update(baseUrl: 'https://b.test', nsec: other.nsec);
+      await pumpEventQueue();
+      expect(container.read(hiddenArchivedIdentitiesProvider), isEmpty);
+      communityB.complete();
+      expect(await settled(), {archivedInB});
     },
   );
 
@@ -85,7 +152,7 @@ void main() {
             RelayConfig(baseUrl: 'https://relay.test', nsec: owner.nsec),
           ),
         ),
-        meRelayInformationClientProvider.overrideWithValue(client),
+        relayInformationClientProvider.overrideWithValue(client),
       ],
     );
     addTearDown(container.dispose);
@@ -96,7 +163,7 @@ void main() {
     });
     addTearDown(trickle.cancel);
     final result = await container
-        .read(meArchivedAgentsProvider.future)
+        .read(identityArchivesProvider.future)
         .timeout(const Duration(seconds: 5));
     expect(result, isEmpty);
     expect(cancelled, isTrue);
@@ -119,12 +186,12 @@ void main() {
               RelayConfig(baseUrl: 'https://relay.test', nsec: owner.nsec),
             ),
           ),
-          meRelayInformationClientProvider.overrideWithValue(client),
+          relayInformationClientProvider.overrideWithValue(client),
         ],
       );
       addTearDown(container.dispose);
       addTearDown(client.close);
-      expect(await container.read(meArchivedAgentsProvider.future), isEmpty);
+      expect(await container.read(identityArchivesProvider.future), isEmpty);
       expect(relay.author, isNull);
     },
   );
@@ -143,4 +210,11 @@ class _ArchiveRelay extends RelaySessionNotifier {
     author = filter.authors!.single;
     return [?event];
   }
+}
+
+class _Config extends RelayConfigNotifier {
+  _Config(this.initial);
+  final RelayConfig initial;
+  @override
+  RelayConfig build() => initial;
 }

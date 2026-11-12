@@ -127,6 +127,11 @@ pub struct Config {
     /// `0` (the default) disables bounded-staleness replica routing; see
     /// [`buzz_db::DbConfig::replica_read_max_age_ms`].
     pub replica_read_max_age_ms: u64,
+    /// Replica fence heartbeat interval in milliseconds
+    /// (`BUZZ_REPLICA_FENCE_PROBE_INTERVAL_MS`). Unset (`0`) selects the
+    /// default; set values must lie within the accepted range. See
+    /// [`buzz_db::DbConfig::replica_fence_probe_interval_ms`].
+    pub replica_fence_probe_interval_ms: u64,
 
     /// Upper bound, in milliseconds, of the per-connection random delay applied
     /// when sending the `1012 Service Restart` close frame during graceful
@@ -285,6 +290,13 @@ pub struct Config {
     /// hex pubkeys. Invalid entries are rejected at startup (config error), not
     /// skipped — a typo must not silently disable an operator.
     pub relay_operator_pubkeys: Vec<String>,
+
+    /// Serve multiple communities (default true). When false, only the
+    /// normalized `relay_url` authority serves ordinary traffic; existing extra
+    /// communities remain available to authenticated management and cleanup.
+    /// Canonical startup bootstrap is preserved. Changes require a restart.
+    /// Set via `BUZZ_MULTI_COMMUNITY_RELAY=true|false`.
+    pub multi_community_relay: bool,
 
     /// Configured operator-listener identities and their HTTP(S) delivery URLs.
     pub operator_listener_delivery_urls: HashMap<String, url::Url>,
@@ -709,6 +721,28 @@ impl Config {
             Err(_) => 0,
         };
 
+        // Fence heartbeat interval: unset or empty selects the default. An
+        // out-of-range value fails startup rather than being clamped, so the
+        // deployed cadence is always the configured one.
+        let replica_fence_probe_interval_ms =
+            match std::env::var("BUZZ_REPLICA_FENCE_PROBE_INTERVAL_MS") {
+                Ok(raw) if !raw.trim().is_empty() => {
+                    let min = buzz_db::replica_fence::MIN_PROBE_INTERVAL.as_millis() as u64;
+                    let max = buzz_db::replica_fence::MAX_PROBE_INTERVAL.as_millis() as u64;
+                    raw.trim()
+                        .parse::<u64>()
+                        .ok()
+                        .filter(|ms| (min..=max).contains(ms))
+                        .ok_or_else(|| {
+                            ConfigError::InvalidValue(format!(
+                                "BUZZ_REPLICA_FENCE_PROBE_INTERVAL_MS must be an integer \
+                                 between {min} and {max}"
+                            ))
+                        })?
+                }
+                _ => 0,
+            };
+
         // Drain jitter: 0 = off (default). Clamp oversized values so every
         // delayed close is initiated with ten seconds left in the relay's
         // hard-drain budget. An empty/whitespace-only value is treated as unset
@@ -884,6 +918,24 @@ impl Config {
             .map(|raw| parse_operator_api_origin(&raw))
             .transpose()?;
 
+        let multi_community_relay = match std::env::var("BUZZ_MULTI_COMMUNITY_RELAY") {
+            Ok(value) => value.parse::<bool>().map_err(|_| {
+                ConfigError::InvalidValue(
+                    "BUZZ_MULTI_COMMUNITY_RELAY must be true or false".to_string(),
+                )
+            })?,
+            Err(std::env::VarError::NotPresent) => true,
+            Err(std::env::VarError::NotUnicode(_)) => {
+                return Err(ConfigError::InvalidValue(
+                    "BUZZ_MULTI_COMMUNITY_RELAY must be true or false".to_string(),
+                ))
+            }
+        };
+        if !multi_community_relay && crate::tenant::relay_url_authority(&relay_url).is_empty() {
+            return Err(ConfigError::InvalidValue(
+                "RELAY_URL must have a host when BUZZ_MULTI_COMMUNITY_RELAY=false".to_owned(),
+            ));
+        }
         let relay_operator_pubkeys = match std::env::var("RELAY_OPERATOR_PUBKEYS") {
             Ok(raw) => {
                 let mut pubkeys = Vec::new();
@@ -1453,6 +1505,7 @@ impl Config {
             database_url,
             read_database_url,
             replica_read_max_age_ms,
+            replica_fence_probe_interval_ms,
             drain_jitter_ms,
             redis_url,
             db_pool_size,
@@ -1489,6 +1542,7 @@ impl Config {
             relay_owner_pubkey,
             relay_operator_api_origin,
             relay_operator_pubkeys,
+            multi_community_relay,
             operator_listener_delivery_urls,
             storage_usage_delivery_url,
             allow_nip_oa_auth,
@@ -1746,6 +1800,29 @@ mod tests {
         );
 
         assert!(found.is_empty(), "unrelated vars must not warn: {found:?}");
+    }
+
+    #[test]
+    fn multi_community_relay_is_strict_and_default_enabled() {
+        let _guards = env_guards();
+        std::env::remove_var("BUZZ_MULTI_COMMUNITY_RELAY");
+        assert!(Config::from_env().expect("unset").multi_community_relay);
+        for (value, expected) in [("false", false), ("true", true)] {
+            std::env::set_var("BUZZ_MULTI_COMMUNITY_RELAY", value);
+            let config = Config::from_env();
+            std::env::remove_var("BUZZ_MULTI_COMMUNITY_RELAY");
+            assert_eq!(
+                config.expect("valid policy").multi_community_relay,
+                expected
+            );
+        }
+        for value in ["", "FALSE", "1", "typo"] {
+            std::env::set_var("BUZZ_MULTI_COMMUNITY_RELAY", value);
+            let result = Config::from_env();
+            std::env::remove_var("BUZZ_MULTI_COMMUNITY_RELAY");
+            assert!(matches!(result, Err(ConfigError::InvalidValue(ref message))
+                if message.contains("BUZZ_MULTI_COMMUNITY_RELAY")));
+        }
     }
 
     #[test]
@@ -2482,6 +2559,44 @@ mod tests {
                 "the error must name the replacement env var, got: {message}"
             ),
             other => panic!("old env name must hard-fail startup, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn replica_fence_probe_interval_defaults_and_rejects_out_of_range() {
+        let _guards = env_guards();
+        let previous = std::env::var_os("BUZZ_REPLICA_FENCE_PROBE_INTERVAL_MS");
+        let read = |value: Option<&str>| {
+            match value {
+                Some(value) => std::env::set_var("BUZZ_REPLICA_FENCE_PROBE_INTERVAL_MS", value),
+                None => std::env::remove_var("BUZZ_REPLICA_FENCE_PROBE_INTERVAL_MS"),
+            }
+            Config::from_env().map(|config| config.replica_fence_probe_interval_ms)
+        };
+
+        let unset = read(None);
+        let empty = read(Some(" "));
+        let set = read(Some("500"));
+        let rejected =
+            ["soon", "0", "299", "10001", "-400"].map(|value| (value, read(Some(value))));
+
+        if let Some(value) = previous {
+            std::env::set_var("BUZZ_REPLICA_FENCE_PROBE_INTERVAL_MS", value);
+        } else {
+            std::env::remove_var("BUZZ_REPLICA_FENCE_PROBE_INTERVAL_MS");
+        }
+
+        assert_eq!(unset.expect("unset"), 0, "unset selects the default");
+        assert_eq!(empty.expect("empty"), 0, "empty selects the default");
+        assert_eq!(set.expect("set"), 500);
+        for (value, result) in rejected {
+            match result {
+                Err(ConfigError::InvalidValue(message)) => assert!(
+                    message.contains("BUZZ_REPLICA_FENCE_PROBE_INTERVAL_MS"),
+                    "{value}: {message}"
+                ),
+                other => panic!("{value} must fail startup, got {other:?}"),
+            }
         }
     }
 

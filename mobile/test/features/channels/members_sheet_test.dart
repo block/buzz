@@ -5,6 +5,7 @@ import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/members_sheet.dart';
 import 'package:buzz/features/profile/user_status.dart';
 import 'package:buzz/features/profile/user_status_cache_provider.dart';
+import 'package:buzz/shared/identity_archives/identity_archives.dart';
 import 'package:buzz/shared/identity_names/identity_names.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
@@ -34,6 +35,8 @@ Future<void> _pump(
   WidgetTester tester,
   List<ChannelMember> members, {
   ValueChanged<String>? onTap,
+  Set<String> archived = const {},
+  Set<String> working = const {},
 }) async {
   final names = IdentityNameSources.empty.scope(
     members.map((m) => m.pubkey),
@@ -46,7 +49,8 @@ Future<void> _pump(
         channelIdentityNamesProvider('channel').overrideWith((ref) => names),
         userCacheProvider.overrideWith(_Cache.new),
         userStatusCacheProvider.overrideWith(_Statuses.new),
-        workingBotPubkeysProvider('channel').overrideWith((ref) => {}),
+        workingBotPubkeysProvider('channel').overrideWith((ref) => working),
+        identityArchivesProvider.overrideWith((ref) async => archived),
       ],
       child: MaterialApp(
         theme: AppTheme.light(),
@@ -72,7 +76,13 @@ Future<void> _pump(
       ),
     ),
   );
-  await tester.pumpAndSettle();
+  if (working.isEmpty) {
+    await tester.pumpAndSettle();
+  } else {
+    // A working indicator animates forever, so settle the data only.
+    await tester.pump();
+    await tester.pump();
+  }
 }
 
 List<ChannelMember> _roster(int people, int bots) => [
@@ -158,6 +168,54 @@ void main() {
       lessThan(400),
     );
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('archived members get their own section and say so', (
+    tester,
+  ) async {
+    final semantics = tester.ensureSemantics();
+    // Person 1 and Agent 3 are archived.
+    await _pump(
+      tester,
+      _roster(3, 2),
+      archived: {_key(1), _key(3)},
+      working: {_key(3), _key(4)},
+    );
+    List<String> titles() => [
+      for (final tile in tester.widgetList<ListTile>(find.byType(ListTile)))
+        (tile.title! as Text).data!,
+    ];
+    // Archived people, then archived agents, after People and Agents.
+    expect(find.text('People \u00b7 2'), findsOne);
+    expect(find.text('Agents \u00b7 1'), findsOne);
+    expect(find.text('Archived \u00b7 2'), findsOne);
+    expect(titles(), ['You', 'Person 2', 'Agent 4', 'Person 1', 'Agent 3']);
+    expect(
+      tester.getTopLeft(find.text('Archived \u00b7 2')).dy,
+      greaterThan(tester.getTopLeft(find.text('Agent 4')).dy),
+    );
+    String subtitle(String name) =>
+        ((tester
+                    .widget<ListTile>(
+                      find.ancestor(
+                        of: find.text(name),
+                        matching: find.byType(ListTile),
+                      ),
+                    )
+                    .subtitle)!
+                as Text)
+            .data!;
+    expect(subtitle('Person 1'), 'Archived \u00b7 Member');
+    // An archived agent says Archived even while it reads as working.
+    expect(subtitle('Agent 3'), 'Archived \u00b7 Agent');
+    expect(subtitle('Person 2'), 'Member');
+    expect(find.text('Working\u2026'), findsOne);
+    expect(find.bySemanticsLabel(RegExp(r'Person 1[\s\S]*Archived')), findsOne);
+    expect(
+      find.bySemanticsLabel(RegExp(r'Person 2[\s\S]*Archived')),
+      findsNothing,
+    );
+    semantics.dispose();
   });
 
   testWidgets('owner actions stay available after lazy scrolling', (

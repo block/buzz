@@ -153,13 +153,11 @@ fn start_sync(
         .clone()
         .try_acquire_owned()
         .expect("permit");
-    tokio::spawn(super::artifact_sync::handle_sync(
-        "s".into(),
-        filter,
-        Arc::clone(conn),
-        Arc::clone(&f.state),
-        permit,
-    ))
+    let (conn, state) = (Arc::clone(conn), Arc::clone(&f.state));
+    tokio::spawn(async move {
+        let owner = super::close::admit("s", &conn).await.expect("admit");
+        super::artifact_sync::handle_sync("s".into(), owner, filter, conn, state, permit).await;
+    })
 }
 
 async fn frame(rx: &mut mpsc::Receiver<WsMessage>) -> Value {
@@ -496,10 +494,12 @@ async fn close_during_a_live_head_read_sends_nothing_more() {
         .try_acquire_owned()
         .expect("permit");
     let pause = Arc::new(super::close::test_seam::Pause::default());
+    let token = super::close::admit("s", &conn).await.expect("admit");
     let task = tokio::spawn(super::artifact_sync::test_seam::LIVE_SEND_PAUSE.scope(
         Arc::clone(&pause),
         super::artifact_sync::handle_sync(
             "s".into(),
+            token,
             filter,
             Arc::clone(&conn),
             Arc::clone(&f.state),

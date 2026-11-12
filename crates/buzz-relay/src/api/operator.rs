@@ -5,7 +5,9 @@
 //! ingest, relay membership, channel scoping, storage, or fan-out.
 
 mod community_policy;
+mod invites;
 pub use community_policy::{community_nip_fi_policy_status, set_community_nip_fi_policy};
+pub use invites::mint_community_invite;
 
 use crate::access::{AccessSlot, AuthMethod, AuthResult};
 use std::sync::Arc;
@@ -423,6 +425,11 @@ pub async fn provision_community(
             tracing::error!("failed to serialize provision-community response: {e}");
             internal_error("operator provision response serialization failed")
         })?)),
+        Err(msg) if msg == "community_creation_disabled" => Err(coded_api_error(
+            StatusCode::FORBIDDEN,
+            "community_creation_disabled",
+            &msg,
+        )),
         Err(msg) if msg.starts_with("actor not authorized") => {
             Err(api_error(StatusCode::FORBIDDEN, &msg))
         }
@@ -823,7 +830,7 @@ pub async fn list_owned_communities(
         })).collect::<Vec<_>>(),
         "quota_used": page.quota_used,
         "quota_limit": page.quota_limit,
-        "can_create": page.can_create,
+        "can_create": state.config.multi_community_relay && page.can_create,
     })))
 }
 
@@ -1010,6 +1017,7 @@ pub async fn community_availability(
         "host": query.host,
         "normalized_host": normalized_host,
         "available": existing.is_none() && !reserved,
+        "can_create": state.config.multi_community_relay && existing.is_none() && !reserved,
         "community_id": existing.map(|record| record.id.to_string()),
     });
     if reserved {
@@ -1246,7 +1254,9 @@ pub async fn no_store_policy_response(
 
 #[cfg(test)]
 mod postgres_tests {
+    mod creation_policy_postgres_tests;
     mod initial_policy_postgres_tests;
+    mod invite_postgres_tests;
     use std::{
         collections::HashSet,
         sync::{Arc, Mutex},
@@ -1346,10 +1356,23 @@ mod postgres_tests {
         operator_keys: &[Keys],
         nip_fi_provision_binding: Option<buzz_auth::ProvisionBindingPolicy>,
     ) -> Option<Arc<AppState>> {
+        operator_test_state_with_policy_and_redis(
+            operator_keys,
+            nip_fi_provision_binding,
+            "redis://127.0.0.1:1",
+        )
+        .await
+    }
+
+    async fn operator_test_state_with_policy_and_redis(
+        operator_keys: &[Keys],
+        nip_fi_provision_binding: Option<buzz_auth::ProvisionBindingPolicy>,
+        redis_url: &str,
+    ) -> Option<Arc<AppState>> {
         let mut config = crate::config::Config::for_test(); // [FI-TRACE-ENV-RACE]
         config.nip_fi_provision_binding = nip_fi_provision_binding;
         config.database_url = crate::test_support::database_url();
-        config.redis_url = "redis://127.0.0.1:1".to_string();
+        config.redis_url = redis_url.to_owned();
         config.relay_url = "wss://tenant.example".to_string();
         config.relay_operator_api_origin = Some(format!("http://{INGRESS_HOST}"));
         config.relay_operator_pubkeys = operator_keys

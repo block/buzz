@@ -333,6 +333,15 @@ class MediaUploadService {
     return XFile.fromData(bytes, name: 'Pasted image');
   }
 
+  /// Extracts a local poster without starting playback or uploading the video.
+  Future<Uint8List?> prepareVideoPoster(String path) async {
+    try {
+      return await _generateVideoPoster(path);
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// Opens the system gallery video picker.
   Future<XFile?> pickGalleryVideo() => _pickGalleryVideo();
 

@@ -9,13 +9,10 @@ import XCTest
 class RunnerTests: XCTestCase {
 
   @MainActor
-  func testRejectedCommunityEntryPresentationCompletesAndAllowsRetry() throws {
+  func testRejectedCommunityEntryPresentationCompletesAndAllowsRetry() async throws {
     let messenger = NavigationTestMessenger()
     let presenter = RejectedCommunityEntryPresenter()
-    let window = UIWindow(frame: UIScreen.main.bounds)
-    window.windowScene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
-    window.rootViewController = presenter
-    window.makeKeyAndVisible()
+    let window = try await keyWindow(showing: presenter)
     defer { window.isHidden = true }
     let coordinator = NativeCommunityEntryCoordinator(messenger: messenger)
     for session in [1, 2] {
@@ -26,11 +23,13 @@ class RunnerTests: XCTestCase {
     }
     let root = UIViewController()
     window.rootViewController = root
-    window.makeKeyAndVisible()
+    // Present only once the new root's view is in the key window: UIKit
+    // drops a presentation from a controller that is not in a window yet.
+    await fulfillment(of: [keyWindowReady(window, showing: root)], timeout: 5)
     let temporary = UIViewController()
     let presented = expectation(description: "Temporary native modal appeared")
     root.present(temporary, animated: false) { presented.fulfill() }
-    wait(for: [presented], timeout: 2)
+    await fulfillment(of: [presented], timeout: 5)
     XCTAssertTrue(root.presentedViewController === temporary)
     XCTAssertNotNil(temporary.view.window)
     var reply: Any?
@@ -264,6 +263,74 @@ class RunnerTests: XCTestCase {
     leading["avatarHidden"] = false
     messenger.configure(["title": "Bravo", "largeTitle": true, "leading": leading])
     XCTAssertEqual(try avatar().alpha, 1)
+  }
+
+  @MainActor
+  func testDmPortraitFloatsAboveGlassTitleAndClearsForChannels() throws {
+    let parent = UIViewController()
+    let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 393, height: 852))
+    window.rootViewController = parent
+    window.makeKeyAndVisible()
+    defer { window.isHidden = true }
+    let messenger = NavigationTestMessenger()
+    let factory = IosNavigationBarFactory(messenger: messenger, parent: parent)
+    let portrait: [String: Any] = ["id": "titlePortrait0", "avatarInitial": "A",
+      "label": "Alice", "avatarBackground": 0xffdddddd, "avatarForeground": 0xff111111]
+    let arguments: [String: Any] = ["title": "Alice", "subtitle": "",
+      "titleEnabled": true, "safeTop": 62, "titleAvatars": [portrait]]
+    let bar = factory.create(withFrame: CGRect(x: 0, y: 0, width: 393, height: 166),
+      viewIdentifier: 999988, arguments: arguments)
+    parent.view.addSubview(bar.view())
+    bar.view().layoutIfNeeded()
+    let title = try XCTUnwrap(bar.view().subviews.compactMap { $0 as? NavigationTitleView }.first)
+    XCTAssertEqual(title.frame.minY, 62 + 64 - 8)
+    XCTAssertTrue(bar.view().bounds.contains(title.frame))
+    XCTAssertFalse(bar.view().subviews.contains { $0 is UIImageView })
+    XCTAssertEqual(title.accessibilityLabel, "Open settings for Alice")
+    XCTAssertTrue(title.accessibilityActivate())
+    XCTAssertEqual(messenger.actions, ["title"])
+    // The app appearance can differ from the surrounding iOS appearance.
+    for dark in [true, false, true] {
+      parent.overrideUserInterfaceStyle = dark ? .light : .dark
+      var themedArguments = arguments
+      themedArguments["dark"] = dark
+      messenger.configure(themedArguments)
+      bar.view().layoutIfNeeded()
+      let themedTitle = try XCTUnwrap(bar.view().subviews.compactMap { $0 as? NavigationTitleView }.first)
+      XCTAssertEqual(themedTitle.traitCollection.userInterfaceStyle, dark ? .dark : .light)
+      for label in descendants(of: themedTitle.contentView).compactMap({ $0 as? UILabel }) {
+        XCTAssertEqual(label.traitCollection.userInterfaceStyle, dark ? .dark : .light)
+      }
+    }
+    var animatedArguments = arguments
+    animatedArguments["titleHasAnimatedPortrait"] = true
+    messenger.configure(animatedArguments)
+    bar.view().layoutIfNeeded()
+    let animatedTitle = try XCTUnwrap(bar.view().subviews.compactMap { $0 as? NavigationTitleView }.first)
+    XCTAssertEqual(animatedTitle.frame.minY, 62 + 56 - 14)
+    XCTAssertTrue(animatedTitle.accessibilityActivate())
+    XCTAssertEqual(messenger.actions, ["title", "title"])
+    var groupArguments = arguments
+    groupArguments["title"] = String(repeating: "Long participant name, ", count: 12)
+    groupArguments["titleMaxWidth"] = 280.0
+    messenger.configure(groupArguments)
+    bar.view().layoutIfNeeded()
+    let groupTitle = try XCTUnwrap(bar.view().subviews.compactMap { $0 as? NavigationTitleView }.first)
+    XCTAssertEqual(groupTitle.frame.minY, 62 + 56)
+    XCTAssertEqual(groupTitle.frame.width, 280, accuracy: 0.5)
+    for label in descendants(of: groupTitle.contentView).compactMap({ $0 as? UILabel }) {
+      XCTAssertTrue(groupTitle.bounds.contains(label.convert(label.bounds, to: groupTitle)))
+    }
+    messenger.configure(["title": "general", "subtitle": "3 members", "titleEnabled": true])
+    XCTAssertFalse(bar.view().subviews.contains { $0 is UIImageView })
+    let navigation = try XCTUnwrap(parent.children.first as? UINavigationController)
+    XCTAssertTrue(navigation.topViewController?.navigationItem.titleView is NavigationTitleView)
+    messenger.configure(["title": String(repeating: "Long channel name ", count: 12),
+                         "subtitle": "3 members", "titleEnabled": true, "titleMaxWidth": 280.0])
+    bar.view().layoutIfNeeded()
+    let channelTitle = try XCTUnwrap(navigation.topViewController?.navigationItem.titleView as? NavigationTitleView)
+    XCTAssertLessThanOrEqual(channelTitle.intrinsicContentSize.width, 280)
+    XCTAssertLessThanOrEqual(channelTitle.frame.width, 280)
   }
 
   @MainActor
@@ -1344,7 +1411,7 @@ class RunnerTests: XCTestCase {
     let size = NativeAttachmentMenuLayout.size(compatibleWith: traits)
 
     XCTAssertEqual(size.width, 216)
-    XCTAssertEqual(size.height, 324) // Five actions, including voice notes.
+    XCTAssertEqual(size.height, 264) // Photos includes videos; four actions.
     XCTAssertEqual(NativeAttachmentMenuLayout.contentPadding, 16)
     XCTAssertEqual(
       NativeAttachmentMenuLayout.itemHeight(compatibleWith: traits),
@@ -2124,5 +2191,47 @@ private final class RejectedCommunityEntryPresenter: UIViewController {
   override func present(_ viewControllerToPresent: UIViewController, animated flag: Bool, completion: (() -> Void)? = nil) {
     // Reproduce UIKit declining a presentation during a scene transition.
     attempts += 1
+  }
+}
+
+// MARK: - Key window readiness
+
+extension XCTestCase {
+  /// A window of the foreground-active scene showing `root`, returned once it
+  /// is the key window and `root`'s view is in it.
+  ///
+  /// Native presenters resolve the key window of the foreground-active scene,
+  /// and UIKit silently drops a presentation from a controller whose view is
+  /// not in a window. `makeKeyAndVisible()` can return before key status moves
+  /// to the new window, so acting right after it raced UIKit.
+  @MainActor
+  func keyWindow(showing root: UIViewController) async throws -> UIWindow {
+    // The scene can still be activating when the first test runs.
+    let activeScene = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+      self.foregroundActiveScene() != nil
+    }, object: nil)
+    await fulfillment(of: [activeScene], timeout: 5)
+    let scene = try XCTUnwrap(foregroundActiveScene())
+    let window = UIWindow(windowScene: scene)
+    window.rootViewController = root
+    window.makeKeyAndVisible()
+    await fulfillment(of: [keyWindowReady(window, showing: root)], timeout: 5)
+    return window
+  }
+
+  /// The scene production code presents in: the foreground-active one.
+  @MainActor
+  func foregroundActiveScene() -> UIWindowScene? {
+    UIApplication.shared.connectedScenes
+      .compactMap { $0 as? UIWindowScene }
+      .first { $0.activationState == .foregroundActive }
+  }
+
+  /// Fulfilled once `window` is the key window and shows `root`'s view.
+  @MainActor
+  func keyWindowReady(_ window: UIWindow, showing root: UIViewController) -> XCTestExpectation {
+    XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+      window.isKeyWindow && root.viewIfLoaded?.window === window
+    }, object: nil)
   }
 }

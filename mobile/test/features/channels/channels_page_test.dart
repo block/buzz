@@ -145,6 +145,7 @@ void main() {
         home: realHome
             ? HomePage(
                 onAgents: showAgents,
+                openBestieConversation: (_, _, _) async {},
                 defaultAgentBuilder: (context) => DefaultAgentLauncher(
                   onChooseAgent: () => showAgents(context),
                 ),
@@ -3547,6 +3548,79 @@ void main() {
     expect(find.text('Retry'), findsOneWidget);
   });
 
+  testWidgets('a refused sign-in names no API token and keeps retry', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      buildTestable(
+        overrides: [
+          channelsProvider.overrideWith(() => _UnauthorizedNotifier()),
+        ],
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 3));
+    await tester.pump();
+
+    expect(
+      find.text("This community couldn't authenticate the request. Try again."),
+      findsOneWidget,
+    );
+    expect(find.textContaining('API token'), findsNothing);
+    expect(find.text('Retry'), findsOneWidget);
+  });
+
+  testWidgets(
+    'an ended organization sign-in leaves the action to the banner, not Retry',
+    (tester) async {
+      final account = BuilderlabAccountClient();
+      final signIn = OrganizationSignIn(
+        account: account,
+        browser: BrowserAuth(),
+        reconnect: () async {},
+      )..status = OrganizationSessionStatus.signedOut;
+      final auth = HostedRelayAuth(
+        BuilderlabAccountClient(),
+        organization: account,
+        organizationRelay: (_) => true,
+      );
+      addTearDown(() {
+        signIn.dispose();
+        auth.dispose();
+        account.dispose();
+      });
+      Future<void> pumpError(ChannelsNotifier Function() notifier) async {
+        await tester.pumpWidget(const SizedBox());
+        await tester.pumpWidget(
+          buildTestable(
+            overrides: [
+              organizationSignInProvider.overrideWithValue(signIn),
+              hostedRelayAuthProvider.overrideWithValue(auth),
+              channelsProvider.overrideWith(notifier),
+            ],
+          ),
+        );
+        await tester.pump();
+        await tester.pump(const Duration(seconds: 3));
+        await tester.pump();
+      }
+
+      await pumpError(_UnauthorizedNotifier.new);
+      expect(find.text('Could not load channels'), findsOneWidget);
+      expect(find.text('Use the prompt above to reconnect.'), findsOneWidget);
+      expect(find.text('Retry'), findsNothing);
+
+      // A relay that does not require the sign-in can still serve the read,
+      // so an error other than the refusal keeps its message and Retry.
+      await pumpError(_ErrorNotifier.new);
+      expect(
+        find.text('Something went wrong. Check your connection.'),
+        findsOneWidget,
+      );
+      expect(find.text('Retry'), findsOneWidget);
+    },
+  );
+
   testWidgets('bolds and clears unread channel labels', (tester) async {
     final channels = [
       Channel(
@@ -3964,6 +4038,12 @@ class _FakeCommunityListNotifier extends CommunityListNotifier {
 class _ErrorNotifier extends ChannelsNotifier {
   @override
   Future<List<Channel>> build() => Future.error('Connection refused');
+}
+
+class _UnauthorizedNotifier extends ChannelsNotifier {
+  @override
+  Future<List<Channel>> build() =>
+      Future.error(RelayException(401, 'authentication required\n'));
 }
 
 class _LoadingNotifier extends ChannelsNotifier {
