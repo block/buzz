@@ -63,7 +63,6 @@ import os.log
   ) -> Bool {
     // Age checking and notification restoration run asynchronously from
     // Flutter. No age-related storage or platform request may delay launch.
-    QuickSendBridge.log.notice("didFinishLaunching, appState=\(application.applicationState.rawValue, privacy: .public)")
     UNUserNotificationCenter.current().delegate = self
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
   }
