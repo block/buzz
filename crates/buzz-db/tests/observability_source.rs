@@ -454,7 +454,12 @@ fn p0_pool_acquisitions_use_typed_operation_pairs_without_other() {
         .next()
         .expect("replica-fence production source");
     assert!(replica_fence_production.contains("WriterOperation::Bootstrap"));
-    assert!(replica_fence_production.contains("WriterOperation::Maintenance"));
+    // The heartbeat probe runs on its own pool, never a serving writer
+    // checkout: queued behind request traffic, its beat goes stale exactly
+    // when the writer is saturated.
+    assert!(!replica_fence_production.contains("WriterOperation::Maintenance"));
+    assert!(replica_fence_production.contains("pub fn connect_probe_pool("));
+    assert!(runtime.contains("replica_fence::connect_probe_pool(&self.pool)"));
     assert!(!replica_fence_production.contains("pool.begin().await"));
     assert!(!replica_fence_production.contains("writer.acquire().await"));
     assert!(!replica_fence_production.contains("fetch_optional(writer)"));

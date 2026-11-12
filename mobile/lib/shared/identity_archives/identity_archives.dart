@@ -7,19 +7,20 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:http/http.dart' as http;
 
 import '../relay/relay.dart';
-import 'me_sync.dart';
+import '../me/me_sync.dart';
 
-final meRelayInformationClientProvider = Provider<http.Client>((ref) {
+final relayInformationClientProvider = Provider<http.Client>((ref) {
   final client = http.Client();
   ref.onDispose(client.close);
   return client;
 });
 
-/// Matches desktop's known-archived filtering. Unknown archive evidence does
-/// not hide identities; this is presentation, never ownership or admission.
-final meArchivedAgentsProvider = FutureProvider<Set<String>>((ref) async {
+/// The identities this relay's NIP-IA archive list (kind 13535) names, never
+/// the viewer: an archive stays visible to its subject. Empty when the list
+/// cannot be read. This is presentation, never ownership or admission.
+final identityArchivesProvider = FutureProvider<Set<String>>((ref) async {
   final sync = ref.watch(meSyncProvider);
-  final client = ref.watch(meRelayInformationClientProvider);
+  final client = ref.watch(relayInformationClientProvider);
   try {
     final uri = Uri.parse(sync.community);
     final response = await client
@@ -61,10 +62,34 @@ final meArchivedAgentsProvider = FutureProvider<Set<String>>((ref) async {
       timeout: const Duration(seconds: 3),
     );
     sync.check();
-    return await _parseArchives(events, authority);
+    return (await _parseArchives(events, authority))..remove(sync.pubkey);
   } catch (_) {
     return {};
   }
+});
+
+/// [identityArchivesProvider] with the relay configuration (community and
+/// account) it was read for.
+final _scopedArchivesProvider = FutureProvider<(RelayConfig, Set<String>)>((
+  ref,
+) async {
+  final config = ref.watch(relayConfigProvider);
+  return (config, await ref.watch(identityArchivesProvider.future));
+});
+
+/// Identities to leave out of forward-looking choices (pickers, search and
+/// the Agents page), as desktop's `archiveHides`: the known-archived ones.
+/// None while the archive list loads or cannot be read. History (messages,
+/// activity, profiles) keeps showing archived identities.
+///
+/// A refresh keeps the last known set, but after a community or account
+/// switch the previous set does not apply: nobody is hidden until the new
+/// community's list arrives.
+final hiddenArchivedIdentitiesProvider = Provider<Set<String>>((ref) {
+  final config = ref.watch(relayConfigProvider);
+  final known = ref.watch(_scopedArchivesProvider).value;
+  if (known == null || !identical(known.$1, config)) return const {};
+  return known.$2;
 });
 
 Future<Set<String>> _parseArchives(List<NostrEvent> events, String authority) =>

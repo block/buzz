@@ -1,12 +1,56 @@
 part of '../channel_detail_page.dart';
 
-class _ReadOnlyNotice extends StatelessWidget {
+class _ReadOnlyNotice extends HookConsumerWidget {
   final Channel channel;
 
   const _ReadOnlyNotice({required this.channel});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    final isJoining = useState(false);
+    // The relay accepted a join that this client could not confirm yet.
+    final isUnconfirmed = useState(false);
+    final place = channel.isForum ? 'forum' : 'channel';
+    final isOpen = channel.visibility == 'open' && !channel.isArchived;
+    // Joining a guest-join channel grants a role that cannot post, so it
+    // offers no Join (as on desktop).
+    final canJoin = isOpen && !channel.joinsAsGuest;
+
+    Future<void> join() async {
+      if (isJoining.value) return;
+      isJoining.value = true;
+      final actions = ref.read(channelActionsProvider);
+      try {
+        await (isUnconfirmed.value
+            ? actions.recheckJoin(channel.id)
+            : actions.joinChannel(channel.id));
+      } on ChannelJoinUnconfirmed {
+        if (context.mounted) isUnconfirmed.value = true;
+      } catch (_) {
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showFeedbackSnackBar(
+            SnackBar(content: Text('Couldn’t join $place. Try again.')),
+            kind: ToastKind.error,
+          );
+        }
+      } finally {
+        if (context.mounted) isJoining.value = false;
+      }
+    }
+
+    final message = channel.isArchived
+        ? 'This $place is archived and read-only on mobile.'
+        : isOpen && channel.joinsAsGuest
+        ? 'This $place is read-only'
+        : canJoin && isUnconfirmed.value
+        ? 'Join sent, but not confirmed yet'
+        : canJoin
+        ? 'Join $place to send messages'
+        : 'You’re previewing this $place';
+    final buttonLabel = isJoining.value
+        ? (isUnconfirmed.value ? 'Checking…' : 'Joining…')
+        : (isUnconfirmed.value ? 'Check again' : 'Join');
+
     return Container(
       width: double.infinity,
       padding: EdgeInsets.only(
@@ -19,14 +63,30 @@ class _ReadOnlyNotice extends StatelessWidget {
         border: Border(top: BorderSide(color: context.colors.outlineVariant)),
         color: context.colors.surface,
       ),
-      child: Text(
-        channel.isArchived
-            ? 'This ${channel.isForum ? 'forum' : 'channel'} is archived and read-only on mobile.'
-            : 'Join this ${channel.isForum ? 'forum' : 'channel'} from Manage to participate.',
-        style: context.textTheme.bodySmall?.copyWith(
-          color: context.colors.onSurfaceVariant,
-        ),
-        textAlign: TextAlign.center,
+      child: Wrap(
+        alignment: WrapAlignment.center,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        spacing: Grid.xxs,
+        runSpacing: Grid.half,
+        children: [
+          Text(
+            message,
+            style: context.textTheme.bodySmall?.copyWith(
+              color: context.colors.onSurfaceVariant,
+            ),
+            textAlign: TextAlign.center,
+          ),
+          if (canJoin)
+            FilledButton(
+              key: const ValueKey('channel-join-button'),
+              style: FilledButton.styleFrom(
+                backgroundColor: context.colors.primary,
+                foregroundColor: context.colors.onPrimary,
+              ),
+              onPressed: isJoining.value ? null : join,
+              child: Text(buttonLabel),
+            ),
+        ],
       ),
     );
   }

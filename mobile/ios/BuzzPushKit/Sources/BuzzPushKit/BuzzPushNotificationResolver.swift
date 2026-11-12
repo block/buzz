@@ -672,18 +672,99 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
     event.tags.first { $0.count >= 2 && $0[0] == name }?[1]
   }
 
+  /// Longest body iOS shows, in UTF-16 code units, even when a notification
+  /// is expanded. It cuts longer bodies without an ellipsis, so we stop one
+  /// unit short and add our own. See docs/adr/0002-notification-message-text.md.
+  static let previewBodyLimit = 256
+
+  /// Most of a message's content, in UTF-16 code units, that the body is
+  /// built from. The regexes below can take quadratic time on unclosed
+  /// markup, and content can be up to 256 KB, so a long message is cut
+  /// first. This only changes the result when stripped markup and
+  /// whitespace in the prefix exceed about 3.8K units.
+  static let previewInputLimit = 4096
+
+  /// A fenced code block (with an optional language line) or an inline code
+  /// span. A fence with no closing fence runs to the end of the text, as in
+  /// CommonMark, which also covers a block cut by `previewInputLimit`.
+  private static let previewCode = try! NSRegularExpression(
+    pattern: #"```(?:[^\n`]*\n)?([\s\S]*?)(?:\n?```|\z)|`([^`\n]*)`"#)
+
+  /// Stands in for a code span while the prose rules run over the whole
+  /// text, so a link label or a bold run can contain code. Private-use
+  /// characters, removed from the content first, so they can't collide.
+  private static let previewCodeOpen = "\u{E000}"
+  private static let previewCodeClose = "\u{E001}"
+  private static let previewCodePlaceholder = try! NSRegularExpression(
+    pattern: "\u{E000}([0-9]+)\u{E001}")
+
+  /// Plain-text notification body for a Markdown message. Code and URLs
+  /// stay as written, line breaks are kept, and the Markdown syntax for code,
+  /// links, images, bold and strikethrough is removed and runs of spaces are
+  /// collapsed outside code.
   static func previewBody(_ content: String) -> String {
-    var result = content.replacingOccurrences(
-      of: #"```[\s\S]*?```"#, with: "[code]", options: .regularExpression)
-    result = result.replacingOccurrences(of: #"`([^`]*)`"#, with: "$1", options: .regularExpression)
+    var input = content
+    let cut = input.utf16.count > previewInputLimit
+    if cut {
+      var units = 0
+      input = String(input.prefix { character in
+        units += character.utf16.count
+        return units <= previewInputLimit
+      })
+    }
+    input = input
+      .replacingOccurrences(of: "\r\n", with: "\n")
+      .replacingOccurrences(of: previewCodeOpen, with: "")
+      .replacingOccurrences(of: previewCodeClose, with: "")
+    // Work in UTF-16 ranges: a match may start or end inside a grapheme
+    // cluster (a combining mark after a backtick), where String indices
+    // don't exist.
+    let text = input as NSString
+    var codes: [String] = []
+    var prose = ""
+    var position = 0
+    for match in previewCode.matches(in: input, range: NSRange(location: 0, length: text.length)) {
+      prose += text.substring(with: NSRange(location: position, length: match.range.location - position))
+      let body = match.range(at: 1).location != NSNotFound ? match.range(at: 1) : match.range(at: 2)
+      prose += previewCodeOpen + String(codes.count) + previewCodeClose
+      codes.append(text.substring(with: body))
+      position = NSMaxRange(match.range)
+    }
+    prose += text.substring(from: position)
+    let stripped = previewProse(prose) as NSString
+    var result = ""
+    position = 0
+    for match in previewCodePlaceholder.matches(
+      in: stripped as String, range: NSRange(location: 0, length: stripped.length))
+    {
+      result += stripped.substring(with: NSRange(location: position, length: match.range.location - position))
+      result += codes[Int(stripped.substring(with: match.range(at: 1)))!]
+      position = NSMaxRange(match.range)
+    }
+    result += stripped.substring(from: position)
     result = result.replacingOccurrences(
-      of: #"!?\[([^\]]*)\]\([^)]*\)"#, with: "$1", options: .regularExpression)
+      of: #"[ \t]+\n"#, with: "\n", options: .regularExpression)
     result = result.replacingOccurrences(
-      of: #"https?://\S+"#, with: "[link]", options: .regularExpression)
-    result = result.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+      of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
       .trimmingCharacters(in: .whitespacesAndNewlines)
-    return result.count > 180
-      ? String(result.prefix(177)).trimmingCharacters(in: .whitespacesAndNewlines) + "…" : result
+    guard cut || result.utf16.count > previewBodyLimit else { return result }
+    var kept = ""
+    var units = 0
+    for character in result {
+      units += character.utf16.count
+      guard units < previewBodyLimit else { break }
+      kept.append(character)
+    }
+    return kept.trimmingCharacters(in: .whitespacesAndNewlines) + "…"
+  }
+
+  private static func previewProse(_ prose: String) -> String {
+    prose
+      .replacingOccurrences(
+        of: #"!?\[([^\]]*)\]\([^)]*\)"#, with: "$1", options: .regularExpression)
+      .replacingOccurrences(
+        of: #"(\*\*|~~)(\S(?:.*?\S)?)\1"#, with: "$2", options: .regularExpression)
+      .replacingOccurrences(of: #"[ \t]+"#, with: " ", options: .regularExpression)
   }
 
   /// Compact sender label for unnamed senders: the first 8 and last 4

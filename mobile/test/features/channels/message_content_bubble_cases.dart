@@ -197,7 +197,7 @@ void bubbleContentTests() {
       ),
     );
     await tester.pumpAndSettle();
-    final gallery = find.byKey(const ValueKey('message-media-carousel'));
+    final gallery = find.byKey(const ValueKey('message-media-stack'));
     expect(gallery, findsOneWidget);
     expect(bubbles, findsOneWidget);
     expect(find.descendant(of: bubbles, matching: gallery), findsNothing);
@@ -316,5 +316,129 @@ void bubbleContentTests() {
     expect(tester.getSize(bubbles).width, lessThanOrEqualTo(230));
     expect(tester.getSize(bubbles).height, greaterThan(80));
     expect(tester.takeException(), isNull);
+  });
+}
+
+void editedMarkerTests() {
+  Iterable<String> plainTexts(WidgetTester tester) => tester
+      .widgetList<RichText>(find.byType(RichText))
+      .map((text) => text.text.toPlainText());
+  TextSpan? markerSpan(WidgetTester tester) {
+    TextSpan? found;
+    for (final text in tester.widgetList<RichText>(find.byType(RichText))) {
+      text.text.visitChildren((span) {
+        if (span is TextSpan && span.text == '(edited)') found = span;
+        return found == null;
+      });
+    }
+    return found;
+  }
+
+  testWidgets('an edit is marked after the body, never inside other text', (
+    tester,
+  ) async {
+    Future<void> show(String content, {bool edited = true, bool own = false}) =>
+        tester
+            .pumpWidget(
+              _testable(
+                MessageContent(
+                  content: content,
+                  bubble: true,
+                  edited: edited,
+                  ownMessage: own,
+                ),
+              ),
+            )
+            .then((_) => tester.pumpAndSettle());
+
+    // Prose: inline after the last line, in the muted metadata colour.
+    await show('First\n\nHi how are ya.');
+    expect(
+      plainTexts(tester),
+      anyElement(endsWith('\nHi how are ya. (edited)')),
+    );
+    final context = tester.element(find.byType(MessageContent));
+    expect(markerSpan(tester)?.style?.color, context.colors.onSurfaceVariant);
+
+    // Your own accent bubble draws it in the bubble's ink.
+    await show('Mine', own: true);
+    expect(plainTexts(tester), contains('Mine (edited)'));
+    expect(
+      markerSpan(tester)?.style?.color,
+      ChatColors.of(tester.element(find.byType(MessageContent))).foreground,
+    );
+
+    // Bodies the slot could restyle render exactly as unedited, plus the
+    // marker on its own line inside the same text bubble.
+    for (final content in [
+      '```npm install```',
+      'Run this:\n```npm install```',
+      'Intro\n\n```\ncode\n```',
+      '````\ncode\n````',
+      '```\nunclosed',
+      '| a | b |\n| - | - |\n| 1 | 2 |',
+      'Above\n\n---',
+      'ok\n-',
+      'ok\n#',
+      'todo\n[x]',
+      '# Heading',
+      'ok\n\nhttps://example.com/file.pdf',
+    ]) {
+      await show(content, edited: false);
+      final unedited = plainTexts(tester).toList();
+      await show(content);
+      expect(plainTexts(tester), [...unedited, '(edited)'], reason: content);
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('message-text-bubble-0')),
+          matching: find.text('(edited)'),
+        ),
+        findsOneWidget,
+        reason: content,
+      );
+    }
+
+    // An escaped bracket is text, not display math, so the marker joins it.
+    await show(r'see \[x\]');
+    expect(plainTexts(tester), contains('see [x] (edited)'));
+
+    // Inside an unclosed <u> or a heading the marker keeps its own style.
+    await show('see <u>this');
+    expect(markerSpan(tester)?.style?.decoration, TextDecoration.none);
+
+    // Trailing media: the marker follows it, outside every text bubble.
+    await show('![](https://example.com/a.png)');
+    expect(find.text('(edited)'), findsOneWidget);
+    expect(
+      find.descendant(
+        of: find.byWidgetPredicate(
+          (widget) =>
+              widget.key is ValueKey<String> &&
+              (widget.key! as ValueKey<String>).value.startsWith(
+                'message-text-bubble-',
+              ),
+        ),
+        matching: find.text('(edited)'),
+      ),
+      findsNothing,
+    );
+
+    // Unedited bodies stay unmarked. An authored slot character is drawn as
+    // written, and only an edit adds the marker, on its own line.
+    bool shows(String text) => tester
+        .widgetList<RichText>(find.byType(RichText))
+        .any((rich) => rich.text.toPlainText().contains(text));
+    await show('Plain', edited: false);
+    expect(markerSpan(tester), isNull);
+    await show('Sneaky $editedSlot', edited: false);
+    expect(shows('Sneaky $editedSlot'), isTrue);
+    expect(markerSpan(tester), isNull);
+    await show('Sneaky $editedSlot');
+    expect(shows('Sneaky $editedSlot'), isTrue);
+    expect(find.text('(edited)'), findsOneWidget);
+    // Also when the authored slot is in an earlier part of the message.
+    await show('Sneaky $editedSlot\n![](https://example.com/a.png)\nafter');
+    expect(shows('Sneaky $editedSlot'), isTrue);
+    expect(find.text('(edited)'), findsOneWidget);
   });
 }

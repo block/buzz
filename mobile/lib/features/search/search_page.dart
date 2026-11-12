@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
+import '../../shared/identity_archives/identity_archives.dart';
 import '../../shared/identity_names/identity_names_provider.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/mentions/mention_tags.dart';
@@ -327,12 +328,19 @@ class _SearchBody extends ConsumerWidget {
         filter == _SearchFilter.all || filter == _SearchFilter.people;
     final showMessages =
         filter == _SearchFilter.all || filter == _SearchFilter.messages;
+    // Known-archived people leave the results. The search asks for more
+    // people than are shown, so they do not push live people out.
+    final archived = ref.watch(hiddenArchivedIdentitiesProvider);
+    final people = state.userResults
+        .where((user) => !archived.contains(user.pubkey.toLowerCase()))
+        .take(searchPeopleShown)
+        .toList();
 
     // Only the active tab's results count, so a tab with none of its own
     // says so rather than showing a blank list.
     final hasAnyResults =
         (showChannels && state.channelResults.isNotEmpty) ||
-        (showPeople && state.userResults.isNotEmpty) ||
+        (showPeople && people.isNotEmpty) ||
         (showMessages && state.messageResults.isNotEmpty);
     void recordResultSelection() =>
         ref.read(recentSearchesProvider.notifier).record(state.query);
@@ -388,9 +396,9 @@ class _SearchBody extends ConsumerWidget {
                 SliverToBoxAdapter(
                   child: _ChannelSearchFailed(onRetry: retryChannels),
                 ),
-              if (showPeople && state.userResults.isNotEmpty)
+              if (showPeople && people.isNotEmpty)
                 _PeopleSection(
-                  users: state.userResults,
+                  users: people,
                   onResultSelected: recordResultSelection,
                 ),
               if (showMessages && state.messageResults.isNotEmpty)

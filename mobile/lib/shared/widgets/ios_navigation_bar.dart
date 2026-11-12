@@ -13,6 +13,8 @@ import '../theme/mobile_appearance.dart';
 import '../theme/theme_extensions.dart';
 import '../animated_avatar.dart';
 import 'avatar_image.dart';
+import 'dm_header_portrait.dart';
+import 'dm_header_cluster.dart';
 import 'app_route_observer.dart';
 import 'ios_navigation_metrics.dart';
 export 'ios_navigation_metrics.dart';
@@ -128,6 +130,8 @@ class IosNavigationBar extends HookConsumerWidget {
     this.subtitle,
     this.ephemeralLabel,
     this.titleAvatar,
+    this.titleAvatars = const [],
+    this.titleMaxWidth,
     this.titlePresenceColor,
     this.titleRefreshing = false,
     this.onTitlePressed,
@@ -147,6 +151,10 @@ class IosNavigationBar extends HookConsumerWidget {
   final String? subtitle;
   final String? ephemeralLabel;
   final IosNavigationAction? titleAvatar;
+
+  /// Floating DM portraits above the existing glass title capsule.
+  final List<IosNavigationAction> titleAvatars;
+  final double? titleMaxWidth;
   final Color? titlePresenceColor;
 
   /// Shows a refresh bar along the bottom of the subtitled title capsule.
@@ -205,7 +213,7 @@ class IosNavigationBar extends HookConsumerWidget {
               url: entry.value.imageUrl,
               initial: entry.value.avatarInitial!,
               isAgent: entry.value.avatarIsAgent,
-              circular: true,
+              circular: !entry.key.startsWith('titlePortrait'),
               background:
                   entry.value.avatarIsAgent &&
                       usesInsetAgentArtwork(entry.value.imageUrl)
@@ -317,12 +325,22 @@ class IosNavigationBar extends HookConsumerWidget {
 
     final payload = <String, Object?>{
       'title': title,
+      'titleMaxWidth': titleMaxWidth,
+      'titleHasAnimatedPortrait':
+          titleAvatars.length == 1 &&
+          DmHeaderPortrait.playsAnimation(
+            titleAvatars.first.imageUrl,
+            titleAvatars.first.avatarIsAgent,
+          ),
       'safeTop': MediaQuery.viewPaddingOf(context).top,
       'subtitle': subtitle,
       'ephemeralLabel': ephemeralLabel,
       'titleAvatar': titleAvatar == null
           ? null
           : encodeAction(titleAvatar!, 'titleAvatar'),
+      'titleAvatars': [
+        for (final avatar in titleAvatars) avatar._encode('portrait'),
+      ],
       'titlePresenceColor': titlePresenceColor?.toARGB32(),
       'titleRefreshing': titleRefreshing,
       'titleRefreshColor': ChatColors.of(context).outgoing.toARGB32(),
@@ -492,7 +510,7 @@ class IosNavigationBar extends HookConsumerWidget {
       };
     }, [channel.value, offset, collapseRange, route]);
 
-    return UiKitView(
+    final nativeBar = UiKitView(
       key: viewKey,
       viewType: viewType,
       creationParams: payload,
@@ -500,6 +518,39 @@ class IosNavigationBar extends HookConsumerWidget {
       onPlatformViewCreated: (id) {
         channel.value = MethodChannel('$viewType/$id');
       },
+    );
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        nativeBar,
+        if (titleAvatars.isNotEmpty)
+          Positioned(
+            top:
+                MediaQuery.viewPaddingOf(context).top -
+                (payload['titleHasAnimatedPortrait'] == true ? 4 : 0),
+            left: 0,
+            right: 0,
+            child: Center(
+              child: ExcludeSemantics(
+                child: GestureDetector(
+                  key: const ValueKey('navigation-header-avatar-settings'),
+                  behavior: HitTestBehavior.opaque,
+                  onTap: onTitlePressed,
+                  child: DmHeaderCluster(
+                    count: titleAvatars.length,
+                    builder: (i, size) => DmHeaderPortrait(
+                      imageUrl: titleAvatars[i].imageUrl,
+                      isAgent: titleAvatars[i].avatarIsAgent,
+                      initial: titleAvatars[i].avatarInitial ?? '?',
+                      size: size,
+                      standalone: titleAvatars.length == 1,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+      ],
     );
   }
 }

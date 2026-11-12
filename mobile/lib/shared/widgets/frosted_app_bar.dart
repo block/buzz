@@ -1,3 +1,5 @@
+import 'dart:math' show max;
+
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
@@ -56,7 +58,10 @@ double frostedAppBarHeight(
 }) {
   if (useNativeNavigation && defaultTargetPlatform == TargetPlatform.iOS) {
     return MediaQuery.paddingOf(context).top +
-        IosNavigationMetrics.of(context).compactHeight +
+        max(
+          IosNavigationMetrics.of(context).compactHeight,
+          titleContentHeight,
+        ) +
         (nativeLargeTitle
             ? IosNavigationMetrics.of(context).largeTitleHeight
             : 0) +
@@ -136,6 +141,10 @@ class FrostedAppBar extends StatelessWidget {
 
   /// Reactive counterpart avatar and presence badge for a native DM title.
   final IosNavigationAction? nativeTitleAvatar;
+
+  /// Portraits floating above a DM title; empty for ordinary channel headers.
+  final List<IosNavigationAction> nativeTitleAvatars;
+  final double? nativeTitleMaxWidth;
   final Color? nativeTitlePresenceColor;
 
   /// Shows a refresh bar in the native iOS title capsule.
@@ -170,6 +179,8 @@ class FrostedAppBar extends StatelessWidget {
     this.nativeSubtitle,
     this.nativeEphemeralLabel,
     this.nativeTitleAvatar,
+    this.nativeTitleAvatars = const [],
+    this.nativeTitleMaxWidth,
     this.nativeTitlePresenceColor,
     this.nativeTitleRefreshing = false,
     this.onNativeTitlePressed,
@@ -227,7 +238,10 @@ class FrostedAppBar extends StatelessWidget {
             : 0.0;
         final barHeight =
             MediaQuery.paddingOf(context).top +
-            IosNavigationMetrics.of(context).compactHeight +
+            max(
+              IosNavigationMetrics.of(context).compactHeight,
+              titleContentHeight,
+            ) +
             extra;
         return AnimatedPositioned(
           duration: layoutDuration,
@@ -251,6 +265,8 @@ class FrostedAppBar extends StatelessWidget {
                   subtitle: nativeSubtitle,
                   ephemeralLabel: nativeEphemeralLabel,
                   titleAvatar: nativeTitleAvatar,
+                  titleAvatars: nativeTitleAvatars,
+                  titleMaxWidth: nativeTitleMaxWidth,
                   titlePresenceColor: nativeTitlePresenceColor,
                   titleRefreshing: nativeTitleRefreshing,
                   onTitlePressed: onNativeTitlePressed,
@@ -351,6 +367,7 @@ class FrostedAppBar extends StatelessWidget {
           data: IconThemeData(color: effectiveIconColor),
           child: _CenteredNavigationLayout(
             leading: effectiveLeading,
+            topAlignedActions: nativeTitleAvatars.isNotEmpty,
             title: title == null
                 ? null
                 : DefaultTextStyle.merge(
@@ -365,6 +382,10 @@ class FrostedAppBar extends StatelessWidget {
                               left: effectiveLeading != null
                                   ? usesAutomaticIosGlassBackButton
                                         ? iosGlassChannelHeaderTitleSpacing
+                                        : defaultTargetPlatform ==
+                                                  TargetPlatform.android &&
+                                              nativeTitleAvatars.isNotEmpty
+                                        ? 16
                                         : 0
                                   : horizontalInset < Grid.gutter
                                   ? Grid.gutter - horizontalInset
@@ -419,6 +440,32 @@ class FrostedAppBar extends StatelessWidget {
       child: content,
     );
 
+    if (defaultTargetPlatform == TargetPlatform.android &&
+        nativeTitleAvatars.isNotEmpty) {
+      return Positioned(
+        top: 0,
+        left: 0,
+        right: 0,
+        child: Stack(
+          children: [
+            Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              height: topPadding + _barContentHeight(context, titleStyle, 0),
+              child: IgnorePointer(
+                child: NavigationBackdrop(
+                  active: paintsFrost,
+                  child: const SizedBox.expand(),
+                ),
+              ),
+            ),
+            background,
+          ],
+        ),
+      );
+    }
+
     final child = NavigationBackdrop(
       active: paintsFrost,
       suppressNativeView: nativeSuppressed,
@@ -437,12 +484,14 @@ class _CenteredNavigationLayout extends StatelessWidget {
     this.title,
     this.actions,
     required this.centered,
+    this.topAlignedActions = false,
   });
 
   final Widget? leading;
   final Widget? title;
   final Widget? actions;
   final bool centered;
+  final bool topAlignedActions;
 
   @override
   Widget build(BuildContext context) {
@@ -456,7 +505,7 @@ class _CenteredNavigationLayout extends StatelessWidget {
       );
     }
     return CustomMultiChildLayout(
-      delegate: _CenteredNavigationLayoutDelegate(),
+      delegate: _CenteredNavigationLayoutDelegate(topAlignedActions),
       children: [
         if (leading != null)
           LayoutId(id: _NavigationSlot.leading, child: leading!),
@@ -469,6 +518,8 @@ class _CenteredNavigationLayout extends StatelessWidget {
 }
 
 class _CenteredNavigationLayoutDelegate extends MultiChildLayoutDelegate {
+  _CenteredNavigationLayoutDelegate(this.topAlignedActions);
+  final bool topAlignedActions;
   @override
   void performLayout(Size size) {
     Size leadingSize = Size.zero;
@@ -479,7 +530,10 @@ class _CenteredNavigationLayoutDelegate extends MultiChildLayoutDelegate {
       );
       positionChild(
         _NavigationSlot.leading,
-        Offset(0, (size.height - leadingSize.height) / 2),
+        Offset(
+          0,
+          topAlignedActions ? Grid.xxs : (size.height - leadingSize.height) / 2,
+        ),
       );
     }
 
@@ -493,7 +547,7 @@ class _CenteredNavigationLayoutDelegate extends MultiChildLayoutDelegate {
         _NavigationSlot.actions,
         Offset(
           size.width - actionsSize.width,
-          (size.height - actionsSize.height) / 2,
+          topAlignedActions ? Grid.xxs : (size.height - actionsSize.height) / 2,
         ),
       );
     }
@@ -523,7 +577,7 @@ class _CenteredNavigationLayoutDelegate extends MultiChildLayoutDelegate {
   @override
   bool shouldRelayout(
     covariant _CenteredNavigationLayoutDelegate oldDelegate,
-  ) => false;
+  ) => topAlignedActions != oldDelegate.topAlignedActions;
 }
 
 IosNavigationAction? _nativeAction(Widget? widget) {

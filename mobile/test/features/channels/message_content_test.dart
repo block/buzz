@@ -1,4 +1,5 @@
 import 'package:buzz/shared/widgets/buzz_agent_icon.dart';
+import 'package:buzz/features/channels/video_poster.dart';
 import 'package:buzz/features/channels/local_send_bubble_surface.dart';
 import 'dart:async';
 import 'dart:convert';
@@ -26,6 +27,7 @@ import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/message_content.dart';
 import 'package:buzz/features/channels/message_long_press_region.dart';
+import 'package:buzz/features/channels/message_content/edited_marker.dart';
 import 'package:buzz/features/channels/media_viewer_page.dart';
 import 'package:buzz/features/channels/voice_note_attachment.dart';
 import 'package:buzz/features/channels/voice_note_waveform.dart';
@@ -41,6 +43,7 @@ import 'package:buzz/shared/widgets/buzz_loading_indicator.dart';
 
 part 'message_content_bubble_cases.dart';
 part 'message_carousel_preview_cases.dart';
+part 'message_stack_cases.dart';
 
 Widget _testable(
   Widget child, {
@@ -460,7 +463,9 @@ class _TestChannelsNotifier extends ChannelsNotifier {
 
 void main() {
   carouselPreviewTests();
+  stackJourneyTests();
   bubbleContentTests();
+  editedMarkerTests();
   test('wide voice-note waveforms distribute bars across their full width', () {
     const width = 320.0;
     const sampleCount = 48;
