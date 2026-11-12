@@ -1,3 +1,7 @@
+import 'dart:convert';
+import 'package:image_picker/image_picker.dart';
+import 'package:buzz/features/home/home_screen_shortcut_host.dart';
+import 'package:buzz/shared/shortcuts/home_screen_shortcuts.dart';
 import 'package:buzz/features/channels/compose_bar.dart';
 import 'package:buzz/shared/custom_emoji/custom_emoji_provider.dart';
 import 'dart:async';
@@ -31,6 +35,27 @@ class _CachedProfiles extends UserCacheNotifier {
   final Map<String, UserProfile> profiles;
   @override
   Map<String, UserProfile> build() => profiles;
+}
+
+class _HeldUpload extends MediaUploadService {
+  _HeldUpload()
+    : super(
+        baseUrl: 'https://relay.test',
+        nsec: null,
+        pickGalleryImage: () async => null,
+        pickGalleryVideo: () async => null,
+      );
+  final result = Completer<BlobDescriptor>();
+  var calls = 0;
+  @override
+  Future<BlobDescriptor> uploadImage(
+    XFile image, {
+    ValueChanged<double>? onProgress,
+    UploadCancellationToken? cancellationToken,
+  }) {
+    calls++;
+    return result.future;
+  }
 }
 
 class _UnavailableRelay extends RelaySessionNotifier {
@@ -433,6 +458,109 @@ void main() {
 
       await tester.pumpWidget(const SizedBox.shrink());
       await tester.pumpAndSettle();
+    },
+  );
+
+  testWidgets(
+    'an app icon shortcut leaves a first message that is still sending',
+    (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final action = ValueNotifier<VoidCallback?>(null);
+      final dmAction = ValueNotifier<VoidCallback?>(() {});
+      final upload = _HeldUpload();
+      final sync = MeSync(
+        _UnavailableRelay(),
+        RelayConfig(
+          baseUrl: 'https://relay.test',
+          nsec: nostr.Keys.generate().nsec,
+        ),
+        prefs: prefs,
+      );
+      addTearDown(() {
+        action.dispose();
+        dmAction.dispose();
+        upload.dispose();
+        pendingHomeScreenShortcut.value = null;
+      });
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            savedPrefsProvider.overrideWithValue(prefs),
+            defaultAgentProvider.overrideWith((ref) => Stream.value(null)),
+            meSyncProvider.overrideWithValue(sync),
+            meGroupsProvider.overrideWith(
+              (ref) => Stream.value(const MeGroups()),
+            ),
+            channelsProvider.overrideWith(FakeChannels.new),
+            meAssistantsProvider.overrideWith(
+              (ref) async => const [
+                AgentDirectoryEntry(pubkey: 'agent', displayName: 'Pip'),
+              ],
+            ),
+            agentDirectoryProvider.overrideWith((ref) async => []),
+            agentOwnersProvider.overrideWith((ref) async => {}),
+            customEmojiListProvider.overrideWithValue([]),
+            mediaUploadServiceProvider.overrideWithValue(upload),
+          ],
+          child: MaterialApp(
+            theme: AppTheme.light(),
+            home: Stack(
+              children: [
+                MePage(newChatAction: action),
+                HomeScreenShortcutHost(
+                  newChat: action,
+                  newDm: dmAction,
+                  onAgents: (_) {},
+                  openBestieConversation: (_, _, _) async {},
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      action.value!();
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Choose an agent'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Pip'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Message Pip'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField), 'Keep this first message');
+      final field = tester.widget<TextField>(find.byType(TextField));
+      field.contentInsertionConfiguration!.onContentInserted(
+        KeyboardInsertedContent(
+          mimeType: 'image/png',
+          uri: 'content://clipboard/tiny.png',
+          data: base64Decode(
+            'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLttAAAAABJRU5ErkJggg==',
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byTooltip('Remove attachment'), findsOneWidget);
+      await tester.tap(find.byIcon(BuzzIcons.arrowUp).hitTestable().last);
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+      expect(upload.calls, 1);
+      expect(MeChatCreation.pending(sync), isNull);
+
+      // The draft refuses to close while its first message sends, so the
+      // shortcut is dropped instead of discarding it.
+      pendingHomeScreenShortcut.value = HomeScreenShortcut.newDm;
+      // The upload's progress keeps animating, so pump frames, not settle.
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+      expect(find.byType(ComposeBar), findsOneWidget);
+      expect(pendingHomeScreenShortcut.value, isNull);
+      // A failed upload restores the message into the draft that kept it.
+      upload.result.completeError(Exception('offline'));
+      await tester.pumpAndSettle();
+      expect(find.text('Keep this first message'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox.shrink());
     },
   );
 

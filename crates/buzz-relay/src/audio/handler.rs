@@ -3004,6 +3004,9 @@ impl HuddleAdmissionGuard {
 
 /// Why [`check_membership_for_admission`] refused: the caller lacks the
 /// authority, or a dependency that decides it could not be read.
+const AGENT_DM_HUDDLE_REFUSED: &str =
+    "agents cannot join huddles in direct messages except with their owner";
+
 #[derive(Debug)]
 enum AdmissionRefusal {
     Denied(&'static str),
@@ -3203,6 +3206,20 @@ async fn check_membership_for_admission(
         return Err(AdmissionRefusal::Denied(
             "only members can join huddles in this channel",
         ));
+    }
+    for (scope_id, scope) in [(lifecycle_parent_id, write_scope), (channel_id, &channel)] {
+        if !crate::handlers::ingest::agent_dm_write_allowed(
+            tenant.community(),
+            state,
+            scope_id,
+            pubkey_bytes,
+            scope,
+        )
+        .await
+        .map_err(AdmissionRefusal::Dependency)?
+        {
+            return Err(AdmissionRefusal::Denied(AGENT_DM_HUDDLE_REFUSED));
+        }
     }
 
     // Fast path: already a member.
@@ -8049,6 +8066,67 @@ mod tests {
 
     mod postgres_tests {
         use super::*;
+
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn agent_joins_dm_huddles_only_with_its_owner() {
+            let state = audio_test_state_real_db()
+                .await
+                .expect("postgres-ci provides a database");
+            let pool = state.db.pool().clone();
+            let (tenant, _parent_id, _member_key) = seed_audio_fixture(&pool).await;
+            let community = tenant.community();
+            let (owner, agent, stranger) = (
+                nostr::Keys::generate().public_key().to_bytes(),
+                nostr::Keys::generate().public_key().to_bytes(),
+                nostr::Keys::generate().public_key().to_bytes(),
+            );
+            for key in [&owner, &agent, &stranger] {
+                state
+                    .db
+                    .ensure_user(community, key)
+                    .await
+                    .expect("ensure user");
+            }
+            state
+                .db
+                .set_agent_owner_for_authorization(community, &agent, &owner)
+                .await
+                .expect("link agent owner");
+            let open_dm = |members: [&[u8; 32]; 2]| {
+                let state = state.clone();
+                let members: Vec<[u8; 32]> = members.iter().map(|k| **k).collect();
+                async move {
+                    let refs: Vec<&[u8]> = members.iter().map(|k| k.as_slice()).collect();
+                    state
+                        .db
+                        .open_dm(community, &refs, refs[0])
+                        .await
+                        .expect("open dm")
+                        .0
+                        .id
+                }
+            };
+            let stranger_dm = open_dm([&agent, &stranger]).await;
+            let owner_dm = open_dm([&agent, &owner]).await;
+
+            assert!(matches!(
+                check_membership_for_admission(&state, &tenant, stranger_dm, &agent, None).await,
+                Err(AdmissionRefusal::Denied(AGENT_DM_HUDDLE_REFUSED))
+            ));
+            assert!(
+                check_membership_for_admission(&state, &tenant, stranger_dm, &stranger, None)
+                    .await
+                    .is_ok(),
+                "a human still joins the DM huddle"
+            );
+            assert!(
+                check_membership_for_admission(&state, &tenant, owner_dm, &agent, None)
+                    .await
+                    .is_ok(),
+                "an agent joins its owner-only DM huddle"
+            );
+        }
 
         /// Joining a huddle is a write. For an ephemeral huddle the joiner
         /// needs a writing role in the huddle itself and in its lifecycle

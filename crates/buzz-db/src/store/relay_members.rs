@@ -1151,7 +1151,7 @@ pub(crate) async fn write_nip43_membership_snapshot(
     .await?;
     sqlx::query(
         "INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, d_tag) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULL, $10)",
     )
     .bind(community_id.as_uuid())
     .bind(event.id.as_bytes().as_slice())
@@ -1162,7 +1162,6 @@ pub(crate) async fn write_nip43_membership_snapshot(
     .bind(&event.content)
     .bind(event.sig.serialize().as_slice())
     .bind(received_at)
-    .bind::<Option<Uuid>>(None)
     .bind(d_tag.as_deref())
     .execute(tx.conn())
     .await?;

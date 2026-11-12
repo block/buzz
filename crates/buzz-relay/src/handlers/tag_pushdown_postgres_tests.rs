@@ -158,3 +158,88 @@ async fn address_reaction_reqs_over_several_channels() {
     );
     assert_eq!(count(&state, &tenant, &member, filter).await, 1);
 }
+
+/// POST one filter to the HTTP bridge as `reader` and return the JSON reply.
+async fn bridge(
+    state: &Arc<AppState>,
+    tenant: &TenantContext,
+    reader: &Keys,
+    path: &str,
+    filter: &serde_json::Value,
+) -> serde_json::Value {
+    use axum::body::Body;
+    use axum::http::{header, Request};
+    use tower::ServiceExt;
+
+    let request = Request::post(path)
+        .header(header::HOST, tenant.host())
+        .header("x-pubkey", reader.public_key().to_hex())
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(serde_json::to_vec(&[filter]).unwrap()))
+        .unwrap();
+    let response = crate::router::build_router(state.clone())
+        .oneshot(request)
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    assert!(status.is_success(), "{path}: {status}");
+    serde_json::from_slice(&body).expect("bridge JSON")
+}
+
+/// An empty `authors`, `ids` or tag set matches nothing, so COUNT is 0 and
+/// REQ is empty on WebSocket and HTTP, even beside a matching `#a`.
+/// Mutation: drop the empty-set sentinel from `filter_to_query_params` → RED
+/// (each COUNT counts the `#a` match, or every kind:7 without `#a`).
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn empty_sets_beside_an_address_match_nothing() {
+    let Some(state) = crate::api::bridge::postgres_tests::bridge_handler_test_state().await else {
+        panic!("requires local Postgres and Redis");
+    };
+    let tenant = community(&state, "a-tag-empty-sets").await;
+    let reactor = Keys::generate();
+    let reader = Keys::generate();
+    let needle = format!("30175:{}:needle", reader.public_key().to_hex());
+    let event = EventBuilder::new(Kind::Reaction, "+")
+        .tags([
+            Tag::parse(["a", &needle]).unwrap(),
+            Tag::parse(["e", &"cd".repeat(32)]).unwrap(),
+            Tag::parse(["p", &reader.public_key().to_hex()]).unwrap(),
+            Tag::parse(["k", "30175"]).unwrap(),
+        ])
+        .sign_with_keys(&reactor)
+        .unwrap();
+    state
+        .db
+        .insert_event(tenant.community(), &event, None)
+        .await
+        .expect("insert reaction");
+
+    let base = serde_json::json!({"kinds": [7], "#a": [needle]});
+    assert_eq!(count(&state, &tenant, &reader, base.clone()).await, 1);
+    let mut filters: Vec<_> = ["authors", "ids", "#e", "#p", "#d", "#k", "#t", "#A"]
+        .into_iter()
+        .map(|key| {
+            let mut filter = base.clone();
+            filter[key] = serde_json::json!([]);
+            filter
+        })
+        .collect();
+    filters.push(serde_json::json!({"kinds": [7], "authors": []}));
+
+    for filter in filters {
+        let ws_count = count(&state, &tenant, &reader, filter.clone()).await;
+        let http_count = bridge(&state, &tenant, &reader, "/count", &filter).await["count"].clone();
+        let ws_req = req_event_ids(&state, &tenant, &reader, filter.clone()).await;
+        let http_req = bridge(&state, &tenant, &reader, "/query", &filter).await;
+        assert_eq!(
+            (ws_count, http_count, ws_req.len()),
+            (0, serde_json::json!(0), 0),
+            "{filter}"
+        );
+        assert_eq!(http_req, serde_json::json!([]), "{filter} /query");
+    }
+}
