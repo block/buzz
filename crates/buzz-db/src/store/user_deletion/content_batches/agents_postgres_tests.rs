@@ -259,13 +259,14 @@ async fn owned_agents_share_bounded_batches_and_preserve_other_owners_and_commun
         );
         assert_eq!(snapshot_rows(&pool, b, table).await, before_b[index]);
     }
-    // Omitting the relay signer removes exactly the two attributed messages.
+    // Omitting the relay signer leaves the two attributed messages and their
+    // two mention rows outside the selection.
     options.relay_pubkey = None;
     let no_relay = store
         .run_message_batches(&options, ExecutionMode::ReadOnly, None, &mut Vec::new())
         .await
         .unwrap();
-    assert_eq!(no_relay.items + 2, summary.items);
+    assert_eq!(no_relay.items + 4, summary.items);
     options.relay_pubkey = Some(agent.public_key().to_hex());
     assert!(store
         .run_message_batches(&options, ExecutionMode::Delete, None, &mut Vec::new())
