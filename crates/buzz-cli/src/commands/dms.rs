@@ -2,7 +2,15 @@ use uuid::Uuid;
 
 use crate::client::{extract_d_tag, normalize_write_response, BuzzClient};
 use crate::error::CliError;
+use crate::limits::{truncation_notice, Paging, ReadLimits};
 use crate::validate::{parse_uuid, sdk_err, validate_hex64};
+
+/// The visible DM list has a result cap and no older-page option.
+const LIST_LIMITS: ReadLimits = ReadLimits {
+    default: 50,
+    max: 200,
+    paging: Paging::None,
+};
 
 /// Tag values named `name` on a relay event.
 fn tag_values<'a>(event: &'a serde_json::Value, name: &'a str) -> impl Iterator<Item = &'a str> {
@@ -22,8 +30,14 @@ fn tag_values<'a>(event: &'a serde_json::Value, name: &'a str) -> impl Iterator<
 /// List visible DM conversations: the viewer's DM group metadata (kind:39000
 /// `t=dm`, one `p` per participant), minus the DMs in the viewer's newest
 /// relay-signed visibility snapshot (kind:30622, one `h` per hidden DM).
-pub async fn cmd_list_dms(client: &BuzzClient, limit: Option<u32>) -> Result<(), CliError> {
-    let dms = list_dms(client, limit.unwrap_or(50).min(200)).await?;
+pub async fn cmd_list_dms(
+    client: &BuzzClient,
+    requested_limit: Option<u32>,
+) -> Result<(), CliError> {
+    let dms = list_dms(client, LIST_LIMITS.effective(requested_limit)).await?;
+    if let Some(notice) = truncation_notice(dms.len(), requested_limit, LIST_LIMITS) {
+        eprintln!("{notice}");
+    }
     println!("{}", serde_json::Value::Array(dms));
     Ok(())
 }
