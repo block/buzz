@@ -129,6 +129,7 @@ void main() {
   };
 
   Future<Widget> buildTestable({
+    Brightness brightness = Brightness.light,
     HomeFeedResponse? feed,
     ActivityNotifier Function()? activityNotifier,
     Map<String, UserProfile>? users,
@@ -171,7 +172,9 @@ void main() {
         ...overrides,
       ],
       child: MaterialApp(
-        theme: AppTheme.light(),
+        theme: brightness == Brightness.dark
+            ? AppTheme.dark()
+            : AppTheme.light(),
         builder: (context, child) => MediaQuery(
           data: MediaQuery.of(
             context,
@@ -1002,17 +1005,28 @@ void main() {
   });
 
   testWidgets('unread rows show a dot; read rows do not', (tester) async {
-    await tester.pumpWidget(
-      await buildTestable(
-        // ch1 fully read; ch2 (thread) unread.
-        readContexts: {'ch1': now},
-      ),
-    );
-    await tester.pumpAndSettle();
+    for (final brightness in Brightness.values) {
+      await tester.pumpWidget(
+        await buildTestable(
+          brightness: brightness,
+          // ch1 fully read; ch2 (thread) unread.
+          readContexts: {'ch1': now},
+        ),
+      );
+      await tester.pumpAndSettle();
 
-    expect(find.byKey(const ValueKey('inbox-unread-dot-m1')), findsNothing);
-    expect(find.byKey(const ValueKey('inbox-unread-dot-ag1')), findsNothing);
-    expect(find.byKey(const ValueKey('inbox-unread-dot-a1')), findsOneWidget);
+      expect(find.byKey(const ValueKey('inbox-unread-dot-m1')), findsNothing);
+      expect(find.byKey(const ValueKey('inbox-unread-dot-ag1')), findsNothing);
+      final dot = tester.widget<Container>(
+        find.byKey(const ValueKey('inbox-unread-dot-a1')),
+      );
+      expect(
+        (dot.decoration as BoxDecoration).color,
+        brightness == Brightness.dark
+            ? const Color(0xFFF4BCCF)
+            : const Color(0xFFDF1E85),
+      );
+    }
   });
 
   testWidgets(

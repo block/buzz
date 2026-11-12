@@ -5,6 +5,9 @@ class AppColors extends ThemeExtension<AppColors> {
   final Color success;
   final Color warning;
   final Color accent;
+
+  /// Unread activity dots, independent of the selected accent.
+  final Color unread;
   final Color huddleDrawerSurface;
   final Color huddleControlSurface;
   final Color onHuddleDrawer;
@@ -18,6 +21,7 @@ class AppColors extends ThemeExtension<AppColors> {
     required this.success,
     required this.warning,
     required this.accent,
+    required this.unread,
     required this.huddleDrawerSurface,
     required this.huddleControlSurface,
     required this.onHuddleDrawer,
@@ -29,6 +33,7 @@ class AppColors extends ThemeExtension<AppColors> {
     Color? success,
     Color? warning,
     Color? accent,
+    Color? unread,
     Color? huddleDrawerSurface,
     Color? huddleControlSurface,
     Color? onHuddleDrawer,
@@ -37,6 +42,7 @@ class AppColors extends ThemeExtension<AppColors> {
     success: success ?? this.success,
     warning: warning ?? this.warning,
     accent: accent ?? this.accent,
+    unread: unread ?? this.unread,
     huddleDrawerSurface: huddleDrawerSurface ?? this.huddleDrawerSurface,
     huddleControlSurface: huddleControlSurface ?? this.huddleControlSurface,
     onHuddleDrawer: onHuddleDrawer ?? this.onHuddleDrawer,
@@ -50,6 +56,7 @@ class AppColors extends ThemeExtension<AppColors> {
       success: Color.lerp(success, other.success, t)!,
       warning: Color.lerp(warning, other.warning, t)!,
       accent: Color.lerp(accent, other.accent, t)!,
+      unread: Color.lerp(unread, other.unread, t)!,
       huddleDrawerSurface: Color.lerp(
         huddleDrawerSurface,
         other.huddleDrawerSurface,

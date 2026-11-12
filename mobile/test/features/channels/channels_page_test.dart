@@ -3701,7 +3701,10 @@ void main() {
     );
   });
 
-  for (final viaMenu in [false, true]) {
+  for (final (viaMenu, brightness) in [
+    (false, Brightness.light),
+    (true, Brightness.dark),
+  ]) {
     testWidgets('dots, not bolds, channels with only unread thread replies '
         '(cleared ${viaMenu ? 'by Mark read' : 'by reading the thread'})', (
       tester,
@@ -3735,6 +3738,7 @@ void main() {
 
       await tester.pumpWidget(
         buildTestable(
+          brightness: brightness,
           overrides: [
             channelsProvider.overrideWith(
               () => _FakeNotifier(
@@ -3770,6 +3774,15 @@ void main() {
       expect(
         find.byKey(const ValueKey('channel-attention-dot-1')),
         findsOneWidget,
+      );
+      final dot = tester.widget<Container>(
+        find.byKey(const ValueKey('channel-attention-dot-1')),
+      );
+      expect(
+        (dot.decoration as BoxDecoration).color,
+        brightness == Brightness.dark
+            ? const Color(0xFFF4BCCF)
+            : const Color(0xFFDF1E85),
       );
       expect(
         find.bySemanticsLabel(RegExp(r'general[\s\S]*Needs your attention')),
