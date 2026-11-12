@@ -348,6 +348,66 @@ void exactMentionTests() {
     },
   );
 
+  // Code the composer styles stays as typed; prose after it is still
+  // qualified, and both recipients send.
+  for (final (form, code, prose) in [
+    ('a fence', '```\nping @Scout now\n```\n', true),
+    ('a list fence', '- run:\n  ```\n  ping @Scout now\n  ```\n\n', true),
+    ('a list-marker fence', '- ```\n  ping @Scout now\n  ```\n\n', true),
+    ('a span in a list item', 'no ` here\n- run `ping @Scout now` x\n\n', true),
+    // Bold and italics consume a backtick inside them before code pairs.
+    ('a span after bold', '**use ` carefully** then `ping @Scout now` ', true),
+    ('a span after italics', '_a ` b_ `ping @Scout now` ', true),
+  ]) {
+    testWidgets('qualifying a namesake leaves $form as typed', (tester) async {
+      List<String>? sent;
+      await mountComposer(
+        tester,
+        members(),
+        (_, keys, {mediaTags = const []}) async => sent = keys,
+      );
+      final controller = tester
+          .widget<TextField>(find.byType(TextField))
+          .controller!;
+      await pick(tester, '@');
+      await pick(tester, '$code${prose ? 'hi @Scout\n' : ''}@', last: true);
+      expect(
+        controller.text,
+        '$code${prose ? 'hi @Scout ($first)\n' : ''}@Scout ($second) ',
+      );
+      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+      await tester.pumpAndSettle();
+      expect(sent, [first, second]);
+    });
+  }
+
+  // Prose that looks like code to a line-by-line reading is still qualified.
+  for (final (form, before, after) in [
+    ('list continuation', '- item\n\n    ask ', '\n\n'),
+    ('lazy list continuation', '- item\nlazy\n\n    ask ', '\n\n'),
+    ('an unmatched backtick in an earlier item', '- a `x\n- b ask ', ' y`\n\n'),
+    ('quote-tab', '>\t ask ', '\n\n'),
+    ('a backtick consumed by bold', '**a `b** ask ', ' `\n\n'),
+  ]) {
+    testWidgets('$form prose is qualified, not taken for code', (tester) async {
+      List<String>? sent;
+      await mountComposer(
+        tester,
+        members(),
+        (_, keys, {mediaTags = const []}) async => sent = keys,
+      );
+      final controller = tester
+          .widget<TextField>(find.byType(TextField))
+          .controller!;
+      await pick(tester, '@');
+      await pick(tester, '$before@Scout$after@', last: true);
+      expect(controller.text, '$before@Scout ($first)$after@Scout ($second) ');
+      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+      await tester.pumpAndSettle();
+      expect(sent, [first, second]);
+    });
+  }
+
   testWidgets(
     'a namesake selection left only in code keeps its label and recipient',
     (tester) async {

@@ -381,7 +381,7 @@ void spliceAndMoveCursor(
 /// occurrence left in code stays bound beside its qualified label. Returns
 /// [start] shifted by the edits before it.
 int _requalifyNamesakes(
-  TextEditingController controller,
+  _MarkdownEditingController controller,
   Map<String, MentionCandidate> mentions,
   Map<String, String> renames,
   int start,
@@ -391,13 +391,14 @@ int _requalifyNamesakes(
   final cursor = controller.selection.isValid
       ? controller.selection.baseOffset
       : text.length;
+  final code = controller._styledCodeRanges(text);
   final result = renameMentions(
     text,
     mentions.keys,
     renames,
     start,
-    excluded: (from, to) =>
-        _MarkdownEditingController._isInCode(text, from, to),
+    // Exactly what the editor draws as code stays as typed.
+    excluded: (from, to) => code.any((c) => c.start < from && to < c.end),
   );
   for (final key in result.renamed) {
     mentions[renames[key]!] = result.kept.contains(key)
