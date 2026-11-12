@@ -2045,7 +2045,11 @@ async fn run_active_audio_connection(
             .await;
             return;
         }
-        Err(refusal @ (JoinCommitError::MembershipLost | JoinCommitError::WriteRoleLost)) => {
+        Err(
+            refusal @ (JoinCommitError::MembershipLost
+            | JoinCommitError::WriteRoleLost
+            | JoinCommitError::AgentDmRefused),
+        ) => {
             // Membership revoked (IMPORTANT 4), or the channel's write rule no
             // longer lets the joiner write, between pre-join check and commit.
             // No `joined` frame was sent — commit-won invariant holds.
@@ -2054,6 +2058,7 @@ async fn run_active_audio_connection(
                 JoinCommitError::WriteRoleLost => {
                     "error: only members can join huddles in this channel"
                 }
+                JoinCommitError::AgentDmRefused => AGENT_DM_HUDDLE_REFUSED_ERROR,
                 _ => "error: not a member",
             };
             // IMPORTANT 3: cancel + await expiry task before peer/room teardown.
@@ -3006,6 +3011,8 @@ impl HuddleAdmissionGuard {
 /// authority, or a dependency that decides it could not be read.
 const AGENT_DM_HUDDLE_REFUSED: &str =
     "agents cannot join huddles in direct messages except with their owner";
+const AGENT_DM_HUDDLE_REFUSED_ERROR: &str =
+    "error: agents cannot join huddles in direct messages except with their owner";
 
 #[derive(Debug)]
 enum AdmissionRefusal {
@@ -3322,6 +3329,9 @@ pub(crate) enum JoinCommitError {
     /// Creator-signed huddle_started link was deleted between pre-join check
     /// and commit (IMPORTANT 4 residual: third carried fact).
     HuddleLinkGone,
+    /// The joiner is an agent and the huddle or its lifecycle parent is a DM
+    /// that is no longer exactly the agent and its owner.
+    AgentDmRefused,
 }
 
 impl std::fmt::Display for JoinCommitError {
@@ -3338,6 +3348,9 @@ impl std::fmt::Display for JoinCommitError {
             }
             JoinCommitError::HuddleLinkGone => {
                 write!(f, "huddle_started creator link gone before commit")
+            }
+            JoinCommitError::AgentDmRefused => {
+                write!(f, "agent DM rule refused before commit")
             }
         }
     }
@@ -3452,6 +3465,9 @@ async fn commit_participant_join(
         })?;
     let event_id_hex = event.id.to_hex();
 
+    let agent_owner =
+        crate::handlers::ingest::agent_owner_cached(state, tenant.community(), pubkey_bytes)
+            .await?;
     // 2. Begin a caller-owned DB transaction admitted for this community,
     //    before any channel-row or huddle-link lock below.
     let mut tx = state
@@ -3630,6 +3646,19 @@ async fn commit_participant_join(
             retire_shadow();
             let _ = tx.rollback().await;
             return Err(refusal);
+        }
+    }
+    if let Some(owner) = agent_owner {
+        for scope in locked_channels.iter().copied() {
+            let members =
+                buzz_db::channel_members::dm_members_in_transaction(membership.tx(), scope).await?;
+            if members.is_some_and(|members| {
+                !crate::handlers::ingest::agent_dm_allowed(pubkey_bytes, &owner, &members)
+            }) {
+                retire_shadow();
+                let _ = tx.rollback().await;
+                return Err(JoinCommitError::AgentDmRefused);
+            }
         }
     }
 
@@ -8125,6 +8154,132 @@ mod tests {
                     .await
                     .is_ok(),
                 "an agent joins its owner-only DM huddle"
+            );
+        }
+
+        /// The owner-only DM rule holds again at commit: a human who widens
+        /// the DM after the agent's admission refuses the join.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn agent_dm_huddle_join_rechecks_the_dm_at_commit() {
+            use chrono::{Duration, Utc};
+            use std::sync::Arc;
+
+            let state = audio_test_state_real_db()
+                .await
+                .expect("postgres-ci provides a database");
+            let pool = state.db.pool().clone();
+            let (tenant, _parent_id, _member_key) = seed_audio_fixture(&pool).await;
+            let community = tenant.community();
+            let owner = nostr::Keys::generate().public_key().to_bytes();
+            let stranger = nostr::Keys::generate().public_key().to_bytes();
+            let widened_agent = nostr::Keys::generate().public_key();
+            let kept_agent = nostr::Keys::generate().public_key();
+            for key in [
+                owner,
+                stranger,
+                widened_agent.to_bytes(),
+                kept_agent.to_bytes(),
+            ] {
+                state
+                    .db
+                    .ensure_user(community, &key)
+                    .await
+                    .expect("ensure user");
+            }
+            for agent in [widened_agent, kept_agent] {
+                state
+                    .db
+                    .set_agent_owner_for_authorization(community, &agent.to_bytes(), &owner)
+                    .await
+                    .expect("link agent owner");
+            }
+            let open_dm = |agent: [u8; 32]| {
+                let state = state.clone();
+                async move {
+                    state
+                        .db
+                        .open_dm(community, &[&agent, &owner], &owner)
+                        .await
+                        .expect("open dm")
+                        .0
+                        .id
+                }
+            };
+            let commit =
+                |channel: Uuid, agent: nostr::PublicKey, admission: MembershipAdmission| {
+                    let state = state.clone();
+                    let tenant = tenant.clone();
+                    async move {
+                        let gate = crate::nip_fi_gate::SessionAdmissionGate::new(
+                            Utc::now() + Duration::hours(1),
+                            tokio_util::sync::CancellationToken::new(),
+                        );
+                        commit_participant_join(
+                            &state,
+                            &tenant,
+                            channel,
+                            channel,
+                            &agent.to_hex(),
+                            &agent.to_bytes(),
+                            Uuid::new_v4(),
+                            0,
+                            0,
+                            1,
+                            "1",
+                            &admission,
+                            &gate,
+                            &Arc::new(crate::audio::room::Room::new(tenant.community(), channel)),
+                            None,
+                            None,
+                            None,
+                        )
+                        .await
+                    }
+                };
+
+            let widened_dm = open_dm(widened_agent.to_bytes()).await;
+            let admission = check_membership_for_admission(
+                &state,
+                &tenant,
+                widened_dm,
+                &widened_agent.to_bytes(),
+                None,
+            )
+            .await
+            .expect("admitted to the owner-only DM huddle");
+            sqlx::query(
+                "INSERT INTO channel_members \
+                 (community_id, channel_id, pubkey, role, invited_by) \
+                 VALUES ($1, $2, $3, 'member'::member_role, $4)",
+            )
+            .bind(community.as_uuid())
+            .bind(widened_dm)
+            .bind(stranger.as_slice())
+            .bind(owner.as_slice())
+            .execute(&pool)
+            .await
+            .expect("a human widens the DM");
+            assert!(matches!(
+                commit(widened_dm, widened_agent, admission).await,
+                Err(JoinCommitError::AgentDmRefused)
+            ));
+
+            let kept_dm = open_dm(kept_agent.to_bytes()).await;
+            let admission = check_membership_for_admission(
+                &state,
+                &tenant,
+                kept_dm,
+                &kept_agent.to_bytes(),
+                None,
+            )
+            .await
+            .expect("admitted to the owner-only DM huddle");
+            let committed = commit(kept_dm, kept_agent, admission).await;
+            assert!(
+                committed.is_ok(),
+                "an owner-only DM huddle join commits: {:?}",
+                committed.err().map(|e| e.to_string())
             );
         }
 
