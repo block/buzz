@@ -1113,9 +1113,22 @@ class HostedFlow extends ChangeNotifier {
     });
   }
 
-  Future<void> leave({bool noCommunities = false}) async {
+  /// Ends the account session for a sign-out that also removes this device's
+  /// communities. Unlike [signOutAccount] it publishes no stage while it runs,
+  /// so hosted setup never covers the screen that asked, and a failure throws
+  /// to the caller instead of blocking the flow.
+  Future<void> endAccountSession() async {
+    _abandon();
+    await browser.cancel();
+    await browser.clearIntent();
+    await account.clearLocalSession();
+    if (!_disposed && stage != HostedFlowStage.idle) {
+      _set(HostedFlowStage.idle);
+    }
+  }
+
+  void _abandon({bool noCommunities = false}) {
     _nextGeneration();
-    final generation = _generation;
     _target = null;
     _importRequested = false;
     _pairedPubkey = null;
@@ -1124,6 +1137,11 @@ class HostedFlow extends ChangeNotifier {
     accountOnly = false;
     _clearCommunityBatch();
     noCommunitiesToAdd = noCommunities;
+  }
+
+  Future<void> leave({bool noCommunities = false}) async {
+    _abandon(noCommunities: noCommunities);
+    final generation = _generation;
     try {
       await browser.cancel();
       if (_disposed || generation != _generation) return;

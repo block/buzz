@@ -1,11 +1,13 @@
 import 'dart:async';
 
 import 'package:buzz/features/settings/settings_page.dart';
+import 'package:buzz/hosted_app_gate.dart';
 import 'package:buzz/onboarding_app_entry.dart';
 import 'package:buzz/shared/auth/auth.dart';
 import 'package:buzz/shared/hosted/account_identity_store.dart';
 import 'package:buzz/shared/hosted/hosted_environment.dart';
 import 'package:buzz/shared/hosted/hosted_flow_provider.dart';
+import 'package:buzz/shared/relay/relay_session.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -61,11 +63,20 @@ void main() {
       final accountStorage = _AccountStorage();
       if (HostedEnvironment.enabled) {
         hosted = HostedCommunitiesFixture();
-        await hosted.initialize(accountStorage: accountStorage);
+        // A later launch whose session restore hasn't succeeded yet: the
+        // session is saved but not in memory.
+        await hosted.initialize(
+          accountStorage: accountStorage,
+          coldAccount: true,
+        );
         addTearDown(hosted.dispose);
         await hosted.flow.leave();
-        expect(hosted.account.account, isNotNull);
+        hosted.unavailable = true;
+        await expectLater(hosted.account.restore(), throwsA(anything));
+        expect(hosted.account.account, isNull);
       }
+      // Hosted setup must never cover Settings while it signs out.
+      final pushes = _Pushes();
       // The Builderlab session must be gone before the Sign in landing can
       // show it or be interrupted by its end.
       final sessionAtRemoval = <bool>[];
@@ -92,10 +103,15 @@ void main() {
             communityPushLeaseRevocationTriggerProvider.overrideWithValue(
               () => revocations.future,
             ),
+            relaySessionProvider.overrideWith(_OfflineSession.new),
             if (hosted != null)
               hostedFlowProvider.overrideWithValue(hosted.flow),
           ],
-          child: MaterialApp(theme: AppTheme.light(), home: const _Root()),
+          child: MaterialApp(
+            theme: AppTheme.light(),
+            navigatorObservers: [pushes],
+            home: const _Root(),
+          ),
         ),
       );
       await tester.pumpAndSettle();
@@ -110,27 +126,50 @@ void main() {
       await tester.pumpAndSettle();
       expect(await storage.loadAll(), hasLength(2));
 
-      if (hosted != null) {
-        // The session can't be cleared, so nothing is removed.
-        accountStorage.failing = true;
+      Future<void> confirmSignOut() async {
         await tester.tap(find.byKey(const Key('settings-sign-out')));
         await tester.pumpAndSettle();
+        pushes.count = 0;
         await tester.tap(find.widgetWithText(FilledButton, 'Sign out'));
-        await tester.pumpAndSettle();
-        expect(find.textContaining('Failed to sign out'), findsOneWidget);
-        expect(find.byType(SettingsPage), findsOneWidget);
-        expect(await storage.loadAll(), hasLength(2));
-        expect(removed, isEmpty);
-        expect(hosted.account.account, isNotNull);
-        accountStorage.failing = false;
       }
 
-      await tester.tap(find.byKey(const Key('settings-sign-out')));
-      await tester.pumpAndSettle();
-      await tester.tap(find.widgetWithText(FilledButton, 'Sign out'));
+      // Each failure keeps every community and shows its error in Settings.
+      Future<void> signOutFails() async {
+        await confirmSignOut();
+        await tester.pumpAndSettle();
+        expect(pushes.count, 0);
+        expect(find.byType(SettingsPage), findsOneWidget);
+        expect(find.textContaining('Failed to sign out'), findsOneWidget);
+        expect(await storage.loadAll(), hasLength(2));
+        expect(removed, isEmpty);
+        ScaffoldMessenger.of(
+          tester.element(find.byKey(const Key('settings-sign-out'))),
+        ).removeCurrentSnackBar();
+        await tester.pumpAndSettle();
+      }
+
+      if (hosted != null) {
+        // The saved session can't be deleted, though it isn't restored yet.
+        accountStorage.failing = true;
+        await signOutFails();
+        hosted.unavailable = false;
+        expect(await hosted.account.restore(), isNotNull);
+        // Nor once it is.
+        await signOutFails();
+        expect(hosted.account.account, isNotNull);
+        accountStorage.failing = false;
+        // A pending browser sign-in can't be forgotten.
+        hosted.browser.clearIntentError = PlatformException(code: 'keychain');
+        await signOutFails();
+        expect(hosted.account.account, isNotNull);
+        hosted.browser.clearIntentError = null;
+      }
+
+      await confirmSignOut();
       // The landing animates, so it never settles.
       await _pumpFor(tester);
 
+      expect(pushes.count, 0);
       expect(await storage.loadAll(), isEmpty);
       expect(find.byType(SettingsPage), findsNothing);
       expect(find.byType(OnboardingAppEntry), findsOneWidget);
@@ -197,18 +236,36 @@ class _Root extends ConsumerWidget {
     final status = ref.watch(authProvider).value?.status;
     if (status == null) return const SizedBox.shrink();
     if (status != AuthStatus.authenticated) return const OnboardingAppEntry();
-    return Scaffold(
-      body: TextButton(
-        onPressed: () => Navigator.of(context).push(
-          MaterialPageRoute<void>(
-            builder: (_) => SettingsPage(
-              profileHeader: const SizedBox.shrink(),
-              identityRecoveryPageBuilder: (_) => const SizedBox.shrink(),
+    return HostedAppGate(
+      authenticated: true,
+      child: Scaffold(
+        body: TextButton(
+          onPressed: () => Navigator.of(context).push(
+            MaterialPageRoute<void>(
+              builder: (_) => SettingsPage(
+                profileHeader: const SizedBox.shrink(),
+                identityRecoveryPageBuilder: (_) => const SizedBox.shrink(),
+              ),
             ),
           ),
+          child: const Text('Open Settings'),
         ),
-        child: const Text('Open Settings'),
       ),
     );
   }
+}
+
+/// The relay boundary: nothing connects.
+class _OfflineSession extends RelaySessionNotifier {
+  @override
+  SessionState build() =>
+      const SessionState(status: SessionStatus.disconnected);
+}
+
+/// Counts routes pushed since [count] was last reset.
+class _Pushes extends NavigatorObserver {
+  int count = 0;
+
+  @override
+  void didPush(Route<dynamic> route, Route<dynamic>? previousRoute) => count++;
 }

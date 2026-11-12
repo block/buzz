@@ -4,7 +4,6 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import '../community/community.dart';
 import '../community/community_provider.dart';
 import 'account_identity_store.dart';
-import 'builderlab_account.dart';
 import 'hosted_environment.dart';
 import 'hosted_flow_provider.dart';
 import '../widgets/confirmation_dialog.dart';
@@ -42,9 +41,7 @@ Future<void> confirmSignOut(BuildContext context, WidgetRef ref) async {
     // landing never shows it and nothing started there can be cancelled by
     // it. Removed communities' push-lease revocations authenticate with the
     // push-stop credential it leaves behind.
-    await flow?.signOutAccount();
-    // A failed clear leaves the flow blocked rather than throwing.
-    if (flow?.account.account != null) throw AccountFailure.storage;
+    await flow?.endAccountSession();
     // The active community goes last, so removing the others never switches
     // to and connects another one.
     for (final community in [
