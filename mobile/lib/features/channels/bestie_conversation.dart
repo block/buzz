@@ -3,6 +3,7 @@ import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 import 'package:flutter/material.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../../shared/widgets/adaptive_conversation_pane.dart';
 import '../../shared/me/default_agent.dart';
 import '../../shared/me/me_sync.dart';
 import '../../shared/relay/relay.dart';
@@ -64,13 +65,18 @@ Future<void> openBestieConversation(
     }
     // Only the lookup is guarded; an open conversation can be replaced.
     release();
-    await Navigator.of(context).push<void>(
-      MaterialPageRoute(
-        // Native glass and video layers must track the live route.
-        allowSnapshotting: false,
-        builder: (_) => ChannelDetailPage(channel: channel),
-      ),
-    );
+    final pane = ConversationPaneScope.maybeOf(context);
+    if (pane != null) {
+      pane.open(channel.id, (_) => ChannelDetailPage(channel: channel));
+    } else {
+      await Navigator.of(context).push<void>(
+        MaterialPageRoute(
+          // Native glass and video layers must track the live route.
+          allowSnapshotting: false,
+          builder: (_) => ChannelDetailPage(channel: channel),
+        ),
+      );
+    }
   } catch (error) {
     if (context.mounted) {
       ScaffoldMessenger.of(context).showFeedbackSnackBar(

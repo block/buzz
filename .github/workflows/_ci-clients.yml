@@ -25,7 +25,7 @@ env:
 jobs:
   web:
     name: Web
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     if: inputs.lane == 'required' && (github.event_name == 'push' || inputs.web)
     permissions:
@@ -61,7 +61,7 @@ jobs:
   # matrix result. Test shards split files, so each compiles only its own.
   mobile:
     name: Mobile (${{ matrix.name }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     if: inputs.lane == 'required' && (github.event_name == 'push' || inputs.mobile)
     strategy:
@@ -177,7 +177,7 @@ jobs:
       - name: Test mobile recipe argument forwarding
         if: matrix.lane == 'checks'
         run: /bin/bash scripts/test-mobile-gateway-recipes.sh
-      # ubuntu-latest (26.04) defaults to JDK 25, which Gradle 8.14 does not
+      # ubuntu-26.04 defaults to JDK 25, which Gradle 8.14 does not
       # support. Pin the JDK 17 the 24.04 image used.
       - name: Set up JDK 17
         if: matrix.lane == 'android'
@@ -291,7 +291,7 @@ jobs:
     name: Results
     if: ${{ always() }}
     needs: [web, mobile, mobile-swift]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions: {}
     outputs:

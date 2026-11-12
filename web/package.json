@@ -38,7 +38,7 @@
     "tailwind-merge": "^3.5.0"
   },
   "devDependencies": {
-    "@playwright/test": "^1.58.2",
+    "@playwright/test": "^1.65.0",
     "@tailwindcss/postcss": "^4.3.0",
     "@tanstack/router-plugin": "^1.167.12",
     "@tanstack/virtual-file-routes": "^1.161.7",

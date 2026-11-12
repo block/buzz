@@ -666,7 +666,10 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         "Search service ready (Postgres FTS)"
     );
 
-    let workflow_config = buzz_workflow::WorkflowConfig::default();
+    let workflow_config = buzz_workflow::WorkflowConfig {
+        agent_mentions: config.workflow_agent_mentions,
+        ..Default::default()
+    };
     let workflow_engine = Arc::new(WorkflowEngine::new(db.clone(), workflow_config));
 
     config
@@ -1701,6 +1704,28 @@ mod env_filter_tests {
             tracing::warn!(target: "buzz_relay::access", "access-warn");
         });
         assert!(access.is_empty(), "{access}");
+    }
+
+    #[test]
+    fn withheld_agent_mentions_log_under_default_filters() {
+        let example =
+            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../.env.example"))
+                .unwrap();
+        let example = example
+            .lines()
+            .find_map(|line| line.strip_prefix("RUST_LOG="))
+            .unwrap()
+            .to_owned();
+        for filter in [log_filter(None), log_filter(Some(&example))] {
+            let logs = logged(filter, || {
+                tracing::info!(target: buzz_workflow::AGENT_MENTIONS_LOG_TARGET, "withheld");
+                tracing::info!(target: "buzz_workflow::executor", "workflow-noise");
+            });
+            assert!(
+                logs.contains("withheld") && !logs.contains("workflow-noise"),
+                "{logs}"
+            );
+        }
     }
 
     #[test]
