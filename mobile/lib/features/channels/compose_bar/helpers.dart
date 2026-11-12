@@ -379,13 +379,17 @@ void spliceAndMoveCursor(
 /// Qualify earlier namesake mentions outside code, keeping the cursor in
 /// place, and rebind [mentions] before the text changes. A key with an
 /// occurrence left in code stays bound beside its qualified label. Returns
-/// [start] shifted by the edits before it.
+/// [start] shifted by the edits before it. Call it before tracking the new
+/// selection: persistence prunes keys absent from the text.
 int _requalifyNamesakes(
   _MarkdownEditingController controller,
   Map<String, MentionCandidate> mentions,
-  Map<String, String> renames,
+  MentionCandidate candidate,
   int start,
 ) {
+  final renames = namesakeRequalifications(candidate.label, candidate.pubkey, {
+    for (final entry in mentions.entries) entry.key: entry.value.pubkey,
+  });
   if (renames.isEmpty) return start;
   final text = controller.text;
   final cursor = controller.selection.isValid

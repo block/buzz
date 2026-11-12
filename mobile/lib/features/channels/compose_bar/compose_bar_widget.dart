@@ -328,14 +328,10 @@ class ComposeBar extends HookConsumerWidget {
 
     // Insert a selected mention into the text field.
     void insertMention(MentionCandidate candidate) {
-      final selected = {
+      final name = selectedMentionLabel(candidate.label, candidate.pubkey, {
         for (final entry in mentionMap.value.entries)
           entry.key: entry.value.pubkey,
-      };
-      final (label, pk) = (candidate.label, candidate.pubkey);
-      final name = selectedMentionLabel(label, pk, selected);
-      // A namesake qualifies every same-name mention, earlier ones included.
-      final renames = namesakeRequalifications(label, pk, selected);
+      });
       ref
           .read(mentionHistoryProvider.notifier)
           .remember(channelId, candidate.pubkey);
@@ -346,10 +342,9 @@ class ComposeBar extends HookConsumerWidget {
         start = _requalifyNamesakes(
           controller,
           mentionMap.value,
-          renames,
+          candidate,
           start,
         );
-        // After the rename: persistence prunes keys absent from the text.
         mentionMap.value[name] = candidate;
         spliceAndMoveCursor(
           controller,
