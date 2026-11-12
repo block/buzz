@@ -1165,6 +1165,7 @@ async fn handle_channel_window_filter(
             let content = serde_json::json!({
                 "reply_count": summary.reply_count,
                 "descendant_count": summary.descendant_count,
+                "agent_descendant_count": summary.agent_descendant_count,
                 "last_reply_at": summary.last_reply_at.map(|t| t.timestamp()),
                 "participants": summary.participants.iter().map(hex::encode).collect::<Vec<_>>(),
             });

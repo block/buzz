@@ -10,6 +10,14 @@ use crate::{
     AdmittedTx,
 };
 
+/// Whether a stored event's `tags` hold `["audience", "agents"]`, as
+/// `crate::event::is_agent_audience` tests a parsed event.
+macro_rules! agent_audience_predicate {
+    () => {
+        r#"jsonb_path_exists(tags, 'strict $[*] ? (@[0] == "audience" && @[1] == "agents")', '{}', true)"#
+    };
+}
+
 /// SQL predicate over an `events` row for coordinates that carry no
 /// historical value: NIP-RS read state and Buzz mesh heartbeats. Their
 /// deletion is physical, including the mention index, so soft-deleted payloads
@@ -154,8 +162,11 @@ macro_rules! purge_retention_free_sql {
 // partition (and its indexes) during plan validation, before runtime pruning.
 // An unnamed statement is always planned with its bound parameters, so only the
 // partition selected by `created_at` is locked.
-const SELECT_KNOWN_EVENT_SQL: &str = "SELECT kind, channel_id, created_at FROM events \
-     WHERE community_id = $1 AND id = $2 AND created_at = $3";
+const SELECT_KNOWN_EVENT_SQL: &str = concat!(
+    "SELECT kind, channel_id, created_at, ",
+    agent_audience_predicate!(),
+    " FROM events WHERE community_id = $1 AND id = $2 AND created_at = $3"
+);
 const SOFT_DELETE_KNOWN_EVENT_SQL: &str = concat!(
     "UPDATE events SET deleted_at = NOW() \
      WHERE community_id = $1 AND id = $2 AND created_at = $3 \
@@ -302,7 +313,7 @@ pub(crate) async fn soft_delete_event_and_update_thread_in_tx(
     // Planned targets already have it; every subsequent events-table access
     // uses the exact partition key. Kind/channel remain canonical DB reads,
     // never caller-supplied classification (including for deleted rows).
-    let target: Option<(i32, Option<Uuid>, DateTime<Utc>)> = match created_at {
+    let target: Option<(i32, Option<Uuid>, DateTime<Utc>, bool)> = match created_at {
         Some(created_at) => {
             sqlx::query_as(SELECT_KNOWN_EVENT_SQL)
                 .persistent(false)
@@ -313,17 +324,18 @@ pub(crate) async fn soft_delete_event_and_update_thread_in_tx(
                 .await?
         }
         None => {
-            sqlx::query_as(
-                "SELECT kind, channel_id, created_at FROM events \
-             WHERE community_id = $1 AND id = $2",
-            )
+            sqlx::query_as(concat!(
+                "SELECT kind, channel_id, created_at, ",
+                agent_audience_predicate!(),
+                " FROM events WHERE community_id = $1 AND id = $2"
+            ))
             .bind(community_id.as_uuid())
             .bind(event_id)
             .fetch_optional(tx.conn())
             .await?
         }
     };
-    let Some((kind, channel_id, created_at)) = target else {
+    let Some((kind, channel_id, created_at, agent_audience)) = target else {
         return Ok(false);
     };
 
@@ -395,6 +407,17 @@ pub(crate) async fn soft_delete_event_and_update_thread_in_tx(
                 .bind(root_id)
                 .execute(tx.conn())
                 .await?;
+                if agent_audience {
+                    sqlx::query(
+                        "UPDATE thread_agent_reply_counts \
+                         SET agent_descendant_count = GREATEST(agent_descendant_count - 1, 0) \
+                         WHERE community_id = $1 AND root_event_id = $2",
+                    )
+                    .bind(community_id.as_uuid())
+                    .bind(root_id)
+                    .execute(tx.conn())
+                    .await?;
+                }
             }
         }
     }

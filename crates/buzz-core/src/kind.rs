@@ -483,7 +483,8 @@ pub const KIND_NIP29_GROUP_ROLES: u32 = 39003;
 // stored). Appended to bridge `/query` responses for `top_level` window
 // requests — see docs/bridge-channel-window.md.
 /// Thread summary overlay: `e`/`d` tag = root event id, content =
-/// `{reply_count, descendant_count, last_reply_at, participants}`.
+/// `{reply_count, descendant_count, agent_descendant_count, last_reply_at,
+/// participants}`.
 pub const KIND_THREAD_SUMMARY: u32 = 39005;
 /// Window bounds overlay: `d` tag = `<channel_id>:<request-cursor-or-head>`,
 /// content = `{has_more, next_cursor}`. The only authority on exhaustion —
