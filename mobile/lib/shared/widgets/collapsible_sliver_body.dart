@@ -187,6 +187,12 @@ class _RenderClippedSection extends RenderProxySliver {
   }
 
   @override
+  Rect? describeApproximatePaintClip(covariant RenderObject child) =>
+      _factor == 1
+      ? null
+      : Rect.fromLTWH(0, 0, constraints.crossAxisExtent, geometry!.paintExtent);
+
+  @override
   void visitChildrenForSemantics(RenderObjectVisitor visitor) {
     if (_expanded) super.visitChildrenForSemantics(visitor);
   }
