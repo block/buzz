@@ -712,7 +712,7 @@ async fn private_media_revocation_http_journey() {
             &text,
             &text,
             true,
-            &member.public_key().to_hex(),
+            crate::workflow_sink::test_sender(&member.public_key().to_hex()),
             None,
         )
         .await;

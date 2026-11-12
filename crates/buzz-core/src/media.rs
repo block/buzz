@@ -86,8 +86,8 @@ fn avatar_hashes(value: &str, base: &str, out: &mut BTreeSet<String>) {
 }
 
 /// Extract counted references. imeta URL/image fields cover attachments,
-/// previews and posters. Profile pictures/banners, group pictures and emoji
-/// are the explicitly supported non-message references. Free text grants nothing.
+/// previews and posters. Profile pictures/banners, group pictures, emoji and
+/// workflow message avatars are the explicitly supported non-attachment references. Free text grants nothing.
 pub fn reference_hashes(event: &Event, base: &str) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     let preview_suppressed = event
@@ -121,6 +121,12 @@ pub fn reference_hashes(event: &Event, base: &str) -> BTreeSet<String> {
             }
             Some("emoji") if matches!(event.kind.as_u16(), 10030 | 30030 | 30180) => {
                 if let Some(value) = parts.get(2) {
+                    out.extend(local_hash(value, base));
+                }
+            }
+            // A workflow message's avatar is shown to everyone who reads it.
+            Some("buzz:workflow-avatar") if event.kind.as_u16() == 9 => {
+                if let Some(value) = parts.get(1) {
                     out.extend(local_hash(value, base));
                 }
             }
@@ -299,6 +305,29 @@ mod tests {
                 .sign_with_keys(&Keys::generate())
                 .unwrap();
             assert_eq!(reference_hashes(&event, "https://local/media"), expected);
+        }
+    }
+    #[test]
+    fn workflow_avatar_counts_only_on_messages() {
+        let a = "a".repeat(64);
+        for (kind, avatar, expected) in [
+            (
+                9,
+                format!("https://local/media/{a}.png"),
+                BTreeSet::from([a.clone()]),
+            ),
+            (9, format!("https://foreign/media/{a}.png"), BTreeSet::new()),
+            (1, format!("https://local/media/{a}.png"), BTreeSet::new()),
+        ] {
+            let event = EventBuilder::new(Kind::Custom(kind), "")
+                .tags([Tag::parse(["buzz:workflow-avatar", &avatar]).unwrap()])
+                .sign_with_keys(&Keys::generate())
+                .unwrap();
+            assert_eq!(
+                reference_hashes(&event, "https://local/media"),
+                expected,
+                "kind {kind}, {avatar}"
+            );
         }
     }
     #[test]

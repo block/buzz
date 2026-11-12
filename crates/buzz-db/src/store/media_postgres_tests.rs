@@ -251,6 +251,74 @@ async fn edits_deletion_legacy_profiles_and_publication_boundaries() {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
+async fn workflow_avatar_grants_channel_readers() {
+    let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
+        .await
+        .unwrap();
+    let db = Db::from_pool(pool);
+    let host = format!("media-avatar-{}.example", uuid::Uuid::new_v4());
+    let community = db.ensure_configured_community(&host).await.unwrap().id;
+    let base = format!("https://{host}/media");
+    let owner = Keys::generate();
+    let outsider = Keys::generate();
+    db.ensure_user(community, owner.public_key().as_bytes())
+        .await
+        .unwrap();
+    let channel = db
+        .create_channel(
+            community,
+            "avatar",
+            ChannelType::Stream,
+            ChannelVisibility::Private,
+            None,
+            owner.public_key().as_bytes(),
+            None,
+        )
+        .await
+        .unwrap()
+        .id;
+    let avatar = "a".repeat(64);
+    let ignored = "b".repeat(64);
+    for hash in [&avatar, &ignored] {
+        db.record_media_upload(community, hash, owner.public_key().as_bytes())
+            .await
+            .unwrap();
+    }
+    db.record_media_publications(community, vec![avatar.clone(), ignored.clone()])
+        .await
+        .unwrap();
+    let now = Timestamp::now().as_secs();
+    for (kind, hash) in [(9, &avatar), (1, &ignored)] {
+        let event = EventBuilder::new(Kind::Custom(kind), "deployed")
+            .tags([
+                Tag::parse(["h", &channel.to_string()]).unwrap(),
+                Tag::parse(["buzz:workflow-avatar", &format!("{base}/{hash}.bin")]).unwrap(),
+            ])
+            .custom_created_at(Timestamp::from(now))
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        db.insert_event(community, &event, Some(channel))
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        allowed(&db, community, &avatar, &base, &owner).await,
+        MediaAccess::Allowed,
+        "a channel reader can load a workflow message's avatar"
+    );
+    assert_eq!(
+        allowed(&db, community, &avatar, &base, &outsider).await,
+        MediaAccess::Restricted
+    );
+    assert_eq!(
+        allowed(&db, community, &ignored, &base, &owner).await,
+        MediaAccess::Restricted,
+        "the tag counts only on channel messages"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
 async fn popular_media_prefers_live_readable_references_and_bounds_work() {
     let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
         .await

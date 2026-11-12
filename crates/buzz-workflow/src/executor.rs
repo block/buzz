@@ -700,7 +700,17 @@ pub async fn dispatch_action(
                             text,
                             authored_text,
                             withheld_reasons.is_empty(),
-                            &owner_pubkey_hex,
+                            crate::action_sink::WorkflowSender {
+                                owner_pubkey: &owner_pubkey_hex,
+                                // Both from the row loaded above: the saved name is
+                                // what workflow lists show, and the saved avatar was
+                                // validated when the definition was stored.
+                                name: &workflow.name,
+                                avatar: workflow
+                                    .definition
+                                    .get("avatar")
+                                    .and_then(serde_json::Value::as_str),
+                            },
                             reply_to,
                         )
                         .await

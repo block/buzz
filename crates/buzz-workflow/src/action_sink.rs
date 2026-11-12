@@ -71,8 +71,7 @@ pub trait ActionSink: Send + Sync {
     ///   output alone.
     /// - `may_direct_agents`: whether this run may attach that metadata; when
     ///   `false`, the consumer withholds it.
-    /// - `author_pubkey`: hex-encoded pubkey of the workflow owner (used for
-    ///   the `p` attribution tag; the relay keypair signs the event)
+    /// - `sender`: the workflow owner and the identity its messages display
     /// - `reply_to`: when `Some(event_id_hex)`, the message is posted as a
     ///   threaded reply to that event (NIP-10 root/reply tags + real thread
     ///   metadata); when `None`, it is a top-level channel message.
@@ -86,7 +85,19 @@ pub trait ActionSink: Send + Sync {
         text: &str,
         authored_text: &str,
         may_direct_agents: bool,
-        author_pubkey: &str,
+        sender: WorkflowSender<'_>,
         reply_to: Option<&str>,
     ) -> Pin<Box<dyn Future<Output = Result<SentMessage, ActionSinkError>> + Send + '_>>;
+}
+
+/// Who a workflow message comes from. The relay keypair signs the event; these
+/// fields only attribute and label it.
+#[derive(Debug, Clone, Copy)]
+pub struct WorkflowSender<'a> {
+    /// Hex-encoded pubkey of the workflow owner, for the `p` attribution tag.
+    pub owner_pubkey: &'a str,
+    /// The workflow definition's `name`, shown as the sender name.
+    pub name: &'a str,
+    /// The definition's validated `avatar` URL, shown as the sender avatar.
+    pub avatar: Option<&'a str>,
 }
