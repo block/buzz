@@ -1615,6 +1615,7 @@ mod postgres_tests {
                 &stranger_dm.to_string(),
                 "hi",
                 "hi",
+                true,
                 &agent_hex,
                 None,
             )
@@ -1629,6 +1630,7 @@ mod postgres_tests {
             &owner_dm.to_string(),
             "hi",
             "hi",
+            true,
             &agent_hex,
             None,
         )
