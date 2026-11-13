@@ -6,6 +6,11 @@ import {
   resolveAgentCardAvatarUrl,
 } from "@/features/agents/lib/agentCardAvatar";
 import { resolveAgentCardModelLabel } from "@/features/agents/lib/agentCardModelLabel";
+import {
+  type AgentLibraryStatusFilter,
+  filterAgentLibrary,
+  isAgentLibraryFilterActive,
+} from "@/features/agents/lib/agentLibraryFilter";
 import { effectiveAgentDescription } from "@/features/agents/lib/agentDescription";
 import { friendlyAgentLastError } from "@/features/agents/lib/friendlyAgentLastError";
 import type { AgentAvailabilityReader } from "@/features/agents/lib/useAgentAvailability";
@@ -17,12 +22,14 @@ import type { AgentPersona, ManagedAgent } from "@/shared/api/types";
 import type { ProfilePanelOpenOptions } from "@/shared/context/ProfilePanelContext";
 import { useFeedbackToasts } from "@/shared/hooks/useToastEffect";
 import { Badge } from "@/shared/ui/badge";
+import { Button } from "@/shared/ui/button";
 import {
   ProtectedBestieCardBadge,
   useProtectedBestiePubkey,
 } from "@protected-feature-components";
 import { IdentityCardSkeleton } from "@/shared/ui/identity-card-skeleton";
 import { AgentIdentityCard } from "./AgentIdentityCard";
+import { AgentLibraryToolbar } from "./AgentLibraryToolbar";
 import { AgentRuntimeAvatarControl } from "./AgentRuntimeAvatarControl";
 import { CreateIdentityCard } from "./CreateIdentityCard";
 import { PersonaActionsMenu } from "./PersonaActionsMenu";
@@ -105,10 +112,32 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
 
   const isArchived = useIsArchivedPredicate();
   const bestiePubkey = useProtectedBestiePubkey(agents)?.toLowerCase() ?? null;
-  const { groups, ungrouped, unknown } = React.useMemo(
+  const library = React.useMemo(
     () => buildUnifiedGroups(personas, agents, isArchived),
     [personas, agents, isArchived],
   );
+  const [query, setQuery] = React.useState("");
+  const [statusFilter, setStatusFilter] =
+    React.useState<AgentLibraryStatusFilter>("all");
+  const searchInputRef = React.useRef<HTMLInputElement | null>(null);
+  const filter = React.useMemo(
+    () => ({ query, status: statusFilter }),
+    [query, statusFilter],
+  );
+  const { groups, ungrouped, unknown, counts } = React.useMemo(
+    () => filterAgentLibrary(library, filter, { isArchived, getAvailability }),
+    [library, filter, isArchived, getAvailability],
+  );
+  const hasLibraryCards =
+    library.groups.length + library.ungrouped.length + library.unknown.length >
+    0;
+  const isFilterActive = isAgentLibraryFilterActive(filter);
+  const hasVisibleCards = groups.length + ungrouped.length + unknown.length > 0;
+  function clearFilters() {
+    setQuery("");
+    setStatusFilter("all");
+    searchInputRef.current?.focus();
+  }
   const [collapsed, setCollapsed] = React.useState<Set<string>>(new Set());
   function toggle(key: string) {
     setCollapsed((prev) => {
@@ -132,6 +161,16 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
 
       {!isLoading ? (
         <div className="space-y-3" data-testid="unified-agents-groups">
+          {hasLibraryCards ? (
+            <AgentLibraryToolbar
+              counts={counts}
+              inputRef={searchInputRef}
+              onQueryChange={setQuery}
+              onStatusChange={setStatusFilter}
+              query={query}
+              status={statusFilter}
+            />
+          ) : null}
           <div className={IDENTITY_CARD_GRID_CLASS}>
             <CreateIdentityCard
               ariaLabel="New agent"
@@ -178,6 +217,22 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
               );
             })}
           </div>
+          {hasLibraryCards && isFilterActive && !hasVisibleCards ? (
+            <div
+              className="flex flex-wrap items-center gap-3 rounded-2xl border border-dashed border-border/70 px-4 py-3 text-sm text-muted-foreground"
+              data-testid="agents-library-filter-empty"
+            >
+              <span>No agents match your search or filter.</span>
+              <Button
+                onClick={clearFilters}
+                size="xs"
+                type="button"
+                variant="outline"
+              >
+                Clear
+              </Button>
+            </div>
+          ) : null}
 
           {unknown.length > 0 ? (
             <CollapsibleAgentGroup
