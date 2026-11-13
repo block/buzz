@@ -53,3 +53,51 @@ void useOpenChannelRoute(WidgetRef ref, String channelId) {
     return ref.read(openChannelRoutesProvider)._register(channelId, route);
   }, [channelId, route]);
 }
+
+/// The thread pages currently open, keyed by their head event ID.
+///
+/// A link into the thread already in front goes to that page instead of
+/// stacking another copy of it.
+class OpenThreadRoutes {
+  final _routes = OpenChannelRoutes();
+  final _showMessage = <Route<Object?>, ValueChanged<String>>{};
+
+  /// Shows [messageId] on the page for [headId]'s thread when [top] shows
+  /// that page, and returns whether it did.
+  bool showInFront(String headId, String messageId, NavigatorState top) {
+    final route = _routes.latest(headId);
+    final showMessage = _showMessage[route];
+    if (route == null ||
+        showMessage == null ||
+        !isOpenChannelShown(route, top)) {
+      return false;
+    }
+    showMessage(messageId);
+    return true;
+  }
+}
+
+final openThreadRoutesProvider = Provider<OpenThreadRoutes>(
+  (ref) => OpenThreadRoutes(),
+);
+
+/// Records that this page's route shows the thread headed by [headId], and
+/// shows a linked message there with [showMessage].
+void useOpenThreadRoute(
+  WidgetRef ref,
+  String headId,
+  ValueChanged<String> showMessage,
+) {
+  final route = ModalRoute.of(useContext());
+  final latestShowMessage = useRef(showMessage)..value = showMessage;
+  useEffect(() {
+    if (route == null) return null;
+    final routes = ref.read(openThreadRoutesProvider);
+    final unregister = routes._routes._register(headId, route);
+    routes._showMessage[route] = (id) => latestShowMessage.value(id);
+    return () {
+      unregister();
+      routes._showMessage.remove(route);
+    };
+  }, [headId, route]);
+}

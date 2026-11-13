@@ -287,17 +287,163 @@ void swipeReplyTests() {
                 .id,
             threadIdRoot,
           );
-          // A thread message must push a reply route too, rather than doing nothing.
+          final navigator = Navigator.of(
+            tester.element(find.byType(ThreadDetailPage)),
+          );
+          if (!thread) {
+            expect(navigator.canPop(), isTrue);
+            return;
+          }
+          // A thread head's reply destination is the page already showing:
+          // its composer takes the reply and no copy of the thread stacks.
+          expect(navigator.canPop(), isFalse);
           expect(
-            Navigator.of(
-              tester.element(find.byType(ThreadDetailPage)),
-            ).canPop(),
+            tester
+                .widget<TextField>(find.byType(TextField))
+                .focusNode
+                ?.hasFocus,
+            isTrue,
+          );
+          FocusManager.instance.primaryFocus?.unfocus();
+          await tester.pumpAndSettle();
+          await tester.longPress(
+            find
+                .descendant(
+                  of: row,
+                  matching: find.byType(LocalSendBubbleSurface),
+                )
+                .first,
+          );
+          await tester.pumpAndSettle();
+          await tester.tap(find.text('Reply'));
+          await tester.pumpAndSettle();
+          expect(navigator.canPop(), isFalse);
+          expect(
+            tester
+                .widget<TextField>(find.byType(TextField))
+                .focusNode
+                ?.hasFocus,
             isTrue,
           );
         },
       );
     }
   }
+
+  testWidgets('a notification for the thread in front keeps one thread page', (
+    tester,
+  ) async {
+    PendingDeepLinkNotifier.debugUriStreamOverride = const Stream.empty();
+    addTearDown(() {
+      PendingDeepLinkNotifier.debugUriStreamOverride = null;
+      pendingPushNotificationLink.value = null;
+    });
+    final events = [
+      _textMsg(id: threadIdRoot, pubkey: 'alice', content: 'Thread head'),
+    ];
+    // The linked reply is the oldest of many, far above the thread's tail.
+    final replies = [
+      for (var i = 0; i < 30; i++)
+        _textMsg(
+          id: i == 0 ? threadIdA : 'later-reply-$i',
+          pubkey: 'alice',
+          content: i == 0 ? 'Linked reply' : 'Later reply $i',
+          createdAt: 1001 + i,
+          extraTags: [
+            ['e', threadIdRoot, '', 'reply'],
+          ],
+        ),
+    ];
+    final messages = formatTimeline(events);
+    await tester.pumpWidget(
+      _buildTestable(
+        signingPubkey: 'self',
+        messages: events,
+        threadReplies: {threadIdRoot: replies},
+        home: DeepLinkDispatcher(
+          child: ThreadDetailPage(
+            threadHead: messages.first,
+            allMessages: messages,
+            channelId: _channelId,
+            currentPubkey: 'self',
+            isMember: true,
+            isArchived: false,
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final navigator = Navigator.of(
+      tester.element(find.byType(ThreadDetailPage)),
+    );
+    final linkedRow = find.byKey(
+      const ValueKey('thread-message-row-$threadIdA'),
+    );
+    expect(linkedRow.hitTestable(), findsNothing);
+    const link = MessageDeepLink(
+      channelId: _channelId,
+      messageId: threadIdA,
+      threadRootId: threadIdRoot,
+    );
+
+    // Tapping the reply's notification while its thread is in front lands on
+    // that reply in the same page, the way opening the thread from it does.
+    pendingPushNotificationLink.value = link;
+    for (var frame = 0; frame < 6; frame++) {
+      await tester.pump();
+    }
+    await tester.pump(const Duration(milliseconds: 50));
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(navigator.canPop(), isFalse);
+    expect(find.byType(ChannelDetailPage), findsNothing);
+    expect(linkedRow.hitTestable(), findsOneWidget);
+    final highlight =
+        tester
+                .widget<DecoratedBox>(
+                  find.byKey(const ValueKey('thread-message-$threadIdA')),
+                )
+                .decoration
+            as BoxDecoration;
+    expect(highlight.color!.a, greaterThan(0));
+    await tester.pumpAndSettle();
+
+    // A reply below the head still opens its own branch on top.
+    final swipe = await tester.startGesture(
+      tester.getCenter(
+        find
+            .descendant(
+              of: linkedRow,
+              matching: find.byType(LocalSendBubbleSurface),
+            )
+            .first,
+      ),
+    );
+    await swipe.moveBy(const Offset(-25, 0));
+    await swipe.moveBy(const Offset(-100, 0));
+    await swipe.up();
+    await tester.pumpAndSettle();
+    expect(navigator.canPop(), isTrue);
+    expect(
+      tester
+          .widget<ThreadDetailPage>(find.byType(ThreadDetailPage))
+          .threadHead
+          .id,
+      threadIdA,
+    );
+
+    // Covered by that branch, the thread is no longer in front, so the
+    // notification opens it again on top.
+    pendingPushNotificationLink.value = null;
+    pendingPushNotificationLink.value = link;
+    await tester.pumpAndSettle();
+    expect(
+      tester
+          .widget<ThreadDetailPage>(find.byType(ThreadDetailPage))
+          .threadHead
+          .id,
+      threadIdRoot,
+    );
+  });
 
   for (final movement in [
     const Offset(-45, 0),
