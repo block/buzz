@@ -101,9 +101,9 @@ class PresenceCacheNotifier extends Notifier<Map<String, String>> {
         added = true;
       }
     }
-    // While live (the poll runs only then), new keys are read once the
-    // subscription covers them, so no live event falls between the snapshot
-    // and the subscription.
+    // While live (the poll runs only then), a new key needs a subscription
+    // that covers it. A snapshot read before that one opens can miss a change,
+    // so the key is read again once it is covered.
     if (added && (_poll?.isActive ?? false)) {
       _queueResubscribe(_generation);
     } else {
@@ -150,6 +150,8 @@ class PresenceCacheNotifier extends Notifier<Map<String, String>> {
     final keys = _tracked.toList()..sort();
     final subscription = ++_nextSubscription;
     var closed = false;
+    // Status reported before this subscription replaces the active one.
+    var retrying = false;
     // The subscription being replaced keeps delivering until this one opens.
     bool current() =>
         generation == _generation &&
@@ -168,7 +170,11 @@ class PresenceCacheNotifier extends Notifier<Map<String, String>> {
               if (current() && !_retrying) _handlePresenceEvent(event);
             },
             onStatusChanged: (status) {
-              if (!current()) return;
+              if (generation != _generation || closed) return;
+              if (subscription != _activeSubscription) {
+                retrying = status == RelaySubscriptionStatus.retrying;
+                return;
+              }
               _retrying = status == RelaySubscriptionStatus.retrying;
               _invalidateSnapshot();
               if (!_retrying) _schedule(generation);
@@ -188,13 +194,27 @@ class PresenceCacheNotifier extends Notifier<Map<String, String>> {
         return;
       }
       final previous = _presenceUnsub;
+      // A replacement still backing off would leave nobody live: keep the
+      // working subscription, and let the next poll try a wider one again.
+      if (retrying && previous != null) {
+        closed = true;
+        unsub();
+        return;
+      }
+      // Read newly covered keys again: an earlier snapshot of them was not
+      // backed by a live subscription.
+      _pending.addAll(keys.where((key) => !_subscribedKeys.contains(key)));
       _activeSubscription = subscription;
-      _retrying = false;
+      _retrying = retrying;
       _presenceUnsub = unsub;
       _subscribedKeys
         ..clear()
         ..addAll(keys);
       previous?.call();
+      if (_retrying) {
+        _invalidateSnapshot();
+        return;
+      }
       // Keys tracked while this one opened need a wider subscription.
       if (!_subscribedKeys.containsAll(_tracked)) _queueResubscribe(generation);
       _schedule(generation);
