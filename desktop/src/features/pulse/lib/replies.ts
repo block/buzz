@@ -1,4 +1,5 @@
 import type { UserNote } from "@/shared/api/socialTypes";
+import { truncateByCharacters } from "@/shared/lib/truncateByCharacters";
 
 export function getReplyParent(note: UserNote): string | null {
   const eTags = note.tags.filter((tag) => tag[0] === "e" && tag[1]);
@@ -27,5 +28,5 @@ export function getReplyParent(note: UserNote): string | null {
 }
 
 export function noteSnippet(content: string) {
-  return content.trim().replace(/\s+/g, " ").slice(0, 120);
+  return truncateByCharacters(content.trim().replace(/\s+/g, " "), 120);
 }
