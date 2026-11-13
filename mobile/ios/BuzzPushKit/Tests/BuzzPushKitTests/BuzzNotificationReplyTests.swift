@@ -122,13 +122,11 @@ func `Forum posts and other kinds offer no reply`(kind: Int) {
 
   buffer.complete(id: "1", outcome: .sent)
   // A deadline after the app reported the outcome changes nothing.
-  #expect(buffer.expire(id: "1") == nil)
+  buffer.expire(id: "1")
   buffer.complete(id: "2", outcome: .notSent(draftThreadRootID: "head"))
   buffer.complete(id: "3", outcome: .unknown)
-  // A taken reply the app is still sending isn't handed back as a draft.
-  #expect(buffer.expire(id: "4") == nil)
-  // One the app never took is, so its text isn't lost.
-  #expect(buffer.expire(id: "5")?.id == "5")
+  buffer.expire(id: "4")
+  buffer.expire(id: "5")
   buffer.complete(id: "unknown", outcome: .sent)
 
   #expect(
@@ -136,6 +134,47 @@ func `Forum posts and other kinds offer no reply`(kind: Int) {
       "1": [.sent], "2": [.notSent(draftThreadRootID: "head")], "3": [.unknown],
       "4": [.notSent(draftThreadRootID: nil)], "5": [.notSent(draftThreadRootID: nil)],
     ])
+}
+
+@Test func `A reply stays journaled until reported, across a relaunch`() throws {
+  let suite = "reply-journal-\(UUID().uuidString)"
+  let defaults = try #require(UserDefaults(suiteName: suite))
+  defer { defaults.removePersistentDomain(forName: suite) }
+  let journal = BuzzNotificationReplyJournal(defaults: defaults)
+  journal.record(["id": "1", "text": "one"])
+  journal.record(["id": "2", "text": "two"])
+
+  #expect(journal.take().map { $0["id"] } == ["1", "2"])
+  // The app is already working on these.
+  #expect(journal.take().isEmpty)
+  journal.settle(id: "1")
+  journal.record(["id": "3", "text": "three"])
+  #expect(journal.take().map { $0["id"] } == ["3"])
+
+  // The app was stopped before reporting 2 and 3, so a relaunch hands them
+  // over again for their drafts.
+  let relaunched = BuzzNotificationReplyJournal(defaults: defaults)
+  #expect(relaunched.take().map { $0["text"] } == ["two", "three"])
+  relaunched.settle(id: "2")
+  relaunched.settle(id: "3")
+  #expect(BuzzNotificationReplyJournal(defaults: defaults).take().isEmpty)
+}
+
+@Test func `Reply context carries whether the chat is Solo`() throws {
+  for inSolo in [true, false, nil] as [Bool?] {
+    let context = BuzzNotificationReplyContext(
+      senderPubkey: "pk", messageCreatedAt: 1, inSolo: inSolo)
+    #expect(
+      BuzzNotificationReplyContext.decodeIfPresent(
+        from: [BuzzNotificationReplyContext.userInfoKey: context.userInfoValue]) == context)
+  }
+  #expect(
+    BuzzNotificationReplyContext.decodeIfPresent(
+      from: [
+        BuzzNotificationReplyContext.userInfoKey: [
+          "sender_pubkey": "pk", "created_at": "1", "in_solo": "yes",
+        ]
+      ]) == nil)
 }
 
 @Test func `Selected community round-trips and clears`() throws {

@@ -8,7 +8,7 @@ import '../../shared/push/push_bridge.dart';
 import '../../shared/read_state/read_state_format.dart';
 import '../../shared/read_state/read_state_provider.dart';
 import '../../shared/relay/relay.dart';
-import '../activity/compose_drafts_provider.dart';
+import '../../shared/drafts/compose_drafts_provider.dart';
 import 'channel.dart';
 import 'channel_management_provider.dart';
 import 'channels_provider.dart';
@@ -81,10 +81,10 @@ const _markReadDeadline = Duration(seconds: 3);
 enum NotificationReplyOutcome {
   sent,
 
-  /// Never published; its text is kept as a draft.
+  /// Never published, or refused by the relay; its text is kept as a draft.
   notSent,
 
-  /// Published, but its acknowledgement never came, so it may have gone out.
+  /// Published, but no answer came from the relay, so it may have gone out.
   /// No draft is kept, so resending can't post it twice.
   unknown,
 }
@@ -144,7 +144,8 @@ Future<NotificationReplyResult> sendNotificationReply(
       ).timeout(left);
     } catch (error) {
       debugPrint('[NotificationReply] not sent: $error');
-      if (published) {
+      // Only the relay saying no settles a published reply as not sent.
+      if (published && error is! RelayEventRejectedException) {
         return (
           outcome: NotificationReplyOutcome.unknown,
           draftThreadRootId: null,
@@ -179,7 +180,8 @@ Future<NotificationReplyResult> sendNotificationReply(
 }
 
 /// Publishes [reply] to its own community's relay, or throws. [mayPublish]
-/// is asked right before publishing, after every wait.
+/// is asked right before the event goes out, after every wait, including a
+/// rate limit's.
 Future<void> _send(
   Ref ref,
   BuzzNotificationReply reply, {
@@ -237,10 +239,10 @@ String? _replyHead(BuzzNotificationReply reply, Channel channel) =>
     channel.isSolo ? null : reply.replyRootId ?? reply.link.messageId;
 
 /// Keeps the reply's text as a draft, after any draft already there, in the
-/// reply's own community, and returns the thread it's in. It goes in the
-/// subthread under the notified message, where the reply would have gone,
-/// when the conversation is known to take threads; otherwise in the
-/// conversation the notification opens.
+/// reply's own community, and returns the thread it's in once it's saved. It
+/// goes where the reply would have gone: the subthread under the notified
+/// message, or a Solo chat itself. Whether it's a Solo chat comes from the
+/// loaded channel, or else from the notification.
 Future<String?> _keepDraft(Ref ref, BuzzNotificationReply reply) async {
   final link = reply.link;
   final channel =
@@ -251,11 +253,8 @@ Future<String?> _keepDraft(Ref ref, BuzzNotificationReply reply) async {
             ?.where((channel) => channel.id == link.channelId)
             .firstOrNull
       : null;
-  final threadHeadId = channel == null
-      ? link.threadRootId
-      : channel.isSolo
-      ? null
-      : link.messageId;
+  final solo = channel?.isSolo ?? reply.inSolo;
+  final threadHeadId = solo ? null : link.messageId;
   try {
     final communities = await ref.read(communityListProvider.future);
     final community = communities
@@ -264,7 +263,7 @@ Future<String?> _keepDraft(Ref ref, BuzzNotificationReply reply) async {
     if (community == null) {
       throw StateError('Community ${link.communityId} not found');
     }
-    ref
+    await ref
         .read(composeDraftsProvider.notifier)
         .append(
           config: RelayConfig(

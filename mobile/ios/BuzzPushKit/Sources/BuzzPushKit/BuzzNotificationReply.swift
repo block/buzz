@@ -17,23 +17,32 @@ public struct BuzzNotificationReplyContext: Codable, Equatable, Sendable {
   public let threadRootID: String?
   /// When the notified message was created; replying marks it read up to here.
   public let messageCreatedAt: Int
+  /// Whether channel metadata showed a Solo chat, which takes no thread
+  /// replies; nil when it was unknown.
+  public let inSolo: Bool?
 
-  public init(senderPubkey: String, threadRootID: String? = nil, messageCreatedAt: Int) {
+  public init(
+    senderPubkey: String, threadRootID: String? = nil, messageCreatedAt: Int, inSolo: Bool? = nil
+  ) {
     self.senderPubkey = senderPubkey
     self.threadRootID = threadRootID
     self.messageCreatedAt = messageCreatedAt
+    self.inSolo = inSolo
   }
 
   /// Kinds the app can answer with an ordinary channel or DM message.
   /// Forum posts (45001) and comments (45003) have their own reply rules.
   static let replyableKinds: Set<Int> = [9, 40002]
 
-  static func make(for event: VerifiedNostrEvent) -> BuzzNotificationReplyContext? {
+  static func make(
+    for event: VerifiedNostrEvent, inSolo: Bool? = nil
+  ) -> BuzzNotificationReplyContext? {
     guard replyableKinds.contains(event.kind) else { return nil }
     return BuzzNotificationReplyContext(
       senderPubkey: event.pubkey.lowercased(),
       threadRootID: nip10RootID(in: event.tags),
-      messageCreatedAt: event.createdAt
+      messageCreatedAt: event.createdAt,
+      inSolo: inSolo
     )
   }
 
@@ -62,6 +71,7 @@ public struct BuzzNotificationReplyContext: Codable, Equatable, Sendable {
   public var userInfoValue: [String: String] {
     var value = ["sender_pubkey": senderPubkey, "created_at": String(messageCreatedAt)]
     value["thread_root_id"] = threadRootID
+    value["in_solo"] = inSolo.map { $0 ? "true" : "false" }
     return value
   }
 
@@ -70,16 +80,24 @@ public struct BuzzNotificationReplyContext: Codable, Equatable, Sendable {
     from userInfo: [AnyHashable: Any]
   ) -> BuzzNotificationReplyContext? {
     guard let raw = userInfo[userInfoKey] as? [String: Any],
-      Set(raw.keys).isSubset(of: ["sender_pubkey", "thread_root_id", "created_at"]),
+      Set(raw.keys).isSubset(of: ["sender_pubkey", "thread_root_id", "created_at", "in_solo"]),
       let sender = raw["sender_pubkey"] as? String, !sender.isEmpty,
       let createdAt = (raw["created_at"] as? String).flatMap(Int.init), createdAt > 0
     else { return nil }
     if let rawRoot = raw["thread_root_id"] {
       guard let root = rawRoot as? String, !root.isEmpty else { return nil }
     }
+    var inSolo: Bool?
+    if let rawSolo = raw["in_solo"] {
+      switch rawSolo as? String {
+      case "true": inSolo = true
+      case "false": inSolo = false
+      default: return nil
+      }
+    }
     return BuzzNotificationReplyContext(
       senderPubkey: sender, threadRootID: raw["thread_root_id"] as? String,
-      messageCreatedAt: createdAt)
+      messageCreatedAt: createdAt, inSolo: inSolo)
   }
 }
 
@@ -181,19 +199,59 @@ public final class BuzzNotificationReplyBuffer: @unchecked Sendable {
     remove(id: id)?.finish(outcome)
   }
 
-  /// Finishes a request as not sent at its deadline, and returns it when the
-  /// app never took it, so its text can still become a draft.
-  @discardableResult
-  public func expire(id: String) -> BuzzNotificationReplyRequest? {
-    guard let entry = remove(id: id) else { return nil }
-    entry.finish(.notSent(draftThreadRootID: nil))
-    return entry.taken ? nil : entry.request
+  /// Finishes a request as not sent at its deadline.
+  public func expire(id: String) {
+    remove(id: id)?.finish(.notSent(draftThreadRootID: nil))
   }
 
   private func remove(id: String) -> Entry? {
     lock.lock()
     defer { lock.unlock() }
     return entries.firstIndex { $0.request.id == id }.map { entries.remove(at: $0) }
+  }
+}
+
+/// Replies typed into notifications that the app hasn't reported on, kept on
+/// disk from the moment they arrive. If the app is stopped before reporting
+/// one, the next launch hands it over again, and its deadline having passed,
+/// the app keeps its text as a draft instead of sending it.
+public final class BuzzNotificationReplyJournal: @unchecked Sendable {
+  public static let defaultsKey = "buzz.notification_reply.pending"
+
+  private let defaults: UserDefaults
+  private let lock = NSLock()
+  /// Ids handed to the app by this process, which aren't handed over twice.
+  private var handedOver: Set<String> = []
+
+  public init(defaults: UserDefaults) {
+    self.defaults = defaults
+  }
+
+  /// Keeps a reply's app arguments, which carry its `id`.
+  public func record(_ arguments: [String: String]) {
+    lock.lock()
+    defer { lock.unlock() }
+    defaults.set(pending() + [arguments], forKey: Self.defaultsKey)
+  }
+
+  /// Replies not yet handed over by this process, oldest first.
+  public func take() -> [[String: String]] {
+    lock.lock()
+    defer { lock.unlock() }
+    let fresh = pending().filter { !handedOver.contains($0["id"] ?? "") }
+    handedOver.formUnion(fresh.compactMap { $0["id"] })
+    return fresh
+  }
+
+  /// Forgets a reply once the app has reported it sent, or kept its draft.
+  public func settle(id: String) {
+    lock.lock()
+    defer { lock.unlock() }
+    defaults.set(pending().filter { $0["id"] != id }, forKey: Self.defaultsKey)
+  }
+
+  private func pending() -> [[String: String]] {
+    defaults.array(forKey: Self.defaultsKey) as? [[String: String]] ?? []
   }
 }
 

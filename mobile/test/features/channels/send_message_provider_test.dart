@@ -273,6 +273,7 @@ class _PendingPublishRelaySession extends RelaySessionNotifier {
   Future<NostrEvent> publish(
     NostrEvent event, {
     Duration timeout = const Duration(seconds: 8),
+    bool Function()? mayPublish,
   }) {
     this.event = event;
     _published.complete();

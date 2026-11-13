@@ -60,6 +60,7 @@ class BuzzNotificationReply {
     required this.messageCreatedAt,
     required this.deadline,
     this.replyRootId,
+    this.inSolo = false,
   });
 
   final String id;
@@ -79,6 +80,10 @@ class BuzzNotificationReply {
 
   /// When iOS stops waiting for the reply and reports it as not sent.
   final DateTime deadline;
+
+  /// Whether the notification knew the message is in a Solo chat, which
+  /// takes no thread replies.
+  final bool inSolo;
 
   static BuzzNotificationReply? fromArguments(Object? arguments) {
     if (arguments is! Map) return null;
@@ -124,6 +129,7 @@ class BuzzNotificationReply {
       messageCreatedAt: createdAt,
       deadline: DateTime.fromMillisecondsSinceEpoch(deadline),
       replyRootId: root as String?,
+      inSolo: arguments['inSolo'] == 'true',
     );
   }
 }

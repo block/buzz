@@ -20,7 +20,7 @@ import '../../../shared/me/me_groups.dart';
 import '../../../shared/me/default_agent.dart';
 import '../../../shared/me/me_chat_title.dart';
 import '../../../shared/me/solo_chat_seed.dart';
-import '../../activity/compose_drafts_provider.dart';
+import '../../../shared/drafts/compose_drafts_provider.dart';
 import '../../../shared/crypto/event_signing.dart';
 import '../../../shared/me/me_chat_creation.dart';
 import '../../../shared/me/me_sync.dart';

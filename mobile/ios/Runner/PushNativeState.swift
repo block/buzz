@@ -133,11 +133,11 @@ final class BuzzNotificationReplyBridge {
   /// iOS gives a background notification action about 30 seconds.
   static let sendTimeout: TimeInterval = 25
   static let replyNotSentThread = "buzz.reply-not-sent"
-  /// Replies the app never took before their deadline, kept so the app makes
-  /// their text a draft when it next runs.
-  static let unsentRepliesKey = "buzz.notification_reply.unsent"
 
   private let buffer = BuzzNotificationReplyBuffer()
+  /// Keeps each reply until the app reports on it, so a reply the app never
+  /// finished, even across a relaunch, still becomes a draft.
+  private let journal = BuzzNotificationReplyJournal(defaults: .standard)
   private let selectedCommunityDefaults: UserDefaults?
   /// Tells Flutter a reply is waiting; Flutter also takes waiting replies
   /// when its handler starts, so a call made before then is harmless.
@@ -202,6 +202,7 @@ final class BuzzNotificationReplyBridge {
       self?.expire(request.id)
       endBackgroundTask()
     }
+    journal.record(Self.flutterArguments(request))
     buffer.add(request) { outcome in
       Self.finish(request, outcome: outcome, notificationID: notificationID, center: center) {
         DispatchQueue.main.async {
@@ -221,7 +222,10 @@ final class BuzzNotificationReplyBridge {
   func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) -> Bool {
     switch call.method {
     case "takePendingNotificationReplies":
-      result(takeUnsentReplies() + buffer.take().map(Self.flutterArguments))
+      // Every buffered reply is in the journal, which also holds any a
+      // previous launch never finished.
+      _ = buffer.take()
+      result(journal.take())
     case "completeNotificationReply":
       guard let arguments = call.arguments as? [String: Any],
         let id = arguments["id"] as? String,
@@ -237,6 +241,8 @@ final class BuzzNotificationReplyBridge {
         : arguments["unknown"] as? Bool == true
           ? .unknown
           : .notSent(draftThreadRootID: arguments["draftThreadRootId"] as? String)
+      // The app reports only after the reply is sent or its draft is saved.
+      journal.settle(id: id)
       buffer.complete(id: id, outcome: outcome)
       result(nil)
     case "setSelectedCommunity":
@@ -248,21 +254,10 @@ final class BuzzNotificationReplyBridge {
     return true
   }
 
-  /// Ends a reply at its deadline. One the app never took is kept, so the
-  /// app still makes its text a draft.
+  /// Ends a reply at its deadline. It stays in the journal until the app
+  /// reports on it, so its text still becomes a draft.
   private func expire(_ id: String) {
-    guard let request = buffer.expire(id: id) else { return }
-    let defaults = UserDefaults.standard
-    var unsent = defaults.array(forKey: Self.unsentRepliesKey) as? [[String: String]] ?? []
-    unsent.append(Self.flutterArguments(request))
-    defaults.set(unsent, forKey: Self.unsentRepliesKey)
-  }
-
-  private func takeUnsentReplies() -> [[String: String]] {
-    let defaults = UserDefaults.standard
-    let unsent = defaults.array(forKey: Self.unsentRepliesKey) as? [[String: String]] ?? []
-    defaults.removeObject(forKey: Self.unsentRepliesKey)
-    return unsent
+    buffer.expire(id: id)
   }
 
   private static func flutterArguments(_ request: BuzzNotificationReplyRequest) -> [String: String] {
@@ -273,6 +268,7 @@ final class BuzzNotificationReplyBridge {
     arguments["replyRootId"] = request.context.threadRootID
     arguments["messageCreatedAt"] = String(request.context.messageCreatedAt)
     arguments["deadline"] = String(Int64(request.deadline.timeIntervalSince1970 * 1000))
+    arguments["inSolo"] = request.context.inSolo == true ? "true" : nil
     return arguments
   }
 
