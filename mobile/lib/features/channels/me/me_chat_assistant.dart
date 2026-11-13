@@ -210,7 +210,11 @@ useMeChatAssistant(
           if (!members.any((member) => member.pubkey == picked)) {
             await ref
                 .read(channelActionsProvider)
-                .addMembers(channelId: channelId, pubkeys: [picked]);
+                .addMembers(
+                  channelId: channelId,
+                  pubkeys: [picked],
+                  agentPubkeys: {picked},
+                );
             ref.invalidate(channelMembersProvider(channelId));
           }
         },
