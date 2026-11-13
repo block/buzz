@@ -1276,8 +1276,9 @@ async fn lock_channel_row(
     }
     lock_channel_ttl(tx, channel_id, ttl).await?;
     // `FOR NO KEY UPDATE`, like a huddle join: it orders this write against
-    // every other settings write and a huddle join, but not against the
-    // `KEY SHARE` lock that a membership INSERT takes for its foreign key.
+    // every other settings write and a huddle join, but not against a
+    // `KEY SHARE` lock on the channel (a membership INSERT's foreign key while
+    // it exists, `insert_auto_membership`'s channel check).
     let (previous_visibility, archived, listed): (String, bool, bool) =
         sqlx::query_as(sqlx::AssertSqlSafe(format!(
             "SELECT visibility::text, archived_at IS NOT NULL, {LISTED_CHANNEL_SQL} FROM channels \

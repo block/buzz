@@ -1361,7 +1361,7 @@ mod postgres_tests {
                 "SELECT EXISTS (SELECT 1 FROM pg_stat_activity \
                  WHERE wait_event_type = 'Lock' \
                    AND $1 = ANY(pg_blocking_pids(pid)) \
-                   AND query LIKE 'SELECT archived_at FROM channels %FOR NO KEY UPDATE')",
+                   AND query LIKE 'SELECT archived_at, deleted_at IS NOT NULL FROM channels %FOR NO KEY UPDATE')",
             )
             .bind(blocker_pid)
             .fetch_one(pool)

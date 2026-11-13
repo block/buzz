@@ -248,6 +248,11 @@ impl ChannelMembershipLocks<'_> {
     ///
     /// Used by `commit_participant_join` to atomically add membership and the
     /// `48101` event in a single transaction under a session effect permit.
+    ///
+    /// The channel must exist in the transaction's community; it is locked
+    /// `FOR KEY SHARE` before the insert, and a missing channel returns
+    /// [`DbError::NotFound`] without writing. The membership lock this proof
+    /// holds is an advisory lock and does not guard the channel row.
     pub async fn insert_auto_membership(
         &mut self,
         channel_id: Uuid,
@@ -256,6 +261,8 @@ impl ChannelMembershipLocks<'_> {
     ) -> Result<()> {
         self.check_covers(channel_id)?;
         let community_id = self.tx.community();
+        crate::store::reference_check::require_channel(self.tx.conn(), community_id, channel_id)
+            .await?;
         sqlx::query(
             r#"
             INSERT INTO channel_members (community_id, channel_id, pubkey, role, invited_by)
@@ -297,32 +304,43 @@ pub async fn lock_channel_memberships_in_transaction<'tx>(
     })
 }
 
-/// Lock the live channel row on a caller-owned transaction and return its
-/// `archived_at` (`None` when the channel is missing, deleted, or not archived).
+/// Lock the channel row on a caller-owned transaction and return its
+/// `archived_at` (`None` when the channel is not archived, or is soft-deleted).
+///
+/// A channel with no row in the transaction's community returns
+/// [`DbError::ChannelNotFound`]: a join into a channel that was purged must not
+/// proceed as if the channel were merely not archived. A soft-deleted channel
+/// keeps its row, so it is not a missing parent and reads as not archived; the
+/// callers' own checks refuse it.
 ///
 /// The `FOR NO KEY UPDATE` row lock makes `archive_channel`'s
 /// `UPDATE channels SET archived_at = NOW()` wait until the caller commits or
 /// rolls back, so a join cannot commit into a channel archived concurrently.
-/// `FOR UPDATE` would invert the lock order against `add_member`, whose
-/// membership INSERT needs `KEY SHARE` on `channels` for its foreign key
-/// after taking the advisory membership lock; `FOR NO KEY UPDATE` still blocks
-/// archive (a non-key update) but is compatible with `KEY SHARE`. Re-reading
-/// under the lock is safe: the caller already holds it.
+/// `FOR UPDATE` would invert the lock order against a membership writer that
+/// key-share locks `channels` after taking the advisory membership lock
+/// ([`ChannelMembershipLocks::insert_auto_membership`]'s channel check, and a
+/// membership INSERT's foreign key while it exists); `FOR NO KEY UPDATE` still
+/// blocks archive (a non-key update) and a delete, but is compatible with
+/// `KEY SHARE`. Re-reading under the lock is safe: the caller already holds it.
 pub async fn lock_channel_archived_at_in_transaction(
     tx: &mut AdmittedTx,
     channel_id: Uuid,
 ) -> Result<Option<DateTime<Utc>>> {
     let community_id = tx.community();
-    let archived_at: Option<Option<DateTime<Utc>>> = sqlx::query_scalar(
-        "SELECT archived_at FROM channels \
-         WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL \
+    let row: Option<(Option<DateTime<Utc>>, bool)> = sqlx::query_as(
+        "SELECT archived_at, deleted_at IS NOT NULL FROM channels \
+         WHERE community_id = $1 AND id = $2 \
          FOR NO KEY UPDATE",
     )
     .bind(community_id.as_uuid())
     .bind(channel_id)
     .fetch_optional(tx.conn())
     .await?;
-    Ok(archived_at.flatten())
+    match row {
+        None => Err(DbError::ChannelNotFound(channel_id)),
+        Some((_, true)) => Ok(None),
+        Some((archived_at, false)) => Ok(archived_at),
+    }
 }
 
 /// Take the shared TTL lock of `channel_id` on a caller-owned transaction.
