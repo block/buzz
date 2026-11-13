@@ -169,9 +169,14 @@ Future<void> _presentIosEmojiPicker({
         if (emojiBytes.lookup(url) case final Uint8List bytes) return bytes;
         final cancel = Completer<void>();
         mediaBytesCancels[id] = cancel;
+        // Only downloads wait for a slot; saved emoji load at once.
+        var admittedLoad = false;
         try {
-          if (activeMediaLoads < _maxNativeMediaLoads) {
+          if (await mediaDiskCache?.contains(url) ?? false) {
+            // Read from disk below without a slot.
+          } else if (activeMediaLoads < _maxNativeMediaLoads) {
             activeMediaLoads++;
+            admittedLoad = true;
           } else {
             final admitted = Completer<void>();
             queuedMediaLoads.add(admitted);
@@ -180,6 +185,7 @@ Future<void> _presentIosEmojiPicker({
               queuedMediaLoads.remove(admitted);
               throw StateError('Media bytes load cancelled');
             }
+            admittedLoad = true;
           }
         } on Object {
           mediaBytesCancels.remove(id);
@@ -196,7 +202,7 @@ Future<void> _presentIosEmojiPicker({
           return bytes;
         } finally {
           mediaBytesCancels.remove(id);
-          releaseMediaLoad();
+          if (admittedLoad) releaseMediaLoad();
         }
       case 'cancelMediaBytes':
         final cancel = mediaBytesCancels.remove(call.arguments as int);

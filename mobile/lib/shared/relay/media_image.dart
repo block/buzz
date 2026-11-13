@@ -90,7 +90,8 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
   final double scale;
   final MediaGetAuthService auth;
 
-  /// Optional observer for bytes already fetched by the foreground image path.
+  /// Optional observer for bytes the foreground image path fetched and
+  /// decoded a frame from.
   /// Excluded from equality because it is a side effect, not cache identity.
   final ValueChanged<Uint8List>? onBytesLoaded;
 
@@ -182,6 +183,7 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
   ) {
     final abandoned = Completer<void>();
     _SharedFetch? fetched;
+    Uint8List? loadedBytes;
     // The image cache listens to a pending load, so this fires mid-download
     // only once a consumer evicts the entry and stops listening (see
     // [abandonPendingImage]), as [MediaImage] does when it stops showing an
@@ -192,6 +194,7 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
         decode,
         abandoned.future,
         onFetch: (fetch) => fetched = fetch,
+        onBytes: (bytes) => loadedBytes = bytes,
       ),
       scale: key.scale,
       debugLabel: url,
@@ -202,6 +205,11 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
       onSettled: (decoded) {
         fetched?.settle(decoded: decoded);
         fetched = null;
+        // Report only bytes that decoded, so observers such as the picker's
+        // bytes cache never keep an error body.
+        final bytes = loadedBytes;
+        loadedBytes = null;
+        if (decoded && bytes != null) onBytesLoaded?.call(bytes);
       },
     )..addOnLastListenerRemovedCallback(() {
       if (!abandoned.isCompleted) abandoned.complete();
@@ -213,6 +221,7 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
     ImageDecoderCallback decode,
     Future<void> abandoned, {
     required void Function(_SharedFetch) onFetch,
+    required void Function(Uint8List) onBytes,
   }) async {
     var wasAbandoned = false;
     try {
@@ -249,7 +258,7 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
       }
       // Another size kept the download going, but this load's consumer left.
       if (wasAbandoned) throw StateError('Image load abandoned');
-      onBytesLoaded?.call(bytes);
+      onBytes(bytes);
       final buffer = await ui.ImmutableBuffer.fromUint8List(bytes);
       return withBrowserFrameTiming(await decode(buffer));
     } catch (_) {

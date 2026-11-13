@@ -284,6 +284,43 @@ void main() {
       },
     );
 
+    test('reports only bytes that decoded to observers', () async {
+      final client = http_testing.MockClient((request) async {
+        if (request.url.path.endsWith('broken.png')) {
+          return http.Response('<html>error</html>', 200);
+        }
+        // Opens a codec, then fails its first frame.
+        if (request.url.path.endsWith('truncated.png')) {
+          return http.Response.bytes(_pngBytes.sublist(0, 41), 200);
+        }
+        return http.Response.bytes(_pngBytes, 200);
+      });
+      final delivered = <String>[];
+      MediaImageProvider provider(String url) => MediaImageProvider(
+        url: url,
+        auth: _auth(),
+        client: client,
+        onBytesLoaded: (_) => delivered.add(url),
+      );
+      for (final name in ['broken', 'truncated']) {
+        expect(
+          await _waitError(
+            provider(
+              'https://emoji.example/$name.png',
+            ).resolve(ImageConfiguration.empty),
+          ),
+          isNotNull,
+        );
+      }
+      await _wait(
+        provider(
+          'https://emoji.example/ok.png',
+        ).resolve(ImageConfiguration.empty),
+      );
+      expect(delivered, ['https://emoji.example/ok.png']);
+      PaintingBinding.instance.imageCache.clear();
+    });
+
     test('resolves one fetch for repeated resolves of the same key', () async {
       var fetches = 0;
       final client = http_testing.MockClient((request) async {
