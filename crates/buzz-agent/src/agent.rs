@@ -91,12 +91,127 @@ Your assistant text and reasoning are never shown to anyone — if you did work,
 or hit a blocker that someone is waiting on, it exists only if you publish it. \
 If you already posted, or if silence is genuinely correct for this turn, ignore this and end your turn.";
 
+/// Reminder emitted when a send was attempted but *provably* did not produce a
+/// publication (explicit rejection, provably empty body, or verified
+/// pre-submission failure). Delivery is known not to have happened, so one
+/// corrective publish is safe and is what the reminder asks for.
+const REPLY_GUARD_FAILED_NAG: &str =
+    "You are about to end this turn without a usable `buzz messages send`. \
+     Your last send did not produce a publication (explicitly rejected, empty, or never ran). \
+     Fix the cause or the content and publish once now, then end the turn.";
+
+/// Reminder emitted when a send was attempted but delivery is *unknown*
+/// (timeout, connection loss, missing acknowledgement, ambiguous exit).
+///
+/// Deliberately does not ask for a repost: a duplicate is worse than a delay,
+/// so the model is told to reconcile/verify and, if it cannot, to record the
+/// uncertainty without sending again. The wording avoids the word "report",
+/// which the model could otherwise satisfy with another `messages send`.
+const REPLY_GUARD_UNCERTAIN_NAG: &str =
+    "You are about to end this turn without a confirmed `buzz messages send`. \
+     Your last send returned no usable relay acknowledgement, so delivery is unknown. \
+     Do not send another channel message: a duplicate is worse than a delay. \
+     If you cannot verify delivery, record the delivery uncertainty through the available \
+     runtime/tool diagnostic path and end the turn without claiming delivery.";
+
+/// Most informative terminal state of this turn's `messages send` attempts.
+///
+/// Strictly ordered so [`ReplyOutcome::merge`] can fold multiple calls: a later
+/// `Confirmed` always wins, and `AttemptUncertain` outranks `AttemptFailed` so a
+/// lost acknowledgement is never downgraded to a proven failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum ReplyOutcome {
+    #[default]
+    NoAttempt,
+    AttemptFailed,
+    AttemptUncertain,
+    Confirmed,
+}
+
+impl ReplyOutcome {
+    fn rank(self) -> u8 {
+        match self {
+            ReplyOutcome::NoAttempt => 0,
+            ReplyOutcome::AttemptFailed => 1,
+            ReplyOutcome::AttemptUncertain => 2,
+            ReplyOutcome::Confirmed => 3,
+        }
+    }
+
+    /// Fold `other` in, keeping the higher-ranked state.
+    fn merge(self, other: ReplyOutcome) -> ReplyOutcome {
+        if other.rank() >= self.rank() {
+            other
+        } else {
+            self
+        }
+    }
+}
+
+/// Per-turn reply tracking.
+///
+/// Fields are deliberately separate rather than one boolean: the reply guard
+/// needs to tell "never tried" from "tried and failed" from "tried, unknown",
+/// from "confirmed", so it can choose the right reminder (and so a later layer
+/// can act differently on a proven failure than on an unknown delivery).
+#[derive(Debug, Default)]
+struct ReplyState {
+    /// Any publish-shaped call executed (a `messages send` OR a `reactions add`).
+    attempted: bool,
+    /// A `messages send` call executed — the only shape eligible for confirmation.
+    send_attempted: bool,
+    /// A `reactions add` call executed. Tracked separately; does not confirm.
+    reacted: bool,
+    /// Most informative outcome across this turn's `messages send` calls.
+    outcome: ReplyOutcome,
+}
+
+impl ReplyState {
+    /// Record the outcome of one executed call. Only `messages send` feeds
+    /// [`Self::outcome`]; a reaction is an attempt but never a confirmation.
+    fn observe(&mut self, call: &ToolCall, result: &ToolResult, mcp: &McpRegistry) {
+        if !is_buzz_reply_call(call, mcp) {
+            return;
+        }
+        if let Some(kind) = publish_kind(&call.name, &call.arguments) {
+            self.observe_kind(kind, call, result);
+        }
+    }
+
+    /// Registry-free core of [`Self::observe`], split out so the state machine
+    /// is testable without a live [`McpRegistry`].
+    fn observe_kind(&mut self, kind: PublishKind, call: &ToolCall, result: &ToolResult) {
+        self.attempted = true;
+        match kind {
+            PublishKind::Send => {
+                self.send_attempted = true;
+                self.outcome = self
+                    .outcome
+                    .merge(classify_messages_send_result(call, result));
+            }
+            PublishKind::Reaction => self.reacted = true,
+        }
+    }
+
+    /// Reminder to inject for this turn, or `None` to let it end. Selected by
+    /// outcome, not merely by whether a send was attempted: a known failure
+    /// ("fix and repost once") and an unknown delivery ("do not duplicate") need
+    /// opposite instructions.
+    fn nag(&self) -> Option<&'static str> {
+        match self.outcome {
+            ReplyOutcome::Confirmed => None,
+            ReplyOutcome::NoAttempt => Some(REPLY_GUARD_NAG),
+            ReplyOutcome::AttemptFailed => Some(REPLY_GUARD_FAILED_NAG),
+            ReplyOutcome::AttemptUncertain => Some(REPLY_GUARD_UNCERTAIN_NAG),
+        }
+    }
+}
+
 /// Whether `call` is a recognized attempt to publish a reply to Buzz.
 ///
-/// Recognizes an *attempt*, not a successful publish: the command text is
-/// inspected, never the exit status. That is deliberate — a send that fails
-/// already returns a non-zero exit and error JSON to the model, which is louder
-/// feedback than the reminder this gates.
+/// Recognizes an *attempt* by shape; whether it succeeded is decided separately
+/// by [`classify_messages_send_result`] from the execution result. This split is
+/// the whole point of the guard: an attempt alone must not clear it.
 ///
 /// `has` + `!is_hook` are the same checks the dispatcher uses to accept a call
 /// (see `execute_calls`), so a hallucinated `fake__shell` — rejected at preflight
@@ -127,17 +242,199 @@ fn is_buzz_reply_call(call: &ToolCall, mcp: &McpRegistry) -> bool {
 /// (`echo "buzz messages send"`) matches. Missing a real post is the expensive
 /// direction, and substring matching is the more forgiving one there.
 fn is_reply_shaped(name: &str, arguments: &serde_json::Value) -> bool {
-    name.ends_with("__shell")
-        && arguments
-            .get("command")
+    publish_kind(name, arguments).is_some()
+}
+
+/// Which Buzz publish action a shell command encodes.
+enum PublishKind {
+    Send,
+    Reaction,
+}
+
+/// Command shape of a Buzz publish call. Pure; callers must apply the registry
+/// checks (via [`is_buzz_reply_call`]) first.
+///
+/// `messages send` also covers `messages send-diff`. `reactions add` is
+/// classified separately: it counts as an attempt, but never as a final textual
+/// reply (see [`ReplyState::observe`]).
+fn publish_kind(name: &str, arguments: &serde_json::Value) -> Option<PublishKind> {
+    if !name.ends_with("__shell") {
+        return None;
+    }
+    let cmd = arguments.get("command").and_then(|v| v.as_str())?;
+    if cmd.contains("messages send") {
+        Some(PublishKind::Send)
+    } else if cmd.contains("reactions add") {
+        Some(PublishKind::Reaction)
+    } else {
+        None
+    }
+}
+
+/// Shape check for a Nostr event id (64 hex chars). Either case is accepted:
+/// ids are canonically lowercase, but rejecting an otherwise-valid hex id buys
+/// nothing here.
+fn is_valid_event_id(id: &str) -> bool {
+    id.len() == 64 && id.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Classify a `messages send` shell result.
+///
+/// Evidence priority (strongest first):
+///   1. explicit relay ack `accepted:true` + valid `event_id`
+///   2. explicit relay rejection `accepted:false`
+///   3. verified pre-submission/local failure
+///   4. timeout / connection loss / missing ack / ambiguous state
+///   5. generic exit status — diagnostic only, never proof of failure
+///
+/// The shell tool returns `CallToolResult::success` even on a non-zero exit
+/// (`buzz-dev-mcp/src/shell.rs`), so `ToolResult::is_error` is not a success
+/// signal. And a non-zero exit alone does not prove rejection — the submission
+/// may already have reached the relay before the failure. Only an explicit ack
+/// (positive or negative) or a verified local failure is treated as decisive.
+fn classify_messages_send_result(call: &ToolCall, result: &ToolResult) -> ReplyOutcome {
+    // 1/2. Explicit relay acknowledgement outranks process status.
+    if let Some(ack) = parse_relay_ack(result) {
+        match ack.get("accepted").and_then(|v| v.as_bool()) {
+            Some(false) => return ReplyOutcome::AttemptFailed,
+            Some(true) => {
+                let event_id = ack.get("event_id").and_then(|v| v.as_str()).unwrap_or("");
+                if !is_valid_event_id(event_id) {
+                    return ReplyOutcome::AttemptUncertain;
+                }
+                return match command_content_state(call) {
+                    Some(false) => ReplyOutcome::AttemptFailed,
+                    Some(true) => ReplyOutcome::Confirmed,
+                    // Dynamic/opaque content: accepted and persisted, but we
+                    // cannot prove the body was non-empty. Never claim Confirmed.
+                    None => ReplyOutcome::AttemptUncertain,
+                };
+            }
+            None => {}
+        }
+    }
+
+    // 3. No usable ack. Separate a verified pre-submission failure from an
+    //    ambiguous one. Everything not provably pre-submission is uncertain.
+    if result.is_error {
+        let msg = result.text().to_ascii_lowercase();
+        return if is_presubmission_failure(&msg) {
+            ReplyOutcome::AttemptFailed
+        } else {
+            ReplyOutcome::AttemptUncertain
+        };
+    }
+    if let Some(outer) = parse_shell_body(result) {
+        let stderr = outer
+            .get("stderr")
             .and_then(|v| v.as_str())
-            .is_some_and(|cmd| {
-                // `messages send` also covers `messages send-diff`. `reactions
-                // add` counts because the base prompt directs agents to react
-                // rather than post a bare acknowledgement, so nagging an agent
-                // that reacted would punish documented-correct behavior.
-                cmd.contains("messages send") || cmd.contains("reactions add")
-            })
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        // The CLI binary never ran — nothing could have been submitted.
+        if stderr.contains("command not found") {
+            return ReplyOutcome::AttemptFailed;
+        }
+    }
+
+    // 4. Unacknowledged: timeout / connection loss / ambiguous exit is unknown,
+    //    never a proven failure.
+    ReplyOutcome::AttemptUncertain
+}
+
+/// Extract the CLI's JSON ack from the shell result, if present and usable.
+/// Tolerates a shell-wrapped body (`{"stdout": "...json..."}`) and a bare
+/// result whose whole text is the CLI JSON.
+fn parse_relay_ack(result: &ToolResult) -> Option<serde_json::Value> {
+    let outer = parse_json_object(&result.text())?;
+    if let Some(stdout) = outer.get("stdout").and_then(|v| v.as_str()) {
+        if let Some(inner) = parse_json_object(stdout) {
+            return Some(inner);
+        }
+    }
+    if outer.get("accepted").is_some() || outer.get("event_id").is_some() {
+        return Some(outer);
+    }
+    None
+}
+
+fn parse_shell_body(result: &ToolResult) -> Option<serde_json::Value> {
+    parse_json_object(&result.text())
+}
+
+fn parse_json_object(s: &str) -> Option<serde_json::Value> {
+    serde_json::from_str::<serde_json::Value>(s.trim())
+        .ok()
+        .filter(serde_json::Value::is_object)
+}
+
+/// Proven pre-submission failures: nothing reached the relay, so a retry is
+/// safe. Deliberately narrow — anything else (timeout, reset, cancelled) is
+/// uncertain, not failed.
+fn is_presubmission_failure(msg: &str) -> bool {
+    msg.contains("permission")
+        || msg.contains("unknown tool")
+        || msg.contains("invalid params")
+        || msg.contains("invalid argument")
+        || msg.contains("validate")
+}
+
+/// Static, pre-execution view of the `--content` argument.
+///
+/// `Some(true)`  — a literal that cannot be empty or shell-expanded;
+/// `Some(false)` — provably empty literal (`''`, `""`, whitespace);
+/// `None`        — absent, stdin (`-`), or contains shell-expansion syntax and
+///                 therefore cannot be trusted to describe the published body.
+///
+/// A pre-execution string is never sufficient to prove the *published* event was
+/// non-empty; dynamic content is deliberately left unknown so the classifier
+/// returns `AttemptUncertain` rather than `Confirmed`.
+fn command_content_state(call: &ToolCall) -> Option<bool> {
+    let cmd = call.arguments.get("command").and_then(|v| v.as_str())?;
+    let value = extract_content_value(cmd)?.trim();
+    if value == "-" {
+        return None; // stdin: content is not in the command
+    }
+    if value.chars().any(is_shell_dynamic) {
+        return None; // `$EMPTY`, backticks, globs: may evaluate to empty
+    }
+    let v = strip_quotes(value);
+    Some(!v.trim().is_empty())
+}
+
+/// Capture the region after `--content` / `--content=` up to the next
+/// whitespace-delimited flag, preserving quotes and internal spacing.
+fn extract_content_value(cmd: &str) -> Option<&str> {
+    const FLAG: &str = "--content";
+    if let Some(idx) = cmd.find("--content=") {
+        return Some(trim_at_next_flag(&cmd[idx + FLAG.len() + 1..]));
+    }
+    for (idx, _) in cmd.match_indices(FLAG) {
+        let after = &cmd[idx + FLAG.len()..];
+        if after.is_empty() || after.starts_with(char::is_whitespace) {
+            return Some(trim_at_next_flag(after.trim_start()));
+        }
+    }
+    None
+}
+
+fn trim_at_next_flag(s: &str) -> &str {
+    match s.find(" --") {
+        Some(i) => &s[..i],
+        None => s,
+    }
+}
+
+fn is_shell_dynamic(c: char) -> bool {
+    matches!(c, '$' | '`' | '*' | '?' | '[' | '~' | '!')
+}
+
+fn strip_quotes(s: &str) -> &str {
+    let b = s.as_bytes();
+    if b.len() >= 2 && matches!((b[0], b[b.len() - 1]), (b'"', b'"') | (b'\'', b'\'')) {
+        &s[1..s.len() - 1]
+    } else {
+        s
+    }
 }
 
 pub struct RunCtx<'a> {
@@ -348,18 +645,12 @@ impl RunCtx<'_> {
         // session) so a stubborn exchange can't permanently disable the stop
         // guard for a long-lived session; `max_rounds` still caps the loop.
         let mut stop_rejections = 0u32;
-        // Reply-guard state for this prompt. `prompt()` *is* the turn, so
-        // locals here are per-turn by construction — same shape as
-        // `stop_rejections` above.
-        //
-        // Named for what it proves: a *recognized attempt* to publish, not a
-        // successful publish. See `is_buzz_reply_call`.
-        // Tracks whether a publish-shaped tool call was seen this turn, updated
-        // unconditionally (not gated on `require_reply`) so the silent-turn
-        // diagnostic has a turn-level view regardless of config.  A turn that
-        // ran read-only tools and then died at 3 tokens IS a silent death;
-        // only a genuine publish should suppress the WARN.
-        let mut buzz_reply_call_seen = false;
+        // Reply-guard state for this prompt. `prompt()` *is* the turn, so this
+        // is per-turn by construction — same shape as `stop_rejections` above.
+        // `attempted` is updated unconditionally (not gated on `require_reply`)
+        // so the silent-turn diagnostic has a turn-level view regardless of
+        // config; `outcome` drives which reminder (if any) is emitted.
+        let mut reply = ReplyState::default();
         let mut reply_nags = 0u32;
         // Per-`run()` reactive context-recovery budget. Per-turn, not
         // per-session: a fresh prompt deserves a fresh chance to recover, and
@@ -715,11 +1006,11 @@ impl RunCtx<'_> {
                     reasoning_details: response.reasoning_details.clone(),
                 });
                 let stop = map_stop(response.stop);
-                // Diagnostic: warn when no publish was seen across the whole
-                // turn, the final response has no visible text, and the
+                // Diagnostic: warn when no publish attempt was seen across the
+                // whole turn, the final response has no visible text, and the
                 // token count looks silent.  Two independent gates:
-                //   1. `!buzz_reply_call_seen` — no publish attempt in any
-                //      round (read-only tool calls do NOT suppress: a turn
+                //   1. `!reply.attempted` — no publish-shaped call executed in
+                //      any round (read-only tool calls do NOT suppress: a turn
                 //      that ran tools but never published then died at 3
                 //      tokens is still a silent death).
                 //   2. `text_is_empty` — model emitted no visible text
@@ -729,7 +1020,7 @@ impl RunCtx<'_> {
                 // the log even if the hook rejects the stop and the loop
                 // continues.  Does not alter control flow.
                 warn_if_silent_turn(
-                    buzz_reply_call_seen,
+                    reply.attempted,
                     text_is_empty,
                     response.output_tokens,
                     response.stop,
@@ -750,14 +1041,15 @@ impl RunCtx<'_> {
                         .await;
                     // Reply guard shares this gate and this budget, so a round
                     // carrying both a hook objection and a reply reminder costs
-                    // one rejection and delivers both texts.
-                    if self.cfg.require_reply
-                        && !buzz_reply_call_seen
-                        && reply_nags < MAX_REPLY_NAGS
-                    {
-                        reply_nags += 1;
-                        objections
-                            .push((REPLY_GUARD_SERVER.to_string(), REPLY_GUARD_NAG.to_string()));
+                    // one rejection and delivers both texts. The reminder is
+                    // chosen by the turn's reply OUTCOME, not merely by whether
+                    // a send was attempted: a proven failure allows one
+                    // corrective publish, an unknown delivery forbids a resend.
+                    if self.cfg.require_reply && reply_nags < MAX_REPLY_NAGS {
+                        if let Some(nag) = reply.nag() {
+                            reply_nags = reply_nags.saturating_add(1);
+                            objections.push((REPLY_GUARD_SERVER.to_string(), nag.to_string()));
+                        }
                     }
                     if !objections.is_empty() {
                         stop_rejections = stop_rejections.saturating_add(1);
@@ -776,21 +1068,18 @@ impl RunCtx<'_> {
                 );
                 calls.truncate(MAX_TOOL_CALLS_PER_TURN);
             }
-            // Deliberately after truncation: a publish-shaped call that was
-            // discarded never runs, so it must not suppress the reminder.
-            // Updated unconditionally (not gated on `require_reply`) so the
-            // silent-turn diagnostic has a publish-aware turn-level signal
-            // regardless of config.
-            if !buzz_reply_call_seen {
-                buzz_reply_call_seen = calls.iter().any(|c| is_buzz_reply_call(c, self.mcp));
-            }
+            // Reply state is recorded at RESULT time, inside `append_results`,
+            // from the executed call and its result. A call discarded by the
+            // truncation above never runs and so never suppresses the reminder;
+            // a call that runs but fails or is unacknowledged does not confirm,
+            // either. Do not pre-set attempt state from the call list here.
             self.history.push(HistoryItem::Assistant {
                 text: response.text,
                 tool_calls: calls.clone(),
                 reasoning_details: response.reasoning_details,
             });
 
-            if let Some(stop) = self.execute_calls(&calls).await {
+            if let Some(stop) = self.execute_calls(&calls, &mut reply).await {
                 return Ok(stop);
             }
         }
@@ -831,7 +1120,11 @@ impl RunCtx<'_> {
     /// `max_parallel_tools = 1` makes phase 2 effectively sequential
     /// (one in-flight call at a time via the semaphore). Larger values
     /// run that many calls concurrently.
-    async fn execute_calls(&mut self, calls: &[ToolCall]) -> Option<StopReason> {
+    async fn execute_calls(
+        &mut self,
+        calls: &[ToolCall],
+        reply: &mut ReplyState,
+    ) -> Option<StopReason> {
         let mut results: Vec<Option<ToolResult>> = vec![None; calls.len()];
         let mut runnable: Vec<usize> = Vec::with_capacity(calls.len());
 
@@ -848,7 +1141,7 @@ impl RunCtx<'_> {
                         results[j] = Some(synthetic_tool_result(c, "cancelled".into()));
                     }
                 }
-                self.append_results(calls, &mut results);
+                self.append_results(calls, &mut results, reply);
                 return Some(StopReason::Cancelled);
             }
             emit_pending(self.wire, self.session_id, call).await;
@@ -877,7 +1170,7 @@ impl RunCtx<'_> {
 
         self.execute_parallel(calls, &runnable, &mut results).await;
 
-        self.append_results(calls, &mut results);
+        self.append_results(calls, &mut results, reply);
 
         if *self.cancel.borrow() {
             Some(StopReason::Cancelled)
@@ -886,7 +1179,12 @@ impl RunCtx<'_> {
         }
     }
 
-    fn append_results(&mut self, calls: &[ToolCall], results: &mut [Option<ToolResult>]) {
+    fn append_results(
+        &mut self,
+        calls: &[ToolCall],
+        results: &mut [Option<ToolResult>],
+        reply: &mut ReplyState,
+    ) {
         for (i, call) in calls.iter().enumerate() {
             let mut result = results[i].take().unwrap_or_else(|| ToolResult {
                 provider_id: call.provider_id.clone(),
@@ -902,6 +1200,10 @@ impl RunCtx<'_> {
                     .content
                     .push(ToolResultContent::Text(ERROR_REFLECTION_SUFFIX.to_string()));
             }
+            // Record the result before it moves into history: the reply guard
+            // is confirmation-based, so it needs the executed call *and* its
+            // result, not just the call shape.
+            reply.observe(call, &result, self.mcp);
             self.history.push(HistoryItem::ToolResult(result));
         }
     }
@@ -1337,11 +1639,10 @@ fn is_silent_turn(output_tokens: u64) -> bool {
 /// Emits the silent-turn diagnostic WARN when the turn produced no publish,
 /// no visible text, and either near-zero or absent output tokens.
 ///
-/// `buzz_reply_call_seen` is the publish-aware gate (from
-/// `is_buzz_reply_call`), updated unconditionally regardless of
-/// `require_reply`.  Read-only tool calls do NOT suppress the WARN — a turn
-/// that ran tools but never published and then died at 3 tokens is a silent
-/// death.
+/// `publish_attempted` is the publish-aware gate (from `is_buzz_reply_call`),
+/// updated unconditionally regardless of `require_reply`.  Read-only tool calls
+/// do NOT suppress the WARN — a turn that ran tools but never published and
+/// then died at 3 tokens is a silent death.
 ///
 /// Two distinct WARN shapes:
 /// - Near-zero token count (`output_tokens <= 12`): canonical silent-death.
@@ -1351,12 +1652,12 @@ fn is_silent_turn(output_tokens: u64) -> bool {
 /// Extracted as a free function so the WARN seam can be exercised by a
 /// scoped tracing subscriber without standing up the full async run loop.
 fn warn_if_silent_turn(
-    buzz_reply_call_seen: bool,
+    publish_attempted: bool,
     text_is_empty: bool,
     output_tokens: Option<u64>,
     stop: ProviderStop,
 ) {
-    if buzz_reply_call_seen || !text_is_empty {
+    if publish_attempted || !text_is_empty {
         return;
     }
     match output_tokens {
@@ -1525,6 +1826,291 @@ mod tests {
         assert!(!is_reply_shaped("dev__shell", &json!({ "command": null })));
         assert!(!is_reply_shaped("dev__shell", &json!({})));
         assert!(!is_reply_shaped("dev__shell", &json!("not an object")));
+    }
+
+    // ── Layer 1: result-based reply confirmation ────────────────────────────
+
+    fn shell_send_call(cmd: &str) -> ToolCall {
+        ToolCall {
+            provider_id: "tc-test".into(),
+            name: "dev__shell".into(),
+            arguments: json!({ "command": cmd }),
+            provider_extra: Default::default(),
+        }
+    }
+
+    /// A `buzz-dev-mcp` shell body: the exit status and streams, as the LLM
+    /// sees them. The CLI's own JSON is carried in `stdout`.
+    fn shell_body(stdout: &str, exit_code: i64, timed_out: bool) -> String {
+        json!({
+            "exit_code": exit_code,
+            "stdout": stdout,
+            "stderr": "",
+            "timed_out": timed_out,
+        })
+        .to_string()
+    }
+
+    fn shell_result(text: impl Into<String>, is_error: bool) -> ToolResult {
+        ToolResult {
+            provider_id: "tc-test".into(),
+            content: vec![ToolResultContent::Text(text.into())],
+            is_error,
+        }
+    }
+
+    /// A successful `buzz messages send` ack with a valid 64-hex event id.
+    fn accepted_stdout() -> String {
+        format!(r#"{{"accepted":true,"event_id":"{}"}}"#, "a".repeat(64))
+    }
+
+    // A. successful send + accepted event_id ⇒ Confirmed.
+    #[test]
+    fn reply_confirmed_on_accepted_event_id() {
+        let call = shell_send_call("buzz messages send --channel c --content hi");
+        let result = shell_result(shell_body(&accepted_stdout(), 0, false), false);
+        assert_eq!(
+            classify_messages_send_result(&call, &result),
+            ReplyOutcome::Confirmed
+        );
+    }
+
+    // B. accepted:false ⇒ Failed.
+    #[test]
+    fn reply_failed_on_accepted_false() {
+        let call = shell_send_call("buzz messages send --channel c --content hi");
+        let result = shell_result(shell_body(r#"{"accepted":false}"#, 0, false), false);
+        assert_eq!(
+            classify_messages_send_result(&call, &result),
+            ReplyOutcome::AttemptFailed
+        );
+    }
+
+    // Non-zero exit alone is NOT proof of failure (may have reached the relay).
+    #[test]
+    fn reply_uncertain_on_nonzero_exit_without_ack() {
+        let call = shell_send_call("buzz messages send --channel c --content hi");
+        let result = shell_result(shell_body("", 1, false), false);
+        assert_eq!(
+            classify_messages_send_result(&call, &result),
+            ReplyOutcome::AttemptUncertain
+        );
+    }
+
+    // An explicit ack outranks process exit status.
+    #[test]
+    fn reply_confirmed_on_ack_despite_nonzero_exit() {
+        let call = shell_send_call("buzz messages send --channel c --content hi");
+        let result = shell_result(shell_body(&accepted_stdout(), 1, false), false);
+        assert_eq!(
+            classify_messages_send_result(&call, &result),
+            ReplyOutcome::Confirmed
+        );
+    }
+
+    // C. verified pre-submission failure ⇒ Failed.
+    #[test]
+    fn reply_failed_on_presubmission_tool_error() {
+        let call = shell_send_call("buzz messages send --channel c --content hi");
+        let result = shell_result("permission denied for tool dev__shell", true);
+        assert_eq!(
+            classify_messages_send_result(&call, &result),
+            ReplyOutcome::AttemptFailed
+        );
+    }
+
+    // A transport error that may have landed pre- or post-submission ⇒ Unknown.
+    #[test]
+    fn reply_uncertain_on_connection_reset() {
+        let call = shell_send_call("buzz messages send --channel c --content hi");
+        let result = shell_result("tool: connection reset by peer", true);
+        assert_eq!(
+            classify_messages_send_result(&call, &result),
+            ReplyOutcome::AttemptUncertain
+        );
+    }
+
+    // D. timeout / no usable acknowledgement ⇒ Unknown.
+    #[test]
+    fn reply_uncertain_on_tool_timeout() {
+        let call = shell_send_call("buzz messages send --channel c --content hi");
+        let result = shell_result("tool: timeout after 120s", true);
+        assert_eq!(
+            classify_messages_send_result(&call, &result),
+            ReplyOutcome::AttemptUncertain
+        );
+    }
+
+    #[test]
+    fn reply_uncertain_on_missing_ack() {
+        let call = shell_send_call("buzz messages send --channel c --content hi");
+        let result = shell_result(shell_body(r#"{"message":"ok"}"#, 0, false), false);
+        assert_eq!(
+            classify_messages_send_result(&call, &result),
+            ReplyOutcome::AttemptUncertain
+        );
+    }
+
+    #[test]
+    fn reply_uncertain_on_timed_out_flag() {
+        let call = shell_send_call("buzz messages send --channel c --content hi");
+        let result = shell_result(shell_body("", 124, true), false);
+        assert_eq!(
+            classify_messages_send_result(&call, &result),
+            ReplyOutcome::AttemptUncertain
+        );
+    }
+
+    // E. provably empty outgoing body ⇒ Failed (one corrective publish allowed).
+    #[test]
+    fn reply_failed_on_empty_static_content() {
+        let call = shell_send_call("buzz messages send --channel c --content ''");
+        let result = shell_result(shell_body(&accepted_stdout(), 0, false), false);
+        assert_eq!(
+            classify_messages_send_result(&call, &result),
+            ReplyOutcome::AttemptFailed
+        );
+    }
+
+    // The real empty-event class: shell-expanded content may evaluate empty, so
+    // an accepted event is NOT confirmed.
+    #[test]
+    fn reply_uncertain_on_dynamic_env_content() {
+        let call = shell_send_call("buzz messages send --channel c --content \"$EMPTY\"");
+        let result = shell_result(shell_body(&accepted_stdout(), 0, false), false);
+        assert_eq!(
+            classify_messages_send_result(&call, &result),
+            ReplyOutcome::AttemptUncertain
+        );
+    }
+
+    #[test]
+    fn reply_uncertain_on_backtick_content() {
+        let call = shell_send_call("buzz messages send --channel c --content \"`cmd`\"");
+        let result = shell_result(shell_body(&accepted_stdout(), 0, false), false);
+        assert_eq!(
+            classify_messages_send_result(&call, &result),
+            ReplyOutcome::AttemptUncertain
+        );
+    }
+
+    #[test]
+    fn reply_uncertain_on_stdin_content() {
+        let call = shell_send_call("printf hi | buzz messages send --channel c --content -");
+        let result = shell_result(shell_body(&accepted_stdout(), 0, false), false);
+        assert_eq!(
+            classify_messages_send_result(&call, &result),
+            ReplyOutcome::AttemptUncertain
+        );
+    }
+
+    #[test]
+    fn reply_empty_static_content_is_detected() {
+        assert_eq!(
+            command_content_state(&shell_send_call(
+                "buzz messages send --channel c --content \"\""
+            )),
+            Some(false)
+        );
+        assert_eq!(
+            command_content_state(&shell_send_call(
+                "buzz messages send --channel c --content hi"
+            )),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn reply_event_id_accepts_upper_and_lower_hex() {
+        assert!(is_valid_event_id(&"a".repeat(64)));
+        assert!(is_valid_event_id(&"A".repeat(64)));
+        assert!(!is_valid_event_id(&"a".repeat(63)));
+        assert!(!is_valid_event_id(&"a".repeat(65)));
+        assert!(!is_valid_event_id(&"g".repeat(64)));
+    }
+
+    // F/G. Reactions are a publish attempt but never a final textual reply.
+    #[test]
+    fn publish_kind_distinguishes_send_and_reaction() {
+        assert!(matches!(
+            publish_kind(
+                "dev__shell",
+                &json!({ "command": "buzz messages send --channel c" })
+            ),
+            Some(PublishKind::Send)
+        ));
+        assert!(matches!(
+            publish_kind(
+                "dev__shell",
+                &json!({ "command": "buzz reactions add --event e --emoji +" })
+            ),
+            Some(PublishKind::Reaction)
+        ));
+        assert!(publish_kind("dev__shell", &json!({ "command": "git status" })).is_none());
+    }
+
+    #[test]
+    fn reply_state_reaction_only_is_not_confirmed() {
+        let mut state = ReplyState::default();
+        let call = shell_send_call("buzz reactions add --event e --emoji +");
+        let result = shell_result("ok", false);
+        state.observe_kind(PublishKind::Reaction, &call, &result);
+        assert!(state.attempted);
+        assert!(state.reacted);
+        assert_ne!(state.outcome, ReplyOutcome::Confirmed);
+        assert_eq!(state.outcome, ReplyOutcome::NoAttempt);
+        assert_eq!(state.nag(), Some(REPLY_GUARD_NAG));
+    }
+
+    /// Nag selection is by outcome, not merely by whether a send was attempted:
+    /// failed (fix and repost once) and uncertain (do not duplicate) differ.
+    #[test]
+    fn reply_nag_selection_matches_outcome() {
+        let mut state = ReplyState::default();
+        assert_eq!(state.nag(), Some(REPLY_GUARD_NAG));
+
+        let call = shell_send_call("buzz messages send --channel c --content hi");
+        state.observe_kind(
+            PublishKind::Send,
+            &call,
+            &shell_result(shell_body(r#"{"accepted":false}"#, 0, false), false),
+        );
+        assert_eq!(state.nag(), Some(REPLY_GUARD_FAILED_NAG));
+
+        let mut state = ReplyState::default();
+        state.observe_kind(
+            PublishKind::Send,
+            &call,
+            &shell_result(shell_body("", 124, true), false),
+        );
+        assert_eq!(state.nag(), Some(REPLY_GUARD_UNCERTAIN_NAG));
+
+        let mut state = ReplyState::default();
+        state.observe_kind(
+            PublishKind::Send,
+            &call,
+            &shell_result(shell_body(&accepted_stdout(), 0, false), false),
+        );
+        assert_eq!(state.outcome, ReplyOutcome::Confirmed);
+        assert_eq!(state.nag(), None);
+    }
+
+    /// Fold priority: a later confirmed send wins; unknown is never downgraded
+    /// to failed.
+    #[test]
+    fn reply_state_merge_priority() {
+        assert_eq!(
+            ReplyOutcome::AttemptFailed.merge(ReplyOutcome::AttemptUncertain),
+            ReplyOutcome::AttemptUncertain
+        );
+        assert_eq!(
+            ReplyOutcome::AttemptUncertain.merge(ReplyOutcome::Confirmed),
+            ReplyOutcome::Confirmed
+        );
+        assert_eq!(
+            ReplyOutcome::Confirmed.merge(ReplyOutcome::NoAttempt),
+            ReplyOutcome::Confirmed
+        );
     }
 
     /// A9 regression: `reasoning_details` contributes real bytes to
