@@ -38,6 +38,7 @@ import {
 export { mergeMessages, mergeTimelineCacheMessages };
 import { splitOutgoingTags } from "@/features/messages/lib/imetaMediaMarkdown";
 import { messageMentionPubkeys } from "@/features/messages/lib/messageMentionPubkeys";
+import { replyAgentRecipient } from "@/features/messages/lib/replyAgentRecipient.mjs";
 import { buildSentFromThreadTag } from "@/features/messages/lib/sentFromThread";
 import {
   clearTimeoutState,
@@ -588,12 +589,24 @@ export function useSendMessageMutation(
               ...threadCaches,
             ])
           : null;
+        // A direct reply to an agent's message is addressed to that agent.
+        const replyAgent = parentEventId
+          ? replyAgentRecipient(
+              parentEventId,
+              [cachedMessages, ...threadCaches],
+              identity.pubkey,
+            )
+          : null;
+        const replyRecipients =
+          replyAgent && !recipientPubkeys.includes(replyAgent)
+            ? [...recipientPubkeys, replyAgent]
+            : recipientPubkeys;
         const result = await sendChannelMessage(
           effectiveChannel.id,
           content,
           parentEventId ?? null,
           imetaTags,
-          recipientPubkeys,
+          replyRecipients,
           undefined,
           emojiTags,
           mentionTags,
@@ -613,7 +626,7 @@ export function useSendMessageMutation(
               identity.pubkey,
               parentEventId,
               result.rootEventId ?? parentEventId,
-              recipientPubkeys,
+              replyRecipients,
             )
           : [];
         const baseTags = parentEventId
