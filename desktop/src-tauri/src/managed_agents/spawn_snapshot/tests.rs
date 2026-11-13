@@ -943,3 +943,24 @@ fn openclaw_cap_crossing_parallelism_snapshots_differ() {
 #[cfg(test)]
 #[path = "tests_ext.rs"]
 mod ext;
+
+#[test]
+fn linked_snapshot_acp_command_is_the_definition_command() {
+    // Restart drift must compare the command every start path launches:
+    // the definition's, not the instance mirror.
+    let mut def = persona("p1", Some("goose"), "Persona prompt.");
+    def.acp_command = Some("buzz-janet-acp".into());
+    let mut rec = record();
+    rec.persona_id = Some("p1".into());
+    rec.acp_command = "buzz-acp".into();
+
+    let prospective = prospective_spawn_config_snapshot(
+        &rec,
+        &[def],
+        &[],
+        "wss://ws.example",
+        &Default::default(),
+        false,
+    );
+    assert_eq!(prospective.acp_command, "buzz-janet-acp");
+}

@@ -28,6 +28,11 @@ pub struct EffectiveAgentConfig {
     pub model: ResolvedField<String>,
     pub provider: ResolvedField<String>,
     pub system_prompt: ResolvedField<String>,
+    /// ACP transport to launch. A linked instance always uses its
+    /// definition's command (absent = stock `buzz-acp`); the instance's own
+    /// `acp_command` bytes are only a mirror written by the spawn re-pin and
+    /// never decide what runs. Every start path reads this one value.
+    pub acp_command: String,
 }
 
 impl EffectiveAgentConfig {
@@ -71,6 +76,13 @@ fn non_blank(v: Option<&str>) -> Option<&str> {
     v.filter(|s| !s.trim().is_empty())
 }
 
+fn acp_command_or_default(command: Option<&str>) -> String {
+    non_blank(command)
+        .map(str::trim)
+        .unwrap_or(super::DEFAULT_ACP_COMMAND)
+        .to_owned()
+}
+
 fn resolve_linked(
     definition: &AgentDefinition,
     global: &GlobalAgentConfig,
@@ -106,6 +118,7 @@ fn resolve_linked(
         model,
         provider,
         system_prompt,
+        acp_command: acp_command_or_default(definition.acp_command.as_deref()),
     }
 }
 
@@ -220,6 +233,7 @@ fn resolve_definition_less(
         model,
         provider,
         system_prompt,
+        acp_command: acp_command_or_default(Some(record.acp_command.as_str())),
     };
 
     // Legacy mesh compatibility. A record with an explicit `provider` has
@@ -268,6 +282,18 @@ pub fn resolve_effective_model_provider_pair(
 ) -> Option<(Option<String>, Option<String>)> {
     match resolve_effective_config(record, definitions, global) {
         EffectiveConfigResult::Resolved(cfg) => Some((cfg.model.value, cfg.provider.value)),
+        EffectiveConfigResult::OrphanedInstance { .. } => None,
+    }
+}
+
+/// The ACP command every start path launches for `record`, or `None` for an
+/// orphaned instance (which never spawns).
+pub fn resolve_effective_acp_command(
+    record: &ManagedAgentRecord,
+    definitions: &[AgentDefinition],
+) -> Option<String> {
+    match resolve_effective_config(record, definitions, &GlobalAgentConfig::default()) {
+        EffectiveConfigResult::Resolved(cfg) => Some(cfg.acp_command),
         EffectiveConfigResult::OrphanedInstance { .. } => None,
     }
 }
