@@ -40,4 +40,22 @@ void main() {
       isNull,
     );
   });
+
+  test('only HTTP(S) URLs, in any case, can be preset artwork', () {
+    const preset = 'dwwgwmfqqjotj.cloudfront.net/avatars/a/poster/b/c.png';
+    expect(usesInsetAgentArtwork('https://$preset'), isTrue);
+    expect(usesInsetAgentArtwork('HTTPS://$preset'), isTrue);
+    expect(usesInsetAgentArtwork('http://$preset'), isFalse);
+    expect(usesInsetAgentArtwork(' https://$preset'), isFalse);
+    expect(
+      usesInsetAgentArtwork('data:image/png;base64,${'A' * 1000}'),
+      isFalse,
+    );
+    expect(usesInsetAgentArtwork(''), isFalse);
+    expect(usesInsetAgentArtwork(null), isFalse);
+    expect(
+      usesInsetAgentArtwork(buildAnimatedAvatarUrl(posterUrl, animationUrl)),
+      isTrue,
+    );
+  });
 }
