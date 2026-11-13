@@ -57,7 +57,7 @@ Future<void> _sendTextOnlyDraft({
       outgoing.pubkeys,
       mediaTags: [...payload.mediaTags, ...outgoing.referenceTags],
     );
-  } on StateError {
+  } on ActiveCommunityChangedError {
     restoreClearedDraft();
     _reportSendCancelledByCommunitySwitch(messenger);
   } catch (error) {
@@ -65,7 +65,7 @@ Future<void> _sendTextOnlyDraft({
     // sent draft unless the user has already started a new one.
     restoreClearedDraft();
     messenger?.showFeedbackSnackBar(
-      SnackBar(content: Text(_composeSendErrorMessage(error))),
+      SnackBar(content: Text(_sendFailureMessage(error))),
       kind: ToastKind.error,
     );
   }
