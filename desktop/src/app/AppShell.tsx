@@ -113,6 +113,20 @@ export function AppShell() {
   useTauriWindowDrag();
   useWebviewScrollBoundaryLock();
   const communitiesHook = useCommunities();
+  // Each committed community lifetime gets a distinct token. An old callback
+  // keeps its token after unmount (or A -> B -> A), which cleanup invalidates.
+  const createScopeRef = React.useRef({ active: false });
+  React.useLayoutEffect(() => {
+    const scope = { active: true };
+    createScopeRef.current = scope;
+    return () => {
+      scope.active = false;
+    };
+  }, [
+    communitiesHook.activeCommunity?.id,
+    communitiesHook.activeCommunity?.relayUrl,
+  ]);
+
   const {
     handleHuddleCompanionOpen,
     handleHuddleEnded,
@@ -556,6 +570,9 @@ export function AppShell() {
       },
       onCreated?: (channelId: string) => void,
     ) => {
+      const scope = createScopeRef.current;
+      const isCurrent = () => scope.active && createScopeRef.current === scope;
+      if (!isCurrent()) return;
       const createdChannel = await createChannelMutation.mutateAsync({
         name,
         description,
@@ -563,13 +580,23 @@ export function AppShell() {
         visibility,
         ttlSeconds,
       });
+      if (!isCurrent()) return;
 
       await applyCanvas(templateId, createdChannel.id, name);
+      if (!isCurrent()) return;
       await goChannel(createdChannel.id);
+      if (!isCurrent()) return;
       onCreated?.(createdChannel.id);
+      if (!isCurrent()) return;
       void applyAgents(templateId, createdChannel.id);
     },
-    [applyAgents, applyCanvas, createChannelMutation, goChannel],
+    [
+      applyAgents,
+      applyCanvas,
+      communitiesHook.activeCommunity?.id,
+      createChannelMutation,
+      goChannel,
+    ],
   );
   const handleCreateForum = React.useCallback(
     async ({
@@ -585,6 +612,9 @@ export function AppShell() {
       ttlSeconds?: number;
       templateId?: string;
     }) => {
+      const scope = createScopeRef.current;
+      const isCurrent = () => scope.active && createScopeRef.current === scope;
+      if (!isCurrent()) return;
       const createdForum = await createForumMutation.mutateAsync({
         name,
         description,
@@ -592,12 +622,21 @@ export function AppShell() {
         visibility,
         ttlSeconds,
       });
+      if (!isCurrent()) return;
 
       await applyCanvas(templateId, createdForum.id, name);
+      if (!isCurrent()) return;
       await goChannel(createdForum.id);
+      if (!isCurrent()) return;
       void applyAgents(templateId, createdForum.id);
     },
-    [applyAgents, applyCanvas, createForumMutation, goChannel],
+    [
+      applyAgents,
+      applyCanvas,
+      communitiesHook.activeCommunity?.id,
+      createForumMutation,
+      goChannel,
+    ],
   );
 
   // The channel browser can create either a stream or a forum depending on
