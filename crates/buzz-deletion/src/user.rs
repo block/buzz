@@ -7,6 +7,30 @@ use uuid::Uuid;
 /// Preview real memberships or prepare and execute synthetic deletion requests.
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Print human-content cleanup batches; optionally execute them.
+    PreviewBatches {
+        /// Human public key, as npub or 64-character hex.
+        #[arg(long, value_parser = preview::parse_pubkey)]
+        pubkey: String,
+        /// Explicit community UUID; includes historical content after leaving.
+        #[arg(long)]
+        community: Uuid,
+        /// Print batches without changing data (default when no mode is supplied).
+        #[arg(long, alias = "read-only", conflicts_with = "delete")]
+        print_only: bool,
+        /// Print and commit each batch. Stop relay/workers before using this mode.
+        #[arg(long)]
+        delete: bool,
+        /// Trusted relay public key for historical actor/p attribution, if needed.
+        #[arg(long, value_parser = preview::parse_pubkey)]
+        relay_pubkey: Option<String>,
+        /// Maximum row operations per printed batch.
+        #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u16).range(1..=100))]
+        batch_size: u16,
+        /// Fail visibly if the preview would exceed this many unique row operations.
+        #[arg(long, default_value_t = 1_000_000, value_parser = clap::value_parser!(u32).range(1..=1_000_000))]
+        max_items: u32,
+    },
     /// Print real current memberships as JSON; does not save or execute a request.
     Inventory {
         /// Demo fixture (default), hex public key, or npub. Current memberships only.
@@ -74,6 +98,32 @@ pub enum Command {
 
 /// Run inventory discovery or synthetic workflow commands against PostgreSQL.
 pub async fn run(command: Command) -> Result<i32> {
+    if let Command::PreviewBatches {
+        pubkey,
+        community,
+        print_only,
+        delete,
+        relay_pubkey,
+        batch_size,
+        max_items,
+    } = command
+    {
+        anyhow::ensure!(
+            !(print_only && delete),
+            "--print-only conflicts with --delete"
+        );
+        return preview::run(
+            buzz_db::user_deletion::preview::PreviewOptions {
+                community,
+                pubkey,
+                relay_pubkey,
+                batch_size,
+                max_items,
+            },
+            delete,
+        )
+        .await;
+    }
     let db = if matches!(command, Command::Inventory { .. }) {
         buzz_db::Db::connect_cold_start(
             buzz_db::DbConfig {
@@ -91,6 +141,9 @@ pub async fn run(command: Command) -> Result<i32> {
     };
     let store = db.entity_deletion_store();
     match command {
+        Command::PreviewBatches { .. } => {
+            anyhow::bail!("batch command must use its standalone connection")
+        }
         Command::Inventory { pubkey } => {
             crate::print_json(&inventory::generate(&db, &pubkey).await?)?;
         }
@@ -154,6 +207,7 @@ mod handlers;
 mod inventory;
 /// Standalone delegation of an owned community to community deletion.
 pub mod owned_community;
+mod preview;
 /// Read-only summaries of locally saved request progress and external waits.
 pub mod summary;
 mod transition;
