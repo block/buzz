@@ -2441,6 +2441,75 @@ fn inactivity_expired(
     !bound.is_zero() && !turn_in_flight && now.duration_since(last_activity) >= bound
 }
 
+/// How often the pool checks whether channels it holds sessions for were
+/// archived, and flushes `session/close` for sessions idle workers discarded.
+const ARCHIVED_SESSION_SWEEP_INTERVAL: Duration = Duration::from_secs(300);
+
+/// Channels among `held` that the kind:39000 metadata marks `archived=true`.
+///
+/// Reuses the discovery merge, which drops archived channels and keeps
+/// channels without metadata as `unknown` — so a missing metadata event never
+/// reads as archived.
+fn archived_among(held: &HashSet<Uuid>, meta_events: &serde_json::Value) -> Vec<Uuid> {
+    let live = relay::merge_discovered_channels(held.iter().copied().collect(), meta_events);
+    held.iter()
+        .filter(|ch| !live.contains_key(ch))
+        .copied()
+        .collect()
+}
+
+/// Release provider sessions for archived channels, then close everything idle
+/// workers discarded.
+///
+/// Archiving a channel (e.g. closing a workroom) does not change membership, so
+/// the membership-removal cleanup never fires and the agent kept one provider
+/// session — a whole `claude` process under claude-agent-acp — per finished
+/// room for the life of the harness. Archive is a terminal lifecycle event, so
+/// this is safe for a session whose agent is still doing background work after
+/// its last turn, unlike an inactivity timeout. Workers checked out during the
+/// sweep lose their session on return (the scope owner is dropped) and are
+/// closed by a later sweep or their next turn.
+async fn sweep_archived_channel_sessions(
+    pool: &mut AgentPool,
+    queue: &mut EventQueue,
+    rest: &relay::RestClient,
+) {
+    let held = pool.channels_with_sessions();
+    if !held.is_empty() {
+        let d_tag = nostr::SingleLetterTag::lowercase(nostr::Alphabet::D);
+        let filter = nostr::Filter::new()
+            .kind(nostr::Kind::Custom(
+                buzz_core::kind::KIND_NIP29_GROUP_METADATA as u16,
+            ))
+            .custom_tags(d_tag, held.iter().map(Uuid::to_string));
+        match rest.query(&[filter]).await {
+            Ok(meta_events) => {
+                for ch in archived_among(&held, &meta_events) {
+                    let invalidated = pool.invalidate_channel_sessions(ch);
+                    // Queued work would re-open a session (and a provider
+                    // process) in a channel that rejects every reply.
+                    let drained_ids = queue.drain_channel(ch);
+                    if !drained_ids.is_empty() {
+                        let rc = rest.clone();
+                        tokio::spawn(async move {
+                            for eid in &drained_ids {
+                                pool::reaction_remove(&rc, eid, "👀").await;
+                            }
+                        });
+                    }
+                    tracing::info!(
+                        channel_id = %ch,
+                        invalidated,
+                        "channel archived — released its sessions and queued work"
+                    );
+                }
+            }
+            Err(e) => tracing::warn!("archived-channel sweep query failed: {e}"),
+        }
+    }
+    pool.flush_idle_pending_closes().await;
+}
+
 /// Whether a woken lazy pool may be torn back down to the empty-slot state.
 ///
 /// True only when the pool is ready, the idle bound has elapsed with no
@@ -3158,6 +3227,11 @@ async fn run_harness(
     } else {
         Duration::ZERO
     };
+    let mut archived_session_sweep = tokio::time::interval_at(
+        tokio::time::Instant::now() + ARCHIVED_SESSION_SWEEP_INTERVAL,
+        ARCHIVED_SESSION_SWEEP_INTERVAL,
+    );
+    archived_session_sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut idle_pool_sleep_reaper = if idle_pool_sleep_bound.is_zero() {
         None
     } else {
@@ -3550,7 +3624,9 @@ async fn run_harness(
                                     // the agent lost access).
                                     let drained_ids = queue.drain_channel(ch);
                                     let invalidated = if pool_ready {
-                                        pool.invalidate_channel_sessions(ch)
+                                        let n = pool.invalidate_channel_sessions(ch);
+                                        pool.flush_idle_pending_closes().await;
+                                        n
                                     } else {
                                         0
                                     };
@@ -3886,6 +3962,14 @@ async fn run_harness(
                             "listening",
                             None,
                         );
+                    }
+                    None
+                }
+                _ = archived_session_sweep.tick() => {
+                    let _ = result_rx; // end split borrow before touching pool
+                    if pool_ready {
+                        sweep_archived_channel_sessions(&mut pool, &mut queue, &relay_rest_client)
+                            .await;
                     }
                     None
                 }
@@ -13720,5 +13804,92 @@ mod observer_payload_trim_tests {
         assert!(leaf.starts_with('…'));
         assert!(leaf.ends_with('…'));
         assert!(leaf.contains("[elided"));
+    }
+}
+
+#[cfg(test)]
+mod archived_session_sweep_tests {
+    use super::*;
+
+    fn meta(ch: Uuid, archived: bool) -> serde_json::Value {
+        let mut tags = vec![
+            serde_json::json!(["d", ch.to_string()]),
+            serde_json::json!(["name", "room"]),
+        ];
+        if archived {
+            tags.push(serde_json::json!(["archived", "true"]));
+        }
+        serde_json::json!({ "kind": 39000, "tags": tags })
+    }
+
+    #[cfg(unix)] // the scripted ACP agent is a bash script
+    #[tokio::test]
+    async fn sweep_releases_archived_rooms_and_their_queued_work() {
+        use pool::session_close_tests::{closed_ids, recording_agent};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = dir.path().join("wire.log");
+        let archived = Uuid::new_v4();
+        let live = Uuid::new_v4();
+        let conv = |channel_id| scope::SessionScope::Conversation { channel_id };
+
+        let mut agent = recording_agent(&log, true).await;
+        let mut pool = AgentPool::from_slots(vec![None]);
+        for (ch, sid) in [(archived, "s-archived"), (live, "s-live")] {
+            agent.state.sessions.insert(conv(ch), sid.into());
+            let generation = pool.record_scope_owner(conv(ch), 0);
+            agent.state.set_scope_owner_generation(conv(ch), generation);
+        }
+        pool.return_agent(agent);
+
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "@agent follow-up")
+            .sign_with_keys(&nostr::Keys::generate())
+            .expect("sign");
+        assert!(queue.push(QueuedEvent {
+            channel_id: archived,
+            scope: conv(archived),
+            event,
+            received_at: std::time::Instant::now(),
+            prompt_tag: "@mention".into(),
+            edit: None,
+        }));
+
+        let (rest, _server) = crate::author_gate_tests::nip11_server(serde_json::json!([
+            meta(archived, true),
+            meta(live, false),
+        ]))
+        .await;
+        sweep_archived_channel_sessions(&mut pool, &mut queue, &rest).await;
+
+        assert_eq!(closed_ids(&log), ["s-archived"]);
+        assert_eq!(
+            queue.pending_channels(),
+            0,
+            "archived room's queued work is dropped"
+        );
+        let agent = pool.agents_mut()[0].as_ref().expect("idle agent");
+        assert!(agent.state.sessions.contains_key(&conv(live)));
+        assert!(!agent.state.sessions.contains_key(&conv(archived)));
+    }
+
+    #[test]
+    fn only_channels_marked_archived_are_released() {
+        let closed_room = Uuid::new_v4();
+        let live_room = Uuid::new_v4();
+        let no_metadata = Uuid::new_v4();
+        let unrelated_archived = Uuid::new_v4();
+        let held: HashSet<Uuid> = [closed_room, live_room, no_metadata].into();
+        let events = serde_json::json!([
+            meta(closed_room, true),
+            meta(live_room, false),
+            meta(unrelated_archived, true),
+        ]);
+        assert_eq!(
+            archived_among(&held, &events),
+            vec![closed_room],
+            "a live room, a room whose metadata is unreadable, and channels the \
+             pool holds nothing for must never be torn down"
+        );
+        assert!(archived_among(&held, &serde_json::json!([])).is_empty());
     }
 }
