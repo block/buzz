@@ -1,4 +1,4 @@
-import { ArrowLeft, MessageSquare } from "lucide-react";
+import { AlertCircle, ArrowLeft, MessageSquare } from "lucide-react";
 import * as React from "react";
 
 import { handleTimelineMentionCopy } from "@/features/messages/lib/timelineMentionCopy";
@@ -26,6 +26,9 @@ import { ForumComposer } from "./ForumComposer";
 type ForumThreadPanelProps = {
   thread: ForumThreadResponse | undefined;
   isLoading: boolean;
+  /** Set when the thread read failed — shown instead of an endless skeleton. */
+  loadError?: Error | null;
+  onRetry?: () => void;
   isSendingReply: boolean;
   channelId: string;
   postId: string;
@@ -145,6 +148,8 @@ function ReplyRow({
 export function ForumThreadPanel({
   thread,
   isLoading,
+  loadError,
+  onRetry,
   isSendingReply,
   channelId,
   postId,
@@ -184,6 +189,40 @@ export function ForumThreadPanel({
     targetElement.scrollIntoView({ block: "center" });
     onTargetReached?.(targetEventId);
   }, [onTargetReached, targetEventId, thread]);
+
+  if (!thread && loadError) {
+    return (
+      <div className={cn("flex h-full flex-col", channelChrome.contentPadding)}>
+        <div className="border-b border-border/60 px-4 py-3">
+          <Button
+            className="gap-1.5 text-muted-foreground"
+            onClick={onBack}
+            size="sm"
+            variant="ghost"
+          >
+            <ArrowLeft className="h-4 w-4" />
+            Back to posts
+          </Button>
+        </div>
+        <div className="flex flex-1 flex-col items-center justify-center gap-3 px-4 text-center">
+          <AlertCircle className="h-10 w-10 text-muted-foreground/40" />
+          <div>
+            <p className="text-sm font-medium text-foreground/70">
+              Could not load this post
+            </p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              {loadError.message}
+            </p>
+          </div>
+          {onRetry ? (
+            <Button onClick={onRetry} size="sm" variant="outline">
+              Try again
+            </Button>
+          ) : null}
+        </div>
+      </div>
+    );
+  }
 
   if (isLoading || !thread) {
     return (
