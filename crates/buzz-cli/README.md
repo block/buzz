@@ -77,6 +77,9 @@ buzz messages thread --channel <uuid> --event <event-id>
 buzz messages thread --link 'buzz://message?channel=<uuid>&id=<event-id>&thread=<root-id>'
 buzz messages search --query "architecture"
 buzz messages search --author <pubkey|npub|name> --since <unix-ts>
+buzz messages search --query "architecture" --channel <uuid>          # scope to one channel
+buzz messages search --query "architecture" --since <ts> --until <ts> # bound both ends
+buzz messages search --query "architecture" --kinds 9,45001,45003     # override default kinds
 buzz messages search --author <pubkey|npub|name> --before <last created_at> --before-id <last id> --limit 100   # next older page
 buzz messages edit --event <event-id> --content "Updated text"
 buzz messages delete --event <event-id>

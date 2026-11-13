@@ -437,6 +437,10 @@ pub async fn cmd_get_thread(
     Ok(())
 }
 
+/// Kinds searched when `--kinds` is not supplied: chat, channel metadata,
+/// forum posts, and forum comments.
+const DEFAULT_SEARCH_KINDS: &[u16] = &[9, 40002, 45001, 45003];
+
 #[allow(clippy::too_many_arguments)]
 pub async fn cmd_search(
     client: &BuzzClient,
@@ -445,6 +449,8 @@ pub async fn cmd_search(
     since: Option<i64>,
     before: Option<i64>,
     before_id: Option<&str>,
+    channel: Option<&str>,
+    kinds: &[u16],
     limit: Option<u32>,
     format: &crate::OutputFormat,
 ) -> Result<(), CliError> {
@@ -453,9 +459,9 @@ pub async fn cmd_search(
             "at least one of --query or --author is required".into(),
         ));
     }
-    // Validate the cursor before resolving the author, so a bad flag fails
+    // Validate every flag before resolving the author, so a bad flag fails
     // without a relay round trip.
-    search_filter(query, None, since, before, before_id, None)?;
+    search_filter(query, None, since, before, before_id, channel, kinds, None)?;
 
     let author_hex = match author {
         Some(a) => Some(resolve_author(client, a).await?),
@@ -468,6 +474,8 @@ pub async fn cmd_search(
         since,
         before,
         before_id,
+        channel,
+        kinds,
         limit,
     )?;
     let resp = client.query(&filter).await?;
@@ -486,18 +494,34 @@ pub async fn cmd_search(
 
 /// The relay filter for `messages search`.
 ///
-/// `before` maps to `until`; `before_id` adds the relay's composite
-/// `(until, before_id)` cursor, so an author-only search pages back with the
-/// last result's `created_at` and `id`. Full-text results are ranked by
-/// relevance, not time, so `before_id` is rejected with `query`.
+/// `before` (also spelled `--until`) maps to `until`; `before_id` adds the
+/// relay's composite `(until, before_id)` cursor, so an author-only search
+/// pages back with the last result's `created_at` and `id`. Full-text results
+/// are ranked by relevance, not time, so `before_id` is rejected with `query`.
+/// `channel` becomes an `#h` filter and a non-empty `kinds` replaces
+/// [`DEFAULT_SEARCH_KINDS`]. Omitting `channel` and `kinds` produces the same
+/// object the command sent before those flags existed.
+#[allow(clippy::too_many_arguments)]
 fn search_filter(
     query: Option<&str>,
     author_hex: Option<&str>,
     since: Option<i64>,
     before: Option<i64>,
     before_id: Option<&str>,
+    channel: Option<&str>,
+    kinds: &[u16],
     limit: Option<u32>,
 ) -> Result<serde_json::Value, CliError> {
+    if let (Some(s), Some(b)) = (since, before) {
+        if s > b {
+            return Err(CliError::Usage(
+                "--since must not be later than --until/--before".into(),
+            ));
+        }
+    }
+    if let Some(c) = channel {
+        validate_uuid(c)?;
+    }
     if let Some(bid) = before_id {
         if query.is_some() {
             return Err(CliError::Usage(
@@ -509,8 +533,13 @@ fn search_filter(
         }
         validate_hex64(bid)?;
     }
+    let kind_list: &[u16] = if kinds.is_empty() {
+        DEFAULT_SEARCH_KINDS
+    } else {
+        kinds
+    };
     let mut filter = serde_json::json!({
-        "kinds": [9, 40002, 45001, 45003],
+        "kinds": kind_list,
         "limit": limit.unwrap_or(20).min(100)
     });
     if let Some(q) = query {
@@ -527,6 +556,9 @@ fn search_filter(
     }
     if let Some(bid) = before_id {
         filter["before_id"] = serde_json::json!(bid.to_ascii_lowercase());
+    }
+    if let Some(c) = channel {
+        filter["#h"] = serde_json::json!([c]);
     }
     Ok(filter)
 }
@@ -1135,6 +1167,8 @@ pub async fn dispatch(
             since,
             before,
             before_id,
+            channel,
+            kinds,
             limit,
         } => {
             cmd_search(
@@ -1144,6 +1178,8 @@ pub async fn dispatch(
                 since,
                 before,
                 before_id.as_deref(),
+                channel.as_deref(),
+                &kinds,
                 limit,
                 format,
             )
@@ -1217,7 +1253,7 @@ mod tests {
 
         // No cursor flags: the filter is unchanged from before.
         assert_eq!(
-            search_filter(None, Some(&pk), Some(100), None, None, None).unwrap(),
+            search_filter(None, Some(&pk), Some(100), None, None, None, &[], None).unwrap(),
             serde_json::json!({
                 "kinds": [9, 40002, 45001, 45003],
                 "limit": 20,
@@ -1228,7 +1264,17 @@ mod tests {
 
         // --before maps to `until`; --before-id rides along, lowercased.
         assert_eq!(
-            search_filter(None, Some(&pk), Some(100), Some(200), Some(&id), Some(500)).unwrap(),
+            search_filter(
+                None,
+                Some(&pk),
+                Some(100),
+                Some(200),
+                Some(&id),
+                None,
+                &[],
+                Some(500)
+            )
+            .unwrap(),
             serde_json::json!({
                 "kinds": [9, 40002, 45001, 45003],
                 "limit": 100,
@@ -1240,7 +1286,7 @@ mod tests {
         );
 
         // --before alone is a plain time bound, allowed with --query.
-        let f = search_filter(Some("q"), None, None, Some(200), None, None).unwrap();
+        let f = search_filter(Some("q"), None, None, Some(200), None, None, &[], None).unwrap();
         assert_eq!(f["until"], 200);
         assert_eq!(f["search"], "q");
         assert!(f.get("before_id").is_none());
@@ -1252,7 +1298,7 @@ mod tests {
         ] {
             assert!(
                 matches!(
-                    search_filter(query, Some(&pk), None, before, before_id, None),
+                    search_filter(query, Some(&pk), None, before, before_id, None, &[], None),
                     Err(CliError::Usage(_))
                 ),
                 "{query:?} {before:?} {before_id:?}"
@@ -2264,6 +2310,158 @@ mod tests {
                 .iter()
                 .any(|t| matches!(t[0].as_str(), Some("e" | "broadcast"))),
             "must be top-level: {tags:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod search_filter_tests {
+    use super::{search_filter, CliError};
+    use serde_json::json;
+
+    const UUID: &str = "0b7f9c2e-3d4a-4b1c-8e5f-6a7b8c9d0e1f";
+    const PUBKEY: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+
+    fn deploy(until: Option<i64>, channel: Option<&str>, kinds: &[u16]) -> serde_json::Value {
+        search_filter(
+            Some("deploy"),
+            None,
+            None,
+            until,
+            None,
+            channel,
+            kinds,
+            Some(20),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn defaults_to_the_four_message_kinds_when_no_kind_flag_is_given() {
+        let f = deploy(None, None, &[]);
+        assert_eq!(f["kinds"], json!([9, 40002, 45001, 45003]));
+    }
+
+    #[test]
+    fn explicit_kinds_replace_the_defaults() {
+        let f = deploy(None, None, &[9, 40002]);
+        assert_eq!(f["kinds"], json!([9, 40002]));
+    }
+
+    #[test]
+    fn channel_becomes_an_h_tag_filter() {
+        let f = deploy(None, Some(UUID), &[]);
+        assert_eq!(f["#h"], json!([UUID]));
+    }
+
+    #[test]
+    fn no_h_key_at_all_when_channel_is_absent() {
+        let f = deploy(None, None, &[]);
+        assert!(f.get("#h").is_none(), "unscoped search must not send #h");
+    }
+
+    #[test]
+    fn until_is_passed_through_when_present_and_absent_otherwise() {
+        let with = deploy(Some(1_784_102_400), None, &[]);
+        assert_eq!(with["until"], json!(1_784_102_400));
+        let without = deploy(None, None, &[]);
+        assert!(without.get("until").is_none());
+    }
+
+    #[test]
+    fn channel_and_kinds_compose_with_the_pagination_cursor() {
+        let id = "d".repeat(64);
+        let f = search_filter(
+            None,
+            Some(PUBKEY),
+            None,
+            Some(200),
+            Some(&id),
+            Some(UUID),
+            &[9],
+            Some(100),
+        )
+        .unwrap();
+        assert_eq!(
+            f,
+            json!({
+                "kinds": [9],
+                "limit": 100,
+                "authors": [PUBKEY],
+                "until": 200,
+                "before_id": id,
+                "#h": [UUID]
+            })
+        );
+    }
+
+    #[test]
+    fn since_later_than_until_is_a_usage_error() {
+        let r = search_filter(
+            Some("deploy"),
+            None,
+            Some(300),
+            Some(200),
+            None,
+            None,
+            &[],
+            None,
+        );
+        assert!(matches!(r, Err(CliError::Usage(_))));
+        // Equal bounds are a valid one-second window.
+        assert!(search_filter(
+            Some("deploy"),
+            None,
+            Some(200),
+            Some(200),
+            None,
+            None,
+            &[],
+            None
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn malformed_channel_is_rejected_locally() {
+        let r = search_filter(
+            Some("deploy"),
+            None,
+            None,
+            None,
+            None,
+            Some("not-a-uuid"),
+            &[],
+            None,
+        );
+        assert!(
+            r.is_err(),
+            "a non-UUID --channel must fail before any relay call"
+        );
+    }
+
+    #[test]
+    fn omitting_every_new_flag_reproduces_the_previous_filter_exactly() {
+        let f = search_filter(
+            Some("checkout"),
+            Some(PUBKEY),
+            Some(1_783_497_600),
+            None,
+            None,
+            None,
+            &[],
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            f,
+            json!({
+                "kinds": [9, 40002, 45001, 45003],
+                "limit": 20,
+                "search": "checkout",
+                "authors": [PUBKEY],
+                "since": 1_783_497_600
+            })
         );
     }
 }

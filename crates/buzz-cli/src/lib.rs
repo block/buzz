@@ -788,7 +788,7 @@ pub enum MessagesCmd {
     },
     /// Full-text search across messages
     #[command(
-        after_help = "Examples:\n  buzz messages search --query checkout\n  buzz messages search --author npub1... --since 1783497600\n  buzz messages search --author Aaron --query checkout --limit 20\n  buzz messages search --author npub1... --before 1783584000 --before-id <last result id> --limit 100"
+        after_help = "Examples:\n  buzz messages search --query checkout\n  buzz messages search --author npub1... --since 1783497600\n  buzz messages search --author Aaron --query checkout --limit 20\n  buzz messages search --query deploy --channel <UUID>\n  buzz messages search --query deploy --since 1783497600 --until 1784102400\n  buzz messages search --query deploy --kinds 9,45001,45003\n  buzz messages search --author npub1... --before 1783584000 --before-id <last result id> --limit 100"
     )]
     Search {
         /// Search query string (optional when --author is given)
@@ -800,14 +800,21 @@ pub enum MessagesCmd {
         /// Unix timestamp — return messages after this time
         #[arg(long)]
         since: Option<i64>,
-        /// Unix timestamp cursor — return messages created at or before this time.
-        /// To page back, pass the last result's `created_at` here and its `id` as --before-id.
-        #[arg(long)]
+        /// Unix timestamp cursor — return messages created at or before this time
+        /// (also spelled --until). To page back, pass the last result's `created_at`
+        /// here and its `id` as --before-id.
+        #[arg(long, visible_alias = "until")]
         before: Option<i64>,
         /// Event ID cursor — with --before, resume after this event, so events from the
         /// same second are neither repeated nor skipped. Not allowed with --query.
         #[arg(long, requires = "before")]
         before_id: Option<String>,
+        /// Channel UUID — restrict results to one channel (from 'buzz channels list')
+        #[arg(long)]
+        channel: Option<String>,
+        /// Nostr event kinds to search (comma-separated) — defaults to chat, channel, and forum kinds
+        #[arg(long, value_delimiter = ',')]
+        kinds: Vec<u16>,
         /// Maximum number of results to return
         #[arg(long)]
         limit: Option<u32>,
@@ -2897,6 +2904,37 @@ mod tests {
             _ => panic!("messages search should parse --before and --before-id"),
         }
         assert!(search(&["--before-id", &id]).is_err());
+    }
+
+    #[test]
+    fn messages_search_parses_until_channel_and_kinds() {
+        let channel = "123e4567-e89b-12d3-a456-426614174000";
+        let argv = [
+            "buzz",
+            "messages",
+            "search",
+            "--query",
+            "deploy",
+            "--until",
+            "300",
+            "--channel",
+            channel,
+            "--kinds",
+            "9,45001",
+        ];
+        match Cli::try_parse_from(argv).map(|c| c.command) {
+            Ok(Cmd::Messages(MessagesCmd::Search {
+                before,
+                channel: parsed_channel,
+                kinds,
+                ..
+            })) => {
+                assert_eq!(before, Some(300), "--until is an alias of --before");
+                assert_eq!(parsed_channel.as_deref(), Some(channel));
+                assert_eq!(kinds, vec![9, 45001]);
+            }
+            _ => panic!("messages search should parse --until, --channel and --kinds"),
+        }
     }
 
     #[test]
