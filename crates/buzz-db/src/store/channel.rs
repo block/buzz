@@ -3327,8 +3327,9 @@ mod postgres_tests {
     /// A group-state write takes its replacement lock once: the snapshot
     /// takes it and the replacement runs under it, so the lock metrics see
     /// one acquisition per write, as they do for
-    /// `Db::replace_addressable_event`. Mutation: take the lock again in
-    /// `replace_addressable_event_under_lock` → RED.
+    /// `Db::replace_addressable_event`, each labelled with the written kind.
+    /// Mutation: take the lock again in `replace_addressable_event_under_lock`,
+    /// or drop the kind from `take_replacement_lock` → RED.
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn group_state_replacement_takes_its_lock_once() {
@@ -3356,7 +3357,7 @@ mod postgres_tests {
         let _guard = metrics::set_default_local_recorder(&recorder);
         // A debugging snapshot drains what it reads, so each call returns the
         // acquisitions since the previous one.
-        let replacement_acquisitions_since_last = || {
+        let replacement_acquisitions_since_last = |kind: &str| {
             snapshotter
                 .snapshot()
                 .into_vec()
@@ -3368,6 +3369,10 @@ mod postgres_tests {
                                 && label.value()
                                     == crate::observability::LockType::Replacement.as_str()
                         })
+                        && key
+                            .key()
+                            .labels()
+                            .any(|label| label.key() == "kind" && label.value() == kind)
                 })
                 .map(|(_, _, _, value)| match value {
                     DebugValue::Counter(count) => count,
@@ -3390,7 +3395,7 @@ mod postgres_tests {
             .expect("sign 39000");
         assert!(snapshot.replace(&event).await.expect("store").1);
         assert_eq!(
-            replacement_acquisitions_since_last(),
+            replacement_acquisitions_since_last("39000"),
             1,
             "one lock per group-state write"
         );
@@ -3406,7 +3411,7 @@ mod postgres_tests {
                 .1
         );
         assert_eq!(
-            replacement_acquisitions_since_last(),
+            replacement_acquisitions_since_last("0"),
             1,
             "one lock per addressable replace"
         );
