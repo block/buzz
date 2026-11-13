@@ -405,6 +405,11 @@ class _InboxRow extends HookConsumerWidget {
                         following
                             ? notifier.unfollowThread(followRootId)
                             : notifier.followThread(followRootId);
+                        if (item.item.channelId case final channelId?) {
+                          ref
+                              .read(channelsProvider.notifier)
+                              .noteThreadFollowChanged(channelId);
+                        }
                       },
                     ),
                   if (canRemind)

@@ -53,13 +53,22 @@ extension _UnreadSnapshot on ChannelsNotifier {
 
   /// Forgets [ids] that are still waiting for their payload. Returns whether
   /// any were.
-  bool _dropPendingThreadReplies(String channelId, Set<String> ids) {
+  bool _dropPendingThreadReplies(String channelId, Set<String> ids) =>
+      _removeObservedUnreadEvents(
+        channelId,
+        (event) => event.threadReplyPending && ids.contains(event.id),
+      );
+
+  /// Forgets [channelId]'s observed unread events that pass [test]. Returns
+  /// whether any did.
+  bool _removeObservedUnreadEvents(
+    String channelId,
+    bool Function(ObservedUnreadEvent event) test,
+  ) {
     final events = _observedUnreadEventsByChannel[channelId];
     if (events == null) return false;
     final before = events.length;
-    events.removeWhere(
-      (id, event) => event.threadReplyPending && ids.contains(id),
-    );
+    events.removeWhere((_, event) => test(event));
     if (events.length == before) return false;
     if (events.isEmpty) {
       _observedUnreadEventsByChannel.remove(channelId);
@@ -80,6 +89,7 @@ extension _UnreadSnapshot on ChannelsNotifier {
         sentAt: json['sentAt'] as int,
         readAt: json['readAt'] as int?,
         muted: json['muted'] as bool,
+        follows: json['follows'] as int,
       );
       final events = [
         for (final event in json['events'] as List<dynamic>)
@@ -108,6 +118,7 @@ extension _UnreadSnapshot on ChannelsNotifier {
             'sentAt': cursor.sentAt,
             'readAt': cursor.readAt,
             'muted': cursor.muted,
+            'follows': cursor.follows,
             'events': [
               for (final event
                   in _observedUnreadEventsByChannel[channelId]?.values ??
@@ -153,4 +164,21 @@ ObservedUnreadEvent _decodeObserved(List<dynamic> json) {
     channelCatchUp: flags & _channelCatchUp != 0,
     threadReplyPending: flags & _threadReply != 0,
   );
+}
+
+/// Keeps the unread catch-up right when the user follows or unfollows a thread.
+extension UnreadThreadFollows on ChannelsNotifier {
+  /// Call after following or unfollowing a thread in [channelId]. That changes
+  /// which of its replies count as unread, so its next catch-up reads its whole
+  /// window and replaces what it found before. Other channels' cursors adopt
+  /// the new followed threads, so they stay deltas. Saved at once, so a
+  /// relaunch before the next catch-up starts from the same place.
+  void noteThreadFollowChanged(String channelId) {
+    final follows = _followsFingerprint(_followedRootIds());
+    _unreadCaughtUpByChannel.updateAll(
+      (id, cursor) =>
+          cursor.withFollows(id == channelId ? _staleFollows : follows),
+    );
+    _saveUnreadSnapshot?.call();
+  }
 }

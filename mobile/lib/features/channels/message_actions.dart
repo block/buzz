@@ -1,4 +1,5 @@
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
+
 import 'dart:async';
 import 'dart:io';
 import 'dart:ui' as ui;
@@ -148,7 +149,10 @@ Future<void> showMessageActions({
                           channelId: channelId,
                           currentPubkey: currentPubkey,
                         ),
-                        _FollowThreadTile(message: message),
+                        _FollowThreadTile(
+                          message: message,
+                          channelId: channelId,
+                        ),
                       ],
                     ),
                     SheetActionSection(
@@ -627,7 +631,9 @@ class _MarkReadUnreadTile extends ConsumerWidget {
 class _FollowThreadTile extends ConsumerWidget {
   final TimelineMessage message;
 
-  const _FollowThreadTile({required this.message});
+  final String channelId;
+
+  const _FollowThreadTile({required this.message, required this.channelId});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -648,6 +654,7 @@ class _FollowThreadTile extends ConsumerWidget {
         } else {
           notifier.followThread(rootId);
         }
+        ref.read(channelsProvider.notifier).noteThreadFollowChanged(channelId);
       },
     );
   }

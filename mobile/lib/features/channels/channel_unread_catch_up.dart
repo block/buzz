@@ -1,5 +1,30 @@
 part of 'channels_provider.dart';
 
+/// A channel's unread catch-up cursor: when it was sent, and what counted as
+/// unread then (the read timestamp, the mute and the followed threads).
+typedef _UnreadCursor = ({int sentAt, int? readAt, bool muted, int follows});
+
+/// A fingerprint of followed thread roots that stays the same across launches,
+/// unlike [Object.hash] of strings.
+int _followsFingerprint(Set<String> rootIds) {
+  var hash = 0x811c9dc5;
+  for (final id in rootIds.toList()..sort()) {
+    for (final unit in [...id.codeUnits, 0]) {
+      hash = ((hash ^ unit) * 0x01000193) & 0xffffffff;
+    }
+  }
+  return hash;
+}
+
+/// A followed-threads value no fingerprint has, so the cursor it marks reads
+/// the full window, and replaces its evidence, on the next catch-up.
+const _staleFollows = -1;
+
+extension on _UnreadCursor {
+  _UnreadCursor withFollows(int follows) =>
+      (sentAt: sentAt, readAt: readAt, muted: muted, follows: follows);
+}
+
 extension _UnreadCatchUp on ChannelsNotifier {
   /// Backfills unread badges for the channels this refresh just installed.
   ///
@@ -41,6 +66,27 @@ extension _UnreadCatchUp on ChannelsNotifier {
           channel.id: readState.effectiveTimestamp(channel.id),
       };
       final requestedAt = currentUnixSeconds();
+      final follows = _followsFingerprint(_followedRootIds());
+      final sinceByChannel = {
+        for (final channel in activeChannels)
+          channel.id: _unreadCatchUpSince(
+            channel.id,
+            readAtByChannel[channel.id],
+            muted: mutedChannelIds.contains(channel.id),
+            follows: follows,
+          ),
+      };
+      // Channels whose cursor no longer holds read the whole unread window,
+      // and it replaces what was observed before it was sent. Live events can
+      // arrive while it is out; they are not in this set. A channel without a
+      // cursor yet only adds what its window finds.
+      final observedBeforeByChannel = {
+        for (final MapEntry(key: channelId, value: since)
+            in sinceByChannel.entries)
+          if (_unreadCaughtUpByChannel[channelId] != null &&
+              since == (readAtByChannel[channelId] ?? -1) + 1)
+            channelId: {...?_observedUnreadEventsByChannel[channelId]?.keys},
+      };
       final cursorsAtStart = {
         for (final channel in activeChannels)
           channel.id: _unreadCaughtUpByChannel[channel.id],
@@ -62,11 +108,7 @@ extension _UnreadCatchUp on ChannelsNotifier {
               tags: {
                 '#h': [channel.id],
               },
-              since: _unreadCatchUpSince(
-                channel.id,
-                readAtByChannel[channel.id],
-                muted: mutedChannelIds.contains(channel.id),
-              ),
+              since: sinceByChannel[channel.id],
               limit: _unreadCatchUpLimit,
             ),
         // Replies restored from disk without their payload, which Activity
@@ -109,6 +151,7 @@ extension _UnreadCatchUp on ChannelsNotifier {
         failedChannelIds,
         cursorsAtStart: cursorsAtStart,
         mutedChannelIds: mutedChannelIds,
+        follows: follows,
       );
       incomplete = failedChannelIds.isNotEmpty;
 
@@ -131,6 +174,43 @@ extension _UnreadCatchUp on ChannelsNotifier {
         }
       }
 
+      // A full page of deletions may have left older ones out, and a restored
+      // event has nothing else to say it was deleted. NIP-09 deletions can
+      // omit h, so those count toward every channel. Mark the cursor stale so
+      // the retry reads the channel's whole window: that pass replaces its
+      // evidence with what is still there, and skips this check, so the next
+      // one is a delta. Until then the evidence stays, so nothing flickers.
+      final deletionsByChannel = <String?, int>{};
+      for (final event in events) {
+        if (event.kind != EventKind.deletion &&
+            event.kind != EventKind.nip29DeleteEvent) {
+          continue;
+        }
+        deletionsByChannel.update(
+          event.channelId,
+          (n) => n + 1,
+          ifAbsent: () => 1,
+        );
+      }
+      for (final channelId in channelById.keys) {
+        if (sinceByChannel[channelId] ==
+                (readAtByChannel[channelId] ?? -1) + 1 ||
+            failedChannelIds.contains(channelId)) {
+          continue;
+        }
+        if ((deletionsByChannel[channelId] ?? 0) +
+                (deletionsByChannel[null] ?? 0) <
+            _unreadCatchUpLimit) {
+          continue;
+        }
+        if (_unreadCaughtUpByChannel[channelId] case final cursor?) {
+          _unreadCaughtUpByChannel[channelId] = cursor.withFollows(
+            _staleFollows,
+          );
+        }
+        incomplete = true;
+      }
+
       for (final event in events) {
         if (batchDeletedIds.contains(event.id)) continue;
         if (EventKind.channelMessageEventKinds.contains(event.kind) &&
@@ -139,8 +219,48 @@ extension _UnreadCatchUp on ChannelsNotifier {
         }
       }
 
+      // The window each channel's filter returned: every unique message at or
+      // after its start, including a pending reply the window also matched.
+      // A reply fetched by ID from before the start is not part of it.
+      final windowIdsByChannel = <String, Set<String>>{};
+      final windowStartByChannel = <String, int>{};
+      for (final event in events) {
+        if (!EventKind.channelMessageEventKinds.contains(event.kind)) continue;
+        final channelId = event.channelId;
+        final since = sinceByChannel[channelId];
+        if (channelId == null || since == null || event.createdAt < since) {
+          continue;
+        }
+        windowIdsByChannel.putIfAbsent(channelId, () => {}).add(event.id);
+        windowStartByChannel[channelId] = min(
+          windowStartByChannel[channelId] ?? event.createdAt,
+          event.createdAt,
+        );
+      }
+
+      // A full window replaces the channel's earlier evidence over the span it
+      // covered, so what no longer counts (a mute, an unfollow, a deletion
+      // the delta missed) goes, and what still counts is recorded again
+      // below, before anything is published. A window that hit its limit
+      // covers only back to its oldest message. Pending replies are checked by
+      // their own fetch.
+      var replaced = false;
+      for (final MapEntry(key: channelId, value: observedBefore)
+          in observedBeforeByChannel.entries) {
+        if (failedChannelIds.contains(channelId)) continue;
+        final saturated =
+            (windowIdsByChannel[channelId]?.length ?? 0) >= _unreadCatchUpLimit;
+        final from = saturated ? windowStartByChannel[channelId]! : null;
+        replaced |= _removeObservedUnreadEvents(
+          channelId,
+          (event) =>
+              !event.threadReplyPending &&
+              observedBefore.contains(event.id) &&
+              (from == null || event.createdAt >= from),
+        );
+      }
+
       final recordedAtByChannel = <String, int>{};
-      final windowSizeByChannel = <String, int>{};
       final oldestQuietByChannel = <String, NostrEvent>{};
       for (final event in events) {
         if (!EventKind.channelMessageEventKinds.contains(event.kind)) continue;
@@ -148,13 +268,6 @@ extension _UnreadCatchUp on ChannelsNotifier {
         if (channelId == null) continue;
         final channel = channelById[channelId];
         if (channel == null) continue;
-        if (pendingRepliesByChannel[channelId]?.contains(event.id) != true) {
-          windowSizeByChannel.update(
-            channelId,
-            (n) => n + 1,
-            ifAbsent: () => 1,
-          );
-        }
         if (batchDeletedIds.contains(event.id) ||
             _unscopedUnreadDeletedIds.contains(event.id) ||
             _unreadDeletedIdsByChannel[channelId]?.contains(event.id) == true) {
@@ -193,7 +306,8 @@ extension _UnreadCatchUp on ChannelsNotifier {
       for (final MapEntry(key: channelId, value: quiet)
           in oldestQuietByChannel.entries) {
         if (recordedAtByChannel.containsKey(channelId)) continue;
-        if ((windowSizeByChannel[channelId] ?? 0) < _unreadCatchUpLimit) {
+        if ((windowIdsByChannel[channelId]?.length ?? 0) <
+            _unreadCatchUpLimit) {
           continue;
         }
         if (_recordUnreadEvent(
@@ -220,7 +334,10 @@ extension _UnreadCatchUp on ChannelsNotifier {
       // from here, so a second check would be dead code.
       // Recorded events also advance `lastMessageAt`, as live events do: a
       // deadline-unavailable latest-message batch leaves it unset.
-      if (recordedAtByChannel.isNotEmpty || appliedDeletion || droppedPending) {
+      if (recordedAtByChannel.isNotEmpty ||
+          appliedDeletion ||
+          droppedPending ||
+          replaced) {
         _publishUnreadCatchUp(recordedAtByChannel);
       }
       // Saved after every settled catch-up, even one that found nothing: its
@@ -256,18 +373,21 @@ extension _UnreadCatchUp on ChannelsNotifier {
   /// earlier one returned every message stored before it was sent, and the
   /// relay stores no event with a `created_at` more than 900s from its own
   /// clock, so anything stored since then is newer than that start, however
-  /// late it arrived and however far this phone's clock is from the sender's. A read timestamp that moved back since then, or a mute
-  /// change (which changes what counts as unread), makes the full window apply
-  /// again.
+  /// late it arrived and however far this phone's clock is from the sender's.
+  /// A read timestamp that moved back since then, or a change to the mute or
+  /// the followed threads (which change what counts as unread), makes the full
+  /// window apply again.
   int _unreadCatchUpSince(
     String channelId,
     int? readAt, {
     required bool muted,
+    required int follows,
   }) {
     final afterRead = (readAt ?? -1) + 1;
     final caughtUp = _unreadCaughtUpByChannel[channelId];
     if (caughtUp == null ||
         caughtUp.muted != muted ||
+        caughtUp.follows != follows ||
         (readAt ?? -1) < (caughtUp.readAt ?? -1)) {
       return afterRead;
     }
@@ -275,18 +395,18 @@ extension _UnreadCatchUp on ChannelsNotifier {
   }
 
   /// Remembers when a catch-up over [readAtByChannel] was sent, and the read
-  /// timestamps and mute state it used, for every channel except
-  /// [failedChannelIds]: their filters failed, so the next catch-up still needs
-  /// their earlier window. A channel whose cursor changed while the request was
-  /// out, such as a live deletion of its marker, keeps that change: this
-  /// response only covered the window the old cursor asked for.
+  /// timestamps, mute state and followed threads it used, for every channel
+  /// except [failedChannelIds]: their filters failed, so the next catch-up
+  /// still needs their earlier window. A channel whose cursor changed while
+  /// the request was out, such as a live deletion of its marker, keeps that
+  /// change: this response only covered the window the old cursor asked for.
   void _recordUnreadCaughtUp(
     Map<String, int?> readAtByChannel,
     int sentAt,
     Set<String> failedChannelIds, {
-    required Map<String, ({int sentAt, int? readAt, bool muted})?>
-    cursorsAtStart,
+    required Map<String, _UnreadCursor?> cursorsAtStart,
     required Set<String> mutedChannelIds,
+    required int follows,
   }) {
     for (final MapEntry(key: channelId, value: readAt)
         in readAtByChannel.entries) {
@@ -299,6 +419,7 @@ extension _UnreadCatchUp on ChannelsNotifier {
         sentAt: sentAt,
         readAt: readAt,
         muted: mutedChannelIds.contains(channelId),
+        follows: follows,
       );
     }
   }

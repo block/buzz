@@ -2,6 +2,12 @@ import 'dart:async';
 
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
+import 'package:buzz/features/channels/channel_unread.dart';
+import 'package:buzz/shared/read_state/read_state_provider.dart';
+import 'package:buzz/features/channels/thread_follows/thread_follows_provider.dart';
+import 'package:buzz/features/channels/channel_mutes/channel_mutes_provider.dart';
+import 'package:buzz/features/channels/channel_mutes/channel_mutes_storage.dart';
+import 'package:buzz/features/channels/unread_badge/unread_badge_provider.dart';
 import 'package:buzz/shared/channels/channel_list_snapshot.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme_provider.dart';
@@ -10,8 +16,212 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+part 'channel_snapshot_restored_cases.dart';
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  _restoredLaunchCases();
+  test(
+    'following a thread before restart recovers its older replies',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final root = 'a' * 64;
+      final reply = NostrEvent(
+        id: 'reply',
+        pubkey: 'alice',
+        createdAt: DateTime.now().millisecondsSinceEpoch ~/ 1000 - 7200,
+        kind: EventKind.streamMessage,
+        tags: [
+          ['h', 'alpha'],
+          ['e', root, '', 'root'],
+          ['e', root, '', 'reply'],
+        ],
+        content: 'reply',
+        sig: 'sig',
+      );
+      final first = _container(
+        prefs,
+        _SnapshotSession(['alpha'])..unreadMessages.add(reply),
+      );
+      await first.read(channelsProvider.future);
+      await _settle();
+      expect(
+        first
+            .read(channelsProvider.notifier)
+            .observedThreadReplies(first.read(channelsProvider).requireValue),
+        isEmpty,
+      );
+      first.read(threadFollowsProvider.notifier).followThread(root);
+      await _settle();
+      first.dispose();
+      final second = _container(
+        prefs,
+        _SnapshotSession(['alpha'])..unreadMessages.add(reply),
+      );
+      addTearDown(second.dispose);
+      await second.read(channelsProvider.future);
+      await _settle();
+      expect(
+        second.read(threadFollowsProvider).followedRootIds,
+        contains(root),
+      );
+      expect(
+        second
+            .read(channelsProvider.notifier)
+            .observedThreadReplies(second.read(channelsProvider).requireValue)
+            .map((e) => e.id),
+        contains('reply'),
+      );
+    },
+  );
+
+  test(
+    'cold start with a changed mute removes ordinary unread evidence',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final message = NostrEvent(
+        id: 'ordinary',
+        pubkey: 'alice',
+        createdAt: DateTime.now().millisecondsSinceEpoch ~/ 1000 - 7200,
+        kind: EventKind.streamMessage,
+        tags: [
+          ['h', 'alpha'],
+        ],
+        content: 'ordinary',
+        sig: 'sig',
+      );
+      final first = _container(
+        prefs,
+        _SnapshotSession(['alpha'])..unreadMessages.add(message),
+      );
+      await first.read(channelsProvider.future);
+      await _settle();
+      expect(first.read(unreadBadgeProvider).generalUnreadCount, 1);
+      first.dispose();
+      final session = _SnapshotSession(['alpha'])
+        ..unreadMessages.add(message)
+        ..unreadGate = Completer();
+      final second = _container(prefs, session, muted: true);
+      addTearDown(second.dispose);
+      await second.read(channelsProvider.future);
+      await _settle();
+      // A mention arrives live while the full window is out, and the window
+      // was read before it. It is told apart by when it arrived, not by its
+      // createdAt, which is older than the window's start here.
+      final mention = NostrEvent(
+        id: 'live-mention',
+        pubkey: 'alice',
+        createdAt: message.createdAt + 1,
+        kind: EventKind.streamMessage,
+        tags: [
+          ['h', 'alpha'],
+          ['p', 'me'],
+        ],
+        content: 'mention',
+        sig: 'sig',
+      );
+      expect(session.unreadFilters, isNotEmpty);
+      session.emit(mention);
+      session.unreadGate!.complete();
+      await _settle();
+      expect(
+        session.unreadFilters.where((f) => f.ids == null).map((f) => f.since),
+        everyElement(0),
+      );
+      expect(second.read(unreadBadgeProvider).generalUnreadCount, 0);
+      expect(second.read(unreadBadgeProvider).highPriorityCount, 1);
+      expect(
+        second
+            .read(channelsProvider.notifier)
+            .observedUnreadEventsByChannel['alpha']
+            ?.keys,
+        ['live-mention'],
+      );
+      second.dispose();
+
+      // Saved after the mute: the next cold start keeps the mention and
+      // drops nothing it should show, and asks only for what is new.
+      final thirdSession = _SnapshotSession(['alpha'])
+        ..unreadMessages.addAll([message, mention]);
+      final third = _container(prefs, thirdSession, muted: true);
+      addTearDown(third.dispose);
+      await third.read(channelsProvider.future);
+      await _settle();
+      expect(
+        thirdSession.unreadFilters
+            .where((f) => f.ids == null)
+            .map((f) => f.since),
+        everyElement(greaterThan(0)),
+      );
+      expect(third.read(unreadBadgeProvider).generalUnreadCount, 0);
+      expect(third.read(unreadBadgeProvider).highPriorityCount, 1);
+    },
+  );
+
+  test(
+    'following a thread in session recovers its older replies, then and after '
+    'a restart',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final root = 'b' * 64;
+      final reply = NostrEvent(
+        id: 'in-session-reply',
+        pubkey: 'alice',
+        createdAt: DateTime.now().millisecondsSinceEpoch ~/ 1000 - 7200,
+        kind: EventKind.streamMessage,
+        tags: [
+          ['h', 'alpha'],
+          ['e', root, '', 'root'],
+          ['e', root, '', 'reply'],
+        ],
+        content: 'reply',
+        sig: 'sig',
+      );
+      Iterable<String> activity(ProviderContainer container) => container
+          .read(channelsProvider.notifier)
+          .observedThreadReplies(container.read(channelsProvider).requireValue)
+          .map((e) => e.id);
+      final firstSession = _SnapshotSession(['alpha'])
+        ..unreadMessages.add(reply);
+      final first = _container(prefs, firstSession);
+      addTearDown(first.dispose);
+      await first.read(channelsProvider.future);
+      await _settle();
+      expect(activity(first), isEmpty);
+
+      // As the Follow thread action does.
+      first.read(threadFollowsProvider.notifier).followThread(root);
+      first.read(channelsProvider.notifier).noteThreadFollowChanged('alpha');
+      firstSession.unreadFilters.clear();
+      await first.read(channelsProvider.notifier).refresh();
+      await first.read(channelsProvider.notifier).waitForUnreadCatchUp();
+      expect(
+        firstSession.unreadFilters
+            .where((f) => f.ids == null)
+            .map((f) => f.since),
+        everyElement(0),
+      );
+      expect(activity(first), ['in-session-reply']);
+      first.dispose();
+
+      final secondSession = _SnapshotSession(['alpha'])
+        ..unreadMessages.add(reply);
+      final second = _container(prefs, secondSession);
+      addTearDown(second.dispose);
+      await second.read(channelsProvider.future);
+      await _settle();
+      expect(
+        secondSession.unreadFilters
+            .where((f) => f.ids == null)
+            .map((f) => f.since),
+        everyElement(greaterThan(0)),
+      );
+      expect(activity(second), ['in-session-reply']);
+    },
+  );
   test(
     'a cold start restores unread state and asks only for newer messages',
     () async {
@@ -48,6 +258,7 @@ void main() {
       final first = _SnapshotSession(['alpha'])
         ..unreadMessages.addAll([old, reply, gone]);
       final firstContainer = _container(prefs, first);
+      addTearDown(firstContainer.dispose);
       final firstSentFrom = now();
       await firstContainer.read(channelsProvider.future);
       await _settle();
@@ -478,6 +689,8 @@ ProviderContainer _container(
   _SnapshotSession session, {
   String pubkey = 'me',
   String relay = 'https://a.example',
+  bool muted = false,
+  ChannelMutesNotifier? mutes,
 }) => ProviderContainer(
   retry: (_, _) => null,
   overrides: [
@@ -485,8 +698,20 @@ ProviderContainer _container(
     relaySessionProvider.overrideWith(() => session),
     myPubkeyProvider.overrideWithValue(pubkey),
     relayConfigProvider.overrideWith(() => _Config(relay)),
+    if (muted) channelMutesProvider.overrideWith(_Muted.new),
+    if (mutes != null) channelMutesProvider.overrideWith(() => mutes),
   ],
 );
+
+class _Muted extends ChannelMutesNotifier {
+  @override
+  ChannelMutesState build() => const ChannelMutesState(
+    isReady: true,
+    store: ChannelMuteStore(
+      channels: {'alpha': ChannelMuteEntry(muted: true, updatedAt: 1)},
+    ),
+  );
+}
 
 class _Config extends RelayConfigNotifier {
   _Config(this.relay);
@@ -502,6 +727,8 @@ class _SnapshotSession extends RelaySessionNotifier {
   bool fail = false;
   bool latestTimeout = false;
   Completer<void>? gate;
+  // Parks unread catch-up responses after they are computed.
+  Completer<void>? unreadGate;
   int membershipRequests = 0;
   int latestReads = 0;
   final unreadMessages = <NostrEvent>[];
@@ -543,16 +770,29 @@ class _SnapshotSession extends RelaySessionNotifier {
     }
     if (filters.any((filter) => filter.limit == 1000)) {
       unreadFilters.addAll(filters);
-      return [
-        for (final filter in filters)
-          if (filter.kinds.contains(EventKind.streamMessage)) ...[
-            for (final message in unreadMessages)
-              if ((filter.ids?.contains(message.id) ??
-                      message.createdAt >= (filter.since ?? 0)) &&
-                  filter.tags['#h']!.contains(message.channelId))
-                message,
-          ],
-      ];
+      final results = <String, NostrEvent>{};
+      for (final filter in filters) {
+        final matches =
+            unreadMessages
+                .where(
+                  (event) =>
+                      filter.kinds.contains(event.kind) &&
+                      (filter.ids == null || filter.ids!.contains(event.id)) &&
+                      event.createdAt >= (filter.since ?? 0) &&
+                      // The relay scopes a NIP-09 deletion without h by
+                      // its target's stored channel.
+                      (filter.tags['#h']!.contains(event.channelId) ||
+                          (event.channelId == null &&
+                              event.kind == EventKind.deletion)),
+                )
+                .toList()
+              ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+        for (final event in matches.take(filter.limit)) {
+          results[event.id] = event;
+        }
+      }
+      if (unreadGate case final gate?) await gate.future;
+      return results.values.toList();
     }
     if (filters.singleOrNull?.kinds.contains(39002) == true) {
       if (filters.single.until != null) return [];

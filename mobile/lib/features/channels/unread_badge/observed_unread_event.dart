@@ -92,6 +92,18 @@ bool recordObservedUnreadEvent(
   return true;
 }
 
+/// Whether [event] still shows as unread. A thread reply restored without its
+/// payload stays out of every count until the payload arrives: until then
+/// Activity has no row to open for it.
+bool _isUnread(
+  ObservedUnreadEvent event,
+  int? Function(ObservedUnreadEvent event) getReadAt,
+) {
+  if (event.threadReplyPending) return false;
+  final readAt = getReadAt(event);
+  return readAt == null || event.createdAt > readAt;
+}
+
 int countUnreadObservedEvents(
   Map<String, ObservedUnreadEvent>? eventsById,
   int? Function(ObservedUnreadEvent event) getReadAt,
@@ -99,8 +111,7 @@ int countUnreadObservedEvents(
   if (eventsById == null) return 0;
   var count = 0;
   for (final event in eventsById.values) {
-    final readAt = getReadAt(event);
-    if (readAt == null || event.createdAt > readAt) count++;
+    if (_isUnread(event, getReadAt)) count++;
   }
   return count;
 }
@@ -113,8 +124,7 @@ int countUnreadBadgeObservedEvents(
   var count = 0;
   for (final event in eventsById.values) {
     if (!event.countsTowardBadge) continue;
-    final readAt = getReadAt(event);
-    if (readAt == null || event.createdAt > readAt) count++;
+    if (_isUnread(event, getReadAt)) count++;
   }
   return count;
 }
@@ -127,8 +137,7 @@ int countUnreadAppBadgeObservedEvents(
   var count = 0;
   for (final event in eventsById.values) {
     if (!event.countsTowardAppBadge) continue;
-    final readAt = getReadAt(event);
-    if (readAt == null || event.createdAt > readAt) count++;
+    if (_isUnread(event, getReadAt)) count++;
   }
   return count;
 }
@@ -141,8 +150,7 @@ int countUnreadHighPriorityObservedEvents(
   var count = 0;
   for (final event in eventsById.values) {
     if (!event.highPriority) continue;
-    final readAt = getReadAt(event);
-    if (readAt == null || event.createdAt > readAt) count++;
+    if (_isUnread(event, getReadAt)) count++;
   }
   return count;
 }
