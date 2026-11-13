@@ -384,6 +384,10 @@ final channelMembersProvider = FutureProvider.autoDispose
       final relayBaseUrl = ref.watch(relayConfigProvider).baseUrl;
       final pubkey = ref.watch(myPubkeyProvider)?.toLowerCase();
       final snapshotCache = ref.read(_channelMembersSnapshotCacheProvider);
+      // A read superseded by a later one (a roster update arriving mid-read)
+      // must not overwrite the snapshot the newer read already wrote.
+      var isCurrentRead = true;
+      ref.onDispose(() => isCurrentRead = false);
       // Re-fetch only after reconnect completes. During the disconnected
       // interval this provider has no session dependency, so its current value
       // remains visible to every consumer rather than becoming AsyncData([]).
@@ -420,12 +424,14 @@ final channelMembersProvider = FutureProvider.autoDispose
         NostrFilters.channelMembers(channelId),
       );
       if (events.isEmpty) {
-        snapshotCache.write(
-          relayBaseUrl: relayBaseUrl,
-          pubkey: pubkey,
-          channelId: channelId,
-          members: const [],
-        );
+        if (isCurrentRead) {
+          snapshotCache.write(
+            relayBaseUrl: relayBaseUrl,
+            pubkey: pubkey,
+            channelId: channelId,
+            members: const [],
+          );
+        }
         return const [];
       }
       final event = events.first;
@@ -442,12 +448,14 @@ final channelMembersProvider = FutureProvider.autoDispose
             ),
           )
           .toList();
-      snapshotCache.write(
-        relayBaseUrl: relayBaseUrl,
-        pubkey: pubkey,
-        channelId: channelId,
-        members: members,
-      );
+      if (isCurrentRead) {
+        snapshotCache.write(
+          relayBaseUrl: relayBaseUrl,
+          pubkey: pubkey,
+          channelId: channelId,
+          members: members,
+        );
+      }
       return members;
     });
 
