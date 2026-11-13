@@ -2447,6 +2447,30 @@ void main() {
         },
       );
 
+      testWidgets('keyboard actions follow query changes before a frame', (
+        tester,
+      ) async {
+        for (final key in [LogicalKeyboardKey.tab, LogicalKeyboardKey.enter]) {
+          final controller = await pumpComposer(tester);
+          await tester.enterText(find.byType(TextField), 'hi @a');
+          await tester.pump();
+          controller.value = const TextEditingValue(
+            text: 'edited',
+            selection: TextSelection.collapsed(offset: 6),
+          );
+          await tester.sendKeyEvent(key);
+          await tester.pump();
+          expect(
+            controller.text,
+            key == LogicalKeyboardKey.tab ? 'edited' : '',
+          );
+          expect(sent, key == LogicalKeyboardKey.tab ? isEmpty : ['edited']);
+          await tester.pump(mentionSearchDebounce * 2);
+          await tester.pumpWidget(const SizedBox.shrink());
+          await tester.pumpAndSettle();
+        }
+      });
+
       testWidgets('rapid Enter sends once while member scanning is pending', (
         tester,
       ) async {
