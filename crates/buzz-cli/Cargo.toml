@@ -35,8 +35,9 @@ thiserror = { workspace = true }
 # Nostr event signing — used in `buzz auth`, auto-mint, and signed event writes
 nostr = { workspace = true }
 
-# UUID parsing for validate_uuid + event building
-uuid = { workspace = true }
+# UUID parsing for validate_uuid + event building; v5 derives stable
+# channel ids for `buzz import slack` so an interrupted run never mints a twin
+uuid = { workspace = true, features = ["v5"] }
 
 # RFC3339 observer timestamps for owner-reviewed agent draft requests
 chrono = { workspace = true }

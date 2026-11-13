@@ -319,6 +319,9 @@ enum Cmd {
     /// Read the activity feed
     #[command(subcommand)]
     Feed(FeedCmd),
+    /// Import history from an external workspace (Slack export)
+    #[command(subcommand)]
+    Import(ImportCmd),
     /// Publish notes and manage the social graph (NIP-01/02)
     #[command(subcommand)]
     Social(SocialCmd),
@@ -1511,6 +1514,57 @@ pub enum WorkflowsCmd {
     },
 }
 
+/// Subcommands for `buzz import`.
+#[derive(Subcommand)]
+pub enum ImportCmd {
+    /// Import a Slack workspace export directory (see docs/slack-import.md)
+    #[command(
+        after_help = "Works against any relay: the CLI identity signs every event, stamped with \
+the time of the import. Each message opens with its original author and time, \
+and each event carries an imported_from tag naming the Slack record it came \
+from. Messages are spaced one second apart to keep their order, so a large \
+workspace takes a while.\n\n\
+Re-running resumes from the state file — completed writes are skipped, and a \
+message whose outcome was lost is looked up on the relay before it is sent again.\n\n\
+Examples:\n  \
+buzz import slack --export-dir ./export --team-id T0266FRGM --dry-run\n  \
+buzz import slack --export-dir ./export --team-id T0266FRGM\n  \
+buzz import slack --export-dir ./export --team-id T0266FRGM --channel-map ./crosswalk.csv --dry-run\n  \
+buzz import slack --export-dir ./export --team-id T0266FRGM --user-map U060=npub1abc,U081=npub1def"
+    )]
+    Slack {
+        /// Path to an unzipped Slack export directory. Repeat for separate
+        /// Slackdump public/private export roots.
+        #[arg(long = "export-dir", required = true, action = clap::ArgAction::Append)]
+        export_dirs: Vec<String>,
+        /// Slack workspace id (team id, e.g. T0266FRGM). Namespaces provenance
+        /// references and channel UUIDs so ids never collide across workspaces.
+        #[arg(long)]
+        team_id: String,
+        /// State file path (default: <export-dir>/buzz-import-state.json)
+        #[arg(long)]
+        state: Option<String>,
+        /// CSV or JSON crosswalk from Slack channel ids to existing Buzz
+        /// channel UUIDs. Adopted archived channels are reopened for the
+        /// import and restored afterward.
+        #[arg(long)]
+        channel_map: Option<String>,
+        /// Only import these conversation names or Slack IDs (comma-separated)
+        #[arg(long)]
+        channels: Option<String>,
+        /// Parse and report what would be imported without writing
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
+        /// Skip importing reactions
+        #[arg(long, default_value_t = false)]
+        skip_reactions: bool,
+        /// Slack users who hold a Buzz key: SLACKID=npub-or-hex, comma-separated.
+        /// Populates private channels and DMs. Public keys only — never an nsec.
+        #[arg(long)]
+        user_map: Option<String>,
+    },
+}
+
 #[derive(Subcommand)]
 pub enum HuddlesCmd {
     /// List a channel's huddles with their state and start/end times
@@ -2690,6 +2744,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Users(sub) => commands::users::dispatch(sub, &client, &cli.format).await,
         Cmd::Workflows(sub) => commands::workflows::dispatch(sub, &client).await,
         Cmd::Feed(sub) => commands::feed::dispatch(sub, &client, &cli.format).await,
+        Cmd::Import(sub) => commands::import::dispatch(sub, &client).await,
         Cmd::Social(sub) => commands::social::dispatch(sub, &client).await,
         Cmd::Notes(sub) => commands::notes::dispatch(sub, &client).await,
         Cmd::Repos(sub) => commands::repos::dispatch(sub, &client).await,
@@ -2978,6 +3033,7 @@ mod tests {
             "feed",
             "gifs",
             "huddles",
+            "import",
             "issues",
             "media",
             "mem",
@@ -3111,6 +3167,7 @@ mod tests {
             vec!["approve", "create", "delete", "get", "list", "runs", "trigger", "update"]
         );
         assert_eq!(names(&cmd, "feed"), vec!["get"]);
+        assert_eq!(names(&cmd, "import"), vec!["slack"]);
         assert_eq!(
             names(&cmd, "social"),
             vec![
@@ -3196,6 +3253,7 @@ mod tests {
             ("emoji", 5),
             ("feed", 1),
             ("huddles", 2),
+            ("import", 1),
             ("issues", 6),
             ("media", 1),
             ("messages", 9),
