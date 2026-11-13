@@ -58,12 +58,13 @@ AnimatedAvatarDescriptor? parseAnimatedAvatarUrl(String? url) {
   );
 }
 
-/// Whether [url] could be an HTTP(S) URL with a host, checked without reading
-/// the rest of it. Avatars are checked on every build, and a `data:` profile
-/// picture of 100 KB costs about a millisecond to scan and parse.
+/// Whether [url] has an HTTP(S) scheme, checked without reading the rest of
+/// it. Avatars are checked on every build, and a `data:` profile picture of
+/// 100 KB costs about a millisecond to scan and parse. The authority is left to
+/// `Uri`, which also accepts backslashes there.
 bool _startsWithHttp(String url) {
-  final head = url.substring(0, url.length < 8 ? url.length : 8).toLowerCase();
-  return head.startsWith('http://') || head.startsWith('https://');
+  final head = url.substring(0, url.length < 6 ? url.length : 6).toLowerCase();
+  return head.startsWith('http:') || head.startsWith('https:');
 }
 
 bool _isHttpUrl(String value) {

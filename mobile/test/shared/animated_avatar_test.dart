@@ -45,6 +45,9 @@ void main() {
     const preset = 'dwwgwmfqqjotj.cloudfront.net/avatars/a/poster/b/c.png';
     expect(usesInsetAgentArtwork('https://$preset'), isTrue);
     expect(usesInsetAgentArtwork('HTTPS://$preset'), isTrue);
+    expect(usesInsetAgentArtwork(r'https:\\' + preset), isTrue);
+    expect(usesInsetAgentArtwork(r'https:/\' + preset), isTrue);
+    expect(usesInsetAgentArtwork(r'https:\/' + preset), isTrue);
     expect(usesInsetAgentArtwork('http://$preset'), isFalse);
     expect(usesInsetAgentArtwork(' https://$preset'), isFalse);
     expect(
