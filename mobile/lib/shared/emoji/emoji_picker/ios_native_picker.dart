@@ -2,6 +2,9 @@ part of '../emoji_picker.dart';
 
 const _nativeEmojiPickerChannel = MethodChannel('buzz/native_emoji_picker');
 
+/// Custom emoji loads the native sheet runs at once; the rest wait in order.
+const _maxNativeMediaLoads = 4;
+
 /// Guards the process-global native method-call handler: one native sheet may
 /// own it at a time. A reentrant open would replace the handler and hijack the
 /// live sheet's select/dismiss callbacks, so [_presentIosEmojiPicker] coalesces
@@ -119,8 +122,25 @@ Future<void> _presentIosEmojiPicker({
   }
   final recent = container.read(recentEmojiProvider);
   final mediaAuth = container.read(mediaGetAuthServiceProvider);
-  final hostedAuth = container.read(hostedRelayAuthProvider);
-  final relayConfig = container.read(relayConfigProvider);
+  final mediaClient = container.read(mediaHttpClientProvider);
+  final mediaDiskCache = container.read(mediaDiskCacheProvider);
+  final emojiBytes = container.read(customEmojiBytesCacheProvider);
+  // Native cells cancel their image request when they scroll away.
+  final mediaBytesCancels = <int, Completer<void>>{};
+  // Like the native loader it replaced, start at most a few loads at once so
+  // a cold custom section finishes its first emoji instead of sharing
+  // bandwidth across all of them. A queued load cancelled before it starts
+  // never runs.
+  var activeMediaLoads = 0;
+  final queuedMediaLoads = Queue<Completer<void>>();
+  void releaseMediaLoad() {
+    if (queuedMediaLoads.isNotEmpty) {
+      queuedMediaLoads.removeFirst().complete();
+    } else {
+      activeMediaLoads--;
+    }
+  }
+
   final prefs = container.read(savedPrefsProvider);
   final colors = context.colors;
   var dismissed = false;
@@ -130,23 +150,64 @@ Future<void> _presentIosEmojiPicker({
     dismissed = true;
     _iosEmojiPickerPresenting = false;
     _nativeEmojiPickerChannel.setMethodCallHandler(null);
+    for (final cancel in mediaBytesCancels.values) {
+      cancel.complete();
+    }
+    mediaBytesCancels.clear();
     onDismiss?.call();
   }
 
   _nativeEmojiPickerChannel.setMethodCallHandler((call) async {
     switch (call.method) {
-      case 'mediaHeaders':
-        final url = call.arguments;
-        if (url is! String) return const <String, String>{};
-        // Native downloads bypass the hosted HTTP client, so add its relay
-        // assertion here too: a hosted relay refuses media reads without it.
-        // Await the assertion before minting the short-lived media proof so a
-        // slow refresh cannot age it.
-        final assertion = await hostedAuth.headersForUrl(
-          relayConfig,
-          Uri.parse(url),
-        );
-        return <String, String>{...mediaAuth.headersFor(url), ...assertion};
+      case 'mediaBytes':
+        // The sheet decodes custom emoji itself but loads their bytes here, so
+        // each emoji downloads once into the media disk cache that chat
+        // surfaces share, keyed by URL rather than by its signed request.
+        final arguments = call.arguments as Map<Object?, Object?>;
+        final id = arguments['id']! as int;
+        final url = arguments['url']! as String;
+        if (emojiBytes.lookup(url) case final Uint8List bytes) return bytes;
+        final cancel = Completer<void>();
+        mediaBytesCancels[id] = cancel;
+        // Only downloads wait for a slot; saved emoji load at once.
+        var admittedLoad = false;
+        try {
+          if (await mediaDiskCache?.contains(url) ?? false) {
+            // Read from disk below without a slot.
+          } else if (activeMediaLoads < _maxNativeMediaLoads) {
+            activeMediaLoads++;
+            admittedLoad = true;
+          } else {
+            final admitted = Completer<void>();
+            queuedMediaLoads.add(admitted);
+            await Future.any([admitted.future, cancel.future]);
+            if (!admitted.isCompleted) {
+              queuedMediaLoads.remove(admitted);
+              throw StateError('Media bytes load cancelled');
+            }
+            admittedLoad = true;
+          }
+        } on Object {
+          mediaBytesCancels.remove(id);
+          rethrow;
+        }
+        try {
+          final bytes = await MediaImageProvider(
+            url: url,
+            auth: mediaAuth,
+            client: mediaClient,
+            diskCache: mediaDiskCache,
+          ).loadEncodedBytes(cancel: cancel.future);
+          emojiBytes.remember(url, bytes);
+          return bytes;
+        } finally {
+          mediaBytesCancels.remove(id);
+          if (admittedLoad) releaseMediaLoad();
+        }
+      case 'cancelMediaBytes':
+        final cancel = mediaBytesCancels.remove(call.arguments as int);
+        cancel?.complete();
+        return null;
       case 'selected':
         final emoji = call.arguments;
         if (emoji is String && emoji.isNotEmpty) onSelect(emoji);

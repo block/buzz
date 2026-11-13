@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -14,7 +15,6 @@ import '../emoji/emoji_data.dart';
 import '../emoji/emoji_data_provider.dart';
 import '../emoji/emoji_search.dart';
 import '../emoji/native_emoji_glyph.dart';
-import '../hosted/hosted_relay_auth.dart';
 import '../relay/relay.dart';
 import '../theme/theme.dart';
 import '../widgets/buzz_sheet_header.dart';

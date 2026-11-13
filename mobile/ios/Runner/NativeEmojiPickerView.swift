@@ -424,223 +424,74 @@ struct NativeEmojiRemoteImage: View {
       case .loading:
         ProgressView().controlSize(.mini)
       case .success(let image):
-        Image(uiImage: image).resizable().scaledToFit()
+        NativeEmojiAnimatedImage(image: image)
       case .failure:
         TablerNativeIcon(symbol: "sparkles")
           .foregroundStyle(Color(uiColor: fallbackColor))
       }
     }
-    .task(id: requestIdentity) {
+    .task(id: url) {
       do {
-        let requestHeaders = try await NativeEmojiPickerCoordinator.mediaHeaders(
-          for: url
-        )
-        var request = URLRequest(url: url)
-        for (name, value) in requestHeaders {
-          request.setValue(value, forHTTPHeaderField: name)
-        }
-        phase = .success(
-          try await NativeEmojiRemoteImageLoader.shared.image(for: request)
-        )
+        phase = .success(try await NativeEmojiRemoteImageLoader.image(for: url))
       } catch {
         if !Task.isCancelled { phase = .failure }
       }
     }
+    // Keep only the first frame of a cell scrolled away, as before animation:
+    // reappearing decodes every frame again anyway.
+    .onDisappear {
+      if case .success(let image) = phase, let first = image.images?.first {
+        phase = .success(first)
+      }
+    }
+  }
+}
+
+/// SwiftUI's `Image` draws only the first frame of an animated `UIImage`;
+/// a `UIImageView` plays every frame.
+/// With Reduce Motion on it shows the first frame, following the setting live.
+private struct NativeEmojiAnimatedImage: UIViewRepresentable {
+  let image: UIImage
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+  func makeUIView(context: Context) -> UIImageView {
+    let view = UIImageView()
+    view.contentMode = .scaleAspectFit
+    view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+    view.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
+    return view
   }
 
-  private var requestIdentity: String {
-    url.absoluteString
+  func updateUIView(_ view: UIImageView, context: Context) {
+    let shown = reduceMotion ? image.images?.first ?? image : image
+    if view.image !== shown { view.image = shown }
+  }
+}
+
+/// Custom emoji, decoded at the picker's glyph size. Flutter serves the bytes
+/// from its memory and disk caches, so a reopen never downloads again.
+enum NativeEmojiRemoteImageLoader {
+  /// The picker's 28-point custom emoji glyph at 3x.
+  private static let maximumPixelSize = 84
+
+  @MainActor
+  static func image(for url: URL) async throws -> UIImage {
+    let bytes = try await NativeEmojiPickerCoordinator.mediaBytes(for: url)
+    // Bytes can arrive after the cell left; don't decode for a dead view
+    // while visible cells wait for the decode threads.
+    try Task.checkCancellation()
+    let decoded = await Task.detached(priority: .userInitiated) {
+      NativeMessageImageLoader.decode(bytes, maximumPixelSize: maximumPixelSize)
+    }.value
+    // A cell that left during the decode keeps only its first frame.
+    try Task.checkCancellation()
+    guard let decoded else { throw NativeEmojiRemoteImageError.invalidImage }
+    return decoded
   }
 }
 
 enum NativeEmojiRemoteImageError: Error {
-  case invalidResponse
-  case responseTooLarge
   case invalidImage
-}
-
-actor NativeEmojiRemoteImageLoader {
-  typealias Downloader = (URLRequest) async throws -> UIImage
-
-  static let shared = NativeEmojiRemoteImageLoader()
-  static let defaultMaximumConcurrentDownloads = 4
-
-  private static let maximumDownloadBytes = 10 * 1024 * 1024
-  private static let maximumThumbnailPixels = 84
-  private static let defaultCacheByteLimit = 8 * 1024 * 1024
-
-  private struct Waiter {
-    let id: UUID
-    let continuation: CheckedContinuation<Void, Error>
-  }
-
-  private let maximumConcurrentDownloads: Int
-  private let downloader: Downloader
-  private let admissionAttemptForTesting: (() -> Void)?
-  private let cache = NSCache<NSURLRequest, UIImage>()
-  private var activeDownloadCount = 0
-  private var waiters: [Waiter] = []
-
-  init(
-    maximumConcurrentDownloads: Int = defaultMaximumConcurrentDownloads,
-    cacheByteLimit: Int = defaultCacheByteLimit,
-    admissionAttemptForTesting: (() -> Void)? = nil,
-    downloader: @escaping Downloader = NativeEmojiRemoteImageLoader.download
-  ) {
-    precondition(maximumConcurrentDownloads > 0)
-    precondition(cacheByteLimit >= 0)
-    self.maximumConcurrentDownloads = maximumConcurrentDownloads
-    self.admissionAttemptForTesting = admissionAttemptForTesting
-    self.downloader = downloader
-    cache.totalCostLimit = cacheByteLimit
-  }
-
-  func image(for request: URLRequest) async throws -> UIImage {
-    let cacheKey = request as NSURLRequest
-    if let cached = cache.object(forKey: cacheKey) {
-      return cached
-    }
-
-    recordAdmissionAttemptForTesting()
-    try await acquireDownloadSlot()
-    defer { releaseDownloadSlot() }
-
-    try Task.checkCancellation()
-    if let cached = cache.object(forKey: cacheKey) {
-      return cached
-    }
-
-    let image = try await downloader(request)
-    cache.setObject(image, forKey: cacheKey, cost: Self.cacheCost(for: image))
-    return image
-  }
-
-  private func recordAdmissionAttemptForTesting() {
-    admissionAttemptForTesting?()
-  }
-
-  private func acquireDownloadSlot() async throws {
-    try Task.checkCancellation()
-    guard activeDownloadCount >= maximumConcurrentDownloads else {
-      activeDownloadCount += 1
-      return
-    }
-
-    let waiterID = UUID()
-    try await withTaskCancellationHandler {
-      try await withCheckedThrowingContinuation {
-        (continuation: CheckedContinuation<Void, Error>) in
-        if Task.isCancelled {
-          continuation.resume(throwing: CancellationError())
-        } else {
-          waiters.append(Waiter(id: waiterID, continuation: continuation))
-        }
-      }
-    } onCancel: {
-      Task { await self.cancelWaiter(id: waiterID) }
-    }
-  }
-
-  private func cancelWaiter(id: UUID) {
-    guard let index = waiters.firstIndex(where: { $0.id == id }) else { return }
-    let waiter = waiters.remove(at: index)
-    waiter.continuation.resume(throwing: CancellationError())
-  }
-
-  private func releaseDownloadSlot() {
-    while !waiters.isEmpty {
-      let waiter = waiters.removeFirst()
-      waiter.continuation.resume()
-      return
-    }
-    activeDownloadCount -= 1
-  }
-
-  private static func download(_ request: URLRequest) async throws -> UIImage {
-    let (bytes, response) = try await URLSession.shared.bytes(
-      for: request,
-      delegate: NativeEmojiRedirectPolicy.shared
-    )
-    guard
-      let httpResponse = response as? HTTPURLResponse,
-      (200..<300).contains(httpResponse.statusCode)
-    else {
-      throw NativeEmojiRemoteImageError.invalidResponse
-    }
-    if let contentLength = httpResponse.value(forHTTPHeaderField: "Content-Length"),
-      let byteCount = Int(contentLength),
-      byteCount > maximumDownloadBytes
-    {
-      throw NativeEmojiRemoteImageError.responseTooLarge
-    }
-
-    var data = Data()
-    let expected = httpResponse.expectedContentLength
-    if expected > 0 {
-      data.reserveCapacity(Int(min(expected, Int64(maximumDownloadBytes))))
-    }
-    for try await byte in bytes {
-      guard data.count < maximumDownloadBytes else {
-        throw NativeEmojiRemoteImageError.responseTooLarge
-      }
-      data.append(byte)
-    }
-    try Task.checkCancellation()
-    guard let image = thumbnail(from: data) else {
-      throw NativeEmojiRemoteImageError.invalidImage
-    }
-    return image
-  }
-
-  private static func thumbnail(from data: Data) -> UIImage? {
-    guard let source = CGImageSourceCreateWithData(data as CFData, nil) else {
-      return nil
-    }
-    let options: [CFString: Any] = [
-      kCGImageSourceCreateThumbnailFromImageAlways: true,
-      kCGImageSourceCreateThumbnailWithTransform: true,
-      kCGImageSourceThumbnailMaxPixelSize: maximumThumbnailPixels,
-      kCGImageSourceShouldCacheImmediately: true,
-    ]
-    guard
-      let image = CGImageSourceCreateThumbnailAtIndex(
-        source,
-        0,
-        options as CFDictionary
-      )
-    else {
-      return nil
-    }
-    return UIImage(cgImage: image)
-  }
-
-  private static func cacheCost(for image: UIImage) -> Int {
-    guard let cgImage = image.cgImage else { return 0 }
-    let (cost, overflow) = cgImage.bytesPerRow.multipliedReportingOverflow(
-      by: cgImage.height
-    )
-    return overflow ? Int.max : cost
-  }
-}
-
-/// Mirrors the Dart hosted HTTP client, which disables redirects for requests
-/// carrying the relay assertion: a redirect must not forward that bearer token
-/// to another host. The 3xx then fails the load like any non-2xx response.
-final class NativeEmojiRedirectPolicy: NSObject, URLSessionTaskDelegate {
-  static let shared = NativeEmojiRedirectPolicy()
-  static let relayAssertionHeader = "Nostr-Federated-Identity"
-
-  func urlSession(
-    _ session: URLSession,
-    task: URLSessionTask,
-    willPerformHTTPRedirection response: HTTPURLResponse,
-    newRequest request: URLRequest,
-    completionHandler: @escaping (URLRequest?) -> Void
-  ) {
-    let carriesAssertion =
-      task.originalRequest?.value(forHTTPHeaderField: Self.relayAssertionHeader) != nil
-    completionHandler(carriesAssertion ? nil : request)
-  }
 }
 
 private struct TablerNativeIcon: View {
