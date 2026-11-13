@@ -1284,6 +1284,55 @@ void main() {
     });
   });
 
+  test(
+    'a reconnect after a late-ready catch-up but before initialize ends syncs again',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final keychain = nostr.Keys.generate();
+      final crypto = ReadStateCrypto.tryCreate(
+        nsec: keychain.nsec,
+        pubkey: keychain.public,
+      )!;
+      final gate = Completer<void>();
+      final relay = _FakeRelaySession()
+        ..readyOnSubscribe = false
+        ..fetchGate = gate.future;
+      final manager = ReadStateManager(
+        pubkey: keychain.public,
+        relayUrl: _relayUrl,
+        prefs: prefs,
+        crypto: crypto,
+        relaySession: relay,
+        signedEventRelay: _FakeSignedEventRelay(),
+        remoteEnabled: true,
+        onChanged: () {},
+      );
+
+      // Readiness times out, so the launch snapshot (held) does not cover
+      // the stream. The late readiness's catch-up succeeds on connection A.
+      final initializing = manager.initialize();
+      await pumpEventQueue();
+      relay.fetchGate = null;
+      relay.liveOnStatus!(RelaySubscriptionStatus.ready);
+      await pumpEventQueue();
+      expect(relay.fetchCount, 2);
+
+      // A drops and B connects before the launch snapshot returns. Neither
+      // snapshot covers B, so the reconnect's re-sync must run.
+      relay.connection++;
+      final reinitializing = manager.reinitializeRemote();
+      gate.complete();
+      await Future.wait([initializing, reinitializing]);
+
+      expect(relay.fetchCount, 3);
+      expect(relay.subscribeCount, 2);
+      expect(relay.liveSubscriptions, 1);
+
+      manager.dispose();
+    },
+  );
+
   test('a connect during a failed initialize syncs again', () async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();

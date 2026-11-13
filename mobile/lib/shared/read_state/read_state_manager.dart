@@ -167,6 +167,10 @@ class ReadStateManager {
   // Whether the first fetch and subscribe both succeeded. A connect that
   // lands while they run (the cold-start connect) then has nothing to redo.
   bool _initialSyncSucceeded = false;
+  // Connection fences of the latest snapshot that started while the stream
+  // was live: the latest to succeed, and the latest started.
+  void Function()? _coveringFence;
+  void Function()? _inFlightLiveFence;
   // The live subscription replays nothing, so a snapshot covers only events
   // stored before it ran. Each subscription gets a generation so a replaced
   // one's callbacks are ignored. [_liveCatchUpNeeded] is set when the stream
@@ -237,16 +241,8 @@ class ReadStateManager {
     _initializing = initializing.future;
     try {
       final subscribed = await _startLiveSubscription();
-      // A stream already live covers what lands after the snapshot, but only
-      // on this connection: a reconnect before this ends reopens it with no
-      // replay, so that reconnect's re-sync must still run. A stream not live
-      // yet is covered by its catch-up instead.
-      final checkConnection = _liveReady
-          ? _relaySession.captureConnectionFence()
-          : null;
       final fetched = await _fetchAndMerge();
-      _initialSyncSucceeded =
-          fetched && subscribed && _connectionHeld(checkConnection);
+      _initialSyncSucceeded = fetched && subscribed;
     } finally {
       _initializing = null;
       initializing.complete();
@@ -327,9 +323,9 @@ class ReadStateManager {
           await running;
         } else if (initializing != null) {
           await initializing;
-          // Connected while the first sync ran: it already used this
-          // connection.
-          if (_initialSyncSucceeded) return;
+          // Connected while the first sync ran: skip only if a snapshot
+          // already covers this connection.
+          if (_initialSyncSucceeded && _snapshotCoversConnection()) return;
         }
         if (_disposed) return;
         if (identical(_queuedResync, pass.future)) _queuedResync = null;
@@ -396,11 +392,16 @@ class ReadStateManager {
   }
 
   Future<bool> _fetchAndMerge() async {
+    // A snapshot started while the stream was live covers everything after it
+    // on that connection; a reconnect reopens the stream with no replay.
+    final fence = _liveReady ? _relaySession!.captureConnectionFence() : null;
+    if (fence != null) _inFlightLiveFence = fence;
     try {
       // Snapshot transport validates completeness and fences retired sessions.
       final events = await _relaySession!.fetchReadStateSnapshot();
       if (_disposed || !_servesThisCommunity) return false;
       _lastSnapshotSucceeded = true;
+      if (fence != null) _coveringFence = fence;
       _mergeEvents(events);
       await _persistLocalState();
       _onChanged();
@@ -517,8 +518,15 @@ class ReadStateManager {
     }
   }
 
+  /// Whether a snapshot that started while the stream was live on the
+  /// current connection succeeded, or is still running as a catch-up (which
+  /// retries on failure).
+  bool _snapshotCoversConnection() =>
+      _connectionHeld(_coveringFence) ||
+      (_catchUpRunning && _connectionHeld(_inFlightLiveFence));
+
   static bool _connectionHeld(void Function()? checkConnection) {
-    if (checkConnection == null) return true;
+    if (checkConnection == null) return false;
     try {
       checkConnection();
       return true;
