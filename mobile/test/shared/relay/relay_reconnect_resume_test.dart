@@ -202,6 +202,35 @@ void main() {
         isFalse,
       );
     });
+
+    test('opening the app keeps a socket held for background work, so a '
+        'publish waiting for its OK still gets it', () async {
+      final h = await _Harness.start();
+      h.sockets.last.connectSuccessfully();
+      h.session.onAppPaused();
+      final release = h.session.holdForBackgroundWork(
+        const Duration(seconds: 30),
+      );
+      h.now = h.now.add(const Duration(seconds: 20));
+      final event = NostrEvent(
+        id: 'd' * 64,
+        pubkey: 'e' * 64,
+        createdAt: h.nowSeconds,
+        kind: 9,
+        tags: const [],
+        content: 'reply',
+        sig: 'f' * 128,
+      );
+      final published = h.session.publish(event);
+      final socketsBefore = h.sockets.length;
+
+      h.session.onAppResumed();
+      await h.settle();
+      expect(h.sockets.length, socketsBefore);
+      h.receive(['OK', event.id, true, '']);
+      expect((await published).id, event.id);
+      release();
+    });
   });
 
   group('background work hold', () {
