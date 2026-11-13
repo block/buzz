@@ -645,6 +645,7 @@ test-unit:
                 + test(=state::tests::nip_fi_disconnect_does_not_close_unproven_audio_socket)
                 + test(=state::tests::community_disconnect_then_nip_fi_keeps_community_deleted_reason)
                 + test(=state::tests::enforce_end_is_recorded_only_by_the_winning_terminal)
+                + test(=state::tests::live_revalidation_does_not_record_deny_set_revocation)
                 + test(=state::tests::disconnect_community_wins_reason_losing_nip_fi_does_not_enqueue_frame)
                 + test(=state::tests::manager_disconnect_sets_reason_enqueues_frame_then_cancels)
                 + test(/^api::nip_fi::/)'
@@ -665,6 +666,8 @@ test-unit:
         cargo nextest run -p buzz-relay --lib -E 'test(=state::tests::admitted_index_follows_every_key_change) + test(/^shared_reads::tests::/) + test(/^membership_cache::tests::/) + test(/^community_active::tests::/) + test(=state::tests::concurrent_open_channel_misses_share_the_in_flight_read) + test(=state::tests::concurrent_restriction_and_host_misses_share_the_in_flight_read) + test(=tenant::tests::app_state_resolver_serves_fresh_cached_hosts_only) + test(=tenant::tests::an_overlong_host_fails_closed_before_the_resolver) + test(=state::tests::disconnect_drops_the_cached_restriction_row)'
         # Retain partially consumed mesh receives across housekeeping ticks.
         cargo nextest run -p buzz-relay --lib -E 'test(=mesh_boot::tests::demo_echo_retains_pending_receive_across_housekeeping_ticks)'
+        # Durable session policy, fairness, timeout and scale contracts are infra-free.
+        cargo nextest run -p buzz-relay --lib -E 'test(/^state::live_authorization_tests::/)'
         # boot_lifecycle spawns the real relay binary and asserts its startup
         # lifecycle, including that buzz_startup_phase_* reaches /metrics. Its
         # non-ignored tests need no Postgres or Redis; the Postgres cases are
