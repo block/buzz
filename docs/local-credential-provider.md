@@ -198,7 +198,7 @@ and signs. `sign_event` is subject to the [operation policy](#operation-policy).
 | `federated_identity` | `[<relay URL>]` | NIP-FI assertion, or empty string |
 | `auth_tag` | `[]` | JSON-encoded NIP-OA `auth` tag, or empty string |
 | `engram_d_tag` | `[<peer pubkey hex>, <slug>]` | NIP-AE `d` tag for that slug |
-| `pair` | `[<client name>, <relay URL>]` | JSON: token and identity |
+| `pair` | `[<client name>, <relay URL>]` or `[<client name>]` | JSON: token and identity |
 
 `describe` returns:
 
@@ -250,7 +250,9 @@ needs an explicit key.
 `pair` is the only method accepted without a token. The provider MUST:
 
 1. Show the human an approval that names the client and the relay, and the
-   calling process when the provider can identify it.
+   calling process when the provider can identify it. Without a relay URL,
+   the relay is the desktop's active community; with none active, answer
+   `unavailable` without asking the human.
 2. Hold the request open until the human decides, for at most 120 seconds.
 3. On approval, answer with
    `{"token":"<token>","instance":"<instance>","pubkey":"<hex>","relays":["<relay>"]}`.
@@ -260,6 +262,11 @@ needs an explicit key.
 The provider MUST rate-limit `pair` so that a local process cannot flood the
 human with approvals. A caller MUST treat a new pairing for an instance as
 replacing its old token.
+
+A caller that sends no relay URL and gets `invalid_request` is talking to a
+provider that predates it, and SHOULD tell the human to name the relay.
+A caller SHOULD skip an advertised provider that does not answer before
+counting the running desktops.
 
 ## Operation policy
 
@@ -342,7 +349,8 @@ The provider MUST revoke tokens when:
 
 - the human revokes the caller in the desktop,
 - the owner signs out or the desktop's account changes, which revokes every
-  token,
+  token (a sign-in that merely lapsed is not a sign-out: the provider keeps
+  the pairing and answers `unavailable`, telling the human to sign in again),
 - an agent is deleted, which revokes that agent's tokens, or
 - a token expires.
 

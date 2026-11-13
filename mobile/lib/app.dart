@@ -36,6 +36,7 @@ import 'features/pairing/pairing_provider.dart';
 import 'features/channels/agent_activity/observer_subscription.dart';
 import 'features/channels/channel_detail_page.dart';
 import 'shared/widgets/app_route_observer.dart';
+import 'shared/widgets/root_page_route.dart';
 import 'features/profile/user_status_cache_provider.dart';
 import 'features/profile/settings_profile_header.dart';
 import 'features/profile/set_status_sheet.dart';
@@ -424,6 +425,42 @@ class App extends HookConsumerWidget {
       });
     }
 
+    final home = authState.when(
+      loading: () => const _SplashScreen(),
+      // An internal build never offers pairing, even when auth state is
+      // unreadable: pairing could make another relay the active community.
+      error: (_, _) => OrganizationEnvironment.enabled
+          ? const OrganizationAppEntry()
+          : const PairingPage(),
+      data: (state) => switch (state.status) {
+        AuthStatus.authenticated => HostedAppGate(
+          authenticated: true,
+          child: CoveredRouteKeyboardInsets(
+            child: HomePage(
+              onAgents: showAgents,
+              defaultAgentBuilder: (context) => DefaultAgentLauncher(
+                onChooseAgent: () => showAgents(context, createOnOpen: true),
+              ),
+              openBestieConversation: openBestieConversation,
+              mePageBuilder: (_, chat, workspace) => MePage(
+                sliver: true,
+                newChatAction: chat,
+                newWorkspaceAction: workspace,
+              ),
+              settingsPageBuilder: _buildSettingsPage,
+              communityInvitePageBuilder: (_) => const CommunityInvitePage(),
+              communityAppearancePageBuilder: (_) => const ThemePickerPage(),
+            ),
+          ),
+        ),
+        _ => const HostedAppGate(
+          authenticated: false,
+          child: OnboardingAppEntry(),
+        ),
+      },
+    );
+    final latestHome = useRef<Widget?>(null)..value = home;
+
     return MaterialApp(
       navigatorKey: _mobileRootNavigatorKey,
       navigatorObservers: [appRouteObserver],
@@ -467,40 +504,14 @@ class App extends HookConsumerWidget {
           ),
         ),
       },
-      home: authState.when(
-        loading: () => const _SplashScreen(),
-        // An internal build never offers pairing, even when auth state is
-        // unreadable: pairing could make another relay the active community.
-        error: (_, _) => OrganizationEnvironment.enabled
-            ? const OrganizationAppEntry()
-            : const PairingPage(),
-        data: (state) => switch (state.status) {
-          AuthStatus.authenticated => HostedAppGate(
-            authenticated: true,
-            child: CoveredRouteKeyboardInsets(
-              child: HomePage(
-                onAgents: showAgents,
-                defaultAgentBuilder: (context) => DefaultAgentLauncher(
-                  onChooseAgent: () => showAgents(context, createOnOpen: true),
-                ),
-                openBestieConversation: openBestieConversation,
-                mePageBuilder: (_, chat, workspace) => MePage(
-                  sliver: true,
-                  newChatAction: chat,
-                  newWorkspaceAction: workspace,
-                ),
-                settingsPageBuilder: _buildSettingsPage,
-                communityInvitePageBuilder: (_) => const CommunityInvitePage(),
-                communityAppearancePageBuilder: (_) => const ThemePickerPage(),
-              ),
-            ),
-          ),
-          _ => const HostedAppGate(
-            authenticated: false,
-            child: OnboardingAppEntry(),
-          ),
-        },
-      ),
+      // A root route that refuses pops, so a stray pop can never leave an
+      // empty navigator. It reads [home] when built, so it follows auth.
+      onGenerateRoute: (settings) => settings.name == Navigator.defaultRouteName
+          ? RootPageRoute<void>(
+              settings: settings,
+              builder: (_) => latestHome.value!,
+            )
+          : null,
     );
   }
 }

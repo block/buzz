@@ -122,6 +122,7 @@ part 'channel_detail_page_test/message_width_tests.dart';
 part 'channel_detail_page_test/author_visibility_tests.dart';
 part 'channel_detail_page_test/swipe_reply_tests.dart';
 part 'channel_detail_page_test/review_avatar_tests.dart';
+part 'channel_detail_page_test/archive_navigation_tests.dart';
 
 const _channelId = '11111111-2222-4333-8444-555555555555';
 const _huddleChannelId = '8d764100-fd8f-44cf-9c98-6d8fbd739b8c';
@@ -1367,6 +1368,7 @@ void main() {
   swipeReplyTests();
   swipeReplyLinkTests();
   reviewAvatarTests();
+  archiveNavigationTests();
   setUp(() async {
     SharedPreferences.setMockInitialValues({});
     _testPrefs = await SharedPreferences.getInstance();
