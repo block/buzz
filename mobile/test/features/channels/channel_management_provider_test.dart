@@ -812,9 +812,13 @@ void main() {
       },
     );
 
-    test(
-      'a superseded roster read does not replace the offline roster',
-      () async {
+    for (final (label, olderAnswer) in [
+      ('a roster', [_heldRoster('bot', 2)]),
+      ('no roster event', <NostrEvent>[]),
+      ('an empty roster', [_emptyHeldRoster(2)]),
+    ]) {
+      test('a superseded roster read answering with $label does not replace '
+          'the offline roster', () async {
         final session = _HeldRosterRelaySession();
         final container = ProviderContainer(
           retry: (_, _) => null,
@@ -844,11 +848,51 @@ void main() {
         await container.pump();
         newer.complete([_heldRoster('member', 3)]);
         expect(await role(), 'member');
-        older.complete([_heldRoster('bot', 2)]);
+        older.complete(olderAnswer);
         await container.pump();
 
         session.disconnect();
         await container.pump();
+        expect(await role(), 'member');
+      });
+    }
+
+    test(
+      'a roster read torn down with no newer read still updates the offline roster',
+      () async {
+        final session = _HeldRosterRelaySession();
+        final container = ProviderContainer(
+          retry: (_, _) => null,
+          overrides: [relaySessionProvider.overrideWith(() => session)],
+        );
+        addTearDown(container.dispose);
+        var subscription = container.listen(
+          channelMembersProvider(_channelId),
+          (_, _) {},
+        );
+        Future<String> role() async => (await container.read(
+          channelMembersProvider(_channelId).future,
+        )).single.role;
+        expect(await role(), 'bot');
+        await container.pump();
+
+        // A roster update arrives; the user leaves before its read answers.
+        final fresh = Completer<List<NostrEvent>>();
+        session.nextRead = fresh.future;
+        session.emit(_heldRoster('member', 2));
+        await container.pump();
+        subscription.close();
+        await container.pump();
+        fresh.complete([_heldRoster('member', 2)]);
+        await container.pump();
+
+        session.disconnect();
+        await container.pump();
+        subscription = container.listen(
+          channelMembersProvider(_channelId),
+          (_, _) {},
+        );
+        addTearDown(subscription.close);
         expect(await role(), 'member');
       },
     );
@@ -999,6 +1043,18 @@ NostrEvent _heldRoster(String role, int version) => NostrEvent(
   tags: [
     ['d', _channelId],
     ['p', _memberPubkey, '', role],
+  ],
+  content: '',
+  sig: '',
+);
+
+NostrEvent _emptyHeldRoster(int version) => NostrEvent(
+  id: 'empty-members-$version',
+  pubkey: 'owner',
+  createdAt: 1800000000 + version,
+  kind: 39002,
+  tags: [
+    ['d', _channelId],
   ],
   content: '',
   sig: '',
