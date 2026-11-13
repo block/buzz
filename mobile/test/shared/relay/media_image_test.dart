@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:async';
 import 'dart:typed_data';
+import 'dart:ui' as ui;
 
 import 'package:buzz/shared/relay/media_auth.dart';
 import 'package:buzz/shared/relay/media_image.dart';
@@ -32,6 +33,50 @@ void main() {
     MediaImageProvider.debugNow = DateTime.now;
     PaintingBinding.instance.imageCache.clear();
     PaintingBinding.instance.imageCache.clearLiveImages();
+  });
+
+  group('withBrowserFrameTiming', () {
+    // A 1x1 GIF with one frame per delay, in centiseconds.
+    Uint8List gif(List<int> delays) => Uint8List.fromList([
+      ...ascii.encode('GIF89a'),
+      1, 0, 1, 0, 0x80, 0, 0, // 1x1, two-colour global table
+      0, 0, 0, 0xff, 0xff, 0xff,
+      for (final delay in delays) ...[
+        0x21, 0xf9, 4, 0, delay & 0xff, delay >> 8, 0, 0, // frame delay
+        0x2c, 0, 0, 0, 0, 1, 0, 1, 0, 0, // 1x1 image
+        2, 2, 0x44, 1, 0, // one pixel
+      ],
+      0x3b,
+    ]);
+
+    Future<List<Duration>> durations(Uint8List bytes) async {
+      final codec = withBrowserFrameTiming(
+        await ui.instantiateImageCodec(bytes),
+      );
+      final result = <Duration>[];
+      for (var i = 0; i < codec.frameCount; i++) {
+        final frame = await codec.getNextFrame();
+        result.add(frame.duration);
+        frame.image.dispose();
+      }
+      codec.dispose();
+      return result;
+    }
+
+    test('shows frames of 10 ms or less for 100 ms, like browsers', () async {
+      expect(await durations(gif([0, 1, 2, 5])), const [
+        Duration(milliseconds: 100),
+        Duration(milliseconds: 100),
+        Duration(milliseconds: 20),
+        Duration(milliseconds: 50),
+      ]);
+    });
+
+    test('leaves a still image alone', () async {
+      final codec = await ui.instantiateImageCodec(_pngBytes);
+      expect(withBrowserFrameTiming(codec), same(codec));
+      codec.dispose();
+    });
   });
 
   group('MediaGetAuthService mint-per-request', () {
