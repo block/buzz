@@ -14,8 +14,18 @@
   <a href="LICENSE">Apache 2.0</a>
 </p>
 
+## Where to find things
+
+Buzz's open-source code lives in two repositories. The desktop app has its own; the relay and the mobile client are here.
+
+| Component | Home |
+|---|---|
+| Desktop app | [block/buzz-app](https://github.com/block/buzz-app) |
+| Mobile client (iOS + Android) | This repo, in [`mobile/`](mobile/) |
+| Relay | This repo, in [`crates/buzz-relay/`](crates/buzz-relay/) |
+
 > [!NOTE]
-> **Buzz 1.0 is at [block/buzz-app](https://github.com/block/buzz-app).** This repository is Buzz 0.X, which is still available and supported.
+> The [`desktop/`](desktop/) directory in this repo is Buzz 0.X, the previous desktop app. It is deprecated and takes bug fixes only; new desktop work goes to [block/buzz-app](https://github.com/block/buzz-app), which is Buzz 1.0.
 > Buzz 1.0 adds [plugins](https://github.com/block/buzz-app/blob/main/docs/plugin-architecture.md); their API is a preview, so updates can break them.
 
 <p align="center">
@@ -104,7 +114,7 @@ Agents are part of the room, not haunted cron jobs.
 | ✅ Works today | 🚧 Being wired up | 💭 Strong opinions, pending code |
 |---|---|---|
 | Relay, channels, threads, DMs, canvases, media, search, audit log | Mobile clients (iOS + Android, Flutter) | Web-of-trust reputation across relays |
-| Desktop app (Tauri + React) | Workflow approval gates (infra exists, glue still drying) | Push notifications |
+| Desktop app (in [block/buzz-app](https://github.com/block/buzz-app)) | Workflow approval gates (infra exists, glue still drying) | Push notifications |
 | `buzz-cli` (agent-first, JSON in / JSON out) + ACP harness (Goose, Codex, Claude Code) | Huddle lifecycle events | Culture features |
 | YAML workflows: message / reaction / schedule / webhook triggers | | |
 | Git events (NIP-34: patches, repo announcements, status) | | |
@@ -120,21 +130,9 @@ New to Buzz? Pick the path that matches you.
 
 ### I just want to try the app
 
-Grab a packaged build from the [latest release](https://github.com/block/buzz/releases/latest):
+The desktop app lives in [block/buzz-app](https://github.com/block/buzz-app). Head there to install, build, or run it.
 
-| Platform | File |
-|---|---|
-| macOS (Apple Silicon) | `Buzz_<version>_aarch64.dmg` |
-| macOS (Intel) | `Buzz_<version>_x64.dmg` |
-| Linux (x86_64) | `Buzz_<version>_amd64.AppImage` or `Buzz_<version>_amd64.deb` |
-| Windows (x64) | `Buzz_<version>_x64-setup_alpha-unsigned.exe` |
-
-On a Mac, check the Apple menu > About This Mac: "Chip: Apple …" means Apple Silicon; "Processor: Intel …" means Intel.
-
-The Windows build is not code-signed, so SmartScreen may show "Windows protected your PC" on first launch. If available, click **More info**, then **Run anyway**.
-
-
-By default the app connects to `ws://localhost:3000`. To point it at a relay you're running or one someone shared with you, set `BUZZ_RELAY_URL` before launching, or switch the relay from inside the app. If you don't have a relay yet, follow **Build & run from source** below to stand one up locally.
+Need a relay for it to connect to? Deploy a hosted one, or follow **Quick start** below to stand one up locally.
 
 ### I want my own hosted relay
 
@@ -144,19 +142,19 @@ To run a relay for your team without managing servers, you can deploy one to Rai
 
 See [here](https://engineering.block.xyz/blog/run-your-own-buzz-relay) for details.
 
-### I work at Block
-
-Don't build from source, and don't use the OSS release — use the internal build. It comes pre-wired to the Block relay and agent provider, so it works out of the box with nothing to configure.
-
-Download the latest build from [`squareup/buzz-releases` releases](https://github.com/squareup/buzz-releases/releases/latest) and install it.
-
-### I want to build & run from source
+### I want to run the relay from source
 
 See **Quick start** below — this is the developer / self-host path.
+
+### I want to work on the mobile app
+
+The Flutter client is in [`mobile/`](mobile/). See [mobile/README.md](mobile/README.md) for setup and run instructions.
 
 ---
 
 ## Quick start
+
+This stands up the relay locally. For the desktop app, see [block/buzz-app](https://github.com/block/buzz-app); for the mobile app, see [mobile/README.md](mobile/README.md).
 
 You'll need [Docker](https://docs.docker.com/get-docker/) and [Hermit](https://cashapp.github.io/hermit/) (or Rust 1.88+, Node 24+, pnpm 10+, `just`).
 
@@ -172,12 +170,10 @@ just setup && just build
 **Every day:**
 ```bash
 . ./bin/activate-hermit
-just dev   # starts the relay + desktop app together
+just relay   # starts the relay (and its Docker services if needed)
 ```
 
-Relay on `ws://localhost:3000`. Desktop app pops up. You're in.
-
-For a split-terminal workflow (relay logs separate from Vite output), use `just relay` in one terminal and `just desktop-dev` in another.
+Relay on `ws://localhost:3000`. You're in.
 
 Want a single-node / VPS relay instead of the local-dev stack? Use the production Compose bundle in [`deploy/compose/`](deploy/compose/README.md) (`docker compose` + Postgres, Redis, MinIO, optional Caddy/TLS). The root [`docker-compose.yml`](docker-compose.yml) is for day-to-day development only.
 
@@ -201,7 +197,7 @@ If you'd rather point buzz at a different bash-compatible shell, set `BUZZ_SHELL
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                             Clients                                     │
 │  Human client         AI agent              CLI / scripts               │
-│  (Buzz desktop)       (Goose, Codex, ...)   (buzz-cli, agents)          │
+│  (desktop, mobile)    (Goose, Codex, ...)   (buzz-cli, agents)          │
 │       │               ┌──────────────┐               │                  │
 │       │               │  buzz-acp  │                 │                  │
 │       │               │  (ACP ↔ MCP) │               │                  │
@@ -222,7 +218,7 @@ If you'd rather point buzz at a different bash-compatible shell, set `BUZZ_SHELL
  └──────────────┘
 ```
 
-A Rust workspace of focused crates. Single source of truth: the relay. See [ARCHITECTURE.md](ARCHITECTURE.md) for the full breakdown.
+A Rust workspace of focused crates. Single source of truth: the relay. The human clients are the desktop app in [block/buzz-app](https://github.com/block/buzz-app) and the mobile app in [`mobile/`](mobile/). See [ARCHITECTURE.md](ARCHITECTURE.md) for the full breakdown.
 
 <details>
 <summary><strong>Crate map</strong></summary>
@@ -261,11 +257,11 @@ All defaults work out of the box. Override via `.env`. Full reference in [`.env.
 <summary><strong>Common dev commands</strong></summary>
 
 ```bash
-just setup          # Docker, migrations, desktop deps
+just setup          # Docker, migrations, JS deps
 just relay          # Run the relay
-just dev            # Run the desktop app
+just mobile-dev     # Run the mobile app in an iOS Simulator
 just build          # Build the Rust workspace
-just check          # fmt + clippy + desktop check
+just check          # Lint, formatting, and repo policy checks
 just test-unit      # Unit tests (no infra required)
 just test           # Full suite (starts services if needed)
 just ci             # Everything CI runs
