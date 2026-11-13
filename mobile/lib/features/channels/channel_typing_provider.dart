@@ -187,6 +187,9 @@ class ChannelTypingNotifier extends Notifier<List<TypingEntry>> {
           tags: {
             '#h': [channelId],
           },
+          // Typing is ephemeral, and stored messages only matter while they
+          // can still end a visible indicator (see [_handleTypingEvent]).
+          since: DateTime.now().millisecondsSinceEpoch ~/ 1000 - _ttlMs ~/ 1000,
           limit: 10,
         ),
         (event) {

@@ -9,6 +9,7 @@ import '../../helpers/thread_ids.dart';
 class _Relay extends RelaySessionNotifier {
   late void Function(NostrEvent) receive;
   int calls = 0;
+  NostrFilter? filter;
   bool reject = false;
   void Function(String)? close;
   int active = 0;
@@ -24,6 +25,7 @@ class _Relay extends RelaySessionNotifier {
   }) async {
     expect(filter.kinds, containsAll([20002, 9, 40002, 40008]));
     calls++;
+    this.filter = filter;
     close = onClosed;
     if (reject) throw StateError('rejected');
     receive = onEvent;
@@ -43,6 +45,21 @@ void _settle(ProviderContainer container, FakeAsync async) {
 }
 
 void main() {
+  test('asks only for stored history inside the typing window', () async {
+    final relay = _Relay();
+    final container = ProviderContainer(
+      overrides: [relaySessionProvider.overrideWith(() => relay)],
+    );
+    addTearDown(container.dispose);
+    final before = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    container.listen(channelTypingProvider('chat'), (_, _) {});
+    await Future<void>.delayed(Duration.zero);
+    final after = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    // Older messages can no longer end an indicator, so replaying them on
+    // every subscribe only downloads them.
+    expect(relay.filter!.since, inInclusiveRange(before - 8, after - 8));
+  });
+
   test(
     'initial rejection retries with a bound and no uncaught error',
     () => fakeAsync((async) {
