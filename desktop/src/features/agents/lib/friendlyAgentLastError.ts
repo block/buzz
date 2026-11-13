@@ -42,6 +42,9 @@ export const RELAY_MESH_DENIED_COPY =
 export const MODEL_NOT_FOUND_COPY =
   "The configured model is not available — open agent settings and select a different one from the dropdown.";
 
+export const USAGE_CREDITS_COPY =
+  "This Claude model requires usage credits — switch to a plan-included model (e.g. sonnet) or run /usage-credits in Claude Code.";
+
 export const CLI_ACP_INTERNAL_ERROR_COPY =
   "The agent's harness reported an internal error. For Codex agents this can mean the configured model isn't supported by your installed codex-acp — check the model in `~/.codex/config.toml` or upgrade the adapter (`brew upgrade codex-acp`).";
 
@@ -96,6 +99,9 @@ export function friendlyAgentLastError(
         if (remainder === BARE_INTERNAL_ERROR) {
           return { severity: "generic", copy: CLI_ACP_INTERNAL_ERROR_COPY };
         }
+        if (/usage credits/i.test(remainder)) {
+          return { severity: "denied", copy: USAGE_CREDITS_COPY };
+        }
         return { severity: "generic", copy: remainder };
       }
     }
@@ -111,6 +117,9 @@ export function friendlyAgentLastError(
     trimmed.startsWith("llm auth:")
   ) {
     return { severity: "denied", copy: RELAY_MESH_DENIED_COPY };
+  }
+  if (/usage credits/i.test(trimmed)) {
+    return { severity: "denied", copy: USAGE_CREDITS_COPY };
   }
 
   return { severity: "generic", copy: trimmed };
