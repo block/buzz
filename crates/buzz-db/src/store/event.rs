@@ -1943,6 +1943,16 @@ pub(crate) async fn get_events_by_ids_on(
     Ok(out)
 }
 
+/// Whether `event` is signed `["audience", "agents"]`: agent coordination that
+/// clients fold away, counted per root in `thread_agent_reply_counts`.
+/// `agent_audience_predicate!` in `event_deletion.rs` is the same test over a
+/// stored `tags` column; keep the two in step.
+pub(crate) fn is_agent_audience(event: &nostr::Event) -> bool {
+    event.tags.iter().any(|tag| {
+        matches!(tag.as_slice(), [name, value, ..] if name == "audience" && value == "agents")
+    })
+}
+
 /// Parameters for [`insert_event_with_thread_metadata`].
 #[derive(Debug)]
 pub struct ThreadMetadataParams<'a> {
@@ -2136,6 +2146,22 @@ pub(crate) async fn insert_event_with_thread_metadata_tx(
                         .bind(root_id)
                         .execute(tx.conn())
                         .await?;
+                        if is_agent_audience(event) {
+                            sqlx::query(
+                                r#"
+                                INSERT INTO thread_agent_reply_counts
+                                    (community_id, root_event_id, agent_descendant_count)
+                                VALUES ($1, $2, 1)
+                                ON CONFLICT (community_id, root_event_id) DO UPDATE
+                                SET agent_descendant_count =
+                                    thread_agent_reply_counts.agent_descendant_count + 1
+                                "#,
+                            )
+                            .bind(community_id.as_uuid())
+                            .bind(root_id)
+                            .execute(tx.conn())
+                            .await?;
+                        }
                     }
                 }
             }

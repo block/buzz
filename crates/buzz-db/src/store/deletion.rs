@@ -121,6 +121,7 @@ pub const EXPECTED_SCOPED_TABLES: &[&str] = &[
     "relay_members",
     "scheduled_workflow_fires",
     "subscriptions",
+    "thread_agent_reply_counts",
     "thread_metadata",
     "users",
     "workflow_approvals",
@@ -158,6 +159,7 @@ pub const PURGE_SCOPED_TABLES: &[&str] = &[
     "subscriptions",
     "api_tokens",
     "channel_members",
+    "thread_agent_reply_counts",
     "thread_metadata",
     "moderation_actions",
     "workflows",
@@ -8810,6 +8812,86 @@ DROP FUNCTION community_deletion_lock_key(UUID);
         .fetch_one(&db.pool)
         .await
         .expect("count relay admin rows")
+    }
+
+    /// `thread_agent_reply_counts` is tenant-owned: once deletion starts its
+    /// writer's admission refuses the community, and the purge removes only that
+    /// community's rows.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn purge_postgres_removes_thread_agent_reply_counts() {
+        let (db, store) = store().await;
+        let (request, inventory) = inventoried_request(&db, &store).await;
+        let community = *request.community_id.as_uuid();
+        let bystander = *db
+            .ensure_configured_community(&format!("bystander-{}.example", Uuid::new_v4().simple()))
+            .await
+            .expect("create bystander community")
+            .id
+            .as_uuid();
+        let count_rows = |target: Uuid| {
+            let pool = db.pool.clone();
+            async move {
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT count(*) FROM thread_agent_reply_counts WHERE community_id = $1",
+                )
+                .bind(target)
+                .fetch_one(&pool)
+                .await
+                .expect("count agent reply rows")
+            }
+        };
+        for target in [community, bystander] {
+            sqlx::query(
+                "INSERT INTO thread_agent_reply_counts \
+                 (community_id, root_event_id, agent_descendant_count) VALUES ($1, $2, 3)",
+            )
+            .bind(target)
+            .bind([7u8; 32].as_slice())
+            .execute(&db.pool)
+            .await
+            .expect("seed agent reply count");
+        }
+
+        store
+            .approve(request.id, "approver", None)
+            .await
+            .expect("approve");
+        let claim = store
+            .claim_specific(request.id, "executor", DEFAULT_LEASE_DURATION)
+            .await
+            .expect("claim")
+            .expect("won claim");
+        store.begin_quiescing(&claim.lease).await.expect("quiesce");
+        assert!(
+            crate::begin_community_event_write_transaction(
+                &db.pool,
+                request.community_id,
+                crate::observability::WriterOperation::EventWrite,
+            )
+            .await
+            .is_err(),
+            "the reply writer's admission must refuse a quiescing community"
+        );
+        let generation = store.fence(&claim.lease).await.expect("fence");
+        let token = LeaseToken {
+            fence_generation: Some(generation),
+            ..claim.lease
+        };
+        store
+            .freeze_destructive_storage_manifest(&token, &inventory.storage)
+            .await
+            .expect("freeze destructive storage");
+        store.mark_drained(&token).await.expect("drain");
+        store
+            .mark_bindings_removed(&token, serde_json::json!({"keys": 0}))
+            .await
+            .expect("bindings");
+        let deleted = store.purge_postgres(&token).await.expect("purge postgres");
+
+        assert_eq!(deleted.get("thread_agent_reply_counts"), Some(&1));
+        assert_eq!(count_rows(community).await, 0);
+        assert_eq!(count_rows(bystander).await, 1);
     }
 
     /// Report-backed staff actions FK `moderation_reports`, and outbox rows FK

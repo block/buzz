@@ -133,11 +133,12 @@ One per returned row with replies. Tag cardinality is exact: one `e`, one `d`, o
     ["d", "<row-event-id>"],
     ["h", "<channel-id>"]
   ],
-  "content": "{\"reply_count\":4,\"descendant_count\":7,\"last_reply_at\":1751500123,\"participants\":[\"<hex-pubkey>\",\"...\"]}"
+  "content": "{\"reply_count\":4,\"descendant_count\":7,\"agent_descendant_count\":2,\"last_reply_at\":1751500123,\"participants\":[\"<hex-pubkey>\",\"...\"]}"
 }
 ```
 
 - `reply_count` — direct replies to the row. `descendant_count` — all events in the row's thread subtree.
+- `agent_descendant_count` — how many of `descendant_count` carry an `["audience", "agents"]` tag: agent coordination that clients may fold away. A client showing the replies a person reads shows `descendant_count - agent_descendant_count`. Relays that predate the field omit it; treat a missing value as `0`. The field can be off until the relay repairs it: replies stored before the relay began counting them are missing from it, and while older relay instances still serve, replies they store or delete do not change it. Clients clamp `descendant_count - agent_descendant_count` at `0`.
 - `last_reply_at` — unix seconds of the newest descendant, or `null`.
 - `participants` — up to 10 distinct author pubkeys from the thread's newest 1000 replies, deleted replies included, most recent first. Deleted replies contribute no author, and an author silent for 1000 replies drops out.
 - The `e` and `d` tags both carry the row's event id: `e` for reference-following, `d` for replaceable addressing.

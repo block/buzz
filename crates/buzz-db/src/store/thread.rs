@@ -36,6 +36,22 @@ macro_rules! thread_participant_scan_limit {
 /// replies drops out of the facepile, which shows at most 10.
 pub const THREAD_PARTICIPANT_SCAN_LIMIT: i64 = thread_participant_scan_limit!();
 
+/// A thread root's `agent_descendant_count` from `thread_agent_reply_counts`,
+/// 0 when the root has no row. The argument is the SQL alias of a
+/// `thread_metadata` root row. One primary-key lookup per root.
+macro_rules! agent_descendant_count_sql {
+    ($root:literal) => {
+        concat!(
+            "COALESCE((SELECT agents.agent_descendant_count FROM thread_agent_reply_counts agents \
+              WHERE agents.community_id = ",
+            $root,
+            ".community_id AND agents.root_event_id = ",
+            $root,
+            ".event_id), 0) AS agent_descendant_count"
+        )
+    };
+}
+
 /// Correlated `ARRAY(...)` of up to 10 participant pubkeys, most recent
 /// first, for the thread rooted at `root.event_id` in community `$1`.
 ///
@@ -110,6 +126,10 @@ pub struct ThreadSummary {
     pub reply_count: i32,
     /// Total number of replies at all nesting levels.
     pub descendant_count: i32,
+    /// How many of `descendant_count` are signed `audience=agents`, from
+    /// `thread_agent_reply_counts`. Replies stored before migration 0089 count
+    /// 0 until repaired.
+    pub agent_descendant_count: i32,
     /// Timestamp of the most recent reply in the thread.
     pub last_reply_at: Option<DateTime<Utc>>,
     /// Up to 10 distinct reply authors, most recently active first, drawn
@@ -526,7 +546,9 @@ pub async fn get_thread_summary(
     )
     .await?;
     let row = sqlx::query(concat!(
-        "SELECT root.reply_count, root.descendant_count, root.last_reply_at, ",
+        "SELECT root.reply_count, root.descendant_count, ",
+        agent_descendant_count_sql!("root"),
+        ", root.last_reply_at, ",
         recent_thread_participants_sql!(""),
         r#" AS participants
         FROM thread_metadata root
@@ -543,6 +565,7 @@ pub async fn get_thread_summary(
         Ok(ThreadSummary {
             reply_count: row.try_get("reply_count")?,
             descendant_count: row.try_get("descendant_count")?,
+            agent_descendant_count: row.try_get("agent_descendant_count")?,
             last_reply_at: row.try_get("last_reply_at")?,
             participants: row.try_get("participants")?,
         })
@@ -617,12 +640,16 @@ pub(crate) async fn get_channel_window_on(
             e.channel_id,
             tm.reply_count,
             tm.descendant_count,
+            agents.agent_descendant_count,
             tm.last_reply_at
         FROM events e
         LEFT JOIN thread_metadata tm
             ON tm.community_id = e.community_id
            AND tm.event_created_at = e.created_at
            AND tm.event_id         = e.id
+        LEFT JOIN thread_agent_reply_counts agents
+            ON agents.community_id  = e.community_id
+           AND agents.root_event_id = e.id
         WHERE e.community_id = $1
           AND e.channel_id = $2
           AND e.deleted_at IS NULL
@@ -731,6 +758,7 @@ pub(crate) async fn get_channel_window_on(
     for row in db_rows {
         let reply_count: Option<i32> = row.try_get("reply_count")?;
         let descendant_count: Option<i32> = row.try_get("descendant_count")?;
+        let agent_descendant_count: Option<i32> = row.try_get("agent_descendant_count")?;
         let last_reply_at: Option<DateTime<Utc>> = row.try_get("last_reply_at")?;
 
         // Skip rows that fail event reconstruction rather than failing the
@@ -744,6 +772,7 @@ pub(crate) async fn get_channel_window_on(
             Some(rc) if rc > 0 => Some(ThreadSummary {
                 reply_count: rc,
                 descendant_count: descendant_count.unwrap_or(0),
+                agent_descendant_count: agent_descendant_count.unwrap_or(0),
                 last_reply_at,
                 participants: Vec::new(), // batch-filled below
             }),
@@ -1028,7 +1057,9 @@ impl Db {
         )
         .await?;
         let rows = sqlx::query(concat!(
-            "SELECT root.event_id, root.reply_count, root.descendant_count, root.last_reply_at, ",
+            "SELECT root.event_id, root.reply_count, root.descendant_count, ",
+            agent_descendant_count_sql!("root"),
+            ", root.last_reply_at, ",
             recent_thread_participants_sql!("AND tm.channel_id = root.channel_id"),
             r#" AS participants
             FROM thread_metadata root
@@ -1053,6 +1084,7 @@ impl Db {
                     ThreadSummary {
                         reply_count: row.try_get("reply_count")?,
                         descendant_count: row.try_get("descendant_count")?,
+                        agent_descendant_count: row.try_get("agent_descendant_count")?,
                         last_reply_at: row.try_get("last_reply_at")?,
                         participants: row.try_get("participants")?,
                     },
@@ -1376,6 +1408,152 @@ mod postgres_tests {
             .await
             .expect("wrong channel")
             .is_empty());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn thread_summaries_count_agent_audience_descendants() {
+        let pool = setup_pool().await;
+        let db = Db::from_pool(pool.clone());
+        let author = Keys::generate();
+        let channel = Uuid::new_v4();
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        crate::channel::create_channel_with_id(
+            &pool,
+            community,
+            channel,
+            &format!("agent-audience-{channel}"),
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            author.public_key().to_bytes().as_slice(),
+            None,
+            &[],
+        )
+        .await
+        .expect("channel");
+        let agent_message = |content: &str| {
+            EventBuilder::new(Kind::Custom(9), content)
+                .tags([nostr::Tag::parse(["audience", "agents"]).expect("audience tag")])
+                .sign_with_keys(&author)
+                .expect("sign event")
+        };
+        let root = make_stream_event(&author, "root");
+        let human_reply = make_stream_event(&author, "human reply");
+        let agent_reply = agent_message("agent progress");
+        let nested_agent_reply = agent_message("nested agent progress");
+        for (event, parent, depth) in [
+            (&root, None, 0),
+            (&human_reply, Some(&root), 1),
+            (&agent_reply, Some(&root), 1),
+            (&nested_agent_reply, Some(&human_reply), 2),
+        ] {
+            let metadata = ThreadMetadataParams {
+                event_id: event.id.as_bytes(),
+                event_created_at: event_created_at(event),
+                channel_id: channel,
+                parent_event_id: parent.map(|parent| parent.id.as_bytes().as_slice()),
+                parent_event_created_at: parent.map(event_created_at),
+                root_event_id: parent.map(|_| root.id.as_bytes().as_slice()),
+                root_event_created_at: parent.map(|_| event_created_at(&root)),
+                depth,
+                broadcast: false,
+            };
+            insert_event_with_thread_metadata(
+                &pool,
+                community,
+                event,
+                Some(channel),
+                Some(metadata),
+            )
+            .await
+            .expect("thread event");
+        }
+
+        let summary = get_thread_summary(&pool, community, root.id.as_bytes())
+            .await
+            .expect("summary")
+            .expect("root has a summary");
+        assert_eq!(
+            (summary.descendant_count, summary.agent_descendant_count),
+            (3, 2)
+        );
+        let window = db
+            .get_channel_window(community, channel, 10, None, None)
+            .await
+            .expect("window");
+        let window_summary = window
+            .rows
+            .iter()
+            .find(|row| row.stored_event.event.id == root.id)
+            .and_then(|row| row.thread_summary.as_ref())
+            .expect("root row has a summary");
+        assert_eq!(window_summary.agent_descendant_count, 2);
+        let resolved = db
+            .resolve_thread_root_summaries(
+                community,
+                channel,
+                &[agent_reply.id.as_bytes().to_vec()],
+            )
+            .await
+            .expect("resolved summaries");
+        assert_eq!(resolved[0].1.agent_descendant_count, 2);
+
+        db.soft_delete_event_and_update_thread(
+            community,
+            agent_reply.id.as_bytes(),
+            Some(root.id.as_bytes()),
+            Some(root.id.as_bytes()),
+        )
+        .await
+        .expect("delete agent reply");
+        db.soft_delete_event_and_update_thread(
+            community,
+            human_reply.id.as_bytes(),
+            Some(root.id.as_bytes()),
+            Some(root.id.as_bytes()),
+        )
+        .await
+        .expect("delete human reply");
+        let summary = get_thread_summary(&pool, community, root.id.as_bytes())
+            .await
+            .expect("summary")
+            .expect("root has a summary");
+        assert_eq!(
+            (summary.descendant_count, summary.agent_descendant_count),
+            (1, 1)
+        );
+
+        // NIP-09 deletions name the target's timestamp, so they read the
+        // target through the known-target statement instead.
+        let deletion = EventBuilder::new(Kind::EventDeletion, "")
+            .tags([nostr::Tag::event(nested_agent_reply.id)])
+            .sign_with_keys(&author)
+            .expect("sign deletion");
+        let (_, _, deleted) = db
+            .insert_deletion_event(
+                community,
+                &deletion,
+                Some(channel),
+                None,
+                &[crate::event::DeletionTarget {
+                    event_id: nested_agent_reply.id.as_bytes(),
+                    created_at: event_created_at(&nested_agent_reply),
+                    parent_event_id: Some(human_reply.id.as_bytes()),
+                    root_event_id: Some(root.id.as_bytes()),
+                }],
+            )
+            .await
+            .expect("NIP-09 delete nested agent reply");
+        assert_eq!(deleted, vec![true]);
+        let summary = get_thread_summary(&pool, community, root.id.as_bytes())
+            .await
+            .expect("summary")
+            .expect("root has a summary");
+        assert_eq!(
+            (summary.descendant_count, summary.agent_descendant_count),
+            (0, 0)
+        );
     }
 
     #[tokio::test]
