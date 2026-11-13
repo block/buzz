@@ -40,9 +40,10 @@ class OrganizationSignInBanner extends HookConsumerWidget {
         actionLabel = 'Cancel';
         onAction = () => unawaited(signIn.cancel());
       case OrganizationSessionStatus.signedOut:
-        message = signIn.failure == null
-            ? "It looks like you're signed out."
-            : 'Sign in failed. Try again.';
+        message = switch (signIn.failureCode) {
+          null => "It looks like you're signed out.",
+          final code => 'Sign in failed ($code). Try again.',
+        };
         actionLabel = 'Sign in';
         onAction = () => unawaited(signIn.signIn());
       case OrganizationSessionStatus.signedIn:
