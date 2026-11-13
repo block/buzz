@@ -8,7 +8,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
 void main() {
-  test('off iOS, clients come from http.Client()', () {
+  test('without a native session, clients come from http.Client()', () {
     final mock = MockClient((_) async => http.Response('', 200));
     for (final traffic in HttpTraffic.values) {
       expect(
@@ -220,7 +220,19 @@ void main() {
     expect(urlErrorFailure(-1200), TransportFailure.insecure);
     expect(urlErrorFailure(-1202), TransportFailure.insecure);
     expect(urlErrorFailure(-999), isNull);
-    expect(urlSessionFailure(http.ClientException('offline')), isNull);
+    expect(transportFailure(http.ClientException('offline')), isNull);
+  });
+
+  test('Cronet error codes map to user-facing failure kinds', () {
+    expect(cronetErrorFailure(4, -7), TransportFailure.timedOut);
+    expect(cronetErrorFailure(6, -118), TransportFailure.timedOut);
+    expect(cronetErrorFailure(1, -105), TransportFailure.unreachable);
+    expect(cronetErrorFailure(2, -106), TransportFailure.unreachable);
+    expect(cronetErrorFailure(7, -102), TransportFailure.unreachable);
+    expect(cronetErrorFailure(11, -202), TransportFailure.insecure);
+    expect(cronetErrorFailure(11, -107), TransportFailure.insecure);
+    expect(cronetErrorFailure(11, -324), isNull);
+    expect(cronetErrorFailure(10, -356), isNull);
   });
 }
 

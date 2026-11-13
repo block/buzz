@@ -47,7 +47,7 @@ class _ErrorView extends HookConsumerWidget {
       return 'Server error (${error.statusCode}). Try again later.';
     }
     if (error is SocketException ||
-        urlSessionFailure(error) == TransportFailure.unreachable) {
+        transportFailure(error) == TransportFailure.unreachable) {
       return 'Could not reach the relay server.';
     }
     return 'Something went wrong. Check your connection.';
