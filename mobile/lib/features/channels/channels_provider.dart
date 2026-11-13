@@ -471,14 +471,20 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     );
     // Latest-message filters depend on channel identity/privacy, not names.
     // Start them alongside profiles, and observe both errors immediately.
-    final latestEventsRequest = fetchLastMessage
-        ? _fetchLastMessageEvents(session, [
-            for (final entry in visibleMetas)
-              if (memberChannelIds.contains(entry.value.id) &&
-                  !entry.value.isArchived)
-                entry.value,
-          ])
-        : Future.value(const <NostrEvent>[]);
+    // A read that keeps the list's times still reads channels it newly lists
+    // as a member, such as a DM opened on another device.
+    final listed = {
+      if (!fetchLastMessage)
+        for (final c in state.value ?? const <Channel>[])
+          if (c.isMember) c.id,
+    };
+    final latestEventsRequest = _fetchLastMessageEvents(session, [
+      for (final entry in visibleMetas)
+        if (memberChannelIds.contains(entry.value.id) &&
+            !entry.value.isArchived &&
+            !listed.contains(entry.value.id))
+          entry.value,
+    ]);
     final (displayNames, latestEvents) = await _fenced(fence, () async {
       await Future.wait(eagerError: true, [
         displayNamesRequest,
@@ -523,60 +529,57 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     // Step 3: fetch the most recent message per channel to populate lastMessageAt.
     // kind:39000 metadata doesn't carry message timestamps, so channels load with
     // lastMessageAt: null. Without this, unread detection and badge computation
-    // see every channel as having no messages. Skipped on background list
-    // reads since live subscriptions keep lastMessageAt current after the
-    // initial load.
-    if (fetchLastMessage) {
-      final activeChannels = [
-        for (final channel in channels)
-          if (channel.isMember && !channel.isArchived) channel,
-      ];
-      final channelById = {
-        for (final channel in activeChannels) channel.id: channel,
-      };
-      final events = latestEvents;
-      final lastMessageMap = <String, int>{};
-      // An unavailable batch keeps the timestamps already known rather than
-      // installing channels whose latest message looks absent.
-      if (events == null) {
-        for (final channel in state.value ?? const <Channel>[]) {
-          final at = channel.lastMessageAt;
-          if (at != null) {
-            lastMessageMap[channel.id] = at.millisecondsSinceEpoch ~/ 1000;
-          }
+    // see every channel as having no messages. Reads that keep the list's
+    // times fetch only newly listed channels; live delivery keeps the rest.
+    final activeChannels = [
+      for (final channel in channels)
+        if (channel.isMember && !channel.isArchived) channel,
+    ];
+    final channelById = {
+      for (final channel in activeChannels) channel.id: channel,
+    };
+    final events = latestEvents;
+    final lastMessageMap = <String, int>{};
+    // An unavailable batch keeps the timestamps already known rather than
+    // installing channels whose latest message looks absent.
+    if (events == null) {
+      for (final channel in state.value ?? const <Channel>[]) {
+        final at = channel.lastMessageAt;
+        if (at != null) {
+          lastMessageMap[channel.id] = at.millisecondsSinceEpoch ~/ 1000;
         }
       }
-      final mutedChannelIds = _mutedChannelIds();
-      for (final event in events ?? const <NostrEvent>[]) {
-        final channelId = event.channelId;
-        if (channelId == null) continue;
-        final channel = channelById[channelId];
-        if (channel == null) continue;
-        if (!channel.isDm &&
-            !shouldNotifyForEvent(
-              event,
-              myPk,
-              mutedChannelIds: mutedChannelIds,
-              channelId: channelId,
-            )) {
-          continue;
-        }
-        final current = lastMessageMap[channelId];
-        if (current == null || event.createdAt > current) {
-          lastMessageMap[channelId] = event.createdAt;
-        }
+    }
+    final mutedChannelIds = _mutedChannelIds();
+    for (final event in events ?? const <NostrEvent>[]) {
+      final channelId = event.channelId;
+      if (channelId == null) continue;
+      final channel = channelById[channelId];
+      if (channel == null) continue;
+      if (!channel.isDm &&
+          !shouldNotifyForEvent(
+            event,
+            myPk,
+            mutedChannelIds: mutedChannelIds,
+            channelId: channelId,
+          )) {
+        continue;
       }
+      final current = lastMessageMap[channelId];
+      if (current == null || event.createdAt > current) {
+        lastMessageMap[channelId] = event.createdAt;
+      }
+    }
 
-      for (var i = 0; i < channels.length; i++) {
-        final ts = lastMessageMap[channels[i].id];
-        if (ts != null) {
-          channels[i] = channels[i].copyWith(
-            lastMessageAt: DateTime.fromMillisecondsSinceEpoch(
-              ts * 1000,
-              isUtc: true,
-            ),
-          );
-        }
+    for (var i = 0; i < channels.length; i++) {
+      final ts = lastMessageMap[channels[i].id];
+      if (ts != null) {
+        channels[i] = channels[i].copyWith(
+          lastMessageAt: DateTime.fromMillisecondsSinceEpoch(
+            ts * 1000,
+            isUtc: true,
+          ),
+        );
       }
     }
 
@@ -626,7 +629,9 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       // snapshot as well as the visible list.
       for (var i = 0; i < channels.length; i++) {
         final previous = prevById[channels[i].id]?.lastMessageAt;
-        if (previous != null) {
+        final fetched = channels[i].lastMessageAt;
+        if (previous != null &&
+            (fetched == null || previous.isAfter(fetched))) {
           channels[i] = channels[i].copyWith(lastMessageAt: previous);
         }
       }
