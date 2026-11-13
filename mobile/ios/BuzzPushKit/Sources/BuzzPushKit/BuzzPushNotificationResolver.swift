@@ -19,6 +19,8 @@ public struct BuzzPushResolution: Decodable, Equatable, Sendable {
   public let conversationDisplayName: String?
   /// Exact verified recipient count for Communication Notifications specialization.
   public let conversationRecipientCount: Int?
+  /// Present only when the notification shows a channel or DM message the user can reply to.
+  public let replyContext: BuzzNotificationReplyContext?
 
   public init(
     title: String,
@@ -31,6 +33,7 @@ public struct BuzzPushResolution: Decodable, Equatable, Sendable {
     conversationIdentifier: String? = nil,
     conversationDisplayName: String? = nil,
     conversationRecipientCount: Int? = nil,
+    replyContext: BuzzNotificationReplyContext? = nil,
     notificationScope: BuzzNotificationCacheScope? = nil
   ) {
     self.notificationScope = notificationScope
@@ -44,6 +47,7 @@ public struct BuzzPushResolution: Decodable, Equatable, Sendable {
     self.conversationIdentifier = conversationIdentifier
     self.conversationDisplayName = conversationDisplayName
     self.conversationRecipientCount = conversationRecipientCount
+    self.replyContext = replyContext
   }
 }
 
@@ -552,6 +556,7 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
       conversationIdentifier: conversationIdentifier,
       conversationDisplayName: conversation?.displayName,
       conversationRecipientCount: conversation?.recipientCount,
+      replyContext: channelID == nil ? nil : BuzzNotificationReplyContext.make(for: event),
       notificationScope: BuzzNotificationCacheScope(community: community)
     )
   }

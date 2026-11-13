@@ -36,6 +36,7 @@ import 'features/pairing/pairing_page.dart';
 import 'features/pairing/pairing_provider.dart';
 import 'features/channels/agent_activity/observer_subscription.dart';
 import 'features/channels/channel_detail_page.dart';
+import 'features/channels/notification_reply.dart';
 import 'shared/widgets/app_route_observer.dart';
 import 'shared/widgets/root_page_route.dart';
 import 'features/profile/profile_provider.dart';
@@ -404,6 +405,9 @@ class App extends HookConsumerWidget {
     // Start listening for buzz:// links immediately (even pre-auth) so a
     // cold-start link survives until the authenticated UI can dispatch it.
     ref.watch(pendingDeepLinkProvider);
+    // Unconditional: iOS may launch the app in the background only to send a
+    // notification reply, and no later frame may come to rebuild this.
+    ref.listen(notificationReplySenderProvider, (_, _) {});
 
     void applyBadge(UnreadBadgeState state) {
       if (state.highPriorityCount > 0) {

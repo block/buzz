@@ -32,6 +32,8 @@ import 'package:buzz/shared/crypto/event_signing.dart';
 export 'relay_session_types.dart';
 
 part 'relay_session_auth.dart';
+part 'relay_session_background.dart';
+part 'relay_session_test_hooks.dart';
 part 'relay_session_subscriptions.dart';
 part 'relay_session_snapshot.dart';
 
@@ -473,23 +475,6 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   void debugSupersedeConnection() => _connectionGeneration++;
 
   @visibleForTesting
-  void debugHandleDisconnected([Object? error]) {
-    _socketConnected = false;
-    _handleDisconnected(_connectionGeneration, error);
-  }
-
-  @visibleForTesting
-  void debugResetClosedRetriesForDisconnect() {
-    _socketConnected = false;
-    _resetAllClosedRetries();
-  }
-
-  @visibleForTesting
-  void debugSetSessionStatus(SessionStatus status) {
-    _socketConnected = status == SessionStatus.connected;
-  }
-
-  @visibleForTesting
   void debugPauseNow() => _pauseNow();
 
   @visibleForTesting
@@ -555,6 +540,10 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     _socket?.disconnect();
     state = const SessionState(status: SessionStatus.disconnected);
   }
+
+  /// See [_RelaySessionBackgroundWork._connectForBackgroundWork].
+  Future<bool> connectForBackgroundWork({required Duration timeout}) =>
+      _connectForBackgroundWork(timeout, state.status, ref);
 
   /// Called by the app lifecycle provider when the app returns to foreground.
   void onAppResumed() {
