@@ -14,8 +14,8 @@ pub const MIN_INVITE_TTL_SECS: u64 = 60;
 /// Default invite lifetime when the mint request omits `ttl_secs`: 72 hours.
 pub const DEFAULT_INVITE_TTL_SECS: u64 = 72 * 60 * 60;
 
-/// Maximum invite lifetime accepted by the mint API: 30 days.
-pub const MAX_INVITE_TTL_SECS: u64 = 30 * 24 * 60 * 60;
+/// Maximum invite lifetime accepted by the mint API: 90 days.
+pub const MAX_INVITE_TTL_SECS: u64 = 90 * 24 * 60 * 60;
 
 /// Maximum supported `max_uses` value. Matches the database constraint.
 pub const MAX_INVITE_USES: i32 = 10_000;
