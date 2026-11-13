@@ -11,12 +11,20 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:hooks_riverpod/misc.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart' as http_testing;
 import 'package:image_picker/image_picker.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:buzz/features/channels/channel.dart';
+import 'package:buzz/features/channels/deep_link_dispatcher.dart';
+import 'package:buzz/features/channels/open_channel_routes.dart';
+import 'package:buzz/shared/auth/auth.dart';
+import 'package:buzz/shared/deeplink/deep_link.dart';
+import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
+import 'package:buzz/shared/deeplink/pending_deep_link_provider.dart';
+import '../../shared/community/community_storage_test.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/timeline_message.dart';
 import 'package:buzz/features/channels/compose_bar.dart';
@@ -222,9 +230,40 @@ Widget _buildComposeBar({
   List<OwnedAgentDirectoryEntry>? ownedAgents,
   bool ownedAgentsUnknown = false,
   List<TimelineMessage>? prefillScopeMessages,
+  List<Override> overrides = const [],
+  Widget Function(Widget page)? wrapPage,
 }) {
+  final page = Scaffold(
+    body: SafeArea(
+      child: Align(
+        alignment: Alignment.bottomCenter,
+        child: Builder(
+          builder: (context) {
+            final composeBar = ComposeBar(
+              key: ValueKey(composeBarKey),
+              channelId: 'channel-1',
+              draftMembers: draftMembers,
+              onSendingChanged: onSendingChanged,
+              threadHeadId: threadHeadId,
+              focusNode: focusNode,
+              onFocusRestorerChanged: onFocusRestorerChanged,
+              onFocusRequested: onFocusRequested,
+              prefillScopeMessages: prefillScopeMessages,
+              onSend: onSend,
+            );
+            if (viewPadding == null) return composeBar;
+            return MediaQuery(
+              data: MediaQuery.of(context).copyWith(viewPadding: viewPadding),
+              child: composeBar,
+            );
+          },
+        ),
+      ),
+    ),
+  );
   return ProviderScope(
     overrides: [
+      ...overrides,
       if (ownedAgents != null)
         ownedAgentDirectoryProvider.overrideWith((ref) async => ownedAgents),
       if (ownedAgentsUnknown)
@@ -294,36 +333,7 @@ Widget _buildComposeBar({
               ),
               child: child!,
             ),
-      home: Scaffold(
-        body: SafeArea(
-          child: Align(
-            alignment: Alignment.bottomCenter,
-            child: Builder(
-              builder: (context) {
-                final composeBar = ComposeBar(
-                  key: ValueKey(composeBarKey),
-                  channelId: 'channel-1',
-                  draftMembers: draftMembers,
-                  onSendingChanged: onSendingChanged,
-                  threadHeadId: threadHeadId,
-                  focusNode: focusNode,
-                  onFocusRestorerChanged: onFocusRestorerChanged,
-                  onFocusRequested: onFocusRequested,
-                  prefillScopeMessages: prefillScopeMessages,
-                  onSend: onSend,
-                );
-                if (viewPadding == null) return composeBar;
-                return MediaQuery(
-                  data: MediaQuery.of(
-                    context,
-                  ).copyWith(viewPadding: viewPadding),
-                  child: composeBar,
-                );
-              },
-            ),
-          ),
-        ),
-      ),
+      home: wrapPage?.call(page) ?? page,
     ),
   );
 }

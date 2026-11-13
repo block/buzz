@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/deep_link_dispatcher.dart';
+import 'package:buzz/features/channels/open_channel_routes.dart';
 import 'package:buzz/shared/auth/auth.dart';
 import 'package:buzz/shared/deeplink/deep_link.dart';
 import 'package:buzz/shared/deeplink/pending_deep_link_provider.dart';
@@ -51,7 +52,10 @@ void main() {
     ).writeAsStringSync(jsonEncodeManifest(manifest));
   }
 
-  Future<ProviderContainer> pumpDispatcher(WidgetTester tester) async {
+  Future<ProviderContainer> pumpDispatcher(
+    WidgetTester tester, {
+    void Function(NavigatorState navigator)? openPages,
+  }) async {
     final storage = CommunityStorage(secure: FakeSecureStorage());
     await tester.runAsync(() async {
       await storage.save(_community);
@@ -71,10 +75,12 @@ void main() {
       ],
     );
     addTearDown(container.dispose);
+    final navigatorKey = GlobalKey<NavigatorState>();
     await tester.pumpWidget(
       UncontrolledProviderScope(
         container: container,
         child: MaterialApp(
+          navigatorKey: navigatorKey,
           home: DeepLinkDispatcher(
             destinationBuilder: (channel, link) => Text('opened ${channel.id}'),
             child: const Scaffold(body: SizedBox()),
@@ -82,6 +88,11 @@ void main() {
         ),
       ),
     );
+    if (openPages != null) {
+      openPages(navigatorKey.currentState!);
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+    }
     // The dispatcher reads the manifest with real file IO, so let it run
     // outside fake time until it has consumed the link.
     for (var i = 0; i < 100; i++) {
@@ -117,6 +128,71 @@ void main() {
     final share = container.read(composerShareInboxProvider)['channel-1']!;
     expect(share.composerText, 'https://example.org/a\nLook');
     expect(share.files, ['${shares.path}/$_shareId/shot.png']);
+  });
+
+  testWidgets('a share to a conversation already open returns to its page', (
+    tester,
+  ) async {
+    writeShare({
+      'version': 1,
+      'target': shareConversationIdentifier(
+        communityId: _community.id,
+        channelId: _channel.id,
+      ),
+      'text': ['Look'],
+      'files': <String>[],
+    });
+
+    final container = await pumpDispatcher(
+      tester,
+      openPages: (navigator) => navigator
+        ..push(MaterialPageRoute<void>(builder: (_) => const _OpenChannel()))
+        ..push(
+          MaterialPageRoute<void>(builder: (_) => const Text('another page')),
+        ),
+    );
+
+    // One composer keeps owning the draft: no second page for the channel.
+    expect(find.text('channel-1 already open'), findsOneWidget);
+    expect(find.text('another page'), findsNothing);
+    expect(find.text('opened channel-1'), findsNothing);
+    expect(
+      container.read(composerShareInboxProvider)['channel-1']!.composerText,
+      'Look',
+    );
+  });
+
+  testWidgets('a share keeps a page that refuses to close', (tester) async {
+    writeShare({
+      'version': 1,
+      'target': shareConversationIdentifier(
+        communityId: _community.id,
+        channelId: _channel.id,
+      ),
+      'text': ['Look'],
+      'files': <String>[],
+    });
+
+    final container = await pumpDispatcher(
+      tester,
+      openPages: (navigator) => navigator
+        ..push(MaterialPageRoute<void>(builder: (_) => const _OpenChannel()))
+        ..push(
+          MaterialPageRoute<void>(
+            builder: (_) =>
+                const PopScope(canPop: false, child: Text('busy page')),
+          ),
+        ),
+    );
+
+    // The busy page stays, and the conversation's own composer still gets
+    // the share rather than a second page for it.
+    expect(find.text('busy page'), findsOneWidget);
+    expect(find.text('opened channel-1'), findsNothing);
+    expect(
+      container.read(composerShareInboxProvider)['channel-1']!.composerText,
+      'Look',
+    );
   });
 
   for (final (name, manifest) in [
@@ -183,6 +259,16 @@ void main() {
 
 String jsonEncodeManifest(Map<String, Object?> manifest) =>
     const JsonEncoder().convert(manifest);
+
+class _OpenChannel extends HookConsumerWidget {
+  const _OpenChannel();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    useOpenChannelRoute(ref, 'channel-1');
+    return const Text('channel-1 already open');
+  }
+}
 
 class _FakePendingDeepLinkNotifier extends PendingDeepLinkNotifier {
   _FakePendingDeepLinkNotifier(this.link);

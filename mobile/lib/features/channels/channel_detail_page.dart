@@ -116,6 +116,7 @@ import 'sticky_date_header.dart';
 import 'date_header_scroll_activity.dart';
 import 'thread_detail_page.dart';
 import 'thread_replies_provider.dart';
+import 'open_channel_routes.dart';
 import 'reading_marks.dart';
 import 'timeline_message.dart';
 
@@ -519,6 +520,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
       final session = ref.read(relaySessionProvider.notifier);
       return session.registerVisibleChannel(channel.id);
     }, [channel.id]);
+    useOpenChannelRoute(ref, channel.id);
 
     useEffect(
       () {

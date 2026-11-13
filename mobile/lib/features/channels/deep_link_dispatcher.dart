@@ -16,6 +16,7 @@ import 'channel.dart';
 import 'channel_detail_page.dart';
 import 'channels_provider.dart';
 import 'me/me_page.dart';
+import 'open_channel_routes.dart';
 
 /// Routes pending `buzz://message` deep links into the channel view.
 ///
@@ -398,12 +399,17 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
   }
 
   void _pushChannel(Channel channel, BuzzDeepLink link) {
+    final navigator = Navigator.of(context);
     if (link is ShareDeepLink) {
       ref
           .read(composerShareInboxProvider.notifier)
           .deliver(composeDraftKey(channel.id), _shares.remove(link)!);
+      // A page already showing the conversation keeps its composer, so the
+      // draft and its attachments stay with one owner.
+      final open = ref.read(openChannelRoutesProvider).latest(channel.id);
+      if (open != null && bringOpenChannelForward(open, navigator)) return;
     }
-    Navigator.of(context).push(
+    navigator.push(
       MaterialPageRoute<void>(
         builder: (_) =>
             widget.destinationBuilder?.call(channel, link) ??
