@@ -737,6 +737,12 @@ impl RunCtx<'_> {
                 // Only gate genuine end_turn — don't override max_tokens/refusal.
                 if stop == StopReason::EndTurn {
                     if stop_rejections >= self.cfg.stop_max_rejections {
+                        tracing::warn!(
+                            target: "buzz_agent",
+                            require_reply = self.cfg.require_reply,
+                            buzz_reply_call_seen,
+                            "end_turn: stop_max_rejections exhausted — allowing turn to end"
+                        );
                         return Ok(stop);
                     }
                     let mut objections = self
@@ -764,6 +770,14 @@ impl RunCtx<'_> {
                         push_hook_outputs_as_tool_results(self.history, "_Stop", &objections);
                         continue;
                     }
+                }
+                // Turn is ending with no objections. Log whether a publish was
+                // attempted — this is the last chance to catch silent drops.
+                if self.cfg.require_reply && !buzz_reply_call_seen {
+                    tracing::warn!(
+                        target: "buzz_agent",
+                        "end_turn: no publish attempt seen — turn ending silently"
+                    );
                 }
                 return Ok(stop);
             }
