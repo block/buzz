@@ -107,6 +107,10 @@ pub(crate) struct KnownAcpRuntime {
     pub model_env_var: Option<&'static str>,
     pub provider_env_var: Option<&'static str>,
     pub provider_locked: bool,
+    /// Whether the harness publishes its own LLM provider inventory over an
+    /// ACP custom request, and can therefore drive the provider dropdown
+    /// (goose: `_goose/unstable/providers/list`).
+    pub provider_inventory: bool,
     pub default_env: &'static [(&'static str, &'static str)],
     pub config_file_path: Option<&'static str>,
     #[allow(dead_code)] // reserved for format-based dispatch when readers are unified
