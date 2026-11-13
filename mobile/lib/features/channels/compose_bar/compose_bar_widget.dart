@@ -127,6 +127,8 @@ class ComposeBar extends HookConsumerWidget {
     final mentionMap = useRef(<String, MentionCandidate>{});
     final prefillText = useRef<String?>(null);
     _useComposeDraftLifecycle(
+      context: context,
+      voiceNote: voiceNoteRef,
       prefillText: prefillText,
       mentionMap: mentionMap,
       ref: ref,

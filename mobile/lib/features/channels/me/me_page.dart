@@ -42,6 +42,7 @@ import 'me_workspace_picker.dart';
 import 'me_recovery_dialog.dart';
 import '../../profile/user_profile_sheet.dart';
 import '../channel_actions_sheet.dart';
+import '../../../shared/share/share_suggestions.dart';
 import '../channel_detail_page.dart';
 import '../channel_identity_names_provider.dart';
 import '../channel_member_profile_actions.dart';
