@@ -7,6 +7,7 @@
 //! schema change. Availability is intentionally client-local.
 
 use std::{
+    collections::BTreeMap,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::Duration,
@@ -137,6 +138,9 @@ pub struct TtsSettings {
     pub version: u32,
     pub agent_text_to_speech: bool,
     pub voice_preferences: VoicePreferences,
+    /// The voice key last chosen for each agent, by agent pubkey.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub agent_voices: BTreeMap<String, String>,
 }
 
 impl Default for TtsSettings {
@@ -145,6 +149,7 @@ impl Default for TtsSettings {
             version: CURRENT_VERSION,
             agent_text_to_speech: true,
             voice_preferences: vec![MARY_VOICE_KEY.to_string()],
+            agent_voices: BTreeMap::new(),
         }
     }
 }
@@ -272,6 +277,7 @@ pub(crate) fn load_from_path(path: &Path) -> Result<TtsSettings, String> {
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(true),
             voice_preferences: vec![voice_key],
+            agent_voices: BTreeMap::new(),
         });
     }
 
@@ -461,6 +467,29 @@ async fn apply_tts_settings(
         state.emit_huddle_state_changed();
     }
     Ok(voice_change_wait)
+}
+
+/// Saves an agent's voice for later huddles. The speech runtime is untouched:
+/// the caller has already applied the choice to the active huddle.
+pub(crate) async fn remember_agent_voice(
+    agent_pubkey: &str,
+    voice_key: &str,
+    app: &AppHandle,
+    state: &AppState,
+) -> Result<(), String> {
+    let _transition = state.huddle_audio.tts_transition.lock().await;
+    ensure_settings_writable(state)?;
+    let mut settings = current_settings(state)?;
+    settings
+        .agent_voices
+        .insert(agent_pubkey.to_owned(), voice_key.to_owned());
+    save_to_path(&settings_path(app)?, &settings)?;
+    *state
+        .huddle_audio
+        .tts
+        .lock()
+        .map_err(|error| format!("text-to-speech settings lock poisoned: {error}"))? = settings;
+    Ok(())
 }
 
 fn current_settings(state: &AppState) -> Result<TtsSettings, String> {
@@ -740,6 +769,7 @@ mod tests {
                 version: 1,
                 agent_text_to_speech: true,
                 voice_preferences: vec!["pocket:mary".to_string()],
+                agent_voices: BTreeMap::new(),
             }
         );
     }
@@ -866,8 +896,41 @@ mod tests {
                 version: 1,
                 agent_text_to_speech: false,
                 voice_preferences: vec![EVE_VOICE_KEY.to_string()],
+                agent_voices: BTreeMap::new(),
             }
         );
+    }
+
+    #[test]
+    fn agent_voices_survive_a_save_and_load() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("tts-settings.json");
+        let mut settings = TtsSettings::default();
+        settings
+            .agent_voices
+            .insert("agent".to_string(), EVE_VOICE_KEY.to_string());
+
+        save_to_path(&path, &settings).expect("save");
+
+        assert_eq!(load_from_path(&path).expect("load"), settings);
+    }
+
+    #[test]
+    fn settings_without_agent_voices_stay_in_the_old_shape() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("tts-settings.json");
+        std::fs::write(
+            &path,
+            r#"{"version":1,"agentTextToSpeech":true,"voicePreferences":["pocket:mary"]}"#,
+        )
+        .expect("fixture write");
+
+        let settings = load_from_path(&path).expect("load");
+        assert!(settings.agent_voices.is_empty());
+
+        save_to_path(&path, &settings).expect("save");
+        let saved = std::fs::read_to_string(&path).expect("read");
+        assert!(!saved.contains("agentVoices"));
     }
 
     #[test]
