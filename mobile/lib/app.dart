@@ -10,6 +10,7 @@ import 'onboarding_app_entry.dart';
 import 'organization_app_entry.dart';
 import 'shared/share/signed_out_share_notice.dart';
 import 'shared/hosted/organization_environment.dart';
+import 'shared/widgets/app_scroll_behavior.dart';
 import 'shared/widgets/ios_navigation_metrics.dart';
 import 'shared/community/paired_community_landing.dart';
 import 'shared/community/community_loading_surface.dart';
@@ -470,6 +471,7 @@ class App extends HookConsumerWidget {
       navigatorObservers: [appRouteObserver],
       title: 'Buzz',
       debugShowCheckedModeBanner: false,
+      scrollBehavior: const AppScrollBehavior(),
       theme: lightTheme,
       darkTheme: darkTheme,
       themeMode: themeMode,
