@@ -95,6 +95,7 @@ ownerPubkey: ""
 #   BUZZ_S3_ACCESS_KEY            — S3 access key
 #   BUZZ_S3_SECRET_KEY            — S3 secret key
 #   BUZZ_KLIPY_API_KEY            — KLIPY GIF search key; omit to disable GIF search
+#   BUZZ_TRANSCRIPTION_API_KEY    — speech-to-text provider key; omit to disable dictation
 secrets:
   existingSecret: ""
   # Inline overrides (NOT recommended for production; they land in values).

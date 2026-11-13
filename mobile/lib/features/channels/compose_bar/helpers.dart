@@ -63,6 +63,7 @@ void _useComposerKeyboardMetrics({
   required BuildContext context,
   required FocusNode focusNode,
   required _ComposerVoiceNote voiceNote,
+  required _ComposerDictation dictation,
   required ObjectRef<Timer?> androidImeFallbackTimer,
   required ValueNotifier<bool> androidImeTransitionStarted,
   required VoidCallback collapseComposer,
@@ -81,6 +82,7 @@ void _useComposerKeyboardMetrics({
           androidImeTransitionStarted.value = false;
         }
         voiceNote.onKeyboardHidden();
+        dictation.onKeyboardHidden();
         collapseComposer();
         focusNode.unfocus();
       },
@@ -90,7 +92,7 @@ void _useComposerKeyboardMetrics({
       WidgetsBinding.instance.removeObserver(observer);
       observer.dispose();
     };
-  }, [appView, focusNode, voiceNote.isPreparing]);
+  }, [appView, focusNode, voiceNote.isPreparing, dictation.isCapturing]);
 }
 
 class _ComposerKeyboardMetricsObserver with WidgetsBindingObserver {

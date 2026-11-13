@@ -1547,9 +1547,10 @@ pub struct AppState {
     /// replace this with process-local caching; replay freshness must survive
     /// cross-pod routing.
     pub nip98_replay: Arc<dyn Nip98ReplayGuard>,
-    /// Shared HTTP client for relay-proxied GIF provider requests. Reusing the
-    /// connection pool avoids a fresh TLS handshake for every search/share.
-    pub gif_http_client: reqwest::Client,
+    /// Shared no-redirect HTTP client for relay-proxied provider requests (GIF
+    /// search/share and transcription). Reusing the connection pool avoids a
+    /// fresh TLS handshake for every call.
+    pub provider_http_client: reqwest::Client,
     /// Shared Redis-backed admission limits for ordinary HTTP and WebSocket work.
     pub admission_rate_limiter: Arc<RedisRateLimiter>,
 
@@ -1798,7 +1799,7 @@ impl AppState {
             Arc::new(RedisNip98ReplayGuard::new(redis_pool.clone()));
         let nip_fi_command_replay =
             crate::api::nip_fi::command_replay_guard(redis_pool.clone(), config.nip_fi.mode);
-        let gif_http_client = crate::api::gifs::build_gif_http_client();
+        let provider_http_client = crate::api::build_provider_http_client();
         let admission_rate_limiter = Arc::new(RedisRateLimiter::new(redis_pool.clone()));
         let audit_enabled = audit_arc.is_some();
         // Build NIP-FI components before moving config into the state Arc.
@@ -1881,7 +1882,7 @@ impl AppState {
             partition_audit: Arc::new(std::sync::RwLock::new(None)),
             started_at: Instant::now(),
             nip98_replay,
-            gif_http_client,
+            provider_http_client,
             admission_rate_limiter,
             observer_rate_limiter: Arc::new(DashMap::new()),
             media_upload_rate_limiter: Arc::new(DashMap::new()),

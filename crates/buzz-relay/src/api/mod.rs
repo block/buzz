@@ -15,6 +15,7 @@ pub mod nip05;
 pub mod nip_fi;
 pub mod operator;
 pub mod profiles;
+pub mod transcriptions;
 pub mod workflows;
 
 // Re-export imeta helpers used by ingest pipeline.
@@ -25,6 +26,94 @@ use axum::{http::StatusCode, response::Json};
 /// Standard error envelope.
 pub(crate) fn api_error(status: StatusCode, msg: &str) -> (StatusCode, Json<serde_json::Value>) {
     (status, Json(serde_json::json!({ "error": msg })))
+}
+
+/// Build the shared client for relay-proxied third-party providers (GIF
+/// search and transcription). Redirects are disabled: a provider credential
+/// can ride in the request (KLIPY's API key is in the path), so following a
+/// provider 3xx could replay it to an attacker-chosen host. With no redirect
+/// policy, a 3xx comes back as a non-success status that callers map to a
+/// generic `502`, and the `Location` target is never read or forwarded. The
+/// 10-second default is a backstop; callers set their own per-request timeout.
+pub fn build_provider_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("static provider HTTP client configuration")
+}
+
+/// Why [`read_capped`] stopped before the end of a provider response.
+pub(crate) enum CappedReadError {
+    /// The declared or streamed body exceeded the cap.
+    TooLarge,
+    /// The body stream failed partway.
+    Read(reqwest::Error),
+}
+
+/// Reads a provider response body, refusing more than `max` bytes whether the
+/// length is declared up front or only discovered while streaming. Callers
+/// map the error to their own generic message.
+pub(crate) async fn read_capped(
+    response: reqwest::Response,
+    max: usize,
+) -> Result<Vec<u8>, CappedReadError> {
+    use futures_util::StreamExt;
+
+    if response
+        .content_length()
+        .is_some_and(|length| length > max as u64)
+    {
+        return Err(CappedReadError::TooLarge);
+    }
+    let mut body = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(CappedReadError::Read)?;
+        if body.len().saturating_add(chunk.len()) > max {
+            return Err(CappedReadError::TooLarge);
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+/// Per-minute member quota for a relay-proxied provider route: 429 with the
+/// reset time once spent, 503 when shared admission is unavailable. `feature`
+/// names the route in messages; quota rejections increment
+/// `rejection_metric{reason="quota"}`.
+pub(crate) async fn enforce_provider_quota(
+    state: &crate::state::AppState,
+    tenant: &buzz_core::TenantContext,
+    pubkey: &nostr::PublicKey,
+    limit_type: buzz_auth::LimitType,
+    limit: u64,
+    feature: &str,
+    rejection_metric: &'static str,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    match crate::admission::check_principal(
+        state.admission_rate_limiter.as_ref(),
+        tenant,
+        pubkey,
+        limit_type,
+        60,
+        limit,
+    )
+    .await
+    {
+        Ok(()) => Ok(()),
+        Err(crate::admission::AdmissionError::Exceeded { reset_in_secs }) => {
+            metrics::counter!(rejection_metric, "reason" => "quota").increment(1);
+            Err(api_error(
+                StatusCode::TOO_MANY_REQUESTS,
+                &format!("rate-limited: {feature} quota exceeded; retry in {reset_in_secs}s"),
+            ))
+        }
+        Err(crate::admission::AdmissionError::Unavailable) => Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            &format!("rate-limited: {feature} admission unavailable"),
+        )),
+    }
 }
 
 pub(crate) fn internal_error(msg: &str) -> (StatusCode, Json<serde_json::Value>) {
@@ -813,6 +902,111 @@ pub mod relay_members {
 
             assert_eq!(result, None);
         }
+    }
+}
+
+#[cfg(test)]
+mod provider_http_client_tests {
+    use std::sync::Arc;
+
+    use axum::{
+        http::{header, StatusCode},
+        routing::get,
+        Router,
+    };
+
+    use super::{api_error, build_provider_http_client};
+
+    /// A provider 3xx must never cause a second connection, and the error
+    /// the GIF handlers surface must leak neither the API key
+    /// (carried in the request path) nor the redirect target.
+    ///
+    /// Mutation check: swapping `build_provider_http_client`'s redirect policy back
+    /// to the default makes the client follow the 302, the redirect listener
+    /// records a request, and this test fails on the `redirect_hits` assertion.
+    #[tokio::test]
+    async fn provider_client_refuses_redirects_without_leaking_secrets() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        const SECRET_KEY: &str = "super-secret-klipy-key";
+
+        // Second listener: the redirect target. It must never be reached.
+        let redirect_hits = Arc::new(AtomicUsize::new(0));
+        let redirect_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind redirect target");
+        let redirect_addr = redirect_listener.local_addr().expect("redirect address");
+        let redirect_hits_server = redirect_hits.clone();
+        let redirect_server = tokio::spawn(async move {
+            axum::serve(
+                redirect_listener,
+                Router::new().route(
+                    "/leaked",
+                    get(move || {
+                        redirect_hits_server.fetch_add(1, Ordering::SeqCst);
+                        async { "reached the redirect target" }
+                    }),
+                ),
+            )
+            .await
+            .expect("serve redirect target");
+        });
+
+        // Fake upstream: answers the key-bearing path with a 302 whose Location
+        // points at the second listener, exactly the disclosure vector.
+        let redirect_location = format!("http://{redirect_addr}/leaked");
+        let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind fake upstream");
+        let upstream_addr = upstream_listener.local_addr().expect("upstream address");
+        let location_header = redirect_location.clone();
+        let upstream_server = tokio::spawn(async move {
+            axum::serve(
+                upstream_listener,
+                Router::new().route(
+                    &format!("/{SECRET_KEY}/gifs/search"),
+                    get(move || {
+                        let location = location_header.clone();
+                        async move {
+                            (
+                                StatusCode::FOUND,
+                                [(header::LOCATION, location)],
+                                "provider body naming the secret-key",
+                            )
+                        }
+                    }),
+                ),
+            )
+            .await
+            .expect("serve fake upstream");
+        });
+
+        let response = build_provider_http_client()
+            .get(format!("http://{upstream_addr}/{SECRET_KEY}/gifs/search"))
+            .send()
+            .await
+            .expect("request completes without following the redirect");
+
+        // The redirect was not followed: the client surfaces the 3xx itself.
+        assert!(response.status().is_redirection());
+        assert!(!response.status().is_success());
+        assert_eq!(redirect_hits.load(Ordering::SeqCst), 0);
+
+        // The GIF handlers' reject path (both gate on `!is_success`) returns a
+        // static generic error carrying no key and no redirect target.
+        let (status, body) = api_error(
+            StatusCode::BAD_GATEWAY,
+            "GIF provider rejected the search request",
+        );
+        let serialized = serde_json::to_string(&body.0).expect("serialize generic error");
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert!(!serialized.contains(SECRET_KEY));
+        assert!(!serialized.contains(&redirect_location));
+
+        upstream_server.abort();
+        redirect_server.abort();
+        let _ = upstream_server.await;
+        let _ = redirect_server.await;
     }
 }
 

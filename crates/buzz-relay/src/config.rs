@@ -1,7 +1,7 @@
 //! Relay configuration from environment variables.
 
 use std::time::Duration;
-use std::{collections::HashMap, net::SocketAddr};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -105,6 +105,113 @@ impl std::fmt::Debug for KlipyConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("KlipyConfig")
             .field("api_key", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// Default upstream for relay-proxied speech-to-text.
+pub const DEFAULT_TRANSCRIPTION_BASE_URL: &str = "https://api.openai.com/v1";
+
+/// Default speech-to-text model sent to the upstream.
+pub const DEFAULT_TRANSCRIPTION_MODEL: &str = "gpt-4o-transcribe";
+
+/// Upstream transcription calls one relay process runs at once. Each holds a
+/// clip in memory and an outbound connection until its upstream call ends.
+pub(crate) const TRANSCRIPTION_MAX_IN_FLIGHT: usize = 8;
+
+/// Optional speech-to-text integration owned by the relay operator.
+///
+/// The relay forwards member audio to an OpenAI-compatible
+/// `audio/transcriptions` endpoint under the configured base URL. The API key
+/// stays private and [`Debug`] redacts it so dumping [`Config`] cannot
+/// disclose it.
+#[derive(Clone)]
+pub struct TranscriptionConfig {
+    api_key: String,
+    endpoint: url::Url,
+    model: String,
+    /// The [`TRANSCRIPTION_MAX_IN_FLIGHT`] upstream slots, shared by every
+    /// clone, so a rebuilt router keeps the same bound.
+    upstream_slots: Arc<tokio::sync::Semaphore>,
+}
+
+impl TranscriptionConfig {
+    /// Builds the integration from raw operator values. An unset or blank key
+    /// turns the feature off; the base URL and model are only read when a key
+    /// is present. A base URL that is not an `http(s)` URL is a startup error.
+    pub fn from_values(
+        api_key: Option<&str>,
+        base_url: Option<&str>,
+        model: Option<&str>,
+    ) -> Result<Option<Self>, ConfigError> {
+        let Some(api_key) = api_key.map(str::trim).filter(|key| !key.is_empty()) else {
+            return Ok(None);
+        };
+        let raw_base = base_url
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(DEFAULT_TRANSCRIPTION_BASE_URL);
+        let invalid = || {
+            ConfigError::InvalidValue("BUZZ_TRANSCRIPTION_BASE_URL must be an http(s) URL".into())
+        };
+        let mut base_url = url::Url::parse(raw_base).map_err(|_| invalid())?;
+        if !matches!(base_url.scheme(), "http" | "https") {
+            return Err(invalid());
+        }
+        if !base_url.path().ends_with('/') {
+            let path = format!("{}/", base_url.path());
+            base_url.set_path(&path);
+        }
+        let endpoint = base_url
+            .join("audio/transcriptions")
+            .map_err(|_| invalid())?;
+        let model = model
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(DEFAULT_TRANSCRIPTION_MODEL)
+            .to_string();
+        // The model is written into a multipart field; refuse anything that
+        // could break out of it.
+        if !model.chars().all(|c| c.is_ascii_graphic()) {
+            return Err(ConfigError::InvalidValue(
+                "BUZZ_TRANSCRIPTION_MODEL must be printable ASCII without spaces".to_string(),
+            ));
+        }
+        Ok(Some(Self {
+            api_key: api_key.to_string(),
+            endpoint,
+            model,
+            upstream_slots: Arc::new(tokio::sync::Semaphore::new(TRANSCRIPTION_MAX_IN_FLIGHT)),
+        }))
+    }
+
+    /// Return the key only to the outbound transcription client.
+    pub(crate) fn api_key(&self) -> &str {
+        &self.api_key
+    }
+
+    /// The upstream `audio/transcriptions` endpoint under the base URL.
+    pub(crate) fn endpoint(&self) -> &url::Url {
+        &self.endpoint
+    }
+
+    /// Model name sent with each upstream request.
+    pub(crate) fn model(&self) -> &str {
+        &self.model
+    }
+
+    /// The in-flight upstream slots; a request that finds none is refused.
+    pub(crate) fn upstream_slots(&self) -> &tokio::sync::Semaphore {
+        &self.upstream_slots
+    }
+}
+
+impl std::fmt::Debug for TranscriptionConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TranscriptionConfig")
+            .field("api_key", &"[REDACTED]")
+            .field("endpoint", &self.endpoint.as_str())
+            .field("model", &self.model)
             .finish()
     }
 }
@@ -323,6 +430,10 @@ pub struct Config {
     /// and its proxy routes return 404.
     pub klipy: Option<KlipyConfig>,
 
+    /// Relay-owned speech-to-text integration. Unset means transcription is
+    /// not advertised and its proxy route returns 404.
+    pub transcription: Option<TranscriptionConfig>,
+
     /// Media storage configuration (S3/MinIO).
     pub media: buzz_media::MediaConfig,
     /// Channel media authorization rollout: off, shadow, or enforce.
@@ -505,6 +616,10 @@ fn rate_limit_config_from_env() -> Result<buzz_auth::RateLimitConfig, ConfigErro
         gif_searches_per_min: positive_u64_from_env(
             "BUZZ_RATE_LIMIT_GIF_SEARCHES_PER_MIN",
             defaults.gif_searches_per_min,
+        )?,
+        transcriptions_per_min: positive_u64_from_env(
+            "BUZZ_RATE_LIMIT_TRANSCRIPTIONS_PER_MIN",
+            defaults.transcriptions_per_min,
         )?,
         human_api_calls_per_min: positive_u64_from_env(
             "BUZZ_RATE_LIMIT_HUMAN_API_CALLS_PER_MIN",
@@ -903,6 +1018,13 @@ impl Config {
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
             .map(|api_key| KlipyConfig { api_key });
+
+        let optional_env = |name: &str| std::env::var(name).ok();
+        let transcription = TranscriptionConfig::from_values(
+            optional_env("BUZZ_TRANSCRIPTION_API_KEY").as_deref(),
+            optional_env("BUZZ_TRANSCRIPTION_BASE_URL").as_deref(),
+            optional_env("BUZZ_TRANSCRIPTION_MODEL").as_deref(),
+        )?;
 
         // Note: intentionally not prefixed with BUZZ_ — this is a relay-identity
         // config that may be shared across multiple services (e.g., ACP agent).
@@ -1570,6 +1692,7 @@ impl Config {
             storage_usage_delivery_url,
             allow_nip_oa_auth,
             klipy,
+            transcription,
             media,
             media_read_mode,
             media_max_concurrent_uploads,
@@ -1645,6 +1768,52 @@ mod tests {
         let debug = format!("{config:?}");
         assert!(debug.contains("[REDACTED]"));
         assert!(!debug.contains("private-klipy-key"));
+    }
+
+    #[test]
+    fn transcription_config_parses_operator_values() {
+        let parse = |key, base, model| {
+            TranscriptionConfig::from_values(key, base, model).map(|config| {
+                config.map(|config| {
+                    let debug = format!("{config:?}");
+                    assert!(debug.contains("[REDACTED]") && !debug.contains("sk-private"));
+                    assert_eq!(config.api_key(), "sk-private");
+                    (config.endpoint().to_string(), config.model().to_string())
+                })
+            })
+        };
+        let on = |endpoint: &str, model: &str| Some((endpoint.to_string(), model.to_string()));
+        for (key, base, model, expected) in [
+            (None, Some("not a url"), None, Some(None)),
+            (Some("  "), None, None, Some(None)),
+            (
+                Some(" sk-private "),
+                None,
+                None,
+                Some(on(
+                    "https://api.openai.com/v1/audio/transcriptions",
+                    DEFAULT_TRANSCRIPTION_MODEL,
+                )),
+            ),
+            (
+                Some("sk-private"),
+                Some("http://127.0.0.1:9000/v1"),
+                Some("whisper-1"),
+                Some(on(
+                    "http://127.0.0.1:9000/v1/audio/transcriptions",
+                    "whisper-1",
+                )),
+            ),
+            (Some("sk-private"), Some("api.openai.com/v1"), None, None),
+            (Some("sk-private"), Some("ftp://example.org/v1"), None, None),
+            (Some("sk-private"), None, Some("model\r\nx"), None),
+        ] {
+            assert_eq!(
+                parse(key, base, model).ok(),
+                expected,
+                "{key:?} {base:?} {model:?}"
+            );
+        }
     }
 
     // Mutex to serialize tests that mutate environment variables.
@@ -2760,6 +2929,7 @@ mod tests {
         let _guards = env_guards();
         std::env::set_var("BUZZ_RATE_LIMIT_HUMAN_MESSAGES_PER_MIN", "1001");
         std::env::set_var("BUZZ_RATE_LIMIT_GIF_SEARCHES_PER_MIN", "1004");
+        std::env::set_var("BUZZ_RATE_LIMIT_TRANSCRIPTIONS_PER_MIN", "1005");
         std::env::set_var("BUZZ_RATE_LIMIT_HUMAN_API_CALLS_PER_MIN", "1002");
         std::env::set_var("BUZZ_RATE_LIMIT_HUMAN_WS_EVENTS_PER_SEC", "1003");
 
@@ -2767,10 +2937,12 @@ mod tests {
 
         std::env::remove_var("BUZZ_RATE_LIMIT_HUMAN_MESSAGES_PER_MIN");
         std::env::remove_var("BUZZ_RATE_LIMIT_GIF_SEARCHES_PER_MIN");
+        std::env::remove_var("BUZZ_RATE_LIMIT_TRANSCRIPTIONS_PER_MIN");
         std::env::remove_var("BUZZ_RATE_LIMIT_HUMAN_API_CALLS_PER_MIN");
         std::env::remove_var("BUZZ_RATE_LIMIT_HUMAN_WS_EVENTS_PER_SEC");
         assert_eq!(config.auth.rate_limits.human_messages_per_min, 1001);
         assert_eq!(config.auth.rate_limits.gif_searches_per_min, 1004);
+        assert_eq!(config.auth.rate_limits.transcriptions_per_min, 1005);
         assert_eq!(config.auth.rate_limits.human_api_calls_per_min, 1002);
         assert_eq!(config.auth.rate_limits.human_ws_events_per_sec, 1003);
     }

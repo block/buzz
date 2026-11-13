@@ -81,6 +81,10 @@ pub struct RelayInfo {
     /// provider-agnostic; provider credentials remain server-side.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gif: Option<GifDescriptor>,
+    /// Relay-owned speech-to-text integration. Public and provider-agnostic;
+    /// the provider credential, URL and model remain server-side.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transcription: Option<TranscriptionDescriptor>,
     /// Relay's own signing pubkey (NIP-11 `self` field, NIP-43).
     #[serde(rename = "self", skip_serializing_if = "Option::is_none")]
     pub relay_self: Option<String>,
@@ -120,6 +124,13 @@ pub struct GifDescriptor {
     pub search: String,
     /// Relay-relative authenticated share-reporting endpoint.
     pub share: String,
+}
+
+/// Public capability descriptor for relay-proxied speech-to-text.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TranscriptionDescriptor {
+    /// Relay-relative authenticated transcription endpoint.
+    pub path: String,
 }
 
 /// Protocol and resource limits advertised in the NIP-11 document.
@@ -201,6 +212,9 @@ pub(crate) struct RelayCapabilityFlags {
     pub advertise_nip43: bool,
     /// Whether NIP-FI (federated identity) is advertised.
     pub advertise_fi: bool,
+    /// Whether relay-proxied transcription is configured: advertises the
+    /// `buzz-transcription` extension and its path-only descriptor.
+    pub advertise_transcription: bool,
 }
 
 impl RelayInfo {
@@ -243,6 +257,7 @@ impl RelayInfo {
         let RelayCapabilityFlags {
             advertise_nip43,
             advertise_fi,
+            advertise_transcription,
         } = flags;
         debug_assert!(
             !advertise_nip43 || relay_self.is_some(),
@@ -272,6 +287,12 @@ impl RelayInfo {
                 provider: provider.to_string(),
                 search: crate::api::gifs::SEARCH_PATH.to_string(),
                 share: crate::api::gifs::SHARE_PATH.to_string(),
+            }
+        });
+        let transcription = advertise_transcription.then(|| {
+            supported_extensions.push(crate::api::transcriptions::EXTENSION.to_string());
+            TranscriptionDescriptor {
+                path: crate::api::transcriptions::TRANSCRIPTIONS_PATH.to_string(),
             }
         });
 
@@ -326,6 +347,7 @@ impl RelayInfo {
             pairing_relay_url: pairing_relay_url.map(str::to_string),
             admin_api: admin_api.map(str::to_string),
             gif,
+            transcription,
             relay_self: relay_self.map(|s| s.to_string()),
             federated_identity,
             requires_nip_fi: false,
@@ -469,6 +491,7 @@ pub(crate) async fn nip11_document(
         RelayCapabilityFlags {
             advertise_nip43,
             advertise_fi,
+            advertise_transcription: state.config.transcription.is_some(),
         },
         state.config.max_frame_bytes,
         state.config.pairing_relay_url.as_deref(),
@@ -972,6 +995,7 @@ mod tests {
             RelayCapabilityFlags {
                 advertise_nip43: true,
                 advertise_fi: false,
+                advertise_transcription: false,
             },
             DEFAULT_MAX_FRAME_BYTES,
             None,
@@ -994,6 +1018,7 @@ mod tests {
             RelayCapabilityFlags {
                 advertise_nip43: true,
                 advertise_fi: false,
+                advertise_transcription: false,
             },
             DEFAULT_MAX_FRAME_BYTES,
             None,

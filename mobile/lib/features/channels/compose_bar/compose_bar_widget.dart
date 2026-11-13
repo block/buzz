@@ -124,6 +124,20 @@ class ComposeBar extends HookConsumerWidget {
       attachments: attachments,
     );
     final voiceNoteRef = useRef(voiceNote)..value = voiceNote;
+    final isModifyingText = useRef(false);
+    final dictation = _useComposerDictation(
+      context: context,
+      ref: ref,
+      controller: controller,
+      focusNode: focusNode,
+      isModifyingText: isModifyingText,
+      isComposerExpanded: isComposerExpanded,
+      showFormatting: showFormatting,
+      attachmentSurface: attachmentSurface,
+      uploadError: uploadError,
+      attachments: attachments.value,
+      voiceNote: voiceNote,
+    );
     final mentionMap = useRef(<String, MentionCandidate>{});
     final prefillText = useRef<String?>(null);
     _useComposeDraftLifecycle(
@@ -144,7 +158,7 @@ class ComposeBar extends HookConsumerWidget {
       attachmentSurface: attachmentSurface,
       uploadError: uploadError,
       iosAttachmentPopover: iosAttachmentPopover,
-      onDraftIdentityChanged: voiceNote.onDraftIdentityChanged,
+      onDraftIdentityChanged: dictation.onDraftIdentityChanged,
     );
     final clipboardHasImage = useState(false);
     final hasAttachments = attachments.value.isNotEmpty;
@@ -176,6 +190,7 @@ class ComposeBar extends HookConsumerWidget {
       context: context,
       focusNode: focusNode,
       voiceNote: voiceNote,
+      dictation: dictation,
       androidImeFallbackTimer: androidImeFallbackTimer,
       androidImeTransitionStarted: androidImeTransitionStarted,
       collapseComposer: collapseComposer,
@@ -323,7 +338,6 @@ class ComposeBar extends HookConsumerWidget {
 
     // Typing indicator broadcast — throttled to one event per 3 seconds.
     final lastTypingSentMs = useRef(0);
-    final isModifyingText = useRef(false);
     final lastObservedEditingValue = useRef(controller.value);
 
     List<MentionCandidate> memberMentionCandidates() => _typedMemberCandidates(
@@ -563,6 +577,7 @@ class ComposeBar extends HookConsumerWidget {
       final text = controller.text.trim();
       if ((draftMembers != null && preparingAttachments.value > 0) ||
           interactionLocked ||
+          dictation.isTranscribing ||
           (text.isEmpty && !hasAttachments) ||
           isSending.value ||
           uploadingCount.value > 0) {
@@ -912,38 +927,6 @@ class ComposeBar extends HookConsumerWidget {
       );
     }
 
-    // Wrap (or insert) markdown formatting around the current selection.
-    void applyFormat(String prefix, [String? suffix]) {
-      suffix ??= prefix;
-      final text = controller.text;
-      final sel = controller.selection;
-      if (!sel.isValid) return;
-
-      isModifyingText.value = true;
-      try {
-        if (sel.isCollapsed) {
-          final offset = sel.baseOffset;
-          final updated =
-              '${text.substring(0, offset)}$prefix$suffix${text.substring(offset)}';
-          controller.text = updated;
-          controller.selection = TextSelection.collapsed(
-            offset: offset + prefix.length,
-          );
-        } else {
-          final selected = text.substring(sel.start, sel.end);
-          final updated =
-              '${text.substring(0, sel.start)}$prefix$selected$suffix${text.substring(sel.end)}';
-          controller.text = updated;
-          controller.selection = TextSelection.collapsed(
-            offset: sel.start + prefix.length + selected.length + suffix.length,
-          );
-        }
-      } finally {
-        isModifyingText.value = false;
-      }
-      focusNode.requestFocus();
-    }
-
     void chooseAttachment(
       Future<void> Function() choose, {
       String? errorMessage,
@@ -993,7 +976,7 @@ class ComposeBar extends HookConsumerWidget {
                   kind: _PendingAttachmentKind.video,
                 );
               }),
-              onVoiceNote: voiceNote.start,
+              onVoiceNote: dictation.startVoiceNote,
               onFiles: () => chooseAttachment(() {
                 final service = ref.read(mediaUploadServiceProvider);
                 return pickThenQueue(
@@ -1087,7 +1070,7 @@ class ComposeBar extends HookConsumerWidget {
             kind: _PendingAttachmentKind.video,
           );
         }),
-        onVoiceNote: voiceNote.start,
+        onVoiceNote: dictation.startVoiceNote,
         onFiles: () => chooseAttachment(() {
           final service = ref.read(mediaUploadServiceProvider);
           return pickThenQueue(
@@ -1116,7 +1099,9 @@ class ComposeBar extends HookConsumerWidget {
     final hasPendingUploads = uploadingCount.value > 0;
     return _ComposerDockFrame(
       expansionAnimation: composerExpansionController,
-      forceFullWidth: _voiceNoteFullWidth(voiceNote, attachments.value),
+      forceFullWidth:
+          dictation.isCapturing ||
+          _voiceNoteFullWidth(voiceNote, attachments.value),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -1143,7 +1128,8 @@ class ComposeBar extends HookConsumerWidget {
               absorbing: interactionLocked || (draftMembers != null && sending),
               child: _ComposeBarLayout(
                 surfaceKey: sendSurfaceKey,
-                voiceNoteRecorder: voiceNote.recorder,
+                voiceNoteRecorder: voiceNote.recorder ?? dictation.recorder,
+                dictationButton: dictation.button,
                 attachments: attachments.value,
                 onRemoveAttachment: removeAttachment,
                 uploadError: uploadError.value,
@@ -1162,7 +1148,13 @@ class ComposeBar extends HookConsumerWidget {
                 onCloseFormatting: () => showFormatting.value = false,
                 motionDuration: motionDuration,
                 resizeDuration: resizeDuration,
-                onFormat: applyFormat,
+                onFormat: (prefix, [suffix]) => _applyMarkdownFormat(
+                  controller,
+                  focusNode,
+                  isModifyingText,
+                  prefix,
+                  suffix,
+                ),
                 onMention: () {
                   attachmentSurface.value = _AttachmentSurface.closed;
                   triggerMention();
@@ -1185,7 +1177,9 @@ class ComposeBar extends HookConsumerWidget {
                   showFormatting.value = true;
                 },
                 hasPendingUploads: hasPendingUploads,
-                canSend: composerText.trim().isNotEmpty || hasAttachments,
+                canSend:
+                    (composerText.trim().isNotEmpty || hasAttachments) &&
+                    !dictation.isTranscribing,
                 isSending: isSending.value || (draftMembers != null && sending),
                 readOnly:
                     interactionLocked || (draftMembers != null && sending),

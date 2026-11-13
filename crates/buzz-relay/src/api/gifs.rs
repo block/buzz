@@ -17,7 +17,6 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Json, Response},
 };
-use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -25,26 +24,13 @@ use crate::state::AppState;
 
 use buzz_auth::LimitType;
 
-use super::{api_error, bridge, internal_error};
+use super::{api_error, bridge, internal_error, read_capped, CappedReadError};
 
 const KLIPY_API_ROOT: &str = "https://api.klipy.com/api/v1/";
 pub(crate) const SEARCH_PATH: &str = "/gifs/search";
 pub(crate) const SHARE_PATH: &str = "/gifs/share";
 const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_UPSTREAM_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
-
-/// Build the dedicated KLIPY client. Redirects are disabled: the API key rides
-/// in the request path, so following a provider 3xx could replay a key-bearing
-/// URL to an attacker-chosen host. With no redirect policy, a 3xx comes back as
-/// a non-success status that the handlers map to a generic `502`, and the
-/// `Location` target is never read or forwarded.
-pub fn build_gif_http_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .timeout(UPSTREAM_TIMEOUT)
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .expect("static GIF HTTP client configuration")
-}
 
 #[derive(Debug, Deserialize)]
 /// Client-owned search context forwarded to KLIPY by the relay.
@@ -134,66 +120,18 @@ async fn send_upstream(
         })
 }
 
-async fn enforce_search_admission(
-    state: &AppState,
-    tenant: &buzz_core::TenantContext,
-    pubkey: &nostr::PublicKey,
-) -> Result<(), (StatusCode, Json<Value>)> {
-    let limit = state.auth.config().rate_limits.gif_searches_per_min;
-    match crate::admission::check_principal(
-        state.admission_rate_limiter.as_ref(),
-        tenant,
-        pubkey,
-        LimitType::GifSearches,
-        60,
-        limit,
-    )
-    .await
-    {
-        Ok(()) => Ok(()),
-        Err(crate::admission::AdmissionError::Exceeded { reset_in_secs }) => {
-            metrics::counter!("buzz_gif_search_rejections_total", "reason" => "quota").increment(1);
-            Err(api_error(
-                StatusCode::TOO_MANY_REQUESTS,
-                &format!("rate-limited: GIF search quota exceeded; retry in {reset_in_secs}s"),
-            ))
-        }
-        Err(crate::admission::AdmissionError::Unavailable) => Err(api_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "rate-limited: GIF search admission unavailable",
-        )),
-    }
-}
-
 async fn limited_json(response: reqwest::Response) -> Result<Value, (StatusCode, Json<Value>)> {
-    if response
-        .content_length()
-        .is_some_and(|length| length > MAX_UPSTREAM_RESPONSE_BYTES as u64)
-    {
-        return Err(api_error(
-            StatusCode::BAD_GATEWAY,
-            "GIF provider response was too large",
-        ));
-    }
-
-    let mut body = Vec::new();
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|_| {
+    let body = read_capped(response, MAX_UPSTREAM_RESPONSE_BYTES)
+        .await
+        .map_err(|error| {
             api_error(
                 StatusCode::BAD_GATEWAY,
-                "GIF provider response could not be read",
+                match error {
+                    CappedReadError::TooLarge => "GIF provider response was too large",
+                    CappedReadError::Read(_) => "GIF provider response could not be read",
+                },
             )
         })?;
-        if body.len().saturating_add(chunk.len()) > MAX_UPSTREAM_RESPONSE_BYTES {
-            return Err(api_error(
-                StatusCode::BAD_GATEWAY,
-                "GIF provider response was too large",
-            ));
-        }
-        body.extend_from_slice(&chunk);
-    }
-
     serde_json::from_slice(&body).map_err(|_| {
         api_error(
             StatusCode::BAD_GATEWAY,
@@ -251,9 +189,17 @@ async fn search_inner(
     validate_text("customer_id", &request.customer_id, 128, false)
         .map_err(|e| e.into_response())?;
     validate_text("locale", &request.locale, 32, false).map_err(|e| e.into_response())?;
-    enforce_search_admission(&state, &tenant, &pubkey)
-        .await
-        .map_err(|e| e.into_response())?;
+    super::enforce_provider_quota(
+        &state,
+        &tenant,
+        &pubkey,
+        LimitType::GifSearches,
+        state.auth.config().rate_limits.gif_searches_per_min,
+        "GIF search",
+        "buzz_gif_search_rejections_total",
+    )
+    .await
+    .map_err(|e| e.into_response())?;
 
     let endpoint = if request.query.trim().is_empty() {
         "trending"
@@ -271,7 +217,7 @@ async fn search_inner(
     }
     let url =
         klipy_url(config.api_key(), &["gifs", endpoint], &query).map_err(|e| e.into_response())?;
-    let response = send_upstream(state.gif_http_client.get(url))
+    let response = send_upstream(state.provider_http_client.get(url))
         .await
         .map_err(|e| e.into_response())?;
     if !response.status().is_success() {
@@ -331,7 +277,7 @@ async fn share_inner(
         .map_err(|e| e.into_response())?;
 
     let response = send_upstream(
-        klipy_share_request(&state.gif_http_client, config.api_key(), &request)
+        klipy_share_request(&state.provider_http_client, config.api_key(), &request)
             .map_err(|e| e.into_response())?,
     )
     .await
@@ -520,97 +466,5 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_GATEWAY);
         let serialized = serde_json::to_string(&body.0).expect("serialize generic error");
         assert!(!serialized.contains("secret-key"));
-    }
-
-    /// A provider 3xx must never cause a second connection, and the error
-    /// surfaced past the shared send/reject path must leak neither the API key
-    /// (carried in the request path) nor the redirect target.
-    ///
-    /// Mutation check: swapping `build_gif_http_client`'s redirect policy back
-    /// to the default makes the client follow the 302, the redirect listener
-    /// records a request, and this test fails on the `redirect_hits` assertion.
-    #[tokio::test]
-    async fn gif_client_refuses_provider_redirects_without_leaking_secrets() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
-        const SECRET_KEY: &str = "super-secret-klipy-key";
-
-        // Second listener: the redirect target. It must never be reached.
-        let redirect_hits = Arc::new(AtomicUsize::new(0));
-        let redirect_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind redirect target");
-        let redirect_addr = redirect_listener.local_addr().expect("redirect address");
-        let redirect_hits_server = redirect_hits.clone();
-        let redirect_server = tokio::spawn(async move {
-            axum::serve(
-                redirect_listener,
-                Router::new().route(
-                    "/leaked",
-                    get(move || {
-                        redirect_hits_server.fetch_add(1, Ordering::SeqCst);
-                        async { "reached the redirect target" }
-                    }),
-                ),
-            )
-            .await
-            .expect("serve redirect target");
-        });
-
-        // Fake upstream: answers the key-bearing path with a 302 whose Location
-        // points at the second listener, exactly the disclosure vector.
-        let redirect_location = format!("http://{redirect_addr}/leaked");
-        let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind fake upstream");
-        let upstream_addr = upstream_listener.local_addr().expect("upstream address");
-        let location_header = redirect_location.clone();
-        let upstream_server = tokio::spawn(async move {
-            axum::serve(
-                upstream_listener,
-                Router::new().route(
-                    &format!("/{SECRET_KEY}/gifs/search"),
-                    get(move || {
-                        let location = location_header.clone();
-                        async move {
-                            (
-                                StatusCode::FOUND,
-                                [(header::LOCATION, location)],
-                                "provider body naming the secret-key",
-                            )
-                        }
-                    }),
-                ),
-            )
-            .await
-            .expect("serve fake upstream");
-        });
-
-        let client = build_gif_http_client();
-        let response =
-            send_upstream(client.get(format!("http://{upstream_addr}/{SECRET_KEY}/gifs/search")))
-                .await
-                .expect("request completes without following the redirect");
-
-        // The redirect was not followed: the client surfaces the 3xx itself.
-        assert!(response.status().is_redirection());
-        assert!(!response.status().is_success());
-        assert_eq!(redirect_hits.load(Ordering::SeqCst), 0);
-
-        // The shared reject path (both handlers gate on `!is_success`) returns a
-        // static generic error carrying no key and no redirect target.
-        let (status, body) = api_error(
-            StatusCode::BAD_GATEWAY,
-            "GIF provider rejected the search request",
-        );
-        let serialized = serde_json::to_string(&body.0).expect("serialize generic error");
-        assert_eq!(status, StatusCode::BAD_GATEWAY);
-        assert!(!serialized.contains(SECRET_KEY));
-        assert!(!serialized.contains(&redirect_location));
-
-        upstream_server.abort();
-        redirect_server.abort();
-        let _ = upstream_server.await;
-        let _ = redirect_server.await;
     }
 }

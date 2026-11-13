@@ -64,6 +64,12 @@ extension and `gif` descriptor in NIP-11, then receive KLIPY-hosted media URLs.
 See [`docs/gif-search.md`](../../../docs/gif-search.md) for the protocol and
 security boundaries.
 
+To enable relay-proxied dictation, add `BUZZ_TRANSCRIPTION_API_KEY` to that
+Secret. Set the non-secret `BUZZ_TRANSCRIPTION_BASE_URL`,
+`BUZZ_TRANSCRIPTION_MODEL` and `BUZZ_RATE_LIMIT_TRANSCRIPTIONS_PER_MIN` through
+`relay.extraEnv` when the defaults do not fit. See
+[`docs/transcription.md`](../../../docs/transcription.md).
+
 See:
 
 - [`examples/argocd-app.yaml`](examples/argocd-app.yaml) — ArgoCD Application

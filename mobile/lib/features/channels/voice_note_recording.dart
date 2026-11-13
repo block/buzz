@@ -65,6 +65,11 @@ abstract interface class VoiceNoteRecorder {
   Future<void> dispose();
 }
 
+/// The clock the recorder reads for its elapsed time and 5-minute auto-stop.
+final voiceNoteClockProvider = Provider<DateTime Function()>(
+  (ref) => DateTime.now,
+);
+
 /// Provider for creating independently owned voice-note recorders.
 final voiceNoteRecorderFactoryProvider = Provider<VoiceNoteRecorder Function()>(
   (ref) => DeviceVoiceNoteRecorder.new,
@@ -137,16 +142,14 @@ class DeviceVoiceNoteRecorder implements VoiceNoteRecorder {
 
   void _ensureStartupActive(int generation) {
     if (_disposed || _finished || generation != _lifecycleGeneration) {
-      throw StateError('Voice note recording was cancelled.');
+      throw StateError('Recording was cancelled.');
     }
   }
 
   @override
   Future<void> start() {
     if (_startup != null || _nativeStarted || _finished || _disposed) {
-      return Future.error(
-        StateError('Voice note recording cannot be started.'),
-      );
+      return Future.error(StateError('Recording cannot be started.'));
     }
     final generation = ++_lifecycleGeneration;
     final startup = _start(generation);
@@ -160,7 +163,7 @@ class DeviceVoiceNoteRecorder implements VoiceNoteRecorder {
     final hasPermission = await _recorder.hasPermission();
     _ensureStartupActive(generation);
     if (!hasPermission) {
-      throw StateError('Microphone access is required to record a voice note.');
+      throw StateError('Microphone access is required to record.');
     }
     final directory = await _temporaryDirectory();
     _ensureStartupActive(generation);
@@ -201,7 +204,7 @@ class DeviceVoiceNoteRecorder implements VoiceNoteRecorder {
   @override
   Future<VoiceNoteRecording> stop() {
     if (_finished || !_nativeStarted || _nativeEnded) {
-      return Future.error(StateError('Voice note recording is not active.'));
+      return Future.error(StateError('Recording is not active.'));
     }
     _finished = true;
     _lifecycleGeneration += 1;
@@ -220,7 +223,7 @@ class DeviceVoiceNoteRecorder implements VoiceNoteRecorder {
     final recordedPath = await _recorder.stop() ?? _path;
     _nativeEnded = true;
     if (recordedPath == null || recordedPath.isEmpty) {
-      throw StateError('Buzz could not finish the voice note.');
+      throw StateError('Buzz could not finish the recording.');
     }
     final startedAt = _startedAt;
     final duration = startedAt == null

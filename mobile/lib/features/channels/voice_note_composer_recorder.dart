@@ -22,19 +22,26 @@ class _VoiceNoteRouteAware extends RouteAware {
 }
 
 /// Composer control that records, previews levels, and finalizes a voice note.
+///
+/// Dictation reuses it with its own labels; the defaults are the voice note's.
 class VoiceNoteComposerRecorder extends HookConsumerWidget {
   const VoiceNoteComposerRecorder({
     super.key,
     required this.onCancel,
     required this.onRecorded,
+    this.discardTooltip = 'Discard voice note',
+    this.stopTooltip = 'Stop recording',
   });
 
   final VoidCallback onCancel;
   final ValueChanged<VoiceNoteRecording> onRecorded;
+  final String discardTooltip;
+  final String stopTooltip;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final recorder = useMemoized(ref.read(voiceNoteRecorderFactoryProvider));
+    final now = ref.read(voiceNoteClockProvider);
     final samples = useState<List<double>>(const []);
     final sampleSequence = useState(0);
     final elapsed = useState(Duration.zero);
@@ -95,7 +102,7 @@ class VoiceNoteComposerRecorder extends HookConsumerWidget {
         }
       } catch (_) {
         if (context.mounted) {
-          error.value = 'Buzz could not finish the voice note.';
+          error.value = 'Buzz could not finish the recording.';
           isStopping.value = false;
         }
       }
@@ -114,14 +121,14 @@ class VoiceNoteComposerRecorder extends HookConsumerWidget {
       final timer = Timer.periodic(const Duration(milliseconds: 200), (_) {
         final started = startedAt.value;
         if (!active || started == null) return;
-        elapsed.value = DateTime.now().difference(started);
+        elapsed.value = now().difference(started);
         if (elapsed.value >= voiceNoteMaxDuration) unawaited(finish());
       });
       unawaited(() async {
         try {
           await recorder.start();
           if (active) {
-            startedAt.value = DateTime.now();
+            startedAt.value = now();
             isStarted.value = true;
           }
         } on StateError catch (recordingError) {
@@ -150,7 +157,7 @@ class VoiceNoteComposerRecorder extends HookConsumerWidget {
       children: [
         _RecorderButton(
           key: const ValueKey('voice-note-recorder-close'),
-          tooltip: 'Discard voice note',
+          tooltip: discardTooltip,
           icon: BuzzIcons.x,
           foreground: context.colors.onSurfaceVariant,
           background: context.colors.surface,
@@ -224,7 +231,7 @@ class VoiceNoteComposerRecorder extends HookConsumerWidget {
         const SizedBox(width: Grid.half),
         _RecorderButton(
           key: const ValueKey('voice-note-recorder-stop'),
-          tooltip: 'Stop recording',
+          tooltip: stopTooltip,
           icon: BuzzIcons.square,
           foreground: Colors.white,
           background: context.colors.error,

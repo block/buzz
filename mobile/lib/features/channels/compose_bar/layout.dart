@@ -3,6 +3,7 @@ part of '../compose_bar.dart';
 class _ComposeBarLayout extends HookWidget {
   final GlobalKey surfaceKey;
   final Widget? voiceNoteRecorder;
+  final Widget? dictationButton;
   final List<_PendingAttachment> attachments;
   final ValueChanged<int> onRemoveAttachment;
   final String? uploadError;
@@ -34,6 +35,7 @@ class _ComposeBarLayout extends HookWidget {
   const _ComposeBarLayout({
     required this.surfaceKey,
     required this.voiceNoteRecorder,
+    required this.dictationButton,
     required this.attachments,
     required this.onRemoveAttachment,
     required this.uploadError,
@@ -174,6 +176,7 @@ class _ComposeBarLayout extends HookWidget {
                 ),
               ),
               const SizedBox(width: Grid.xxs),
+              ?dictationButton,
               _SendButton(
                 isDisabled: !canSend || hasPendingUploads,
                 isSending: isSending,
@@ -232,6 +235,7 @@ class _ComposeBarLayout extends HookWidget {
                                   onTap: onOpenFormatting,
                                 ),
                                 const Spacer(),
+                                if (isExpanded) ?dictationButton,
                                 _SendButton(
                                   isDisabled: !canSend || hasPendingUploads,
                                   isSending: isSending,

@@ -32,6 +32,8 @@ import 'package:buzz/shared/custom_emoji/custom_emoji_provider.dart';
 import 'package:buzz/shared/agents/owned_agent_directory.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
+import 'package:buzz/shared/relay/transcription.dart';
+import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
 import 'package:buzz/features/activity/compose_drafts_provider.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
@@ -47,6 +49,7 @@ part 'compose_bar_test/mixed_gallery_tests.dart';
 part 'compose_bar_test/solo_draft_tests.dart';
 part 'compose_bar_test/durable_mention_tests.dart';
 part 'compose_bar_test/agent_prefill_tests.dart';
+part 'compose_bar_test/dictation_tests.dart';
 
 final _pngBytes = Uint8List.fromList([
   0x89,
@@ -215,14 +218,25 @@ Widget _buildComposeBar({
   String composeBarKey = 'compose-bar',
   String? threadHeadId,
   VoiceNoteRecorder Function()? voiceNoteRecorderFactory,
+  DateTime Function()? voiceNoteClock,
   VoiceNotePlayerController Function()? voiceNotePlayerFactory,
   Future<List<UserProfile>> Function(String query)? searchPeople,
   List<OwnedAgentDirectoryEntry>? ownedAgents,
   bool ownedAgentsUnknown = false,
   List<TimelineMessage>? prefillScopeMessages,
+  TranscriptionCapability? transcription,
+  http.Client Function()? relayHttpClientFactory,
 }) {
   return ProviderScope(
     overrides: [
+      // Dictation stays hidden unless a test advertises it.
+      transcriptionCapabilityProvider.overrideWith(
+        (ref) async => transcription,
+      ),
+      if (relayHttpClientFactory != null)
+        hostedHttpClientFactoryProvider.overrideWithValue(
+          relayHttpClientFactory,
+        ),
       if (ownedAgents != null)
         ownedAgentDirectoryProvider.overrideWith((ref) async => ownedAgents),
       if (ownedAgentsUnknown)
@@ -244,6 +258,8 @@ Widget _buildComposeBar({
         voiceNoteRecorderFactoryProvider.overrideWithValue(
           voiceNoteRecorderFactory,
         ),
+      if (voiceNoteClock != null)
+        voiceNoteClockProvider.overrideWithValue(voiceNoteClock),
       if (voiceNotePlayerFactory != null)
         voiceNotePlayerFactoryProvider.overrideWithValue(
           voiceNotePlayerFactory,
@@ -744,6 +760,7 @@ void main() {
   exactMentionTests();
   durableMentionTests();
   agentPrefillTests();
+  dictationTests();
   TestWidgetsFlutterBinding.ensureInitialized();
 
   setUp(() async {

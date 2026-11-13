@@ -7793,6 +7793,13 @@ pub(crate) mod postgres_tests {
         let config = Arc::make_mut(&mut state.config);
         config.require_relay_membership = true;
         config.buzz_v1_enabled = true;
+        // Unconfigured, the transcription route is not mounted at all.
+        config.transcription = crate::config::TranscriptionConfig::from_values(
+            Some("test-transcription-key"),
+            None,
+            None,
+        )
+        .expect("transcription config");
         state.nip_fi_verifier = Some(Arc::new(handler_test_verifier()));
         let state = Arc::new(state);
 
@@ -7904,6 +7911,12 @@ pub(crate) mod postgres_tests {
                     crate::api::profiles::SEARCH_PATH.into(),
                     Some(crate::api::profiles::SEARCH_PATH.into()),
                     br#"{"query":"a"}"#.to_vec(),
+                ),
+                (
+                    "POST",
+                    crate::api::transcriptions::TRANSCRIPTIONS_PATH.into(),
+                    Some(crate::api::transcriptions::TRANSCRIPTIONS_PATH.into()),
+                    b"audio".to_vec(),
                 ),
                 (
                     "GET",
