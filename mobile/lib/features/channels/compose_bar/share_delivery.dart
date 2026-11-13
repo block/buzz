@@ -65,6 +65,14 @@ Future<void> _deliverShare(
   } finally {
     unawaited(deletePendingShare(share.id));
   }
+  final text = share.composerText;
+  if (text.isEmpty && files.isEmpty) {
+    // Nothing survived, so the draft stays as it was.
+    if (context.mounted && filesFailed) {
+      uploadError.value = 'Couldn’t add the shared files.';
+    }
+    return;
+  }
   final hasDraft =
       controller.text.trim().isNotEmpty || attachments.value.isNotEmpty;
   final replace =
@@ -82,7 +90,6 @@ Future<void> _deliverShare(
     unawaited(_deleteOwnedAttachments(removed));
     controller.clear();
   }
-  final text = share.composerText;
   if (text.isNotEmpty) {
     final existing = controller.text.trimRight();
     controller.value = TextEditingValue(

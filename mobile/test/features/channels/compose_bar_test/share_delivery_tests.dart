@@ -109,5 +109,21 @@ void shareDeliveryTests() {
     expect(draftText(), 'Still here');
     expect(find.text('Couldn’t add the shared files.'), findsOneWidget);
     expect(find.byTooltip('Remove attachment'), findsNothing);
+
+    // A share with nothing left to add leaves the draft alone, unasked.
+    const empty = '44444444-4444-4444-8444-444444444444';
+    Directory('${shares.path}/$empty').createSync();
+    await deliver(
+      PendingShare(
+        id: empty,
+        target: null,
+        text: const [],
+        files: ['${shares.path}/$empty/missing.png'],
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Add to your draft?'), findsNothing);
+    expect(draftText(), 'Still here');
+    expect(find.text('Couldn’t add the shared files.'), findsOneWidget);
   });
 }
