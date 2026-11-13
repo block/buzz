@@ -553,24 +553,16 @@ async fn deliver_one(
             return;
         }
     };
-    let serving_write = match buzz_deletion::acquire_serving_write(
-        &state.db,
-        outcome.community,
-        "push_delivery",
-    )
-    .await
-    {
-        Ok(guard) => guard,
-        Err(error) => {
-            warn!(wake=%outcome.id, %error, "push delivery suppressed by community deletion fence");
-            let _ = state
-                .db
-                .fail_push_wake(outcome.community, outcome.id, outcome.claim_id)
-                .await;
-            record_delivery("suppressed");
-            return;
-        }
-    };
+    let serving_write =
+        match buzz_deletion::acquire_serving_write(&state.db, outcome.community, "push_delivery")
+            .await
+        {
+            Ok(guard) => guard,
+            Err(error) => {
+                record_delivery(serving_write_failed(state, &outcome, &error).await);
+                return;
+            }
+        };
     let Some(url) = state.config.push_gateway_delivery_url.as_ref() else {
         record_delivery("configuration_error");
         return;
@@ -756,6 +748,26 @@ fn class_rank(_: &str) -> u8 {
     1
 }
 
+/// Settle a wake whose serving-write lease acquisition failed. A deletion
+/// fence is terminal; anything else (e.g. a pool timeout) backs off like a
+/// gateway retry, so sustained pool pressure cannot keep every wake cycling.
+async fn serving_write_failed(
+    state: &AppState,
+    wake: &buzz_db::push::ClaimedWake,
+    error: &anyhow::Error,
+) -> &'static str {
+    if buzz_deletion::ServingWriteGuard::acquisition_is_fenced(error) {
+        warn!(wake=%wake.id, %error, "push delivery suppressed by community deletion fence");
+        let _ = state
+            .db
+            .fail_push_wake(wake.community, wake.id, wake.claim_id)
+            .await;
+        return "suppressed";
+    }
+    warn!(wake=%wake.id, %error, "push serving-write acquisition failed; retrying");
+    retry_or_fail(state, wake, 2).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -770,6 +782,47 @@ mod tests {
     use serde_json::Value;
     use std::{future::IntoFuture, sync::Arc};
     use tokio::sync::Mutex;
+
+    /// A fenced acquisition fails the wake; any other error retries with the
+    /// gateway backoff and stops at `MAX_ATTEMPTS` instead of cycling until
+    /// the wake expires. The unreachable database makes the settle writes
+    /// best-effort no-ops, so the returned outcome is the decision.
+    #[tokio::test]
+    async fn serving_write_failure_retries_with_a_bound_unless_fenced() {
+        let state = crate::state::tests::test_state_with_unreachable_database_url(
+            "postgres://buzz@127.0.0.1:1/buzz",
+        )
+        .await;
+        let wake = |attempt| buzz_db::push::ClaimedWake {
+            community: buzz_core::CommunityId::from_uuid(uuid::Uuid::from_u128(1)),
+            id: uuid::Uuid::from_u128(2),
+            claim_id: uuid::Uuid::from_u128(3),
+            event_id: vec![4; 32],
+            channel_id: None,
+            author: vec![5; 32],
+            installation_id: "install".to_owned(),
+            lease_generation: 1,
+            endpoint_grant: "grant".to_owned(),
+            class: "default".to_owned(),
+            expires_at: i64::MAX,
+            queued_at: Utc::now(),
+            attempt,
+        };
+        let fenced = anyhow::Error::new(buzz_db::DbError::AccessDenied("write-fenced".into()));
+        let timeout = anyhow::anyhow!("pool timed out while waiting for an open connection");
+        for (attempt, error, outcome) in [
+            (1, &fenced, "suppressed"),
+            (1, &timeout, "retry"),
+            (MAX_ATTEMPTS - 1, &timeout, "retry"),
+            (MAX_ATTEMPTS, &timeout, "exhausted"),
+        ] {
+            assert_eq!(
+                serving_write_failed(&state, &wake(attempt), error).await,
+                outcome,
+                "attempt {attempt}: {error}"
+            );
+        }
+    }
 
     #[test]
     fn gift_wrap_match_requires_self_p_filter_and_recipient() {
