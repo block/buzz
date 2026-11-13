@@ -301,10 +301,9 @@ fn media_url_from_input(relay_url: &str, input: &str) -> Result<String, CliError
             "media input must be sha256, sha256.ext, or sha256.thumb.{webp,jpg}".to_string(),
         ));
     }
-    Ok(format!(
-        "{}/media/{sha256_ext}",
-        relay_url.trim_end_matches('/')
-    ))
+    buzz_core::relay::relay_http_endpoint(relay_url, &format!("/media/{sha256_ext}"))
+        .map(String::from)
+        .map_err(|e| CliError::Usage(format!("invalid relay URL: {e}")))
 }
 
 /// Blossom (BUD-01) `t=get` proof for `media_url`, scoped to its server.
@@ -546,7 +545,17 @@ fn sensitive(value: String) -> Result<reqwest::header::HeaderValue, CliError> {
     Ok(value)
 }
 
+#[cfg(test)]
+#[path = "client/endpoint_tests.rs"]
+mod endpoint_tests;
+
 impl BuzzClient {
+    fn endpoint_url(&self, path: &str) -> Result<String, CliError> {
+        buzz_core::relay::relay_http_endpoint(&self.relay_url, path)
+            .map(String::from)
+            .map_err(|e| CliError::Usage(format!("invalid relay URL: {e}")))
+    }
+
     /// Create a new client pointing at `relay_url`.
     ///
     /// Timeout defaults are tuned for degraded WAN links and can be overridden
@@ -957,7 +966,7 @@ impl BuzzClient {
     /// `x-auth-tag` header — the endpoint is public relay metadata, not a
     /// membership-scoped resource.
     pub async fn get_public(&self, path: &str) -> Result<String, CliError> {
-        let url = format!("{}{path}", self.relay_url);
+        let url = self.endpoint_url(path)?;
         let resp = self
             .http
             .get(&url)
@@ -977,7 +986,7 @@ impl BuzzClient {
     /// Execute a one-shot query with multiple filters via the HTTP bridge.
     /// Each filter is ORed by the relay (standard Nostr REQ behavior).
     pub async fn query_multi(&self, filters: &[serde_json::Value]) -> Result<String, CliError> {
-        let url = format!("{}/query", self.relay_url);
+        let url = self.endpoint_url("/query")?;
         let body = bytes::Bytes::from(
             serde_json::to_vec(filters)
                 .map_err(|e| CliError::Other(format!("filter serialization failed: {e}")))?,
@@ -1006,7 +1015,7 @@ impl BuzzClient {
     /// Returns the count as a JSON string.
     #[allow(dead_code)]
     pub async fn count(&self, filter: &serde_json::Value) -> Result<String, CliError> {
-        let url = format!("{}/count", self.relay_url);
+        let url = self.endpoint_url("/count")?;
         let body = bytes::Bytes::from(
             serde_json::to_vec(&[filter])
                 .map_err(|e| CliError::Other(format!("filter serialization failed: {e}")))?,
@@ -1038,7 +1047,7 @@ impl BuzzClient {
     /// read commands, which read structured queue/audit rows rather than
     /// stored events.
     pub async fn get_authed(&self, path: &str) -> Result<String, CliError> {
-        let url = format!("{}{path}", self.relay_url);
+        let url = self.endpoint_url(path)?;
         self.with_retry_body(|| {
             let url = url.clone();
             async move {
@@ -1069,7 +1078,7 @@ impl BuzzClient {
         path: &str,
         body: &serde_json::Value,
     ) -> Result<String, CliError> {
-        let url = format!("{}{path}", self.relay_url);
+        let url = self.endpoint_url(path)?;
         let body_bytes = bytes::Bytes::from(
             serde_json::to_vec(body)
                 .map_err(|e| CliError::Other(format!("request serialization failed: {e}")))?,
@@ -1106,7 +1115,7 @@ impl BuzzClient {
         path: &str,
         body: &serde_json::Value,
     ) -> Result<String, CliError> {
-        let url = format!("{}{path}", self.relay_url);
+        let url = self.endpoint_url(path)?;
         let body = serde_json::to_vec(body).map_err(|e| CliError::Other(e.to_string()))?;
         let unknown = |detail: String| CliError::DeliveryUnknown(detail);
         let http = reqwest::Client::builder()
@@ -1166,7 +1175,7 @@ impl BuzzClient {
 
     /// Submit a moderation command (kinds 9040–9044) with non-idempotent retry policy.
     async fn submit_moderation_event(&self, event: nostr::Event) -> Result<String, CliError> {
-        let url = format!("{}/events", self.relay_url);
+        let url = self.endpoint_url("/events")?;
         let body = bytes::Bytes::from(
             serde_json::to_vec(&event)
                 .map_err(|e| CliError::Other(format!("event serialization failed: {e}")))?,
@@ -1297,7 +1306,7 @@ impl BuzzClient {
     /// Content-addressed uploads are exempt: same bytes ⇒ same hash, so outer
     /// re-run is safe regardless of the failure kind.
     async fn submit_stored_event(&self, event: nostr::Event) -> Result<String, CliError> {
-        let url = format!("{}/events", self.relay_url);
+        let url = self.endpoint_url("/events")?;
         let body = bytes::Bytes::from(
             serde_json::to_vec(&event)
                 .map_err(|e| CliError::Other(format!("event serialization failed: {e}")))?,
@@ -1487,7 +1496,7 @@ impl BuzzClient {
         } else {
             Duration::from_secs(120)
         };
-        let url = format!("{}/upload", self.relay_url);
+        let url = self.endpoint_url("/upload")?;
         let upload_body = bytes::Bytes::from(bytes);
 
         // The full upload operation — network send AND response body read — lives inside
@@ -1538,7 +1547,7 @@ impl BuzzClient {
             Err(e) => return Err(e),
         }
 
-        let legacy_url = format!("{}/media/upload", self.relay_url);
+        let legacy_url = self.endpoint_url("/media/upload")?;
         self.with_retry_body(|| {
             let upload_body = upload_body.clone();
             let legacy_url = legacy_url.clone();
@@ -1607,20 +1616,68 @@ impl BuzzClient {
     }
 }
 
-/// Normalize a relay URL: ws:// → http://, wss:// → https://, strip trailing slash.
+/// Normalize a relay URL: ws:// → http:// and wss:// → https://.
 /// BUZZ_RELAY_URL may be ws/wss (copied from MCP config).
 pub fn normalize_relay_url(url: &str) -> String {
-    url.replace("wss://", "https://")
-        .replace("ws://", "http://")
-        .trim_end_matches('/')
-        .to_string()
+    let mut parsed = match url::Url::parse(url.trim()) {
+        Ok(parsed) => parsed,
+        Err(_) => return url.trim().to_string(),
+    };
+    let scheme = match parsed.scheme() {
+        "wss" => "https".to_owned(),
+        "ws" => "http".to_owned(),
+        scheme => scheme.to_owned(),
+    };
+    let _ = parsed.set_scheme(&scheme);
+    let had_root_path = parsed.path() == "/";
+    if had_root_path {
+        parsed.set_path("");
+    } else if parsed.query().is_none() && parsed.fragment().is_none() {
+        let path = parsed.path().trim_end_matches('/').to_owned();
+        parsed.set_path(&path);
+    }
+    serialize_relay_url(parsed, had_root_path)
 }
 
 /// Convert an HTTP(S) relay base URL back to a WebSocket URL for NIP-01 connections.
 fn to_ws_url(http_url: &str) -> String {
-    http_url
-        .replace("https://", "wss://")
-        .replace("http://", "ws://")
+    let mut parsed = match url::Url::parse(http_url.trim()) {
+        Ok(parsed) => parsed,
+        Err(_) => return http_url.trim().to_string(),
+    };
+    let scheme = match parsed.scheme() {
+        "https" => "wss".to_owned(),
+        "http" => "ws".to_owned(),
+        scheme => scheme.to_owned(),
+    };
+    let _ = parsed.set_scheme(&scheme);
+    // NIP-42 must name the configured path, including its trailing slash.
+    // Only remove a root slash that the parser inserted into a pathless URL.
+    let remove_root_slash = parsed.path() == "/"
+        && !http_url
+            .trim()
+            .split(['?', '#'])
+            .next()
+            .is_some_and(|base| base.ends_with('/'));
+    serialize_relay_url(parsed, remove_root_slash)
+}
+
+fn serialize_relay_url(parsed: url::Url, had_root_path: bool) -> String {
+    let mut serialized = parsed.to_string();
+    if !had_root_path {
+        return serialized;
+    }
+    let delimiter = serialized.find(['?', '#']);
+    match delimiter {
+        Some(index) if serialized.as_bytes().get(index.wrapping_sub(1)) == Some(&b'/') => {
+            serialized.remove(index - 1);
+        }
+        None if serialized.ends_with('/') => {
+            serialized.pop();
+        }
+        _ => {}
+    }
+    serialized
 }
 
 /// Normalize raw event JSON array into the canonical Nostr event shape.
@@ -2679,9 +2736,52 @@ mod tests {
 
     use super::{
         advance_query_cursor, create_response_with_id_if_accepted, extract_relay_response_field,
-        normalize_events, BuzzClient, Credentials, Proof,
+        normalize_events, normalize_relay_url, to_ws_url, BuzzClient, Credentials, Proof,
     };
     use nostr::{EventBuilder, Keys, Kind, Tag};
+
+    #[test]
+    fn relay_url_scheme_conversion_preserves_query_bytes() {
+        assert_eq!(
+            normalize_relay_url("wss://relay.example/?next=/"),
+            "https://relay.example?next=/"
+        );
+        assert_eq!(
+            normalize_relay_url("wss://relay.example/?url=wss://other.example/"),
+            "https://relay.example?url=wss://other.example/"
+        );
+        assert_eq!(
+            to_ws_url("https://relay.example/?next=/foo/"),
+            "wss://relay.example/?next=/foo/"
+        );
+        assert_eq!(
+            normalize_relay_url("wss://relay.example/nostr/"),
+            "https://relay.example/nostr"
+        );
+        assert_eq!(
+            normalize_relay_url("wss://relay.example/nostr/?next=/"),
+            "https://relay.example/nostr/?next=/"
+        );
+    }
+
+    #[test]
+    fn websocket_scheme_conversion_preserves_configured_path() {
+        for (input, expected) in [
+            ("https://relay.example", "wss://relay.example"),
+            ("https://relay.example/", "wss://relay.example/"),
+            ("https://relay.example/team/", "wss://relay.example/team/"),
+            (
+                "https://relay.example/team/?next=/",
+                "wss://relay.example/team/?next=/",
+            ),
+            (
+                "http://relay.example?url=https://other/",
+                "ws://relay.example?url=https://other/",
+            ),
+        ] {
+            assert_eq!(to_ws_url(input), expected);
+        }
+    }
 
     #[test]
     fn normalize_events_preserves_the_complete_signed_event_shape() {
