@@ -101,6 +101,7 @@ export default defineConfig({
         "**/sidebar-snapshot.spec.ts",
         "**/home-collapsed-top-chrome.spec.ts",
         "**/top-chrome-zoom-clearance.spec.ts",
+        "**/deprecation-banner.spec.ts",
         "**/thread-unread.spec.ts",
         "**/thread-load-failure.spec.ts",
         "**/project-conversation-load-failure.spec.ts",
