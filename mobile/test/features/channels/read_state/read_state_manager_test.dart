@@ -931,6 +931,36 @@ void main() {
     },
   );
 
+  test('the live subscription asks only for new events', () async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final keychain = nostr.Keys.generate();
+    final crypto = ReadStateCrypto.tryCreate(
+      nsec: keychain.nsec,
+      pubkey: keychain.public,
+    )!;
+    final relay = _FakeRelaySession();
+    final manager = ReadStateManager(
+      pubkey: keychain.public,
+      relayUrl: _relayUrl,
+      prefs: prefs,
+      crypto: crypto,
+      relaySession: relay,
+      signedEventRelay: _FakeSignedEventRelay(),
+      remoteEnabled: true,
+      onChanged: () {},
+    );
+
+    // The snapshot holds every stored event, so neither the first sync nor a
+    // re-sync replays them on the subscription.
+    await manager.initialize();
+    await manager.reinitializeRemote();
+    expect(relay.subscribeFilters.map((filter) => filter.limit), [0, 0]);
+    expect(relay.fetchCount, 2);
+
+    manager.dispose();
+  });
+
   test('a connect during a failed initialize syncs again', () async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
