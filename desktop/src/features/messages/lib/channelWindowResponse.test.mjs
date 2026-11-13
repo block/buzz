@@ -169,3 +169,26 @@ test("drops malformed or mistargeted live thread summaries", () => {
     null,
   );
 });
+
+test("live thread summary defaults missing participants to []", () => {
+  const rootId = "a".padEnd(64, "0");
+  const push = event(
+    "s",
+    39005,
+    700,
+    JSON.stringify({
+      reply_count: 4,
+      descendant_count: 6,
+      last_reply_at: 650,
+    }),
+    [["e", rootId]],
+  );
+  const parsed = parseLiveThreadSummary(push);
+  assert.equal(parsed.rootId, rootId);
+  assert.deepEqual(parsed.live.summary, {
+    replyCount: 4,
+    descendantCount: 6,
+    lastReplyAt: 650,
+    participantPubkeys: [],
+  });
+});
