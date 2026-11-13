@@ -822,8 +822,13 @@ class ComposeBar extends HookConsumerWidget {
       uploadError.value = null;
       try {
         final picked = await pick();
-        if (picked == null || !context.mounted) return;
-        queueAttachment(picked, kind);
+        if (picked == null) return;
+        final owned = picked is RetainedAttachmentFile;
+        if (!context.mounted) {
+          if (owned) await picked.dispose();
+          return;
+        }
+        queueAttachment(picked, kind, deleteAfterUse: owned);
       } catch (error) {
         if (context.mounted) {
           uploadError.value = _formatUploadError(error);

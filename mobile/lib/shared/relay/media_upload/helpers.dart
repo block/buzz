@@ -1,5 +1,75 @@
 part of '../media_upload.dart';
 
+/// A composer-owned document copy, released when sent or discarded.
+class RetainedAttachmentFile extends XFile {
+  final Directory _directory;
+
+  RetainedAttachmentFile._(super.path, this._directory, String? mimeType)
+    : super(mimeType: mimeType);
+
+  /// Copies a picker result without retaining large recordings in memory.
+  static Future<RetainedAttachmentFile> capture(XFile source) async {
+    final directory = await Directory.systemTemp.createTemp('buzz-attachment-');
+    try {
+      final file = File(
+        '${directory.path}/${_safeAttachmentFilename(source.name)}',
+      );
+      final output = await file.open(mode: FileMode.write);
+      try {
+        await for (final chunk in _attachmentChunks(source)) {
+          await output.writeFrom(chunk);
+        }
+      } finally {
+        await output.close();
+      }
+      return RetainedAttachmentFile._(file.path, directory, source.mimeType);
+    } catch (_) {
+      await directory.delete(recursive: true);
+      rethrow;
+    }
+  }
+
+  /// Removes only this attachment's owned copy, never the picked original.
+  Future<void> dispose() async {
+    try {
+      await _directory.delete(recursive: true);
+    } on PathNotFoundException {
+      // Removal can race composer disposal after a completed send.
+    }
+  }
+}
+
+Future<Uint8List> _readAttachmentBytes(XFile file) async {
+  final builder = BytesBuilder(copy: false);
+  await for (final chunk in _attachmentChunks(file)) {
+    builder.add(chunk);
+  }
+  return builder.takeBytes();
+}
+
+Stream<Uint8List> _attachmentChunks(XFile file) async* {
+  try {
+    final length = await file.length();
+    if (length > _maxFileSizeBytes) {
+      throw Exception('File is too large. Maximum is 100MB.');
+    }
+    var size = 0;
+    // Bound the read too: a provider's file can change after its size check.
+    await for (final chunk in file.openRead()) {
+      size += chunk.length;
+      if (size > _maxFileSizeBytes) {
+        throw Exception('File is too large. Maximum is 100MB.');
+      }
+      yield chunk;
+    }
+    if (size == 0) throw Exception('File is empty.');
+  } on FileSystemException {
+    throw Exception(
+      'This file is no longer available. Save a copy in Files, then attach it again.',
+    );
+  }
+}
+
 bool _startsWith(Uint8List bytes, List<int> prefix) {
   if (bytes.length < prefix.length) return false;
   for (var i = 0; i < prefix.length; i++) {
