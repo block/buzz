@@ -53,3 +53,14 @@ fail-fast = false
 
 [profile.flake.junit]
 path = "junit.xml"
+
+[test-groups.desktop-same-user-check]
+# Most of buzz-cli's `desktop_provider::` tests reach the real same-user
+# check, which runs `lsof` with a 5-second limit. Run all at once on a busy
+# Mac, they starve each other past that limit, so the whole module takes
+# turns; the few that never reach the check run serially too.
+max-threads = 1
+
+[[profile.default.overrides]]
+filter = "package(buzz-cli) and test(/^desktop_provider::/)"
+test-group = "desktop-same-user-check"

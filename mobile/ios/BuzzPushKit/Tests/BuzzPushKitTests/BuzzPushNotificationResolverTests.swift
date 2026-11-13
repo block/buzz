@@ -385,12 +385,14 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
     XCTAssertEqual(result.title, "")
     XCTAssertEqual(result.body, "Hello Buzz")
     XCTAssertNil(result.subtitle)
+    // Grouping keeps the key delivered notifications already use.
     XCTAssertEqual(
       result.threadIdentifier,
-      BuzzPushPresentationIdentity.conversation(
-        communityID: "community-id",
-        channelID: Self.channelID
-      )
+      "buzz.conversation."
+        + VerifiedNostrEvent.hex(
+          SHA256.hash(
+            data: try JSONEncoder().encode(["conversation", "community-id", Self.channelID]))
+        )
     )
     XCTAssertEqual(result.senderPubkey, event.pubkey)
     XCTAssertEqual(

@@ -304,7 +304,7 @@ short sender pubkey, community subtitle, and no image.
 ```bash
 dart format --output=none --set-exit-if-changed .
 flutter analyze
-flutter test --dart-define=BUZZ_PUSH_GATEWAY_URL=https://push.example
+flutter test
 ```
 
 Or from the repo root: `just mobile-check` and `just mobile-test`.

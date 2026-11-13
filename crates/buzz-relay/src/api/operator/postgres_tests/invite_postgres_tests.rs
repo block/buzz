@@ -347,8 +347,8 @@ mod postgres_tests {
 
         // A deletion fence that lands after the host lookup refuses it too.
         let mut holder = state.db.pool().begin().await.expect("begin fence");
-        sqlx::query("SELECT pg_advisory_xact_lock(community_deletion_lock_key($1))")
-            .bind(community.as_uuid())
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(buzz_db::deletion::community_deletion_lock_key(community))
             .execute(&mut *holder)
             .await
             .expect("take deletion lock");

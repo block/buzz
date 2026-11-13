@@ -5512,8 +5512,8 @@ mod postgres_tests {
 
         let mut contender = pool.begin().await.expect("begin deletion contender");
         let exclusive_taken: bool =
-            sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(community_deletion_lock_key($1))")
-                .bind(community.as_uuid())
+            sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0))")
+                .bind(crate::deletion::community_deletion_lock_key(community))
                 .fetch_one(&mut *contender)
                 .await
                 .expect("try exclusive community deletion lock");

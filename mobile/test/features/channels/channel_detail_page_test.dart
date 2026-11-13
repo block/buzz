@@ -16,6 +16,7 @@ import 'package:buzz/features/channels/agent_reply_handoff.dart';
 import 'package:buzz/features/channels/me/me_messages_provider.dart';
 import 'package:buzz/shared/me/me_assistants.dart';
 import 'package:buzz/shared/me/me_sync.dart';
+import 'package:buzz/features/channels/me/me_page.dart';
 import 'package:buzz/shared/me/me_groups.dart';
 import 'package:flutter/semantics.dart';
 import 'package:buzz/features/channels/message_media_avatar.dart';
@@ -122,6 +123,7 @@ part 'channel_detail_page_test/message_width_tests.dart';
 part 'channel_detail_page_test/author_visibility_tests.dart';
 part 'channel_detail_page_test/swipe_reply_tests.dart';
 part 'channel_detail_page_test/review_avatar_tests.dart';
+part 'channel_detail_page_test/archive_navigation_tests.dart';
 
 const _channelId = '11111111-2222-4333-8444-555555555555';
 const _huddleChannelId = '8d764100-fd8f-44cf-9c98-6d8fbd739b8c';
@@ -1367,6 +1369,7 @@ void main() {
   swipeReplyTests();
   swipeReplyLinkTests();
   reviewAvatarTests();
+  archiveNavigationTests();
   setUp(() async {
     SharedPreferences.setMockInitialValues({});
     _testPrefs = await SharedPreferences.getInstance();
@@ -13845,7 +13848,7 @@ void main() {
   });
 
   for (final own in [true, false]) {
-    testWidgets('label-only Solo uses owner-aware sending: $own', (
+    testWidgets('Solo inventory preserves owner-aware sending: $own', (
       tester,
     ) async {
       final ordinary = _RecordingOrdinarySender(),
@@ -13867,8 +13870,9 @@ void main() {
           messages: [],
           channel: channel,
           signingPubkey: 'self',
-          personalChat: own,
-          organization: Stream.value(const MeGroups()),
+          bestie: 'agent',
+          personalChat: true,
+          organization: Stream.value(const MeGroups(channels: [_channelId])),
           sender: ordinary,
           soloSender: solo,
           members: [
@@ -13878,10 +13882,18 @@ void main() {
               joinedAt: DateTime(2026),
             ),
           ],
-          home: ChannelDetailPage(channel: channel),
+          home: own ? ChannelDetailPage(channel: channel) : const MePage(),
         ),
       );
       await tester.pumpAndSettle();
+      if (!own) {
+        await tester.tap(find.text('Labeled Solo'));
+        await tester.pumpAndSettle();
+        expect(
+          find.byKey(const ValueKey('me-chat-settings-button')),
+          findsNothing,
+        );
+      }
       await tester
           .widget<ComposeBar>(find.byType(ComposeBar))
           .onSend('Label message', own ? ['agent'] : []);

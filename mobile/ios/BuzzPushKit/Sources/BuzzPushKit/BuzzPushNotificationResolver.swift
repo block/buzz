@@ -536,7 +536,9 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
       subtitle: channel.flatMap {
         channelDisplayName(channel: $0, currentUser: community.pubkey?.lowercased())
       },
-      threadIdentifier: conversationIdentifier ?? community.id,
+      threadIdentifier: channelID.map {
+        BuzzPushPresentationIdentity.notificationThread(communityID: community.id, channelID: $0)
+      } ?? community.id,
       navigationTarget: channelID.map {
         BuzzPushNavigationTarget(
           eventID: event.id,

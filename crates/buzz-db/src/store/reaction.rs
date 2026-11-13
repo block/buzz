@@ -1596,8 +1596,10 @@ mod postgres_tests {
 
         let mut contender = pool.begin().await.expect("begin exclusive contender");
         let exclusive_taken: bool =
-            sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(community_deletion_lock_key($1))")
-                .bind(community_uuid)
+            sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0))")
+                .bind(crate::deletion::community_deletion_lock_key(
+                    buzz_core::CommunityId::from_uuid(community_uuid),
+                ))
                 .fetch_one(&mut *contender)
                 .await
                 .expect("probe exclusive community-deletion lock");
@@ -1618,8 +1620,10 @@ mod postgres_tests {
 
         let mut released = pool.begin().await.expect("begin post-release contender");
         let exclusive_after_release: bool =
-            sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(community_deletion_lock_key($1))")
-                .bind(community_uuid)
+            sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0))")
+                .bind(crate::deletion::community_deletion_lock_key(
+                    buzz_core::CommunityId::from_uuid(community_uuid),
+                ))
                 .fetch_one(&mut *released)
                 .await
                 .expect("probe exclusive lock after release");
