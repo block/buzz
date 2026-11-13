@@ -551,6 +551,8 @@ class ThreadDetailPage extends HookConsumerWidget {
     // A link into this thread while it is in front lands here like the link
     // that opened it, instead of stacking another copy of the page.
     useOpenThreadRoute(ref, threadHead.id, (messageId) {
+      // Like a deep-link entry, a link's older target must expose Latest.
+      hidesLatestForInitialTailSettle.value = false;
       didJumpToInitialMessage.value = false;
       initialHighlightTargetIndex.value = null;
       initialTargetReadyForHighlight.value = false;
@@ -560,6 +562,24 @@ class ThreadDetailPage extends HookConsumerWidget {
         link: linkTarget.value.link + 1,
       );
     });
+
+    // The page that opened this thread loaded its first target by ID, the
+    // way a channel page does for a deep link. A later link's target may be
+    // missing here too (a reply the socket missed), so load it the same way
+    // and keep it until the next link or until this page closes.
+    useEffect(() {
+      final target = linkTarget.value;
+      final messageId = target.messageId;
+      if (target.link == 0 || messageId == null) return null;
+      if (allMsgs.any((message) => message.id == messageId)) return null;
+      final notifier = ref.read(channelMessagesProvider(channelId).notifier);
+      unawaited(
+        notifier.loadEventsById({messageId}).catchError((Object error) {
+          debugPrint('deep-link: failed to load thread target: $error');
+        }),
+      );
+      return () => notifier.releaseDeepLinkEvents({messageId});
+    }, [linkTarget.value]);
 
     useEffect(
       () {
