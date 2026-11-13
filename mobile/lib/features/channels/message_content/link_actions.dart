@@ -67,6 +67,112 @@ class _LinkLongPress extends HookWidget {
   }
 }
 
+/// Tap and hold for a link drawn as text, so it wraps with the sentence.
+///
+/// A span holds one recognizer, so this one does both: a tap opens the link
+/// and a hold of [iosMessageLongPressDuration] opens [_showLinkActions]. The
+/// hold timer starts at pointer down, the same moment the message row's long
+/// press starts its own, and the paragraph sees the pointer first, so the
+/// link wins the hold the same way [_LinkLongPress] does.
+class _LinkTextRecognizer extends TapGestureRecognizer {
+  VoidCallback? onHold;
+  Timer? _holdTimer;
+  bool _held = false;
+
+  @override
+  void addAllowedPointer(PointerDownEvent event) {
+    super.addAllowedPointer(event);
+    _held = false;
+    _holdTimer?.cancel();
+    _holdTimer = Timer(
+      defaultTargetPlatform == TargetPlatform.iOS
+          ? iosMessageLongPressDuration
+          : kLongPressTimeout,
+      () {
+        _held = true;
+        resolve(GestureDisposition.accepted);
+        onHold?.call();
+      },
+    );
+  }
+
+  @override
+  void handleTapUp({
+    required PointerDownEvent down,
+    required PointerUpEvent up,
+  }) {
+    _holdTimer?.cancel();
+    if (!_held) super.handleTapUp(down: down, up: up);
+  }
+
+  @override
+  void handleTapCancel({
+    required PointerDownEvent down,
+    PointerCancelEvent? cancel,
+    required String reason,
+  }) {
+    _holdTimer?.cancel();
+    if (!_held) {
+      super.handleTapCancel(down: down, cancel: cancel, reason: reason);
+    }
+  }
+
+  // A scroll can take the pointer before the tap-down deadline, when no tap
+  // cancel is sent, so the hold timer is also stopped here.
+  @override
+  void rejectGesture(int pointer) {
+    if (pointer == primaryPointer) {
+      _holdTimer?.cancel();
+    }
+    super.rejectGesture(pointer);
+  }
+
+  @override
+  void dispose() {
+    _holdTimer?.cancel();
+    super.dispose();
+  }
+}
+
+/// One [_LinkTextRecognizer] per link in a message, kept across rebuilds and
+/// disposed with the message.
+class _LinkTextRecognizers {
+  final _byLink = <String, _LinkTextRecognizer>{};
+
+  _LinkTextRecognizer forLink(String url, String label) =>
+      _byLink.putIfAbsent('$url\n$label', _LinkTextRecognizer.new);
+
+  void dispose() {
+    for (final recognizer in _byLink.values) {
+      recognizer.dispose();
+    }
+    _byLink.clear();
+  }
+}
+
+/// [spans] with [recognizer] on every plain text run, so the whole label is
+/// one link. Package span types (inline code) keep their own rendering.
+List<InlineSpan> _withLinkRecognizer(
+  List<InlineSpan> spans,
+  GestureRecognizer recognizer,
+) => [
+  for (final span in spans)
+    if (span.runtimeType == TextSpan)
+      TextSpan(
+        text: (span as TextSpan).text,
+        style: span.style,
+        children: span.children == null
+            ? null
+            : _withLinkRecognizer(span.children!, recognizer),
+        recognizer: span.recognizer ?? recognizer,
+        semanticsLabel: span.semanticsLabel,
+        locale: span.locale,
+        spellOut: span.spellOut,
+      )
+    else
+      span,
+];
+
 /// Link-specific actions: open, copy and share the destination.
 void _showLinkActions(
   BuildContext context, {

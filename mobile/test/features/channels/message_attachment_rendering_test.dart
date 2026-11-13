@@ -13,6 +13,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
+import '../../helpers/message_link_finders.dart';
 import '../../helpers/media_codec_fixtures.dart';
 
 const _base = 'https://relay.example';
@@ -198,7 +199,7 @@ void main() {
                 ],
               ),
             );
-            await tester.tap(find.text('$stem.$extension'));
+            await tester.tapAt(linkCenter(tester, '$stem.$extension'));
             await tester.pump();
             expect(opened, url);
             expect(filename, '$stem.$extension');
