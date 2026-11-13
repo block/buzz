@@ -190,15 +190,21 @@ class ForumPostCard extends HookConsumerWidget {
               blendMode: BlendMode.dstIn,
               child: ConstrainedBox(
                 constraints: const BoxConstraints(maxHeight: 120),
+                // Multi-block Markdown lays out as a column of blocks; a
+                // non-scrolling viewport clips it at the cap instead of
+                // overflowing.
                 child: IgnorePointer(
-                  child: MessageContent(
-                    content: preview,
-                    mentionNames: mentionNames,
-                    mentionLabels: mentionLabels,
-                    agentMentionPubkeys: agentMentionPubkeys,
-                    tags: post.tags,
-                    baseStyle: messageBodyTextStyle.copyWith(
-                      color: context.colors.onSurface,
+                  child: SingleChildScrollView(
+                    physics: const NeverScrollableScrollPhysics(),
+                    child: MessageContent(
+                      content: preview,
+                      mentionNames: mentionNames,
+                      mentionLabels: mentionLabels,
+                      agentMentionPubkeys: agentMentionPubkeys,
+                      tags: post.tags,
+                      baseStyle: messageBodyTextStyle.copyWith(
+                        color: context.colors.onSurface,
+                      ),
                     ),
                   ),
                 ),
