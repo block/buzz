@@ -16,6 +16,7 @@ license permits redistribution.
 | `pi.svg` | [earendil-works/pi-website](https://github.com/earendil-works/pi-website) | `2f5e410b97474d0a34ec2500aa1aa58d6c3f992c` | MIT © 2026 Earendil Inc. and contributors | `src/favicon.svg` | None |
 | `kimi.png` | [MoonshotAI/kimi-cli](https://github.com/MoonshotAI/kimi-cli) | `4a550effdfcb29a25a5d325bf935296cc50cd417` | Apache-2.0; NOTICE: Kimi Code CLI © 2025 Moonshot AI | `web/public/logo.png` | None |
 | `grok.svg` | [SpaceXAI brand guidelines](https://x.ai/legal/brand-guidelines) | Retrieved 2026-07-25 | xAI Brand Guidelines: marks may be used to accurately refer to xAI or its services; logos must be used exactly as provided | `SpaceXAI_Grok_Assets.zip` → `Grok_Logomark_Dark.svg` | None |
+| `cybara.png` | [metaspartan/cybara](https://github.com/metaspartan/cybara) | `630b38b8125c50310535b9cd567f2427f00017ea` | MIT © 2026 Carsen Klock | `cybara.png` | Resized from 689×689 to 128×128 |
 
 ## Inline SVG marks (`RUNTIME_MARKS`)
 
