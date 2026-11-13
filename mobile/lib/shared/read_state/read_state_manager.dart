@@ -23,11 +23,10 @@ class ReadStateCrypto {
   /// Plaintext by ciphertext, least recently used first. NIP-44 payloads
   /// carry a random nonce and a MAC, so under this one conversation key the
   /// same ciphertext always decrypts to the same plaintext. Every publish
-  /// re-reads up to [readStateFetchLimit] of our own blobs, every resume
-  /// replays them on the live subscription, and the relay echoes each
-  /// publish back, so most decrypts here repeat a ciphertext this instance
-  /// already decrypted or produced. Decrypting is pure-Dart ChaCha20 and HMAC
-  /// on the UI isolate, so repeats are served from this memo.
+  /// re-reads the snapshot of our own blobs and the relay echoes each publish
+  /// back, so most decrypts here repeat a ciphertext this instance already
+  /// decrypted or produced. Decrypting is pure-Dart ChaCha20 and HMAC on the
+  /// UI isolate, so repeats are served from this memo.
   final Map<String, String> _plaintextByCiphertext = {};
   int _retainedLength = 0;
 
@@ -35,7 +34,7 @@ class ReadStateCrypto {
   /// key and its plaintext, so it cannot grow without limit however large the
   /// blobs get (about 8 MB of one-byte strings at the default). Each slot's
   /// current blob costs up to about 95,000 (a 40 KiB plaintext and its
-  /// base64 ciphertext), so this holds about 80 slots. The replay walks every
+  /// base64 ciphertext), so this holds about 80 slots. A snapshot walks every
   /// slot in turn, so a bound below the live slots' total evicts each entry
   /// before its next use and nothing hits; an account with 27 slots measured
   /// about 2.6M.
@@ -168,6 +167,26 @@ class ReadStateManager {
   // Whether the first fetch and subscribe both succeeded. A connect that
   // lands while they run (the cold-start connect) then has nothing to redo.
   bool _initialSyncSucceeded = false;
+  // Connection fences of the latest snapshot that started while the stream
+  // was live: the latest to succeed, and the latest started.
+  void Function()? _coveringFence;
+  void Function()? _inFlightLiveFence;
+  // The live subscription replays nothing, so a snapshot covers only events
+  // stored before it ran. Each subscription gets a generation so a replaced
+  // one's callbacks are ignored. [_liveCatchUpNeeded] is set when the stream
+  // was not live while the last snapshot ran (readiness timed out) or was
+  // interrupted after it (a retryable CLOSED); its next readiness then fetches
+  // a catch-up snapshot.
+  // [_liveReadyFence] is the connection fence captured at the stream's
+  // readiness: a socket replacement drops the stream without a status
+  // callback, so readiness counts only while that connection holds.
+  int _liveGeneration = 0;
+  void Function()? _liveReadyFence;
+  bool _liveCatchUpNeeded = false;
+  bool _catchUpRunning = false;
+  bool _catchUpAgain = false;
+  Timer? _catchUpTimer;
+  Completer<void>? _catchUpWake;
 
   bool _disposed = false;
   bool _isPublishing = false;
@@ -307,9 +326,9 @@ class ReadStateManager {
           await running;
         } else if (initializing != null) {
           await initializing;
-          // Connected while the first sync ran: it already used this
-          // connection.
-          if (_initialSyncSucceeded) return;
+          // Connected while the first sync ran: skip only if a snapshot
+          // already covers this connection.
+          if (_initialSyncSucceeded && _snapshotCoversConnection()) return;
         }
         if (_disposed) return;
         if (identical(_queuedResync, pass.future)) _queuedResync = null;
@@ -356,6 +375,7 @@ class ReadStateManager {
 
     _unsubscribeLive?.call();
     _unsubscribeLive = null;
+    _wakeCatchUp();
   }
 
   bool _advanceContext(
@@ -375,11 +395,16 @@ class ReadStateManager {
   }
 
   Future<bool> _fetchAndMerge() async {
+    // A snapshot started while the stream was live covers everything after it
+    // on that connection; a reconnect reopens the stream with no replay.
+    final fence = _liveReadyNow ? _liveReadyFence : null;
+    if (fence != null) _inFlightLiveFence = fence;
     try {
       // Snapshot transport validates completeness and fences retired sessions.
       final events = await _relaySession!.fetchReadStateSnapshot();
       if (_disposed || !_servesThisCommunity) return false;
       _lastSnapshotSucceeded = true;
+      if (fence != null) _coveringFence = fence;
       _mergeEvents(events);
       await _persistLocalState();
       _onChanged();
@@ -461,22 +486,33 @@ class ReadStateManager {
 
   Future<bool> _startLiveSubscription() async {
     try {
-      final unsub = await _relaySession!.subscribe(
+      final generation = ++_liveGeneration;
+      _liveReadyFence = null;
+      _liveCatchUpNeeded = false;
+      // This stream's re-sync fetches its own snapshot; end the old backoff.
+      _wakeCatchUp();
+      final unsub = await _relaySession!.subscribeWithStatus(
         NostrFilter(
           kinds: const [EventKind.readState],
           authors: [pubkey],
           tags: const {
             '#t': ['read-state'],
           },
-          limit: readStateFetchLimit,
+          // New events only: the snapshot fetched right after this already
+          // holds every stored one, and a replay would download them twice.
+          limit: 0,
         ),
         _handleIncomingEvent,
+        onStatusChanged: (status) => _onLiveStatus(generation, status),
       );
       if (_disposed) {
         unsub.call();
         return false;
       }
       _unsubscribeLive = unsub;
+      // Returned on the readiness timeout or a retryable CLOSED: the snapshot
+      // about to run may finish before the stream is live.
+      if (!_liveReadyNow) _liveCatchUpNeeded = true;
       debugPrint('[ReadStateManager] live subscription established');
       return true;
     } catch (e) {
@@ -484,6 +520,99 @@ class ReadStateManager {
       return false;
     }
   }
+
+  /// Whether a snapshot that started while the stream was live on the
+  /// current connection succeeded, or is still running as a catch-up (which
+  /// retries on failure).
+  bool _snapshotCoversConnection() =>
+      _connectionHeld(_coveringFence) ||
+      (_catchUpRunning && _connectionHeld(_inFlightLiveFence));
+
+  bool get _liveReadyNow => _connectionHeld(_liveReadyFence);
+
+  static bool _connectionHeld(void Function()? checkConnection) {
+    if (checkConnection == null) return false;
+    try {
+      checkConnection();
+      return true;
+    } on StateError {
+      return false;
+    }
+  }
+
+  void _onLiveStatus(int generation, RelaySubscriptionStatus status) {
+    if (_disposed || generation != _liveGeneration) return;
+    if (status == RelaySubscriptionStatus.retrying) {
+      _liveReadyFence = null;
+      _liveCatchUpNeeded = true;
+      return;
+    }
+    _liveReadyFence = _relaySession!.captureConnectionFence();
+    if (!_liveCatchUpNeeded) return;
+    _liveCatchUpNeeded = false;
+    unawaited(_runCatchUp());
+  }
+
+  // Waits before each retry of a failed catch-up snapshot.
+  static const _catchUpRetryDelays = [
+    Duration(seconds: 2),
+    Duration(seconds: 10),
+    Duration(seconds: 30),
+  ];
+
+  /// Fetches the snapshot again once the stream is live. A readiness that
+  /// lands while one runs fetches once more after it, since the running fetch
+  /// may predate it, and ends any backoff wait so that one fresh fetch serves
+  /// it. A failed fetch is retried a few times; if every attempt fails, the
+  /// next recovery of this stream tries again. A re-sync that replaces the
+  /// stream fetches its own snapshot, so retries stop there.
+  Future<void> _runCatchUp() async {
+    if (_catchUpRunning) {
+      _catchUpAgain = true;
+      // A newer readiness supersedes the backoff: fetch for it now.
+      _wakeCatchUp();
+      return;
+    }
+    _catchUpRunning = true;
+    var fetched = false;
+    var generation = _liveGeneration;
+    try {
+      do {
+        _catchUpAgain = false;
+        generation = _liveGeneration;
+        fetched = await _fetchAndMerge();
+        for (final delay in _catchUpRetryDelays) {
+          if (fetched || _catchUpAgain || !_catchUpCurrent(generation)) break;
+          await _catchUpWait(delay);
+          if (_catchUpAgain || !_catchUpCurrent(generation)) break;
+          fetched = await _fetchAndMerge();
+        }
+      } while (_catchUpAgain && !_disposed);
+      if (!fetched && _catchUpCurrent(generation)) _liveCatchUpNeeded = true;
+    } finally {
+      _catchUpRunning = false;
+    }
+  }
+
+  /// Waits [delay] before a catch-up retry. A newer readiness, a re-sync
+  /// replacing the stream or dispose ends the wait early ([_wakeCatchUp]).
+  Future<void> _catchUpWait(Duration delay) {
+    final wake = Completer<void>();
+    _catchUpWake = wake;
+    _catchUpTimer = Timer(delay, _wakeCatchUp);
+    return wake.future;
+  }
+
+  void _wakeCatchUp() {
+    _catchUpTimer?.cancel();
+    _catchUpTimer = null;
+    final wake = _catchUpWake;
+    _catchUpWake = null;
+    if (wake != null && !wake.isCompleted) wake.complete();
+  }
+
+  bool _catchUpCurrent(int generation) =>
+      !_disposed && generation == _liveGeneration;
 
   void _handleIncomingEvent(NostrEvent event) {
     if (_disposed || !_servesThisCommunity) return;

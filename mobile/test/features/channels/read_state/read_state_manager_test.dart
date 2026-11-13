@@ -931,6 +931,466 @@ void main() {
     },
   );
 
+  test('the live subscription asks only for new events', () async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final keychain = nostr.Keys.generate();
+    final crypto = ReadStateCrypto.tryCreate(
+      nsec: keychain.nsec,
+      pubkey: keychain.public,
+    )!;
+    final relay = _FakeRelaySession();
+    final manager = ReadStateManager(
+      pubkey: keychain.public,
+      relayUrl: _relayUrl,
+      prefs: prefs,
+      crypto: crypto,
+      relaySession: relay,
+      signedEventRelay: _FakeSignedEventRelay(),
+      remoteEnabled: true,
+      onChanged: () {},
+    );
+
+    // The snapshot holds every stored event, so neither the first sync nor a
+    // re-sync replays them on the subscription.
+    await manager.initialize();
+    await manager.reinitializeRemote();
+    expect(relay.subscribeFilters.map((filter) => filter.limit), [0, 0]);
+    expect(relay.fetchCount, 2);
+
+    manager.dispose();
+  });
+
+  test(
+    'a peer read published while the live stream retries is fetched once it is live again',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final keychain = nostr.Keys.generate();
+      final crypto = ReadStateCrypto.tryCreate(
+        nsec: keychain.nsec,
+        pubkey: keychain.public,
+      )!;
+      final relay = _FakeRelaySession();
+      final manager = ReadStateManager(
+        pubkey: keychain.public,
+        relayUrl: _relayUrl,
+        prefs: prefs,
+        crypto: crypto,
+        relaySession: relay,
+        signedEventRelay: _FakeSignedEventRelay(),
+        remoteEnabled: true,
+        onChanged: () {},
+      );
+      await manager.initialize();
+      expect(relay.fetchCount, 1);
+
+      // The relay closes the REQ retryably; a peer publishes in the gap, and
+      // the reopened REQ (limit 0) does not replay it.
+      relay.liveOnStatus!(RelaySubscriptionStatus.retrying);
+      relay.historyEvents = [
+        _readStateEvent(
+          pubkey: keychain.public,
+          crypto: crypto,
+          clientId: 'peer-client',
+          slotId: 'peer-slot',
+          contexts: {'channel-1': 50},
+          createdAt: 100,
+        ),
+      ];
+      expect(manager.getEffectiveTimestamp('channel-1'), isNull);
+      relay.liveOnStatus!(RelaySubscriptionStatus.ready);
+      await pumpEventQueue();
+
+      expect(relay.fetchCount, 2);
+      expect(manager.getEffectiveTimestamp('channel-1'), 50);
+
+      // A later readiness with no interruption fetches nothing more.
+      relay.liveOnStatus!(RelaySubscriptionStatus.ready);
+      await pumpEventQueue();
+      expect(relay.fetchCount, 2);
+
+      manager.dispose();
+    },
+  );
+
+  test(
+    'a snapshot that finished before the live stream was ready is fetched again',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final keychain = nostr.Keys.generate();
+      final crypto = ReadStateCrypto.tryCreate(
+        nsec: keychain.nsec,
+        pubkey: keychain.public,
+      )!;
+      final relay = _FakeRelaySession()..readyOnSubscribe = false;
+      final manager = ReadStateManager(
+        pubkey: keychain.public,
+        relayUrl: _relayUrl,
+        prefs: prefs,
+        crypto: crypto,
+        relaySession: relay,
+        signedEventRelay: _FakeSignedEventRelay(),
+        remoteEnabled: true,
+        onChanged: () {},
+      );
+      await manager.initialize();
+      expect(relay.fetchCount, 1);
+
+      // A peer publishes after the snapshot but before the REQ is live.
+      relay.historyEvents = [
+        _readStateEvent(
+          pubkey: keychain.public,
+          crypto: crypto,
+          clientId: 'peer-client',
+          slotId: 'peer-slot',
+          contexts: {'channel-1': 50},
+          createdAt: 100,
+        ),
+      ];
+      relay.liveOnStatus!(RelaySubscriptionStatus.ready);
+      await pumpEventQueue();
+
+      expect(relay.fetchCount, 2);
+      expect(manager.getEffectiveTimestamp('channel-1'), 50);
+
+      manager.dispose();
+    },
+  );
+
+  test(
+    'a reconnect after the first snapshot but before initialize ends syncs again',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final keychain = nostr.Keys.generate();
+      final crypto = ReadStateCrypto.tryCreate(
+        nsec: keychain.nsec,
+        pubkey: keychain.public,
+      )!;
+      final gate = Completer<void>();
+      final relay = _FakeRelaySession()..fetchGate = gate.future;
+      final manager = ReadStateManager(
+        pubkey: keychain.public,
+        relayUrl: _relayUrl,
+        prefs: prefs,
+        crypto: crypto,
+        relaySession: relay,
+        signedEventRelay: _FakeSignedEventRelay(),
+        remoteEnabled: true,
+        onChanged: () {},
+      );
+
+      // The stream is live and the snapshot in flight when the socket drops
+      // and reconnects. The reopened REQ replays nothing, so the reconnect's
+      // re-sync must not be skipped as covered by the first sync.
+      final initializing = manager.initialize();
+      await pumpEventQueue();
+      relay.connection++;
+      final reinitializing = manager.reinitializeRemote();
+      relay.fetchGate = null;
+      gate.complete();
+      await Future.wait([initializing, reinitializing]);
+
+      expect(relay.fetchCount, 2);
+      expect(relay.subscribeCount, 2);
+      expect(relay.liveSubscriptions, 1);
+
+      manager.dispose();
+    },
+  );
+
+  test('a failed catch-up snapshot is retried until one succeeds', () {
+    fakeAsync((async) {
+      SharedPreferences.setMockInitialValues({});
+      late final SharedPreferences prefs;
+      SharedPreferences.getInstance().then((value) => prefs = value);
+      async.flushMicrotasks();
+      final keychain = nostr.Keys.generate();
+      final crypto = ReadStateCrypto.tryCreate(
+        nsec: keychain.nsec,
+        pubkey: keychain.public,
+      )!;
+      final relay = _FakeRelaySession();
+      final manager = ReadStateManager(
+        pubkey: keychain.public,
+        relayUrl: _relayUrl,
+        prefs: prefs,
+        crypto: crypto,
+        relaySession: relay,
+        signedEventRelay: _FakeSignedEventRelay(),
+        remoteEnabled: true,
+        onChanged: () {},
+      );
+      manager.initialize();
+      async.flushMicrotasks();
+      expect(relay.fetchCount, 1);
+
+      // A peer publishes while the stream retries; the first catch-up fetch
+      // fails and the retry after it succeeds.
+      relay.liveOnStatus!(RelaySubscriptionStatus.retrying);
+      relay.historyEvents = [
+        _readStateEvent(
+          pubkey: keychain.public,
+          crypto: crypto,
+          clientId: 'peer-client',
+          slotId: 'peer-slot',
+          contexts: {'channel-1': 50},
+          createdAt: 100,
+        ),
+      ];
+      relay.failNextFetch = true;
+      relay.liveOnStatus!(RelaySubscriptionStatus.ready);
+      async.flushMicrotasks();
+      expect(relay.fetchCount, 2);
+      expect(manager.getEffectiveTimestamp('channel-1'), isNull);
+
+      async.elapse(const Duration(seconds: 2));
+      expect(relay.fetchCount, 3);
+      expect(manager.getEffectiveTimestamp('channel-1'), 50);
+
+      // Recovered: nothing more is fetched.
+      async.elapse(const Duration(minutes: 1));
+      expect(relay.fetchCount, 3);
+
+      manager.dispose();
+    });
+  });
+
+  test('a catch-up that keeps failing is tried again at the next recovery', () {
+    fakeAsync((async) {
+      SharedPreferences.setMockInitialValues({});
+      late final SharedPreferences prefs;
+      SharedPreferences.getInstance().then((value) => prefs = value);
+      async.flushMicrotasks();
+      final keychain = nostr.Keys.generate();
+      final crypto = ReadStateCrypto.tryCreate(
+        nsec: keychain.nsec,
+        pubkey: keychain.public,
+      )!;
+      final relay = _FakeRelaySession();
+      final manager = ReadStateManager(
+        pubkey: keychain.public,
+        relayUrl: _relayUrl,
+        prefs: prefs,
+        crypto: crypto,
+        relaySession: relay,
+        signedEventRelay: _FakeSignedEventRelay(),
+        remoteEnabled: true,
+        onChanged: () {},
+      );
+      manager.initialize();
+      async.flushMicrotasks();
+
+      relay.liveOnStatus!(RelaySubscriptionStatus.retrying);
+      relay.failAllFetches = true;
+      relay.liveOnStatus!(RelaySubscriptionStatus.ready);
+      async.elapse(const Duration(minutes: 2));
+      // One fetch plus three bounded retries, then it stops.
+      expect(relay.fetchCount, 5);
+
+      // The next readiness, even without a new interruption, tries again.
+      relay.failAllFetches = false;
+      relay.liveOnStatus!(RelaySubscriptionStatus.ready);
+      async.flushMicrotasks();
+      expect(relay.fetchCount, 6);
+
+      manager.dispose();
+    });
+  });
+
+  test('a readiness during a catch-up backoff fetches once, right away', () {
+    fakeAsync((async) {
+      SharedPreferences.setMockInitialValues({});
+      late final SharedPreferences prefs;
+      SharedPreferences.getInstance().then((value) => prefs = value);
+      async.flushMicrotasks();
+      final keychain = nostr.Keys.generate();
+      final crypto = ReadStateCrypto.tryCreate(
+        nsec: keychain.nsec,
+        pubkey: keychain.public,
+      )!;
+      final relay = _FakeRelaySession();
+      final manager = ReadStateManager(
+        pubkey: keychain.public,
+        relayUrl: _relayUrl,
+        prefs: prefs,
+        crypto: crypto,
+        relaySession: relay,
+        signedEventRelay: _FakeSignedEventRelay(),
+        remoteEnabled: true,
+        onChanged: () {},
+      );
+      manager.initialize();
+      async.flushMicrotasks();
+
+      // Three failed catch-up fetches put it in the 30 s wait.
+      relay.liveOnStatus!(RelaySubscriptionStatus.retrying);
+      relay.failAllFetches = true;
+      relay.liveOnStatus!(RelaySubscriptionStatus.ready);
+      async.elapse(const Duration(seconds: 12));
+      expect(relay.fetchCount, 4);
+
+      relay.failAllFetches = false;
+      relay.liveOnStatus!(RelaySubscriptionStatus.retrying);
+      relay.liveOnStatus!(RelaySubscriptionStatus.ready);
+      async.flushMicrotasks();
+      expect(relay.fetchCount, 5);
+
+      async.elapse(const Duration(minutes: 1));
+      expect(relay.fetchCount, 5);
+
+      manager.dispose();
+    });
+  });
+
+  test('dispose during a catch-up backoff leaves no timer', () {
+    fakeAsync((async) {
+      SharedPreferences.setMockInitialValues({});
+      late final SharedPreferences prefs;
+      SharedPreferences.getInstance().then((value) => prefs = value);
+      async.flushMicrotasks();
+      final keychain = nostr.Keys.generate();
+      final crypto = ReadStateCrypto.tryCreate(
+        nsec: keychain.nsec,
+        pubkey: keychain.public,
+      )!;
+      final relay = _FakeRelaySession();
+      final manager = ReadStateManager(
+        pubkey: keychain.public,
+        relayUrl: _relayUrl,
+        prefs: prefs,
+        crypto: crypto,
+        relaySession: relay,
+        signedEventRelay: _FakeSignedEventRelay(),
+        remoteEnabled: true,
+        onChanged: () {},
+      );
+      manager.initialize();
+      async.flushMicrotasks();
+
+      // Three failed catch-up fetches put it in the 30 s wait.
+      relay.liveOnStatus!(RelaySubscriptionStatus.retrying);
+      relay.failAllFetches = true;
+      relay.liveOnStatus!(RelaySubscriptionStatus.ready);
+      async.elapse(const Duration(seconds: 12));
+      expect(relay.fetchCount, 4);
+
+      manager.dispose();
+      async.flushMicrotasks();
+      expect(async.pendingTimers, isEmpty);
+      expect(relay.fetchCount, 4);
+    });
+  });
+
+  test(
+    'a reconnect after a late-ready catch-up but before initialize ends syncs again',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final keychain = nostr.Keys.generate();
+      final crypto = ReadStateCrypto.tryCreate(
+        nsec: keychain.nsec,
+        pubkey: keychain.public,
+      )!;
+      final gate = Completer<void>();
+      final relay = _FakeRelaySession()
+        ..readyOnSubscribe = false
+        ..fetchGate = gate.future;
+      final manager = ReadStateManager(
+        pubkey: keychain.public,
+        relayUrl: _relayUrl,
+        prefs: prefs,
+        crypto: crypto,
+        relaySession: relay,
+        signedEventRelay: _FakeSignedEventRelay(),
+        remoteEnabled: true,
+        onChanged: () {},
+      );
+
+      // Readiness times out, so the launch snapshot (held) does not cover
+      // the stream. The late readiness's catch-up succeeds on connection A.
+      final initializing = manager.initialize();
+      await pumpEventQueue();
+      relay.fetchGate = null;
+      relay.liveOnStatus!(RelaySubscriptionStatus.ready);
+      await pumpEventQueue();
+      expect(relay.fetchCount, 2);
+
+      // A drops and B connects before the launch snapshot returns. Neither
+      // snapshot covers B, so the reconnect's re-sync must run.
+      relay.connection++;
+      final reinitializing = manager.reinitializeRemote();
+      gate.complete();
+      await Future.wait([initializing, reinitializing]);
+
+      expect(relay.fetchCount, 3);
+      expect(relay.subscribeCount, 2);
+      expect(relay.liveSubscriptions, 1);
+
+      manager.dispose();
+    },
+  );
+
+  test(
+    'a catch-up retry after a socket replacement does not cover the new connection',
+    () {
+      fakeAsync((async) {
+        SharedPreferences.setMockInitialValues({});
+        late final SharedPreferences prefs;
+        SharedPreferences.getInstance().then((value) => prefs = value);
+        async.flushMicrotasks();
+        final keychain = nostr.Keys.generate();
+        final crypto = ReadStateCrypto.tryCreate(
+          nsec: keychain.nsec,
+          pubkey: keychain.public,
+        )!;
+        final gate = Completer<void>();
+        final relay = _FakeRelaySession()
+          ..readyOnSubscribe = false
+          ..fetchGate = gate.future;
+        final manager = ReadStateManager(
+          pubkey: keychain.public,
+          relayUrl: _relayUrl,
+          prefs: prefs,
+          crypto: crypto,
+          relaySession: relay,
+          signedEventRelay: _FakeSignedEventRelay(),
+          remoteEnabled: true,
+          onChanged: () {},
+        );
+
+        // Readiness times out and the launch snapshot is held. A's late
+        // readiness starts a catch-up that fails and waits to retry.
+        var initialized = false;
+        manager.initialize().then((_) => initialized = true);
+        async.flushMicrotasks();
+        relay.fetchGate = null;
+        relay.failNextFetch = true;
+        relay.liveOnStatus!(RelaySubscriptionStatus.ready);
+        async.flushMicrotasks();
+        expect(relay.fetchCount, 2);
+
+        // The socket is replaced with no status callback, and the retry runs
+        // before B's stream is live, so it does not cover B.
+        relay.connection++;
+        var reinitialized = false;
+        manager.reinitializeRemote().then((_) => reinitialized = true);
+        async.elapse(const Duration(seconds: 2));
+        expect(relay.fetchCount, 3);
+
+        gate.complete();
+        async.flushMicrotasks();
+        expect(initialized && reinitialized, isTrue);
+        expect(relay.fetchCount, 4);
+        expect(relay.subscribeCount, 2);
+
+        manager.dispose();
+      });
+    },
+  );
+
   test('a connect during a failed initialize syncs again', () async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
@@ -1199,9 +1659,21 @@ NostrEvent _readStateEvent({
 }
 
 class _FakeRelaySession extends RelaySessionNotifier {
+  // Bumped to simulate a reconnect for [captureConnectionFence].
+  int connection = 0;
+
+  @override
+  void Function() captureConnectionFence() {
+    final captured = connection;
+    return () {
+      if (connection != captured) throw StateError('Relay connection changed');
+    };
+  }
+
   List<NostrEvent> historyEvents = [];
   Future<void>? fetchGate;
   bool failNextFetch = false;
+  bool failAllFetches = false;
   int fetchCount = 0;
   int subscribeCount = 0;
   int liveSubscriptions = 0;
@@ -1221,22 +1693,30 @@ class _FakeRelaySession extends RelaySessionNotifier {
     fetchCount++;
     fetchFilters.add(filter);
     await fetchGate;
-    if (failNextFetch) {
+    if (failNextFetch || failAllFetches) {
       failNextFetch = false;
       throw TimeoutException('history timed out');
     }
     return historyEvents;
   }
 
+  // False models a subscribe that returns on the readiness timeout, before
+  // the relay's EOSE.
+  bool readyOnSubscribe = true;
+  void Function(RelaySubscriptionStatus status)? liveOnStatus;
+
   @override
-  Future<void Function()> subscribe(
+  Future<void Function()> subscribeWithStatus(
     NostrFilter filter,
     void Function(NostrEvent) onEvent, {
     void Function(String message)? onClosed,
+    required void Function(RelaySubscriptionStatus status) onStatusChanged,
   }) async {
     subscribeCount++;
     subscribeFilters.add(filter);
     liveSubscriptions++;
+    liveOnStatus = onStatusChanged;
+    if (readyOnSubscribe) onStatusChanged(RelaySubscriptionStatus.ready);
     var open = true;
     return () {
       if (open) liveSubscriptions--;
