@@ -208,6 +208,98 @@ impl RelayActionSink {
 }
 
 impl ActionSink for RelayActionSink {
+    fn send_dm(
+        &self,
+        community_id: CommunityId,
+        recipient_pubkey: &str,
+        text: &str,
+        authored_text: &str,
+        author_pubkey: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>> {
+        let recipient = nostr::PublicKey::from_hex(recipient_pubkey)
+            .map_err(|e| ActionSinkError::InvalidInput(format!("invalid recipient pubkey: {e}")));
+        let author = nostr::PublicKey::from_hex(author_pubkey)
+            .map_err(|e| ActionSinkError::InvalidInput(format!("invalid author pubkey: {e}")));
+        let text = text.to_owned();
+        let authored_text = authored_text.to_owned();
+        Box::pin(async move {
+            use crate::handlers::ingest::{agent_dm_allowed, agent_owner_cached, AGENT_DM_REFUSED};
+            use crate::handlers::side_effects::{
+                emit_group_discovery_events, emit_membership_notification,
+                publish_dm_visibility_snapshot,
+            };
+            let recipient = recipient?.to_bytes();
+            let author = author?.to_bytes();
+            if text.trim().is_empty() {
+                return Err(ActionSinkError::EmptyContent);
+            }
+            if recipient == author {
+                return Err(ActionSinkError::InvalidInput(
+                    "DM requires another participant".into(),
+                ));
+            }
+            let state = self
+                .state
+                .upgrade()
+                .ok_or_else(|| ActionSinkError::Database("relay is shutting down".into()))?;
+            let host = state
+                .db
+                .lookup_community_host(community_id)
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?
+                .ok_or_else(|| {
+                    ActionSinkError::Database("workflow community has no host".into())
+                })?;
+            let tenant = buzz_core::tenant::TenantContext::resolved(community_id, host);
+            let participants = vec![author.to_vec(), recipient.to_vec()];
+            if let Some(owner) = agent_owner_cached(&state, community_id, &author)
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?
+            {
+                if !agent_dm_allowed(&author, &owner, &participants) {
+                    return Err(ActionSinkError::InvalidInput(AGENT_DM_REFUSED.into()));
+                }
+            }
+            let (channel, _) = state
+                .db
+                .open_dm(community_id, &[&recipient], &author)
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+            // Refresh on every attempt: a prior attempt may have persisted the
+            // channel but failed before publishing its discovery events.
+            for participant in &participants {
+                state.invalidate_membership(&tenant, channel.id, participant);
+            }
+            emit_group_discovery_events(&tenant, &state, channel.id)
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+            publish_dm_visibility_snapshot(&tenant, &state, &author)
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+            for participant in &participants {
+                emit_membership_notification(
+                    &tenant,
+                    &state,
+                    channel.id,
+                    participant,
+                    &author,
+                    buzz_core::kind::KIND_MEMBER_ADDED_NOTIFICATION,
+                )
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+            }
+            self.send_message(
+                community_id,
+                &channel.id.to_string(),
+                &text,
+                &authored_text,
+                &hex::encode(author),
+                None,
+            )
+            .await
+        })
+    }
+
     fn send_message(
         &self,
         community_id: CommunityId,
@@ -528,6 +620,29 @@ impl ActionSink for RelayActionSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn send_dm_rejects_invalid_inputs_before_accessing_storage() {
+        let sink = RelayActionSink { state: Weak::new() };
+        let community = CommunityId::from_uuid(Uuid::new_v4());
+        let author = nostr::Keys::generate().public_key().to_hex();
+        let recipient = nostr::Keys::generate().public_key().to_hex();
+        for (to, from) in [
+            ("invalid", author.as_str()),
+            (recipient.as_str(), "invalid"),
+            (author.as_str(), author.as_str()),
+        ] {
+            assert!(matches!(
+                sink.send_dm(community, to, "hello", "hello", from).await,
+                Err(ActionSinkError::InvalidInput(_))
+            ));
+        }
+        assert!(matches!(
+            sink.send_dm(community, &recipient, "  ", "  ", &author)
+                .await,
+            Err(ActionSinkError::EmptyContent)
+        ));
+    }
 
     fn m(name: &str, pubkey: &str) -> (String, String) {
         (name.to_string(), pubkey.to_string())
@@ -1064,6 +1179,132 @@ mod postgres_tests {
         .expect("execute workflow");
 
         result.step_outputs["send"].clone()
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn workflow_send_dm_resolves_templates_and_reuses_private_channel() {
+        let state = test_state().await;
+        let owner = nostr::Keys::generate().public_key();
+        let recipient = nostr::Keys::generate().public_key();
+        let host = format!("wf-dm-{}.example.org", Uuid::new_v4().simple());
+        let community = match state
+            .db
+            .create_community_with_owner(&host, &owner.to_hex(), &nostr::Keys::generate())
+            .await
+            .expect("create community")
+            .outcome
+        {
+            CreateCommunityWithOwnerResult::Created(rec) => rec.id,
+            other => panic!("expected new community: {other:?}"),
+        };
+        for key in [owner, recipient] {
+            state
+                .db
+                .ensure_user(community, &key.to_bytes())
+                .await
+                .expect("ensure user");
+        }
+        let definition = serde_json::json!({
+            "name": "dm-test", "trigger": {"on": "message_posted"},
+            "steps": [{"id": "send", "action": "send_dm",
+                       "to": "{{trigger.author}}", "text": "Notice: {{trigger.text}}"}],
+            "enabled": true,
+        });
+        let workflow_id = state
+            .db
+            .create_workflow(
+                community,
+                None,
+                &owner.to_bytes(),
+                "dm-test",
+                &definition.to_string(),
+                &[0; 32],
+            )
+            .await
+            .expect("create workflow");
+        state
+            .workflow_engine
+            .set_action_sink(Arc::new(RelayActionSink::new(&state)));
+        let def: buzz_workflow::WorkflowDef = serde_json::from_value(
+            state
+                .db
+                .get_workflow(community, workflow_id)
+                .await
+                .expect("workflow")
+                .definition,
+        )
+        .expect("definition");
+        let mut channel_id = None;
+        for text in ["first", "second"] {
+            let trigger = buzz_workflow::executor::TriggerContext {
+                author: recipient.to_hex(),
+                text: text.into(),
+                ..Default::default()
+            };
+            let run_id = state
+                .db
+                .create_workflow_run(community, workflow_id, None, None)
+                .await
+                .expect("create run");
+            let result = buzz_workflow::executor::execute_run(
+                &state.workflow_engine,
+                community,
+                run_id,
+                &def,
+                &trigger,
+            )
+            .await
+            .expect("execute DM workflow");
+            assert_eq!(result.step_outputs["send"]["sent"], true);
+            let id = nostr::EventId::from_hex(
+                result.step_outputs["send"]["event_id"]
+                    .as_str()
+                    .expect("event id"),
+            )
+            .expect("parse id");
+            let stored = state
+                .db
+                .get_event_by_id_for_event_write(community, id.as_bytes())
+                .await
+                .expect("load event")
+                .expect("persisted DM");
+            assert_eq!(stored.event.content, format!("Notice: {text}"));
+            assert_eq!(stored.event.kind, Kind::from(KIND_STREAM_MESSAGE as u16));
+            assert_eq!(stored.event.pubkey, state.relay_keypair.public_key());
+            stored.event.verify().expect("valid signature");
+            let channel = stored.channel_id.expect("DM channel");
+            if let Some(previous) = channel_id {
+                assert_eq!(channel, previous, "reuse the two-party DM");
+            }
+            channel_id = Some(channel);
+            let row = state
+                .db
+                .get_channel_for_event_write(community, channel)
+                .await
+                .expect("channel");
+            assert_eq!(row.channel_type, "dm");
+            assert_eq!(row.visibility, "private");
+            let members = state
+                .db
+                .get_members_for_event_write(community, channel)
+                .await
+                .expect("members");
+            assert_eq!(members.len(), 2);
+            for key in [owner, recipient] {
+                assert!(members.iter().any(|m| m.pubkey == key.to_bytes()));
+            }
+            assert!(stored
+                .event
+                .tags
+                .iter()
+                .any(|t| t.as_slice() == ["buzz:workflow", "true"]));
+            assert!(stored
+                .event
+                .tags
+                .iter()
+                .any(|t| t.as_slice() == ["buzz:workflow-owner", &owner.to_hex()]));
+        }
     }
 
     #[tokio::test]
@@ -1636,6 +1877,29 @@ mod postgres_tests {
         )
         .await
         .expect("an agent's workflow may post in its owner-only DM");
+        let sink = RelayActionSink::new(&state);
+        let agent_hex = agent.public_key().to_hex();
+        let error = sink
+            .send_dm(
+                community,
+                &stranger.public_key().to_hex(),
+                "hi",
+                "hi",
+                &agent_hex,
+            )
+            .await
+            .expect_err("an agent must not open a stranger DM through a workflow");
+        assert!(matches!(&error, ActionSinkError::InvalidInput(m)
+            if m == crate::handlers::ingest::AGENT_DM_REFUSED));
+        sink.send_dm(
+            community,
+            &owner.public_key().to_hex(),
+            "owner DM",
+            "owner DM",
+            &agent_hex,
+        )
+        .await
+        .expect("an agent may DM its owner through a workflow");
     }
 
     #[tokio::test]

@@ -735,10 +735,43 @@ pub async fn dispatch_action(
                     Ok(StepResult::Completed(output))
                 }
 
-                SendDm { to, text: _ } => {
-                    warn!(run_id = %run_id, step = step_id, "SendDm not yet implemented (to={to})");
-                    // TODO (WF-07): emit DM event.
-                    Err(WorkflowError::NotImplemented("SendDm".into()))
+                SendDm { to, text } => {
+                    let run = engine
+                        .db
+                        .get_workflow_run(community_id, run_id)
+                        .await
+                        .map_err(|e| WorkflowError::WebhookError(format!(
+                            "SendDm: failed to load workflow run {run_id}: {e}"
+                        )))?;
+                    let workflow = engine
+                        .db
+                        .get_workflow(community_id, run.workflow_id)
+                        .await
+                        .map_err(|e| WorkflowError::WebhookError(format!(
+                            "SendDm: failed to load workflow {}: {e}", run.workflow_id
+                        )))?;
+                    let authored_text = match &step.action {
+                        SendDm { text, .. } => text.as_str(),
+                        _ => {
+                            return Err(WorkflowError::InvalidDefinition(
+                                "SendDm: resolved action does not match its authored step".into(),
+                            ));
+                        }
+                    };
+                    let event_id = engine
+                        .action_sink()?
+                        .send_dm(
+                            community_id,
+                            to,
+                            text,
+                            authored_text,
+                            &hex::encode(&workflow.owner_pubkey),
+                        )
+                        .await?;
+                    Ok(StepResult::Completed(serde_json::json!({
+                        "sent": true,
+                        "event_id": event_id,
+                    })))
                 }
 
                 SetChannelTopic { topic: _ } => {
