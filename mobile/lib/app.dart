@@ -38,6 +38,7 @@ import 'features/channels/agent_activity/observer_subscription.dart';
 import 'features/channels/channel_detail_page.dart';
 import 'shared/widgets/app_route_observer.dart';
 import 'shared/widgets/root_page_route.dart';
+import 'features/profile/profile_provider.dart';
 import 'features/profile/user_status_cache_provider.dart';
 import 'features/profile/settings_profile_header.dart';
 import 'features/profile/set_status_sheet.dart';
@@ -392,6 +393,8 @@ class App extends HookConsumerWidget {
       ref.listen(observerRelayProvider, (_, _) {});
       ref.watch(appLifecycleProvider);
       ref.listen(userStatusCacheProvider, (_, _) {});
+      // Presence heartbeats run only while something holds this provider.
+      ref.listen(presenceProvider, (_, _) {});
       // Activity owns hidden-DM recovery even when Inbox is never opened.
       ref.listen(activityProvider, (_, _) {});
       // Preserve initial read seeding even while Solo is hidden.
