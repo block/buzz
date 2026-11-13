@@ -800,11 +800,21 @@ async function renderHeldTarget() {
       ),
     );
   };
+  let viewportWidth = 800;
   const resizeViewport = async () => {
+    viewportWidth -= 10;
     await act(async () => {
       for (const observer of resizeObservers) {
-        if (observer.targets.includes(scroller)) observer.callback();
+        if (observer.targets.includes(scroller)) {
+          observer.callback([
+            {
+              target: scroller,
+              contentRect: { width: viewportWidth, height: 600 },
+            },
+          ]);
+        }
       }
+      await new Promise((resolve) => setTimeout(resolve, 0));
     });
   };
 
