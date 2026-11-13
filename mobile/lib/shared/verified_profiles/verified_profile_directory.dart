@@ -21,13 +21,18 @@ const _discoveryRefresh = Duration(minutes: 5);
 /// tolerated, a flood before EOSE fails the batch instead of buffering it.
 const _maxEarlyPerSubject = 4;
 
-/// Batches smaller than [verifiedProfileBatchSize] allowed before they are
-/// merged into full ones.
+/// Batches smaller than [verifiedProfileBatchSize] allowed before the smallest
+/// are merged into the next new one until it fills a batch.
 const _maxPartialBatches = 4;
 
 class _Batch {
-  _Batch(this.subjects);
+  _Batch(this.subjects, this.interest);
   final List<String> subjects;
+
+  /// The newest interest when the batch opened. A subject whose interest is
+  /// newer was evicted and tracked again since, which dropped its `_checked`
+  /// mark and maybe its cached head, so the batch must be read again.
+  final int interest;
   final List<NostrEvent> early = [];
 
   /// Live events awaiting proof, newest per subject, so a fast stream cannot
@@ -284,14 +289,19 @@ class VerifiedProfilesNotifier extends Notifier<Map<String, VerifiedProfile>> {
       _publish();
       return;
     }
-    // Keep every open batch whose subjects are all still tracked, so newly
-    // tracked people get a batch of their own instead of re-reading everyone
-    // already checked. A retried batch is replaced so a fresh snapshot can
-    // prove absence, and a batch that lost a subject to eviction is replaced
-    // too.
+    // Keep every open batch whose subjects are all still tracked since it
+    // opened, so newly tracked people get a batch of their own instead of
+    // re-reading everyone already checked. A retried batch is replaced so a
+    // fresh snapshot can prove absence, and a batch that lost a subject to
+    // eviction is replaced too, even if the subject was tracked again.
     for (final id in _batches.keys.toList()) {
       final batch = _batches[id]!;
-      if (!batch.stale && batch.subjects.every(_wanted.containsKey)) continue;
+      if (!batch.stale &&
+          batch.subjects.every(
+            (subject) => (_wanted[subject] ?? 1 << 62) <= batch.interest,
+          )) {
+        continue;
+      }
       _close(id);
     }
     var uncovered = _uncoveredSubjects();
@@ -300,14 +310,28 @@ class VerifiedProfilesNotifier extends Notifier<Map<String, VerifiedProfile>> {
       _publish();
       return;
     }
-    // Small additions each open a small batch. Past a few of those, merge
-    // them into full ones, so the subscription count stays near the minimum.
+    // Small additions each open a small batch. Past a few of those, merge the
+    // smallest into the new subjects until they fill a batch, so the
+    // subscription count stays near the minimum while re-reading as few
+    // checked subjects as possible.
     final partial = [
-      for (final MapEntry(:key, :value) in _batches.entries)
-        if (value.subjects.length < verifiedProfileBatchSize) key,
+      for (final batch in _batches.entries)
+        if (batch.value.subjects.length < verifiedProfileBatchSize) batch,
     ];
     if (partial.length >= _maxPartialBatches) {
-      partial.forEach(_close);
+      partial.sort(
+        (a, b) => a.value.subjects.length.compareTo(b.value.subjects.length),
+      );
+      // Retire at least one unless the new subjects split evenly, since
+      // they can add a partial batch of their own.
+      var size = uncovered.length;
+      var retired = size % verifiedProfileBatchSize == 0;
+      for (final MapEntry(:key, :value) in partial) {
+        if (retired && size >= verifiedProfileBatchSize) break;
+        size += value.subjects.length;
+        retired = true;
+        _close(key);
+      }
       uncovered = _uncoveredSubjects();
     }
     for (var i = 0; i < uncovered.length; i += verifiedProfileBatchSize) {
@@ -342,7 +366,7 @@ class VerifiedProfilesNotifier extends Notifier<Map<String, VerifiedProfile>> {
     VerifiedProfileAuthority authority,
     int generation,
   ) async {
-    final batch = _Batch(chunk);
+    final batch = _Batch(chunk, _interest);
     _batches[id] = batch;
     void fail() {
       if (!batch.active) return;

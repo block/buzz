@@ -226,23 +226,41 @@ void main() {
     expect(h.profiles[subjectB]?.checked, isTrue);
   });
 
-  journey('small batches merge into one past four', (h) {
+  journey('past four small batches, the smallest merge until one is full', (h) {
     String key(int i) => i.toRadixString(16).padLeft(64, '0');
-    h.start([key(0)]);
     final notifier = h.container.read(verifiedProfilesProvider.notifier);
+    h.start([for (var i = 0; i < 64; i++) key(i)]);
+    for (var group = 1; group < 4; group++) {
+      notifier.track([for (var i = 0; i < 64; i++) key(group * 64 + i)]);
+      h.settle();
+    }
+    final before = h.dFilters.length;
+    expect(before, 4, reason: 'four partial batches of 64');
+    notifier.track([key(256)]);
+    h.settle();
+    // Two of the 64s fill one batch with the newcomer; the other two stay.
+    final reads = [
+      for (final f in h.dFilters.skip(before)) (f['#d'] as List).cast<String>(),
+    ];
+    expect([for (final r in reads) r.length], [128, 1]);
+    expect(reads.expand((r) => r), contains(key(256)));
+  });
+
+  journey('a large addition past four small batches still retires one', (h) {
+    String key(int i) => i.toRadixString(16).padLeft(64, '0');
+    final notifier = h.container.read(verifiedProfilesProvider.notifier);
+    h.start([key(0)]);
     for (var i = 1; i < 4; i++) {
       notifier.track([key(i)]);
       h.settle();
     }
     final before = h.dFilters.length;
-    expect(before, 4);
-    notifier.track([key(4)]);
+    notifier.track([for (var i = 4; i < 133; i++) key(i)]);
     h.settle();
+    // 129 newcomers would leave a fifth partial; one single folds in.
     expect(
-      [for (final f in h.dFilters.skip(before)) f['#d']],
-      [
-        [for (var i = 0; i < 5; i++) key(i)],
-      ],
+      [for (final f in h.dFilters.skip(before)) (f['#d'] as List).length],
+      [128, 2],
     );
   });
 
@@ -259,6 +277,44 @@ void main() {
         [for (var i = 1; i < 128; i++) key(i), key(1024)],
       ],
     );
+  });
+
+  journey('a subject evicted and tracked again before the sync is re-read', (
+    h,
+  ) {
+    String key(int i) => i.toRadixString(16).padLeft(64, '0');
+    h.relay.seed([signedProjection(profileTags(subjectA))]);
+    h.start([subjectA]);
+    final notifier = h.container.read(verifiedProfilesProvider.notifier);
+    notifier.track([for (var i = 0; i < 1023; i++) key(i)]);
+    h.settle();
+    expect(h.profiles[subjectA]?.checked, isTrue);
+    // A is evicted, then tracked again, which evicts key(0) in another batch.
+    notifier
+      ..track([key(1023)])
+      ..track([subjectA]);
+    h.settle();
+    expect(h.profiles[subjectA]?.checked, isTrue);
+  });
+
+  journey('a re-tracked subject keeps its name when the head cache trims', (h) {
+    String key(int i) => i.toRadixString(16).padLeft(64, '0');
+    h.relay.seed([signedProjection(profileTags(subjectA))]);
+    h.start([subjectA]);
+    final notifier = h.container.read(verifiedProfilesProvider.notifier);
+    // Each round evicts A, may trim its cached head, then tracks it again
+    // before the sync; past 4,096 cached heads only a re-read restores it.
+    for (var round = 0; round < 6; round++) {
+      final subjects = [for (var i = 0; i < 1023; i++) key(round * 1023 + i)];
+      h.relay.seed([
+        for (final s in subjects) signedProjection(profileTags(s)),
+      ]);
+      notifier
+        ..track(subjects)
+        ..track([subjectA]);
+      h.settle();
+      expect(h.profiles[subjectA]?.displayName, 'Ada Lovelace');
+    }
   });
 
   journey('a large roster keeps the 1,024 most recently tracked subjects', (h) {
