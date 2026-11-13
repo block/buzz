@@ -29,6 +29,14 @@
 //! The TTL must cover the verifier's clock-skew tolerance (currently ±60s, so
 //! the window over which a duplicate event id is even plausible is 2×60 = 120s).
 //! [`DEFAULT_REPLAY_TTL_SECS`] is the floor; deployments may raise it.
+//!
+//! Keying on the event id has a client-visible consequence: a NIP-98 event is
+//! deterministic (kind, second-granularity `created_at`, `u`/`method`/`payload`
+//! tags), so two distinct same-second requests to the same URL sign to the same
+//! id and the second is rejected as a replay. Clients that may burst requests
+//! must add a random `nonce` tag per request — see `buzz-cli`'s `sign_nip98` —
+//! and see `SECURITY.md` for the documented client contract, including why the
+//! git smart-HTTP transport intentionally skips this dedup.
 
 use std::{future::Future, pin::Pin};
 
