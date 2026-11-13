@@ -755,8 +755,13 @@ void main() {
       expect(find.text('Open link'), findsNothing);
     });
 
-    for (final platform in [TargetPlatform.iOS, TargetPlatform.android]) {
-      testWidgets('holding a link opens link actions on ${platform.name}', (
+    for (final (platform, label) in [
+      (TargetPlatform.iOS, 'report'),
+      (TargetPlatform.android, 'report'),
+      (TargetPlatform.iOS, '`report`'),
+      (TargetPlatform.android, '`report`'),
+    ]) {
+      testWidgets('holding $label opens link actions on ${platform.name}', (
         tester,
       ) async {
         debugDefaultTargetPlatformOverride = platform;
@@ -789,8 +794,8 @@ void main() {
           _testable(
             MessageLongPressInkWell(
               onLongPress: (_) => messageMenus++,
-              child: const MessageContent(
-                content: 'See the [report]($url) before standup',
+              child: MessageContent(
+                content: 'See the [$label]($url) before standup',
               ),
             ),
             overrides: [
@@ -810,7 +815,7 @@ void main() {
 
         // A finger that slides off the link before the hold is up scrolls:
         // no link actions, no message menu and nothing opened.
-        final press = await tester.startGesture(linkCenter(tester, 'report'));
+        final press = await tester.startGesture(textCenter(tester, 'report'));
         await press.moveBy(const Offset(0, 40));
         await tester.pump(const Duration(seconds: 1));
         await press.up();
@@ -820,7 +825,7 @@ void main() {
         expect(opened, isEmpty);
 
         // A hold on the link opens its own actions instead.
-        await tester.longPressAt(linkCenter(tester, 'report'));
+        await tester.longPressAt(textCenter(tester, 'report'));
         await tester.pumpAndSettle();
         expect(messageMenus, 1);
         expect(find.text(url), findsOneWidget);
@@ -831,14 +836,14 @@ void main() {
         expect(clipboard, [url]);
         expect(find.text('Copy link'), findsNothing);
 
-        await tester.longPressAt(linkCenter(tester, 'report'));
+        await tester.longPressAt(textCenter(tester, 'report'));
         await tester.pumpAndSettle();
         await tester.tap(find.text('Open link'));
         await tester.pumpAndSettle();
         expect(opened, [url]);
 
         // An ordinary tap still opens the link directly.
-        await tester.tapAt(linkCenter(tester, 'report'));
+        await tester.tapAt(textCenter(tester, 'report'));
         await tester.pumpAndSettle();
         expect(opened, [url, url]);
         expect(messageMenus, 1);
@@ -847,7 +852,7 @@ void main() {
         _setSurfaceSize(tester, const Size(640, 260));
         addTearDown(tester.view.reset);
         await tester.pumpAndSettle();
-        await tester.longPressAt(linkCenter(tester, 'report'));
+        await tester.longPressAt(textCenter(tester, 'report'));
         await tester.pumpAndSettle();
         await tester.ensureVisible(find.text('Share link'));
         await tester.pumpAndSettle();
@@ -855,6 +860,63 @@ void main() {
         debugDefaultTargetPlatformOverride = null;
       });
     }
+
+    testWidgets('removing a link during a hold cancels its actions', (
+      tester,
+    ) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      final content = ValueNotifier('See [report](https://example.com/report)');
+      addTearDown(content.dispose);
+      await tester.pumpWidget(
+        _testable(
+          ValueListenableBuilder<String>(
+            valueListenable: content,
+            builder: (context, value, child) => MessageContent(content: value),
+          ),
+        ),
+      );
+      final press = await tester.startGesture(textCenter(tester, 'report'));
+      await tester.pump(const Duration(milliseconds: 150));
+      content.value = 'The report was removed';
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 600));
+      await press.up();
+      expect(tester.takeException(), isNull);
+      expect(find.text('Copy link'), findsNothing);
+      debugDefaultTargetPlatformOverride = null;
+    });
+
+    testWidgets('a second finger does not restart a link hold', (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      var messageMenus = 0;
+      await tester.pumpWidget(
+        _testable(
+          MessageLongPressInkWell(
+            onLongPress: (_) => messageMenus++,
+            child: const MessageContent(
+              content: 'See [report](https://example.com/report) now',
+            ),
+          ),
+        ),
+      );
+      final point = textCenter(tester, 'report');
+      final first = await tester.startGesture(point, pointer: 1);
+      await tester.pump(const Duration(milliseconds: 200));
+      final second = await tester.startGesture(
+        point + const Offset(1, 0),
+        pointer: 2,
+      );
+      await tester.pump(const Duration(milliseconds: 100));
+      await second.up();
+      await tester.pump(const Duration(milliseconds: 250));
+      await first.up();
+      await tester.pumpAndSettle();
+      expect(messageMenus, 0);
+      expect(find.text('Copy link'), findsOneWidget);
+      debugDefaultTargetPlatformOverride = null;
+    });
 
     test('buildImageViewerRoute uses modal-style page route builder', () {
       final route = buildImageViewerRoute(

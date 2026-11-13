@@ -81,7 +81,11 @@ class _LinkTextRecognizer extends TapGestureRecognizer {
 
   @override
   void addAllowedPointer(PointerDownEvent event) {
+    // Only the pointer that starts a gesture times the hold; a second finger
+    // joining it must not restart the first finger's clock.
+    final startsGesture = state == GestureRecognizerState.ready;
     super.addAllowedPointer(event);
+    if (!startsGesture) return;
     _held = false;
     _holdTimer?.cancel();
     _holdTimer = Timer(
@@ -134,8 +138,8 @@ class _LinkTextRecognizer extends TapGestureRecognizer {
   }
 }
 
-/// One [_LinkTextRecognizer] per link in a message, kept across rebuilds and
-/// disposed with the message.
+/// One [_LinkTextRecognizer] per link in a message's text, kept across
+/// rebuilds and disposed when the text changes or the message goes away.
 class _LinkTextRecognizers {
   final _byLink = <String, _LinkTextRecognizer>{};
 
@@ -150,14 +154,33 @@ class _LinkTextRecognizers {
   }
 }
 
-/// [spans] with [recognizer] on every plain text run, so the whole label is
-/// one link. Package span types (inline code) keep their own rendering.
+/// [spans] with [recognizer] on every text run, so the whole label is one
+/// link. Inline code keeps its chip rendering. Other package span types are
+/// left as they are.
 List<InlineSpan> _withLinkRecognizer(
   List<InlineSpan> spans,
   GestureRecognizer recognizer,
 ) => [
   for (final span in spans)
-    if (span.runtimeType == TextSpan)
+    if (span is CodeTextSpan)
+      span.children == null
+          ? CodeTextSpan(
+              text: span.text ?? '',
+              codeStyle: span.codeStyle,
+              style: span.style,
+              recognizer: span.recognizer ?? recognizer,
+              mouseCursor: span.mouseCursor,
+              semanticsLabel: span.semanticsLabel,
+            )
+          : CodeTextSpan.revealing(
+              children: _withLinkRecognizer(span.children!, recognizer),
+              codeStyle: span.codeStyle,
+              style: span.style,
+              recognizer: span.recognizer ?? recognizer,
+              mouseCursor: span.mouseCursor,
+              semanticsLabel: span.semanticsLabel,
+            )
+    else if (span.runtimeType == TextSpan)
       TextSpan(
         text: (span as TextSpan).text,
         style: span.style,

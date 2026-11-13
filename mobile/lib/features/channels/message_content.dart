@@ -367,7 +367,11 @@ class MessageContent extends HookConsumerWidget {
         ? kEmojiOnlyCustomEmojiSize
         : kCustomEmojiInlineSize;
 
-    final linkRecognizers = useMemoized(_LinkTextRecognizers.new);
+    // A new pool per message text, so an edit retires the old links'
+    // recognizers (and any hold under way on them) with the old text.
+    final linkRecognizers = useMemoized(_LinkTextRecognizers.new, [
+      markdownContent,
+    ]);
     useEffect(() => linkRecognizers.dispose, [linkRecognizers]);
 
     final finalContent = useMemoized(() {
@@ -846,9 +850,15 @@ class MessageContent extends HookConsumerWidget {
 
     // Text, not a widget, so a long label wraps mid-label and the words after
     // it continue on the same line.
+    // The recognizer outlives this link when an edit removes it, so a tap or
+    // hold already under way checks that the link is still on screen.
     final recognizer = recognizers.forLink(url, text)
-      ..onTap = (() => unawaited(openLink()))
-      ..onHold = showActions;
+      ..onTap = (() {
+        if (context.mounted) unawaited(openLink());
+      })
+      ..onHold = () {
+        if (context.mounted) showActions();
+      };
     // A canonical label is drawn as its plain text, as before; an authored
     // label keeps its parsed spans (bold, code) in the link style.
     if (isCanonicalBuzzLabel) {
