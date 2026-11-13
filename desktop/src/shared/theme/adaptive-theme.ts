@@ -179,6 +179,7 @@ export interface ThemeGitColors {
 
 export interface ThemeResult {
   isDark: boolean;
+  windowBackingColor: string;
   vars: Record<string, string>;
 }
 
@@ -233,6 +234,7 @@ export function createThemeVars(
 
   return {
     isDark,
+    windowBackingColor: chromeColor,
     vars: {
       // Backgrounds
       "--background": hexToHsl(primaryBg),

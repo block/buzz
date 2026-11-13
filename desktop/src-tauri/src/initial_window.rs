@@ -15,30 +15,18 @@ pub(crate) fn reveal_initial_window<R: tauri::Runtime>(window: &tauri::Window<R>
 
 #[cfg(target_os = "macos")]
 pub(crate) fn set_initial_window_backing<R: tauri::Runtime>(window: &tauri::Window<R>) {
-    // Both this write and the deferred clear target the Window (NSWindow)
-    // backing color only; they never touch the webview canvas or the
-    // NSVisualEffectView, so they are not load-bearing for glass. Glass state
+    // This write targets the Window (NSWindow) backing color only; it never
+    // touches the webview canvas or the NSVisualEffectView, so it is not
+    // load-bearing for glass. Glass state
     // — the effect view and webview-canvas transparency — is managed entirely
     // by `set_window_vibrancy`, which the ThemeProvider calls after mount. The
-    // 250ms-delayed clear cannot clobber a persisted-glass-on cold boot
-    // regardless of ordering with that call.
+    // ThemeProvider replaces this startup color with the resolved theme
+    // background as soon as theme data is ready.
     //
     // Write an opaque dark backing so the previous app cannot show through
     // before WebKit submits its first composited surface.
     if let Err(error) = window.set_background_color(Some(tauri::window::Color(17, 21, 24, 255))) {
         eprintln!("buzz-desktop: failed to set initial window backing: {error}");
-    }
-}
-
-#[cfg(target_os = "macos")]
-pub(crate) async fn clear_initial_window_backing<R: tauri::Runtime>(window: &tauri::Window<R>) {
-    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-    // Restore the default system window background so fast-resize gutter
-    // flashes match the platform theme rather than the hardcoded dark color
-    // written at reveal. Targets the Window (NSWindow) layer only; webview
-    // canvas and glass state are unaffected.
-    if let Err(error) = window.set_background_color(None) {
-        eprintln!("buzz-desktop: failed to clear initial window backing: {error}");
     }
 }
 
