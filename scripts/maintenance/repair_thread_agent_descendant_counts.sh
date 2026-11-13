@@ -32,7 +32,7 @@
 set -euo pipefail
 
 : "${DATABASE_URL:?set DATABASE_URL}"
-batch_size=${BATCH_SIZE:-500}
+batch_size=${BATCH_SIZE:-100}
 max_attempts=${MAX_ATTEMPTS:-5}
 [[ $batch_size =~ ^[1-9][0-9]*$ ]] || {
     echo "BATCH_SIZE must be a positive integer" >&2
@@ -162,8 +162,11 @@ while IFS= read -r community; do
 done <<<"$communities"
 echo "repaired $total thread roots"
 
-# Unbounded check over the active communities' roots, run once at the end.
+# One check over the active communities' roots, run once at the end. The
+# timeout stops a slow scan from hanging the end of a long run; a timeout
+# fails the script after the repair has committed.
 mismatched=$("${psql_base[@]}" -c "
+SET statement_timeout = '5min';
 SELECT count(*)
   FROM thread_metadata root
   JOIN communities c ON c.id = root.community_id
