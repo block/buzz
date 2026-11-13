@@ -2210,8 +2210,10 @@ impl Db {
 
     /// Archive only while the caller still owns the lifecycle decision.
     /// Recheck after acquiring channel locks and before commit, so a queued
-    /// write cannot act on authority retired while it waited. A false result
-    /// rolls back; admission uses the same row lock and cannot interleave.
+    /// write cannot act on authority retired while it waited. False means
+    /// nothing was written: authority was lost (rolled back), or the channel
+    /// was already archived. Admission uses the same row lock and cannot
+    /// interleave.
     #[datastore_span(name = "archive_channel_if", system = "postgresql")]
     pub async fn archive_channel_if<Fut>(
         &self,
@@ -2225,6 +2227,9 @@ impl Db {
         let mut tx = self.begin_event_write_transaction(community_id).await?;
         let mut locked =
             lock_channel_for_settings_write(&mut tx, channel_id, &ChannelUpdate::default()).await?;
+        if locked.archived {
+            return Ok(false);
+        }
         if !authorized().await? {
             return Ok(false);
         }
@@ -2739,6 +2744,12 @@ mod postgres_tests {
             .unwrap()
             .archived_at
             .is_some());
+        // Already archived (the creator ended the Huddle first) is terminal:
+        // nothing to write, not an error.
+        assert!(!db
+            .archive_channel_if(community, channel.id, || async { Ok(true) })
+            .await
+            .unwrap());
     }
 
     #[tokio::test]
