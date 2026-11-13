@@ -19,6 +19,7 @@ import 'package:buzz/shared/push/dev_push_lease.dart';
 import 'package:buzz/shared/push/push_bootstrap.dart';
 import 'package:buzz/shared/push/push_bridge.dart';
 import 'package:buzz/shared/push/push_subscription.dart';
+import 'package:buzz/shared/push/push_subscription_provider.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:buzz/shared/push/push_lease_revocation_outbox.dart';
@@ -341,6 +342,170 @@ void main() {
     },
   );
 
+  for (final enabledSibling in [false, true]) {
+    testWidgets(
+      'opt-out fences late native recovery with enabled same-origin sibling=$enabledSibling',
+      (tester) async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+        SharedPreferences.setMockInitialValues({});
+        final prefs = await SharedPreferences.getInstance();
+        final keys = nostr.Keys.generate();
+        final community =
+            Community.create(
+              name: 'Canceled',
+              relayUrl: 'https://relay.example',
+              nsec: keys.nsec,
+              pubkey: keys.public,
+            ).copyWith(
+              pushSubscriptionState: BuzzPushLeaseSubscriptionState.desired(
+                desired: [
+                  BuzzPushSubscription(
+                    filter: BuzzPushFilter(kinds: [9], pTags: [keys.public]),
+                    notificationClass: 'default',
+                  ),
+                ],
+              ),
+            );
+        final storage = CommunityStorage(secure: FakeSecureStorage());
+        await storage.save(community);
+        await storage.save(
+          Community.create(
+            name: 'Unrelated',
+            relayUrl: 'https://other.example',
+          ),
+        );
+        final siblingKeys = nostr.Keys('3' * 64);
+        final sibling = Community.create(
+          name: 'Same origin, different member',
+          relayUrl: 'wss://relay.example/',
+          nsec: siblingKeys.nsec,
+          pubkey: siblingKeys.public,
+        ).copyWith(pushNotificationsEnabled: enabledSibling);
+        expect(sibling.pubkey, isNot(community.pubkey));
+        await storage.save(sibling);
+        await storage.saveActiveId(community.id);
+        final journal = BuzzPushLeaseRevocationStorage(
+          secure: FakeSecureStorage(),
+        );
+        final enrollment = Completer<Map<String, Object>>();
+        var enrollments = 0;
+        var emptyInventoryReads = 0;
+        var wildcardRevocations = 0;
+        var settledWildcardRevocations = 0;
+        final grant = <String, Object>{
+          'relayOrigin': 'wss://relay.example',
+          'relayPubkey': 'a' * 64,
+          'installationId': '0' * 32,
+          'endpointGrant': 'g2_recovered',
+          'endpointHash': 'b' * 64,
+          'endpointEpoch': 1,
+          'generation': 4,
+          'expiresAt': DateTime.now().millisecondsSinceEpoch ~/ 1000 + 3600,
+          'gatewayInstallationHandle': '22222222-2222-4222-8222-222222222222',
+          'appAttestKeyId': 'installed-key',
+        };
+        const native = MethodChannel('buzz/push');
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(native, (
+          call,
+        ) async {
+          switch (call.method) {
+            case 'endpointGrants':
+              if (!enrollment.isCompleted) emptyInventoryReads++;
+              return enrollment.isCompleted ? [grant] : [];
+            case 'enrollPush':
+              enrollments++;
+              return enrollment.future;
+            case 'revokePushDelegation':
+              final target = call.arguments as Map;
+              if (target['relayPubkey'] == '') {
+                wildcardRevocations++;
+                // The native lane settles issuance before applying cancellation.
+                await enrollment.future;
+                settledWildcardRevocations++;
+                return null;
+              }
+              throw PlatformException(code: 'push_management_busy_or_invalid');
+            default:
+              return null;
+          }
+        });
+        addTearDown(() {
+          tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            native,
+            null,
+          );
+          apnsDeviceToken.value = null;
+          pushEndpointGrants.value = [];
+          pushLeaseCleanupError.value = null;
+        });
+        apnsDeviceToken.value = 'token';
+        await tester.pumpWidget(
+          ProviderScope(
+            retry: (_, _) => null,
+            overrides: [
+              savedPrefsProvider.overrideWithValue(prefs),
+              communityStorageProvider.overrideWithValue(storage),
+              communitySnapshotWriterProvider.overrideWithValue((_) async {}),
+              buzzPushLeaseRevocationStorageProvider.overrideWithValue(journal),
+              relaySessionProvider.overrideWith(_ConnectedSession.new),
+              pushSubscriptionSyncProvider.overrideWith((_) async => 0),
+              currentRelayPushDescriptorProvider.overrideWith(
+                (_) async => _descriptor,
+              ),
+              buzzPushDescriptorFetcherProvider.overrideWithValue(
+                (_) async => _descriptor,
+              ),
+            ],
+            child: const BuzzPushBootstrap(child: SizedBox()),
+          ),
+        );
+        await tester.pump();
+        await tester.pump();
+        expect(enrollments, 1);
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(BuzzPushBootstrap)),
+        );
+        await container
+            .read(communityListProvider.notifier)
+            .setPushNotificationsEnabled(community.id, false);
+        await tester.pump();
+        final outbox = container.read(buzzPushLeaseRevocationOutboxProvider);
+        final draining = outbox.trigger();
+        await tester.pump();
+        expect(emptyInventoryReads, greaterThan(0));
+        expect(wildcardRevocations, enabledSibling ? 0 : 1);
+        expect(settledWildcardRevocations, 0);
+        // Native may safely recover a stale/lost issuance at generation 4 while
+        // its serialized cancellation is waiting. That result is not new consent.
+        enrollment.complete(grant);
+        await tester.pump();
+        await draining;
+        await tester.pump();
+        final canceled = (await storage.loadAll()).firstWhere(
+          (value) => value.id == community.id,
+        );
+        expect(canceled.pushNotificationsEnabled, isFalse);
+        expect(canceled.pushSubscriptionState.generationCursor, isNull);
+        final pending = await journal.loadAll();
+        expect(
+          pending.any(
+            (record) =>
+                record.gatewayRevocation?['generation'] == 4 &&
+                record.gatewayRevocation?['installationHandle'] ==
+                    grant['gatewayInstallationHandle'],
+          ),
+          !enabledSibling,
+        );
+        expect(wildcardRevocations, enabledSibling ? 0 : 1);
+        expect(settledWildcardRevocations, enabledSibling ? 0 : 1);
+        if (enabledSibling) expect(pending, isEmpty);
+        expect(enrollments, 1);
+        await tester.pumpWidget(const SizedBox());
+        debugDefaultTargetPlatformOverride = null;
+      },
+    );
+  }
+
   testWidgets('cold-start native failure cannot prevent runApp', (
     tester,
   ) async {
@@ -423,6 +588,11 @@ class _Age extends AgeSignalNotifier {
   AgeSignalState build() => AgeSignalState.allowed;
   @override
   Future<void> request() async {}
+}
+
+class _ConnectedSession extends RelaySessionNotifier {
+  @override
+  SessionState build() => const SessionState(status: SessionStatus.connected);
 }
 
 class _Session extends RelaySessionNotifier {
