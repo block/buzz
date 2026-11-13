@@ -1035,11 +1035,11 @@ class ComposeBar extends HookConsumerWidget {
             controller,
             pickerVisible: pickerVisible,
             acceptSuggestion: topChannel != null
-                ? () => insertChannel(topChannel)
+                ? () => _runComposerAction(() => insertChannel(topChannel))
                 : topMention != null
-                ? () => insertMention(topMention)
+                ? () => _runComposerAction(() => insertMention(topMention))
                 : null,
-            send: send,
+            send: () async => _runComposerAction(() => unawaited(send())),
           );
 
     final suggestionPanel = _composerSuggestionPanel(

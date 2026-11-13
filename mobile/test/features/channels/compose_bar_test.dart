@@ -2227,6 +2227,44 @@ void main() {
         await tester.pump(mentionSearchDebounce * 2);
       });
 
+      testWidgets(
+        'keyboard suggestion acceptance and send use selection haptics',
+        (tester) async {
+          final calls = <Object?>[];
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+              .setMockMethodCallHandler(SystemChannels.platform, (call) async {
+                if (call.method == 'HapticFeedback.vibrate') {
+                  calls.add(call.arguments);
+                }
+                return null;
+              });
+          addTearDown(
+            () => TestDefaultBinaryMessengerBinding
+                .instance
+                .defaultBinaryMessenger
+                .setMockMethodCallHandler(SystemChannels.platform, null),
+          );
+          final controller = await pumpComposer(tester);
+          calls.clear();
+          for (final (draft, key, expected) in [
+            ('hi @a', LogicalKeyboardKey.tab, 'hi @Alice '),
+            ('yo @b', LogicalKeyboardKey.enter, 'yo @Bob '),
+            ('#cur', LogicalKeyboardKey.tab, '#current '),
+            ('hello', LogicalKeyboardKey.enter, ''),
+          ]) {
+            await tester.enterText(find.byType(TextField), draft);
+            await tester.pump();
+            calls.clear();
+            await tester.sendKeyEvent(key);
+            await tester.pump();
+            expect(controller.text, expected);
+            expect(calls, ['HapticFeedbackType.selectionClick'], reason: draft);
+          }
+          expect(sent, ['hello']);
+          await tester.pump(mentionSearchDebounce * 2);
+        },
+      );
+
       testWidgets('a picker with no selectable row consumes Tab and Enter', (
         tester,
       ) async {
