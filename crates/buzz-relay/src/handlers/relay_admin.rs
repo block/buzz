@@ -238,15 +238,15 @@ async fn execute_relay_admin_command(
     // of captured admin commands. The window is intentionally tight — admin
     // events should be freshly signed.
     {
-        let event_ts = event.created_at.as_secs() as i64;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        if (event_ts - now).abs() > 120 {
+        use super::freshness::{check_created_at_skew, unix_now_secs, MAX_COMMAND_SKEW_SECS};
+        if let Err(e) =
+            check_created_at_skew(event.created_at, unix_now_secs(), MAX_COMMAND_SKEW_SECS)
+        {
             return Err(format!(
-                "event timestamp out of range: created_at={event_ts}, now={now}, delta={}s (max ±120s)",
-                event_ts - now
+                "event timestamp out of range: created_at={}, now={}, delta={}s (max ±{MAX_COMMAND_SKEW_SECS}s)",
+                e.created_at,
+                e.now,
+                e.delta()
             ));
         }
     }

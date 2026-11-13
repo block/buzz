@@ -76,10 +76,7 @@ use crate::handlers::report_resolution::{enforcement_audit_action, resolve_repor
 use crate::state::AppState;
 use buzz_db::moderation::NewAction;
 
-/// Max clock skew for a freshly-signed command (mirrors `relay_admin.rs` and
-/// the NIP-42 auth freshness window). Commands are never stored, so replay of a
-/// captured command is the only threat and a tight window is the mitigation.
-const MAX_COMMAND_SKEW_SECS: i64 = 120;
+use super::freshness::MAX_COMMAND_SKEW_SECS;
 
 /// Validate and execute a moderation command (kinds 9040–9044).
 ///
@@ -133,15 +130,15 @@ async fn execute_moderation_command(
     let kind = event.kind.as_u16() as u32;
 
     // Freshness: reject stale/replayed commands (they are never stored).
-    let event_ts = event.created_at.as_secs() as i64;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    if (event_ts - now).abs() > MAX_COMMAND_SKEW_SECS {
+    let now = super::freshness::unix_now_secs();
+    if let Err(e) =
+        super::freshness::check_created_at_skew(event.created_at, now, MAX_COMMAND_SKEW_SECS)
+    {
         return Err(invalid(format!(
-            "event timestamp out of range: created_at={event_ts}, now={now}, delta={}s (max ±{MAX_COMMAND_SKEW_SECS}s)",
-            event_ts - now
+            "event timestamp out of range: created_at={}, now={}, delta={}s (max ±{MAX_COMMAND_SKEW_SECS}s)",
+            e.created_at,
+            e.now,
+            e.delta()
         )));
     }
 

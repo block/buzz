@@ -14,6 +14,7 @@ use buzz_core::tenant::TenantContext;
 use buzz_core::CommunityId;
 use buzz_db::EventQuery;
 
+use crate::handlers::freshness::MAX_COMMAND_SKEW_SECS;
 use crate::handlers::side_effects::{
     publish_nipia_archival_list, publish_nipia_archived, publish_nipia_unarchived,
 };
@@ -139,18 +140,17 @@ pub async fn handle_identity_archive_event(
 }
 
 fn enforce_freshness(event: &Event) -> Result<(), String> {
-    let event_ts = event.created_at.as_secs() as i64;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    if (event_ts - now).abs() > 120 {
-        return Err(format!(
-            "event timestamp out of range: created_at={event_ts}, now={now}, delta={}s (max ±120s)",
-            event_ts - now
-        ));
-    }
-    Ok(())
+    let now = super::freshness::unix_now_secs();
+    super::freshness::check_created_at_skew(event.created_at, now, MAX_COMMAND_SKEW_SECS).map_err(
+        |e| {
+            format!(
+                "event timestamp out of range: created_at={}, now={}, delta={}s (max ±{MAX_COMMAND_SKEW_SECS}s)",
+                e.created_at,
+                e.now,
+                e.delta()
+            )
+        },
+    )
 }
 
 fn require_single_protected_tag(event: &Event) -> Result<(), String> {
@@ -437,7 +437,7 @@ mod tests {
 
     async fn test_pool() -> Option<sqlx::PgPool> {
         let url = std::env::var("DATABASE_URL")
-            .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".into());
+            .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".into()); // sadscan:disable np.postgres.1 -- local test fixture
         sqlx::PgPool::connect(&url).await.ok()
     }
 
@@ -764,5 +764,34 @@ mod tests {
             err.contains("live kind:0 no longer attests"),
             "unexpected error: {err}"
         );
+    }
+}
+
+#[cfg(test)]
+mod freshness_tests {
+    use super::*;
+    use nostr::{EventBuilder, Keys, Kind, Timestamp};
+
+    fn archive_request_at(created_at: u64) -> Event {
+        EventBuilder::new(Kind::Custom(KIND_IA_ARCHIVE_REQUEST as u16), "")
+            .custom_created_at(Timestamp::from_secs(created_at))
+            .sign_with_keys(&Keys::generate())
+            .expect("sign test event")
+    }
+
+    #[test]
+    fn freshness_rejects_created_at_that_wraps_i64_delta() {
+        let now = crate::handlers::freshness::unix_now_secs();
+        // `created_at as i64 - now` is exactly `i64::MIN` here; its `abs()`
+        // overflows (panic in debug, stays negative in release).
+        let err = enforce_freshness(&archive_request_at((1u64 << 63) + now))
+            .expect_err("extreme future timestamp must be rejected");
+        assert!(err.contains("out of range"), "{err}");
+    }
+
+    #[test]
+    fn freshness_accepts_current_created_at() {
+        let now = crate::handlers::freshness::unix_now_secs();
+        assert!(enforce_freshness(&archive_request_at(now)).is_ok());
     }
 }

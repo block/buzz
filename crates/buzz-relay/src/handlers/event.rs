@@ -1376,9 +1376,8 @@ async fn handle_agent_observer_event(
     }
 
     // Freshness check: reject observer frames with stale/future timestamps
-    let now = chrono::Utc::now().timestamp();
-    let event_ts = event.created_at.as_secs() as i64;
-    if (event_ts - now).unsigned_abs() > 300 {
+    let now = super::freshness::unix_now_secs();
+    if super::freshness::check_created_at_skew(event.created_at, now, 300).is_err() {
         write.ok(
             &conn,
             event_id_hex,
