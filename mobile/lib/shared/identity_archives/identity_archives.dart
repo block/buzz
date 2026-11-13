@@ -73,6 +73,10 @@ final identityArchivesProvider = FutureProvider<Set<String>>((ref) async {
     final cache = ref.read(_archiveCacheProvider).entries;
     final key = (sync.community, authority);
     final known = cache[key];
+    // Ask only for a list newer than the known one. This assumes each list is
+    // stamped strictly later than the previous one, which the relay does
+    // except when two lists are published in the same second; then the
+    // second can be missed until a later list arrives or the app restarts.
     final events = await sync.session.fetchHistory(
       NostrFilter(
         kinds: const [13535],
