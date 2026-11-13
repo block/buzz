@@ -117,8 +117,10 @@ async fn delete_workflow_in_transaction(
     // The owner predicate is in the locking SELECT; FOR UPDATE keeps it
     // binding for the deletes below.
     let workflow_id = Uuid::parse_str(d_tag).ok();
-    // Lock the workflow first: a concurrent run or fire insert must lock it for
-    // its foreign key, so the child deletes below see every committed child.
+    // Lock the workflow first: a concurrent run, approval or fire insert must
+    // lock it `FOR KEY SHARE` (the reference checks in `workflow.rs`), so the
+    // child deletes below see every committed child, and an insert that starts
+    // later finds the workflow gone.
     let target: Option<Uuid> = sqlx::query_scalar(
         "SELECT id FROM workflows WHERE community_id = $1 AND owner_pubkey = $2 \
              AND id = COALESCE($3::uuid, (SELECT id FROM workflows \
@@ -159,10 +161,12 @@ async fn delete_workflow_in_transaction(
 /// or any of its runs), then runs. Returns the workflow's `channel_id`.
 async fn delete_workflow_with_children(tx: &mut AdmittedTx, id: Uuid) -> Result<Option<Uuid>> {
     let community = *tx.community().as_uuid();
-    // Fires go before the run lock. A new fire must key-share lock the workflow,
-    // which is already locked. Attaching a run to a fire locks the fire row and
-    // then the run, so taking the run lock first would invert that order and can
-    // deadlock; deleting the fire first waits for any in-flight attach instead.
+    // Fires go before the run lock. A new fire claim key-share locks the
+    // workflow, which is already locked. Attaching a run to a fire locks the
+    // fire row and, while the fire's run foreign key exists, then key-share
+    // locks the run, so taking the run lock first would invert that order and
+    // can deadlock; deleting the fire first waits for any in-flight attach
+    // instead, and an attach that starts later finds no fire to update.
     sqlx::query(
         "DELETE FROM scheduled_workflow_fires WHERE community_id = $1 AND workflow_id = $2",
     )
@@ -171,7 +175,8 @@ async fn delete_workflow_with_children(tx: &mut AdmittedTx, id: Uuid) -> Result<
     .execute(tx.conn())
     .await?;
     // The workflow lock stops new runs, but an approval naming another workflow
-    // can still reference one of these runs; it key-share locks only that run.
+    // can still reference one of these runs; its reference check key-share locks
+    // only that run.
     // Lock the runs (in a fixed order) so such an insert either commits before
     // the approval delete below or waits until this transaction ends.
     sqlx::query(
