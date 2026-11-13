@@ -326,6 +326,15 @@ class ComposeBar extends HookConsumerWidget {
     final isModifyingText = useRef(false);
     final lastObservedEditingValue = useRef(controller.value);
 
+    // Typed member names the send resolves, selection or not.
+    List<MentionCandidate> memberMentionCandidates() => _typedMemberCandidates(
+      membersAsync: membersAsync,
+      sessionStatus: sessionStatus,
+      cachedMembers: cachedMembers,
+      userCache: userCache,
+      agentOwners: agentOwners,
+    );
+
     // Insert a selected mention into the text field.
     void insertMention(MentionCandidate candidate) {
       final name = selectedMentionLabel(candidate.label, candidate.pubkey, {
@@ -344,6 +353,7 @@ class ComposeBar extends HookConsumerWidget {
           mentionMap.value,
           candidate,
           start,
+          [for (final member in memberMentionCandidates()) member.label],
         );
         mentionMap.value[name] = candidate;
         spliceAndMoveCursor(
@@ -579,17 +589,7 @@ class ComposeBar extends HookConsumerWidget {
         selectedMentions = _resolveComposerMentions(
           text,
           mentionMap.value,
-          buildMentionCandidates(
-            members: channelMembersForAutocomplete(
-              membersAsync: membersAsync,
-              sessionStatus: sessionStatus,
-              cachedMembers: cachedMembers,
-            ),
-            relayAgents: const [],
-            sharedChannelIds: const {},
-            userCache: userCache,
-            ownerByAgentPubkey: agentOwners ?? const {},
-          ),
+          memberMentionCandidates(),
           buildMentionCandidates(
             members: membersAsync.asData?.value ?? const [],
             relayAgents: relayAgents ?? const [],
