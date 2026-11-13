@@ -495,10 +495,8 @@ pub async fn search_profile_names(
     qb.push(TIER_TEXT[1]);
     qb.push(" AS typed), matches AS (SELECT e.pubkey AS person, ");
     push_name_match(&mut qb, &["name", "display_name"], "e.created_at");
-    qb.push(
-        " FROM events e CROSS JOIN search_query \
-         CROSS JOIN LATERAL profile_name_fields(e.content) AS fields",
-    );
+    qb.push(" FROM events e CROSS JOIN search_query");
+    qb.push(PROFILE_NAME_FIELDS);
     push_name_columns(&mut qb, &["name", "display_name"]);
     qb.push(" WHERE e.community_id = ");
     qb.push_bind(*community.as_uuid());
@@ -604,6 +602,33 @@ pub async fn search_profile_names(
     }
     Ok(SearchResult { hits, page })
 }
+
+/// Joins `fields.name` and `fields.display_name` for the kind:0 `e.content`.
+/// A field is NULL unless the content is a JSON object and the field is a
+/// string.
+///
+/// Content is any text the signer chose, and some of it must have no names
+/// rather than fail the whole search:
+/// - Valid JSON that cannot become jsonb, such as `\u0000`, a lone surrogate
+///   or a huge number. `pg_input_is_valid` rejects it.
+/// - Nesting deep enough to exhaust PostgreSQL's recursive JSON parser (about
+///   ten thousand levels at the default `max_stack_depth`). That raises an
+///   error `pg_input_is_valid` does not catch, so content with more than 4096
+///   `[` and `{` is never parsed. The count bounds the depth; ingest already
+///   rejects kind:0 content nested deeper than 128 levels. The bound assumes
+///   the default 2 MB `max_stack_depth`; well below that, content stored
+///   outside ingest with fewer than 4096 levels can still fail the search.
+///
+/// `OFFSET 0` keeps the planner from copying the parse into each use of `doc`.
+const PROFILE_NAME_FIELDS: &str = " CROSS JOIN LATERAL (SELECT CASE \
+     WHEN length(e.content) - length(translate(e.content, '[{', '')) > 4096 THEN NULL \
+     WHEN pg_input_is_valid(e.content, 'jsonb') THEN e.content::jsonb END AS doc \
+     OFFSET 0) AS profile \
+     CROSS JOIN LATERAL (SELECT \
+     CASE WHEN jsonb_typeof(profile.doc -> 'name') = 'string' \
+     THEN profile.doc ->> 'name' END AS name, \
+     CASE WHEN jsonb_typeof(profile.doc -> 'display_name') = 'string' \
+     THEN profile.doc ->> 'display_name' END AS display_name) AS fields";
 
 /// Name tags of a relay-signed kind:30382 verified profile.
 const VERIFIED_NAME_TAGS: [&str; 3] = ["display_name", "username", "full_name"];

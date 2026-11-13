@@ -18,7 +18,7 @@
 
 use std::collections::BTreeMap;
 
-use nostr::{Event, EventBuilder, Keys, Kind, PublicKey, Tag, TagKind};
+use nostr::{Event, EventBuilder, Keys, Kind, PublicKey, Tag, TagKind, Timestamp};
 
 /// Subset of `Manifest` needed to emit a kind:30618 event.
 ///
@@ -39,6 +39,10 @@ pub struct RefStateInputs<'a> {
     /// the pusher's pubkey from the receive-pack hook. On repo-creation, this
     /// is the kind:30617 author (repo owner). Hex-encoded (64 chars).
     pub actor_pubkey_hex: &'a str,
+    /// The manifest's `published_at`, used as the event's `created_at` so
+    /// readers that pick the newest kind:30618 see the newest manifest. `None`
+    /// (a manifest written before the field existed) falls back to now.
+    pub published_at: Option<u64>,
 }
 
 /// Errors from building a kind:30618 ref-state event.
@@ -105,8 +109,11 @@ pub fn build_ref_state_event(
     // p-tag: buzz extension (pusher or owner pubkey).
     tags.push(Tag::public_key(actor));
 
-    let event = EventBuilder::new(Kind::Custom(30618), "")
-        .tags(tags)
+    let mut builder = EventBuilder::new(Kind::Custom(30618), "").tags(tags);
+    if let Some(published_at) = inputs.published_at {
+        builder = builder.custom_created_at(Timestamp::from(published_at));
+    }
+    let event = builder
         .sign_with_keys(relay_keys)
         .map_err(|e| BuildError::Sign(e.to_string()))?;
 
@@ -183,6 +190,7 @@ mod tests {
             head: "refs/heads/main",
             refs: &refs,
             actor_pubkey_hex: &owner,
+            published_at: None,
         };
         let ev = build_ref_state_event(&inputs, &relay_keys()).unwrap();
 
@@ -214,6 +222,7 @@ mod tests {
             head: "refs/heads/dev",
             refs: &refs,
             actor_pubkey_hex: &owner_hex(),
+            published_at: None,
         };
         let ev = build_ref_state_event(&inputs, &relay_keys()).unwrap();
         assert_eq!(first_tag(&ev, "HEAD").unwrap()[1], "ref: refs/heads/dev");
@@ -234,6 +243,7 @@ mod tests {
             head: "refs/heads/main",
             refs: &refs,
             actor_pubkey_hex: &owner_hex(),
+            published_at: None,
         };
         let ev = build_ref_state_event(&inputs, &relay_keys()).unwrap();
 
@@ -277,6 +287,7 @@ mod tests {
             head: "refs/heads/main",
             refs: &refs,
             actor_pubkey_hex: &owner_hex(),
+            published_at: None,
         };
         let ev = build_ref_state_event(&inputs, &relay_keys()).unwrap();
 
@@ -300,6 +311,7 @@ mod tests {
             head: "refs/heads/sha1-branch",
             refs: &refs,
             actor_pubkey_hex: &owner_hex(),
+            published_at: None,
         };
         let ev = build_ref_state_event(&inputs, &relay_keys()).unwrap();
         assert!(first_tag(&ev, "refs/heads/sha1-branch").is_some());
@@ -325,6 +337,7 @@ mod tests {
             head: "refs/heads/ok",
             refs: &refs,
             actor_pubkey_hex: &owner_hex(),
+            published_at: None,
         };
         let ev = build_ref_state_event(&inputs, &relay_keys()).unwrap();
         assert!(first_tag(&ev, "refs/heads/short").is_none());
@@ -358,6 +371,7 @@ mod tests {
             head: "refs/heads/legit",
             refs: &refs,
             actor_pubkey_hex: &owner_hex(),
+            published_at: None,
         };
         let ev = build_ref_state_event(&inputs, &relay_keys()).unwrap();
         assert!(first_tag(&ev, "refs/heads/legit").is_some());
@@ -373,6 +387,7 @@ mod tests {
             head: "refs/heads/main",
             refs: &refs,
             actor_pubkey_hex: "not-a-pubkey",
+            published_at: None,
         };
         let err = build_ref_state_event(&inputs, &relay_keys()).unwrap_err();
         assert!(matches!(err, BuildError::InvalidActor(_)));
@@ -386,10 +401,26 @@ mod tests {
             head: "refs/heads/main",
             refs: &refs,
             actor_pubkey_hex: &owner_hex(),
+            published_at: None,
         };
         let ev = build_ref_state_event(&inputs, &relay_keys()).unwrap();
         assert_eq!(first_tag(&ev, "d").unwrap()[1], "myrepo");
         // Pin: caller responsibility — if they pass "myrepo.git", that's what
         // ends up in the d-tag and won't match the kind:30617 announcement.
+    }
+
+    #[test]
+    fn created_at_is_the_manifest_published_at() {
+        let refs = refs_with(&[]);
+        let inputs = RefStateInputs {
+            repo_id: "r",
+            head: "refs/heads/main",
+            refs: &refs,
+            actor_pubkey_hex: &owner_hex(),
+            published_at: Some(1_700_000_000),
+        };
+        let ev = build_ref_state_event(&inputs, &relay_keys()).unwrap();
+        assert_eq!(ev.created_at, Timestamp::from(1_700_000_000));
+        ev.verify().expect("signature covers the custom created_at");
     }
 }

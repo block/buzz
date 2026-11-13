@@ -1,4 +1,6 @@
 import 'package:buzz/features/channels/channel_management_provider.dart';
+import 'package:buzz/shared/custom_emoji/custom_emoji.dart';
+import 'package:buzz/shared/custom_emoji/custom_emoji_provider.dart';
 import 'package:buzz/shared/custom_emoji/custom_emoji_render.dart';
 import 'package:buzz/shared/emoji/native_emoji_glyph.dart';
 import 'package:http/http.dart' as http;
@@ -30,10 +32,12 @@ import 'package:flutter/foundation.dart';
 import 'package:buzz/shared/widgets/native_message_presentation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:hooks_riverpod/misc.dart' show Override;
 
 import '../../helpers/widget_helpers.dart';
 
 part 'reaction_row_test/combined_tests.dart';
+part 'reaction_row_test/shortcode_tests.dart';
 
 const _alice =
     'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
@@ -150,6 +154,7 @@ class _RecordingReactionActions implements ChannelActions {
 
 void main() {
   combinedReactionTests();
+  shortcodeReactionTests();
 
   testWidgets('removing the sole reaction closes the sheet', (tester) async {
     final reactions = ValueNotifier<List<TimelineReaction>>([

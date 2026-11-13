@@ -1,5 +1,7 @@
 import 'dart:convert';
+
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
+import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
@@ -40,6 +42,7 @@ import 'me_workspace_picker.dart';
 import 'me_recovery_dialog.dart';
 import '../../profile/user_profile_sheet.dart';
 import '../channel_actions_sheet.dart';
+import '../../../shared/share/share_suggestions.dart';
 import '../channel_detail_page.dart';
 import '../channel_identity_names_provider.dart';
 import '../channel_member_profile_actions.dart';
@@ -149,75 +152,109 @@ class MePage extends HookConsumerWidget {
             ),
           )
         : child;
-    final inventory = groups.when(
+    // Labelled chats come from the channel list, so they stay reachable while
+    // the optional filing record loads or fails. Until it has a value, show
+    // its status above an unfiled list and never treat it as empty.
+    final legacyChannels = groups.value?.channels ?? const <String>[];
+    final organizationStatus = groups.when<Widget?>(
+      loading: () => const Center(child: BuzzLoadingIndicator()),
+      error: (_, _) =>
+          _MeRetry(onRetry: () => ref.invalidate(meGroupsProvider)),
+      data: (_) => null,
+    );
+    final organization = organizationStatus == null ? groups.value : null;
+    final sections = organization?.groups ?? const [];
+    final assignments = organization?.assignments ?? const {};
+    final inventory = channels.when(
       loading: () =>
           inventoryStatus(const Center(child: BuzzLoadingIndicator())),
       error: (_, _) => inventoryStatus(
-        _MeRetry(onRetry: () => ref.invalidate(meGroupsProvider)),
+        _MeRetry(onRetry: () => ref.invalidate(channelsProvider)),
       ),
-      data: (organization) => channels.when(
-        loading: () =>
-            inventoryStatus(const Center(child: BuzzLoadingIndicator())),
-        error: (_, _) => inventoryStatus(
-          _MeRetry(onRetry: () => ref.invalidate(channelsProvider)),
-        ),
-        data: (all) {
-          final visible =
-              all
-                  .where(
-                    (c) =>
-                        c.isMember &&
-                        !c.isArchived &&
-                        c.isPersonalChat(viewer, organization.channels),
-                  )
-                  .toList()
-                ..sort(
-                  (a, b) => (b.lastMessageAt ?? b.createdAt).compareTo(
-                    a.lastMessageAt ?? a.createdAt,
-                  ),
-                );
-          Widget row(Channel channel) => _MeChatRow(
-            channelId: channel.id,
-            name: channel.name,
-            isUnread: unreadIds.contains(channel.id),
-            onTap: () => Navigator.of(context).push(
-              MaterialPageRoute<void>(
-                builder: (_) =>
-                    ChannelDetailPage(channel: channel, personalChat: true),
-              ),
+      data: (all) {
+        final visible =
+            all
+                .where(
+                  (c) =>
+                      c.isMember &&
+                      !c.isArchived &&
+                      c.isSoloChat(legacyChannels),
+                )
+                .toList()
+              ..sort(
+                (a, b) => (b.lastMessageAt ?? b.createdAt).compareTo(
+                  a.lastMessageAt ?? a.createdAt,
+                ),
+              );
+        Widget row(Channel channel) {
+          final pane = ConversationPaneScope.maybeOf(context);
+          final selected = pane?.selectedId == channel.id;
+          return DecoratedBox(
+            decoration: BoxDecoration(
+              color: selected ? context.colors.primaryContainer : null,
+              borderRadius: BorderRadius.circular(Radii.md),
             ),
-            onLongPress: () => showChannelDetailsSheet(
-              context: context,
-              channel: channel,
-              currentPubkey: viewer,
-              onMemberTap: (context, pubkey) => showUserProfileSheet(
-                context,
-                pubkey,
-                names: channelIdentityNamesProvider(channel.id),
-                contextualActions: (_) => ChannelMemberProfileActions(
+            child: Semantics(
+              selected: selected,
+              child: _MeChatRow(
+                channelId: channel.id,
+                name: channel.name,
+                isUnread: unreadIds.contains(channel.id),
+                onLongPress: () => showChannelDetailsSheet(
+                  context: context,
                   channel: channel,
-                  pubkey: pubkey,
+                  currentPubkey: viewer,
+                  onMemberTap: (context, pubkey) => showUserProfileSheet(
+                    context,
+                    pubkey,
+                    names: channelIdentityNamesProvider(channel.id),
+                    contextualActions: (_) => ChannelMemberProfileActions(
+                      channel: channel,
+                      pubkey: pubkey,
+                    ),
+                  ),
+                  personalChat: true,
+                ),
+                onTap: () => openConversationPane(
+                  context,
+                  channel.id,
+                  (_) => ChannelDetailPage(
+                    channel: channel,
+                    personalChat: channel.isPersonalChat(
+                      viewer,
+                      legacyChannels,
+                    ),
+                  ),
                 ),
               ),
-              personalChat: true,
             ),
           );
-          final inventorySlivers = <Widget>[
-            SliverPadding(
-              padding: EdgeInsets.fromLTRB(
-                Grid.gutter - Grid.xxs,
-                topSectionHeight + (sliver ? 0 : Grid.xxs),
-                Grid.gutter - Grid.xxs,
-                sliver
-                    ? 0
-                    : visible.isEmpty && organization.groups.isEmpty
-                    ? 0
-                    : MediaQuery.viewPaddingOf(context).bottom + Grid.gutter,
-              ),
-              sliver: SliverList.list(
-                children: [
-                  if (offlineSaveFailed)
-                    Semantics(
+        }
+
+        final inventorySlivers = <Widget>[
+          SliverPadding(
+            padding: EdgeInsets.fromLTRB(
+              Grid.gutter - Grid.xxs,
+              topSectionHeight + (sliver ? 0 : Grid.xxs),
+              Grid.gutter - Grid.xxs,
+              sliver
+                  ? 0
+                  : visible.isEmpty && sections.isEmpty
+                  ? 0
+                  : MediaQuery.viewPaddingOf(context).bottom + Grid.gutter,
+            ),
+            sliver: SliverMainAxisGroup(
+              slivers: [
+                if (organizationStatus != null)
+                  SliverToBoxAdapter(
+                    child: Padding(
+                      padding: const EdgeInsets.all(Grid.gutter),
+                      child: organizationStatus,
+                    ),
+                  ),
+                if (offlineSaveFailed)
+                  SliverToBoxAdapter(
+                    child: Semantics(
                       liveRegion: true,
                       child: Column(
                         children: [
@@ -231,90 +268,92 @@ class MePage extends HookConsumerWidget {
                         ],
                       ),
                     ),
-                  for (final group in organization.groups) ...[
-                    if (group != organization.groups.first)
-                      const SizedBox(height: Grid.xxs),
-                    MeSection(
-                      key: ValueKey(group['id']),
-                      label: group['name'] as String,
-                      children: [
-                        for (final channel in visible.where(
-                          (c) => organization.assignments[c.id] == group['id'],
-                        ))
-                          row(channel),
-                        if (!visible.any(
-                          (c) => organization.assignments[c.id] == group['id'],
-                        ))
-                          const _MeSectionEmpty(
-                            'No chats in this workspace yet',
-                          ),
-                      ],
-                    ),
-                  ],
-                  if (organization.groups.isNotEmpty)
-                    const SizedBox(height: Grid.xxs),
-                  if (visible.isNotEmpty || organization.groups.isNotEmpty)
-                    MeSection(
-                      key: const ValueKey('me-ungrouped-chats'),
-                      label: 'Chats',
-                      children: [
-                        for (final channel in visible.where(
-                          (c) => !organization.assignments.containsKey(c.id),
-                        ))
-                          row(channel),
-                        if (!visible.any(
-                          (c) => !organization.assignments.containsKey(c.id),
-                        ))
-                          const _MeSectionEmpty('No chats yet'),
-                      ],
-                    ),
+                  ),
+                for (final group in sections) ...[
+                  if (group != sections.first)
+                    const SliverToBoxAdapter(child: SizedBox(height: Grid.xxs)),
+                  MeSection(
+                    sliver: true,
+                    key: ValueKey(group['id']),
+                    label: group['name'] as String,
+                    children: [
+                      for (final channel in visible.where(
+                        (c) => assignments[c.id] == group['id'],
+                      ))
+                        row(channel),
+                      if (!visible.any((c) => assignments[c.id] == group['id']))
+                        const _MeSectionEmpty('No chats in this workspace yet'),
+                    ],
+                  ),
                 ],
+                if (sections.isNotEmpty)
+                  const SliverToBoxAdapter(child: SizedBox(height: Grid.xxs)),
+                if (visible.isNotEmpty || sections.isNotEmpty)
+                  MeSection(
+                    sliver: true,
+                    key: const ValueKey('me-ungrouped-chats'),
+                    label: 'Chats',
+                    children: [
+                      for (final channel in visible.where(
+                        (c) => !assignments.containsKey(c.id),
+                      ))
+                        row(channel),
+                      if (!visible.any((c) => !assignments.containsKey(c.id)))
+                        const _MeSectionEmpty('No chats yet'),
+                    ],
+                  ),
+              ],
+            ),
+          ),
+          if (organization != null &&
+              visible.isEmpty &&
+              sections.isEmpty &&
+              !sliver)
+            SliverFillRemaining(
+              hasScrollBody: false,
+              child: Padding(
+                padding: EdgeInsets.only(
+                  bottom:
+                      MediaQuery.viewPaddingOf(context).bottom + Grid.gutter,
+                ),
+                child: Center(child: _MeEmptyState(onNewChat: newChat)),
               ),
             ),
-            if (visible.isEmpty && organization.groups.isEmpty && !sliver)
-              SliverFillRemaining(
-                hasScrollBody: false,
-                child: Padding(
-                  padding: EdgeInsets.only(
-                    bottom:
-                        MediaQuery.viewPaddingOf(context).bottom + Grid.gutter,
-                  ),
-                  child: Center(child: _MeEmptyState(onNewChat: newChat)),
+          if (sliver &&
+              organization != null &&
+              visible.isEmpty &&
+              sections.isEmpty)
+            SliverToBoxAdapter(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: Grid.gutter,
+                  vertical: Grid.half,
                 ),
-              ),
-            if (sliver && visible.isEmpty && organization.groups.isEmpty)
-              SliverToBoxAdapter(
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: Grid.gutter,
-                    vertical: Grid.half,
-                  ),
-                  child: Text(
-                    'No chats yet',
-                    style: contentListBodyTextStyle.copyWith(
-                      color: context.colors.onSurfaceVariant.withValues(
-                        alpha: 0.65,
-                      ),
+                child: Text(
+                  'No chats yet',
+                  style: contentListBodyTextStyle.copyWith(
+                    color: context.colors.onSurfaceVariant.withValues(
+                      alpha: 0.65,
                     ),
                   ),
                 ),
               ),
-          ];
-          if (sliver) return SliverMainAxisGroup(slivers: inventorySlivers);
-          return BeeRefreshIndicator(
-            edgeOffset: topSectionHeight,
-            onRefresh: () async {
-              ref.invalidate(meGroupsProvider);
-              await ref.read(channelsProvider.notifier).refresh();
-              await ref.read(meGroupsProvider.future);
-            },
-            child: CustomScrollView(
-              physics: const AlwaysScrollableScrollPhysics(),
-              slivers: inventorySlivers,
             ),
-          );
-        },
-      ),
+        ];
+        if (sliver) return SliverMainAxisGroup(slivers: inventorySlivers);
+        return BeeRefreshIndicator(
+          edgeOffset: topSectionHeight,
+          onRefresh: () async {
+            ref.invalidate(meGroupsProvider);
+            await ref.read(channelsProvider.notifier).refresh();
+            await ref.read(meGroupsProvider.future);
+          },
+          child: CustomScrollView(
+            physics: const AlwaysScrollableScrollPhysics(),
+            slivers: inventorySlivers,
+          ),
+        );
+      },
     );
     if (sliver) return inventory;
     return FrostedScaffold(

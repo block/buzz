@@ -359,10 +359,11 @@ private final class NativeReactionCloseButton: UIButton {
 /// Short-lived image loader. Auth is supplied for the specific URL by Buzz's
 /// existing media auth service; redirects are refused to avoid forwarding it.
 /// Encoded `bytes` Flutter already downloaded are shown without a fetch. A
-/// custom emoji ([isReaction] with a `url`) never shows its `:shortcode:` text,
-/// which is illegible at this size: it stays blank while loading and shows
-/// sparkles, like the native emoji picker, if the image cannot be loaded. An
-/// avatar keeps its initial behind the image.
+/// custom emoji ([isReaction] with a `url`, or flagged `isShortcode`) never
+/// shows its `:shortcode:` text, which is illegible at this size: it stays blank
+/// while loading and shows sparkles, like the native emoji picker, if there is
+/// no image or it cannot be loaded. An avatar keeps its initial behind the
+/// image.
 final class NativeMessageGlyph: UIView {
   private var cancelLoad: (() -> Void)?
   private let label = UILabel()
@@ -371,7 +372,7 @@ final class NativeMessageGlyph: UIView {
   init(data: [String: Any], size: CGFloat, isReaction: Bool = false) {
     super.init(frame: .zero)
     let raw = data["url"] as? String
-    let customEmoji = isReaction && raw != nil
+    let customEmoji = isReaction && (raw != nil || data["isShortcode"] as? Bool == true)
     label.text = customEmoji ? nil : data["emoji"] as? String
     label.textAlignment = .center
     label.font = .systemFont(ofSize: size)
@@ -388,13 +389,13 @@ final class NativeMessageGlyph: UIView {
         child.bottomAnchor.constraint(equalTo: bottomAnchor),
       ])
     }
-    guard let raw else { return }
     let fallback = { [weak self] in
       guard let self, customEmoji else { return }
       image.image = NativeTabler.image("sparkles", size: size)
       image.tintColor = .secondaryLabel
       image.contentMode = .center
     }
+    guard let raw else { fallback(); return }
     if let bytes = data["bytes"] as? FlutterStandardTypedData {
       DispatchQueue.global(qos: .userInitiated).async { [weak self] in
         let decoded = NativeMessageImageLoader.decode(bytes.data)
@@ -573,7 +574,10 @@ final class NativeMessageImageLoader: NSObject, URLSessionDataDelegate {
       let animation = (properties?[kCGImagePropertyGIFDictionary as String]
         ?? properties?[kCGImagePropertyPNGDictionary as String] ?? properties?["{WebP}"]) as? [String: Any]
       let delay = (animation?["UnclampedDelayTime"] ?? animation?["DelayTime"]) as? Double ?? 0.1
-      duration += max(0.02, delay) * Double(step)
+      // Frames asking for 10 ms or less show for 100 ms, as in browsers and
+      // the Flutter timeline (MediaImageProvider), so the sheet plays an
+      // emoji at the same speed as the chip that opened it.
+      duration += (delay <= 0.01 ? 0.1 : delay) * Double(step)
     }
     guard let first = frames.first else { return nil }
     return frames.count > 1 ? UIImage.animatedImage(with: frames, duration: duration) : first

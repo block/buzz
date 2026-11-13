@@ -437,11 +437,14 @@ pub async fn cmd_get_thread(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn cmd_search(
     client: &BuzzClient,
     query: Option<&str>,
     author: Option<&str>,
     since: Option<i64>,
+    before: Option<i64>,
+    before_id: Option<&str>,
     limit: Option<u32>,
     format: &crate::OutputFormat,
 ) -> Result<(), CliError> {
@@ -450,26 +453,23 @@ pub async fn cmd_search(
             "at least one of --query or --author is required".into(),
         ));
     }
-    let limit = limit.unwrap_or(20).min(100);
+    // Validate the cursor before resolving the author, so a bad flag fails
+    // without a relay round trip.
+    search_filter(query, None, since, before, before_id, None)?;
 
     let author_hex = match author {
         Some(a) => Some(resolve_author(client, a).await?),
         None => None,
     };
 
-    let mut filter = serde_json::json!({
-        "kinds": [9, 40002, 45001, 45003],
-        "limit": limit
-    });
-    if let Some(q) = query {
-        filter["search"] = serde_json::json!(q);
-    }
-    if let Some(ref pk) = author_hex {
-        filter["authors"] = serde_json::json!([pk]);
-    }
-    if let Some(s) = since {
-        filter["since"] = serde_json::json!(s);
-    }
+    let filter = search_filter(
+        query,
+        author_hex.as_deref(),
+        since,
+        before,
+        before_id,
+        limit,
+    )?;
     let resp = client.query(&filter).await?;
     let mut events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
     // The full-text path returns relevance order; a pure author/time query has
@@ -482,6 +482,53 @@ pub async fn cmd_search(
     let normalized = normalize_events(&events);
     println!("{}", format_events(&normalized, format));
     Ok(())
+}
+
+/// The relay filter for `messages search`.
+///
+/// `before` maps to `until`; `before_id` adds the relay's composite
+/// `(until, before_id)` cursor, so an author-only search pages back with the
+/// last result's `created_at` and `id`. Full-text results are ranked by
+/// relevance, not time, so `before_id` is rejected with `query`.
+fn search_filter(
+    query: Option<&str>,
+    author_hex: Option<&str>,
+    since: Option<i64>,
+    before: Option<i64>,
+    before_id: Option<&str>,
+    limit: Option<u32>,
+) -> Result<serde_json::Value, CliError> {
+    if let Some(bid) = before_id {
+        if query.is_some() {
+            return Err(CliError::Usage(
+                "--before-id cannot be combined with --query: full-text results are ranked by relevance, not time".into(),
+            ));
+        }
+        if before.is_none() {
+            return Err(CliError::Usage("--before-id requires --before".into()));
+        }
+        validate_hex64(bid)?;
+    }
+    let mut filter = serde_json::json!({
+        "kinds": [9, 40002, 45001, 45003],
+        "limit": limit.unwrap_or(20).min(100)
+    });
+    if let Some(q) = query {
+        filter["search"] = serde_json::json!(q);
+    }
+    if let Some(pk) = author_hex {
+        filter["authors"] = serde_json::json!([pk]);
+    }
+    if let Some(s) = since {
+        filter["since"] = serde_json::json!(s);
+    }
+    if let Some(b) = before {
+        filter["until"] = serde_json::json!(b);
+    }
+    if let Some(bid) = before_id {
+        filter["before_id"] = serde_json::json!(bid.to_ascii_lowercase());
+    }
+    Ok(filter)
 }
 
 /// Resolve an `--author` value to a 64-char hex pubkey.
@@ -1086,6 +1133,8 @@ pub async fn dispatch(
             query,
             author,
             since,
+            before,
+            before_id,
             limit,
         } => {
             cmd_search(
@@ -1093,6 +1142,8 @@ pub async fn dispatch(
                 query.as_deref(),
                 author.as_deref(),
                 since,
+                before,
+                before_id.as_deref(),
                 limit,
                 format,
             )
@@ -1158,6 +1209,57 @@ fn parse_kinds(list: &str) -> Result<Vec<u16>, CliError> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn search_filter_pages_by_composite_cursor() {
+        use super::{search_filter, CliError};
+        let pk = "a".repeat(64);
+        let id = "B".repeat(64);
+
+        // No cursor flags: the filter is unchanged from before.
+        assert_eq!(
+            search_filter(None, Some(&pk), Some(100), None, None, None).unwrap(),
+            serde_json::json!({
+                "kinds": [9, 40002, 45001, 45003],
+                "limit": 20,
+                "authors": [pk],
+                "since": 100
+            })
+        );
+
+        // --before maps to `until`; --before-id rides along, lowercased.
+        assert_eq!(
+            search_filter(None, Some(&pk), Some(100), Some(200), Some(&id), Some(500)).unwrap(),
+            serde_json::json!({
+                "kinds": [9, 40002, 45001, 45003],
+                "limit": 100,
+                "authors": [pk],
+                "since": 100,
+                "until": 200,
+                "before_id": "b".repeat(64)
+            })
+        );
+
+        // --before alone is a plain time bound, allowed with --query.
+        let f = search_filter(Some("q"), None, None, Some(200), None, None).unwrap();
+        assert_eq!(f["until"], 200);
+        assert_eq!(f["search"], "q");
+        assert!(f.get("before_id").is_none());
+
+        for (query, before, before_id) in [
+            (Some("q"), Some(200), Some(id.as_str())), // relevance order has no cursor
+            (None, None, Some(id.as_str())),           // before_id needs until
+            (None, Some(200), Some("short")),          // malformed id
+        ] {
+            assert!(
+                matches!(
+                    search_filter(query, Some(&pk), None, before, before_id, None),
+                    Err(CliError::Usage(_))
+                ),
+                "{query:?} {before:?} {before_id:?}"
+            );
+        }
+    }
+
     #[test]
     fn parse_kinds_rejects_any_invalid_kind() {
         use super::{parse_kinds, CliError};

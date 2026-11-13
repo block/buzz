@@ -127,6 +127,8 @@ class ComposeBar extends HookConsumerWidget {
     final mentionMap = useRef(<String, MentionCandidate>{});
     final prefillText = useRef<String?>(null);
     _useComposeDraftLifecycle(
+      context: context,
+      voiceNote: voiceNoteRef,
       prefillText: prefillText,
       mentionMap: mentionMap,
       ref: ref,
@@ -326,22 +328,35 @@ class ComposeBar extends HookConsumerWidget {
     final isModifyingText = useRef(false);
     final lastObservedEditingValue = useRef(controller.value);
 
+    List<MentionCandidate> memberMentionCandidates() => _typedMemberCandidates(
+      membersAsync: membersAsync,
+      sessionStatus: sessionStatus,
+      cachedMembers: cachedMembers,
+      userCache: userCache,
+      agentOwners: agentOwners,
+    );
+
     // Insert a selected mention into the text field.
     void insertMention(MentionCandidate candidate) {
       final name = selectedMentionLabel(candidate.label, candidate.pubkey, {
         for (final entry in mentionMap.value.entries)
           entry.key: entry.value.pubkey,
       });
-      // Track the resolved candidate so we can pass its pubkey and prepare
-      // selected non-member agents at send time.
-      mentionMap.value[name] = candidate;
       ref
           .read(mentionHistoryProvider.notifier)
           .remember(channelId, candidate.pubkey);
 
-      final start = mentionStartIdx.value.clamp(0, controller.text.length);
+      var start = mentionStartIdx.value.clamp(0, controller.text.length);
       isModifyingText.value = true;
       try {
+        start = _requalifyNamesakes(
+          controller,
+          mentionMap.value,
+          candidate,
+          start,
+          [for (final member in memberMentionCandidates()) member.label],
+        );
+        mentionMap.value[name] = candidate;
         spliceAndMoveCursor(
           controller,
           focusNode,
@@ -575,17 +590,7 @@ class ComposeBar extends HookConsumerWidget {
         selectedMentions = _resolveComposerMentions(
           text,
           mentionMap.value,
-          buildMentionCandidates(
-            members: channelMembersForAutocomplete(
-              membersAsync: membersAsync,
-              sessionStatus: sessionStatus,
-              cachedMembers: cachedMembers,
-            ),
-            relayAgents: const [],
-            sharedChannelIds: const {},
-            userCache: userCache,
-            ownerByAgentPubkey: agentOwners ?? const {},
-          ),
+          memberMentionCandidates(),
           buildMentionCandidates(
             members: membersAsync.asData?.value ?? const [],
             relayAgents: relayAgents ?? const [],
@@ -974,6 +979,7 @@ class ComposeBar extends HookConsumerWidget {
         iosAttachmentPopover
             .present(
               sourceContext: triggerContext,
+              composerContext: sendSurfaceKey.currentContext ?? context,
               onCapture: (image) => retainAndQueueImages([image]),
               onChoosePhotos: retainAndQueueImages,
               onAllPhotos: () => chooseAttachment(() async {

@@ -10,7 +10,9 @@
 -- The FK to workflow_runs uses NO ACTION (not SET NULL): community_id is shared
 -- with the claim PK and is NOT NULL, so SET NULL is unimplementable here; a future
 -- delete of a still-linked run is blocked rather than orphaning the at-most-once
--- claim row. workflow_runs are not pruned today, so this is a guardrail, not a path.
+-- claim row. Workflow delete removes the workflow's own fires before its runs, so
+-- attach_scheduled_workflow_run only links a run of the same workflow; a
+-- cross-workflow link would otherwise block that delete.
 
 CREATE TABLE scheduled_workflow_fires (
     community_id    UUID NOT NULL REFERENCES communities(id),

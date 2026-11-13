@@ -38,6 +38,36 @@
       "expected": "Run just ci first"
     },
     {
+      "name": "backticks inside a fenced block don't close it",
+      "input": "```js\nconst fence = \"```\";\nconst text = \"**literal**\";\n```\nDone",
+      "expected": "const fence = \"```\";\nconst text = \"**literal**\";\nDone"
+    },
+    {
+      "name": "a closing fence at the end of the last code line closes the block",
+      "input": "```\nlet x = 1```\n**After**",
+      "expected": "let x = 1\nAfter"
+    },
+    {
+      "name": "a block fenced with four backticks keeps its code",
+      "input": "````\nlet text = \"**literal**\";\n````\n**After**",
+      "expected": "let text = \"**literal**\";\nAfter"
+    },
+    {
+      "name": "a four-backtick block can hold a three-backtick fence",
+      "input": "````\n```\n**literal**\n```\n````\n**After**",
+      "expected": "```\n**literal**\n```\nAfter"
+    },
+    {
+      "name": "an unclosed fence on one line runs to the end of the text",
+      "input": "Run ```**literal**",
+      "expected": "Run **literal**"
+    },
+    {
+      "name": "a block's opening line is dropped even when it has a backtick",
+      "input": "```code with `tick`\nmore\n```",
+      "expected": "more"
+    },
+    {
       "name": "inline code keeps its text",
       "input": "Call `fetch()` again",
       "expected": "Call fetch() again"

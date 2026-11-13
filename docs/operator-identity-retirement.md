@@ -219,29 +219,29 @@ a timed-out request as an unknown outcome and repeat it.
 
 ## Rollout
 
-Migration 0087 adds three community-scoped tables and widens the consent check
-without validating it; 0088 validates it. A relay that predates the precursor
+Migration 0089 adds three community-scoped tables and widens the consent check
+without validating it; 0090 validates it. A relay that predates the precursor
 release ([#9304](https://github.com/block/buzz/pull/9304)) fails community
-deletion closed for every community once 0087 exists, because its deletion
+deletion closed for every community once 0089 exists, because its deletion
 catalog check finds tables it does not know. The precursor knows these tables before they exist: it deletes
 communities with them absent or present, and a deletion it or an older release
-approved before 0087 still executes afterwards and purges their rows. Roll out
+approved before 0089 still executes afterwards and purges their rows. Roll out
 in this order:
 
 1. Deploy the precursor everywhere that runs community deletion or reads the
    schema: every relay, the deletion executor (including any CronJob image),
-   and the `buzz-admin` used by operators. Once 0087 is applied, the precursor
+   and the `buzz-admin` used by operators. Once 0089 is applied, the precursor
    is the compatibility floor: never run an older release against the
    database again.
 2. Run relays with auto-migration off (`migrate.autoMigrate=false` in the Helm
    chart, `BUZZ_AUTO_MIGRATE` unset or false) and keep it off through every
    restart and rollback. With it on, a precursor relay that restarts after
-   0087 fails at startup on the migrations it does not know (sqlx
+   0089 fails at startup on the migrations it does not know (sqlx
    `VersionMissing`, Rule 5 in [database.md](database.md)).
-3. Apply 0087 out of band with `buzz-admin migrate` from this release, and
+3. Apply 0089 out of band with `buzz-admin migrate` from this release, and
    restart one precursor relay to confirm it still starts and serves.
-4. Deploy this release. It requires 0087 before it serves, so never start it
-   against a database without it. Apply 0088 once every relay runs it.
+4. Deploy this release. It requires 0089 before it serves, so never start it
+   against a database without it. Apply 0090 once every relay runs it.
 5. Keep `BUZZ_ADMIN_IDENTITY_RETIREMENT` off until every serving relay runs
    this release (see *Enabling*).
 

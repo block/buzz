@@ -1,6 +1,6 @@
 -- Operator identity retirement (docs/operator-identity-retirement.md).
 -- Expand only: the deployed relay never writes or reads the new tables, and
--- the widened consent CHECK admits every row it can write. Validated in 0088
+-- the widened consent CHECK admits every row it can write. Validated in 0090
 -- so the scan does not retain this transaction's DDL lock.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '30s';

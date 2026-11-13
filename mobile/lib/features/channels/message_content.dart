@@ -1,9 +1,11 @@
 import 'message_reply_drag_target.dart';
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
+
 import 'dart:async';
 import 'dart:convert';
 import '../../shared/widgets/ios_media_carousel.dart';
 import '../../shared/widgets/message_attachment_corners.dart';
+
 import 'dart:io';
 import 'dart:math' as math;
 
@@ -44,6 +46,7 @@ import 'native_photo_zoom_preview.dart';
 import 'native_video_files.dart';
 import 'message_content/link_normalizer.dart';
 import 'message_content/markdown_escapes.dart';
+import 'message_content/markdown_tables.dart';
 import 'message_content/preview_text.dart';
 import 'message_media.dart';
 import 'message_content/bubble_segments.dart';
@@ -117,6 +120,9 @@ class MessageContent extends HookConsumerWidget {
 
   /// Paint conversation text bubbles while keeping attachments on the page.
   final bool bubble;
+
+  /// Space reclaimed from an omitted sender avatar and its gutter.
+  final double additionalTextWidth;
 
   /// Distinguishes messages authored by the signed-in identity.
   final bool ownMessage;
@@ -198,6 +204,7 @@ class MessageContent extends HookConsumerWidget {
     super.key,
     required this.content,
     this.bubble = false,
+    this.additionalTextWidth = 0,
     this.ownMessage = false,
     this.trimTrailingSpacing = false,
     this.bubbleEnd = true,
@@ -323,10 +330,8 @@ class MessageContent extends HookConsumerWidget {
           )
         : null;
     final galleryText = trailingGallery?.content ?? normalizedContent;
-    // gpt_markdown has no backslash escapes, so hold escaped characters as
-    // stand-ins that _MarkdownEscapeMd and the link builders restore.
     final markdownContent = useMemoized(
-      () => shieldMarkdownProseEscapes(galleryText),
+      () => separateMarkdownTables(escapeMarkdownLiterals(galleryText)),
       [galleryText],
     );
     final customEmoji = _mergeCustomEmoji(
@@ -364,40 +369,24 @@ class MessageContent extends HookConsumerWidget {
 
     final finalContent = useMemoized(() {
       // Replace spaces with non-breaking spaces inside known mention names
-      // so the gpt_markdown combined regex can match multi-word names
-      // even when caseSensitive is not preserved.
-      // Skip content inside backticks to avoid altering inline code.
-      final mentionParts = markdownContent.split('`');
-      final mentionBuf = StringBuffer();
-      for (var i = 0; i < mentionParts.length; i++) {
-        if (i.isOdd) {
-          mentionBuf.write('`${mentionParts[i]}`');
-        } else {
-          var segment = mentionParts[i];
-          for (final range in mentionOccurrences(
-            segment,
-            mentionBindings.keys,
-          ).reversed) {
-            segment = segment.replaceRange(
-              range.start,
-              range.end,
-              '@${_markdownMentionName(range.label)}',
-            );
-          }
-          mentionBuf.write(segment);
+      // so _MentionMd's pattern matches multi-word names as one token, in
+      // the authored case. Code, inline or fenced, is left as written.
+      return mapMarkdownProse(markdownContent, (segment) {
+        for (final range in mentionOccurrences(
+          segment,
+          mentionBindings.keys,
+        ).reversed) {
+          segment = segment.replaceRange(
+            range.start,
+            range.end,
+            '@${_markdownMentionName(segment.substring(range.start + 1, range.end))}',
+          );
         }
-      }
-      var result = mentionBuf.toString();
-
-      // Ensure channel links at the very start of content don't get
-      // swallowed by markdown processing.
-      if (RegExp(r'^#[A-Za-z0-9_]').hasMatch(result)) {
-        result = '\u200B$result';
-      }
-      return result;
+        return segment;
+      });
     }, [markdownContent, mentionPresentationKey]);
 
-    final inlineComponents = _useMessageInlineComponents(
+    final inlinePatterns = _useMessageInlinePatterns(
       content: content,
       finalContent: finalContent,
       mentionNames: resolvedMentionNames,
@@ -417,8 +406,12 @@ class MessageContent extends HookConsumerWidget {
     // An authored slot is drawn as written; the marker takes its own line.
     final markerSlot = edited && !finalContent.contains(editedSlot);
     final components = useMemoized(
-      () => [if (markerSlot) EditedMarkerMd(editedStyle), ...inlineComponents],
-      [inlineComponents, editedStyle, markerSlot],
+      () => [
+        if (markerSlot) editedMarkerPattern(editedStyle),
+        ...inlinePatterns,
+        escapedSigilPattern,
+      ],
+      [inlinePatterns, editedStyle, markerSlot],
     );
 
     Widget renderMarkdown(String text) => KeyedSubtree(
@@ -441,30 +434,36 @@ class MessageContent extends HookConsumerWidget {
             : null,
         followLinkColor: false,
         // normalizeBareLinks() already turns bare URLs into Markdown links;
-        // gpt_markdown 1.2.0 autolinks by default, so both would run.
+        // gpt_markdown autolinks by default, so both would run.
         autolink: false,
+        // Desktop has no GitHub alerts: a `> [!NOTE]` quote stays a quote.
+        alertBuilder: (_, alert) => alert.asBlockQuote(),
         codeBuilder: (context, name, code, closed) => _MessageCodeBlock(
           name: name,
           code: code,
           bubble: bubble,
           ink: bubble && ownMessage ? ownTextColor : null,
         ),
-        linkBuilder: (context, linkText, shieldedUrl, linkStyle) {
-          final url = unshieldMarkdownEscapes(shieldedUrl);
-          return _buildLink(
-            context,
-            ref,
-            linkText,
-            url,
-            imetaByUrl[url],
-            linkStyle,
-            style,
-            resolvedChannelTap,
-            resolvedChannelNames,
+        // Same widget-shaped link as before: chips, media links and taps
+        // are handled in _buildLink, so the package's own tap is not used.
+        inlineLinkBuilder: (link) {
+          final url = unmaskInlinePatterns(link.url);
+          return link.asWidgetSpan(
+            _buildLink(
+              link.context,
+              ref,
+              TextSpan(children: link.labelSpans),
+              url,
+              imetaByUrl[url],
+              link.style,
+              style,
+              resolvedChannelTap,
+              resolvedChannelNames,
+            ),
           );
         },
-        imageBuilder: (context, shieldedUrl, _, _) {
-          final imageUrl = unshieldMarkdownEscapes(shieldedUrl);
+        imageBuilder: (context, maskedUrl, _, _) {
+          final imageUrl = unmaskInlinePatterns(maskedUrl);
           return _buildMedia(
             context,
             imageUrl,
@@ -475,7 +474,7 @@ class MessageContent extends HookConsumerWidget {
         },
         textAlign: textAlign ?? (bubble ? TextAlign.start : null),
         maxLines: maxLines,
-        inlineComponents: components,
+        inlinePatterns: components,
       ),
     );
     final segments = bubble
@@ -527,7 +526,8 @@ class MessageContent extends HookConsumerWidget {
                       constraints: BoxConstraints(
                         maxWidth:
                             MediaQuery.sizeOf(context).width *
-                            messageTextMaxWidthFraction,
+                                messageTextMaxWidthFraction +
+                            additionalTextWidth,
                       ),
                       child: MessageReplyDragTarget(
                         child: LocalSendBubbleSurface(
@@ -765,12 +765,17 @@ class MessageContent extends HookConsumerWidget {
 
     // Mobile has no repo/PR/issue destination yet, so these chips have no tap
     // and no Open action, but a hold still copies or shares the link.
+    // The container keeps the chip's label its own node; without it, the
+    // non-interactive chip merges into the surrounding paragraph's label.
     if (buzzLink is EntityDeepLink) {
-      return _LinkLongPress(
-        url: url,
-        onOpen: null,
-        highlightColor: highlightColor,
-        child: renderedLink,
+      return Semantics(
+        container: true,
+        child: _LinkLongPress(
+          url: url,
+          onOpen: null,
+          highlightColor: highlightColor,
+          child: renderedLink,
+        ),
       );
     }
 

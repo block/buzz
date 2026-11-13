@@ -5,6 +5,15 @@ part of 'me_page.dart';
 Future<void> _openNewMeChat(BuildContext context, WidgetRef ref) =>
     _openMeChatDraft(context, ref);
 
+/// Draft key of the New chat composer, which a share to the plain Buzz icon
+/// fills.
+const newSoloComposerKey = 'new-solo';
+
+/// Opens the New chat draft with its composer focused, for a share that
+/// starts a new Solo chat.
+Future<void> openNewSoloChat(BuildContext context, WidgetRef ref) =>
+    _openMeChatDraft(context, ref, focusComposer: true);
+
 /// Opens a New chat draft that starts from a message, like desktop's Start
 /// Solo chat. The composer is seeded with the message's link when its channel
 /// is open to the agent, else with the message quoted. Each source message
@@ -42,7 +51,7 @@ Future<void> openSoloChatFromMessage(
 Future<void> _openMeChatDraft(
   BuildContext context,
   WidgetRef ref, {
-  String composerKey = 'new-solo',
+  String composerKey = newSoloComposerKey,
   bool focusComposer = false,
 }) async {
   final initialSync = ref.read(meSyncProvider);

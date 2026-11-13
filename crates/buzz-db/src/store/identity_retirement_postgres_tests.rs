@@ -406,12 +406,25 @@ async fn hold_blocks_every_workflow_writer_and_survives_a_signed_unarchive() {
         ));
     }
     assert!(matches!(
-        f.db.create_workflow_run(f.c, root_wf, None, None).await,
+        f.db.create_workflow_run(
+            f.c,
+            root_wf,
+            None,
+            None,
+            &crate::workflow::RunCause::Webhook
+        )
+        .await,
         Err(DbError::ExecutionHeld)
     ));
-    f.db.create_workflow_run(f.c, other_wf, None, None)
-        .await
-        .unwrap();
+    f.db.create_workflow_run(
+        f.c,
+        other_wf,
+        None,
+        None,
+        &crate::workflow::RunCause::Webhook,
+    )
+    .await
+    .unwrap();
 
     // A signed NIP-IA unarchive (the store write its handler makes) restores
     // visibility only.
@@ -421,7 +434,14 @@ async fn hold_blocks_every_workflow_writer_and_survives_a_signed_unarchive() {
     assert!(f.db.list_archived(f.c).await.unwrap().is_empty());
     assert!(f.held(&ROOT).await && f.held(&AGENT).await);
     assert!(matches!(
-        f.db.create_workflow_run(f.c, root_wf, None, None).await,
+        f.db.create_workflow_run(
+            f.c,
+            root_wf,
+            None,
+            None,
+            &crate::workflow::RunCause::Webhook
+        )
+        .await,
         Err(DbError::ExecutionHeld)
     ));
 }
@@ -513,7 +533,8 @@ async fn release_restores_only_unmodified_workflows_of_the_exact_key() {
     assert!(preview.identities[0].execution_held && !preview.identities[0].owner_execution_held);
     assert!(preview.identities[1].owner_execution_held);
     assert!(matches!(
-        f.db.create_workflow_run(f.c, kept, None, None).await,
+        f.db.create_workflow_run(f.c, kept, None, None, &crate::workflow::RunCause::Webhook)
+            .await,
         Err(DbError::ExecutionHeld)
     ));
 
@@ -527,7 +548,7 @@ async fn release_restores_only_unmodified_workflows_of_the_exact_key() {
     assert_eq!(f.workflow_status(root_wf).await, "active");
     let preview = f.db.admin_identity_inventory(f.c, &AGENT).await.unwrap();
     assert!(!preview.identities[0].owner_execution_held);
-    f.db.create_workflow_run(f.c, kept, None, None)
+    f.db.create_workflow_run(f.c, kept, None, None, &crate::workflow::RunCause::Webhook)
         .await
         .unwrap();
 
@@ -621,8 +642,11 @@ async fn workflow_and_run_writers_wait_for_an_in_flight_retirement() {
             .await
     });
     let db = f.db.clone();
-    let run =
-        tokio::spawn(async move { db.create_workflow_run(c, wf, None, None).await.map(|_| ()) });
+    let run = tokio::spawn(async move {
+        db.create_workflow_run(c, wf, None, None, &crate::workflow::RunCause::Webhook)
+            .await
+            .map(|_| ())
+    });
     assert_waits(&create).await;
     assert!(
         !upsert.is_finished() && !run.is_finished(),

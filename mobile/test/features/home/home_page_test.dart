@@ -1,22 +1,34 @@
+import 'package:buzz/shared/widgets/mobile_tab_footer_backdrop.dart';
+import 'package:buzz/shared/widgets/navigation_backdrop.dart';
+import 'package:buzz/shared/widgets/ios_glass_navigation_button.dart';
+import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
+import 'dart:async';
+
 import 'package:buzz/features/channels/default_agent_launcher.dart';
 import 'package:buzz/features/agents/agents_page.dart';
 import 'package:buzz/features/channels/me/me_section.dart';
 import 'package:buzz/features/activity/activity_page.dart';
 import 'package:buzz/features/activity/inbox_unread_provider.dart';
 import 'package:buzz/features/channels/channel.dart';
+import 'package:buzz/features/channels/channel_detail_page.dart';
+import 'package:buzz/features/profile/profile_edit_page.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/shared/me/default_agent.dart';
+import 'package:buzz/shared/relay/app_lifecycle_provider.dart';
+import 'package:buzz/shared/profile/user_cache_provider.dart';
+import 'package:buzz/shared/profile/user_profile.dart';
+import 'package:buzz/shared/shortcuts/home_screen_shortcuts.dart';
 import 'package:buzz/shared/widgets/frosted_app_bar.dart';
 import 'package:buzz/features/home/home_page.dart';
 import 'package:buzz/features/home/messages_filters.dart';
 import 'package:buzz/features/home/messages_navigation_bar.dart';
 import 'package:buzz/shared/widgets/ios_message_create_button.dart';
-import 'package:buzz/shared/widgets/ios_glass_navigation_button.dart';
 import 'package:buzz/shared/widgets/ios_navigation_bar.dart';
 import 'package:buzz/features/search/search_page.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -39,6 +51,9 @@ void main() {
     bool disableAnimations = false,
     Gradient? topSectionGradient,
     ValueChanged<ValueNotifier<VoidCallback?>>? onNewChatAction,
+    String? bestie,
+    Stream<String?>? bestieUpdates,
+    ValueChanged<String>? onOpenBestie,
   }) async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
@@ -46,8 +61,12 @@ void main() {
       overrides: [
         savedPrefsProvider.overrideWithValue(prefs),
         inboxHasUnreadProvider.overrideWithValue(inboxUnread),
-        defaultAgentProvider.overrideWith((ref) => Stream.value(null)),
+        defaultAgentProvider.overrideWith(
+          (ref) => bestieUpdates ?? Stream.value(bestie),
+        ),
         channelsProvider.overrideWith(_Channels.new),
+        // Lifecycle changes here exercise Home, not the relay connection.
+        appLifecycleProvider.overrideWith(_Lifecycle.new),
       ],
       child: MaterialApp(
         theme: AppTheme.light(topSectionGradient: topSectionGradient),
@@ -59,6 +78,8 @@ void main() {
         ),
         home: HomePage(
           onAgents: showAgents,
+          openBestieConversation: (_, _, pubkey) async =>
+              onOpenBestie?.call(pubkey),
           defaultAgentBuilder: (context) =>
               DefaultAgentLauncher(onChooseAgent: () => showAgents(context)),
           mePageBuilder: (_, action, workspace) {
@@ -81,6 +102,62 @@ void main() {
       ),
     );
   }
+
+  testWidgets('every Home shortcut inherits the conversation controller', (
+    tester,
+  ) async {
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    for (final scenario in [
+      (size: const Size(1024, 768), rail: 0.0),
+      (size: const Size(466, 678), rail: 76.0),
+      (size: const Size(951, 669), rail: 76.0),
+    ]) {
+      tester.view.physicalSize = scenario.size;
+      tester.view.viewPadding = FakeViewPadding(right: scenario.rail);
+      tester.view.padding = tester.view.viewPadding;
+      await tester.pumpWidget(await buildHome());
+      await tester.pumpAndSettle();
+      final launcherContext = tester.element(find.byType(DefaultAgentLauncher));
+      final controller = tester
+          .widget<AdaptiveConversationPane>(
+            find.byType(AdaptiveConversationPane),
+          )
+          .controller;
+      expect(ConversationPaneScope.maybeOf(launcherContext), same(controller));
+      await tester.pumpWidget(const SizedBox.shrink());
+    }
+  });
+
+  testWidgets('keyboard in a phone conversation does not rebuild Home', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(402, 874);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    var homeBuilds = 0;
+    await tester.pumpWidget(
+      await buildHome(onNewChatAction: (_) => homeBuilds++),
+    );
+    await tester.pumpAndSettle();
+    tester
+        .widget<AdaptiveConversationPane>(find.byType(AdaptiveConversationPane))
+        .controller
+        .open(
+          'sample',
+          (_) => const Scaffold(body: Text('Conversation content')),
+        );
+    await tester.pumpAndSettle();
+    expect(find.text('Conversation content'), findsOneWidget);
+    homeBuilds = 0;
+
+    for (var frame = 1; frame <= 20; frame++) {
+      tester.view.viewInsets = FakeViewPadding(bottom: frame * 15.0);
+      await tester.pump(const Duration(milliseconds: 16));
+    }
+
+    expect(homeBuilds, 0);
+  });
 
   testWidgets('feedback clears floating navigation and wraps large text', (
     tester,
@@ -119,6 +196,262 @@ void main() {
     expect(tester.takeException(), isNull);
     messenger.removeCurrentSnackBar();
     await tester.pumpAndSettle();
+  });
+
+  testWidgets(
+    'Duo Messages keeps its title and switcher aligned across folds',
+    (tester) async {
+      tester.view.devicePixelRatio = 1;
+      tester.view.physicalSize = const Size(951, 669);
+      tester.view.viewPadding = const FakeViewPadding(right: 76);
+      tester.view.padding = const FakeViewPadding(right: 76);
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(await buildHome(longSolo: true));
+      await tester.pumpAndSettle();
+      final bar = find.byWidgetPredicate(
+        (widget) => widget is FrostedAppBar && widget.nativeTitle == 'Messages',
+      );
+      expect(tester.widget<FrostedAppBar>(bar).nativeLargeTitle, isFalse);
+      expect(tester.getSize(bar).width, 375);
+      expect(
+        find.byWidgetPredicate((w) => w is Image && w.semanticLabel == 'Buzz'),
+        findsOneWidget,
+      );
+      expect(tester.getTopLeft(bar).dy, 0);
+      final menu = find.byWidgetPredicate(
+        (widget) =>
+            widget is IosMessageCreateButton &&
+            widget.accessibilityLabel == 'Community menu',
+      );
+      expect(
+        tester.getCenter(find.text('Messages')).dy,
+        tester.getCenter(menu).dy,
+      );
+      expect(
+        tester.getCenter(menu).dy,
+        frostedAppBarHeight(tester.element(bar)) / 2,
+      );
+      final originalHeaderRect = tester.getRect(bar);
+      final originalFiltersRect = tester.getRect(find.byType(MessagesFilters));
+      expect(
+        originalFiltersRect.top - tester.getRect(menu).bottom,
+        lessThanOrEqualTo(12),
+      );
+      final scrollable = find.byType(Scrollable).first;
+      await tester.drag(scrollable, const Offset(0, -250));
+      await tester.pumpAndSettle();
+      expect(tester.getRect(bar), originalHeaderRect);
+      expect(tester.getRect(find.byType(MessagesFilters)), originalFiltersRect);
+      expect(
+        tester.getCenter(find.text('Messages')).dy,
+        tester.getCenter(menu).dy,
+      );
+      expect(
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is IosMessageCreateButton &&
+              widget.accessibilityLabel == 'Community menu',
+        ),
+        findsOneWidget,
+      );
+      expect(find.byType(MessagesFilters), findsOneWidget);
+      tester.view.physicalSize = const Size(466, 678);
+      await tester.pumpAndSettle();
+      expect(tester.widget<FrostedAppBar>(bar).nativeLargeTitle, isFalse);
+      expect(
+        tester.getCenter(find.text('Messages')).dy,
+        tester.getCenter(menu).dy,
+      );
+      final closedHeaderRect = tester.getRect(bar);
+      expect(closedHeaderRect.left, 0);
+      expect(closedHeaderRect.right, 466);
+      expect(tester.getRect(scrollable).right, lessThanOrEqualTo(390));
+      expect(tester.getRect(menu).right, lessThanOrEqualTo(466 - 76));
+
+      final closedFiltersRect = tester.getRect(find.byType(MessagesFilters));
+      expect(
+        closedFiltersRect.top - tester.getRect(menu).bottom,
+        lessThanOrEqualTo(12),
+      );
+      await tester.drag(scrollable, const Offset(0, -200));
+      await tester.pumpAndSettle();
+      expect(tester.getRect(bar), closedHeaderRect);
+      expect(tester.getRect(find.byType(MessagesFilters)), closedFiltersRect);
+      tester.view.physicalSize = const Size(951, 669);
+      tester.view.viewPadding = const FakeViewPadding(left: 76);
+      tester.view.padding = const FakeViewPadding(left: 76);
+      await tester.pumpAndSettle();
+      expect(tester.getRect(bar).left, 0);
+      expect(tester.getSize(bar).width, 375 + 76);
+      expect(
+        tester.getRect(find.text('Messages')).left,
+        greaterThanOrEqualTo(76),
+      );
+      expect(tester.takeException(), isNull);
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+  );
+
+  testWidgets('Duo rail retains unified Messages selection across folds', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(466, 678);
+    tester.view.viewPadding = const FakeViewPadding(right: 76);
+    tester.view.padding = const FakeViewPadding(right: 76);
+    addTearDown(tester.view.reset);
+    await tester.pumpWidget(await buildHome(disableAnimations: true));
+    await tester.pumpAndSettle();
+    expect(
+      tester
+          .widget<MessagesNavigationBar>(find.byType(MessagesNavigationBar))
+          .axis,
+      Axis.vertical,
+    );
+    expect(tester.getCenter(find.byTooltip('Search')).dx, greaterThan(390));
+    final create = tester.widget<IosMessageCreateButton>(
+      find.descendant(
+        of: find.byType(MessagesNavigationBar),
+        matching: find.byType(IosMessageCreateButton),
+      ),
+    );
+    expect(create.mergingNavigation, isTrue);
+    expect(create.navigationAxis, Axis.vertical);
+    create.onMenuVisibilityChanged!(true);
+    await tester.pumpAndSettle();
+    expect(
+      tester
+          .widget<IgnorePointer>(
+            find
+                .ancestor(
+                  of: find.byTooltip('Search'),
+                  matching: find.byType(IgnorePointer),
+                )
+                .first,
+          )
+          .ignoring,
+      isTrue,
+    );
+    create.onMenuVisibilityChanged!(false);
+    await tester.pumpAndSettle();
+    expect(
+      tester
+          .widget<IgnorePointer>(
+            find
+                .ancestor(
+                  of: find.byTooltip('Search'),
+                  matching: find.byType(IgnorePointer),
+                )
+                .first,
+          )
+          .ignoring,
+      isFalse,
+    );
+
+    // Dispatch the native control callback; widget tests do not run UIKit.
+    tester
+        .widget<IosGlassNavigationButton>(
+          find.byWidgetPredicate(
+            (w) => w is IosGlassNavigationButton && w.label == 'Solo',
+          ),
+        )
+        .onPressed!();
+    await tester.pumpAndSettle();
+    expect(find.text('Personal workspace'), findsOneWidget);
+    expect(find.text('General'), findsNothing);
+    final pane = ConversationPaneScope.maybeOf(
+      tester.element(find.text('Personal workspace')),
+    )!;
+    pane.open(
+      'sample',
+      (_) => const Scaffold(body: Text('Conversation content')),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Conversation content'), findsOneWidget);
+    expect(find.byType(MessagesNavigationBar), findsNothing);
+    tester.view.physicalSize = const Size(951, 669);
+    await tester.pumpAndSettle();
+    expect(find.byType(MessagesNavigationBar), findsOneWidget);
+    expect(find.text('Conversation content'), findsOneWidget);
+    expect(pane.selectedId, 'sample');
+    final openNavigation = find.byType(MessagesNavigationBar);
+    expect(
+      tester.widget<MessagesNavigationBar>(openNavigation).axis,
+      Axis.horizontal,
+    );
+    final openBounds = tester.getRect(openNavigation);
+    expect(openBounds.left, greaterThanOrEqualTo(0));
+    expect(openBounds.right, lessThanOrEqualTo(375));
+    expect(openBounds.center.dx, 375 / 2);
+    expect(669 - openBounds.bottom, mobileTabBarBottomGap);
+    final openCreate = tester.widget<IosMessageCreateButton>(
+      find.descendant(
+        of: openNavigation,
+        matching: find.byType(IosMessageCreateButton),
+      ),
+    );
+    expect(openCreate.navigationAxis, Axis.horizontal);
+    openCreate.onMenuVisibilityChanged!(true);
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+    openCreate.onMenuVisibilityChanged!(false);
+    await tester.pumpAndSettle();
+    tester.widget<MessagesNavigationBar>(openNavigation).onSearch();
+    await tester.pumpAndSettle();
+    expect(tester.getSize(find.byType(SearchPage)).width, 375);
+    tester.view.physicalSize = const Size(466, 678);
+    await tester.pumpAndSettle();
+    final searchHeader = find.descendant(
+      of: find.byType(SearchPage),
+      matching: find.byType(NavigationBackdrop),
+    );
+    final searchField = find.byKey(const Key('search-field-container'));
+    expect(tester.getRect(searchHeader).left, 0);
+    expect(tester.getRect(searchHeader).right, 466);
+    expect(tester.getRect(searchField).top, Grid.xs);
+    expect(tester.getRect(searchField).right, lessThanOrEqualTo(390));
+    tester.view.physicalSize = const Size(951, 669);
+    await tester.pumpAndSettle();
+    expect(tester.getSize(find.byType(SearchPage)).width, 375);
+    expect(tester.getRect(searchField).top, Grid.half);
+    Navigator.of(tester.element(find.byType(SearchPage))).pop();
+    await tester.pumpAndSettle();
+    tester.view.physicalSize = const Size(669, 951);
+    tester.view.viewPadding = const FakeViewPadding(top: 82, bottom: 34);
+    tester.view.padding = const FakeViewPadding(top: 82, bottom: 34);
+    await tester.pumpAndSettle();
+    expect(find.byType(MessagesNavigationBar), findsNothing);
+    expect(find.text('Personal workspace'), findsNothing);
+    expect(find.text('Conversation content'), findsOneWidget);
+    expect(pane.selectedId, 'sample');
+    tester.view.viewPadding = const FakeViewPadding(right: 76);
+    tester.view.padding = const FakeViewPadding(right: 76);
+    tester.view.physicalSize = const Size(951, 669);
+    await tester.pumpAndSettle();
+    expect(find.text('Personal workspace'), findsOneWidget);
+    expect(find.text('Conversation content'), findsOneWidget);
+
+    tester.view.physicalSize = const Size(466, 678);
+    await tester.pumpAndSettle();
+    await tester.binding.handlePopRoute();
+    await tester.pumpAndSettle();
+    expect(find.text('Personal workspace'), findsOneWidget);
+    expect(find.text('General'), findsNothing);
+    expect(find.byType(MessagesNavigationBar), findsOneWidget);
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.viewPadding = const FakeViewPadding(bottom: 34);
+    tester.view.padding = const FakeViewPadding(bottom: 34);
+    await tester.pumpAndSettle();
+    expect(
+      tester
+          .widget<MessagesNavigationBar>(find.byType(MessagesNavigationBar))
+          .axis,
+      Axis.horizontal,
+    );
+    expect(tester.takeException(), isNull);
+    debugDefaultTargetPlatformOverride = null;
   });
 
   testWidgets(
@@ -341,6 +674,281 @@ void main() {
       expect(created, 1);
     });
   }
+
+  testWidgets('app icon shortcuts name the Bestie and open each destination', (
+    tester,
+  ) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(402, 874);
+    addTearDown(tester.view.reset);
+    addTearDown(() => pendingHomeScreenShortcut.value = null);
+    const channel = MethodChannel('buzz/home_screen_shortcuts');
+    final published = <List<String>>[];
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(channel, (
+      call,
+    ) async {
+      if (call.method == 'setItems') {
+        published.add([
+          for (final item in call.arguments as List)
+            '${(item as Map)['title']}',
+        ]);
+      }
+      return null;
+    });
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        channel,
+        null,
+      ),
+    );
+    Future<Object?> tap(String type) async {
+      Object? reply;
+      await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+        channel.name,
+        const StandardMethodCodec().encodeMethodCall(MethodCall('open', type)),
+        (data) => reply = const StandardMethodCodec().decodeEnvelope(data!),
+      );
+      await tester.pumpAndSettle();
+      return reply;
+    }
+
+    final bestie = 'b' * 64;
+    final bestieUpdates = StreamController<String?>();
+    addTearDown(() async {
+      await tester.pumpWidget(const SizedBox());
+      await bestieUpdates.close();
+    });
+    bestieUpdates.add(bestie);
+    ValueNotifier<VoidCallback?>? chat;
+    var homeBuilds = 0;
+    var created = 0;
+    final opened = <String>[];
+    await tester.pumpWidget(
+      await buildHome(
+        bestieUpdates: bestieUpdates.stream,
+        onOpenBestie: opened.add,
+        onNewChatAction: (value) {
+          chat = value;
+          homeBuilds++;
+        },
+      ),
+    );
+    await tester.pumpAndSettle();
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    // A tap that launched the app waits for its destination to be ready.
+    expect(await tap('new-chat'), 'handled');
+    expect(created, 0);
+    chat!.value = () => created++;
+    ProviderScope.containerOf(tester.element(find.byType(HomePage)))
+        .read(userCacheProvider.notifier)
+        .put(UserProfile(pubkey: bestie, displayName: 'Pip'));
+    await tester.pumpAndSettle();
+    // iOS delivers the tap before the app is active again.
+    expect(created, 0);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pumpAndSettle();
+    expect(created, 1);
+    expect(published.last, ['New chat', 'New DM', 'Message Pip']);
+
+    // A tap with another screen open returns to Home first.
+    Navigator.of(
+      tester.element(find.byType(HomePage)),
+    ).push(MaterialPageRoute<void>(builder: (_) => const Text('Open sheet')));
+    await tester.pumpAndSettle();
+    await tap('message-bestie');
+    expect(find.text('Open sheet'), findsNothing);
+    expect(opened, [bestie]);
+    await tap('new-chat');
+    expect(created, 2);
+
+    // With a New chat draft open, the tap leaves the draft and starts one.
+    final startChat = chat!.value;
+    Navigator.of(
+      tester.element(find.byType(HomePage)),
+    ).push(MaterialPageRoute<void>(builder: (_) => const Text('Draft')));
+    chat!.value = null;
+    await tester.pumpAndSettle();
+    await tap('new-chat');
+    expect(find.text('Draft'), findsNothing);
+    expect(created, 2);
+    chat!.value = startChat;
+    await tester.pumpAndSettle();
+    expect(created, 3);
+    expect(pendingHomeScreenShortcut.value, isNull);
+
+    // A New DM tap with a New DM picker already open replaces it, and the
+    // replacement keeps receiving the native picker's callbacks.
+    const dmBridge = MethodChannel('buzz/add_members_sheet');
+    final dmStates = <Map<Object?, Object?>>[];
+    final dmCalls = <String>[];
+    String? nativeSession;
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(dmBridge, (
+      call,
+    ) async {
+      final args = Map<Object?, Object?>.from(call.arguments as Map);
+      dmCalls.add('${call.method}:${args['session']}');
+      if (call.method == 'present') {
+        if (nativeSession != null) throw PlatformException(code: 'busy');
+        nativeSession = args['session'] as String;
+        dmStates.add(args);
+      } else if (call.method == 'dismiss') {
+        if (nativeSession == args['session']) nativeSession = null;
+      } else if (call.method == 'update') {
+        dmStates.add(args);
+      }
+      return null;
+    });
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        dmBridge,
+        null,
+      ),
+    );
+    await tap('new-dm');
+    expect(dmStates.last['title'], 'New DM');
+    final firstSession = nativeSession;
+    expect(firstSession, isNotNull);
+    await tap('new-dm');
+    expect(nativeSession, isNotNull, reason: dmCalls.join('\n'));
+    expect(nativeSession, isNot(firstSession));
+    await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+      dmBridge.name,
+      const StandardMethodCodec().encodeMethodCall(
+        MethodCall('closed', {'session': nativeSession}),
+      ),
+      (_) {},
+    );
+    await tester.pumpAndSettle();
+    expect(
+      Navigator.of(tester.element(find.byType(HomePage))).canPop(),
+      isFalse,
+      reason: dmCalls.join(', '),
+    );
+
+    // Search uses a pane even on an ordinary phone. Drive the real search
+    // result and channel page, then dispatch each shortcut through the bridge.
+    Future<void> openSearchResult() async {
+      tester
+          .widget<MessagesNavigationBar>(find.byType(MessagesNavigationBar))
+          .onSearch();
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField), '#');
+      // Advance the production search debounce, then settle its results.
+      await tester.pump(const Duration(milliseconds: 300));
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.byKey(const ValueKey('search-channel-row-channel')),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byType(ChannelDetailPage), findsOneWidget);
+    }
+
+    for (final shortcut in HomeScreenShortcut.values) {
+      await openSearchResult();
+      final beforeChat = created;
+      final beforeBestie = opened.length;
+      final beforeDm = dmStates.length;
+      await tap(shortcut.type);
+      expect(find.byType(ChannelDetailPage), findsNothing);
+      expect(find.byType(SearchPage), findsNothing);
+      expect(pendingHomeScreenShortcut.value, isNull);
+      switch (shortcut) {
+        case HomeScreenShortcut.newChat:
+          expect(created, beforeChat + 1);
+        case HomeScreenShortcut.messageBestie:
+          expect(opened, hasLength(beforeBestie + 1));
+          expect(opened.last, bestie);
+        case HomeScreenShortcut.newDm:
+          expect(dmStates.length, greaterThan(beforeDm));
+          expect(nativeSession, isNotNull);
+          await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+            dmBridge.name,
+            const StandardMethodCodec().encodeMethodCall(
+              MethodCall('closed', {'session': nativeSession}),
+            ),
+            (_) {},
+          );
+          await tester.pumpAndSettle();
+      }
+    }
+
+    // A real page veto, including one under another nested page, must not be
+    // mistaken for the pane's navigation-only Back interception.
+    await openSearchResult();
+    final nested = Navigator.of(tester.element(find.byType(ChannelDetailPage)));
+    nested.push(
+      MaterialPageRoute<void>(
+        builder: (_) => const ProfileEditPage(startInPhotoEditor: true),
+      ),
+    );
+    await tester.pumpAndSettle();
+    nested.push(
+      MaterialPageRoute<void>(
+        builder: (_) => const Scaffold(body: Text('Above editor')),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final beforeVeto = opened.length;
+    await tap('message-bestie');
+    expect(find.text('Above editor'), findsNothing);
+    expect(
+      find.byKey(const ValueKey('profile-avatar-editor-page')),
+      findsOneWidget,
+    );
+    expect(opened, hasLength(beforeVeto));
+    expect(pendingHomeScreenShortcut.value, isNull);
+    await nested.maybePop();
+    await tester.pumpAndSettle();
+    expect(find.byType(ProfileEditPage), findsNothing);
+    await tap('message-bestie');
+    expect(find.byType(ChannelDetailPage), findsNothing);
+    expect(find.byType(SearchPage), findsNothing);
+    expect(opened, hasLength(beforeVeto + 1));
+    final completedOpens = List<String>.of(opened);
+
+    // Shortcut state rebuilds only its own leaf, never Home.
+    final builds = homeBuilds;
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    await tester.pumpAndSettle();
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pumpAndSettle();
+    expect(homeBuilds, builds);
+
+    // A tap waiting on an unavailable Bestie returns to Home once, never
+    // closing screens opened while it waits.
+    bestieUpdates.addError(StateError('Bestie sync stopped'));
+    await tester.pumpAndSettle();
+    await tap('message-bestie');
+    Navigator.of(
+      tester.element(find.byType(HomePage)),
+    ).push(MaterialPageRoute<void>(builder: (_) => const Text('Opened later')));
+    await tester.pumpAndSettle();
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    await tester.pumpAndSettle();
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pumpAndSettle();
+    expect(find.text('Opened later'), findsOneWidget);
+    // Once the Bestie is back, the stale tap opens nothing, even after the
+    // newer screen closes.
+    bestieUpdates.add(bestie);
+    await tester.pumpAndSettle();
+    expect(find.text('Opened later'), findsOneWidget);
+    Navigator.of(
+      tester.element(find.byType(HomePage, skipOffstage: false)),
+    ).pop();
+    await tester.pumpAndSettle();
+    expect(opened, completedOpens);
+    expect(pendingHomeScreenShortcut.value, isNull);
+
+    // Signing out drops a tap that is still waiting, so it can't run in the
+    // next account's Home.
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    await tap('new-chat');
+    await tester.pumpWidget(const SizedBox());
+    expect(pendingHomeScreenShortcut.value, isNull);
+    expect(published.last, isEmpty);
+    pendingHomeScreenShortcut.value = null;
+  }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
   for (final platform in [TargetPlatform.android, TargetPlatform.iOS]) {
     testWidgets('$platform scrolled bell opens Activity', (tester) async {
@@ -615,4 +1223,9 @@ class _Channels extends ChannelsNotifier {
       isMember: true,
     ),
   ];
+}
+
+class _Lifecycle extends AppLifecycleNotifier {
+  @override
+  AppLifecycleState build() => AppLifecycleState.resumed;
 }

@@ -64,11 +64,23 @@ class VoiceNoteComposerRecorder extends HookConsumerWidget {
       return subscription.close;
     }, [recorder, onCancel]);
 
-    final route = ModalRoute.of(context);
+    // A root presentation covers nested composers without pushing on their
+    // local navigator. Observe every enclosing route so either path cancels.
+    final routes = <ModalRoute<dynamic>>[];
+    BuildContext? routeContext = context;
+    while (routeContext != null) {
+      final route = ModalRoute.of(routeContext);
+      if (route != null) routes.add(route);
+      routeContext = routeContext
+          .findAncestorStateOfType<NavigatorState>()
+          ?.context;
+    }
     useEffect(() {
-      if (route != null) voiceNoteRouteObserver.subscribe(routeAware, route);
+      for (final route in routes) {
+        voiceNoteRouteObserver.subscribe(routeAware, route);
+      }
       return () => voiceNoteRouteObserver.unsubscribe(routeAware);
-    }, [routeAware, route]);
+    }, [routeAware, ...routes]);
 
     Future<void> finish() async {
       if (!isStarted.value || isStopping.value || error.value != null) return;

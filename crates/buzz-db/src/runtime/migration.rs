@@ -902,7 +902,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 88);
+        assert_eq!(migrations.len(), 90);
         assert!(migrations[83]
             .sql
             .as_str()
@@ -918,8 +918,16 @@ mod postgres_tests {
         assert!(migrations[86]
             .sql
             .as_str()
-            .contains("CREATE TABLE identity_retirement_holds"));
+            .contains("ADD COLUMN cause_source TEXT"));
         assert!(migrations[87]
+            .sql
+            .as_str()
+            .contains("VALIDATE CONSTRAINT workflow_runs_cause_pubkey_check"));
+        assert!(migrations[88]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE identity_retirement_holds"));
+        assert!(migrations[89]
             .sql
             .as_str()
             .contains("VALIDATE CONSTRAINT archived_identities_consent_path_check"));
@@ -3069,6 +3077,7 @@ mod postgres_tests {
             "communities",
             "entity_deletion_stage_history",
             "user_deletion_fences",
+            "workflow_runs",
         ] {
             assert_eq!(
                 columns(&desired, table).await,
@@ -3132,6 +3141,7 @@ mod postgres_tests {
             "entity_deletion_stage_history",
             "user_deletion_fences",
             "entity_deletion_approvals",
+            "workflow_runs",
         ] {
             assert_eq!(
                 constraints(&desired, table).await,
@@ -3310,6 +3320,87 @@ mod postgres_tests {
             .unwrap();
             assert_eq!(row, (true, None, None, 1));
         }
+    }
+
+    /// 0087 adds the run-cause columns and NOT VALID checks without scanning
+    /// existing runs, and 0088 validates them. Runs written before the upgrade,
+    /// and inserts from an older relay that omits both columns, keep no cause.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn workflow_run_cause_upgrade_preserves_populated_rows_and_legacy_inserts() {
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+        run_migrations_through(&pool, 86).await.unwrap();
+        let community_id = uuid::Uuid::new_v4();
+        let workflow_id = uuid::Uuid::new_v4();
+        let owner = vec![7u8; 32];
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(community_id)
+            .bind(format!("run-cause-{}.example", community_id.simple()))
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO users (community_id, pubkey) VALUES ($1, $2)")
+            .bind(community_id)
+            .bind(&owner)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO workflows (community_id, id, name, owner_pubkey, definition, definition_hash) \
+             VALUES ($1, $2, 'cause', $3, '{}', $4)",
+        )
+        .bind(community_id)
+        .bind(workflow_id)
+        .bind(&owner)
+        .bind(vec![0u8; 32])
+        .execute(&pool)
+        .await
+        .unwrap();
+        let legacy_insert =
+            "INSERT INTO workflow_runs (community_id, id, workflow_id) VALUES ($1, $2, $3)";
+        let insert_legacy_run = |id| {
+            sqlx::query(legacy_insert)
+                .bind(community_id)
+                .bind(id)
+                .bind(workflow_id)
+                .execute(&pool)
+        };
+        let before = uuid::Uuid::new_v4();
+        insert_legacy_run(before).await.unwrap();
+        run_migrations(&pool).await.unwrap();
+        let after = uuid::Uuid::new_v4();
+        insert_legacy_run(after).await.unwrap();
+
+        for id in [before, after] {
+            let cause: (Option<String>, Option<Vec<u8>>) = sqlx::query_as(
+                "SELECT cause_source, cause_pubkey FROM workflow_runs WHERE id = $1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(cause, (None, None));
+        }
+        let unvalidated: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_constraint \
+             WHERE conrelid = 'public.workflow_runs'::regclass AND contype = 'c' \
+               AND conname LIKE 'workflow_runs_%' AND NOT convalidated",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(unvalidated, 0, "0088 validates every cause check");
+        let unknown_source = sqlx::query(
+            "INSERT INTO workflow_runs (community_id, id, workflow_id, cause_source) \
+             VALUES ($1, $2, $3, 'relay')",
+        )
+        .bind(community_id)
+        .bind(uuid::Uuid::new_v4())
+        .bind(workflow_id)
+        .execute(&pool)
+        .await;
+        assert!(unknown_source.is_err(), "the trigger source check holds");
     }
 
     /// Migrations 0076 and 0078 refuse a populated table whose index was not

@@ -37,7 +37,7 @@ jobs:
   # artifact into target/ci as before.
   desktop-e2e-relay:
     name: Desktop E2E Relay (${{ matrix.artifact }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 45
     if: inputs.lane == 'artifacts' && (github.event_name == 'push' || inputs.desktop || inputs.desktop_rust || inputs.rust)
     strategy:
@@ -167,7 +167,7 @@ jobs:
 
   postgres-tests:
     name: PostgreSQL Tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     if: inputs.lane == 'postgres' && (github.event_name == 'push' || inputs.rust)
     permissions:
@@ -248,7 +248,7 @@ jobs:
 
   desktop-e2e-integration-shard:
     name: Desktop E2E Integration (${{ matrix.shard }}/${{ strategy.job-total }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     # A shard needs ~10m; Playwright install-deps is bounded by
     # ci-apt-retry.sh (~25m worst case), so a degraded mirror fails with its
     # own error instead of the job timeout.
@@ -431,7 +431,7 @@ jobs:
 
   desktop-e2e-integration:
     name: Desktop E2E Integration
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     needs: [desktop-e2e-integration-shard]
     if: always() && inputs.lane == 'required' && (github.event_name == 'push' || inputs.desktop || inputs.desktop_rust || inputs.rust)
@@ -448,7 +448,7 @@ jobs:
 
   backend-integration:
     name: Backend Integration (relay e2e)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     if: inputs.lane == 'required' && (github.event_name == 'push' || inputs.rust)
     permissions:
@@ -560,6 +560,19 @@ jobs:
             --archive-file target/ci/backend-integration-tests.tar.zst \
             -E 'package(buzz-relay) and test(/api::admin::postgres_tests::external_infra_minio_tests::/)' \
             --run-ignored ignored-only
+      - name: Media thumbnail regeneration regressions
+        # The tests share one fixture image's storage keys, and nextest gives
+        # each its own process, so their in-process lock can't order them.
+        env:
+          BUZZ_TEST_DATABASE_URL: postgres://buzz:${{ env.BUZZ_TEST_POSTGRES_PASSWORD }}@localhost:5432/buzz
+          BUZZ_S3_ENDPOINT: http://localhost:9000
+          BUZZ_S3_BUCKET: buzz-media
+        run: |
+          cargo nextest run \
+            --archive-file target/ci/backend-integration-tests.tar.zst \
+            -E 'package(buzz-relay) and test(/^api::media::tests::postgres_tests::external_infra_minio_tests::/)' \
+            --run-ignored ignored-only \
+            --test-threads 1
       - name: Relay quota accounting and rejection regressions
         env:
           BUZZ_TEST_REDIS_URL: redis://localhost:6379
@@ -651,7 +664,7 @@ jobs:
 
   relay-e2e:
     name: Relay E2E
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     if: inputs.lane == 'required' && (github.event_name == 'push' || inputs.rust)
     permissions:
@@ -718,7 +731,7 @@ jobs:
     name: Results
     if: ${{ always() }}
     needs: [desktop-e2e-relay, postgres-tests, desktop-e2e-integration, backend-integration, relay-e2e]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions: {}
     outputs:

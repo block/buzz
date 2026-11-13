@@ -9,6 +9,7 @@ import '../emoji/emoji_search.dart';
 import '../theme/theme.dart';
 import '../theme/buzz_icons.dart';
 import 'avatar_background_grid.dart';
+import 'avatar_editor_options.dart';
 import 'avatar_editor_option_button.dart';
 import 'emoji_avatar_tile.dart';
 import 'ios_glass_navigation_button.dart';
@@ -233,36 +234,27 @@ class EmojiAvatarControls extends HookConsumerWidget {
                   : Offset(actionOffset, 0),
               child: Opacity(
                 opacity: transitionProgress,
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Spacer(),
-                    Expanded(
-                      child: AvatarEditorOptionButton(
-                        key: const ValueKey('emoji-editor-background'),
-                        icon: BuzzIcons.palette,
-                        iosIcon: IosGlassNavigationIcon.palette,
-                        label: 'Background',
-                        selected:
-                            activeSection == EmojiEditorSection.background,
-                        onTap: () =>
-                            onSectionChanged(EmojiEditorSection.background),
-                        labelMaxWidth: 96,
-                      ),
+                child: AvatarEditorOptions(
+                  options: [
+                    AvatarEditorOptionButton(
+                      key: const ValueKey('emoji-editor-background'),
+                      icon: BuzzIcons.palette,
+                      iosIcon: IosGlassNavigationIcon.palette,
+                      label: 'Background',
+                      selected: activeSection == EmojiEditorSection.background,
+                      onTap: () =>
+                          onSectionChanged(EmojiEditorSection.background),
+                      labelMaxWidth: 96,
                     ),
-                    const SizedBox(width: Grid.half),
-                    Expanded(
-                      child: AvatarEditorOptionButton(
-                        key: const ValueKey('emoji-editor-emoji'),
-                        icon: BuzzIcons.smile,
-                        iosIcon: IosGlassNavigationIcon.emoji,
-                        label: 'Emoji',
-                        selected: activeSection == EmojiEditorSection.emoji,
-                        onTap: () => onSectionChanged(EmojiEditorSection.emoji),
-                        labelMaxWidth: 80,
-                      ),
+                    AvatarEditorOptionButton(
+                      key: const ValueKey('emoji-editor-emoji'),
+                      icon: BuzzIcons.smile,
+                      iosIcon: IosGlassNavigationIcon.emoji,
+                      label: 'Emoji',
+                      selected: activeSection == EmojiEditorSection.emoji,
+                      onTap: () => onSectionChanged(EmojiEditorSection.emoji),
+                      labelMaxWidth: 80,
                     ),
-                    const Spacer(),
                   ],
                 ),
               ),

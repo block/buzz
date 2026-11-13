@@ -2065,6 +2065,21 @@ async fn profile_names_survive_unparsable_content() {
 
     assert_eq!(profile_names(&pool, c, "wes", 1, 100).await, vec![plain]);
 
+    // The nesting bound counts brackets, so content at the bound (4096,
+    // counting the object's own `{`) still has names even when the other
+    // brackets sit inside a string.
+    let bracketed = put_profile(
+        &pool,
+        c,
+        &format!(r#"{{"name":"Ada","about":"{}"}}"#, "[".repeat(4095)),
+        1_700_000_200,
+    )
+    .await;
+    assert_eq!(
+        profile_names(&pool, c, "ada", 1, 100).await,
+        vec![bracketed]
+    );
+
     teardown(pool, &schema).await;
 }
 
