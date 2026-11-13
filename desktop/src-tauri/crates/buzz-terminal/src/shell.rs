@@ -21,6 +21,9 @@
 //! on many systems. A directory or a non-executable file falls through to the
 //! next candidate instead of becoming an unspawnable child.
 
+// Only the `#[cfg(unix)]` executable probes take a `Path`; on Windows this
+// import is dead and `-D warnings` rejects the crate.
+#[cfg(unix)]
 use std::path::Path;
 
 /// Last-resort shell. POSIX guarantees `/bin/sh`; if this is not executable
