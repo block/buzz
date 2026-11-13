@@ -91,6 +91,16 @@ void main() {
     SemanticsData option(String key) =>
         tester.getSemantics(find.byKey(Key(key))).getSemanticsData();
     expect(option('high').flagsCollection.isChecked, CheckedState.isTrue);
+    final check = find.descendant(
+      of: find.byKey(const Key('high')),
+      matching: find.byIcon(Icons.check),
+    );
+    final label = find.descendant(
+      of: find.byKey(const Key('high')),
+      matching: find.text('High'),
+    );
+    expect(tester.getCenter(check).dx, lessThan(tester.getTopLeft(label).dx));
+
     expect(option('low').flagsCollection.isChecked, CheckedState.isFalse);
     handle.dispose();
   });

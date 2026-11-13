@@ -31,7 +31,7 @@ async fn reference_index_populated_upgrade_matches_desired_state_and_new_partiti
     assert!(expected.1 && expected.2 && expected.3);
     let admin = std::env::var("BUZZ_POSTGRES_ADMIN_URL").unwrap();
     let (pool, _scratch) =
-        crate::test_support::ScratchDb::migrated_through(&admin, "reference_upgrade", 86).await;
+        crate::test_support::ScratchDb::migrated_through(&admin, "reference_upgrade", 88).await;
     seed(&pool).await;
     let before: serde_json::Value = sqlx::query_scalar("SELECT to_jsonb(e) FROM events e")
         .fetch_one(&pool)
@@ -153,13 +153,14 @@ async fn reference_recheck_uses_index_with_unrelated_history() {
         .await
         .unwrap();
     assert!(!referenced);
-    let plan: serde_json::Value =
-        sqlx::query_scalar(&format!("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {query}"))
-            .bind(community)
-            .bind(1_i64)
-            .fetch_one(&mut *tx)
-            .await
-            .unwrap();
+    let plan: serde_json::Value = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {query}"
+    )))
+    .bind(community)
+    .bind(1_i64)
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
     let indexes: Vec<String> = sqlx::query_scalar("SELECT c.relname FROM pg_inherits h JOIN pg_class c ON c.oid=h.inhrelid WHERE h.inhparent='idx_events_reference_ids'::regclass")
         .fetch_all(&mut *tx).await.unwrap();
     fn check(node: &serde_json::Value, indexes: &[String], used: &mut bool) {

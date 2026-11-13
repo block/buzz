@@ -13,6 +13,8 @@ import '../theme/mobile_appearance.dart';
 import '../theme/theme_extensions.dart';
 import '../animated_avatar.dart';
 import 'avatar_image.dart';
+import 'dm_header_portrait.dart';
+import 'dm_header_cluster.dart';
 import 'app_route_observer.dart';
 import 'ios_navigation_metrics.dart';
 export 'ios_navigation_metrics.dart';
@@ -37,7 +39,11 @@ class IosNavigationAction {
 
     this.plain = false,
     this.sharesBackground = true,
+    this.keepInHeaderOnDuo = false,
   });
+
+  /// Keeps list controls beside their content when a Duo rail is present.
+  final bool keepInHeaderOnDuo;
 
   final String label;
   final String? symbol;
@@ -83,6 +89,7 @@ class IosNavigationAction {
 
     'plain': plain,
     'sharesBackground': sharesBackground,
+    'keepInHeaderOnDuo': keepInHeaderOnDuo,
     'children': [
       for (var i = 0; i < children.length; i++) children[i]._encode('$id.$i'),
     ],
@@ -128,12 +135,20 @@ class IosNavigationBar extends HookConsumerWidget {
     this.subtitle,
     this.ephemeralLabel,
     this.titleAvatar,
+    this.titleAvatars = const [],
+    this.titleMaxWidth,
     this.titlePresenceColor,
     this.titleRefreshing = false,
     this.onTitlePressed,
     this.largeTitle = false,
     this.alwaysFrosted = false,
     this.backdropOnly = false,
+    this.standaloneControl = false,
+    this.standaloneLargeTitle = false,
+    this.horizontalControls = false,
+    this.centerTitleInPane = false,
+    this.titleInsets = EdgeInsets.zero,
+    this.alignCollapsedTitleToLeading = false,
     this.leading,
     this.actions = const [],
     this.onBack,
@@ -147,6 +162,10 @@ class IosNavigationBar extends HookConsumerWidget {
   final String? subtitle;
   final String? ephemeralLabel;
   final IosNavigationAction? titleAvatar;
+
+  /// Floating DM portraits above the existing glass title capsule.
+  final List<IosNavigationAction> titleAvatars;
+  final double? titleMaxWidth;
   final Color? titlePresenceColor;
 
   /// Shows a refresh bar along the bottom of the subtitled title capsule.
@@ -159,6 +178,20 @@ class IosNavigationBar extends HookConsumerWidget {
 
   /// Paints only the native edge beneath custom Flutter header controls.
   final bool backdropOnly;
+
+  /// Renders one glass control without navigation-bar overflow or safe areas.
+  final bool standaloneControl;
+
+  /// A wrapping native large title for a static title pane.
+  final bool standaloneLargeTitle;
+  final bool horizontalControls;
+
+  /// Centers compact titles within a pane that already excludes the Duo rail.
+  final bool centerTitleInPane;
+
+  /// Content-area insets for a title whose backdrop spans the whole window.
+  final EdgeInsets titleInsets;
+  final bool alignCollapsedTitleToLeading;
   final IosNavigationAction? leading;
   final List<IosNavigationAction> actions;
   final VoidCallback? onBack;
@@ -205,7 +238,7 @@ class IosNavigationBar extends HookConsumerWidget {
               url: entry.value.imageUrl,
               initial: entry.value.avatarInitial!,
               isAgent: entry.value.avatarIsAgent,
-              circular: true,
+              circular: !entry.key.startsWith('titlePortrait'),
               background:
                   entry.value.avatarIsAgent &&
                       usesInsetAgentArtwork(entry.value.imageUrl)
@@ -315,14 +348,26 @@ class IosNavigationBar extends HookConsumerWidget {
       };
     }
 
+    final portraitTopPadding = centerTitleInPane ? 12.0 : 0.0;
     final payload = <String, Object?>{
       'title': title,
+      'titleMaxWidth': titleMaxWidth,
+      'portraitTopPadding': portraitTopPadding,
+      'titleHasAnimatedPortrait':
+          titleAvatars.length == 1 &&
+          DmHeaderPortrait.playsAnimation(
+            titleAvatars.first.imageUrl,
+            titleAvatars.first.avatarIsAgent,
+          ),
       'safeTop': MediaQuery.viewPaddingOf(context).top,
       'subtitle': subtitle,
       'ephemeralLabel': ephemeralLabel,
       'titleAvatar': titleAvatar == null
           ? null
           : encodeAction(titleAvatar!, 'titleAvatar'),
+      'titleAvatars': [
+        for (final avatar in titleAvatars) avatar._encode('portrait'),
+      ],
       'titlePresenceColor': titlePresenceColor?.toARGB32(),
       'titleRefreshing': titleRefreshing,
       'titleRefreshColor': ChatColors.of(context).outgoing.toARGB32(),
@@ -330,6 +375,13 @@ class IosNavigationBar extends HookConsumerWidget {
       'largeTitle': largeTitle,
       'alwaysFrosted': alwaysFrosted,
       'backdropOnly': backdropOnly,
+      'standaloneControl': standaloneControl,
+      'standaloneLargeTitle': standaloneLargeTitle,
+      'horizontalControls': horizontalControls,
+      'centerTitleInPane': centerTitleInPane,
+      'titleInsetLeft': titleInsets.left,
+      'titleInsetRight': titleInsets.right,
+      'alignCollapsedTitleToLeading': alignCollapsedTitleToLeading,
       'back': onBack != null,
       'leading': leading == null ? null : encodeAction(leading!, 'leading'),
       'actions': [
@@ -347,6 +399,15 @@ class IosNavigationBar extends HookConsumerWidget {
       final current = channel.value;
       if (current == null) return null;
       current.setMethodCallHandler((call) async {
+        if (call.method == 'railGeometry') {
+          if (context.mounted) {
+            IosNavigationMetrics.updateRail(
+              context,
+              call.arguments as Map<Object?, Object?>,
+            );
+          }
+          return;
+        }
         if (call.method == 'avatarBounds') {
           final values = call.arguments as Map<Object?, Object?>;
           final box = viewKey.currentContext?.findRenderObject();
@@ -492,7 +553,7 @@ class IosNavigationBar extends HookConsumerWidget {
       };
     }, [channel.value, offset, collapseRange, route]);
 
-    return UiKitView(
+    final nativeBar = UiKitView(
       key: viewKey,
       viewType: viewType,
       creationParams: payload,
@@ -500,6 +561,40 @@ class IosNavigationBar extends HookConsumerWidget {
       onPlatformViewCreated: (id) {
         channel.value = MethodChannel('$viewType/$id');
       },
+    );
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        nativeBar,
+        if (titleAvatars.isNotEmpty)
+          Positioned(
+            top:
+                MediaQuery.viewPaddingOf(context).top +
+                portraitTopPadding -
+                (payload['titleHasAnimatedPortrait'] == true ? 4 : 0),
+            left: 0,
+            right: 0,
+            child: Center(
+              child: ExcludeSemantics(
+                child: GestureDetector(
+                  key: const ValueKey('navigation-header-avatar-settings'),
+                  behavior: HitTestBehavior.opaque,
+                  onTap: onTitlePressed,
+                  child: DmHeaderCluster(
+                    count: titleAvatars.length,
+                    builder: (i, size) => DmHeaderPortrait(
+                      imageUrl: titleAvatars[i].imageUrl,
+                      isAgent: titleAvatars[i].avatarIsAgent,
+                      initial: titleAvatars[i].avatarInitial ?? '?',
+                      size: size,
+                      standalone: titleAvatars.length == 1,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+      ],
     );
   }
 }

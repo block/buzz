@@ -22,6 +22,10 @@ use crate::error::CliError;
 mod ownership;
 use ownership::{connect, current_uid};
 
+/// Serializes same-user checks across in-process tests; see [`call`].
+#[cfg(test)]
+static SAME_USER_TURN: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 pub const PROVIDER_ENV: &str = "BUZZ_CREDENTIAL_PROVIDER";
 
 /// The protocol version this caller speaks.
@@ -345,8 +349,15 @@ async fn call_with(
         } else {
             QUICK_TIMEOUT
         };
+        // In `cargo test`, the real same-user checks take turns, as the
+        // nextest group `desktop-same-user-check` makes them there. Waiting
+        // for a turn does not count against the request's timeout.
+        #[cfg(test)]
+        let turn = SAME_USER_TURN.lock().await;
         let attempt = async {
             let stream = connect(endpoint.port, same_user).await?;
+            #[cfg(test)]
+            drop(turn);
             exchange(stream, endpoint, token, version, &body).await
         };
         let (_, raw) = tokio::time::timeout(timeout, attempt)
@@ -1293,10 +1304,11 @@ struct Paired {
     relays: Vec<String>,
 }
 
-/// Ask the running desktop to pair this CLI for `relay_url`, holding until the
-/// person decides, and store the token in the OS keychain.
+/// Ask the running desktop to pair this CLI for `relay_url`, or for its active
+/// community when `None`, holding until the person decides, and store the
+/// token in the OS keychain.
 pub async fn pair(
-    relay_url: &str,
+    relay_url: Option<&str>,
     client_name: &str,
     instance: Option<&str>,
 ) -> Result<serde_json::Value, CliError> {
@@ -1310,17 +1322,25 @@ pub async fn pair(
     .await
 }
 
-/// [`pair`] among the `found` desktops, storing in `store`.
+/// [`pair`] among the `found` desktops that are running, storing in `store`.
 async fn pair_among(
     store: &dyn PairingStore,
     mut found: Vec<(String, Endpoint)>,
-    relay_url: &str,
+    relay_url: Option<&str>,
     client_name: &str,
     instance: Option<&str>,
 ) -> Result<serde_json::Value, CliError> {
     if let Some(want) = instance {
         found.retain(|(i, _)| i == want);
     }
+    // A desktop that exited without removing its advertisement is not running.
+    let mut running = Vec::new();
+    for (instance, endpoint) in found {
+        if is_running(&endpoint).await {
+            running.push((instance, endpoint));
+        }
+    }
+    let mut found = running;
     let (instance, endpoint) = match found.len() {
         0 => {
             return Err(CliError::Auth(
@@ -1339,25 +1359,42 @@ async fn pair_among(
     pair_with(store, instance, endpoint, relay_url, client_name).await
 }
 
+/// Whether a desktop answers at `endpoint`, by the same test as [`probe`]:
+/// only a transport failure means it is not running. Without a token it
+/// answers `revoked`. Nothing secret is sent, so this skips the same-user
+/// check; the `pair` that follows makes it.
+async fn is_running(endpoint: &Endpoint) -> bool {
+    !matches!(
+        call_with(endpoint, None, false, "describe", 0, &Vec::new).await,
+        Err(ProviderError::Transport(_))
+    )
+}
+
 async fn pair_with(
     store: &dyn PairingStore,
     instance: String,
     endpoint: Endpoint,
-    relay_url: &str,
+    relay_url: Option<&str>,
     client_name: &str,
 ) -> Result<serde_json::Value, CliError> {
     // Fail on a missing or unreadable keychain before asking for approval.
     parse_pairings(store.read()?)?;
-    let relay = provider_relay_url(relay_url)?;
-    let raw = call(
-        &endpoint,
-        None,
-        true,
-        "pair",
-        &[client_name.to_owned(), relay],
-    )
-    .await
-    .map_err(|e| e.into_cli("pair"))?;
+    let mut params = vec![client_name.to_owned()];
+    if let Some(relay_url) = relay_url {
+        params.push(provider_relay_url(relay_url)?);
+    }
+    let raw = call(&endpoint, None, true, "pair", &params)
+        .await
+        .map_err(|e| match e {
+            // A desktop older than community-less pairing rejects it as malformed.
+            ProviderError::Code {
+                code: "invalid_request",
+                ..
+            } if relay_url.is_none() => {
+                CliError::Usage("this Buzz can't pick a community; pass --relay".into())
+            }
+            e => e.into_cli("pair"),
+        })?;
     let paired: Paired = serde_json::from_str(&raw)
         .map_err(|_| CliError::Auth("Buzz desktop: unreadable `pair` answer".into()))?;
     if paired.instance != instance
@@ -2144,13 +2181,15 @@ pub(crate) mod tests {
         let store = Arc::new(MemoryStore::with(&[("a", "ta", &[RELAY])]));
         let pairing = {
             let store = store.clone();
-            tokio::spawn(
-                async move { pair_with(store.as_ref(), "b".into(), slow, RELAY, "cli").await },
-            )
+            tokio::spawn(async move {
+                pair_with(store.as_ref(), "b".into(), slow, Some(RELAY), "cli").await
+            })
         };
-        tokio::task::spawn_blocking(move || started.recv().unwrap())
+        // Fail, not hang, if the pair request never reaches the desktop.
+        tokio::task::spawn_blocking(move || started.recv_timeout(Duration::from_secs(60)))
             .await
-            .unwrap();
+            .unwrap()
+            .expect("the pair request never reached the desktop");
         unpair_with(store.as_ref(), Some("a")).unwrap();
         update(store.as_ref(), |p| {
             assert!(!p.0.contains_key("b"));
@@ -2182,7 +2221,7 @@ pub(crate) mod tests {
         let (endpoint, seen) = desktop(nostr::Keys::generate(), vec![TEAM.into()]).await;
         let cli = parse(&["buzz", "--relay", TEAM, "users", "get"]);
         let (_, client) = crate::connect(
-            cli.relay.as_deref().unwrap(),
+            cli.relay.as_deref(),
             cli.command,
             async |_, _| unreachable!(),
             {
@@ -2214,7 +2253,7 @@ pub(crate) mod tests {
             "buzz", "--relay", TEAM, "auth", "desktop", "pair", "--name", "cli",
         ]);
         let paired = crate::connect(
-            cli.relay.as_deref().unwrap(),
+            cli.relay.as_deref(),
             cli.command,
             async |sub, relay| {
                 let crate::AuthCmd::Desktop(crate::DesktopAuthCmd::Pair { name, .. }) = sub else {
@@ -2238,11 +2277,15 @@ pub(crate) mod tests {
         let (endpoint, seen) = desktop(nostr::Keys::generate(), vec![RELAY.into()]).await;
         let store = MemoryStore::default();
         *store.json.lock().unwrap() = Some("not json".into());
-        assert!(
-            pair_with(&store, "xyz.block.buzz".into(), endpoint, RELAY, "cli")
-                .await
-                .is_err()
-        );
+        assert!(pair_with(
+            &store,
+            "xyz.block.buzz".into(),
+            endpoint,
+            Some(RELAY),
+            "cli"
+        )
+        .await
+        .is_err());
         assert!(seen.lock().unwrap().is_empty(), "approval was requested");
         assert!(unpair_with(&store, Some("a")).is_err());
         assert_eq!(store.json.lock().unwrap().as_deref(), Some("not json"));
@@ -2266,7 +2309,7 @@ pub(crate) mod tests {
             &store,
             "i".into(),
             endpoint,
-            "https://host.example/a",
+            Some("https://host.example/a"),
             "cli",
         )
         .await
@@ -2438,12 +2481,12 @@ pub(crate) mod tests {
         let relay = crate::default_relay_with(&cli.command, false, async { Ok(None) }, paired)
             .await
             .unwrap();
-        assert_eq!(relay, "wss://community.example/");
+        assert_eq!(relay.as_deref(), Some("wss://community.example/"));
     }
 
     /// `auth desktop pair --instance b` with no `--relay`, through relay
     /// selection and command dispatch: desktop A, which would refuse, is
-    /// never asked, and B gets exactly one pair request.
+    /// never asked, and B gets one pair request naming no community.
     #[tokio::test]
     async fn pairing_a_chosen_desktop_ignores_another_desktops_refusal() {
         use clap::Parser;
@@ -2468,8 +2511,9 @@ pub(crate) mod tests {
             .await
             .unwrap();
         let result = std::cell::RefCell::new(None);
+        assert!(relay.is_none());
         let connected = crate::connect(
-            &relay,
+            None,
             cli.command,
             async |sub, relay| {
                 let crate::AuthCmd::Desktop(crate::DesktopAuthCmd::Pair { name, instance }) = sub
@@ -2488,16 +2532,72 @@ pub(crate) mod tests {
 
         assert!(refused.lock().unwrap().is_empty(), "A was asked");
         let asked = seen.lock().unwrap();
-        assert_eq!(asked.len(), 1);
-        assert_eq!(asked[0].2["method"], "pair");
-        assert_eq!(
-            asked[0].2["params"],
-            serde_json::json!(["buzz CLI", "ws://localhost:3000/"])
-        );
+        let pairs: Vec<_> = asked.iter().filter(|a| a.2["method"] == "pair").collect();
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].2["params"], serde_json::json!(["buzz CLI"]));
         assert_eq!(
             result.into_inner().unwrap(),
             serde_json::json!({"instance": "b", "pubkey": pubkey, "relays": [RELAY]})
         );
+    }
+
+    /// A desktop that exited and left its advertisement behind is not counted,
+    /// so `pair` reaches the one that is running without `--instance`.
+    #[tokio::test]
+    async fn pair_skips_a_desktop_that_is_not_running() {
+        let stale = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            drop(listener);
+            Endpoint::parse(&format!("http://127.0.0.1:{port}/rpc")).unwrap()
+        };
+        let pubkey = nostr::Keys::generate().public_key().to_hex();
+        let (live, seen) = provider(move |_, request| {
+            if request["method"] == "describe" {
+                return serde_json::json!({"result": "", "error": "revoked"});
+            }
+            serde_json::json!({"result": serde_json::json!({
+                "token": "tok", "instance": "live", "pubkey": pubkey, "relays": [RELAY],
+            }).to_string()})
+        })
+        .await;
+        let store = MemoryStore::default();
+        let found = vec![("live".to_owned(), live), ("stale".to_owned(), stale)];
+        pair_among(&store, found, Some(RELAY), "cli", None)
+            .await
+            .unwrap();
+        assert_eq!(store.instances(), ["live"]);
+        assert_eq!(seen.lock().unwrap().last().unwrap().2["method"], "pair");
+
+        let none = pair_among(&store, Vec::new(), None, "cli", None).await;
+        assert!(none
+            .unwrap_err()
+            .to_string()
+            .contains("no running Buzz desktop"));
+    }
+
+    /// A desktop that predates community-less pairing rejects it as malformed;
+    /// the CLI says to pass `--relay` instead of reporting a parse error.
+    #[tokio::test]
+    async fn an_older_desktop_asks_for_a_relay() {
+        let (endpoint, _) = provider(|_, _| {
+            serde_json::json!({
+                "result": "", "error": "invalid_request", "message": "Wrong parameters for pair",
+            })
+        })
+        .await;
+        let store = MemoryStore::default();
+        let err = pair_with(&store, "i".into(), endpoint.clone(), None, "cli")
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "this Buzz can't pick a community; pass --relay"
+        );
+        let err = pair_with(&store, "i".into(), endpoint, Some(RELAY), "cli")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("malformed"), "{err}");
     }
 
     /// A crashed desktop's leftover advertisement reads as not running, and
@@ -2510,15 +2610,28 @@ pub(crate) mod tests {
             drop(listener);
             Endpoint::parse(&format!("http://127.0.0.1:{port}/rpc")).unwrap()
         };
-        let (throttled, seen) = provider(
-            |_, _| serde_json::json!({"result": "", "error": "rate_limited", "retry_after": 30}),
-        )
+        // Timed from the desktop's first answer, so waiting for a turn on the
+        // same-user check is not counted.
+        let answered = Arc::new(StdMutex::new(None));
+        let (throttled, seen) = provider({
+            let answered = answered.clone();
+            move |_, _| {
+                answered
+                    .lock()
+                    .unwrap()
+                    .get_or_insert_with(std::time::Instant::now);
+                serde_json::json!({"result": "", "error": "rate_limited", "retry_after": 30})
+            }
+        })
         .await;
         let store = MemoryStore::with(&[("a", "ta", &[RELAY]), ("b", "tb", &[RELAY])]);
         let ads = vec![("a".to_owned(), closed), ("b".to_owned(), throttled)];
-        let started = std::time::Instant::now();
         let listed = list_with(&store, ads).await.unwrap();
-        assert!(started.elapsed() < Duration::from_secs(5));
+        let answered = answered.lock().unwrap().expect("b was asked");
+        assert!(
+            answered.elapsed() < Duration::from_secs(5),
+            "waited out retry_after"
+        );
         assert_eq!(listed[0]["status"], "not running");
         assert_eq!(listed[1]["status"], "rate limited");
         assert_eq!(seen.lock().unwrap().len(), 1, "no retries");

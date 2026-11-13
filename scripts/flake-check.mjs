@@ -91,9 +91,6 @@ export const nodeTestArgs = (file) =>
         "--test",
       ]
     : ["--import", "./test-loader.mjs", "--experimental-strip-types", "--test"];
-// Mirrors the mobile test shards in .github/workflows/_ci-clients.yml.
-export const dartDefine =
-  "--dart-define=BUZZ_PUSH_GATEWAY_URL=https://push.example";
 // Mirrors the postgres-ci default-filter in .config/nextest.toml
 // (`test(/postgres_tests::/)`, `binary(/^postgres_/)` and
 // `test(/(^|::)external_infra[^:]*::/)`): those tests need Postgres, Redis,
@@ -1163,7 +1160,6 @@ function repeatDart(files, iterations) {
       "flutter",
       [
         "test",
-        dartDefine,
         `--file-reporter=json:${reportFile}`,
         ...files.map((file) => file.replace(/^mobile\//, "")),
       ],

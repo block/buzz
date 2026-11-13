@@ -112,9 +112,16 @@ async fn workflow_deletion_removes_both_projections_and_is_scoped_and_retryable(
     assert!(!unchanged.changed);
     assert_present(&db, &query, id).await;
 
-    let run_id = create_workflow_run(&db.pool, community, id, None, None)
-        .await
-        .expect("run");
+    let run_id = create_workflow_run(
+        &db.pool,
+        community,
+        id,
+        None,
+        None,
+        &crate::workflow::RunCause::Schedule,
+    )
+    .await
+    .expect("run");
     // A fired schedule links both the workflow and a cascading run. Deletion
     // must also remove the claim despite its NO ACTION run foreign key.
     sqlx::query(
@@ -391,9 +398,16 @@ async fn workflow_deletion_removes_children_without_cascades() {
     let query = seed(&db, community, &keys, id, &d_tag, now).await;
     let other = Uuid::new_v4();
     seed(&db, community, &keys, other, &other.to_string(), now).await;
-    let run_id = create_workflow_run(&db.pool, community, id, None, None)
-        .await
-        .expect("run");
+    let run_id = create_workflow_run(
+        &db.pool,
+        community,
+        id,
+        None,
+        None,
+        &crate::workflow::RunCause::Schedule,
+    )
+    .await
+    .expect("run");
     sqlx::query(
         "INSERT INTO scheduled_workflow_fires \
         (community_id, workflow_id, scheduled_for, workflow_run_id) VALUES ($1, $2, NOW(), $3)",
@@ -512,9 +526,16 @@ async fn workflow_deletion_waits_for_and_removes_concurrent_cross_workflow_appro
     seed(&db, community, &keys, id, &d_tag, now).await;
     let other = Uuid::new_v4();
     seed(&db, community, &keys, other, &other.to_string(), now).await;
-    let run_id = create_workflow_run(&db.pool, community, id, None, None)
-        .await
-        .expect("run");
+    let run_id = create_workflow_run(
+        &db.pool,
+        community,
+        id,
+        None,
+        None,
+        &crate::workflow::RunCause::Schedule,
+    )
+    .await
+    .expect("run");
 
     let mut inserter = db.pool.begin().await.expect("begin approval insert");
     sqlx::query(
@@ -573,9 +594,16 @@ async fn workflow_deletion_waits_for_concurrent_fire_attach_without_deadlock() {
     let d_tag = id.to_string();
     let now = Timestamp::now().as_secs();
     seed(&db, community, &keys, id, &d_tag, now).await;
-    let run_id = create_workflow_run(&db.pool, community, id, None, None)
-        .await
-        .expect("run");
+    let run_id = create_workflow_run(
+        &db.pool,
+        community,
+        id,
+        None,
+        None,
+        &crate::workflow::RunCause::Schedule,
+    )
+    .await
+    .expect("run");
     let scheduled_for: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
         "INSERT INTO scheduled_workflow_fires (community_id, workflow_id, scheduled_for) \
          VALUES ($1, $2, date_trunc('second', NOW())) RETURNING scheduled_for",

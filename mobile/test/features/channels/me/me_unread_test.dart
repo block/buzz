@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:buzz/features/channels/channel_typing_provider.dart';
 import 'package:buzz/features/channels/me/solo_working_dots.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
@@ -25,8 +27,9 @@ Channel chat(String id, {bool member = true, bool archived = false}) => Channel(
   name: id,
   channelType: 'stream',
   visibility: 'private',
+  labels: id == 'ordinary' ? const [] : const ['buzz.solo'],
   description: '',
-  createdBy: 'owner',
+  createdBy: 'other',
   createdAt: DateTime(2026),
   lastMessageAt: DateTime.fromMillisecondsSinceEpoch(20000),
   memberCount: 2,
@@ -123,7 +126,7 @@ const organization = MeGroups(
     {'id': 'project', 'name': 'Project', 'defaultTemplateId': ''},
   ],
   assignments: {'solo': 'project'},
-  channels: ['solo', 'archived', 'nonmember'],
+  channels: ['archived', 'nonmember'],
 );
 
 class _Typing extends ChannelTypingNotifier {
@@ -246,8 +249,7 @@ void main() {
             channelsProvider.overrideWith(() => channels),
             readStateProvider.overrideWith(() => reads),
             meGroupsProvider.overrideWith(
-              (ref) =>
-                  Stream.value(const MeGroups(channels: ['solo', 'ordinary'])),
+              (ref) => Stream.value(const MeGroups(channels: ['ordinary'])),
             ),
           ],
         );
@@ -328,6 +330,7 @@ void main() {
                   ref.listen(meUnreadChannelIdsProvider, (_, _) {});
                   return HomePage(
                     onAgents: showAgents,
+                    openBestieConversation: (_, _, _) async {},
                     defaultAgentBuilder: (context) => DefaultAgentLauncher(
                       onChooseAgent: () => showAgents(context),
                     ),
@@ -418,4 +421,42 @@ void main() {
       },
     );
   }
+
+  test('labelled shared chats badge before the filing record loads', () async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final channels = _Channels();
+    final record = StreamController<MeGroups>();
+    addTearDown(() => unawaited(record.close()));
+    final container = ProviderContainer(
+      overrides: [
+        savedPrefsProvider.overrideWithValue(prefs),
+        channelsProvider.overrideWith(() => channels),
+        readStateProvider.overrideWith(() => _Reads(empty: true)),
+        meGroupsProvider.overrideWith((ref) => record.stream),
+      ],
+    );
+    addTearDown(container.dispose);
+    container.listen(channelsProvider, (_, _) {});
+    container.listen(meGroupsProvider, (_, _) {});
+    container.listen(meUnreadChannelIdsProvider, (_, _) {});
+    await container.read(channelsProvider.future);
+    expect(container.read(meGroupsProvider).hasValue, isFalse);
+    expect(container.read(meUnreadChannelIdsProvider), isEmpty);
+    await container.pump();
+    expect(container.read(readStateProvider).effectiveTimestamp('solo'), 20);
+    channels.reply();
+    await container.pump();
+    expect(container.read(meUnreadChannelIdsProvider), {'solo'});
+
+    // Legacy ids join once the record arrives, seeded at their history.
+    record.add(const MeGroups(channels: ['ordinary']));
+    await container.read(meGroupsProvider.future);
+    expect(container.read(meUnreadChannelIdsProvider), {'solo'});
+    await container.pump();
+    expect(container.read(meUnreadChannelIdsProvider), {'solo'});
+    channels.reply();
+    await container.pump();
+    expect(container.read(meUnreadChannelIdsProvider), {'solo', 'ordinary'});
+  });
 }

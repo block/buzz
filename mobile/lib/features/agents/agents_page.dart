@@ -1,6 +1,10 @@
 import 'dart:async';
+import 'package:duo_kit/duo_kit.dart';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
+import '../../shared/widgets/adaptive_conversation_pane.dart';
+import '../../shared/widgets/duo_toolbar.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
@@ -136,114 +140,175 @@ class _AgentsNavigation extends HookConsumerWidget {
     if (identical(ModalRoute.of(context), _openAgentsRoute)) {
       _openAgentsNavigator = navigator;
     }
-    return NavigatorPopHandler<Channel>(
-      onPopWithResult: (result) {
-        if (navigator.currentState?.canPop() ?? false) {
-          navigator.currentState!.pop(result);
-        }
-      },
-      child: Navigator(
-        key: navigator,
-        observers: [heroController],
-        onGenerateRoute: (_) => MaterialPageRoute<void>(
-          builder: (listContext) => Material(
-            color: context.colors.surface,
-            child: AgentsPage(
-              controller: controller,
-              draft: draft,
-              createOnOpen: createOnOpen,
-              onClose: () => Navigator.of(context).pop(),
-              onCreated: (pubkey) async {
-                // Only a first agent becomes Bestie; continue into its chat.
-                final scope = ref.read(meSyncProvider);
-                bool current() =>
-                    context.mounted && ref.read(meSyncProvider) == scope;
-                final Channel channel;
-                try {
-                  if (await ref.read(defaultAgentProvider.future) != pubkey ||
-                      !current()) {
-                    return;
-                  }
-                  channel = await ref
-                      .read(channelActionsProvider)
-                      .openDm(pubkeys: [pubkey]);
-                } catch (error) {
-                  if (context.mounted) {
-                    ScaffoldMessenger.maybeOf(context)?.showFeedbackSnackBar(
-                      SnackBar(
-                        content: Text(
-                          'Could not open the agent conversation. $error',
+    final toolbar = DuoToolbarScope.maybeOf(context);
+    return DuoToolbarScope(
+      strip: toolbar?.strip,
+      active:
+          (toolbar?.active ?? true) &&
+          (ModalRoute.isCurrentOf(context) ?? true),
+      child: NavigatorPopHandler<Channel>(
+        onPopWithResult: (result) {
+          if (navigator.currentState?.canPop() ?? false) {
+            navigator.currentState!.pop(result);
+          }
+        },
+        child: Navigator(
+          key: navigator,
+          observers: [heroController],
+          onGenerateRoute: (_) => MaterialPageRoute<void>(
+            builder: (_) => _AgentsWorkspace(
+              child: Builder(
+                builder: (listContext) => Material(
+                  color: context.colors.surface,
+                  child: AgentsPage(
+                    controller: controller,
+                    draft: draft,
+                    createOnOpen: createOnOpen,
+                    onClose: () => Navigator.of(context).pop(),
+                    onCreated: (pubkey) async {
+                      // Only a first agent becomes Bestie; continue into its chat.
+                      final scope = ref.read(meSyncProvider);
+                      bool current() =>
+                          context.mounted && ref.read(meSyncProvider) == scope;
+                      final Channel channel;
+                      try {
+                        if (await ref.read(defaultAgentProvider.future) !=
+                                pubkey ||
+                            !current()) {
+                          return;
+                        }
+                        channel = await ref
+                            .read(channelActionsProvider)
+                            .openDm(pubkeys: [pubkey]);
+                      } catch (error) {
+                        if (context.mounted) {
+                          ScaffoldMessenger.maybeOf(
+                            context,
+                          )?.showFeedbackSnackBar(
+                            SnackBar(
+                              content: Text(
+                                'Could not open the agent conversation. $error',
+                              ),
+                            ),
+                            kind: ToastKind.error,
+                          );
+                        }
+                        return;
+                      }
+                      if (!current()) return;
+                      // The welcome is local decoration; never let it block the chat.
+                      try {
+                        await saveBestieWelcome(
+                          ref.read(savedPrefsProvider),
+                          scope,
+                          channel.id,
+                          pubkey,
+                        );
+                        ref.invalidate(bestieWelcomeProvider(channel.id));
+                      } catch (error) {
+                        debugPrint('agents: Bestie welcome not saved: $error');
+                      }
+                      // Close only the Agents stack, never a route opened above it.
+                      if (!context.mounted || !current()) return;
+                      if (ModalRoute.of(context)?.isCurrent ?? false) {
+                        Navigator.of(context).pop(channel);
+                      }
+                    },
+                    onSelect: (pubkey) async {
+                      final strip = DuoToolbarScope.maybeOf(listContext)?.strip;
+                      final wide =
+                          defaultTargetPlatform == TargetPlatform.iOS &&
+                          usesConversationPanes(
+                            listContext,
+                            strip: strip,
+                            windowSize:
+                                View.of(listContext).physicalSize /
+                                View.of(listContext).devicePixelRatio,
+                          );
+                      Widget profile({
+                        ValueChanged<Channel>? onOpenChannel,
+                        EdgeInsets contentPadding = EdgeInsets.zero,
+                      }) => UserProfileSheet(
+                        onOpenChannel: onOpenChannel,
+                        embedded: onOpenChannel != null,
+                        contentPadding: contentPadding,
+                        pubkey: pubkey,
+                        agentPresentation: true,
+                        agentSubtitleIcon:
+                            controller.agents.any(
+                              (agent) => agent['agent_pubkey'] == pubkey,
+                            )
+                            ? const AgentNavigationIcon(size: 16)
+                            : null,
+                        agentSubtitle:
+                            controller.agents.any(
+                              (agent) => agent['agent_pubkey'] == pubkey,
+                            )
+                            ? 'Builderbot agent'
+                            : agentLocationUnknown(
+                                ref.read(activeCommunityProvider).asData?.value,
+                                controller,
+                              )
+                            ? null
+                            : 'Manage on desktop',
+                        primaryActionsSpacing: Grid.md,
+                        contextualActions: (_) =>
+                            BestieAgentAction(pubkey: pubkey, compact: true),
+                        agentIdentity: (_) => AgentIdentitySections(
+                          pubkey: pubkey,
+                          controller: controller,
                         ),
-                      ),
-                      kind: ToastKind.error,
-                    );
-                  }
-                  return;
-                }
-                if (!current()) return;
-                // The welcome is local decoration; never let it block the chat.
-                try {
-                  await saveBestieWelcome(
-                    ref.read(savedPrefsProvider),
-                    scope,
-                    channel.id,
-                    pubkey,
-                  );
-                  ref.invalidate(bestieWelcomeProvider(channel.id));
-                } catch (error) {
-                  debugPrint('agents: Bestie welcome not saved: $error');
-                }
-                // Close only the Agents stack, never a route opened above it.
-                if (!context.mounted || !current()) return;
-                if (ModalRoute.of(context)?.isCurrent ?? false) {
-                  Navigator.of(context).pop(channel);
-                }
-              },
-              onSelect: (pubkey) async {
-                final channel = await showBuzzModalBottomSheet<Channel>(
-                  context: listContext,
-                  isScrollControlled: true,
-                  showDragHandle: false,
-                  showCloseButton: false,
-                  padBottom: false,
-                  builder: (_) => UserProfileSheet(
-                    pubkey: pubkey,
-                    agentPresentation: true,
-                    agentSubtitleIcon:
-                        controller.agents.any(
-                          (agent) => agent['agent_pubkey'] == pubkey,
-                        )
-                        ? const AgentNavigationIcon(size: 16)
-                        : null,
-                    agentSubtitle:
-                        controller.agents.any(
-                          (agent) => agent['agent_pubkey'] == pubkey,
-                        )
-                        ? 'Builderbot agent'
-                        : agentLocationUnknown(
-                            ref.read(activeCommunityProvider).asData?.value,
-                            controller,
-                          )
-                        ? null
-                        : 'Manage on desktop',
-                    primaryActionsSpacing: Grid.md,
-                    contextualActions: (_) =>
-                        BestieAgentAction(pubkey: pubkey, compact: true),
-                    agentIdentity: (_) => AgentIdentitySections(
-                      pubkey: pubkey,
-                      controller: controller,
-                    ),
-                    agentSettings: (_) => DeleteAgentAction(
-                      asSettingsRow: true,
-                      controller: controller,
-                      pubkey: pubkey,
-                    ),
+                        agentSettings: (_) => DeleteAgentAction(
+                          asSettingsRow: true,
+                          controller: controller,
+                          pubkey: pubkey,
+                        ),
+                      );
+                      if (wide) {
+                        await openConversationPane(listContext, pubkey, (
+                          paneContext,
+                        ) {
+                          final pane = DuoToolbarScope.maybeOf(paneContext)!;
+                          return DuoToolbarScope(
+                            strip: pane.strip,
+                            active: pane.active,
+                            child: FrostedScaffold(
+                              appBar: const FrostedAppBar(),
+                              body: SizedBox.expand(
+                                child: DuoSheetCloseScope(
+                                  inRail: true,
+                                  child: profile(
+                                    contentPadding: pane.contentInsets,
+                                    onOpenChannel: (channel) {
+                                      if (context.mounted) {
+                                        Navigator.of(context).pop(channel);
+                                      }
+                                    },
+                                  ),
+                                ),
+                              ),
+                            ),
+                          );
+                        });
+                        return;
+                      }
+                      final channel = await showBuzzModalBottomSheet<Channel>(
+                        context: listContext,
+                        isScrollControlled: true,
+                        showDragHandle: false,
+                        showCloseButton: false,
+                        showRailCloseButton: true,
+                        padHorizontal: false,
+                        padBottom: false,
+                        builder: (_) => profile(),
+                      );
+                      if (channel != null && context.mounted) {
+                        Navigator.of(context).pop(channel);
+                      }
+                    },
                   ),
-                );
-                if (channel != null && context.mounted) {
-                  Navigator.of(context).pop(channel);
-                }
-              },
+                ),
+              ),
             ),
           ),
         ),
@@ -748,3 +813,29 @@ class AgentsPage extends HookConsumerWidget {
 /// Progress of opening a link's draft: waiting on gates, sign-in requested,
 /// sign-in seen running, or done.
 enum _DraftStep { wait, signInRequested, signingIn, done }
+
+class _AgentsWorkspace extends StatelessWidget {
+  const _AgentsWorkspace({required this.child});
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) =>
+      defaultTargetPlatform != TargetPlatform.iOS
+      ? child
+      : AdaptiveConversationDestination(
+          emptyLabel: 'Select an agent',
+          preferredListWidth:
+              (DuoToolbarScope.maybeOf(context)?.strip ??
+                      FoldGeometry.of(context).strip) !=
+                  null
+              ? 375
+              : null,
+          listWidthFraction:
+              (DuoToolbarScope.maybeOf(context)?.strip ??
+                      FoldGeometry.of(context).strip) !=
+                  null
+              ? null
+              : .5,
+          child: child,
+        );
+}

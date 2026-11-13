@@ -37,6 +37,16 @@ class _MessageVideoPreview extends HookConsumerWidget {
               final fallback = await NativePhotoZoomPreview.open(
                 context: context,
                 sourceKeys: [sourceKey],
+                previewProviders: [
+                  if (posterUrl != null)
+                    MediaImageProvider(
+                      url: posterUrl,
+                      auth: auth,
+                      client: client,
+                    )
+                  else
+                    null,
+                ],
                 providers: [
                   MediaImageProvider(
                     url: posterUrl ?? url,

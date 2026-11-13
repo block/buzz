@@ -23,14 +23,24 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 /// comes down to the held value, or as soon as focus is inside this route
 /// (the page raised its own keyboard and has to follow it).
 class CoveredRouteKeyboardInsets extends HookWidget {
-  const CoveredRouteKeyboardInsets({super.key, required this.child});
+  const CoveredRouteKeyboardInsets({
+    super.key,
+    required this.child,
+    this.isCovered,
+  });
 
   final Widget child;
+
+  /// Overrides route currency for content covered within its own route, such
+  /// as a compact list beneath a nested detail navigator.
+  final bool? isCovered;
 
   @override
   Widget build(BuildContext context) {
     final data = MediaQuery.of(context);
-    final current = ModalRoute.isCurrentOf(context) ?? true;
+    final current = isCovered == null
+        ? ModalRoute.isCurrentOf(context) ?? true
+        : !isCovered!;
     // Focus moving into the route must release the held values even when the
     // keyboard height is not changing at that moment.
     useListenable(FocusManager.instance);

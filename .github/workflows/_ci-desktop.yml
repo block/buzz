@@ -26,7 +26,7 @@ jobs:
   # relayReconnectReplay.test.mjs), so Rust changes select this job too.
   desktop-js:
     name: Desktop JS
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     # Keep in sync with JS_SELECTED in the Desktop gate (pinned by ci-required-gates.test.mjs).
     if: github.event_name == 'push' || inputs.desktop || inputs.rust
@@ -68,7 +68,7 @@ jobs:
   # cache read-only; the mesh-llm feature pulls its own dependency graph.
   desktop-tauri:
     name: Desktop Tauri (${{ matrix.lane }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     # A lane needs up to ~15m. ci-apt-retry.sh bounds the apt steps at ~34m worst
     # case (update ~8.5m + install ~25m); 55m fits both, so a degraded mirror
     # fails with the wrapper's error instead of the job timeout.
@@ -191,7 +191,7 @@ jobs:
 
   desktop-smoke-e2e:
     name: Desktop Smoke E2E (${{ matrix.shard }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     # A smoke shard needs ~12m, and Chromium dependency setup is bounded by
     # ci-apt-retry.sh (~25m worst case). Leave time for the full suite
     # and its reports to finish.
@@ -262,7 +262,7 @@ jobs:
 
   desktop:
     name: Desktop
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     needs: [desktop-js, desktop-tauri, desktop-smoke-e2e, desktop-windows-build]
     if: always() && (github.event_name == 'push' || inputs.desktop || inputs.desktop_rust || inputs.rust)
@@ -330,7 +330,7 @@ jobs:
     name: Results
     if: ${{ always() }}
     needs: [desktop]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions: {}
     outputs:
