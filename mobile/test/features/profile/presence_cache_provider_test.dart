@@ -17,6 +17,7 @@ void main() {
 
     // Track alice, then emit her initial 'online' status.
     container.read(presenceCacheProvider.notifier).track(['alice']);
+    await _pumpEventQueue();
     relaySession.emit(_presence('alice', 'online'));
     expect(container.read(presenceCacheProvider)['alice'], 'online');
 
@@ -35,6 +36,7 @@ void main() {
 
     // Track only alice.
     container.read(presenceCacheProvider.notifier).track(['alice']);
+    await _pumpEventQueue();
 
     // Emit event for bob (untracked).
     relaySession.emit(_presence('bob', 'online'));
@@ -52,6 +54,7 @@ void main() {
     await _pumpEventQueue();
 
     container.read(presenceCacheProvider.notifier).track(['alice']);
+    await _pumpEventQueue();
     relaySession.emit(_presence('alice', 'online'));
     expect(container.read(presenceCacheProvider)['alice'], 'online');
 
@@ -71,6 +74,7 @@ void main() {
     await _pumpEventQueue();
 
     container.read(presenceCacheProvider.notifier).track(['alice']);
+    await _pumpEventQueue();
     relaySession.emit(_presence('alice', 'online'));
 
     // Listen for state changes after initial setup.
@@ -84,18 +88,30 @@ void main() {
     expect(stateChangeCount, 0);
   });
 
-  test('subscribes to kind:20001 with limit 0', () async {
+  test('subscribes to kind:20001 for tracked pubkeys only', () async {
     final relaySession = _RecordingRelaySessionNotifier();
     final container = _buildContainer(relaySession: relaySession);
     addTearDown(container.dispose);
 
     container.read(presenceCacheProvider);
     await _pumpEventQueue();
+    // Nothing is tracked, so nothing is worth a community-wide stream.
+    expect(relaySession.filters, isEmpty);
 
-    // Should have subscribed with the correct filter.
+    container.read(presenceCacheProvider.notifier).track(['alice']);
+    await _pumpEventQueue();
     expect(relaySession.filters, hasLength(1));
     expect(relaySession.filters.single.kinds, [EventKind.presenceUpdate]);
+    expect(relaySession.filters.single.authors, ['alice']);
     expect(relaySession.filters.single.limit, 0);
+
+    // A newly tracked key replaces the subscription with a wider one.
+    container.read(presenceCacheProvider.notifier).track(['bob', 'alice']);
+    await _pumpEventQueue();
+    expect(relaySession.filters, hasLength(1));
+    expect(relaySession.filters.single.authors, ['alice', 'bob']);
+    relaySession.emit(_presence('bob', 'online'));
+    expect(container.read(presenceCacheProvider)['bob'], 'online');
   });
 
   test('WS event uses pubkey variable, not literal string', () async {
@@ -112,6 +128,7 @@ void main() {
       'deadbeef',
       'cafebabe',
     ]);
+    await _pumpEventQueue();
 
     // Seed cafebabe -> offline, then set deadbeef online.
     relaySession.emit(_presence('cafebabe', 'offline'));

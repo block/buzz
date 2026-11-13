@@ -27,9 +27,16 @@ class PresenceCacheNotifier extends Notifier<Map<String, String>> {
   final Map<String, int> _timestamps = {};
   final Map<String, int> _snapshotAt = {};
   final List<String> _seenIds = [];
+  // Keys the live subscription asks for. Only tracked keys are subscribed:
+  // a community's presence heartbeats arrive many times a second.
+  final Set<String> _subscribedKeys = {};
   void Function()? _presenceUnsub;
   Timer? _poll;
   Timer? _queued;
+  Timer? _resubscribe;
+  int _nextSubscription = 0;
+  int _activeSubscription = 0;
+  bool _subscribeAttempted = false;
   int _generation = 0;
   int _epoch = 0;
   bool _querying = false;
@@ -53,6 +60,9 @@ class PresenceCacheNotifier extends Notifier<Map<String, String>> {
     _timestamps.clear();
     _snapshotAt.clear();
     _seenIds.clear();
+    _subscribedKeys.clear();
+    _activeSubscription = 0;
+    _subscribeAttempted = false;
     _pending
       ..clear()
       ..addAll(_tracked);
@@ -63,11 +73,13 @@ class PresenceCacheNotifier extends Notifier<Map<String, String>> {
       _poll?.cancel();
       _queued?.cancel();
       _queued = null;
+      _resubscribe?.cancel();
+      _resubscribe = null;
     });
     if (sessionState.status == SessionStatus.connected &&
         lifecycle == AppLifecycleState.resumed) {
       _poll = Timer.periodic(const Duration(seconds: 60), (_) {
-        if (_presenceUnsub == null) {
+        if (_presenceUnsub == null || !_subscribedKeys.containsAll(_tracked)) {
           unawaited(_subscribe(generation));
         } else if (!_querying) {
           _pending.addAll(_tracked);
@@ -82,10 +94,32 @@ class PresenceCacheNotifier extends Notifier<Map<String, String>> {
 
   /// Request initial presence for exact keys. Repeated render calls coalesce.
   void track(List<String> pubkeys) {
+    var added = false;
     for (final key in pubkeys.map((key) => key.trim().toLowerCase())) {
-      if (key.isNotEmpty && _tracked.add(key)) _pending.add(key);
+      if (key.isNotEmpty && _tracked.add(key)) {
+        _pending.add(key);
+        added = true;
+      }
     }
-    _schedule(_generation);
+    // While live (the poll runs only then), new keys are read once the
+    // subscription covers them, so no live event falls between the snapshot
+    // and the subscription.
+    if (added && (_poll?.isActive ?? false)) {
+      _queueResubscribe(_generation);
+    } else {
+      _schedule(_generation);
+    }
+  }
+
+  void _queueResubscribe(int generation) {
+    _resubscribe ??= Timer(Duration.zero, () {
+      _resubscribe = null;
+      // Without a subscription, the next poll opens one with every key.
+      if (generation == _generation &&
+          (_presenceUnsub != null || !_subscribeAttempted)) {
+        unawaited(_subscribe(generation));
+      }
+    });
   }
 
   void _schedule(int generation) {
@@ -105,22 +139,36 @@ class PresenceCacheNotifier extends Notifier<Map<String, String>> {
   }
 
   Future<void> _subscribe(int generation) async {
-    if (_opening || generation != _generation) return;
+    if (_opening ||
+        generation != _generation ||
+        _tracked.isEmpty ||
+        (_presenceUnsub != null && _subscribedKeys.containsAll(_tracked))) {
+      return;
+    }
     _opening = true;
-    _retrying = false;
+    _subscribeAttempted = true;
+    final keys = _tracked.toList()..sort();
+    final subscription = ++_nextSubscription;
     var closed = false;
+    // The subscription being replaced keeps delivering until this one opens.
+    bool current() =>
+        generation == _generation &&
+        !closed &&
+        subscription == _activeSubscription;
     try {
       final unsub = await ref
           .read(relaySessionProvider.notifier)
           .subscribeWithStatus(
-            const NostrFilter(kinds: [EventKind.presenceUpdate], limit: 0),
+            NostrFilter(
+              kinds: const [EventKind.presenceUpdate],
+              authors: keys,
+              limit: 0,
+            ),
             (event) {
-              if (generation == _generation && !closed && !_retrying) {
-                _handlePresenceEvent(event);
-              }
+              if (current() && !_retrying) _handlePresenceEvent(event);
             },
             onStatusChanged: (status) {
-              if (generation != _generation || closed) return;
+              if (!current()) return;
               _retrying = status == RelaySubscriptionStatus.retrying;
               _invalidateSnapshot();
               if (!_retrying) _schedule(generation);
@@ -128,8 +176,10 @@ class PresenceCacheNotifier extends Notifier<Map<String, String>> {
             onClosed: (_) {
               if (generation != _generation || closed) return;
               closed = true;
+              if (subscription != _activeSubscription) return;
               _presenceUnsub?.call();
               _presenceUnsub = null;
+              _subscribedKeys.clear();
               _invalidateSnapshot();
             },
           );
@@ -137,7 +187,16 @@ class PresenceCacheNotifier extends Notifier<Map<String, String>> {
         unsub();
         return;
       }
+      final previous = _presenceUnsub;
+      _activeSubscription = subscription;
+      _retrying = false;
       _presenceUnsub = unsub;
+      _subscribedKeys
+        ..clear()
+        ..addAll(keys);
+      previous?.call();
+      // Keys tracked while this one opened need a wider subscription.
+      if (!_subscribedKeys.containsAll(_tracked)) _queueResubscribe(generation);
       _schedule(generation);
     } catch (error) {
       if (generation == _generation) {
