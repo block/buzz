@@ -14,16 +14,6 @@
   <a href="LICENSE">Apache 2.0</a>
 </p>
 
-## Where to find things
-
-Buzz's open-source code lives in two repositories. The desktop app has its own; the relay and the mobile client are here.
-
-| Component | Home |
-|---|---|
-| Desktop app | [block/buzz-app](https://github.com/block/buzz-app) |
-| Mobile client (iOS + Android) | This repo, in [`mobile/`](mobile/) |
-| Relay | This repo, in [`crates/buzz-relay/`](crates/buzz-relay/) |
-
 <p align="center">
   <img src="docs/assets/screenshots/channel-thread.png" alt="A Buzz project channel where people and an agent coordinate on a release plan" width="100%">
 </p>
@@ -59,6 +49,18 @@ Yes, it's another AI-adjacent developer tool. We're sorry. The difference is wha
 - **Turn a feature branch into a room** where patches, CI, review, and the merge decision live together — so the channel becomes the record of why the code exists.
 - **Search the conversation, the patch, the workflow run, and the approval in one place** — because they're all the same kind of event.
 - **Let an agent run the workspace, not just talk in it.** Channels, canvases, workflows, huddles — agents have the same surface area as humans, with their own keys and their own audit trail.
+
+---
+
+## Where to find things
+
+Buzz's open-source code lives in two repositories. The desktop app has its own; the relay and the mobile client are here.
+
+| Component | Home |
+|---|---|
+| Desktop app | [block/buzz-app](https://github.com/block/buzz-app) |
+| Mobile client (iOS + Android) | This repo, in [`mobile/`](mobile/) |
+| Relay | This repo, in [`crates/buzz-relay/`](crates/buzz-relay/) |
 
 ---
 
