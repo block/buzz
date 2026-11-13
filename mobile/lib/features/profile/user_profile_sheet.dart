@@ -154,10 +154,10 @@ class UserProfileSheet extends HookConsumerWidget {
 
     // Ensure presence and status are tracked.
     useEffect(() {
-      ref.read(presenceCacheProvider.notifier).track([pk]);
+      final release = ref.read(presenceCacheProvider.notifier).track([pk]);
       ref.read(userStatusCacheProvider.notifier).track([pk]);
       ref.read(userCacheProvider.notifier).preload([pk]);
-      return null;
+      return release;
     }, [pk]);
     final copied = useState(false);
     final isOpeningDirectMessage = useState(false);

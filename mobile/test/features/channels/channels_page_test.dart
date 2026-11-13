@@ -266,6 +266,41 @@ void main() {
     await tester.pumpWidget(const SizedBox());
   });
 
+  testWidgets('a DM row stops following presence once it is gone', (
+    tester,
+  ) async {
+    final relay = PresenceTestRelay();
+    final channels = _FakeNotifier(testChannels);
+    await tester.pumpWidget(
+      buildTestable(
+        overrides: [
+          channelsProvider.overrideWith(() => channels),
+          relaySessionProvider.overrideWith(() => relay),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+    relay.results.removeAt(0).complete([
+      presenceEvent('relay', 'online', subject: 'alice', timestamp: 20),
+    ]);
+    await tester.pumpAndSettle();
+    final container = ProviderScope.containerOf(
+      tester.element(_dmTileFor('Alice')),
+    );
+    expect(container.read(presenceCacheProvider)['alice'], 'online');
+
+    channels.replaceChannels([
+      for (final channel in testChannels)
+        if (channel.channelType != 'dm') channel,
+    ]);
+    await tester.pumpAndSettle();
+    expect(find.text('Alice'), findsNothing);
+    await tester.pump(PresenceCacheNotifier.releaseDelay);
+    expect(relay.unsubscribes, 1);
+    expect(container.read(presenceCacheProvider), isEmpty);
+    await tester.pumpWidget(const SizedBox());
+  });
+
   for (final label in ['Channels options', 'Design options']) {
     testWidgets('$label exposes a labeled button and tap action', (
       tester,
@@ -4216,6 +4251,8 @@ class _FakeNotifier extends ChannelsNotifier {
 
   @override
   Future<void> waitForUnreadCatchUp() async => await unreadCatchUp;
+
+  void replaceChannels(List<Channel> channels) => state = AsyncData(channels);
 
   void addUnread(String channelId, ObservedUnreadEvent event) {
     (_observedEventsByChannel[channelId] ??= {})[event.id] = event;

@@ -49,5 +49,5 @@ class _ListPresenceFixture extends PresenceCacheNotifier {
   @override
   Map<String, String> build() => {};
   @override
-  void track(List<String> pubkeys) {}
+  void Function() track(List<String> pubkeys) => () {};
 }

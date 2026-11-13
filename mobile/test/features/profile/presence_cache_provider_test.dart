@@ -206,6 +206,112 @@ void main() {
     });
   });
 
+  test('a released key leaves the subscription once nobody shows it', () {
+    fakeAsync((time) {
+      final relaySession = _RecordingRelaySessionNotifier();
+      final container = _buildContainer(relaySession: relaySession);
+      addTearDown(container.dispose);
+      final notifier = container.read(presenceCacheProvider.notifier);
+
+      container.read(presenceCacheProvider);
+      // Alice is shown in two places, Bob in one.
+      final aliceRow = notifier.track(['alice']);
+      final aliceSheet = notifier.track(['alice']);
+      final bobRow = notifier.track(['bob']);
+      time.elapse(Duration.zero);
+      expect(relaySession.subscriptions.last.filter.authors, ['alice', 'bob']);
+      final wide = relaySession.subscriptions.last;
+
+      aliceRow();
+      bobRow();
+      bobRow(); // a second call releases nothing more
+      time.elapse(
+        PresenceCacheNotifier.releaseDelay - const Duration(seconds: 1),
+      );
+      expect(relaySession.subscriptions, [wide]);
+
+      time.elapse(const Duration(seconds: 1));
+      expect(relaySession.subscriptions, hasLength(1));
+      expect(relaySession.subscriptions.single.filter.authors, ['alice']);
+      expect(container.read(presenceCacheProvider).keys, ['alice']);
+
+      relaySession.emit(_presence('bob', 'online'));
+      relaySession.emit(_presence('alice', 'online'));
+      expect(container.read(presenceCacheProvider), {'alice': 'online'});
+      aliceSheet();
+    });
+  });
+
+  test('a key shown again within the delay keeps its subscription', () {
+    fakeAsync((time) {
+      final relaySession = _RecordingRelaySessionNotifier();
+      final container = _buildContainer(relaySession: relaySession);
+      addTearDown(container.dispose);
+      final notifier = container.read(presenceCacheProvider.notifier);
+
+      container.read(presenceCacheProvider);
+      notifier.track(['alice']);
+      final bob = notifier.track(['bob']);
+      time.elapse(Duration.zero);
+      relaySession.emit(_presence('bob', 'online'));
+      final wide = relaySession.subscriptions.single;
+
+      // Bob scrolls off and back before the delay ends.
+      bob();
+      time.elapse(const Duration(seconds: 10));
+      notifier.track(['bob']);
+      time.elapse(PresenceCacheNotifier.releaseDelay);
+      expect(relaySession.subscriptions, [wide]);
+      expect(container.read(presenceCacheProvider)['bob'], 'online');
+    });
+  });
+
+  test('releasing everyone closes the stream until someone is shown', () {
+    fakeAsync((time) {
+      final relaySession = _RecordingRelaySessionNotifier();
+      final container = _buildContainer(relaySession: relaySession);
+      addTearDown(container.dispose);
+      final notifier = container.read(presenceCacheProvider.notifier);
+
+      container.read(presenceCacheProvider);
+      final alice = notifier.track(['alice']);
+      time.elapse(Duration.zero);
+      alice();
+      time.elapse(PresenceCacheNotifier.releaseDelay);
+      expect(relaySession.subscriptions, isEmpty);
+      expect(container.read(presenceCacheProvider), isEmpty);
+
+      relaySession.queried.clear();
+      notifier.track(['carol']);
+      time.elapse(Duration.zero);
+      expect(relaySession.subscriptions.single.filter.authors, ['carol']);
+      expect(relaySession.queried.expand((keys) => keys), ['carol']);
+    });
+  });
+
+  test('scrolling a long list keeps only the rows still shown', () {
+    fakeAsync((time) {
+      final relaySession = _RecordingRelaySessionNotifier();
+      final container = _buildContainer(relaySession: relaySession);
+      addTearDown(container.dispose);
+      final notifier = container.read(presenceCacheProvider.notifier);
+
+      container.read(presenceCacheProvider);
+      // 500 rows scroll past a window of 10.
+      final shown = <void Function()>[];
+      for (var row = 0; row < 500; row++) {
+        shown.add(notifier.track(['p${row.toString().padLeft(3, '0')}']));
+        if (shown.length > 10) shown.removeAt(0)();
+        time.elapse(const Duration(milliseconds: 50));
+      }
+      time.elapse(PresenceCacheNotifier.releaseDelay);
+      expect(relaySession.subscriptions, hasLength(1));
+      expect(relaySession.subscriptions.single.filter.authors, [
+        for (var row = 490; row < 500; row++) 'p$row',
+      ]);
+    });
+  });
+
   test('the poll still reads a live stream while its widening fails', () {
     fakeAsync((time) {
       final relaySession = _RecordingRelaySessionNotifier();
