@@ -62,19 +62,19 @@ pub(crate) fn delete_sentinel(app_data_dir: &Path) -> Result<(), String> {
 /// Implemented for `SecretStore`; a fake is used in tests.
 pub(crate) trait ResetKeychain {
     /// Delete the blob + all per-key legacy entries.
-    fn delete_all_with_legacy(&self) -> Result<(), String>;
+    fn delete_all_with_legacy(&self, known_keys: &[String]) -> Result<(), String>;
     /// Return `true` when all keychain shapes (main blob, DPK blob, per-key
     /// entries) that `migrate_legacy_key` can consume are absent.
-    fn verify_fully_wiped(&self) -> bool;
+    fn verify_fully_wiped(&self, known_keys: &[String]) -> bool;
 }
 
 impl ResetKeychain for crate::secret_store::SecretStore {
-    fn delete_all_with_legacy(&self) -> Result<(), String> {
-        self.delete_all_with_legacy_cleanup()
+    fn delete_all_with_legacy(&self, known_keys: &[String]) -> Result<(), String> {
+        self.delete_all_with_legacy_cleanup(known_keys)
     }
 
-    fn verify_fully_wiped(&self) -> bool {
-        self.verify_fully_wiped()
+    fn verify_fully_wiped(&self, known_keys: &[String]) -> bool {
+        self.verify_fully_wiped(known_keys)
     }
 }
 
@@ -167,6 +167,30 @@ fn trash_path(original: &Path) -> PathBuf {
     ))
 }
 
+/// Discover per-agent credential names before reset destroys the pubkey index.
+/// A retry may find that index only in deterministic reset trash.
+fn discover_known_agent_credential_keys(app_data_dir: &Path) -> Result<Vec<String>, String> {
+    let mut keys = std::collections::BTreeSet::new();
+    for root in [app_data_dir.to_path_buf(), trash_path(app_data_dir)] {
+        let path = root.join("agents").join("managed-agents.json");
+        let content = match std::fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(format!("read {}: {error}", path.display())),
+        };
+        let records: Vec<serde_json::Value> = serde_json::from_str(&content)
+            .map_err(|error| format!("parse {}: {error}", path.display()))?;
+        for pubkey in records
+            .iter()
+            .filter_map(|record| record.get("pubkey").and_then(serde_json::Value::as_str))
+            .filter(|pubkey| !pubkey.is_empty())
+        {
+            keys.insert(format!("agent:{pubkey}"));
+        }
+    }
+    Ok(keys.into_iter().collect())
+}
+
 /// Remove an existing reset-trash directory if present (from a prior crashed
 /// attempt), then rename `src` into the deterministic trash path. Returns
 /// `Ok(trash_path)` on success.
@@ -193,6 +217,16 @@ pub(crate) fn run_boot_reset_with_keychain(ctx: ResetContext<'_>) -> ResetOutcom
         };
     }
     let app_data_dir = ctx.app_data_dir;
+    let known_agent_keys = match discover_known_agent_credential_keys(app_data_dir) {
+        Ok(keys) => keys,
+        Err(error) => {
+            eprintln!("buzz-desktop reset: cannot discover managed-agent credentials: {error}");
+            return ResetOutcome {
+                completed: false,
+                failed: true,
+            };
+        }
+    };
 
     // ── Step 1: rename app-data dir (atomic — sentinel survives the parent) ──
     let trash_app = trash_path(app_data_dir);
@@ -270,7 +304,7 @@ pub(crate) fn run_boot_reset_with_keychain(ctx: ResetContext<'_>) -> ResetOutcom
     }
 
     // ── Step 4: keychain — LAST so we can read keys before deleting ──────────
-    if let Err(e) = ctx.keychain.delete_all_with_legacy() {
+    if let Err(e) = ctx.keychain.delete_all_with_legacy(&known_agent_keys) {
         eprintln!("buzz-desktop reset: keychain delete: {e}");
         // Keychain failure is fatal: keep sentinel, signal failure.
         // Restore all three dirs so the app returns to a coherent pre-reset state.
@@ -312,7 +346,7 @@ pub(crate) fn run_boot_reset_with_keychain(ctx: ResetContext<'_>) -> ResetOutcom
     }
 
     // ── Step 6: verify ────────────────────────────────────────────────────────
-    let keychain_ok = ctx.keychain.verify_fully_wiped();
+    let keychain_ok = ctx.keychain.verify_fully_wiped(&known_agent_keys);
     let app_data_gone = !app_data_dir.exists();
     let legacy_gone = ctx
         .legacy_app_data_dir
@@ -433,12 +467,12 @@ mod tests {
     }
 
     impl ResetKeychain for FakeKeychain {
-        fn delete_all_with_legacy(&self) -> Result<(), String> {
+        fn delete_all_with_legacy(&self, _known_keys: &[String]) -> Result<(), String> {
             self.delete_calls.set(self.delete_calls.get() + 1);
             self.delete_result.clone()
         }
 
-        fn verify_fully_wiped(&self) -> bool {
+        fn verify_fully_wiped(&self, _known_keys: &[String]) -> bool {
             if self.verify_always_fails {
                 return false;
             }
@@ -877,6 +911,93 @@ mod tests {
     }
 
     // ── Test 13: keychain-fail restores all dirs, retry cleans trash ──────
+
+    #[test]
+    fn discovers_agent_credentials_from_live_and_reset_trash_stores() {
+        let tmp = TempDir::new().unwrap();
+        let app_data = make_app_data(&tmp);
+        let live_store = app_data.join("agents").join("managed-agents.json");
+        std::fs::create_dir_all(live_store.parent().unwrap()).unwrap();
+        std::fs::write(&live_store, r#"[{"pubkey":"live-pubkey"},{"pubkey":""}]"#).unwrap();
+
+        let trash_store = trash_path(&app_data)
+            .join("agents")
+            .join("managed-agents.json");
+        std::fs::create_dir_all(trash_store.parent().unwrap()).unwrap();
+        std::fs::write(&trash_store, r#"[{"pubkey":"trash-pubkey"}]"#).unwrap();
+
+        assert_eq!(
+            discover_known_agent_credential_keys(&app_data).unwrap(),
+            vec![
+                "agent:live-pubkey".to_string(),
+                "agent:trash-pubkey".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn full_reset_deletes_and_verifies_all_known_agent_credentials() {
+        struct RecordingKeychain {
+            deleted: std::cell::RefCell<Vec<String>>,
+            verified: std::cell::RefCell<Vec<String>>,
+        }
+        impl ResetKeychain for RecordingKeychain {
+            fn delete_all_with_legacy(&self, known_keys: &[String]) -> Result<(), String> {
+                *self.deleted.borrow_mut() = known_keys.to_vec();
+                Ok(())
+            }
+            fn verify_fully_wiped(&self, known_keys: &[String]) -> bool {
+                *self.verified.borrow_mut() = known_keys.to_vec();
+                true
+            }
+        }
+
+        let tmp = TempDir::new().unwrap();
+        let app_data = make_app_data(&tmp);
+        let store = app_data.join("agents").join("managed-agents.json");
+        std::fs::create_dir_all(store.parent().unwrap()).unwrap();
+        std::fs::write(store, r#"[{"pubkey":"agent-a"},{"pubkey":"agent-b"}]"#).unwrap();
+        write_sentinel(&app_data).unwrap();
+        let keychain = RecordingKeychain {
+            deleted: std::cell::RefCell::new(Vec::new()),
+            verified: std::cell::RefCell::new(Vec::new()),
+        };
+
+        let outcome = run_boot_reset_with_keychain(make_ctx(&app_data, &keychain, false));
+
+        let expected = vec!["agent:agent-a".to_string(), "agent:agent-b".to_string()];
+        assert!(outcome.completed);
+        assert_eq!(*keychain.deleted.borrow(), expected);
+        assert_eq!(*keychain.verified.borrow(), expected);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[ignore = "requires Windows Credential Manager (run locally)"]
+    #[test]
+    fn windows_full_reset_removes_known_per_key_credentials() {
+        let tmp = TempDir::new().unwrap();
+        let app_data = make_app_data(&tmp);
+        let managed_store = app_data.join("agents").join("managed-agents.json");
+        std::fs::create_dir_all(managed_store.parent().unwrap()).unwrap();
+        std::fs::write(
+            managed_store,
+            r#"[{"pubkey":"reset-a"},{"pubkey":"reset-b"}]"#,
+        )
+        .unwrap();
+        write_sentinel(&app_data).unwrap();
+
+        let keychain = crate::secret_store::SecretStore::keyring("buzz-test-windows-full-reset");
+        let known = vec!["agent:reset-a".to_string(), "agent:reset-b".to_string()];
+        let _ = keychain.delete_all_with_legacy_cleanup(&known);
+        keychain.store("identity", "nsec1identity").unwrap();
+        keychain.store(&known[0], "nsec1agenta").unwrap();
+        keychain.store(&known[1], "nsec1agentb").unwrap();
+
+        let outcome = run_boot_reset_with_keychain(make_ctx(&app_data, &keychain, false));
+
+        assert!(outcome.completed);
+        assert!(keychain.verify_fully_wiped(&known));
+    }
 
     #[test]
     fn test_keychain_fail_restores_all_then_retry_cleans() {
