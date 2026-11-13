@@ -698,6 +698,15 @@ impl HuddleOwnerRegistry {
         self.draining.load(std::sync::atomic::Ordering::Acquire)
     }
 
+    pub(crate) fn owns_generation(&self, session_id: Uuid, generation: u64) -> bool {
+        self.entries.get(&session_id).is_some_and(|entry| {
+            entry.generation == generation
+                && !entry.lost.is_cancelled()
+                && !entry.draining.is_cancelled()
+                && !self.is_draining()
+        })
+    }
+
     /// The room's owner-loss signal, or `None` when this pod holds no live
     /// owner lease for the session. The acceptor passes this into
     /// `serve_control_loop`; a steady-state owner joiner uses it to reuse the
@@ -1238,14 +1247,21 @@ impl<D: HuddleDirectory + ?Sized> HuddleControlAcceptor<D> {
     /// path. The owner-registry release is generation-fenced, so a late close
     /// from an old stream cannot cancel a newly acquired lease epoch.
     ///
+    /// `explicit` is true only for an `UnregisterPeer` frame, the ingress's
+    /// clean-leave signal. Only an explicit last departure ends the Huddle
+    /// (archive plus 48103). A stream that ends with peers still registered
+    /// means the ingress relay or the mesh link went away while its clients
+    /// may rejoin, so the room and lease are released without ending.
+    ///
     /// **Only call for committed peers.** For pending (uncommitted) slots use
     /// [`Self::remove_remote_peer_pending`].
-    fn remove_remote_peer(
+    async fn remove_remote_peer(
         &self,
         community: CommunityId,
         session_id: Uuid,
         generation: u64,
         peer_id: Uuid,
+        explicit: bool,
     ) {
         let Some(room) = self.rooms.get(community, session_id) else {
             return;
@@ -1253,8 +1269,14 @@ impl<D: HuddleDirectory + ?Sized> HuddleControlAcceptor<D> {
         let Some((delta, should_end)) = room.remove_peer_and_check_ended(peer_id) else {
             return;
         };
+        let participant = delta.left.as_ref().map(|peer| peer.pubkey.clone());
         broadcast_peer_left(&room, delta, session_id);
-        if should_end && self.rooms.cleanup_if_empty(community, session_id) {
+        let finalized = match (should_end, explicit, room.end_handler.get()) {
+            (false, _, _) => false,
+            (true, true, Some(handler)) => handler.finish(&room, participant.as_deref()).await,
+            (true, _, _) => true,
+        };
+        if finalized && self.rooms.cleanup_ended_room(&room) {
             self.owners.release(session_id, generation);
         }
     }
@@ -1264,18 +1286,24 @@ impl<D: HuddleDirectory + ?Sized> HuddleControlAcceptor<D> {
     /// logic still runs so an empty room whose only peer was pending does not
     /// linger.
     /// [Fix B: FI-TRACE-COMMIT-BEFORE-PUBLISH]
-    fn remove_remote_peer_pending(
+    async fn remove_remote_peer_pending(
         &self,
         community: CommunityId,
         session_id: Uuid,
         generation: u64,
         peer_id: Uuid,
+        explicit: bool,
     ) {
         let Some(room) = self.rooms.get(community, session_id) else {
             return;
         };
         let (_, should_end) = room.remove_peer_silent_and_check_ended(peer_id);
-        if should_end && self.rooms.cleanup_if_empty(community, session_id) {
+        let finalized = match (should_end, explicit, room.end_handler.get()) {
+            (false, _, _) => false,
+            (true, true, Some(handler)) => handler.finish(&room, None).await,
+            (true, _, _) => true,
+        };
+        if finalized && self.rooms.cleanup_ended_room(&room) {
             self.owners.release(session_id, generation);
         }
     }
@@ -1529,7 +1557,9 @@ impl<D: HuddleDirectory + ?Sized> HuddleControlAcceptor<D> {
                                 session_id,
                                 fenced.generation,
                                 peer_id,
-                            );
+                                true,
+                            )
+                            .await;
                         }
                     } else if let Some(peer_id) = pending_registered.remove(&pubkey) {
                         if let Some(community_id) = stream_community {
@@ -1538,7 +1568,9 @@ impl<D: HuddleDirectory + ?Sized> HuddleControlAcceptor<D> {
                                 session_id,
                                 fenced.generation,
                                 peer_id,
-                            );
+                                true,
+                            )
+                            .await;
                         }
                     }
                 }
@@ -1605,18 +1637,28 @@ impl<D: HuddleDirectory + ?Sized> HuddleControlAcceptor<D> {
 
         // Teardown: drop every peer this stream registered, regardless of how
         // the loop ended. Dropping the peer drops its `audio_tx`, which ends the
-        // matching `spawn_remote_peer_sink` task.
+        // matching `spawn_remote_peer_sink` task. These peers never sent
+        // `UnregisterPeer`, so their departure is not explicit: the room and
+        // lease are released, but the Huddle is not ended and they can rejoin.
         if let Some(community_id) = stream_community {
             let community = CommunityId::from_uuid(community_id);
             for (_pubkey, peer_id) in registered {
-                self.remove_remote_peer(community, session_id, fenced.generation, peer_id);
+                self.remove_remote_peer(community, session_id, fenced.generation, peer_id, false)
+                    .await;
             }
             // Pending peers (commit never arrived): remove silently.
             // They were never visible — no `joined` was published.
             // Using remove_remote_peer_pending so no delta/revision bump fires.
             // [Fix B: FI-TRACE-COMMIT-BEFORE-PUBLISH]
             for (_pubkey, peer_id) in pending_registered {
-                self.remove_remote_peer_pending(community, session_id, fenced.generation, peer_id);
+                self.remove_remote_peer_pending(
+                    community,
+                    session_id,
+                    fenced.generation,
+                    peer_id,
+                    false,
+                )
+                .await;
             }
         }
         result
@@ -2980,52 +3022,125 @@ mod tests {
         assert_eq!(room.peer_pubkeys(), vec![("owner-local".into(), 0)]);
     }
 
+    struct RecordedRoomEnd(Arc<std::sync::Mutex<Vec<Option<String>>>>);
+
+    #[async_trait::async_trait]
+    impl super::super::room::RoomEndHandler for RecordedRoomEnd {
+        async fn finish(&self, room: &Room, participant: Option<&str>) -> bool {
+            assert!(room.is_empty());
+            self.0.lock().unwrap().push(participant.map(str::to_owned));
+            true
+        }
+    }
+
+    /// The last remote peer leaving releases the owner's room and lease either
+    /// way, but only a clean leave (`UnregisterPeer`) ends the Huddle. A bare
+    /// stream close is transport loss: the ingress tells its clients to rejoin,
+    /// so ending the Huddle there would refuse the rejoin.
     #[tokio::test]
     async fn remote_only_stream_close_releases_owner_room_and_lease() {
-        let owner_rt = rt(1);
-        let from = rt(2);
-        let session_id = Uuid::new_v4();
-        let fenced = fenced_owned_by(owner_rt, session_id);
-        let rooms = Arc::new(AudioRoomManager::new());
-        let dir = Arc::new(FakeDir::default());
-        let owners = Arc::new(HuddleOwnerRegistry::new());
-        owners.attach_signals(session_id, Arc::clone(&dir), lease_for(session_id, 7));
+        for clean_leave in [false, true] {
+            let owner_rt = rt(1);
+            let from = rt(2);
+            let session_id = Uuid::new_v4();
+            let fenced = fenced_owned_by(owner_rt, session_id);
+            let rooms = Arc::new(AudioRoomManager::new());
+            let dir = Arc::new(FakeDir::default());
+            let owners = Arc::new(HuddleOwnerRegistry::new());
+            owners.attach_signals(session_id, Arc::clone(&dir), lease_for(session_id, 7));
 
-        let acceptor = HuddleControlAcceptor::new(
-            Arc::clone(&rooms),
-            Arc::new(NullTransport) as Arc<dyn RelayPeerTransport>,
-            Arc::clone(&dir),
-            owner_rt,
-            Arc::clone(&owners),
-        );
-        let (owner_stream, mut client) = stream_pair();
-        let hello = huddle_hello(from, fenced);
-        let served =
-            tokio::spawn(async move { acceptor.accept_inbound(from, hello, owner_stream).await });
+            let acceptor = HuddleControlAcceptor::new(
+                Arc::clone(&rooms),
+                Arc::new(NullTransport) as Arc<dyn RelayPeerTransport>,
+                Arc::clone(&dir),
+                owner_rt,
+                Arc::clone(&owners),
+            );
+            let (owner_stream, mut client) = stream_pair();
+            let hello = huddle_hello(from, fenced);
+            let served =
+                tokio::spawn(
+                    async move { acceptor.accept_inbound(from, hello, owner_stream).await },
+                );
 
-        client
-            .send_frame(MeshStreamFrame::Data {
-                fenced,
-                payload: encode_control(&HuddleControlMsg::RegisterPeer {
-                    community_id: *community().as_uuid(),
-                    pubkey: "remote-only".into(),
-                    protocol_version: 2,
+            client
+                .send_frame(MeshStreamFrame::Data {
+                    fenced,
+                    payload: encode_control(&HuddleControlMsg::RegisterPeer {
+                        community_id: *community().as_uuid(),
+                        pubkey: "remote-only".into(),
+                        protocol_version: 2,
+                    })
+                    .unwrap(),
                 })
-                .unwrap(),
-            })
-            .await
-            .unwrap();
-        let registered = client.recv_frame().await.unwrap().unwrap();
-        assert!(matches!(registered, MeshStreamFrame::Data { .. }));
-        assert!(rooms.get(community(), session_id).is_some());
-        assert!(owners.lost_for(session_id).is_some());
+                .await
+                .unwrap();
+            let registered = client.recv_frame().await.unwrap().unwrap();
+            assert!(matches!(registered, MeshStreamFrame::Data { .. }));
+            assert!(rooms.get(community(), session_id).is_some());
+            assert!(owners.lost_for(session_id).is_some());
 
-        drop(client);
-        served.await.unwrap().unwrap();
+            let endings = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let room = rooms.get(community(), session_id).unwrap();
+            assert!(room
+                .end_handler
+                .set(Arc::new(RecordedRoomEnd(Arc::clone(&endings))))
+                .is_ok());
 
-        assert!(rooms.get(community(), session_id).is_none());
-        assert!(owners.lost_for(session_id).is_none());
-        await_release_calls(&dir, 1).await;
+            if clean_leave {
+                // Keep the ingress half open: the clean close's Goodbye ends
+                // the owner loop.
+                send_clean_close(&mut client, fenced, "remote-only").await;
+                served.await.unwrap().unwrap();
+                drop(client);
+            } else {
+                drop(client);
+                served.await.unwrap().unwrap();
+            }
+
+            assert!(rooms.get(community(), session_id).is_none());
+            assert!(owners.lost_for(session_id).is_none());
+            let expected = if clean_leave {
+                vec![Some("remote-only".to_owned())]
+            } else {
+                Vec::new()
+            };
+            assert_eq!(
+                *endings.lock().unwrap(),
+                expected,
+                "clean_leave={clean_leave}"
+            );
+            await_release_calls(&dir, 1).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_last_slot_finishes_committed_room_but_not_a_new_room() {
+        for committed in [false, true] {
+            let rooms = Arc::new(AudioRoomManager::new());
+            let session = Uuid::new_v4();
+            let room = rooms.get_or_create(community(), session);
+            let endings = Arc::new(std::sync::Mutex::new(Vec::new()));
+            if committed {
+                assert!(room
+                    .end_handler
+                    .set(Arc::new(RecordedRoomEnd(Arc::clone(&endings))))
+                    .is_ok());
+            }
+            let (peer, ..) = room.add_peer_pending("pending".into(), 2).unwrap();
+            let acceptor = HuddleControlAcceptor::new(
+                Arc::clone(&rooms),
+                Arc::new(NullTransport),
+                Arc::new(FakeDir::default()),
+                rt(1),
+                Arc::new(HuddleOwnerRegistry::new()),
+            );
+            acceptor
+                .remove_remote_peer_pending(community(), session, 7, peer, true)
+                .await;
+            assert_eq!(endings.lock().unwrap().len(), usize::from(committed));
+            assert!(rooms.get(community(), session).is_none());
+        }
     }
 
     /// A `RegisterPeer` whose fence is rejected (wrong community keys a lease

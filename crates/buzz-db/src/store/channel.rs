@@ -2208,6 +2208,39 @@ impl Db {
         archive_channel(&self.pool, community_id, channel_id).await
     }
 
+    /// Archive only while the caller still owns the lifecycle decision.
+    /// Recheck after acquiring channel locks and before commit, so a queued
+    /// write cannot act on authority retired while it waited. False means
+    /// nothing was written: authority was lost (rolled back), or the channel
+    /// was already archived. Admission uses the same row lock and cannot
+    /// interleave.
+    #[datastore_span(name = "archive_channel_if", system = "postgresql")]
+    pub async fn archive_channel_if<Fut>(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+        authorized: impl Fn() -> Fut + Send,
+    ) -> Result<bool>
+    where
+        Fut: std::future::Future<Output = Result<bool>> + Send,
+    {
+        let mut tx = self.begin_event_write_transaction(community_id).await?;
+        let mut locked =
+            lock_channel_for_settings_write(&mut tx, channel_id, &ChannelUpdate::default()).await?;
+        if locked.archived {
+            return Ok(false);
+        }
+        if !authorized().await? {
+            return Ok(false);
+        }
+        set_archived_on(&mut locked, true).await?;
+        if !authorized().await? {
+            return Ok(false);
+        }
+        tx.commit().await?;
+        Ok(true)
+    }
+
     /// Unarchives a channel.
     #[datastore_span(name = "unarchive_channel", system = "postgresql")]
     pub async fn unarchive_channel(
@@ -2625,6 +2658,98 @@ mod postgres_tests {
         )
         .await
         .is_err());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn conditional_archive_rechecks_authority_before_committing() {
+        let pool = setup_pool().await;
+        let community_uuid = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_uuid);
+        let owner = random_pubkey();
+        ensure_user(&pool, community, &owner).await.unwrap();
+        let channel = create_test_channel(
+            &pool,
+            community_uuid,
+            "conditional-archive",
+            ChannelType::Stream,
+            ChannelVisibility::Private,
+            None,
+            &owner,
+            None,
+        )
+        .await
+        .unwrap();
+        let db = Db::from_pool(pool.clone());
+        // An old owner's archive queues behind a channel writer; ownership
+        // retires before the lock becomes available.
+        let mut blocker = pool.begin().await.unwrap();
+        sqlx::query(
+            "SELECT id FROM channels WHERE community_id = $1 AND id = $2 FOR NO KEY UPDATE",
+        )
+        .bind(community.as_uuid())
+        .bind(channel.id)
+        .fetch_one(&mut *blocker)
+        .await
+        .unwrap();
+        let authorized = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let authorization = authorized.clone();
+        let queued_db = Db::from_pool(pool.clone());
+        let queued = tokio::spawn(async move {
+            queued_db
+                .archive_channel_if(community, channel.id, || async {
+                    Ok(authorization.load(std::sync::atomic::Ordering::SeqCst))
+                })
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let waiting: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND pid <> pg_backend_pid()",
+                ).fetch_one(&pool).await.unwrap();
+                if waiting > 0 { break; }
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+        authorized.store(false, std::sync::atomic::Ordering::SeqCst);
+        blocker.rollback().await.unwrap();
+        assert!(!queued.await.unwrap().unwrap());
+        assert!(db
+            .get_channel(community, channel.id)
+            .await
+            .unwrap()
+            .archived_at
+            .is_none());
+        let checks = std::sync::atomic::AtomicUsize::new(0);
+        // Authority is lost after the update, before commit: it must roll back.
+        assert!(!db
+            .archive_channel_if(community, channel.id, || async {
+                Ok(checks.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0)
+            })
+            .await
+            .unwrap());
+        assert!(db
+            .get_channel(community, channel.id)
+            .await
+            .unwrap()
+            .archived_at
+            .is_none());
+        assert!(db
+            .archive_channel_if(community, channel.id, || async { Ok(true) })
+            .await
+            .unwrap());
+        assert!(db
+            .get_channel(community, channel.id)
+            .await
+            .unwrap()
+            .archived_at
+            .is_some());
+        // Already archived (the creator ended the Huddle first) is terminal:
+        // nothing to write, not an error.
+        assert!(!db
+            .archive_channel_if(community, channel.id, || async { Ok(true) })
+            .await
+            .unwrap());
     }
 
     #[tokio::test]
