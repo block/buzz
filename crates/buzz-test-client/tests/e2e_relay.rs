@@ -223,22 +223,43 @@ async fn test_connect_and_authenticate() {
 #[tokio::test]
 #[ignore]
 async fn test_client_submitted_nip43_membership_snapshots_are_rejected() {
-    let url = relay_url();
     let keys = Keys::generate();
     // Prove this actor can submit a normal event so the rejection below is
     // specifically the relay-only invariant, not a broader authorization failure.
     create_test_channel(&keys).await;
-    let forged = EventBuilder::new(Kind::Custom(13_534), "")
-        .tags([Tag::parse(["member", &keys.public_key().to_hex(), "owner"]).unwrap()])
-        .sign_with_keys(&keys)
-        .expect("sign forged membership snapshot");
+    let member = Tag::parse(["member", &keys.public_key().to_hex(), "owner"]).unwrap();
+    assert_relay_only_snapshot_rejected(&keys, 13_534, member).await;
+}
 
-    let mut ws = BuzzTestClient::connect(&url, &keys).await.expect("connect");
+/// NIP-IA's kind:13535 archived-identities list is relay-signed, like the
+/// kind:13534 membership list; a client-signed copy is rejected at ingest.
+#[tokio::test]
+#[ignore]
+async fn test_client_submitted_nip_ia_archive_snapshots_are_rejected() {
+    let keys = Keys::generate();
+    create_test_channel(&keys).await;
+    let archived = Tag::parse(["p", &Keys::generate().public_key().to_hex()]).unwrap();
+    assert_relay_only_snapshot_rejected(&keys, 13_535, archived).await;
+}
+
+/// Submit a `kind` snapshot signed by `keys` over WebSocket and HTTP and
+/// assert that both transports reject it as a relay-only kind.
+async fn assert_relay_only_snapshot_rejected(keys: &Keys, kind: u16, tag: Tag) {
+    let url = relay_url();
+    let forged = EventBuilder::new(Kind::Custom(kind), "")
+        .tags([tag])
+        .sign_with_keys(keys)
+        .expect("sign forged snapshot");
+
+    let mut ws = BuzzTestClient::connect(&url, keys).await.expect("connect");
     let ok = ws
         .send_event(forged.clone())
         .await
         .expect("submit forged snapshot via websocket");
-    assert!(!ok.accepted, "forged WebSocket snapshot must be rejected");
+    assert!(
+        !ok.accepted,
+        "forged WebSocket kind:{kind} snapshot must be rejected"
+    );
     assert_eq!(ok.message, "restricted: relay-only kind");
     ws.disconnect().await.expect("disconnect");
 
@@ -254,7 +275,7 @@ async fn test_client_submitted_nip43_membership_snapshots_are_rejected() {
     let body = response.text().await.expect("read HTTP rejection");
     assert!(
         body.contains("restricted: relay-only kind"),
-        "unexpected HTTP rejection: {body}"
+        "unexpected kind:{kind} HTTP rejection: {body}"
     );
 }
 

@@ -705,9 +705,14 @@ mod tests {
 
         /// NIP-IA: every snapshot's `created_at` is strictly past the previous
         /// one's, even when publishers race on one head. Concurrent publishers
-        /// each read the head behind the replacement lock. RED-on-revert: with the
-        /// head read before the lock, publishers keep tying on head + 1 and one
-        /// exhausts its replacement attempts.
+        /// each read the head behind the replacement lock. The head is first
+        /// pinned an hour ahead, so each snapshot is stamped exactly one second
+        /// past the one it replaces. A superseded kind:13535 is deleted, so the
+        /// coordinate stores one row, 16 seconds past the pinned one only if
+        /// each of the 16 publishers stored exactly one snapshot one second
+        /// later. RED-on-revert: with the head read before the lock, publishers
+        /// keep tying on head + 1, so a same-second replacement leaves the row
+        /// short of + 16 s, or a publisher exhausts its replacement attempts.
         #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
         #[ignore = "requires Postgres and Redis"]
         async fn concurrent_archival_publishers_stamp_strictly_increasing_snapshots() {
@@ -718,6 +723,26 @@ mod tests {
                 .await
                 .expect("Redis for an ignored test");
             let tenant = seed_test_community(&pool).await;
+            let pinned = EventBuilder::new(
+                Kind::Custom(buzz_core::kind::KIND_IA_ARCHIVED_LIST as u16),
+                "",
+            )
+            .tags([Tag::parse(["-"]).expect("'-' tag")])
+            .custom_created_at(nostr::Timestamp::from(
+                nostr::Timestamp::now().as_secs() + 3600,
+            ))
+            .sign_with_keys(&state.relay_keypair)
+            .expect("sign pinned kind:13535");
+            assert!(
+                state
+                    .db
+                    .replace_addressable_event(tenant.community(), &pinned, None)
+                    .await
+                    .expect("store pinned kind:13535")
+                    .1
+            );
+            let pinned_at = chrono::DateTime::from_timestamp(pinned.created_at.as_secs() as i64, 0)
+                .expect("pinned created_at");
 
             let publishers: Vec<_> = (0..16)
                 .map(|_| {
@@ -733,8 +758,7 @@ mod tests {
                     .expect("publisher succeeds");
             }
 
-            // Superseded snapshots stay as soft-deleted rows, so every snapshot
-            // ever stored is visible here.
+            // Every stored row of the coordinate, retired rows included.
             let stamps: Vec<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
                 "SELECT created_at FROM events WHERE community_id = $1 AND kind = $2 \
                  AND pubkey = $3 ORDER BY created_at",
@@ -745,10 +769,11 @@ mod tests {
             .fetch_all(&pool)
             .await
             .expect("read stored snapshots");
-            assert_eq!(stamps.len(), 16, "every publisher stores its own snapshot");
-            assert!(
-                stamps.windows(2).all(|pair| pair[0] < pair[1]),
-                "snapshots must never share a created_at: {stamps:?}"
+            assert_eq!(
+                stamps,
+                [pinned_at + chrono::Duration::seconds(16)],
+                "each publisher stores one snapshot one second past the head it \
+                 replaces, and deletes that head"
             );
         }
     }

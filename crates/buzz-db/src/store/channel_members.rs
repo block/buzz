@@ -494,15 +494,17 @@ impl LockedMemberSnapshot {
         let created_at_secs = event.created_at.as_secs() as i64;
         let created_at = chrono::DateTime::from_timestamp(created_at_secs, 0)
             .ok_or(DbError::InvalidTimestamp(created_at_secs))?;
-        let existing: Option<(chrono::DateTime<Utc>, Vec<u8>)> = sqlx::query_as(
-            "SELECT created_at, id FROM events WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND channel_id = $4 AND deleted_at IS NULL ORDER BY created_at DESC, id ASC LIMIT 1",
-        )
-        .bind(community_id.as_uuid())
-        .bind(kind)
-        .bind(pubkey.as_slice())
-        .bind(channel_id)
-        .fetch_optional(self.tx.conn())
-        .await?;
+        let (head_sql, supersede_sql) = crate::replaceable::replacement_sql(
+            true,
+            crate::replaceable::hard_deletes_superseded(kind),
+        );
+        let existing: Option<(chrono::DateTime<Utc>, Vec<u8>)> = sqlx::query_as(head_sql)
+            .bind(community_id.as_uuid())
+            .bind(kind)
+            .bind(pubkey.as_slice())
+            .bind(channel_id)
+            .fetch_optional(self.tx.conn())
+            .await?;
         let incoming_id = event.id.as_bytes().as_slice();
         if let Some((existing_ts, existing_id)) = existing {
             if created_at < existing_ts
@@ -527,11 +529,14 @@ impl LockedMemberSnapshot {
             Some(channel_id),
         )
         .await?;
-        sqlx::query(superseded_with_mentions_sql!(
-            "UPDATE events SET deleted_at = NOW() WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND channel_id = $4 AND deleted_at IS NULL"
-        ))
-            .bind(community_id.as_uuid()).bind(kind).bind(pubkey.as_slice()).bind(channel_id)
-            .execute(self.tx.conn()).await?;
+        // A superseded roster is deleted, not soft-deleted.
+        sqlx::query(supersede_sql)
+            .bind(community_id.as_uuid())
+            .bind(kind)
+            .bind(pubkey.as_slice())
+            .bind(channel_id)
+            .execute(self.tx.conn())
+            .await?;
         let received_at = Utc::now();
         let sig = event.sig.serialize();
         let inserted = sqlx::query("INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, d_tag) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT DO NOTHING")
