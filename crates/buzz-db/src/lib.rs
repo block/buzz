@@ -113,7 +113,7 @@ pub use leader_lock::SessionLeader;
 pub use nip_fi_binding::{NipFiBindingRecord, NipFiUnbind, RowCapExceeded};
 pub use reaction::ReactionEventInsertOutcome;
 pub use reminder::DueReminder;
-pub use store::{ArtifactSnapshot, SnapshotDenied};
+pub use store::{ArtifactSnapshot, RelayArtifactState, SnapshotDenied};
 
 /// A value read from the database, with when its reading connection was
 /// checked out of the pool.
