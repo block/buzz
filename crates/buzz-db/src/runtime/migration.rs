@@ -902,7 +902,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 88);
+        assert_eq!(migrations.len(), 89);
         assert!(migrations[83]
             .sql
             .as_str()
@@ -942,6 +942,19 @@ mod postgres_tests {
         assert!(crate::test_support::desired_state_schema_sql().contains(
             "CREATE UNIQUE INDEX idx_channels_listed_name ON channels (community_id, lower(name))"
         ));
+        assert_eq!(migrations[88].version, 89);
+        let retire_roster_fence = strip_sql_comments(migrations[88].sql.as_str());
+        for statement in [
+            "SET LOCAL lock_timeout = '1s';",
+            "SET LOCAL statement_timeout = '5s';",
+            "DROP TRIGGER trg_events_guard_channel_roster_snapshot ON events;",
+            "DROP FUNCTION guard_channel_roster_snapshot();",
+        ] {
+            assert!(
+                retire_roster_fence.contains(statement),
+                "0089 must run {statement}"
+            );
+        }
         assert!(migrations[70]
             .sql
             .as_str()
@@ -1493,31 +1506,8 @@ mod postgres_tests {
         assert!(roster_fence.contains("snapshot_members IS DISTINCT FROM canonical_members"));
         assert!(roster_fence.contains("ERRCODE = '23514'"));
 
-        // Fresh desired-state bootstrap must install the identical executable
-        // fence as migration 0032. CI and isolated relay startup use schema.sql
-        // without running migrations, so drift reopens rolling-deploy races.
-        // The desired state keeps the function and its trigger in separate
-        // files, so compare each statement rather than one contiguous span.
-        fn extract_span<'a>(sql: &'a str, start: &str, end: &str) -> &'a str {
-            let begin = sql.find(start).expect("span start");
-            let relative_end = sql[begin..].find(end).expect("span end");
-            &sql[begin..begin + relative_end + end.len()]
-        }
-        for (start, end) in [
-            (
-                "CREATE OR REPLACE FUNCTION guard_channel_roster_snapshot()",
-                "$$ LANGUAGE plpgsql;",
-            ),
-            (
-                "CREATE TRIGGER trg_events_guard_channel_roster_snapshot",
-                "    FOR EACH ROW EXECUTE FUNCTION guard_channel_roster_snapshot();",
-            ),
-        ] {
-            assert_eq!(
-                extract_span(roster_fence, start, end),
-                extract_span(&desired_schema, start, end)
-            );
-        }
+        // Migration 0089 retires this fence; the desired state never installs it.
+        assert!(!desired_schema.contains("guard_channel_roster_snapshot"));
 
         // The single-row heartbeat table is updated continuously. Prevent
         // autovacuum from truncating its heap so standby queries are not
@@ -4224,7 +4214,9 @@ mod postgres_tests {
                 .await
                 .unwrap();
             if prebuilt {
-                run_migrations(&pool)
+                // Stop at 88: 0089 drops an events trigger, which needs a
+                // lock this writer blocks.
+                run_migrations_through(&pool, 88)
                     .await
                     .expect("verified prebuild does not request an index-build lock");
                 writer.rollback().await.unwrap();
