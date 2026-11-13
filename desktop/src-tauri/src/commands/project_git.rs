@@ -871,3 +871,63 @@ pub async fn pull_project_local_repository(
     .await
     .map_err(|error| format!("repo pull task failed: {error}"))?
 }
+
+#[cfg(test)]
+mod tests {
+    use super::snapshot_from_worktree;
+    use crate::commands::project_git_exec::{build_test_git_auth_config, run_git};
+
+    /// `ls-files -z` prints raw paths while `log --name-only` quotes them, so
+    /// without `core.quotepath=false` the file-browser lookup misses every
+    /// non-ASCII path and the "last commit" column comes back empty.
+    #[test]
+    fn worktree_snapshot_resolves_the_latest_commit_of_a_non_ascii_path() {
+        const NON_ASCII_PATH: &str = "Beppo-Aufträge/B1 — Ergebnis.md";
+
+        let auth = build_test_git_auth_config().expect("build test git config");
+        let root = tempfile::tempdir().expect("create test directory");
+        let repo = root.path().join("repo");
+        run_git(
+            &["init", "--", repo.to_str().expect("repo path")],
+            None,
+            &auth,
+        )
+        .expect("init repo");
+
+        let file = repo.join(NON_ASCII_PATH);
+        std::fs::create_dir_all(file.parent().expect("parent")).expect("create directory");
+        std::fs::write(&file, "hallo\n").expect("write fixture");
+        run_git(&["add", "-A"], Some(&repo), &auth).expect("stage fixture");
+        run_git(
+            &[
+                "-c",
+                "user.name=Buzz Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "-m",
+                "init",
+            ],
+            Some(&repo),
+            &auth,
+        )
+        .expect("commit fixture");
+
+        let snapshot = snapshot_from_worktree(&repo, &auth, None, None);
+        let file = snapshot
+            .files
+            .iter()
+            .find(|file| file.path == NON_ASCII_PATH)
+            .unwrap_or_else(|| {
+                panic!(
+                    "expected {NON_ASCII_PATH} in {:?}",
+                    snapshot.files.iter().map(|f| &f.path).collect::<Vec<_>>()
+                )
+            });
+        let latest_commit = file
+            .latest_commit
+            .as_ref()
+            .expect("non-ASCII path must resolve its latest commit");
+        assert_eq!(latest_commit.subject, "init");
+    }
+}
