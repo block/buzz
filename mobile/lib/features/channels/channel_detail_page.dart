@@ -74,6 +74,8 @@ import 'channel_actions_sheet.dart';
 import 'channel_identity_names_provider.dart';
 import 'channel_member_profile_actions.dart';
 import 'channel_link_navigation.dart';
+import 'agent_activity/show_agent_activity_sheet.dart';
+import 'agent_activity/working_bots_provider.dart';
 import 'channel_management_provider.dart';
 import 'channel_sections/channel_sections_provider.dart';
 import 'channel_messages_provider.dart';
@@ -728,6 +730,9 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                   messagesNotifier.isCatchingUp,
         onNativeTitlePressed: openChannelDetails,
         nativeActions: [
+          if (_agentActivityNavigationAction(context, ref, resolvedChannel.id)
+              case final agentActivity?)
+            agentActivity,
           if (personalChat)
             IosNavigationAction(
               label: 'Chat settings',
@@ -753,6 +758,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
           onTap: openChannelDetails,
         ),
         actions: [
+          _AgentActivityButton(channelId: resolvedChannel.id),
           if (personalChat)
             IconButton(
               key: const ValueKey('me-chat-settings-button'),
