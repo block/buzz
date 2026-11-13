@@ -21,6 +21,10 @@ const _discoveryRefresh = Duration(minutes: 5);
 /// tolerated, a flood before EOSE fails the batch instead of buffering it.
 const _maxEarlyPerSubject = 4;
 
+/// Batches smaller than [verifiedProfileBatchSize] allowed before they are
+/// merged into full ones.
+const _maxPartialBatches = 4;
+
 class _Batch {
   _Batch(this.subjects);
   final List<String> subjects;
@@ -280,29 +284,56 @@ class VerifiedProfilesNotifier extends Notifier<Map<String, VerifiedProfile>> {
       _publish();
       return;
     }
-    final subjects = _wanted.keys.toList();
-    final next = <String, List<String>>{};
-    for (var i = 0; i < subjects.length; i += verifiedProfileBatchSize) {
-      final end = i + verifiedProfileBatchSize;
-      final chunk = subjects.sublist(
-        i,
-        end < subjects.length ? end : subjects.length,
-      );
-      next[chunk.join(':')] = chunk;
-    }
+    // Keep every open batch whose subjects are all still tracked, so newly
+    // tracked people get a batch of their own instead of re-reading everyone
+    // already checked. A retried batch is replaced so a fresh snapshot can
+    // prove absence, and a batch that lost a subject to eviction is replaced
+    // too.
     for (final id in _batches.keys.toList()) {
-      // A retried batch is replaced so a fresh snapshot can prove absence.
-      if (next.containsKey(id) && !_batches[id]!.stale) continue;
-      final batch = _batches.remove(id)!..stop();
-      _checked.removeAll(batch.subjects);
+      final batch = _batches[id]!;
+      if (!batch.stale && batch.subjects.every(_wanted.containsKey)) continue;
+      _close(id);
     }
-    for (final MapEntry(key: id, value: chunk) in next.entries) {
-      if (!_batches.containsKey(id)) {
-        unawaited(_open(id, chunk, authority, generation));
-      }
+    var uncovered = _uncoveredSubjects();
+    if (uncovered.isEmpty) {
+      if (_refreshTimer == null) _armRefresh(generation);
+      _publish();
+      return;
+    }
+    // Small additions each open a small batch. Past a few of those, merge
+    // them into full ones, so the subscription count stays near the minimum.
+    final partial = [
+      for (final MapEntry(:key, :value) in _batches.entries)
+        if (value.subjects.length < verifiedProfileBatchSize) key,
+    ];
+    if (partial.length >= _maxPartialBatches) {
+      partial.forEach(_close);
+      uncovered = _uncoveredSubjects();
+    }
+    for (var i = 0; i < uncovered.length; i += verifiedProfileBatchSize) {
+      final end = i + verifiedProfileBatchSize;
+      final chunk = uncovered.sublist(
+        i,
+        end < uncovered.length ? end : uncovered.length,
+      );
+      unawaited(_open(chunk.join(':'), chunk, authority, generation));
     }
     if (_refreshTimer == null) _armRefresh(generation);
     _publish();
+  }
+
+  void _close(String id) {
+    final batch = _batches.remove(id)!..stop();
+    _checked.removeAll(batch.subjects);
+  }
+
+  /// Tracked subjects no open batch covers, oldest interest first.
+  List<String> _uncoveredSubjects() {
+    final covered = {for (final batch in _batches.values) ...batch.subjects};
+    return [
+      for (final key in _wanted.keys)
+        if (!covered.contains(key)) key,
+    ];
   }
 
   Future<void> _open(
