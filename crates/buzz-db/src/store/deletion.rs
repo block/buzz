@@ -96,6 +96,7 @@ pub const EXPECTED_SCOPED_TABLES: &[&str] = &[
     "artifact_heads",
     "artifact_revisions",
     "audit_log",
+    "channel_heads",
     "channel_members",
     "channels",
     "community_bans",
@@ -154,6 +155,7 @@ pub const PURGE_SCOPED_TABLES: &[&str] = &[
     "join_policy_acceptances",
     "media_uploaders",
     "media_publications",
+    "channel_heads",
     "moderation_reports",
     "subscriptions",
     "api_tokens",
@@ -843,6 +845,11 @@ impl Db {
 }
 
 impl DeletionStore {
+    /// The pool this store's admissions run on.
+    pub(crate) fn pool(&self) -> &PgPool {
+        &self.pool
+    }
+
     /// Construct from the writer pool used by [`crate::Db`].
     pub(crate) fn new(pool: PgPool) -> Self {
         Self { pool }
@@ -8140,6 +8147,17 @@ DROP FUNCTION community_deletion_lock_key(UUID);
         db.record_media_publications(request.community_id, vec![media_hash.clone()])
             .await
             .expect("publication boundary");
+        // A stored channel message leaves a channel head row behind.
+        let head_channel = Uuid::new_v4();
+        let message = |text: &str| {
+            nostr::EventBuilder::new(nostr::Kind::Custom(9), text)
+                .sign_with_keys(&nostr::Keys::generate())
+                .expect("sign message")
+        };
+        db.insert_event(request.community_id, &message("before"), Some(head_channel))
+            .await
+            .expect("store channel message");
+        crate::store::channel_heads::flush().await;
         store
             .approve(request.id, "approver", None)
             .await
@@ -8150,6 +8168,11 @@ DROP FUNCTION community_deletion_lock_key(UUID);
             .expect("claim")
             .expect("won claim");
         store.begin_quiescing(&claim.lease).await.expect("quiesce");
+        // Head rows are written only by admitted writers, refused from here.
+        assert!(db
+            .insert_event(request.community_id, &message("after"), Some(head_channel))
+            .await
+            .is_err());
         assert!(db
             .record_media_upload(request.community_id, &media_hash, &[8; 32])
             .await
@@ -8215,6 +8238,7 @@ DROP FUNCTION community_deletion_lock_key(UUID);
         let first = store.purge_postgres(&token).await.expect("purge postgres");
         assert_eq!(first["media_uploaders"], 1);
         assert_eq!(first["media_publications"], 1);
+        assert_eq!(first["channel_heads"], 1);
         let expected_tables: BTreeSet<&str> = EXPECTED_SCOPED_TABLES
             .iter()
             .chain(RELAY_ADMIN_TABLES.iter().map(|(table, _)| table))

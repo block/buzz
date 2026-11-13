@@ -539,6 +539,7 @@ async fn insert_event_on(
             channel_id,
         )
         .await?;
+        crate::store::channel_heads::stage(tx, event, created_at, channel_id, None);
     }
 
     Ok((
@@ -2032,6 +2033,7 @@ pub(crate) async fn insert_event_with_thread_metadata_tx(
             channel_id,
         )
         .await?;
+        crate::store::channel_heads::stage(tx, event, created_at, channel_id, thread_meta.as_ref());
 
         if let Some(ref meta) = thread_meta {
             let broadcast_val: bool = meta.broadcast;
