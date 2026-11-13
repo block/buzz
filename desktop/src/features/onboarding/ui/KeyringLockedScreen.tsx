@@ -14,7 +14,7 @@ export function KeyringLockedScreen() {
 
   const handleReimportClick = React.useCallback(() => {
     const confirmed = window.confirm(
-      "Importing a different nsec replaces the identity currently locked in the keyring for this install. The previous identity will no longer be accessible. Continue?",
+      "Importing a different nsec replaces the identity currently held by the local secret provider for this install. The previous identity will no longer be accessible. Continue?",
     );
     if (confirmed) {
       setShowImport(true);
@@ -41,12 +41,12 @@ export function KeyringLockedScreen() {
       <StartupWindowDragRegion />
       <div className="relative flex w-full max-w-[500px] flex-col items-center text-center">
         <h1 className="text-3xl font-semibold tracking-tight">
-          Unlock your system keyring
+          Secret provider unavailable
         </h1>
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          Your identity is safe in the OS keyring, but it's unreachable this
-          session. Unlock your keyring or sign into your desktop session, then
-          relaunch Buzz.
+          Buzz could not reach the machine-local secret provider. Your identity
+          was not replaced or copied to a file. Relaunch Buzz after the provider
+          is restored, or re-import your key to replace it deliberately.
         </p>
 
         {showImport ? (

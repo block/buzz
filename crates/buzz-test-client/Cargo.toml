@@ -23,6 +23,8 @@ thiserror = { workspace = true }
 uuid = { workspace = true }
 url = { workspace = true }
 rustls = "0.23"
+daz-secrets = { workspace = true }
+zeroize = { workspace = true }
 base64 = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 hex = { workspace = true }

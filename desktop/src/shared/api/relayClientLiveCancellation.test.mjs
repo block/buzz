@@ -38,9 +38,7 @@ globalThis.window = {
 };
 Date.now = () => now;
 const { RelayClient } = await import("./relayClientSession.ts");
-const { resetRateLimitGate, isRateLimited } = await import(
-  "./relayRateLimitGate.ts"
-);
+const { resetRateLimitGate } = await import("./relayRateLimitGate.ts");
 
 beforeEach(() => {
   resetRateLimitGate();

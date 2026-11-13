@@ -8,7 +8,7 @@
 //! - `buzz mem patch <slug>`          — apply a unified diff to the current value
 //! - `buzz mem rm <slug>`             — publish a tombstone
 //!
-//! By default, the caller's `BUZZ_PRIVATE_KEY` is the agent's nsec. The
+//! By default, the caller's daz-secrets identity is the agent's nsec. The
 //! agent's owner pubkey is resolved from `BUZZ_AUTH_TAG` (NIP-OA attestation)
 //! or the `--owner` flag. Read commands also support owner-side recovery via
 //! `--agent <pubkey>`: the CLI identity is treated as the owner and decrypts

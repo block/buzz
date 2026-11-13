@@ -14,7 +14,8 @@ git config tag.gpgsign true
 git config user.signingkey <hex-pubkey>
 
 # Set the private key (env var)
-export NOSTR_PRIVATE_KEY=<hex-or-nsec>
+git config nostr.secretService buzz-desktop
+git config nostr.secretAccount identity
 
 # Optional: NIP-OA owner attestation
 export BUZZ_AUTH_TAG='["auth","<owner-pk>","<conditions>","<owner-sig>"]'
@@ -28,9 +29,10 @@ git verify-commit HEAD
 
 ## Key Loading Priority
 
-1. `NOSTR_PRIVATE_KEY` environment variable
-2. `BUZZ_PRIVATE_KEY` environment variable
-3. Keyfile at path from `git config nostr.keyfile`
+The signing identity is read from the local `daz-secrets` provider. The Git
+configuration keys `nostr.secretService` and `nostr.secretAccount` select the
+entry and default to `buzz-desktop` / `identity`. Private key bytes are never
+accepted through environment variables, argv, or files.
 
 Keys may be hex (64 chars) or NIP-19 bech32 (`nsec1...`).
 

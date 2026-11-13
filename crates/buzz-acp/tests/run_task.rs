@@ -10,16 +10,23 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "support/provider.rs"]
+mod provider;
+
 const KEY: &str = "0000000000000000000000000000000000000000000000000000000000000001";
 const PUBKEY: &str = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
 struct Fixture {
     dir: PathBuf,
+    identity: provider::ProviderIdentity,
 }
 impl Fixture {
     fn new() -> Self {
         let dir = std::env::temp_dir().join(format!("buzz-run-{}", uuid::Uuid::new_v4()));
         fs::create_dir(&dir).unwrap();
-        Self { dir }
+        Self {
+            dir,
+            identity: provider::ProviderIdentity::seed(KEY),
+        }
     }
     fn command(&self) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_buzz-acp"));
@@ -27,10 +34,9 @@ impl Fixture {
             command.env_remove(key);
         }
         command
+            .arg("run")
+            .args(self.identity.args())
             .args([
-                "run",
-                "--private-key",
-                KEY,
                 "--relay-url",
                 "ws://127.0.0.1:1",
                 "--agent-command",
@@ -182,11 +188,15 @@ fn file_and_stdin_run_one_fresh_equipped_session_without_service() {
         assert_eq!(spawned.len(), 2);
         assert_ne!(spawned[0]["pid"], spawned[1]["pid"]);
         for proc in spawned {
-            assert_eq!(proc["key"], KEY);
+            // Identity bytes never reach the adapter, even when inherited.
+            assert_eq!(proc["key"], Value::Null);
+            assert_eq!(proc["nostrKey"], Value::Null);
+            assert_eq!(proc["gitKeyfile"], Value::Null);
+            assert_eq!(proc["gitSecretService"], json!(f.identity.service));
+            assert_eq!(proc["gitSecretAccount"], json!(f.identity.account));
             assert_eq!(proc["relay"], "ws://127.0.0.1:1");
             assert_eq!(proc["outputFormat"], "agent");
             assert_dead(proc["pid"].as_u64().unwrap() as u32);
-            assert!(!std::path::Path::new(proc["gitKeyfile"].as_str().unwrap()).exists());
         }
         let sessions: Vec<_> = wire
             .iter()

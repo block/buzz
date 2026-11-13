@@ -4,6 +4,9 @@ use super::*;
 use std::path::PathBuf;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+#[path = "../tests/support/provider.rs"]
+mod provider;
+
 async fn scripted_model(command: String) -> (String, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
@@ -79,23 +82,26 @@ async fn check_runtime(goose: bool) {
     } else {
         binaries.join("buzz-dev-mcp").to_str().unwrap().into()
     };
-    let git =
-        git::GitEnvironment::install(&config.keys, &config.relay_url, &binaries.join("buzz-acp"))
-            .unwrap();
+    let provider = provider::ProviderIdentity::for_keys(&config.keys);
+    config.secret_service = provider.service.clone();
+    config.secret_account = provider.account.clone();
+    let git = git::GitEnvironment::install(
+        &config.keys,
+        &config.secret_service,
+        &config.secret_account,
+        &config.relay_url,
+        &binaries.join("buzz-acp"),
+    )
+    .unwrap();
     config.persona_env_vars.extend(git.env.iter().cloned());
-    let keyfile = git
-        .env
-        .windows(2)
-        .find(|pair| pair[0].1 == "nostr.keyfile")
-        .unwrap()[1]
-        .1
-        .clone();
     let script = temp.path().join("probe.sh");
     std::fs::write(
         &script,
         r#"set -eu
 cd "$(dirname "$0")"
 test -z "${NOSTR_PRIVATE_KEY:-}"
+test -z "${BUZZ_PRIVATE_KEY:-}"
+! git config nostr.keyfile
 git config user.name > identity
 git config user.email >> identity
 test "$(git config --get-urlmatch credential.helper https://relay.invalid/git/test/repo)" = nostr
@@ -106,7 +112,8 @@ git -c core.hooksPath=/dev/null commit -s --allow-empty -qm 'runtime Git probe'
 git tag -m 'runtime tag probe' probe
 git verify-commit HEAD
 git verify-tag probe
-git config nostr.keyfile > ../keyfile
+git config nostr.secretService > ../coordinates
+git config nostr.secretAccount >> ../coordinates
 printf 'passed' > ../result
 "#,
     )
@@ -159,14 +166,11 @@ printf 'passed' > ../result
         config.keys.public_key().to_hex()
     )));
     assert_eq!(
-        std::fs::read_to_string(temp.path().join("keyfile"))
-            .unwrap()
-            .trim(),
-        keyfile
+        std::fs::read_to_string(temp.path().join("coordinates")).unwrap(),
+        format!("{}\n{}\n", provider.service, provider.account)
     );
-    assert!(std::path::Path::new(&keyfile).exists());
     drop(git);
-    assert!(!std::path::Path::new(&keyfile).exists());
+    drop(provider);
 }
 
 #[tokio::test]

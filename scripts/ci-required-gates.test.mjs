@@ -146,3 +146,38 @@ test("desktop gate selects jobs per changed-path input", () => {
   assert.deepEqual(selected("push", {}), Object.keys(desktopJobs).sort());
   assert.deepEqual(selected("pull_request", {}), []);
 });
+
+test("credential integration lanes configure the real protocol provider before tests", () => {
+  for (const [file, job, testStep] of [
+    ["_ci-rust.yml", "unit-tests", "Unit tests"],
+    ["_ci-desktop.yml", "desktop-tauri", "Desktop Tauri ${{ matrix.lane }}"],
+  ]) {
+    const source = readFileSync(
+      new URL(`../.github/workflows/${file}`, import.meta.url),
+      "utf8",
+    );
+    const body = source.match(
+      new RegExp(`^  ${job}:\\n([\\s\\S]*?)(?=^  [\\w-]+:|$(?![\\s\\S]))`, "m"),
+    )[1];
+    const setup = body.indexOf("uses: ./.github/actions/setup-test-secrets");
+    assert.ok(setup >= 0, `${job} must configure an isolated provider`);
+    assert.ok(setup < body.indexOf(`- name: ${testStep}`));
+  }
+  const action = readFileSync(
+    new URL("../.github/actions/setup-test-secrets/action.yml", import.meta.url),
+    "utf8",
+  );
+  assert.match(action, /ref: ef01d96a2fa8d661a6a2ad7dace77fce0f2f60aa/);
+  assert.match(action, /cmd\/daz-secrets-conformance-provider/);
+  assert.match(action, /chmod 0600 .*provider\.toml/);
+  assert.match(action, /persist-credentials: false/);
+  assert.match(action, /provider_id = "conformance"/);
+  assert.match(action, /cd \.ci\/daz-secrets/);
+  assert.match(action, /cmd\/daz-secrets\n/);
+  assert.doesNotMatch(action, /GITHUB_PATH/);
+  const rust = readFileSync(
+    new URL("../.github/workflows/_ci-rust.yml", import.meta.url),
+    "utf8",
+  );
+  assert.match(rust, /export PATH="\$RUNNER_TEMP\/daz-secrets:\$PATH"\n {10}just test-unit/);
+});
