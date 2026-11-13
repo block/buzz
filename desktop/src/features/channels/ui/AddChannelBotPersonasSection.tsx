@@ -95,6 +95,10 @@ type AddChannelBotPersonasSectionProps = {
   onCreateAgent?: () => void;
   onTogglePersona: (personaId: string) => void;
   personas: AgentPersona[];
+  /** A search is narrowing `personas`; suppresses the unfiltered copy. */
+  isSearching?: boolean;
+  /** The search matched nothing anywhere in the dialog, teams included. */
+  searchHasNoMatches?: boolean;
   selectedPersonaIds: readonly string[];
   // Legacy no-op props retained for the channel-template selector. Generic
   // remains supported there but is no longer exposed by channel add flows.
@@ -110,6 +114,8 @@ export function AddChannelBotPersonasSection({
   onCreateAgent,
   onTogglePersona,
   personas,
+  isSearching = false,
+  searchHasNoMatches = false,
   selectedPersonaIds,
 }: AddChannelBotPersonasSectionProps) {
   const available = personas.filter(
@@ -121,7 +127,7 @@ export function AddChannelBotPersonasSection({
 
   return (
     <div className="space-y-4">
-      {onCreateAgent && available.length === 0 ? (
+      {onCreateAgent && available.length === 0 && !isSearching ? (
         <CreateAgentRow onCreateAgent={onCreateAgent} />
       ) : null}
 
@@ -149,13 +155,25 @@ export function AddChannelBotPersonasSection({
         </div>
       ) : null}
 
-      {!isLoading && available.length === 0 && inChannel.length > 0 ? (
+      {!isLoading && searchHasNoMatches ? (
+        <p
+          className="px-3 text-sm text-muted-foreground"
+          data-testid="add-channel-bot-search-empty"
+        >
+          No agents match your search.
+        </p>
+      ) : null}
+
+      {!isLoading &&
+      !isSearching &&
+      available.length === 0 &&
+      inChannel.length > 0 ? (
         <p className="px-3 text-sm text-muted-foreground">
           All of your agents are already in this channel.
         </p>
       ) : null}
 
-      {onCreateAgent && available.length > 0 ? (
+      {onCreateAgent && (available.length > 0 || isSearching) ? (
         <CreateAgentRow onCreateAgent={onCreateAgent} />
       ) : null}
 
