@@ -5,8 +5,10 @@ import 'package:buzz/features/channels/channel_actions_sheet.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channel_sections/channel_sections_provider.dart';
 import 'package:buzz/features/channels/channel_sections/channel_sections_storage.dart';
+import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/manage_channel_sheet.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
+import 'package:buzz/shared/read_state/read_state_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:flutter/material.dart';
@@ -159,6 +161,85 @@ void main() {
 
     expect(find.text('Mark Read'), findsOneWidget);
     expect(find.text('Mark Unread'), findsNothing);
+  });
+
+  group('Mark Read', () {
+    late _KnownTimesChannels channels;
+    late _RecordingReadState readState;
+
+    Future<void> pumpSheet(WidgetTester tester, Channel channel) async {
+      channels = _KnownTimesChannels();
+      readState = _RecordingReadState();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            currentPubkeyProvider.overrideWith((ref) => _currentPubkey),
+            channelMembersProvider(
+              channel.id,
+            ).overrideWith((ref) async => const <ChannelMember>[]),
+            agentOwnersProvider.overrideWithValue(
+              const AsyncValue.data(<String, String>{}),
+            ),
+            channelsProvider.overrideWith(() => channels),
+            readStateProvider.overrideWith(() => readState),
+          ],
+          child: MaterialApp(
+            theme: AppTheme.light(),
+            home: Builder(
+              builder: (context) => Scaffold(
+                body: TextButton(
+                  onPressed: () => showChannelActionsSheet(
+                    context: context,
+                    channel: channel,
+                    isUnread: true,
+                  ),
+                  child: const Text('Open actions'),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('Open actions'));
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('covers a message that arrived while the sheet was open', (
+      tester,
+    ) async {
+      final opened = DateTime.utc(2026, 1, 1);
+      final channel = Channel(
+        id: 'channel-id',
+        name: 'general',
+        channelType: 'stream',
+        visibility: 'open',
+        description: '',
+        createdBy: 'owner',
+        createdAt: DateTime(2025),
+        memberCount: 2,
+        isMember: true,
+        lastMessageAt: opened,
+      );
+      await pumpSheet(tester, channel);
+      final openedAt = opened.millisecondsSinceEpoch ~/ 1000;
+      channels.latest = openedAt + 30;
+
+      await tester.tap(find.text('Mark Read'));
+      await tester.pumpAndSettle();
+
+      expect(readState.marks, [('channel-id', openedAt + 30, true)]);
+    });
+
+    testWidgets('with no known message time only releases forced unread', (
+      tester,
+    ) async {
+      await pumpSheet(tester, _channel());
+
+      await tester.tap(find.text('Mark Read'));
+      await tester.pumpAndSettle();
+
+      expect(readState.marks, [('channel-id', 0, true)]);
+    });
   });
 
   testWidgets('admin can archive but cannot delete', (tester) async {
@@ -1014,4 +1095,45 @@ class _FakeChannelActions extends ChannelActions {
   Future<void> unarchiveChannel(String channelId) async {
     unarchivedChannelId = channelId;
   }
+}
+
+/// Lists the sheet's channel with whatever [latest] holds when asked.
+class _KnownTimesChannels extends ChannelsNotifier {
+  int? latest;
+
+  @override
+  Future<List<Channel>> build() async => const [];
+
+  @override
+  Channel? channelById(String channelId) => Channel(
+    id: channelId,
+    name: 'general',
+    channelType: 'stream',
+    visibility: 'open',
+    description: '',
+    createdBy: 'owner',
+    createdAt: DateTime(2025),
+    memberCount: 2,
+    isMember: true,
+    lastMessageAt: latest == null
+        ? null
+        : DateTime.fromMillisecondsSinceEpoch(latest! * 1000, isUtc: true),
+  );
+
+  @override
+  void clearObservedUnreadCoveredByRead(String channelId, int readAt) {}
+}
+
+class _RecordingReadState extends ReadStateNotifier {
+  final marks = <(String, int, bool)>[];
+
+  @override
+  ReadStateState build() => const ReadStateState.inert();
+
+  @override
+  void markContextRead(
+    String contextId,
+    int unixTimestamp, {
+    bool clearForcedMessages = false,
+  }) => marks.add((contextId, unixTimestamp, clearForcedMessages));
 }

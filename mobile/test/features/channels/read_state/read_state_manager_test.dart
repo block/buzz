@@ -804,6 +804,164 @@ void main() {
     },
   );
 
+  group('timestamp-refused pending update', () {
+    const signedAt = 1800000000;
+    late SharedPreferences prefs;
+    late nostr.Keys keys;
+    late ReadStateCrypto crypto;
+    late _RefusingRelaySession session;
+    late int now;
+
+    ReadStateManager create() => ReadStateManager(
+      pubkey: keys.public,
+      relayUrl: _relayUrl,
+      prefs: prefs,
+      crypto: crypto,
+      relaySession: session,
+      signedEventRelay: SignedEventRelay(session: session, nsec: keys.nsec),
+      remoteEnabled: true,
+      onChanged: () {},
+      now: () => now,
+    );
+
+    Map<String, Object?> journal() => ReadStateStorage(
+      prefs,
+    ).readJournal('${keys.public}:${Uri.encodeComponent(_relayUrl)}')!;
+
+    // Leaves one signed update pending: the send times out unseen.
+    Future<NostrEvent> leavePending(Map<String, int> marks) async {
+      SharedPreferences.setMockInitialValues({});
+      prefs = await SharedPreferences.getInstance();
+      keys = nostr.Keys.generate();
+      crypto = ReadStateCrypto.tryCreate(nsec: keys.nsec, pubkey: keys.public)!;
+      session = _RefusingRelaySession();
+      now = signedAt;
+      final manager = create();
+      marks.forEach(manager.markContextRead);
+      session.timeOut = true;
+      await manager.flush();
+      expect((journal()['pending'] as Map), hasLength(1));
+      manager.dispose(flushPending: false);
+      session.timeOut = false;
+      return session.attempts.single;
+    }
+
+    Map<String, int> publishedContexts() => mergeReadStateContexts([
+      for (final event in session.retained.values)
+        decodeReadStateBlob(crypto.decrypt(event.content))!.contexts,
+    ]);
+
+    test('an expired update with no covering copy is renewed', () async {
+      final pending = await leavePending({
+        'room-a': signedAt - 100,
+        'room-b': signedAt - 50,
+      });
+      // A newer own update that holds only one of the pending marks.
+      session.retained[pending.tags.first[1]] = _readStateEvent(
+        pubkey: keys.public,
+        crypto: crypto,
+        clientId: journal()['clientId'] as String,
+        slotId: pending.tags.first[1].substring(readStateDTagPrefix.length),
+        contexts: {'room-a': signedAt - 100},
+        createdAt: signedAt + 10,
+      );
+      now = signedAt + 3600;
+      session.refuseCreatedAtBefore = now - 900;
+      final restarted = create();
+      await restarted.flush();
+
+      expect(restarted.syncError, isNull);
+      final successor = session.attempts.last;
+      expect(successor.id, isNot(pending.id));
+      expect(successor.createdAt, greaterThan(pending.createdAt));
+      expect(publishedContexts(), {
+        'room-a': signedAt - 100,
+        'room-b': signedAt - 50,
+      });
+      expect((journal()['pending'] as Map), isEmpty);
+      restarted.dispose(flushPending: false);
+    });
+
+    test('an expired update the relay already holds is retired', () async {
+      final pending = await leavePending({'room-a': signedAt - 100});
+      session.retained[pending.tags.first[1]] = pending;
+      now = signedAt + 3600;
+      session.refuseCreatedAtBefore = now - 900;
+      final restarted = create();
+      final attemptsBefore = session.attempts.length;
+      await restarted.flush();
+
+      expect(restarted.syncError, isNull);
+      // Only the refused retry: nothing new to send.
+      expect(session.attempts.length, attemptsBefore + 1);
+      expect(session.attempts.last.id, pending.id);
+      expect((journal()['pending'] as Map), isEmpty);
+      restarted.dispose(flushPending: false);
+    });
+
+    test('a refusal from clock skew keeps the exact update', () async {
+      final pending = await leavePending({'room-a': signedAt - 100});
+      // Not old by this device's clock, so the device clock is wrong.
+      now = signedAt + 60;
+      session.refuseCreatedAtBefore = signedAt + 1;
+      final restarted = create();
+      await restarted.flush();
+
+      expect(restarted.syncError, isA<ReadStateClockSkewError>());
+      expect(session.attempts.last.toJson(), pending.toJson());
+      final kept = (journal()['pending'] as Map).values.single as Map;
+      expect(kept['id'], pending.id);
+      restarted.dispose(flushPending: false);
+    });
+  });
+
+  test('a failed snapshot retries on a backoff timer', () {
+    fakeAsync((async) {
+      SharedPreferences.setMockInitialValues({});
+      late SharedPreferences prefs;
+      SharedPreferences.getInstance().then((value) => prefs = value);
+      async.flushMicrotasks();
+      final keys = nostr.Keys.generate();
+      final crypto = ReadStateCrypto.tryCreate(
+        nsec: keys.nsec,
+        pubkey: keys.public,
+      )!;
+      final session = _FakeRelaySession()..failNextFetch = true;
+      var changes = 0;
+      final manager = ReadStateManager(
+        pubkey: keys.public,
+        relayUrl: _relayUrl,
+        prefs: prefs,
+        crypto: crypto,
+        relaySession: session,
+        signedEventRelay: _FakeSignedEventRelay(),
+        remoteEnabled: true,
+        onChanged: () => changes++,
+        now: () => 2000,
+      );
+      manager.initialize();
+      async.flushMicrotasks();
+      expect(session.fetchCount, 1);
+      expect(manager.syncError, isNotNull);
+
+      session.failNextFetch = true;
+      async.elapse(const Duration(seconds: 5));
+      expect(session.fetchCount, 2);
+      // Doubled after a second failure.
+      async.elapse(const Duration(seconds: 9));
+      expect(session.fetchCount, 2);
+      async.elapse(const Duration(seconds: 1));
+      expect(session.fetchCount, 3);
+      async.elapse(const Duration(seconds: 6));
+      expect(manager.syncError, isNull);
+      // Recovered: no further retries.
+      async.elapse(const Duration(minutes: 10));
+      expect(session.fetchCount, 3);
+      expect(changes, greaterThan(0));
+      manager.dispose(flushPending: false);
+    });
+  });
+
   test('message feedback survives restart but is never published', () async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
@@ -1266,6 +1424,35 @@ class _JournalRelaySession extends _FakeRelaySession {
     if (failSecond && attempts.length == 2) {
       throw TimeoutException('Accepted but acknowledgement lost');
     }
+    return event;
+  }
+}
+
+/// Stores what it accepts. [timeOut] drops the reply after storing nothing,
+/// and [refuseCreatedAtBefore] refuses older events the way the relay
+/// refuses timestamps outside its window.
+class _RefusingRelaySession extends _FakeRelaySession {
+  final attempts = <NostrEvent>[];
+  final retained = <String, NostrEvent>{};
+  bool timeOut = false;
+  int refuseCreatedAtBefore = 0;
+
+  @override
+  Future<List<NostrEvent>> fetchReadStateSnapshot({
+    Duration timeout = const Duration(seconds: 8),
+  }) async => retained.values.toList();
+
+  @override
+  Future<NostrEvent> publish(
+    NostrEvent event, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    attempts.add(event);
+    if (timeOut) throw TimeoutException('No acknowledgement');
+    if (event.createdAt < refuseCreatedAtBefore) {
+      throw Exception('invalid: event timestamp too far from server time');
+    }
+    retained[event.tags.firstWhere((tag) => tag.first == 'd')[1]] = event;
     return event;
   }
 }

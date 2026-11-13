@@ -102,6 +102,7 @@ class _ChannelsBody extends StatelessWidget {
               hitTestBehavior: HitTestBehavior.translucent,
               slivers: [
                 SliverToBoxAdapter(child: SizedBox(height: barHeight)),
+                const SliverToBoxAdapter(child: _ReadStateSyncNotice()),
                 if (onInbox != null)
                   SliverPadding(
                     padding: const EdgeInsets.only(top: Grid.twelve),
@@ -470,21 +471,8 @@ class _SliverChannelsList extends HookConsumerWidget {
                 onSortModeChange: (mode) =>
                     setSortMode(sectionSortGroupKey(section.id), mode),
                 onSelectChannel: onSelectChannel,
-                onMarkChannelRead: (channel) {
-                  final ts = dateTimeToUnixSeconds(channel.lastMessageAt);
-                  if (ts != null) {
-                    ref
-                        .read(readStateProvider.notifier)
-                        .markContextRead(
-                          channel.id,
-                          ts,
-                          clearForcedMessages: true,
-                        );
-                    ref
-                        .read(channelsProvider.notifier)
-                        .clearObservedUnreadCoveredByRead(channel.id, ts);
-                  }
-                },
+                onMarkChannelRead: (channel) =>
+                    markChannelReadNow(ref, channel.id),
               ),
             ],
             if (userSections.isNotEmpty || starredStreamChannels.isNotEmpty)
@@ -522,6 +510,40 @@ class _SliverChannelsList extends HookConsumerWidget {
             ),
           ],
         ],
+      ),
+    );
+  }
+}
+
+/// Says when unread status is not syncing with other devices, and retries.
+class _ReadStateSyncNotice extends ConsumerWidget {
+  const _ReadStateSyncNotice();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final failed = ref.watch(
+      readStateProvider.select((state) => state.syncFailed),
+    );
+    if (!failed) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(Grid.gutter, Grid.xs, Grid.gutter, 0),
+      child: Semantics(
+        button: true,
+        child: InkWell(
+          key: const Key('read-state-sync-notice'),
+          borderRadius: BorderRadius.circular(Radii.lg),
+          onTap: () =>
+              unawaited(ref.read(readStateProvider.notifier).retrySync()),
+          child: Padding(
+            padding: const EdgeInsets.all(Grid.xs),
+            child: Text(
+              'Unread status isn’t syncing with your other devices. Tap to retry.',
+              style: context.textTheme.bodySmall?.copyWith(
+                color: context.colors.onSurfaceVariant,
+              ),
+            ),
+          ),
+        ),
       ),
     );
   }

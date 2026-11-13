@@ -109,6 +109,16 @@ void main() {
     expect(state().effectiveTimestamp(channelId), state().retentionFloor);
   });
 
+  test('a mark made before the next manager starts is kept', () async {
+    final notifier = await pumpNotifier();
+    // The switch retires this community's manager; the next one has not been
+    // built yet when the mark arrives.
+    config.switchTo('http://localhost:2');
+    notifier.markContextRead(channelId, now);
+    await settle();
+    expect(state().effectiveTimestamp(channelId), now);
+  });
+
   test('a disconnect and reconnect keeps the manager and forced unread '
       'flags, and resyncs once on connect', () async {
     final notifier = await pumpNotifier();

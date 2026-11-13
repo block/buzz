@@ -34,6 +34,7 @@ import 'channel_stars/channel_stars_provider.dart';
 import 'channels_provider.dart';
 import 'manage_channel_sheet.dart';
 import 'members_sheet.dart';
+import 'unread_badge/observed_unread_event.dart';
 import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/read_state/read_state_provider.dart';
 import '../../shared/read_state/read_state_time.dart';
@@ -64,6 +65,32 @@ Future<bool?> showChannelActionsSheet({
     sectionId: sectionId,
   ),
 );
+
+/// Marks [channelId] read through the newest message known at the moment of
+/// the call, its listed last message or a newer observed unread event, so a
+/// message that arrived while a menu was open is covered and
+/// one that arrives later stays unread. With no known message time it only
+/// releases forced-unread flags.
+void markChannelReadNow(WidgetRef ref, String channelId) {
+  final channels = ref.read(channelsProvider.notifier);
+  var timestamp = dateTimeToUnixSeconds(
+    channels.channelById(channelId)?.lastMessageAt,
+  );
+  for (final event
+      in channels.observedUnreadEventsByChannel[channelId]?.values ??
+          const <ObservedUnreadEvent>[]) {
+    if (timestamp == null || event.createdAt > timestamp) {
+      timestamp = event.createdAt;
+    }
+  }
+  // Time 0 never advances a read marker, so it only releases the flags.
+  ref
+      .read(readStateProvider.notifier)
+      .markContextRead(channelId, timestamp ?? 0, clearForcedMessages: true);
+  if (timestamp != null) {
+    channels.clearObservedUnreadCoveredByRead(channelId, timestamp);
+  }
+}
 
 /// Mobile action sheet for channel-level read, organization, and lifecycle
 /// operations.
@@ -154,26 +181,9 @@ class ChannelActionsSheet extends HookConsumerWidget {
                   },
                   onToggleRead: () {
                     close();
-                    final timestamp = dateTimeToUnixSeconds(
-                      channel.lastMessageAt,
-                    );
                     if (isUnread) {
                       onMarkRead?.call();
-                      if (timestamp != null) {
-                        ref
-                            .read(readStateProvider.notifier)
-                            .markContextRead(
-                              channel.id,
-                              timestamp,
-                              clearForcedMessages: true,
-                            );
-                        ref
-                            .read(channelsProvider.notifier)
-                            .clearObservedUnreadCoveredByRead(
-                              channel.id,
-                              timestamp,
-                            );
-                      }
+                      markChannelReadNow(ref, channel.id);
                     } else {
                       ref
                           .read(readStateProvider.notifier)
