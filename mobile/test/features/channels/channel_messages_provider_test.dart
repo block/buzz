@@ -45,6 +45,24 @@ void test(String description, Future<void> Function() body) {
 }
 
 void main() {
+  test('does not publish a fake empty timeline before first connection', () {
+    final relaySession = _RecordingRelaySessionNotifier(
+      initialStatus: SessionStatus.disconnected,
+    );
+    final container = _buildContainer(relaySession);
+    addTearDown(container.dispose);
+
+    final state = container.read(channelMessagesProvider(_channelId));
+
+    expect(state.isLoading, isTrue);
+    expect(
+      container
+          .read(channelMessagesProvider(_channelId).notifier)
+          .hasLoadedMessages,
+      isFalse,
+    );
+  });
+
   test(
     'Solo notification target does not skip the intervening history',
     () async {
@@ -6477,6 +6495,7 @@ class _DeletedTargetSummaryResponse {
 }
 
 class _RecordingRelaySessionNotifier extends RelaySessionNotifier {
+  final SessionStatus initialStatus;
   final bool failSubscribe;
   final Queue<Object> _queryResults;
   final Queue<List<NostrEvent>> _historyResults;
@@ -6501,6 +6520,7 @@ class _RecordingRelaySessionNotifier extends RelaySessionNotifier {
   final Queue<Completer<List<NostrEvent>>> _targetHistories = Queue();
 
   _RecordingRelaySessionNotifier({
+    this.initialStatus = SessionStatus.connected,
     this.failSubscribe = false,
     List<Object> queryResults = const [],
     List<List<NostrEvent>> historyResults = const [],
@@ -6510,7 +6530,7 @@ class _RecordingRelaySessionNotifier extends RelaySessionNotifier {
   Future<void> get subscribed => _subscribed.future;
 
   @override
-  SessionState build() => const SessionState(status: SessionStatus.connected);
+  SessionState build() => SessionState(status: initialStatus);
 
   void setConnected(bool connected) {
     state = SessionState(
