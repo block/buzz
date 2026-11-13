@@ -210,6 +210,7 @@ fn profile_info_parses_content() {
         vec![],
     );
     let p = profile_info_from_event(&e).unwrap();
+    assert_eq!(p.name.as_deref(), Some("alice"));
     assert_eq!(p.display_name.as_deref(), Some("Alice"));
     assert_eq!(p.avatar_url.as_deref(), Some("http://x/a.png"));
     assert_eq!(p.about.as_deref(), Some("hi"));
@@ -227,10 +228,11 @@ fn profile_info_extracts_valid_nip_oa_owner() {
 }
 
 #[test]
-fn profile_info_falls_back_to_name() {
+fn profile_info_keeps_name_and_display_name_independent() {
     let e = ev(0, r#"{"name":"bob"}"#, vec![]);
     let p = profile_info_from_event(&e).unwrap();
-    assert_eq!(p.display_name.as_deref(), Some("bob"));
+    assert_eq!(p.name.as_deref(), Some("bob"));
+    assert_eq!(p.display_name, None);
 }
 
 #[test]
@@ -248,7 +250,7 @@ fn users_batch_keeps_latest_and_reports_missing() {
         .custom_created_at(nostr::Timestamp::from(1000))
         .sign_with_keys(&keys)
         .unwrap();
-    let e_new = EventBuilder::new(Kind::Metadata, r#"{"display_name":"New"}"#)
+    let e_new = EventBuilder::new(Kind::Metadata, r#"{"display_name":"   ","name":"  New  "}"#)
         .custom_created_at(nostr::Timestamp::from(2000))
         .sign_with_keys(&keys)
         .unwrap();
@@ -262,6 +264,7 @@ fn users_batch_keeps_latest_and_reports_missing() {
     );
     assert_eq!(resp.profiles.len(), 2);
     assert_eq!(resp.profiles[&pk].display_name.as_deref(), Some("New"));
+    assert_eq!(resp.profiles[&pk].name.as_deref(), Some("New"));
     assert_eq!(resp.missing, vec![missing_pk]);
 }
 
