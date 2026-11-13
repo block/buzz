@@ -33,7 +33,7 @@ pub struct UpdatePersonaResult {
 /// pool-named instances (e.g. "Birch", "Compass") keep their individualised name.
 /// Updates both `record.name` (relay display name) and `record.display_name`.
 /// Returns the pubkeys of the records that were renamed.
-fn propagate_persona_name_rename(
+pub(super) fn propagate_persona_name_rename(
     records: &mut [ManagedAgentRecord],
     persona_id: &str,
     old_display_name: &str,
