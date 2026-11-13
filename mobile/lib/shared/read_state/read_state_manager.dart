@@ -178,6 +178,8 @@ class ReadStateManager {
   bool _liveCatchUpNeeded = false;
   bool _catchUpRunning = false;
   bool _catchUpAgain = false;
+  Timer? _catchUpTimer;
+  Completer<void>? _catchUpWake;
 
   bool _disposed = false;
   bool _isPublishing = false;
@@ -374,6 +376,7 @@ class ReadStateManager {
 
     _unsubscribeLive?.call();
     _unsubscribeLive = null;
+    _wakeCatchUp();
   }
 
   bool _advanceContext(
@@ -482,6 +485,8 @@ class ReadStateManager {
       final generation = ++_liveGeneration;
       _liveReady = false;
       _liveCatchUpNeeded = false;
+      // This stream's re-sync fetches its own snapshot; end the old backoff.
+      _wakeCatchUp();
       final unsub = await _relaySession!.subscribeWithStatus(
         NostrFilter(
           kinds: const [EventKind.readState],
@@ -544,12 +549,15 @@ class ReadStateManager {
 
   /// Fetches the snapshot again once the stream is live. A readiness that
   /// lands while one runs fetches once more after it, since the running fetch
-  /// may predate it. A failed fetch is retried a few times; if every attempt
-  /// fails, the next recovery of this stream tries again. A re-sync that
-  /// replaces the stream fetches its own snapshot, so retries stop there.
+  /// may predate it, and ends any backoff wait so that one fresh fetch serves
+  /// it. A failed fetch is retried a few times; if every attempt fails, the
+  /// next recovery of this stream tries again. A re-sync that replaces the
+  /// stream fetches its own snapshot, so retries stop there.
   Future<void> _runCatchUp() async {
     if (_catchUpRunning) {
       _catchUpAgain = true;
+      // A newer readiness supersedes the backoff: fetch for it now.
+      _wakeCatchUp();
       return;
     }
     _catchUpRunning = true;
@@ -562,8 +570,8 @@ class ReadStateManager {
         fetched = await _fetchAndMerge();
         for (final delay in _catchUpRetryDelays) {
           if (fetched || _catchUpAgain || !_catchUpCurrent(generation)) break;
-          await Future<void>.delayed(delay);
-          if (!_catchUpCurrent(generation)) break;
+          await _catchUpWait(delay);
+          if (_catchUpAgain || !_catchUpCurrent(generation)) break;
           fetched = await _fetchAndMerge();
         }
       } while (_catchUpAgain && !_disposed);
@@ -571,6 +579,23 @@ class ReadStateManager {
     } finally {
       _catchUpRunning = false;
     }
+  }
+
+  /// Waits [delay] before a catch-up retry. A newer readiness, a re-sync
+  /// replacing the stream or dispose ends the wait early ([_wakeCatchUp]).
+  Future<void> _catchUpWait(Duration delay) {
+    final wake = Completer<void>();
+    _catchUpWake = wake;
+    _catchUpTimer = Timer(delay, _wakeCatchUp);
+    return wake.future;
+  }
+
+  void _wakeCatchUp() {
+    _catchUpTimer?.cancel();
+    _catchUpTimer = null;
+    final wake = _catchUpWake;
+    _catchUpWake = null;
+    if (wake != null && !wake.isCompleted) wake.complete();
   }
 
   bool _catchUpCurrent(int generation) =>

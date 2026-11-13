@@ -1200,6 +1200,90 @@ void main() {
     });
   });
 
+  test('a readiness during a catch-up backoff fetches once, right away', () {
+    fakeAsync((async) {
+      SharedPreferences.setMockInitialValues({});
+      late final SharedPreferences prefs;
+      SharedPreferences.getInstance().then((value) => prefs = value);
+      async.flushMicrotasks();
+      final keychain = nostr.Keys.generate();
+      final crypto = ReadStateCrypto.tryCreate(
+        nsec: keychain.nsec,
+        pubkey: keychain.public,
+      )!;
+      final relay = _FakeRelaySession();
+      final manager = ReadStateManager(
+        pubkey: keychain.public,
+        relayUrl: _relayUrl,
+        prefs: prefs,
+        crypto: crypto,
+        relaySession: relay,
+        signedEventRelay: _FakeSignedEventRelay(),
+        remoteEnabled: true,
+        onChanged: () {},
+      );
+      manager.initialize();
+      async.flushMicrotasks();
+
+      // Three failed catch-up fetches put it in the 30 s wait.
+      relay.liveOnStatus!(RelaySubscriptionStatus.retrying);
+      relay.failAllFetches = true;
+      relay.liveOnStatus!(RelaySubscriptionStatus.ready);
+      async.elapse(const Duration(seconds: 12));
+      expect(relay.fetchCount, 4);
+
+      relay.failAllFetches = false;
+      relay.liveOnStatus!(RelaySubscriptionStatus.retrying);
+      relay.liveOnStatus!(RelaySubscriptionStatus.ready);
+      async.flushMicrotasks();
+      expect(relay.fetchCount, 5);
+
+      async.elapse(const Duration(minutes: 1));
+      expect(relay.fetchCount, 5);
+
+      manager.dispose();
+    });
+  });
+
+  test('dispose during a catch-up backoff leaves no timer', () {
+    fakeAsync((async) {
+      SharedPreferences.setMockInitialValues({});
+      late final SharedPreferences prefs;
+      SharedPreferences.getInstance().then((value) => prefs = value);
+      async.flushMicrotasks();
+      final keychain = nostr.Keys.generate();
+      final crypto = ReadStateCrypto.tryCreate(
+        nsec: keychain.nsec,
+        pubkey: keychain.public,
+      )!;
+      final relay = _FakeRelaySession();
+      final manager = ReadStateManager(
+        pubkey: keychain.public,
+        relayUrl: _relayUrl,
+        prefs: prefs,
+        crypto: crypto,
+        relaySession: relay,
+        signedEventRelay: _FakeSignedEventRelay(),
+        remoteEnabled: true,
+        onChanged: () {},
+      );
+      manager.initialize();
+      async.flushMicrotasks();
+
+      // Three failed catch-up fetches put it in the 30 s wait.
+      relay.liveOnStatus!(RelaySubscriptionStatus.retrying);
+      relay.failAllFetches = true;
+      relay.liveOnStatus!(RelaySubscriptionStatus.ready);
+      async.elapse(const Duration(seconds: 12));
+      expect(relay.fetchCount, 4);
+
+      manager.dispose();
+      async.flushMicrotasks();
+      expect(async.pendingTimers, isEmpty);
+      expect(relay.fetchCount, 4);
+    });
+  });
+
   test('a connect during a failed initialize syncs again', () async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
