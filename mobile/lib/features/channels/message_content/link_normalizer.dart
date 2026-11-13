@@ -107,6 +107,11 @@ String _mapMarkdownProseAt(
   var fenceDelimiterLength = 0;
   var fenceChar = '';
   var fenceQuoteDepth = 0;
+  // The paragraph end found for the last unpaired opener, reused while later
+  // openers at the same quote depth sit before it, so a long paragraph is
+  // walked once rather than once per opener.
+  var paragraphEnd = -1;
+  var paragraphDepth = -1;
 
   while (offset < content.length) {
     // A fence opened inside a quote ends with that quote, closed or not.
@@ -162,7 +167,17 @@ String _mapMarkdownProseAt(
       continue;
     } else if (_hasInlineCloserOnLine(content, run.end, runLength) ||
         (!_isOpeningFence(content, run.start, runLength) &&
-            _hasInlineCloser(content, run.end, runLength))) {
+            _hasInlineCloser(content, run.end, runLength, () {
+              final depth = _lineQuoteDepth(
+                content,
+                content.lastIndexOf('\n', run.start) + 1,
+              );
+              if (run.end >= paragraphEnd || depth != paragraphDepth) {
+                paragraphEnd = _paragraphEnd(content, run.end, depth);
+                paragraphDepth = depth;
+              }
+              return paragraphEnd;
+            }))) {
       buffer.write(
         transform(content.substring(proseStart, run.start), proseStart),
       );
@@ -268,24 +283,26 @@ bool _hasInlineCloserOnLine(String content, int start, int delimiterLength) {
 
 /// Whether a closing run follows before the paragraph ends: a code span
 /// cannot continue past a blank line, a list item, heading, fence or a deeper
-/// block quote.
-bool _hasInlineCloser(String content, int start, int delimiterLength) {
-  final end = _paragraphEnd(content, start);
+/// block quote. [paragraphEnd] is asked only when no closer is near.
+bool _hasInlineCloser(
+  String content,
+  int start,
+  int delimiterLength,
+  int Function() paragraphEnd,
+) {
+  int? end;
   for (final run in _backtickRunPattern.allMatches(content, start)) {
-    if (run.start >= end) return false;
+    if (run.start >= (end ??= paragraphEnd())) return false;
     if (run.end - run.start == delimiterLength) return true;
   }
   return false;
 }
 
-int _paragraphEnd(String content, int start) {
-  // A block quote can interrupt a paragraph, so a line opening a deeper quote
-  // than the paragraph's own line ends it. Equal or shallower markers continue
-  // it, as in a multi-line code span inside a quote.
-  final openerDepth = _lineQuoteDepth(
-    content,
-    start == 0 ? 0 : content.lastIndexOf('\n', start - 1) + 1,
-  );
+/// Where the paragraph containing [start] ends, for a line at quote depth
+/// [openerDepth]. A block quote can interrupt a paragraph, so a line opening a
+/// deeper quote ends it. Equal or shallower markers continue it, as in a
+/// multi-line code span inside a quote.
+int _paragraphEnd(String content, int start, int openerDepth) {
   var newline = content.indexOf('\n', start);
   while (newline >= 0) {
     if (_lineQuoteDepth(content, newline + 1) > openerDepth ||

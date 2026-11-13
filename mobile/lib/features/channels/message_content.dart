@@ -370,29 +370,20 @@ class MessageContent extends HookConsumerWidget {
     final finalContent = useMemoized(() {
       // Replace spaces with non-breaking spaces inside known mention names
       // so _MentionMd's pattern matches multi-word names as one token, in
-      // the bound name's case.
-      // Skip content inside backticks to avoid altering inline code.
-      final mentionParts = markdownContent.split('`');
-      final mentionBuf = StringBuffer();
-      for (var i = 0; i < mentionParts.length; i++) {
-        if (i.isOdd) {
-          mentionBuf.write('`${mentionParts[i]}`');
-        } else {
-          var segment = mentionParts[i];
-          for (final range in mentionOccurrences(
-            segment,
-            mentionBindings.keys,
-          ).reversed) {
-            segment = segment.replaceRange(
-              range.start,
-              range.end,
-              '@${_markdownMentionName(segment.substring(range.start + 1, range.end))}',
-            );
-          }
-          mentionBuf.write(segment);
+      // the authored case. Code, inline or fenced, is left as written.
+      return mapMarkdownProse(markdownContent, (segment) {
+        for (final range in mentionOccurrences(
+          segment,
+          mentionBindings.keys,
+        ).reversed) {
+          segment = segment.replaceRange(
+            range.start,
+            range.end,
+            '@${_markdownMentionName(segment.substring(range.start + 1, range.end))}',
+          );
         }
-      }
-      return mentionBuf.toString();
+        return segment;
+      });
     }, [markdownContent, mentionPresentationKey]);
 
     final inlinePatterns = _useMessageInlinePatterns(

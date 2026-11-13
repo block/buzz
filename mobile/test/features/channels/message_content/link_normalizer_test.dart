@@ -55,6 +55,14 @@ void main() {
     expect(timer.elapsedMilliseconds, lessThan(500));
   });
 
+  test('a long paragraph of unpaired backticks takes linear time', () {
+    // Walking to the paragraph end for every opener took seconds at 64 KB.
+    final body = 'a `\n` b' * (64 * 1024 ~/ 7);
+    final timer = Stopwatch()..start();
+    expect(mapMarkdownProse(body, (prose) => prose), body);
+    expect(timer.elapsedMilliseconds, lessThan(500));
+  });
+
   test('keeps punctuation and open Markdown delimiters outside links', () {
     expect(
       normalizeBareLinks('**open $url**. and **_${url}_**!'),

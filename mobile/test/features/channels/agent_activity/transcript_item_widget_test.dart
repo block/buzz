@@ -73,4 +73,28 @@ void main() {
     );
     expect(_rendersLink(tester), isFalse);
   });
+
+  testWidgets('reads escapes as literal characters', (tester) async {
+    await tester.pumpWidget(
+      _testable(
+        TranscriptItemWidget(
+          item: MessageItem(
+            id: 'm2',
+            role: 'assistant',
+            title: 'Assistant',
+            text: r'Group as \(a + b\), then ping \@alice.',
+            timestamp: '2026-08-29T09:00:00Z',
+          ),
+        ),
+      ),
+    );
+
+    expect(
+      find.textContaining(
+        'Group as (a + b), then ping @alice.',
+        findRichText: true,
+      ),
+      findsOneWidget,
+    );
+  });
 }

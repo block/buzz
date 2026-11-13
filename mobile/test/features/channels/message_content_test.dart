@@ -3194,6 +3194,28 @@ Photos
         expect(_allRichText(tester), isNot(contains('Lopez Lopez')));
       });
 
+      testWidgets('leaves mentions in code and stray backticks as written', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content:
+                  '~~~\n@Kenny Lopez ran it\n~~~\n\n'
+                  'stray ` tick then **bold** and @Kenny Lopez',
+              mentionNames: {'pk1': 'Kenny Lopez'},
+            ),
+          ),
+        );
+
+        final text = _allRichText(tester);
+        // The fence keeps the author's space, not the chip's NBSP.
+        expect(text, contains('@Kenny Lopez ran it'));
+        expect(text, contains('stray ` tick then bold and '));
+        // Only the prose mention becomes a chip.
+        expect(find.text('Kenny Lopez'), findsOneWidget);
+      });
+
       testWidgets('renders unknown @mention as-is', (tester) async {
         await tester.pumpWidget(
           _testable(
