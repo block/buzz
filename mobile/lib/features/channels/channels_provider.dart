@@ -471,8 +471,6 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     );
     // Latest-message filters depend on channel identity/privacy, not names.
     // Start them alongside profiles, and observe both errors immediately.
-    // A read that keeps the list's times still reads channels it newly lists
-    // as a member, such as a DM opened on another device.
     final listed = {
       if (!fetchLastMessage)
         for (final c in state.value ?? const <Channel>[])
@@ -528,9 +526,8 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
 
     // Step 3: fetch the most recent message per channel to populate lastMessageAt.
     // kind:39000 metadata doesn't carry message timestamps, so channels load with
-    // lastMessageAt: null. Without this, unread detection and badge computation
-    // see every channel as having no messages. Reads that keep the list's
-    // times fetch only newly listed channels; live delivery keeps the rest.
+    // lastMessageAt: null. Reads that keep the list's times fetch only newly
+    // listed channels; live delivery keeps the rest current.
     final activeChannels = [
       for (final channel in channels)
         if (channel.isMember && !channel.isArchived) channel,
@@ -636,7 +633,11 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
         }
       }
     }
-    if (fetchLastMessage) _needsSnapshotRevalidation = latestEvents == null;
+    // A failed targeted batch also leaves new channels for a full read to date.
+    _needsSnapshotRevalidation =
+        latestEvents == null ||
+        (!fetchLastMessage && _needsSnapshotRevalidation);
+    if (latestEvents == null) _listReadRetry.schedule(_readListIfChanged);
     if (hiddenDmIds != null) {
       _channelListChangesRead = max(_channelListChangesRead, listChanges);
     } else {
