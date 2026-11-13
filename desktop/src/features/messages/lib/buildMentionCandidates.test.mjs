@@ -110,6 +110,120 @@ test("active personas join unless a managed agent already carries them", () => {
   );
 });
 
+test("an owned relay agent suppresses its mintable persona on a second desktop", () => {
+  const persona = {
+    id: "planner",
+    displayName: "Claude Hall",
+    avatarUrl: null,
+    isActive: true,
+  };
+  const candidates = buildMentionCandidates(
+    input({
+      activePersonas: [persona],
+      currentPubkey: MEMBER_PUBKEY,
+      memberPubkeys: new Set([AGENT_PUBKEY]),
+      members: [
+        {
+          pubkey: AGENT_PUBKEY,
+          displayName: "Claude Hall",
+          isAgent: true,
+          role: "bot",
+        },
+      ],
+      mentionableAgentPubkeys: new Set([AGENT_PUBKEY]),
+      relayAgents: [
+        {
+          pubkey: AGENT_PUBKEY,
+          ownerPubkey: MEMBER_PUBKEY,
+          personaId: persona.id,
+          name: "Claude Hall",
+          status: "online",
+          channelIds: [],
+        },
+      ],
+    }),
+  );
+
+  assert.equal(candidates.length, 1);
+  assert.equal(candidates[0].kind, "identity");
+  assert.equal(candidates[0].pubkey, AGENT_PUBKEY);
+  assert.equal(candidates[0].personaId, persona.id);
+});
+
+test("a foreign relay agent cannot suppress a colliding local persona", () => {
+  const persona = {
+    id: "planner",
+    displayName: "Planner",
+    avatarUrl: null,
+    isActive: true,
+  };
+  const candidates = buildMentionCandidates(
+    input({
+      activePersonas: [persona],
+      currentPubkey: MEMBER_PUBKEY,
+      mentionableAgentPubkeys: new Set([AGENT_PUBKEY]),
+      relayAgents: [
+        {
+          pubkey: AGENT_PUBKEY,
+          ownerPubkey: SEARCHED_PUBKEY,
+          personaId: persona.id,
+          name: "Remote Planner",
+          status: "online",
+          channelIds: [],
+        },
+      ],
+    }),
+  );
+
+  assert.equal(candidates.length, 2);
+  assert.equal(
+    candidates.filter((candidate) => candidate.kind === "persona").length,
+    1,
+  );
+  assert.equal(
+    candidates.find((candidate) => candidate.pubkey === AGENT_PUBKEY)
+      ?.personaId,
+    undefined,
+  );
+});
+
+for (const hiddenBy of ["archive", "eligibility"]) {
+  test(`a relay agent hidden by ${hiddenBy} does not suppress its persona`, () => {
+    const persona = {
+      id: "planner",
+      displayName: "Planner",
+      avatarUrl: null,
+      isActive: true,
+    };
+    const candidates = buildMentionCandidates(
+      input({
+        activePersonas: [persona],
+        currentPubkey: MEMBER_PUBKEY,
+        isArchived:
+          hiddenBy === "archive"
+            ? (pubkey) => pubkey === AGENT_PUBKEY
+            : () => false,
+        mentionableAgentPubkeys:
+          hiddenBy === "eligibility" ? new Set() : new Set([AGENT_PUBKEY]),
+        relayAgents: [
+          {
+            pubkey: AGENT_PUBKEY,
+            ownerPubkey: MEMBER_PUBKEY,
+            personaId: persona.id,
+            name: "Remote Planner",
+            status: "online",
+            channelIds: [],
+          },
+        ],
+      }),
+    );
+
+    assert.equal(candidates.length, 1);
+    assert.equal(candidates[0].kind, "persona");
+    assert.equal(candidates[0].personaId, persona.id);
+  });
+}
+
 test("global search results join only while global search is enabled", () => {
   const userSearchResults = [
     {
