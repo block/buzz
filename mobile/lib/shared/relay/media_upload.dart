@@ -712,7 +712,7 @@ class MediaUploadService {
   _PreparedUploadImage _buildPreparedUploadImage(Uint8List bytes) {
     return _PreparedUploadImage(
       bytes: bytes,
-      mimeType: _detectImageMimeType(bytes),
+      mimeType: detectImageMimeType(bytes),
     );
   }
 
@@ -803,13 +803,14 @@ String _sha256Hex(Uint8List bytes) => crypto.sha256.convert(bytes).toString();
 
 String? _tryDetectImageMimeType(Uint8List bytes) {
   try {
-    return _detectImageMimeType(bytes);
+    return detectImageMimeType(bytes);
   } on Exception {
     return null;
   }
 }
 
-String _detectImageMimeType(Uint8List bytes) {
+/// Returns the image MIME type of [bytes] from their signature.
+String detectImageMimeType(Uint8List bytes) {
   if (_startsWith(bytes, const [0xff, 0xd8, 0xff])) {
     return 'image/jpeg';
   }
