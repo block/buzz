@@ -429,6 +429,33 @@ void exactMentionTests() {
     },
   );
 
+  testWidgets(
+    'a namesake selection touching code backticks stays bound after unformatting',
+    (tester) async {
+      List<String>? sent;
+      await mountComposer(
+        tester,
+        members(),
+        (_, keys, {mediaTags = const []}) async => sent = keys,
+      );
+      final controller = tester
+          .widget<TextField>(find.byType(TextField))
+          .controller!;
+      await pick(tester, '@');
+      await pick(tester, '`@Scout` and @Scout @', last: true);
+      expect(controller.text, '`@Scout` and @Scout ($first) @Scout ($second) ');
+      // Delete the qualified prose mention and remove the code formatting.
+      await tester.enterText(
+        find.byType(TextField),
+        '@Scout and @Scout ($second) ',
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+      await tester.pumpAndSettle();
+      expect(sent, [first, second]);
+    },
+  );
+
   testWidgets('unbound qualified text cannot notify a shorter member alias', (
     tester,
   ) async {

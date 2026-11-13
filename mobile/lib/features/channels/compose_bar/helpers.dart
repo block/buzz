@@ -377,8 +377,9 @@ void spliceAndMoveCursor(
 }
 
 /// Qualify earlier namesake mentions outside code, keeping the cursor in
-/// place, and rebind [mentions] before the text changes. A key with an
-/// occurrence left in code stays bound beside its qualified label. Returns
+/// place, and rebind [mentions] before the text changes. A key with any
+/// plain occurrence left, by the presence rule draft persistence uses (code
+/// formatting ignored), stays bound beside its qualified label. Returns
 /// [start] shifted by the edits before it. Call it before tracking the new
 /// selection: persistence prunes keys absent from the text.
 int _requalifyNamesakes(
@@ -404,8 +405,14 @@ int _requalifyNamesakes(
     // Exactly what the editor draws as code stays as typed.
     excluded: (from, to) => code.any((c) => c.start < from && to < c.end),
   );
+  // Backtick-adjacent code is no occurrence, but persistence still keeps it.
+  final remaining = mentionOccurrences(
+    result.text.replaceAll('`', ' '),
+    result.renamed,
+  ).map((range) => range.label).toSet();
   for (final key in result.renamed) {
-    mentions[renames[key]!] = result.kept.contains(key)
+    mentions[renames[key]!] =
+        result.kept.contains(key) || remaining.contains(key)
         ? mentions[key]!
         : mentions.remove(key)!;
   }
