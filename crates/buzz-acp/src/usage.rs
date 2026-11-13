@@ -268,6 +268,8 @@ struct StandardSessionState {
     published_seq: u64,
     last_cost: Option<f64>,
     cost_poisoned: bool,
+    /// Set by `session/resume`; cleared by the next cost observation.
+    resumed: bool,
 }
 
 #[derive(Debug, Default)]
@@ -286,15 +288,19 @@ impl StandardUsageTracker {
                 published_seq: 0,
                 last_cost: Some(0.0),
                 cost_poisoned: false,
+                resumed: false,
             });
     }
 
-    /// A resumed session runs in a fresh adapter query whose cumulative cost
-    /// restarts at zero; re-baseline instead of poisoning on the decrease.
+    /// Mark `session_id` resumed. If the adapter rebuilt the session, its
+    /// cumulative cost restarted at zero, so the next cost below the baseline
+    /// is a restart (the turn cost is that whole value), not corruption. A
+    /// still-loaded session keeps counting, and its next cost is a normal delta.
     pub(crate) fn rebaseline_resumed(&mut self, session_id: &str) {
-        let state = self.sessions.entry(session_id.to_string()).or_default();
-        state.last_cost = Some(0.0);
-        state.cost_poisoned = false;
+        self.sessions
+            .entry(session_id.to_string())
+            .or_default()
+            .resumed = true;
     }
 
     pub(crate) fn begin_turn(&mut self, session_id: &str) {
@@ -352,6 +358,14 @@ impl StandardUsageTracker {
 
         let state = self.sessions.entry(session_id.clone()).or_default();
         let cumulative_cost = cost.map(|(_, cost)| cost);
+        if cumulative_cost.is_some() && std::mem::take(&mut state.resumed) {
+            if let (Some(previous), Some(current)) = (state.last_cost, cumulative_cost) {
+                if current < previous {
+                    // The series restarted at zero with the resumed query.
+                    state.last_cost = Some(0.0);
+                }
+            }
+        }
         let turn_cost = match (state.cost_poisoned, state.last_cost, cumulative_cost) {
             (false, Some(previous), Some(current)) if current >= previous => {
                 let delta = current - previous;
@@ -3493,5 +3507,43 @@ mod tests {
             !a2.delta_reliable,
             "A second turn must be poisoned: output absence from cross-session notification must hold even with no prior entry"
         );
+    }
+
+    #[test]
+    fn standard_cost_after_resume_tells_restart_from_continuation() {
+        // (case, resumed, cumulative cost on the turn after a 0.50 baseline,
+        //  expected turn cost)
+        let cases = [
+            (
+                "rebuilt by resume: series restarted",
+                true,
+                0.10,
+                Some(0.10),
+            ),
+            (
+                "still loaded at resume: keeps counting",
+                true,
+                0.60,
+                Some(0.10),
+            ),
+            ("no resume: a decrease is corruption", false, 0.10, None),
+        ];
+        for (case, resumed, cost, expected) in cases {
+            let mut tracker = StandardUsageTracker::default();
+            tracker.seed_zero_baseline("s");
+            tracker.begin_turn("s");
+            tracker.record_cost("s", 0.50);
+            assert!(tracker.take().is_some(), "{case}: baseline turn");
+            if resumed {
+                tracker.rebaseline_resumed("s");
+            }
+            tracker.begin_turn("s");
+            tracker.record_cost("s", cost);
+            let turn_cost = tracker.take().and_then(|usage| usage.turn_cost_usd);
+            match (turn_cost, expected) {
+                (Some(got), Some(want)) => assert!((got - want).abs() < 1e-9, "{case}: {got}"),
+                (got, want) => assert_eq!(got, want, "{case}"),
+            }
+        }
     }
 }

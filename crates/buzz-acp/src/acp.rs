@@ -121,12 +121,30 @@ pub enum AcpError {
 /// preserving the numeric code. When the `message` field is missing or
 /// non-string, fall back to the full JSON object so provider-specific
 /// detail (e.g. a `data` field) is not lost.
+impl AcpError {
+    /// Whether the agent reports that the prompted session no longer exists
+    /// (claude-agent-acp: "Session not found", or its ended-session message).
+    /// Retrying on the same session id can never succeed.
+    pub fn is_session_gone(&self) -> bool {
+        matches!(self, AcpError::AgentError { message, .. }
+            if message.contains("Session not found")
+                || message.contains("session has ended"))
+    }
+}
+
 fn agent_error_from_json(error: &serde_json::Value) -> AcpError {
     let code = error.get("code").and_then(|c| c.as_i64()).unwrap_or(-32000);
-    let message = match error.get("message").and_then(|m| m.as_str()) {
+    let mut message = match error.get("message").and_then(|m| m.as_str()) {
         Some(m) => m.to_string(),
         None => error.to_string(),
     };
+    // The TypeScript ACP SDK reports a thrown `Error` as a generic
+    // "Internal error" whose `data.details` carries the real message.
+    if let Some(details) = error.pointer("/data/details").and_then(|d| d.as_str()) {
+        if !message.contains(details) {
+            message = format!("{message}: {details}");
+        }
+    }
     AcpError::AgentError { code, message }
 }
 
@@ -832,19 +850,19 @@ impl AcpClient {
 
     /// Send `session/close`, freeing the agent's resources for `session_id`.
     ///
-    /// Bounded by `timeout` (in addition to the usual request timeout). A late
-    /// response after a timeout is skipped by id on the next read. Callers
+    /// `read_timeout` bounds only the wait for the response; the write keeps
+    /// its own bound, since abandoning a half-written frame closes stdin. A
+    /// late response after a timeout is skipped by id on the next read. Callers
     /// gate on [`session_close_supported`](Self::session_close_supported).
     pub async fn session_close(
         &mut self,
         session_id: &str,
-        timeout: std::time::Duration,
+        read_timeout: std::time::Duration,
     ) -> Result<(), AcpError> {
         let params = serde_json::json!({ "sessionId": session_id });
-        match tokio::time::timeout(timeout, self.send_request("session/close", params)).await {
-            Ok(result) => result.map(|_| ()),
-            Err(_) => Err(AcpError::Timeout(timeout)),
-        }
+        self.send_request_with_read_timeout("session/close", params, read_timeout)
+            .await
+            .map(|_| ())
     }
 
     /// Send `session/resume` for a closed session, re-sending the exact
@@ -1279,6 +1297,18 @@ impl AcpClient {
         method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, AcpError> {
+        self.send_request_with_read_timeout(method, params, Self::REQUEST_TIMEOUT)
+            .await
+    }
+
+    /// [`send_request`](Self::send_request) with a caller-chosen bound on the
+    /// response read (the write is bounded by `REQUEST_TIMEOUT`).
+    async fn send_request_with_read_timeout(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+        read_timeout: std::time::Duration,
+    ) -> Result<serde_json::Value, AcpError> {
         let id = self.next_id;
         self.next_id += 1;
 
@@ -1300,9 +1330,9 @@ impl AcpClient {
             Err(_) => return Err(AcpError::Timeout(timeout)),
         }
 
-        match tokio::time::timeout(timeout, self.read_until_response(id)).await {
+        match tokio::time::timeout(read_timeout, self.read_until_response(id)).await {
             Ok(result) => result,
-            Err(_) => Err(AcpError::Timeout(timeout)),
+            Err(_) => Err(AcpError::Timeout(read_timeout)),
         }
     }
 
@@ -5129,6 +5159,17 @@ sleep 1"#,
             }
             other => panic!("expected AgentError, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn agent_error_from_json_appends_sdk_internal_error_details() {
+        let error = serde_json::json!({
+            "code": -32603,
+            "message": "Internal error",
+            "data": {"details": "Session not found"},
+        });
+        let error = super::agent_error_from_json(&error);
+        assert!(error.is_session_gone(), "{error:?}");
     }
 
     #[test]

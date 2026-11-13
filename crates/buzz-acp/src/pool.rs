@@ -3662,10 +3662,19 @@ pub async fn run_prompt_task(
             tracing::error!(target: "pool::prompt", "session_prompt error: {e}");
             // AgentError means the agent caught a problem before mutating
             // session state (e.g. bad LLM response). The session is healthy —
-            // don't invalidate it. Other errors may have corrupted state.
-            if !matches!(e, AcpError::AgentError { .. }) {
+            // don't invalidate it. Other errors may have corrupted state, and a
+            // session the agent no longer has can never be prompted again.
+            let session_gone = e.is_session_gone();
+            if session_gone || !matches!(e, AcpError::AgentError { .. }) {
                 agent.state.invalidate(&source);
             }
+            // The agent never saw this batch, so retry it (on a new session with
+            // full thread context) even under `DedupMode::Drop`.
+            let retry_batch = if session_gone {
+                batch
+            } else {
+                requeue_batch_if_queue(&ctx, batch)
+            };
             let usage = agent.acp.take_turn_usage();
             publish_agent_turn_metric(
                 &ctx,
@@ -3682,7 +3691,7 @@ pub async fn run_prompt_task(
                 agent,
                 source,
                 PromptOutcome::Error(e),
-                requeue_batch_if_queue(&ctx, batch),
+                retry_batch,
             );
         }
     }
