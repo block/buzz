@@ -7,7 +7,10 @@
 use super::runtime_metadata::{
     KnownAcpRuntime, BUZZ_AGENT_EFFORT_VALUES, GOOSE_EFFORT_NORMALIZATION,
 };
-use super::{BUZZ_AGENT_AVATAR_URL, CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL, GOOSE_AVATAR_URL};
+use super::{
+    BUZZ_AGENT_AVATAR_URL, CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL, GOOSE_AVATAR_URL,
+    META_AVATAR_URL,
+};
 
 pub(crate) const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
     KnownAcpRuntime {
@@ -152,5 +155,42 @@ pub(crate) const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         required_normalized_fields: &["model", "provider"],
         login_hint: None,
         auth_probe_args: None,
+    },
+    KnownAcpRuntime {
+        id: "meta",
+        label: "Meta",
+        commands: &["muse-acp"],
+        aliases: &[],
+        avatar_url: META_AVATAR_URL,
+        mcp_command: None,
+        mcp_hooks: false,
+        // The bridge binary is both the CLI and the ACP adapter: there is
+        // no separate adapter package to install (compare claude/codex).
+        underlying_cli: Some("muse-acp"),
+        cli_install_commands: &["cargo install --git https://github.com/block/buzz.git muse-acp"],
+        cli_install_commands_windows: &["cargo install --git https://github.com/block/buzz.git muse-acp"],
+        adapter_install_commands: &[],
+        cli_install_instructions_url: "https://github.com/block/buzz/tree/main/crates/muse-acp",
+        adapter_install_instructions_url: "",
+        cli_install_hint: "Buzz talks to Muse through the muse-acp bridge, which drives your Muse web session. Requires a Rust toolchain (cargo) to build from source.",
+        adapter_install_hint: "",
+        skill_dir: None,
+        supports_acp_model_switching: false,
+        model_env_var: None,
+        provider_env_var: None,
+        provider_locked: true,
+        default_env: &[],
+        config_file_path: None,
+        config_file_format: None,
+        supports_acp_native_config: false,
+        thinking_env_var: None,
+        effort_normalization: None, // meta: Muse web exposes no effort control
+        effort_accepted_values: None, // meta: no effort transport
+        max_tokens_env_var: None,
+        context_limit_env_var: None,
+        max_rounds_env_var: None,
+        required_normalized_fields: &[],
+        login_hint: Some("Sign in to Muse when the bridge opens its browser window on first run."),
+        auth_probe_args: Some(&["muse-acp", "auth", "status"]),
     },
 ];
