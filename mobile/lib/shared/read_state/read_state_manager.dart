@@ -535,24 +535,46 @@ class ReadStateManager {
     unawaited(_runCatchUp());
   }
 
+  // Waits before each retry of a failed catch-up snapshot.
+  static const _catchUpRetryDelays = [
+    Duration(seconds: 2),
+    Duration(seconds: 10),
+    Duration(seconds: 30),
+  ];
+
   /// Fetches the snapshot again once the stream is live. A readiness that
   /// lands while one runs fetches once more after it, since the running fetch
-  /// may predate it.
+  /// may predate it. A failed fetch is retried a few times; if every attempt
+  /// fails, the next recovery of this stream tries again. A re-sync that
+  /// replaces the stream fetches its own snapshot, so retries stop there.
   Future<void> _runCatchUp() async {
     if (_catchUpRunning) {
       _catchUpAgain = true;
       return;
     }
     _catchUpRunning = true;
+    var fetched = false;
+    var generation = _liveGeneration;
     try {
       do {
         _catchUpAgain = false;
-        await _fetchAndMerge();
+        generation = _liveGeneration;
+        fetched = await _fetchAndMerge();
+        for (final delay in _catchUpRetryDelays) {
+          if (fetched || _catchUpAgain || !_catchUpCurrent(generation)) break;
+          await Future<void>.delayed(delay);
+          if (!_catchUpCurrent(generation)) break;
+          fetched = await _fetchAndMerge();
+        }
       } while (_catchUpAgain && !_disposed);
+      if (!fetched && _catchUpCurrent(generation)) _liveCatchUpNeeded = true;
     } finally {
       _catchUpRunning = false;
     }
   }
+
+  bool _catchUpCurrent(int generation) =>
+      !_disposed && generation == _liveGeneration;
 
   void _handleIncomingEvent(NostrEvent event) {
     if (_disposed || !_servesThisCommunity) return;

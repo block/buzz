@@ -1101,6 +1101,105 @@ void main() {
     },
   );
 
+  test('a failed catch-up snapshot is retried until one succeeds', () {
+    fakeAsync((async) {
+      SharedPreferences.setMockInitialValues({});
+      late final SharedPreferences prefs;
+      SharedPreferences.getInstance().then((value) => prefs = value);
+      async.flushMicrotasks();
+      final keychain = nostr.Keys.generate();
+      final crypto = ReadStateCrypto.tryCreate(
+        nsec: keychain.nsec,
+        pubkey: keychain.public,
+      )!;
+      final relay = _FakeRelaySession();
+      final manager = ReadStateManager(
+        pubkey: keychain.public,
+        relayUrl: _relayUrl,
+        prefs: prefs,
+        crypto: crypto,
+        relaySession: relay,
+        signedEventRelay: _FakeSignedEventRelay(),
+        remoteEnabled: true,
+        onChanged: () {},
+      );
+      manager.initialize();
+      async.flushMicrotasks();
+      expect(relay.fetchCount, 1);
+
+      // A peer publishes while the stream retries; the first catch-up fetch
+      // fails and the retry after it succeeds.
+      relay.liveOnStatus!(RelaySubscriptionStatus.retrying);
+      relay.historyEvents = [
+        _readStateEvent(
+          pubkey: keychain.public,
+          crypto: crypto,
+          clientId: 'peer-client',
+          slotId: 'peer-slot',
+          contexts: {'channel-1': 50},
+          createdAt: 100,
+        ),
+      ];
+      relay.failNextFetch = true;
+      relay.liveOnStatus!(RelaySubscriptionStatus.ready);
+      async.flushMicrotasks();
+      expect(relay.fetchCount, 2);
+      expect(manager.getEffectiveTimestamp('channel-1'), isNull);
+
+      async.elapse(const Duration(seconds: 2));
+      expect(relay.fetchCount, 3);
+      expect(manager.getEffectiveTimestamp('channel-1'), 50);
+
+      // Recovered: nothing more is fetched.
+      async.elapse(const Duration(minutes: 1));
+      expect(relay.fetchCount, 3);
+
+      manager.dispose();
+    });
+  });
+
+  test('a catch-up that keeps failing is tried again at the next recovery', () {
+    fakeAsync((async) {
+      SharedPreferences.setMockInitialValues({});
+      late final SharedPreferences prefs;
+      SharedPreferences.getInstance().then((value) => prefs = value);
+      async.flushMicrotasks();
+      final keychain = nostr.Keys.generate();
+      final crypto = ReadStateCrypto.tryCreate(
+        nsec: keychain.nsec,
+        pubkey: keychain.public,
+      )!;
+      final relay = _FakeRelaySession();
+      final manager = ReadStateManager(
+        pubkey: keychain.public,
+        relayUrl: _relayUrl,
+        prefs: prefs,
+        crypto: crypto,
+        relaySession: relay,
+        signedEventRelay: _FakeSignedEventRelay(),
+        remoteEnabled: true,
+        onChanged: () {},
+      );
+      manager.initialize();
+      async.flushMicrotasks();
+
+      relay.liveOnStatus!(RelaySubscriptionStatus.retrying);
+      relay.failAllFetches = true;
+      relay.liveOnStatus!(RelaySubscriptionStatus.ready);
+      async.elapse(const Duration(minutes: 2));
+      // One fetch plus three bounded retries, then it stops.
+      expect(relay.fetchCount, 5);
+
+      // The next readiness, even without a new interruption, tries again.
+      relay.failAllFetches = false;
+      relay.liveOnStatus!(RelaySubscriptionStatus.ready);
+      async.flushMicrotasks();
+      expect(relay.fetchCount, 6);
+
+      manager.dispose();
+    });
+  });
+
   test('a connect during a failed initialize syncs again', () async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
@@ -1383,6 +1482,7 @@ class _FakeRelaySession extends RelaySessionNotifier {
   List<NostrEvent> historyEvents = [];
   Future<void>? fetchGate;
   bool failNextFetch = false;
+  bool failAllFetches = false;
   int fetchCount = 0;
   int subscribeCount = 0;
   int liveSubscriptions = 0;
@@ -1402,7 +1502,7 @@ class _FakeRelaySession extends RelaySessionNotifier {
     fetchCount++;
     fetchFilters.add(filter);
     await fetchGate;
-    if (failNextFetch) {
+    if (failNextFetch || failAllFetches) {
       failNextFetch = false;
       throw TimeoutException('history timed out');
     }
