@@ -1,4 +1,5 @@
 import 'package:buzz/shared/crypto/event_signing.dart';
+import 'package:buzz/shared/http/app_http_client.dart';
 import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
@@ -151,7 +152,9 @@ final relayClientProvider = Provider<RelayClient>((ref) {
   final config = ref.watch(relayConfigProvider);
   final client = RelayClient(
     baseUrl: config.baseUrl,
-    httpClient: ref.watch(hostedHttpClientFactoryProvider)(),
+    httpClient: ref.watch(hostedHttpClientFactoryProvider)(
+      traffic: HttpTraffic.media,
+    ),
   );
   ref.onDispose(client.dispose);
   return client;

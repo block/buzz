@@ -13,7 +13,9 @@ Future<bool> requiresLegacyMediaStoragePermission() async {
 
 final mediaUploadServiceProvider = Provider<MediaUploadService>((ref) {
   final config = ref.watch(relayConfigProvider);
-  final client = ref.watch(hostedHttpClientFactoryProvider)();
+  final client = ref.watch(hostedHttpClientFactoryProvider)(
+    traffic: HttpTraffic.media,
+  );
   ref.onDispose(client.close);
   final picker = ImagePicker();
   final service = MediaUploadService(
