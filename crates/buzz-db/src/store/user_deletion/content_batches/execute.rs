@@ -1,8 +1,6 @@
 //! Execution of an internally generated plan, never an imported JSON manifest.
 use super::*;
 use crate::entity_deletion::EntityLease;
-use sqlx::Connection;
-use std::collections::HashMap;
 
 impl UserDeletionStore {
     /// Shared entry point for direct commands and workflow content cleanup.
@@ -33,70 +31,63 @@ impl UserDeletionStore {
         writer: &mut impl Write,
         stage: Option<(&EntityLease, Uuid)>,
     ) -> Result<ContentBatchSummary> {
-        let mut conn = self.pool.acquire().await?.detach();
-        sqlx::query("SET statement_timeout='30s'")
-            .execute(&mut conn)
+        // A private one-connection pool pins the temporary worklist's session
+        // while allowing each batch to own an admitted transaction. It never
+        // returns temporary tables or session settings to the serving pool.
+        let session = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .max_lifetime(None)
+            .idle_timeout(None)
+            .connect_with((*self.pool.connect_options()).clone())
             .await?;
-        sqlx::query("SET lock_timeout='3s'")
-            .execute(&mut conn)
-            .await?;
-        sqlx::query("SET TIME ZONE 'UTC'")
-            .execute(&mut conn)
-            .await?;
-        let mut plan = plan(&mut conn, options, &mut std::io::sink(), true).await?;
-        plan.start["record"] = json!("delete_start");
-        plan.start["read_only"] = json!(false);
-        plan.start["execution"] =
-            json!("print each batch, commit, then print batch_committed; rerun after interruption");
-        line(writer, &plan.start)?;
-        if plan.summary.warnings != 0 {
-            return Err(invalid("selected records have active-work warnings; nothing deleted; inspect --read-only output"));
-        }
-        // Validate *all* source payloads before deleting even the first row.
-        let mut fingerprints = HashMap::new();
-        for batch in &plan.batches {
-            for item in items(batch)? {
-                let (table, predicate) = selection(item)?;
-                let hash = inspect(
-                    &mut conn,
-                    options.community,
-                    table,
-                    predicate,
-                    &item["key"],
-                    true,
-                )
-                .await?;
-                fingerprints.insert(identity(item), hash);
-            }
-        }
-        for batch in &plan.batches {
-            execute_owned_batch(&mut conn, options, batch, &fingerprints, writer, stage).await?;
-        }
-        let remaining = plan_remaining(&mut conn, options).await?;
-        if remaining != 0 {
-            return Err(invalid(
-                "supported rows remain after execution; deletion incomplete",
-            ));
-        }
-        plan.summary.record = "delete_complete";
-        // This connection owns its session settings and is never returned to the pool.
-        conn.close().await?;
-        line(writer, &plan.summary)?;
-        Ok(plan.summary)
+        let result = execute_session(&session, options, writer, stage).await;
+        session.close().await;
+        result
     }
 }
 
-async fn plan_remaining(conn: &mut PgConnection, options: &ContentBatchOptions) -> Result<usize> {
-    Ok(plan(conn, options, &mut std::io::sink(), false)
-        .await?
-        .summary
-        .items)
+async fn execute_session(
+    session: &sqlx::PgPool,
+    options: &ContentBatchOptions,
+    writer: &mut impl Write,
+    stage: Option<(&EntityLease, Uuid)>,
+) -> Result<ContentBatchSummary> {
+    let mut planning = session.begin().await?;
+    sqlx::query("SET statement_timeout='30s'")
+        .execute(&mut *planning)
+        .await?;
+    sqlx::query("SET lock_timeout='3s'")
+        .execute(&mut *planning)
+        .await?;
+    sqlx::query("SET TIME ZONE 'UTC'")
+        .execute(&mut *planning)
+        .await?;
+    // Selection, retention and fingerprints share one snapshot. The temporary
+    // worklist belongs to this detached session and disappears on disconnect.
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        .execute(&mut *planning)
+        .await?;
+    let mut plan = plan(&mut planning, options, &mut std::io::sink(), true).await?;
+    if plan.summary.warnings != 0 {
+        return Err(invalid("selected records have active-work warnings; nothing deleted; inspect --read-only output"));
+    }
+    grouped::prepare(&mut planning, options.community, &plan).await?;
+    planning.commit().await?;
+    plan.start["record"] = json!("delete_start");
+    plan.start["read_only"] = json!(false);
+    plan.start["execution"] =
+        json!("print each batch, commit, then print batch_committed; rerun after interruption");
+    line(writer, &plan.start)?;
+    for batch in &plan.batches {
+        execute_owned_batch(session, options, batch, writer, stage).await?;
+    }
+    grouped::verify_remaining(&mut *session.acquire().await?, options, &plan.start).await?;
+    plan.summary.record = "delete_complete";
+    line(writer, &plan.summary)?;
+    Ok(plan.summary)
 }
 
-fn identity(item: &Value) -> String {
-    format!("{}:{}", item["table"], item["key"])
-}
-fn items(batch: &Value) -> Result<&Vec<Value>> {
+pub(super) fn items(batch: &Value) -> Result<&Vec<Value>> {
     batch["items"]
         .as_array()
         .ok_or_else(|| invalid("invalid internal batch"))
@@ -104,7 +95,7 @@ fn items(batch: &Value) -> Result<&Vec<Value>> {
 
 // SQL identifiers and key expressions are exclusively from this static list.
 // JSON keys are bound parameters, never interpolated SQL or caller input.
-fn selection(item: &Value) -> Result<(&'static str, &'static str)> {
+pub(super) fn selection(item: &Value) -> Result<(&'static str, &'static str)> {
     Ok(match item["table"].as_str() {
         Some("events") => ("events", "id=decode($2->>'id','hex') AND created_at=($2->>'created_at')::timestamptz"),
         Some("reactions") => ("reactions", "event_id=decode($2->>'event_id','hex') AND event_created_at=($2->>'event_created_at')::timestamptz AND pubkey=decode($2->>'pubkey','hex') AND emoji=$2->>'emoji'"),
@@ -120,17 +111,27 @@ fn selection(item: &Value) -> Result<(&'static str, &'static str)> {
 }
 
 async fn execute_owned_batch(
-    conn: &mut PgConnection,
+    session: &sqlx::PgPool,
     options: &ContentBatchOptions,
     batch: &Value,
-    fingerprints: &HashMap<String, String>,
     writer: &mut impl Write,
     stage: Option<(&EntityLease, Uuid)>,
 ) -> Result<()> {
     let community = options.community;
-    let mut tx = conn.begin().await?;
+    let mut tx = session.begin().await?;
     sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
         .execute(&mut *tx)
+        .await?;
+    // Check schema before blocking community writers, then keep the schema
+    // lock until this batch commits. Never fall back to scanning history.
+    reference_index::ensure(&mut tx).await?;
+    // Serving writers already hold the shared form of this lock. Keep the
+    // exclusive section short: at most one bounded batch, never the whole run.
+    sqlx::query("SELECT pg_advisory_xact_lock(community_deletion_lock_key($1))")
+        .bind(community)
+        .execute(&mut *tx)
+        .await?;
+    crate::deletion::guard_community_write(&mut tx, crate::CommunityId::from_uuid(community))
         .await?;
     if let Some((lease, stage_id)) = stage {
         let request = crate::store::entity_deletion::lock_owned(&mut tx, lease).await?;
@@ -145,175 +146,22 @@ async fn execute_owned_batch(
             return Err(invalid("content stage differs from approved scope"));
         }
     }
+    let mut tx = crate::AdmittedTx::admit(
+        tx,
+        &crate::deletion::DeletionStore::new(session.clone()),
+        crate::CommunityId::from_uuid(community),
+    )
+    .await?;
     // Output must succeed before any mutation in this transaction.
     line(writer, batch)?;
-    for item in items(batch)? {
-        let (table, predicate) = selection(item)?;
-        let hash = inspect(&mut tx, community, table, predicate, &item["key"], false).await?;
-        if fingerprints.get(&identity(item)) != Some(&hash) {
-            return Err(invalid(format!(
-                "{table} row changed after planning; current batch rolled back"
-            )));
-        }
-        children(&mut tx, community, table, &item["key"]).await?;
-        if item["action"] != "would_delete" {
-            return Err(invalid("unsupported internally generated action"));
-        }
-        let sql = format!("DELETE FROM {table} WHERE community_id=$1 AND {predicate}");
-        let count = sqlx::query(sqlx::AssertSqlSafe(sql))
-            .bind(community)
-            .bind(&item["key"])
-            .execute(&mut *tx)
-            .await?
-            .rows_affected();
-        if count != 1 {
-            return Err(invalid("planned row missing; current batch rolled back"));
-        }
-    }
-    repair_batch(&mut tx, community, batch).await?;
+    grouped::execute(&mut tx, batch).await?;
     if let Some((lease, _)) = stage {
-        crate::store::entity_deletion::lock_owned(&mut tx, lease).await?;
+        crate::store::entity_deletion::lock_owned(tx.conn(), lease).await?;
     }
     tx.commit().await?;
     line(
         writer,
         &json!({"record":"batch_committed", "number":batch["number"], "items":items(batch)?.len()}),
     )?;
-    Ok(())
-}
-
-async fn inspect(
-    conn: &mut PgConnection,
-    community: Uuid,
-    table: &str,
-    predicate: &str,
-    key: &Value,
-    preflight: bool,
-) -> Result<String> {
-    let active = match table {
-        "push_match_queue" => "COALESCE(lease_until>clock_timestamp(),false)",
-        "push_wake_outbox" | "operator_listener_outbox" => {
-            "state='sending' OR COALESCE(lease_until>clock_timestamp(),false)"
-        }
-        _ => "false",
-    };
-    let lock = if preflight { "" } else { " FOR UPDATE" };
-    let query = format!("SELECT md5(to_jsonb(t)::text),({active}) FROM {table} t WHERE community_id=$1 AND {predicate}{lock}");
-    let (hash, active): (String, bool) = sqlx::query_as(sqlx::AssertSqlSafe(query))
-        .bind(community)
-        .bind(key)
-        .fetch_optional(&mut *conn)
-        .await?
-        .ok_or_else(|| invalid(format!("selected {table} row is missing")))?;
-    if active {
-        return Err(invalid(format!(
-            "selected {table} has active work; nothing further deleted"
-        )));
-    }
-    Ok(hash)
-}
-
-// No unchecked FK cascade is allowed to do extra work outside the printed
-// batch. New children make the current transaction fail rather than disappear.
-async fn children(
-    conn: &mut PgConnection,
-    community: Uuid,
-    table: &str,
-    key: &Value,
-) -> Result<()> {
-    let query = match table {
-        "subscriptions" => "SELECT EXISTS(SELECT 1 FROM delivery_log WHERE community_id=$1 AND subscription_id=$2->>'id')",
-        "push_leases" => "SELECT EXISTS(SELECT 1 FROM push_wake_outbox WHERE community_id=$1 AND author=decode($2->>'author','hex') AND installation_id=$2->>'installation_id')",
-        // Other authors' events/reactions and workflow records may retain
-        // references to this event. They are intentionally outside this pass.
-        "events" => "SELECT EXISTS(SELECT 1 FROM event_mentions WHERE community_id=$1 AND event_id=decode($2->>'id','hex'))
-OR EXISTS(SELECT 1 FROM push_match_queue WHERE community_id=$1 AND event_id=decode($2->>'id','hex'))
-OR EXISTS(SELECT 1 FROM push_wake_outbox WHERE community_id=$1 AND event_id=decode($2->>'id','hex'))
-OR EXISTS(SELECT 1 FROM operator_listener_outbox WHERE community_id=$1 AND event_id=decode($2->>'id','hex'))",
-        _ => return Ok(()),
-    };
-    let remains: bool = sqlx::query_scalar(query)
-        .bind(community)
-        .bind(key)
-        .fetch_one(conn)
-        .await?;
-    if remains {
-        return Err(invalid(format!(
-            "{table} still has dependent rows; current batch rolled back"
-        )));
-    }
-    Ok(())
-}
-
-async fn repair_batch(conn: &mut PgConnection, community: Uuid, batch: &Value) -> Result<()> {
-    let repairs = batch["thread_repairs"]
-        .as_array()
-        .ok_or_else(|| invalid("missing internal repairs"))?;
-    let mut seen = HashSet::new();
-    for repair in repairs {
-        let mut roots = repair["stored_threads"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default();
-        // A surviving reply can name a root whose own metadata never existed.
-        roots.push(json!({"channel_id":repair["channel_id"], "root_event_id":repair["event_id"]}));
-        for root in roots {
-            if !seen.insert(root.to_string()) {
-                continue;
-            }
-            let channel: Option<Uuid> = serde_json::from_value(root["channel_id"].clone())?;
-            let id = root["root_event_id"]
-                .as_str()
-                .ok_or_else(|| invalid("missing repair root"))?;
-            let id = hex::decode(id).map_err(|_| invalid("invalid repair root"))?;
-            repair_thread(conn, community, channel, &id).await?;
-        }
-    }
-    Ok(())
-}
-
-async fn repair_thread(
-    conn: &mut PgConnection,
-    community: Uuid,
-    channel: Option<Uuid>,
-    root: &[u8],
-) -> Result<()> {
-    // Preserve only the ancestry needed by retained events. The missing event
-    // rows carry no content, author, tags or signature; metadata keeps replies
-    // reachable without manufacturing a signed replacement event.
-    sqlx::query(
-        "WITH RECURSIVE needed AS (
-          SELECT tm.* FROM thread_metadata tm
-          WHERE tm.community_id=$1 AND tm.channel_id IS NOT DISTINCT FROM $2::uuid AND (tm.event_id=$3 OR tm.root_event_id=$3)
-            AND EXISTS (SELECT 1 FROM events e WHERE e.community_id=tm.community_id
-              AND e.id=tm.event_id AND e.created_at=tm.event_created_at)
-          UNION
-          SELECT p.* FROM thread_metadata p JOIN needed n ON p.community_id=n.community_id
-            AND p.channel_id IS NOT DISTINCT FROM n.channel_id AND (p.event_id=n.parent_event_id OR p.event_id=n.root_event_id)
-        ) DELETE FROM thread_metadata tm WHERE tm.community_id=$1 AND tm.channel_id IS NOT DISTINCT FROM $2::uuid
-          AND (tm.event_id=$3 OR tm.root_event_id=$3)
-          AND NOT EXISTS (SELECT 1 FROM needed n WHERE n.event_id=tm.event_id AND n.event_created_at=tm.event_created_at)",
-    ).bind(community).bind(channel).bind(root).execute(&mut *conn).await?;
-    // Recompute, never subtract old counts. Already-soft-deleted messages do
-    // not count; received_at matches the server-arrival activity clock.
-    // Like live writes, last_reply_at tracks direct replies, not descendants.
-    sqlx::query(
-        "WITH visible AS MATERIALIZED (
-          SELECT tm.parent_event_id,tm.root_event_id,e.received_at FROM thread_metadata tm
-          JOIN events e ON e.community_id=tm.community_id AND e.id=tm.event_id AND e.created_at=tm.event_created_at
-          WHERE tm.community_id=$1 AND tm.channel_id IS NOT DISTINCT FROM $2::uuid AND tm.root_event_id=$3 AND e.deleted_at IS NULL
-        ), direct AS (
-          SELECT parent_event_id,count(*)::int AS n,max(received_at) AS last_at FROM visible GROUP BY parent_event_id
-        ), descendants AS (
-          SELECT root_event_id,count(*)::int AS n FROM visible GROUP BY root_event_id
-        ), counts AS (
-          SELECT tm.event_id,tm.event_created_at,COALESCE(d.n,0) AS replies,COALESCE(r.n,0) AS descendants,
-            d.last_at
-          FROM thread_metadata tm LEFT JOIN direct d ON d.parent_event_id=tm.event_id
-          LEFT JOIN descendants r ON r.root_event_id=tm.event_id
-          WHERE tm.community_id=$1 AND tm.channel_id IS NOT DISTINCT FROM $2::uuid AND (tm.event_id=$3 OR tm.root_event_id=$3)
-        ) UPDATE thread_metadata tm SET reply_count=c.replies,descendant_count=c.descendants,last_reply_at=c.last_at
-          FROM counts c WHERE tm.community_id=$1 AND tm.event_id=c.event_id AND tm.event_created_at=c.event_created_at",
-    ).bind(community).bind(channel).bind(root).execute(&mut *conn).await?;
     Ok(())
 }

@@ -40,11 +40,11 @@ pub(super) async fn rows(
 
 pub(super) async fn event_rows(
     conn: &mut PgConnection,
-    event: &Event,
+    events: &[Event],
     output: &mut Output<'_, impl Write>,
 ) -> Result<()> {
-    let id = hex::encode(&event.id);
-    let reason = json!({"type": "event_record", "event_id": id});
+    let ids: Vec<Vec<u8>> = events.iter().map(|e| e.id.clone()).collect();
+    let reason = json!({"type": "event_records"});
     for (table, key, warning) in [
         (
             "event_mentions",
@@ -75,7 +75,7 @@ pub(super) async fn event_rows(
                 "SELECT {key} AS row_key,{warning} AS warning
             FROM {table} WHERE community_id=$1 AND event_id=ANY($2::bytea[])"
             ),
-            std::slice::from_ref(&event.id),
+            &ids,
             &reason,
             "would_delete",
         )

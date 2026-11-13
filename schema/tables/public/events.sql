@@ -74,3 +74,11 @@ CREATE INDEX idx_events_tags_gin ON events USING GIN (tags jsonb_path_ops);
 CREATE INDEX idx_events_media_edit_target ON events
     (community_id, channel_id, (decode(lower(jsonb_path_query_first(tags, 'strict $[*] ? (@[0] == "e" && @[1] like_regex "^[0-9A-Fa-f]{64}$")[1]', '{}'::jsonb, true) #>> '{}'), 'hex')), created_at DESC, id DESC)
     WHERE kind = 40003 AND deleted_at IS NULL;
+
+-- Case-independent valid e references, including legacy events without metadata.
+-- The planner and final deletion check must use this same expression.
+CREATE INDEX idx_events_reference_ids ON events USING GIN (
+    (lower(jsonb_path_query_array(tags,
+        'strict $[*] ? (@[0] == "e" && @[1] like_regex "^[0-9A-Fa-f]{64}$")[1]',
+        '{}'::jsonb, true)::text)::jsonb) jsonb_path_ops
+);

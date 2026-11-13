@@ -134,6 +134,8 @@ async fn preview_delete_and_retry_preserve_other_users_contributions() {
             .bind((!is_root).then(|| original.id.as_bytes().to_vec()))
             .bind(if is_root { 0_i32 } else { 1 }).execute(&pool).await.unwrap();
     }
+    sqlx::query("UPDATE thread_metadata SET reply_count=3,descendant_count=3 WHERE community_id=$1 AND event_id=$2")
+        .bind(community.as_uuid()).bind(original.id.as_bytes().as_slice()).execute(&pool).await.unwrap();
     // Even an owned workflow can contain someone else's approval. Neither its
     // ownership nor Alice's trigger message authorizes deleting that history.
     for author in [&alice, &agent, &bob] {
@@ -200,11 +202,12 @@ async fn preview_delete_and_retry_preserve_other_users_contributions() {
         .run_message_batches(&options, ExecutionMode::Delete, None, &mut Vec::new())
         .await
         .unwrap();
-    let remaining: Vec<Vec<u8>> = sqlx::query_scalar("SELECT id FROM events WHERE community_id=$1")
-        .bind(community.as_uuid())
-        .fetch_all(&pool)
-        .await
-        .unwrap();
+    let remaining: Vec<Vec<u8>> =
+        sqlx::query_scalar("SELECT id FROM events WHERE community_id=$1 AND deleted_at IS NULL")
+            .bind(community.as_uuid())
+            .fetch_all(&pool)
+            .await
+            .unwrap();
     assert_eq!(
         remaining.into_iter().collect::<HashSet<_>>(),
         preserved
