@@ -943,6 +943,9 @@ pub struct PromptContext {
     /// the desktop keys per (agent, relay) pair, e.g. `session_config_captured`,
     /// mirroring the `managed_agent_runtime_lifecycle` frames.
     pub relay_url: String,
+    /// `--session-idle-evict` is on: keep each thread session's `session/new`
+    /// params so an evicted session can be resumed.
+    pub session_idle_evict: bool,
 }
 
 impl AgentPool {
@@ -1664,12 +1667,26 @@ async fn create_session_and_apply_model(
         }
     }
 
+    configure_session(agent, ctx, &resp.raw, &resp.session_id).await?;
+    Ok(resp.session_id)
+}
+
+/// Per-session configuration after `session/new` or `session/resume`: model
+/// catalog, desired model, startup effort, the desktop config capture, and
+/// permission mode. `raw` is the create/resume response. A resumed session is
+/// rebuilt by the adapter without these, so both paths must run this.
+pub(super) async fn configure_session(
+    agent: &mut OwnedAgent,
+    ctx: &PromptContext,
+    raw: &serde_json::Value,
+    session_id: &str,
+) -> Result<(), AcpError> {
     // Populate model capabilities on first session creation.
     if agent.model_capabilities.is_none() {
         agent.model_capabilities = Some(AgentModelCapabilities {
-            config_options_raw: extract_model_config_options(&resp.raw),
-            available_models_raw: extract_model_state(&resp.raw),
-            thought_level_config_id: extract_thought_level_config_id(&resp.raw),
+            config_options_raw: extract_model_config_options(raw),
+            available_models_raw: extract_model_state(raw),
+            thought_level_config_id: extract_thought_level_config_id(raw),
         });
     }
 
@@ -1692,10 +1709,9 @@ async fn create_session_and_apply_model(
         // taking it here keeps a leftover flag from firing a spurious success
         // on some later unrelated session.
         let pending_ack = std::mem::take(&mut agent.desired_model_pending_ack);
-        match resolve_model_switch_method(&resp.raw, desired) {
+        match resolve_model_switch_method(raw, desired) {
             Some(method) => {
-                match apply_model_switch(&mut agent.acp, &resp.session_id, desired, &method).await?
-                {
+                match apply_model_switch(&mut agent.acp, session_id, desired, &method).await? {
                     ModelSwitchOutcome::Applied(switch_result) => {
                         // The adapter rebuilds `session.configOptions` for the
                         // target model and echoes them here. Refresh capabilities
@@ -1793,8 +1809,8 @@ async fn create_session_and_apply_model(
     // Reads the post-switch snapshot so the configId is discovered on the model
     // the session is actually running; computed BEFORE the capture emission so
     // the cached configOptions tell the truth about the running session.
-    let effort_snapshot = post_switch_snapshot.as_ref().unwrap_or(&resp.raw);
-    let effort_outcome = apply_startup_effort(agent, effort_snapshot, &resp.session_id).await?;
+    let effort_snapshot = post_switch_snapshot.as_ref().unwrap_or(raw);
+    let effort_outcome = apply_startup_effort(agent, effort_snapshot, session_id).await?;
 
     // Emit session config for desktop consumption (config bridge tier 1b).
     // Emitted AFTER desired_model resolution so the desktop caches the
@@ -1822,14 +1838,14 @@ async fn create_session_and_apply_model(
         "session_config_captured",
         serde_json::json!({
             "configOptions": config_options_for_cache,
-            "modes": resp.raw.get("modes").cloned().unwrap_or(serde_json::Value::Null),
+            "modes": raw.get("modes").cloned().unwrap_or(serde_json::Value::Null),
             // `models` must come from the SAME snapshot as configOptions — the
             // post-switch snapshot on a successful switch, session/new otherwise.
-            // Taking it from `resp.raw` here would emit the target model's option
+            // Taking it from `raw` here would emit the target model's option
             // set alongside the pre-switch model identity, so the desktop panel
             // would report the old model as live after an applied switch. When a
             // successful target response omits `models`, this emits Null rather
-            // than falling back to the pre-switch `resp.raw.models`.
+            // than falling back to the pre-switch `raw.models`.
             "models": effort_snapshot.get("models").cloned().unwrap_or(serde_json::Value::Null),
             "modelOverridden": agent.model_overridden && switch_succeeded,
             // Pair identity for the desktop session-config cache, which is
@@ -1843,12 +1859,12 @@ async fn create_session_and_apply_model(
     // the mode (e.g., goose crashes on unrecognized set_config_option values)
     // are safely skipped — the harness auto-approves via handle_permission_request.
     if !ctx.permission_mode.is_default()
-        && agent_supports_mode(&resp.raw, ctx.permission_mode.as_wire_str())
+        && agent_supports_mode(raw, ctx.permission_mode.as_wire_str())
     {
-        apply_permission_mode(&mut agent.acp, &resp.session_id, &ctx.permission_mode).await?;
+        apply_permission_mode(&mut agent.acp, session_id, &ctx.permission_mode).await?;
     }
 
-    Ok(resp.session_id)
+    Ok(())
 }
 
 /// Run a prepared task with the normal session setup and standing instructions.
@@ -2554,7 +2570,8 @@ pub async fn run_prompt_task(
         .is_some_and(|info| info.channel_type == "dm");
     // Drain queued session/close calls and resume a dormant session first, so
     // a failed resume falls back to the new-session path below.
-    if let Err(error) = session_slots::prepare_turn_session(&mut agent, source.scope()).await {
+    if let Err(error) = session_slots::prepare_turn_session(&mut agent, &ctx, source.scope()).await
+    {
         tracing::error!(
             target: "pool::session",
             "agent {} exited preparing session: {error}",
@@ -2737,7 +2754,9 @@ pub async fn run_prompt_task(
                         );
                         agent.state.sessions.insert(scope.clone(), sid.clone());
                         if let Some(params) = agent.acp.take_session_new_params(&sid) {
-                            agent.state.sessions.set_resume_params(scope, params);
+                            if ctx.session_idle_evict && agent.can_evict_sessions() {
+                                agent.state.sessions.set_resume_params(scope, params);
+                            }
                         }
                         agent
                             .state
@@ -10517,6 +10536,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             memory_enabled: false,
             harness_name: "goose".to_string(),
             relay_url: "ws://127.0.0.1:3000".to_string(),
+            session_idle_evict: false,
         }
     }
 

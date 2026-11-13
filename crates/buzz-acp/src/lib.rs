@@ -3853,7 +3853,6 @@ async fn run_harness(
                     None
                 }
                 _ = session_maintenance.tick() => {
-                    let _ = result_rx; // end split borrow before touching pool
                     if pool_ready {
                         pool.maintain_idle_sessions(
                             &queue,

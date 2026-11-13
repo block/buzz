@@ -289,6 +289,14 @@ impl StandardUsageTracker {
             });
     }
 
+    /// A resumed session runs in a fresh adapter query whose cumulative cost
+    /// restarts at zero; re-baseline instead of poisoning on the decrease.
+    pub(crate) fn rebaseline_resumed(&mut self, session_id: &str) {
+        let state = self.sessions.entry(session_id.to_string()).or_default();
+        state.last_cost = Some(0.0);
+        state.cost_poisoned = false;
+    }
+
     pub(crate) fn begin_turn(&mut self, session_id: &str) {
         self.in_flight_session = Some(session_id.to_string());
         self.pending_cost = None;

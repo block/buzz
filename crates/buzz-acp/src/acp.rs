@@ -1066,6 +1066,13 @@ impl AcpClient {
         goose_usage.or(standard_usage)
     }
 
+    /// Notify the usage tracker that buzz-acp resumed `session_id` with
+    /// `session/resume`: the adapter's cumulative cost restarts in the new
+    /// query, so the cost baseline restarts at zero (turn counters continue).
+    pub(crate) fn notify_session_resumed(&mut self, session_id: &str) {
+        self.standard_usage.rebaseline_resumed(session_id);
+    }
+
     /// Notify the usage tracker that buzz-acp just spawned a new session.
     ///
     /// Seeds a zero baseline so the first usage notification for `session_id`

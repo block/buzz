@@ -15,19 +15,22 @@ use std::time::Duration;
 
 use tokio::time::Instant;
 
-use super::{apply_model_switch, AgentPool, OwnedAgent, SessionOwner};
-use crate::acp::{resolve_model_switch_method, AcpClient, AcpError};
+use super::{configure_session, AgentPool, OwnedAgent, PromptContext, SessionOwner};
+use crate::acp::{AcpClient, AcpError};
 use crate::queue::EventQueue;
 use crate::scope::SessionScope;
 
 /// Upper bound on the maintenance tick interval.
 pub(crate) const MAINTENANCE_MAX_INTERVAL: Duration = Duration::from_secs(30);
-/// At most this many `session/close` requests per maintenance tick (all agents).
-const MAX_CLOSES_PER_TICK: usize = 8;
-/// Bound on each `session/close`; the tick runs on the main loop.
-const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
-/// Total bound on draining queued closes at the start of a turn.
-const TURN_CLOSE_BUDGET: Duration = Duration::from_secs(5);
+/// At most this many `session/close` requests per maintenance tick, across
+/// all workers. The tick runs inline on the main loop, so this and
+/// [`CLOSE_TIMEOUT`] bound how long one tick can delay dispatch.
+const MAX_CLOSES_PER_TICK: usize = 2;
+/// Bound on waiting for one `session/close` response. The agent still finishes
+/// a close we stopped waiting for; a late response is skipped by request id.
+const CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
+/// Queued closes sent at the start of a turn, before the user's prompt.
+const MAX_CLOSES_PER_TURN: usize = 1;
 /// Queued closes kept per worker; the oldest is dropped (and only leaks) beyond it.
 const MAX_PENDING_CLOSES: usize = 64;
 
@@ -209,8 +212,9 @@ pub(crate) fn eviction_due(check: &EvictionCheck) -> bool {
         && check.idle_for >= check.idle_bound
 }
 
-/// Send queued closes until `budget` is spent; `Err` only when the agent is
-/// wedged or gone (stop talking to it this round).
+/// Send up to `budget` queued closes; `Err` when the agent timed out or is
+/// gone (stop talking to it this round). A timed-out close is not retried:
+/// the agent still processes the request; only our wait was bounded.
 async fn drain_pending_closes(
     acp: &mut AcpClient,
     slots: &mut SessionSlots,
@@ -239,21 +243,30 @@ async fn drain_pending_closes(
     Ok(())
 }
 
-/// Prepare `scope`'s session before a turn: drain queued closes (bounded),
-/// then resume a dormant session. A failed resume invalidates the scope so the
-/// caller falls through to `session/new` with full thread context. `Err` is
-/// returned only for [`AcpError::AgentExited`].
+impl OwnedAgent {
+    /// Whether this worker's sessions may be evicted and resumed: the agent
+    /// advertised `session/close` and `session/resume`. Goose is excluded
+    /// because its system prompt is installed by a post-create extension call
+    /// that resume does not replay.
+    pub(crate) fn can_evict_sessions(&self) -> bool {
+        self.acp.session_evict_supported() && self.agent_name != "goose"
+    }
+}
+
+/// Prepare `scope`'s session before a turn: send at most one queued close
+/// (the tick drains the rest), then resume a dormant session and re-apply its
+/// per-session configuration. Any resume or configuration failure invalidates
+/// the scope so the caller falls through to `session/new` with full thread
+/// context. `Err` is returned only for [`AcpError::AgentExited`].
 pub(super) async fn prepare_turn_session(
     agent: &mut OwnedAgent,
+    ctx: &PromptContext,
     scope: Option<&SessionScope>,
 ) -> Result<(), AcpError> {
-    let mut budget = MAX_PENDING_CLOSES;
-    let drained = tokio::time::timeout(
-        TURN_CLOSE_BUDGET,
-        drain_pending_closes(&mut agent.acp, &mut agent.state.sessions, &mut budget),
-    )
-    .await;
-    if let Ok(Err(AcpError::AgentExited)) = drained {
+    let mut budget = MAX_CLOSES_PER_TURN;
+    if let Err(AcpError::AgentExited) =
+        drain_pending_closes(&mut agent.acp, &mut agent.state.sessions, &mut budget).await
+    {
         return Err(AcpError::AgentExited);
     }
     let Some(scope) = scope else {
@@ -285,27 +298,21 @@ pub(super) async fn prepare_turn_session(
         scope = %scope.telemetry_label(),
         "resumed dormant session {id}"
     );
-    // A resumed session runs the transcript's model; re-apply a live override.
-    let desired = agent
-        .desired_model
-        .clone()
-        .filter(|_| agent.model_overridden);
-    if let Some(desired) = desired {
-        if let Some(method) = resolve_model_switch_method(&resumed, &desired) {
-            match apply_model_switch(&mut agent.acp, &id, &desired, &method).await {
-                Ok(_) => {}
-                Err(AcpError::AgentExited) => return Err(AcpError::AgentExited),
-                Err(error) => {
-                    tracing::warn!(
-                        target: "pool::session",
-                        "model re-apply on resumed session {id} failed: {error}; starting a new session"
-                    );
-                    reset_scope_keeping_owner(agent, scope);
-                }
-            }
+    agent.acp.notify_session_resumed(&id);
+    // The adapter rebuilds a resumed session without the harness's model,
+    // effort, or permission mode, so apply them exactly as for a new session.
+    match configure_session(agent, ctx, &resumed, &id).await {
+        Ok(()) => Ok(()),
+        Err(AcpError::AgentExited) => Err(AcpError::AgentExited),
+        Err(error) => {
+            tracing::warn!(
+                target: "pool::session",
+                "configuring resumed session {id} failed: {error}; starting a new session"
+            );
+            reset_scope_keeping_owner(agent, scope);
+            Ok(())
         }
     }
-    Ok(())
 }
 
 /// Invalidate `scope` mid-turn so this turn creates a fresh session, keeping
@@ -322,23 +329,26 @@ fn reset_scope_keeping_owner(agent: &mut OwnedAgent, scope: &SessionScope) {
 }
 
 impl AgentPool {
-    /// Maintenance tick for idle workers: drain queued `session/close`s and,
+    /// Maintenance tick for idle workers: send one queued `session/close` and,
     /// when `idle_bound` is non-zero, close thread sessions idle at least that
-    /// long, marking them dormant. Runs on the main loop, so no dispatch can
-    /// interleave; each close is bounded and the tick is capped in total.
+    /// long and mark them dormant. It runs on the main loop, so no dispatch can
+    /// interleave, and is bounded to [`MAX_CLOSES_PER_TICK`] closes of
+    /// [`CLOSE_TIMEOUT`] each; a tick with nothing due does no I/O.
     pub(crate) async fn maintain_idle_sessions(
         &mut self,
         queue: &EventQueue,
         idle_bound: Duration,
         now: Instant,
     ) {
+        let mut drain_budget = 1;
         let mut budget = MAX_CLOSES_PER_TICK;
         for agent in self.agents.iter_mut().flatten() {
             if budget == 0 {
                 break;
             }
             let state = &agent.state;
-            let due: Vec<(SessionScope, String)> = state
+            let supports_evict = agent.can_evict_sessions();
+            let mut due: Vec<(Instant, SessionScope, String)> = state
                 .sessions
                 .slots
                 .iter()
@@ -353,7 +363,7 @@ impl AgentPool {
                     !slot.dormant
                         && eviction_due(&EvictionCheck {
                             idle_bound,
-                            agent_supports_evict: agent.acp.session_evict_supported(),
+                            agent_supports_evict: supports_evict,
                             is_thread: scope.is_thread(),
                             resumable: slot.resume_params.is_some(),
                             idle_for: now.saturating_duration_since(slot.last_active),
@@ -364,40 +374,51 @@ impl AgentPool {
                             held: self.held_since.contains_key(*scope),
                         })
                 })
-                .map(|(scope, slot)| (scope.clone(), slot.id.clone()))
+                .map(|(scope, slot)| (slot.last_active, scope.clone(), slot.id.clone()))
                 .collect();
+            // Longest-idle first, so a capped tick is deterministic.
+            due.sort_by_key(|(last_active, _, _)| *last_active);
             let sessions = &mut agent.state.sessions;
-            if drain_pending_closes(&mut agent.acp, sessions, &mut budget)
-                .await
-                .is_err()
-            {
+            let before = drain_budget;
+            let drained = drain_pending_closes(&mut agent.acp, sessions, &mut drain_budget).await;
+            budget -= before - drain_budget;
+            if drained.is_err() {
                 continue;
             }
-            for (scope, id) in due {
+            for (_, scope, id) in due {
                 if budget == 0 {
                     break;
                 }
                 budget -= 1;
-                match agent.acp.session_close(&id, CLOSE_TIMEOUT).await {
-                    Ok(()) => {
-                        if sessions.mark_dormant(&scope, &id) {
-                            tracing::info!(
-                                target: "pool::session",
-                                agent = agent.index,
-                                scope = %scope.telemetry_label(),
-                                "evicted idle session {id}"
-                            );
-                        }
-                    }
-                    Err(error) => {
-                        // Stays live; retried next tick.
-                        tracing::warn!(
+                let closed = agent.acp.session_close(&id, CLOSE_TIMEOUT).await;
+                if let Err(AcpError::AgentExited) = closed {
+                    break;
+                }
+                // Any other failure (an error, or a timeout while the agent
+                // finishes teardown) still marks the session dormant: keeping a
+                // possibly closed session live would fail every later prompt in
+                // the thread, while resuming a still-loaded one returns it as is.
+                if sessions.mark_dormant(&scope, &id) {
+                    match &closed {
+                        Ok(()) => tracing::info!(
                             target: "pool::session",
                             agent = agent.index,
-                            "idle eviction close of {id} failed: {error}"
-                        );
-                        break;
+                            scope = %scope.telemetry_label(),
+                            "evicted idle session {id}"
+                        ),
+                        Err(error) => tracing::warn!(
+                            target: "pool::session",
+                            agent = agent.index,
+                            scope = %scope.telemetry_label(),
+                            "idle eviction close of {id} failed ({error}); marked dormant, resume reloads it"
+                        ),
                     }
+                }
+                // A slow or broken transport: leave this worker until next tick.
+                if let Err(AcpError::Timeout(_) | AcpError::WriteTimeout(_) | AcpError::Io(_)) =
+                    closed
+                {
+                    break;
                 }
             }
         }
@@ -408,7 +429,7 @@ impl AgentPool {
 mod tests {
     use super::*;
     use crate::acp::StopReason;
-    use crate::config::DedupMode;
+    use crate::config::{DedupMode, PermissionMode};
     use crate::pool::tests::make_prompt_context_no_owner;
     use crate::pool::{run_prompt_task, ChannelInfoResolver, PromptContext, PromptOutcome};
     use crate::queue::{BatchEvent, FlushBatch, QueuedEvent};
@@ -460,9 +481,80 @@ mod tests {
         pool.return_agent(result.agent);
     }
 
-    /// Evict idle threads (not one with queued work), resume one, fall back to
-    /// `session/new` with full context when resume fails, and close a rotated
-    /// session, all through `run_prompt_task` and the real maintenance tick.
+    /// Requests the fake agent logged since `seen`.
+    fn requests_since(capture: &std::path::Path, seen: &mut usize) -> Vec<serde_json::Value> {
+        let all: Vec<serde_json::Value> = std::fs::read_to_string(capture)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let new = all[*seen..].to_vec();
+        *seen = all.len();
+        new
+    }
+
+    /// Session lifecycle and configuration requests, as `method session [k=v]`.
+    fn lifecycle(requests: &[serde_json::Value]) -> Vec<String> {
+        requests
+            .iter()
+            .filter(|r| r["method"] != "session/prompt" && r["method"] != "initialize")
+            .map(|r| {
+                let p = &r["params"];
+                let mut line = format!(
+                    "{} {}",
+                    r["method"].as_str().unwrap(),
+                    p["sessionId"].as_str().unwrap_or("")
+                );
+                if let (Some(k), Some(v)) = (p["configId"].as_str(), p["value"].as_str()) {
+                    line.push_str(&format!(" {k}={v}"));
+                }
+                line
+            })
+            .collect()
+    }
+
+    /// The one prompt in `requests`: its session id and text.
+    fn prompt(requests: &[serde_json::Value]) -> (String, String) {
+        let r = requests
+            .iter()
+            .find(|r| r["method"] == "session/prompt")
+            .unwrap();
+        let text = r["params"]["prompt"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|b| b["text"].as_str())
+            .collect();
+        (r["params"]["sessionId"].as_str().unwrap().to_owned(), text)
+    }
+
+    const FAKE_AGENT: &str = r#"count=0; n=0
+cfg='"configOptions":[{"id":"model","category":"model","options":[{"value":"m-test"}]}],"modes":{"availableModes":[{"id":"plan"}]}'
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> 'CAPTURE'
+  case "$line" in
+    *'"method":"initialize"'*) r='{"agentCapabilities":{"sessionCapabilities":{"close":{},"resume":{}}}}' ;;
+    *'"method":"session/new"'*) n=$((n + 1)); r="{\"sessionId\":\"sess-$n\",$cfg}" ;;
+    *'"method":"session/resume"'*'"sess-3"'*) r=fail ;;
+    *'"method":"session/resume"'*) r="{$cfg}" ;;
+    *'"method":"session/close"'*'"sess-2"'*) r=fail ;;
+    *'"method":"session/prompt"'*) r='{"stopReason":"end_turn"}' ;;
+    *) r='{}' ;;
+  esac
+  if [ "$r" = fail ]; then
+    printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":$count,\"error\":{\"code\":-32002,\"message\":\"not found\"}}"
+  else
+    printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":$count,\"result\":$r}"
+  fi
+  count=$((count + 1))
+done"#;
+
+    /// Through `run_prompt_task` and the real maintenance tick: idle threads are
+    /// evicted longest-idle first, except one with queued work or a busy-owner
+    /// hold; a dormant session is never closed twice; a failed close still
+    /// leaves the thread resumable; a resumed session gets the startup model
+    /// and permission mode again; a failed resume falls back to `session/new`
+    /// with full thread context; discarded sessions are closed.
     #[tokio::test]
     async fn idle_thread_sessions_evict_resume_and_close_on_discard() {
         let channel_id = uuid::Uuid::new_v4();
@@ -477,10 +569,11 @@ mod tests {
                 .sign_with_keys(&human)
                 .unwrap()
         };
+        // Thread 0 is created first (longest idle) but stays busy.
         let roots = [
+            post("busy", None),
             post("thread a", None),
             post("thread b", None),
-            post("thread c", None),
         ];
         let scope = |i: usize| SessionScope::Thread {
             channel_id,
@@ -506,29 +599,11 @@ mod tests {
             }
         });
 
-        // Fake agent: advertises close+resume, logs requests, fails resume of sess-2.
+        // Fake agent: advertises close+resume and a model/mode catalog; the
+        // close of sess-2 and the resume of sess-3 fail.
         let capture =
             std::env::temp_dir().join(format!("buzz-acp-evict-{}.ndjson", uuid::Uuid::new_v4()));
-        let script = format!(
-            r#"count=0; n=0
-while IFS= read -r line; do
-  printf '%s\n' "$line" >> '{}'
-  case "$line" in
-    *'"method":"initialize"'*) r='{{"agentCapabilities":{{"sessionCapabilities":{{"close":{{}},"resume":{{}}}}}}}}' ;;
-    *'"method":"session/new"'*) n=$((n + 1)); r="{{\"sessionId\":\"sess-$n\"}}" ;;
-    *'"method":"session/resume"'*'"sess-2"'*) r=fail ;;
-    *'"method":"session/prompt"'*) r='{{"stopReason":"end_turn"}}' ;;
-    *) r='{{}}' ;;
-  esac
-  if [ "$r" = fail ]; then
-    printf '%s\n' "{{\"jsonrpc\":\"2.0\",\"id\":$count,\"error\":{{\"code\":-32002,\"message\":\"not found\"}}}}"
-  else
-    printf '%s\n' "{{\"jsonrpc\":\"2.0\",\"id\":$count,\"result\":$r}}"
-  fi
-  count=$((count + 1))
-done"#,
-            capture.display()
-        );
+        let script = FAKE_AGENT.replace("CAPTURE", &capture.display().to_string());
         let mut acp = AcpClient::spawn("bash", &["-c".into(), script], &[], false)
             .await
             .unwrap();
@@ -538,7 +613,7 @@ done"#,
             acp,
             state: Default::default(),
             model_capabilities: None,
-            desired_model: None,
+            desired_model: Some("m-test".into()), // startup --model, not overridden
             model_overridden: false,
             desired_model_request_id: None,
             desired_model_pending_ack: false,
@@ -551,6 +626,8 @@ done"#,
             let mut ctx = make_prompt_context_no_owner();
             ctx.context_message_limit = 10;
             ctx.max_turns_per_session = max_turns_per_session;
+            ctx.permission_mode = PermissionMode::Plan;
+            ctx.session_idle_evict = true;
             ctx.session_title = Some("agent".into());
             ctx.rest_client.base_url = base_url.clone();
             let info = crate::relay::ChannelInfo {
@@ -564,139 +641,106 @@ done"#,
             );
             Arc::new(ctx)
         };
+        let mut seen = 1; // initialize
+        let configured = |id: &str| {
+            [
+                format!("session/set_config_option {id} model=m-test"),
+                format!("session/set_config_option {id} mode=plan"),
+            ]
+        };
 
+        let mut created = Vec::new();
         for (i, root) in roots.iter().enumerate() {
-            turn(&mut pool, &scope(i), root.clone(), ctx(0)).await; // sess-1..3
+            turn(&mut pool, &scope(i), root.clone(), ctx(0)).await;
+            created.push(requests_since(&capture, &mut seen));
         }
-        let mut queue = EventQueue::new(DedupMode::Drop);
-        queue.push(QueuedEvent {
+        let [model, mode] = configured("sess-1");
+        assert_eq!(lifecycle(&created[0]), ["session/new ", &model, &mode]);
+
+        let idle = Duration::from_secs(600);
+        let mut busy = EventQueue::new(DedupMode::Drop);
+        busy.push(QueuedEvent {
             channel_id,
-            scope: scope(2),
-            event: post("queued for c", Some(&roots[2])),
+            scope: scope(0),
+            event: post("queued", Some(&roots[0])),
             received_at: std::time::Instant::now(),
             prompt_tag: "@mention".into(),
             edit: None,
         });
-        let idle = Duration::from_secs(600);
-        pool.maintain_idle_sessions(&queue, idle, Instant::now() + idle)
+        pool.maintain_idle_sessions(&busy, idle, Instant::now() + idle)
             .await;
-        turn(
-            &mut pool,
-            &scope(0),
-            post("follow-up a", Some(&roots[0])),
-            ctx(0),
-        )
-        .await;
+        let evicted = lifecycle(&requests_since(&capture, &mut seen));
+        assert_eq!(evicted, ["session/close sess-2", "session/close sess-3"]);
+
+        let quiet = EventQueue::new(DedupMode::Drop);
+        pool.held_since.insert(scope(0), Instant::now());
+        pool.maintain_idle_sessions(&quiet, idle, Instant::now() + idle)
+            .await;
+        pool.held_since.clear();
+        let held_tick = lifecycle(&requests_since(&capture, &mut seen));
+        assert!(held_tick.is_empty(), "held or dormant: {held_tick:?}");
+
+        // A: its close failed, yet it resumes with identical params and is
+        // reconfigured; the prompt relies on the context it already has.
         turn(
             &mut pool,
             &scope(1),
-            post("follow-up b", Some(&roots[1])),
+            post("more a", Some(&roots[1])),
             ctx(0),
         )
         .await;
+        let step = requests_since(&capture, &mut seen);
+        let [model, mode] = configured("sess-2");
+        assert_eq!(lifecycle(&step), ["session/resume sess-2", &model, &mode]);
+        let resume = &step[0]["params"];
+        let new_a = &created[1][0]["params"];
+        assert_eq!(
+            (&resume["cwd"], &resume["_meta"]),
+            (&new_a["cwd"], &new_a["_meta"])
+        );
+        let (session, text) = prompt(&step);
+        assert_eq!(session, "sess-2");
+        assert!(text.contains("Earlier thread context is already available in this session"));
+
+        // B: resume fails, so a session built like its first one takes the batch.
         turn(
             &mut pool,
             &scope(2),
-            post("follow-up c", Some(&roots[2])),
-            ctx(1),
-        )
-        .await; // rotates
-        pool.maintain_idle_sessions(
-            &EventQueue::new(DedupMode::Drop),
-            Duration::ZERO,
-            Instant::now(),
+            post("more b", Some(&roots[2])),
+            ctx(0),
         )
         .await;
+        let step = requests_since(&capture, &mut seen);
+        let [model, mode] = configured("sess-4");
+        assert_eq!(
+            lifecycle(&step),
+            ["session/resume sess-3", "session/new ", &model, &mode]
+        );
+        assert_eq!(step[1]["params"], created[2][0]["params"]);
+        let (session, text) = prompt(&step);
+        assert_eq!(session, "sess-4");
+        assert!(text.contains("Thread context included below"), "{text}");
+
+        // Thread 0 rotates; the next turn and tick close the discarded ids.
+        turn(
+            &mut pool,
+            &scope(0),
+            post("more 0", Some(&roots[0])),
+            ctx(1),
+        )
+        .await;
+        let step = lifecycle(&requests_since(&capture, &mut seen));
+        assert_eq!(step, ["session/close sess-3"]);
+        pool.maintain_idle_sessions(&quiet, Duration::ZERO, Instant::now())
+            .await;
+        let step = lifecycle(&requests_since(&capture, &mut seen));
+        assert_eq!(step, ["session/close sess-1"]);
+
         for agent in pool.agents.iter_mut().flatten() {
             agent.acp.shutdown().await;
         }
         server.abort();
-
-        let requests: Vec<serde_json::Value> = std::fs::read_to_string(&capture)
-            .unwrap()
-            .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
-            .collect();
         std::fs::remove_file(&capture).unwrap();
-        let lifecycle: Vec<String> = requests
-            .iter()
-            .filter(|r| r["method"] != "session/prompt" && r["method"] != "initialize")
-            .map(|r| {
-                format!(
-                    "{} {}",
-                    r["method"].as_str().unwrap(),
-                    r["params"]["sessionId"].as_str().unwrap_or("")
-                )
-            })
-            .collect();
-        let mut evicted = lifecycle[3..5].to_vec();
-        evicted.sort();
-        assert_eq!(
-            evicted,
-            ["session/close sess-1", "session/close sess-2"],
-            "C has queued work: {lifecycle:?}"
-        );
-        assert_eq!(
-            lifecycle[5..],
-            [
-                "session/resume sess-1",
-                "session/resume sess-2",
-                "session/new ",
-                "session/close sess-2",
-                "session/close sess-3"
-            ],
-            "{lifecycle:?}"
-        );
-        let news: Vec<_> = requests
-            .iter()
-            .filter(|r| r["method"] == "session/new")
-            .collect();
-        assert_eq!(
-            news[3]["params"], news[1]["params"],
-            "B's fallback session/new is built like its first session"
-        );
-        let new_a = &news[0]["params"];
-        let resume_a = &requests
-            .iter()
-            .find(|r| r["method"] == "session/resume")
-            .unwrap()["params"];
-        assert_eq!(
-            (&resume_a["cwd"], &resume_a["_meta"]),
-            (&new_a["cwd"], &new_a["_meta"])
-        );
-        let prompts: Vec<(&str, String)> = requests
-            .iter()
-            .filter(|r| r["method"] == "session/prompt")
-            .map(|r| {
-                let text = r["params"]["prompt"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .filter_map(|b| b["text"].as_str())
-                    .collect();
-                (r["params"]["sessionId"].as_str().unwrap(), text)
-            })
-            .collect();
-        assert_eq!(
-            prompts[3].0, "sess-1",
-            "follow-up in A runs on the resumed session"
-        );
-        assert!(
-            prompts[3]
-                .1
-                .contains("Earlier thread context is already available in this session"),
-            "{}",
-            prompts[3].1
-        );
-        assert_eq!(
-            prompts[4].0, "sess-4",
-            "failed resume falls back to session/new"
-        );
-        assert!(
-            prompts[4].1.contains("Thread context included below"),
-            "{}",
-            prompts[4].1
-        );
     }
 
     #[test]
