@@ -56,12 +56,22 @@ void main() {
       addTearDown(client.close);
       expect(await container.read(identityArchivesProvider.future), {target});
       expect(relay.author, authority.public);
-      for (final invalid in [
-        snapshot(impostor),
-        snapshot(authority, marker: false),
-        NostrEvent.fromJson(snapshot(authority).toJson()..['sig'] = '0' * 128),
+      for (final invalid in <NostrEvent Function()>[
+        () => snapshot(impostor),
+        () => snapshot(authority, marker: false),
+        () => NostrEvent.fromJson(
+          snapshot(authority).toJson()..['sig'] = '0' * 128,
+        ),
       ]) {
-        relay.event = invalid;
+        // Each case starts from a warm cache, so it must also drop the known
+        // list: once the relay has nothing newer, nobody stays hidden.
+        relay.event = snapshot(authority);
+        container.invalidate(identityArchivesProvider);
+        expect(await container.read(identityArchivesProvider.future), {target});
+        relay.event = invalid();
+        container.invalidate(identityArchivesProvider);
+        expect(await container.read(identityArchivesProvider.future), isEmpty);
+        relay.event = null;
         container.invalidate(identityArchivesProvider);
         expect(await container.read(identityArchivesProvider.future), isEmpty);
       }
