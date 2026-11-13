@@ -22055,6 +22055,7 @@ class _RecordingOrdinarySender implements SendMessage {
     List<String>? mentionPubkeys,
     Channel? channel,
     List<List<String>> mediaTags = const [],
+    bool Function()? mayPublish,
   }) async {
     sent.add(content);
     channels.add(channel);

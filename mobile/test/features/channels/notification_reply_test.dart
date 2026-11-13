@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:buzz/features/activity/compose_drafts_provider.dart';
 import 'package:buzz/features/channels/channel.dart';
+import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/notification_reply.dart';
 import 'package:buzz/features/channels/send_message_provider.dart';
@@ -16,6 +17,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:buzz/shared/theme/theme_provider.dart';
 import 'package:fake_async/fake_async.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:nostr/nostr.dart' as nostr;
 import 'package:shared_preferences/shared_preferences.dart';
 
 const _push = MethodChannel('buzz/push');
@@ -53,6 +55,9 @@ Channel _channel(String id, {bool solo = false, bool member = true}) => Channel(
   labels: solo ? const ['buzz.solo'] : const [],
 );
 
+ChannelMember _member(String pubkey) =>
+    ChannelMember(pubkey: pubkey, role: 'member', joinedAt: DateTime.utc(2026));
+
 Map<String, String> _reply(
   String id, {
   String communityId = 'community',
@@ -70,6 +75,8 @@ Map<String, String> _reply(
   'senderPubkey': _sender,
   'replyRootId': ?replyRootId,
   'messageCreatedAt': '$createdAt',
+  'deadline':
+      '${DateTime.now().add(const Duration(seconds: 25)).millisecondsSinceEpoch}',
 };
 
 void main() {
@@ -91,7 +98,8 @@ void main() {
         // Another community's notification can't be answered without
         // switching; its text is kept as a draft in that community.
         _reply('4', communityId: 'elsewhere'),
-        // A send that fails keeps the text where its notification opens.
+        // A send that fails before publishing keeps the text in the
+        // subthread under the notified message, where the reply would go.
         _reply(
           '5',
           channelId: 'broken',
@@ -101,9 +109,14 @@ void main() {
         // A channel the user isn't in isn't replied to, and its text goes
         // after the draft already there.
         _reply('6', channelId: 'outside'),
+        // A sender who has left isn't mentioned, but still gets the reply.
+        _reply('10', channelId: 'left'),
+        // A reply published without an acknowledgement may have gone out, so
+        // no draft is kept.
+        _reply('11', channelId: 'lost'),
       ];
       installBuzzPushMethodHandler();
-      final outcomes = <String, bool>{};
+      final outcomes = <String, Object>{};
       final selected = <Object?>[];
       messenger.setMockMethodCallHandler(_push, (call) async {
         switch (call.method) {
@@ -113,7 +126,11 @@ void main() {
             return taken;
           case 'completeNotificationReply':
             final args = call.arguments as Map;
-            outcomes[args['id'] as String] = args['sent'] as bool;
+            outcomes[args['id'] as String] = args['unknown'] == true
+                ? 'unknown'
+                : args['sent'] == true
+                ? 'sent'
+                : 'draft in ${args['draftThreadRootId']}';
           case 'setSelectedCommunity':
             selected.add(call.arguments);
         }
@@ -126,7 +143,8 @@ void main() {
 
       SharedPreferences.setMockInitialValues({
         _selectedDrafts:
-            '[{"key":"outside","channel_id":"outside","text":"earlier draft",'
+            '[{"key":"outside:$_message","channel_id":"outside",'
+            '"thread_head_id":"$_message","text":"earlier draft",'
             '"updated_at":1}]',
       });
       final prefs = await SharedPreferences.getInstance();
@@ -145,8 +163,14 @@ void main() {
               _channel('solo', solo: true),
               _channel('broken'),
               _channel('outside', member: false),
+              _channel('left'),
+              _channel('lost'),
             ]),
           ),
+          channelMembersProvider.overrideWith((ref, channelId) async {
+            if (channelId == 'broken') throw StateError('members unavailable');
+            return [if (channelId != 'left') _member(_sender), _member('me')];
+          }),
           sendMessageProvider.overrideWithValue(sender),
           readStateProvider.overrideWith(_ReadState.new),
           relaySessionProvider.overrideWith(() => session),
@@ -160,34 +184,42 @@ void main() {
 
       expect(selected, ['community']);
       expect(outcomes, {
-        '1': true,
-        '2': true,
-        '3': true,
-        '4': false,
-        '5': false,
-        '6': false,
+        '1': 'sent',
+        '2': 'sent',
+        '3': 'sent',
+        '4': 'draft in null',
+        '5': 'draft in $_message',
+        '6': 'draft in $_message',
+        '10': 'sent',
+        '11': 'unknown',
       });
       expect(sender.calls, [
         ('general', 'reply 1', _message, _message, _sender),
         ('general', 'reply 2', _message, _root, _sender),
         ('solo', 'reply 3', null, null, _sender),
-        ('broken', 'reply 5', _message, _root, _sender),
+        ('left', 'reply 10', _message, _message, ''),
+        ('lost', 'reply 11', _message, _message, _sender),
       ]);
       // Read only up to each notified message, so newer ones stay unread.
       expect(container.read(readStateProvider).contexts, {
         'general': 1000,
         threadContextKey(_root): 2000,
         'solo': 3000,
+        'left': 1000,
       });
       expect(drafts.textFor(composeDraftKey('general')), isNull);
       expect(prefs.getString(_elsewhereDrafts), contains('"text":"reply 4"'));
       expect(
-        drafts.textFor(composeDraftKey('broken', threadHeadId: _root)),
+        drafts.textFor(composeDraftKey('broken', threadHeadId: _message)),
         'reply 5',
       );
       expect(
-        drafts.textFor(composeDraftKey('outside')),
+        drafts.textFor(composeDraftKey('outside', threadHeadId: _message)),
         'earlier draft\n\nreply 6',
+      );
+      expect(
+        drafts.textFor(composeDraftKey('lost', threadHeadId: _message)),
+        isNull,
       );
 
       Future<void> signalReply(Map<String, String> reply) async {
@@ -204,13 +236,13 @@ void main() {
 
       // A reply arriving while the app runs is sent when iOS signals it.
       await signalReply(_reply('7', channelId: 'solo'));
-      expect(outcomes['7'], isTrue);
+      expect(outcomes['7'], 'sent');
 
       // When the relay can't be reached in time, nothing is sent and the
       // text is kept.
       session.reachable = false;
       await signalReply(_reply('8', channelId: 'solo'));
-      expect(outcomes['8'], isFalse);
+      expect(outcomes['8'], 'draft in null');
       expect(sender.calls.last.$2, 'reply 7');
       expect(drafts.textFor(composeDraftKey('solo')), 'reply 8');
 
@@ -224,7 +256,7 @@ void main() {
         await container.read(activeCommunityProvider.future);
       };
       await signalReply(_reply('9', channelId: 'solo'));
-      expect(outcomes['9'], isFalse);
+      expect(outcomes['9'], 'draft in null');
       expect(sender.calls.last.$2, 'reply 7');
       expect(
         prefs.getString(_selectedDrafts),
@@ -234,16 +266,25 @@ void main() {
     },
   );
 
-  test('a reply given up on never publishes later', () {
+  test('a reply publishes only while its outcome can still be reported', () {
     fakeAsync((async) {
       SharedPreferences.setMockInitialValues({});
       late SharedPreferences prefs;
       SharedPreferences.getInstance().then((value) => prefs = value);
       async.flushMicrotasks();
-      final sender = _RecordingSender();
       final session = _Session();
-      final connected = Completer<void>();
-      session.onConnect = () => connected.future;
+      var members = Completer<List<ChannelMember>>();
+      final send = SendMessage(
+        signedEventRelay: SignedEventRelay(
+          session: session,
+          nsec: nostr.Keys.generate().nsec,
+        ),
+        fetchMembers: (_) => members.future,
+        readUserCache: () => const {},
+        addLocalMessage: (_, _) {},
+        completeLocalMessage: (_, _) {},
+        removeLocalMessage: (_, _) {},
+      );
       final container = ProviderContainer(
         overrides: [
           savedPrefsProvider.overrideWithValue(prefs),
@@ -251,30 +292,52 @@ void main() {
           communityListProvider.overrideWith(_Communities.new),
           activeCommunityProvider.overrideWith((ref) async => _community),
           channelsProvider.overrideWith(() => _Channels([_channel('general')])),
-          sendMessageProvider.overrideWithValue(sender),
+          channelMembersProvider.overrideWith(
+            (ref, channelId) async => [_member(_sender)],
+          ),
+          sendMessageProvider.overrideWithValue(send),
           readStateProvider.overrideWith(_ReadState.new),
           relaySessionProvider.overrideWith(() => session),
         ],
       );
       addTearDown(container.dispose);
       final ref = container.read(_refProvider);
-
-      bool? sent;
-      sendNotificationReply(
-        ref,
-        BuzzNotificationReply.fromArguments(_reply('1'))!,
-      ).then((value) => sent = value);
-      // The relay connects only after the reply's deadline, so its text is
-      // kept as a draft.
-      async.elapse(const Duration(seconds: 30));
-      expect(sent, isFalse);
       final drafts = container.read(composeDraftsProvider.notifier);
-      expect(drafts.textFor(composeDraftKey('general')), 'reply 1');
+      NotificationReplyResult? result;
+      void reply(String id) {
+        result = null;
+        sendNotificationReply(
+          ref,
+          BuzzNotificationReply.fromArguments(_reply(id))!,
+        ).then((value) => result = value);
+      }
 
-      // Retrying that draft must not post the reply twice.
-      connected.complete();
+      // The message send's own member lookup finishes too late to hear the
+      // relay's OK in time, so the reply is never published and its text is
+      // kept where it would have gone.
+      reply('1');
+      async.elapse(const Duration(seconds: 25));
+      expect(result?.outcome, NotificationReplyOutcome.notSent);
+      expect(
+        drafts.textFor(composeDraftKey('general', threadHeadId: _message)),
+        'reply 1',
+      );
+      members.complete([_member(_sender)]);
       async.flushMicrotasks();
-      expect(sender.calls, isEmpty);
+      expect(session.published, isEmpty);
+
+      // A published reply whose OK never comes may have gone out, so it
+      // leaves no draft to resend.
+      members = Completer()..complete([_member(_sender)]);
+      session.acknowledge = false;
+      reply('2');
+      async.elapse(const Duration(seconds: 25));
+      expect(session.published.single.content, 'reply 2');
+      expect(result?.outcome, NotificationReplyOutcome.unknown);
+      expect(
+        drafts.textFor(composeDraftKey('general', threadHeadId: _message)),
+        'reply 1',
+      );
     });
   });
 }
@@ -320,7 +383,22 @@ class _Communities extends CommunityListNotifier {
 
 class _Session extends RelaySessionNotifier {
   var reachable = true;
+  var acknowledge = true;
+  final published = <NostrEvent>[];
   Future<void> Function()? onConnect;
+  @override
+  Future<NostrEvent> publish(
+    NostrEvent event, {
+    Duration timeout = const Duration(seconds: 8),
+  }) {
+    published.add(event);
+    if (acknowledge) return Future.value(event);
+    return Future.delayed(
+      timeout,
+      () => throw TimeoutException('not acknowledged', timeout),
+    );
+  }
+
   @override
   SessionState build() =>
       const SessionState(status: SessionStatus.disconnected);
@@ -342,7 +420,9 @@ class _RecordingSender implements SendMessage {
     List<String>? mentionPubkeys,
     Channel? channel,
     List<List<String>> mediaTags = const [],
+    bool Function()? mayPublish,
   }) async {
+    if (mayPublish?.call() == false) throw StateError('no longer wanted');
     calls.add((
       channelId,
       content,
@@ -350,6 +430,6 @@ class _RecordingSender implements SendMessage {
       rootEventId,
       mentionPubkeys?.join(','),
     ));
-    if (channelId == 'broken') throw StateError('relay rejected');
+    if (channelId == 'lost') throw TimeoutException('no OK');
   }
 }

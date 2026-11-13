@@ -58,6 +58,7 @@ class BuzzNotificationReply {
     required this.link,
     required this.senderPubkey,
     required this.messageCreatedAt,
+    required this.deadline,
     this.replyRootId,
   });
 
@@ -75,6 +76,9 @@ class BuzzNotificationReply {
 
   /// When the notified message was created, in Unix seconds.
   final int messageCreatedAt;
+
+  /// When iOS stops waiting for the reply and reports it as not sent.
+  final DateTime deadline;
 
   static BuzzNotificationReply? fromArguments(Object? arguments) {
     if (arguments is! Map) return null;
@@ -95,6 +99,10 @@ class BuzzNotificationReply {
       final String value => int.tryParse(value),
       _ => null,
     };
+    final deadline = switch (arguments['deadline']) {
+      final String value => int.tryParse(value),
+      _ => null,
+    };
     if (link == null ||
         id is! String ||
         id.isEmpty ||
@@ -104,6 +112,7 @@ class BuzzNotificationReply {
         sender.isEmpty ||
         createdAt == null ||
         createdAt <= 0 ||
+        deadline == null ||
         (root != null && (root is! String || root.isEmpty))) {
       return null;
     }
@@ -113,6 +122,7 @@ class BuzzNotificationReply {
       link: link,
       senderPubkey: sender,
       messageCreatedAt: createdAt,
+      deadline: DateTime.fromMillisecondsSinceEpoch(deadline),
       replyRootId: root as String?,
     );
   }
@@ -138,16 +148,22 @@ Future<List<BuzzNotificationReply>> takePendingBuzzNotificationReplies() async {
 }
 
 /// Reports whether a notification reply was sent, so iOS clears the
-/// conversation's notifications or shows that it wasn't.
+/// conversation's notifications or shows that it wasn't. [unknown] means it
+/// may have gone out; [draftThreadRootId] is the thread holding its draft,
+/// which the "Reply not sent" notification opens.
 Future<void> completeBuzzNotificationReply(
   String id, {
   required bool sent,
+  bool unknown = false,
+  String? draftThreadRootId,
 }) async {
   if (defaultTargetPlatform != TargetPlatform.iOS) return;
   try {
     await _channel.invokeMethod<void>('completeNotificationReply', {
       'id': id,
       'sent': sent,
+      if (unknown) 'unknown': true,
+      'draftThreadRootId': ?draftThreadRootId,
     });
   } on MissingPluginException {
     // Flutter tests and non-Runner embeddings do not install the native bridge.
