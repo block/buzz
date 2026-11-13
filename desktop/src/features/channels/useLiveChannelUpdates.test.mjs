@@ -378,3 +378,53 @@ test("unmount disposes both established and pending channel streams", async () =
     h.restore();
   }
 });
+
+test("live threaded reply routes to its thread cache, never the channel timeline cache", async () => {
+  const h = await mount(channels(2));
+  try {
+    const { threadRepliesKey } = await import(
+      "@/features/messages/lib/messageQueryKeys"
+    );
+    const key = h.channelMessagesKey("channel-1");
+    h.queryClient.setQueryData(key, [
+      message("root", { tags: [["h", "channel-1"]] }),
+    ]);
+    // Same tag shape the relay holds for a `buzz messages send --reply-to`
+    // reply: h + marked e + p, no broadcast.
+    const replyTags = [
+      ["h", "channel-1"],
+      ["e", "root", "", "reply"],
+      ["p", PEER],
+    ];
+    await h.deliver(
+      h.subscriptions[1],
+      message("reply", { content: "threaded", tags: replyTags }),
+    );
+    assert.deepEqual(
+      h.queryClient.getQueryData(key).map((event) => event.id),
+      ["root"],
+      "a non-broadcast reply must not enter the channel timeline cache",
+    );
+    assert.deepEqual(
+      h.queryClient
+        .getQueryData(threadRepliesKey("channel-1", "root"))
+        .map((event) => event.id),
+      ["reply"],
+    );
+
+    await h.deliver(
+      h.subscriptions[1],
+      message("shout", {
+        content: "also to channel",
+        tags: [...replyTags, ["broadcast", "1"]],
+      }),
+    );
+    assert.deepEqual(
+      h.queryClient.getQueryData(key).map((event) => event.id),
+      ["root", "shout"],
+      "a broadcast reply still lands in the channel timeline cache",
+    );
+  } finally {
+    h.restore();
+  }
+});
