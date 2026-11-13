@@ -104,13 +104,19 @@ class ComposeDraftsNotifier extends Notifier<List<ComposeDraft>> {
     // community or the derived account pubkey changes.
     final config = ref.watch(relayConfigProvider);
     final pubkey = ref.watch(myPubkeyProvider) ?? 'anon';
-    _prefsKey = '$_draftsPrefsKey:${config.baseUrl}:$pubkey';
+    _prefsKey = _storeKey(config.baseUrl, pubkey);
+    return _readStore(config, pubkey);
+  }
 
+  static String _storeKey(String origin, String pubkey) =>
+      '$_draftsPrefsKey:$origin:$pubkey';
+
+  List<ComposeDraft> _readStore(RelayConfig config, String pubkey) {
     final prefs = ref.read(savedPrefsProvider);
     final raw = readMigratedPref<String>(
       prefs,
-      canonicalKey: _prefsKey,
-      legacyKey: '$_draftsPrefsKey:${config.storedOrigin}:$pubkey',
+      canonicalKey: _storeKey(config.baseUrl, pubkey),
+      legacyKey: _storeKey(config.storedOrigin, pubkey),
       read: prefs.getString,
       write: prefs.setString,
     );
@@ -126,6 +132,39 @@ class ComposeDraftsNotifier extends Notifier<List<ComposeDraft>> {
       return drafts;
     } catch (_) {
       return const [];
+    }
+  }
+
+  /// Adds [text] after any draft at [key] in the store of the community at
+  /// [config], which need not be the selected one. Another community's
+  /// store is written without being loaded here, so its text never appears
+  /// in this community.
+  void append({
+    required RelayConfig config,
+    required String key,
+    required String channelId,
+    String? threadHeadId,
+    required String text,
+  }) {
+    final pubkey = pubkeyFromNsec(config.nsec) ?? 'anon';
+    final selected = _storeKey(config.baseUrl, pubkey) == _prefsKey;
+    final drafts = selected ? state : _readStore(config, pubkey);
+    final existing = drafts.where((d) => d.key == key).firstOrNull;
+    final existingText = existing?.text.trimRight() ?? '';
+    final draft = ComposeDraft(
+      key: key,
+      channelId: channelId,
+      threadHeadId: threadHeadId,
+      text: existingText.isEmpty ? text : '$existingText\n\n$text',
+      mentionKeys: existing?.mentionKeys ?? const {},
+      updatedAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+    );
+    final next = [draft, ...drafts.where((d) => d.key != key)];
+    final kept = next.length > _maxDrafts ? next.sublist(0, _maxDrafts) : next;
+    if (selected) {
+      _persist(kept);
+    } else {
+      _write(_storeKey(config.baseUrl, pubkey), kept);
     }
   }
 
@@ -172,11 +211,13 @@ class ComposeDraftsNotifier extends Notifier<List<ComposeDraft>> {
 
   void _persist(List<ComposeDraft> drafts) {
     state = List.unmodifiable(drafts);
-    final prefs = ref.read(savedPrefsProvider);
-    prefs.setString(
-      _prefsKey,
-      jsonEncode([for (final d in drafts) d.toJson()]),
-    );
+    _write(_prefsKey, drafts);
+  }
+
+  void _write(String prefsKey, List<ComposeDraft> drafts) {
+    ref
+        .read(savedPrefsProvider)
+        .setString(prefsKey, jsonEncode([for (final d in drafts) d.toJson()]));
   }
 }
 

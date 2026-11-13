@@ -107,6 +107,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   Object _liveSubscriptionOwner = Object();
   final Map<Object, String> _visibleChannelsByOwner = {};
   final Map<Object, Future<void> Function()> _beforePauseCallbacks = {};
+  int _backgroundWorkHolds = 0;
   bool _socketConnected = false;
   bool _closedRetryReplayScheduled = false;
   String? _relayUrl;
@@ -540,7 +541,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     } catch (error) {
       debugPrint('Background cleanup failed: $error');
     }
-    if (_backgroundedAt != null) _pauseNow();
+    if (_backgroundedAt != null && _backgroundWorkHolds == 0) _pauseNow();
   }
 
   void _pauseNow() {
@@ -552,6 +553,10 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     _socket?.disconnect();
     state = const SessionState(status: SessionStatus.disconnected);
   }
+
+  /// See [_RelaySessionBackgroundWork._holdForBackgroundWork].
+  void Function() holdForBackgroundWork(Duration maxHold) =>
+      _holdForBackgroundWork(maxHold);
 
   /// See [_RelaySessionBackgroundWork._connectForBackgroundWork].
   Future<bool> connectForBackgroundWork({required Duration timeout}) =>
