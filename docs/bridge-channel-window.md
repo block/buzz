@@ -135,6 +135,9 @@ Until then such a thread shows every reply, the behavior before this field.
 Deleting an agent-audience reply stored before 0089 decrements the count while
 its insert never incremented it, so an unrepaired thread can undercount its
 agent replies (show more replies than it should) until the repair runs.
+During a rolling deploy an older relay stores and deletes replies without
+updating the table, so the count can also run high; clients clamp the visible
+count at 0, and the repair, run after the rollout, corrects both.
 
 ### `kind:39006` — window bounds overlay
 

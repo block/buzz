@@ -127,7 +127,7 @@ pub struct ThreadSummary {
     /// Total number of replies at all nesting levels.
     pub descendant_count: i32,
     /// How many of `descendant_count` are signed `audience=agents`, from
-    /// `thread_agent_reply_counts`. Replies stored before migration 0087 count
+    /// `thread_agent_reply_counts`. Replies stored before migration 0089 count
     /// 0 until repaired.
     pub agent_descendant_count: i32,
     /// Timestamp of the most recent reply in the thread.
