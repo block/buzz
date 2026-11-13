@@ -241,6 +241,7 @@ class _ReadSeedSession extends RelaySessionNotifier {
   Future<NostrEvent> publish(
     NostrEvent event, {
     Duration timeout = const Duration(seconds: 8),
+    bool Function()? mayPublish,
   }) async {
     if (event.kind == EventKind.readState) readStatePublishes++;
     return event;

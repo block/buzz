@@ -524,6 +524,7 @@ class _FakeSignedRelay implements SignedEventRelay {
     required List<List<String>> tags,
     int? createdAt,
     void Function(NostrEvent)? onSigned,
+    bool Function()? mayPublish,
   }) async {
     attempts++;
     if (attempts == 1 && firstSubmissionGate != null) {

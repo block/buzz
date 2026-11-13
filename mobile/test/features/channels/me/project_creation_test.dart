@@ -55,6 +55,7 @@ class _Relay extends RelaySessionNotifier {
   Future<NostrEvent> publish(
     NostrEvent event, {
     Duration timeout = const Duration(seconds: 8),
+    bool Function()? mayPublish,
   }) async {
     events = [event];
     writes++;

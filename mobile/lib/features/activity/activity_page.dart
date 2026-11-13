@@ -47,7 +47,7 @@ import '../../shared/read_state/read_state_provider.dart';
 import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/profile/user_profile.dart';
 import 'activity_provider.dart';
-import 'compose_drafts_provider.dart';
+import '../../shared/drafts/compose_drafts_provider.dart';
 import 'dm_resurface.dart';
 import 'feed_item.dart';
 import 'inbox_item.dart';

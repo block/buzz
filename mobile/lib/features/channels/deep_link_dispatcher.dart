@@ -9,7 +9,7 @@ import '../../shared/deeplink/deep_link.dart';
 import '../../shared/deeplink/pending_deep_link_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/share/pending_share.dart';
-import '../activity/compose_drafts_provider.dart';
+import '../../shared/drafts/compose_drafts_provider.dart';
 import '../invites/invite_join_provider.dart';
 import '../invites/invite_join_sheet.dart';
 import 'channel.dart';

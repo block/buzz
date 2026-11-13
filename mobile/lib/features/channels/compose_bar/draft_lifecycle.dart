@@ -105,12 +105,12 @@ void _useComposeDraftLifecycle({
         lastDraftIdentity.value != null && lastDraftIdentity.value != identity;
     lastDraftIdentity.value = identity;
     final saved = ref.read(composeDraftsProvider.notifier).draftFor(draftKey);
-    if (shouldHydrate) {
+    void restoreBindings(ComposeDraft? draft) {
       mentionMap.value
         ..clear()
         ..addAll({
           for (final entry
-              in (saved?.mentionKeys ?? <String, String>{}).entries)
+              in (draft?.mentionKeys ?? <String, String>{}).entries)
             entry.key: MentionCandidate(
               pubkey: entry.value,
               displayName: entry.key,
@@ -118,6 +118,8 @@ void _useComposeDraftLifecycle({
             ),
         });
     }
+
+    if (shouldHydrate) restoreBindings(saved);
     if (identityChanged) {
       prefillText.value = null;
       draftRevision.value += 1;
@@ -181,8 +183,30 @@ void _useComposeDraftLifecycle({
           );
     }
 
+    // Take a draft saved from elsewhere, such as an unsent notification
+    // reply, so this composer's next edit doesn't overwrite it.
+    final drafts = ref.listenManual(composeDraftsProvider, (_, _) {
+      if (!identical(currentOwner.value, owner)) return;
+      final saved = ref.read(composeDraftsProvider.notifier).draftFor(draftKey);
+      if (saved == null ||
+          (saved.text == lastPersistedText &&
+              mapEquals(saved.mentionKeys, lastBindings))) {
+        return;
+      }
+      // Text and the keys its mentions are bound to change together.
+      lastPersistedText = saved.text;
+      lastBindings = Map.of(saved.mentionKeys);
+      restoreBindings(saved);
+      // A send or upload in flight must not restore over it.
+      draftRevision.value += 1;
+      controller.text = saved.text;
+    });
+
     controller.addListener(persistDraft);
-    return () => controller.removeListener(persistDraft);
+    return () {
+      drafts.close();
+      controller.removeListener(persistDraft);
+    };
   }, [controller, draftKey, draftIdentity, onDraftIdentityChanged]);
   _useComposerShareDelivery(
     context: context,

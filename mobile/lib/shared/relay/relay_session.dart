@@ -32,6 +32,8 @@ import 'package:buzz/shared/crypto/event_signing.dart';
 export 'relay_session_types.dart';
 
 part 'relay_session_auth.dart';
+part 'relay_session_background.dart';
+part 'relay_session_test_hooks.dart';
 part 'relay_session_subscriptions.dart';
 part 'relay_session_snapshot.dart';
 
@@ -104,6 +106,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   int _contextGeneration = 0;
   final Map<Object, String> _visibleChannelsByOwner = {};
   final Map<Object, Future<void> Function()> _beforePauseCallbacks = {};
+  int _backgroundWorkHolds = 0;
   bool _socketConnected = false;
   bool _closedRetryReplayScheduled = false;
   String? _relayUrl;
@@ -419,12 +422,14 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   Future<NostrEvent> publish(
     NostrEvent event, {
     Duration timeout = const Duration(seconds: 8),
+    bool Function()? mayPublish,
   }) async {
     final generation = _connectionGeneration;
     if (_rateLimitGate.isActive) await _rateLimitGate.wait();
     if (!_isActiveConnection(generation) || !_socketConnected) {
       throw StateError('Relay session is not connected');
     }
+    if (mayPublish?.call() == false) throw StateError('Event no longer wanted');
 
     final completer = Completer<NostrEvent>();
 
@@ -471,23 +476,6 @@ class RelaySessionNotifier extends Notifier<SessionState> {
 
   @visibleForTesting
   void debugSupersedeConnection() => _connectionGeneration++;
-
-  @visibleForTesting
-  void debugHandleDisconnected([Object? error]) {
-    _socketConnected = false;
-    _handleDisconnected(_connectionGeneration, error);
-  }
-
-  @visibleForTesting
-  void debugResetClosedRetriesForDisconnect() {
-    _socketConnected = false;
-    _resetAllClosedRetries();
-  }
-
-  @visibleForTesting
-  void debugSetSessionStatus(SessionStatus status) {
-    _socketConnected = status == SessionStatus.connected;
-  }
 
   @visibleForTesting
   void debugPauseNow() => _pauseNow();
@@ -543,7 +531,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     } catch (error) {
       debugPrint('Background cleanup failed: $error');
     }
-    if (_backgroundedAt != null) _pauseNow();
+    if (_backgroundedAt != null && _backgroundWorkHolds == 0) _pauseNow();
   }
 
   void _pauseNow() {
@@ -556,6 +544,14 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     state = const SessionState(status: SessionStatus.disconnected);
   }
 
+  /// See [_RelaySessionBackgroundWork._holdForBackgroundWork].
+  void Function() holdForBackgroundWork(Duration maxHold) =>
+      _holdForBackgroundWork(maxHold);
+
+  /// See [_RelaySessionBackgroundWork._connectForBackgroundWork].
+  Future<bool> connectForBackgroundWork({required Duration timeout}) =>
+      _connectForBackgroundWork(timeout, state.status, ref);
+
   /// Called by the app lifecycle provider when the app returns to foreground.
   void onAppResumed() {
     _paused = false;
@@ -567,7 +563,9 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     final backgroundedLongEnoughToRequireReconnect =
         backgroundedAt != null &&
         _now().difference(backgroundedAt) >= _backgroundGraceDuration;
-    if (!backgroundedLongEnoughToRequireReconnect &&
+    // Keep a socket held open for background work: an OK may still come.
+    final heldOpen = _backgroundWorkHolds > 0 && _socketConnected;
+    if ((heldOpen || !backgroundedLongEnoughToRequireReconnect) &&
         state.status == SessionStatus.connected) {
       return;
     }
@@ -1030,7 +1028,9 @@ class RelaySessionNotifier extends Notifier<SessionState> {
       }
       if (!pending.completer.isCompleted) {
         pending.completer.completeError(
-          Exception(message.isNotEmpty ? message : 'Event rejected'),
+          RelayEventRejectedException(
+            message.isNotEmpty ? message : 'Event rejected',
+          ),
         );
       }
     }

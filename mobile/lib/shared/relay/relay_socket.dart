@@ -28,6 +28,16 @@ class RelayAuthRejectedException implements Exception {
   String toString() => 'Relay authentication rejected: $message';
 }
 
+/// The relay answered an EVENT with OK false, so it wasn't stored.
+class RelayEventRejectedException implements Exception {
+  final String message;
+
+  const RelayEventRejectedException(this.message);
+
+  @override
+  String toString() => 'Exception: $message';
+}
+
 Exception classifyRelayAuthFailure(String message) {
   if (message.startsWith('error:')) return Exception(message);
   return RelayAuthRejectedException(message);

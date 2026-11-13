@@ -1,4 +1,5 @@
 import BuzzPushKit
+import Flutter
 import Foundation
 import Security
 import UserNotifications
@@ -121,5 +122,208 @@ enum BuzzPushKeychain {
       query[kSecAttrAccessGroup as String] = accessGroup
     }
     return query
+  }
+}
+
+/// Carries replies typed into notifications to Flutter, which sends them, and
+/// reports each outcome on the notification side. See
+/// docs/adr/0004-notification-reply.md.
+final class BuzzNotificationReplyBridge {
+  /// Longest wait for Flutter to send before the reply counts as not sent.
+  /// iOS gives a background notification action about 30 seconds.
+  static let sendTimeout: TimeInterval = 25
+  static let replyNotSentThread = "buzz.reply-not-sent"
+
+  private let buffer = BuzzNotificationReplyBuffer()
+  /// Keeps each reply until the app reports on it, so a reply the app never
+  /// finished, even across a relaunch, still becomes a draft.
+  private let journal = BuzzNotificationReplyJournal(defaults: .standard)
+  private let selectedCommunityDefaults: UserDefaults?
+  /// Tells Flutter a reply is waiting; Flutter also takes waiting replies
+  /// when its handler starts, so a call made before then is harmless.
+  var notifyFlutter: (() -> Void)?
+
+  init(appGroupIdentifier: String?) {
+    selectedCommunityDefaults = appGroupIdentifier.flatMap(UserDefaults.init(suiteName:))
+  }
+
+  static func registerCategory(with center: UNUserNotificationCenter = .current()) {
+    let reply = UNTextInputNotificationAction(
+      identifier: BuzzNotificationReplyContext.actionIdentifier,
+      title: "Reply",
+      // The app reads its keychain-held keys to send.
+      options: [.authenticationRequired],
+      textInputButtonTitle: "Send",
+      textInputPlaceholder: ""
+    )
+    center.setNotificationCategories([
+      UNNotificationCategory(
+        identifier: BuzzNotificationReplyContext.categoryIdentifier,
+        actions: [reply],
+        intentIdentifiers: [],
+        options: []
+      )
+    ])
+  }
+
+  /// Handles a Reply action. Returns false for any other response.
+  func handle(
+    _ response: UNNotificationResponse,
+    center: UNUserNotificationCenter = .current(),
+    completion: @escaping () -> Void
+  ) -> Bool {
+    guard response.actionIdentifier == BuzzNotificationReplyContext.actionIdentifier else {
+      return false
+    }
+    let content = response.notification.request.content
+    guard let text = (response as? UNTextInputNotificationResponse)?.userText,
+      let request = BuzzNotificationReplyRequest.make(
+        id: UUID().uuidString,
+        text: text,
+        userInfo: content.userInfo,
+        threadIdentifier: content.threadIdentifier,
+        deadline: Date().addingTimeInterval(Self.sendTimeout)
+      )
+    else {
+      completion()
+      return true
+    }
+    let notificationID = response.notification.request.identifier
+    // Runs on the main queue, like every caller below; ends the task once.
+    var backgroundTask = UIBackgroundTaskIdentifier.invalid
+    let endBackgroundTask = {
+      guard backgroundTask != .invalid else { return }
+      UIApplication.shared.endBackgroundTask(backgroundTask)
+      backgroundTask = .invalid
+    }
+    backgroundTask = UIApplication.shared.beginBackgroundTask { [weak self] in
+      // iOS requires the task to end before this handler returns; the
+      // unsent reply is still reported if the app gets the time.
+      self?.expire(request.id)
+      endBackgroundTask()
+    }
+    journal.record(Self.flutterArguments(request))
+    buffer.add(request) { outcome in
+      Self.finish(request, outcome: outcome, notificationID: notificationID, center: center) {
+        DispatchQueue.main.async {
+          completion()
+          endBackgroundTask()
+        }
+      }
+    }
+    DispatchQueue.main.asyncAfter(deadline: .now() + Self.sendTimeout) { [weak self] in
+      self?.expire(request.id)
+    }
+    notifyFlutter?()
+    return true
+  }
+
+  /// Handles the reply methods on the push channel. Returns false for others.
+  func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) -> Bool {
+    switch call.method {
+    case "takePendingNotificationReplies":
+      // Every buffered reply is in the journal, which also holds any a
+      // previous launch never finished.
+      _ = buffer.take()
+      result(journal.take())
+    case "completeNotificationReply":
+      guard let arguments = call.arguments as? [String: Any],
+        let id = arguments["id"] as? String,
+        let sent = arguments["sent"] as? Bool
+      else {
+        result(
+          FlutterError(code: "invalid_arguments", message: "Expected id and sent.", details: nil))
+        return true
+      }
+      let outcome: BuzzNotificationReplyOutcome =
+        sent
+        ? .sent
+        : arguments["unknown"] as? Bool == true
+          ? .unknown
+          : .notSent(draftThreadRootID: arguments["draftThreadRootId"] as? String)
+      // The app reports only after the reply is sent or its draft is saved.
+      journal.settle(id: id)
+      buffer.complete(id: id, outcome: outcome)
+      result(nil)
+    case "setSelectedCommunity":
+      BuzzSelectedCommunity.set(call.arguments as? String, in: selectedCommunityDefaults)
+      result(nil)
+    default:
+      return false
+    }
+    return true
+  }
+
+  /// Ends a reply at its deadline. It stays in the journal until the app
+  /// reports on it, so its text still becomes a draft.
+  private func expire(_ id: String) {
+    buffer.expire(id: id)
+  }
+
+  private static func flutterArguments(_ request: BuzzNotificationReplyRequest) -> [String: String] {
+    var arguments = request.target.flutterArguments
+    arguments["id"] = request.id
+    arguments["text"] = request.text
+    arguments["senderPubkey"] = request.context.senderPubkey
+    arguments["replyRootId"] = request.context.threadRootID
+    arguments["messageCreatedAt"] = String(request.context.messageCreatedAt)
+    arguments["deadline"] = String(Int64(request.deadline.timeIntervalSince1970 * 1000))
+    arguments["inSolo"] = request.context.inSolo == true ? "true" : nil
+    return arguments
+  }
+
+  /// A sent reply clears the notifications it marked read: the notified one
+  /// and earlier ones in the same conversation. An unsent one is replaced by a
+  /// "Reply not sent" notification that keeps the typed text and opens its
+  /// draft; one that may have gone out says so instead, without a draft.
+  private static func finish(
+    _ request: BuzzNotificationReplyRequest,
+    outcome: BuzzNotificationReplyOutcome,
+    notificationID: String,
+    center: UNUserNotificationCenter,
+    done: @escaping () -> Void
+  ) {
+    guard outcome == .sent else {
+      let content = UNMutableNotificationContent()
+      var target = request.target
+      switch outcome {
+      case .notSent(let draftThreadRootID):
+        content.title = "Reply not sent"
+        if let draftThreadRootID {
+          target = BuzzPushNavigationTarget(
+            eventID: target.eventID, communityID: target.communityID,
+            channelID: target.channelID, threadRootID: draftThreadRootID)
+        }
+      default:
+        content.title = "Reply may not have sent"
+      }
+      content.body = request.text
+      // Grouped apart, so clearing a conversation never removes it.
+      content.threadIdentifier = Self.replyNotSentThread
+      content.userInfo = [BuzzPushNavigationTarget.userInfoKey: target.userInfoValue]
+      center.add(
+        UNNotificationRequest(
+          identifier: "buzz.reply-not-sent.\(request.id)", content: content, trigger: nil)
+      ) { _ in done() }
+      return
+    }
+    center.getDeliveredNotifications { delivered in
+      let ids = delivered.compactMap { notification -> String? in
+        let identifier = notification.request.identifier
+        let content = notification.request.content
+        guard identifier != notificationID else { return identifier }
+        // Only notifications that offer Reply know where and when their
+        // message was; the replied conversation's earlier ones were read.
+        guard !request.threadIdentifier.isEmpty,
+          content.threadIdentifier == request.threadIdentifier,
+          let context = BuzzNotificationReplyContext.decodeIfPresent(from: content.userInfo),
+          context.threadRootID == request.context.threadRootID,
+          context.messageCreatedAt <= request.context.messageCreatedAt
+        else { return nil }
+        return identifier
+      }
+      center.removeDeliveredNotifications(withIdentifiers: ids)
+      done()
+    }
   }
 }

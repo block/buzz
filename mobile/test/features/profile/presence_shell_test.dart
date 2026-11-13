@@ -75,6 +75,7 @@ class _PublishingSession extends RelaySessionNotifier {
   Future<NostrEvent> publish(
     NostrEvent event, {
     Duration timeout = const Duration(seconds: 8),
+    bool Function()? mayPublish,
   }) async {
     if (event.kind == EventKind.presenceUpdate) presence.add(event.content);
     return event;

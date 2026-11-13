@@ -9,7 +9,7 @@ import 'package:buzz/shared/widgets/ios_glass_navigation_button.dart';
 import 'package:flutter/foundation.dart';
 import 'package:buzz/features/activity/activity_page.dart';
 import 'package:buzz/features/activity/activity_provider.dart';
-import 'package:buzz/features/activity/compose_drafts_provider.dart';
+import 'package:buzz/shared/drafts/compose_drafts_provider.dart';
 import 'package:buzz/features/activity/feed_item.dart';
 import 'package:buzz/features/activity/reminders_provider.dart';
 import 'package:buzz/features/channels/channel.dart';

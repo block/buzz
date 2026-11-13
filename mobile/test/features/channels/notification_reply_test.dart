@@ -1,0 +1,502 @@
+import 'dart:async';
+
+import 'package:buzz/shared/drafts/compose_drafts_provider.dart';
+import 'package:buzz/features/channels/channel.dart';
+import 'package:buzz/features/channels/channel_management_provider.dart';
+import 'package:buzz/features/channels/channels_provider.dart';
+import 'package:buzz/features/channels/notification_reply.dart';
+import 'package:buzz/features/channels/send_message_provider.dart';
+import 'package:buzz/shared/auth/auth.dart';
+import 'package:buzz/shared/push/push_bridge.dart';
+import 'package:buzz/shared/read_state/read_state_format.dart';
+import 'package:buzz/shared/read_state/read_state_provider.dart';
+import 'package:buzz/shared/relay/relay.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:buzz/shared/theme/theme_provider.dart';
+import 'package:fake_async/fake_async.dart';
+import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:nostr/nostr.dart' as nostr;
+import 'package:shared_preferences/shared_preferences.dart';
+
+const _push = MethodChannel('buzz/push');
+final _root = 'a' * 64;
+final _message = 'b' * 64;
+final _sender = 'c' * 64;
+
+final _community = Community(
+  id: 'community',
+  name: 'Example',
+  relayUrl: 'https://relay.example.org',
+  addedAt: DateTime.utc(2026),
+);
+
+final _elsewhere = Community(
+  id: 'elsewhere',
+  name: 'Elsewhere',
+  relayUrl: 'https://other.example.org',
+  addedAt: DateTime.utc(2026),
+);
+
+const _selectedDrafts = 'compose_drafts_v1:https://relay.example.org:anon';
+const _elsewhereDrafts = 'compose_drafts_v1:https://other.example.org:anon';
+
+Channel _channel(String id, {bool solo = false, bool member = true}) => Channel(
+  id: id,
+  name: id,
+  description: '',
+  channelType: 'stream',
+  visibility: solo ? 'private' : 'open',
+  createdBy: 'owner',
+  createdAt: DateTime.utc(2026),
+  memberCount: 2,
+  isMember: member,
+  labels: solo ? const ['buzz.solo'] : const [],
+);
+
+ChannelMember _member(String pubkey) =>
+    ChannelMember(pubkey: pubkey, role: 'member', joinedAt: DateTime.utc(2026));
+
+Map<String, String> _reply(
+  String id, {
+  String communityId = 'community',
+  String channelId = 'general',
+  String? threadRootId,
+  String? replyRootId,
+  int createdAt = 1000,
+  bool inSolo = false,
+}) => {
+  'id': id,
+  'text': 'reply $id',
+  'eventId': _message,
+  'communityId': communityId,
+  'channelId': channelId,
+  'threadRootId': ?threadRootId,
+  'senderPubkey': _sender,
+  'replyRootId': ?replyRootId,
+  'messageCreatedAt': '$createdAt',
+  if (inSolo) 'inSolo': 'true',
+  'deadline':
+      '${DateTime.now().add(const Duration(seconds: 25)).millisecondsSinceEpoch}',
+};
+
+void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  test(
+    'replies typed into notifications are sent, read and reported',
+    () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      final waiting = <Map<String, String>>[
+        // A top-level channel message: a new subthread under it.
+        _reply('1'),
+        // A message inside a thread: the subthread keeps the thread's root.
+        _reply('2', threadRootId: _root, replyRootId: _root, createdAt: 2000),
+        // A Solo chat takes no thread replies.
+        _reply('3', channelId: 'solo', createdAt: 3000),
+        // Another community's notification can't be answered without
+        // switching; its text is kept as a draft in that community, in the
+        // subthread under the notified message even though that community's
+        // channels aren't loaded.
+        _reply('4', communityId: 'elsewhere'),
+        _reply(
+          '12',
+          communityId: 'elsewhere',
+          channelId: 'nested',
+          threadRootId: _root,
+          replyRootId: _root,
+        ),
+        // A notification that knew it was a Solo chat keeps it in the chat.
+        _reply('13', communityId: 'elsewhere', channelId: 'own', inSolo: true),
+        // A send that fails before publishing keeps the text in the
+        // subthread under the notified message, where the reply would go.
+        _reply(
+          '5',
+          channelId: 'broken',
+          threadRootId: _root,
+          replyRootId: _root,
+        ),
+        // A channel the user isn't in isn't replied to, and its text goes
+        // after the draft already there.
+        _reply('6', channelId: 'outside'),
+        // A sender who has left isn't mentioned, but still gets the reply.
+        _reply('10', channelId: 'left'),
+        // A reply published without an acknowledgement may have gone out, so
+        // no draft is kept.
+        _reply('11', channelId: 'lost'),
+      ];
+      installBuzzPushMethodHandler();
+      final outcomes = <String, Object>{};
+      final selected = <Object?>[];
+      messenger.setMockMethodCallHandler(_push, (call) async {
+        switch (call.method) {
+          case 'takePendingNotificationReplies':
+            final taken = [...waiting];
+            waiting.clear();
+            return taken;
+          case 'completeNotificationReply':
+            final args = call.arguments as Map;
+            outcomes[args['id'] as String] = args['unknown'] == true
+                ? 'unknown'
+                : args['sent'] == true
+                ? 'sent'
+                : 'draft in ${args['draftThreadRootId']}';
+          case 'setSelectedCommunity':
+            selected.add(call.arguments);
+        }
+        return null;
+      });
+      addTearDown(() {
+        messenger.setMockMethodCallHandler(_push, null);
+        debugDefaultTargetPlatformOverride = null;
+      });
+
+      SharedPreferences.setMockInitialValues({
+        _selectedDrafts:
+            '[{"key":"outside:$_message","channel_id":"outside",'
+            '"thread_head_id":"$_message","text":"earlier draft",'
+            '"updated_at":1}]',
+      });
+      final prefs = await SharedPreferences.getInstance();
+      final sender = _RecordingSender();
+      final session = _Session();
+      var active = _community;
+      final container = ProviderContainer(
+        overrides: [
+          savedPrefsProvider.overrideWithValue(prefs),
+          authProvider.overrideWith(_Auth.new),
+          communityListProvider.overrideWith(_Communities.new),
+          activeCommunityProvider.overrideWith((ref) async => active),
+          channelsProvider.overrideWith(
+            () => _Channels([
+              _channel('general'),
+              _channel('solo', solo: true),
+              _channel('broken'),
+              _channel('outside', member: false),
+              _channel('left'),
+              _channel('lost'),
+            ]),
+          ),
+          channelMembersProvider.overrideWith((ref, channelId) async {
+            if (channelId == 'broken') throw StateError('members unavailable');
+            return [if (channelId != 'left') _member(_sender), _member('me')];
+          }),
+          sendMessageProvider.overrideWithValue(sender),
+          readStateProvider.overrideWith(_ReadState.new),
+          relaySessionProvider.overrideWith(() => session),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      container.listen(notificationReplySenderProvider, (_, _) {});
+      await pumpEventQueue();
+      final drafts = container.read(composeDraftsProvider.notifier);
+
+      expect(selected, ['community']);
+      expect(outcomes, {
+        '1': 'sent',
+        '2': 'sent',
+        '3': 'sent',
+        '4': 'draft in $_message',
+        '5': 'draft in $_message',
+        '6': 'draft in $_message',
+        '10': 'sent',
+        '11': 'unknown',
+        '12': 'draft in $_message',
+        '13': 'draft in null',
+      });
+      expect(sender.calls, [
+        ('general', 'reply 1', _message, _message, _sender),
+        ('general', 'reply 2', _message, _root, _sender),
+        ('solo', 'reply 3', null, null, _sender),
+        ('left', 'reply 10', _message, _message, ''),
+        ('lost', 'reply 11', _message, _message, _sender),
+      ]);
+      // Read only up to each notified message, so newer ones stay unread.
+      expect(container.read(readStateProvider).contexts, {
+        'general': 1000,
+        threadContextKey(_root): 2000,
+        'solo': 3000,
+        'left': 1000,
+      });
+      expect(drafts.textFor(composeDraftKey('general')), isNull);
+      final elsewhere = prefs.getString(_elsewhereDrafts);
+      expect(elsewhere, contains('"key":"general:$_message"'));
+      expect(elsewhere, contains('"text":"reply 4"'));
+      expect(elsewhere, contains('"key":"nested:$_message"'));
+      expect(
+        elsewhere,
+        contains('"key":"own","channel_id":"own","text":"reply 13"'),
+      );
+      expect(
+        drafts.textFor(composeDraftKey('broken', threadHeadId: _message)),
+        'reply 5',
+      );
+      expect(
+        drafts.textFor(composeDraftKey('outside', threadHeadId: _message)),
+        'earlier draft\n\nreply 6',
+      );
+      expect(
+        drafts.textFor(composeDraftKey('lost', threadHeadId: _message)),
+        isNull,
+      );
+
+      Future<void> signalReply(Map<String, String> reply) async {
+        waiting.add(reply);
+        await messenger.handlePlatformMessage(
+          _push.name,
+          _push.codec.encodeMethodCall(
+            const MethodCall('notificationReplyAvailable'),
+          ),
+          (_) {},
+        );
+        await pumpEventQueue();
+      }
+
+      // A reply arriving while the app runs is sent when iOS signals it.
+      await signalReply(_reply('7', channelId: 'solo'));
+      expect(outcomes['7'], 'sent');
+
+      // When the relay can't be reached in time, nothing is sent and the
+      // text is kept.
+      session.reachable = false;
+      await signalReply(_reply('8', channelId: 'solo'));
+      expect(outcomes['8'], 'draft in null');
+      expect(sender.calls.last.$2, 'reply 7');
+      expect(drafts.textFor(composeDraftKey('solo')), 'reply 8');
+
+      // A community switch while the relay connects stops the reply before
+      // it reaches the other community's relay, and keeps the text in the
+      // reply's own community.
+      session.reachable = true;
+      session.onConnect = () async {
+        active = _elsewhere;
+        container.invalidate(activeCommunityProvider);
+        await container.read(activeCommunityProvider.future);
+      };
+      // The other community's channels say nothing about this one, so the
+      // notification's Solo flag places the draft.
+      await signalReply(_reply('9', channelId: 'solo', inSolo: true));
+      expect(outcomes['9'], 'draft in null');
+      expect(sender.calls.last.$2, 'reply 7');
+      expect(
+        prefs.getString(_selectedDrafts),
+        contains('"text":"reply 8\\n\\nreply 9"'),
+      );
+      expect(prefs.getString(_elsewhereDrafts), isNot(contains('reply 9')));
+    },
+  );
+
+  test('a reply publishes only while its outcome can still be reported', () {
+    fakeAsync((async) {
+      SharedPreferences.setMockInitialValues({});
+      late SharedPreferences prefs;
+      SharedPreferences.getInstance().then((value) => prefs = value);
+      async.flushMicrotasks();
+      final gate = RelayRateLimitGate(now: async.getClock(DateTime(2026)).now);
+      final session = _Session(rateLimitGate: gate);
+      final relay = _Relay(session);
+      var members = Completer<List<ChannelMember>>();
+      final send = SendMessage(
+        signedEventRelay: SignedEventRelay(
+          session: session,
+          nsec: nostr.Keys.generate().nsec,
+        ),
+        fetchMembers: (_) => members.future,
+        readUserCache: () => const {},
+        addLocalMessage: (_, _) {},
+        completeLocalMessage: (_, _) {},
+        removeLocalMessage: (_, _) {},
+      );
+      final container = ProviderContainer(
+        overrides: [
+          savedPrefsProvider.overrideWithValue(prefs),
+          authProvider.overrideWith(_Auth.new),
+          communityListProvider.overrideWith(_Communities.new),
+          activeCommunityProvider.overrideWith((ref) async => _community),
+          channelsProvider.overrideWith(() => _Channels([_channel('general')])),
+          channelMembersProvider.overrideWith(
+            (ref, channelId) async => [_member(_sender)],
+          ),
+          sendMessageProvider.overrideWithValue(send),
+          readStateProvider.overrideWith(_ReadState.new),
+          relaySessionProvider.overrideWith(() => session),
+        ],
+      );
+      addTearDown(container.dispose);
+      final ref = container.read(_refProvider);
+      container.read(relaySessionProvider);
+      session.debugAttachSocketForTest(relay);
+      final drafts = container.read(composeDraftsProvider.notifier);
+      NotificationReplyResult? result;
+      void reply(String id) {
+        result = null;
+        sendNotificationReply(
+          ref,
+          BuzzNotificationReply.fromArguments(_reply(id))!,
+        ).then((value) => result = value);
+      }
+
+      // The message send's own member lookup finishes too late to hear the
+      // relay's OK in time, so the reply is never published and its text is
+      // kept where it would have gone.
+      reply('1');
+      async.elapse(const Duration(seconds: 25));
+      expect(result?.outcome, NotificationReplyOutcome.notSent);
+      expect(
+        drafts.textFor(composeDraftKey('general', threadHeadId: _message)),
+        'reply 1',
+      );
+      members.complete([_member(_sender)]);
+      async.flushMicrotasks();
+      expect(relay.events, isEmpty);
+      String? draft() =>
+          drafts.textFor(composeDraftKey('general', threadHeadId: _message));
+
+      // Held by a rate limit past its deadline, a reply is reported not sent,
+      // and never goes out once the limit lifts.
+      members = Completer()..complete([_member(_sender)]);
+      gate.activate(60);
+      reply('2');
+      async.elapse(const Duration(seconds: 25));
+      expect(result?.outcome, NotificationReplyOutcome.notSent);
+      expect(draft(), 'reply 1\n\nreply 2');
+      async.elapse(const Duration(seconds: 60));
+      expect(relay.events, isEmpty);
+
+      // A reply the relay refuses wasn't sent, so its text is kept.
+      relay.answer = (id) => ['OK', id, false, 'blocked: not allowed'];
+      reply('3');
+      async.elapse(const Duration(seconds: 25));
+      expect(relay.events.single['content'], 'reply 3');
+      expect(result?.outcome, NotificationReplyOutcome.notSent);
+      expect(draft(), 'reply 1\n\nreply 2\n\nreply 3');
+
+      // A published reply whose OK never comes may have gone out, so it
+      // leaves no draft to resend.
+      relay.answer = (_) => null;
+      reply('4');
+      async.elapse(const Duration(seconds: 25));
+      expect(relay.events.last['content'], 'reply 4');
+      expect(result?.outcome, NotificationReplyOutcome.unknown);
+      expect(draft(), 'reply 1\n\nreply 2\n\nreply 3');
+    });
+  });
+}
+
+final _refProvider = Provider<Ref>((ref) => ref);
+
+class _Auth extends AuthNotifier {
+  @override
+  Future<AuthState> build() async =>
+      AuthState(status: AuthStatus.authenticated, community: _community);
+}
+
+class _Channels extends ChannelsNotifier {
+  _Channels(this._channels);
+  final List<Channel> _channels;
+  @override
+  Future<List<Channel>> build() async => _channels;
+}
+
+class _ReadState extends ReadStateNotifier {
+  @override
+  ReadStateState build() => const ReadStateState(
+    isReady: true,
+    pubkey: 'me',
+    contexts: {},
+    version: 1,
+  );
+
+  @override
+  void markContextRead(
+    String contextId,
+    int unixTimestamp, {
+    bool clearForcedMessages = false,
+  }) {
+    state = state.copyWithContext(contextId, unixTimestamp);
+  }
+}
+
+class _Communities extends CommunityListNotifier {
+  @override
+  Future<List<Community>> build() async => [_community, _elsewhere];
+}
+
+class _Session extends RelaySessionNotifier {
+  _Session({super.rateLimitGate});
+  var reachable = true;
+  Future<void> Function()? onConnect;
+
+  @override
+  SessionState build() =>
+      const SessionState(status: SessionStatus.disconnected);
+  @override
+  Future<bool> connectForBackgroundWork({required Duration timeout}) async {
+    await onConnect?.call();
+    return reachable;
+  }
+}
+
+class _RecordingSender implements SendMessage {
+  final calls = <(String, String, String?, String?, String?)>[];
+  @override
+  Future<void> call({
+    required String channelId,
+    required String content,
+    String? parentEventId,
+    String? rootEventId,
+    List<String>? mentionPubkeys,
+    Channel? channel,
+    List<List<String>> mediaTags = const [],
+    bool Function()? mayPublish,
+  }) async {
+    if (mayPublish?.call() == false) throw StateError('no longer wanted');
+    calls.add((
+      channelId,
+      content,
+      parentEventId,
+      rootEventId,
+      mentionPubkeys?.join(','),
+    ));
+    if (channelId == 'lost') throw TimeoutException('no OK');
+  }
+}
+
+/// A connected relay socket that answers each EVENT with [answer]'s reply,
+/// or not at all when it gives null.
+class _Relay extends RelaySocket {
+  _Relay(this._session)
+    : super(
+        wsUrl: 'ws://localhost',
+        nsec: null,
+        onMessage: (_) {},
+        onConnected: () {},
+        onDisconnected: (_) {},
+      );
+
+  final RelaySessionNotifier _session;
+  final events = <Map<String, dynamic>>[];
+  List<dynamic>? Function(String id) answer = (id) => ['OK', id, true, ''];
+
+  @override
+  SocketState get state => SocketState.connected;
+
+  @override
+  void send(List<dynamic> payload) {
+    if (payload case ['EVENT', final Map<String, dynamic> event]) {
+      events.add(event);
+      final reply = answer(event['id'] as String);
+      if (reply != null) _session.debugHandleSocketMessageForTest(reply);
+    }
+  }
+
+  @override
+  Future<void> disconnect() async {}
+
+  @override
+  void dispose() {}
+}

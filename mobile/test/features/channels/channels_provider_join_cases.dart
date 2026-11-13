@@ -222,6 +222,7 @@ class _WriterReplicaRelaySession extends _FakeRelaySession {
   Future<NostrEvent> publish(
     NostrEvent event, {
     Duration timeout = const Duration(seconds: 8),
+    bool Function()? mayPublish,
   }) async {
     published.add(event);
     return event;

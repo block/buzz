@@ -3,8 +3,8 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
-import '../../shared/relay/relay.dart';
-import '../../shared/theme/theme_provider.dart';
+import '../relay/relay.dart';
+import '../theme/theme_provider.dart';
 
 const _draftsPrefsKey = 'compose_drafts_v1';
 const _maxDrafts = 50;
@@ -104,13 +104,19 @@ class ComposeDraftsNotifier extends Notifier<List<ComposeDraft>> {
     // community or the derived account pubkey changes.
     final config = ref.watch(relayConfigProvider);
     final pubkey = ref.watch(myPubkeyProvider) ?? 'anon';
-    _prefsKey = '$_draftsPrefsKey:${config.baseUrl}:$pubkey';
+    _prefsKey = _storeKey(config.baseUrl, pubkey);
+    return _readStore(config, pubkey);
+  }
 
+  static String _storeKey(String origin, String pubkey) =>
+      '$_draftsPrefsKey:$origin:$pubkey';
+
+  List<ComposeDraft> _readStore(RelayConfig config, String pubkey) {
     final prefs = ref.read(savedPrefsProvider);
     final raw = readMigratedPref<String>(
       prefs,
-      canonicalKey: _prefsKey,
-      legacyKey: '$_draftsPrefsKey:${config.storedOrigin}:$pubkey',
+      canonicalKey: _storeKey(config.baseUrl, pubkey),
+      legacyKey: _storeKey(config.storedOrigin, pubkey),
       read: prefs.getString,
       write: prefs.setString,
     );
@@ -127,6 +133,37 @@ class ComposeDraftsNotifier extends Notifier<List<ComposeDraft>> {
     } catch (_) {
       return const [];
     }
+  }
+
+  /// Adds [text] after any draft at [key] in the store of the community at
+  /// [config], which need not be the selected one. Another community's
+  /// store is written without being loaded here, so its text never appears
+  /// in this community. Completes once it's saved.
+  Future<void> append({
+    required RelayConfig config,
+    required String key,
+    required String channelId,
+    String? threadHeadId,
+    required String text,
+  }) {
+    final pubkey = pubkeyFromNsec(config.nsec) ?? 'anon';
+    final selected = _storeKey(config.baseUrl, pubkey) == _prefsKey;
+    final drafts = selected ? state : _readStore(config, pubkey);
+    final existing = drafts.where((d) => d.key == key).firstOrNull;
+    final existingText = existing?.text.trimRight() ?? '';
+    final draft = ComposeDraft(
+      key: key,
+      channelId: channelId,
+      threadHeadId: threadHeadId,
+      text: existingText.isEmpty ? text : '$existingText\n\n$text',
+      mentionKeys: existing?.mentionKeys ?? const {},
+      updatedAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+    );
+    final next = [draft, ...drafts.where((d) => d.key != key)];
+    final kept = next.length > _maxDrafts ? next.sublist(0, _maxDrafts) : next;
+    if (!selected) return _write(_storeKey(config.baseUrl, pubkey), kept);
+    state = List.unmodifiable(kept);
+    return _write(_prefsKey, kept);
   }
 
   /// Persist [text] for the composer identified by [key]. Empty text removes
@@ -172,12 +209,12 @@ class ComposeDraftsNotifier extends Notifier<List<ComposeDraft>> {
 
   void _persist(List<ComposeDraft> drafts) {
     state = List.unmodifiable(drafts);
-    final prefs = ref.read(savedPrefsProvider);
-    prefs.setString(
-      _prefsKey,
-      jsonEncode([for (final d in drafts) d.toJson()]),
-    );
+    _write(_prefsKey, drafts);
   }
+
+  Future<void> _write(String prefsKey, List<ComposeDraft> drafts) => ref
+      .read(savedPrefsProvider)
+      .setString(prefsKey, jsonEncode([for (final d in drafts) d.toJson()]));
 }
 
 final composeDraftsProvider =

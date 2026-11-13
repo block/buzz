@@ -49,6 +49,146 @@ MessageDeepLink? _pushNotificationLink(Object? arguments) {
   );
 }
 
+/// A reply typed into an iOS notification, waiting to be sent.
+@immutable
+class BuzzNotificationReply {
+  const BuzzNotificationReply({
+    required this.id,
+    required this.text,
+    required this.link,
+    required this.senderPubkey,
+    required this.messageCreatedAt,
+    required this.deadline,
+    this.replyRootId,
+    this.inSolo = false,
+  });
+
+  final String id;
+  final String text;
+
+  /// The notified message, and where tapping its notification opens.
+  final MessageDeepLink link;
+
+  /// Author of the notified message, whom the reply mentions.
+  final String senderPubkey;
+
+  /// NIP-10 thread root of the notified message; null when it is top-level.
+  final String? replyRootId;
+
+  /// When the notified message was created, in Unix seconds.
+  final int messageCreatedAt;
+
+  /// When iOS stops waiting for the reply and reports it as not sent.
+  final DateTime deadline;
+
+  /// Whether the notification knew the message is in a Solo chat, which
+  /// takes no thread replies.
+  final bool inSolo;
+
+  static BuzzNotificationReply? fromArguments(Object? arguments) {
+    if (arguments is! Map) return null;
+    final link = _pushNotificationLink({
+      for (final key in const [
+        'eventId',
+        'communityId',
+        'channelId',
+        'threadRootId',
+      ])
+        if (arguments.containsKey(key)) key: arguments[key],
+    });
+    final id = arguments['id'];
+    final text = arguments['text'];
+    final sender = arguments['senderPubkey'];
+    final root = arguments['replyRootId'];
+    final createdAt = switch (arguments['messageCreatedAt']) {
+      final String value => int.tryParse(value),
+      _ => null,
+    };
+    final deadline = switch (arguments['deadline']) {
+      final String value => int.tryParse(value),
+      _ => null,
+    };
+    if (link == null ||
+        id is! String ||
+        id.isEmpty ||
+        text is! String ||
+        text.trim().isEmpty ||
+        sender is! String ||
+        sender.isEmpty ||
+        createdAt == null ||
+        createdAt <= 0 ||
+        deadline == null ||
+        (root != null && (root is! String || root.isEmpty))) {
+      return null;
+    }
+    return BuzzNotificationReply(
+      id: id,
+      text: text,
+      link: link,
+      senderPubkey: sender,
+      messageCreatedAt: createdAt,
+      deadline: DateTime.fromMillisecondsSinceEpoch(deadline),
+      replyRootId: root as String?,
+      inSolo: arguments['inSolo'] == 'true',
+    );
+  }
+}
+
+/// Bumped when iOS hands the app a notification reply to send.
+final notificationReplyAvailable = ValueNotifier<int>(0);
+
+/// Takes notification replies native iOS is holding for the app.
+Future<List<BuzzNotificationReply>> takePendingBuzzNotificationReplies() async {
+  if (defaultTargetPlatform != TargetPlatform.iOS) return const [];
+  try {
+    final raw = await _channel.invokeListMethod<dynamic>(
+      'takePendingNotificationReplies',
+    );
+    return [
+      for (final value in raw ?? const [])
+        ?BuzzNotificationReply.fromArguments(value),
+    ];
+  } on MissingPluginException {
+    return const [];
+  }
+}
+
+/// Reports whether a notification reply was sent, so iOS clears the
+/// conversation's notifications or shows that it wasn't. [unknown] means it
+/// may have gone out; [draftThreadRootId] is the thread holding its draft,
+/// which the "Reply not sent" notification opens.
+Future<void> completeBuzzNotificationReply(
+  String id, {
+  required bool sent,
+  bool unknown = false,
+  String? draftThreadRootId,
+}) async {
+  if (defaultTargetPlatform != TargetPlatform.iOS) return;
+  try {
+    await _channel.invokeMethod<void>('completeNotificationReply', {
+      'id': id,
+      'sent': sent,
+      if (unknown) 'unknown': true,
+      'draftThreadRootId': ?draftThreadRootId,
+    });
+  } on MissingPluginException {
+    // Flutter tests and non-Runner embeddings do not install the native bridge.
+  }
+}
+
+/// Tells the iOS notification extension which community is selected; only
+/// its notifications offer Reply.
+Future<void> shareSelectedCommunityWithNotifications(
+  String? communityId,
+) async {
+  if (defaultTargetPlatform != TargetPlatform.iOS) return;
+  try {
+    await _channel.invokeMethod<void>('setSelectedCommunity', communityId);
+  } on MissingPluginException {
+    // Flutter tests and non-Runner embeddings do not install the native bridge.
+  }
+}
+
 /// Pulls a notification response that arrived before the Flutter method
 /// handler was installed.
 Future<void> syncPendingBuzzPushNotificationResponse() async {
@@ -306,6 +446,9 @@ void installBuzzPushMethodHandler() {
             ? message
             : 'APNs registration failed';
         debugPrint('APNs registration failed: ${apnsRegistrationError.value}');
+        return null;
+      case 'notificationReplyAvailable':
+        notificationReplyAvailable.value++;
         return null;
       case 'notificationOpened':
         final link = _pushNotificationLink(call.arguments);

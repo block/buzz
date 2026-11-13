@@ -340,6 +340,7 @@ class _ThemeRelaySession extends RelaySessionNotifier {
   Future<NostrEvent> publish(
     NostrEvent event, {
     Duration timeout = const Duration(seconds: 8),
+    bool Function()? mayPublish,
   }) async {
     published = event;
     return event;
