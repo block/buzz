@@ -7,10 +7,19 @@ part of '../compose_bar.dart';
 KeyEventResult _handleComposerHardwareKey(
   KeyEvent event,
   TextEditingController controller, {
+  required bool inputOwned,
+  required (String?, String?) query,
+  required (String?, String?) renderedQuery,
   required bool pickerVisible,
   required VoidCallback? acceptSuggestion,
   required Future<void> Function() send,
 }) {
+  if (inputOwned) return KeyEventResult.handled;
+  // A new query must render its own rows before a key can select one.
+  if (query != renderedQuery) {
+    pickerVisible = query != (null, null);
+    acceptSuggestion = null;
+  }
   if (event is KeyUpEvent || !controller.value.composing.isCollapsed) {
     return KeyEventResult.ignored;
   }

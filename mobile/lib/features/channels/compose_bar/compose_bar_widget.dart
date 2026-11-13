@@ -1029,31 +1029,23 @@ class ComposeBar extends HookConsumerWidget {
         .where((s) => !mentionRows.unavailable.contains(s.pubkey))
         .firstOrNull;
     final pickerQuery = (mentionQuery.value, channelQuery.value);
-    KeyEventResult handleHardwareKey(FocusNode _, KeyEvent event) {
-      if (iosAttachmentPopover.isActive || isEmojiPickerOpen.value) {
-        return KeyEventResult.handled;
-      }
-      final currentQuery = (mentionQuery.value, channelQuery.value);
-      final queryChanged = currentQuery != pickerQuery;
-      // A new query must render its own rows before a key can select one.
-      return _handleComposerHardwareKey(
-        event,
-        controller,
-        pickerVisible: queryChanged
-            ? currentQuery != (null, null)
-            : pickerVisible,
-        acceptSuggestion: queryChanged
-            ? null
-            : topChannel != null
-            ? () => _runComposerAction(() => insertChannel(topChannel))
-            : topMention != null
-            ? () => _runComposerAction(() => insertMention(topMention))
-            : null,
-        send: () async {
-          if (canSend()) _runComposerAction(() => unawaited(send()));
-        },
-      );
-    }
+    KeyEventResult handleHardwareKey(FocusNode _, KeyEvent event) =>
+        _handleComposerHardwareKey(
+          event,
+          controller,
+          inputOwned: iosAttachmentPopover.isActive || isEmojiPickerOpen.value,
+          query: (mentionQuery.value, channelQuery.value),
+          renderedQuery: pickerQuery,
+          pickerVisible: pickerVisible,
+          acceptSuggestion: topChannel != null
+              ? () => _runComposerAction(() => insertChannel(topChannel))
+              : topMention != null
+              ? () => _runComposerAction(() => insertMention(topMention))
+              : null,
+          send: () async {
+            if (canSend()) _runComposerAction(() => unawaited(send()));
+          },
+        );
 
     final suggestionPanel = _composerSuggestionPanel(
       channelSuggestions: channelSuggestions,
