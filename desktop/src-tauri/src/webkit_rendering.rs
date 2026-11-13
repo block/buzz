@@ -168,6 +168,7 @@ fn plan(
     let signals = [
         (nvidia_gpu(drm_root), "NVIDIA GPU"),
         (env("APPIMAGE").is_some(), "AppImage"),
+        (cosmic_desktop(env), "COSMIC desktop"),
     ];
     let hits: Vec<&str> = signals
         .iter()
@@ -176,7 +177,7 @@ fn plan(
 
     match hits.is_empty() {
         true => Plan::Leave {
-            why: "no NVIDIA GPU and not an AppImage".to_string(),
+            why: "no NVIDIA GPU, AppImage, or COSMIC desktop".to_string(),
         },
         false => Plan::Apply {
             vars: &HEURISTIC,
@@ -215,6 +216,26 @@ fn nvidia_gpu(drm_root: &Path) -> bool {
         std::fs::read_to_string(entry.path().join("device/vendor"))
             .is_ok_and(|vendor| vendor.trim().eq_ignore_ascii_case(NVIDIA_PCI_VENDOR))
     })
+}
+
+/// Whether the session is running System76's COSMIC DE under Wayland.
+///
+/// Pop!_OS COSMIC ships Wayland by default and its compositor is the second
+/// reproducible freeze report (#4305) after NVIDIA/AppImage — same dmabuf
+/// desync, same symptoms (frozen UI, frame rendered but never handed off to
+/// the compositor, min/max forces a one-frame redraw). Detection goes through
+/// `XDG_CURRENT_DESKTOP`, the standard freedesktop probe, which COSMIC sets
+/// to `COSMIC`. Multi-value sessions (`Hyprland:COSMIC`) deliberately match
+/// too: the workaround is the kind one such session can inherit, not a
+/// judgment about which DE owns what.
+fn cosmic_desktop(env: EnvLookup<'_>) -> bool {
+    let Some(desktop) = env("XDG_CURRENT_DESKTOP") else {
+        return false;
+    };
+    desktop
+        .to_string_lossy()
+        .split(':')
+        .any(|entry| entry.trim().eq_ignore_ascii_case("cosmic"))
 }
 
 /// The diagnostic for `--safe-rendering` against a user-set owned variable.
