@@ -437,6 +437,13 @@ struct NativeEmojiRemoteImage: View {
         if !Task.isCancelled { phase = .failure }
       }
     }
+    // Keep only the first frame of a cell scrolled away, as before animation:
+    // reappearing decodes every frame again anyway.
+    .onDisappear {
+      if case .success(let image) = phase, let first = image.images?.first {
+        phase = .success(first)
+      }
+    }
   }
 }
 
@@ -470,6 +477,9 @@ enum NativeEmojiRemoteImageLoader {
   @MainActor
   static func image(for url: URL) async throws -> UIImage {
     let bytes = try await NativeEmojiPickerCoordinator.mediaBytes(for: url)
+    // Bytes can arrive after the cell left; don't decode for a dead view
+    // while visible cells wait for the decode threads.
+    try Task.checkCancellation()
     let decoded = await Task.detached(priority: .userInitiated) {
       NativeMessageImageLoader.decode(bytes, maximumPixelSize: maximumPixelSize)
     }.value

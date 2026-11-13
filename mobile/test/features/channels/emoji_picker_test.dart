@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:buzz/shared/emoji/emoji_picker.dart';
 import 'package:buzz/shared/emoji/recent_emoji_provider.dart';
@@ -137,19 +138,25 @@ const _relayCustomEmoji = [
   ),
 ];
 
-/// Media downloads that answer at once, except `slow.png`, which waits until
-/// the caller aborts it.
+/// A 1x1 PNG, so loads pass the decode check.
+final _pngBytes = base64Decode(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAA'
+  'AAYAAjCB0C8AAAAASUVORK5CYII=',
+);
+
+/// Media downloads that answer at once with [_pngBytes], except `slow` ones,
+/// which wait until the caller aborts them.
 class _MediaClient extends http.BaseClient {
   final requests = <http.BaseRequest>[];
 
   @override
   Future<http.StreamedResponse> send(http.BaseRequest request) async {
     requests.add(request);
-    if (request.url.path.endsWith('slow.png')) {
+    if (request.url.path.contains('slow')) {
       await (request as http.AbortableRequest).abortTrigger;
       throw http.RequestAbortedException(request.url);
     }
-    return http.StreamedResponse(Stream.value([1, 2, 3]), 200);
+    return http.StreamedResponse(Stream.value(_pngBytes), 200);
   }
 }
 
@@ -795,7 +802,7 @@ void main() {
             'mediaBytes',
             {'id': 1, 'url': 'https://relay.example/media/buzzbee.png'},
           );
-          expect(relayBytes, Uint8List.fromList([1, 2, 3]));
+          expect(relayBytes, _pngBytes);
           expect(
             mediaClient.requests.single.headers['Authorization'],
             startsWith('Nostr '),
@@ -815,6 +822,36 @@ void main() {
           await _sendNativeEmojiPickerCall(tester, 'cancelMediaBytes', 3);
           await expectLater(slow, throwsA(isA<PlatformException>()));
           expect(mediaClient.requests, hasLength(2));
+
+          // At most four loads run at once; a queued load cancelled before
+          // its turn never downloads.
+          mediaClient.requests.clear();
+          final running = [
+            for (var id = 10; id < 14; id++)
+              expectLater(
+                _sendNativeEmojiPickerCall(tester, 'mediaBytes', {
+                  'id': id,
+                  'url': 'https://example.test/slow-$id.png',
+                }),
+                throwsA(isA<PlatformException>()),
+              ),
+          ];
+          final queued = expectLater(
+            _sendNativeEmojiPickerCall(tester, 'mediaBytes', {
+              'id': 14,
+              'url': 'https://example.test/queued.png',
+            }),
+            throwsA(isA<PlatformException>()),
+          );
+          await Future<void>.delayed(const Duration(milliseconds: 50));
+          expect(mediaClient.requests, hasLength(4));
+          await _sendNativeEmojiPickerCall(tester, 'cancelMediaBytes', 14);
+          await queued;
+          for (var id = 10; id < 14; id++) {
+            await _sendNativeEmojiPickerCall(tester, 'cancelMediaBytes', id);
+          }
+          await Future.wait(running);
+          expect(mediaClient.requests, hasLength(4));
         });
 
         await _sendNativeEmojiPickerCall(tester, 'skinToneChanged', 4);
