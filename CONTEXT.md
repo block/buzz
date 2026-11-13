@@ -1,6 +1,6 @@
 # Buzz domain language
 
-Shared terminology for Buzz product behavior. This glossary currently covers mobile [push suppression](#push-suppression), the [notification body](#notification-body) and [mobile builds](#mobile-builds); it is not a complete model of Buzz.
+Shared terminology for Buzz product behavior. This glossary currently covers mobile [push suppression](#push-suppression), the [notification body](#notification-body), [mobile builds](#mobile-builds) and [quick send](#quick-send); it is not a complete model of Buzz.
 
 ## Notifications
 
@@ -69,3 +69,23 @@ _Avoid_: Dogfood build, enterprise build, org build
 The mobile app distributed through the App Store and TestFlight. It uses only the public Builderlab and cannot reach any organization's community.
 
 _Avoid_: App Store build, external build
+
+## Agents and conversations
+
+### Bestie
+
+The one agent a person has chosen as their default in a community. A community has at most one Bestie per person.
+
+_Avoid_: Default agent, main agent, assistant
+
+### Solo chat
+
+A private chat a person starts with their agents, listed under Solo rather than among channels and DMs.
+
+_Avoid_: Me chat, agent DM
+
+### Quick send
+
+Sending a message to Buzz from outside the app (Siri, Shortcuts, the Action button) without opening Buzz. A quick send to the [Bestie](#bestie) starts a new [Solo chat](#solo-chat) with the message as its first message.
+
+_Avoid_: Siri message, dictation, background send

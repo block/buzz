@@ -92,6 +92,7 @@ import os.log
     }
     identityFilePlugin = IdentityFilePlugin(messenger: messenger)
     HomeScreenShortcuts.shared.attach(messenger: messenger)
+    QuickSendBridge.shared.attach(messenger: messenger)
     browserAuthBridge = BuzzBrowserAuthBridge(messenger: messenger)
     hostedHpkeChannel = FlutterMethodChannel(name: "buzz/hosted_hpke", binaryMessenger: messenger)
     hostedHpkeChannel?.setMethodCallHandler { call, result in
