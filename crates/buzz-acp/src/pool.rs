@@ -44,6 +44,9 @@ use crate::queue::{
 use crate::relay::{ChannelInfo, RestClient};
 use crate::scope::SessionScope;
 
+pub(crate) mod session_slots;
+pub use session_slots::SessionSlots;
+
 /// Window within which agent activity before a hard-cap death qualifies
 /// the turn as "recently active" (eligible for requeue instead of dead-letter).
 const RECENT_ACTIVITY_WINDOW: Duration = Duration::from_secs(60);
@@ -129,8 +132,9 @@ pub struct ChannelDeliveryState {
 /// spawning a real agent subprocess.
 #[derive(Default)]
 pub struct SessionState {
-    /// session scope → session_id
-    pub sessions: HashMap<SessionScope, String>,
+    /// session scope → live or dormant session id (see [`SessionSlots`]).
+    /// Removing a live id queues its `session/close`.
+    pub sessions: SessionSlots,
     pub heartbeat_session: Option<String>,
     /// Per-scope turn counters for proactive session rotation.
     /// Incremented on each successful prompt; reset when the session is rotated.
@@ -171,7 +175,9 @@ impl SessionState {
                 self.invalidate_scope(scope);
             }
             PromptSource::Heartbeat => {
-                self.heartbeat_session = None;
+                if let Some(id) = self.heartbeat_session.take() {
+                    self.sessions.schedule_close(id);
+                }
                 self.heartbeat_turn_count = 0;
                 self.heartbeat_standing_context_sent = false;
             }
@@ -2390,6 +2396,12 @@ fn send_prompt_result(
     batch: Option<FlushBatch>,
 ) {
     agent.acp.clear_steer_rx();
+    if let PromptSource::Channel(scope) = &source {
+        agent
+            .state
+            .sessions
+            .touch(scope, tokio::time::Instant::now());
+    }
     let _ = result_tx.send(PromptResult {
         agent,
         source,
@@ -2540,6 +2552,25 @@ pub async fn run_prompt_task(
     let prompt_is_dm = resolved_channel_info
         .as_ref()
         .is_some_and(|info| info.channel_type == "dm");
+    // Drain queued session/close calls and resume a dormant session first, so
+    // a failed resume falls back to the new-session path below.
+    if let Err(error) = session_slots::prepare_turn_session(&mut agent, source.scope()).await {
+        tracing::error!(
+            target: "pool::session",
+            "agent {} exited preparing session: {error}",
+            agent.index
+        );
+        agent.state.invalidate_all();
+        send_prompt_result(
+            &result_tx,
+            &turn_id,
+            agent,
+            source,
+            PromptOutcome::AgentExited,
+            requeue_batch_if_queue(&ctx, batch),
+        );
+        return;
+    }
     let initial_message_pending = ctx.initial_message.is_some()
         && matches!(&source, PromptSource::Channel(scope) if !agent.state.sessions.contains_key(scope));
     if !initial_message_pending {
@@ -2705,6 +2736,9 @@ pub async fn run_prompt_task(
                             scope.telemetry_label()
                         );
                         agent.state.sessions.insert(scope.clone(), sid.clone());
+                        if let Some(params) = agent.acp.take_session_new_params(&sid) {
+                            agent.state.sessions.set_resume_params(scope, params);
+                        }
                         agent
                             .state
                             .deliveries

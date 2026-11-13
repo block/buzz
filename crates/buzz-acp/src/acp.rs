@@ -225,6 +225,13 @@ pub struct AcpClient {
     /// readable thinking unless asked; set only when the CLI the adapter runs
     /// is new enough to accept `--thinking-display`.
     claude_thinking_summaries: bool,
+    /// Whether `initialize` advertised `agentCapabilities.sessionCapabilities.close`.
+    session_close_supported: bool,
+    /// Whether `initialize` advertised `agentCapabilities.sessionCapabilities.resume`.
+    session_resume_supported: bool,
+    /// Request params of the most recent successful `session/new`, keyed by the
+    /// session it created, so a later `session/resume` can resend them verbatim.
+    last_session_new: Option<(String, serde_json::Value)>,
 }
 
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
@@ -634,6 +641,9 @@ impl AcpClient {
             standard_usage: StandardUsageTracker::default(),
             standard_adapter,
             claude_thinking_summaries,
+            session_close_supported: false,
+            session_resume_supported: false,
+            last_session_new: None,
         })
     }
 
@@ -679,6 +689,9 @@ impl AcpClient {
     /// Must be called exactly once, before any other ACP method.
     /// The caller may inspect `agentCapabilities` in the returned value.
     ///
+    /// Also records whether `sessionCapabilities.close` / `.resume` were
+    /// advertised (see [`session_close`](Self::session_close)).
+    ///
     /// Records `_meta.steering.supported` into
     /// [`steering_supported`](Self::steering_supported) so the read loop's steer
     /// arm can choose [`ACP_STEER_METHOD`] for adapters that implement it.
@@ -692,6 +705,13 @@ impl AcpClient {
             .pointer("/_meta/steering/supported")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        let advertised = |name: &str| {
+            result
+                .pointer(&format!("/agentCapabilities/sessionCapabilities/{name}"))
+                .is_some_and(|v| !v.is_null())
+        };
+        self.session_close_supported = advertised("close");
+        self.session_resume_supported = advertised("resume");
         tracing::debug!(target: "acp::init", "initialize response: {result}");
         Ok(result)
     }
@@ -733,6 +753,28 @@ impl AcpClient {
         system_prompt: Option<SystemPromptTransport<'_>>,
         session_title: Option<&str>,
     ) -> Result<SessionNewResponse, AcpError> {
+        let params = self.session_new_params(cwd, mcp_servers, system_prompt, session_title);
+        let result = self.send_request("session/new", params.clone()).await?;
+        let session_id = result["sessionId"]
+            .as_str()
+            .ok_or_else(|| AcpError::Protocol("session/new response missing sessionId".into()))?
+            .to_owned();
+        tracing::info!(target: "acp::session", "session created: {session_id}");
+        self.last_session_new = Some((session_id.clone(), params));
+        Ok(SessionNewResponse {
+            session_id,
+            raw: result,
+        })
+    }
+
+    /// Build the `session/new` params; `session/resume` resends the same ones.
+    fn session_new_params(
+        &self,
+        cwd: &str,
+        mcp_servers: Vec<McpServer>,
+        system_prompt: Option<SystemPromptTransport<'_>>,
+        session_title: Option<&str>,
+    ) -> serde_json::Value {
         let mut params = serde_json::json!({
             "cwd": cwd,
             "mcpServers": mcp_servers,
@@ -759,16 +801,64 @@ impl AcpClient {
             params["_meta"]["claudeCode"]["options"]["extraArgs"]["thinking-display"] =
                 serde_json::Value::String("summarized".to_owned());
         }
-        let result = self.send_request("session/new", params).await?;
-        let session_id = result["sessionId"]
-            .as_str()
-            .ok_or_else(|| AcpError::Protocol("session/new response missing sessionId".into()))?
-            .to_owned();
-        tracing::info!(target: "acp::session", "session created: {session_id}");
-        Ok(SessionNewResponse {
-            session_id,
-            raw: result,
-        })
+        params
+    }
+
+    /// Take the `session/new` params that created `session_id`, if it was the
+    /// most recent session created on this client.
+    pub(crate) fn take_session_new_params(
+        &mut self,
+        session_id: &str,
+    ) -> Option<serde_json::Value> {
+        match self.last_session_new.take() {
+            Some((id, params)) if id == session_id => Some(params),
+            other => {
+                self.last_session_new = other;
+                None
+            }
+        }
+    }
+
+    /// Whether the agent advertised the ACP `session/close` capability.
+    pub fn session_close_supported(&self) -> bool {
+        self.session_close_supported
+    }
+
+    /// Whether the agent advertised both `session/close` and `session/resume`,
+    /// the pair idle-session eviction needs.
+    pub fn session_evict_supported(&self) -> bool {
+        self.session_close_supported && self.session_resume_supported
+    }
+
+    /// Send `session/close`, freeing the agent's resources for `session_id`.
+    ///
+    /// Bounded by `timeout` (in addition to the usual request timeout). A late
+    /// response after a timeout is skipped by id on the next read. Callers
+    /// gate on [`session_close_supported`](Self::session_close_supported).
+    pub async fn session_close(
+        &mut self,
+        session_id: &str,
+        timeout: std::time::Duration,
+    ) -> Result<(), AcpError> {
+        let params = serde_json::json!({ "sessionId": session_id });
+        match tokio::time::timeout(timeout, self.send_request("session/close", params)).await {
+            Ok(result) => result.map(|_| ()),
+            Err(_) => Err(AcpError::Timeout(timeout)),
+        }
+    }
+
+    /// Send `session/resume` for a closed session, re-sending the exact
+    /// `session/new` params (`cwd`, `mcpServers`, `_meta`, system prompt) that
+    /// created it. Unlike `session/load`, no history is replayed. Returns the
+    /// raw result (same shape as `session/new`, for model re-application).
+    pub async fn session_resume(
+        &mut self,
+        session_id: &str,
+        new_params: &serde_json::Value,
+    ) -> Result<serde_json::Value, AcpError> {
+        let mut params = new_params.clone();
+        params["sessionId"] = serde_json::Value::String(session_id.to_owned());
+        self.send_request("session/resume", params).await
     }
 
     /// Send `session/new` and return only the `sessionId` string.
