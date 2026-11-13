@@ -15,7 +15,6 @@ import '../../shared/animated_avatar.dart';
 import '../../shared/widgets/buzz_toast.dart';
 import '../../shared/identity_names/identity_names.dart';
 import '../../shared/identity_names/identity_names_provider.dart';
-import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/utils/string_utils.dart';
 import '../../shared/widgets/avatar_shape.dart';
@@ -137,28 +136,16 @@ class UserProfileSheet extends HookConsumerWidget {
     final statusCache = ref.watch(userStatusCacheProvider);
     final userStatus = statusCache[pk];
 
-    // Fetch about from the user's kind:0 profile event.
-    final aboutFuture = useMemoized(
-      () => ref
-          .read(relaySessionProvider.notifier)
-          .fetchHistory(NostrFilters.profile(pk))
-          .then((events) {
-            if (events.isEmpty) return '';
-            return ProfileData.fromEvent(events.first).about ?? '';
-          })
-          .catchError((_) => ''),
-      [pk],
-    );
-    final aboutSnapshot = useFuture(aboutFuture);
-    final about = aboutSnapshot.data ?? profile?.about ?? '';
-
-    // Ensure presence and status are tracked.
+    // Opening a profile does a full, verified kind:0 fetch into the cache, so
+    // name, avatar, and about recover even when since-based revalidation
+    // missed a backdated edit.
     useEffect(() {
       ref.read(presenceCacheProvider.notifier).track([pk]);
       ref.read(userStatusCacheProvider.notifier).track([pk]);
-      ref.read(userCacheProvider.notifier).preload([pk]);
+      ref.read(userCacheProvider.notifier).refresh([pk]);
       return null;
     }, [pk]);
+    final about = profile?.about ?? '';
     final copied = useState(false);
     final isOpeningDirectMessage = useState(false);
 

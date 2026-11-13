@@ -24,6 +24,19 @@ class _UserCache extends UserCacheNotifier {
   @override
   Future<bool> preload(List<String> pubkeys) async => true;
 
+  /// What the relay holds; [refresh] admits it like a full fetch would.
+  final Map<String, UserProfile> relay = {};
+
+  @override
+  Future<bool> refresh(List<String> pubkeys) async {
+    await Future<void>.value(); // The relay answers asynchronously.
+    for (final pubkey in pubkeys) {
+      final profile = relay[pubkey.toLowerCase()];
+      if (profile != null) replace(profile);
+    }
+    return true;
+  }
+
   void replace(UserProfile profile) =>
       state = {...state, profile.pubkey: profile};
 }
@@ -129,5 +142,38 @@ void main() {
     await tester.pump();
     expect(find.text('Scout Example'), findsNothing);
     expect(find.text('Scout'), findsOneWidget);
+  });
+
+  testWidgets('opening the sheet refreshes a stale cached profile', (
+    tester,
+  ) async {
+    // Since-based revalidation can miss a backdated edit, so the cache still
+    // holds the old name. Opening the profile does the full fetch that
+    // repairs name and about.
+    final cache = _UserCache({
+      scout: UserProfile(pubkey: scout, displayName: 'Old', about: 'Old about'),
+    });
+    cache.relay[scout] = UserProfile(
+      pubkey: scout,
+      displayName: 'New',
+      about: 'New about',
+    );
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          userCacheProvider.overrideWith(() => cache),
+          verifiedProfilesProvider.overrideWith(_VerifiedProfiles.new),
+        ],
+        child: MaterialApp(
+          theme: AppTheme.light(),
+          home: Scaffold(body: UserProfileSheet(pubkey: scout)),
+        ),
+      ),
+    );
+    await tester.pump();
+    expect(find.text('New'), findsOneWidget);
+    expect(find.text('New about'), findsOneWidget);
+    expect(find.text('Old'), findsNothing);
+    expect(find.text('Old about'), findsNothing);
   });
 }
