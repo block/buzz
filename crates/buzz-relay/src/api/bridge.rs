@@ -800,6 +800,17 @@ fn extract_buzz_channel(raw: &Value) -> Option<&str> {
         .and_then(Value::as_str)
 }
 
+/// Whether an HTTP read filter holds a NUL byte in a string the relay binds:
+/// the typed NIP-01 fields, or `#buzz-channel`, which `nostr::Filter` drops
+/// and [`extract_buzz_channel`] reads from the raw filter.
+fn filters_contain_nul(raw: &[Value], filters: &[nostr::Filter]) -> bool {
+    buzz_core::filter::filters_contain_nul(filters)
+        || raw
+            .iter()
+            .filter_map(extract_buzz_channel)
+            .any(|channel| channel.contains('\0'))
+}
+
 /// True when the raw filter opts into a bridge extension flag (`top_level`,
 /// `include_summaries`, `include_aux`). Absent or non-boolean = false.
 fn extension_flag(raw: &Value, key: &str) -> bool {
@@ -1745,6 +1756,12 @@ async fn query_member_events(
         .collect::<Result<_, _>>()
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("invalid filters: {e}")))?;
     caller.read(&filters);
+    if filters_contain_nul(&raw_filters, &filters) {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            crate::handlers::req::NUL_BYTE_CLOSED,
+        ));
+    }
     crate::handlers::req::extract_channel_ids_from_filters_limited(&filters)
         .map_err(|()| api_error(StatusCode::BAD_REQUEST, "too many explicit channels"))?;
 
@@ -2424,6 +2441,12 @@ async fn count_member_events(
     let filters: Vec<nostr::Filter> = serde_json::from_slice(body)
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("invalid filters: {e}")))?;
     caller.read(&filters);
+    if filters_contain_nul(&raw, &filters) {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            crate::handlers::req::NUL_BYTE_CLOSED,
+        ));
+    }
     crate::handlers::req::extract_channel_ids_from_filters_limited(&filters)
         .map_err(|()| api_error(StatusCode::BAD_REQUEST, "too many explicit channels"))?;
 
@@ -4498,6 +4521,23 @@ pub(crate) mod postgres_tests {
             search_hit_accepted(&filter, &stored, &[scoped_channel], &reader),
             "channel-scoped hit must be accepted when caller has access to that channel"
         );
+    }
+
+    #[test]
+    fn filters_contain_nul_covers_buzz_channel() {
+        let check = |raw: Value| {
+            let raw = vec![raw];
+            let filters: Vec<nostr::Filter> =
+                serde_json::from_value(Value::Array(raw.clone())).unwrap();
+            filters_contain_nul(&raw, &filters)
+        };
+        assert!(check(
+            serde_json::json!({"kinds": [30621], "#buzz-channel": ["a\u{0}b"]})
+        ));
+        assert!(check(serde_json::json!({"kinds": [9], "#p": ["a\u{0}b"]})));
+        assert!(!check(
+            serde_json::json!({"kinds": [30621], "#buzz-channel": ["ab"]})
+        ));
     }
 
     #[test]
