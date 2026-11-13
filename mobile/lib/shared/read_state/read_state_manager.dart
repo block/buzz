@@ -157,6 +157,12 @@ class ReadStateManager {
 
   Timer? _debounceTimer;
   void Function()? _unsubscribeLive;
+  // The last full snapshot by coordinate, kept current by the live
+  // subscription and this device's own publishes, so a publish need not
+  // download it again. Trusted only on the connection it was fetched on: a
+  // reconnect may have missed peer events, and its re-sync fetches anew.
+  Map<String, NostrEvent>? _snapshot;
+  void Function()? _snapshotFence;
   bool _initialized = false;
   bool _initialSeedComplete = false;
   // Pending first fetch and subscribe. A reconnect while it runs waits for it
@@ -333,6 +339,7 @@ class ReadStateManager {
     }
     _unsubscribeLive?.call();
     _unsubscribeLive = null;
+    _snapshot = null;
     await _startLiveSubscription();
     await _fetchAndMerge();
     _schedulePublish();
@@ -356,6 +363,7 @@ class ReadStateManager {
 
     _unsubscribeLive?.call();
     _unsubscribeLive = null;
+    _snapshot = null;
   }
 
   bool _advanceContext(
@@ -376,10 +384,12 @@ class ReadStateManager {
 
   Future<bool> _fetchAndMerge() async {
     try {
+      final fence = _relaySession!.captureConnectionFence();
       // Snapshot transport validates completeness and fences retired sessions.
-      final events = await _relaySession!.fetchReadStateSnapshot();
+      final events = await _relaySession.fetchReadStateSnapshot();
       if (_disposed || !_servesThisCommunity) return false;
       _lastSnapshotSucceeded = true;
+      _rememberSnapshot(events, fence);
       _mergeEvents(events);
       await _persistLocalState();
       _onChanged();
@@ -487,6 +497,7 @@ class ReadStateManager {
 
   void _handleIncomingEvent(NostrEvent event) {
     if (_disposed || !_servesThisCommunity) return;
+    _noteSnapshotEvent(event);
     _mergeEvents([event]);
     _persistLocalState();
     _onChanged();
@@ -603,8 +614,10 @@ class ReadStateManager {
       final checkConnection = _relaySession?.captureConnectionFence();
       var snapshot = <NostrEvent>[];
       if (_relaySession != null) {
-        final events = await _relaySession.fetchReadStateSnapshot();
-        _lastSnapshotSucceeded = true;
+        // Already merged when it was fetched or as live events arrived.
+        final cached = _cachedSnapshot();
+        final events = cached ?? await _relaySession.fetchReadStateSnapshot();
+        if (cached == null) _lastSnapshotSucceeded = true;
         if (!_servesThisCommunity ||
             !_ownsJournal ||
             (_disposed && !allowDisposed)) {
@@ -612,7 +625,10 @@ class ReadStateManager {
         }
         checkConnection?.call();
         snapshot = events;
-        _mergeEvents(events);
+        if (cached == null) {
+          _rememberSnapshot(events, checkConnection);
+          _mergeEvents(events);
+        }
         if (events.any(
           (event) =>
               hasValidReadStateTags(event) &&
@@ -706,6 +722,7 @@ class ReadStateManager {
         }
         checkConnection?.call();
         await _relaySession.publish(entry.value);
+        _noteSnapshotEvent(entry.value);
         if (!_servesThisCommunity ||
             !_ownsJournal ||
             (_disposed && !allowDisposed)) {
@@ -728,7 +745,7 @@ class ReadStateManager {
           return;
         }
         checkConnection?.call();
-        await signedEventRelay.submit(
+        final published = await signedEventRelay.submit(
           kind: event.kind,
           content: event.content,
           tags: event.tags,
@@ -752,6 +769,7 @@ class ReadStateManager {
             (_disposed && !allowDisposed)) {
           return;
         }
+        _noteSnapshotEvent(published);
         _published[slot] = contexts;
         _pending.remove(slot);
         _maxFetchedCreatedAt = event.createdAt;
@@ -773,11 +791,9 @@ class ReadStateManager {
     List<NostrEvent> snapshot,
     Iterable<NostrEvent> writes,
   ) {
-    String coordinate(NostrEvent event) =>
-        '${event.kind}:${event.pubkey}:${event.tags.where((tag) => tag.length >= 2 && tag.first == 'd').map((tag) => tag[1]).firstOrNull ?? ''}';
-    final projected = {for (final event in snapshot) coordinate(event): event};
+    final projected = {for (final event in snapshot) _coordinate(event): event};
     for (final event in writes) {
-      projected[coordinate(event)] = event;
+      projected[_coordinate(event)] = event;
       if (projected.length > readStateSnapshotMaxEvents ||
           utf8
                   .encode(
@@ -791,6 +807,53 @@ class ReadStateManager {
           'Read-state publication exceeds full snapshot capacity',
         );
       }
+    }
+  }
+
+  static String _coordinate(NostrEvent event) =>
+      '${event.kind}:${event.pubkey}:${event.tags.where((tag) => tag.length >= 2 && tag.first == 'd').map((tag) => tag[1]).firstOrNull ?? ''}';
+
+  /// Keeps [events] as the snapshot for the connection [fence] belongs to,
+  /// when the live subscription is up to keep it current.
+  void _rememberSnapshot(List<NostrEvent> events, void Function()? fence) {
+    if (fence == null || _unsubscribeLive == null) {
+      _snapshot = null;
+      return;
+    }
+    final snapshot = <String, NostrEvent>{};
+    for (final event in events) {
+      _noteSnapshotEvent(event, into: snapshot);
+    }
+    _snapshot = snapshot;
+    _snapshotFence = fence;
+  }
+
+  /// The kept snapshot, or null when it must be downloaded again.
+  List<NostrEvent>? _cachedSnapshot() {
+    final snapshot = _snapshot;
+    if (snapshot == null || _unsubscribeLive == null) return null;
+    try {
+      _snapshotFence?.call();
+    } on StateError {
+      _snapshot = null;
+      return null;
+    }
+    return snapshot.values.toList();
+  }
+
+  /// Applies [event] to its coordinate in the kept snapshot, keeping the
+  /// newest version (NIP-01 replaceable order).
+  void _noteSnapshotEvent(NostrEvent event, {Map<String, NostrEvent>? into}) {
+    final snapshot = into ?? _snapshot;
+    // The snapshot holds only this identity's events.
+    if (snapshot == null || event.pubkey != pubkey) return;
+    final key = _coordinate(event);
+    final current = snapshot[key];
+    if (current == null ||
+        event.createdAt > current.createdAt ||
+        (event.createdAt == current.createdAt &&
+            event.id.compareTo(current.id) < 0)) {
+      snapshot[key] = event;
     }
   }
 

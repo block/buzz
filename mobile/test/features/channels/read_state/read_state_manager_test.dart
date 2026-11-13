@@ -409,6 +409,65 @@ void main() {
     manager.dispose(flushPending: false);
   });
 
+  test('publishes reuse the snapshot until the connection changes', () async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final keychain = nostr.Keys.generate();
+    final crypto = ReadStateCrypto.tryCreate(
+      nsec: keychain.nsec,
+      pubkey: keychain.public,
+    )!;
+    final relay = _FakeRelaySession();
+    final signer = _FakeSignedEventRelay();
+    final manager = ReadStateManager(
+      pubkey: keychain.public,
+      relayUrl: _relayUrl,
+      prefs: prefs,
+      crypto: crypto,
+      relaySession: relay,
+      signedEventRelay: signer,
+      remoteEnabled: true,
+      onChanged: () {},
+      now: () => 2000,
+    );
+    await manager.initialize();
+    expect(relay.fetchCount, 1);
+
+    // The snapshot fetched with the live subscription up serves the publish.
+    manager.markContextRead('a', 10);
+    await manager.flush();
+    expect(signer.submitCount, 1);
+    expect(relay.fetchCount, 1);
+
+    // A peer's slot arrives live and joins the kept snapshot.
+    relay.onEvent!(
+      _readStateEvent(
+        pubkey: keychain.public,
+        crypto: crypto,
+        clientId: 'peer',
+        slotId: 'peer-slot',
+        contexts: {'p': 5},
+        createdAt: 1990,
+      ),
+    );
+    manager.markContextRead('b', 20);
+    await manager.flush();
+    expect(signer.submitCount, 2);
+    expect(relay.fetchCount, 1);
+    expect(manager.getEffectiveTimestamp('p'), 5);
+
+    // After a reconnect the kept copy may have missed events: download again.
+    relay.connection++;
+    manager.markContextRead('c', 30);
+    await manager.flush();
+    expect(signer.submitCount, 3);
+    expect(relay.fetchCount, 2);
+    final blob = decodeReadStateBlob(crypto.decrypt(signer.contents.last))!;
+    expect(blob.contexts, {'a': 10, 'b': 20, 'c': 30});
+
+    manager.dispose(flushPending: false);
+  });
+
   test(
     'a skipped publish clears an error a later snapshot recovered',
     () async {
@@ -1207,6 +1266,17 @@ class _FakeRelaySession extends RelaySessionNotifier {
   int liveSubscriptions = 0;
   final List<NostrFilter> fetchFilters = [];
   final List<NostrFilter> subscribeFilters = [];
+  void Function(NostrEvent)? onEvent;
+  // Bumped to simulate a reconnect for [captureConnectionFence].
+  int connection = 0;
+
+  @override
+  void Function() captureConnectionFence() {
+    final captured = connection;
+    return () {
+      if (connection != captured) throw StateError('Relay connection changed');
+    };
+  }
 
   @override
   Future<List<NostrEvent>> fetchReadStateSnapshot({
@@ -1236,6 +1306,7 @@ class _FakeRelaySession extends RelaySessionNotifier {
   }) async {
     subscribeCount++;
     subscribeFilters.add(filter);
+    this.onEvent = onEvent;
     liveSubscriptions++;
     var open = true;
     return () {
