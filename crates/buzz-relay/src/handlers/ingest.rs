@@ -157,12 +157,15 @@ fn validate_custom_emoji_tags(event: &Event) -> Result<(), IngestError> {
     Ok(())
 }
 
-/// Validate a kind:30180 custom emoji entry (see `docs/nips/NIP-CE.md`).
+/// Validate a kind:30180 custom emoji entry (see `docs/nips/NIP-CE.md`) and
+/// return its normalized shortcode and image URL, or no URL for a removal.
 ///
-/// Requires exactly one `d` tag, exactly one `emoji` tag, no `h` tag, a `d` equal
-/// to the normalized shortcode in the `emoji` tag, an `http(s)` image URL, and
-/// `content` equal to [`buzz_sdk::emoji_entry_search_text`] of that shortcode.
-fn validate_emoji_entry(event: &Event) -> Result<(), IngestError> {
+/// Requires exactly one `d` tag holding a normalized shortcode and no `h` tag.
+/// An entry that sets the emoji also has exactly one `emoji` tag naming that
+/// shortcode with an `http(s)` image URL, and `content` equal to
+/// [`buzz_sdk::emoji_entry_search_text`] of the shortcode. A removal has no
+/// `emoji` tag and empty `content`.
+fn validate_emoji_entry(event: &Event) -> Result<(String, Option<String>), IngestError> {
     let reject = |message: &str| IngestError::Rejected(format!("invalid: {message}"));
     let mut d_tags = Vec::new();
     let mut emoji_tags = Vec::new();
@@ -177,18 +180,31 @@ fn validate_emoji_entry(event: &Event) -> Result<(), IngestError> {
     let [d_tag] = d_tags.as_slice() else {
         return Err(reject("emoji entry must have exactly one d tag"));
     };
-    let [emoji_tag] = emoji_tags.as_slice() else {
-        return Err(reject("emoji entry must have exactly one emoji tag"));
+    let Some(d) = d_tag.get(1) else {
+        return Err(reject("emoji entry d tag must hold a shortcode"));
     };
-    let (Some(d), Some(shortcode), Some(url)) = (d_tag.get(1), emoji_tag.get(1), emoji_tag.get(2))
-    else {
+    let normalized =
+        buzz_sdk::normalize_custom_emoji_shortcode(d).map_err(|err| reject(&err.to_string()))?;
+    if *d != normalized {
+        return Err(reject(
+            "emoji entry d tag and emoji shortcode must equal the normalized shortcode",
+        ));
+    }
+    if emoji_tags.is_empty() {
+        if !event.content.is_empty() {
+            return Err(reject("emoji removal must have empty content"));
+        }
+        return Ok((normalized, None));
+    }
+    let [emoji_tag] = emoji_tags.as_slice() else {
+        return Err(reject("emoji entry must have at most one emoji tag"));
+    };
+    let (Some(shortcode), Some(url)) = (emoji_tag.get(1), emoji_tag.get(2)) else {
         return Err(reject(
             "emoji entry emoji tag must be [emoji, shortcode, url]",
         ));
     };
-    let normalized = buzz_sdk::normalize_custom_emoji_shortcode(shortcode)
-        .map_err(|err| reject(&err.to_string()))?;
-    if *d != normalized || *shortcode != normalized {
+    if *shortcode != normalized {
         return Err(reject(
             "emoji entry d tag and emoji shortcode must equal the normalized shortcode",
         ));
@@ -199,7 +215,7 @@ fn validate_emoji_entry(event: &Event) -> Result<(), IngestError> {
             "emoji entry content must equal the shortcode with _ and - replaced by spaces",
         ));
     }
-    Ok(())
+    Ok((normalized, Some(url.clone())))
 }
 
 fn validate_reaction_emoji(event: &Event, emoji: &str) -> Result<(), IngestError> {
@@ -3578,9 +3594,11 @@ async fn ingest_event_inner(
     if kind_u32 == KIND_EMOJI_SET || kind_u32 == KIND_EMOJI_LIST {
         validate_custom_emoji_tags(&event)?;
     }
-    if kind_u32 == KIND_EMOJI_ENTRY {
-        validate_emoji_entry(&event)?;
-    }
+    let emoji_entry = if kind_u32 == KIND_EMOJI_ENTRY {
+        Some(validate_emoji_entry(&event)?)
+    } else {
+        None
+    };
 
     // Resolve the target reference, then use one DB transaction to upsert the
     // reaction row (dedup via ON CONFLICT) with reaction_event_id already set and
@@ -3819,6 +3837,34 @@ async fn ingest_event_inner(
                 }
                 _ => IngestError::Internal(format!("error: channel update failed: {e}")),
             })?
+    } else if let Some((shortcode, url)) = emoji_entry.as_ref() {
+        // One commit stores the entry and applies it to the community's emoji
+        // catalog, which decides who may write the shortcode.
+        match state
+            .db
+            .put_custom_emoji_entry(tenant.community(), &event, shortcode, url.as_deref())
+            .await
+            .map_err(|e| IngestError::Internal(format!("error: {}", e.kind())))?
+        {
+            buzz_db::custom_emoji::CustomEmojiWrite::Applied(stored) => (stored, true),
+            buzz_db::custom_emoji::CustomEmojiWrite::Unchanged(stored) => (stored, false),
+            buzz_db::custom_emoji::CustomEmojiWrite::Taken => {
+                return Err(IngestError::Rejected(format!(
+                    "invalid: emoji :{shortcode}: already exists and belongs to another member"
+                )));
+            }
+            buzz_db::custom_emoji::CustomEmojiWrite::Stale => {
+                return Err(IngestError::Rejected(format!(
+                    "invalid: you already published a newer entry for :{shortcode}:; \
+                     publish again with a later created_at"
+                )));
+            }
+            buzz_db::custom_emoji::CustomEmojiWrite::NothingToRemove => {
+                return Err(IngestError::Rejected(format!(
+                    "invalid: there is no emoji :{shortcode}: to remove"
+                )));
+            }
+        }
     } else if buzz_core::kind::is_replaceable(kind_u32) {
         // NIP-16 replaceable event — atomic replace with stale-write protection.
         // channel_id is None for global kinds (0, 1, 3) due to step 5b above.
@@ -4195,6 +4241,11 @@ mod postgres_tests {
         let max_shortcode = "a".repeat(buzz_sdk::MAX_CUSTOM_EMOJI_SHORTCODE_LEN);
         let max_tags: &[&[&str]] = &[&["d", &max_shortcode], &["emoji", &max_shortcode, URL]];
         assert!(validate_emoji_entry(&emoji_entry_event(max_tags, &max_shortcode)).is_ok());
+        let set = validate_emoji_entry(&emoji_entry_event(ok_tags, "party parrot")).unwrap();
+        assert_eq!(set, ("party_parrot".to_owned(), Some(URL.to_owned())));
+        let removal: &[&[&str]] = &[&["d", "party_parrot"]];
+        let removed = validate_emoji_entry(&emoji_entry_event(removal, "")).unwrap();
+        assert_eq!(removed, ("party_parrot".to_owned(), None));
 
         let cases: Vec<(&str, Vec<&[&str]>, &str, &str)> = vec![
             ("no d", vec![&["emoji", "a", URL]], "", "exactly one d tag"),
@@ -4204,12 +4255,17 @@ mod postgres_tests {
                 "",
                 "exactly one d tag",
             ),
-            ("no emoji", vec![&["d", "a"]], "", "exactly one emoji tag"),
+            (
+                "removal with content",
+                vec![&["d", "a"]],
+                "a",
+                "removal must have empty content",
+            ),
             (
                 "two emoji",
                 vec![&["d", "a"], &["emoji", "a", URL], &["emoji", "b", URL]],
                 "",
-                "exactly one emoji tag",
+                "at most one emoji tag",
             ),
             (
                 "h tag",
@@ -4461,6 +4517,250 @@ mod postgres_tests {
         .await
         .expect("surviving id");
         assert_eq!(hex::encode(surviving), second.event_id);
+    }
+
+    async fn publish_emoji_removal(
+        state: &Arc<crate::state::AppState>,
+        tenant: &TenantContext,
+        keys: &nostr::Keys,
+        shortcode: &str,
+        created_at: u64,
+    ) -> Result<IngestResult, IngestError> {
+        let event = buzz_sdk::build_emoji_entry_removal(shortcode)
+            .expect("build emoji removal")
+            .custom_created_at(nostr::Timestamp::from(created_at))
+            .sign_with_keys(keys)
+            .expect("sign emoji removal");
+        let auth = IngestAuth::Http {
+            pubkey: keys.public_key(),
+            scopes: vec![Scope::UsersWrite],
+            auth_method: HttpAuthMethod::Nip98,
+        };
+        ingest_event(state, tenant, event, auth).await
+    }
+
+    /// The catalog a community's kind:30180 entries build, through
+    /// `ingest_event`: a shortcode belongs to its first publisher, an admin
+    /// may replace or remove it, a removal frees it, kind 5 cannot remove it,
+    /// and every accepted write gets the next change number.
+    /// Mutations: drop the ownership check, the role check, the retire of the
+    /// previous holder's event, the catalog upsert, or either kind 5 refusal → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn emoji_entries_build_one_catalog_per_community() {
+        let state = ingest_state().await;
+        let (owner, member, admin) = (
+            nostr::Keys::generate(),
+            nostr::Keys::generate(),
+            nostr::Keys::generate(),
+        );
+        let tenant = emoji_tenant(&state, &[&owner, &member, &admin]).await;
+        let other_tenant = emoji_tenant(&state, &[&member]).await;
+        let community = tenant.community();
+        let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
+            .await
+            .expect("connect test Postgres");
+        sqlx::query(
+            "INSERT INTO relay_members (community_id, pubkey, role) VALUES ($1, $2, 'admin')",
+        )
+        .bind(community.as_uuid())
+        .bind(admin.public_key().to_hex())
+        .execute(&pool)
+        .await
+        .expect("make admin");
+        let now = chrono::Utc::now().timestamp() as u64;
+        let (url_a, url_b, url_c) = (
+            "https://example.com/a.png",
+            "https://example.com/b.png",
+            "https://example.com/c.png",
+        );
+        let rejected = |result: Result<IngestResult, IngestError>, needle: &str| match result {
+            Err(IngestError::Rejected(msg)) => assert!(msg.contains(needle), "{msg}"),
+            Err(other) => panic!("expected a rejection naming {needle:?}, got {other:?}"),
+            Ok(accepted) => panic!(
+                "expected a rejection naming {needle:?}, got {}",
+                accepted.message
+            ),
+        };
+        // (shortcode, change, url, owner) for every row, in change order.
+        let catalog = |since: i64| {
+            let state = state.clone();
+            async move {
+                state
+                    .db
+                    .custom_emoji_changes(community, since, 100)
+                    .await
+                    .expect("read catalog")
+                    .0
+                    .into_iter()
+                    .map(|row| (row.shortcode, row.change, row.url, row.pubkey))
+                    .collect::<Vec<_>>()
+            }
+        };
+        let live_events = |shortcode: &'static str| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query_scalar::<_, Vec<u8>>(
+                    "SELECT pubkey FROM events WHERE community_id = $1 AND kind = $2 \
+                     AND d_tag = $3 AND deleted_at IS NULL",
+                )
+                .bind(community.as_uuid())
+                .bind(KIND_EMOJI_ENTRY as i32)
+                .bind(shortcode)
+                .fetch_all(&pool)
+                .await
+                .expect("live entry events")
+            }
+        };
+        let (owner_pk, member_pk, admin_pk) = (
+            owner.public_key().to_bytes(),
+            member.public_key().to_bytes(),
+            admin.public_key().to_bytes(),
+        );
+
+        // The first publisher owns the shortcode; another member is refused.
+        publish_built_emoji_entry(&state, &tenant, &owner, "parrot", url_a, now - 50)
+            .await
+            .expect("owner adds");
+        publish_built_emoji_entry(&state, &tenant, &member, "wave", url_a, now - 49)
+            .await
+            .expect("member adds another name");
+        rejected(
+            publish_built_emoji_entry(&state, &tenant, &member, "parrot", url_b, now - 48).await,
+            "belongs to another member",
+        );
+        rejected(
+            publish_emoji_removal(&state, &tenant, &member, "parrot", now - 47).await,
+            "belongs to another member",
+        );
+        // The same name in another community is unrelated.
+        publish_built_emoji_entry(&state, &other_tenant, &member, "parrot", url_b, now - 46)
+            .await
+            .expect("same name in another community");
+        assert_eq!(
+            catalog(0).await,
+            vec![
+                ("parrot".to_owned(), 1, Some(url_a.to_owned()), owner_pk),
+                ("wave".to_owned(), 2, Some(url_a.to_owned()), member_pk),
+            ],
+            "refused writes change nothing"
+        );
+
+        // The owner replaces their own image: one row, a later change.
+        publish_built_emoji_entry(&state, &tenant, &owner, "parrot", url_b, now - 40)
+            .await
+            .expect("owner replaces");
+        assert_eq!(
+            catalog(2).await,
+            vec![("parrot".to_owned(), 3, Some(url_b.to_owned()), owner_pk)],
+            "a reader at change 2 gets only the replacement"
+        );
+
+        // An admin takes the shortcode over; the previous holder's event is retired.
+        publish_built_emoji_entry(&state, &tenant, &admin, "parrot", url_c, now - 30)
+            .await
+            .expect("admin replaces");
+        assert_eq!(live_events("parrot").await, vec![admin_pk.to_vec()]);
+        assert_eq!(
+            catalog(3).await,
+            vec![("parrot".to_owned(), 4, Some(url_c.to_owned()), admin_pk)]
+        );
+
+        // Kind 5 cannot remove an entry, by coordinate or by event id.
+        let entry_id: Vec<u8> = sqlx::query_scalar(
+            "SELECT id FROM events WHERE community_id = $1 AND kind = $2 \
+             AND d_tag = 'wave' AND deleted_at IS NULL",
+        )
+        .bind(community.as_uuid())
+        .bind(KIND_EMOJI_ENTRY as i32)
+        .fetch_one(&pool)
+        .await
+        .expect("wave entry id");
+        let coordinate = format!("{KIND_EMOJI_ENTRY}:{}:wave", member.public_key().to_hex());
+        for target in [
+            vec!["a", coordinate.as_str()],
+            vec!["e", &hex::encode(&entry_id)],
+        ] {
+            let deletion = EventBuilder::new(Kind::Custom(KIND_DELETION as u16), "")
+                .tags([nostr::Tag::parse(target.iter().copied()).expect("target tag")])
+                .sign_with_keys(&member)
+                .expect("sign deletion");
+            let auth = IngestAuth::Http {
+                pubkey: member.public_key(),
+                scopes: vec![Scope::UsersWrite, Scope::MessagesWrite],
+                auth_method: HttpAuthMethod::Nip98,
+            };
+            rejected(
+                ingest_event(&state, &tenant, deletion, auth).await,
+                "kind 30180 removal",
+            );
+        }
+        assert_eq!(live_events("wave").await, vec![member_pk.to_vec()]);
+
+        // A removal keeps the row without a url; removing it again is refused.
+        publish_emoji_removal(&state, &tenant, &member, "wave", now - 20)
+            .await
+            .expect("member removes own");
+        rejected(
+            publish_emoji_removal(&state, &tenant, &member, "wave", now - 19).await,
+            "no emoji :wave: to remove",
+        );
+        rejected(
+            publish_emoji_removal(&state, &tenant, &member, "never", now - 19).await,
+            "no emoji :never: to remove",
+        );
+        assert_eq!(
+            catalog(4).await,
+            vec![("wave".to_owned(), 5, None, member_pk)],
+            "a reader that holds the emoji learns it was removed"
+        );
+        assert_eq!(
+            catalog(0).await,
+            vec![("parrot".to_owned(), 4, Some(url_c.to_owned()), admin_pk)],
+            "a first read leaves removed shortcodes out"
+        );
+
+        // A removed shortcode is free: anyone may claim it.
+        publish_built_emoji_entry(&state, &tenant, &owner, "wave", url_b, now - 10)
+            .await
+            .expect("another member claims the freed name");
+        assert_eq!(live_events("wave").await, vec![owner_pk.to_vec()]);
+        assert_eq!(
+            catalog(5).await,
+            vec![("wave".to_owned(), 6, Some(url_b.to_owned()), owner_pk)]
+        );
+
+        // An older event from the owner is refused and changes nothing.
+        rejected(
+            publish_built_emoji_entry(&state, &tenant, &owner, "wave", url_a, now - 15).await,
+            "already published a newer entry",
+        );
+        assert!(catalog(6).await.is_empty());
+
+        // Lookup returns live rows only, and pages report what remains.
+        let found = state
+            .db
+            .custom_emoji_by_shortcode(
+                community,
+                &["parrot".to_owned(), "wave".to_owned(), "never".to_owned()],
+            )
+            .await
+            .expect("lookup");
+        let mut names: Vec<_> = found.iter().map(|row| row.shortcode.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(names, ["parrot", "wave"]);
+        let (page, more) = state
+            .db
+            .custom_emoji_changes(community, 0, 1)
+            .await
+            .expect("first page");
+        assert_eq!((page.len(), page[0].change, more), (1, 4, true));
+        let (page, more) = state
+            .db
+            .custom_emoji_changes(community, 4, 1)
+            .await
+            .expect("last page");
+        assert_eq!((page.len(), page[0].change, more), (1, 6, false));
     }
 
     /// Prefix search over kind:30180 content finds "party parrot" for "parr", and
