@@ -17,6 +17,10 @@ export function isBroadcastReply(tags: string[][]): boolean {
   return tags.some((tag) => tag[0] === "broadcast" && tag[1] === "1");
 }
 
+export function buildBroadcastTag(): string[] {
+  return ["broadcast", "1"];
+}
+
 export function isThreadReply(tags: string[][]): boolean {
   const ref = getThreadReference(tags);
   return ref.parentId !== null && !isBroadcastReply(tags);

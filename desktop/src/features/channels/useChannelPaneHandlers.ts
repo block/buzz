@@ -351,6 +351,7 @@ export function useChannelPaneHandlers({
       threadContext?: {
         parentEventId: string | null;
         threadHeadId: string | null;
+        broadcast?: boolean;
       } | null,
       forceRest?: boolean,
     ) => {
@@ -386,6 +387,7 @@ export function useChannelPaneHandlers({
         mediaTags,
         channelId: channelId ?? undefined,
         forceRest,
+        broadcast: threadContext?.broadcast === true,
       });
 
       // Only update thread UI state if the user is still viewing the same
