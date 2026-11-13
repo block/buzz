@@ -1102,6 +1102,9 @@ impl ChannelUpdate {
 ///
 /// At least one field must be provided; returns `InvalidData` otherwise.
 /// Returns the updated `ChannelRecord` on success.
+///
+/// It has no sender, so it does not apply the private-to-open rule that
+/// kind:9002 enforces (`apply_channel_metadata_event`); user edits go there.
 pub async fn update_channel(
     pool: &PgPool,
     community_id: CommunityId,
@@ -1636,6 +1639,34 @@ pub struct ChannelMetadataWrite {
     pub previous_visibility: String,
 }
 
+/// The refusal of a private-to-open change on a channel that holds, or once
+/// held, someone besides the sender and the sender's own agents.
+const PRIVATE_TO_OPEN_REFUSAL: &str =
+    "a private channel with other members cannot be made open; create a new open channel instead";
+
+/// Whether the locked channel has a member, current or removed, that is neither
+/// `sender` nor an agent whose NIP-OA owner is `sender`. Removed members count:
+/// their posts stay in the history that opening would publish.
+async fn has_member_besides_sender_and_agents(
+    w: &mut ChannelSettingsWriter<'_>,
+    sender: &[u8],
+) -> Result<bool> {
+    let channel_id = w.channel_id;
+    let tx = w.tx();
+    let community_id = tx.community();
+    Ok(sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM channel_members m \
+         LEFT JOIN users u ON u.community_id = m.community_id AND u.pubkey = m.pubkey \
+         WHERE m.community_id = $1 AND m.channel_id = $2 \
+         AND m.pubkey <> $3 AND u.agent_owner_pubkey IS DISTINCT FROM $3)",
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .bind(sender)
+    .fetch_one(tx.conn())
+    .await?)
+}
+
 pub(crate) async fn apply_channel_metadata_event(
     pool: &PgPool,
     push_enqueue: Option<crate::runtime::push_enqueue::PushEnqueue>,
@@ -1692,6 +1723,19 @@ pub(crate) async fn apply_channel_metadata_event(
         (false, Some(false)) => {
             return Err(DbError::AccessDenied("channel is not archived".to_string()));
         }
+    }
+    // Opening a private channel publishes its existing history to new
+    // readers. So only a channel that has never held anyone but the sender
+    // and the sender's own agents (NIP-OA) may be opened, for example a Solo
+    // chat; removed members count, because their posts stay. A visibility
+    // change holds the membership lock
+    // (`lock_channel_for_settings_write`), so the member set read here stays
+    // the same until commit.
+    if edit.columns.visibility.as_deref() == Some(ChannelVisibility::Open.as_str())
+        && locked.previous_visibility() == ChannelVisibility::Private.as_str()
+        && has_member_besides_sender_and_agents(&mut locked, &event.pubkey.to_bytes()).await?
+    {
+        return Err(DbError::AccessDenied(PRIVATE_TO_OPEN_REFUSAL.to_string()));
     }
     // `auto_join` only makes sense where a kind:9021 self-join would work:
     // an open, unarchived channel. Decide it here, under the row lock and
@@ -2167,7 +2211,8 @@ impl Db {
         .await
     }
 
-    /// Updates a channel's name and/or description.
+    /// Applies every field set in `updates`, visibility included. It does
+    /// not apply the private-to-open rule; user edits go through kind:9002.
     #[datastore_span(name = "update_channel", system = "postgresql")]
     pub async fn update_channel(
         &self,
