@@ -90,7 +90,8 @@ class CommunitySwitcherPage extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final communitiesAsync = ref.watch(communityListProvider);
-    final knownAsync = ref.watch(knownCommunitiesProvider).unwrapPrevious();
+    final known = ref.watch(knownCommunitiesProvider);
+    final knownAsync = known.isReloading ? known.unwrapPrevious() : known;
     final activeId = ref.watch(activeCommunityProvider).value?.id;
     final isEditing = useState(false);
     final openingAccountCommunity = useState(false);
@@ -402,14 +403,6 @@ class CommunitySwitcherPage extends HookConsumerWidget {
                   ),
                 ),
               const AccountCommunitySyncStatus(),
-              if (knownAsync.isLoading)
-                const Padding(
-                  padding: EdgeInsets.only(bottom: Grid.sm),
-                  child: BuzzLoadingIndicator(
-                    size: 18,
-                    semanticLabel: 'Loading account communities',
-                  ),
-                ),
               if (knownAsync.hasError)
                 Column(
                   children: [

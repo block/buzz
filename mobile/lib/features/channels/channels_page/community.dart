@@ -87,7 +87,7 @@ Future<void> _confirmRemoveCommunity(
   final account = ref.read(builderlabAccountProvider);
   final sync = ref.read(knownCommunitySyncProvider);
   try {
-    final subject = sync == null ? null : await account.retainedSubject();
+    final subject = sync == null ? null : await account.localEditSubject();
     if (!context.mounted) return;
     final retainsDestination = (ref.read(communityListProvider).value ?? [])
         .any(
@@ -108,7 +108,7 @@ Future<void> _confirmRemoveCommunity(
     );
     if (!confirmed ||
         !context.mounted ||
-        (sync != null && await account.retainedSubject() != subject)) {
+        (sync != null && await account.localEditSubject() != subject)) {
       return;
     }
     await ref
