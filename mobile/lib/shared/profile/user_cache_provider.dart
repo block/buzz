@@ -44,9 +44,6 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
   /// so a restored profile is revalidated with `since` instead of re-sent.
   final Map<String, int> _checkedAt = {};
 
-  /// The check times in the stored snapshot, as of the last write or restore.
-  final Map<String, int> _storedCheckedAt = {};
-
   /// Lookups whose batch query is on the wire.
   final Set<String> _inFlight = {};
   void Function()? _snapshotWriter;
@@ -60,7 +57,6 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
     _profileEventOrders.clear();
     _unrevalidated.clear();
     _checkedAt.clear();
-    _storedCheckedAt.clear();
     _inFlight.clear();
     ref.onDispose(() {
       _generation++;
@@ -85,7 +81,6 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
     if (storage == null || pubkey == null) return {};
     final relay = config.baseUrl;
     final token = storage.capture(pubkey, relay);
-    final generation = _generation;
     _snapshotWriter = () {
       final profiles = [
         for (final MapEntry(:key, value: order) in _profileEventOrders.entries)
@@ -96,20 +91,11 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
               eventId: order.eventId,
             ),
       ];
-      final checkedAt = Map<String, int>.of(_checkedAt);
       storage
-          .write(token, profiles, checkedAt: checkedAt)
+          .write(token, profiles, checkedAt: _checkedAt)
           .then(
             (saved) {
-              if (!saved) {
-                debugPrint('[UserCache] snapshot was not saved');
-                return;
-              }
-              // A rebuilt scope restores its own stored check times.
-              if (!_isCurrent(generation)) return;
-              _storedCheckedAt
-                ..clear()
-                ..addAll(checkedAt);
+              if (!saved) debugPrint('[UserCache] snapshot was not saved');
             },
             onError: (Object error, StackTrace stack) {
               debugPrint('[UserCache] snapshot write failed: $error');
@@ -125,9 +111,7 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
         eventId: parsed.eventId,
       );
       _unrevalidated.add(key);
-      if (parsed.checkedAt > 0) {
-        _checkedAt[key] = _storedCheckedAt[key] = parsed.checkedAt;
-      }
+      if (parsed.checkedAt > 0) _checkedAt[key] = parsed.checkedAt;
     }
     return _latest = restored;
   }
@@ -369,24 +353,20 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
 
   void _confirmed(Iterable<String> pubkeys, int checkedAt) {
     _unrevalidated.removeAll(pubkeys);
-    var stale = false;
+    var unrecorded = false;
     for (final pubkey in pubkeys) {
-      final stored = _storedCheckedAt[pubkey];
-      if (state.containsKey(pubkey) &&
-          (stored == null || checkedAt - stored > _checkedAtRefreshSeconds)) {
-        stale = true;
+      if (state.containsKey(pubkey) && !_checkedAt.containsKey(pubkey)) {
+        unrecorded = true;
       }
       _checkedAt[pubkey] = checkedAt;
     }
-    // An older stored check time only widens the next `since` window, so
-    // fresh check times ride along with the next state-driven write. Write
-    // for them alone only when a cached profile's stored check time is
-    // missing or a day old, so an unchanged launch doesn't rewrite the
-    // snapshot per lookup.
-    if (stale) _scheduleSnapshotWrite();
+    // An older stored check time only widens the next `since` window, and
+    // every profile change writes the whole map, so fresh check times ride
+    // along with that write. Write for them alone only when a cached profile
+    // had none (stored before check times existed), so an unchanged launch
+    // doesn't rewrite the snapshot per lookup.
+    if (unrecorded) _scheduleSnapshotWrite();
   }
-
-  static const _checkedAtRefreshSeconds = 24 * 60 * 60;
 
   static int _nowSeconds() => DateTime.now().millisecondsSinceEpoch ~/ 1000;
 

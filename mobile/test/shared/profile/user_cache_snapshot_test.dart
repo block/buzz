@@ -168,30 +168,34 @@ void main() {
       everyElement(isTrue),
     );
 
-    // A launch that only confirms recently checked profiles leaves the
-    // snapshot untouched rather than rewriting it per lookup.
-    final hourAgo = DateTime.now().millisecondsSinceEpoch ~/ 1000 - 3600;
-    final restored = storage.read(pubkey, _relay);
-    await storage.write(
-      storage.capture(pubkey, _relay),
-      [
-        for (final p in restored)
-          (profile: p.profile, createdAt: p.createdAt, eventId: p.eventId),
-      ],
-      checkedAt: {for (final p in restored) p.profile.pubkey: hourAgo},
-    );
+    // A launch that only confirms profiles with stored check times leaves
+    // the snapshot untouched rather than rewriting it per lookup, however
+    // old those check times are.
     final key = ProfileSnapshotStorage.key(pubkey, _relay);
-    final stored = prefs.getString(key);
-    final third = _ProfileSession([]);
-    final launch3 = cacheScope(third);
-    final cache3 = launch3.read(userCacheProvider.notifier);
-    expect(await cache3.preload(const [_alice, bob]), isTrue);
-    // Awaiting an uncached profile drains the revalidation before it.
-    expect(await cache3.preload(const [carol]), isTrue);
-    expect(third.filters.where((f) => f.since != null), hasLength(1));
-    launch3.dispose();
-    await pumpEventQueue();
-    expect(prefs.getString(key), stored);
+    for (final age in const [Duration(hours: 1), Duration(days: 2)]) {
+      final checked =
+          DateTime.now().subtract(age).millisecondsSinceEpoch ~/ 1000;
+      final restored = storage.read(pubkey, _relay);
+      await storage.write(
+        storage.capture(pubkey, _relay),
+        [
+          for (final p in restored)
+            (profile: p.profile, createdAt: p.createdAt, eventId: p.eventId),
+        ],
+        checkedAt: {for (final p in restored) p.profile.pubkey: checked},
+      );
+      final stored = prefs.getString(key);
+      final session = _ProfileSession([]);
+      final launch = cacheScope(session);
+      final cache = launch.read(userCacheProvider.notifier);
+      expect(await cache.preload(const [_alice, bob]), isTrue);
+      // Awaiting an uncached profile drains the revalidation before it.
+      expect(await cache.preload(const [carol]), isTrue);
+      expect(session.filters.where((f) => f.since != null), hasLength(1));
+      launch.dispose();
+      await pumpEventQueue();
+      expect(prefs.getString(key), stored, reason: 'checked $age ago');
+    }
   });
 
   test('snapshot scopes are per identity and relay, and bounded', () async {
