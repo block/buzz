@@ -132,6 +132,54 @@ void main() {
       expect(relay.since, hasLength(5));
     },
   );
+
+  test('a capped full read keeps every cached set', () async {
+    var now = 1000000;
+    const limit = CustomEmojiPaletteNotifier.readLimit;
+    final relay = _EmojiRelay();
+    for (var i = 0; i < limit; i++) {
+      relay.sets['u$i'] = _set('u$i', 1000 + i, {'e$i': 'https://e/$i.png'});
+    }
+    final container = ProviderContainer(
+      overrides: [
+        relaySessionProvider.overrideWith(() => relay),
+        relayClientProvider.overrideWithValue(
+          RelayClient(baseUrl: 'http://localhost:3000'),
+        ),
+        customEmojiPaletteProvider.overrideWith(
+          () => CustomEmojiPaletteNotifier(now: () => now),
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+    container.listen(customEmojiPaletteProvider, (_, _) {});
+
+    Future<List<CustomEmoji>> read() =>
+        container.read(customEmojiPaletteProvider.future);
+    Future<void> reconnectAfter(int seconds) async {
+      now += seconds;
+      relay.setStatus(SessionStatus.disconnected);
+      await read();
+      relay.setStatus(SessionStatus.connected);
+      await read();
+    }
+
+    expect(await read(), hasLength(limit));
+
+    // One more member's set arrives incrementally, so the relay now holds
+    // more live sets than a read returns.
+    relay.sets['new'] = _set('new', now, {'new': 'https://e/new.png'});
+    await reconnectAfter(60);
+    expect(await read(), hasLength(limit + 1));
+
+    // The day's full read is capped and leaves the oldest live set out; the
+    // palette keeps it, and the next read waits a day rather than going full.
+    await reconnectAfter(CustomEmojiPaletteNotifier.fullReadEverySeconds);
+    expect(relay.since.last, isNull);
+    expect(await read(), hasLength(limit + 1));
+    await reconnectAfter(60);
+    expect(relay.since.last, isNotNull);
+  });
 }
 
 NostrEvent _set(
@@ -168,9 +216,10 @@ class _EmojiRelay extends RelaySessionNotifier {
   }) async {
     expect(filter.kinds, [kindEmojiSet]);
     since.add(filter.since);
-    return [
+    final matching = [
       for (final event in sets.values)
         if (event.createdAt >= (filter.since ?? 0)) event,
-    ];
+    ]..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+    return matching.take(filter.limit).toList();
   }
 }

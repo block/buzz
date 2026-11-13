@@ -21,6 +21,10 @@ class CustomEmojiPaletteNotifier extends AsyncNotifier<List<CustomEmoji>> {
   /// How stale the last complete read may get before a reconnect repeats it.
   static const fullReadEverySeconds = 24 * 60 * 60;
 
+  /// One 30030 per member; the relay keeps only the latest per
+  /// (pubkey, d_tag), so this bounds member count, not history.
+  static const readLimit = 500;
+
   final int Function() _now;
   RelayClient? _client;
 
@@ -74,13 +78,15 @@ class CustomEmojiPaletteNotifier extends AsyncNotifier<List<CustomEmoji>> {
           // Another device can store a set backdated up to this far, so a
           // repeated read reaches back past the previous one.
           since: full ? null : previousRead - relayCrossDeviceSkewSeconds,
-          // One 30030 per member; the relay keeps only the latest per
-          // (pubkey, d_tag), so this bounds member count, not history.
-          limit: 500,
+          limit: readLimit,
         ),
       );
       if (identical(client, _client)) {
-        final changed = full ? _replaceAll(events) : _merge(events);
+        // A capped full read may have left live sets out, so only a complete
+        // one can show that a set is gone.
+        final changed = full && events.length < readLimit
+            ? _replaceAll(events)
+            : _merge(events);
         if (changed) _palette = unionCustomEmoji(_sets.values);
         _readAt = sentAt;
         if (full) _fullReadAt = sentAt;
