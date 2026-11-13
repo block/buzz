@@ -628,6 +628,13 @@ void main() {
         expect(channels.read().requireValue.single.name, 'general');
         expect(membershipReads(), 1);
 
+        // Control Center, Notification Center or a system alert passes
+        // through inactive without leaving the foreground: not a resume.
+        lifecycle(AppLifecycleState.inactive);
+        lifecycle(AppLifecycleState.resumed);
+        settle();
+        expect(membershipReads(), 1);
+
         // Backgrounded while the session is still connected through its
         // grace period: nothing is read until the app returns.
         async.elapse(const Duration(seconds: 58));
