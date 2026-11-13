@@ -1043,6 +1043,7 @@ class ComposeBar extends HookConsumerWidget {
               ? () => _runComposerAction(() => insertMention(topMention))
               : null,
           send: () async {
+            if (attachmentSurface.value != _AttachmentSurface.closed) return;
             if (canSend()) _runComposerAction(() => unawaited(send()));
           },
         );

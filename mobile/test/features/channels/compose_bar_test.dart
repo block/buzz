@@ -2356,28 +2356,41 @@ void main() {
         await tester.pump(mentionSearchDebounce * 2);
       });
 
-      testWidgets('Tab with the attachment menu open leaves the draft alone', (
-        tester,
-      ) async {
-        final focus = FocusNode();
-        addTearDown(focus.dispose);
-        final controller = await pumpComposer(tester, focusNode: focus);
-        await tester.enterText(find.byType(TextField), 'hi @a');
-        await tester.pumpAndSettle();
-        expect(popover(), findsOneWidget);
+      testWidgets(
+        'attachment menu blocks keyboard sending and suggestion acceptance',
+        (tester) async {
+          final previousPlatform = debugDefaultTargetPlatformOverride;
+          debugDefaultTargetPlatformOverride = TargetPlatform.android;
+          try {
+            final focus = FocusNode();
+            addTearDown(focus.dispose);
+            final controller = await pumpComposer(tester, focusNode: focus);
+            await tester.enterText(find.byType(TextField), 'hi @a');
+            await tester.pumpAndSettle();
+            expect(popover(), findsOneWidget);
 
-        await _openAttachmentMenu(tester);
-        expect(popover(), findsNothing);
-        expect(find.text('Files'), findsOneWidget);
-        expect(focus.hasFocus, isTrue);
+            await _openAttachmentMenu(tester);
+            expect(popover(), findsNothing);
+            expect(find.text('Files'), findsOneWidget);
+            expect(focus.hasFocus, isTrue);
 
-        await tester.sendKeyEvent(LogicalKeyboardKey.tab);
-        await tester.pump();
-
-        expect(controller.text, 'hi @a');
-        await tester.pumpWidget(const SizedBox.shrink());
-        await tester.pumpAndSettle();
-      });
+            for (final key in [
+              LogicalKeyboardKey.enter,
+              LogicalKeyboardKey.numpadEnter,
+              LogicalKeyboardKey.tab,
+            ]) {
+              await tester.sendKeyEvent(key);
+              await tester.pump();
+              expect(controller.text, 'hi @a', reason: '$key');
+              expect(sent, isEmpty, reason: '$key');
+            }
+            await tester.pumpWidget(const SizedBox.shrink());
+            await tester.pumpAndSettle();
+          } finally {
+            debugDefaultTargetPlatformOverride = previousPlatform;
+          }
+        },
+      );
 
       for (final modifier in [
         LogicalKeyboardKey.controlLeft,
