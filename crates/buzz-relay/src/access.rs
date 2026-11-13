@@ -2304,7 +2304,11 @@ pub(crate) mod tests {
             axum::http::StatusCode::OK,
             axum::http::StatusCode::NOT_FOUND,
         ] {
-            for path in ["/assets/app.js", "/invite/INVITECODE123"] {
+            for path in [
+                "/assets/app.js",
+                "/invite/INVITECODE123",
+                "/open/channel/4f1c2a9e-0000-4000-8000-000000000001",
+            ] {
                 let lines = layer_lines(state.clone(), status, get_req(path)).await;
                 assert!(lines.is_empty(), "{path} {status}: {lines:?}");
             }

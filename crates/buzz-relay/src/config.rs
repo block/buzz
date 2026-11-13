@@ -410,11 +410,12 @@ pub struct Config {
     pub admin: Option<AdminConfig>,
 
     /// Optional path to the web UI `dist/` directory.
-    /// When set, the relay serves the invite landing page and its static assets.
+    /// When set, the relay serves the invite landing page, the `/open/` link
+    /// page and their static assets.
     /// When unset, no static file serving happens (relay behaves as before).
     pub web_dir: Option<std::path::PathBuf>,
     /// Whether the configured web bundle serves Git browser routes in addition
-    /// to the public invite landing page. Defaults to false.
+    /// to the public invite and `/open/` link pages. Defaults to false.
     pub serve_git_web_gui: bool,
 
     /// NIP-FI federated-identity enforcement configuration.
