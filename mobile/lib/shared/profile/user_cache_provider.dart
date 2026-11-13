@@ -44,6 +44,9 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
   /// so a restored profile is revalidated with `since` instead of re-sent.
   final Map<String, int> _checkedAt = {};
 
+  /// The check times in the stored snapshot, as of the last write or restore.
+  final Map<String, int> _storedCheckedAt = {};
+
   /// Lookups whose batch query is on the wire.
   final Set<String> _inFlight = {};
   void Function()? _snapshotWriter;
@@ -57,6 +60,7 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
     _profileEventOrders.clear();
     _unrevalidated.clear();
     _checkedAt.clear();
+    _storedCheckedAt.clear();
     _inFlight.clear();
     ref.onDispose(() {
       _generation++;
@@ -91,6 +95,9 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
               eventId: order.eventId,
             ),
       ];
+      _storedCheckedAt
+        ..clear()
+        ..addAll(_checkedAt);
       storage
           .write(token, profiles, checkedAt: _checkedAt)
           .then(
@@ -111,7 +118,9 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
         eventId: parsed.eventId,
       );
       _unrevalidated.add(key);
-      if (parsed.checkedAt > 0) _checkedAt[key] = parsed.checkedAt;
+      if (parsed.checkedAt > 0) {
+        _checkedAt[key] = _storedCheckedAt[key] = parsed.checkedAt;
+      }
     }
     return _latest = restored;
   }
@@ -353,12 +362,24 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
 
   void _confirmed(Iterable<String> pubkeys, int checkedAt) {
     _unrevalidated.removeAll(pubkeys);
+    var stale = false;
     for (final pubkey in pubkeys) {
+      final stored = _storedCheckedAt[pubkey];
+      if (state.containsKey(pubkey) &&
+          (stored == null || checkedAt - stored > _checkedAtRefreshSeconds)) {
+        stale = true;
+      }
       _checkedAt[pubkey] = checkedAt;
     }
-    // Keep the stored check times current even when nothing changed.
-    _scheduleSnapshotWrite();
+    // An older stored check time only widens the next `since` window, so
+    // fresh check times ride along with the next state-driven write. Write
+    // for them alone only when a cached profile's stored check time is
+    // missing or a day old, so an unchanged launch doesn't rewrite the
+    // snapshot per lookup.
+    if (stale) _scheduleSnapshotWrite();
   }
+
+  static const _checkedAtRefreshSeconds = 24 * 60 * 60;
 
   static int _nowSeconds() => DateTime.now().millisecondsSinceEpoch ~/ 1000;
 
