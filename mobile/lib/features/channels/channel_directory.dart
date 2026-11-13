@@ -459,6 +459,16 @@ class _ChannelRefreshCoordinator {
   /// wire cannot be written into the new scope.
   void retireInFlight() => _generation++;
 
+  /// Retires every in-flight request, directory-only loads included, for a
+  /// relay or identity change. A directory-only load survives ordinary list
+  /// refreshes, but not a scope change: its loading status must not look
+  /// owned when the user returns to the old scope.
+  void retireScope() {
+    _generation++;
+    _directoryGeneration++;
+    _directoryOnlyGeneration = null;
+  }
+
   /// Starts a fenced refresh without issuing the directory query.
   ///
   /// Used by callers that must carry the scope across later awaits even when

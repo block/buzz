@@ -1963,6 +1963,107 @@ void main() {
         isNot(communityB),
       );
     });
+
+    test(
+      'returning to a community during a discarded load loads again',
+      () async {
+        final session = _FakeRelaySession(
+          memberships: [_membership(_channelA, myPk)],
+          metadata: [
+            _meta(id: _channelA, name: 'general'),
+            _meta(id: _channelB, name: 'community-a-open'),
+          ],
+        );
+        final container = await loaded(session);
+        final communityA = container.read(relayConfigProvider).baseUrl;
+
+        session.pauseNextDirectoryQuery();
+        final directory = container
+            .read(channelsProvider.notifier)
+            .ensureDirectoryLoaded(maxAge: Duration.zero);
+        await session.nextDirectoryQueryStarted;
+
+        container
+            .read(relayConfigProvider.notifier)
+            .update(baseUrl: 'https://community-b.example');
+        await container.read(channelsProvider.future);
+        container
+            .read(relayConfigProvider.notifier)
+            .update(baseUrl: communityA);
+        await container.read(channelsProvider.future);
+        await _settle();
+        final directoryQueries = session.directoryQueryFilters.length;
+        await container
+            .read(channelsProvider.notifier)
+            .ensureDirectoryLoaded(maxAge: Duration.zero);
+
+        expect(
+          session.directoryQueryFilters.length,
+          greaterThan(directoryQueries),
+        );
+        expect(
+          container.read(channelDirectoryLoadStatusProvider).status,
+          ChannelDirectoryLoadStatus.loaded,
+        );
+
+        // The old request ending later leaves the newer load's status alone.
+        session.resumePausedDirectoryQuery();
+        await directory;
+        await _settle();
+        expect(
+          container.read(channelDirectoryLoadStatusProvider).status,
+          ChannelDirectoryLoadStatus.loaded,
+        );
+      },
+    );
+
+    test(
+      'returning to a community after a discarded load loads again',
+      () async {
+        final session = _FakeRelaySession(
+          memberships: [_membership(_channelA, myPk)],
+          metadata: [
+            _meta(id: _channelA, name: 'general'),
+            _meta(id: _channelB, name: 'community-a-open'),
+          ],
+        );
+        final container = await loaded(session);
+        final communityA = container.read(relayConfigProvider).baseUrl;
+
+        session.pauseNextDirectoryQuery();
+        final directory = container
+            .read(channelsProvider.notifier)
+            .ensureDirectoryLoaded(maxAge: Duration.zero);
+        await session.nextDirectoryQueryStarted;
+
+        container
+            .read(relayConfigProvider.notifier)
+            .update(baseUrl: 'https://community-b.example');
+        await container.read(channelsProvider.future);
+        session.resumePausedDirectoryQuery();
+        await directory;
+        await _settle();
+
+        container
+            .read(relayConfigProvider.notifier)
+            .update(baseUrl: communityA);
+        await container.read(channelsProvider.future);
+        await _settle();
+        final directoryQueries = session.directoryQueryFilters.length;
+        await container
+            .read(channelsProvider.notifier)
+            .ensureDirectoryLoaded(maxAge: Duration.zero);
+
+        expect(
+          session.directoryQueryFilters.length,
+          greaterThan(directoryQueries),
+        );
+        expect(
+          container.read(channelDirectoryLoadStatusProvider).status,
+          ChannelDirectoryLoadStatus.loaded,
+        );
+      },
+    );
   });
 
   test('membership refresh does not refetch a loaded directory', () async {
@@ -3490,6 +3591,7 @@ class _FakeRelaySession extends RelaySessionNotifier {
   Completer<void>? _pausedSubscribe;
   Completer<void>? _subscribeStarted;
   Completer<void>? _pausedDirectory;
+  bool _pauseClaimed = false;
   Completer<void>? _directoryStarted;
   Completer<void>? _pausedHiddenDm;
   Completer<void>? _hiddenDmStarted;
@@ -3812,11 +3914,15 @@ class _FakeRelaySession extends RelaySessionNotifier {
       // active when the response is released.
       final directorySnapshot = List.of(metadata);
       final paused = _pausedDirectory;
-      if (paused != null) {
+      // Only the first query after the pause waits; a later one meanwhile
+      // (a new scope's load) answers at once.
+      if (paused != null && !_pauseClaimed) {
+        _pauseClaimed = true;
         _directoryStarted!.complete();
         await paused.future;
         _pausedDirectory = null;
         _directoryStarted = null;
+        _pauseClaimed = false;
       }
       if (directoryFailures > 0) {
         directoryFailures--;

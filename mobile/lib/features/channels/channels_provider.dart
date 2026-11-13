@@ -228,7 +228,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       _confirmedJoins.clear();
       // Retire any in-flight directory request: its response describes the
       // previous relay or identity and must not reach this scope's state.
-      _refreshCoordinator.retireInFlight();
+      _refreshCoordinator.retireScope();
     }
     final snapshot =
         (_hasLoaded ? state.value : null) ??
