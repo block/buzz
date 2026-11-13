@@ -1014,17 +1014,30 @@ class ComposeBar extends HookConsumerWidget {
       expand: expandComposer,
     );
 
+    final readOnly = interactionLocked || (draftMembers != null && sending);
+    // Matches what _composerSuggestionPanel renders, and only while the field
+    // can be edited.
+    final pickerVisible =
+        (channelSuggestions.isNotEmpty ||
+            suggestions.isNotEmpty ||
+            mentionRows.searchFailed) &&
+        attachmentSurface.value == _AttachmentSurface.closed &&
+        !readOnly;
+    final topChannel = channelSuggestions.firstOrNull;
+    final topMention = suggestions
+        .where((s) => !mentionRows.unavailable.contains(s.pubkey))
+        .firstOrNull;
     KeyEventResult handleHardwareKey(FocusNode _, KeyEvent event) =>
         _handleComposerHardwareKey(
           event,
           controller,
-          mentionQuery.value == null
-              ? null
-              : suggestions
-                    .where((s) => !mentionRows.unavailable.contains(s.pubkey))
-                    .firstOrNull,
-          insertMention,
-          send,
+          pickerVisible: pickerVisible,
+          acceptSuggestion: topChannel != null
+              ? () => insertChannel(topChannel)
+              : topMention != null
+              ? () => insertMention(topMention)
+              : null,
+          send: send,
         );
 
     final suggestionPanel = _composerSuggestionPanel(
@@ -1163,8 +1176,7 @@ class ComposeBar extends HookConsumerWidget {
                 hasPendingUploads: hasPendingUploads,
                 canSend: composerText.trim().isNotEmpty || hasAttachments,
                 isSending: isSending.value || (draftMembers != null && sending),
-                readOnly:
-                    interactionLocked || (draftMembers != null && sending),
+                readOnly: readOnly,
               ),
             ),
           ),

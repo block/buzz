@@ -1,22 +1,22 @@
 part of '../compose_bar.dart';
 
-// Hardware keyboards only: software Return keeps its newline. Tab accepts a
-// mention, Enter sends, and Shift+Enter leaves newline handling to the field.
+// Hardware keyboards only: software Return keeps its newline. While the
+// suggestion picker is shown, Tab and Enter accept its first selectable row
+// (or do nothing when it has none); otherwise Enter sends and Tab traverses.
+// Shift+Enter leaves newline handling to the field.
 KeyEventResult _handleComposerHardwareKey(
   KeyEvent event,
-  TextEditingController controller,
-  MentionCandidate? top,
-  void Function(MentionCandidate) insertMention,
-  Future<void> Function() send,
-) {
+  TextEditingController controller, {
+  required bool pickerVisible,
+  required VoidCallback? acceptSuggestion,
+  required Future<void> Function() send,
+}) {
   if (event is KeyUpEvent) return KeyEventResult.ignored;
   final keyboard = HardwareKeyboard.instance;
   final key = event.logicalKey;
   if (key == LogicalKeyboardKey.tab && !keyboard.isShiftPressed) {
-    if (top == null) {
-      return KeyEventResult.ignored;
-    }
-    if (event is KeyDownEvent) insertMention(top);
+    if (!pickerVisible) return KeyEventResult.ignored;
+    if (event is KeyDownEvent) acceptSuggestion?.call();
     return KeyEventResult.handled;
   }
   final isEnter =
@@ -37,6 +37,12 @@ KeyEventResult _handleComposerHardwareKey(
       event.physicalKey != PhysicalKeyboardKey.numpadEnter) {
     return KeyEventResult.ignored;
   }
-  if (event is KeyDownEvent) unawaited(send());
+  if (event is KeyDownEvent) {
+    if (pickerVisible) {
+      acceptSuggestion?.call();
+    } else {
+      unawaited(send());
+    }
+  }
   return KeyEventResult.handled;
 }

@@ -2132,7 +2132,11 @@ void main() {
 
     group('hardware keyboard', () {
       final sent = <String>[];
-      Future<TextEditingController> pumpComposer(WidgetTester tester) async {
+      Future<TextEditingController> pumpComposer(
+        WidgetTester tester, {
+        FocusNode? focusNode,
+        Future<List<UserProfile>> Function(String query)? searchPeople,
+      }) async {
         sent.clear();
         final members = [
           for (final (i, name) in ['Alice', 'Bob'].indexed)
@@ -2149,10 +2153,11 @@ void main() {
             membersFuture: Future.value(members),
             cachedMembers: members,
             channels: [_makeCurrentChannel()],
+            focusNode: focusNode,
             onSend: (content, _, {mediaTags = const <List<String>>[]}) async {
               sent.add(content);
             },
-            searchPeople: (_) async => const [],
+            searchPeople: searchPeople ?? (_) async => const [],
           ),
         );
         await _expandComposer(tester);
@@ -2162,7 +2167,41 @@ void main() {
       Finder popover() =>
           find.byKey(const ValueKey('mention-suggestions-popover'));
 
-      testWidgets('Tab accepts the top mention suggestion', (tester) async {
+      // Android IMEs may send KEYCODE_ENTER (66) with scan code zero.
+      // Flutter maps it onto the Android physical-key plane, not USB Enter.
+      // The caller sets the Android platform override.
+      Future<void> sendAndroidImeEnter(WidgetTester tester) async {
+        for (final down in [true, false]) {
+          tester.binding.platformDispatcher.onKeyData!(
+            ui.KeyData(
+              type: down ? ui.KeyEventType.down : ui.KeyEventType.up,
+              physical: 0x1100000042,
+              logical: LogicalKeyboardKey.enter.keyId,
+              timeStamp: Duration.zero,
+              character: null,
+              synthesized: false,
+            ),
+          );
+          await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+            SystemChannels.keyEvent.name,
+            SystemChannels.keyEvent.codec.encodeMessage({
+              'type': down ? 'keydown' : 'keyup',
+              'keymap': 'android',
+              'keyCode': 66,
+              'scanCode': 0,
+              'metaState': 0,
+              'flags': 2,
+              'source': 257,
+              'deviceId': -1,
+            }),
+            (_) {},
+          );
+        }
+      }
+
+      testWidgets('Tab and Enter accept the top mention suggestion', (
+        tester,
+      ) async {
         final controller = await pumpComposer(tester);
         await tester.enterText(find.byType(TextField), 'hi @a');
         await tester.pump();
@@ -2173,7 +2212,185 @@ void main() {
 
         expect(controller.text, 'hi @Alice ');
         expect(popover(), findsNothing);
+
+        await tester.enterText(find.byType(TextField), 'yo @b');
+        await tester.pump();
+        expect(popover(), findsOneWidget);
+
+        await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+        await tester.pump();
+
+        expect(controller.text, 'yo @Bob ');
+        expect(sent, isEmpty);
+        expect(popover(), findsNothing);
         await tester.pump(mentionSearchDebounce * 2);
+      });
+
+      testWidgets('a picker with no selectable row consumes Tab and Enter', (
+        tester,
+      ) async {
+        final controller = await pumpComposer(
+          tester,
+          searchPeople: (_) async => throw StateError('relay down'),
+        );
+        await tester.enterText(find.byType(TextField), 'hi @zz');
+        await tester.pump();
+        await tester.pump(mentionSearchDebounce * 2);
+        await tester.pump();
+        expect(
+          find.byKey(const ValueKey('mention-search-error')),
+          findsOneWidget,
+        );
+
+        for (final key in [LogicalKeyboardKey.enter, LogicalKeyboardKey.tab]) {
+          await tester.sendKeyEvent(key);
+          await tester.pumpAndSettle();
+          expect(controller.text, 'hi @zz', reason: '$key');
+          expect(sent, isEmpty, reason: '$key');
+        }
+      });
+
+      testWidgets('Enter that is not a plain hardware Enter skips the picker', (
+        tester,
+      ) async {
+        final controller = await pumpComposer(tester);
+        await tester.enterText(find.byType(TextField), 'hi @a');
+        await tester.pump();
+        expect(popover(), findsOneWidget);
+
+        for (final modifier in [
+          LogicalKeyboardKey.shiftLeft,
+          LogicalKeyboardKey.controlLeft,
+          LogicalKeyboardKey.altLeft,
+          LogicalKeyboardKey.metaLeft,
+        ]) {
+          await tester.sendKeyDownEvent(modifier);
+          await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+          await tester.sendKeyUpEvent(modifier);
+          await tester.pump();
+          expect(controller.text, 'hi @a', reason: '$modifier');
+        }
+
+        controller.value = controller.value.copyWith(
+          composing: const TextRange(start: 3, end: 5),
+        );
+        await tester.pump();
+        await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+        await tester.pump();
+        expect(controller.text, 'hi @a', reason: 'active composition');
+        controller.clearComposing();
+        await tester.pump();
+
+        final previousPlatform = debugDefaultTargetPlatformOverride;
+        debugDefaultTargetPlatformOverride = TargetPlatform.android;
+        try {
+          await sendAndroidImeEnter(tester);
+          await tester.pump();
+          expect(controller.text, 'hi @a', reason: 'Android IME Return');
+        } finally {
+          debugDefaultTargetPlatformOverride = previousPlatform;
+        }
+        expect(sent, isEmpty);
+        expect(popover(), findsOneWidget);
+        await tester.pump(mentionSearchDebounce * 2);
+      });
+
+      testWidgets('Tab with the attachment menu open leaves the draft alone', (
+        tester,
+      ) async {
+        final focus = FocusNode();
+        addTearDown(focus.dispose);
+        final controller = await pumpComposer(tester, focusNode: focus);
+        await tester.enterText(find.byType(TextField), 'hi @a');
+        await tester.pumpAndSettle();
+        expect(popover(), findsOneWidget);
+
+        await _openAttachmentMenu(tester);
+        expect(popover(), findsNothing);
+        expect(find.text('Files'), findsOneWidget);
+        expect(focus.hasFocus, isTrue);
+
+        await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+        await tester.pump();
+
+        expect(controller.text, 'hi @a');
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pumpAndSettle();
+      });
+
+      testWidgets('Tab cannot edit a Solo draft frozen by Paste Image', (
+        tester,
+      ) async {
+        final previousPlatform = debugDefaultTargetPlatformOverride;
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+        final clipboard = Completer<Uint8List?>();
+        var busy = false;
+        final focus = FocusNode();
+        addTearDown(focus.dispose);
+        final members = [
+          ChannelMember(
+            pubkey: '1' * 64,
+            role: 'member',
+            joinedAt: DateTime.fromMillisecondsSinceEpoch(1000),
+            displayName: 'Alice',
+          ),
+        ];
+        try {
+          await tester.pumpWidget(
+            _buildComposeBar(
+              uploadService: MediaUploadService(
+                baseUrl: 'https://relay.example',
+                nsec: nostr.Keys.generate().nsec,
+                pickGalleryVideo: () async => null,
+                pickGalleryImage: () async => null,
+                readClipboardImage: () => clipboard.future,
+              ),
+              focusNode: focus,
+              draftMembers: members,
+              members: members,
+              cachedMembers: members,
+              channels: [_makeCurrentChannel()],
+              searchPeople: (_) async => const [],
+              onSendingChanged: (value) => busy = value,
+              onSend: (_, _, {mediaTags = const <List<String>>[]}) async {},
+            ),
+          );
+          await _expandComposer(tester);
+          await tester.enterText(find.byType(TextField), 'hi @a');
+          await tester.pumpAndSettle();
+          final field = tester.widget<TextField>(find.byType(TextField));
+          final controller = field.controller!;
+          expect(popover(), findsOneWidget);
+
+          final menu =
+              field.contextMenuBuilder!(
+                    tester.element(find.byType(TextField)),
+                    tester.state<EditableTextState>(find.byType(EditableText)),
+                  )
+                  as AdaptiveTextSelectionToolbar;
+          menu.buttonItems!
+              .singleWhere((item) => item.label == 'Paste Image')
+              .onPressed!();
+          await tester.pump();
+          expect(busy, isTrue);
+          expect(
+            tester.widget<TextField>(find.byType(TextField)).readOnly,
+            isTrue,
+          );
+          expect(focus.hasFocus, isTrue);
+
+          await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+          await tester.pump();
+          expect(controller.text, 'hi @a');
+
+          clipboard.complete(null);
+          await tester.pumpAndSettle();
+          await tester.pumpWidget(const SizedBox.shrink());
+          await tester.pumpAndSettle();
+        } finally {
+          if (!clipboard.isCompleted) clipboard.complete(null);
+          debugDefaultTargetPlatformOverride = previousPlatform;
+        }
       });
 
       testWidgets('Tab without an open picker leaves the draft alone', (
@@ -2239,37 +2456,10 @@ void main() {
         await tester.pumpAndSettle();
         expect(sent, isEmpty);
 
-        // Android IMEs may send KEYCODE_ENTER (66) with scan code zero.
-        // Flutter maps it onto the Android physical-key plane, not USB Enter.
         final previousPlatform = debugDefaultTargetPlatformOverride;
         debugDefaultTargetPlatformOverride = TargetPlatform.android;
         try {
-          for (final down in [true, false]) {
-            tester.binding.platformDispatcher.onKeyData!(
-              ui.KeyData(
-                type: down ? ui.KeyEventType.down : ui.KeyEventType.up,
-                physical: 0x1100000042,
-                logical: LogicalKeyboardKey.enter.keyId,
-                timeStamp: Duration.zero,
-                character: null,
-                synthesized: false,
-              ),
-            );
-            await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
-              SystemChannels.keyEvent.name,
-              SystemChannels.keyEvent.codec.encodeMessage({
-                'type': down ? 'keydown' : 'keyup',
-                'keymap': 'android',
-                'keyCode': 66,
-                'scanCode': 0,
-                'metaState': 0,
-                'flags': 2,
-                'source': 257,
-                'deviceId': -1,
-              }),
-              (_) {},
-            );
-          }
+          await sendAndroidImeEnter(tester);
           await tester.pumpAndSettle();
           expect(sent, isEmpty);
           expect(
