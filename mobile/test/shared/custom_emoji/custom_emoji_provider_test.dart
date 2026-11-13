@@ -49,23 +49,48 @@ void main() {
     });
     await reconnect();
     expect(await palette(), ['b', 'c']);
+
+    // Nothing new again: the reconnect publishes the identical list.
+    final unchanged = await container.read(customEmojiPaletteProvider.future);
+    await reconnect();
+    expect(
+      await container.read(customEmojiPaletteProvider.future),
+      same(unchanged),
+    );
+
+    // On a same-second tie the relay keeps the lower id, and so does the
+    // palette.
+    final second = relay.sets['alice']!.createdAt;
+    relay.sets['alice'] = _set('alice', second, {
+      'd': 'https://e/d.png',
+    }, id: '0');
+    await reconnect();
+    expect(await palette(), ['b', 'd']);
+    relay.sets['alice'] = _set('alice', second, {
+      'e': 'https://e/e.png',
+    }, id: 'z');
+    await reconnect();
+    expect(await palette(), ['b', 'd']);
   });
 }
 
-NostrEvent _set(String pubkey, int createdAt, Map<String, String> emoji) =>
-    NostrEvent(
-      id: '$pubkey$createdAt',
-      pubkey: pubkey,
-      createdAt: createdAt,
-      kind: kindEmojiSet,
-      tags: [
-        ['d', customEmojiSetDTag],
-        for (final MapEntry(:key, :value) in emoji.entries)
-          ['emoji', key, value],
-      ],
-      content: '',
-      sig: '',
-    );
+NostrEvent _set(
+  String pubkey,
+  int createdAt,
+  Map<String, String> emoji, {
+  String? id,
+}) => NostrEvent(
+  id: id ?? '$pubkey$createdAt',
+  pubkey: pubkey,
+  createdAt: createdAt,
+  kind: kindEmojiSet,
+  tags: [
+    ['d', customEmojiSetDTag],
+    for (final MapEntry(:key, :value) in emoji.entries) ['emoji', key, value],
+  ],
+  content: '',
+  sig: '',
+);
 
 class _EmojiRelay extends RelaySessionNotifier {
   final Map<String, NostrEvent> sets = {};

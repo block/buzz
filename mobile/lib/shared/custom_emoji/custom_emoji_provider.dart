@@ -21,6 +21,10 @@ class CustomEmojiPaletteNotifier extends AsyncNotifier<List<CustomEmoji>> {
   /// When the last complete read was sent.
   int? _readAt;
 
+  /// [unionCustomEmoji] of [_sets], recomputed only when a set changes so an
+  /// unchanged palette keeps its identity and rebuilds no listeners.
+  List<CustomEmoji> _palette = const [];
+
   @override
   Future<List<CustomEmoji>> build() {
     final client = ref.watch(relayClientProvider);
@@ -29,15 +33,14 @@ class CustomEmojiPaletteNotifier extends AsyncNotifier<List<CustomEmoji>> {
       _client = client;
       _sets.clear();
       _readAt = null;
+      _palette = const [];
     }
     return _fetch();
   }
 
   Future<List<CustomEmoji>> _fetch() async {
     final sessionState = ref.read(relaySessionProvider);
-    if (sessionState.status != SessionStatus.connected) {
-      return _sets.isEmpty ? [] : unionCustomEmoji(_sets.values);
-    }
+    if (sessionState.status != SessionStatus.connected) return _palette;
 
     final client = _client;
     final previousRead = _readAt;
@@ -61,19 +64,28 @@ class CustomEmojiPaletteNotifier extends AsyncNotifier<List<CustomEmoji>> {
         ),
       );
       if (identical(client, _client)) {
+        var changed = false;
         for (final event in events) {
           final known = _sets[event.pubkey];
-          if (known == null || event.createdAt > known.createdAt) {
+          if (known == null || _replaces(event, known)) {
             _sets[event.pubkey] = event;
+            changed = true;
           }
         }
+        if (changed) _palette = unionCustomEmoji(_sets.values);
         _readAt = sentAt;
       }
-      return unionCustomEmoji(_sets.values);
+      return _palette;
     } catch (_) {
-      return _sets.isEmpty ? [] : unionCustomEmoji(_sets.values);
+      return _palette;
     }
   }
+
+  /// The relay's replaceable-event order: the newer set wins, and on a
+  /// same-second tie the lower id does.
+  static bool _replaces(NostrEvent event, NostrEvent known) =>
+      event.createdAt > known.createdAt ||
+      (event.createdAt == known.createdAt && event.id.compareTo(known.id) < 0);
 
   /// Force a re-fetch of the community palette.
   Future<void> refresh() async {
