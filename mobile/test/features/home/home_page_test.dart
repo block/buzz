@@ -168,6 +168,7 @@ void main() {
     testWidgets('a sheet opening above Home does not rebuild its inventory '
         '($name)', (tester) async {
       debugDefaultTargetPlatformOverride = platform;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
       tester.view.physicalSize = size;
       tester.view.viewPadding = FakeViewPadding(right: rightInset);
       tester.view.padding = tester.view.viewPadding;
@@ -182,6 +183,7 @@ void main() {
           rebuilds.add(type);
         }
       };
+      addTearDown(() => debugOnRebuildDirtyWidget = null);
 
       unawaited(
         showModalBottomSheet<void>(
