@@ -1513,6 +1513,104 @@ void main() {
       }
     });
 
+    testWidgets('a composer covered by another for the same conversation '
+        'takes its text with the keys its mentions are bound to', (
+      tester,
+    ) async {
+      final first = 'a' * 64;
+      final second = 'b' * 64;
+      List<String>? sent;
+      Future<void> onSend(
+        String content,
+        List<String> mentions, {
+        List<List<String>> mediaTags = const [],
+      }) async {
+        sent = mentions;
+      }
+
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          members: [
+            for (final key in [first, second])
+              ChannelMember(
+                pubkey: key,
+                displayName: 'Scout',
+                role: 'member',
+                joinedAt: DateTime.utc(2026),
+              ),
+          ],
+          channels: [_makeCurrentChannel()],
+          onSend: onSend,
+        ),
+      );
+      Finder scouts() => find.descendant(
+        of: find.byKey(const ValueKey('mention-suggestions-popover')),
+        matching: find.textContaining('Scout'),
+      );
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(ComposeBar)),
+      );
+      Map<String, String>? storedKeys() => container
+          .read(composeDraftsProvider.notifier)
+          .draftFor('channel-1')
+          ?.mentionKeys;
+
+      // The first composer mentions one of two people named Scout.
+      await _expandComposer(tester);
+      await tester.enterText(find.byType(TextField), '@');
+      await tester.pumpAndSettle();
+      await tester.tap(scouts().first);
+      await tester.pumpAndSettle();
+      expect(storedKeys(), {'Scout': first});
+
+      // A second composer for the same conversation, such as the page a
+      // notification opens, replaces it with the other Scout.
+      final navigator = Navigator.of(tester.element(find.byType(ComposeBar)));
+      unawaited(
+        navigator.push<void>(
+          MaterialPageRoute(
+            builder: (_) => Scaffold(
+              body: Align(
+                alignment: Alignment.bottomCenter,
+                child: ComposeBar(channelId: 'channel-1', onSend: onSend),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('@Scout'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField), '');
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField), '@');
+      await tester.pumpAndSettle();
+      await tester.tap(scouts().last);
+      await tester.pumpAndSettle();
+      final text =
+          '${tester.widget<TextField>(find.byType(TextField)).controller!.text}'
+          'hello';
+      await tester.enterText(find.byType(TextField), text);
+      await tester.pumpAndSettle();
+      expect(storedKeys(), {'Scout': second});
+
+      // Back on the first composer, the text it shows goes to that Scout.
+      navigator.pop();
+      await tester.pumpAndSettle();
+      if (find.byType(TextField).evaluate().isEmpty) {
+        await tester.tap(find.textContaining('@Scout').first);
+        await tester.pumpAndSettle();
+      }
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).controller!.text,
+        text,
+      );
+      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+      await tester.pumpAndSettle();
+      expect(sent, [second]);
+    });
+
     testWidgets('mounted composer does not carry draft text across an in-place '
         'identity switch', (tester) async {
       final keysA = nostr.Keys.generate();
