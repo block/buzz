@@ -902,7 +902,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 88);
+        assert_eq!(migrations.len(), 89);
         assert!(migrations[83]
             .sql
             .as_str()
@@ -923,6 +923,10 @@ mod postgres_tests {
             .sql
             .as_str()
             .contains("VALIDATE CONSTRAINT workflow_runs_cause_pubkey_check"));
+        assert!(migrations[88]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE channel_heads"));
         for (index, migration) in migrations.iter().enumerate() {
             assert_eq!(migration.version, (index + 1) as i64);
         }
@@ -3050,6 +3054,7 @@ mod postgres_tests {
             .expect("apply migrations for schema parity");
 
         for table in [
+            "channel_heads",
             "media_uploaders",
             "media_publications",
             "relay_members",

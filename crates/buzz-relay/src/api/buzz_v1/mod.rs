@@ -17,6 +17,7 @@ pub const BASE_PATH: &str = "/buzz/v1";
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/me/sidebar", get(handlers::sidebar))
+        .route("/me/channel-heads", get(handlers::channel_heads))
         .route("/me/read-state", post(handlers::write))
         .fallback(|| async { auth::Error::new(axum::http::StatusCode::NOT_FOUND, "not_found") })
         .with_state(state)

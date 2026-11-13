@@ -109,6 +109,9 @@ pub struct BuzzV1Descriptor {
     /// Message kinds that count as unread and as latest activity. Clients
     /// classify live arrivals with this set instead of keeping a copy.
     pub eligible_kinds: [i32; 4],
+    /// Whether `GET {base_path}/me/channel-heads` is served.
+    #[serde(default)]
+    pub channel_heads: bool,
 }
 
 /// Public capability descriptor for relay-proxied GIF search.
@@ -493,6 +496,7 @@ pub(crate) async fn nip11_document(
                 max_channels: MAX_CHANNELS,
                 max_intents: MAX_INTENTS,
                 eligible_kinds: ELIGIBLE_KINDS,
+                channel_heads: true,
             });
         }
         if state.config.membership_snapshot_enabled {

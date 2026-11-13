@@ -51,6 +51,7 @@ pub(crate) async fn after_admitted_insert(
 ) -> Result<()> {
     tx.record_push_event(event_id, created_at, kind);
     tx.record_channel_event(channel_id, kind);
+    crate::store::channel_heads::seen(tx, created_at, channel_id);
     Ok(())
 }
 
