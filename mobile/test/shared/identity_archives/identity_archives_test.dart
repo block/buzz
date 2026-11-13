@@ -18,12 +18,14 @@ void main() {
       final authority = nostr.Keys.generate();
       final impostor = nostr.Keys.generate();
       final target = 'a' * 64;
+      var createdAt = 1700000000;
       NostrEvent snapshot(nostr.Keys signer, {bool marker = true}) =>
           NostrEvent.fromJson(
             nostr.Event.from(
               kind: 13535,
               content: '',
               secretKey: signer.secret,
+              createdAt: createdAt++,
               tags: [
                 if (marker) ['-'],
                 ['p', target],
@@ -136,6 +138,55 @@ void main() {
     },
   );
 
+  test('a refresh downloads the list again only when it changed', () async {
+    final owner = nostr.Keys.generate();
+    final authority = nostr.Keys.generate();
+    NostrEvent snapshot(String target, int createdAt) => NostrEvent.fromJson(
+      nostr.Event.from(
+        kind: 13535,
+        content: '',
+        secretKey: authority.secret,
+        createdAt: createdAt,
+        tags: [
+          ['-'],
+          ['p', target],
+        ],
+      ).toMap(),
+    );
+    final relay = _ArchiveRelay(snapshot('a' * 64, 1700000000));
+    final client = MockClient(
+      (_) async => http.Response(jsonEncode({'self': authority.public}), 200),
+    );
+    final container = ProviderContainer(
+      overrides: [
+        meSyncProvider.overrideWithValue(
+          MeSync(
+            relay,
+            RelayConfig(baseUrl: 'https://relay.test', nsec: owner.nsec),
+          ),
+        ),
+        relayInformationClientProvider.overrideWithValue(client),
+      ],
+    );
+    addTearDown(container.dispose);
+    addTearDown(client.close);
+    expect(await container.read(identityArchivesProvider.future), {'a' * 64});
+    expect(relay.since, isNull);
+
+    // Unchanged: the relay has nothing newer, and the known list stands.
+    container.invalidate(identityArchivesProvider);
+    expect(await container.read(identityArchivesProvider.future), {'a' * 64});
+    expect(relay.since, 1700000001);
+
+    // Replaced: the newer list wins and becomes the new baseline.
+    relay.event = snapshot('b' * 64, 1700000100);
+    container.invalidate(identityArchivesProvider);
+    expect(await container.read(identityArchivesProvider.future), {'b' * 64});
+    container.invalidate(identityArchivesProvider);
+    expect(await container.read(identityArchivesProvider.future), {'b' * 64});
+    expect(relay.since, 1700000101);
+  });
+
   test('slow metadata has a total deadline and cancels its stream', () async {
     final owner = nostr.Keys.generate();
     final relay = _ArchiveRelay(null);
@@ -226,6 +277,7 @@ class _ArchiveRelay extends RelaySessionNotifier {
   _ArchiveRelay(this.event);
   NostrEvent? event;
   String? author;
+  int? since;
   @override
   Future<List<NostrEvent>> fetchHistory(
     NostrFilter filter, {
@@ -233,7 +285,10 @@ class _ArchiveRelay extends RelaySessionNotifier {
   }) async {
     expect(filter.kinds, [13535]);
     author = filter.authors!.single;
-    return [?event];
+    since = filter.since;
+    final event = this.event;
+    if (event == null || event.createdAt < (filter.since ?? 0)) return [];
+    return [event];
   }
 }
 

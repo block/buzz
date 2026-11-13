@@ -16,6 +16,14 @@ final relayInformationClientProvider = Provider<http.Client>((ref) {
   return client;
 });
 
+/// The last verified archive list per community and authority, so a refresh
+/// asks the relay only for a newer list instead of downloading it again.
+class _ArchiveCache {
+  final entries = <(String, String), ({int createdAt, Set<String> archived})>{};
+}
+
+final _archiveCacheProvider = Provider<_ArchiveCache>((_) => _ArchiveCache());
+
 /// The identities this relay's NIP-IA archive list (kind 13535) names, never
 /// the viewer: an archive stays visible to its subject. Empty when the list
 /// cannot be read. This is presentation, never ownership or admission.
@@ -61,12 +69,29 @@ final identityArchivesProvider = FutureProvider<Set<String>>((ref) async {
         !RegExp(r'^[0-9a-f]{64}$').hasMatch(authority)) {
       return {};
     }
+    final cache = ref.read(_archiveCacheProvider).entries;
+    final key = (sync.community, authority);
+    final known = cache[key];
     final events = await sync.session.fetchHistory(
-      NostrFilter(kinds: const [13535], authors: [authority], limit: 1),
+      NostrFilter(
+        kinds: const [13535],
+        authors: [authority],
+        since: known == null ? null : known.createdAt + 1,
+        limit: 1,
+      ),
       timeout: const Duration(seconds: 3),
     );
     sync.check();
-    return (await _parseArchives(events, authority))..remove(sync.pubkey);
+    if (known != null && events.isEmpty) {
+      return {...known.archived}..remove(sync.pubkey);
+    }
+    final archived = await _parseArchives(events, authority);
+    if (events.length == 1 && archived != null) {
+      cache[key] = (createdAt: events.single.createdAt, archived: archived);
+    } else {
+      cache.remove(key);
+    }
+    return {...?archived}..remove(sync.pubkey);
   } catch (_) {
     return {};
   } finally {
@@ -98,11 +123,14 @@ final hiddenArchivedIdentitiesProvider = Provider<Set<String>>((ref) {
   return known.$2;
 });
 
-Future<Set<String>> _parseArchives(List<NostrEvent> events, String authority) =>
-    Isolate.run(() => _archived(events, authority));
+/// The archived identities, or null when [events] is not one valid list.
+Future<Set<String>?> _parseArchives(
+  List<NostrEvent> events,
+  String authority,
+) => Isolate.run(() => _archived(events, authority));
 
-Set<String> _archived(List<NostrEvent> events, String authority) {
-  if (events.length != 1) return {};
+Set<String>? _archived(List<NostrEvent> events, String authority) {
+  if (events.length != 1) return null;
   final event = events.single;
   final markers = event.tags.where((tag) => tag.isNotEmpty && tag.first == '-');
   if (event.kind != 13535 ||
@@ -110,10 +138,10 @@ Set<String> _archived(List<NostrEvent> events, String authority) {
       event.content.isNotEmpty ||
       markers.length != 1 ||
       markers.single.length != 1) {
-    return {};
+    return null;
   }
   final encoded = jsonEncode(event.toJson());
-  if (utf8.encode(encoded).length > 2 * 1024 * 1024) return {};
+  if (utf8.encode(encoded).length > 2 * 1024 * 1024) return null;
   verifiedNostrEventFromJson(encoded);
   return {
     for (final tag in event.tags)
