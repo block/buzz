@@ -470,8 +470,10 @@ value, the manifest it names is the same manifest, with the same refs, HEAD and
 packs, so a push computed from the earlier observation is also correct against
 the current state. Because a manifest records its predecessor, a body in fact
 never recurs (the Lean theorem `pointer_depth_eq_writes`), and a successful
-write implies that no other write happened since the read
-(`cas_sees_no_intervening_write`).
+write implies that no other write that changed the pointer happened since the
+read (`cas_sees_no_intervening_write`; the Lean model omits the default-branch
+setter, whose same-value write rewrites the same body and so preserves the
+argument of the previous paragraph).
 
 *Model:* the temporal property `Refines`. Removing the CAS guard, predicating
 the write on a later observation than the one the workspace was built from, a
@@ -898,7 +900,9 @@ proves:
   (the pointer part of Theorem 3).
 - `pointer_depth_eq_writes` and `cas_sees_no_intervening_write`: a pointer body
   never recurs, and a successful conditional write implies that no other write
-  happened since the read.
+  that changed the pointer happened since the read (the Lean model omits the
+  default-branch setter, whose same-value write rewrites the same body and so
+  preserves the argument of the previous paragraph).
 
 `write_is_possible` shows that a successful write is reachable, so the results
 do not hold vacuously. The proofs use no axioms beyond Lean's standard three

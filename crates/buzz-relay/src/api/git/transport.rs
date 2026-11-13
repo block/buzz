@@ -2028,6 +2028,19 @@ async fn finalize_push_inner(
     let (disposition, workspace) =
         match observe_push(&ctx.pack, &ctx.parent_state, ctx.repo_handle.path()).await {
             Ok(observed) => observed,
+            Err(CasError::ResourceLimit(e)) => {
+                warn!(
+                    owner = %ctx.owner,
+                    repo = %ctx.repo_id,
+                    error = %e,
+                    "push rejected: repo exceeds relay resource limits"
+                );
+                return (
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "repository exceeds relay resource limits",
+                )
+                    .into_response();
+            }
             Err(error) => {
                 error!(
                     owner = %ctx.owner,
@@ -2755,6 +2768,98 @@ mod track_c_tests {
                 case.name
             );
         }
+    }
+
+    /// A push whose ref snapshot crosses the manifest ref cap is a permanent
+    /// repository limit: it must answer 413, as the publish path did before
+    /// the snapshot moved ahead of the publish decision, not a 500 a client
+    /// would retry.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn snapshot_resource_limit_answers_413() {
+        let state = crate::state::tests::test_state().await;
+        let scratch = TempDir::new().expect("scratch");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock object store listener");
+        let addr = listener.local_addr().expect("mock address");
+        let app = Router::new().fallback(|| async { StatusCode::NOT_FOUND });
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+        let store = super::super::store::GitStore::new(
+            &format!("http://{addr}"),
+            "fixture",
+            "fixture",
+            "fixture",
+            "us-east-1",
+            buzz_media::config::S3AddressingStyle::Path,
+        )
+        .expect("mock Git store");
+        let tenant = TenantContext::resolved(
+            CommunityId::from_uuid(uuid::Uuid::from_u128(1)),
+            "git.example",
+        );
+        let (hydrated, parent_state) = hydrate_for_write(
+            &store,
+            &tenant,
+            &"a".repeat(64),
+            "snapshot-limit",
+            HydrationOptions {
+                pack_cache: &state.git_pack_cache,
+                scratch_dir: scratch.path(),
+                max_pack_bytes: 1024 * 1024,
+                max_repo_bytes: 2 * 1024 * 1024,
+            },
+        )
+        .await
+        .expect("hydrate empty fixture");
+        server.abort();
+        let _ = server.await;
+
+        let (_fixture_root, source, _, tip) = push_fixture(true);
+        assert_git_success(
+            run_test_git(
+                &source,
+                &["push", "--quiet", hydrated.path().to_str().unwrap(), "main"],
+                &[],
+            ),
+            "seed fixture commit",
+        );
+        let mut packed_refs = String::from("# pack-refs with: peeled fully-peeled sorted\n");
+        for index in 0..=super::super::manifest::MAX_MANIFEST_REFS {
+            packed_refs.push_str(&format!("{tip} refs/heads/ref-{index:05}\n"));
+        }
+        std::fs::write(hydrated.path().join("packed-refs"), packed_refs).expect("fixture refs");
+        assert!(matches!(
+            snapshot_workspace(hydrated.path()).await,
+            Err(CasError::ResourceLimit(_))
+        ));
+        let response = finalize_push(
+            &state,
+            PushContext {
+                pack: PackOutput {
+                    stdout: Vec::new(),
+                    exited_ok: true,
+                },
+                parent_state,
+                owner: "a".repeat(64),
+                repo: "snapshot-limit".into(),
+                repo_id: "snapshot-limit".into(),
+                pusher: Keys::generate().public_key(),
+                tenant,
+                repo_handle: hydrated,
+            },
+        )
+        .await;
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        assert_eq!(
+            status,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "snapshot resource limits must not become backend errors; body: {}",
+            String::from_utf8_lossy(&body)
+        );
     }
 
     async fn run_finalize_git(repo: &Path, args: &[&str]) -> std::process::Output {
