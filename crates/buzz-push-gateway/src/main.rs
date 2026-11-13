@@ -18,6 +18,11 @@ use std::{
 };
 use tracing_subscriber::EnvFilter;
 
+/// Runtime Postgres pool ceiling.
+const DB_MAX_CONNECTIONS: u32 = 20;
+/// How often the pool sampler publishes connection gauges.
+const DB_POOL_SAMPLE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Without `RUST_LOG`, keep the gateway's own warnings, such as App Attest
 /// rejection reasons, alongside `EnvFilter`'s error-level default for all
 /// other targets.
@@ -75,9 +80,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .collect::<Result<_, _>>()?,
     )?;
     let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(20)
+        .max_connections(DB_MAX_CONNECTIONS)
         .connect(&c.database_url)
         .await?;
+    let sampled_pool = pool.clone();
+    let pool_sampler = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(DB_POOL_SAMPLE_INTERVAL);
+        loop {
+            interval.tick().await;
+            buzz_push_gateway::metrics::record_db_pool(buzz_push_gateway::metrics::DbPoolStats {
+                size: sampled_pool.size(),
+                idle: u32::try_from(sampled_pool.num_idle()).unwrap_or(u32::MAX),
+                max: DB_MAX_CONNECTIONS,
+            });
+        }
+    });
     let authority = Arc::new(PostgresAuthorityStore::new(pool));
     authority
         .reap_expired(chrono::Utc::now().timestamp())
@@ -141,6 +158,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = htx.send(true);
     let _ = h.await;
     reaper.abort();
+    pool_sampler.abort();
     Ok(())
 }
 async fn shutdown_signal() -> std::io::Result<()> {

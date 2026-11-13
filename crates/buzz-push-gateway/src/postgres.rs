@@ -1,9 +1,10 @@
 //! PostgreSQL authority store. Mutations use row locks and compare-and-swap
 //! predicates so counters, epochs, and generation tombstones only move forward.
 use crate::authority::*;
+use crate::metrics;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use sqlx::{AssertSqlSafe, PgPool, Row};
+use sqlx::{pool::PoolConnection, AssertSqlSafe, PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
 #[cfg(test)]
@@ -27,6 +28,21 @@ pub struct PostgresAuthorityStore {
 impl PostgresAuthorityStore {
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
+    }
+
+    /// Check out a pooled connection, timing the wait and counting it as a
+    /// waiter until it ends. Every store operation takes its connection here.
+    async fn acquire(&self) -> Result<PoolConnection<Postgres>, AuthorityError> {
+        let attempt = metrics::PoolAcquire::start();
+        let result = self.pool.acquire().await;
+        attempt.finish(metrics::PoolAcquireOutcome::from_result(&result));
+        result.map_err(db)
+    }
+
+    /// Begin a transaction on a connection from [`Self::acquire`].
+    async fn begin(&self) -> Result<Transaction<'static, Postgres>, AuthorityError> {
+        let connection = self.acquire().await?;
+        Transaction::begin(connection, None).await.map_err(db)
     }
 
     pub async fn apply_migrations_and_grants(
@@ -95,7 +111,7 @@ impl AuthorityStore for PostgresAuthorityStore {
             "push_gateway_delivery_auth_replays",
             "push_gateway_delivery_request_replays",
         ];
-        let mut tx = self.pool.begin().await.map_err(db)?;
+        let mut tx = self.begin().await?;
         for table in TABLES {
             let ready: bool = sqlx::query_scalar(
                 "SELECT to_regclass($1) IS NOT NULL
@@ -129,7 +145,7 @@ impl AuthorityStore for PostgresAuthorityStore {
     async fn put_challenge(&self, c: Challenge) -> Result<(), AuthorityError> {
         use sha2::{Digest, Sha256};
         const CHALLENGE_ISSUANCE_LOCK: i64 = 0x4255_5a5a_504c_0001;
-        let mut tx = self.pool.begin().await.map_err(db)?;
+        let mut tx = self.begin().await?;
         sqlx::query("SELECT pg_advisory_xact_lock($1)")
             .bind(CHALLENGE_ISSUANCE_LOCK)
             .execute(&mut *tx)
@@ -166,7 +182,7 @@ impl AuthorityStore for PostgresAuthorityStore {
     ) -> Result<(), AuthorityError> {
         use sha2::{Digest, Sha256};
         let result = sqlx::query("DELETE FROM push_gateway_challenges WHERE id=$1 AND challenge_hash=$2 AND expires_at >= $3")
-            .bind(id).bind(Sha256::digest(value).to_vec()).bind(at(now)?).execute(&self.pool).await.map_err(db)?;
+            .bind(id).bind(Sha256::digest(value).to_vec()).bind(at(now)?).execute(&mut *self.acquire().await?).await.map_err(db)?;
         if result.rows_affected() != 1 {
             return Err(AuthorityError::Rejected);
         }
@@ -177,7 +193,7 @@ impl AuthorityStore for PostgresAuthorityStore {
         n: NewInstallation,
         now: i64,
     ) -> Result<(), AuthorityError> {
-        let mut tx = self.pool.begin().await.map_err(db)?;
+        let mut tx = self.begin().await?;
         let now_at = at(now)?;
         let existing = sqlx::query(
             "SELECT id,expires_at,revoked_at FROM push_gateway_installations WHERE app_attest_key_id=$1 OR token_fingerprint=$2 FOR UPDATE",
@@ -233,7 +249,7 @@ impl AuthorityStore for PostgresAuthorityStore {
     }
     async fn installation(&self, id: Uuid, now: i64) -> Result<Installation, AuthorityError> {
         let r = sqlx::query("SELECT * FROM push_gateway_installations WHERE id=$1 AND revoked_at IS NULL AND expires_at >= $2")
-            .bind(id).bind(at(now)?).fetch_optional(&self.pool).await.map_err(db)?.ok_or(AuthorityError::Rejected)?;
+            .bind(id).bind(at(now)?).fetch_optional(&mut *self.acquire().await?).await.map_err(db)?.ok_or(AuthorityError::Rejected)?;
         Ok(Installation {
             id,
             app_attest_key_id: r.try_get("app_attest_key_id").map_err(db)?,
@@ -258,7 +274,7 @@ impl AuthorityStore for PostgresAuthorityStore {
         )
         .bind(id)
         .bind(at(now)?)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *self.acquire().await?)
         .await
         .map_err(db)?
         .ok_or(AuthorityError::Rejected)?;
@@ -294,7 +310,7 @@ impl AuthorityStore for PostgresAuthorityStore {
             .bind(endpoint_epoch)
             .bind(at(expires_at)?)
             .bind(at(now)?)
-            .fetch_optional(&self.pool)
+            .fetch_optional(&mut *self.acquire().await?)
             .await
             .map_err(db)?;
         r.map(|r| {
@@ -327,14 +343,14 @@ impl AuthorityStore for PostgresAuthorityStore {
             return Err(AuthorityError::Rejected);
         }
         let result=sqlx::query("UPDATE push_gateway_installations SET assertion_counter=$3,updated_at=now() WHERE id=$1 AND assertion_counter=$2")
-            .bind(id).bind(i64::from(previous)).bind(i64::from(next)).execute(&self.pool).await.map_err(db)?;
+            .bind(id).bind(i64::from(previous)).bind(i64::from(next)).execute(&mut *self.acquire().await?).await.map_err(db)?;
         if result.rows_affected() != 1 {
             return Err(AuthorityError::Rejected);
         }
         Ok(())
     }
     async fn upsert_delegation(&self, d: Delegation) -> Result<(), AuthorityError> {
-        let mut tx = self.pool.begin().await.map_err(db)?;
+        let mut tx = self.begin().await?;
         let i=sqlx::query("SELECT endpoint_epoch,expires_at,revoked_at FROM push_gateway_installations WHERE id=$1 FOR UPDATE").bind(d.installation_id).fetch_optional(&mut *tx).await.map_err(db)?.ok_or(AuthorityError::Rejected)?;
         if i.try_get::<Option<DateTime<Utc>>, _>("revoked_at")
             .map_err(db)?
@@ -369,7 +385,7 @@ impl AuthorityStore for PostgresAuthorityStore {
         if new != expected.checked_add(1).ok_or(AuthorityError::Rejected)? {
             return Err(AuthorityError::Rejected);
         }
-        let result=sqlx::query("UPDATE push_gateway_installations SET endpoint_epoch=$3,token_ciphertext=$4,token_fingerprint=$5,updated_at=now() WHERE id=$1 AND endpoint_epoch=$2 AND revoked_at IS NULL").bind(id).bind(expected).bind(new).bind(ciphertext).bind(fingerprint.to_vec()).execute(&self.pool).await.map_err(db)?;
+        let result=sqlx::query("UPDATE push_gateway_installations SET endpoint_epoch=$3,token_ciphertext=$4,token_fingerprint=$5,updated_at=now() WHERE id=$1 AND endpoint_epoch=$2 AND revoked_at IS NULL").bind(id).bind(expected).bind(new).bind(ciphertext).bind(fingerprint.to_vec()).execute(&mut *self.acquire().await?).await.map_err(db)?;
         if result.rows_affected() != 1 {
             return Err(AuthorityError::Rejected);
         }
@@ -382,9 +398,9 @@ impl AuthorityStore for PostgresAuthorityStore {
         expected_generation: i64,
     ) -> Result<(), AuthorityError> {
         let relay = hex::decode(relay).map_err(|_| AuthorityError::Rejected)?;
-        let result=sqlx::query("UPDATE push_gateway_delegations SET revoked_at=now(),updated_at=now() WHERE installation_id=$1 AND relay_pubkey=$2 AND generation=$3 AND revoked_at IS NULL").bind(id).bind(&relay).bind(expected_generation).execute(&self.pool).await.map_err(db)?;
+        let result=sqlx::query("UPDATE push_gateway_delegations SET revoked_at=now(),updated_at=now() WHERE installation_id=$1 AND relay_pubkey=$2 AND generation=$3 AND revoked_at IS NULL").bind(id).bind(&relay).bind(expected_generation).execute(&mut *self.acquire().await?).await.map_err(db)?;
         if result.rows_affected() != 1 {
-            let already_revoked: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM push_gateway_delegations WHERE installation_id=$1 AND relay_pubkey=$2 AND generation=$3 AND revoked_at IS NOT NULL)").bind(id).bind(&relay).bind(expected_generation).fetch_one(&self.pool).await.map_err(db)?;
+            let already_revoked: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM push_gateway_delegations WHERE installation_id=$1 AND relay_pubkey=$2 AND generation=$3 AND revoked_at IS NOT NULL)").bind(id).bind(&relay).bind(expected_generation).fetch_one(&mut *self.acquire().await?).await.map_err(db)?;
             if !already_revoked {
                 return Err(AuthorityError::Rejected);
             }
@@ -400,9 +416,9 @@ impl AuthorityStore for PostgresAuthorityStore {
         if new != expected.checked_add(1).ok_or(AuthorityError::Rejected)? {
             return Err(AuthorityError::Rejected);
         }
-        let result=sqlx::query("UPDATE push_gateway_installations SET endpoint_epoch=$3,revoked_at=now(),updated_at=now() WHERE id=$1 AND endpoint_epoch=$2 AND revoked_at IS NULL").bind(id).bind(expected).bind(new).execute(&self.pool).await.map_err(db)?;
+        let result=sqlx::query("UPDATE push_gateway_installations SET endpoint_epoch=$3,revoked_at=now(),updated_at=now() WHERE id=$1 AND endpoint_epoch=$2 AND revoked_at IS NULL").bind(id).bind(expected).bind(new).execute(&mut *self.acquire().await?).await.map_err(db)?;
         if result.rows_affected() != 1 {
-            let already_revoked: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM push_gateway_installations WHERE id=$1 AND endpoint_epoch=$2 AND revoked_at IS NOT NULL)").bind(id).bind(new).fetch_one(&self.pool).await.map_err(db)?;
+            let already_revoked: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM push_gateway_installations WHERE id=$1 AND endpoint_epoch=$2 AND revoked_at IS NOT NULL)").bind(id).bind(new).fetch_one(&mut *self.acquire().await?).await.map_err(db)?;
             if !already_revoked {
                 return Err(AuthorityError::Rejected);
             }
@@ -427,7 +443,7 @@ impl AuthorityStore for PostgresAuthorityStore {
         if event_bytes.len() != 32 {
             return Err(AuthorityError::Rejected);
         }
-        let mut tx = self.pool.begin().await.map_err(db)?;
+        let mut tx = self.begin().await?;
         // Every authority mutation locks installation before delegation. Keep
         // this order here to avoid delivery-vs-refresh deadlocks.
         let i = sqlx::query(
@@ -507,7 +523,7 @@ impl AuthorityStore for PostgresAuthorityStore {
             sqlx::query("DELETE FROM push_gateway_delivery_request_replays WHERE relay_pubkey=$1 AND request_id=$2")
                 .bind(hex::decode(permit.relay_pubkey).map_err(|_| AuthorityError::Unavailable)?)
                 .bind(permit.request_id)
-                .execute(&self.pool)
+                .execute(&mut *self.acquire().await?)
                 .await
                 .map_err(db)?;
         }
@@ -515,7 +531,7 @@ impl AuthorityStore for PostgresAuthorityStore {
     }
 
     async fn reap_expired(&self, now: i64) -> Result<(), AuthorityError> {
-        let mut tx = self.pool.begin().await.map_err(db)?;
+        let mut tx = self.begin().await?;
         sqlx::query("DELETE FROM push_gateway_challenges WHERE expires_at < $1")
             .bind(at(now)?)
             .execute(&mut *tx)
@@ -1353,6 +1369,56 @@ mod postgres_tests {
         assert!(store.installation(id, now + 31 * 86400).await.is_err());
         store.revoke_installation(id, 1, 2).await.unwrap();
         assert!(store.installation(id, now).await.is_err());
+        pool.close().await;
+        drop_schema(&schema).await;
+    }
+
+    // Every store checkout goes through the timed acquire seam: a lookup queued
+    // behind the only connection counts as a waiter, an abandoned lookup records
+    // a cancelled wait, and a served lookup records a successful one.
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL"]
+    async fn store_checkouts_report_waiters_and_acquire_waits() {
+        let (pool, schema) = full_schema(1).await;
+        let store = PostgresAuthorityStore::new(pool.clone());
+        let recorder = crate::metrics::test_recorder();
+        let handle = recorder.handle();
+        let _local = ::metrics::set_default_local_recorder(&recorder);
+        let waiters =
+            || crate::metrics::rendered_sample(&handle.render(), "push_gateway_db_pool_waiters");
+        let waits = |outcome: &str| {
+            crate::metrics::rendered_sample(
+                &handle.render(),
+                &format!(
+                    "push_gateway_db_pool_acquire_wait_seconds_count{{outcome=\"{outcome}\"}}"
+                ),
+            )
+        };
+        let queued = std::time::Duration::from_millis(50);
+        let held = pool.acquire().await.expect("hold the only pool connection");
+
+        // The store's futures are boxed, so dropping one drops the checkout.
+        let mut abandoned = store.installation(Uuid::new_v4(), 1_700_000_000);
+        assert!(
+            tokio::time::timeout(queued, &mut abandoned).await.is_err(),
+            "lookup queues behind the held connection"
+        );
+        assert_eq!(waiters(), Some(1.0));
+        drop(abandoned);
+        assert_eq!(waiters(), Some(0.0));
+        assert_eq!(waits("cancelled"), Some(1.0));
+
+        let mut served = store.installation(Uuid::new_v4(), 1_700_000_000);
+        assert!(tokio::time::timeout(queued, &mut served).await.is_err());
+        assert_eq!(waiters(), Some(1.0));
+        drop(held);
+        assert!(
+            matches!(served.await, Err(AuthorityError::Rejected)),
+            "unknown installation is rejected after its checkout succeeds"
+        );
+        assert_eq!(waiters(), Some(0.0));
+        assert_eq!(waits("success"), Some(1.0));
+
         pool.close().await;
         drop_schema(&schema).await;
     }
