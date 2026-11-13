@@ -502,6 +502,15 @@ pub struct ManagedAgentRecord {
 #[derive(Debug)]
 pub struct ManagedAgentProcess {
     pub child: Child,
+    /// Write end of the harness's stdin pipe, held open for the child's whole
+    /// life. `Some` only for runtimes that consume stdin eagerly and exit on
+    /// EOF (dsh): a null stdin would deliver EOF at boot and kill them before
+    /// they serve a request. `None` for all other harnesses, which take a null
+    /// stdin. Buzz never writes to this handle; retaining it IS the behavior
+    /// (dropping it closes the pipe). The retention is pinned by
+    /// `dsh_spawn_retains_the_harness_stdin_write_end` in `runtime/tests.rs`.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub harness_stdin: Option<std::process::ChildStdin>,
     pub log_path: PathBuf,
     /// The effective spawn config this process was launched with (see
     /// `spawn_snapshot::SpawnConfigSnapshot`). Runtime-only — never persisted.

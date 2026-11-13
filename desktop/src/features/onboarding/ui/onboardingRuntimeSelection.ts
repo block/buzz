@@ -14,6 +14,7 @@ export const ONBOARDING_RUNTIME_ORDER = [
   "amp",
   "hermes",
   "openclaw",
+  "dsh",
 ];
 
 const VISIBLE_ONBOARDING_RUNTIME_IDS = new Set<string>(
