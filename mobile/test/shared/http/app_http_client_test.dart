@@ -213,6 +213,47 @@ void main() {
     expect(cleartextClosed, isTrue);
   });
 
+  test(
+    'streamed uploads keep dart:io when the session buffers bodies',
+    () async {
+      final sessionRequests = <String>[];
+      final fallbackRequests = <String>[];
+      final client = SharedSessionClient(
+        MockClient.streaming((request, body) async {
+          await body.drain<void>();
+          sessionRequests.add('${request.method} ${request.url.path}');
+          return http.StreamedResponse(const Stream.empty(), 200);
+        }),
+        cleartext: () => MockClient.streaming((request, body) async {
+          await body.drain<void>();
+          fallbackRequests.add('${request.method} ${request.url.path}');
+          return http.StreamedResponse(const Stream.empty(), 200);
+        }),
+        streamsUploads: false,
+      );
+
+      final upload = http.StreamedRequest(
+        'PUT',
+        Uri.parse('https://media.example/upload'),
+      );
+      upload.sink
+        ..add([1, 2, 3])
+        ..close();
+      await client.send(upload);
+      final download = http.StreamedRequest(
+        'GET',
+        Uri.parse('https://media.example/video'),
+      );
+      unawaited(download.sink.close());
+      await client.send(download);
+      await client.post(Uri.parse('https://relay.example/query'), body: '{}');
+      client.close();
+
+      expect(fallbackRequests, ['PUT /upload']);
+      expect(sessionRequests, ['GET /video', 'POST /query']);
+    },
+  );
+
   test('URLSession error codes map to user-facing failure kinds', () {
     expect(urlErrorFailure(-1009), TransportFailure.unreachable);
     expect(urlErrorFailure(-1004), TransportFailure.unreachable);

@@ -34,7 +34,7 @@ final _sessions = <HttpTraffic, http.Client?>{};
 http.Client newAppHttpClient([HttpTraffic traffic = HttpTraffic.api]) {
   final session = _sessions.putIfAbsent(traffic, _openNativeSession);
   if (session == null) return http.Client();
-  return SharedSessionClient(session);
+  return SharedSessionClient(session, streamsUploads: !Platform.isAndroid);
 }
 
 /// Whether [newAppHttpClient] uses a native session on this device.
@@ -88,13 +88,24 @@ http.Client? _openCronetSession() {
 /// App Transport Security blocks cleartext `URLSession` loads from public
 /// hosts, while saved community icons and remote media may still use
 /// `http://`. Those keep the handle's own `dart:io` client, as before.
+///
+/// Unless [streamsUploads], a streamed request with a body (media and voice
+/// note uploads) also keeps `dart:io`: `CronetClient` reads the whole body
+/// into memory before sending it, so progress would reach 100% before any
+/// byte left and a large attachment would be copied in full.
 @visibleForTesting
 class SharedSessionClient extends http.BaseClient {
-  SharedSessionClient(this._session, {http.Client Function()? cleartext})
-    : _newCleartext = cleartext ?? http.Client.new;
+  SharedSessionClient(
+    this._session, {
+    http.Client Function()? cleartext,
+    this.streamsUploads = true,
+  }) : _newCleartext = cleartext ?? http.Client.new;
 
   final http.Client _session;
   final http.Client Function() _newCleartext;
+
+  /// Whether the session streams request bodies instead of buffering them.
+  final bool streamsUploads;
 
   /// One abort trigger per request still running, so [close] can cancel it.
   /// A request leaves the set once its response body is done, failed or
@@ -113,7 +124,8 @@ class SharedSessionClient extends http.BaseClient {
         request.url,
       );
     }
-    if (request.url.scheme != 'https') {
+    if (request.url.scheme != 'https' ||
+        (!streamsUploads && _isStreamedUpload(request))) {
       return (_cleartext ??= _newCleartext()).send(request);
     }
     final abort = Completer<void>();
@@ -167,6 +179,11 @@ class SharedSessionClient extends http.BaseClient {
       reasonPhrase: response.reasonPhrase,
     );
   }
+
+  static bool _isStreamedUpload(http.BaseRequest request) =>
+      request is! http.Request &&
+      request.method != 'GET' &&
+      request.method != 'HEAD';
 
   /// A copy of [request] that the session cancels when [trigger] completes.
   http.BaseRequest _withAbortTrigger(
