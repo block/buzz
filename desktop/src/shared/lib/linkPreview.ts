@@ -275,6 +275,7 @@ function createPreview(
   provider: SupportedLinkPreview["provider"],
   typeLabel: SupportedLinkPreview["typeLabel"],
   title: string,
+  sourceUrl?: string,
 ): SupportedLinkPreview {
   // Strip the `#fragment` from the preview identity. A fragment is a
   // client-only anchor into the page — the preview (and the signed snapshot's
@@ -282,11 +283,26 @@ function createPreview(
   // fragment-free snapshot-URL guard, so a link like `pull/3767#review-1`
   // would silently get no preview at all. The message body keeps the raw URL,
   // so click-through to the anchor is preserved.
-  const canonical = new URL(parsed.href);
-  canonical.hash = "";
+  //
+  // When `sourceUrl` is available (the original text the user typed), use it
+  // with string-based fragment stripping instead of round-tripping through
+  // `new URL().href`. The URL constructor normalizes bare-domain URLs by
+  // adding a trailing slash (e.g. `https://api.airtable.com` →
+  // `https://api.airtable.com/`), but the relay's ingest validates that the
+  // canonical URL appears *verbatim* in the message body — a mismatched
+  // trailing slash causes `invalid link-preview canonical URL`.
+  let href: string;
+  if (sourceUrl) {
+    const hashIndex = sourceUrl.indexOf("#");
+    href = hashIndex >= 0 ? sourceUrl.slice(0, hashIndex) : sourceUrl;
+  } else {
+    const canonical = new URL(parsed.href);
+    canonical.hash = "";
+    href = canonical.href;
+  }
   return {
     kind,
-    href: canonical.href,
+    href,
     provider,
     title,
     typeLabel,
@@ -393,7 +409,7 @@ function parseBuzzGitLink(
   };
 }
 
-function parseGithubLink(parsed: URL): SupportedLinkPreview | null {
+function parseGithubLink(parsed: URL, sourceUrl?: string): SupportedLinkPreview | null {
   if (normalizeHostname(parsed) !== "github.com") {
     return null;
   }
@@ -410,6 +426,7 @@ function parseGithubLink(parsed: URL): SupportedLinkPreview | null {
       "GitHub",
       "repo",
       repoLabel,
+      sourceUrl,
     );
   }
 
@@ -421,6 +438,7 @@ function parseGithubLink(parsed: URL): SupportedLinkPreview | null {
         "GitHub",
         "PR",
         `${repoLabel} #${number}`,
+        sourceUrl,
       );
     }
 
@@ -431,6 +449,7 @@ function parseGithubLink(parsed: URL): SupportedLinkPreview | null {
         "GitHub",
         "issue",
         `${repoLabel} #${number}`,
+        sourceUrl,
       );
     }
   }
@@ -438,7 +457,7 @@ function parseGithubLink(parsed: URL): SupportedLinkPreview | null {
   return null;
 }
 
-function parseLinearIssue(parsed: URL): SupportedLinkPreview | null {
+function parseLinearIssue(parsed: URL, sourceUrl?: string): SupportedLinkPreview | null {
   if (normalizeHostname(parsed) !== "linear.app") {
     return null;
   }
@@ -459,10 +478,10 @@ function parseLinearIssue(parsed: URL): SupportedLinkPreview | null {
     return null;
   }
 
-  return createPreview("linear-issue", parsed, "Linear", "issue", issueId);
+  return createPreview("linear-issue", parsed, "Linear", "issue", issueId, sourceUrl);
 }
 
-function parseGoogleDriveLink(parsed: URL): SupportedLinkPreview | null {
+function parseGoogleDriveLink(parsed: URL, sourceUrl?: string): SupportedLinkPreview | null {
   if (normalizeHostname(parsed) !== "drive.google.com") {
     return null;
   }
@@ -479,6 +498,7 @@ function parseGoogleDriveLink(parsed: URL): SupportedLinkPreview | null {
       "Google Drive",
       "folder",
       "Drive folder",
+      sourceUrl,
     );
   }
 
@@ -492,13 +512,14 @@ function parseGoogleDriveLink(parsed: URL): SupportedLinkPreview | null {
       "Google Drive",
       "file",
       "Drive file",
+      sourceUrl,
     );
   }
 
   return null;
 }
 
-function parseGoogleDocsLink(parsed: URL): SupportedLinkPreview | null {
+function parseGoogleDocsLink(parsed: URL, sourceUrl?: string): SupportedLinkPreview | null {
   if (normalizeHostname(parsed) !== "docs.google.com") {
     return null;
   }
@@ -514,6 +535,7 @@ function parseGoogleDocsLink(parsed: URL): SupportedLinkPreview | null {
       "Google Docs",
       "document",
       "Document",
+      sourceUrl,
     );
   }
 
@@ -524,6 +546,7 @@ function parseGoogleDocsLink(parsed: URL): SupportedLinkPreview | null {
       "Google Sheets",
       "spreadsheet",
       "Spreadsheet",
+      sourceUrl,
     );
   }
 
@@ -534,6 +557,7 @@ function parseGoogleDocsLink(parsed: URL): SupportedLinkPreview | null {
       "Google Slides",
       "presentation",
       "Presentation",
+      sourceUrl,
     );
   }
 
@@ -563,12 +587,19 @@ export function parseSupportedLinkPreview(
     return null;
   }
 
+  // Preserve the original URL string for the preview href. The URL constructor
+  // normalizes bare-domain URLs by adding a trailing slash, but the relay
+  // validates that the canonical URL appears verbatim in the message body.
+  const sourceUrl = /^https?:\/\//i.test(candidate)
+    ? candidate
+    : `https://${candidate}`;
+
   const recognized =
     parseBuzzGitLink(parsed, activeRelayOrigin ?? null) ??
-    parseGithubLink(parsed) ??
-    parseLinearIssue(parsed) ??
-    parseGoogleDriveLink(parsed) ??
-    parseGoogleDocsLink(parsed);
+    parseGithubLink(parsed, sourceUrl) ??
+    parseLinearIssue(parsed, sourceUrl) ??
+    parseGoogleDriveLink(parsed, sourceUrl) ??
+    parseGoogleDocsLink(parsed, sourceUrl);
   if (recognized) return recognized;
   const hostname = normalizeHostname(parsed);
   if (
@@ -584,7 +615,7 @@ export function parseSupportedLinkPreview(
   }
 
   const provider = hostname;
-  return createPreview("generic-link", parsed, provider, "link", provider);
+  return createPreview("generic-link", parsed, provider, "link", provider, sourceUrl);
 }
 
 export function isSupportedLinkAutolinkLabel(
