@@ -72,6 +72,66 @@ void main() {
     await reconnect();
     expect(await palette(), ['b', 'd']);
   });
+
+  test(
+    'a day after the last full read, a reconnect drops deleted sets',
+    () async {
+      var now = 1000000;
+      final relay = _EmojiRelay()
+        ..sets['alice'] = _set('alice', 1000, {'a': 'https://e/a.png'})
+        ..sets['bob'] = _set('bob', 1000, {'b': 'https://e/b.png'});
+      final container = ProviderContainer(
+        overrides: [
+          relaySessionProvider.overrideWith(() => relay),
+          relayClientProvider.overrideWithValue(
+            RelayClient(baseUrl: 'http://localhost:3000'),
+          ),
+          customEmojiPaletteProvider.overrideWith(
+            () => CustomEmojiPaletteNotifier(now: () => now),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+      container.listen(customEmojiPaletteProvider, (_, _) {});
+
+      Future<List<CustomEmoji>> read() =>
+          container.read(customEmojiPaletteProvider.future);
+      Future<List<String>> palette() async => [
+        for (final emoji in await read()) emoji.shortcode,
+      ];
+      Future<void> reconnectAfter(int seconds) async {
+        now += seconds;
+        relay.setStatus(SessionStatus.disconnected);
+        await read();
+        relay.setStatus(SessionStatus.connected);
+        await read();
+      }
+
+      expect(await palette(), ['a', 'b']);
+
+      // Bob deletes his set; a `since` read can't tell.
+      relay.sets.remove('bob');
+      await reconnectAfter(60);
+      expect(relay.since.last, isNotNull);
+      expect(await palette(), ['a', 'b']);
+
+      // A day on, the reconnect reads every set and drops Bob's.
+      await reconnectAfter(CustomEmojiPaletteNotifier.fullReadEverySeconds);
+      expect(relay.since.last, isNull);
+      expect(await palette(), ['a']);
+
+      // An unchanged full read keeps the same list, and the next read is
+      // incremental again.
+      final unchanged = await read();
+      await reconnectAfter(CustomEmojiPaletteNotifier.fullReadEverySeconds);
+      expect(relay.since.last, isNull);
+      expect(await read(), same(unchanged));
+      await reconnectAfter(60);
+      expect(relay.since.last, isNotNull);
+      expect(await read(), same(unchanged));
+      expect(relay.since, hasLength(5));
+    },
+  );
 }
 
 NostrEvent _set(
