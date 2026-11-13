@@ -961,6 +961,104 @@ void main() {
     manager.dispose();
   });
 
+  test(
+    'a peer read published while the live stream retries is fetched once it is live again',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final keychain = nostr.Keys.generate();
+      final crypto = ReadStateCrypto.tryCreate(
+        nsec: keychain.nsec,
+        pubkey: keychain.public,
+      )!;
+      final relay = _FakeRelaySession();
+      final manager = ReadStateManager(
+        pubkey: keychain.public,
+        relayUrl: _relayUrl,
+        prefs: prefs,
+        crypto: crypto,
+        relaySession: relay,
+        signedEventRelay: _FakeSignedEventRelay(),
+        remoteEnabled: true,
+        onChanged: () {},
+      );
+      await manager.initialize();
+      expect(relay.fetchCount, 1);
+
+      // The relay closes the REQ retryably; a peer publishes in the gap, and
+      // the reopened REQ (limit 0) does not replay it.
+      relay.liveOnStatus!(RelaySubscriptionStatus.retrying);
+      relay.historyEvents = [
+        _readStateEvent(
+          pubkey: keychain.public,
+          crypto: crypto,
+          clientId: 'peer-client',
+          slotId: 'peer-slot',
+          contexts: {'channel-1': 50},
+          createdAt: 100,
+        ),
+      ];
+      expect(manager.getEffectiveTimestamp('channel-1'), isNull);
+      relay.liveOnStatus!(RelaySubscriptionStatus.ready);
+      await pumpEventQueue();
+
+      expect(relay.fetchCount, 2);
+      expect(manager.getEffectiveTimestamp('channel-1'), 50);
+
+      // A later readiness with no interruption fetches nothing more.
+      relay.liveOnStatus!(RelaySubscriptionStatus.ready);
+      await pumpEventQueue();
+      expect(relay.fetchCount, 2);
+
+      manager.dispose();
+    },
+  );
+
+  test(
+    'a snapshot that finished before the live stream was ready is fetched again',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final keychain = nostr.Keys.generate();
+      final crypto = ReadStateCrypto.tryCreate(
+        nsec: keychain.nsec,
+        pubkey: keychain.public,
+      )!;
+      final relay = _FakeRelaySession()..readyOnSubscribe = false;
+      final manager = ReadStateManager(
+        pubkey: keychain.public,
+        relayUrl: _relayUrl,
+        prefs: prefs,
+        crypto: crypto,
+        relaySession: relay,
+        signedEventRelay: _FakeSignedEventRelay(),
+        remoteEnabled: true,
+        onChanged: () {},
+      );
+      await manager.initialize();
+      expect(relay.fetchCount, 1);
+
+      // A peer publishes after the snapshot but before the REQ is live.
+      relay.historyEvents = [
+        _readStateEvent(
+          pubkey: keychain.public,
+          crypto: crypto,
+          clientId: 'peer-client',
+          slotId: 'peer-slot',
+          contexts: {'channel-1': 50},
+          createdAt: 100,
+        ),
+      ];
+      relay.liveOnStatus!(RelaySubscriptionStatus.ready);
+      await pumpEventQueue();
+
+      expect(relay.fetchCount, 2);
+      expect(manager.getEffectiveTimestamp('channel-1'), 50);
+
+      manager.dispose();
+    },
+  );
+
   test('a connect during a failed initialize syncs again', () async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
@@ -1258,15 +1356,23 @@ class _FakeRelaySession extends RelaySessionNotifier {
     return historyEvents;
   }
 
+  // False models a subscribe that returns on the readiness timeout, before
+  // the relay's EOSE.
+  bool readyOnSubscribe = true;
+  void Function(RelaySubscriptionStatus status)? liveOnStatus;
+
   @override
-  Future<void Function()> subscribe(
+  Future<void Function()> subscribeWithStatus(
     NostrFilter filter,
     void Function(NostrEvent) onEvent, {
     void Function(String message)? onClosed,
+    required void Function(RelaySubscriptionStatus status) onStatusChanged,
   }) async {
     subscribeCount++;
     subscribeFilters.add(filter);
     liveSubscriptions++;
+    liveOnStatus = onStatusChanged;
+    if (readyOnSubscribe) onStatusChanged(RelaySubscriptionStatus.ready);
     var open = true;
     return () {
       if (open) liveSubscriptions--;

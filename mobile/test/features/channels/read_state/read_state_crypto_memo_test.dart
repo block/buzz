@@ -234,10 +234,11 @@ class _CapturingRelaySession extends RelaySessionNotifier {
   }) async => history;
 
   @override
-  Future<void Function()> subscribe(
+  Future<void Function()> subscribeWithStatus(
     NostrFilter filter,
     void Function(NostrEvent) onEvent, {
     void Function(String message)? onClosed,
+    required void Function(RelaySubscriptionStatus status) onStatusChanged,
   }) async {
     this.onEvent = onEvent;
     return () {};

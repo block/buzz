@@ -167,6 +167,17 @@ class ReadStateManager {
   // Whether the first fetch and subscribe both succeeded. A connect that
   // lands while they run (the cold-start connect) then has nothing to redo.
   bool _initialSyncSucceeded = false;
+  // The live subscription replays nothing, so a snapshot covers only events
+  // stored before it ran. Each subscription gets a generation so a replaced
+  // one's callbacks are ignored. [_liveCatchUpNeeded] is set when the stream
+  // was not live while the last snapshot ran (readiness timed out) or was
+  // interrupted after it (a retryable CLOSED); its next readiness then fetches
+  // a catch-up snapshot.
+  int _liveGeneration = 0;
+  bool _liveReady = false;
+  bool _liveCatchUpNeeded = false;
+  bool _catchUpRunning = false;
+  bool _catchUpAgain = false;
 
   bool _disposed = false;
   bool _isPublishing = false;
@@ -460,7 +471,10 @@ class ReadStateManager {
 
   Future<bool> _startLiveSubscription() async {
     try {
-      final unsub = await _relaySession!.subscribe(
+      final generation = ++_liveGeneration;
+      _liveReady = false;
+      _liveCatchUpNeeded = false;
+      final unsub = await _relaySession!.subscribeWithStatus(
         NostrFilter(
           kinds: const [EventKind.readState],
           authors: [pubkey],
@@ -472,17 +486,53 @@ class ReadStateManager {
           limit: 0,
         ),
         _handleIncomingEvent,
+        onStatusChanged: (status) => _onLiveStatus(generation, status),
       );
       if (_disposed) {
         unsub.call();
         return false;
       }
       _unsubscribeLive = unsub;
+      // Returned on the readiness timeout or a retryable CLOSED: the snapshot
+      // about to run may finish before the stream is live.
+      if (!_liveReady) _liveCatchUpNeeded = true;
       debugPrint('[ReadStateManager] live subscription established');
       return true;
     } catch (e) {
       debugPrint('[ReadStateManager] live subscription FAILED: $e');
       return false;
+    }
+  }
+
+  void _onLiveStatus(int generation, RelaySubscriptionStatus status) {
+    if (_disposed || generation != _liveGeneration) return;
+    if (status == RelaySubscriptionStatus.retrying) {
+      _liveReady = false;
+      _liveCatchUpNeeded = true;
+      return;
+    }
+    _liveReady = true;
+    if (!_liveCatchUpNeeded) return;
+    _liveCatchUpNeeded = false;
+    unawaited(_runCatchUp());
+  }
+
+  /// Fetches the snapshot again once the stream is live. A readiness that
+  /// lands while one runs fetches once more after it, since the running fetch
+  /// may predate it.
+  Future<void> _runCatchUp() async {
+    if (_catchUpRunning) {
+      _catchUpAgain = true;
+      return;
+    }
+    _catchUpRunning = true;
+    try {
+      do {
+        _catchUpAgain = false;
+        await _fetchAndMerge();
+      } while (_catchUpAgain && !_disposed);
+    } finally {
+      _catchUpRunning = false;
     }
   }
 
