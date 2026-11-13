@@ -314,6 +314,7 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
     }
 
     await storage.save(community);
+    await recordKnownCommunityJoin(ref, community.relayUrl);
     final updatedList = [...current, community];
     state = AsyncData(updatedList);
     await _removeOrphanChannelListSnapshots(updatedList);
@@ -321,7 +322,11 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
     return community.id;
   }
 
-  Future<void> removeCommunity(String id) {
+  /// Forgets a community on this device. The Builderlab account learns of the
+  /// leave unless [reportToAccount] is false: an organization sign-out removes
+  /// the organization's community from this device only, not from any
+  /// account's list.
+  Future<void> removeCommunity(String id, {bool reportToAccount = true}) {
     return ref.read(communityTransitionProvider).runExclusive(() async {
       var revocationJournaled = false;
       final storage = ref.read(communityStorageProvider);
@@ -341,6 +346,12 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
         revocationJournaled = await ref.read(
           communityPushLeaseRevocationEnqueuerProvider,
         )(current[removedIndex]);
+        // The account's list learns of the leave before the device forgets
+        // the community, so the next sign-in does not add it back. The leave
+        // itself never waits on or fails for that record.
+        if (reportToAccount) {
+          await recordKnownCommunityLeave(ref, current[removedIndex].relayUrl);
+        }
       }
       await storage.remove(id);
 

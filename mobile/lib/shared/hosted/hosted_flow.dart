@@ -22,76 +22,7 @@ import 'web_connect_binding.dart';
 import 'hosted_join_policy.dart';
 
 part 'hosted_flow_identity_recovery.dart';
-
-enum HostedFlowStage {
-  idle,
-  working,
-  signIn,
-  chooseIdentity,
-  setupIdentity,
-  chooseCommunities,
-  communityConflict,
-  acceptPolicy,
-  profile,
-  blocked,
-  browserReturned,
-  complete,
-}
-
-enum HostedFlowProblem {
-  retry,
-  denied,
-  accountSetupRequired,
-  differentAccount,
-  identityUnreadable,
-  backupUnavailable,
-  unsupportedPlatform,
-  invalidResponse,
-  requestRejected,
-  identityMismatch,
-  identityUnavailable,
-  backupRequired,
-  bindingRequired,
-  unsupportedEnvironment,
-  invitePolicyRequired,
-  inviteExpired,
-  inviteExhausted,
-  inviteInvalid,
-  inviteRestricted,
-  inviteOwnerMismatch,
-  communityCreationRejected,
-}
-
-/// Resolves only after relay admission is proven and local persistence completes.
-/// Implementations must check [isCurrent] immediately before durable mutations.
-typedef HostedCommunityAdmission =
-    Future<void> Function(
-      BuzzDeepLink target,
-      String subject,
-      String pubkey,
-      bool Function() isCurrent,
-    );
-
-/// Reopens the completed Add destination after restoring older memberships.
-typedef HostedCommunityReturn =
-    Future<void> Function(bool Function() isCurrent);
-
-/// Account-scoped picker state retained while the Add route is open.
-class HostedCommunityChoices {
-  HostedCommunityChoices._(
-    this._subject,
-    this._communities,
-    this._selectedRelays,
-    this._landingRelay,
-    this._addedRelays,
-  );
-
-  final String _subject;
-  final List<AddCommunityDeepLink> _communities;
-  final Set<String> _selectedRelays;
-  final String? _landingRelay;
-  final Set<String> _addedRelays;
-}
+part 'hosted_flow_types.dart';
 
 /// App-scoped owner: callback subscriptions must outlive any individual page.
 /// Only public progress reaches widgets; pending auth secrets remain in BrowserAuth.
@@ -794,13 +725,8 @@ class HostedFlow extends ChangeNotifier {
       _isCurrent(generation),
     );
     if (generation != _generation || _disposed) return;
-    // Save only after admission/persistence succeeds. A failure keeps the
-    // existing intent for retry; add is idempotent after a lost response.
-    await account.rememberCommunity(
-      destination.relayUrl ?? (throw AccountFailure.invalidResponse),
-      expectedSubject: session.subject,
-    );
-    if (generation != _generation || _disposed) return;
+    // The saved membership reaches the account through the known-communities
+    // outbox, which persistence queued; setup never waits on that upload.
     await browser.clearIntent();
     _set(HostedFlowStage.complete);
   }
@@ -853,12 +779,29 @@ class HostedFlow extends ChangeNotifier {
     return true;
   }
 
+  /// Told of the listed communities the user saw in the picker and left
+  /// unchosen, so a background join does not add them anyway. Set by the
+  /// known-communities sync owner.
+  void Function(Iterable<String> relayUrls)? onCommunitiesDeclined;
+
+  void _declineCommunities(Iterable<String> relayUrls) {
+    final declined = List.of(relayUrls);
+    if (declined.isNotEmpty) onCommunitiesDeclined?.call(declined);
+  }
+
   Future<void> addSelectedCommunities({bool returnToAddedCommunity = false}) {
     if (!accountOnly ||
         stage != HostedFlowStage.chooseCommunities ||
         selectedRelays.isEmpty) {
       return Future.value();
     }
+    // Finishing the picker with a subset declines the rest.
+    _declineCommunities([
+      for (final community in communities)
+        if (!selectedRelays.contains(community.relayUrl) &&
+            !_addedRelays.contains(community.relayUrl))
+          community.relayUrl,
+    ]);
     _returnToAddedCommunity = returnToAddedCommunity || _returnToAddedCommunity;
     _addingCommunities = true;
     final generation = _nextGeneration();
@@ -882,6 +825,7 @@ class HostedFlow extends ChangeNotifier {
     selectedRelays = Set.unmodifiable(
       selectedRelays.where((item) => item != relay),
     );
+    _declineCommunities([relay]);
     _failedRelay = null;
     final generation = _nextGeneration();
     _set(HostedFlowStage.working);
@@ -896,6 +840,7 @@ class HostedFlow extends ChangeNotifier {
     selectedRelays = Set.unmodifiable(
       selectedRelays.where((item) => item != relay),
     );
+    _declineCommunities([relay]);
     _conflictingRelay = null;
     final generation = _nextGeneration();
     _set(HostedFlowStage.working);

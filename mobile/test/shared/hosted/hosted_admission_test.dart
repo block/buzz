@@ -1,9 +1,11 @@
 import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
 import 'dart:async';
+import 'dart:io';
 import 'hosted_http_fixture.dart';
 import 'package:buzz/shared/hosted/hosted_join_policy.dart';
 import 'dart:convert';
 
+import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/deeplink/deep_link.dart';
 import 'package:buzz/shared/hosted/account_identity_store.dart';
 import 'package:buzz/shared/hosted/builderlab_account.dart';
@@ -240,6 +242,55 @@ void main() {
     expect(claims, isEmpty);
   });
 
+  test('the relay probe refuses only a refused identity; an unreachable or '
+      'closed relay is unavailable, so the join is retried', () async {
+    final probing = HostedAdmission(
+      account: account,
+      relayAuth: HostedRelayAuth(account, enabled: false),
+      store: store,
+    );
+    addTearDown(probing.dispose);
+    Community community(int port) => Community.create(
+      name: 'probe',
+      relayUrl: 'ws://127.0.0.1:$port',
+      pubkey: keys.public,
+      nsec: keys.nsec,
+    );
+    final closed = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+    final closedPort = closed.port;
+    await closed.close();
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    addTearDown(() => server.close(force: true));
+    var refuse = true;
+    server.listen((request) async {
+      if (refuse) {
+        request.response.statusCode = HttpStatus.forbidden;
+        await request.response.close();
+        return;
+      }
+      // Accept the upgrade, then drop the connection before NIP-42 auth.
+      final socket = await WebSocketTransformer.upgrade(request);
+      await socket.close();
+    });
+    // The test binding answers every HTTP request with a 400 stub; the probe
+    // must reach the loopback servers above.
+    await HttpOverrides.runWithHttpOverrides(() async {
+      await expectLater(
+        probing.authenticateRelay(community(closedPort)),
+        throwsA(AccountFailure.unavailable),
+      );
+      await expectLater(
+        probing.authenticateRelay(community(server.port)),
+        throwsA(AccountFailure.denied),
+      );
+      refuse = false;
+      await expectLater(
+        probing.authenticateRelay(community(server.port)),
+        throwsA(AccountFailure.unavailable),
+      );
+    }, _RealHttp());
+  });
+
   test('different account and untrusted host cannot claim', () async {
     await store.create(keys.nsec);
     await backup();
@@ -279,3 +330,6 @@ class _Account extends BuilderlabAccountClient {
     };
   }
 }
+
+/// Real sockets; the base class builds the SDK's own client.
+class _RealHttp extends HttpOverrides {}

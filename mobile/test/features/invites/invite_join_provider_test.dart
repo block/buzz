@@ -14,6 +14,7 @@ import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/invites/invite_join_provider.dart';
 import 'package:buzz/shared/auth/auth.dart';
 import 'package:buzz/shared/deeplink/deep_link.dart';
+import 'package:buzz/shared/hosted/known_communities_sync.dart';
 
 import '../../shared/community/community_storage_test.dart';
 
@@ -1037,9 +1038,11 @@ void main() {
       final secure = FakeSecureStorage();
       final storage = CommunityStorage(secure: secure);
       final auth = _RecordingAuthNotifier();
+      final knownOutbox = KnownCommunitiesOutbox(storage: FakeSecureStorage());
       ProviderContainer open() => ProviderContainer(
         overrides: [
           communityStorageProvider.overrideWithValue(storage),
+          knownCommunitiesOutboxProvider.overrideWithValue(knownOutbox),
           communitySnapshotWriterProvider.overrideWithValue((_) async {}),
           communityPushLeaseRevocationEnqueuerProvider.overrideWithValue(
             (_) async => false,
