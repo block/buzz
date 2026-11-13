@@ -1,7 +1,11 @@
 import buzzMark from "@/assets/invite/mark.svg";
+import { BeeField } from "@/features/invite/ui/BeeField";
 import "@/features/invite/ui/invite-page.css";
 import { buzzLinkFromOpenUrl } from "@/features/open/open-link";
-import { BUZZ_RELEASES_URL } from "@/shared/lib/buzz-download";
+import {
+  BUZZ_RELEASES_URL,
+  resolveBuzzDownloadUrl,
+} from "@/shared/lib/buzz-download";
 import { Button } from "@/shared/ui/button";
 import * as React from "react";
 
@@ -12,6 +16,7 @@ export function OpenLinkPage() {
     window.location.search,
   );
   const launched = React.useRef(false);
+  const [downloadUrl, setDownloadUrl] = React.useState(BUZZ_RELEASES_URL);
 
   React.useEffect(() => {
     if (!link || launched.current) return;
@@ -19,8 +24,20 @@ export function OpenLinkPage() {
     window.location.href = link;
   }, [link]);
 
+  React.useEffect(() => {
+    if (!link) return;
+    let active = true;
+    resolveBuzzDownloadUrl().then((url) => {
+      if (active) setDownloadUrl(url);
+    });
+    return () => {
+      active = false;
+    };
+  }, [link]);
+
   return (
     <div className="invite-page">
+      <BeeField count={24} sizeScale={0.75} zIndex={-1} />
       <img className="invite-mark" src={buzzMark} alt="Buzz" />
       <div className="invite-stack">
         <div className="invite-card">
@@ -53,7 +70,7 @@ export function OpenLinkPage() {
             Don&apos;t have the app?{" "}
             <a
               className="ml-1 font-medium text-black underline-offset-4 hover:text-black/70 hover:underline focus-visible:underline"
-              href={BUZZ_RELEASES_URL}
+              href={downloadUrl}
               rel="noreferrer"
               target="_blank"
             >
