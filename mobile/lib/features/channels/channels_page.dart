@@ -187,7 +187,7 @@ class ChannelsPage extends HookConsumerWidget {
     final nativeDuoTitle =
         messagesFilters != null &&
         defaultTargetPlatform == TargetPlatform.iOS &&
-        (DuoToolbarScope.maybeOf(context)?.strip ??
+        (DuoToolbarScope.maybeStripOf(context) ??
                 FoldGeometry.of(context).strip) !=
             null;
     final filterContentHeight = messagesFilters == null
@@ -205,10 +205,8 @@ class ChannelsPage extends HookConsumerWidget {
     );
     // A sheet's dim barrier can't composite over Home's native soft edge, so
     // use the Flutter backdrop while another route covers this page.
-    final route = ModalRoute.of(context);
     final headerNativeSuppressed = useValueNotifier(false);
-    headerNativeSuppressed.value =
-        messagesFilters != null && !(route?.isCurrent ?? true);
+    final routeCurrent = useValueNotifier(true);
     final communityAvatarKey = useMemoized(GlobalKey.new);
     final nativeCommunityAvatarBounds = useRef<Rect?>(null);
     final headerKey = useMemoized(GlobalKey.new);
@@ -310,7 +308,10 @@ class ChannelsPage extends HookConsumerWidget {
         .toList();
     Future<void> openChannel(Channel channel) async {
       if (!context.mounted) return;
-      final pane = ConversationPaneScope.maybeOf(context);
+      // A lookup, not a dependency: the page doesn't rebuild with the pane.
+      final pane = context
+          .getInheritedWidgetOfExactType<ConversationPaneScope>()
+          ?.notifier;
       if (pane != null) {
         pane.open(
           channel.id,
@@ -431,7 +432,7 @@ class ChannelsPage extends HookConsumerWidget {
         do {
           await WidgetsBinding.instance.endOfFrame;
           if (cancelled || !context.mounted) return;
-        } while (ModalRoute.of(context)?.isCurrent == false);
+        } while (!routeCurrent.value);
         if (ref.read(pairedCommunityLandingProvider)?.id !=
             arrivingCommunity.id) {
           return;
@@ -500,7 +501,7 @@ class ChannelsPage extends HookConsumerWidget {
         do {
           await WidgetsBinding.instance.endOfFrame;
           if (cancelled || !context.mounted) return;
-        } while (ModalRoute.of(context)?.isCurrent == false);
+        } while (!routeCurrent.value);
         if (!ref.read(communityGridLandingProvider)) return;
         ref.read(communityGridLandingProvider.notifier).clear();
         openCommunityGrid();
@@ -648,7 +649,7 @@ class ChannelsPage extends HookConsumerWidget {
       return () => active = false;
     }, [newChannelAction, newDmAction, currentPubkey]);
 
-    return ValueListenableBuilder(
+    final page = ValueListenableBuilder(
       valueListenable: headerTreatment,
       // Retain the inventory during header animation. Provider and parent
       // updates still construct a fresh body with current channel data.
@@ -840,6 +841,40 @@ class ChannelsPage extends HookConsumerWidget {
         body: child!,
       ),
     );
+    return _RouteCurrencySync(
+      current: routeCurrent,
+      nativeSuppressed: headerNativeSuppressed,
+      suppressesNative: messagesFilters != null,
+      child: page,
+    );
+  }
+}
+
+/// Mirrors whether this page's route is current into [current], and into
+/// [nativeSuppressed] when [suppressesNative] is set.
+///
+/// Only this leaf depends on the route, so a route or sheet opening above Home
+/// rebuilds it and the header listening to [nativeSuppressed], not the channel
+/// inventory. The header is a descendant, so it updates in the same frame.
+class _RouteCurrencySync extends StatelessWidget {
+  const _RouteCurrencySync({
+    required this.current,
+    required this.nativeSuppressed,
+    required this.suppressesNative,
+    required this.child,
+  });
+
+  final ValueNotifier<bool> current;
+  final ValueNotifier<bool> nativeSuppressed;
+  final bool suppressesNative;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final isCurrent = ModalRoute.isCurrentOf(context) ?? true;
+    current.value = isCurrent;
+    nativeSuppressed.value = suppressesNative && !isCurrent;
+    return child;
   }
 }
 

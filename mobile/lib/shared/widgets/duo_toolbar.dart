@@ -18,7 +18,7 @@ bool isCompactDuoWindow(BuildContext context) {
 }
 
 /// Carries window geometry through the independently sized conversation panes.
-class DuoToolbarScope extends InheritedWidget {
+class DuoToolbarScope extends InheritedModel<Object> {
   const DuoToolbarScope({
     required this.strip,
     required this.active,
@@ -35,8 +35,20 @@ class DuoToolbarScope extends InheritedWidget {
   /// Space above detail actions for the workspace's persistent rail controls.
   final int leadingSlots;
 
+  static const Object _stripAspect = #strip;
+
   static DuoToolbarScope? maybeOf(BuildContext context) =>
-      context.dependOnInheritedWidgetOfExactType<DuoToolbarScope>();
+      InheritedModel.inheritFrom<DuoToolbarScope>(context);
+
+  /// The enclosing pane's [strip], depending on nothing else.
+  ///
+  /// [active] flips whenever a route covers the pane, so geometry readers
+  /// such as headers and page lists use this to avoid rebuilding with it.
+  static FoldStrip? maybeStripOf(BuildContext context) =>
+      InheritedModel.inheritFrom<DuoToolbarScope>(
+        context,
+        aspect: _stripAspect,
+      )?.strip;
 
   @override
   bool updateShouldNotify(DuoToolbarScope oldWidget) =>
@@ -44,6 +56,12 @@ class DuoToolbarScope extends InheritedWidget {
       active != oldWidget.active ||
       contentInsets != oldWidget.contentInsets ||
       leadingSlots != oldWidget.leadingSlots;
+
+  @override
+  bool updateShouldNotifyDependent(
+    DuoToolbarScope oldWidget,
+    Set<Object> dependencies,
+  ) => strip != oldWidget.strip;
 }
 
 /// Content clearance for a pane, or a full-window route outside a pane.

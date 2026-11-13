@@ -41,7 +41,7 @@ double _barContentHeight(
       : scaledTitleHeight;
   final accessibleHeight = Grid.xxs + effectiveTitleHeight + Grid.xxs;
   final strip =
-      DuoToolbarScope.maybeOf(context)?.strip ?? FoldGeometry.of(context).strip;
+      DuoToolbarScope.maybeStripOf(context) ?? FoldGeometry.of(context).strip;
   final minimumHeight =
       defaultTargetPlatform == TargetPlatform.iOS &&
           strip != null &&
