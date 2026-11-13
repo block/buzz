@@ -1336,6 +1336,9 @@ mod external_infra {
                 &self.owner.public_key().to_hex(),
                 &self.repo,
                 &super::super::super::cas_publish::ParentState::fresh(),
+                &super::super::super::cas_publish::snapshot_workspace(&source)
+                    .await
+                    .unwrap(),
                 limits(0),
             )
             .await
@@ -1800,6 +1803,9 @@ mod external_infra {
             &f.owner.public_key().to_hex(),
             &f.repo,
             &parent,
+            &super::super::super::cas_publish::snapshot_workspace(push.path())
+                .await
+                .unwrap(),
             limits(push.hydrated_bytes()),
         )
         .await;
@@ -1827,6 +1833,9 @@ mod external_infra {
             &f.owner.public_key().to_hex(),
             &f.repo,
             &parent,
+            &super::super::super::cas_publish::snapshot_workspace(push.path())
+                .await
+                .unwrap(),
             limits(push.hydrated_bytes()),
         )
         .await
@@ -1877,6 +1886,9 @@ mod external_infra {
             &f.owner.public_key().to_hex(),
             &f.repo,
             &parent,
+            &super::super::super::cas_publish::snapshot_workspace(push.path())
+                .await
+                .unwrap(),
             limits(push.hydrated_bytes()),
         )
         .await
@@ -1903,6 +1915,9 @@ mod external_infra {
             &f.owner.public_key().to_hex(),
             &f.repo,
             &parent,
+            &super::super::super::cas_publish::snapshot_workspace(push.path())
+                .await
+                .unwrap(),
             limits(push.hydrated_bytes()),
         )
         .await
