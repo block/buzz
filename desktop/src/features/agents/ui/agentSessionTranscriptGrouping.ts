@@ -780,7 +780,7 @@ export function deriveTranscriptBlockIds(
 ): string[] {
   const items = buildTranscriptState(events).items;
   const blocks = buildTranscriptDisplayBlocks(items);
-  return blocks.map(getDisplayBlockKey);
+  return blocks.map(getDisplayBlockKey).reverse();
 }
 
 /** Human-readable labels for a collapsed turn setup row. */
