@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:buzz/features/activity/compose_drafts_provider.dart';
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
@@ -12,6 +14,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:buzz/shared/theme/theme_provider.dart';
+import 'package:fake_async/fake_async.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -230,7 +233,53 @@ void main() {
       expect(prefs.getString(_elsewhereDrafts), isNot(contains('reply 9')));
     },
   );
+
+  test('a reply given up on never publishes later', () {
+    fakeAsync((async) {
+      SharedPreferences.setMockInitialValues({});
+      late SharedPreferences prefs;
+      SharedPreferences.getInstance().then((value) => prefs = value);
+      async.flushMicrotasks();
+      final sender = _RecordingSender();
+      final session = _Session();
+      final connected = Completer<void>();
+      session.onConnect = () => connected.future;
+      final container = ProviderContainer(
+        overrides: [
+          savedPrefsProvider.overrideWithValue(prefs),
+          authProvider.overrideWith(_Auth.new),
+          communityListProvider.overrideWith(_Communities.new),
+          activeCommunityProvider.overrideWith((ref) async => _community),
+          channelsProvider.overrideWith(() => _Channels([_channel('general')])),
+          sendMessageProvider.overrideWithValue(sender),
+          readStateProvider.overrideWith(_ReadState.new),
+          relaySessionProvider.overrideWith(() => session),
+        ],
+      );
+      addTearDown(container.dispose);
+      final ref = container.read(_refProvider);
+
+      bool? sent;
+      sendNotificationReply(
+        ref,
+        BuzzNotificationReply.fromArguments(_reply('1'))!,
+      ).then((value) => sent = value);
+      // The relay connects only after the reply's deadline, so its text is
+      // kept as a draft.
+      async.elapse(const Duration(seconds: 30));
+      expect(sent, isFalse);
+      final drafts = container.read(composeDraftsProvider.notifier);
+      expect(drafts.textFor(composeDraftKey('general')), 'reply 1');
+
+      // Retrying that draft must not post the reply twice.
+      connected.complete();
+      async.flushMicrotasks();
+      expect(sender.calls, isEmpty);
+    });
+  });
 }
+
+final _refProvider = Provider<Ref>((ref) => ref);
 
 class _Auth extends AuthNotifier {
   @override
