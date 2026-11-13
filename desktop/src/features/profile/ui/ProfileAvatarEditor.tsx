@@ -49,6 +49,11 @@ import type {
   ProfileAvatarEditorProps,
 } from "./ProfileAvatarEditor.types";
 
+type ImageDragEvent = Pick<
+  DragEvent,
+  "dataTransfer" | "preventDefault" | "stopPropagation"
+>;
+
 const INITIAL_EMOJI_AVATAR_COLORS = AVATAR_COLORS.filter(
   (color) => color !== DEFAULT_EMOJI_AVATAR_COLOR,
 );
@@ -82,6 +87,8 @@ export function ProfileAvatarEditor({
   disabled,
   testIdPrefix = "profile-avatar",
   animatedPreviewContainer = null,
+  imageDropTarget = null,
+  onImageDropActiveChange,
   modeTabsContainer,
   onAnimatedPreviewActiveChange,
   onAnimatedPreviewCaptionChange,
@@ -503,7 +510,99 @@ export function ProfileAvatarEditor({
     };
   }, [isDragging, resetDragState]);
 
+  const handleImageDragEnter = React.useCallback(
+    (event: ImageDragEvent) => {
+      if (!dataTransferHasImage(event.dataTransfer)) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      if (isInputDisabled) {
+        return;
+      }
+      dragDepthRef.current += 1;
+      updateMode("image");
+      setIsDragging(true);
+    },
+    [isInputDisabled, updateMode],
+  );
+
+  const handleImageDragLeave = React.useCallback(
+    (event: ImageDragEvent) => {
+      if (!isDragging && !dataTransferHasImage(event.dataTransfer)) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+      if (dragDepthRef.current === 0) {
+        setIsDragging(false);
+      }
+    },
+    [isDragging],
+  );
+
+  const handleImageDragOver = React.useCallback(
+    (event: ImageDragEvent) => {
+      if (!event.dataTransfer || !dataTransferHasImage(event.dataTransfer)) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      if (isInputDisabled) {
+        return;
+      }
+      event.dataTransfer.dropEffect = "copy";
+      updateMode("image");
+      setIsDragging(true);
+    },
+    [isInputDisabled, updateMode],
+  );
+
+  const handleImageDrop = React.useCallback(
+    (event: ImageDragEvent) => {
+      if (!event.dataTransfer || !dataTransferHasImage(event.dataTransfer)) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      resetDragState();
+      if (isInputDisabled) {
+        return;
+      }
+      handleFiles(event.dataTransfer.files);
+    },
+    [handleFiles, isInputDisabled, resetDragState],
+  );
+
+  // The host's avatar preview (outside this fieldset) accepts the same drops.
+  React.useEffect(() => {
+    if (!imageDropTarget) {
+      return;
+    }
+
+    imageDropTarget.addEventListener("dragenter", handleImageDragEnter);
+    imageDropTarget.addEventListener("dragleave", handleImageDragLeave);
+    imageDropTarget.addEventListener("dragover", handleImageDragOver);
+    imageDropTarget.addEventListener("drop", handleImageDrop);
+    return () => {
+      imageDropTarget.removeEventListener("dragenter", handleImageDragEnter);
+      imageDropTarget.removeEventListener("dragleave", handleImageDragLeave);
+      imageDropTarget.removeEventListener("dragover", handleImageDragOver);
+      imageDropTarget.removeEventListener("drop", handleImageDrop);
+    };
+  }, [
+    handleImageDragEnter,
+    handleImageDragLeave,
+    handleImageDragOver,
+    handleImageDrop,
+    imageDropTarget,
+  ]);
+
   const isImageDropActive = mode === "image" && isDragging;
+  React.useEffect(() => {
+    onImageDropActiveChange?.(isImageDropActive);
+  }, [isImageDropActive, onImageDropActiveChange]);
   const shouldShowDoneButton =
     onDone &&
     !isAnyCustomColorPickerVisible &&
@@ -534,55 +633,10 @@ export function ProfileAvatarEditor({
       )}
       data-testid={`${testIdPrefix}-editor`}
       disabled={isInputDisabled}
-      onDragEnter={(event) => {
-        if (!dataTransferHasImage(event.dataTransfer)) {
-          return;
-        }
-        event.preventDefault();
-        event.stopPropagation();
-        if (isInputDisabled) {
-          return;
-        }
-        dragDepthRef.current += 1;
-        updateMode("image");
-        setIsDragging(true);
-      }}
-      onDragLeave={(event) => {
-        if (!isDragging && !dataTransferHasImage(event.dataTransfer)) {
-          return;
-        }
-        event.preventDefault();
-        event.stopPropagation();
-        dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
-        if (dragDepthRef.current === 0) {
-          setIsDragging(false);
-        }
-      }}
-      onDragOver={(event) => {
-        if (!dataTransferHasImage(event.dataTransfer)) {
-          return;
-        }
-        event.preventDefault();
-        event.stopPropagation();
-        if (isInputDisabled) {
-          return;
-        }
-        event.dataTransfer.dropEffect = "copy";
-        updateMode("image");
-        setIsDragging(true);
-      }}
-      onDrop={(event) => {
-        if (!dataTransferHasImage(event.dataTransfer)) {
-          return;
-        }
-        event.preventDefault();
-        event.stopPropagation();
-        resetDragState();
-        if (isInputDisabled) {
-          return;
-        }
-        void handleFiles(event.dataTransfer.files);
-      }}
+      onDragEnter={handleImageDragEnter}
+      onDragLeave={handleImageDragLeave}
+      onDragOver={handleImageDragOver}
+      onDrop={handleImageDrop}
     >
       <legend className="sr-only">Avatar image picker</legend>
       <div

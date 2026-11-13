@@ -29,6 +29,11 @@ export type ProfileAvatarEditorProps = {
   disabled?: boolean;
   testIdPrefix?: string;
   animatedPreviewContainer?: HTMLElement | null;
+  /** An element outside the editor, such as the host's avatar preview, that
+   *  also accepts dropped images and uploads them like the editor does. */
+  imageDropTarget?: HTMLElement | null;
+  /** Reports whether an image is being dragged over a drop target. */
+  onImageDropActiveChange?: (active: boolean) => void;
   modeTabsContainer?: HTMLElement | null;
   onAnimatedPreviewActiveChange?: (active: boolean) => void;
   onAnimatedPreviewCaptionChange?: (caption: string | null) => void;
