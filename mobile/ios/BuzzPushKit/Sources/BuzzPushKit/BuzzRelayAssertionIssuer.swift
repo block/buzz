@@ -130,16 +130,15 @@ public final class BuzzRelayAssertionIssuer: @unchecked Sendable {
   /// and received at `receipt`: the issuer's lifetime (`exp − iat`) counted from before the
   /// request was sent, capped by `exp` against the local wall clock. The first bound keeps a
   /// skewed phone clock from stretching the token; the second keeps a short session-capped
-  /// token from outliving its `exp`.
+  /// token from outliving its `exp`. A deadline at or before `receipt` means no lifetime is left.
   static func localDeadline(
-    requestStart: TimeInterval, receipt: TimeInterval, wallAtReceipt: Date, exp: Int, iat: Int?
+    requestStart: TimeInterval, receipt: TimeInterval, wallAtReceipt: Date, exp: Int, iat: Int
   ) -> TimeInterval {
     let byExp = receipt + max(0, TimeInterval(exp) - wallAtReceipt.timeIntervalSince1970)
-    guard let iat else { return byExp }
     return min(byExp, requestStart + TimeInterval(max(0, exp - iat)))
   }
 
-  /// The `iat` claim of a compact JWS, or nil when it has none.
+  /// The `iat` claim of a compact JWS, or nil when it has none or it is unreadable.
   static func issuedAt(_ token: String) -> Int? {
     let parts = token.split(separator: ".", omittingEmptySubsequences: false)
     guard parts.count == 3 else { return nil }
@@ -334,9 +333,14 @@ public final class BuzzRelayAssertionIssuer: @unchecked Sendable {
         return
       }
       let receipt = uptime()
+      // An assertion without a readable `iat` has no lifetime to count, so it is refused.
+      guard let iat = Self.issuedAt(token) else {
+        completion(nil)
+        return
+      }
       let deadline = Self.localDeadline(
         requestStart: requestStart, receipt: receipt, wallAtReceipt: now(), exp: expiresAt,
-        iat: Self.issuedAt(token))
+        iat: iat)
       // A sign-out or account change during issuance revokes this result.
       guard deadline > receipt, current(organization.isHosted) == organization else {
         completion(nil)

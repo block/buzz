@@ -8,14 +8,17 @@ void main() {
     const issuerIat = 10000;
     const issuerExp = 10180;
 
-    Duration deadline({required int delay, required int wall, int? iat}) =>
-        localDeadline(
-          requestStart: start,
-          receipt: start + Duration(seconds: delay),
-          wallAtReceipt: wall,
-          exp: issuerExp,
-          iat: iat,
-        );
+    Duration deadline({
+      required int delay,
+      required int wall,
+      int iat = issuerIat,
+    }) => localDeadline(
+      requestStart: start,
+      receipt: start + Duration(seconds: delay),
+      wallAtReceipt: wall,
+      exp: issuerExp,
+      iat: iat,
+    );
 
     test('a phone 120 s slow does not stretch the token', () {
       // `exp` alone would leave 300 s; the lifetime from the request start

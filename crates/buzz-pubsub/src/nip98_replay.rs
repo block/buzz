@@ -190,7 +190,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires Redis"]
-    async fn duplicate_at_last_admissible_second_rejected_across_instances() {
+    async fn a_marked_proof_is_refused_by_another_instance() {
         use nostr::{Tag, Timestamp};
 
         // Two relay instances sharing one Redis.
@@ -229,7 +229,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires Redis"]
-    async fn marker_outlives_the_admission_window() {
+    async fn the_marker_ttl_exceeds_the_admission_window() {
         let guard = RedisNip98ReplayGuard::new(redis_pool());
         let ctx = fresh_ctx();
         let eid = fresh_event_id();

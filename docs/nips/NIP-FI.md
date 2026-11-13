@@ -722,8 +722,9 @@ If an `x` tag is present on a read proof: there MUST be exactly one, and it
 MUST match the requested parent blob hash.  A mismatched `x` tag MUST be
 rejected as `evidence_rejected`.
 
-> **Named residual:** within a window of at most 60 seconds from minting (plus
-> a bounded 5-second future-skew allowance), a captured full header set allows
+> **Named residual:** while a proof's `created_at` is within 120 seconds of
+> the server's clock in either direction, and before its `expiration` has
+> been more than 120 seconds past, a captured full header set allows
 > reading any media blob on exactly one tenant host.  This access is read-only,
 > membership-checked, and revocable via assertion expiry or deny-map
 > enforcement.  It is not state-changing and does not cross tenant boundaries.
@@ -737,8 +738,7 @@ The following freshness rules apply to all kind-24242 proofs (upload and read):
 - `now - created_at <= 120s` — a proof older than 120 seconds MUST be rejected
   as `evidence_rejected`.
 - Exactly one `expiration` tag MUST be present, MUST be valid
-  (`expiration > now - 120s` at admission time, so a proof from a client clock
-  up to 120 seconds slow is not already expired), and MUST satisfy
+  (`expiration > now - 120s` at admission time), and MUST satisfy
   `expiration <= created_at + 60s`.
   An absent, duplicate, expired, or out-of-range `expiration` tag MUST be
   rejected as `evidence_rejected`.

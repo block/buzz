@@ -1114,7 +1114,8 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
     let issuer = BuzzRelayAssertionIssuer(
       session: URLSession(configuration: configuration), loadSession: { sharedSession },
       now: { Date(timeIntervalSince1970: TimeInterval(Self.now)) })
-    let issued = "header.payload.signature"
+    // A compact JWS with an `iat`, as the issuer sends.
+    let issued = "e30.eyJpYXQiOjAsImp0aSI6Im9yZyJ9.c2ln"
     var issuerBodies: [[String: Any]] = []
     var signOutDuringQuery = false
     var signOutDuringProfile = false
@@ -1224,7 +1225,8 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
     let issuer = BuzzRelayAssertionIssuer(
       session: URLSession(configuration: configuration), loadSession: { organization },
       loadHostedSession: { sharedHosted }, now: { clock })
-    let issued = "hosted.payload.signature"
+    // A compact JWS with an `iat`, as the issuer sends.
+    let issued = "e30.eyJpYXQiOjAsImp0aSI6Imhvc3RlZCJ9.c2ln"
     let enforcing: Set<String> = ["team.communities.example", "pending.communities.example"]
     var issuedRelays: [String] = []
     var builderlabCalls = 0

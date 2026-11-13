@@ -89,8 +89,8 @@ class BuilderlabAccountClient {
   ({String path, int status})? lastRejectedRequest;
 
   /// From the last refusal (403): how many minutes the local clock looked off
-  /// from the server's `Date`, when far enough to explain it. See
-  /// [clockHintMinutes].
+  /// from the server's `Date` when its headers arrived, when far enough to
+  /// explain it. See [clockHintMinutes].
   int? lastRefusalClockHint;
 
   static const _beekeeperRoutes = {
@@ -497,24 +497,34 @@ class BuilderlabAccountClient {
           );
         }
       }
-      final response = await boundedHttpResponse(
-        _http,
-        request,
-        maxBytes: _responseLimit(path),
-      );
+      var refused = false;
+      final http.Response response;
+      try {
+        response = await boundedHttpResponse(
+          _http,
+          request,
+          maxBytes: _responseLimit(path),
+          onHeaders: (headers) {
+            if (headers.statusCode != 403) return;
+            refused = true;
+            lastRefusalClockHint = clockHintMinutes(
+              headers.headers['date'],
+              DateTime.now(),
+            );
+          },
+        );
+      } catch (_) {
+        // The status is the answer; a lost or oversized body does not change it.
+        if (refused) throw AccountFailure.denied;
+        rethrow;
+      }
       if (kDebugMode && response.statusCode >= 400) {
         debugPrint(
           'Builderlab ${accountOrigin.host} ${request.method} $path: HTTP ${response.statusCode} contentType=${response.headers['content-type']?.split(';').first}',
         );
       }
       if (response.statusCode == 401) throw AccountFailure.signedOut;
-      if (response.statusCode == 403) {
-        lastRefusalClockHint = clockHintMinutes(
-          response.headers['date'],
-          DateTime.now(),
-        );
-        throw AccountFailure.denied;
-      }
+      if (response.statusCode == 403) throw AccountFailure.denied;
       if (const {400, 404, 409, 422}.contains(response.statusCode)) {
         lastRejectedRequest = (path: path, status: response.statusCode);
         throw AccountFailure.rejected;

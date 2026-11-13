@@ -48,9 +48,7 @@ class OrganizationSignInBanner extends HookConsumerWidget {
         onAction = () => unawaited(signIn.signIn());
       case OrganizationSessionStatus.signedIn:
         final denied = relayFailure == AccountFailure.denied;
-        final clockHint = denied
-            ? auth.organization?.lastRefusalClockHint
-            : null;
+        final clockHint = denied ? auth.failureClockHint : null;
         message = [
           denied ? 'Denied access to this community.' : 'Could not connect.',
           if (clockHint != null) clockHintText(clockHint),

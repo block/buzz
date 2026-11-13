@@ -31,7 +31,7 @@ class HostedReconnectBanner extends HookConsumerWidget {
         auth.failure != null;
     final signIn = active && auth.failure == AccountFailure.signedOut;
     final changeAccount = auth.failure == AccountFailure.denied;
-    final clockHint = changeAccount ? auth.account.lastRefusalClockHint : null;
+    final clockHint = changeAccount ? auth.failureClockHint : null;
     return Stack(
       children: [
         ReconnectCapsule(

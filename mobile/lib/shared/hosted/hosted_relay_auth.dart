@@ -158,6 +158,20 @@ class HostedRelayAuth extends ChangeNotifier {
   String? failedPubkey;
   AccountFailure? failure;
 
+  /// How many minutes the device clock looked off when the issuer refused
+  /// the current [failure], from that refusal's `Date`; null when not far
+  /// enough to explain it, or once the account session that was refused
+  /// has changed.
+  int? get failureClockHint =>
+      identical(_hintSession, _hintAccount?.account) ? _clockHint : null;
+  int? _clockHint;
+  BuilderlabAccountClient? _hintAccount;
+  BuilderlabAccount? _hintSession;
+
+  /// Issuance attempts per acquisition before a token that arrives with no
+  /// local lifetime left is reported instead of retried.
+  static const _acquireAttempts = 3;
+
   bool protects(RelayConfig config) => _accountFor(config) != null;
 
   /// Whether this relay uses the organization's session, not the hosted one.
@@ -392,25 +406,35 @@ class HostedRelayAuth extends ChangeNotifier {
       } else if (identity is! Map || identity['pubkey_hex'] != pubkey) {
         throw AccountFailure.denied;
       }
-      // Sampled before the request, so time in flight counts against the
-      // token's life.
-      final requestStart = _elapsed();
-      final value = await account.relayAssertion(
-        relay,
-        config.nsec!,
-        expectedSubject: session.subject,
-      );
-      final (:token, :expiry) = _token(value, pubkey);
-      final receipt = _elapsed();
-      final deadline = localDeadline(
-        requestStart: requestStart,
-        receipt: receipt,
-        wallAtReceipt: _now().millisecondsSinceEpoch ~/ 1000,
-        exp: expiry,
-        iat: _issuedAt(token),
-      );
+      String? token;
+      late Duration receipt;
+      late Duration deadline;
+      for (var attempt = 0; token == null; attempt++) {
+        if (attempt == _acquireAttempts) throw AccountFailure.unavailable;
+        // Sampled before the request, so time in flight counts against the
+        // token's life.
+        final requestStart = _elapsed();
+        final value = await account.relayAssertion(
+          relay,
+          config.nsec!,
+          expectedSubject: session.subject,
+        );
+        final issued = _token(value, pubkey);
+        final iat = _issuedAt(issued.token);
+        if (iat == null) throw AccountFailure.invalidResponse;
+        receipt = _elapsed();
+        deadline = localDeadline(
+          requestStart: requestStart,
+          receipt: receipt,
+          wallAtReceipt: _now().millisecondsSinceEpoch ~/ 1000,
+          exp: issued.expiry,
+          iat: iat,
+        );
+        // A token with no local lifetime left is never sent: ask again.
+        if (deadline > receipt) token = issued.token;
+        if (_disposed) throw AccountFailure.unavailable;
+      }
       final remaining = (deadline - receipt).inSeconds;
-      if (_disposed) throw AccountFailure.unavailable;
       if (!identical(session, account.account)) {
         return null;
       }
@@ -418,15 +442,17 @@ class HostedRelayAuth extends ChangeNotifier {
       // recovery, back up a discarded key or seed the shared cache.
       if (background) return token;
       _cached.removeWhere((_, entry) => entry.refreshAt <= receipt);
-      // A token with no local budget left is used once, never cached.
-      if (remaining > 0) {
-        _cached[(relay: relay, pubkey: pubkey)] = (
-          token: token,
-          refreshAt:
-              deadline -
-              Duration(seconds: remaining > 60 ? 30 : remaining ~/ 2),
-          account: session,
-        );
+      _cached[(relay: relay, pubkey: pubkey)] = (
+        token: token,
+        refreshAt:
+            deadline - Duration(seconds: remaining > 60 ? 30 : remaining ~/ 2),
+        account: session,
+      );
+      if (_clockHint != null &&
+          failedRelay == config.baseUrl &&
+          failedPubkey == pubkey) {
+        _clockHint = null;
+        notifyListeners();
       }
       // Issuance alone cannot prove admission after a relay refusal.
       if (failure != AccountFailure.denied) connected(config);
@@ -443,13 +469,23 @@ class HostedRelayAuth extends ChangeNotifier {
       if (!background &&
           !_disposed &&
           !(otherScope && _failureSequence > started)) {
-        _record(config.baseUrl, pubkey, error, started);
+        _record(
+          config.baseUrl,
+          pubkey,
+          error,
+          started,
+          clockHint: error == AccountFailure.denied
+              ? account.lastRefusalClockHint
+              : null,
+          account: account,
+        );
       }
       rethrow;
     }
   }
 
-  /// The `iat` claim of a compact JWS, or null when it has none.
+  /// The `iat` claim of a compact JWS, or null when it has none or it is
+  /// unreadable.
   static int? _issuedAt(String token) {
     final parts = token.split('.');
     if (parts.length != 3) return null;
@@ -491,6 +527,7 @@ class HostedRelayAuth extends ChangeNotifier {
     failure = null;
     failedRelay = null;
     failedPubkey = null;
+    _clockHint = null;
     notifyListeners();
   }
 
@@ -515,12 +552,17 @@ class HostedRelayAuth extends ChangeNotifier {
     String relay,
     String? pubkey,
     AccountFailure error,
-    int sequence,
-  ) {
+    int sequence, {
+    int? clockHint,
+    BuilderlabAccountClient? account,
+  }) {
     failedRelay = relay;
     failedPubkey = pubkey;
     failure = error;
     _failureSequence = sequence;
+    _clockHint = clockHint;
+    _hintAccount = account;
+    _hintSession = account?.account;
     notifyListeners();
   }
 
@@ -575,17 +617,17 @@ class HostedRelayHttpClient extends http.BaseClient {
 /// seconds): the issuer's lifetime (`exp − iat`) counted from before the
 /// request was sent, capped by [exp] against the local wall clock. The first
 /// bound keeps a skewed phone clock from stretching the token; the second
-/// keeps a short session-capped token from outliving its `exp`.
+/// keeps a short session-capped token from outliving its `exp`. A deadline
+/// at or before [receipt] means no lifetime is left.
 @visibleForTesting
 Duration localDeadline({
   required Duration requestStart,
   required Duration receipt,
   required int wallAtReceipt,
   required int exp,
-  int? iat,
+  required int iat,
 }) {
   final byExp = receipt + Duration(seconds: max(0, exp - wallAtReceipt));
-  if (iat == null) return byExp;
   final byLifetime = requestStart + Duration(seconds: max(0, exp - iat));
   return byLifetime < byExp ? byLifetime : byExp;
 }

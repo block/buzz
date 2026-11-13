@@ -234,6 +234,34 @@ mod tests {
     }
 
     #[test]
+    fn a_duplicate_still_verifies_at_the_last_second_its_marker_must_cover() {
+        // First seen at server time t, signed 120 s ahead: timestamp
+        // validation keeps admitting it through t + 240 and refuses it at
+        // t + 241, so only the replay marker (live until t + TTL) can refuse
+        // the duplicate in between.
+        let url = "https://relay.example.com/api/tokens";
+        let t = 1_800_000_000u64;
+        let event = EventBuilder::new(Kind::HttpAuth, "")
+            .tags([
+                nostr::Tag::parse(["u", url]).unwrap(),
+                nostr::Tag::parse(["method", "POST"]).unwrap(),
+            ])
+            .custom_created_at(nostr::Timestamp::from(t + TIMESTAMP_TOLERANCE_SECS))
+            .sign_with_keys(&Keys::generate())
+            .expect("sign");
+        let json = serde_json::to_string(&event).unwrap();
+        let verify_at = |now| {
+            crate::test_clock::pinned(now, || crate::verify_nip98_event(&json, url, "POST", None))
+        };
+
+        assert!(verify_at(t).is_ok());
+        let last_valid = t + 2 * TIMESTAMP_TOLERANCE_SECS;
+        assert!(verify_at(last_valid).is_ok());
+        assert!(verify_at(last_valid + 1).is_err());
+        assert!(last_valid < t + DEFAULT_REPLAY_TTL_SECS);
+    }
+
+    #[test]
     fn marker_covers_a_pod_with_a_slower_clock() {
         // Pod A first sees an event signed 120 s ahead of A's clock, at A
         // time t, and writes its marker until t + TTL. Pod B's clock runs

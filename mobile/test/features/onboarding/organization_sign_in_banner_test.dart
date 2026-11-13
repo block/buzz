@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io' show HttpDate;
 import 'package:flutter/services.dart';
 import 'package:buzz/features/onboarding/organization_sign_in_banner.dart';
 import 'package:buzz/shared/hosted/browser_auth.dart';
@@ -15,11 +16,22 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
+import 'package:nostr/nostr.dart' as nostr;
 
 class _Config extends RelayConfigNotifier {
   @override
   RelayConfig build() =>
       const RelayConfig(baseUrl: 'https://organization.example');
+}
+
+class _KeyedConfig extends RelayConfigNotifier {
+  @override
+  RelayConfig build() => RelayConfig(
+    baseUrl: 'https://organization.example',
+    nsec: nostr.Keys(
+      '0000000000000000000000000000000000000000000000000000000000000001',
+    ).nsec,
+  );
 }
 
 class _Session extends RelaySessionNotifier {
@@ -50,16 +62,26 @@ void main() {
     final account = BuilderlabAccountClient(
       accountOrigin: Uri.parse('https://organization.example'),
       httpClient: MockClient(
-        (request) async => http.Response(
-          jsonEncode({
-            if (request.url.path.endsWith('/exchange'))
-              'session_credential': 'org-secret'
-            else
-              'subject': 'member',
-            'expires_at': expiry.toIso8601String(),
-          }),
-          200,
-        ),
+        (request) async => request.url.path.endsWith('/identity/assertions')
+            ? http.Response(
+                '{"error":"invalid_proof"}',
+                403,
+                headers: {
+                  'date': HttpDate.format(
+                    DateTime.now().add(const Duration(minutes: 10)),
+                  ),
+                },
+              )
+            : http.Response(
+                jsonEncode({
+                  if (request.url.path.endsWith('/exchange'))
+                    'session_credential': 'org-secret'
+                  else
+                    'subject': 'member',
+                  'expires_at': expiry.toIso8601String(),
+                }),
+                200,
+              ),
       ),
     );
     signIn = OrganizationSignIn(
@@ -86,7 +108,11 @@ void main() {
       account.dispose();
     });
   });
-  Future<void> mount(WidgetTester tester, {double scale = 1}) async {
+  Future<void> mount(
+    WidgetTester tester, {
+    double scale = 1,
+    RelayConfigNotifier Function() config = _Config.new,
+  }) async {
     await tester.binding.setSurfaceSize(const Size(320, 568));
     addTearDown(() => tester.binding.setSurfaceSize(null));
     await tester.pumpWidget(
@@ -94,7 +120,7 @@ void main() {
         overrides: [
           organizationSignInProvider.overrideWithValue(signIn),
           hostedRelayAuthProvider.overrideWithValue(auth),
-          relayConfigProvider.overrideWith(_Config.new),
+          relayConfigProvider.overrideWith(config),
           relaySessionProvider.overrideWith(() => session),
         ],
         child: MaterialApp(
@@ -226,6 +252,35 @@ void main() {
     expect(logins, hasLength(1));
     expect(signIn.account.account, isNull);
     expect(find.text('Cancel'), findsOneWidget);
+  });
+  testWidgets('an issuer refusal from a far-off clock explains itself', (
+    tester,
+  ) async {
+    await tester.runAsync(() async {
+      await signIn.signIn();
+      await signIn.browser.receive(
+        Uri.parse(BrowserAuth.callback).replace(
+          queryParameters: {
+            'state': logins.last.queryParameters['state']!,
+            'code': 'code',
+          },
+        ),
+      );
+      await pumpEventQueue();
+      await expectLater(
+        auth.headers(_KeyedConfig().build()),
+        throwsA(AccountFailure.denied),
+      );
+    });
+    await mount(tester, config: _KeyedConfig.new);
+    expect(
+      find.textContaining('Denied access to this community.'),
+      findsOneWidget,
+    );
+    expect(
+      find.textContaining("Your device's clock looks about 10 minutes off"),
+      findsOneWidget,
+    );
   });
   testWidgets('transient toast yields back to persistent sign-in prompt', (
     tester,

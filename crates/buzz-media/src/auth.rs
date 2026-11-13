@@ -11,6 +11,16 @@ const STRICT_MAX_LIFETIME_SECS: u64 = 60;
 /// Permissive mode: the pre-NIP-FI one-hour age allowance.
 const PERMISSIVE_MAX_AGE_SECS: u64 = 3600;
 
+/// Unix seconds now, as the verifier sees it. Tests pin it with
+/// `tests::pinned`.
+fn wall_now() -> u64 {
+    #[cfg(test)]
+    if let Some(now) = tests::PINNED_NOW.with(std::cell::Cell::get) {
+        return now;
+    }
+    nostr::Timestamp::now().as_secs()
+}
+
 /// Blossom kind:24242 verbs Buzz currently accepts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BlossomVerb {
@@ -29,13 +39,15 @@ impl BlossomVerb {
 
 /// Verification strictness derived from the NIP-FI mode.
 ///
-/// `Strict` applies the full NIP-FI kind-24242 rules: 60-second proof window,
-/// `expiration <= created_at + 60s`, mandatory `server` tag on all proofs, and
+/// `Strict` applies the full NIP-FI kind-24242 rules: `created_at` within 120
+/// seconds of now either way, `expiration <= created_at + 60s`, mandatory
+/// `server` tag on all proofs, and
 /// exact cardinality (exactly one each of `t`, `expiration`, `server`; at most
 /// one `x`).
 ///
 /// `Permissive` preserves the pre-NIP-FI behavior for Off-mode deployments:
-/// 3600-second proof window, `server` tag optional, and duplicate tags accepted.
+/// `created_at` up to 3600 seconds old and at most 120 seconds in the future,
+/// `server` tag optional, and duplicate tags accepted.
 /// This keeps a deployed desktop that mints old-shape tokens working against an
 /// Off-mode relay [FI-INV-15].
 ///
@@ -43,9 +55,9 @@ impl BlossomVerb {
 /// callers without mode access may pass `Strict` directly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BlossomStrictness {
-    /// Full NIP-FI compliance: 60s window, mandatory `server`, exact cardinality.
+    /// Full NIP-FI compliance: ±120s window, 60s lifetime cap, mandatory `server`, exact cardinality.
     Strict,
-    /// Pre-NIP-FI compatibility: 3600s window, optional `server`, tolerant cardinality.
+    /// Pre-NIP-FI compatibility: 3600s age, +120s future, optional `server`, tolerant cardinality.
     Permissive,
 }
 
@@ -62,9 +74,10 @@ pub enum BlossomStrictness {
 ///      - `Permissive`: at least one `t` tag equal to `verb`; any other valued
 ///        `t` (including `""`) rejects and valueless tags are ignored
 ///        (origin/main `found_t` semantics).
-///   4. `expiration` tag present, strictly future, and within the freshness window
-///   5. `created_at` bounded: not more than 5s in the future; not older than the
-///      mode-selected window (60s `Strict`, 3600s `Permissive`)
+///   4. `expiration` tag present and later than 120s ago; in `Strict`, at most
+///      60s after `created_at`
+///   5. `created_at` bounded: not more than 120s in the future; not older than
+///      the mode-selected age (120s `Strict`, 3600s `Permissive`)
 ///   6. `server` tag enforcement: in `Strict` mode, exactly one `server` tag is
 ///      required and MUST match the bound tenant host; in `Permissive`, optional
 ///      when-present behavior is preserved
@@ -194,7 +207,7 @@ pub fn verify_blossom_auth_event_for_verb(
     if exp_count == 0 {
         return Err(MediaError::MissingTag("expiration"));
     }
-    let now = nostr::Timestamp::now().as_secs();
+    let now = wall_now();
 
     // 4b. Expiration must not have passed, allowing for a client clock up to
     //     MEDIA_CLOCK_SKEW_SECS slow.
@@ -1888,12 +1901,16 @@ mod tests {
 
     // ── Clock skew: ±120 s client clocks ─────────────────────────────────────
 
+    thread_local! {
+        pub(super) static PINNED_NOW: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+    }
+
+    const SERVER_NOW: u64 = 1_800_000_000;
+
     fn upload_proof_at(created_offset: i64, lifetime: u64) -> (nostr::Event, String) {
         let keys = Keys::generate();
         let sha256 = "a".repeat(64);
-        let created = Timestamp::now()
-            .as_secs()
-            .saturating_add_signed(created_offset);
+        let created = SERVER_NOW.saturating_add_signed(created_offset);
         let exp_str = (created + lifetime).to_string();
         let tags = vec![
             Tag::parse(["t", "upload"]).unwrap(),
@@ -1909,19 +1926,25 @@ mod tests {
         (event, sha256)
     }
 
+    /// Verifies with the clock pinned at `SERVER_NOW`.
     fn verify_upload(
         event: &nostr::Event,
         sha256: &str,
         mode: BlossomStrictness,
     ) -> Result<(), MediaError> {
-        verify_blossom_upload_auth(event, sha256, Some("relay.example"), mode)
+        PINNED_NOW.with(|c| c.set(Some(SERVER_NOW)));
+        let out = verify_blossom_upload_auth(event, sha256, Some("relay.example"), mode);
+        PINNED_NOW.with(|c| c.set(None));
+        out
     }
 
+    const BOTH_MODES: [BlossomStrictness; 2] =
+        [BlossomStrictness::Strict, BlossomStrictness::Permissive];
+
     #[test]
-    fn test_both_modes_accept_client_120s_fast_or_slow() {
-        // One second of slack on the slow side for the wall clock ticking.
-        for mode in [BlossomStrictness::Strict, BlossomStrictness::Permissive] {
-            for offset in [120, -119] {
+    fn test_both_modes_accept_client_exactly_120s_fast_or_slow() {
+        for mode in BOTH_MODES {
+            for offset in [120, -120] {
                 let (event, sha256) = upload_proof_at(offset, 60);
                 assert!(
                     verify_upload(&event, &sha256, mode).is_ok(),
@@ -1932,9 +1955,9 @@ mod tests {
     }
 
     #[test]
-    fn test_both_modes_reject_proof_more_than_120s_in_future() {
-        for mode in [BlossomStrictness::Strict, BlossomStrictness::Permissive] {
-            let (event, sha256) = upload_proof_at(122, 60);
+    fn test_both_modes_reject_proof_121s_in_future() {
+        for mode in BOTH_MODES {
+            let (event, sha256) = upload_proof_at(121, 60);
             assert!(
                 matches!(
                     verify_upload(&event, &sha256, mode),
@@ -1946,9 +1969,11 @@ mod tests {
     }
 
     #[test]
-    fn test_both_modes_reject_expiration_more_than_120s_past() {
-        for mode in [BlossomStrictness::Strict, BlossomStrictness::Permissive] {
-            let (event, sha256) = upload_proof_at(-181, 60);
+    fn test_both_modes_reject_expiration_at_now_minus_120s() {
+        // created_at stays inside Permissive's age so only expiration decides;
+        // Strict is covered too because its age check comes later.
+        for mode in BOTH_MODES {
+            let (event, sha256) = upload_proof_at(-180, 60);
             assert!(
                 matches!(
                     verify_upload(&event, &sha256, mode),
@@ -1957,11 +1982,26 @@ mod tests {
                 "{mode:?} must reject expiration <= now - 120s"
             );
         }
+        let (event, sha256) = upload_proof_at(-179, 60);
+        assert!(verify_upload(&event, &sha256, BlossomStrictness::Permissive).is_ok());
     }
 
     #[test]
-    fn test_strict_rejects_proof_older_than_120s() {
-        let (event, sha256) = upload_proof_at(-121, 3600);
+    fn test_strict_rejects_proof_121s_old_within_lifetime_cap() {
+        // A 60 s lifetime keeps the cap and expiration satisfied, so only the
+        // 120 s age bound can reject it.
+        let (event, sha256) = upload_proof_at(-121, 60);
+        assert!(matches!(
+            verify_upload(&event, &sha256, BlossomStrictness::Strict),
+            Err(MediaError::TimestampOutOfWindow)
+        ));
+    }
+
+    #[test]
+    fn test_strict_lifetime_cap_is_exact() {
+        let (event, sha256) = upload_proof_at(0, 60);
+        assert!(verify_upload(&event, &sha256, BlossomStrictness::Strict).is_ok());
+        let (event, sha256) = upload_proof_at(0, 61);
         assert!(matches!(
             verify_upload(&event, &sha256, BlossomStrictness::Strict),
             Err(MediaError::TimestampOutOfWindow)
@@ -1970,9 +2010,7 @@ mod tests {
 
     #[test]
     fn test_permissive_keeps_hour_age_and_no_lifetime_cap() {
-        // Older than 120 s but inside 3600 s, with a lifetime past Strict's
-        // 60 s cap: still accepted in Permissive mode.
-        let (event, sha256) = upload_proof_at(-1800, 7200);
+        let (event, sha256) = upload_proof_at(-3600, 7200);
         assert!(verify_upload(&event, &sha256, BlossomStrictness::Permissive).is_ok());
         let (event, sha256) = upload_proof_at(-3601, 7200);
         assert!(matches!(

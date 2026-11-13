@@ -35,6 +35,7 @@ import 'package:http/testing.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
 import 'widget_helpers.dart';
+import 'test_assertion.dart';
 
 /// Synthetic REST/relay boundaries with the production flow factory, account,
 /// identity, admission, auth and storage. No admission/persistence is simulated.
@@ -182,7 +183,7 @@ class HostedJourneyFixture {
       }
       bound ??= body['nostr_pubkey'] as String;
       result = {
-        'assertion': 'synthetic-assertion',
+        'assertion': testAssertion('synthetic-assertion'),
         'nostr_pubkey': bound,
         'expires_at':
             assertionNow
@@ -201,7 +202,9 @@ class HostedJourneyFixture {
           HostedEnvironment.requiresAuth(request.url.host)) {
         expect(
           request.headers['Nostr-Federated-Identity'],
-          nipFiRequired == true ? 'Bearer synthetic-assertion' : isNull,
+          nipFiRequired == true
+              ? 'Bearer ${testAssertion('synthetic-assertion')}'
+              : isNull,
         );
         expect(request.headers.containsKey('X-BB-Session-Credential'), isFalse);
       }
@@ -371,7 +374,7 @@ class HostedJourneyFixture {
       }
       organizationBound ??= body['nostr_pubkey'] as String;
       result = {
-        'assertion': 'organization-assertion',
+        'assertion': testAssertion('organization-assertion'),
         'nostr_pubkey': organizationBound,
         'expires_at':
             assertionNow
@@ -744,10 +747,10 @@ class _RelaySocket extends RelaySocket {
       fixture.organizationEnabled &&
               host == HostedJourneyFixture.organizationRelayHost
           // Signed out connects without one and lets the relay decide.
-          ? anyOf(isNull, 'Bearer organization-assertion')
+          ? anyOf(isNull, 'Bearer ${testAssertion('organization-assertion')}')
           : HostedEnvironment.requiresAuth(host) &&
                 fixture.nipFiRequired != false
-          ? 'Bearer synthetic-assertion'
+          ? 'Bearer ${testAssertion('synthetic-assertion')}'
           : isNull,
     );
     if (fixture.refuseUpgrade) {

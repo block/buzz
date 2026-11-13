@@ -616,7 +616,7 @@ impl Provider {
             Some(&self.token),
             self.same_user,
             "federated_identity",
-            &[self.relay.clone()],
+            std::slice::from_ref(&self.relay),
         )
         .await
         {

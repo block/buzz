@@ -6,7 +6,7 @@ final class BuzzRelayAssertionLifetimeTests: XCTestCase {
   private let iat = 10_000
   private let exp = 10_180
 
-  private func deadline(delay: TimeInterval, wall: Int, iat: Int?) -> TimeInterval {
+  private func deadline(delay: TimeInterval, wall: Int, iat: Int) -> TimeInterval {
     BuzzRelayAssertionIssuer.localDeadline(
       requestStart: 1_000, receipt: 1_000 + delay,
       wallAtReceipt: Date(timeIntervalSince1970: TimeInterval(wall)), exp: exp, iat: iat)
@@ -26,10 +26,6 @@ final class BuzzRelayAssertionLifetimeTests: XCTestCase {
 
   func testNoBudgetLeftEndsAtReceipt() {
     XCTAssertEqual(deadline(delay: 5, wall: exp + 1, iat: iat), 1_005)
-  }
-
-  func testWithoutIatOnlyExpBounds() {
-    XCTAssertEqual(deadline(delay: 0, wall: iat, iat: nil), 1_180)
   }
 
   func testIssuedAtReadsTheJWSPayload() {

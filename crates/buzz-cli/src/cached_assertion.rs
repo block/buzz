@@ -9,17 +9,28 @@ use crate::error::CliError;
 /// Refresh at least this long before expiry.
 const REFRESH_MARGIN_SECS: u64 = 30;
 
+/// Fetches per [`CachedAssertion::get`] before an assertion that arrives with
+/// no local lifetime left is reported instead of retried.
+const ACQUIRE_ATTEMPTS: usize = 3;
+
+/// A fetched assertion and the monotonic time ([`monotonic_now`]) the
+/// request that returned it was sent.
+pub(crate) type Fetched = Option<(String, u64)>;
+
 /// An evidence link's current assertion, or its answer that it has none.
 #[derive(Default)]
 pub(crate) struct CachedAssertion(Mutex<Option<(Option<String>, u64)>>);
 
 impl CachedAssertion {
     /// The cached answer until its refresh point, else `fetch`'s. A fetched
-    /// assertion must be a compact JWS with an `exp`; `None` is kept until
-    /// the next command. Concurrent callers share one fetch.
-    pub(crate) async fn get<F>(&self, fetch: F) -> Result<Option<String>, CliError>
+    /// assertion must be a compact JWS with `exp` and `iat`, and must have
+    /// local lifetime left; one with none is fetched again, a bounded number
+    /// of times. `None` is kept until the next command. Concurrent callers
+    /// share one fetch.
+    pub(crate) async fn get<F, Fut>(&self, fetch: F) -> Result<Option<String>, CliError>
     where
-        F: std::future::Future<Output = Result<Option<String>, CliError>>,
+        F: Fn() -> Fut,
+        Fut: std::future::Future<Output = Result<Fetched, CliError>>,
     {
         let mut cached = self.0.lock().await;
         if let Some((assertion, refresh)) = cached.as_ref() {
@@ -27,37 +38,42 @@ impl CachedAssertion {
                 return Ok(assertion.clone());
             }
         }
-        let request_start = monotonic_now();
-        let assertion = fetch.await?;
-        let refresh = match assertion.as_deref() {
-            Some(jws) => {
-                let claims = jws_claims(jws).ok_or_else(|| {
+        *cached = None;
+        for _ in 0..ACQUIRE_ATTEMPTS {
+            let Some((jws, request_start)) = fetch().await? else {
+                *cached = Some((None, u64::MAX));
+                return Ok(None);
+            };
+            let claims = jws_claims(&jws)
+                .filter(|c| c.iat.is_some())
+                .ok_or_else(|| {
                     CliError::Auth("the evidence source returned an unreadable assertion".into())
                 })?;
-                let receipt = monotonic_now();
-                let deadline = local_deadline(request_start, receipt, unix_now(), claims);
-                refresh_at(receipt, deadline)
+            let receipt = monotonic_now();
+            let deadline = local_deadline(request_start, receipt, unix_now(), claims);
+            if deadline > receipt {
+                *cached = Some((Some(jws.clone()), refresh_at(receipt, deadline)));
+                return Ok(Some(jws));
             }
-            None => u64::MAX,
-        };
-        *cached = Some((assertion.clone(), refresh));
-        Ok(assertion)
+        }
+        Err(CliError::Auth(format!(
+            "the evidence source returned {ACQUIRE_ATTEMPTS} assertions with no lifetime left; \
+             check that this computer's clock is correct"
+        )))
     }
 }
 
-/// The local monotonic deadline of an assertion fetched between
-/// `request_start` and `receipt` (monotonic seconds), with the wall clock at
-/// `wall_at_receipt`: the issuer's lifetime counted from before the request
-/// was sent, capped by `exp` against the local wall clock. The first term
-/// keeps a skewed local clock from stretching the token; the second keeps a
-/// short session-capped token from outliving its `exp`. A zero budget gives
-/// `receipt`, so the assertion is fetched again on the next call.
+/// The local monotonic deadline of an assertion whose request was sent at
+/// `request_start` and answered at `receipt` (monotonic seconds), with the
+/// wall clock at `wall_at_receipt`: the issuer's lifetime counted from the
+/// send, capped by `exp` against the local wall clock. The first term keeps a
+/// skewed local clock from stretching the token; the second keeps a short
+/// session-capped token from outliving its `exp`. A deadline at or before
+/// `receipt` means no lifetime is left. `claims.iat` must be present.
 fn local_deadline(request_start: u64, receipt: u64, wall_at_receipt: u64, claims: Claims) -> u64 {
     let by_exp = receipt + claims.exp.saturating_sub(wall_at_receipt);
-    match claims.iat {
-        Some(iat) => by_exp.min(request_start + claims.exp.saturating_sub(iat)),
-        None => by_exp,
-    }
+    let by_lifetime = request_start + claims.exp.saturating_sub(claims.iat.unwrap_or(claims.exp));
+    by_exp.min(by_lifetime)
 }
 
 /// Refresh at the earlier of half-life and [`REFRESH_MARGIN_SECS`] before
@@ -114,7 +130,7 @@ fn jws_claims(token: &str) -> Option<Claims> {
 
 /// Whole seconds on a monotonic clock, for local deadlines a wall-clock
 /// change cannot move.
-fn monotonic_now() -> u64 {
+pub(crate) fn monotonic_now() -> u64 {
     static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
     let now = START
         .get_or_init(std::time::Instant::now)
@@ -174,14 +190,10 @@ mod tests {
         assert_eq!(local_deadline(0, 20, 10_140, claims(10_000, 10_180)), 60);
         // A short session-capped token: `exp` 30 s after `iat`.
         assert_eq!(local_deadline(0, 20, 10_000, claims(10_000, 10_030)), 30);
-        // Already past `exp` locally: no budget, fetched again next call.
+        // Already past `exp` locally: no budget left at receipt.
         assert_eq!(local_deadline(0, 20, 10_200, claims(10_000, 10_180)), 20);
-        // Without `iat`, only `exp` bounds it.
-        let no_iat = Claims {
-            exp: 10_180,
-            iat: None,
-        };
-        assert_eq!(local_deadline(0, 20, 10_000, no_iat), 200);
+        // A 10 s token whose reply took 20 s: exhausted before it arrived.
+        assert_eq!(local_deadline(0, 20, 9_900, claims(10_000, 10_010)), 10);
     }
 
     #[test]

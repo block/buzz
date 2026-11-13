@@ -787,6 +787,13 @@ public final class BuzzDevPushEnrollmentDriver {
     // save failure is retried at a strictly higher generation.
     try store.savePendingEnrollment(pending)
 
+    // The grant never outlives the gateway's maximum from this window's start.
+    // A journal from a client that did not backdate can carry an installation
+    // expiry past it; the installation keeps its attested bytes, and only this
+    // freshly signed delegation is bounded.
+    let (grantCeiling, ceilingOverflow) = notBefore.addingReportingOverflow(lifetimeSeconds)
+    let grantExpiresAt = ceilingOverflow ? pending.expiresAt : min(pending.expiresAt, grantCeiling)
+
     let delegationChallenge = try await challenge()
     let delegationClientData = try BuzzPushTranscript.delegate(
       gatewayOrigin: gatewayBaseURL,
@@ -797,7 +804,7 @@ public final class BuzzDevPushEnrollmentDriver {
       generation: generation,
       relayPubkey: relayPubkey,
       notBefore: notBefore,
-      expiresAt: pending.expiresAt
+      expiresAt: grantExpiresAt
     )
     guard let appAttestKeyId = pending.keyId else {
       throw BuzzDevPushEnrollmentError.invalidAppAttestKeyId
@@ -812,7 +819,7 @@ public final class BuzzDevPushEnrollmentDriver {
       relayPubkey: relayPubkey,
       generation: generation,
       notBefore: notBefore,
-      expiresAt: pending.expiresAt,
+      expiresAt: grantExpiresAt,
       assertion: assertion
     )
 
@@ -828,7 +835,7 @@ public final class BuzzDevPushEnrollmentDriver {
       endpointHash: pending.endpointHash,
       endpointEpoch: Self.endpointEpoch,
       generation: generation,
-      expiresAt: pending.expiresAt
+      expiresAt: grantExpiresAt
     )
     try store.save(record)
     try store.removePendingEnrollment(
