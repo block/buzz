@@ -1768,6 +1768,12 @@ pub enum ReposCmd {
         #[arg(long)]
         channel: String,
     },
+    /// Delete one of your repository announcements (NIP-09 a-tag)
+    Rm {
+        /// Repository identifier (d-tag)
+        #[arg(long)]
+        id: String,
+    },
     /// Manage branch and tag protection rules on one of your repositories.
     #[command(subcommand)]
     Protect(ReposProtectCmd),
@@ -3125,7 +3131,15 @@ mod tests {
         );
         assert_eq!(
             names(&cmd, "repos"),
-            vec!["bind", "create", "default-branch", "get", "list", "protect"]
+            vec![
+                "bind",
+                "create",
+                "default-branch",
+                "get",
+                "list",
+                "protect",
+                "rm"
+            ]
         );
         let repos = cmd
             .get_subcommands()
@@ -3204,7 +3218,7 @@ mod tests {
             ("pr", 5),
             ("projects", 8),
             ("reactions", 3),
-            ("repos", 6),
+            ("repos", 7),
             ("social", 7),
             ("upload", 1),
             ("users", 6),
