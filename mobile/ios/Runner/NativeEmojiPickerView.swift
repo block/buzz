@@ -483,6 +483,8 @@ enum NativeEmojiRemoteImageLoader {
     let decoded = await Task.detached(priority: .userInitiated) {
       NativeMessageImageLoader.decode(bytes, maximumPixelSize: maximumPixelSize)
     }.value
+    // A cell that left during the decode keeps only its first frame.
+    try Task.checkCancellation()
     guard let decoded else { throw NativeEmojiRemoteImageError.invalidImage }
     return decoded
   }

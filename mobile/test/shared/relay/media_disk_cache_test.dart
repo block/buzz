@@ -419,9 +419,11 @@ void main() {
         diskCache: cache,
       ).loadEncodedBytes(cancel: Completer<void>().future);
 
+      expect(await cache.contains(_truncatedUrl), isTrue);
       await expectLater(load(), throwsA(anything));
       expect(fetched, isEmpty);
       await _settle();
+      expect(await cache.contains(_truncatedUrl), isFalse);
       MediaImageProvider.debugResetCooldowns();
       expect(await load(), _pngBytes);
       expect(fetched, [_truncatedUrl]);

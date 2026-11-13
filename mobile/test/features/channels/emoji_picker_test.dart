@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:buzz/shared/emoji/emoji_picker.dart';
 import 'package:buzz/shared/emoji/recent_emoji_provider.dart';
@@ -733,6 +734,19 @@ void main() {
         nsec: nostr.Keys.generate().nsec,
       );
       final mediaClient = _MediaClient();
+      final diskDirectory = (await tester.runAsync(
+        () => Directory.systemTemp.createTemp('emoji_picker_test'),
+      ))!;
+      // The cache's own I/O and timers need the real event loop.
+      final diskCache = (await tester.runAsync(
+        () async => MediaDiskCache.open(diskDirectory),
+      ))!;
+      addTearDown(
+        () => tester.runAsync(() async {
+          await diskCache.dispose();
+          await diskDirectory.delete(recursive: true);
+        }),
+      );
       MethodCall? presentation;
       final selected = <String>[];
       var dismissals = 0;
@@ -754,6 +768,7 @@ void main() {
               ),
               mediaGetAuthServiceProvider.overrideWithValue(mediaAuth),
               mediaHttpClientProvider.overrideWithValue(mediaClient),
+              mediaDiskCacheProvider.overrideWithValue(diskCache),
             ],
             child: MaterialApp(
               theme: AppTheme.light(),
@@ -844,6 +859,20 @@ void main() {
             throwsA(isA<PlatformException>()),
           );
           await Future<void>.delayed(const Duration(milliseconds: 50));
+          expect(mediaClient.requests, hasLength(4));
+          // An emoji already saved on disk does not wait for a slot.
+          await diskCache.write(
+            'https://example.test/saved.png',
+            _pngBytes,
+            immutable: false,
+          );
+          expect(
+            await _sendNativeEmojiPickerCall(tester, 'mediaBytes', {
+              'id': 15,
+              'url': 'https://example.test/saved.png',
+            }),
+            _pngBytes,
+          );
           expect(mediaClient.requests, hasLength(4));
           await _sendNativeEmojiPickerCall(tester, 'cancelMediaBytes', 14);
           await queued;
