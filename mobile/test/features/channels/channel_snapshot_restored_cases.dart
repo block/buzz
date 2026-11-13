@@ -397,22 +397,28 @@ void _restoredLaunchCases() {
             ..unreadMessages.addAll(
               history.where((event) => event.kind != EventKind.deletion),
             );
-          // A failed verification must survive another kill and relaunch.
-          session.failIds = true;
-          session.deadlineIds = !scoped;
-          launch = _container(prefs, session);
-          addTearDown(launch.dispose);
-          await loaded(launch);
-          expect(
-            checkedById(),
-            containsAll(['kept-mention', 'deleted-mention']),
-          );
-          expect(observed(), containsAll(['kept-mention', 'deleted-mention']));
-          launch.dispose();
-          session = _SnapshotSession(['alpha'])
-            ..unreadMessages.addAll(
-              history.where((event) => event.kind != EventKind.deletion),
+          // A failed verification, timed out or erroring, must survive
+          // another kill and relaunch.
+          for (final deadline in [true, false]) {
+            session.failIds = true;
+            session.deadlineIds = deadline;
+            launch = _container(prefs, session);
+            addTearDown(launch.dispose);
+            await loaded(launch);
+            expect(
+              checkedById(),
+              containsAll(['kept-mention', 'deleted-mention']),
             );
+            expect(
+              observed(),
+              containsAll(['kept-mention', 'deleted-mention']),
+            );
+            launch.dispose();
+            session = _SnapshotSession(['alpha'])
+              ..unreadMessages.addAll(
+                history.where((event) => event.kind != EventKind.deletion),
+              );
+          }
           launch = _container(prefs, session);
           addTearDown(launch.dispose);
           await loaded(launch);

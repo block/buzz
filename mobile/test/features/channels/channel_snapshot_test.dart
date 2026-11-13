@@ -178,12 +178,26 @@ void main() {
       content: 'reply',
       sig: 'sig',
     );
+    final betaRoot = 'c' * 64;
+    final betaReply = NostrEvent(
+      id: 'beta-reply',
+      pubkey: 'alice',
+      createdAt: reply.createdAt,
+      kind: EventKind.streamMessage,
+      tags: [
+        ['h', 'beta'],
+        ['e', betaRoot, '', 'root'],
+        ['e', betaRoot, '', 'reply'],
+      ],
+      content: 'reply',
+      sig: 'sig',
+    );
     Iterable<String> activity(ProviderContainer container) => container
         .read(channelsProvider.notifier)
         .observedThreadReplies(container.read(channelsProvider).requireValue)
         .map((e) => e.id);
     final firstSession = _SnapshotSession(['alpha', 'beta'])
-      ..unreadMessages.add(reply);
+      ..unreadMessages.addAll([reply, betaReply]);
     final first = _container(prefs, firstSession);
     addTearDown(first.dispose);
     await first.read(channelsProvider.future);
@@ -194,7 +208,7 @@ void main() {
     first.read(threadFollowsProvider.notifier).followThread(root);
     first.read(channelsProvider.notifier).noteThreadFollowChanged('alpha');
     // A second follow elsewhere before the catch-up keeps alpha's reset.
-    first.read(threadFollowsProvider.notifier).followThread('c' * 64);
+    first.read(threadFollowsProvider.notifier).followThread(betaRoot);
     first.read(channelsProvider.notifier).noteThreadFollowChanged('beta');
     firstSession.unreadFilters.clear();
     await first.read(channelsProvider.notifier).refresh();
@@ -205,11 +219,14 @@ void main() {
           .map((f) => f.since),
       everyElement(0),
     );
-    expect(activity(first), ['in-session-reply']);
+    expect(
+      activity(first),
+      unorderedEquals(['in-session-reply', 'beta-reply']),
+    );
     first.dispose();
 
     final secondSession = _SnapshotSession(['alpha', 'beta'])
-      ..unreadMessages.add(reply);
+      ..unreadMessages.addAll([reply, betaReply]);
     final second = _container(prefs, secondSession);
     addTearDown(second.dispose);
     await second.read(channelsProvider.future);
@@ -220,7 +237,10 @@ void main() {
           .map((f) => f.since),
       everyElement(greaterThan(0)),
     );
-    expect(activity(second), ['in-session-reply']);
+    expect(
+      activity(second),
+      unorderedEquals(['in-session-reply', 'beta-reply']),
+    );
   });
   test(
     'a cold start restores unread state and asks only for newer messages',
