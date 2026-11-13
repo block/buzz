@@ -640,10 +640,11 @@ export function AppShell() {
   );
   const handleOpenSettings = React.useCallback(
     (section: SettingsSection = DEFAULT_SETTINGS_SECTION) => {
+      if (settingsOpen) return;
       setIsChannelManagementOpen(false);
       void goSettings(section);
     },
-    [goSettings],
+    [goSettings, settingsOpen],
   );
   const handleCloseSettings = React.useCallback(
     () => closeSettings(),
@@ -689,7 +690,6 @@ export function AppShell() {
     onSearchEverything: handleOpenSearch,
   });
   useSettingsShortcuts({
-    onClose: handleCloseSettings,
     onOpenSettings: handleOpenSettings,
     open: isHuddleRoom ? undefined : settingsOpen,
   });
@@ -707,6 +707,7 @@ export function AppShell() {
           channels={channels}
           goChannel={goChannel}
           openCreateChannel={handleOpenCreateChannel}
+          openSettings={handleOpenSettings}
         />
       ) : null}
       <ChannelNavigationProvider channels={channels}>
