@@ -137,10 +137,10 @@ void main() {
     session.setStatus(SessionStatus.connected);
     await flushMicrotasks();
 
-    // The reconnect listener refetches and replaces the live subscription
-    // on the same manager.
+    // The replayed subscription's ready rereads the snapshot on the same
+    // manager, which keeps its subscription.
     expect(session.fetchCount, 2);
-    expect(session.subscribeCount, 2);
+    expect(session.subscribeCount, 1);
     expect(session.liveSubscriptions, 1);
     expect(state().isReady, isTrue);
     expect(state().isForcedUnread(msgKey), isTrue);
@@ -305,7 +305,17 @@ class _FakeRelaySession extends RelaySessionNotifier {
   int subscribeCount = 0;
   int liveSubscriptions = 0;
 
-  void setStatus(SessionStatus status) => state = SessionState(status: status);
+  final List<void Function(RelaySubscriptionStatus)> _open = [];
+
+  /// A connect replays each open live subscription, whose EOSE reports
+  /// ready after the connected listeners ran.
+  void setStatus(SessionStatus status) {
+    state = SessionState(status: status);
+    if (status != SessionStatus.connected) return;
+    for (final onStatusChanged in [..._open]) {
+      onStatusChanged(RelaySubscriptionStatus.ready);
+    }
+  }
 
   @override
   SessionState build() =>
@@ -317,6 +327,21 @@ class _FakeRelaySession extends RelaySessionNotifier {
   }) async {
     fetchCount++;
     return [];
+  }
+
+  @override
+  Future<void Function()> subscribeWithStatus(
+    NostrFilter filter,
+    void Function(NostrEvent) onEvent, {
+    void Function(String message)? onClosed,
+    required void Function(RelaySubscriptionStatus status) onStatusChanged,
+  }) async {
+    final unsubscribe = await subscribe(filter, onEvent, onClosed: onClosed);
+    _open.add(onStatusChanged);
+    return () {
+      _open.remove(onStatusChanged);
+      unsubscribe();
+    };
   }
 
   @override

@@ -23,10 +23,10 @@ class ReadStateCrypto {
   /// Plaintext by ciphertext, least recently used first. NIP-44 payloads
   /// carry a random nonce and a MAC, so under this one conversation key the
   /// same ciphertext always decrypts to the same plaintext. Every publish
-  /// re-reads up to [readStateFetchLimit] of our own blobs, every resume
-  /// replays them on the live subscription, and the relay echoes each
-  /// publish back, so most decrypts here repeat a ciphertext this instance
-  /// already decrypted or produced. Decrypting is pure-Dart ChaCha20 and HMAC
+  /// and every resume re-read up to [readStateFetchLimit] of our own blobs
+  /// through the snapshot, and the relay echoes each publish back, so most
+  /// decrypts here repeat a ciphertext this instance already decrypted or
+  /// produced. Decrypting is pure-Dart ChaCha20 and HMAC
   /// on the UI isolate, so repeats are served from this memo.
   final Map<String, String> _plaintextByCiphertext = {};
   int _retainedLength = 0;
@@ -35,9 +35,9 @@ class ReadStateCrypto {
   /// key and its plaintext, so it cannot grow without limit however large the
   /// blobs get (about 8 MB of one-byte strings at the default). Each slot's
   /// current blob costs up to about 95,000 (a 40 KiB plaintext and its
-  /// base64 ciphertext), so this holds about 80 slots. The replay walks every
-  /// slot in turn, so a bound below the live slots' total evicts each entry
-  /// before its next use and nothing hits; an account with 27 slots measured
+  /// base64 ciphertext), so this holds about 80 slots. Each snapshot walks
+  /// every slot in turn, so a bound below the live slots' total evicts each
+  /// entry before its next use and nothing hits; an account with 27 slots measured
   /// about 2.6M.
   static const defaultMaxRetainedLength = 8000000;
 
@@ -147,9 +147,14 @@ class ReadStateManager {
   Future<void> _saved = Future.value();
   bool _saveScheduled = false;
   Object? syncError;
-  // Whether the latest snapshot read succeeded. A publish that skips its own
+  // Whether the newest snapshot read succeeded. A publish that skips its own
   // snapshot clears [syncError] only on this evidence.
   bool _lastSnapshotSucceeded = false;
+  // Snapshot reads numbered in start order. Only a read newer than every
+  // settled one decides [_lastSnapshotSucceeded], so an older read finishing
+  // late cannot clear the retry a newer failure needs.
+  int _snapshotsStarted = 0;
+  int _newestSettledSnapshot = 0;
   final int Function() _now;
   // Override keys already in this device's own slot, carried unchanged.
   // See [isOverrideContext].
@@ -159,15 +164,12 @@ class ReadStateManager {
   void Function()? _unsubscribeLive;
   bool _initialized = false;
   bool _initialSeedComplete = false;
-  // Pending first fetch and subscribe. A reconnect while it runs waits for it
-  // so two passes cannot each install a live subscription and leak one.
-  Future<void>? _initializing;
-  // The reconnect pass running now, and the one waiting to start after it.
-  Future<void>? _runningResync;
-  Future<void>? _queuedResync;
-  // Whether the first fetch and subscribe both succeeded. A connect that
-  // lands while they run (the cold-start connect) then has nothing to redo.
-  bool _initialSyncSucceeded = false;
+  // The one sync loop, while it runs. Each pass opens the live subscription
+  // if it is missing, then reads the snapshot, so two passes never each
+  // install a subscription and leak one. A request before a pass starts its
+  // read joins that read; a request after runs one more pass.
+  Future<void>? _syncing;
+  bool _snapshotWanted = false;
 
   bool _disposed = false;
   bool _isPublishing = false;
@@ -221,16 +223,7 @@ class ReadStateManager {
       return;
     }
 
-    final initializing = Completer<void>();
-    _initializing = initializing.future;
-    try {
-      final subscribed = await _startLiveSubscription();
-      final fetched = await _fetchAndMerge();
-      _initialSyncSucceeded = fetched && subscribed;
-    } finally {
-      _initializing = null;
-      initializing.complete();
-    }
+    await _requestSync();
     if (_localContexts.isNotEmpty ||
         _pending.isNotEmpty ||
         _carriedOverrides.isNotEmpty) {
@@ -290,53 +283,51 @@ class ReadStateManager {
     await _publish();
   }
 
-  /// Fetch and resubscribe after a reconnect. Passes run one at a time, so
-  /// each replaces the previous live subscription instead of leaking one.
-  /// Reconnects while a pass waits to start share that pass.
-  Future<void> reinitializeRemote() {
-    if (_disposed || !_remoteEnabled || !_initialized) return Future.value();
-    final queued = _queuedResync;
-    if (queued != null) return queued;
-    final running = _runningResync;
-    final initializing = _initializing;
-    final pass = Completer<void>();
-    _queuedResync = pass.future;
-    unawaited(() async {
-      try {
-        if (running != null) {
-          await running;
-        } else if (initializing != null) {
-          await initializing;
-          // Connected while the first sync ran: it already used this
-          // connection.
-          if (_initialSyncSucceeded) return;
-        }
-        if (_disposed) return;
-        if (identical(_queuedResync, pass.future)) _queuedResync = null;
-        _runningResync = pass.future;
-        await _resyncRemote();
-      } catch (e) {
-        debugPrint('[ReadStateManager] reinitializeRemote failed: $e');
-      } finally {
-        if (identical(_queuedResync, pass.future)) _queuedResync = null;
-        if (identical(_runningResync, pass.future)) _runningResync = null;
-        pass.complete();
-      }
-    }());
-    return pass.future;
-  }
-
-  Future<void> _resyncRemote() async {
+  /// Catch up after a reconnect. The session replays the live subscription
+  /// on the new socket, and its ready reads the snapshot, so this reads only
+  /// when it has to open a subscription that was lost (a terminal CLOSED or a
+  /// failed subscribe).
+  Future<void> reinitializeRemote() async {
+    if (_disposed || !_remoteEnabled || !_initialized) return;
     debugPrint('[ReadStateManager] reinitializeRemote');
-    if (_isPublishing) {
-      await _publishCompleter?.future;
-    }
-    _unsubscribeLive?.call();
-    _unsubscribeLive = null;
-    await _startLiveSubscription();
-    await _fetchAndMerge();
+    if (_unsubscribeLive == null) await _requestSync();
     _schedulePublish();
     _onChanged();
+  }
+
+  /// Asks the sync loop for a snapshot read. Completes when the loop has
+  /// nothing left to do.
+  Future<void> _requestSync() {
+    _snapshotWanted = true;
+    final syncing = _syncing;
+    if (syncing != null) return syncing;
+    // Set before the loop starts: a subscription can report ready from
+    // inside subscribe, and that request must join this loop.
+    final done = Completer<void>();
+    _syncing = done.future;
+    unawaited(_runSync(done));
+    return done.future;
+  }
+
+  Future<void> _runSync(Completer<void> done) async {
+    try {
+      while (_snapshotWanted && !_disposed) {
+        if (_unsubscribeLive == null) {
+          await _startLiveSubscription();
+          if (_disposed) return;
+        }
+        _snapshotWanted = false;
+        // A failed read waits for the next trigger: the publish scheduled
+        // here, which reads the snapshot in full after a failure, or a later
+        // ready, resume or reconnect.
+        if (!await _fetchAndMerge()) _schedulePublish();
+      }
+    } catch (e) {
+      debugPrint('[ReadStateManager] sync failed: $e');
+    } finally {
+      _syncing = null;
+      done.complete();
+    }
   }
 
   void dispose({bool flushPending = true}) {
@@ -375,21 +366,30 @@ class ReadStateManager {
   }
 
   Future<bool> _fetchAndMerge() async {
+    final read = ++_snapshotsStarted;
     try {
       // Snapshot transport validates completeness and fences retired sessions.
       final events = await _relaySession!.fetchReadStateSnapshot();
       if (_disposed || !_servesThisCommunity) return false;
-      _lastSnapshotSucceeded = true;
+      _settleSnapshot(read, succeeded: true);
       _mergeEvents(events);
       await _persistLocalState();
       _onChanged();
       return true;
     } catch (error) {
-      _lastSnapshotSucceeded = false;
-      syncError = error;
+      if (_settleSnapshot(read, succeeded: false)) syncError = error;
       debugPrint('[ReadStateManager] snapshot failed: $error');
       return false;
     }
+  }
+
+  /// Records snapshot read [read]'s outcome unless a newer read already
+  /// settled. Returns whether it was recorded.
+  bool _settleSnapshot(int read, {required bool succeeded}) {
+    if (read < _newestSettledSnapshot) return false;
+    _newestSettledSnapshot = read;
+    _lastSnapshotSucceeded = succeeded;
+    return true;
   }
 
   void _mergeEvents(List<NostrEvent> events) {
@@ -461,16 +461,29 @@ class ReadStateManager {
 
   Future<bool> _startLiveSubscription() async {
     try {
-      final unsub = await _relaySession!.subscribe(
+      final unsub = await _relaySession!.subscribeWithStatus(
         NostrFilter(
           kinds: const [EventKind.readState],
           authors: [pubkey],
           tags: const {
             '#t': ['read-state'],
           },
-          limit: readStateFetchLimit,
+          // Change notifications only: the snapshot that follows reads the
+          // stored blobs, so a stored replay here would download them twice.
+          limit: 0,
         ),
         _handleIncomingEvent,
+        // With limit 0 nothing replays marks published before the REQ went
+        // live, so read the snapshot every time it goes live: its EOSE, which
+        // can come after the 500 ms fallback on a slow AUTH, on a reconnect's
+        // replay, or after a CLOSED's retry.
+        onStatusChanged: (status) {
+          if (status == RelaySubscriptionStatus.ready && !_disposed) {
+            unawaited(_requestSync());
+          }
+        },
+        // The session dropped it, so the next reconnect opens a new one.
+        onClosed: (_) => _unsubscribeLive = null,
       );
       if (_disposed) {
         unsub.call();
@@ -594,17 +607,26 @@ class ReadStateManager {
       // The snapshot below is the whole read state (megabytes on a busy
       // account), so skip it when there is nothing to send. Each resume
       // schedules a publish after its re-sync whether or not anything changed.
-      if (!_hasUnpublishedState()) {
-        // Nothing pending and every slot published, so after a good snapshot
-        // this device is in sync, as a full publish would have concluded.
-        if (_lastSnapshotSucceeded) syncError = null;
+      // After a failed snapshot, run the full publish anyway: its own
+      // snapshot is the retry, which the change notifications can't replace.
+      if (_lastSnapshotSucceeded && !_hasUnpublishedState()) {
+        // Nothing pending and every slot published, so this device is in
+        // sync, as a full publish would have concluded.
+        syncError = null;
         return;
       }
       final checkConnection = _relaySession?.captureConnectionFence();
       var snapshot = <NostrEvent>[];
       if (_relaySession != null) {
-        final events = await _relaySession.fetchReadStateSnapshot();
-        _lastSnapshotSucceeded = true;
+        final read = ++_snapshotsStarted;
+        final List<NostrEvent> events;
+        try {
+          events = await _relaySession.fetchReadStateSnapshot();
+        } catch (_) {
+          _settleSnapshot(read, succeeded: false);
+          rethrow;
+        }
+        _settleSnapshot(read, succeeded: true);
         if (!_servesThisCommunity ||
             !_ownsJournal ||
             (_disposed && !allowDisposed)) {
@@ -613,6 +635,9 @@ class ReadStateManager {
         checkConnection?.call();
         snapshot = events;
         _mergeEvents(events);
+        // Unchanged slots publish nothing, so no echo would announce marks
+        // this snapshot brought in.
+        _onChanged();
         if (events.any(
           (event) =>
               hasValidReadStateTags(event) &&
