@@ -6,6 +6,10 @@ Federated identity authorization — stateless core
 
 `draft` `optional` `relay`
 
+The optional [Agent authorization withdrawal](#agent-authorization-withdrawal)
+profile adds authorization withdrawal without retiring an agent key.
+The stateless core remains unchanged for deployments not selecting it.
+
 **Protocol dependencies**: NIP-01, NIP-42, NIP-98.
 
 The key words "MUST", "MUST NOT", "REQUIRED", "SHOULD", "SHOULD NOT", and
@@ -1025,6 +1029,279 @@ proof remains an independent control.
 **Algorithm confusion.** The verifier enforces asymmetric algorithms only;
 `alg=none` and symmetric algorithms deny.  The exact `kid`-based key selection
 is bounded before any attacker-controlled lookup.
+
+## Agent authorization withdrawal
+
+This optional profile, `agent-authorization-withdrawal-v1`, adds withdrawal of
+earlier agent assertions while preserving the asserted key. It does not authorize a workspace
+transfer, restore grants, or reverse key retirement. Core deployments retain
+the semantics above; where this profile is selected, the rules below supplement
+Verification, Session policy, Admin disconnect API, HTTP ingress, Discovery,
+and the core's stateless and revocation-scope statements.
+
+### Scope and signed evidence
+
+The profile uses the existing signed `iat` of `nip-fi-agent+jwt`; it adds no
+assertion claim or token type. Relays MUST retain each admitted agent session's
+verified assertion `iat`, issuer, asserted key, and owner. A timestamp supplied
+by the client outside the verified assertion, or the relay's receipt time,
+MUST NOT substitute for `iat`. Core assertion signature, audience, owner,
+proof-of-possession, time bounds, and authorization checks remain mandatory.
+
+Withdrawal state is an `issued_before` cutoff `C`, keyed by exact
+`(iss, target_pubkey)`, across all communities served under that issuer by
+the receiving deployment. It matches only agent assertions whose
+`nostr_pubkey == target_pubkey` and whose signed `iat < C`. Equality does not
+match. It MUST NOT match other issuers, human assertions, or assertions merely
+naming the target as their owner. Owner-wide denial remains a core disconnect.
+
+### Withdrawal command
+
+The authenticated administrative endpoint and request body remain
+`POST /api/nip-fi/disconnect` and `{"pubkey":"<target>"}`. Command authentication
+uses `nip-fi-command+jwt` and all core signature, issuer-principal, audience,
+method/path binding, size, command-age, and replay checks. The signed command
+has these operation-specific claims:
+
+| Claim | Requirement |
+|---|---|
+| `cmd` | Exactly `withdraw_agent_authorization`. This is a distinct operation, not an optional modifier of `disconnect`. |
+| `target_pubkey` | Same lowercase-hex target encoding and signed-target/body agreement as the core command. |
+| `issued_before` | A non-negative integer NumericDate, at most `9007199254740991`, interpreted with the strict comparison above. |
+| `until` | MUST be absent. Withdrawal is a persistent cutoff, not a deny-until lease. |
+
+For this operation, verification replaces the core `cmd == disconnect` and
+`until` checks with the table above. Missing, malformed, fractional, out-of-range,
+or duplicate operation-specific claims deny `evidence_rejected`. Unknown
+operations MUST deny without effects; they MUST NOT be treated as `disconnect`.
+Core `disconnect` retains its existing schema and MUST reject an
+`issued_before` claim rather than silently treating it as a scope modifier.
+
+After all pure checks, the relay MUST atomically reserve `(iss, jti)` through
+the command's effective expiry and durably merge
+`C := max(existing_C, command.issued_before)`. A replay denies
+`authorization_denied` without changing state. A fresh command identity with
+the same or an older cutoff is an idempotent semantic retry and MUST NOT
+lower state. Expiry of the command JWT or replay record MUST NOT expire the
+cutoff. A command that fails pure verification MUST NOT close sessions or
+change state. Storage/capacity failure before commit MUST return `503` without
+reserving the replay identity or claiming completion.
+
+There is no independent `until` to merge with the cutoff. Implementations
+MUST NOT independently maximize cutoff and deadline fields from separate
+commands to construct a wider time-bounded scope.
+
+### Admission, live sessions, and completion
+
+Every protected agent admission, including HTTP, MUST deny
+`authorization_denied` when `iat < max(C, F)`, where absent per-key `C` is zero
+and `F` is the durable issuer-wide agent floor defined below. Unavailable enforcement state MUST deny
+`authorization_unavailable`; an unreadable state store is not an absent cutoff.
+These checks supplement, and never replace, core key-wide and owner denial.
+
+A withdrawal MUST cancel all matching registered WebSocket sessions, including
+those registered but not yet admitted. Registration and cutoff checking MUST
+interlock with withdrawal so that either the close scan catches the session or
+admission observes the cutoff; cancellation is terminal. A session with
+`iat >= C` MUST NOT be closed by this withdrawal, including during delayed or
+duplicate inter-process delivery. All inter-process messages MUST preserve the
+verified operation and cutoff; they MUST NOT become key-wide close requests.
+
+Before completion, matching sessions MUST lose the ability to dispatch work or
+receive protected output. Matching protected HTTP work admitted before the
+cutoff MUST finish, be cancelled, or be fenced against further protected effects
+before completion is acknowledged. Already-performed effects are not undone.
+Implementations MUST NOT acknowledge completion merely because a socket close
+has been queued or a pub/sub message sent.
+
+The receiving deployment MUST have an authenticated, operator-configured
+authority for the complete set of processes and ingress paths that can serve
+the issuer, including HTTP, WebSocket, and relevant long-lived transports.
+Its completion coordinator MUST confirm that each serving process has applied
+the effective cutoff and fenced matching work, or that the process is fenced
+from all serving paths. Joining/restarted processes MUST restore enforcement
+state before serving. A partitioned process MUST be fenced or prevent a
+completion acknowledgement; an unreachable process is not an acknowledgement.
+The deployment MUST preserve these conditions as membership changes.
+
+Only after those conditions hold MAY the coordinator return HTTP `200` with
+`{"withdrawn":true,"issued_before":C_requested}` over the authenticated
+administrative connection. This attests at least the requested cutoff across
+the entire configured deployment; it does not expose a newer stored cutoff.
+The issuer trusts this acknowledgement through the authenticated administrative
+connection to its configured coordinator; it is not a signed, transferable
+receipt and MUST NOT be accepted from an untrusted intermediary.
+The receiver MUST use a finite configured completion timeout. An incomplete
+barrier returns `503` with `authorization unavailable\n`, not core
+`{"disconnected":true}`. Partial application may already have committed and
+MUST NOT be rolled back. The issuer retries using a fresh `jti`.
+
+The issuer MUST maintain a trusted inventory of every relay deployment to
+which affected assertions were issued. Discovery and a single deployment's
+acknowledgement MUST NOT stand in for that inventory. Destination issuance
+relying on completed withdrawal MUST wait for completion from every such
+deployment. An incomplete or unknown inventory MUST take the fallback below.
+
+### Persistence and precedence
+
+Profile deployments MUST persist cutoffs and recover them before admission;
+RAM-only storage plus eventual re-push does not meet this profile. Cutoffs
+MUST NOT decrease on retry, restart, failover, policy reload, or restore from
+backup. Equivalent or stronger enforcement MAY replace a per-key cutoff only
+under the compaction procedure below. If state rollback cannot be excluded, affected issuer admissions MUST stay
+closed until reconciled with authoritative issuer state. Fresh keys may have
+no cutoff only when the authoritative store confirms that absence.
+
+Profile deployments MUST also persist accepted core key-wide deny entries and
+restore them before serving, retaining their original expiry and maximum merge
+rule. This deliberately strengthens core restart handling for participating
+deployments. An active key-wide deny of the agent or owner always wins,
+regardless of `iat` or cutoff; a withdrawal MUST NOT shorten or clear it.
+Permanent retirement remains an issuer decision: the issuer MUST NOT issue
+fresh assertions for a retired key. This profile defines no unretirement.
+
+Cutoff storage MUST be bounded per issuer. At capacity, new entries MUST fail
+`503`, without evicting enforcement state or consuming a replay identity.
+There is one cutoff per `(iss, target_pubkey)`: repeated transfers of that key
+update its entry by maximum; storage grows with distinct withdrawn keys, not
+with transfer count. The following compaction permits bounded reclamation.
+
+### Compaction and rollback gate
+
+Each participating issuer MUST have one durable, non-decreasing agent assertion
+floor `F`, initially zero. Every agent admission and live-session enforcement
+MUST reject signed `iat < F`, independent of key, assertion-age policy or wall
+clock. The floor applies to agents only, and MUST NOT override core key/owner
+denies. It is enforcement state and has the same restore-before-serving and
+deployment-completion requirements as per-key cutoffs.
+
+For a cutoff `C`, define the conservative compaction horizon
+`H = C + S + A`, using overflow-safe arithmetic. `A` is the greatest positive
+finite `maximum_assertion_age` used by any serving process or applicable policy
+version since this cutoff was first stored; `S` is the greatest configured skew
+over that interval. An increase before compaction MUST recompute `H`, or MUST
+be blocked until compaction is complete. A decrease MUST NOT shorten `H`.
+The coordinator MUST establish that every serving process's trusted current
+time is at least `H` and that no agent assertion below `C` retains live or
+in-flight authority on any protected surface. Unknown clock bounds, legacy
+sessions without expiry, or incomplete ingress coverage prevent compaction.
+This time check protects availability for other keys whose old assertions
+would be covered by the broader floor; time alone never permits deletion.
+
+Reclamation MUST first durably raise `F := max(F, C)`, complete its enforcement
+across the deployment, and only then delete a per-key entry whose current
+value is at most `F`. Raising `F` and concurrent withdrawal MUST serialize so
+a newly increased per-key cutoff cannot be lost. A crash between raising the
+floor and deletion retains both, which is safe. Any affected live sessions
+MUST be fenced before floor completion is acknowledged. If the issuer cannot
+meet these conditions, it MUST retain the per-key entry or independently fence
+the affected agents; capacity pressure is not permission to weaken denial.
+
+After compaction, `iat < C` remains rejected by `F` even if clocks move
+backward, assertion-age limits are later raised, or old commands are replayed.
+`F` MUST NOT be reset or reclaimed on expiry, policy change, restart, or restore.
+An issuer clock behind `F` MUST wait rather than mint a fabricated future `iat`.
+The issuer MUST learn the authenticated current floor before fresh issuance;
+it MUST NOT expose that floor in public discovery or errors.
+
+A profile-unaware binary MUST NOT serve the issuer's agents unless an
+independent enforcement layer retains the effective predicate
+`iat >= max(F, C_key)` and all applicable key/owner denies on every protected
+surface, and fences pre-existing sessions/work before serving. Otherwise agent
+ingress MUST remain closed. Even `now >= max(C_key, F) + S + A` alone MUST NOT
+authorize rollback: a later clock rollback or age-limit increase could revive
+old assertions in a binary that lost the predicates. The rollback test is to
+replay a withdrawn assertion after compaction and downgrade, then repeat after
+winding the clock back and increasing age limits: each MUST deny or remain
+fenced. If that test cannot be satisfied, rollback MUST retain profile-aware
+enforcement or keep agent ingress closed.
+
+### Issuer ordering and fresh authorization
+
+An issuer using this profile MUST serialize source assertion finalization,
+authorization withdrawal, and destination activation for the affected agent.
+At each successful assertion finalization it MUST durably record the per-key
+maximum finalized `iat` under that serialization. It MUST durably end source
+issuance and choose a cutoff `T` strictly greater
+than every `iat` finalized under the withdrawn authority, including assertions
+issued ahead of wall time within permitted skew. Each later transfer MUST
+choose `T` strictly greater than the preceding transfer's cutoff. The issuer
+MUST retain these high-water marks across clock rollback, restart and failover.
+
+The issuer MUST NOT fabricate a future `iat` to bypass withdrawal. It MUST
+wait until its trusted wall clock reaches `T`, revalidate fresh destination
+authority, and use an actual issuance time `iat >= T`. If clock correctness or
+the high-water mark is uncertain, issuance MUST stop until reconciled. A new
+grant or another approving session MUST NOT resume source issuance.
+
+Before destination issuance, the issuer MUST obtain all required completion
+acknowledgements and fence every stale authorization-loss check, queued retry,
+temporary-deny producer and issuance result against its originating approval.
+A check based on withdrawn authority MUST NOT enqueue or extend a key-wide
+deny over fresh authority. Existing legitimate security denies MUST NOT be
+discarded. Already queued/in-flight legacy key-wide transfer disconnects MUST
+be reconciled; the scoped command does not neutralize them. If their possible
+future effects cannot be excluded, the issuer MUST use the fallback and MUST
+NOT promise uninterrupted destination access.
+
+These requirements permit a pause for clock, delivery, and runtime barriers.
+They do not promise zero interruption. Destination resource access, compute,
+credentials, billing and retained data remain issuer/application concerns.
+
+### Compatibility, discovery, and fallback
+
+A supporting deployment MAY advertise
+`"authorization_withdrawal":"agent-authorization-withdrawal-v1"` inside the existing NIP-11
+`federated_identity` object. This conveys capability only; it is not an
+acknowledgement, an issuer inventory, or evidence that every serving process
+has completed a particular withdrawal. It MUST contain no private identifiers.
+Profile selection MUST be operator-controlled and covered by policy identity.
+
+The assertion format is unchanged, so an older relay can still accept an old
+source assertion. A legacy peer rejects the new signed operation; this alone
+does not withdraw source authority. On unsupported, rejected, timed-out, or
+unprovable completion at any affected deployment, the issuer MUST stop
+source/destination issuance for the transition, send existing key-wide core
+disconnect commands to all affected deployments, and durably retry failed
+delivery. It MUST NOT report completed withdrawal based on a rejection or
+local `200` from the core disconnect endpoint.
+
+As a fallback, destination execution MUST remain disconnected until all source
+assertions and already-authenticated source session authority have demonstrably
+expired or been fenced across the inventory, and all relevant key-wide deny
+windows have elapsed. The issuer MUST establish that each serving version
+actually terminates session authority at the applicable deadline; admission
+checks alone are insufficient. Late legacy close delivery can still disrupt
+fresh sessions and MUST be reconciled or disclosed as a fallback limitation.
+The verified-drain fallback MUST NOT rely on off/shadow mode or legacy sessions
+without enforced expiry. Such sessions and ingress MUST first be fenced or
+demonstrably drained. Completion MUST cover every access surface in the claimed
+scope, including bridge, media and git HTTP routes and long-lived work they
+start; evidence for WebSocket/audio expiry alone is insufficient. Implementers
+MUST validate each surface before relying on this fallback.
+If these bounds, clock assumptions, or serving inventory cannot be established,
+the agent MUST remain disconnected pending repair; a timeout is not approval.
+
+Deployments enabling the profile MUST first close or drain pre-existing agent
+sessions whose verified `iat` is unavailable. They MUST prevent admission via
+older processes, shadow/off mode, or alternate ingress that omits enforcement.
+A rolling upgrade or rollback MUST meet the compaction and rollback gate above,
+including retention of `F` after per-key reclamation. The issuer MUST NOT
+retry the new operation as core `disconnect` and then treat its response as
+equivalent scoped completion. Core-only deployments retain their existing
+bounded-expiry behavior and make no new durability promise.
+
+### Behavioral oracles for the profile
+
+| ID | Required outcome |
+|---|---|
+| `FI-TRACE-WITHDRAW-SCOPE` | At cutoff T, signed agent `iat < T` denies on HTTP and WebSocket and matching sessions close; equality and later assertions survive this operation; another issuer, human, or agent merely owned by the target is unaffected. |
+| `FI-TRACE-WITHDRAW-ORDER` | Concurrent admission is caught by scan or cutoff check; delayed T1 after T2 retains max(T1,T2) and never closes assertions at/after that maximum; exact-command replay has no side effects; a semantic retry with fresh jti converges. |
+| `FI-TRACE-WITHDRAW-DURABLE` | Restart, failover, policy reload, or rollback cannot restore withdrawn authority; unavailable state fails closed; active agent/owner key-wide denial wins and survives restart; per-issuer capacity failure does not evict state or consume jti. |
+| `FI-TRACE-WITHDRAW-BARRIER` | A process without applied enforcement is fenced or prevents 200; registering/restarted processes cannot serve stale state; in-flight work cannot exercise old authority after completion; local pub/sub success is insufficient. |
+| `FI-TRACE-WITHDRAW-ISSUANCE` | Source finalization racing withdrawal cannot issue past the fence; skewed source iat and repeated same-second transfers force a sufficient cutoff; clock rollback stops issuance; stale confirmed-loss checks cannot extend a key-wide deny over destination authority. |
+| `FI-TRACE-WITHDRAW-COMPAT` | An older peer rejects the distinct operation without a key-wide side effect; issuer fallback sends core denies and withholds destination execution through the verified drain; missing capability, incomplete inventory, and partial completion never count as scoped success. |
+| `FI-TRACE-WITHDRAW-COMPACTION` | Repeated transfers update one key entry; distinct keys consume distinct entries. At H, persist/apply F before deleting C. Replay below C after deletion, clock rollback and age-limit increase always denies; age/skew increases before compaction extend H. Concurrent withdrawal cannot lose an increased C; a crash before deletion retains safe state; profile-unaware rollback without independent enforcement leaves agent ingress closed. |
 
 ## Sources
 
