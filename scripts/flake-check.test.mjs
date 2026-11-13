@@ -535,6 +535,7 @@ test("a helper under tests/ selects the integration binaries that include it", (
       "crates/buzz-agent/tests/fake_llm.rs",
       "crates/buzz-agent/tests/permission_boundary.rs",
       "crates/buzz-agent/tests/regressions.rs",
+      "crates/buzz-agent/tests/streaming.rs",
     ],
     scanned: true,
   });
@@ -624,7 +625,7 @@ test("select, through its entry point, repeats a changed Tauri test and the bina
   const helper = selectAppending(["crates/buzz-agent/tests/common/mod.rs"]);
   assert.match(
     helper.summary,
-    /\| crates\/buzz-agent\/tests\/common\/mod\.rs \| rust \| helper for: anthropic_continuation, fake_llm, permission_boundary, regressions: \d+ test\(s\) \|/,
+    /\| crates\/buzz-agent\/tests\/common\/mod\.rs \| rust \| helper for: anthropic_continuation, fake_llm, permission_boundary, regressions, streaming: \d+ test\(s\) \|/,
   );
   const binaries = new Set(
     helper.outputs.rust.map((entry) => entry.split("::")[0]),
@@ -634,6 +635,7 @@ test("select, through its entry point, repeats a changed Tauri test and the bina
     "crates/buzz-agent/tests/fake_llm.rs",
     "crates/buzz-agent/tests/permission_boundary.rs",
     "crates/buzz-agent/tests/regressions.rs",
+    "crates/buzz-agent/tests/streaming.rs",
   ]);
   assert.ok(helper.outputs.rust.length > 0);
   // Changed together, the helper and an importer select each test once.
