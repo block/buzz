@@ -952,6 +952,10 @@ void main() {
       // No other trigger: the backoff re-syncs, then the marks go out.
       async.elapse(const Duration(seconds: 15));
       expect(relay.submitCount, 1);
+      expect(
+        decodeReadStateBlob(crypto.decrypt(relay.contents.single))!.contexts,
+        {'room': 1990},
+      );
       expect(manager.syncError, isNull);
       manager.dispose(flushPending: false);
     });
