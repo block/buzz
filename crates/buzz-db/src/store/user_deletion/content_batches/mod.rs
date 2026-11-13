@@ -14,7 +14,10 @@ use std::io::Write;
 use uuid::Uuid;
 
 mod execute;
+mod grouped;
 mod owned;
+mod reference_index;
+mod retention;
 mod rows;
 
 const KINDS: &[i32] = &[
@@ -24,7 +27,7 @@ const KINDS: &[i32] = &[
 ];
 const PAGE_SIZE: i64 = 100;
 const MAX_TARGETS: usize = 10_000;
-const EVENT_COLUMNS: &str = "e.id,e.created_at,e.channel_id,e.kind";
+const EVENT_COLUMNS: &str = "e.id,e.created_at,e.channel_id,e.kind,e.tags";
 
 /// Scope and bounds for standalone preview or explicitly requested deletion.
 pub struct ContentBatchOptions {
@@ -52,16 +55,19 @@ pub struct ContentBatchSummary {
     pub items: usize,
     /// Operations carrying an active-work or delivery warning.
     pub warnings: usize,
+    /// Events retained as erased structural tombstones.
+    pub scrubbed_events: usize,
     /// Authored event kinds outside this handler, with counts.
     pub excluded_event_kinds: Vec<Value>,
 }
 
-#[derive(Clone, sqlx::FromRow)]
+#[derive(Clone, sqlx::FromRow, Serialize)]
 struct Event {
     id: Vec<u8>,
     created_at: DateTime<Utc>,
     channel_id: Option<Uuid>,
     kind: i32,
+    tags: Value,
 }
 
 #[derive(Default, Clone)]
@@ -197,6 +203,7 @@ async fn plan(
     writer: &mut impl Write,
     collect: bool,
 ) -> Result<Plan> {
+    reference_index::ensure(conn).await?;
     if !(1..=100).contains(&options.batch_size) || !(1..=1_000_000).contains(&options.max_items) {
         return Err(invalid(
             "batch size must be 1–100 and max items must be 1–1,000,000",
@@ -267,7 +274,9 @@ async fn plan(
         collected: collect.then(Vec::new),
     };
     owned::plan(conn, &targets, &mut output).await?;
+    rows::authored_reactions(conn, &targets, &mut output).await?;
     let mut cursor = Cursor::default();
+    let mut selected = Vec::new();
     loop {
         let query = format!(
             "WITH authored AS ({}) SELECT {EVENT_COLUMNS} FROM authored e
@@ -290,10 +299,35 @@ async fn plan(
         }
         for event in events {
             cursor.advance(&event);
-            plan_event(conn, &event, &mut output).await?;
+            selected.push(event);
+            if selected.len() > options.max_items as usize {
+                return Err(invalid("content event limit exceeded"));
+            }
         }
     }
-    rows::authored_reactions(conn, &targets, &mut output).await?;
+    let needed = retention::needed(conn, options.community, &selected, &targets).await?;
+    // Children before ancestors: a later batch must not expose a live child
+    // whose selected ancestor was already physically removed.
+    let metadata = retention::metadata(conn, options.community, &selected).await?;
+    let selected = retention::children_first(selected, &metadata)?;
+    for page in selected.chunks(PAGE_SIZE as usize) {
+        rows::event_rows(conn, page, &mut output).await?;
+        for event in page {
+            let id = hex::encode(&event.id);
+            let scrub = needed.contains(&id);
+            output
+                .repairs
+                .push(json!({"event_id": id, "channel_id": event.channel_id,
+                "metadata": metadata.get(&id), "action": "preserve ancestry and update counts"}));
+            output.add(
+                "events",
+                json!({"id": id, "created_at": event.created_at}),
+                if scrub { "would_scrub" } else { "would_delete" },
+                &json!({"selection": {"type": "authored_event"}, "kind": event.kind}),
+                None,
+            )?;
+        }
+    }
     let query = format!(
         "WITH authored AS ({}) SELECT jsonb_build_object('kind',kind,'count',count(*))
             FROM authored WHERE NOT(kind=ANY($4)) GROUP BY kind ORDER BY kind",
@@ -312,6 +346,7 @@ async fn plan(
         batches: output.batches,
         items: output.seen.len(),
         warnings: output.warnings,
+        scrubbed_events: needed.len(),
         excluded_event_kinds: excluded,
     };
     Ok(Plan {
@@ -321,40 +356,14 @@ async fn plan(
     })
 }
 
-// The authored query is the only event selector. References never expand scope.
-async fn plan_event(
-    conn: &mut PgConnection,
-    event: &Event,
-    output: &mut Output<'_, impl Write>,
-) -> Result<()> {
-    rows::event_rows(conn, event, output).await?;
-    let roots: Vec<Value> = sqlx::query_scalar(
-        "SELECT jsonb_build_object(
-        'channel_id',channel_id,'root_event_id',encode(COALESCE(root_event_id,event_id),'hex'))
-        FROM thread_metadata WHERE community_id=$1 AND event_id=$2 AND event_created_at=$3
-        ORDER BY channel_id,root_event_id",
-    )
-    .bind(output.community)
-    .bind(&event.id)
-    .bind(event.created_at)
-    .fetch_all(&mut *conn)
-    .await?;
-    output
-        .repairs
-        .push(json!({"event_id": hex::encode(&event.id),
-        "channel_id": event.channel_id, "stored_threads": roots,
-        "action": "recompute affected thread metadata; preserve surviving reply ancestry"}));
-    output.add(
-        "events",
-        json!({"id": hex::encode(&event.id), "created_at": event.created_at}),
-        "would_delete",
-        &json!({"selection": {"type": "authored_event"}, "kind": event.kind}),
-        None,
-    )
-}
-
 #[cfg(test)]
 mod postgres_tests;
 
 #[cfg(test)]
 mod agents_postgres_tests;
+
+#[cfg(test)]
+mod scrub_postgres_tests;
+
+#[cfg(test)]
+mod reference_index_postgres_tests;
