@@ -7,6 +7,8 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		B36650032F40000100A17E01 /* NativeSwitchTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B36650042F40000100A17E01 /* NativeSwitchTests.swift */; };
+		B36650012F40000100A17E01 /* NativeSwitch.swift in Sources */ = {isa = PBXBuildFile; fileRef = B36650022F40000100A17E01 /* NativeSwitch.swift */; };
 		ACAF00000000000000000001 /* ToastLayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACAF00000000000000000002 /* ToastLayer.swift */; };
 		BC0010000000000000000003 /* BrowserAuthBridgeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC0010000000000000000004 /* BrowserAuthBridgeTests.swift */; };
 		BC0010000000000000000001 /* BuzzBrowserAuthBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC0010000000000000000002 /* BuzzBrowserAuthBridge.swift */; };
@@ -111,6 +113,8 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		B36650042F40000100A17E01 /* NativeSwitchTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeSwitchTests.swift; sourceTree = "<group>"; };
+		B36650022F40000100A17E01 /* NativeSwitch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeSwitch.swift; sourceTree = "<group>"; };
 		ACAF00000000000000000002 /* ToastLayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToastLayer.swift; sourceTree = "<group>"; };
 		BC0010000000000000000004 /* BrowserAuthBridgeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserAuthBridgeTests.swift; sourceTree = "<group>"; };
 		BC0010000000000000000002 /* BuzzBrowserAuthBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BuzzBrowserAuthBridge.swift; sourceTree = "<group>"; };
@@ -236,6 +240,7 @@
 			isa = PBXGroup;
 			children = (
 				331C807B294A618700263BE5 /* RunnerTests.swift */,
+				B36650042F40000100A17E01 /* NativeSwitchTests.swift */,
 				BC0010000000000000000004 /* BrowserAuthBridgeTests.swift */,
 				F84380010000000000000002 /* ProfileSetupRecoveryTests.swift */,
 				AB1200132F40400100A17E01 /* NativeMessageImageLoaderTests.swift */,
@@ -353,6 +358,7 @@
 				7B81D01A2F40D00100A17E01 /* NativeCommunityEntry.swift */,
 				7B81D01A2F40D00100A17E91 /* NativeProfileSetup.swift */,
 				4A71C01C2F40E00100A17E01 /* NativeSkinToneControl.swift */,
+				B36650022F40000100A17E01 /* NativeSwitch.swift */,
 				4A71C01E2F40F00100A17E01 /* ThemePaginationGlassControl.swift */,
 				CA8300022F50000100A17E01 /* IosMediaCarousel.swift */,
 				AC7400022F50000100A17E01 /* ThemePaginationGeometry.swift */,
@@ -703,6 +709,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				331C808B294A63AB00263BE5 /* RunnerTests.swift in Sources */,
+				B36650032F40000100A17E01 /* NativeSwitchTests.swift in Sources */,
 				BC0010000000000000000003 /* BrowserAuthBridgeTests.swift in Sources */,
 				F84380010000000000000001 /* ProfileSetupRecoveryTests.swift in Sources */,
 				AB1200032F40400100A17E01 /* NativeMessageImageLoaderTests.swift in Sources */,
@@ -753,6 +760,7 @@
 				7B81D0192F40D00100A17E01 /* NativeCommunityEntry.swift in Sources */,
 				7B81D0192F40D00100A17E91 /* NativeProfileSetup.swift in Sources */,
 				4A71C01B2F40E00100A17E01 /* NativeSkinToneControl.swift in Sources */,
+				B36650012F40000100A17E01 /* NativeSwitch.swift in Sources */,
 				4A71C01D2F40F00100A17E01 /* ThemePaginationGlassControl.swift in Sources */,
 				CA8300012F50000100A17E01 /* IosMediaCarousel.swift in Sources */,
 				AC7400012F50000100A17E01 /* ThemePaginationGeometry.swift in Sources */,

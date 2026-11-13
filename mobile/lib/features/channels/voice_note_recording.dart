@@ -45,7 +45,11 @@ class VoiceNoteRecording {
     required this.file,
     required this.duration,
     required this.waveform,
+    this.draftGeneration,
   });
+
+  /// Identifies the persisted draft generation for conditional cleanup.
+  final String? draftGeneration;
 
   final XFile file;
   final Duration duration;
@@ -176,6 +180,10 @@ class DeviceVoiceNoteRecorder implements VoiceNoteRecorder {
         autoGain: true,
         echoCancel: true,
         noiseSuppress: true,
+        // The recording-start pulse fires after the microphone is active.
+        iosConfig: IosRecordConfig(
+          allowHapticsAndSystemSoundsDuringRecording: true,
+        ),
       ),
       path: path,
     );

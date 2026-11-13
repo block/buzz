@@ -209,6 +209,8 @@ void main() {
     );
     await tester.pump();
 
+    await tester.ensureVisible(find.text('Send identity to desktop'));
+    await tester.pumpAndSettle();
     await tester.tap(find.text('Send identity to desktop'));
     await tester.pump();
     tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
@@ -248,6 +250,8 @@ void main() {
     await tester.pump();
     tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
 
+    await tester.ensureVisible(find.text('Send identity to desktop'));
+    await tester.pumpAndSettle();
     await tester.tap(find.text('Send identity to desktop'));
     await tester.pump();
     await tester.pump(const Duration(seconds: 5));
@@ -287,6 +291,8 @@ void main() {
     final settingsContext = tester.element(
       find.text('Send identity to desktop'),
     );
+    await tester.ensureVisible(find.text('Send identity to desktop'));
+    await tester.pumpAndSettle();
     await tester.tap(find.text('Send identity to desktop'));
     await tester.pump();
     unawaited(
@@ -331,6 +337,8 @@ void main() {
     final settingsContext = tester.element(
       find.text('Send identity to desktop'),
     );
+    await tester.ensureVisible(find.text('Send identity to desktop'));
+    await tester.pumpAndSettle();
     await tester.tap(find.text('Send identity to desktop'));
     await tester.pump();
     unawaited(
@@ -371,6 +379,8 @@ void main() {
     );
     await tester.pump();
 
+    await tester.ensureVisible(find.text('Send identity to desktop'));
+    await tester.pumpAndSettle();
     await tester.tap(find.text('Send identity to desktop'));
     await tester.pumpAndSettle();
 

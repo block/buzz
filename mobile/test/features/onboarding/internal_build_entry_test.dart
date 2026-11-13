@@ -12,6 +12,7 @@ import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
 import 'package:buzz/shared/hosted/organization_environment.dart';
 import 'package:buzz/shared/hosted/organization_sign_in.dart';
 import 'package:buzz/shared/push/push_bridge.dart';
+import 'package:buzz/shared/theme/theme_provider.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -21,6 +22,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:nostr/nostr.dart' as nostr;
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../helpers/widget_helpers.dart';
 
@@ -31,6 +33,7 @@ import '../../helpers/widget_helpers.dart';
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   final skip = !OrganizationEnvironment.enabled;
+  setUp(() => SharedPreferences.setMockInitialValues({}));
 
   testWidgets(
     'one Sign in joins the organization; after signing out, Sign in reuses '
@@ -376,6 +379,7 @@ class _Harness {
 
   Future<void> open({Widget child = const OnboardingAppEntry()}) async {
     final origin = OrganizationEnvironment.origin!;
+    final preferences = await SharedPreferences.getInstance();
     tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
       const MethodChannel('buzz/browser_auth'),
       (_) async => null,
@@ -400,6 +404,7 @@ class _Harness {
       WidgetHelpers.testable(
         disableAnimations: true,
         overrides: [
+          savedPrefsProvider.overrideWithValue(preferences),
           organizationAccountProvider.overrideWith((ref) {
             final account = BuilderlabAccountClient(
               accountOrigin: origin,

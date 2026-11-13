@@ -3,6 +3,9 @@ import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
 
 import 'dart:async';
 
+import '../../shared/me/hold_to_talk.dart';
+import '../../shared/widgets/app_toggle_row.dart';
+
 import 'package:buzz/shared/crypto/event_signing.dart';
 import 'package:flutter/foundation.dart';
 import 'package:duo_kit/duo_kit.dart';
@@ -40,6 +43,7 @@ part 'settings_page/profile_section.dart';
 part 'settings_page/status_section.dart';
 part 'settings_page/connection_section.dart';
 part 'settings_page/notifications_section.dart';
+part 'settings_page/voice_section.dart';
 part 'settings_page/builderlab_account_section.dart';
 
 Widget _emptyProfileEditPage(BuildContext context) => const SizedBox.shrink();
@@ -99,6 +103,7 @@ class SettingsPage extends HookConsumerWidget {
       ),
       if (_notificationsVisible(ref))
         ('Notifications', const _NotificationsSection()),
+      ('Voice notes', const _VoiceSection()),
       (
         'Connection',
         _ConnectionSection(

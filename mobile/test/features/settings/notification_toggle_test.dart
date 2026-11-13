@@ -1,3 +1,4 @@
+import 'package:buzz/shared/widgets/buzz_switch.dart';
 import 'dart:async';
 import 'dart:convert';
 
@@ -204,19 +205,34 @@ void main() {
       expect(session.leases.single['active'], isTrue);
       // Capability discovery plus the active publication.
       expect(discoveries, 2);
-      expect(tester.widget<Switch>(find.byType(Switch)).value, isTrue);
       expect(
-        tester.getSemantics(
-          find.byKey(const ValueKey('push-notifications-setting')),
-        ),
-        isSemantics(
-          label: 'Notifications',
-          hasToggledState: true,
-          isToggled: true,
+        tester
+            .widget<BuzzSwitch>(
+              find.descendant(
+                of: find.byKey(const ValueKey('push-notifications-setting')),
+                matching: find.byType(BuzzSwitch),
+              ),
+            )
+            .value,
+        isTrue,
+      );
+      final native = tester.widget<UiKitView>(
+        find.descendant(
+          of: find.byKey(const ValueKey('push-notifications-setting')),
+          matching: find.byType(UiKitView),
         ),
       );
+      expect(native.viewType, 'buzz/switch');
+      expect(native.creationParams, containsPair('label', 'Notifications'));
       expect(
-        tester.getSize(find.byType(Switch)).height,
+        tester
+            .getSize(
+              find.descendant(
+                of: find.byKey(const ValueKey('push-notifications-setting')),
+                matching: find.byType(BuzzSwitch),
+              ),
+            )
+            .height,
         greaterThanOrEqualTo(48),
       );
       // Compare rendered row bounds, not just their padding parameters.
@@ -231,7 +247,7 @@ void main() {
         statusHeight,
         reason: 'single-line settings rows share a height',
       );
-      await tester.tap(find.byType(Switch));
+      await tester.tap(find.text('Notifications'));
       await tester.pumpAndSettle();
       final stored = (await storage.loadAll()).single;
       expect(stored.pushNotificationsEnabled, isFalse);
@@ -258,7 +274,12 @@ void main() {
       );
       expect(discoveries, 3);
       expect(snapshots.last.single.pushNotificationsEnabled, isFalse);
-      final offSwitch = tester.widget<Switch>(find.byType(Switch));
+      final offSwitch = tester.widget<BuzzSwitch>(
+        find.descendant(
+          of: find.byKey(const ValueKey('push-notifications-setting')),
+          matching: find.byType(BuzzSwitch),
+        ),
+      );
       expect(offSwitch.value, isFalse);
       expect(offSwitch.onChanged, isNotNull);
       // Closing and reopening Settings must not strand the off control either.
@@ -266,10 +287,30 @@ void main() {
       await tester.pumpAndSettle();
       showingSettings.value = true;
       await tester.pumpAndSettle();
-      expect(tester.widget<Switch>(find.byType(Switch)).onChanged, isNotNull);
+      expect(
+        tester
+            .widget<BuzzSwitch>(
+              find.descendant(
+                of: find.byKey(const ValueKey('push-notifications-setting')),
+                matching: find.byType(BuzzSwitch),
+              ),
+            )
+            .onChanged,
+        isNotNull,
+      );
       await tester.tap(find.text('Notifications'));
       await tester.pumpAndSettle();
-      expect(tester.widget<Switch>(find.byType(Switch)).value, isTrue);
+      expect(
+        tester
+            .widget<BuzzSwitch>(
+              find.descendant(
+                of: find.byKey(const ValueKey('push-notifications-setting')),
+                matching: find.byType(BuzzSwitch),
+              ),
+            )
+            .value,
+        isTrue,
+      );
       expect((await storage.loadAll()).single.pushNotificationsEnabled, isTrue);
       expect(
         session.leases.where((lease) => lease['active'] == true).length,
@@ -306,7 +347,17 @@ void main() {
       );
       await tester.pumpAndSettle();
       expect(discoveries, 5);
-      expect(tester.widget<Switch>(find.byType(Switch)).onChanged, isNotNull);
+      expect(
+        tester
+            .widget<BuzzSwitch>(
+              find.descendant(
+                of: find.byKey(const ValueKey('push-notifications-setting')),
+                matching: find.byType(BuzzSwitch),
+              ),
+            )
+            .onChanged,
+        isNotNull,
+      );
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox.shrink());
       await tester.pumpAndSettle();

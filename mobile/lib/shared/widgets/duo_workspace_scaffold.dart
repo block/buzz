@@ -8,9 +8,11 @@ class DuoWorkspaceScaffold extends StatelessWidget {
   const DuoWorkspaceScaffold({
     required this.body,
     required this.navigationBuilder,
+    this.navigationOverflow = 0,
     super.key,
   });
 
+  final double navigationOverflow;
   final Widget body;
   final FoldNavigationBuilder navigationBuilder;
 
@@ -28,7 +30,12 @@ class DuoWorkspaceScaffold extends StatelessWidget {
         body,
         if (strip != null)
           Positioned.fromRect(
-            rect: strip.rect,
+            rect: Rect.fromLTRB(
+              strip.rect.left - navigationOverflow,
+              strip.rect.top,
+              strip.rect.right + navigationOverflow,
+              strip.rect.bottom,
+            ),
             child: MediaQuery(
               data: MediaQuery.of(context).copyWith(
                 padding: EdgeInsets.only(

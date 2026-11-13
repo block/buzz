@@ -13,16 +13,18 @@ class MessagesFilters extends StatelessWidget {
     this.isCollapsed = false,
     required this.selected,
     required this.onSelected,
+    this.useNativeGlass = true,
   });
   final bool isCollapsed;
   final String selected;
   final ValueChanged<String> onSelected;
+  final bool useNativeGlass;
 
   @override
   Widget build(BuildContext context) => SizedBox(
     width: double.infinity,
     child: FilterChipBar<String>(
-      useNativeGlass: true,
+      useNativeGlass: useNativeGlass,
       matchNativeWidths: true,
       labelOffset: defaultTargetPlatform == TargetPlatform.android
           ? const Offset(-0.5, -1)
