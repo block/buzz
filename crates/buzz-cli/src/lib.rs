@@ -358,6 +358,26 @@ enum Cmd {
     /// Community moderation — reports queue, bans, timeouts, audit trail
     #[command(subcommand)]
     Moderation(ModerationCmd),
+    /// Browse the community's shared agent persona catalog (read-only)
+    #[command(subcommand)]
+    Personas(PersonasCmd),
+    /// Browse your agent teams and the community's shared team catalog (read-only)
+    #[command(subcommand)]
+    Teams(TeamsCmd),
+}
+
+#[derive(Subcommand)]
+pub enum PersonasCmd {
+    /// List shared personas published by anyone in the community (kind:30175)
+    List,
+}
+
+#[derive(Subcommand)]
+pub enum TeamsCmd {
+    /// List your own teams (kind:30176)
+    List,
+    /// List teams shared with the community, with embedded members (kind:30178)
+    Catalog,
 }
 
 #[derive(Subcommand)]
@@ -516,6 +536,18 @@ impl RespondToArg {
 
 #[derive(Subcommand)]
 pub enum AgentsCmd {
+    /// Read your agents' decrypted turn metrics — token usage and cost (kind:44200, owner key only)
+    Metrics {
+        /// Only this agent: a 64-hex pubkey or the unique name of one of your managed agents
+        #[arg(long)]
+        agent: Option<String>,
+        /// Unix timestamp — return metrics at or after this time
+        #[arg(long)]
+        since: Option<i64>,
+        /// Maximum number of metrics to return (default 50, max 200)
+        #[arg(long)]
+        limit: Option<u32>,
+    },
     /// Open a prefilled create-agent form in the owner's Buzz Desktop
     DraftCreate {
         /// Current channel UUID; the new agent is added here after save
@@ -2689,6 +2721,8 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Huddles(sub) => commands::huddles::dispatch(sub, &client).await,
         Cmd::Users(sub) => commands::users::dispatch(sub, &client, &cli.format).await,
         Cmd::Workflows(sub) => commands::workflows::dispatch(sub, &client).await,
+        Cmd::Personas(sub) => commands::personas::dispatch(sub, &client).await,
+        Cmd::Teams(sub) => commands::teams::dispatch(sub, &client).await,
         Cmd::Feed(sub) => commands::feed::dispatch(sub, &client, &cli.format).await,
         Cmd::Social(sub) => commands::social::dispatch(sub, &client).await,
         Cmd::Notes(sub) => commands::notes::dispatch(sub, &client).await,
@@ -2986,12 +3020,14 @@ mod tests {
             "notes",
             "pack",
             "patches",
+            "personas",
             "pr",
             "projects",
             "reactions",
             "repos",
             "sidebar",
             "social",
+            "teams",
             "upload",
             "users",
             "workflows",
@@ -3043,6 +3079,7 @@ mod tests {
                 "archived",
                 "draft-create",
                 "draft-update",
+                "metrics",
                 "unarchive"
             ]
         );
@@ -3111,6 +3148,8 @@ mod tests {
             vec!["approve", "create", "delete", "get", "list", "runs", "trigger", "update"]
         );
         assert_eq!(names(&cmd, "feed"), vec!["get"]);
+        assert_eq!(names(&cmd, "personas"), vec!["list"]);
+        assert_eq!(names(&cmd, "teams"), vec!["catalog", "list"]);
         assert_eq!(
             names(&cmd, "social"),
             vec![
@@ -3189,7 +3228,7 @@ mod tests {
     #[test]
     fn subcommand_counts_are_stable() {
         let expected: Vec<(&str, usize)> = vec![
-            ("agents", 5),
+            ("agents", 6),
             ("canvas", 4),
             ("channels", 17),
             ("dms", 4),
@@ -3201,11 +3240,13 @@ mod tests {
             ("messages", 9),
             ("pack", 2),
             ("patches", 4),
+            ("personas", 1),
             ("pr", 5),
             ("projects", 8),
             ("reactions", 3),
             ("repos", 6),
             ("social", 7),
+            ("teams", 2),
             ("upload", 1),
             ("users", 6),
             ("workflows", 8),
