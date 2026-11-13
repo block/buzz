@@ -1,10 +1,12 @@
 import 'dart:async';
 import 'dart:io' show Platform;
 
+import 'package:cronet_http/cronet_http.dart';
 import 'package:cupertino_http/cupertino_http.dart';
 import 'package:http/http.dart' as http;
+import 'package:jni/jni.dart' show JThrowable;
 import 'package:objective_c/objective_c.dart';
-import 'package:flutter/foundation.dart' show visibleForTesting;
+import 'package:flutter/foundation.dart' show debugPrint, visibleForTesting;
 
 /// Which app-wide connection pool a request belongs to.
 enum HttpTraffic {
@@ -15,20 +17,34 @@ enum HttpTraffic {
   media,
 }
 
-final _sessions = <HttpTraffic, http.Client>{};
+/// The app-wide session for each traffic class, or null where the platform
+/// has none.
+final _sessions = <HttpTraffic, http.Client?>{};
 
 /// An HTTP client for [traffic]. Callers own it and close it as usual.
 ///
-/// On iOS, every client for the same [traffic] shares one `NSURLSession`, so
-/// requests to a host multiplex over one HTTP/2 connection instead of opening
-/// an HTTP/1.1 connection each, and gzip is inflated natively, off the Dart
-/// isolate. Media has its own session, and so its own connection, so image
-/// bytes cannot starve queries queued behind them on a shared connection.
+/// On iOS and Android, every client for the same [traffic] shares one native
+/// session (`NSURLSession` or a Cronet engine), so requests to a host
+/// multiplex over one HTTP/2 connection instead of opening an HTTP/1.1
+/// connection each, and gzip is inflated natively, off the Dart isolate.
+/// Media has its own session, and so its own connection, so image bytes
+/// cannot starve queries queued behind them on a shared connection.
 ///
 /// Elsewhere this is `http.Client()`, which also honors `http.runWithClient`.
 http.Client newAppHttpClient([HttpTraffic traffic = HttpTraffic.api]) {
-  if (!Platform.isIOS) return http.Client();
-  return SharedSessionClient(_sessions[traffic] ??= _openUrlSession());
+  final session = _sessions.putIfAbsent(traffic, _openNativeSession);
+  if (session == null) return http.Client();
+  return SharedSessionClient(session, streamsUploads: !Platform.isAndroid);
+}
+
+/// Whether [newAppHttpClient] uses a native session on this device.
+bool get hasNativeHttpSession =>
+    _sessions.putIfAbsent(HttpTraffic.api, _openNativeSession) != null;
+
+http.Client? _openNativeSession() {
+  if (Platform.isIOS) return _openUrlSession();
+  if (Platform.isAndroid) return _openCronetSession();
+  return null;
 }
 
 /// Matches the `dart:io` transport apart from the protocol: no HTTP cache and
@@ -42,21 +58,54 @@ http.Client _openUrlSession() {
   return CupertinoClient.fromSessionConfiguration(config);
 }
 
+/// Matches the `dart:io` transport apart from the protocol: no HTTP cache,
+/// and Cronet keeps no cookies. QUIC stays off, so this changes only the
+/// HTTP version.
+///
+/// Null when no Cronet provider is available: Cronet comes from Google Play
+/// services, which some Android devices don't have. Those keep `dart:io`.
+http.Client? _openCronetSession() {
+  final CronetEngine engine;
+  try {
+    engine = CronetEngine.build(
+      cacheMode: CacheMode.disabled,
+      enableHttp2: true,
+      enableQuic: false,
+    );
+  } on JThrowable catch (error) {
+    debugPrint('Cronet is unavailable, using dart:io: ${error.message}');
+    return null;
+  }
+  return CronetClient.fromCronetEngine(engine);
+}
+
 /// A caller's handle on an app-wide session. Like closing a `dart:io` client,
 /// [close] cancels the handle's requests still in flight and refuses later
 /// ones, but leaves the session open for other handles. Closing a
-/// `CupertinoClient` while any of its requests run would also throw.
+/// `CupertinoClient` while any of its requests run would also throw, and
+/// closing a `CronetClient` would stop the shared engine.
 ///
 /// App Transport Security blocks cleartext `URLSession` loads from public
 /// hosts, while saved community icons and remote media may still use
 /// `http://`. Those keep the handle's own `dart:io` client, as before.
+///
+/// Unless [streamsUploads], a streamed request with a body (media and voice
+/// note uploads) also keeps `dart:io`: `CronetClient` reads the whole body
+/// into memory before sending it, so progress would reach 100% before any
+/// byte left and a large attachment would be copied in full.
 @visibleForTesting
 class SharedSessionClient extends http.BaseClient {
-  SharedSessionClient(this._session, {http.Client Function()? cleartext})
-    : _newCleartext = cleartext ?? http.Client.new;
+  SharedSessionClient(
+    this._session, {
+    http.Client Function()? cleartext,
+    this.streamsUploads = true,
+  }) : _newCleartext = cleartext ?? http.Client.new;
 
   final http.Client _session;
   final http.Client Function() _newCleartext;
+
+  /// Whether the session streams request bodies instead of buffering them.
+  final bool streamsUploads;
 
   /// One abort trigger per request still running, so [close] can cancel it.
   /// A request leaves the set once its response body is done, failed or
@@ -75,7 +124,8 @@ class SharedSessionClient extends http.BaseClient {
         request.url,
       );
     }
-    if (request.url.scheme != 'https') {
+    if (request.url.scheme != 'https' ||
+        (!streamsUploads && _isStreamedUpload(request))) {
       return (_cleartext ??= _newCleartext()).send(request);
     }
     final abort = Completer<void>();
@@ -130,6 +180,11 @@ class SharedSessionClient extends http.BaseClient {
     );
   }
 
+  static bool _isStreamedUpload(http.BaseRequest request) =>
+      request is! http.Request &&
+      request.method != 'GET' &&
+      request.method != 'HEAD';
+
   /// A copy of [request] that the session cancels when [trigger] completes.
   http.BaseRequest _withAbortTrigger(
     http.BaseRequest request,
@@ -178,17 +233,20 @@ class SharedSessionClient extends http.BaseClient {
   }
 }
 
-/// How an iOS transport request failed, for user-facing messages. `dart:io`
-/// failures are recognized by their messages instead.
+/// How a native transport request failed, for user-facing messages.
+/// `dart:io` failures are recognized by their messages instead.
 enum TransportFailure { unreachable, insecure, timedOut }
 
-/// The [TransportFailure] for a `URLSession` error, or null for any other
-/// error.
-TransportFailure? urlSessionFailure(Object error) {
-  if (error is! NSErrorClientException) return null;
-  if (error.error.domain.toDartString() != 'NSURLErrorDomain') return null;
-  return urlErrorFailure(error.error.code);
-}
+/// The [TransportFailure] for a `URLSession` or Cronet error, or null for
+/// any other error.
+TransportFailure? transportFailure(Object error) => switch (error) {
+  NSErrorClientException(:final error)
+      when error.domain.toDartString() == 'NSURLErrorDomain' =>
+    urlErrorFailure(error.code),
+  NetworkException(:final errorCode, :final cronetInternalErrorCode) =>
+    cronetErrorFailure(errorCode, cronetInternalErrorCode),
+  _ => null,
+};
 
 /// Classifies an `NSURLErrorDomain` code.
 @visibleForTesting
@@ -207,3 +265,21 @@ TransportFailure? urlErrorFailure(int code) => switch (code) {
   >= -1206 && <= -1200 => TransportFailure.insecure,
   _ => null,
 };
+
+/// Classifies a Cronet `NetworkException` by its `ERROR_*` code and, for
+/// `ERROR_OTHER`, Chromium's internal net error code.
+@visibleForTesting
+TransportFailure? cronetErrorFailure(int errorCode, int internalCode) =>
+    switch (errorCode) {
+      4 || 6 => TransportFailure.timedOut,
+      // Host not resolved, offline, network changed, connection closed,
+      // refused or reset, address unreachable.
+      1 || 2 || 3 || 5 || 7 || 8 || 9 => TransportFailure.unreachable,
+      // SSL protocol error, cipher mismatch, and the certificate errors.
+      11
+          when internalCode == -107 ||
+              internalCode == -113 ||
+              (internalCode <= -200 && internalCode >= -299) =>
+        TransportFailure.insecure,
+      _ => null,
+    };

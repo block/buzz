@@ -2,8 +2,8 @@ part of 'pairing_provider.dart';
 
 String _friendlyErrorMessage(Object error) {
   final message = error.toString();
-  final transportFailure = urlSessionFailure(error);
-  if (transportFailure == TransportFailure.unreachable ||
+  final failure = transportFailure(error);
+  if (failure == TransportFailure.unreachable ||
       message.contains('SocketException') ||
       message.contains('Connection refused') ||
       message.contains('Network is unreachable') ||
@@ -20,13 +20,13 @@ String _friendlyErrorMessage(Object error) {
       message.contains('Null check operator used on a null value')) {
     return 'Pairing stopped because of an internal error. Please try again.';
   }
-  if (transportFailure == TransportFailure.insecure ||
+  if (failure == TransportFailure.insecure ||
       message.contains('HandshakeException') ||
       message.contains('CERTIFICATE_VERIFY_FAILED')) {
     return 'Secure connection failed. Check your network settings '
         'and try again.';
   }
-  if (transportFailure == TransportFailure.timedOut ||
+  if (failure == TransportFailure.timedOut ||
       message.contains('TimeoutException') ||
       message.contains('timed out')) {
     return 'Connection timed out. Check your internet connection and '

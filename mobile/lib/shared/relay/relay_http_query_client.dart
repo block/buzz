@@ -5,15 +5,16 @@ import 'package:http/http.dart' as http;
 import 'package:http/io_client.dart';
 import 'package:buzz/shared/http/app_http_client.dart';
 
-/// The default transport. On iOS, the app-wide `NSURLSession` inflates gzip
-/// natively, off the Dart isolate. `dart:io` would inflate on the calling
-/// isolate, so leave its responses compressed for the response decoder.
+/// The default transport. On iOS and Android, the app-wide native session
+/// inflates gzip natively, off the Dart isolate. `dart:io` would inflate on
+/// the calling isolate, so leave its responses compressed for the response
+/// decoder.
 ///
 /// A non-`dart:io` client supplied through `http.runWithClient`, such as a
 /// `MockClient`, is used as is. An `IOClient` is replaced, not closed, since
 /// it may be shared.
 http.Client _defaultTransport() {
-  if (Platform.isIOS) return newAppHttpClient();
+  if (hasNativeHttpSession) return newAppHttpClient();
   final client = http.Client();
   if (client is! IOClient) return client;
   return IOClient(HttpClient()..autoUncompress = false);

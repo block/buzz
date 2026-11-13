@@ -8,7 +8,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
 void main() {
-  test('off iOS, clients come from http.Client()', () {
+  test('without a native session, clients come from http.Client()', () {
     final mock = MockClient((_) async => http.Response('', 200));
     for (final traffic in HttpTraffic.values) {
       expect(
@@ -213,6 +213,47 @@ void main() {
     expect(cleartextClosed, isTrue);
   });
 
+  test(
+    'streamed uploads keep dart:io when the session buffers bodies',
+    () async {
+      final sessionRequests = <String>[];
+      final fallbackRequests = <String>[];
+      final client = SharedSessionClient(
+        MockClient.streaming((request, body) async {
+          await body.drain<void>();
+          sessionRequests.add('${request.method} ${request.url.path}');
+          return http.StreamedResponse(const Stream.empty(), 200);
+        }),
+        cleartext: () => MockClient.streaming((request, body) async {
+          await body.drain<void>();
+          fallbackRequests.add('${request.method} ${request.url.path}');
+          return http.StreamedResponse(const Stream.empty(), 200);
+        }),
+        streamsUploads: false,
+      );
+
+      final upload = http.StreamedRequest(
+        'PUT',
+        Uri.parse('https://media.example/upload'),
+      );
+      upload.sink
+        ..add([1, 2, 3])
+        ..close();
+      await client.send(upload);
+      final download = http.StreamedRequest(
+        'GET',
+        Uri.parse('https://media.example/video'),
+      );
+      unawaited(download.sink.close());
+      await client.send(download);
+      await client.post(Uri.parse('https://relay.example/query'), body: '{}');
+      client.close();
+
+      expect(fallbackRequests, ['PUT /upload']);
+      expect(sessionRequests, ['GET /video', 'POST /query']);
+    },
+  );
+
   test('URLSession error codes map to user-facing failure kinds', () {
     expect(urlErrorFailure(-1009), TransportFailure.unreachable);
     expect(urlErrorFailure(-1004), TransportFailure.unreachable);
@@ -220,7 +261,19 @@ void main() {
     expect(urlErrorFailure(-1200), TransportFailure.insecure);
     expect(urlErrorFailure(-1202), TransportFailure.insecure);
     expect(urlErrorFailure(-999), isNull);
-    expect(urlSessionFailure(http.ClientException('offline')), isNull);
+    expect(transportFailure(http.ClientException('offline')), isNull);
+  });
+
+  test('Cronet error codes map to user-facing failure kinds', () {
+    expect(cronetErrorFailure(4, -7), TransportFailure.timedOut);
+    expect(cronetErrorFailure(6, -118), TransportFailure.timedOut);
+    expect(cronetErrorFailure(1, -105), TransportFailure.unreachable);
+    expect(cronetErrorFailure(2, -106), TransportFailure.unreachable);
+    expect(cronetErrorFailure(7, -102), TransportFailure.unreachable);
+    expect(cronetErrorFailure(11, -202), TransportFailure.insecure);
+    expect(cronetErrorFailure(11, -107), TransportFailure.insecure);
+    expect(cronetErrorFailure(11, -324), isNull);
+    expect(cronetErrorFailure(10, -356), isNull);
   });
 }
 
