@@ -363,6 +363,10 @@ pub struct Config {
     /// Repo-name uniqueness lives in Postgres (`git_repo_names`), not on disk,
     /// so this directory need not be persistent or shared across replicas.
     pub git_repo_path: std::path::PathBuf,
+    /// Interpreter for the git pre-receive hook's shebang (`BUZZ_BASH_PATH`).
+    /// `None` keeps `#!/usr/bin/env bash`; set an absolute path to bash on
+    /// hosts without `/usr/bin/env`, such as minimal containers.
+    pub git_hook_interpreter: Option<String>,
     /// Parent directory for process-isolated immutable pack cache sessions.
     pub git_pack_cache_path: std::path::PathBuf,
     /// Maximum pack file size for git push (bytes). Default: 500 MB.
@@ -666,6 +670,73 @@ fn ensure_git_repo_path(
     raw: impl Into<std::path::PathBuf>,
 ) -> Result<std::path::PathBuf, ConfigError> {
     ensure_git_path("BUZZ_GIT_REPO_PATH", raw)
+}
+
+/// Longest interpreter path Linux 5.1+ runs from a `#!` line: the kernel reads
+/// the first 256 bytes and needs `#!`, the path and the newline inside them.
+/// Older kernels read 128 bytes; the startup probe catches a path they can't run.
+pub(crate) const MAX_GIT_HOOK_INTERPRETER_BYTES: usize = 253;
+
+/// Read `BUZZ_BASH_PATH`; `hooks_dir` is where the hooks will run.
+fn git_hook_interpreter_from_env(
+    hooks_dir: &std::path::Path,
+) -> Result<Option<String>, ConfigError> {
+    git_hook_interpreter(std::env::var("BUZZ_BASH_PATH"), hooks_dir)
+}
+
+/// Validate `BUZZ_BASH_PATH` and run it once the way git runs the hook, so a
+/// bad value fails at startup instead of rejecting every push.
+fn git_hook_interpreter(
+    raw: Result<String, std::env::VarError>,
+    hooks_dir: &std::path::Path,
+) -> Result<Option<String>, ConfigError> {
+    let raw = match raw {
+        Ok(raw) => Some(raw),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err(ConfigError::InvalidValue(
+                "BUZZ_BASH_PATH must be valid Unicode".into(),
+            ))
+        }
+    };
+    let Some(interpreter) = parse_git_hook_interpreter(raw)? else {
+        return Ok(None);
+    };
+    crate::api::git::hook::probe_interpreter(&interpreter, hooks_dir).map_err(|e| {
+        ConfigError::InvalidValue(format!(
+            "BUZZ_BASH_PATH {interpreter:?} can't run the git hook: {e}"
+        ))
+    })?;
+    Ok(Some(interpreter))
+}
+
+/// Parse `BUZZ_BASH_PATH`. Unset or blank means "use `/usr/bin/env bash`".
+///
+/// The value becomes the hook's shebang line, so it follows the kernel's
+/// rules for one: an absolute path without whitespace (the kernel splits at
+/// the first space or tab, and a line break would inject script lines) that
+/// fits in the bytes the kernel reads.
+fn parse_git_hook_interpreter(raw: Option<String>) -> Result<Option<String>, ConfigError> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let interpreter = raw.trim();
+    if interpreter.is_empty() {
+        return Ok(None);
+    }
+    if !interpreter.starts_with('/') || interpreter.contains(char::is_whitespace) {
+        return Err(ConfigError::InvalidValue(format!(
+            "BUZZ_BASH_PATH must be an absolute path without whitespace, got {raw:?}"
+        )));
+    }
+    if interpreter.len() > MAX_GIT_HOOK_INTERPRETER_BYTES {
+        return Err(ConfigError::InvalidValue(format!(
+            "BUZZ_BASH_PATH must be at most {MAX_GIT_HOOK_INTERPRETER_BYTES} bytes \
+             to fit a #! line, got {} bytes",
+            interpreter.len()
+        )));
+    }
+    Ok(Some(interpreter.to_string()))
 }
 
 fn ensure_git_path(
@@ -1183,6 +1254,7 @@ impl Config {
         let git_repo_path = ensure_git_repo_path(
             std::env::var("BUZZ_GIT_REPO_PATH").unwrap_or_else(|_| "./repos".to_string()),
         )?;
+        let git_hook_interpreter = git_hook_interpreter_from_env(&git_repo_path)?;
         let git_pack_cache_path = ensure_git_path(
             "BUZZ_GIT_PACK_CACHE_PATH",
             std::env::var("BUZZ_GIT_PACK_CACHE_PATH")
@@ -1579,6 +1651,7 @@ impl Config {
             workflow_agent_mentions,
             ephemeral_ttl_override,
             git_repo_path,
+            git_hook_interpreter,
             git_pack_cache_path,
             git_max_pack_bytes,
             git_max_repo_bytes,
@@ -1635,6 +1708,107 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn git_hook_interpreter_unset_or_blank_keeps_default() {
+        assert_eq!(parse_git_hook_interpreter(None).unwrap(), None);
+        assert_eq!(parse_git_hook_interpreter(Some("  ".into())).unwrap(), None);
+    }
+
+    #[test]
+    fn git_hook_interpreter_accepts_absolute_path() {
+        assert_eq!(
+            parse_git_hook_interpreter(Some(" /run/current-system/sw/bin/bash ".into())).unwrap(),
+            Some("/run/current-system/sw/bin/bash".to_string())
+        );
+    }
+
+    #[test]
+    fn git_hook_interpreter_rejects_relative_or_whitespace_values() {
+        for raw in [
+            "bash",
+            "/bin/bash\necho injected",
+            "/bin/bash\r\nexit 0",
+            "/opt/team tools/bash",
+            "/opt/team\ttools/bash",
+        ] {
+            assert!(
+                matches!(
+                    parse_git_hook_interpreter(Some(raw.into())),
+                    Err(ConfigError::InvalidValue(_))
+                ),
+                "{raw:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn git_hook_interpreter_must_fit_the_shebang_buffer() {
+        let longest = format!("/{}", "b".repeat(MAX_GIT_HOOK_INTERPRETER_BYTES - 1));
+        assert_eq!(
+            parse_git_hook_interpreter(Some(longest.clone())).unwrap(),
+            Some(longest.clone())
+        );
+        let too_long = format!("{longest}b");
+        assert!(matches!(
+            parse_git_hook_interpreter(Some(too_long)),
+            Err(ConfigError::InvalidValue(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn git_hook_interpreter_is_checked_by_running_it() {
+        use std::env::VarError;
+        use std::os::unix::{ffi::OsStringExt, fs::PermissionsExt};
+
+        use crate::api::git::hook::tests::executable_on_path;
+
+        let hooks = tempfile::tempdir().unwrap();
+        let files = tempfile::tempdir().unwrap();
+        let bash = executable_on_path("bash").to_str().unwrap().to_string();
+        assert_eq!(
+            git_hook_interpreter(Err(VarError::NotPresent), hooks.path()).unwrap(),
+            None
+        );
+        assert_eq!(
+            git_hook_interpreter(Ok("  ".into()), hooks.path()).unwrap(),
+            None
+        );
+        assert_eq!(
+            git_hook_interpreter(Ok(bash.clone()), hooks.path()).unwrap(),
+            Some(bash)
+        );
+
+        let not_executable = files.path().join("not-executable");
+        std::fs::write(&not_executable, "").unwrap();
+        std::fs::set_permissions(&not_executable, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let path = |p: &std::path::Path| p.to_str().unwrap().to_string();
+        let rejected = [
+            Err(VarError::NotUnicode(std::ffi::OsString::from_vec(
+                b"/bin/\xff".to_vec(),
+            ))),
+            Ok("bash".to_string()),
+            Ok(path(&not_executable)),
+            Ok(path(files.path())),
+            Ok(path(&files.path().join("missing"))),
+            // Runs, but the hook would fail: the probe needs a zero exit.
+            Ok(path(&executable_on_path("false"))),
+        ];
+        for raw in rejected {
+            assert!(
+                matches!(
+                    git_hook_interpreter(raw.clone(), hooks.path()),
+                    Err(ConfigError::InvalidValue(_))
+                ),
+                "{raw:?} must be rejected"
+            );
+        }
+        assert!(
+            std::fs::read_dir(hooks.path()).unwrap().next().is_none(),
+            "the probe leaves no file behind"
+        );
+    }
 
     #[test]
     fn klipy_config_debug_redacts_the_api_key() {
