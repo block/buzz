@@ -103,6 +103,10 @@
   margin: 0;
 }
 
+.rich-text-composer .tiptap br + .ProseMirror-trailingBreak {
+  display: none;
+}
+
 .rich-text-composer .tiptap p.is-editor-empty:first-child::before {
   content: attr(data-placeholder);
   float: left;
