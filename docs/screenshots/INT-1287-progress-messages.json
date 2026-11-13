@@ -1,0 +1,43 @@
+[
+  {
+    "channelName": "engineering",
+    "content": "@mira call Cursor and keep posting until we get an answer",
+    "createdAt": 1786710852
+  },
+  {
+    "channelName": "engineering",
+    "pubkey": "8f83d6b7f3d74f7d933ae3a54dd8c6cc85c7f98e531c16e5a827b953441a8d67",
+    "content": "\u25b8 Working \u00b7 grok-4.6",
+    "createdAt": 1786710862
+  },
+  {
+    "channelName": "engineering",
+    "pubkey": "8f83d6b7f3d74f7d933ae3a54dd8c6cc85c7f98e531c16e5a827b953441a8d67",
+    "content": "\u2699 shell \u2014 git status --short",
+    "createdAt": 1786710872
+  },
+  {
+    "channelName": "engineering",
+    "pubkey": "8f83d6b7f3d74f7d933ae3a54dd8c6cc85c7f98e531c16e5a827b953441a8d67",
+    "content": "\u2713 shell",
+    "createdAt": 1786710882
+  },
+  {
+    "channelName": "engineering",
+    "pubkey": "8f83d6b7f3d74f7d933ae3a54dd8c6cc85c7f98e531c16e5a827b953441a8d67",
+    "content": "\u2699 grep \u2014 ATRIUM_BUZZ_LIVE",
+    "createdAt": 1786710892
+  },
+  {
+    "channelName": "engineering",
+    "pubkey": "8f83d6b7f3d74f7d933ae3a54dd8c6cc85c7f98e531c16e5a827b953441a8d67",
+    "content": "\u23f3 read atrium-buzz-pretty.py",
+    "createdAt": 1786710902
+  },
+  {
+    "channelName": "engineering",
+    "pubkey": "8f83d6b7f3d74f7d933ae3a54dd8c6cc85c7f98e531c16e5a827b953441a8d67",
+    "content": "The channel stays readable: one Working row for tool noise, then this answer.",
+    "createdAt": 1786710912
+  }
+]
