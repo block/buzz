@@ -90,6 +90,30 @@ void main() {
     );
     await aborted.future.timeout(const Duration(seconds: 5));
   });
+
+  test('an oversized bounded response is aborted before it is read', () async {
+    Future<void>? aborted;
+    final client = RelayHttpQueryClient(
+      client: MockClient.streaming((request, _) async {
+        aborted = (request as http.Abortable).abortTrigger;
+        return http.StreamedResponse(
+          StreamController<List<int>>().stream,
+          200,
+          contentLength: 4096,
+        );
+      }),
+    );
+
+    await expectLater(
+      client.sendBounded(
+        http.Request('GET', Uri.parse('https://relay.example/')),
+        maxBytes: 1024,
+        timeout: const Duration(seconds: 5),
+      ),
+      throwsA(isA<FormatException>()),
+    );
+    await aborted!.timeout(const Duration(seconds: 1));
+  });
 }
 
 /// Never responds; reports when the request's abort trigger fires.

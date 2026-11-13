@@ -64,7 +64,7 @@ class RelayHttpQueryClient {
           .then(http.Response.fromStream)
           .timeout(timeout);
     } on TimeoutException {
-      abort.complete();
+      if (!abort.isCompleted) abort.complete();
       if (identical(_currentGeneration, generation)) {
         _currentGeneration = null;
       }
@@ -133,7 +133,7 @@ class RelayHttpQueryClient {
     try {
       return await receive().timeout(timeout);
     } on TimeoutException {
-      abort.complete();
+      if (!abort.isCompleted) abort.complete();
       if (identical(_currentGeneration, generation)) {
         _currentGeneration = null;
       }
@@ -141,6 +141,9 @@ class RelayHttpQueryClient {
       rethrow;
     } finally {
       finished = true;
+      // Cancelling an iterator that never listened leaves the body
+      // downloading on a shared session, so abort on every exit.
+      if (!abort.isCompleted) abort.complete();
       if (iterator != null) await iterator!.cancel();
       generation?.release();
     }
