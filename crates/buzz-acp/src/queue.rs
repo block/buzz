@@ -1704,11 +1704,12 @@ fn append_reply_instruction(s: &mut String, event_id: &str) {
     ));
 }
 
-/// Append a new-thread reply instruction for a human-facing top-level mention.
+/// Append a new-thread reply instruction for a human-facing top-level mention
+/// under the thread session policy.
 ///
-/// The triggering mention has no thread tags, so the agent's reply becomes the
-/// thread root. Anchoring to the triggering event (rather than leaving the
-/// choice open) prevents replying into a stale/unrelated prior thread.
+/// That policy gives the mention a session rooted at the triggering event, so
+/// the agent's reply opens that thread. Under the default channel policy a
+/// top-level mention has no anchor and the reply stays top-level.
 fn append_new_thread_reply_instruction(s: &mut String, event_id: &str) {
     s.push_str(&format!(
         "\nIMPORTANT: This is a new top-level message. For ordinary replies in \
@@ -1748,9 +1749,10 @@ fn turn_is_human_facing(
 
 /// Resolve the `--reply-to` anchor for a non-DM turn.
 ///
-/// Human-facing turns (see [`turn_is_human_facing`]) stay flat:
+/// Human-facing turns (see [`turn_is_human_facing`]) follow the human's
+/// threading choice:
 ///   - in a thread → the thread ROOT, keeping the reply at layer 1
-///   - top-level   → the triggering event id, which becomes the new thread root
+///   - top-level   → `None`, so the reply stays top-level
 ///
 /// Agent↔agent turns may nest (intentional for agent coordination):
 ///   - in a thread → the triggering event id, so the reply stays in the thread
@@ -1767,12 +1769,7 @@ fn resolve_reply_anchor(
             .is_some()
             .then(|| triggering_event_id.to_string());
     }
-    Some(
-        thread_tags
-            .root_event_id
-            .clone()
-            .unwrap_or_else(|| triggering_event_id.to_string()),
-    )
+    thread_tags.root_event_id.clone()
 }
 
 /// Whether `format_prompt` anchors `batch`'s ordinary replies to its
@@ -1945,9 +1942,8 @@ fn append_project_home(s: &mut String, channel_info: Option<&PromptChannelInfo>,
 ///
 /// `reply_anchor` is the pre-resolved `--reply-to` target for this turn (see
 /// [`resolve_reply_anchor`]). In the thread/DM branches it threads ordinary
-/// replies; in the channel branch a `Some` anchor means a human-facing
-/// top-level mention whose reply should open a new thread rooted at the
-/// triggering event.
+/// replies. A top-level triggering message has no anchor, so the response stays
+/// top-level and follows the user's threading choice.
 fn format_context_hints(
     scope: &SessionScope,
     channel_info: Option<&PromptChannelInfo>,
@@ -2053,6 +2049,8 @@ fn format_context_hints(
         }
         crate::prompt_framing::semantic_section("context", &s)
     } else {
+        // A channel-scope turn has no anchor: a top-level message keeps its
+        // reply top-level, following the human's threading choice.
         let mut s = format!(
             "Scope: channel\n\
              Session scope: channel\n\
@@ -2063,9 +2061,6 @@ fn format_context_hints(
         s.push_str(
             "\nHint: Use `buzz messages get --channel <UUID>` for recent messages if needed.",
         );
-        if let Some(event_id) = reply_anchor {
-            append_new_thread_reply_instruction(&mut s, event_id);
-        }
         crate::prompt_framing::semantic_section("context", &s)
     }
 }
@@ -2378,12 +2373,14 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
 
     // 2. Context hints (with a human-aware reply anchor).
     //
-    // Human-facing turns are anchored so replies stay readable at layer 1:
+    // Human-facing turns follow the user's threading choice:
     //   - in a thread  → anchor to the thread ROOT (no depth-2 nesting)
-    //   - top-level     → anchor to the triggering event (it becomes the root)
+    //   - top-level     → no anchor, so the response stays top-level, except
+    //     under the thread session policy, where a top-level mention opens a
+    //     thread session rooted at itself and the reply must open that thread
     // Agent↔agent turns in a thread anchor to the triggering event — deep
     // nesting is intentional there — and top-level ones get no anchor.
-    // DMs are always 1:1 with a human, so they always anchor.
+    // DMs anchor only when the human is already in a thread.
     // `ReplyRoute::accepts_steer` mirrors this DM rule, and
     // `reply_anchor_is_trigger` reports the agent↔agent thread anchor to the
     // native-steer guard; keep them in sync.
@@ -2400,6 +2397,16 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
             &routing_event_id,
             args.profile_lookup,
         )
+        .or_else(|| {
+            batch
+                .scope
+                .root_event_id()
+                .filter(|_| {
+                    thread_tags.root_event_id.is_none()
+                        && turn_is_human_facing(&sender_pubkey, &thread_tags, args.profile_lookup)
+                })
+                .map(str::to_owned)
+        })
     };
     sections.push(format_context_hints(
         &batch.scope,
@@ -3020,13 +3027,12 @@ mod tests {
         assert_eq!(batch.events[0].event.content, "oldest");
         assert_eq!(batch.events[1].event.content, "newest");
 
-        // The rendered prompt's reply anchor must cite the newest event, so
-        // the agent's reply threads under the message it is responding to.
-        let newest_id = batch.events[1].event.id.to_hex();
+        // The newest event is top-level, so rendering must not inherit a reply
+        // anchor from replay order or an older event.
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
         assert!(
-            prompt.contains(&format!("--reply-to {newest_id}")),
-            "reply anchor must target the newest event; prompt was:\n{prompt}"
+            !prompt.contains("--reply-to"),
+            "top-level replay must keep the response top-level; prompt was:\n{prompt}"
         );
     }
 
@@ -4570,11 +4576,15 @@ mod tests {
                                 "Scope: channel"
                             }));
                         }
+                        // A top-level human mention stays top-level, except
+                        // under the thread policy, whose session is rooted at
+                        // the mention, so the reply opens that thread.
+                        let opens_thread = !is_dm && !is_reply && policy == SessionPolicy::Thread;
                         assert_eq!(
                             prompt.contains("This is a new top-level message"),
-                            !is_dm && !is_reply
+                            opens_thread
                         );
-                        if !is_dm || is_reply {
+                        if is_reply || opens_thread {
                             let anchor = if is_dm {
                                 reply.id.to_hex()
                             } else if is_reply {
@@ -5013,11 +5023,11 @@ mod tests {
     }
 
     #[test]
-    fn test_anchor_human_top_level_uses_triggering_event() {
-        // Human top-level mention (no thread tags) → triggering event is root.
+    fn test_anchor_human_top_level_is_none() {
+        // Human top-level mention (no thread tags) → keep the response top-level.
         let tags = thread_tags(None, &[AGENT_A_PK]);
         let anchor = resolve_reply_anchor(HUMAN_PK, &tags, TRIGGER_ID, Some(&id_lookup()));
-        assert_eq!(anchor.as_deref(), Some(TRIGGER_ID));
+        assert_eq!(anchor, None);
     }
 
     #[test]
@@ -5916,10 +5926,9 @@ mod tests {
     }
 
     #[test]
-    fn test_reply_instruction_present_for_top_level_human_message() {
+    fn test_reply_instruction_absent_for_top_level_human_message() {
         let ch = Uuid::new_v4();
         let event = make_event("hello world");
-        let event_id = event.id.to_hex();
         let batch = FlushBatch {
             channel_id: ch,
             scope: conv(ch),
@@ -5933,17 +5942,12 @@ mod tests {
             cancel_reason: None,
         };
 
-        // Top-level human message (no lookup → human): the reply opens a new
-        // thread anchored to the triggering event, preventing replies into a
-        // stale older thread.
+        // A top-level human message keeps the response top-level. Only a user
+        // who writes in a thread causes an agent response in that thread.
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
         assert!(
-            prompt.contains(&format!("--reply-to {event_id}")),
-            "top-level human message should anchor a new thread at the triggering event"
-        );
-        assert!(
-            prompt.contains("new top-level message"),
-            "top-level human message should use the new-thread instruction"
+            !prompt.contains("--reply-to"),
+            "top-level human message should keep the response top-level"
         );
     }
 
@@ -6111,7 +6115,6 @@ mod tests {
             vec![vec!["e".into(), root_id, "".into(), "reply".into()]],
         );
         let plain = make_event("latest top-level");
-        let plain_id = plain.id.to_hex();
         let batch = FlushBatch {
             channel_id: ch,
             scope: conv(ch),
@@ -6133,16 +6136,12 @@ mod tests {
             cancel_reason: None,
         };
 
-        // Last event is top-level and human-facing → opens a new thread
-        // anchored to that top-level event (NOT the earlier thread's root).
+        // Last event is top-level and human-facing, so it supersedes the
+        // earlier threaded event's reply destination.
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
         assert!(
-            prompt.contains(&format!("--reply-to {plain_id}")),
-            "batched top-level-last prompt should anchor to the last (top-level) event"
-        );
-        assert!(
-            prompt.contains("new top-level message"),
-            "batched top-level-last prompt should use the new-thread instruction"
+            !prompt.contains("--reply-to"),
+            "batched top-level-last prompt should keep the response top-level"
         );
     }
 
@@ -6804,10 +6803,11 @@ mod tests {
     }
 
     #[test]
-    fn edit_of_top_level_anchors_original_message_in_rendered_prompt() {
+    fn edit_of_top_level_keeps_reply_top_level_in_rendered_prompt() {
+        // An edited top-level mention is still top-level: the reply stays
+        // top-level and never anchors to the auxiliary edit event.
         let original_id = "11".repeat(32);
         let edit = edit_event(&original_id);
-        let edit_id = edit.id.to_hex();
         let batch = one_event_batch(
             edit,
             Some(ResolvedEdit {
@@ -6816,11 +6816,8 @@ mod tests {
             }),
         );
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n");
-        assert!(
-            prompt.contains(&format!("--reply-to {original_id}")),
-            "{prompt}"
-        );
-        assert!(!prompt.contains(&format!("--reply-to {edit_id}")));
+        assert!(!prompt.contains("--reply-to"), "{prompt}");
+        assert!(prompt.contains(&format!("Edit of: {original_id}")));
     }
 
     #[test]
@@ -6846,17 +6843,15 @@ mod tests {
     }
 
     #[test]
-    fn edit_fetch_failure_anchors_target_never_auxiliary_edit_event() {
+    fn edit_fetch_failure_never_anchors_auxiliary_edit_event() {
+        // With the original unfetchable there are no thread tags, so the turn
+        // is treated as top-level: no anchor, and never the edit event.
         let original_id = "55".repeat(32);
         let edit = edit_event(&original_id);
-        let edit_id = edit.id.to_hex();
         let prompt =
             format_prompt(&one_event_batch(edit, None), &FormatPromptArgs::default()).join("\n");
-        assert!(
-            prompt.contains(&format!("--reply-to {original_id}")),
-            "{prompt}"
-        );
-        assert!(!prompt.contains(&format!("--reply-to {edit_id}")));
+        assert!(!prompt.contains("--reply-to"), "{prompt}");
+        assert!(prompt.contains(&format!("Edit of: {original_id}")));
     }
 
     #[test]
