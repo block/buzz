@@ -524,6 +524,17 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_IDLE_POOL_SLEEP", default_value_t = 0)]
     pub idle_pool_sleep: u64,
 
+    /// Close a thread's provider session (ACP `session/close`) after this many
+    /// seconds without a turn, releasing the agent-side process it holds, and
+    /// resume it (`session/resume`, no history replay) on the thread's next
+    /// event. Applies only to thread scopes (`--session-policy thread`), never
+    /// to DM or channel-conversation sessions, and only when the agent
+    /// advertises both the `close` and `resume` session capabilities. A failed
+    /// resume starts a new session with full thread context. Not persisted
+    /// across harness restarts. 0 disables eviction.
+    #[arg(long, env = "BUZZ_ACP_SESSION_IDLE_EVICT", default_value_t = 0)]
+    pub session_idle_evict: u64,
+
     /// Unix-seconds replay floor for the startup watermark. A publish-first
     /// mention send publishes the triggering message and then spawns this
     /// harness, passing the send timestamp here so the first REQ replays past
@@ -621,6 +632,9 @@ pub struct Config {
     /// woken lazy pool is torn back down to the empty-slot state. 0 = disabled.
     /// Only meaningful when `lazy_pool` is true.
     pub idle_pool_sleep_secs: u64,
+    /// Seconds a thread session may stay idle before it is closed and later
+    /// resumed on demand (`--session-idle-evict`). 0 = disabled.
+    pub session_idle_evict_secs: u64,
     /// Optional unix-seconds replay floor for the startup watermark
     /// (`--replay-floor` / `BUZZ_ACP_REPLAY_FLOOR`), set by a publish-first
     /// mention send so the first REQ replays past the already-published
@@ -1233,6 +1247,7 @@ impl Config {
             exit_after_inactivity_secs: args.exit_after_inactivity,
             lazy_pool: args.lazy_pool,
             idle_pool_sleep_secs: args.idle_pool_sleep,
+            session_idle_evict_secs: args.session_idle_evict,
             replay_floor_unix: args.replay_floor,
             agent_owner: args.agent_owner.map(|s| s.trim().to_ascii_lowercase()),
             no_base_prompt: args.no_base_prompt,
@@ -1611,6 +1626,7 @@ mod tests {
             exit_after_inactivity_secs: 0,
             lazy_pool: false,
             idle_pool_sleep_secs: 0,
+            session_idle_evict_secs: 0,
             replay_floor_unix: None,
             agent_owner: None,
             no_base_prompt: false,

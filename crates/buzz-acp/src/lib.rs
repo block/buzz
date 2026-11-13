@@ -3168,6 +3168,19 @@ async fn run_harness(
         ))
     };
 
+    // Session maintenance: close discarded provider sessions and, with
+    // `--session-idle-evict`, evict idle thread sessions (resumed on demand).
+    let session_idle_evict = Duration::from_secs(config.session_idle_evict_secs);
+    let session_maintenance_interval = if session_idle_evict.is_zero() {
+        pool::session_slots::MAINTENANCE_MAX_INTERVAL
+    } else {
+        session_idle_evict.min(pool::session_slots::MAINTENANCE_MAX_INTERVAL)
+    };
+    let mut session_maintenance = tokio::time::interval_at(
+        tokio::time::Instant::now() + session_maintenance_interval,
+        session_maintenance_interval,
+    );
+
     // Runs at the TOP of every loop iteration via Instant check — cannot be
     // starved by the biased select. Slot refill spawns background tasks so
     // spawn_and_init never blocks the main loop.
@@ -3836,6 +3849,17 @@ async fn run_harness(
                             "inactivity bound reached — exiting gracefully"
                         );
                         let _ = shutdown_tx.send(());
+                    }
+                    None
+                }
+                _ = session_maintenance.tick() => {
+                    if pool_ready {
+                        pool.maintain_idle_sessions(
+                            &queue,
+                            session_idle_evict,
+                            tokio::time::Instant::now(),
+                        )
+                        .await;
                     }
                     None
                 }
@@ -10172,6 +10196,7 @@ mod build_mcp_servers_tests {
             exit_after_inactivity_secs: 0,
             lazy_pool: false,
             idle_pool_sleep_secs: 0,
+            session_idle_evict_secs: 0,
             replay_floor_unix: None,
             agent_owner: None,
             no_base_prompt: false,
@@ -11309,6 +11334,7 @@ mod error_outcome_emission_tests {
             exit_after_inactivity_secs: 0,
             lazy_pool: false,
             idle_pool_sleep_secs: 0,
+            session_idle_evict_secs: 0,
             replay_floor_unix: None,
             agent_owner: None,
             no_base_prompt: false,
