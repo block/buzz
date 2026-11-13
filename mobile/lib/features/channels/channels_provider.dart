@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 
-import 'package:flutter/widgets.dart';
 import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
@@ -273,8 +272,8 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
 
     // Re-fetch when the app returns to foreground so channels created on
     // another device while mobile was backgrounded appear immediately.
-    ref.listen(appLifecycleProvider, (prev, next) {
-      if (next != AppLifecycleState.resumed) return;
+    ref.listen(appForegroundProvider, (_, foreground) {
+      if (!foreground) return;
       // Resume is published before the session hears it. Let the session
       // decide first: one that reconnects reconciles when it connects, so
       // refreshing here too would fetch the same list twice.

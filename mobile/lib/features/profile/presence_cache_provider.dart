@@ -1,7 +1,6 @@
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
-import 'package:flutter/widgets.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/agents/remote_agents.dart';
@@ -49,7 +48,7 @@ class PresenceCacheNotifier extends Notifier<Map<String, String>> {
   @override
   Map<String, String> build() {
     final sessionState = ref.watch(relaySessionProvider);
-    final lifecycle = ref.watch(appLifecycleProvider);
+    final foreground = ref.watch(appForegroundProvider);
     final scope = ref.watch(
       relayConfigProvider.select((config) => (config.baseUrl, config.nsec)),
     );
@@ -80,8 +79,7 @@ class PresenceCacheNotifier extends Notifier<Map<String, String>> {
       _resubscribe?.cancel();
       _resubscribe = null;
     });
-    if (sessionState.status == SessionStatus.connected &&
-        lifecycle == AppLifecycleState.resumed) {
+    if (sessionState.status == SessionStatus.connected && foreground) {
       _poll = Timer.periodic(const Duration(seconds: 60), (_) {
         // A replacement the relay never answered must not hold the slot, so a
         // lost REQ costs at most one poll interval.
