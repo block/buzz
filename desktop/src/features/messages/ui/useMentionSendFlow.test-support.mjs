@@ -5,6 +5,7 @@ import { after, afterEach, before } from "node:test";
 import { JSDOM } from "jsdom";
 import * as React from "react";
 import ts from "typescript";
+import { agentMentionFailureMessage } from "../lib/agentMentionRevalidation.ts";
 import * as helpers from "./useMentionSendFlow.helpers.ts";
 import * as draftStore from "../lib/useDrafts.ts";
 
@@ -170,7 +171,7 @@ export async function setup({ lifecycle = false } = {}) {
       buildAgentAddressMentionTags: () => [],
     },
     "@/features/messages/lib/agentMentionRevalidation": {
-      AgentMentionAuthorizationError: class extends Error {},
+      agentMentionFailureMessage,
     },
   };
   stubs["./useDetachedAgentStart"] = load("useDetachedAgentStart", stubs);

@@ -22,6 +22,23 @@ export class AgentMentionAuthorizationError extends Error {
   }
 }
 
+export class AgentMentionRelayError extends Error {
+  constructor() {
+    super("Couldn't reach the relay to verify this agent. Retry?");
+    this.name = "AgentMentionRelayError";
+  }
+}
+
+export function agentMentionFailureMessage(error: unknown): string | null {
+  if (
+    error instanceof AgentMentionAuthorizationError ||
+    error instanceof AgentMentionRelayError
+  ) {
+    return error.message;
+  }
+  return null;
+}
+
 type DirectoryResult<T> = {
   data: T | undefined;
   error: Error | null;
@@ -53,10 +70,12 @@ export async function revalidateAgentMentionPubkeys({
     return [...pubkeys];
   }
 
-  const [managedResult, relayAgents] = await Promise.all([
-    refetchManagedAgents().catch(() => null),
-    fetchRelayAgents([...requestedAgentPubkeys]).catch(() => null),
+  const managedQuery = refetchManagedAgents().catch(() => null);
+  const relayRead = await readRelayAgents(fetchRelayAgents, [
+    ...requestedAgentPubkeys,
   ]);
+  const managedResult = await managedQuery;
+  const relayAgents = relayRead.agents;
   const relayDirectoryReady = relayAgents !== null;
   // Each directory proves only its own identities. A failed local runtime
   // query must neither veto fresh relay evidence nor admit stale local data.
@@ -87,12 +106,37 @@ export async function revalidateAgentMentionPubkeys({
       );
     }),
   );
-  if (
-    [...requestedAgentPubkeys].some((pubkey) => !admittedPubkeys.has(pubkey))
-  ) {
+  const deniedPubkeys = [...requestedAgentPubkeys].filter(
+    (pubkey) => !admittedPubkeys.has(pubkey),
+  );
+  if (deniedPubkeys.length > 0) {
+    const deniedBecauseRelayWasUnreachable =
+      relayRead.transportFailed &&
+      deniedPubkeys.some((pubkey) => !managedPubkeys.has(normalizePubkey(pubkey)));
+    if (deniedBecauseRelayWasUnreachable) {
+      throw new AgentMentionRelayError();
+    }
     throw new AgentMentionAuthorizationError();
   }
   return [...pubkeys];
+}
+
+const relayReadAttempts = 3;
+
+async function readRelayAgents(
+  fetchRelayAgents: (pubkeys: string[]) => Promise<RelayAgent[]>,
+  pubkeys: string[],
+): Promise<{ agents: RelayAgent[] | null; transportFailed: boolean }> {
+  for (let attempt = 0; attempt < relayReadAttempts; attempt += 1) {
+    try {
+      return { agents: await fetchRelayAgents(pubkeys), transportFailed: false };
+    } catch {
+      if (attempt < relayReadAttempts - 1) {
+        await new Promise((resolve) => setTimeout(resolve, 25 * (attempt + 1)));
+      }
+    }
+  }
+  return { agents: null, transportFailed: true };
 }
 
 export function useAgentMentionRevalidation({
