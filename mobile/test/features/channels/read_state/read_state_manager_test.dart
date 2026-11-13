@@ -915,6 +915,48 @@ void main() {
     });
   });
 
+  test('a snapshot failure inside a publish retries and sends the marks', () {
+    fakeAsync((async) {
+      SharedPreferences.setMockInitialValues({});
+      late SharedPreferences prefs;
+      SharedPreferences.getInstance().then((value) => prefs = value);
+      async.flushMicrotasks();
+      final keys = nostr.Keys.generate();
+      final crypto = ReadStateCrypto.tryCreate(
+        nsec: keys.nsec,
+        pubkey: keys.public,
+      )!;
+      final session = _FakeRelaySession();
+      final relay = _FakeSignedEventRelay();
+      final manager = ReadStateManager(
+        pubkey: keys.public,
+        relayUrl: _relayUrl,
+        prefs: prefs,
+        crypto: crypto,
+        relaySession: session,
+        signedEventRelay: relay,
+        remoteEnabled: true,
+        onChanged: () {},
+        now: () => 2000,
+      );
+      manager.initialize();
+      async.flushMicrotasks();
+      expect(manager.syncError, isNull);
+
+      manager.markContextRead('room', 1990);
+      session.failNextFetch = true;
+      async.elapse(const Duration(seconds: 5));
+      expect(manager.syncError, isNotNull);
+      expect(relay.submitCount, 0);
+
+      // No other trigger: the backoff re-syncs, then the marks go out.
+      async.elapse(const Duration(seconds: 15));
+      expect(relay.submitCount, 1);
+      expect(manager.syncError, isNull);
+      manager.dispose(flushPending: false);
+    });
+  });
+
   test('a failed snapshot retries on a backoff timer', () {
     fakeAsync((async) {
       SharedPreferences.setMockInitialValues({});

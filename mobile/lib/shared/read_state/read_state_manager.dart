@@ -233,6 +233,10 @@ class ReadStateManager {
     _hydrateFromLocalStorage();
   }
 
+  /// Whether the relay refused read state for this session, so publishing
+  /// stays off until the next manager (restart, sign-in, community switch).
+  bool get remoteUnsupported => _remoteUnsupported;
+
   Map<String, int> get effectiveContexts => Map.unmodifiable(_effectiveState);
 
   int? getEffectiveTimestamp(String contextId) => _effectiveState[contextId];
@@ -672,7 +676,16 @@ class ReadStateManager {
       final checkConnection = _relaySession?.captureConnectionFence();
       var snapshot = <NostrEvent>[];
       if (_relaySession != null) {
-        final events = await _relaySession.fetchReadStateSnapshot();
+        final List<NostrEvent> events;
+        try {
+          events = await _relaySession.fetchReadStateSnapshot();
+        } catch (_) {
+          // Retry on the same backoff as a failed sync; the retry re-syncs
+          // and publishes the journaled marks.
+          _lastSnapshotSucceeded = false;
+          _scheduleSnapshotRetry();
+          rethrow;
+        }
         _lastSnapshotSucceeded = true;
         if (!_servesThisCommunity ||
             !_ownsJournal ||

@@ -471,8 +471,6 @@ class _SliverChannelsList extends HookConsumerWidget {
                 onSortModeChange: (mode) =>
                     setSortMode(sectionSortGroupKey(section.id), mode),
                 onSelectChannel: onSelectChannel,
-                onMarkChannelRead: (channel) =>
-                    markChannelReadNow(ref, channel.id),
               ),
             ],
             if (userSections.isNotEmpty || starredStreamChannels.isNotEmpty)
@@ -515,16 +513,40 @@ class _SliverChannelsList extends HookConsumerWidget {
   }
 }
 
-/// Says when unread status is not syncing with other devices, and retries.
+/// Says when unread status is not syncing with other devices: retries on tap,
+/// or, once the relay refused read state for the session, says how to recover.
 class _ReadStateSyncNotice extends ConsumerWidget {
   const _ReadStateSyncNotice();
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final failed = ref.watch(
-      readStateProvider.select((state) => state.syncFailed),
+    final (:failed, :unsupported) = ref.watch(
+      readStateProvider.select(
+        (state) =>
+            (failed: state.syncFailed, unsupported: state.syncUnsupported),
+      ),
     );
     if (!failed) return const SizedBox.shrink();
+    final text = Text(
+      unsupported
+          ? 'Unread status can’t sync with your other devices right now. Sign in again or restart Buzz to try again.'
+          : 'Unread status isn’t syncing with your other devices. Tap to retry.',
+      style: context.textTheme.bodySmall?.copyWith(
+        color: context.colors.onSurfaceVariant,
+      ),
+    );
+    if (unsupported) {
+      return Padding(
+        key: const Key('read-state-sync-notice'),
+        padding: const EdgeInsets.fromLTRB(
+          Grid.gutter,
+          Grid.xs,
+          Grid.gutter,
+          0,
+        ),
+        child: Padding(padding: const EdgeInsets.all(Grid.xs), child: text),
+      );
+    }
     return Padding(
       padding: const EdgeInsets.fromLTRB(Grid.gutter, Grid.xs, Grid.gutter, 0),
       child: Semantics(
@@ -534,15 +556,7 @@ class _ReadStateSyncNotice extends ConsumerWidget {
           borderRadius: BorderRadius.circular(Radii.lg),
           onTap: () =>
               unawaited(ref.read(readStateProvider.notifier).retrySync()),
-          child: Padding(
-            padding: const EdgeInsets.all(Grid.xs),
-            child: Text(
-              'Unread status isn’t syncing with your other devices. Tap to retry.',
-              style: context.textTheme.bodySmall?.copyWith(
-                color: context.colors.onSurfaceVariant,
-              ),
-            ),
-          ),
+          child: Padding(padding: const EdgeInsets.all(Grid.xs), child: text),
         ),
       ),
     );

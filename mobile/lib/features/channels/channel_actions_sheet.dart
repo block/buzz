@@ -48,7 +48,6 @@ Future<bool?> showChannelActionsSheet({
   required BuildContext context,
   required Channel channel,
   required bool isUnread,
-  VoidCallback? onMarkRead,
   String? sectionId,
 }) => showBuzzModalBottomSheet<bool>(
   context: context,
@@ -61,7 +60,6 @@ Future<bool?> showChannelActionsSheet({
   builder: (_) => ChannelActionsSheet(
     channel: channel,
     isUnread: isUnread,
-    onMarkRead: onMarkRead,
     sectionId: sectionId,
   ),
 );
@@ -71,7 +69,7 @@ Future<bool?> showChannelActionsSheet({
 /// message that arrived while a menu was open is covered and
 /// one that arrives later stays unread. With no known message time it only
 /// releases forced-unread flags.
-void markChannelReadNow(WidgetRef ref, String channelId) {
+void _markChannelReadNow(WidgetRef ref, String channelId) {
   final channels = ref.read(channelsProvider.notifier);
   var timestamp = dateTimeToUnixSeconds(
     channels.channelById(channelId)?.lastMessageAt,
@@ -99,13 +97,11 @@ class ChannelActionsSheet extends HookConsumerWidget {
     super.key,
     required this.channel,
     required this.isUnread,
-    this.onMarkRead,
     this.sectionId,
   });
 
   final Channel channel;
   final bool isUnread;
-  final VoidCallback? onMarkRead;
   final String? sectionId;
 
   @override
@@ -182,8 +178,7 @@ class ChannelActionsSheet extends HookConsumerWidget {
                   onToggleRead: () {
                     close();
                     if (isUnread) {
-                      onMarkRead?.call();
-                      markChannelReadNow(ref, channel.id);
+                      _markChannelReadNow(ref, channel.id);
                     } else {
                       ref
                           .read(readStateProvider.notifier)

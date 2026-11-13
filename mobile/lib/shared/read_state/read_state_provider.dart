@@ -21,6 +21,10 @@ class ReadStateState {
   /// an update was not published. Retries continue in the background.
   final bool syncFailed;
 
+  /// Whether the relay refused read state for the rest of this session.
+  /// Retrying cannot help; signing in again or restarting can.
+  final bool syncUnsupported;
+
   /// Session-local forced-unread flags, keyed by the forced context id
   /// (a channel id from the channel tile, or a `msg:` key from the message
   /// actions sheet), each mapped to the channel it belongs to so channel
@@ -35,6 +39,7 @@ class ReadStateState {
     this.forcedUnreadContexts = const {},
     this.retentionFloor = 0,
     this.syncFailed = false,
+    this.syncUnsupported = false,
   });
 
   const ReadStateState.inert()
@@ -44,6 +49,7 @@ class ReadStateState {
       version = 0,
       retentionFloor = 0,
       syncFailed = false,
+      syncUnsupported = false,
       forcedUnreadContexts = const {};
 
   /// Channels that should surface as unread because of a forced-unread flag —
@@ -78,6 +84,7 @@ class ReadStateState {
       retentionFloor: retentionFloor,
       forcedUnreadContexts: forcedUnreadContexts,
       syncFailed: syncFailed,
+      syncUnsupported: syncUnsupported,
     );
   }
 }
@@ -275,6 +282,7 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
       contexts: manager.effectiveContexts,
       version: (previousVersion ?? 0) + 1,
       syncFailed: manager.syncError != null,
+      syncUnsupported: manager.remoteUnsupported,
       forcedUnreadContexts: Map.unmodifiable(
         Map<String, String>.from(_forcedUnreadContexts),
       ),
