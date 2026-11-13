@@ -2,7 +2,8 @@
 # Model-checks the Git-on-object-storage protocol (docs/git-on-object-storage.md).
 #
 #   docs/spec/check.sh            run the whole suite
-#   docs/spec/check.sh NAME...    run only the named checks
+#   docs/spec/check.sh NAME...    run only the named checks; a name that is
+#                                 not a check is an error (exit status 2)
 #
 # The suite has two halves.  The protocol as specified must satisfy every
 # property.  Each seeded design error must violate the property named for it;
@@ -18,6 +19,18 @@
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
+
+# Reject names that are not checks before doing any work.  Otherwise a
+# misspelled name selects nothing and the run reports success without having
+# checked anything.  The names are read from the `check` lines of this file.
+known=$({ echo refdb; sed -nE 's/^check +([a-z0-9-]+) .*/\1/p' "$here/$(basename "$0")"; })
+for name in "$@"; do
+  if ! printf '%s\n' "$known" | grep -qxF -- "$name"; then
+    echo "error: unknown check '$name'" >&2
+    echo "known checks: $(printf '%s' "$known" | tr '\n' ' ')" >&2
+    exit 2
+  fi
+done
 cd "$here"
 
 TLC_VERSION=1.7.4
