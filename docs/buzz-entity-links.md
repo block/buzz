@@ -135,7 +135,10 @@ doesn't open. It forwards only the navigation forms `message`, `channel`,
 `repo`, `project`, `pr` and `issue`; invite, authorization and install links get "This
 link doesn't work". For example,
 `https://relay.example/open/message?channel=<uuid>&id=<event>` opens
-`buzz://message?channel=<uuid>&id=<event>`.
+`buzz://message?channel=<uuid>&id=<event>`. Like any `buzz://` navigation
+link, it opens in the community selected in the app. The page doesn't pass on
+which relay served it, because the apps don't read `relay=` yet and the entity
+link parsers reject unknown query keys.
 
 ## Rendering in chat (desktop)
 
