@@ -35,6 +35,7 @@ import {
 import { useIdentityQuery } from "@/shared/api/hooks";
 import type { ChannelMember } from "@/shared/api/types";
 import { BuzzLoadingState } from "@/shared/ui/BuzzLoadingState";
+import { isRepositoryMaintainer } from "@/features/projects/projectModels";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { IssueAssigneeFacepile, IssueAssigneesRow } from "./IssueAssigneesRow";
 import { DiscussedInChannels } from "./DiscussionChannels";
@@ -315,9 +316,11 @@ export function ProjectIssueDetail({
   const viewer = viewerPubkey ? normalizePubkey(viewerPubkey) : null;
   const isAuthor = viewer === normalizePubkey(issue.author);
   const isOwner = viewer === normalizePubkey(project.owner);
+  const isMaintainer = isRepositoryMaintainer(project, viewer);
   const isManagedAgentOwner = useIsManagedAgent(project.owner) === true;
   const canAssignOthers =
-    Boolean(viewer) && (isAuthor || isOwner || isManagedAgentOwner);
+    Boolean(viewer) &&
+    (isAuthor || isOwner || isMaintainer || isManagedAgentOwner);
 
   return (
     <div

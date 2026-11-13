@@ -5,6 +5,7 @@ use crate::commands::with_git_provenance;
 use crate::commands::GIT_ORIGIN_CHANNEL_ENV;
 use crate::error::CliError;
 use crate::validate::{read_or_stdin, sdk_err, validate_hex64, validate_repo_id};
+use buzz_core::kind::KIND_GIT_REPO_ANNOUNCEMENT;
 use buzz_sdk::{GitIssueMeta, GitRepoCoord, GitStatusMeta};
 use nostr::Timestamp;
 use serde::Deserialize;
@@ -121,6 +122,19 @@ fn is_hex64(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+/// Lowercased pubkeys from every `maintainers` tag of a repository
+/// announcement; malformed values are skipped.
+fn repo_maintainers(event: &AssignmentQueryEvent) -> Vec<String> {
+    event
+        .tags
+        .iter()
+        .filter(|tag| tag.first().map(String::as_str) == Some("maintainers"))
+        .flat_map(|tag| tag.iter().skip(1))
+        .filter(|value| is_hex64(value))
+        .map(|value| value.to_ascii_lowercase())
+        .collect()
+}
+
 fn apply_assignment_operation(state: &mut AssignmentState, operation: ParsedAssignmentOperation) {
     if let Some(prior) = operation.prior.as_ref() {
         let Some(target) = operation.pubkeys.first() else {
@@ -140,14 +154,21 @@ fn apply_assignment_operation(state: &mut AssignmentState, operation: ParsedAssi
     }
 }
 
+/// `maintainers` are the pubkeys named in the repository's live `kind:30617`
+/// `maintainers` tag; their operations are authoritative like the owner's.
 fn reduce_assignment_operations(
     issue_id: &str,
     issue_author: &str,
     repo_owner: &str,
+    maintainers: &[String],
     events: &[AssignmentEvent],
 ) -> AssignmentState {
     let issue_author = issue_author.to_ascii_lowercase();
     let repo_owner = repo_owner.to_ascii_lowercase();
+    let maintainers: Vec<String> = maintainers
+        .iter()
+        .map(|pubkey| pubkey.to_ascii_lowercase())
+        .collect();
     let mut events = events.iter().collect::<Vec<_>>();
     events.sort_by(|left, right| {
         left.created_at
@@ -173,7 +194,8 @@ fn reduce_assignment_operations(
             .into_iter()
             .map(str::to_ascii_lowercase)
             .collect::<Vec<_>>();
-        let is_authoritative = signer == issue_author || signer == repo_owner;
+        let is_authoritative =
+            signer == issue_author || signer == repo_owner || maintainers.contains(&signer);
         let is_self_operation = pubkeys.len() == 1 && pubkeys[0] == signer;
         if !is_authoritative && !is_self_operation {
             continue;
@@ -428,8 +450,21 @@ async fn issue_assignment_context(
         "authors": [signer],
         "limit": 1
     });
+    // The live announcement names the maintainers whose operations count as
+    // authoritative alongside the owner's (NIP-34 `maintainers` tag).
+    let repo_filter = serde_json::json!({
+        "kinds": [KIND_GIT_REPO_ANNOUNCEMENT],
+        "authors": [repo.owner.to_ascii_lowercase()],
+        "#d": [repo.id],
+        "limit": 1
+    });
     let response = client
-        .query_multi(&[root_filter, assignment_filter, signer_comment_filter])
+        .query_multi(&[
+            root_filter,
+            assignment_filter,
+            signer_comment_filter,
+            repo_filter,
+        ])
         .await?;
     // CLI read responses intentionally omit signatures, so deserialize only
     // the event fields needed for assignment reduction.
@@ -450,6 +485,12 @@ async fn issue_assignment_context(
         ));
     }
 
+    let maintainers = events
+        .iter()
+        .filter(|event| event.kind as u32 == KIND_GIT_REPO_ANNOUNCEMENT)
+        .max_by_key(|event| event.created_at)
+        .map(repo_maintainers)
+        .unwrap_or_default();
     let comments = events
         .iter()
         .filter(|event| event.kind == 1)
@@ -468,7 +509,7 @@ async fn issue_assignment_context(
         .max(latest.saturating_add(1));
     let prior = include_prior
         .then(|| {
-            reduce_assignment_operations(issue, &root.pubkey, &repo.owner, &comments)
+            reduce_assignment_operations(issue, &root.pubkey, &repo.owner, &maintainers, &comments)
                 .heads
                 .get(&signer.to_ascii_lowercase())
                 .cloned()
@@ -771,6 +812,7 @@ mod tests {
             ISSUE,
             AUTHOR,
             OWNER,
+            &[],
             &[
                 assignment_event(VOLUNTEER, &"2".repeat(64), true, 1_000, None),
                 assignment_event(OWNER, &owner_unassign, false, 200, None),
@@ -784,6 +826,7 @@ mod tests {
             ISSUE,
             AUTHOR,
             OWNER,
+            &[],
             &[
                 assignment_event(VOLUNTEER, &"4".repeat(64), false, 1_000, None),
                 assignment_event(OWNER, &owner_assign, true, 200, None),
@@ -794,6 +837,59 @@ mod tests {
     }
 
     #[test]
+    fn maintainer_operations_are_authoritative() {
+        let maintainer = "7".repeat(64);
+        let maintainer_unassign = "8".repeat(64);
+        // Without the maintainer list the same event is a stranger's op on
+        // someone else and is ignored.
+        let state = reduce_assignment_operations(
+            ISSUE,
+            AUTHOR,
+            OWNER,
+            &[],
+            &[
+                assignment_event(VOLUNTEER, &"2".repeat(64), true, 1_000, None),
+                assignment_event(&maintainer, &maintainer_unassign, false, 2_000, None),
+            ],
+        );
+        assert!(state.assignees.contains(VOLUNTEER));
+
+        // Listed (in any case) it beats the volunteer's uncaused self-op
+        // exactly like the owner's would.
+        let state = reduce_assignment_operations(
+            ISSUE,
+            AUTHOR,
+            OWNER,
+            &[maintainer.to_ascii_uppercase()],
+            &[
+                assignment_event(VOLUNTEER, &"2".repeat(64), true, 1_000, None),
+                assignment_event(&maintainer, &maintainer_unassign, false, 200, None),
+            ],
+        );
+        assert!(!state.assignees.contains(VOLUNTEER));
+        assert_eq!(state.heads.get(VOLUNTEER), Some(&maintainer_unassign));
+    }
+
+    #[test]
+    fn repo_maintainers_reads_every_tag_and_skips_malformed_values() {
+        let good = "9".repeat(64);
+        let other = "6".repeat(64);
+        let event: AssignmentQueryEvent = serde_json::from_value(serde_json::json!({
+            "id": "0".repeat(64),
+            "kind": 30617,
+            "pubkey": OWNER,
+            "created_at": 1,
+            "tags": [
+                ["d", "demo"],
+                ["maintainers", good.to_ascii_uppercase(), "npub1nothex"],
+                ["maintainers", other],
+            ],
+        }))
+        .unwrap();
+        assert_eq!(super::repo_maintainers(&event), vec![good, other]);
+    }
+
+    #[test]
     fn causal_self_operations_can_follow_authority() {
         let owner_assign = "5".repeat(64);
         let self_unassign = "6".repeat(64);
@@ -801,6 +897,7 @@ mod tests {
             ISSUE,
             AUTHOR,
             OWNER,
+            &[],
             &[
                 assignment_event(OWNER, &owner_assign, true, 200, None),
                 assignment_event(VOLUNTEER, &self_unassign, false, 300, Some(&owner_assign)),
@@ -815,6 +912,7 @@ mod tests {
             ISSUE,
             AUTHOR,
             OWNER,
+            &[],
             &[
                 assignment_event(OWNER, &owner_unassign, false, 200, None),
                 assignment_event(VOLUNTEER, &self_assign, true, 300, Some(&owner_unassign)),
@@ -832,6 +930,7 @@ mod tests {
             ISSUE,
             AUTHOR,
             OWNER,
+            &[],
             &[
                 assignment_event(OWNER, &initial_assign, true, 100, None),
                 assignment_event(OWNER, &owner_unassign, false, 200, None),

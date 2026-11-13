@@ -107,6 +107,52 @@ test("honors status events from the issue author and repo owner", () => {
   );
 });
 
+test("honors status and assignment events from a repo maintainer", () => {
+  const MAINTAINER = "d".repeat(64);
+  const maintainerDone = statusEvent({
+    kind: 1631,
+    pubkey: MAINTAINER,
+    createdAt: 300,
+  });
+
+  // Not listed: the maintainer is a stranger and the status is ignored.
+  assert.equal(
+    eventToProjectIssue(issueEvent(), [maintainerDone]).status,
+    PROJECT_ISSUE_STATUS.BACKLOG,
+  );
+  // Listed on the repository (any case): trusted like the owner.
+  assert.equal(
+    eventToProjectIssue(
+      issueEvent(),
+      [maintainerDone],
+      [],
+      [MAINTAINER.toUpperCase()],
+    ).status,
+    PROJECT_ISSUE_STATUS.DONE,
+  );
+  // Malformed maintainer values never widen trust.
+  assert.equal(
+    eventToProjectIssue(issueEvent(), [maintainerDone], [], ["not-a-pubkey"])
+      .status,
+    PROJECT_ISSUE_STATUS.BACKLOG,
+  );
+
+  const assignByMaintainer = assignmentComment(
+    MAINTAINER,
+    [ATTACKER],
+    "1".repeat(64),
+  );
+  assert.deepEqual(
+    eventToProjectIssue(issueEvent(), [], [assignByMaintainer]).assignees,
+    [],
+  );
+  assert.deepEqual(
+    eventToProjectIssue(issueEvent(), [], [assignByMaintainer], [MAINTAINER])
+      .assignees,
+    [ATTACKER],
+  );
+});
+
 test("tag helpers drop malformed value-less tags", () => {
   const event = issueEvent({
     tags: [
