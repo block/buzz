@@ -1,9 +1,11 @@
 import * as React from "react";
 import { AlertTriangle, ChevronDown, ChevronRight } from "lucide-react";
 
+import { useAcpRuntimesQuery } from "@/features/agents/hooks";
 import {
   isAgentCardAvatarLoading,
   resolveAgentCardAvatarUrl,
+  resolveCurrentRuntimeAvatarUrl,
 } from "@/features/agents/lib/agentCardAvatar";
 import { resolveAgentCardModelLabel } from "@/features/agents/lib/agentCardModelLabel";
 import { effectiveAgentDescription } from "@/features/agents/lib/agentDescription";
@@ -13,7 +15,11 @@ import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlA
 import { pickProfileAgent } from "@/features/agents/lib/pickProfileAgent";
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
 import { useUserProfileQuery } from "@/features/profile/hooks";
-import type { AgentPersona, ManagedAgent } from "@/shared/api/types";
+import type {
+  AcpRuntimeCatalogEntry,
+  AgentPersona,
+  ManagedAgent,
+} from "@/shared/api/types";
 import type { ProfilePanelOpenOptions } from "@/shared/context/ProfilePanelContext";
 import { useFeedbackToasts } from "@/shared/hooks/useToastEffect";
 import { Badge } from "@/shared/ui/badge";
@@ -109,6 +115,17 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
     () => buildUnifiedGroups(personas, agents, isArchived),
     [personas, agents, isArchived],
   );
+  const runtimesQuery = useAcpRuntimesQuery();
+  const runtimes = runtimesQuery.data;
+  const catalogStockAvatarUrls = React.useMemo(() => {
+    if (!runtimes) return undefined;
+
+    return new Set(
+      runtimes
+        .map((runtime) => runtime.avatarUrl.trim())
+        .filter((avatarUrl) => avatarUrl.length > 0),
+    );
+  }, [runtimes]);
   const [collapsed, setCollapsed] = React.useState<Set<string>>(new Set());
   function toggle(key: string) {
     setCollapsed((prev) => {
@@ -167,8 +184,10 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
                   key={group.persona.id}
                   persona={group.persona}
                   restartingAgentPubkey={restartingAgentPubkey}
+                  runtimes={runtimes}
                   startingAgentPubkey={startingAgentPubkey}
                   startingPersonaIds={startingPersonaIds}
+                  catalogStockAvatarUrls={catalogStockAvatarUrls}
                   onOpenAgentProfile={onOpenAgentProfile}
                   onOpenPersonaProfile={onOpenPersonaProfile}
                   onRestartAgent={onRestartAgent}
@@ -242,8 +261,10 @@ function AgentPersonaCard({
   getAvailability,
   persona,
   restartingAgentPubkey,
+  runtimes,
   startingAgentPubkey,
   startingPersonaIds,
+  catalogStockAvatarUrls,
   onOpenAgentProfile,
   onOpenPersonaProfile,
   onRestartAgent,
@@ -260,8 +281,10 @@ function AgentPersonaCard({
   getAvailability: AgentAvailabilityReader;
   persona: AgentPersona;
   restartingAgentPubkey: string | null;
+  runtimes: readonly AcpRuntimeCatalogEntry[] | undefined;
   startingAgentPubkey: string | null;
   startingPersonaIds: ReadonlySet<string>;
+  catalogStockAvatarUrls: ReadonlySet<string> | undefined;
   onOpenAgentProfile: (
     pubkey: string,
     options?: ProfilePanelOpenOptions,
@@ -285,8 +308,20 @@ function AgentPersonaCard({
     });
   const isActive = agent ? isManagedAgentActive(agent) : false;
   const profileQuery = useUserProfileQuery(agent?.pubkey);
-  const avatarUrl = agent
+  const actionAvatarUrl = agent
     ? resolveAgentCardAvatarUrl(profileQuery.data?.avatarUrl, persona.avatarUrl)
+    : persona.avatarUrl;
+  const currentRuntimeAvatarUrl =
+    agent && runtimes
+      ? resolveCurrentRuntimeAvatarUrl(agent, persona, runtimes)
+      : undefined;
+  const avatarUrl = agent
+    ? resolveAgentCardAvatarUrl(
+        profileQuery.data?.avatarUrl,
+        persona.avatarUrl,
+        currentRuntimeAvatarUrl,
+        catalogStockAvatarUrls,
+      )
     : persona.avatarUrl;
   const friendlyError = agent
     ? friendlyAgentLastError(agent.lastError, agent.lastErrorCode)?.copy
@@ -295,7 +330,7 @@ function AgentPersonaCard({
   return (
     <AgentIdentityCard
       actions={actions?.(
-        avatarUrl,
+        actionAvatarUrl,
         isAgentCardAvatarLoading(Boolean(agent), profileQuery.isPending),
       )}
       ariaLabel={`${title} agent profile`}
