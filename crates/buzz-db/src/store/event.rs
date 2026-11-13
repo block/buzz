@@ -530,7 +530,8 @@ async fn insert_event_on(
 
     let was_inserted = result.rows_affected() > 0;
     if was_inserted {
-        crate::replica_fence::guard_event_created_at_floor(tx, created_at, channel_id).await?;
+        crate::replica_fence::guard_event_created_at_floor(tx, created_at, channel_id, &event.id)
+            .await?;
         crate::store::event_follow_up::after_admitted_insert(
             tx,
             id_bytes.as_slice(),
@@ -2023,7 +2024,8 @@ pub(crate) async fn insert_event_with_thread_metadata_tx(
     let was_inserted = result.rows_affected() > 0;
 
     if was_inserted {
-        crate::replica_fence::guard_event_created_at_floor(tx, created_at, channel_id).await?;
+        crate::replica_fence::guard_event_created_at_floor(tx, created_at, channel_id, &event.id)
+            .await?;
         crate::store::event_follow_up::after_admitted_insert(
             tx,
             id_bytes.as_slice(),

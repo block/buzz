@@ -332,7 +332,7 @@ async fn replace_parameterized_event_in_transaction_impl(
         // After the replay exit: a stored id (even soft-deleted) is a
         // duplicate, not a floor rejection. Failure rolls back to the
         // savepoint, restoring the previous live head.
-        crate::replica_fence::guard_event_created_at_floor(tx, created_at, channel_id).await?;
+        crate::replica_fence::guard_event_created_at_floor(tx, created_at, channel_id, &event.id).await?;
 
         if is_nip_rs {
             sqlx::query(
@@ -569,7 +569,8 @@ pub(crate) async fn replace_addressable_event_under_lock(
     }
     // After the replay exit, as in the parameterized path; the caller's
     // rollback restores the previous head on failure.
-    crate::replica_fence::guard_event_created_at_floor(tx, created_at, channel_id).await?;
+    crate::replica_fence::guard_event_created_at_floor(tx, created_at, channel_id, &event.id)
+        .await?;
 
     crate::store::event_follow_up::after_admitted_insert(
         tx,

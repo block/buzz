@@ -77,6 +77,7 @@ pub struct AdmittedTx {
     ttl_refresh_channels: BTreeSet<Uuid>,
     push_enqueue: Option<super::push_enqueue::PushEnqueue>,
     push_events: Vec<StagedPushEvent>,
+    scheduled_event: Option<nostr::EventId>,
 }
 
 struct StagedPushEvent {
@@ -98,6 +99,7 @@ impl AdmittedTx {
             ttl_refresh_channels: BTreeSet::new(),
             push_enqueue: None,
             push_events: Vec::new(),
+            scheduled_event: None,
         })
     }
 
@@ -117,7 +119,18 @@ impl AdmittedTx {
             ttl_refresh_channels: BTreeSet::new(),
             push_enqueue: None,
             push_events: Vec::new(),
+            scheduled_event: None,
         })
+    }
+
+    /// Permit only the exact event protected by this transaction's locked queue
+    /// claim and durable replica reservation. Called only by scheduled delivery.
+    pub(crate) fn authorize_scheduled_event(&mut self, id: nostr::EventId) {
+        self.scheduled_event = Some(id);
+    }
+
+    pub(crate) fn has_scheduled_event_reservation(&self, id: &nostr::EventId) -> bool {
+        self.scheduled_event.as_ref() == Some(id)
     }
 
     pub(crate) fn set_push_enqueue(&mut self, producer: Option<super::push_enqueue::PushEnqueue>) {
