@@ -128,6 +128,10 @@ void main() {
       container.read(presenceCacheProvider.notifier).track(['alice']);
       await _pumpEventQueue();
       final subscription = relaySession.subscriptions.single;
+      // Bob is tracked while alice's first subscription is still opening.
+      container.read(presenceCacheProvider.notifier).track(['bob']);
+      await _pumpEventQueue();
+      expect(relaySession.subscriptions, [subscription]);
 
       // A retryable CLOSED releases the open before the stream is live, so a
       // snapshot now could miss a change before the retry's EOSE.
@@ -136,14 +140,71 @@ void main() {
       await _pumpEventQueue();
       expect(relaySession.queried, isEmpty);
 
+      // Its recovery reads both and widens to cover bob live.
       subscription.ready();
       await _pumpEventQueue();
-      expect(relaySession.queried, [
-        ['alice'],
-      ]);
+      expect(
+        relaySession.queried.expand((keys) => keys),
+        containsAll(['alice', 'bob']),
+      );
+      expect(relaySession.subscriptions.last.filter.authors, ['alice', 'bob']);
       expect(container.read(presenceCacheProvider)['alice'], 'online');
     },
   );
+
+  test('the poll recovers from a replacement the relay never answers', () {
+    fakeAsync((time) {
+      final relaySession = _RecordingRelaySessionNotifier();
+      final container = _buildContainer(relaySession: relaySession);
+      addTearDown(container.dispose);
+      final notifier = container.read(presenceCacheProvider.notifier);
+
+      container.read(presenceCacheProvider);
+      notifier.track(['alice']);
+      time.elapse(Duration.zero);
+      final first = relaySession.subscriptions.single;
+
+      // Bob's replacement opens on the timeout and never gets EOSE or CLOSED.
+      relaySession.autoReady = false;
+      notifier.track(['bob']);
+      time.elapse(Duration.zero);
+      final lost = relaySession.subscriptions.last;
+      lost.open();
+      time.elapse(Duration.zero);
+
+      // The next poll drops it and widens again; alice's stream stays.
+      time.elapse(const Duration(seconds: 60));
+      expect(relaySession.subscriptions, hasLength(2));
+      expect(relaySession.subscriptions, isNot(contains(lost)));
+      final retry = relaySession.subscriptions.last;
+      expect(retry.filter.authors, ['alice', 'bob']);
+      retry.open();
+      time.elapse(Duration.zero);
+
+      // That one is lost too, and then alice's stream closes for good.
+      first.closeTerminal();
+      time.elapse(Duration.zero);
+      expect(relaySession.subscriptions, [retry]);
+
+      // One poll later a fresh subscription covers everyone and reads them.
+      relaySession.autoReady = true;
+      relaySession.queried.clear();
+      time.elapse(const Duration(seconds: 60));
+      expect(relaySession.subscriptions, hasLength(1));
+      expect(relaySession.subscriptions.single.filter.authors, [
+        'alice',
+        'bob',
+      ]);
+      expect(
+        relaySession.queried.expand((keys) => keys),
+        containsAll(['alice', 'bob']),
+      );
+      expect(container.read(presenceCacheProvider), {
+        'alice': 'offline',
+        'bob': 'offline',
+      });
+    });
+  });
 
   test('the poll still reads a live stream while its widening fails', () {
     fakeAsync((time) {
@@ -397,6 +458,12 @@ class _FakeSubscription {
   void retrying() {
     if (!opened.isCompleted) open();
     onStatusChanged(RelaySubscriptionStatus.retrying);
+  }
+
+  /// A terminal CLOSED on a subscription that is already open.
+  void closeTerminal() {
+    _remove();
+    onClosed?.call('blocked: test');
   }
 
   /// A terminal CLOSED before the open future resolves.

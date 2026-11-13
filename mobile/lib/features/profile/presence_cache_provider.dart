@@ -31,8 +31,8 @@ class PresenceCacheNotifier extends Notifier<Map<String, String>> {
   // a community's presence heartbeats arrive many times a second.
   final Set<String> _subscribedKeys = {};
   void Function()? _presenceUnsub;
-  // Closes the replacement being opened, until it is promoted or abandoned.
-  void Function()? _pendingClose;
+  // Drops the replacement being opened, until it is promoted or abandoned.
+  void Function()? _abandonPending;
   Timer? _poll;
   Timer? _queued;
   Timer? _resubscribe;
@@ -72,8 +72,8 @@ class PresenceCacheNotifier extends Notifier<Map<String, String>> {
       _generation++;
       _presenceUnsub?.call();
       _presenceUnsub = null;
-      _pendingClose?.call();
-      _pendingClose = null;
+      _abandonPending?.call();
+      _abandonPending = null;
       _poll?.cancel();
       _queued?.cancel();
       _queued = null;
@@ -83,6 +83,9 @@ class PresenceCacheNotifier extends Notifier<Map<String, String>> {
     if (sessionState.status == SessionStatus.connected &&
         lifecycle == AppLifecycleState.resumed) {
       _poll = Timer.periodic(const Duration(seconds: 60), (_) {
+        // A replacement the relay never answered must not hold the slot, so a
+        // lost REQ costs at most one poll interval.
+        _abandonPending?.call();
         if (_presenceUnsub == null || !_subscribedKeys.containsAll(_tracked)) {
           unawaited(_subscribe(generation));
         }
@@ -179,7 +182,7 @@ class PresenceCacheNotifier extends Notifier<Map<String, String>> {
         subscription == _activeSubscription;
     void promote() {
       pending = false;
-      _pendingClose = null;
+      _abandonPending = null;
       _opening = false;
       final previous = _presenceUnsub;
       final added = keys.where((key) => !_subscribedKeys.contains(key));
@@ -205,14 +208,15 @@ class PresenceCacheNotifier extends Notifier<Map<String, String>> {
 
     void abandon() {
       pending = false;
-      _pendingClose = null;
-      _opening = false;
+      _abandonPending = null;
       close();
+      if (generation != _generation) return;
+      _opening = false;
       // Keys only it would cover get a snapshot; the poll retries the widening.
       _schedule(generation);
     }
 
-    if (pending) _pendingClose = close;
+    if (pending) _abandonPending = abandon;
     try {
       unsub = await ref
           .read(relaySessionProvider.notifier)
@@ -237,7 +241,12 @@ class PresenceCacheNotifier extends Notifier<Map<String, String>> {
               }
               _retrying = status == RelaySubscriptionStatus.retrying;
               _invalidateSnapshot();
-              if (!_retrying) _schedule(generation);
+              if (_retrying) return;
+              // Keys tracked during the backoff need a wider subscription.
+              if (!_subscribedKeys.containsAll(_tracked)) {
+                _queueResubscribe(generation);
+              }
+              _schedule(generation);
             },
             onClosed: (_) {
               if (generation != _generation || closed) return;
