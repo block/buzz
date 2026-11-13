@@ -36,6 +36,13 @@ old snapshots; short metadata operations retain a one-second lock budget.
 Completion validates the exact parent definition and ready/live/valid flags.
 Then apply migration 0089 through the ordinary migration runner.
 
+For an existing database managed with `pgschema`, run the same prebuild before
+`pgschema plan` or `pgschema apply`. PostgreSQL cannot build an index on a
+partitioned parent with `CREATE INDEX CONCURRENTLY`, which pgschema otherwise
+generates. The prebuild creates and attaches the exact desired indexes so
+pgschema can reconcile the remaining schema. Fresh desired-state databases
+can create the ordinary index while bootstrapping their empty tables.
+
 Do not create or detach event partitions during this procedure. If a new
 partition appears, rerun and require the final validation to succeed. Once the
 valid parent exists, newly created partitions inherit its index automatically.
