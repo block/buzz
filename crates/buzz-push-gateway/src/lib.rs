@@ -5,6 +5,7 @@ pub mod authority;
 pub mod config;
 pub mod grant;
 pub mod http;
+pub(crate) mod ingress;
 pub mod metrics;
 pub mod model;
 pub mod postgres;
