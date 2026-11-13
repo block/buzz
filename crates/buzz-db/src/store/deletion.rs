@@ -3474,7 +3474,7 @@ async fn lock_schema_destruction_shared(conn: &mut PgConnection) -> Result<()> {
 /// Destructive transactions call this on their own transaction after taking
 /// the shared schema/destruction lock, so the validated surface cannot change
 /// before the transaction commits.
-async fn validate_catalog_on(conn: &mut PgConnection) -> Result<()> {
+pub(crate) async fn validate_catalog_on(conn: &mut PgConnection) -> Result<()> {
     let expected = EXPECTED_SCOPED_TABLES
         .iter()
         .copied()
