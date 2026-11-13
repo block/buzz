@@ -32,6 +32,40 @@ export async function expandTilde(input: string): Promise<string | undefined> {
   return trimmed;
 }
 
+/**
+ * Resolve the Repos Directory field of the edit dialog into a community
+ * update. Expands `~`, then validates the expanded path with the
+ * caller-supplied validator (the backend's `validate_repos_dir`). A cleared
+ * field skips validation entirely: empty input means "remove the override",
+ * and the backend's absolute-path check would always reject `""`, which made
+ * the override impossible to clear from the dialog.
+ *
+ * Pure apart from the injected validator — extracted so it can be unit-tested
+ * without a DOM or Tauri.
+ */
+export async function resolveReposDirUpdate(
+  input: string,
+  current: string | undefined,
+  validate: (dir: string) => Promise<unknown>,
+): Promise<
+  | { kind: "unchanged" }
+  | { kind: "invalid"; error: string }
+  | { kind: "changed"; value: string | undefined }
+> {
+  const expanded = await expandTilde(input);
+  if (expanded === current) {
+    return { kind: "unchanged" };
+  }
+  if (expanded !== undefined) {
+    try {
+      await validate(expanded);
+    } catch (error) {
+      return { kind: "invalid", error: String(error) };
+    }
+  }
+  return { kind: "changed", value: expanded };
+}
+
 export function migrateLegacyCommunityStorage(
   storage: Storage = localStorage,
 ): void {
