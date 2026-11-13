@@ -1,4 +1,4 @@
-//! Databricks model catalog discovery.
+//! Provider model catalogs and Databricks discovery.
 //!
 //! Exposes [`discover_databricks_models`] — an async helper that lists
 //! available models for the `databricks` and `databricks_v2` providers
@@ -34,6 +34,20 @@ use crate::{
 pub struct ModelEntry {
     pub id: String,
     pub name: String,
+}
+
+/// Current MiniMax text choices, with the default first.
+pub const MINIMAX_KNOWN_MODELS: &[&str] = &["MiniMax-M3.1-Flash", "MiniMax-M3"];
+
+/// Ordinary choices; explicit saved and custom model IDs remain valid.
+pub fn minimax_known_models() -> Vec<ModelEntry> {
+    MINIMAX_KNOWN_MODELS
+        .iter()
+        .map(|id| ModelEntry {
+            id: (*id).to_string(),
+            name: (*id).to_string(),
+        })
+        .collect()
 }
 
 const AUTHENTICATED_EMPTY_CATALOG_SUFFIX: &str = " (default catalog)";
@@ -1947,5 +1961,15 @@ mod tests {
             by_id["custom-unlisted-endpoint"],
             "custom-unlisted-endpoint"
         );
+    }
+
+    #[test]
+    fn minimax_catalog_lists_supported_text_models() {
+        let models = minimax_known_models();
+        let ids = models
+            .iter()
+            .map(|model| model.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["MiniMax-M3.1-Flash", "MiniMax-M3"]);
     }
 }
