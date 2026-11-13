@@ -30,4 +30,7 @@ pub use upload_record::{
     parse_port, parse_public_ip, upload_record_key, UploadAttribution, UploadNetworkInfo,
     UploadRecord, UPLOAD_RECORD_VERSION,
 };
-pub use validation::{looks_like_iso_bmff, serve_inline, validate_video_file, VideoMeta};
+pub use validation::{
+    looks_like_iso_bmff, serve_inline, validate_mp4_file, validate_video_file, ValidatedMp4,
+    VideoMeta, AUDIO_MP4_MIME,
+};
