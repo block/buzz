@@ -81,8 +81,17 @@ Future<bool> sendNotificationReply(Ref ref, BuzzNotificationReply reply) async {
       .read(relaySessionProvider.notifier)
       .holdForBackgroundWork(_sendDeadline + _markReadDeadline);
   try {
+    // Timing out doesn't stop the send, so it checks this before publishing:
+    // a reply kept as a draft must never also go out.
+    var expired = false;
     try {
-      await _send(ref, reply).timeout(_sendDeadline);
+      await _send(ref, reply, expired: () => expired).timeout(
+        _sendDeadline,
+        onTimeout: () {
+          expired = true;
+          throw TimeoutException('Reply not sent in time', _sendDeadline);
+        },
+      );
     } catch (error) {
       debugPrint('[NotificationReply] not sent: $error');
       await _keepDraft(ref, reply);
@@ -107,8 +116,13 @@ Future<bool> sendNotificationReply(Ref ref, BuzzNotificationReply reply) async {
   }
 }
 
-/// Publishes [reply] to its own community's relay, or throws.
-Future<void> _send(Ref ref, BuzzNotificationReply reply) async {
+/// Publishes [reply] to its own community's relay, or throws, including when
+/// [expired] says the reply has already been given up on.
+Future<void> _send(
+  Ref ref,
+  BuzzNotificationReply reply, {
+  required bool Function() expired,
+}) async {
   final link = reply.link;
   final auth = await ref.read(authProvider.future);
   final active = await ref.read(activeCommunityProvider.future);
@@ -135,6 +149,7 @@ Future<void> _send(Ref ref, BuzzNotificationReply reply) async {
   if (ref.read(activeCommunityProvider).value?.id != link.communityId) {
     throw StateError('Selected community changed');
   }
+  if (expired()) throw StateError('Reply deadline passed');
   // A Solo chat takes no thread replies, so the reply goes at its top level.
   final threaded = !channel.isSolo;
   await send(
