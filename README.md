@@ -24,10 +24,6 @@ Buzz's open-source code lives in two repositories. The desktop app has its own; 
 | Mobile client (iOS + Android) | This repo, in [`mobile/`](mobile/) |
 | Relay | This repo, in [`crates/buzz-relay/`](crates/buzz-relay/) |
 
-> [!NOTE]
-> The [`desktop/`](desktop/) directory in this repo is Buzz 0.X, the previous desktop app. It is deprecated and takes bug fixes only; new desktop work goes to [block/buzz-app](https://github.com/block/buzz-app), which is Buzz 1.0.
-> Buzz 1.0 adds [plugins](https://github.com/block/buzz-app/blob/main/docs/plugin-architecture.md); their API is a preview, so updates can break them.
-
 <p align="center">
   <img src="docs/assets/screenshots/channel-thread.png" alt="A Buzz project channel where people and an agent coordinate on a release plan" width="100%">
 </p>
