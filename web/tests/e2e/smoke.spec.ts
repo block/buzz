@@ -579,3 +579,61 @@ test("invite swarm follows width and height changes with reduced motion", async 
     await expect(page.locator(".bee-sprite")).toHaveCount(24);
   }
 });
+
+test("open link hands the buzz:// link to the app", async ({ page }) => {
+  const query = `?channel=4f1c2a9e-0000-4000-8000-000000000001&id=${"ab".repeat(32)}`;
+  const launches: string[] = [];
+  const cdp = await page.context().newCDPSession(page);
+  cdp.on("Page.frameRequestedNavigation", ({ url }) => {
+    if (url.startsWith("buzz:")) launches.push(url);
+  });
+  await cdp.send("Page.enable");
+
+  await page.goto(`/open/message${query}`);
+
+  await expect(
+    page.getByRole("heading", { name: "Opening Buzz…" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("link", { name: "Open in Buzz" }),
+  ).toHaveAttribute("href", `buzz://message${query}`);
+  await expect.poll(() => launches).toEqual([`buzz://message${query}`]);
+});
+
+test("open link forwards every navigation form", async ({ page }) => {
+  const owner = "cd".repeat(32);
+  for (const rest of [
+    "channel/4f1c2a9e-0000-4000-8000-000000000001",
+    `repo?owner=${owner}&d=demo-repo`,
+    `project?owner=${owner}&d=demo-project&tab=board`,
+    `pr?owner=${owner}&d=demo-repo&id=${"ef".repeat(32)}`,
+    `issue?owner=${owner}&d=demo-repo&id=${"ef".repeat(32)}`,
+  ]) {
+    await page.goto(`/open/${rest}`);
+    await expect(
+      page.getByRole("link", { name: "Open in Buzz" }),
+    ).toHaveAttribute("href", `buzz://${rest}`);
+  }
+});
+
+test("open link refuses links that are not navigation", async ({ page }) => {
+  for (const path of [
+    "/open/join?relay=wss%3A%2F%2Frelay.example&code=demo-code",
+    "/open/connect?relay=wss%3A%2F%2Frelay.example",
+    "/open/add-community?relay=wss%3A%2F%2Frelay.example",
+    "/open/plugin-install?repository=example-org%2Fplugin",
+    "/open/message-extra?channel=general",
+    "/open/MESSAGE?channel=general",
+    "/open/message%2Fjoin?channel=general",
+    "/open//join?code=demo-code",
+  ]) {
+    await page.goto(path);
+    await expect(
+      page.getByRole("heading", { name: "This link doesn't work" }),
+      path,
+    ).toBeVisible();
+    await expect(page.getByRole("link", { name: "Open in Buzz" })).toHaveCount(
+      0,
+    );
+  }
+});

@@ -146,6 +146,8 @@ const NIP_FI_EXEMPT_PREFIXES: &[&str] = &[
     "/favicon.svg",
     // Invite landing page (SPA) — subtree
     "/invite/",
+    // HTTPS front for buzz:// navigation links (SPA) — subtree
+    "/open/",
     // Git web GUI (SPA) — exact + subtree
     "/repos",
     // Internal HMAC/localhost control-plane endpoint for the pre-receive hook.
@@ -745,8 +747,17 @@ fn is_invite_landing_path(path: &str) -> bool {
         .is_some_and(|code| !code.is_empty() && !code.contains('/'))
 }
 
+/// `/open/<rest>` is the HTTPS front for `buzz://<rest>`; the page decides
+/// which link forms it opens.
+fn is_open_link_path(path: &str) -> bool {
+    path.strip_prefix("/open/")
+        .is_some_and(|rest| !rest.is_empty())
+}
+
 fn should_serve_spa(path: &str, serve_git_web_gui: bool) -> bool {
-    is_invite_landing_path(path) || (serve_git_web_gui && is_git_web_gui_path(path))
+    is_invite_landing_path(path)
+        || is_open_link_path(path)
+        || (serve_git_web_gui && is_git_web_gui_path(path))
 }
 
 fn is_git_web_gui_path(path: &str) -> bool {
@@ -1396,9 +1407,20 @@ mod tests {
     }
 
     #[test]
+    fn open_link_path_requires_a_nonempty_link() {
+        assert!(is_open_link_path("/open/message"));
+        assert!(is_open_link_path("/open/channel/general/abc"));
+        assert!(!is_open_link_path("/open/"));
+        assert!(!is_open_link_path("/open"));
+        assert!(!is_open_link_path("/opener/message"));
+    }
+
+    #[test]
     fn invite_is_always_served_but_git_gui_requires_opt_in() {
         assert!(should_serve_spa("/invite/payload.mac", false));
         assert!(should_serve_spa("/invite/payload.mac", true));
+        assert!(should_serve_spa("/open/message", false));
+        assert!(should_serve_spa("/open/message", true));
         assert!(!should_serve_spa("/", false));
         assert!(!should_serve_spa("/repos/example", false));
         assert!(should_serve_spa("/", true));
@@ -3876,6 +3898,8 @@ mod tests {
         // SPA / assets
         assert!(is_exempt("/assets/main.js"));
         assert!(is_exempt("/invite/abc"));
+        assert!(is_exempt("/open/message"));
+        assert!(!is_exempt("/opener"), "/opener must not match /open/");
         assert!(is_exempt("/repos"));
         assert!(is_exempt("/repos/owner/name"));
     }
@@ -5109,6 +5133,38 @@ mod tests {
         );
         let resp = nip_fi_gate_response(state, "/health", None, None).await;
         assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        assert_eq!(verifier.calls(), 0);
+    }
+
+    // Pins: the `/open/` link front is public. With a web bundle, a request
+    // carrying no assertion gets the SPA document; a bare `/open/` does not.
+    // Mutation: dropping `/open/` from `NIP_FI_EXEMPT_PREFIXES` turns the 200
+    // into 401; dropping it from `should_serve_spa` turns it into 404.
+    #[tokio::test]
+    async fn open_link_front_is_public_under_enforce() {
+        let web_dir = tempfile::tempdir().unwrap();
+        write_bundle(web_dir.path());
+        let (state, verifier) = guard_state_with(Ok(None)).await;
+        let mut state = (*state).clone();
+        let mut config = (*state.config).clone();
+        config.web_dir = Some(web_dir.path().to_path_buf());
+        state.config = Arc::new(config);
+        let state = Arc::new(state);
+        for (path, status) in [
+            (
+                "/open/message?channel=general&id=abc",
+                axum::http::StatusCode::OK,
+            ),
+            ("/open/channel/general", axum::http::StatusCode::OK),
+            ("/open/", axum::http::StatusCode::NOT_FOUND),
+        ] {
+            let resp = nip_fi_gate_response(state.clone(), path, None, None).await;
+            let (actual, body) = status_and_body(resp).await;
+            assert_eq!(actual, status, "{path}");
+            if status == axum::http::StatusCode::OK {
+                assert_eq!(body, b"<!doctype html>", "{path}");
+            }
+        }
         assert_eq!(verifier.calls(), 0);
     }
 
