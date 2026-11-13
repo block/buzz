@@ -35,6 +35,18 @@ function membershipIsAlreadyAbsent(error: unknown): boolean {
   );
 }
 
+/**
+ * The shared session latches terminal when the relay rejects AUTH and then
+ * refuses to reconnect, so it reports its own latch rather than the relay's
+ * answer. It cannot deliver the leave request in that state.
+ */
+function sessionIsTerminal(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    error.message.toLowerCase().includes("session is terminal")
+  );
+}
+
 export type LeaveCommunityResult =
   | { status: "left" }
   | { status: "already-absent" };
@@ -68,7 +80,15 @@ export async function leaveCommunity(
   });
 
   if (relayUrl === activeRelayUrl) {
-    return publishLeaveRequest(() => dependencies.publishActive(event));
+    try {
+      return await publishLeaveRequest(() => dependencies.publishActive(event));
+    } catch (error) {
+      // A terminal session is most often a membership the relay already ended,
+      // and then waiting for it to accept a leave request is a dead end (#7049).
+      // Fall through to a fresh connection so the relay itself answers: an ended
+      // membership resolves as already-absent, anything else still fails.
+      if (!sessionIsTerminal(error)) throw error;
+    }
   }
 
   const client = dependencies.createRelayClient(relayUrl);
