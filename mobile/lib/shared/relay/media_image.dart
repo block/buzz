@@ -319,29 +319,54 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
       if (cache.isClosed) return;
       final bytes = await _fetchBytes(cache.closed);
       // Nothing displays these bytes yet, so check they decode before they
-      // replace the saved copy. A tiny target keeps the check from
-      // allocating a full-resolution frame.
-      try {
-        final codec = await ui.instantiateImageCodec(
-          bytes,
-          targetWidth: 1,
-          targetHeight: 1,
-          allowUpscaling: false,
-        );
-        try {
-          (await codec.getNextFrame()).image.dispose();
-        } finally {
-          codec.dispose();
-        }
-      } on Object {
-        // A body that never decodes is a failed fetch: back off.
-        _cooldownUntil[_cooldownKey] = debugNow().add(_defaultCooldown);
-        rethrow;
-      }
+      // replace the saved copy.
+      await _checkDecodes(bytes);
       await cache.write(url, bytes, immutable: _isContentAddressed);
     } on Object catch (error) {
       // The stale bytes stay; the next load after the cooldown retries.
       debugPrint('[MediaImageProvider] refresh of $url failed: $error');
+    }
+  }
+
+  /// [url]'s encoded bytes for a native surface that decodes them itself,
+  /// such as the iOS emoji picker: from [diskCache] when saved there, else
+  /// downloaded with the same client, auth and failure cooldown as an image
+  /// load, and saved once they decode. Completing [cancel] aborts the
+  /// download without a cooldown.
+  Future<Uint8List> loadEncodedBytes({required Future<void> cancel}) async {
+    final cache = diskCache;
+    final hit = await cache?.read(url);
+    if (hit != null) {
+      if (hit.isStale) _scheduleRefresh(cache!);
+      return hit.bytes;
+    }
+    final bytes = await _fetchBytes(cancel);
+    if (cache != null) {
+      await _checkDecodes(bytes);
+      unawaited(cache.write(url, bytes, immutable: _isContentAddressed));
+    }
+    return bytes;
+  }
+
+  /// Throws, and puts [url] on cooldown, when [bytes] do not decode. A tiny
+  /// target keeps the check from allocating a full-resolution frame.
+  Future<void> _checkDecodes(Uint8List bytes) async {
+    try {
+      final codec = await ui.instantiateImageCodec(
+        bytes,
+        targetWidth: 1,
+        targetHeight: 1,
+        allowUpscaling: false,
+      );
+      try {
+        (await codec.getNextFrame()).image.dispose();
+      } finally {
+        codec.dispose();
+      }
+    } on Object {
+      // A body that never decodes is a failed fetch: back off.
+      _cooldownUntil[_cooldownKey] = debugNow().add(_defaultCooldown);
+      rethrow;
     }
   }
 

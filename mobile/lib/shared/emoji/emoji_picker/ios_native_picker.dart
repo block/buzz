@@ -119,8 +119,11 @@ Future<void> _presentIosEmojiPicker({
   }
   final recent = container.read(recentEmojiProvider);
   final mediaAuth = container.read(mediaGetAuthServiceProvider);
-  final hostedAuth = container.read(hostedRelayAuthProvider);
-  final relayConfig = container.read(relayConfigProvider);
+  final mediaClient = container.read(mediaHttpClientProvider);
+  final mediaDiskCache = container.read(mediaDiskCacheProvider);
+  final emojiBytes = container.read(customEmojiBytesCacheProvider);
+  // Native cells cancel their image request when they scroll away.
+  final mediaBytesCancels = <int, Completer<void>>{};
   final prefs = container.read(savedPrefsProvider);
   final colors = context.colors;
   var dismissed = false;
@@ -130,23 +133,41 @@ Future<void> _presentIosEmojiPicker({
     dismissed = true;
     _iosEmojiPickerPresenting = false;
     _nativeEmojiPickerChannel.setMethodCallHandler(null);
+    for (final cancel in mediaBytesCancels.values) {
+      cancel.complete();
+    }
+    mediaBytesCancels.clear();
     onDismiss?.call();
   }
 
   _nativeEmojiPickerChannel.setMethodCallHandler((call) async {
     switch (call.method) {
-      case 'mediaHeaders':
-        final url = call.arguments;
-        if (url is! String) return const <String, String>{};
-        // Native downloads bypass the hosted HTTP client, so add its relay
-        // assertion here too: a hosted relay refuses media reads without it.
-        // Await the assertion before minting the short-lived media proof so a
-        // slow refresh cannot age it.
-        final assertion = await hostedAuth.headersForUrl(
-          relayConfig,
-          Uri.parse(url),
-        );
-        return <String, String>{...mediaAuth.headersFor(url), ...assertion};
+      case 'mediaBytes':
+        // The sheet decodes custom emoji itself but loads their bytes here, so
+        // each emoji downloads once into the media disk cache that chat
+        // surfaces share, keyed by URL rather than by its signed request.
+        final arguments = call.arguments as Map<Object?, Object?>;
+        final id = arguments['id']! as int;
+        final url = arguments['url']! as String;
+        if (emojiBytes.lookup(url) case final Uint8List bytes) return bytes;
+        final cancel = Completer<void>();
+        mediaBytesCancels[id] = cancel;
+        try {
+          final bytes = await MediaImageProvider(
+            url: url,
+            auth: mediaAuth,
+            client: mediaClient,
+            diskCache: mediaDiskCache,
+          ).loadEncodedBytes(cancel: cancel.future);
+          emojiBytes.remember(url, bytes);
+          return bytes;
+        } finally {
+          mediaBytesCancels.remove(id);
+        }
+      case 'cancelMediaBytes':
+        final cancel = mediaBytesCancels.remove(call.arguments as int);
+        cancel?.complete();
+        return null;
       case 'selected':
         final emoji = call.arguments;
         if (emoji is String && emoji.isNotEmpty) onSelect(emoji);

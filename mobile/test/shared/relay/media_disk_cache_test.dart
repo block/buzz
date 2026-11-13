@@ -356,6 +356,45 @@ void main() {
       await refresh.dispose();
     },
   );
+
+  test('encoded bytes for a native surface download once, across a '
+      'relaunch, and bytes that never decode are not saved', () async {
+    final fetched = <String>[];
+    final client = http_testing.MockClient((request) async {
+      fetched.add(request.url.toString());
+      if (request.url.toString() == _corruptUrl) {
+        return http.Response('not an image', 200);
+      }
+      return http.Response.bytes(_pngBytes, 200);
+    });
+    final directory = MediaDiskCache.directoryFor(
+      root,
+      'community-1',
+      'signer-1',
+    );
+    Future<Uint8List> load(MediaDiskCache cache, String url) =>
+        MediaImageProvider(
+          url: url,
+          auth: auth,
+          client: client,
+          diskCache: cache,
+        ).loadEncodedBytes(cancel: Completer<void>().future);
+
+    for (var launch = 0; launch < 2; launch++) {
+      final cache = MediaDiskCache.open(directory);
+      try {
+        expect(await load(cache, _relayUrl), _pngBytes);
+        await expectLater(load(cache, _corruptUrl), throwsA(anything));
+        await _settle();
+      } finally {
+        await cache.dispose();
+      }
+      // A failed body goes on cooldown; let the next launch retry it.
+      MediaImageProvider.debugResetCooldowns();
+    }
+
+    expect(fetched, [_relayUrl, _corruptUrl, _corruptUrl]);
+  });
 }
 
 /// Waits for background work that a fixed delay cannot bound on a slow

@@ -557,7 +557,7 @@ final class NativeMessageImageLoader: NSObject, URLSessionDataDelegate {
     completionHandler(nil) // Never forward supplied auth to another URL.
   }
 
-  static func decode(_ bytes: Data) -> UIImage? {
+  static func decode(_ bytes: Data, maximumPixelSize: Int = 120) -> UIImage? {
     guard let source = CGImageSourceCreateWithData(bytes as CFData, nil) else { return nil }
     let count = CGImageSourceGetCount(source)
     let step = max(1, Int(ceil(Double(count) / 60)))
@@ -566,7 +566,7 @@ final class NativeMessageImageLoader: NSObject, URLSessionDataDelegate {
     for index in stride(from: 0, to: count, by: step) {
       guard let image = CGImageSourceCreateThumbnailAtIndex(source, index, [
         kCGImageSourceCreateThumbnailFromImageAlways: true,
-        kCGImageSourceThumbnailMaxPixelSize: 120,
+        kCGImageSourceThumbnailMaxPixelSize: maximumPixelSize,
         kCGImageSourceCreateThumbnailWithTransform: true,
       ] as CFDictionary) else { continue }
       frames.append(UIImage(cgImage: image))
