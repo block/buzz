@@ -1,7 +1,7 @@
 /**
  * Global back/forward navigation chords.
  *
- * macOS: ⌘[ / ⌘] — matching Safari, Chrome, Finder, and Slack.
+ * macOS: ⌘[ / ⌘] and ⌘← / ⌘→ (outside text editing).
  * Windows/Linux: Alt+← / Alt+→ — matching browsers and Slack.
  *
  * Kept pure (no DOM access) so chord matching can be unit tested; the
@@ -24,11 +24,19 @@ export function matchBackForwardChord(
       return null;
     }
 
-    if (event.key === "[" || event.code === "BracketLeft") {
+    if (
+      event.key === "[" ||
+      event.code === "BracketLeft" ||
+      event.key === "ArrowLeft"
+    ) {
       return "back";
     }
 
-    if (event.key === "]" || event.code === "BracketRight") {
+    if (
+      event.key === "]" ||
+      event.code === "BracketRight" ||
+      event.key === "ArrowRight"
+    ) {
       return "forward";
     }
 
