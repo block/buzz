@@ -723,6 +723,42 @@ fn hydrate_error_to_response(owner: &str, repo: &str, err: HydrateError) -> Resp
         .into_response()
 }
 
+/// Registry gate shared by every git HTTP entry point: the `owner` in the
+/// URL must be the pubkey that holds `repo_name` in `git_repo_names`.
+///
+/// Repository identity in Buzz is `(community, name)`, allocated by the name
+/// registry at announce time. Resolving a repo by `(URL owner, d)` alone let
+/// a second member's colliding kind:30617, or a push to a never-announced
+/// `/git/<self>/<victim-name>` path, mint a pointer and a relay-signed
+/// kind:30618 for a name they do not own. An unreserved name denies too: a
+/// pointer may only come into existence through an accepted announcement.
+/// Every denial is the generic 404 so the registry cannot be probed here.
+pub(super) async fn require_registry_owner(
+    db: &buzz_db::Db,
+    community: buzz_core::CommunityId,
+    owner_hex: &str,
+    repo_name: &str,
+) -> Result<(), Response> {
+    fn denied() -> Response {
+        (StatusCode::NOT_FOUND, "repository not found").into_response()
+    }
+    match db.repo_name_owner(community, repo_name).await {
+        Ok(Some(registered)) if registered == owner_hex => Ok(()),
+        Ok(Some(_)) => {
+            warn!(repo = %repo_name, url_owner = %owner_hex, "git registry gate: name owned by another pubkey (deny)");
+            Err(denied())
+        }
+        Ok(None) => {
+            warn!(repo = %repo_name, url_owner = %owner_hex, "git registry gate: name not reserved (deny)");
+            Err(denied())
+        }
+        Err(e) => {
+            error!(repo = %repo_name, error = %e, "git registry gate: lookup failed (deny)");
+            Err(denied())
+        }
+    }
+}
+
 /// SEC-005: authorize a repository *read* (ref advertisement, upload-pack).
 ///
 /// The authorization invariant is the authenticated git caller's **current
@@ -770,6 +806,7 @@ pub(super) async fn authorize_git_read(
     if owner_bytes.len() != 32 {
         return Err(denied());
     }
+    require_registry_owner(db, community, owner_hex, repo_name).await?;
 
     let query = buzz_db::EventQuery {
         kinds: Some(vec![30617]),
@@ -1382,6 +1419,12 @@ pub async fn receive_pack(
     let body = decode_git_request_body(&headers, body, state.config.git_max_pack_bytes);
     let pusher_hex = hex::encode(auth.pubkey.to_bytes());
     let _permit = acquire_git_permit(&state, "receive_pack")?;
+    // Registry gate before any hydration or pointer write: the URL owner must
+    // hold this name. Closes pointer creation for never-announced names and
+    // pushes through a colliding announcement (see `require_registry_owner`).
+    // Sits after the permit so the route's precedence contract (auth →
+    // permit → repo resolution) is unchanged.
+    require_registry_owner(&state.db, auth.tenant.community(), &params.owner, repo_name).await?;
 
     // **No per-repo advisory lock — by design.** Writer serialization is
     // the pointer CAS at `cas_publish` step 7 (`Inv_NoFork` proves this
@@ -2285,6 +2328,7 @@ async fn finalize_push_inner(
     let publication_result: Result<(), String> = if manifest_changed {
         let inputs = RefStateInputs {
             repo_id: &ctx.repo_id,
+            owner_pubkey_hex: &ctx.owner,
             head: &success.manifest.head,
             refs: &success.manifest.refs,
             actor_pubkey_hex: &hex::encode(ctx.pusher.to_bytes()),
@@ -3698,6 +3742,11 @@ mod sec005_postgres_tests {
             .expect("30617");
 
         let owner_hex = owner_keys.public_key().to_hex();
+        // Mirror the production announce path: the registry row exists for
+        // every announced repo (`require_registry_owner` depends on it).
+        db.reserve_repo_name(community, &repo, &owner_hex)
+            .await
+            .expect("reserve repo name");
         RepoFixture {
             db,
             community,
@@ -3880,6 +3929,47 @@ mod sec005_postgres_tests {
         )
         .await;
         assert_eq!(body, GENERIC_DENIAL, "remediation is author-only");
+    }
+
+    /// Repo identity is `(community, name)` as allocated by `git_repo_names`:
+    /// the gate must deny a URL owner who does not hold the name (another
+    /// member's colliding kind:30617) and a name nobody holds (a push to a
+    /// never-announced `/git/<self>/<name>` path), and allow the holder.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn registry_gate_requires_url_owner_to_hold_the_name() {
+        let f = setup_repo(Binding::Channel).await;
+
+        assert!(
+            require_registry_owner(&f.db, f.community, &f.owner_hex, &f.repo)
+                .await
+                .is_ok(),
+            "registered owner passes"
+        );
+
+        let other = Keys::generate().public_key().to_hex();
+        let (status, body) =
+            denial_parts(require_registry_owner(&f.db, f.community, &other, &f.repo).await).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body, GENERIC_DENIAL, "another pubkey never holds this name");
+
+        let unreserved = format!("repo-{}", uuid::Uuid::new_v4().simple());
+        let (status, body) = denial_parts(
+            require_registry_owner(&f.db, f.community, &f.owner_hex, &unreserved).await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body, GENERIC_DENIAL, "an unreserved name is not a repo");
+
+        // The read gate composes the registry check: a member of the bound
+        // channel is still denied when the URL owner is not the holder.
+        let member = f.member_keys.public_key();
+        assert!(
+            authorize_git_read(&f.db, f.community, &member, &other, &f.repo)
+                .await
+                .is_err(),
+            "colliding owner path denies even a bound-channel member"
+        );
     }
 
     #[tokio::test]

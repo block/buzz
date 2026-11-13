@@ -1620,6 +1620,46 @@ async fn validate_edit_ownership(
 }
 
 /// Validate kind:45002 vote targets a forum post (45001) or comment (45003).
+/// Reject a kind:30617 announcement whose `d` (repo name) is already
+/// reserved in `git_repo_names` by a different pubkey, *before* the event is
+/// stored.
+///
+/// The name registry used to be enforced only as a post-insert side effect
+/// (`side_effects::handle_git_repo_announcement`), whose failure was logged
+/// but reported to the client as `accepted: true`. That left a second
+/// announcement with the same `d` in the event store, where the push policy
+/// (`api::git::policy`), the relay-signed kind:30618 (keyed by `d` only) and
+/// every by-name client lookup honoured it. Checking here makes a collision a
+/// visible NIP-01 `OK false` and keeps the colliding event out of the store.
+/// Same-owner re-announce and unreserved names pass; the atomic
+/// `INSERT … ON CONFLICT` in the side effect remains the race guard for two
+/// simultaneous first claims.
+async fn validate_repo_announcement_name(
+    community: CommunityId,
+    event: &Event,
+    state: &Arc<AppState>,
+) -> Result<(), String> {
+    let repo_id = event
+        .tags
+        .iter()
+        .find_map(|t| {
+            let s = t.as_slice();
+            (s.len() >= 2 && s[0] == "d").then(|| s[1].clone())
+        })
+        .ok_or_else(|| "kind:30617 missing d tag".to_string())?;
+    let owner_hex = hex::encode(event.pubkey.to_bytes());
+    match state.db.repo_name_owner(community, &repo_id).await {
+        Ok(Some(existing)) if existing != owner_hex => Err(format!(
+            "repo name '{repo_id}' already owned by another pubkey"
+        )),
+        Ok(_) => Ok(()),
+        Err(e) => {
+            error!(repo_id = %repo_id, error = %e, "kind:30617 registry lookup failed (reject)");
+            Err("repo name registry unavailable".to_string())
+        }
+    }
+}
+
 async fn validate_forum_vote_target(
     community_id: CommunityId,
     event: &Event,
@@ -3316,6 +3356,12 @@ async fn ingest_event_inner(
 
     if kind_u32 == KIND_FORUM_VOTE {
         validate_forum_vote_target(tenant.community(), &event, state)
+            .await
+            .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
+    }
+
+    if kind_u32 == KIND_GIT_REPO_ANNOUNCEMENT {
+        validate_repo_announcement_name(tenant.community(), &event, state)
             .await
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }

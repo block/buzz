@@ -264,6 +264,20 @@ pub async fn hook_policy_check(
             return (StatusCode::FORBIDDEN, "invalid repo owner").into_response();
         }
     };
+    // Registry gate: the announcement is only authoritative if its author
+    // holds the name in `git_repo_names`. A colliding kind:30617 from another
+    // member (stored before the registry rejected it) must not grant `Owner`.
+    match state.db.repo_name_owner(community, &req.repo_id).await {
+        Ok(Some(registered)) if registered == req.repo_owner => {}
+        Ok(_) => {
+            warn!(repo = %req.repo_id, owner = %req.repo_owner, "hook callback: URL owner does not hold repo name");
+            return (StatusCode::FORBIDDEN, "repository not found").into_response();
+        }
+        Err(e) => {
+            error!(repo = %req.repo_id, error = %e, "hook callback: registry lookup failed");
+            return (StatusCode::FORBIDDEN, "internal error").into_response();
+        }
+    }
     let query = EventQuery {
         kinds: Some(vec![30617]),
         pubkey: Some(owner_bytes.clone()),
@@ -898,6 +912,13 @@ printf '%s' "$HMAC_INPUT" | openssl dgst -sha256 -hmac "{secret}" -hex 2>/dev/nu
             .expect("insert 30617");
 
         let owner_hex = keys.public_key().to_hex();
+        // Mirror the production announce path: the registry row exists for
+        // every announced repo (the hook callback now requires it).
+        state
+            .db
+            .reserve_repo_name(community, repo_id, &owner_hex)
+            .await
+            .expect("reserve repo name");
         let mut req = HookCallbackRequest {
             repo_id: repo_id.to_string(),
             repo_owner: owner_hex.clone(),

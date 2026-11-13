@@ -411,6 +411,7 @@ async fn set_default_branch(
             let event = build_ref_state_event(
                 &RefStateInputs {
                     repo_id: repo_name,
+                    owner_pubkey_hex: &owner,
                     head: &snapshot.manifest.head,
                     refs: &snapshot.manifest.refs,
                     actor_pubkey_hex: &actor,

@@ -1278,6 +1278,13 @@ mod external_infra {
                 .insert_event(community, &announcement, None)
                 .await
                 .unwrap();
+            // Mirror the production announce path: every announced repo has
+            // a `git_repo_names` row (`require_registry_owner` depends on it).
+            state
+                .db
+                .reserve_repo_name(community, &repo, &owner.public_key().to_hex())
+                .await
+                .unwrap();
             let f = Self {
                 state,
                 pool,
