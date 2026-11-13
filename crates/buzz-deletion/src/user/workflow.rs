@@ -31,6 +31,12 @@ const RULES: &[Rule] = &[
     Rule {
         name: "gate_user",
         community_scope: false,
+        allowed: &[Decision::Stage("purge_media")],
+        decide: |_| Ok(Decision::Stage("purge_media")),
+    },
+    Rule {
+        name: "purge_media",
+        community_scope: false,
         allowed: &[Decision::EnterCommunities],
         decide: |_| Ok(Decision::EnterCommunities),
     },
@@ -222,6 +228,23 @@ impl Progress {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gating_always_precedes_global_media() {
+        assert_eq!(INITIAL_STAGE, "gate_user");
+        let gate = rule(INITIAL_STAGE).unwrap();
+        assert!(!gate.community_scope);
+        assert_eq!(
+            (gate.decide)(&serde_json::json!({})).unwrap(),
+            Decision::Stage("purge_media")
+        );
+        let media = rule("purge_media").unwrap();
+        assert!(!media.community_scope);
+        assert_eq!(
+            (media.decide)(&serde_json::json!({})).unwrap(),
+            Decision::EnterCommunities
+        );
+    }
 
     #[test]
     fn stage_options_follow_the_workflow_definition() {

@@ -902,7 +902,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 88);
+        assert_eq!(migrations.len(), 89);
         assert!(migrations[83]
             .sql
             .as_str()
@@ -3051,6 +3051,7 @@ mod postgres_tests {
 
         for table in [
             "media_uploaders",
+            "audit_log",
             "media_publications",
             "relay_members",
             "relay_admin_actions",
