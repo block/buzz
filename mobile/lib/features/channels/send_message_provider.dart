@@ -117,9 +117,6 @@ class SendMessage {
     ];
 
     _ensureDeliveryValid();
-    if (mayPublish?.call() == false) {
-      throw StateError('Message no longer wanted');
-    }
     NostrEvent? localMessage;
     try {
       await _signedEventRelay.submit(
@@ -131,6 +128,7 @@ class SendMessage {
           _markLocalMessageForAnimation(channelId, event.id);
           _addLocalMessage(channelId, event);
         },
+        mayPublish: mayPublish,
       );
       final event = localMessage;
       if (event != null) _completeLocalMessage(channelId, event.id);

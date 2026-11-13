@@ -3,8 +3,8 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
-import '../../shared/relay/relay.dart';
-import '../../shared/theme/theme_provider.dart';
+import '../relay/relay.dart';
+import '../theme/theme_provider.dart';
 
 const _draftsPrefsKey = 'compose_drafts_v1';
 const _maxDrafts = 50;
@@ -138,8 +138,8 @@ class ComposeDraftsNotifier extends Notifier<List<ComposeDraft>> {
   /// Adds [text] after any draft at [key] in the store of the community at
   /// [config], which need not be the selected one. Another community's
   /// store is written without being loaded here, so its text never appears
-  /// in this community.
-  void append({
+  /// in this community. Completes once it's saved.
+  Future<void> append({
     required RelayConfig config,
     required String key,
     required String channelId,
@@ -161,11 +161,9 @@ class ComposeDraftsNotifier extends Notifier<List<ComposeDraft>> {
     );
     final next = [draft, ...drafts.where((d) => d.key != key)];
     final kept = next.length > _maxDrafts ? next.sublist(0, _maxDrafts) : next;
-    if (selected) {
-      _persist(kept);
-    } else {
-      _write(_storeKey(config.baseUrl, pubkey), kept);
-    }
+    if (!selected) return _write(_storeKey(config.baseUrl, pubkey), kept);
+    state = List.unmodifiable(kept);
+    return _write(_prefsKey, kept);
   }
 
   /// Persist [text] for the composer identified by [key]. Empty text removes
@@ -214,11 +212,9 @@ class ComposeDraftsNotifier extends Notifier<List<ComposeDraft>> {
     _write(_prefsKey, drafts);
   }
 
-  void _write(String prefsKey, List<ComposeDraft> drafts) {
-    ref
-        .read(savedPrefsProvider)
-        .setString(prefsKey, jsonEncode([for (final d in drafts) d.toJson()]));
-  }
+  Future<void> _write(String prefsKey, List<ComposeDraft> drafts) => ref
+      .read(savedPrefsProvider)
+      .setString(prefsKey, jsonEncode([for (final d in drafts) d.toJson()]));
 }
 
 final composeDraftsProvider =

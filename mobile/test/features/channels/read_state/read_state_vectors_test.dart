@@ -602,6 +602,7 @@ class _VectorRelay extends RelaySessionNotifier {
   Future<NostrEvent> publish(
     NostrEvent event, {
     Duration timeout = const Duration(seconds: 8),
+    bool Function()? mayPublish,
   }) async {
     beforePublish?.call(event);
     attempts.add(event);

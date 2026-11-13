@@ -1,6 +1,6 @@
 import 'dart:async';
 
-import 'package:buzz/features/activity/compose_drafts_provider.dart';
+import 'package:buzz/shared/drafts/compose_drafts_provider.dart';
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
@@ -65,6 +65,7 @@ Map<String, String> _reply(
   String? threadRootId,
   String? replyRootId,
   int createdAt = 1000,
+  bool inSolo = false,
 }) => {
   'id': id,
   'text': 'reply $id',
@@ -75,6 +76,7 @@ Map<String, String> _reply(
   'senderPubkey': _sender,
   'replyRootId': ?replyRootId,
   'messageCreatedAt': '$createdAt',
+  if (inSolo) 'inSolo': 'true',
   'deadline':
       '${DateTime.now().add(const Duration(seconds: 25)).millisecondsSinceEpoch}',
 };
@@ -96,8 +98,19 @@ void main() {
         // A Solo chat takes no thread replies.
         _reply('3', channelId: 'solo', createdAt: 3000),
         // Another community's notification can't be answered without
-        // switching; its text is kept as a draft in that community.
+        // switching; its text is kept as a draft in that community, in the
+        // subthread under the notified message even though that community's
+        // channels aren't loaded.
         _reply('4', communityId: 'elsewhere'),
+        _reply(
+          '12',
+          communityId: 'elsewhere',
+          channelId: 'nested',
+          threadRootId: _root,
+          replyRootId: _root,
+        ),
+        // A notification that knew it was a Solo chat keeps it in the chat.
+        _reply('13', communityId: 'elsewhere', channelId: 'own', inSolo: true),
         // A send that fails before publishing keeps the text in the
         // subthread under the notified message, where the reply would go.
         _reply(
@@ -187,11 +200,13 @@ void main() {
         '1': 'sent',
         '2': 'sent',
         '3': 'sent',
-        '4': 'draft in null',
+        '4': 'draft in $_message',
         '5': 'draft in $_message',
         '6': 'draft in $_message',
         '10': 'sent',
         '11': 'unknown',
+        '12': 'draft in $_message',
+        '13': 'draft in null',
       });
       expect(sender.calls, [
         ('general', 'reply 1', _message, _message, _sender),
@@ -208,7 +223,14 @@ void main() {
         'left': 1000,
       });
       expect(drafts.textFor(composeDraftKey('general')), isNull);
-      expect(prefs.getString(_elsewhereDrafts), contains('"text":"reply 4"'));
+      final elsewhere = prefs.getString(_elsewhereDrafts);
+      expect(elsewhere, contains('"key":"general:$_message"'));
+      expect(elsewhere, contains('"text":"reply 4"'));
+      expect(elsewhere, contains('"key":"nested:$_message"'));
+      expect(
+        elsewhere,
+        contains('"key":"own","channel_id":"own","text":"reply 13"'),
+      );
       expect(
         drafts.textFor(composeDraftKey('broken', threadHeadId: _message)),
         'reply 5',
@@ -255,7 +277,9 @@ void main() {
         container.invalidate(activeCommunityProvider);
         await container.read(activeCommunityProvider.future);
       };
-      await signalReply(_reply('9', channelId: 'solo'));
+      // The other community's channels say nothing about this one, so the
+      // notification's Solo flag places the draft.
+      await signalReply(_reply('9', channelId: 'solo', inSolo: true));
       expect(outcomes['9'], 'draft in null');
       expect(sender.calls.last.$2, 'reply 7');
       expect(
@@ -272,7 +296,9 @@ void main() {
       late SharedPreferences prefs;
       SharedPreferences.getInstance().then((value) => prefs = value);
       async.flushMicrotasks();
-      final session = _Session();
+      final gate = RelayRateLimitGate(now: async.getClock(DateTime(2026)).now);
+      final session = _Session(rateLimitGate: gate);
+      final relay = _Relay(session);
       var members = Completer<List<ChannelMember>>();
       final send = SendMessage(
         signedEventRelay: SignedEventRelay(
@@ -302,6 +328,8 @@ void main() {
       );
       addTearDown(container.dispose);
       final ref = container.read(_refProvider);
+      container.read(relaySessionProvider);
+      session.debugAttachSocketForTest(relay);
       final drafts = container.read(composeDraftsProvider.notifier);
       NotificationReplyResult? result;
       void reply(String id) {
@@ -324,20 +352,37 @@ void main() {
       );
       members.complete([_member(_sender)]);
       async.flushMicrotasks();
-      expect(session.published, isEmpty);
+      expect(relay.events, isEmpty);
+      String? draft() =>
+          drafts.textFor(composeDraftKey('general', threadHeadId: _message));
+
+      // Held by a rate limit past its deadline, a reply is reported not sent,
+      // and never goes out once the limit lifts.
+      members = Completer()..complete([_member(_sender)]);
+      gate.activate(60);
+      reply('2');
+      async.elapse(const Duration(seconds: 25));
+      expect(result?.outcome, NotificationReplyOutcome.notSent);
+      expect(draft(), 'reply 1\n\nreply 2');
+      async.elapse(const Duration(seconds: 60));
+      expect(relay.events, isEmpty);
+
+      // A reply the relay refuses wasn't sent, so its text is kept.
+      relay.answer = (id) => ['OK', id, false, 'blocked: not allowed'];
+      reply('3');
+      async.elapse(const Duration(seconds: 25));
+      expect(relay.events.single['content'], 'reply 3');
+      expect(result?.outcome, NotificationReplyOutcome.notSent);
+      expect(draft(), 'reply 1\n\nreply 2\n\nreply 3');
 
       // A published reply whose OK never comes may have gone out, so it
       // leaves no draft to resend.
-      members = Completer()..complete([_member(_sender)]);
-      session.acknowledge = false;
-      reply('2');
+      relay.answer = (_) => null;
+      reply('4');
       async.elapse(const Duration(seconds: 25));
-      expect(session.published.single.content, 'reply 2');
+      expect(relay.events.last['content'], 'reply 4');
       expect(result?.outcome, NotificationReplyOutcome.unknown);
-      expect(
-        drafts.textFor(composeDraftKey('general', threadHeadId: _message)),
-        'reply 1',
-      );
+      expect(draft(), 'reply 1\n\nreply 2\n\nreply 3');
     });
   });
 }
@@ -382,22 +427,9 @@ class _Communities extends CommunityListNotifier {
 }
 
 class _Session extends RelaySessionNotifier {
+  _Session({super.rateLimitGate});
   var reachable = true;
-  var acknowledge = true;
-  final published = <NostrEvent>[];
   Future<void> Function()? onConnect;
-  @override
-  Future<NostrEvent> publish(
-    NostrEvent event, {
-    Duration timeout = const Duration(seconds: 8),
-  }) {
-    published.add(event);
-    if (acknowledge) return Future.value(event);
-    return Future.delayed(
-      timeout,
-      () => throw TimeoutException('not acknowledged', timeout),
-    );
-  }
 
   @override
   SessionState build() =>
@@ -432,4 +464,39 @@ class _RecordingSender implements SendMessage {
     ));
     if (channelId == 'lost') throw TimeoutException('no OK');
   }
+}
+
+/// A connected relay socket that answers each EVENT with [answer]'s reply,
+/// or not at all when it gives null.
+class _Relay extends RelaySocket {
+  _Relay(this._session)
+    : super(
+        wsUrl: 'ws://localhost',
+        nsec: null,
+        onMessage: (_) {},
+        onConnected: () {},
+        onDisconnected: (_) {},
+      );
+
+  final RelaySessionNotifier _session;
+  final events = <Map<String, dynamic>>[];
+  List<dynamic>? Function(String id) answer = (id) => ['OK', id, true, ''];
+
+  @override
+  SocketState get state => SocketState.connected;
+
+  @override
+  void send(List<dynamic> payload) {
+    if (payload case ['EVENT', final Map<String, dynamic> event]) {
+      events.add(event);
+      final reply = answer(event['id'] as String);
+      if (reply != null) _session.debugHandleSocketMessageForTest(reply);
+    }
+  }
+
+  @override
+  Future<void> disconnect() async {}
+
+  @override
+  void dispose() {}
 }

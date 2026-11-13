@@ -133,6 +133,7 @@ class _SoloSession extends RelaySessionNotifier {
   Future<NostrEvent> publish(
     NostrEvent event, {
     Duration timeout = const Duration(seconds: 8),
+    bool Function()? mayPublish,
   }) async {
     published.add(event);
     exists = true;

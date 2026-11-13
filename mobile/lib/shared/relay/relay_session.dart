@@ -434,12 +434,14 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   Future<NostrEvent> publish(
     NostrEvent event, {
     Duration timeout = const Duration(seconds: 8),
+    bool Function()? mayPublish,
   }) async {
     final generation = _connectionGeneration;
     if (_rateLimitGate.isActive) await _rateLimitGate.wait();
     if (!_isActiveConnection(generation) || !_socketConnected) {
       throw StateError('Relay session is not connected');
     }
+    if (mayPublish?.call() == false) throw StateError('Event no longer wanted');
 
     final completer = Completer<NostrEvent>();
 
@@ -573,8 +575,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     final backgroundedLongEnoughToRequireReconnect =
         backgroundedAt != null &&
         _now().difference(backgroundedAt) >= _backgroundGraceDuration;
-    // A socket held open for background work, such as a notification reply
-    // waiting for its OK, is current; replacing it would lose that OK.
+    // Keep a socket held open for background work: an OK may still come.
     final heldOpen = _backgroundWorkHolds > 0 && _socketConnected;
     if ((heldOpen || !backgroundedLongEnoughToRequireReconnect) &&
         state.status == SessionStatus.connected) {
@@ -1026,7 +1027,9 @@ class RelaySessionNotifier extends Notifier<SessionState> {
       }
       if (!pending.completer.isCompleted) {
         pending.completer.completeError(
-          Exception(message.isNotEmpty ? message : 'Event rejected'),
+          RelayEventRejectedException(
+            message.isNotEmpty ? message : 'Event rejected',
+          ),
         );
       }
     }
