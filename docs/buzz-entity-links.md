@@ -120,12 +120,22 @@ not a browsable page), so clone-URL cards and inline clone-URL anchors get
 the same in-app click navigation as explicit entity links, and both
 spellings of the same repository dedupe to one card.
 
-PRs, issues, and projects have no HTTPS page to link to (the web client has
-no such routes), which is why they use the `buzz://` scheme above: it is
+PRs, issues, and projects have no HTTPS page of their own (the web client has
+no such views), which is why they use the `buzz://` scheme above: it is
 community-relative by construction, matches the established `buzz://message`
 precedent, and requires no new relay surface. If web views land later, the
 desktop can additionally recognize those `{relay-origin}/…` URLs with the
 same card treatment.
+
+Places that drop custom schemes (GitHub and Slack markdown, terminals) can
+use the relay's HTTPS front instead: `{relay-origin}/open/<rest>` is a
+public page that opens `buzz://<rest>`, keeping the path and query byte for
+byte, and offers an **Open in Buzz** button and a download link if the app
+doesn't open. It forwards only the navigation forms `message`, `channel`,
+`repo`, `project`, `pr` and `issue`; invite, authorization and install links get "This
+link doesn't work". For example,
+`https://relay.example/open/message?channel=<uuid>&id=<event>` opens
+`buzz://message?channel=<uuid>&id=<event>`.
 
 ## Rendering in chat (desktop)
 
