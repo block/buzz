@@ -107,7 +107,7 @@ void shareDeliveryTests() {
     );
     await tester.pumpAndSettle();
     expect(draftText(), 'Still here');
-    expect(find.text('Couldn’t add the shared files.'), findsOneWidget);
+    expect(find.text('Couldn’t add some of what you shared.'), findsOneWidget);
     expect(find.byTooltip('Remove attachment'), findsNothing);
 
     // A share with nothing left to add leaves the draft alone, unasked.
@@ -124,7 +124,25 @@ void shareDeliveryTests() {
     await tester.pumpAndSettle();
     expect(find.text('Add to your draft?'), findsNothing);
     expect(draftText(), 'Still here');
-    expect(find.text('Couldn’t add the shared files.'), findsOneWidget);
+    expect(find.text('Couldn’t add some of what you shared.'), findsOneWidget);
+
+    // Items the extension couldn't load are reported even when others land.
+    final partial = share('55555555-5555-4555-8555-555555555555', [], [
+      'ok.png',
+    ]);
+    await deliver(
+      PendingShare(
+        id: partial.id,
+        target: null,
+        text: partial.text,
+        files: partial.files,
+        missed: 1,
+      ),
+    );
+    await tester.tap(find.text('Add'));
+    await tester.pumpAndSettle();
+    expect(find.byTooltip('Remove attachment'), findsOneWidget);
+    expect(find.text('Couldn’t add some of what you shared.'), findsOneWidget);
   });
 
   testWidgets('a share to the open conversation joins the composer on screen', (

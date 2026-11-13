@@ -58,7 +58,8 @@ Future<void> _deliverShare(
   ValueNotifier<String?> uploadError,
 ) async {
   var files = const <XFile>[];
-  var filesFailed = false;
+  // Items the extension already failed to load count as failed too.
+  var filesFailed = share.missed > 0;
   try {
     // The composer owns its copies; the app group's are deleted right away.
     // The pending share is only a hand-off: the items stay in the app they
@@ -76,7 +77,7 @@ Future<void> _deliverShare(
   if (text.isEmpty && files.isEmpty) {
     // Nothing survived, so the draft stays as it was.
     if (context.mounted && filesFailed) {
-      uploadError.value = 'Couldn’t add the shared files.';
+      uploadError.value = 'Couldn’t add some of what you shared.';
     }
     return;
   }
@@ -108,7 +109,6 @@ Future<void> _deliverShare(
       ),
     );
   }
-  if (filesFailed) uploadError.value = 'Couldn’t add the shared files.';
   if (files.isNotEmpty &&
       !_queueComposerImages(
         files,
@@ -121,7 +121,10 @@ Future<void> _deliverShare(
     for (final file in files) {
       await _deleteXFile(file);
     }
+    return;
   }
+  // After queueing, which clears any earlier upload error.
+  if (filesFailed) uploadError.value = 'Couldn’t add some of what you shared.';
 }
 
 /// Asks whether a share replaces the draft already in this conversation.

@@ -21,15 +21,19 @@ final class ShareViewController: UIViewController {
     let target = (extensionContext?.intent as? INSendMessageIntent)?.conversationIdentifier
     var text: [String] = []
     var files: [String] = []
+    // Items that couldn't be loaded, so the app can say some didn't arrive.
+    var missed = 0
     let items = (extensionContext?.inputItems as? [NSExtensionItem]) ?? []
     for provider in items.flatMap({ $0.attachments ?? [] }) {
       switch await load(provider, into: directory) {
       case .text(let value): text.append(value)
       case .file(let name): files.append(name)
-      case nil: break
+      case nil: missed += 1
       }
     }
-    var manifest: [String: Any] = ["version": 1, "text": text, "files": files]
+    var manifest: [String: Any] = [
+      "version": 1, "text": text, "files": files, "missed": missed,
+    ]
     if let target { manifest["target"] = target }
     let data = try! JSONSerialization.data(withJSONObject: manifest)
     try! data.write(to: directory.appendingPathComponent("share.json"), options: .atomic)

@@ -27,6 +27,7 @@ class PendingShare {
     required this.target,
     required this.text,
     required this.files,
+    this.missed = 0,
   });
 
   final String id;
@@ -40,6 +41,10 @@ class PendingShare {
 
   /// Paths of the shared images and videos copied into the app group.
   final List<String> files;
+
+  /// Shared items the extension couldn't load or copy, so they are absent
+  /// from [text] and [files].
+  final int missed;
 
   /// The composer text the share adds: each URL or text item on its own line.
   String get composerText => text.join('\n');
@@ -80,8 +85,10 @@ Future<PendingShare> loadPendingShare(
   final text = json['text'];
   final files = json['files'];
   final target = json['target'];
+  final missed = json['missed'] ?? 0;
   if (text is! List ||
       files is! List ||
+      missed is! int ||
       (target != null && target is! String)) {
     throw PendingShareUnavailable('share $shareId has a malformed manifest');
   }
@@ -90,6 +97,7 @@ Future<PendingShare> loadPendingShare(
     target: target == null ? null : parseShareConversationIdentifier(target),
     text: [for (final item in text) item as String],
     files: [for (final name in files) '${directory.path}/${_fileName(name)}'],
+    missed: missed,
   );
 }
 

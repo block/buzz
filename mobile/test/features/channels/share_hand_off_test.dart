@@ -198,6 +198,15 @@ void main() {
         'files': <String>[],
       },
     ),
+    (
+      'a manifest with a malformed missed count',
+      {
+        'version': 1,
+        'text': ['hello'],
+        'files': <String>[],
+        'missed': 'one',
+      },
+    ),
     ('a manifest from an unknown version', {'version': 2}),
     ('a missing manifest', null),
   ]) {
