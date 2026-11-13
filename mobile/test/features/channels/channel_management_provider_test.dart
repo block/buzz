@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:buzz/features/channels/channel.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -812,6 +814,91 @@ void main() {
       },
     );
 
+    for (final (label, olderAnswer) in [
+      ('a roster', [_heldRoster('bot', 2)]),
+      ('no roster event', <NostrEvent>[]),
+      ('an empty roster', [_emptyHeldRoster(2)]),
+    ]) {
+      test('a superseded roster read answering with $label does not replace '
+          'the offline roster', () async {
+        final session = _HeldRosterRelaySession();
+        final container = ProviderContainer(
+          retry: (_, _) => null,
+          overrides: [relaySessionProvider.overrideWith(() => session)],
+        );
+        addTearDown(container.dispose);
+        final subscription = container.listen(
+          channelMembersProvider(_channelId),
+          (_, _) {},
+        );
+        addTearDown(subscription.close);
+        Future<String> role() async => (await container.read(
+          channelMembersProvider(_channelId).future,
+        )).single.role;
+
+        expect(await role(), 'bot');
+        await container.pump();
+
+        // Two roster updates arrive; the first read answers after the second.
+        final older = Completer<List<NostrEvent>>();
+        session.nextRead = older.future;
+        session.emit(_heldRoster('bot', 2));
+        await container.pump();
+        final newer = Completer<List<NostrEvent>>();
+        session.nextRead = newer.future;
+        session.emit(_heldRoster('member', 3));
+        await container.pump();
+        newer.complete([_heldRoster('member', 3)]);
+        expect(await role(), 'member');
+        older.complete(olderAnswer);
+        await container.pump();
+
+        session.disconnect();
+        await container.pump();
+        expect(await role(), 'member');
+      });
+    }
+
+    test(
+      'a roster read torn down with no newer read still updates the offline roster',
+      () async {
+        final session = _HeldRosterRelaySession();
+        final container = ProviderContainer(
+          retry: (_, _) => null,
+          overrides: [relaySessionProvider.overrideWith(() => session)],
+        );
+        addTearDown(container.dispose);
+        var subscription = container.listen(
+          channelMembersProvider(_channelId),
+          (_, _) {},
+        );
+        Future<String> role() async => (await container.read(
+          channelMembersProvider(_channelId).future,
+        )).single.role;
+        expect(await role(), 'bot');
+        await container.pump();
+
+        // A roster update arrives; the user leaves before its read answers.
+        final fresh = Completer<List<NostrEvent>>();
+        session.nextRead = fresh.future;
+        session.emit(_heldRoster('member', 2));
+        await container.pump();
+        subscription.close();
+        await container.pump();
+        fresh.complete([_heldRoster('member', 2)]);
+        await container.pump();
+
+        session.disconnect();
+        await container.pump();
+        subscription = container.listen(
+          channelMembersProvider(_channelId),
+          (_, _) {},
+        );
+        addTearDown(subscription.close);
+        expect(await role(), 'member');
+      },
+    );
+
     test('keeps the member snapshot available during reconnect', () {
       final cachedMembers = [
         ChannelMember(
@@ -948,4 +1035,64 @@ class _ConnectionAwareRelaySession extends RelaySessionNotifier {
     void Function(NostrEvent) onEvent, {
     void Function(String message)? onClosed,
   }) async => () {};
+}
+
+NostrEvent _heldRoster(String role, int version) => NostrEvent(
+  id: 'members-$version',
+  pubkey: 'owner',
+  createdAt: 1800000000 + version,
+  kind: 39002,
+  tags: [
+    ['d', _channelId],
+    ['p', _memberPubkey, '', role],
+  ],
+  content: '',
+  sig: '',
+);
+
+NostrEvent _emptyHeldRoster(int version) => NostrEvent(
+  id: 'empty-members-$version',
+  pubkey: 'owner',
+  createdAt: 1800000000 + version,
+  kind: 39002,
+  tags: [
+    ['d', _channelId],
+  ],
+  content: '',
+  sig: '',
+);
+
+/// Answers each roster read with [nextRead] and delivers live roster updates
+/// through [emit].
+class _HeldRosterRelaySession extends RelaySessionNotifier {
+  Future<List<NostrEvent>> nextRead = Future.value([_heldRoster('bot', 1)]);
+  void Function(NostrEvent)? _listener;
+
+  @override
+  SessionState build() => const SessionState(status: SessionStatus.connected);
+
+  @override
+  Future<List<NostrEvent>> fetchHistory(
+    NostrFilter filter, {
+    Duration timeout = const Duration(seconds: 8),
+  }) => nextRead;
+
+  @override
+  Future<void Function()> subscribeWithStatus(
+    NostrFilter filter,
+    void Function(NostrEvent) onEvent, {
+    void Function(String message)? onClosed,
+    required void Function(RelaySubscriptionStatus status) onStatusChanged,
+  }) async {
+    _listener = onEvent;
+    onStatusChanged(RelaySubscriptionStatus.ready);
+    return () {
+      if (identical(_listener, onEvent)) _listener = null;
+    };
+  }
+
+  void emit(NostrEvent event) => _listener?.call(event);
+
+  void disconnect() =>
+      state = const SessionState(status: SessionStatus.disconnected);
 }
