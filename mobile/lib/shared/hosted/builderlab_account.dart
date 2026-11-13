@@ -443,6 +443,14 @@ class BuilderlabAccountClient {
       failed = true;
     }
     if (failed) {
+      // The record may already be gone, so an unrestored session's credential
+      // must survive for the retry's push stops.
+      if (_credential == null && signedOut != null) {
+        _signedOut = (
+          credential: signedOut,
+          until: DateTime.now().add(pushStopWindow),
+        );
+      }
       // The account stays signed in, so the extension gets its copy back.
       _unshared = _credential;
       _share();

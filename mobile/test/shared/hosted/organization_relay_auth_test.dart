@@ -47,8 +47,11 @@ void main() {
     late int assertionLifetime;
     late String Function(String relayUrl) tokenFor;
 
-    BuilderlabAccountClient organizationClient() => BuilderlabAccountClient(
+    BuilderlabAccountClient organizationClient({
+      Future<void> Function(String?)? onSessionChanged,
+    }) => BuilderlabAccountClient(
       accountOrigin: organization,
+      onSessionChanged: onSessionChanged,
       httpClient: MockClient((request) async {
         requests.add(request);
         expect(request.url.origin, organization.origin);
@@ -391,13 +394,24 @@ void main() {
     });
 
     test('a push stop still gets an assertion after signing out a saved '
-        'session that was never restored', () async {
+        'session that was never restored, across a failed cleanup', () async {
       // An offline launch keeps the saved session without adopting it.
       await saveSession();
-      final account = organizationClient();
+      // The first cleanup deletes the record, then fails to unshare.
+      var unshareFails = true;
+      final account = organizationClient(
+        onSessionChanged: (_) async {
+          if (unshareFails) throw StateError('unshare failed');
+        },
+      );
       final auth = relayAuth(account);
       boundIdentity = {'pubkey_hex': keys.public};
 
+      await expectLater(
+        account.clearLocalSession(),
+        throwsA(AccountFailure.storage),
+      );
+      unshareFails = false;
       await account.clearLocalSession();
       expect(await account.restore(), isNull);
       requests.clear();
