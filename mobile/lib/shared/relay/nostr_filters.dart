@@ -135,29 +135,55 @@ abstract final class NostrFilters {
     limit: 1,
   );
 
-  /// Forum posts (kind:45001) in a channel.
+  /// Root kinds accepted from desktop, agents, and mobile in a forum.
+  static const forumRootKinds = [9, 40002, 45001];
+
+  /// Reply kinds accepted from desktop, agents, and mobile in a forum.
+  static const forumReplyKinds = [9, 40002, 45003];
+
+  /// A root window, so a busy thread cannot consume the post budget.
   static NostrFilter forumPosts(
     String channelId, {
     int limit = 50,
     int? until,
+    String? beforeId,
   }) => NostrFilter(
-    kinds: [45001],
+    kinds: forumRootKinds,
     tags: {
       '#h': [channelId],
     },
     limit: limit,
     until: until,
+    extensions: {
+      'top_level': true,
+      'include_summaries': true,
+      'include_aux': true,
+      'before_id': ?beforeId,
+    },
   );
 
-  /// Replies in a forum thread (root event id + channel scope).
-  static NostrFilter forumThread(String rootId, String channelId) =>
-      NostrFilter(
-        kinds: [9, 45003],
-        tags: {
-          '#e': [rootId],
-          '#h': [channelId],
-        },
-      );
+  /// A NIP-CW thread window, including nested replies and auxiliary events.
+  static NostrFilter forumThread(
+    String rootId,
+    String channelId, {
+    int limit = 50,
+    int? until,
+    String? beforeId,
+  }) => NostrFilter(
+    kinds: forumReplyKinds,
+    tags: {
+      '#e': [rootId],
+      '#h': [channelId],
+    },
+    limit: limit,
+    until: until,
+    extensions: {
+      'thread_window': true,
+      'depth_limit': 100,
+      'include_aux': true,
+      'before_id': ?beforeId,
+    },
+  );
 
   /// Global user search over kind:0 profiles (NIP-50 via the HTTP bridge).
   ///

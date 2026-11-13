@@ -32,23 +32,6 @@ class _DeadlineHttpSession extends RelaySessionNotifier {
   }
 }
 
-class _DeadlineWsSession extends RelaySessionNotifier {
-  int historyCount = 0;
-
-  @override
-  SessionState build() => const SessionState(status: SessionStatus.connected);
-
-  @override
-  Future<List<NostrEvent>> fetchHistory(
-    NostrFilter filter, {
-    Duration timeout = const Duration(seconds: 8),
-  }) async {
-    historyCount++;
-    // WebSocket CLOSED: Exception("error: query timed out")
-    throw Exception('error: query timed out');
-  }
-}
-
 class _OrdinaryErrorSession extends RelaySessionNotifier {
   int queryCount = 0;
 
@@ -200,14 +183,14 @@ void main() {
   });
 
   // -------------------------------------------------------------------------
-  // forumPostsProvider — WebSocket history path
+  // forumPostsProvider — HTTP channel-window path
   // -------------------------------------------------------------------------
 
   group('forumPostsProvider deadline retry suppression', () {
     test(
       'deadline: settles error in exactly one call and does not rebuild',
       () async {
-        final session = _DeadlineWsSession();
+        final session = _DeadlineHttpSession();
         final container = ProviderContainer(
           retry: relayProviderRetry,
           overrides: [relaySessionProvider.overrideWith(() => session)],
@@ -221,7 +204,7 @@ void main() {
         await Future<void>.delayed(const Duration(milliseconds: 500));
 
         expect(container.read(forumPostsProvider('chan')).hasError, isTrue);
-        expect(session.historyCount, 1);
+        expect(session.queryCount, 1);
       },
     );
   });

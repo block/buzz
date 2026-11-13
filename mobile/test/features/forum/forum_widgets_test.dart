@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/features/channels/channel.dart';
+import 'package:buzz/features/channels/channel_window.dart';
 import 'package:buzz/features/forum/forum_models.dart';
 import 'package:buzz/features/forum/forum_post_card.dart';
 import 'package:buzz/features/forum/forum_posts_view.dart';
@@ -104,7 +105,9 @@ Widget _buildPostsView({
     overrides: [
       userCacheProvider.overrideWith(() => _FakeUserCacheNotifier(users)),
       profileProvider.overrideWith(() => _FakeProfileNotifier()),
-      forumPostsProvider(ch.id).overrideWith((ref) async => postsResponse),
+      forumPostsProvider(
+        ch.id,
+      ).overrideWithBuild((ref, notifier) async => postsResponse),
       relayClientProvider.overrideWithValue(
         RelayClient(baseUrl: 'http://localhost:3000'),
       ),
@@ -148,7 +151,7 @@ Widget _buildThreadPage({
       forumThreadProvider((
         channelId: _channelId,
         eventId: postEventId,
-      )).overrideWith((ref) async => threadResponse),
+      )).overrideWithBuild((ref, notifier) async => threadResponse),
       savedPrefsProvider.overrideWithValue(_testPrefs),
       relayClientProvider.overrideWithValue(
         RelayClient(baseUrl: 'http://localhost:3000'),
@@ -187,6 +190,44 @@ class _CountingForumSession extends RelaySessionNotifier {
   SessionState build() => const SessionState(status: SessionStatus.connected);
 
   @override
+  Future<void Function()> subscribeWithStatus(
+    NostrFilter filter,
+    void Function(NostrEvent) onEvent, {
+    void Function(String message)? onClosed,
+    required void Function(RelaySubscriptionStatus status) onStatusChanged,
+  }) async {
+    onStatusChanged(RelaySubscriptionStatus.ready);
+    return () {};
+  }
+
+  @override
+  Future<List<NostrEvent>> queryRelay(
+    List<NostrFilter> filters, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    final filter = filters.single;
+    fetchCount++;
+    forumAttempts++;
+    if (park case final park?) await park.future;
+    if (error case final error?) throw error;
+    if (filter.ids != null) return const [];
+    return [
+      NostrEvent(
+        id: 'bounds',
+        pubkey: 'relay',
+        createdAt: 1,
+        kind: 39006,
+        tags: const [
+          ['d', 'forum-channel:head'],
+          ['h', 'forum-channel'],
+        ],
+        content: '{"has_more":false,"next_cursor":null}',
+        sig: '',
+      ),
+    ];
+  }
+
+  @override
   Future<List<NostrEvent>> fetchHistory(
     NostrFilter filter, {
     Duration timeout = const Duration(seconds: 8),
@@ -202,11 +243,57 @@ class _CountingForumSession extends RelaySessionNotifier {
   }
 }
 
+class _PagedForumSession extends _CountingForumSession {
+  _PagedForumSession() : super(null);
+  final forumQueries = <NostrFilter>[];
+  bool failOlder = false;
+
+  @override
+  Future<List<NostrEvent>> queryRelay(
+    List<NostrFilter> filters, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    final filter = filters.single;
+    forumQueries.add(filter);
+    final older = filter.until != null;
+    if (older && failOlder) throw RelayException(503, 'query unavailable');
+    final id = (older ? '2' : '1') * 64;
+    return [
+      NostrEvent(
+        id: id,
+        pubkey: 'alice',
+        createdAt: older ? 900 : 1000,
+        kind: older ? 40002 : 9,
+        tags: const [
+          ['h', _channelId],
+        ],
+        content: older ? 'Older agent post' : 'Desktop post',
+        sig: '',
+      ),
+      NostrEvent(
+        id: 'bounds',
+        pubkey: 'relay',
+        createdAt: 1,
+        kind: 39006,
+        tags: [
+          ['d', '$_channelId:${older ? '1000:${'1' * 64}' : 'head'}'],
+          ['h', _channelId],
+        ],
+        content: older
+            ? '{"has_more":false,"next_cursor":null}'
+            : '{"has_more":true,"next_cursor":{"created_at":1000,"id":"${'1' * 64}"}}',
+        sig: '',
+      ),
+    ];
+  }
+}
+
 Widget _buildLiveForum(_CountingForumSession session, Widget child) =>
     ProviderScope(
       // Isolate the timers from Riverpod's own error retry.
       retry: (_, _) => null,
       overrides: [
+        relayConfigProvider.overrideWith(() => _ForumConfig()),
         relaySessionProvider.overrideWith(() => session),
         userCacheProvider.overrideWith(() => _FakeUserCacheNotifier(const {})),
         knownAgentPubkeysProvider.overrideWithValue(const {}),
@@ -221,6 +308,11 @@ Widget _buildLiveForum(_CountingForumSession session, Widget child) =>
         home: Scaffold(body: child),
       ),
     );
+
+class _ForumConfig extends RelayConfigNotifier {
+  @override
+  RelayConfig build() => const RelayConfig(baseUrl: 'https://relay.example');
+}
 
 void main() {
   setUp(() async {
@@ -680,6 +772,122 @@ void main() {
   });
 
   group('ForumPostsView', () {
+    testWidgets(
+      'distinguishes an unproven fallback continuation from known older posts',
+      (tester) async {
+        for (final uncertain in [true, false]) {
+          for (final failed in [false, true]) {
+            await tester.pumpWidget(
+              _buildPostsView(
+                postsResponse: ForumPostsResponse(
+                  posts: [_makePost(content: 'Readable post')],
+                  nextCursor: ChannelPageCursor(
+                    createdAt: 1,
+                    eventId: 'a' * 64,
+                  ),
+                  hasUnconfirmedContinuation: uncertain,
+                  loadMoreError: failed
+                      ? Exception('history check failed')
+                      : null,
+                ),
+              ),
+            );
+            await tester.pumpAndSettle();
+            expect(find.text('Readable post'), findsOneWidget);
+            if (uncertain) {
+              expect(find.text('Older posts are available.'), findsNothing);
+              expect(find.text('Retry older posts'), findsNothing);
+              expect(
+                find.text(
+                  failed
+                      ? 'History may be incomplete. The relay could not continue this history check.'
+                      : 'There may be older posts',
+                ),
+                findsOneWidget,
+              );
+              expect(
+                find.text(
+                  failed ? 'Check history again' : 'Check for older posts',
+                ),
+                findsOneWidget,
+              );
+            } else {
+              expect(
+                find.text(
+                  failed
+                      ? 'Could not load older posts. History is incomplete.'
+                      : 'Older posts are available.',
+                ),
+                findsOneWidget,
+              );
+              expect(
+                find.text(failed ? 'Retry older posts' : 'Load older posts'),
+                findsOneWidget,
+              );
+            }
+            await tester.pumpWidget(const SizedBox());
+            await tester.pumpAndSettle();
+          }
+        }
+      },
+    );
+
+    testWidgets(
+      'loads older mixed-kind posts and keeps them through the next poll',
+      (tester) async {
+        final session = _PagedForumSession();
+        await tester.pumpWidget(
+          _buildLiveForum(
+            session,
+            ForumPostsView(channel: _forumChannel, currentPubkey: 'self'),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(find.text('Desktop post'), findsOneWidget);
+        expect(find.text('Older agent post'), findsNothing);
+        await tester.tap(find.text('Load older posts'));
+        await tester.pumpAndSettle();
+        expect(find.text('Older agent post'), findsOneWidget);
+        expect(session.forumQueries, hasLength(2));
+        await tester.pump(const Duration(seconds: 15));
+        await tester.pumpAndSettle();
+        expect(find.text('Older agent post'), findsOneWidget);
+        expect(session.forumQueries, hasLength(3));
+        expect(session.forumQueries.last.until, isNull);
+        await tester.pumpWidget(const SizedBox());
+      },
+    );
+
+    testWidgets(
+      'failed continuation stays incomplete and its Retry loads the same cursor',
+      (tester) async {
+        final session = _PagedForumSession()..failOlder = true;
+        await tester.pumpWidget(
+          _buildLiveForum(
+            session,
+            ForumPostsView(channel: _forumChannel, currentPubkey: 'self'),
+          ),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Load older posts'));
+        await tester.pumpAndSettle();
+        expect(find.text('Desktop post'), findsOneWidget);
+        expect(
+          find.text('Could not load older posts. History is incomplete.'),
+          findsOneWidget,
+        );
+        session.failOlder = false;
+        await tester.tap(find.text('Retry older posts'));
+        await tester.pumpAndSettle();
+        expect(find.text('Older agent post'), findsOneWidget);
+        expect(
+          session.forumQueries[1].extensions['before_id'],
+          session.forumQueries[2].extensions['before_id'],
+        );
+        await tester.pumpWidget(const SizedBox());
+      },
+    );
+
     testWidgets('shows empty state for members', (tester) async {
       await tester.pumpWidget(
         _buildPostsView(postsResponse: const ForumPostsResponse(posts: [])),
@@ -771,9 +979,83 @@ void main() {
       expect(find.text('First post'), findsOneWidget);
       expect(find.text('Second post'), findsOneWidget);
     });
+
+    testWidgets(
+      'separates unconfirmed history from a retryable refresh failure',
+      (tester) async {
+        final post = _makePost(content: 'Readable post');
+        await tester.pumpWidget(
+          _buildPostsView(
+            postsResponse: ForumPostsResponse(
+              posts: [post],
+              hasUnconfirmedHistory: true,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(find.text('Readable post'), findsOneWidget);
+        expect(
+          find.text("This relay can't confirm that history is complete."),
+          findsOneWidget,
+        );
+        expect(find.text('Retry refresh'), findsNothing);
+        expect(
+          find.text('Could not refresh. Loaded history may be incomplete.'),
+          findsNothing,
+        );
+
+        await tester.pumpWidget(const SizedBox());
+        await tester.pumpAndSettle();
+        await tester.pumpWidget(
+          _buildPostsView(
+            postsResponse: ForumPostsResponse(
+              posts: [post],
+              refreshError: Exception('temporary failure'),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(find.text('Readable post'), findsOneWidget);
+        expect(
+          find.text("This relay can't confirm that history is complete."),
+          findsNothing,
+        );
+        expect(
+          find.text('Could not refresh. Loaded history may be incomplete.'),
+          findsOneWidget,
+        );
+        expect(find.text('Retry refresh'), findsOneWidget);
+      },
+    );
   });
 
   group('ForumThreadPage', () {
+    testWidgets('shows unverified thread effects without a refresh retry', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildThreadPage(
+          threadResponse: ForumThreadResponse(
+            post: _makePost(content: 'Readable root'),
+            replies: const [],
+            totalReplies: 0,
+            hasUnconfirmedHistory: true,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Readable root'), findsOneWidget);
+      expect(
+        find.text("This relay can't confirm that history is complete."),
+        findsOneWidget,
+      );
+      expect(find.text('Retry refresh'), findsNothing);
+      expect(
+        find.text('No replies yet. Be the first to respond.'),
+        findsNothing,
+      );
+    });
+
     AvatarImage avatarIn(WidgetTester tester, Key key) =>
         tester.widget<AvatarImage>(
           find.descendant(

@@ -181,10 +181,11 @@ void main() {
     test('parses paginated response', () {
       final response = ForumPostsResponse.fromJson({
         'messages': [_postJson(), _postJson(eventId: 'evt2')],
-        'next_cursor': 900,
+        'next_cursor': {'created_at': 900, 'id': 'a' * 64},
       });
       expect(response.posts, hasLength(2));
-      expect(response.nextCursor, 900);
+      expect(response.nextCursor?.createdAt, 900);
+      expect(response.nextCursor?.eventId, 'a' * 64);
     });
 
     test('handles empty messages', () {
@@ -208,12 +209,12 @@ void main() {
         'root': _postJson(),
         'replies': [_replyJson(), _replyJson(eventId: 'reply2')],
         'total_replies': 2,
-        'next_cursor': 'abc',
+        'next_cursor': {'created_at': 900, 'id': 'b' * 64},
       });
       expect(response.post.eventId, 'evt1');
       expect(response.replies, hasLength(2));
       expect(response.totalReplies, 2);
-      expect(response.nextCursor, 'abc');
+      expect(response.nextCursor?.eventId, 'b' * 64);
     });
 
     test('handles empty replies', () {

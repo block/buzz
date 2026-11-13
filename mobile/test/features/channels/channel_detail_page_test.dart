@@ -3348,7 +3348,7 @@ void main() {
     testWidgets('keeps loaded forum content visible during reconnect', (
       tester,
     ) async {
-      final relaySession = _ReconnectingRelaySession();
+      final relaySession = _ReconnectingRelaySession(forumHistory: true);
       final forumChannel = Channel(
         id: _channelId,
         name: 'design-forum',
@@ -20982,10 +20982,12 @@ class _VoiceDmRelaySession extends _IdentityUpdateRelaySession {
 
 class _ReconnectingRelaySession extends RelaySessionNotifier {
   final SessionStatus initialStatus;
+  final bool forumHistory;
   void setReconnecting() =>
       state = const SessionState(status: SessionStatus.reconnecting);
   _ReconnectingRelaySession({
     this.initialStatus = SessionStatus.reconnecting,
+    this.forumHistory = false,
     this.huddleCreatePublishGate,
     this.huddleEndPublishGate,
   });
@@ -21004,6 +21006,14 @@ class _ReconnectingRelaySession extends RelaySessionNotifier {
     NostrFilter filter, {
     Duration timeout = const Duration(seconds: 8),
   }) async => [];
+
+  @override
+  Future<List<NostrEvent>> queryRelay(
+    List<NostrFilter> filters, {
+    Duration timeout = const Duration(seconds: 8),
+  }) => forumHistory
+      ? Future.value(const [])
+      : super.queryRelay(filters, timeout: timeout);
 
   @override
   Future<NostrEvent> publish(
