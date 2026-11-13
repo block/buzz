@@ -128,6 +128,17 @@ function retireLiveChannel(entry: LiveChannelEntry) {
 
 const SEEN_NOTIFICATION_EVENT_LIMIT = 5_000;
 
+// Reconnect replay (sleep/wake, network blips) and membership resyncs move the
+// subscription start forward, but the relay still delivers messages that were
+// sent while we were away. Alert for recent ones; older backlog stays silent
+// so a long sleep does not unleash a burst of notifications.
+export const MISSED_MESSAGE_ALERT_WINDOW_SECONDS = 10 * 60;
+
+// A channel that appears after the initial sync (typically a brand-new DM whose
+// first message is what created it) subscribes slightly in the past so the
+// message that caused it to appear is not lost.
+export const NEW_CHANNEL_BACKFILL_SECONDS = 120;
+
 export function trackSeenEvent(
   seenEventIds: Set<string>,
   eventId: string,
@@ -214,7 +225,10 @@ export function useLiveChannelUpdates(
 
       // Suppress backlog events that predate our subscription — these are
       // historical replays, not live messages.
-      if (event.created_at < dmSubscriptionStartedAtRef.current) {
+      if (
+        event.created_at <
+        dmSubscriptionStartedAtRef.current - MISSED_MESSAGE_ALERT_WINDOW_SECONDS
+      ) {
         return;
       }
 
@@ -381,6 +395,7 @@ export function useLiveChannelUpdates(
   );
 
   const liveSubsRef = React.useRef(new Map<string, LiveChannelEntry>());
+  const hasInitialChannelSyncRef = React.useRef(false);
 
   React.useEffect(() => {
     let isCancelled = false;
@@ -404,6 +419,12 @@ export function useLiveChannelUpdates(
         dmSubscriptionStartedAtRef.current = Math.floor(Date.now() / 1000);
       }
 
+      const nowSeconds = Math.floor(Date.now() / 1_000);
+      const since = hasInitialChannelSyncRef.current
+        ? nowSeconds - NEW_CHANNEL_BACKFILL_SECONDS
+        : nowSeconds;
+      if (targetIds.size > 0) hasInitialChannelSyncRef.current = true;
+
       const pending = Array.from(targetIds).map((channelId) => {
         const existing = activeSubs.get(channelId);
         if (existing) return existing.pending;
@@ -419,7 +440,7 @@ export function useLiveChannelUpdates(
               kinds: [...CHANNEL_EVENT_KINDS],
               "#h": [channelId],
               limit: 1000,
-              since: Math.floor(Date.now() / 1_000),
+              since,
             },
             (event) => {
               if (activeSubs.get(channelId) === entry) {
