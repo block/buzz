@@ -465,8 +465,10 @@ test-unit:
         cargo test -p buzz-db --doc
         # Storage accounting crosses three crates whose focused regression
         # suites are otherwise absent from the infra-free unit lane.
+        # The request-body error classifier decides 408 vs 413 vs 500 at every
+        # body-consumption path (relay API guard, media uploads); infra-free.
         cargo nextest run -p buzz-media --lib \
-            -E 'test(=bucket_index::tests::bucket_snapshot_json_round_trip_preserves_community_keys)'
+            -E 'test(=bucket_index::tests::bucket_snapshot_json_round_trip_preserves_community_keys) + test(/^upload::tests::classify_body_error/) + test(=upload::tests::video_stream_idle_timeout_maps_to_request_body_timeout_not_500)'
         # buzz-admin: storage-snapshot worker, the community archive command
         # parser, validation, and propagation-evidence tests, and the partition
         # audit outcome contract, NIP-FI policy/backfill, and user-deletion intake.
