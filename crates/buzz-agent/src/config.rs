@@ -608,6 +608,11 @@ pub struct Config {
     /// Default (env unset/empty) is `None` — hooks are off unless the
     /// operator explicitly opts in.
     pub hook_servers: HookServers,
+    /// Call the `_PreTurn` hook once per prompt, before the first model
+    /// request of that turn. Default off; opt in with
+    /// `BUZZ_AGENT_PRETURN_HOOK=1` (or `true`). Still requires
+    /// `MCP_HOOK_SERVERS` like every other hook.
+    pub preturn_hook: bool,
     /// The effective `DATABRICKS_MODEL_FILTER` value. This is parsed by the
     /// caller and passed explicitly so discovery never consults process env.
     pub databricks_model_filter: Option<DatabricksModelFilter>,
@@ -745,6 +750,7 @@ impl Config {
             stop_max_rejections: parse_env("BUZZ_AGENT_STOP_MAX_REJECTIONS", 3u32)?,
             require_reply: parse_env("BUZZ_AGENT_REQUIRE_REPLY", 0u8)? != 0,
             hook_servers: parse_hook_servers_env("MCP_HOOK_SERVERS"),
+            preturn_hook: parse_flag(env("BUZZ_AGENT_PRETURN_HOOK").as_deref()),
             databricks_model_filter: DatabricksModelFilter::parse(
                 env("DATABRICKS_MODEL_FILTER").as_deref(),
             )?,
@@ -801,6 +807,7 @@ impl Config {
             stop_max_rejections: 0,
             require_reply: false,
             hook_servers: HookServers::None,
+            preturn_hook: false,
             databricks_model_filter,
             hints_enabled: false,
             thinking_effort: None,
@@ -1066,6 +1073,13 @@ pub fn pricing_authority(base_url: &str) -> Option<&'static str> {
     }
 }
 
+/// Boolean opt-in flag: `1` or `true` (case-insensitive, trimmed) enables;
+/// anything else, including unset, disables.
+fn parse_flag(raw: Option<&str>) -> bool {
+    raw.map(str::trim)
+        .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+}
+
 fn parse_env<T: std::str::FromStr>(key: &str, default: T) -> Result<T, String>
 where
     T::Err: std::fmt::Display,
@@ -1188,6 +1202,18 @@ mod tests {
             .unwrap();
         assert!(filter.matches("goose-é"));
         assert!(!filter.matches("goose-eé"));
+    }
+
+    #[test]
+    fn preturn_flag_accepts_one_and_true_only() {
+        assert!(parse_flag(Some("1")));
+        assert!(parse_flag(Some("true")));
+        assert!(parse_flag(Some(" TRUE ")));
+        assert!(!parse_flag(None));
+        assert!(!parse_flag(Some("")));
+        assert!(!parse_flag(Some("0")));
+        assert!(!parse_flag(Some("false")));
+        assert!(!parse_flag(Some("yes")));
     }
 
     #[test]
