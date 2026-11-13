@@ -170,6 +170,31 @@ void main() {
     expect(relay.author, isNull);
   });
 
+  test('a refused metadata response is aborted, not left unread', () async {
+    final owner = nostr.Keys.generate();
+    final relay = _ArchiveRelay(null);
+    Future<void>? aborted;
+    final client = MockClient.streaming((request, _) async {
+      aborted = (request as http.Abortable).abortTrigger;
+      return http.StreamedResponse(StreamController<List<int>>().stream, 503);
+    });
+    final container = ProviderContainer(
+      overrides: [
+        meSyncProvider.overrideWithValue(
+          MeSync(
+            relay,
+            RelayConfig(baseUrl: 'https://relay.test', nsec: owner.nsec),
+          ),
+        ),
+        relayInformationClientProvider.overrideWithValue(client),
+      ],
+    );
+    addTearDown(container.dispose);
+    addTearDown(client.close);
+    expect(await container.read(identityArchivesProvider.future), isEmpty);
+    await aborted!.timeout(const Duration(seconds: 1));
+  });
+
   test(
     'contact keys and unavailable metadata are not archive authority',
     () async {

@@ -22,11 +22,14 @@ final relayInformationClientProvider = Provider<http.Client>((ref) {
 final identityArchivesProvider = FutureProvider<Set<String>>((ref) async {
   final sync = ref.watch(meSyncProvider);
   final client = ref.watch(relayInformationClientProvider);
+  // Completed on every exit, so a dropped, refused or timed-out response
+  // stops downloading on a shared session instead of staying in flight.
+  final abort = Completer<void>();
   try {
     final uri = Uri.parse(sync.community);
     final response = await client
         .send(
-          http.Request('GET', uri)
+          http.AbortableRequest('GET', uri, abortTrigger: abort.future)
             ..headers['Accept'] = 'application/nostr+json',
         )
         .timeout(const Duration(seconds: 3));
@@ -66,6 +69,8 @@ final identityArchivesProvider = FutureProvider<Set<String>>((ref) async {
     return (await _parseArchives(events, authority))..remove(sync.pubkey);
   } catch (_) {
     return {};
+  } finally {
+    if (!abort.isCompleted) abort.complete();
   }
 });
 

@@ -60,7 +60,9 @@ class SharedSessionClient extends http.BaseClient {
 
   /// One abort trigger per request still running, so [close] can cancel it.
   /// A request leaves the set once its response body is done, failed or
-  /// cancelled, so a long-lived handle holds nothing for finished requests.
+  /// cancelled, or once the caller's own abort trigger fires. A body nobody
+  /// listens to stays until then: the session keeps downloading it, so
+  /// callers that drop a response unread must abort it.
   final _inFlight = <Completer<void>>{};
   var _closed = false;
   http.Client? _cleartext;
@@ -159,7 +161,8 @@ class SharedSessionClient extends http.BaseClient {
           ..maxRedirects = request.maxRedirects
           ..persistentConnection = request.persistentConnection;
     // addStream keeps backpressure: the body is read only as the session
-    // reads the copy, so upload progress still tracks bytes actually sent.
+    // reads the copy, so upload progress tracks bytes the session has taken
+    // (including its read-ahead buffers), as with plain cupertino_http.
     unawaited(copy.sink.addStream(body).whenComplete(copy.sink.close));
     return copy;
   }

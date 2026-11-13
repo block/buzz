@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:buzz/shared/relay/relay_author_provider.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -89,6 +90,34 @@ void main() {
         container.dispose();
       }
     }
+  });
+
+  test('a refused relay information response is aborted', () async {
+    Future<void>? aborted;
+    final container = ProviderContainer(
+      overrides: [
+        relayInformationClientProvider.overrideWithValue(
+          MockClient.streaming((request, _) async {
+            aborted = (request as http.Abortable).abortTrigger;
+            return http.StreamedResponse(
+              StreamController<List<int>>().stream,
+              503,
+            );
+          }),
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+    final subscription = container.listen(
+      relayAuthorProvider('wss://relay.example'),
+      (_, _) {},
+    );
+    addTearDown(subscription.close);
+    expect(
+      await container.read(relayAuthorProvider('wss://relay.example').future),
+      isNull,
+    );
+    await aborted!.timeout(const Duration(seconds: 1));
   });
 
   test(
