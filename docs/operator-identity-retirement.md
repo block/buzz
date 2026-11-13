@@ -99,8 +99,8 @@ root is released too.
 
 Release never changes NIP-IA visibility and publishes nothing, so it always
 answers `200` with `stages.visibility: "unchanged"`. Only release uses that
-value; archive answers `confirmed` or `pending`. The response lists
-exactly one identity, the target, with `role: "root"`.
+value; archive answers `confirmed`, `superseded` or `pending`. The response
+lists exactly one identity, the target, with `role: "root"`.
 
 ## Clearing an archive
 
@@ -154,9 +154,12 @@ always `unsupported`.
 `200` when the NIP-IA snapshot is published (or the action does not affect
 visibility), `202` when publication is pending. Repeat the same request to
 retry it. `visibility: "confirmed"` means the `kind:13535` snapshot, the state
-clients converge on, reflects the action. The per-key `kind:8002` deltas are
-best-effort history: a failed delta is logged and never re-sent,
-because a late delta could contradict a later action. Body:
+clients converge on, reflects the action. `visibility: "superseded"` means the
+snapshot is published but a later signed NIP-IA unarchive cleared at least one
+key the action archived, so it no longer reflects the action; the identities
+still show the action's recorded result, and nothing is re-applied. The per-key
+`kind:8002` deltas are best-effort history: a failed delta is logged and never
+re-sent, because a late delta could contradict a later action. Body:
 
 ```json
 {
@@ -175,7 +178,7 @@ because a late delta could contradict a later action. Body:
 
 | Stage | Values |
 |-------|--------|
-| `visibility` | `confirmed`, `pending`, `unchanged` (release) |
+| `visibility` | `confirmed`, `superseded`, `pending`, `unchanged` (release) |
 | `newWorkAdmission` | `blocked`, `released`, `unchanged` |
 | `workflows` | `confirmed`, `partial`, `unchanged` |
 | `inFlightRuns` | `none`, `draining` |

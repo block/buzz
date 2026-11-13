@@ -1,6 +1,7 @@
 //! Route journey for identity retirement: Operator-only, feature-gated,
 //! inventory-bound archive with NIP-IA publication, replay and conflict,
-//! no operator unarchive route, and release that never clears an archive.
+//! no operator unarchive route, release that never clears an archive, and a
+//! replay superseded by a later NIP-IA unarchive.
 
 use std::sync::Arc;
 
@@ -313,6 +314,17 @@ async fn retirement_routes_are_operator_only_gated_bound_and_idempotent() {
     assert_eq!(released["identities"][0]["archived"], true);
     assert_eq!(archived(&pool, c).await, 2);
     assert!(tags(&pool, c, 8003).await.is_empty());
+
+    // A signed NIP-IA unarchive clears the agent. Replaying the archive keeps
+    // its recorded result but no longer claims the snapshot reflects it.
+    assert!(on.db.unarchive(c, &agent).await.unwrap());
+    let (status, superseded) = call(&on, &operator, "POST", &archive, &body).await;
+    assert_eq!(status, StatusCode::OK, "{superseded}");
+    assert_eq!(superseded["replayed"], true);
+    assert_eq!(superseded["identities"], first["identities"]);
+    assert_eq!(superseded["stages"]["visibility"], "superseded");
+    assert_eq!(actions(&pool, c).await, 3);
+    assert_eq!(archived(&pool, c).await, 1);
 }
 
 async fn actions(pool: &sqlx::PgPool, c: CommunityId) -> i64 {

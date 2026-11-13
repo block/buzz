@@ -294,7 +294,31 @@ pub(crate) async fn execute(
         }
     };
     let published = record.published || publish(&tenant, state, &record).await;
-    Ok(respond(&tenant, record, replayed, published))
+    let superseded = published && superseded(&tenant, state, &record).await?;
+    Ok(respond(&tenant, record, replayed, published, superseded))
+}
+
+/// Whether a later signed NIP-IA unarchive cleared a key this archive reports
+/// as archived, so the published snapshot no longer reflects the action. The
+/// stored result stays as recorded; only the visibility stage says so.
+async fn superseded(
+    tenant: &buzz_core::TenantContext,
+    state: &Arc<AppState>,
+    record: &RetirementRecord,
+) -> Result<bool, ApiError> {
+    if record.operation != RetirementOperation::Archive {
+        return Ok(false);
+    }
+    for identity in record.result.identities.iter().filter(|i| i.archived) {
+        if !state
+            .db
+            .is_archived(tenant.community(), &identity.pubkey)
+            .await?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Emit one NIP-IA `kind:8002` delta per key this archive newly archived.
@@ -363,11 +387,13 @@ fn respond(
     record: RetirementRecord,
     replayed: bool,
     published: bool,
+    superseded: bool,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let visibility = match (record.operation, published) {
-        (RetirementOperation::Release, _) => "unchanged",
-        (RetirementOperation::Archive, true) => "confirmed",
-        (RetirementOperation::Archive, false) => "pending",
+    let visibility = match (record.operation, published, superseded) {
+        (RetirementOperation::Release, _, _) => "unchanged",
+        (RetirementOperation::Archive, true, true) => "superseded",
+        (RetirementOperation::Archive, true, false) => "confirmed",
+        (RetirementOperation::Archive, false, _) => "pending",
     };
     let mut stages = serde_json::to_value(&record.result.stages).unwrap_or_default();
     stages["visibility"] = visibility.into();
