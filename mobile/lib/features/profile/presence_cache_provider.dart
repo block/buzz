@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:clock/clock.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -21,7 +22,17 @@ class PresenceCacheNotifier extends Notifier<Map<String, String>> {
   /// Bound deduplication memory; redelivery must not re-arm confirmation.
   static const _seenIdLimit = 256;
 
+  /// How long a key nobody shows stays followed, so scrolling back and forth
+  /// doesn't reopen the subscription on every row.
+  static const releaseDelay = Duration(seconds: 30);
+
   final Set<String> _tracked = {};
+  // Widgets currently showing each key. A key with none is released, then
+  // retired once it has been released for [releaseDelay] unless shown again.
+  final Map<String, int> _holders = {};
+  // When each released key was released.
+  final Map<String, DateTime> _released = {};
+  Timer? _retire;
   final Set<String> _pending = {};
   final Map<String, int> _revisions = {};
   final Map<String, int> _timestamps = {};
@@ -53,7 +64,16 @@ class PresenceCacheNotifier extends Notifier<Map<String, String>> {
     final scope = ref.watch(
       relayConfigProvider.select((config) => (config.baseUrl, config.nsec)),
     );
-    if (_scope != scope) _tracked.clear();
+    _retire?.cancel();
+    _retire = null;
+    _tracked.removeAll(_released.keys);
+    _released.clear();
+    // A new community keeps only the keys still on screen.
+    if (_scope != scope) {
+      _tracked
+        ..clear()
+        ..addAll(_holders.keys);
+    }
     _scope = scope;
     final generation = ++_generation;
     _epoch++;
@@ -79,6 +99,8 @@ class PresenceCacheNotifier extends Notifier<Map<String, String>> {
       _queued = null;
       _resubscribe?.cancel();
       _resubscribe = null;
+      _retire?.cancel();
+      _retire = null;
     });
     if (sessionState.status == SessionStatus.connected &&
         lifecycle == AppLifecycleState.resumed) {
@@ -86,7 +108,7 @@ class PresenceCacheNotifier extends Notifier<Map<String, String>> {
         // A replacement the relay never answered must not hold the slot, so a
         // lost REQ costs at most one poll interval.
         _abandonPending?.call();
-        if (_presenceUnsub == null || !_subscribedKeys.containsAll(_tracked)) {
+        if (_presenceUnsub == null || !_covered) {
           unawaited(_subscribe(generation));
         }
         // The snapshot backstop runs for a live stream even while a widening
@@ -102,11 +124,16 @@ class PresenceCacheNotifier extends Notifier<Map<String, String>> {
     return {};
   }
 
-  /// Request initial presence for exact keys. Repeated render calls coalesce.
-  void track(List<String> pubkeys) {
+  /// Follow presence for exact keys while they are shown. Call the returned
+  /// function once when they no longer are.
+  void Function() track(List<String> pubkeys) {
+    final keys = {for (final key in pubkeys) key.trim().toLowerCase()}
+      ..remove('');
     var added = false;
-    for (final key in pubkeys.map((key) => key.trim().toLowerCase())) {
-      if (key.isNotEmpty && _tracked.add(key)) {
+    for (final key in keys) {
+      _holders[key] = (_holders[key] ?? 0) + 1;
+      _released.remove(key);
+      if (_tracked.add(key)) {
         _pending.add(key);
         added = true;
       }
@@ -119,7 +146,57 @@ class PresenceCacheNotifier extends Notifier<Map<String, String>> {
     } else {
       _schedule(_generation);
     }
+    var released = false;
+    return () {
+      if (released) return;
+      released = true;
+      for (final key in keys) {
+        final holders = (_holders[key] ?? 0) - 1;
+        if (holders > 0) {
+          _holders[key] = holders;
+        } else {
+          _holders.remove(key);
+          _released[key] = clock.now();
+        }
+      }
+      if (_released.isNotEmpty && ref.mounted) {
+        _retire ??= Timer(releaseDelay, _retireReleased);
+      }
+    };
   }
+
+  /// Stops following keys released at least [releaseDelay] ago, and narrows
+  /// the live subscription to what is still shown. Later releases wait for
+  /// the next sweep, so the subscription narrows at most once per delay.
+  void _retireReleased() {
+    _retire = null;
+    if (!ref.mounted) return;
+    final cutoff = clock.now().subtract(releaseDelay);
+    final retired = {
+      for (final entry in _released.entries)
+        if (!entry.value.isAfter(cutoff)) entry.key,
+    };
+    _released.removeWhere((key, _) => retired.contains(key));
+    if (_released.isNotEmpty) _retire = Timer(releaseDelay, _retireReleased);
+    if (retired.isEmpty) return;
+    _tracked.removeAll(retired);
+    _pending.removeAll(retired);
+    for (final key in retired) {
+      _timestamps.remove(key);
+      _snapshotAt.remove(key);
+      // A read from this lifetime must not fill the next one.
+      _revisions[key] = (_revisions[key] ?? 0) + 1;
+    }
+    // Absent means unknown: nothing keeps a retired key current.
+    final kept = {
+      for (final entry in state.entries)
+        if (!retired.contains(entry.key)) entry.key: entry.value,
+    };
+    if (kept.length != state.length) state = kept;
+    if (_poll?.isActive ?? false) _queueResubscribe(_generation);
+  }
+
+  bool get _covered => setEquals(_subscribedKeys, _tracked);
 
   void _queueResubscribe(int generation) {
     _resubscribe ??= Timer(Duration.zero, () {
@@ -149,12 +226,16 @@ class PresenceCacheNotifier extends Notifier<Map<String, String>> {
   }
 
   Future<void> _subscribe(int generation) async {
-    if (_opening ||
-        generation != _generation ||
-        _tracked.isEmpty ||
-        (_presenceUnsub != null && _subscribedKeys.containsAll(_tracked))) {
+    if (_opening || generation != _generation) return;
+    if (_tracked.isEmpty) {
+      // Nobody is shown: close the stream, and the next track opens one.
+      _presenceUnsub?.call();
+      _presenceUnsub = null;
+      _subscribedKeys.clear();
+      _subscribeAttempted = _retrying = false;
       return;
     }
+    if (_presenceUnsub != null && _covered) return;
     // One subscription opens at a time. A replacement holds this until it is
     // promoted or abandoned, so tracking bursts widen it in later rounds.
     _opening = true;
@@ -185,7 +266,9 @@ class PresenceCacheNotifier extends Notifier<Map<String, String>> {
       _abandonPending = null;
       _opening = false;
       final previous = _presenceUnsub;
-      final added = keys.where((key) => !_subscribedKeys.contains(key));
+      final added = keys.where(
+        (key) => _tracked.contains(key) && !_subscribedKeys.contains(key),
+      );
       _pending.addAll(added);
       _activeSubscription = subscription;
       _retrying = retrying;
@@ -199,8 +282,8 @@ class PresenceCacheNotifier extends Notifier<Map<String, String>> {
         _invalidateSnapshot();
         return;
       }
-      // Keys tracked while this one opened need a wider subscription.
-      if (!_subscribedKeys.containsAll(_tracked)) _queueResubscribe(generation);
+      // Keys tracked or retired while this one opened need another one.
+      if (!_covered) _queueResubscribe(generation);
       // Newly covered keys are read only now, so no change between an earlier
       // snapshot and their live coverage is lost.
       _schedule(generation);
@@ -242,8 +325,8 @@ class PresenceCacheNotifier extends Notifier<Map<String, String>> {
               _retrying = status == RelaySubscriptionStatus.retrying;
               _invalidateSnapshot();
               if (_retrying) return;
-              // Keys tracked during the backoff need a wider subscription.
-              if (!_subscribedKeys.containsAll(_tracked)) {
+              // Keys tracked or retired during the backoff need another one.
+              if (!_covered) {
                 _queueResubscribe(generation);
               }
               _schedule(generation);
@@ -340,7 +423,11 @@ class PresenceCacheNotifier extends Notifier<Map<String, String>> {
       }
       final updated = {...state};
       for (final key in keys) {
-        if ((_revisions[key] ?? 0) != revisions[key]) continue;
+        // A key retired meanwhile stays absent.
+        if (!_tracked.contains(key) ||
+            (_revisions[key] ?? 0) != revisions[key]) {
+          continue;
+        }
         if (events == null) {
           updated.remove(key); // failure is unknown; next poll retries
         } else {

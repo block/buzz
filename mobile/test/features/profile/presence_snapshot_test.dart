@@ -200,7 +200,7 @@ void main() {
     });
   });
 
-  test('community/account switch clears tracking and fences old snapshot', () {
+  test('community/account switch keeps shown keys and fences old snapshot', () {
     scenario((time, container, relay) {
       final stale = relay.results.removeAt(0);
       container
@@ -211,10 +211,38 @@ void main() {
       stale.complete([presenceEvent('alice', 'online')]);
       time.flushMicrotasks();
       expect(container.read(presenceCacheProvider), isEmpty);
-      expect(relay.queries, hasLength(1));
+      // Alice and Bob are still on screen, so the new community reads them.
+      expect(relay.queries, hasLength(2));
+      expect(relay.queries.last.authors, ['alice', 'bob']);
+      relay.results.removeAt(0).complete([]);
+      time.flushMicrotasks();
       container.read(presenceCacheProvider.notifier).track(['carol']);
       time.elapse(Duration.zero);
       expect(relay.queries.last.authors, ['carol']);
+    });
+  });
+
+  test('a key retired during its snapshot stays absent', () {
+    fakeAsync((time) {
+      final relay = PresenceTestRelay();
+      final container = ProviderContainer(
+        overrides: [
+          relaySessionProvider.overrideWith(() => relay),
+          appLifecycleProvider.overrideWith(_Lifecycle.new),
+        ],
+      );
+      final release = container.read(presenceCacheProvider.notifier).track([
+        'alice',
+      ]);
+      time.elapse(Duration.zero);
+      final snapshot = relay.results.removeAt(0);
+      release();
+      time.elapse(PresenceCacheNotifier.releaseDelay);
+      snapshot.complete([presenceEvent('alice', 'online')]);
+      time.flushMicrotasks();
+      expect(container.read(presenceCacheProvider), isEmpty);
+      container.dispose();
+      time.flushMicrotasks();
     });
   });
 
