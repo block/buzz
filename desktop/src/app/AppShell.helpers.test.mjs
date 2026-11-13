@@ -1,12 +1,66 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import { after, before, test } from "node:test";
+
+import { JSDOM } from "jsdom";
 
 import {
+  isWindowDragHandleEvent,
   markAllReadSources,
   activateDesktopNotificationTarget,
   createDesktopNotificationActivationQueue,
   shouldBounceForChannelNotification,
 } from "./AppShell.helpers.ts";
+
+const dom = new JSDOM("<!doctype html><html><body></body></html>", {
+  url: "http://localhost",
+});
+
+before(() => {
+  Object.assign(globalThis, {
+    Element: dom.window.Element,
+    HTMLElement: dom.window.HTMLElement,
+    document: dom.window.document,
+    window: dom.window,
+  });
+});
+
+after(() => dom.window.close());
+
+// `composedPath()` is only populated during dispatch, so the helper has to be
+// called from a live listener rather than on a synthesized event object.
+function dragHandleVerdictAt(element, clientY) {
+  let verdict;
+  const listener = (event) => {
+    verdict = isWindowDragHandleEvent(event);
+  };
+  dom.window.addEventListener("pointerdown", listener, true);
+  element.dispatchEvent(
+    new dom.window.MouseEvent("pointerdown", { bubbles: true, clientY }),
+  );
+  dom.window.removeEventListener("pointerdown", listener, true);
+  return verdict;
+}
+
+test("window drag fallback leaves content that sits under the top strip selectable", () => {
+  // Regression for #6827: the fallback was purely geometric, so any click in
+  // the top 44px — including message text scrolled up there — was swallowed as
+  // a title-bar drag and could never start a selection.
+  dom.window.document.body.innerHTML = `
+    <div data-tauri-drag-region><span id="chrome-label">Buzz</span></div>
+    <main><p id="message">selectable message text</p></main>
+  `;
+  const message = dom.window.document.getElementById("message");
+  assert.equal(dragHandleVerdictAt(message, 42), false);
+});
+
+test("window drag fallback still covers plain children of a drag region", () => {
+  dom.window.document.body.innerHTML = `
+    <div data-tauri-drag-region><span id="chrome-label">Buzz</span></div>
+    <main><p id="message">selectable message text</p></main>
+  `;
+  const label = dom.window.document.getElementById("chrome-label");
+  assert.equal(dragHandleVerdictAt(label, 42), true);
+});
 
 test("shouldBounceForChannelNotification_allowsTopLevelChannelMessages", () => {
   assert.equal(shouldBounceForChannelNotification([["h", "channel"]]), true);
