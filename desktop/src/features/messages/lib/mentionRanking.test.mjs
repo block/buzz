@@ -247,3 +247,55 @@ test("pickDefaultAgentCandidate: returns null without an addressable agent", () 
   assert.equal(pickDefaultAgentCandidate([]), null);
   assert.equal(pickDefaultAgentCandidate([candidate()]), null);
 });
+
+test("empty channel menus contain the roster, not local personas or nonmember agents", async () => {
+  const { channelMentionCandidates } = await import("./mentionRanking.ts");
+  const members = [
+    {
+      kind: "identity",
+      displayName: "Davin",
+      pubkey: "1".repeat(64),
+      isMember: true,
+      isAgent: false,
+    },
+    {
+      kind: "identity",
+      displayName: "Ariadne",
+      pubkey: "2".repeat(64),
+      isMember: true,
+      isAgent: true,
+    },
+    {
+      kind: "identity",
+      displayName: "Daedalus",
+      pubkey: "3".repeat(64),
+      isMember: true,
+      isAgent: true,
+    },
+  ];
+  const hermes = {
+    kind: "identity",
+    displayName: "Hermes",
+    pubkey: "4".repeat(64),
+    isMember: false,
+    isAgent: true,
+  };
+  const local = {
+    kind: "persona",
+    displayName: "Fizz",
+    isMember: false,
+    isAgent: true,
+  };
+  const all = [...members, hermes, local];
+  assert.deepEqual(channelMentionCandidates(all, "", "deliberation"), members);
+  assert.deepEqual(
+    channelMentionCandidates(
+      [...members, { ...hermes, isMember: true }, local],
+      "",
+      "build",
+    ),
+    [...members, { ...hermes, isMember: true }],
+  );
+  assert.deepEqual(channelMentionCandidates(all, "Fizz", "deliberation"), all);
+  assert.deepEqual(channelMentionCandidates(all, "", null), all);
+});
