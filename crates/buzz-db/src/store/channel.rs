@@ -128,8 +128,8 @@ pub async fn create_channel(
     }
 
     let name = buzz_core::channel::canonical_channel_name(name);
-    if name.trim().is_empty() {
-        return Err(DbError::InvalidData("channel name is required".into()));
+    if let Some(error) = buzz_core::channel::channel_name_error(name) {
+        return Err(DbError::InvalidData(error.into()));
     }
 
     let id = Uuid::new_v4();
@@ -382,8 +382,8 @@ async fn insert_channel_rows(
     }
 
     let name = buzz_core::channel::canonical_channel_name(name);
-    if name.trim().is_empty() {
-        return Err(DbError::InvalidData("channel name is required".into()));
+    if let Some(error) = buzz_core::channel::channel_name_error(name) {
+        return Err(DbError::InvalidData(error.into()));
     }
 
     let rows_affected = sqlx::query(
@@ -1311,8 +1311,8 @@ async fn update_channel_on(
     let community_id = tx.community();
     if let Some(name) = updates.name.as_mut() {
         *name = buzz_core::channel::canonical_channel_name(name).to_owned();
-        if name.is_empty() {
-            return Err(DbError::InvalidData("channel name is required".into()));
+        if let Some(error) = buzz_core::channel::channel_name_error(name) {
+            return Err(DbError::InvalidData(error.into()));
         }
     }
 

@@ -17,17 +17,52 @@ pub fn canonical_channel_name(name: &str) -> &str {
         .trim_end()
 }
 
+/// Require content beyond whitespace, controls and default-ignorable characters.
+/// This checks the name without stripping joiners or selectors from valid text.
+pub fn channel_name_has_content(name: &str) -> bool {
+    name.chars().any(|c| {
+        // Unicode 17.0 Default_Ignorable_Code_Point, plus BRAILLE PATTERN BLANK.
+        // https://www.unicode.org/Public/17.0.0/ucd/DerivedCoreProperties.txt
+        // Keep in sync with buzz-app's channelNameHasContent and name fixtures.
+        !c.is_whitespace()
+            && !c.is_control()
+            && !matches!(
+                c,
+                '\u{ad}'
+                    | '\u{34f}'
+                    | '\u{61c}'
+                    | '\u{115f}'..='\u{1160}'
+                    | '\u{17b4}'..='\u{17b5}'
+                    | '\u{180b}'..='\u{180f}'
+                    | '\u{200b}'..='\u{200f}'
+                    | '\u{202a}'..='\u{202e}'
+                    | '\u{2060}'..='\u{206f}'
+                    | '\u{2800}'
+                    | '\u{3164}'
+                    | '\u{fe00}'..='\u{fe0f}'
+                    | '\u{feff}'
+                    | '\u{ffa0}'
+                    | '\u{fff0}'..='\u{fff8}'
+                    | '\u{1bca0}'..='\u{1bca3}'
+                    | '\u{1d173}'..='\u{1d17a}'
+                    | '\u{e0000}'..='\u{e0fff}'
+            )
+    })
+}
+
 /// Maximum length of a canonical channel name, in characters. Matches
 /// `channels.name VARCHAR(255)`, so the relay can refuse a longer name before
 /// it stores the command event instead of failing when it applies it.
 pub const MAX_CHANNEL_NAME_CHARS: usize = 255;
 
-/// Whether `name` is a storable channel name: nonempty and at most
+/// Whether `name` is a storable channel name: visible content and at most
 /// [`MAX_CHANNEL_NAME_CHARS`] characters after [`canonical_channel_name`].
 pub fn channel_name_error(name: &str) -> Option<&'static str> {
     let name = canonical_channel_name(name);
     if name.is_empty() {
         Some("channel name is required")
+    } else if !channel_name_has_content(name) {
+        Some("channel name must contain at least one visible character")
     } else if name.chars().count() > MAX_CHANNEL_NAME_CHARS {
         Some("channel name is longer than 255 characters")
     } else {
@@ -552,6 +587,22 @@ mod tests {
         group_state_identity_tags, parse_channel_labels, ChannelJoinRole, ChannelLabelError,
         ChannelType, MemberRole, LEGACY_CHANNEL_TYPES, MAX_CHANNEL_LABELS, RESERVED_CHANNEL_LABELS,
     };
+
+    #[test]
+    fn channel_names_require_content_without_rewriting_unicode() {
+        // Identical fixture in buzz-app: src/features/relay/channel-names.fixture.json.
+        let cases: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/channel-names.json")).unwrap();
+        for name in cases["invalid"].as_array().unwrap() {
+            let name = name.as_str().unwrap();
+            assert!(channel_name_error(name).is_some(), "accepted {name:?}");
+        }
+        for name in cases["valid"].as_array().unwrap() {
+            let name = name.as_str().unwrap();
+            assert_eq!(channel_name_error(name), None, "rejected {name:?}");
+            assert_eq!(canonical_channel_name(name), name);
+        }
+    }
 
     #[test]
     fn channel_name_error_matches_the_column_limit() {
