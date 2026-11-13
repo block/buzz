@@ -667,7 +667,15 @@ async fn deliver_one(
             record_delivery(retry_or_fail(state, &outcome, delay).await);
         }
         Ok(r) if r.status() == reqwest::StatusCode::TOO_MANY_REQUESTS => {
-            record_delivery(retry_or_fail(state, &outcome, 2).await);
+            let delay = r
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse::<i64>().ok())
+                .filter(|seconds| *seconds > 0)
+                .unwrap_or(2)
+                .clamp(1, 300);
+            record_delivery(retry_or_fail(state, &outcome, delay).await);
         }
         // A timed-out terminal attempt burns the stable request id. Its replay
         // is indistinguishable from another invalid-grant 404, but sending a
@@ -738,7 +746,7 @@ async fn retry_or_fail(
             .await;
         "exhausted"
     } else {
-        let secs = delay * (1_i64 << (wake.attempt - 1).clamp(0, 6));
+        let secs = delay.clamp(1, 300) * (1_i64 << (wake.attempt - 1).clamp(0, 6));
         let _ = state
             .db
             .retry_push_wake(

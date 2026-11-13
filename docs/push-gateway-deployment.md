@@ -12,7 +12,7 @@
 
 | Variable | Purpose |
 |---|---|
-| `DATABASE_URL` | PostgreSQL authority/admission store. Runtime credentials need DML on the six gateway tables, not DDL. |
+| `DATABASE_URL` | PostgreSQL authority/admission store. Runtime credentials need DML on the seven gateway tables, not DDL. |
 | `BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS` | Maximum delegation capability lifetime (`1..=31536000`). |
 | `BUZZ_PUSH_MAX_INSTALLATION_LIFETIME_SECONDS` | Maximum encrypted-token installation lifetime (default 90 days, max one year). Clients must renew before expiry. |
 | `BUZZ_PUSH_APP_ATTEST_ROOT_CERT_PATH` | Read-only mounted Apple App Attest root certificate PEM. |
@@ -87,9 +87,9 @@ that app identity; omitting it is not a push shutdown mechanism.
 
 The gateway's dedicated pool does not consume the relay-oriented `BUZZ_DB_LOCK_TIMEOUT_MS`, `BUZZ_DB_IDLE_TXN_TIMEOUT_MS`, or `BUZZ_DB_STATEMENT_TIMEOUT_MS` settings. Its session-timeout policy remains separate from the `buzz-db` writer policy and must be designed and rolled out independently.
 
-All replicas must share one PostgreSQL database. Delivery authority, replay admission, and endpoint quota reservation are transactional there, so replica count does not multiply the abuse ceiling. The gateway owns a scoped migration history under `crates/buzz-push-gateway/migrations`; it creates only the six `push_gateway_*` authority tables plus SQLx's migration-history table and never runs relay migrations.
+All replicas must share one PostgreSQL database. Delivery authority, replay admission, and endpoint quota reservation are transactional there, so replica count does not multiply the abuse ceiling. The gateway owns a scoped migration history under `crates/buzz-push-gateway/migrations`; it creates only the seven `push_gateway_*` authority tables plus SQLx's migration-history table and never runs relay migrations.
 
-The Helm chart runs a single pre-install/pre-upgrade migration Job using `migration.existingSecret`; that secret contains a DDL-capable `DATABASE_URL`. The URL MUST name a dedicated gateway database, not the relay database: SQLx stores its `_sqlx_migrations` history in `public`, so sharing a database would collide with another application's migration history. `migration.runtimeDatabaseRole` names an existing LOGIN role (the default is `buzz_push_gateway_runtime`) used by runtime `DATABASE_URL`. After scoped migrations, the Job revokes database `CREATE` from that role and schema `CREATE` from both `PUBLIC` and the role, then grants only database `CONNECT`, schema `USAGE`, and `SELECT, INSERT, UPDATE, DELETE` on the six gateway tables. The migration role must own the database/schema objects or otherwise be allowed to issue those grants; it is never provided to runtime replicas. Readiness rejects an empty/partial schema, missing DML, or a runtime role that retains database/schema `CREATE`. Helm waits for the migration hook before updating replicas, so rolling deployments never race unconditional startup migration. Readiness must be removed from load-balancer service endpoints before terminating a pod.
+The Helm chart runs a single pre-install/pre-upgrade migration Job using `migration.existingSecret`; that secret contains a DDL-capable `DATABASE_URL`. The URL MUST name a dedicated gateway database, not the relay database: SQLx stores its `_sqlx_migrations` history in `public`, so sharing a database would collide with another application's migration history. `migration.runtimeDatabaseRole` names an existing LOGIN role (the default is `buzz_push_gateway_runtime`) used by runtime `DATABASE_URL`. After scoped migrations, the Job revokes database `CREATE` from that role and schema `CREATE` from both `PUBLIC` and the role, then grants only database `CONNECT`, schema `USAGE`, and `SELECT, INSERT, UPDATE, DELETE` on the seven gateway tables. The migration role must own the database/schema objects or otherwise be allowed to issue those grants; it is never provided to runtime replicas. Readiness rejects an empty/partial schema, missing DML, or a runtime role that retains database/schema `CREATE`. Helm waits for the migration hook before updating replicas, so rolling deployments never race unconditional startup migration. Readiness must be removed from load-balancer service endpoints before terminating a pod.
 
 The service reaps expired challenges and replay rows, idle quota rows, expired/revoked delegations, and retention-eligible installations (including their encrypted token ciphertext) at startup and every five minutes. Monitor reaper failures and table growth; retention does not depend on process restarts.
 
@@ -411,3 +411,14 @@ those peers overwrite `X-Buzz-Client-IP` with one bare client IP and cannot be
 reached through untrusted peers. Trusted peers must supply exactly one such
 header. NAT clients share a source budget. Delivery permits remain occupied
 until APNs and disposition bookkeeping finish, even after HTTP cancellation.
+
+Delivery also charges a durable destination/relay counter atomically with the
+existing aggregate destination counter and replay fences. One relay can use at
+most half the aggregate window budget (minimum one); renewal or reissue does
+not reset usage. No community/relay enrollment limit is imposed. With an
+operator-configured aggregate ceiling of one, subdivision is impossible and
+the existing one-delivery behavior is retained. These counters are shared by
+all gateway replicas. A 429 carries bounded Retry-After; relays retain their
+stable request ID and honor up to 300 seconds before their existing backoff.
+The additive gateway-only migration preserves existing encrypted grants and
+rows; no relay schema migration or data rewrite is needed.
