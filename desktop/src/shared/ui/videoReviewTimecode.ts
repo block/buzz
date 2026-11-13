@@ -13,6 +13,10 @@ function parseTimecode(value: string): number | null {
     return null;
   }
 
+  if (parts.length === 1) {
+    return parts[0];
+  }
+
   if (parts.length === 2) {
     return parts[0] * 60 + parts[1];
   }
