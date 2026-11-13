@@ -106,6 +106,58 @@ void main() {
     expect(launch4.read(userCacheProvider), isEmpty);
   });
 
+  test('restored profiles revalidate with since their last check', () async {
+    const bob = 'b0b';
+    // First launch: both load in full and record when they were checked.
+    final before = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final first = _ProfileSession([
+      Future.value([_profile('v1', 1, 'Alice')]),
+    ]);
+    final launch1 = cacheScope(first);
+    await launch1.read(userCacheProvider.notifier).preload(const [_alice]);
+    expect(first.filters.single.since, isNull);
+    launch1.dispose();
+    await pumpEventQueue();
+    // A profile stored before check times existed has no `checked_at`.
+    final storage = ProfileSnapshotStorage(prefs);
+    final pubkey = pubkeyFromNsec(_nsec)!;
+    await storage.write(
+      storage.capture(pubkey, _relay),
+      [
+        ...storage
+            .read(pubkey, _relay)
+            .map(
+              (p) => (
+                profile: p.profile,
+                createdAt: p.createdAt,
+                eventId: p.eventId,
+              ),
+            ),
+        _parsed(bob, 1, 'Bob'),
+      ],
+      checkedAt: {_alice: storage.read(pubkey, _relay).single.checkedAt},
+    );
+
+    // Next launch: the checked profile asks only for changes since its check
+    // (less the skew margin); the unchecked one fetches in full. An empty
+    // answer confirms the stored profile.
+    final second = _ProfileSession([]);
+    final launch2 = cacheScope(second);
+    final cache2 = launch2.read(userCacheProvider.notifier);
+    expect(await cache2.preload(const [_alice, bob]), isTrue);
+    await Future<void>.delayed(const Duration(milliseconds: 80));
+    final full = second.filters.singleWhere((f) => f.since == null);
+    final changed = second.filters.singleWhere((f) => f.since != null);
+    expect(full.authors, [bob]);
+    expect(changed.authors, [_alice]);
+    expect(changed.since, inInclusiveRange(before - 3600, before - 3599 + 5));
+    expect(cache2.state[_alice]?.displayName, 'Alice');
+    cache2.get(_alice);
+    await Future<void>.delayed(const Duration(milliseconds: 80));
+    expect(second.requests, 2);
+    launch2.dispose();
+  });
+
   test('snapshot scopes are per identity and relay, and bounded', () async {
     final storage = ProfileSnapshotStorage(prefs);
     final huge = _parsed('huge', 3, 'x' * maxProfileSnapshotEntryBytes);
@@ -161,6 +213,7 @@ class _ProfileSession extends RelaySessionNotifier {
   final List<Future<List<NostrEvent>>> _results;
   final bool fail;
   int requests = 0;
+  final filters = <NostrFilter>[];
 
   @override
   SessionState build() => const SessionState(status: SessionStatus.connected);
@@ -171,6 +224,7 @@ class _ProfileSession extends RelaySessionNotifier {
     Duration timeout = const Duration(seconds: 8),
   }) async {
     requests++;
+    filters.add(filter);
     if (fail) throw StateError('offline');
     return _results.isEmpty ? const [] : await _results.removeAt(0);
   }

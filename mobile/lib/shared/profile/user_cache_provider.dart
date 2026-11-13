@@ -23,6 +23,12 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
   static const _maximumProfilesPerQuery = 1000;
   static const _snapshotWriteDelay = Duration(seconds: 2);
 
+  /// How far before a restored profile's last check a revalidation asks for
+  /// changes, so an edit stamped by a clock somewhat behind ours still
+  /// arrives. An edit stamped earlier than this is missed until the next
+  /// full fetch of that profile.
+  static const _revalidationSkew = Duration(hours: 1);
+
   final Set<String> _pending = {};
   final Map<String, ({int createdAt, String eventId})> _profileEventOrders = {};
   int _generation = 0;
@@ -33,6 +39,10 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
 
   /// Restored from the snapshot and not yet checked with the relay this scope.
   final Set<String> _unrevalidated = {};
+
+  /// When the relay last confirmed each profile was current (Unix seconds),
+  /// so a restored profile is revalidated with `since` instead of re-sent.
+  final Map<String, int> _checkedAt = {};
 
   /// Lookups whose batch query is on the wire.
   final Set<String> _inFlight = {};
@@ -46,6 +56,7 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
     _generation++;
     _profileEventOrders.clear();
     _unrevalidated.clear();
+    _checkedAt.clear();
     _inFlight.clear();
     ref.onDispose(() {
       _generation++;
@@ -81,7 +92,7 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
             ),
       ];
       storage
-          .write(token, profiles)
+          .write(token, profiles, checkedAt: _checkedAt)
           .then(
             (saved) {
               if (!saved) debugPrint('[UserCache] snapshot was not saved');
@@ -100,6 +111,7 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
         eventId: parsed.eventId,
       );
       _unrevalidated.add(key);
+      if (parsed.checkedAt > 0) _checkedAt[key] = parsed.checkedAt;
     }
     return _latest = restored;
   }
@@ -107,6 +119,10 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
   @override
   set state(Map<String, UserProfile> value) {
     super.state = _latest = value;
+    _scheduleSnapshotWrite();
+  }
+
+  void _scheduleSnapshotWrite() {
     if (_snapshotWriter == null) return;
     _snapshotTimer ??= Timer(_snapshotWriteDelay, () {
       _snapshotTimer = null;
@@ -147,6 +163,7 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
         .where((pubkey) => refreshCached || !_isCached(pubkey))
         .toList();
     final generation = _generation;
+    final checkedAt = _nowSeconds();
     final session = ref.read(relaySessionProvider.notifier);
     for (final batch in _profileQueryBatches(toFetch)) {
       if (!_isCurrent(generation)) {
@@ -162,7 +179,7 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
     if (!_isCurrent(generation)) {
       throw StateError('Profile request belongs to a retired cache');
     }
-    _unrevalidated.removeAll(toFetch);
+    _confirmed(toFetch, checkedAt);
     return {for (final pubkey in requested) pubkey: ?state[pubkey]};
   }
 
@@ -201,6 +218,7 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
     if (normalized.isEmpty) return true;
     _trackVerified(normalized);
     final generation = _generation;
+    final checkedAt = _nowSeconds();
     try {
       final session = ref.read(relaySessionProvider.notifier);
       for (final batch in _profileQueryBatches(normalized)) {
@@ -211,7 +229,7 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
         if (!_isCurrent(generation)) return false;
         if (!await _verifyAndMerge(events, generation)) return false;
       }
-      _unrevalidated.removeAll(normalized);
+      _confirmed(normalized, checkedAt);
       return true;
     } catch (_) {
       return false;
@@ -255,19 +273,18 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
     _flushInFlight = true;
     _inFlight.addAll(pubkeys);
     final generation = _generation;
+    final checkedAt = _nowSeconds();
     var succeeded = false;
     try {
       final session = ref.read(relaySessionProvider.notifier);
       var remaining = pubkeys.length;
-      for (final batch in _profileQueryBatches(pubkeys)) {
+      for (final (:batch, :filter) in _revalidationQueries(pubkeys)) {
         if (!_isCurrent(generation)) return;
-        final events = await session.fetchHistory(
-          NostrFilters.profilesBatch(batch),
-        );
+        final events = await session.fetchHistory(filter);
         if (!_isCurrent(generation)) return;
         if (!await _verifyAndMerge(events, generation)) return;
         // Confirmed by the relay, whether or not it still has a profile.
-        _unrevalidated.removeAll(batch);
+        _confirmed(batch, checkedAt);
         remaining -= batch.length;
         if (remaining == 0) {
           // All requested pages are ready.
@@ -298,6 +315,52 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
       yield pubkeys.sublist(start, end < pubkeys.length ? end : pubkeys.length);
     }
   }
+
+  /// Queries for a display lookup. Restored profiles with a known last check
+  /// ask only for changes since then (less [_revalidationSkew]); everything
+  /// else fetches in full.
+  Iterable<({List<String> batch, NostrFilter filter})> _revalidationQueries(
+    List<String> pubkeys,
+  ) sync* {
+    final full = <String>[];
+    final restored = <String>[];
+    var since = 0;
+    for (final pubkey in pubkeys) {
+      final checkedAt = _checkedAt[pubkey];
+      if (checkedAt == null || !_unrevalidated.contains(pubkey)) {
+        full.add(pubkey);
+        continue;
+      }
+      restored.add(pubkey);
+      if (since == 0 || checkedAt < since) since = checkedAt;
+    }
+    for (final batch in _profileQueryBatches(full)) {
+      yield (batch: batch, filter: NostrFilters.profilesBatch(batch));
+    }
+    since -= _revalidationSkew.inSeconds;
+    for (final batch in _profileQueryBatches(restored)) {
+      yield (
+        batch: batch,
+        filter: NostrFilter(
+          kinds: const [0],
+          authors: batch,
+          since: since,
+          limit: batch.length,
+        ),
+      );
+    }
+  }
+
+  void _confirmed(Iterable<String> pubkeys, int checkedAt) {
+    _unrevalidated.removeAll(pubkeys);
+    for (final pubkey in pubkeys) {
+      _checkedAt[pubkey] = checkedAt;
+    }
+    // Keep the stored check times current even when nothing changed.
+    _scheduleSnapshotWrite();
+  }
+
+  static int _nowSeconds() => DateTime.now().millisecondsSinceEpoch ~/ 1000;
 
   void _scheduleBatch() {
     if (_flushInFlight) return;

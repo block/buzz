@@ -21,6 +21,15 @@ const maxProfileSnapshotBytes = 2 * 1024 * 1024;
 /// large; such profiles are skipped rather than crowding out everyone else.
 const maxProfileSnapshotEntryBytes = 16 * 1024;
 
+/// A stored profile, with when the relay last confirmed it was current
+/// (Unix seconds; 0 when unknown).
+typedef StoredProfile = ({
+  UserProfile profile,
+  int createdAt,
+  String eventId,
+  int checkedAt,
+});
+
 /// Permission to write one scope's snapshot, captured when the cache starts.
 ///
 /// [ProfileSnapshotStorage.remove] retires every token captured before it, so
@@ -58,7 +67,7 @@ class ProfileSnapshotStorage {
   }
 
   /// Returns the scope's profiles, or an empty list when absent or unusable.
-  List<ParsedProfileEvent> read(String pubkey, String relayUrl) {
+  List<StoredProfile> read(String pubkey, String relayUrl) {
     final key = ProfileSnapshotStorage.key(pubkey, relayUrl);
     final raw = _prefs.getString(key);
     if (raw == null) return const [];
@@ -90,11 +99,13 @@ class ProfileSnapshotStorage {
   }
 
   /// Replaces the scope's snapshot with the newest [profiles] that fit the
-  /// bounds. Returns false when [token] was retired or storage rejected it.
+  /// bounds, each with its [checkedAt] time when known. Returns false when
+  /// [token] was retired or storage rejected it.
   Future<bool> write(
     ProfileSnapshotToken token,
-    Iterable<ParsedProfileEvent> profiles,
-  ) async {
+    Iterable<ParsedProfileEvent> profiles, {
+    Map<String, int> checkedAt = const {},
+  }) async {
     if ((_epochs[token._key] ?? 0) != token._epoch) return false;
     final newestFirst = profiles.toList()
       ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
@@ -103,7 +114,9 @@ class ProfileSnapshotStorage {
     var bytes = 32;
     for (final profile in newestFirst) {
       if (entries.length == maxProfileSnapshotProfiles) break;
-      final entry = jsonEncode(_encode(profile));
+      final entry = jsonEncode(
+        _encode(profile, checkedAt[profile.profile.pubkey]),
+      );
       final entryBytes = utf8.encode(entry).length;
       if (entryBytes > maxProfileSnapshotEntryBytes) continue;
       if (bytes + entryBytes + 1 > maxProfileSnapshotBytes) break;
@@ -140,7 +153,10 @@ class ProfileSnapshotStorage {
     }
   }
 
-  static Map<String, Object?> _encode(ParsedProfileEvent parsed) {
+  static Map<String, Object?> _encode(
+    ParsedProfileEvent parsed,
+    int? checkedAt,
+  ) {
     final profile = parsed.profile;
     return {
       'pubkey': profile.pubkey,
@@ -151,10 +167,11 @@ class ProfileSnapshotStorage {
       'about': ?profile.about,
       'nip05': ?profile.nip05Handle,
       'owner': ?profile.ownerPubkey,
+      'checked_at': ?checkedAt,
     };
   }
 
-  static ParsedProfileEvent _decode(Map<String, dynamic> json) => (
+  static StoredProfile _decode(Map<String, dynamic> json) => (
     profile: UserProfile(
       pubkey: (json['pubkey'] as String).toLowerCase(),
       displayName: json['display_name'] as String?,
@@ -165,6 +182,7 @@ class ProfileSnapshotStorage {
     ),
     createdAt: json['created_at'] as int,
     eventId: json['event_id'] as String,
+    checkedAt: json['checked_at'] as int? ?? 0,
   );
 }
 
