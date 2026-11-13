@@ -1225,7 +1225,7 @@ async fn publish_channel_ephemeral(
     pubkey_bytes: &[u8],
 ) -> Result<(), IngestError> {
     // Membership refusals are client-input rejections, and the shared
-    // gate's message text is surfaced verbatim.
+    // gate's message text is surfaced verbatim; a failed lookup is internal.
     super::ingest::check_channel_membership(
         tenant.community(),
         state,
@@ -1234,8 +1234,7 @@ async fn publish_channel_ephemeral(
         None,
         super::ingest::ChannelWrite::Post,
     )
-    .await
-    .map_err(IngestError::Rejected)?;
+    .await?;
 
     // Mark as local before Redis publish to prevent double-delivery when
     // the event comes back through the Redis subscriber loop.
@@ -1640,6 +1639,43 @@ mod tests {
             !super::super::ingest::requires_h_channel_scope(KIND_PRESENCE_UPDATE),
             "presence updates are global/ephemeral"
         );
+    }
+
+    /// A channel ephemeral event whose membership lookup fails is an internal
+    /// error naming only the error kind, never a client rejection quoting the
+    /// database error. The ephemeral arm forwards `Internal` text verbatim,
+    /// so it must stay fixed. Mutation: map the gate's DB arm to `Rejected`
+    /// or format the error itself → RED.
+    #[tokio::test]
+    async fn channel_ephemeral_membership_lookup_failure_is_internal() {
+        let state = crate::state::tests::test_state_with_unreachable_database_url(
+            "postgres://127.0.0.1:1/none",
+        )
+        .await;
+        let community = buzz_core::CommunityId::from_uuid(Uuid::new_v4());
+        let tenant = buzz_core::TenantContext::resolved(community, "ephemeral.test");
+        let keys = Keys::generate();
+        let channel_id = Uuid::new_v4();
+        let event = EventBuilder::new(Kind::Custom(20002), "")
+            .tags([Tag::parse(["h", &channel_id.to_string()]).unwrap()])
+            .sign_with_keys(&keys)
+            .unwrap();
+
+        let result = super::publish_channel_ephemeral(
+            &state,
+            &tenant,
+            event,
+            channel_id,
+            &keys.public_key().to_bytes(),
+        )
+        .await;
+
+        match result {
+            Err(super::IngestError::Internal(message)) => {
+                assert_eq!(message, "error: database error: pool_timed_out")
+            }
+            other => panic!("a failed membership lookup must be internal, got {other:?}"),
+        }
     }
 
     #[test]
