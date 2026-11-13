@@ -56,7 +56,9 @@ int _cellCount(String row) {
 }
 
 final _fenceMarker = RegExp(r'^(`{3,}|~{3,})');
+// Each blank run has one place to go, so a long run followed by a stray
+// character fails in linear time instead of retrying every split.
 final _delimiterRow = RegExp(
-  r'^ {0,3}\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)*\|?\s*$',
+  r'^ {0,3}\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)*(?:\|\s*)?$',
 );
 final _unescapedPipe = RegExp(r'(?<!\\)\|');
