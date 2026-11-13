@@ -1,12 +1,15 @@
 import * as React from "react";
 import { applyReusableAgentAccessPolicy } from "@/features/agents/channelAgents";
-import type { AgentPersona, ManagedAgent } from "@/shared/api/types";
+import type {
+  AgentPersona,
+  ManagedAgent,
+  PresenceStatus,
+} from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import {
   enqueueAgentWake,
   getErrorMessage,
-  isManagedAgentRunning,
-  isProviderBackedAgent,
+  mentionedAgentNeedsWake,
   type QueuedAgentWake,
   uniqueNormalizedPubkeys,
 } from "./useMentionSendFlow.helpers";
@@ -49,6 +52,9 @@ type AttachAgentToChannel = (input: {
 
 type UseEnsureAgentMentionsReadyOptions = {
   attachAgentToChannel: AttachAgentToChannel;
+  /** Relay presence, read only for a provider `deployed` receipt: an agent
+   * established offline (shut down or reaped) is redeployed, not trusted. */
+  readAvailability: (pubkey: string) => Promise<PresenceStatus | undefined>;
   getManagedAgentsByPubkey: () => Promise<Map<string, ManagedAgent>>;
   getPersonas: () => Promise<AgentPersona[]>;
   memberPubkeys: ReadonlySet<string>;
@@ -69,6 +75,7 @@ export function useEnsureAgentMentionsReady({
   getManagedAgentsByPubkey,
   getPersonas,
   memberPubkeys,
+  readAvailability,
 }: UseEnsureAgentMentionsReadyOptions): EnsureAgentMentionsReady {
   return React.useCallback(
     async (
@@ -121,15 +128,18 @@ export function useEnsureAgentMentionsReady({
           }
           if (isCancelled()) break;
           if (participants.has(pubkey)) {
-            if (
-              (isProviderBackedAgent(readyAgent) &&
-                readyAgent.status !== "deployed") ||
-              (!isProviderBackedAgent(readyAgent) &&
-                !isManagedAgentRunning(readyAgent))
-            ) {
+            const availability =
+              readyAgent.status === "deployed"
+                ? await readAvailability(pubkey)
+                : undefined;
+            // The presence read awaited the relay; a send cancelled meanwhile
+            // must not queue a wake for a message that will never publish.
+            if (isCancelled()) break;
+            if (mentionedAgentNeedsWake(readyAgent, availability)) {
               enqueueAgentWake(agentsToWake, readyAgent);
             }
           } else {
+            // The attach reads presence itself after the membership write.
             await attachAgentToChannel({
               channelId: capturedChannelId,
               agent: readyAgent,
@@ -158,6 +168,7 @@ export function useEnsureAgentMentionsReady({
       getManagedAgentsByPubkey,
       getPersonas,
       memberPubkeys,
+      readAvailability,
     ],
   );
 }

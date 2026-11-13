@@ -1,5 +1,6 @@
 import * as React from "react";
 
+import { displayedManagedAgentStatus } from "@/features/agents/lib/managedAgentControlActions";
 import { Badge } from "@/shared/ui/badge";
 import type { ManagedAgent, PresenceStatus } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
@@ -13,7 +14,7 @@ export function AgentStatusBadge({
   presenceLoaded,
   presenceStatus,
   sentenceCase = false,
-  status,
+  status: rawStatus,
 }: {
   className?: string;
   isWorking?: boolean;
@@ -29,6 +30,7 @@ export function AgentStatusBadge({
     return () => clearTimeout(timer);
   }, []);
 
+  const status = displayedManagedAgentStatus(rawStatus, presenceStatus);
   const isActive = status === "running" || status === "deployed";
   const isStarting =
     !inGracePeriod &&
