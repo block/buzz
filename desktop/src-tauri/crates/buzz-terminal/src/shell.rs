@@ -21,6 +21,9 @@
 //! on many systems. A directory or a non-executable file falls through to the
 //! next candidate instead of becoming an unspawnable child.
 
+// Reject regressions to direct libc passwd pointers at the production boundary.
+#![forbid(unsafe_code)]
+
 use std::path::Path;
 
 /// Last-resort shell. POSIX guarantees `/bin/sh`; if this is not executable
@@ -52,18 +55,11 @@ pub fn is_executable_file(path: &Path) -> bool {
     meta.is_file() && can_execute(path)
 }
 
-/// `access(path, X_OK)`: does the *effective* user have execute permission,
+/// `access(path, X_OK)`: do the real user/group IDs have execute permission,
 /// accounting for the applicable permission class and ACLs?
 #[cfg(unix)]
 fn can_execute(path: &Path) -> bool {
-    use std::os::unix::ffi::OsStrExt;
-
-    let Ok(c_path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
-        return false; // interior NUL: not a path we can ask about
-    };
-    // SAFETY: `c_path` is a valid NUL-terminated C string for the duration of
-    // the call, and `access` only reads it.
-    unsafe { libc::access(c_path.as_ptr(), libc::X_OK) == 0 }
+    nix::unistd::access(path, nix::unistd::AccessFlags::X_OK).is_ok()
 }
 
 /// Resolves the shell to spawn: `$SHELL`, then the passwd entry, then
@@ -99,24 +95,22 @@ fn validated(candidate: &str) -> bool {
 /// This is the step that matters for a Finder- or launchd-started app, which
 /// can have no `$SHELL` at all: without it we would hand a zsh user `/bin/sh`
 /// and call it their shell of choice.
+///
+/// Uses nix's safe `User::from_uid`, backed by reentrant `getpwuid_r` with
+/// caller-owned storage, rather than directly accessing libc pointers.
+/// `getpwuid` hands back a pointer to libc-owned **static** storage that any
+/// thread's passwd-database call can rewrite mid-copy: Linux documents it as
+/// MT-Unsafe `race:pwuid`, and glibc drops its internal NSS lock before
+/// returning, so the copy out of the struct is itself the race window. The
+/// observed signature is a torn read — CI run 34631406730 saw two reads of
+/// the same uid disagree (`"/bin/bash"` vs `"/back"`) in a concurrently
+/// running test binary (#7589). A private mutex cannot close this window,
+/// because it cannot govern unrelated libc consumers in the same process;
+/// only reentrancy can.
 #[cfg(unix)]
 pub(crate) fn passwd_shell() -> Option<String> {
-    // SAFETY: `getpwuid` returns a pointer to a static passwd struct owned by
-    // libc, valid until the next passwd-database call. We copy the string out
-    // before returning and make no other libc calls in between.
-    let shell = unsafe {
-        let ent = libc::getpwuid(libc::getuid());
-        if ent.is_null() {
-            return None;
-        }
-        let pw_shell = (*ent).pw_shell;
-        if pw_shell.is_null() {
-            return None;
-        }
-        std::ffi::CStr::from_ptr(pw_shell).to_str().ok()?.to_owned()
-    };
-
-    Some(shell)
+    let user = nix::unistd::User::from_uid(nix::unistd::Uid::current()).ok()??;
+    user.shell.into_os_string().into_string().ok()
 }
 
 /// The login-shell `argv[0]` convention: the shell's basename prefixed with
