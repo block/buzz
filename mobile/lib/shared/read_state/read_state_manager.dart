@@ -164,13 +164,12 @@ class ReadStateManager {
   void Function()? _unsubscribeLive;
   bool _initialized = false;
   bool _initialSeedComplete = false;
-  // The one sync loop, while it runs. Each pass resubscribes if asked, then
-  // reads the snapshot, so two passes never each install a subscription and
-  // leak one. A request before a pass starts its read joins that read; a
-  // request after runs one more pass.
+  // The one sync loop, while it runs. Each pass opens the live subscription
+  // if it is missing, then reads the snapshot, so two passes never each
+  // install a subscription and leak one. A request before a pass starts its
+  // read joins that read; a request after runs one more pass.
   Future<void>? _syncing;
   bool _snapshotWanted = false;
-  bool _resubscribeWanted = false;
 
   bool _disposed = false;
   bool _isPublishing = false;
@@ -224,7 +223,7 @@ class ReadStateManager {
       return;
     }
 
-    await _requestSync(resubscribe: true);
+    await _requestSync();
     if (_localContexts.isNotEmpty ||
         _pending.isNotEmpty ||
         _carriedOverrides.isNotEmpty) {
@@ -284,20 +283,22 @@ class ReadStateManager {
     await _publish();
   }
 
-  /// Resubscribe and read the snapshot after a reconnect.
+  /// Catch up after a reconnect. The session replays the live subscription
+  /// on the new socket, and its ready reads the snapshot, so this reads only
+  /// when it has to open a subscription that was lost (a terminal CLOSED or a
+  /// failed subscribe).
   Future<void> reinitializeRemote() async {
     if (_disposed || !_remoteEnabled || !_initialized) return;
     debugPrint('[ReadStateManager] reinitializeRemote');
-    await _requestSync(resubscribe: true);
+    if (_unsubscribeLive == null) await _requestSync();
     _schedulePublish();
     _onChanged();
   }
 
-  /// Asks the sync loop for a snapshot read, after a resubscribe if
-  /// [resubscribe]. Completes when the loop has nothing left to do.
-  Future<void> _requestSync({bool resubscribe = false}) {
+  /// Asks the sync loop for a snapshot read. Completes when the loop has
+  /// nothing left to do.
+  Future<void> _requestSync() {
     _snapshotWanted = true;
-    if (resubscribe) _resubscribeWanted = true;
     final syncing = _syncing;
     if (syncing != null) return syncing;
     // Set before the loop starts: a subscription can report ready from
@@ -310,18 +311,15 @@ class ReadStateManager {
 
   Future<void> _runSync(Completer<void> done) async {
     try {
-      while ((_snapshotWanted || _resubscribeWanted) && !_disposed) {
-        if (_resubscribeWanted) {
-          _resubscribeWanted = false;
-          if (_isPublishing) await _publishCompleter?.future;
-          _unsubscribeLive?.call();
-          _unsubscribeLive = null;
+      while (_snapshotWanted && !_disposed) {
+        if (_unsubscribeLive == null) {
           await _startLiveSubscription();
           if (_disposed) return;
         }
         _snapshotWanted = false;
-        // A failed read is retried by the next publish, which reads the
-        // snapshot in full after a failure.
+        // A failed read waits for the next trigger: the publish scheduled
+        // here, which reads the snapshot in full after a failure, or a later
+        // ready, resume or reconnect.
         if (!await _fetchAndMerge()) _schedulePublish();
       }
     } catch (e) {
@@ -478,13 +476,14 @@ class ReadStateManager {
         // With limit 0 nothing replays marks published before the REQ went
         // live, so read the snapshot every time it goes live: its EOSE, which
         // can come after the 500 ms fallback on a slow AUTH, on a reconnect's
-        // replay, or after a CLOSED's retry. The sync loop folds a ready during its own subscribe
-        // into the read that follows.
+        // replay, or after a CLOSED's retry.
         onStatusChanged: (status) {
           if (status == RelaySubscriptionStatus.ready && !_disposed) {
             unawaited(_requestSync());
           }
         },
+        // The session dropped it, so the next reconnect opens a new one.
+        onClosed: (_) => _unsubscribeLive = null,
       );
       if (_disposed) {
         unsub.call();
@@ -620,7 +619,13 @@ class ReadStateManager {
       var snapshot = <NostrEvent>[];
       if (_relaySession != null) {
         final read = ++_snapshotsStarted;
-        final events = await _relaySession.fetchReadStateSnapshot();
+        final List<NostrEvent> events;
+        try {
+          events = await _relaySession.fetchReadStateSnapshot();
+        } catch (_) {
+          _settleSnapshot(read, succeeded: false);
+          rethrow;
+        }
         _settleSnapshot(read, succeeded: true);
         if (!_servesThisCommunity ||
             !_ownsJournal ||
