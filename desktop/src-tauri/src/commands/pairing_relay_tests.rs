@@ -1,5 +1,6 @@
 use super::{
-    pairing_relay_from_nip11, probe_pairing_relay, resolve_pairing_relay_url, PairingRelay,
+    nip42_auth_origin, pairing_relay_from_nip11, probe_pairing_relay, resolve_pairing_relay_url,
+    PairingRelay,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -101,4 +102,48 @@ fn main_relay_pairing_uses_main_relay_url() {
     .expect("resolve main pairing relay");
 
     assert_eq!(resolved, "wss://sprout-oss.stage.blox.sqprod.co");
+}
+
+/// The relay expects the bare origin, so the legacy `/pair` path must not
+/// reach the signed AUTH event.
+#[test]
+fn nip42_auth_url_strips_the_legacy_pair_path() {
+    assert_eq!(
+        nip42_auth_origin("wss://relay.example/pair").expect("hostname pair URL"),
+        "wss://relay.example"
+    );
+}
+
+/// Reassembling the origin from `host_str()` drops the brackets an IPv6
+/// literal needs, which made `RelayUrl::parse` fail before the AUTH event was
+/// ever signed.
+#[test]
+fn nip42_auth_url_keeps_ipv6_brackets() {
+    assert_eq!(
+        nip42_auth_origin("ws://[::1]:7777/pair").expect("IPv6 pair URL"),
+        "ws://[::1]:7777"
+    );
+}
+
+#[test]
+fn nip42_auth_url_preserves_a_non_default_port() {
+    assert_eq!(
+        nip42_auth_origin("ws://127.0.0.1:5000/pair").expect("ported pair URL"),
+        "ws://127.0.0.1:5000"
+    );
+}
+
+/// The modern `pairing_relay_url` path is already origin-only; the helper must
+/// leave it alone.
+#[test]
+fn nip42_auth_url_is_a_no_op_for_an_origin_only_url() {
+    assert_eq!(
+        nip42_auth_origin("wss://relay.example").expect("origin-only URL"),
+        "wss://relay.example"
+    );
+}
+
+#[test]
+fn nip42_auth_url_rejects_a_malformed_url() {
+    assert!(nip42_auth_origin("not a url").is_err());
 }
