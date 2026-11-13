@@ -456,6 +456,42 @@ void exactMentionTests() {
     },
   );
 
+  testWidgets(
+    'qualifying a namesake leaves a longer typed member name intact',
+    (tester) async {
+      final third = 'c' * 64;
+      List<String>? sent;
+      await mountComposer(tester, [
+        ...members(),
+        ChannelMember(
+          pubkey: third,
+          displayName: 'Scout Leader',
+          role: 'member',
+          joinedAt: DateTime(2025),
+        ),
+      ], (_, keys, {mediaTags = const []}) async => sent = keys);
+      final controller = tester
+          .widget<TextField>(find.byType(TextField))
+          .controller!;
+      await pick(tester, '@');
+      await tester.enterText(
+        find.byType(TextField),
+        '@Scout and @Scout Leader @',
+      );
+      await tester.pumpAndSettle();
+      // Rows: the earlier pick, its namesake, then Scout Leader.
+      await tester.tap(scoutRows().at(1));
+      await tester.pumpAndSettle();
+      expect(
+        controller.text,
+        '@Scout ($first) and @Scout Leader @Scout ($second) ',
+      );
+      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+      await tester.pumpAndSettle();
+      expect(sent, [first, third, second]);
+    },
+  );
+
   testWidgets('unbound qualified text cannot notify a shorter member alias', (
     tester,
   ) async {
