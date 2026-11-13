@@ -13791,8 +13791,8 @@ mod tests {
                 "the CAS must have minted a lease before verification"
             );
             let mut blocker = pool.begin().await.expect("blocker tx");
-            sqlx::query("SELECT pg_advisory_xact_lock(community_deletion_lock_key($1))")
-                .bind(community.as_uuid())
+            sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+                .bind(buzz_db::deletion::community_deletion_lock_key(community))
                 .execute(&mut *blocker)
                 .await
                 .expect("hold the exclusive deletion lock");
@@ -13930,8 +13930,8 @@ mod tests {
             .expect("lock lease row");
             assert_eq!(locked.len(), 1, "exactly the acquire's lease row");
             if stall_release {
-                sqlx::query("SELECT pg_advisory_xact_lock(community_deletion_lock_key($1))")
-                    .bind(community.as_uuid())
+                sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+                    .bind(buzz_db::deletion::community_deletion_lock_key(community))
                     .execute(&mut *blocker)
                     .await
                     .expect("hold the exclusive deletion lock");
