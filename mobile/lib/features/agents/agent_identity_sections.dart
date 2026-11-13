@@ -4,8 +4,11 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/agents/remote_agents.dart';
 import '../../shared/community/community_provider.dart';
+import '../../shared/theme/buzz_icons.dart';
 import '../../shared/theme/theme.dart';
+import '../../shared/widgets/app_list.dart';
 import '../../shared/widgets/app_list_card.dart';
+import '../../shared/widgets/text_editor.dart';
 import 'agent_instructions.dart';
 
 /// The agent's instructions and management information in shared Settings cards.
@@ -36,6 +39,11 @@ class AgentIdentitySections extends HookConsumerWidget {
               .where((agent) => agent['agent_pubkey'] == pubkey)
               .firstOrNull
         : null;
+    final editable = row != null &&
+        community != null &&
+        supportsRemoteAgents(community) &&
+        controller.owner == community.pubkey &&
+        controller.activeAgents.contains(pubkey);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -50,6 +58,39 @@ class AgentIdentitySections extends HookConsumerWidget {
                 child: AgentInstructions(pubkey: pubkey, registryRow: row),
               ),
             ),
+            if (editable)
+              AppListRow(
+                key: const ValueKey('edit-agent-instructions-row'),
+                title: 'Edit instructions',
+                trailing: const Icon(BuzzIcons.chevronRight, size: 18),
+                onTap: () async {
+                  await showTextEditor(
+                    context: context,
+                    title: 'Instructions',
+                    initialValue: row['agent_instructions'] as String? ?? '',
+                    hintText: 'Describe what this agent should do.',
+                    multiline: true,
+                    keyPrefix: 'agent-instructions',
+                    onSave: (value) async {
+                      final ok = await controller.updateInstructions(
+                        community: community,
+                        pubkey: pubkey,
+                        instructions: value,
+                        isCurrent: () =>
+                            context.mounted &&
+                            community.pubkey == controller.owner,
+                      );
+                      if (!ok) {
+                        throw StateError(
+                          controller.failure.isNotEmpty
+                              ? controller.failure
+                              : 'Could not update instructions',
+                        );
+                      }
+                    },
+                  );
+                },
+              ),
           ],
         ),
         AppListCard(
