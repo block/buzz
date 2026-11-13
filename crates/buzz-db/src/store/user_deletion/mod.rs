@@ -1,7 +1,10 @@
 //! User-specific submission and inventory preparation over the shared deletion tables.
 use crate::Db;
 use sqlx::PgPool;
+/// Standalone owned-agent database cleanup and durable per-agent progress.
+pub mod agents;
 mod discovery;
+mod execution;
 mod inventory;
 /// Standalone per-thread message cleanup.
 pub mod messages;

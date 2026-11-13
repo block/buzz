@@ -189,13 +189,13 @@ async fn expiry_after_admission_rolls_back_deletions_and_count_repairs() {
     assert!(
         error
             .to_string()
-            .contains("lease expired during message batch"),
+            .contains("lease expired during cleanup batch"),
         "{error}"
     );
     assert_preserved(&f, &root, &source, &reaction).await;
     // The injected deadline is transactional too. Rollback restores the live
     // lease, so this case can assert durable failure recording independently.
-    assert_retry(&f, "lease expired during message batch").await;
+    assert_retry(&f, "lease expired during cleanup batch").await;
 }
 
 #[tokio::test]
