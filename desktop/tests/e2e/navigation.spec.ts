@@ -137,7 +137,8 @@ test("back/forward keyboard chords work while the composer has focus", async ({
     await expect(composer).toHaveText("Keep this draft");
 
     // Empty composers autofocus on navigation; arrows must work there too.
-    await composer.fill("");
+    await composer.press("Meta+a");
+    await composer.press("Backspace");
     await expect(composer).toHaveText("");
     await expect(composer).toBeFocused();
     await page.keyboard.press("Meta+ArrowLeft");
