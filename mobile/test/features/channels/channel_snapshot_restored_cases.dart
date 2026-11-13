@@ -52,61 +52,66 @@ void _restoredLaunchCases() {
     }
   }
 
-  test('newly muted cold start equals a full-window cold start', () async {
-    SharedPreferences.setMockInitialValues({});
-    final prefs = await SharedPreferences.getInstance();
-    final old = message('ordinary-backlog', now() - 7200);
-    final first = _container(
-      prefs,
-      _SnapshotSession(['alpha'])..unreadMessages.add(old),
-      mutes: _StoredMutes(),
-    );
-    addTearDown(first.dispose);
-    await loaded(first);
-    expect(unread(first), {'alpha'});
-    first.dispose();
+  for (final dm in [false, true]) {
+    test(
+      'newly muted ${dm ? 'DM' : 'channel'} cold start equals a full-window cold start',
+      () async {
+        SharedPreferences.setMockInitialValues({});
+        final prefs = await SharedPreferences.getInstance();
+        final old = message('ordinary-backlog', now() - 7200);
+        final first = _container(
+          prefs,
+          (_SnapshotSession(['alpha'])..dm = dm)..unreadMessages.add(old),
+          mutes: _StoredMutes(),
+        );
+        addTearDown(first.dispose);
+        await loaded(first);
+        expect(unread(first), {'alpha'});
+        first.dispose();
 
-    // Persisted mute changed since the saved catch-up (e.g. mute then quit).
-    await ChannelMutesStorage(prefs).write(
-      'me',
-      'https://a.example',
-      const ChannelMuteStore(
-        channels: {'alpha': ChannelMuteEntry(muted: true, updatedAt: 1)},
-      ),
-    );
-    final secondSession = _SnapshotSession(['alpha'])
-      ..unreadMessages.add(old)
-      ..unreadMessages.addAll([
-        for (var i = 0; i < 1000; i++)
-          message('new-quiet-$i', now() - 1200 + i, quiet: true),
-      ]);
-    final second = _container(prefs, secondSession, mutes: _StoredMutes());
-    await loaded(second);
-    // The cursor notices the mute change and requests the full window.
-    expect(
-      secondSession.unreadFilters.every((filter) => filter.since == 0),
-      isTrue,
-    );
-    final cachedUnread = unread(second);
-    second.dispose();
+        // Persisted mute changed since the saved catch-up (e.g. mute then quit).
+        await ChannelMutesStorage(prefs).write(
+          'me',
+          'https://a.example',
+          const ChannelMuteStore(
+            channels: {'alpha': ChannelMuteEntry(muted: true, updatedAt: 1)},
+          ),
+        );
+        final secondSession = (_SnapshotSession(['alpha'])..dm = dm)
+          ..unreadMessages.add(old)
+          ..unreadMessages.addAll([
+            for (var i = 0; i < 1000; i++)
+              message('new-quiet-$i', now() - 1200 + i, quiet: true),
+          ]);
+        final second = _container(prefs, secondSession, mutes: _StoredMutes());
+        await loaded(second);
+        // The cursor notices the mute change and requests the full window.
+        expect(
+          secondSession.unreadFilters.every((filter) => filter.since == 0),
+          isTrue,
+        );
+        final cachedUnread = unread(second);
+        second.dispose();
 
-    await discardUnreadOnly(prefs);
-    final fresh = _container(
-      prefs,
-      _SnapshotSession(['alpha'])
-        ..unreadMessages.addAll(secondSession.unreadMessages),
-      mutes: _StoredMutes(),
+        await discardUnreadOnly(prefs);
+        final fresh = _container(
+          prefs,
+          (_SnapshotSession(['alpha'])..dm = dm)
+            ..unreadMessages.addAll(secondSession.unreadMessages),
+          mutes: _StoredMutes(),
+        );
+        addTearDown(fresh.dispose);
+        await loaded(fresh);
+        expect(unread(fresh), isEmpty);
+        expect(
+          cachedUnread,
+          unread(fresh),
+          reason:
+              'Saved ordinary backlog must not keep a muted channel unread after a full catch-up.',
+        );
+      },
     );
-    addTearDown(fresh.dispose);
-    await loaded(fresh);
-    expect(unread(fresh), isEmpty);
-    expect(
-      cachedUnread,
-      unread(fresh),
-      reason:
-          'Saved ordinary backlog must not keep a muted channel unread after a full catch-up.',
-    );
-  });
+  }
 
   test('newly followed old reply is not skipped on cold start', () async {
     SharedPreferences.setMockInitialValues({});
@@ -214,6 +219,88 @@ void _restoredLaunchCases() {
       reason:
           'The reply matched both the delta and ID filters: excluding it from the window hides the channel.',
     );
+    fresh.dispose();
+
+    // The quiet marker can itself be deleted beyond the deletion page cap.
+    // Let automatic retry finish the verification and rebuild its backlog.
+    await discardUnreadOnly(prefs);
+    final quietHistory = [
+      message('hidden-ordinary', now() - 9000),
+      for (var i = 0; i < 1000; i++)
+        message('old-quiet-$i', now() - 8000 + i, quiet: true),
+    ];
+    final seeded = _container(
+      prefs,
+      _SnapshotSession(['alpha'])..unreadMessages.addAll(quietHistory),
+    );
+    addTearDown(seeded.dispose);
+    await loaded(seeded);
+    expect(
+      seeded
+          .read(channelsProvider.notifier)
+          .observedUnreadEventsByChannel['alpha']
+          ?.keys,
+      ['old-quiet-0'],
+    );
+    seeded.dispose();
+    // Deleted past the cap, the verification by ID drops the marker; deleted
+    // alone, the delta returns its tombstone. Either way the retry reads the
+    // whole window and brings the older ordinary message back.
+    final savedUnread = {
+      for (final key in prefs.getKeys())
+        if (key.startsWith('buzz.channel-unread.v1:'))
+          key: prefs.getString(key)!,
+    };
+    for (final pastCap in [true, false]) {
+      for (final MapEntry(:key, :value) in savedUnread.entries) {
+        await prefs.setString(key, value);
+      }
+      final offlineHistory = [
+        ...quietHistory.where((e) => e.id != 'old-quiet-0'),
+        for (var i = 0; i <= (pastCap ? 1000 : 0); i++)
+          NostrEvent(
+            id: 'quiet-delete-$i',
+            pubkey: 'alice',
+            createdAt: now() - 1500 + i,
+            kind: EventKind.deletion,
+            tags: [
+              ['h', 'alpha'],
+              ['e', i == 0 ? 'old-quiet-0' : 'reaction-$i'],
+            ],
+            content: '',
+            sig: 'sig',
+          ),
+      ];
+      fakeAsync((clock) {
+        final session = _SnapshotSession(['alpha'])
+          ..unreadMessages.addAll(offlineHistory);
+        final restored = _container(prefs, session);
+        try {
+          restored.listen(channelsProvider, (_, _) {});
+          clock.flushMicrotasks();
+          clock.elapse(const Duration(minutes: 1));
+          clock.flushMicrotasks();
+          expect(
+            session.unreadFilters.any(
+              (f) => f.ids?.contains('old-quiet-0') == true,
+            ),
+            pastCap,
+          );
+          expect(unread(restored), {'alpha'});
+          expect(
+            restored
+                .read(channelsProvider.notifier)
+                .observedUnreadEventsByChannel['alpha']
+                ?.keys,
+            contains('hidden-ordinary'),
+            reason:
+                'Dropping the quiet marker must schedule the full window: older ordinary backlog still exists.',
+          );
+        } finally {
+          restored.dispose();
+        }
+      });
+    }
   });
 
   for (final busyWindow in [false, true]) {
@@ -305,6 +392,22 @@ void _restoredLaunchCases() {
           expect(observed(), contains('deleted-mention'));
           // Killed before the retry, and relaunched once the burst is too old
           // for the delta to see: the saved cursor still asks to check by ID.
+          launch.dispose();
+          session = _SnapshotSession(['alpha'])
+            ..unreadMessages.addAll(
+              history.where((event) => event.kind != EventKind.deletion),
+            );
+          // A failed verification must survive another kill and relaunch.
+          session.failIds = true;
+          session.deadlineIds = !scoped;
+          launch = _container(prefs, session);
+          addTearDown(launch.dispose);
+          await loaded(launch);
+          expect(
+            checkedById(),
+            containsAll(['kept-mention', 'deleted-mention']),
+          );
+          expect(observed(), containsAll(['kept-mention', 'deleted-mention']));
           launch.dispose();
           session = _SnapshotSession(['alpha'])
             ..unreadMessages.addAll(

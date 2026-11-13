@@ -204,6 +204,7 @@ extension _UnreadCatchUp on ChannelsNotifier {
       // cross-request tombstones: a large batch can evict its own early IDs.
       final batchDeletedIds = <String>{};
       var appliedDeletion = false;
+      final cursorsBeforeDeletions = Map.of(_unreadCaughtUpByChannel);
       for (final event in events) {
         final channelId = event.channelId;
         if (channelById.containsKey(channelId) ||
@@ -217,6 +218,14 @@ extension _UnreadCatchUp on ChannelsNotifier {
             );
           }
         }
+      }
+
+      // A tombstone that dropped saved evidence stales its channel's cursor
+      // (see _applyUnreadDeletion): read that full window soon, as a retry.
+      if (_unreadCaughtUpByChannel.entries.any(
+        (entry) => cursorsBeforeDeletions[entry.key] != entry.value,
+      )) {
+        incomplete = true;
       }
 
       // A full page of deletions may have left older ones out, and a restored
@@ -289,9 +298,15 @@ extension _UnreadCatchUp on ChannelsNotifier {
       // its saved flags still earn attention. Pending replies are checked by
       // their own fetch.
       final followedRootIds = _followedRootIds();
-      bool stillCounts(ObservedUnreadEvent event, {required bool muted}) {
+      // Every DM event is saved as high priority, so in a muted DM the flag
+      // can't tell a mention from an ordinary message: none is kept.
+      bool stillCounts(
+        ObservedUnreadEvent event, {
+        required bool muted,
+        required bool dm,
+      }) {
+        if (muted) return event.highPriority && !dm;
         if (event.highPriority) return true;
-        if (muted) return false;
         final rootId = event.rootId;
         return rootId == null ||
             followedRootIds.contains(rootId) ||
@@ -314,7 +329,11 @@ extension _UnreadCatchUp on ChannelsNotifier {
               observedBefore.contains(event.id) &&
               (from == null ||
                   event.createdAt >= from ||
-                  !stillCounts(event, muted: muted)),
+                  !stillCounts(
+                    event,
+                    muted: muted,
+                    dm: channelById[channelId]?.isDm ?? false,
+                  )),
         );
       }
 
@@ -397,13 +416,15 @@ extension _UnreadCatchUp on ChannelsNotifier {
               !returnedIds.contains(event.id),
         );
         // As for a returned tombstone: a deleted marker may have been standing
-        // in for a full window of quiet messages, so read the window again.
+        // in for a full window of quiet messages, so read the window again,
+        // soon, as a retry.
         if (dropped) {
           if (_unreadCaughtUpByChannel[channelId] case final cursor?) {
             _unreadCaughtUpByChannel[channelId] = cursor.withFollows(
               _staleFollows,
             );
           }
+          incomplete = true;
         }
         droppedPending |= dropped;
       }

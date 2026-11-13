@@ -726,6 +726,10 @@ class _SnapshotSession extends RelaySessionNotifier {
   final bool connected;
   bool fail = false;
   bool latestTimeout = false;
+  // Serves every channel as a DM.
+  bool dm = false;
+  bool failIds = false;
+  bool deadlineIds = false;
   Completer<void>? gate;
   // Parks unread catch-up responses after they are computed.
   Completer<void>? unreadGate;
@@ -770,6 +774,12 @@ class _SnapshotSession extends RelaySessionNotifier {
     }
     if (filters.any((filter) => filter.limit == 1000)) {
       unreadFilters.addAll(filters);
+      if (failIds && filters.any((f) => f.ids != null)) {
+        if (deadlineIds) {
+          throw RelayException(503, '{"error":"query timed out"}');
+        }
+        throw StateError('ID verification unavailable');
+      }
       final results = <String, NostrEvent>{};
       for (final filter in filters) {
         final matches =
@@ -816,13 +826,16 @@ class _SnapshotSession extends RelaySessionNotifier {
     NostrFilter filter, {
     Duration timeout = const Duration(seconds: 8),
   }) async {
+    if (failIds && filter.ids != null) {
+      throw StateError('ID verification fallback unavailable');
+    }
     if (filter.kinds.contains(39000)) {
       return [
         for (final id in ids)
           event(39000, [
             ['d', id],
             ['name', id],
-            ['t', 'stream'],
+            ['t', dm ? 'dm' : 'stream'],
             ['public'],
           ]),
       ];
