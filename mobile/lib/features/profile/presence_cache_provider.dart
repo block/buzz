@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:clock/clock.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -27,9 +28,10 @@ class PresenceCacheNotifier extends Notifier<Map<String, String>> {
 
   final Set<String> _tracked = {};
   // Widgets currently showing each key. A key with none is released, then
-  // retired after [releaseDelay] unless shown again.
+  // retired once it has been released for [releaseDelay] unless shown again.
   final Map<String, int> _holders = {};
-  final Set<String> _released = {};
+  // When each released key was released.
+  final Map<String, DateTime> _released = {};
   Timer? _retire;
   final Set<String> _pending = {};
   final Map<String, int> _revisions = {};
@@ -64,7 +66,7 @@ class PresenceCacheNotifier extends Notifier<Map<String, String>> {
     );
     _retire?.cancel();
     _retire = null;
-    _tracked.removeAll(_released);
+    _tracked.removeAll(_released.keys);
     _released.clear();
     // A new community keeps only the keys still on screen.
     if (_scope != scope) {
@@ -154,7 +156,7 @@ class PresenceCacheNotifier extends Notifier<Map<String, String>> {
           _holders[key] = holders;
         } else {
           _holders.remove(key);
-          _released.add(key);
+          _released[key] = clock.now();
         }
       }
       if (_released.isNotEmpty && ref.mounted) {
@@ -163,23 +165,33 @@ class PresenceCacheNotifier extends Notifier<Map<String, String>> {
     };
   }
 
-  /// Stops following keys nobody has shown since their release, and narrows
-  /// the live subscription to what is still shown.
+  /// Stops following keys released at least [releaseDelay] ago, and narrows
+  /// the live subscription to what is still shown. Later releases wait for
+  /// the next sweep, so the subscription narrows at most once per delay.
   void _retireReleased() {
     _retire = null;
-    if (!ref.mounted || _released.isEmpty) return;
-    _tracked.removeAll(_released);
-    _pending.removeAll(_released);
-    for (final key in _released) {
+    if (!ref.mounted) return;
+    final cutoff = clock.now().subtract(releaseDelay);
+    final retired = {
+      for (final entry in _released.entries)
+        if (!entry.value.isAfter(cutoff)) entry.key,
+    };
+    _released.removeWhere((key, _) => retired.contains(key));
+    if (_released.isNotEmpty) _retire = Timer(releaseDelay, _retireReleased);
+    if (retired.isEmpty) return;
+    _tracked.removeAll(retired);
+    _pending.removeAll(retired);
+    for (final key in retired) {
       _timestamps.remove(key);
       _snapshotAt.remove(key);
+      // A read from this lifetime must not fill the next one.
+      _revisions[key] = (_revisions[key] ?? 0) + 1;
     }
     // Absent means unknown: nothing keeps a retired key current.
     final kept = {
       for (final entry in state.entries)
-        if (!_released.contains(entry.key)) entry.key: entry.value,
+        if (!retired.contains(entry.key)) entry.key: entry.value,
     };
-    _released.clear();
     if (kept.length != state.length) state = kept;
     if (_poll?.isActive ?? false) _queueResubscribe(_generation);
   }

@@ -266,6 +266,85 @@ void main() {
     });
   });
 
+  test('each key keeps the full delay after its own release', () {
+    fakeAsync((time) {
+      final relaySession = _RecordingRelaySessionNotifier();
+      final container = _buildContainer(relaySession: relaySession);
+      addTearDown(container.dispose);
+      final notifier = container.read(presenceCacheProvider.notifier);
+
+      container.read(presenceCacheProvider);
+      final alice = notifier.track(['alice']);
+      final bob = notifier.track(['bob']);
+      notifier.track(['carol']);
+      relaySession.snapshot['bob'] = 'online';
+      time.elapse(Duration.zero);
+
+      alice();
+      time.elapse(const Duration(seconds: 29));
+      bob();
+      time.elapse(const Duration(seconds: 1));
+      // Alice's delay is over; Bob was released a second ago.
+      expect(relaySession.subscriptions.single.filter.authors, [
+        'bob',
+        'carol',
+      ]);
+      expect(container.read(presenceCacheProvider)['bob'], 'online');
+
+      // Showing Bob again costs nothing.
+      final opens = relaySession.opens;
+      final bobAgain = notifier.track(['bob']);
+      time.elapse(PresenceCacheNotifier.releaseDelay * 2);
+      expect(relaySession.opens, opens);
+      expect(container.read(presenceCacheProvider)['bob'], 'online');
+
+      // Released for good, Bob goes at the sweep after his delay.
+      bobAgain();
+      time.elapse(PresenceCacheNotifier.releaseDelay * 2);
+      expect(relaySession.subscriptions.single.filter.authors, ['carol']);
+      expect(container.read(presenceCacheProvider), isNot(contains('bob')));
+    });
+  });
+
+  test('a read from before retirement does not fill a key shown again', () {
+    fakeAsync((time) {
+      final relaySession = _RecordingRelaySessionNotifier();
+      final container = _buildContainer(relaySession: relaySession);
+      addTearDown(container.dispose);
+      final notifier = container.read(presenceCacheProvider.notifier);
+
+      container.read(presenceCacheProvider);
+      final alice = notifier.track(['alice']);
+      notifier.track(['carol']);
+      time.elapse(Duration.zero);
+      time.elapse(const Duration(seconds: 31));
+      alice();
+      relaySession.holdQueries = true;
+      // The poll's read starts a second before Alice is retired.
+      time.elapse(const Duration(seconds: 29));
+      expect(relaySession.held, hasLength(1));
+      time.elapse(const Duration(seconds: 1));
+      expect(relaySession.subscriptions.single.filter.authors, ['carol']);
+
+      notifier.track(['alice']);
+      time.elapse(Duration.zero);
+      relaySession.held.removeAt(0).complete([
+        _presence('alice', 'online'),
+        _presence('carol', 'online'),
+      ]);
+      time.elapse(Duration.zero);
+      // Carol keeps her answer; Alice waits for a read of her own.
+      expect(container.read(presenceCacheProvider), {'carol': 'online'});
+      expect(relaySession.queried.last, ['alice']);
+      relaySession.held.removeAt(0).complete([_presence('alice', 'away')]);
+      time.elapse(Duration.zero);
+      expect(container.read(presenceCacheProvider), {
+        'alice': 'away',
+        'carol': 'online',
+      });
+    });
+  });
+
   test('releasing everyone closes the stream until someone is shown', () {
     fakeAsync((time) {
       final relaySession = _RecordingRelaySessionNotifier();
@@ -304,7 +383,10 @@ void main() {
         if (shown.length > 10) shown.removeAt(0)();
         time.elapse(const Duration(milliseconds: 50));
       }
-      time.elapse(PresenceCacheNotifier.releaseDelay);
+      // Rows released over the last 25 s go in two narrowings, 30 s apart.
+      final opensWhileScrolling = relaySession.opens;
+      time.elapse(PresenceCacheNotifier.releaseDelay * 2);
+      expect(relaySession.opens - opensWhileScrolling, 2);
       expect(relaySession.subscriptions, hasLength(1));
       expect(relaySession.subscriptions.single.filter.authors, [
         for (var row = 490; row < 500; row++) 'p$row',
@@ -481,6 +563,13 @@ class _RecordingRelaySessionNotifier extends RelaySessionNotifier {
   final List<List<String>> queried = [];
   final Map<String, String> snapshot = {};
 
+  /// Every subscription ever opened, closed ones included.
+  int opens = 0;
+
+  /// When true, each read waits in [held] for the test to answer it.
+  bool holdQueries = false;
+  final List<Completer<List<NostrEvent>>> held = [];
+
   /// When false, each subscription waits for the test to drive it.
   bool autoReady = true;
 
@@ -503,6 +592,7 @@ class _RecordingRelaySessionNotifier extends RelaySessionNotifier {
     );
     filters.add(filter);
     subscriptions.add(subscription);
+    opens++;
     if (autoReady) {
       // Like an EOSE that arrives before the open future resolves.
       onStatusChanged(RelaySubscriptionStatus.ready);
@@ -518,6 +608,11 @@ class _RecordingRelaySessionNotifier extends RelaySessionNotifier {
   }) async {
     final authors = filters.single.authors!;
     queried.add(authors);
+    if (holdQueries) {
+      final read = Completer<List<NostrEvent>>();
+      held.add(read);
+      return read.future;
+    }
     return [
       for (final key in authors)
         if (snapshot[key] case final status?) _presence(key, status),
