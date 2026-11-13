@@ -6,7 +6,9 @@
 //! 1. **Insert-time floor**: supported channel-event writers check `created_at`
 //!    against database `clock_timestamp()` on their admitted transaction for
 //!    each new row. Duplicate INSERTs need no floor check. This is the primary
-//!    guard. Migration 0021's deferred trigger and the writer-pool
+//!    guard. A locked scheduled-message claim permits only its exact reserved
+//!    event; pending reservations cap the heartbeat wall until delivery commits.
+//!    Migration 0021's deferred trigger and the writer-pool
 //!    `buzz.created_at_floor` GUC remain the mixed-version backstop until phase 2;
 //!    they also reject rows that age below the floor before COMMIT.
 //! 2. **Ordered heartbeat handshake** (this module): on one pinned writer
@@ -96,8 +98,11 @@ pub(crate) async fn guard_event_created_at_floor(
     tx: &mut crate::AdmittedTx,
     created_at: DateTime<Utc>,
     channel_id: Option<Uuid>,
+    event_id: &nostr::EventId,
 ) -> crate::Result<()> {
-    if channel_id.is_none() {
+    // A locked scheduled claim reserves this exact signed event below the
+    // published fence wall; ordinary writes retain the fixed timestamp floor.
+    if channel_id.is_none() || tx.has_scheduled_event_reservation(event_id) {
         return Ok(());
     }
     let below_floor: bool = sqlx::query_scalar(

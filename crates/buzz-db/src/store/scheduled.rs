@@ -117,6 +117,7 @@ impl ScheduledDispatch {
         // its wall below all pending reservations before publishing a heartbeat.
         sqlx::query("SELECT set_config('buzz.created_at_floor', GREATEST(960,ceil(extract(epoch FROM clock_timestamp())-$1)+960)::bigint::text,true)")
             .bind(event.created_at.as_secs() as i64).execute(tx.conn()).await?;
+        tx.authorize_scheduled_event(event.id);
         tx.set_push_enqueue(db.push_enqueue.clone());
         let result =
             crate::event::insert_event_with_thread_metadata_tx(&mut tx, event, channel, thread)

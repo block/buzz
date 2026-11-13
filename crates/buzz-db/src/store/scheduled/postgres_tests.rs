@@ -79,6 +79,10 @@ async fn scheduled_overdue_dispatch_atomically_stores_message_and_sent_state() {
         .scheduled_mutate(c, &owner, id, None, Some(&value), at)
         .await
         .is_err());
+    assert!(matches!(
+        crate::event::insert_event(db.pool(), c, &event, Some(channel)).await,
+        Err(crate::DbError::CreatedAtFloorRejected)
+    ));
     let future = chrono::Utc::now().timestamp() + 3600;
     let initial = serde_json::to_value(queued_event(&keys, channel, future)).unwrap();
     db.scheduled_mutate(c, &owner, id, None, Some(&initial), future)
@@ -111,6 +115,26 @@ async fn scheduled_overdue_dispatch_atomically_stores_message_and_sent_state() {
     assert!(inserted);
     let rows = db.scheduled_list(c, &owner).await.unwrap();
     assert_eq!(rows[0].status, "sent");
+    // The reservation cannot authorize a different event with the same old
+    // timestamp, even on an admitted transaction carrying the reserved id.
+    let unrelated = EventBuilder::new(Kind::Custom(9), "Unreserved old message")
+        .tags([Tag::parse(["h".to_string(), channel.to_string()]).unwrap()])
+        .custom_created_at(event.created_at)
+        .sign_with_keys(&keys)
+        .unwrap();
+    let mut unrelated_tx = db.begin_event_write_transaction(c).await.unwrap();
+    unrelated_tx.authorize_scheduled_event(event.id);
+    assert!(matches!(
+        crate::event::insert_event_with_thread_metadata_tx(
+            &mut unrelated_tx,
+            &unrelated,
+            Some(channel),
+            None
+        )
+        .await,
+        Err(crate::DbError::CreatedAtFloorRejected)
+    ));
+    unrelated_tx.rollback().await.unwrap();
     let released = crate::replica_fence::probe_once(db.pool(), &fence)
         .await
         .unwrap();

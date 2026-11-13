@@ -7238,7 +7238,7 @@ mod postgres_tests {
                 auth_method: HttpAuthMethod::Nip98,
             };
             let tracer: Arc<dyn buzz_conformance::Tracer> = Arc::new(VecTracer::default());
-            ingest_event_inner(&self.state, &tracer, &self.tenant, event, auth)
+            ingest_event_inner(&self.state, &tracer, &self.tenant, event, auth, None)
                 .await
                 .map(|_| ())
         }
