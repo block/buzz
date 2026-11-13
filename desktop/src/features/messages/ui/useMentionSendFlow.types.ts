@@ -12,7 +12,8 @@ import type { UseDraftsResult } from "@/features/messages/lib/useDrafts";
 export type UseMentionSendFlowOptions = {
   /** Visit-bound accessor reading shared source-key intent, even after exit. */
   getComposerRevision: () => number;
-  runComposerUpdate: (update: () => void) => void;
+  /** `pendingImeta` snapshots restored media for an imminent unmount. */
+  runComposerUpdate: (update: () => void, pendingImeta?: ImetaMedia[]) => void;
   channelId: string | null;
   /** The actual persistence key, including same-channel thread identity. */
   effectiveDraftKey: string | null | undefined;
