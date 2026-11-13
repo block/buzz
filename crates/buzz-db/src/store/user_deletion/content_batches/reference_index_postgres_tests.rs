@@ -37,8 +37,27 @@ async fn reference_index_populated_upgrade_matches_desired_state_and_new_partiti
         .fetch_one(&pool)
         .await
         .unwrap();
+    let mut writer = pool.begin().await.unwrap();
+    writer
+        .execute("LOCK TABLE public.events IN ROW EXCLUSIVE MODE")
+        .await
+        .unwrap();
+    let error = apply(&pool).await.unwrap_err();
+    assert_eq!(
+        error.as_database_error().unwrap().code().as_deref(),
+        Some("55P03")
+    );
+    writer.rollback().await.unwrap();
     crate::migration::run_migrations(&pool).await.unwrap();
     assert_eq!(catalog(&pool).await, expected);
+    // A valid prebuild must avoid requesting an index-build table lock.
+    let mut writer = pool.begin().await.unwrap();
+    writer
+        .execute("LOCK TABLE public.events IN ROW EXCLUSIVE MODE")
+        .await
+        .unwrap();
+    apply(&pool).await.unwrap();
+    writer.rollback().await.unwrap();
     let oid: i64 = sqlx::query_scalar("SELECT 'idx_events_reference_ids'::regclass::oid::bigint")
         .fetch_one(&pool)
         .await
