@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../../features/channels/channel_management_provider.dart';
 import '../../shared/crypto/nip_oa.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/utils/string_utils.dart';
@@ -321,22 +322,14 @@ final channelMembershipUpdateProvider = NotifierProvider.autoDispose
     );
 
 /// Bot pubkeys currently assigned a channel bot role.
+///
+/// Read from [channelMembersProvider] so a channel's roster is fetched once
+/// for both its member list and its bot roles.
 final channelBotPubkeysProvider = FutureProvider.autoDispose
     .family<Set<String>, String>((ref, channelId) async {
-      ref.watch(
-        channelMembershipUpdateProvider(
-          channelId,
-        ).select((update) => update.version),
-      );
-      final sessionState = ref.watch(relaySessionProvider);
-      if (sessionState.status != SessionStatus.connected) return const {};
-      final session = ref.read(relaySessionProvider.notifier);
-      final events = await session.fetchHistory(
-        NostrFilters.channelMembers(channelId),
-      );
-      if (events.isEmpty) return const {};
+      final members = await ref.watch(channelMembersProvider(channelId).future);
       return _AgentPubkeySet({
-        for (final member in membersFromEvent(events.first))
+        for (final member in members)
           if (member.role == 'bot') member.pubkey.toLowerCase(),
       });
     });

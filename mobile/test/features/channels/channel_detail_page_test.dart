@@ -422,9 +422,10 @@ Widget _buildTestable({
           authorPubkey: null,
         ),
       ),
-      channelMembersProvider(_channelId).overrideWith(
-        (ref) async => loadMembers != null ? loadMembers() : members,
-      ),
+      if (!watchChannelMembershipUpdates)
+        channelMembersProvider(_channelId).overrideWith(
+          (ref) async => loadMembers != null ? loadMembers() : members,
+        ),
       channelMembersProvider(_huddleChannelId).overrideWith(
         (ref) async => huddleMembersNotifier == null
             ? huddleMembers
@@ -2665,18 +2666,6 @@ void main() {
           channel: dmChannel,
           relaySessionNotifier: relaySession,
           watchChannelMembershipUpdates: true,
-          members: [
-            ChannelMember(
-              pubkey: 'self',
-              role: 'member',
-              joinedAt: DateTime(2025),
-            ),
-            ChannelMember(
-              pubkey: 'alice',
-              role: 'member',
-              joinedAt: DateTime(2025),
-            ),
-          ],
         ),
       );
       await tester.pumpAndSettle();
