@@ -214,7 +214,7 @@ The NIP-70 marker is intentional on the snapshot even though the snapshot is rep
 
 Each archived identity is represented by a bare `p` tag whose second element is the archived pubkey. Additional elements on `p` tags are not defined by this NIP and MUST be ignored for archive-state construction. Metadata such as reason, replacement pubkey, actor, and consent path belongs on the `kind:8002`/`kind:8003` deltas, not on the list.
 
-The relay SHOULD publish a new `kind:13535` list after every accepted archive or unarchive operation. Clients MUST treat the latest valid list as authoritative current state. Deltas are useful for live updates and audit history, but if a delta history and the latest list disagree, the latest valid list wins.
+The relay SHOULD publish a new `kind:13535` list after every accepted archive or unarchive operation. Each list the relay publishes MUST have a `created_at` strictly greater than that of the relay's previous `kind:13535`, even when publications race or fall within one second, so that clients can ask only for a newer list (see [Snapshot and Delta Consistency](#snapshot-and-delta-consistency)). Clients MUST treat the latest valid list as authoritative current state. Deltas are useful for live updates and audit history, but if a delta history and the latest list disagree, the latest valid list wins.
 
 ## Request Authorization Policy
 
@@ -312,7 +312,7 @@ Clients SHOULD process live `kind:8002` and `kind:8003` deltas for immediate UI 
 
 ## Snapshot and Delta Consistency
 
-The latest valid `kind:13535` snapshot is authoritative. Deltas are an append-only explanation stream. Clients SHOULD track the highest `created_at` they have accepted per relay identity for `kind:13535` and reject older snapshots from the same relay identity, even if they arrive later over a subscription. This provides rollback resistance against stale snapshot replay. Same-`created_at` resolution follows NIP-01: retain the event with the lowest id (first in lexical order).
+The latest valid `kind:13535` snapshot is authoritative. Deltas are an append-only explanation stream. Clients SHOULD track the highest `created_at` they have accepted per relay identity for `kind:13535` and reject older snapshots from the same relay identity, even if they arrive later over a subscription. This provides rollback resistance against stale snapshot replay. Because a relay whose stored history is intact never publishes two snapshots with one `created_at`, a client holding a snapshot MAY reconcile by requesting only `kind:13535` with `since` set to that snapshot's `created_at` plus one, and keep its snapshot when nothing newer exists. Should two snapshots with one `created_at` nevertheless meet, resolution follows NIP-01: retain the event with the lowest id (first in lexical order). A relay restored to an older database can stamp its next snapshot at or below one a client already holds; that client rejects it under the rule above, with or without `since`, until a later snapshot passes its high-water mark.
 
 A client reconstructing state from scratch SHOULD:
 
