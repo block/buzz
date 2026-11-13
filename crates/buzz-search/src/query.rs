@@ -62,20 +62,19 @@ pub enum SearchMode {
     /// Prefix-match the trailing normalized query token (`pro` matches `project`).
     ///
     /// Intended for bounded typeahead surfaces such as the desktop topbar. The
-    /// relay still refetches and re-authorizes every hit; this mode changes the
-    /// candidate tsquery and, for relevance outside profile search, ranks only
-    /// the newest 1000 matches. It does not change the access boundary. A
-    /// trailing token that yields a lexeme shorter than three characters
-    /// returns no hits unless the query is kind:0-only (see `PREFIX_MIN_CHARS`).
+    /// relay still refetches and re-authorizes every hit; this mode changes
+    /// only the candidate tsquery, not the access boundary. A trailing token
+    /// that yields a lexeme shorter than three characters returns no hits
+    /// unless the query is kind:0-only (see `PREFIX_MIN_CHARS`).
     Prefix,
 }
 
 /// Result ordering for a search.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchSort {
-    /// `ts_rank_cd` relevance, newest first among equal ranks. In
-    /// [`SearchMode::Prefix`] outside profile search, only the newest 1000
-    /// matches are ranked, so pages end with them.
+    /// `ts_rank_cd` relevance, newest first among equal ranks. Outside
+    /// profile search, only the newest 1000 matches are ranked, so pages end
+    /// with them.
     Relevance,
     /// Newest first, ignoring relevance; ties ordered by event id.
     Newest,
@@ -154,13 +153,13 @@ const SEARCH_TEXT_MAX_CHARS: usize = 4096;
 /// bridge uses page 1), but clamp here too so a future caller cannot accidentally
 /// wire untrusted input into a multi-trillion-row OFFSET.
 const PAGE_MAX: u32 = 1000;
-/// How many of the newest matches a prefix-mode relevance search ranks.
+/// How many of the newest matches a relevance search ranks.
 /// The GIN index returns matches in no useful order, so ranking every match
-/// before `LIMIT` costs time proportional to the match count, and a short
-/// typeahead prefix matches most of a community. Reading candidates newest
-/// first lets Postgres stop at this many instead. Every page ranks the same
-/// window, so pages stay consistent and end with it.
-const PREFIX_RANK_WINDOW: i64 = 1000;
+/// before `LIMIT` costs time proportional to the match count, and a common
+/// word or a short typeahead prefix matches a large share of a community.
+/// Reading candidates newest first lets Postgres stop at this many instead.
+/// Every page ranks the same window, so pages stay consistent and end with it.
+const RANK_WINDOW: i64 = 1000;
 /// Shortest lexeme [`SearchMode::Prefix`] gives `:*` for anything but a
 /// kind:0-only (profile) query. If the trailing token yields a shorter one,
 /// the tsquery is NULL and the search returns no hits, whatever completed
@@ -254,7 +253,7 @@ fn normalized_search_text(q: &str) -> Option<String> {
 /// ```sql
 /// SELECT id, kind, pubkey, channel_id, EXTRACT(EPOCH FROM created_at)::bigint AS created_at_s,
 ///        ts_rank_cd(search_tsv, $q) AS rank
-/// FROM events            -- prefix relevance: the newest PREFIX_RANK_WINDOW matches
+/// FROM events            -- relevance outside profiles: the newest RANK_WINDOW matches
 /// WHERE community_id = $ctx
 ///   AND deleted_at IS NULL
 ///   AND search_tsv @@ $q
@@ -292,10 +291,8 @@ pub async fn search(pool: &PgPool, query: &SearchQuery) -> Result<SearchResult, 
         && query.mode == SearchMode::Prefix
         && profile_only
         && search_text.chars().count() <= 2;
-    // Profiles are few, so profile typeahead keeps ranking every match.
-    let rank_window =
-        (query.sort == SearchSort::Relevance && query.mode == SearchMode::Prefix && !profile_only)
-            .then_some(PREFIX_RANK_WINDOW);
+    // Profiles are few, so profile search keeps ranking every match.
+    let rank_window = (query.sort == SearchSort::Relevance && !profile_only).then_some(RANK_WINDOW);
 
     let min_prefix_chars = if profile_only { 0 } else { PREFIX_MIN_CHARS };
     // One checkout for both statements, so a busy pool queues a search once.
