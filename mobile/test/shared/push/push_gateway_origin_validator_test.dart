@@ -35,6 +35,24 @@ void main() {
       });
       expect(configured.exitCode, 0, reason: '${configured.stderr}');
       expect(configured.stdout, 'continued:${define('https://push.example')}');
+      for (final configuration in ['Release', 'Profile']) {
+        for (final origin in [
+          'https://push.example:443',
+          'https://push.example:8444',
+        ]) {
+          for (final gatewayEnvironment in [
+            {'BUZZ_PUSH_GATEWAY_URL': origin},
+            {'DART_DEFINES': define(origin)},
+          ]) {
+            final customPort = await buildPhase({
+              'CONFIGURATION': configuration,
+              ...gatewayEnvironment,
+            });
+            expect(customPort.exitCode, 0, reason: '${customPort.stderr}');
+            expect(customPort.stdout, 'continued:${define(origin)}');
+          }
+        }
+      }
       for (final origin in [
         '',
         'not-a-url',
@@ -72,10 +90,16 @@ void main() {
       isValidPushGatewayOrigin('http://localhost:8080', requireHttps: true),
       isFalse,
     );
-    expect(
-      isValidPushGatewayOrigin('https://push.example:8443', requireHttps: true),
-      isFalse,
-    );
+    for (final port in [1, 443, 8444, 65535]) {
+      expect(
+        isValidPushGatewayOrigin(
+          'https://push.example:$port',
+          requireHttps: true,
+        ),
+        isTrue,
+        reason: 'valid HTTPS port $port',
+      );
+    }
   });
 
   test('rejects malformed or non-origin gateway URLs', () {
@@ -87,9 +111,21 @@ void main() {
       'https://push.example?token=x',
       'https://push.example#fragment',
       'https://user@push.example',
+      'https://push.example:0',
+      'https://push.example:65536',
       'https://push.example:70000',
+      'https://push.example:invalid',
+      'https://user:password@push.example:8444',
+      'https://push.example:8444/path',
+      'https://push.example:8444?token=x',
+      'https://push.example:8444#fragment',
     ]) {
       expect(isValidPushGatewayOrigin(value), isFalse, reason: value);
+      expect(
+        isValidPushGatewayOrigin(value, requireHttps: true),
+        isFalse,
+        reason: value,
+      );
     }
   });
 }
