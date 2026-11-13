@@ -404,6 +404,14 @@ async fn set_agent_owner_with_operation(
         tx.commit().await?;
         return Ok(false);
     }
+    // A new link to a held owner is refused (an existing link is untouched
+    // above). Retirement writes holds under this admission lock.
+    if crate::store::identity_retirement::owner_is_held(tx.conn(), community_id, owner_pubkey)
+        .await?
+    {
+        tx.rollback().await?;
+        return Err(crate::error::DbError::ExecutionHeld);
+    }
     crate::relay_invite::revoke_restricted_agent_invites(
         tx.conn(),
         community_id,

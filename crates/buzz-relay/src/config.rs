@@ -409,6 +409,12 @@ pub struct Config {
     /// Deployment-admin API and SPA configuration. Absent means the surface is disabled.
     pub admin: Option<AdminConfig>,
 
+    /// Whether the admin API accepts identity-retirement mutations. Set by
+    /// `BUZZ_ADMIN_IDENTITY_RETIREMENT=enabled`; unset or `disabled` refuses
+    /// them with 503. Enable only once every serving relay runs a release that
+    /// enforces the execution hold.
+    pub admin_identity_retirement: bool,
+
     /// Optional path to the web UI `dist/` directory.
     /// When set, the relay serves the invite landing page and its static assets.
     /// When unset, no static file serving happens (relay behaves as before).
@@ -1471,6 +1477,20 @@ impl Config {
             }
         };
 
+        let admin_identity_retirement = match std::env::var("BUZZ_ADMIN_IDENTITY_RETIREMENT")
+            .ok()
+            .as_deref()
+            .map(str::trim)
+        {
+            None | Some("") | Some("disabled") => false,
+            Some("enabled") => true,
+            Some(other) => {
+                return Err(ConfigError::InvalidValue(format!(
+                    "BUZZ_ADMIN_IDENTITY_RETIREMENT must be \"enabled\" or \"disabled\"; got \"{other}\""
+                )))
+            }
+        };
+
         // Web UI static file serving
         let web_dir = std::env::var("BUZZ_WEB_DIR")
             .ok()
@@ -1595,6 +1615,7 @@ impl Config {
             join_policy,
             invite_v1_invalid_after: invite_v1_cutoff_from_env()?,
             admin,
+            admin_identity_retirement,
             web_dir,
             serve_git_web_gui,
             nip_fi_provision_binding,

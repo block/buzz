@@ -571,6 +571,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     // Merge — each sub-router carries its own body limit.
     // Metrics → Trace → CORS applied once over the combined router.
     let mut merged = api_router
+        .merge(api::operator::members::router(state.clone()))
         .merge(media_router)
         .merge(git_router)
         .merge(git_policy_router);

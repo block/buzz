@@ -340,6 +340,12 @@ pub async fn create_workflow(
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
+    crate::store::identity_retirement::admit_shared(tx.conn(), community_id).await?;
+    if crate::store::identity_retirement::owner_is_held(tx.conn(), community_id, owner_pubkey)
+        .await?
+    {
+        return Err(DbError::ExecutionHeld);
+    }
     let id = Uuid::new_v4();
 
     sqlx::query(
@@ -385,6 +391,12 @@ pub async fn upsert_workflow(
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
+    crate::store::identity_retirement::admit_shared(tx.conn(), community_id).await?;
+    if crate::store::identity_retirement::owner_is_held(tx.conn(), community_id, owner_pubkey)
+        .await?
+    {
+        return Err(DbError::ExecutionHeld);
+    }
     let row = sqlx::query(
         r#"
         INSERT INTO workflows
@@ -737,7 +749,7 @@ pub async fn update_workflow(
     let affected = sqlx::query(
         r#"
         UPDATE workflows
-        SET name = $1, definition = $2::jsonb, definition_hash = $3
+        SET name = $1, definition = $2::jsonb, definition_hash = $3, updated_at = NOW()
         WHERE community_id = $4 AND id = $5
         "#,
     )
@@ -776,7 +788,7 @@ pub async fn update_workflow_status(
     let affected = sqlx::query(
         r#"
         UPDATE workflows
-        SET status = $1::workflow_status
+        SET status = $1::workflow_status, updated_at = NOW()
         WHERE community_id = $2 AND id = $3
         "#,
     )
@@ -813,7 +825,7 @@ pub async fn set_workflow_enabled(
     let affected = sqlx::query(
         r#"
         UPDATE workflows
-        SET enabled = $1
+        SET enabled = $1, updated_at = NOW()
         WHERE community_id = $2 AND id = $3
         "#,
     )
@@ -923,6 +935,18 @@ pub async fn create_workflow_run(
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
+    crate::store::identity_retirement::admit_shared(tx.conn(), community_id).await?;
+    let owner: Vec<u8> = sqlx::query_scalar(
+        "SELECT owner_pubkey FROM workflows WHERE community_id = $1 AND id = $2",
+    )
+    .bind(community_id.as_uuid())
+    .bind(workflow_id)
+    .fetch_optional(tx.conn())
+    .await?
+    .ok_or_else(|| DbError::NotFound(format!("workflow {workflow_id}")))?;
+    if crate::store::identity_retirement::owner_is_held(tx.conn(), community_id, &owner).await? {
+        return Err(DbError::ExecutionHeld);
+    }
     let id = Uuid::new_v4();
 
     sqlx::query(
@@ -1038,6 +1062,13 @@ pub struct WorkflowRunFailure<'a> {
 /// has not yet been stamped (IS NULL). The original code read `status` from the
 /// column AFTER `SET status = ?` had already changed it, so the condition was
 /// always false. We now check the bind parameter directly.
+///
+/// A `cancelled` run is final: any later write keeps its status and the
+/// cancelling reason, stamps `completed_at` if unset (the writer has stopped
+/// acting on the run) and returns [`DbError::RunCancelled`]. A terminal write
+/// (the executor's final progress) also records `current_step` and the
+/// execution trace, so results of steps that already ran survive; a `Running`
+/// stamp leaves them unchanged.
 pub async fn update_workflow_run(
     pool: &PgPool,
     community_id: CommunityId,
@@ -1054,10 +1085,42 @@ pub async fn update_workflow_run(
     )
     .await?;
     let status_str = status.to_string();
+    let current: String = sqlx::query_scalar(
+        "SELECT status::text FROM workflow_runs WHERE community_id = $1 AND id = $2 FOR UPDATE",
+    )
+    .bind(community_id.as_uuid())
+    .bind(id)
+    .fetch_optional(tx.conn())
+    .await?
+    .ok_or_else(|| DbError::NotFound(format!("workflow_run {id}")))?;
+    if current == "cancelled" {
+        // A cancelled run never leaves `cancelled`. The executor writing to it
+        // has stopped acting on it, so stamp that as the run's stop evidence,
+        // and keep its final progress so completed steps' outputs survive.
+        let terminal = matches!(
+            status,
+            RunStatus::Completed | RunStatus::Failed | RunStatus::Cancelled
+        );
+        sqlx::query(
+            "UPDATE workflow_runs SET completed_at = COALESCE(completed_at, NOW()), \
+             current_step = CASE WHEN $3 THEN $4 ELSE current_step END, \
+             execution_trace = CASE WHEN $3 THEN $5 ELSE execution_trace END \
+             WHERE community_id = $1 AND id = $2",
+        )
+        .bind(community_id.as_uuid())
+        .bind(id)
+        .bind(terminal)
+        .bind(current_step)
+        .bind(trace)
+        .execute(tx.conn())
+        .await?;
+        tx.commit().await?;
+        return Err(DbError::RunCancelled(id));
+    }
     let (error_code, error) = failure
         .map(|failure| (Some(failure.code), Some(failure.message)))
         .unwrap_or((None, None));
-    let affected = sqlx::query(
+    sqlx::query(
         r#"
         UPDATE workflow_runs
         SET status        = $1::run_status,
@@ -1065,11 +1128,11 @@ pub async fn update_workflow_run(
             execution_trace = $3,
             error_code    = $4,
             error_message = $5,
-            started_at    = CASE WHEN $6 = 'running' AND started_at IS NULL
+            started_at    = CASE WHEN $1 = 'running' AND started_at IS NULL
                                  THEN NOW() ELSE started_at END,
-            completed_at  = CASE WHEN $7 IN ('completed','failed','cancelled')
+            completed_at  = CASE WHEN $1 IN ('completed','failed','cancelled')
                                  THEN NOW() ELSE completed_at END
-        WHERE community_id = $8 AND id = $9
+        WHERE community_id = $6 AND id = $7
         "#,
     )
     .bind(&status_str)
@@ -1077,18 +1140,11 @@ pub async fn update_workflow_run(
     .bind(trace)
     .bind(error_code)
     .bind(error)
-    .bind(&status_str) // for started_at CASE
-    .bind(&status_str) // for completed_at CASE
     .bind(community_id.as_uuid())
     .bind(id)
     .execute(tx.conn())
-    .await?
-    .rows_affected();
+    .await?;
     tx.commit().await?;
-
-    if affected == 0 {
-        return Err(DbError::NotFound(format!("workflow_run {id}")));
-    }
     Ok(())
 }
 

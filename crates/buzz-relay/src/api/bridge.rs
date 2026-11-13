@@ -2994,7 +2994,11 @@ pub async fn workflow_webhook(
             &buzz_db::workflow::RunCause::Webhook,
         )
         .await
-        .map_err(|e| super::internal_error(&format!("db error: {e}")))?;
+        .map_err(|e| match e {
+            // Like every other authority denial, a held owner reads as not found.
+            buzz_db::DbError::ExecutionHeld => not_found("workflow not found"),
+            e => super::internal_error(&format!("db error: {e}")),
+        })?;
 
     // Spawn workflow execution asynchronously.
     let engine = Arc::clone(&state.workflow_engine);
@@ -11076,13 +11080,16 @@ pub(crate) mod postgres_tests {
             // A schema whose `users` table can be taken away after the link,
             // so only the owner-to-agent lookup fails at revoke time. It
             // carries `communities` and the deletion lock key so writes pass
-            // community write admission, and `events` for the member list
-            // each membership change writes.
+            // community write admission, `events` for the member list each
+            // membership change writes, and the retirement holds the owner
+            // link checks.
             let db_url = crate::test_support::database_url();
             let schema = format!("late_owner_{}", uuid::Uuid::new_v4().simple());
             sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
                 "CREATE SCHEMA {schema}; \
                  CREATE TABLE {schema}.users (LIKE public.users INCLUDING ALL); \
+                 CREATE TABLE {schema}.identity_retirement_holds \
+                     (LIKE public.identity_retirement_holds INCLUDING ALL); \
                  CREATE TABLE {schema}.community_bans (LIKE public.community_bans INCLUDING ALL); \
                  CREATE TABLE {schema}.relay_invites (LIKE public.relay_invites INCLUDING ALL); \
                  CREATE TABLE {schema}.relay_members (LIKE public.relay_members INCLUDING ALL); \

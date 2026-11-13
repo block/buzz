@@ -4822,15 +4822,26 @@ async fn publish_nipia_delta(
 ) -> anyhow::Result<()> {
     let relay_pubkey_hex = state.relay_keypair.public_key().to_hex();
 
+    // NIP-IA: a `relay` decision has no request event and omits the actor.
+    let relay_consent = consent_path == "relay";
+    let consent = if relay_consent {
+        Tag::parse(["consent", consent_path])
+    } else {
+        Tag::parse(["consent", consent_path, actor_pubkey_hex])
+    }
+    .map_err(|e| anyhow::anyhow!("failed to build consent tag: {e}"))?;
     let mut tags = vec![
         Tag::parse(["-"]).map_err(|e| anyhow::anyhow!("failed to build '-' tag: {e}"))?,
         Tag::parse(["p", target_pubkey_hex])
             .map_err(|e| anyhow::anyhow!("failed to build p tag: {e}"))?,
-        Tag::parse(["consent", consent_path, actor_pubkey_hex])
-            .map_err(|e| anyhow::anyhow!("failed to build consent tag: {e}"))?,
-        Tag::parse(["e", request_event_id])
-            .map_err(|e| anyhow::anyhow!("failed to build e tag: {e}"))?,
+        consent,
     ];
+    if !relay_consent {
+        tags.push(
+            Tag::parse(["e", request_event_id])
+                .map_err(|e| anyhow::anyhow!("failed to build e tag: {e}"))?,
+        );
+    }
 
     if let Some(reason) = reason {
         tags.push(
