@@ -11,6 +11,7 @@ import 'bestie_welcome_storage.dart';
 import 'agent_reply_handoff.dart';
 import 'huddle_timeline.dart';
 import '../../shared/widgets/confirmation_dialog.dart';
+import '../../shared/share/share_suggestions.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/widgets/ios_scroll_to_top.dart';
 import 'message_footer_layout.dart';
@@ -115,6 +116,7 @@ import 'sticky_date_header.dart';
 import 'date_header_scroll_activity.dart';
 import 'thread_detail_page.dart';
 import 'thread_replies_provider.dart';
+import 'open_channel_routes.dart';
 import 'reading_marks.dart';
 import 'timeline_message.dart';
 
@@ -518,6 +520,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
       final session = ref.read(relaySessionProvider.notifier);
       return session.registerVisibleChannel(channel.id);
     }, [channel.id]);
+    useOpenChannelRoute(ref, channel.id);
 
     useEffect(
       () {
@@ -966,12 +969,21 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                                   mentionPubkeys,
                                 );
                               }
+                              final donate = activeShareSuggestionDonor(ref);
+                              final displayName = resolvedChannel.displayLabel(
+                                currentPubkey: ref.read(myPubkeyProvider),
+                              );
                               await sendMessage.call(
                                 channelId: channel.id,
                                 content: content,
                                 mentionPubkeys: recipients,
                                 channel: resolvedChannel,
                                 mediaTags: mediaTags,
+                              );
+                              donate(
+                                channelId: channel.id,
+                                displayName: displayName,
+                                recipientCount: resolvedChannel.memberCount - 1,
                               );
                             },
                       ),

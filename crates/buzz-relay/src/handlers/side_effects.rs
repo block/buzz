@@ -4196,6 +4196,7 @@ async fn seed_manifest_pointer(
         refs: BTreeMap::new(),
         packs: Vec::new(),
         parent: None,
+        published_at: None,
     };
     empty
         .validate()
@@ -4311,6 +4312,7 @@ async fn emit_initial_ref_state(
         head: DEFAULT_HEAD,
         refs: &empty_refs,
         actor_pubkey_hex: owner_hex,
+        published_at: None,
     };
     let event = build_ref_state_event(&inputs, &state.relay_keypair)
         .map_err(|e| anyhow::anyhow!("build_ref_state_event: {e}"))?;

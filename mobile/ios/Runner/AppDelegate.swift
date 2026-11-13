@@ -34,6 +34,7 @@ import os.log
   private var communityKeyboardObserver: NSObjectProtocol?
   private var hapticsChannel: FlutterMethodChannel?
   private var appGroupChannel: FlutterMethodChannel?
+  private var shareSuggestions: ShareSuggestions?
   private var qrScannerChannel: FlutterMethodChannel?
   private var inlinePhotoPickerSupportChannel: FlutterMethodChannel?
   private var ageSignalChannel: FlutterMethodChannel?
@@ -92,6 +93,12 @@ import os.log
     }
     identityFilePlugin = IdentityFilePlugin(messenger: messenger)
     HomeScreenShortcuts.shared.attach(messenger: messenger)
+    shareSuggestions = ShareSuggestions { [weak self] in
+      self?.appGroupIdentifier.flatMap {
+        FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: $0)
+      }
+    }
+    shareSuggestions?.attach(messenger: messenger)
     browserAuthBridge = BuzzBrowserAuthBridge(messenger: messenger)
     hostedHpkeChannel = FlutterMethodChannel(name: "buzz/hosted_hpke", binaryMessenger: messenger)
     hostedHpkeChannel?.setMethodCallHandler { call, result in
@@ -142,17 +149,19 @@ import os.log
       binaryMessenger: messenger
     )
     appGroupChannel?.setMethodCallHandler { [weak self] call, result in
-      guard call.method == "cachesDirectory" else {
-        result(FlutterMethodNotImplemented)
-        return
+      let container = self?.appGroupIdentifier.flatMap {
+        FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: $0)
       }
-      // Caches the app's extensions can read too. The OS may purge it.
-      let caches = self?.appGroupIdentifier
-        .flatMap {
-          FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: $0)
-        }?
-        .appendingPathComponent("Library/Caches", isDirectory: true)
-      result(caches?.path)
+      switch call.method {
+      case "cachesDirectory":
+        // Caches the app's extensions can read too. The OS may purge it.
+        result(container?.appendingPathComponent("Library/Caches", isDirectory: true).path)
+      case "pendingSharesDirectory":
+        // Where the share extension leaves items for the app to pick up.
+        result(container?.appendingPathComponent("PendingShares", isDirectory: true).path)
+      default:
+        result(FlutterMethodNotImplemented)
+      }
     }
     hapticsChannel = FlutterMethodChannel(
       name: "buzz/haptics",

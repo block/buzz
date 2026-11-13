@@ -4,6 +4,7 @@ import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
 import 'channel_unread.dart';
 import '../../shared/widgets/collapsible_section_body.dart';
 import '../../shared/widgets/collapsible_sliver_body.dart';
+import '../../shared/http/app_http_client.dart';
 import '../../shared/me/me_sync.dart';
 import '../../shared/hosted/hosted_relay_auth.dart';
 import '../../shared/hosted/organization_environment.dart';
@@ -302,11 +303,10 @@ class ChannelsPage extends HookConsumerWidget {
     if (channelsAsync.asData?.value case final data?) {
       cachedChannels.value = data;
     }
-    final soloViewer = ref.watch(myPubkeyProvider);
     final personalIds =
         ref.watch(meGroupsProvider).asData?.value.channels ?? const <String>[];
     final channels = cachedChannels.value
-        ?.where((channel) => !channel.isPersonalChat(soloViewer, personalIds))
+        ?.where((channel) => !channel.isSoloChat(personalIds))
         .toList();
     Future<void> openChannel(Channel channel) async {
       if (!context.mounted) return;

@@ -1119,7 +1119,7 @@ dependencies = [
 
 [[package]]
 name = "buzz-desktop"
-version = "0.5.28"
+version = "0.5.29"
 dependencies = [
  "anyhow",
  "arboard",
@@ -1207,6 +1207,7 @@ dependencies = [
  "webkit2gtk",
  "window-vibrancy",
  "windows-sys 0.61.2",
+ "xattr",
  "zeroize",
  "zip 9.0.5",
 ]
