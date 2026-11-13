@@ -16,6 +16,8 @@ pub mod channel_members;
 pub mod community;
 /// Monotonic community auth policy and operator acceptance receipts.
 pub mod community_auth;
+/// The community's custom emoji catalog (NIP-CE).
+pub mod custom_emoji;
 /// Durable whole-community deletion lifecycle and PostgreSQL adapter.
 pub mod deletion;
 /// Direct message channel persistence.

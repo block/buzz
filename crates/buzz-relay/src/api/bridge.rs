@@ -7906,6 +7906,12 @@ pub(crate) mod postgres_tests {
                     br#"{"query":"a"}"#.to_vec(),
                 ),
                 (
+                    "POST",
+                    crate::api::emoji::CATALOG_PATH.into(),
+                    Some(crate::api::emoji::CATALOG_PATH.into()),
+                    br#"{"since":0}"#.to_vec(),
+                ),
+                (
                     "GET",
                     format!("/workflows/{workflow}/runs"),
                     Some(format!("/workflows/{workflow}/runs")),
