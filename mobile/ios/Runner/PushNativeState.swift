@@ -133,6 +133,9 @@ final class BuzzNotificationReplyBridge {
   /// iOS gives a background notification action about 30 seconds.
   static let sendTimeout: TimeInterval = 25
   static let replyNotSentThread = "buzz.reply-not-sent"
+  /// Replies the app never took before their deadline, kept so the app makes
+  /// their text a draft when it next runs.
+  static let unsentRepliesKey = "buzz.notification_reply.unsent"
 
   private let buffer = BuzzNotificationReplyBuffer()
   private let selectedCommunityDefaults: UserDefaults?
@@ -178,7 +181,8 @@ final class BuzzNotificationReplyBridge {
         id: UUID().uuidString,
         text: text,
         userInfo: content.userInfo,
-        threadIdentifier: content.threadIdentifier
+        threadIdentifier: content.threadIdentifier,
+        deadline: Date().addingTimeInterval(Self.sendTimeout)
       )
     else {
       completion()
@@ -192,22 +196,22 @@ final class BuzzNotificationReplyBridge {
       UIApplication.shared.endBackgroundTask(backgroundTask)
       backgroundTask = .invalid
     }
-    backgroundTask = UIApplication.shared.beginBackgroundTask { [buffer] in
+    backgroundTask = UIApplication.shared.beginBackgroundTask { [weak self] in
       // iOS requires the task to end before this handler returns; the
       // unsent reply is still reported if the app gets the time.
-      buffer.complete(id: request.id, sent: false)
+      self?.expire(request.id)
       endBackgroundTask()
     }
-    buffer.add(request) { sent in
-      Self.finish(request, sent: sent, notificationID: notificationID, center: center) {
+    buffer.add(request) { outcome in
+      Self.finish(request, outcome: outcome, notificationID: notificationID, center: center) {
         DispatchQueue.main.async {
           completion()
           endBackgroundTask()
         }
       }
     }
-    DispatchQueue.main.asyncAfter(deadline: .now() + Self.sendTimeout) { [buffer] in
-      buffer.complete(id: request.id, sent: false)
+    DispatchQueue.main.asyncAfter(deadline: .now() + Self.sendTimeout) { [weak self] in
+      self?.expire(request.id)
     }
     notifyFlutter?()
     return true
@@ -217,7 +221,7 @@ final class BuzzNotificationReplyBridge {
   func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) -> Bool {
     switch call.method {
     case "takePendingNotificationReplies":
-      result(buffer.take().map(Self.flutterArguments))
+      result(takeUnsentReplies() + buffer.take().map(Self.flutterArguments))
     case "completeNotificationReply":
       guard let arguments = call.arguments as? [String: Any],
         let id = arguments["id"] as? String,
@@ -227,7 +231,13 @@ final class BuzzNotificationReplyBridge {
           FlutterError(code: "invalid_arguments", message: "Expected id and sent.", details: nil))
         return true
       }
-      buffer.complete(id: id, sent: sent)
+      let outcome: BuzzNotificationReplyOutcome =
+        sent
+        ? .sent
+        : arguments["unknown"] as? Bool == true
+          ? .unknown
+          : .notSent(draftThreadRootID: arguments["draftThreadRootId"] as? String)
+      buffer.complete(id: id, outcome: outcome)
       result(nil)
     case "setSelectedCommunity":
       BuzzSelectedCommunity.set(call.arguments as? String, in: selectedCommunityDefaults)
@@ -238,6 +248,23 @@ final class BuzzNotificationReplyBridge {
     return true
   }
 
+  /// Ends a reply at its deadline. One the app never took is kept, so the
+  /// app still makes its text a draft.
+  private func expire(_ id: String) {
+    guard let request = buffer.expire(id: id) else { return }
+    let defaults = UserDefaults.standard
+    var unsent = defaults.array(forKey: Self.unsentRepliesKey) as? [[String: String]] ?? []
+    unsent.append(Self.flutterArguments(request))
+    defaults.set(unsent, forKey: Self.unsentRepliesKey)
+  }
+
+  private func takeUnsentReplies() -> [[String: String]] {
+    let defaults = UserDefaults.standard
+    let unsent = defaults.array(forKey: Self.unsentRepliesKey) as? [[String: String]] ?? []
+    defaults.removeObject(forKey: Self.unsentRepliesKey)
+    return unsent
+  }
+
   private static func flutterArguments(_ request: BuzzNotificationReplyRequest) -> [String: String] {
     var arguments = request.target.flutterArguments
     arguments["id"] = request.id
@@ -245,27 +272,39 @@ final class BuzzNotificationReplyBridge {
     arguments["senderPubkey"] = request.context.senderPubkey
     arguments["replyRootId"] = request.context.threadRootID
     arguments["messageCreatedAt"] = String(request.context.messageCreatedAt)
+    arguments["deadline"] = String(Int64(request.deadline.timeIntervalSince1970 * 1000))
     return arguments
   }
 
   /// A sent reply clears the notifications it marked read: the notified one
   /// and earlier ones in the same conversation. An unsent one is replaced by a
-  /// "Reply not sent" notification that keeps the typed text and opens the
-  /// conversation.
+  /// "Reply not sent" notification that keeps the typed text and opens its
+  /// draft; one that may have gone out says so instead, without a draft.
   private static func finish(
     _ request: BuzzNotificationReplyRequest,
-    sent: Bool,
+    outcome: BuzzNotificationReplyOutcome,
     notificationID: String,
     center: UNUserNotificationCenter,
     done: @escaping () -> Void
   ) {
-    guard sent else {
+    guard outcome == .sent else {
       let content = UNMutableNotificationContent()
-      content.title = "Reply not sent"
+      var target = request.target
+      switch outcome {
+      case .notSent(let draftThreadRootID):
+        content.title = "Reply not sent"
+        if let draftThreadRootID {
+          target = BuzzPushNavigationTarget(
+            eventID: target.eventID, communityID: target.communityID,
+            channelID: target.channelID, threadRootID: draftThreadRootID)
+        }
+      default:
+        content.title = "Reply may not have sent"
+      }
       content.body = request.text
       // Grouped apart, so clearing a conversation never removes it.
       content.threadIdentifier = Self.replyNotSentThread
-      content.userInfo = [BuzzPushNavigationTarget.userInfoKey: request.target.userInfoValue]
+      content.userInfo = [BuzzPushNavigationTarget.userInfoKey: target.userInfoValue]
       center.add(
         UNNotificationRequest(
           identifier: "buzz.reply-not-sent.\(request.id)", content: content, trigger: nil)

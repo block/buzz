@@ -111,20 +111,31 @@ func `Forum posts and other kinds offer no reply`(kind: Int) {
     BuzzNotificationReplyRequest(
       id: id, text: id, target: target, context: context, threadIdentifier: "t")
   }
-  var outcomes: [String: [Bool]] = [:]
-  buffer.add(request("1")) { outcomes["1", default: []].append($0) }
-  buffer.add(request("2")) { outcomes["2", default: []].append($0) }
+  var outcomes: [String: [BuzzNotificationReplyOutcome]] = [:]
+  for id in ["1", "2", "3", "4"] {
+    buffer.add(request(id)) { outcomes[id, default: []].append($0) }
+  }
 
-  #expect(buffer.take().map(\.id) == ["1", "2"])
+  #expect(buffer.take().map(\.id) == ["1", "2", "3", "4"])
   #expect(buffer.take().isEmpty)
+  buffer.add(request("5")) { outcomes["5", default: []].append($0) }
 
-  buffer.complete(id: "1", sent: true)
-  // A timeout after the app reported the outcome changes nothing.
-  buffer.complete(id: "1", sent: false)
-  buffer.complete(id: "2", sent: false)
-  buffer.complete(id: "unknown", sent: true)
+  buffer.complete(id: "1", outcome: .sent)
+  // A deadline after the app reported the outcome changes nothing.
+  #expect(buffer.expire(id: "1") == nil)
+  buffer.complete(id: "2", outcome: .notSent(draftThreadRootID: "head"))
+  buffer.complete(id: "3", outcome: .unknown)
+  // A taken reply the app is still sending isn't handed back as a draft.
+  #expect(buffer.expire(id: "4") == nil)
+  // One the app never took is, so its text isn't lost.
+  #expect(buffer.expire(id: "5")?.id == "5")
+  buffer.complete(id: "unknown", outcome: .sent)
 
-  #expect(outcomes == ["1": [true], "2": [false]])
+  #expect(
+    outcomes == [
+      "1": [.sent], "2": [.notSent(draftThreadRootID: "head")], "3": [.unknown],
+      "4": [.notSent(draftThreadRootID: nil)], "5": [.notSent(draftThreadRootID: nil)],
+    ])
 }
 
 @Test func `Selected community round-trips and clears`() throws {

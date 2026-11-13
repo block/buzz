@@ -91,19 +91,23 @@ public struct BuzzNotificationReplyRequest: Equatable, Sendable {
   public let context: BuzzNotificationReplyContext
   /// The notification's thread, whose delivered notifications a sent reply clears.
   public let threadIdentifier: String
+  /// When the reply counts as not sent if the app hasn't reported otherwise.
+  public let deadline: Date
 
   public init(
     id: String,
     text: String,
     target: BuzzPushNavigationTarget,
     context: BuzzNotificationReplyContext,
-    threadIdentifier: String
+    threadIdentifier: String,
+    deadline: Date = .distantFuture
   ) {
     self.id = id
     self.text = text
     self.target = target
     self.context = context
     self.threadIdentifier = threadIdentifier
+    self.deadline = deadline
   }
 
   /// Builds a request from a Reply action, or nil when the notification
@@ -112,7 +116,8 @@ public struct BuzzNotificationReplyRequest: Equatable, Sendable {
     id: String,
     text: String,
     userInfo: [AnyHashable: Any],
-    threadIdentifier: String
+    threadIdentifier: String,
+    deadline: Date = .distantFuture
   ) -> BuzzNotificationReplyRequest? {
     guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
       let target = BuzzPushNavigationTarget.decodeIfPresent(from: userInfo),
@@ -120,8 +125,18 @@ public struct BuzzNotificationReplyRequest: Equatable, Sendable {
     else { return nil }
     return BuzzNotificationReplyRequest(
       id: id, text: text, target: target, context: context,
-      threadIdentifier: threadIdentifier)
+      threadIdentifier: threadIdentifier, deadline: deadline)
   }
+}
+
+/// How a notification reply ended.
+public enum BuzzNotificationReplyOutcome: Equatable, Sendable {
+  case sent
+  /// Never published. The app keeps its text as a draft in the thread named
+  /// here, or in the notified conversation when nil.
+  case notSent(draftThreadRootID: String?)
+  /// Published without an acknowledgement, so it may have gone out.
+  case unknown
 }
 
 /// Holds replies from notification actions until the app finishes each one.
@@ -131,7 +146,7 @@ public struct BuzzNotificationReplyRequest: Equatable, Sendable {
 public final class BuzzNotificationReplyBuffer: @unchecked Sendable {
   private struct Entry {
     let request: BuzzNotificationReplyRequest
-    let finish: (Bool) -> Void
+    let finish: (BuzzNotificationReplyOutcome) -> Void
     var taken: Bool
   }
 
@@ -142,7 +157,7 @@ public final class BuzzNotificationReplyBuffer: @unchecked Sendable {
 
   public func add(
     _ request: BuzzNotificationReplyRequest,
-    finish: @escaping (_ sent: Bool) -> Void
+    finish: @escaping (BuzzNotificationReplyOutcome) -> Void
   ) {
     lock.lock()
     entries.append(Entry(request: request, finish: finish, taken: false))
@@ -162,12 +177,23 @@ public final class BuzzNotificationReplyBuffer: @unchecked Sendable {
   }
 
   /// Finishes a request. Unknown or already finished ids are ignored.
-  public func complete(id: String, sent: Bool) {
+  public func complete(id: String, outcome: BuzzNotificationReplyOutcome) {
+    remove(id: id)?.finish(outcome)
+  }
+
+  /// Finishes a request as not sent at its deadline, and returns it when the
+  /// app never took it, so its text can still become a draft.
+  @discardableResult
+  public func expire(id: String) -> BuzzNotificationReplyRequest? {
+    guard let entry = remove(id: id) else { return nil }
+    entry.finish(.notSent(draftThreadRootID: nil))
+    return entry.taken ? nil : entry.request
+  }
+
+  private func remove(id: String) -> Entry? {
     lock.lock()
-    let index = entries.firstIndex { $0.request.id == id }
-    let entry = index.map { entries.remove(at: $0) }
-    lock.unlock()
-    entry?.finish(sent)
+    defer { lock.unlock() }
+    return entries.firstIndex { $0.request.id == id }.map { entries.remove(at: $0) }
   }
 }
 

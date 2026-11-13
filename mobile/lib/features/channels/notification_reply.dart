@@ -9,6 +9,8 @@ import '../../shared/read_state/read_state_format.dart';
 import '../../shared/read_state/read_state_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../activity/compose_drafts_provider.dart';
+import 'channel.dart';
+import 'channel_management_provider.dart';
 import 'channels_provider.dart';
 import 'send_message_provider.dart';
 
@@ -41,8 +43,13 @@ final notificationReplySenderProvider = Provider<void>((ref) {
         drainAgain = false;
         for (final reply in await takePendingBuzzNotificationReplies()) {
           try {
-            final sent = await sendNotificationReply(ref, reply);
-            await completeBuzzNotificationReply(reply.id, sent: sent);
+            final result = await sendNotificationReply(ref, reply);
+            await completeBuzzNotificationReply(
+              reply.id,
+              sent: result.outcome == NotificationReplyOutcome.sent,
+              unknown: result.outcome == NotificationReplyOutcome.unknown,
+              draftThreadRootId: result.draftThreadRootId,
+            );
           } catch (error) {
             // The native side gives up on it at its own deadline.
             debugPrint('[NotificationReply] not completed: $error');
@@ -60,42 +67,97 @@ final notificationReplySenderProvider = Provider<void>((ref) {
   unawaited(drain());
 });
 
-/// How long a reply may take to get ready to publish.
-const _prepareDeadline = Duration(seconds: 12);
+/// How long a publish waits for the relay's OK; see
+/// [RelaySessionNotifier.publish].
+const _publishTimeout = Duration(seconds: 8);
 
-/// How long a reply may take to send, including getting ready. iOS gives the
-/// app about 30 s and the native side gives up at 25 s.
-const _sendDeadline = Duration(seconds: 20);
+/// Time kept before the native deadline to report the outcome.
+const _reportMargin = Duration(seconds: 2);
 
-/// How long marking the conversation read may take after a reply is sent.
+/// Longest wait for marking the conversation read after a reply is sent.
 const _markReadDeadline = Duration(seconds: 3);
 
+/// Whether a notification reply went out.
+enum NotificationReplyOutcome {
+  sent,
+
+  /// Never published; its text is kept as a draft.
+  notSent,
+
+  /// Published, but its acknowledgement never came, so it may have gone out.
+  /// No draft is kept, so resending can't post it twice.
+  unknown,
+}
+
+/// What happened to a notification reply, and the thread holding its draft
+/// when one was kept.
+typedef NotificationReplyResult = ({
+  NotificationReplyOutcome outcome,
+  String? draftThreadRootId,
+});
+
 /// Sends [reply] in a subthread under the notified message, mentioning its
-/// sender, then marks the conversation read up to that message. Returns
-/// whether it was sent; an unsent reply's text is kept as a draft where its
-/// notification opens, in the reply's own community.
+/// sender while they're still in the conversation, then marks the
+/// conversation read up to that message. A reply that wasn't published keeps
+/// its text as a draft where it would have gone, in the reply's own community.
+///
+/// Everything happens before the reply's native deadline: publishing starts
+/// only while there's still time to hear the relay's OK, so the outcome
+/// reported is the real one.
 @visibleForTesting
-Future<bool> sendNotificationReply(Ref ref, BuzzNotificationReply reply) async {
+Future<NotificationReplyResult> sendNotificationReply(
+  Ref ref,
+  BuzzNotificationReply reply,
+) async {
+  // Sending ends early enough to mark read and report before the deadline.
+  final left =
+      reply.deadline.difference(DateTime.now()) -
+      _reportMargin -
+      _markReadDeadline;
+  final publishWindow = left - _publishTimeout;
+  if (publishWindow <= Duration.zero) {
+    return (
+      outcome: NotificationReplyOutcome.notSent,
+      draftThreadRootId: await _keepDraft(ref, reply),
+    );
+  }
   // The background grace period would otherwise disconnect mid-reply.
   final release = ref
       .read(relaySessionProvider.notifier)
-      .holdForBackgroundWork(_sendDeadline + _markReadDeadline);
+      .holdForBackgroundWork(left + _markReadDeadline);
+  var tooLate = false;
+  final publishBy = Timer(publishWindow, () => tooLate = true);
+  var published = false;
+  bool mayPublish() {
+    if (tooLate) return false;
+    published = true;
+    return true;
+  }
+
   try {
-    // Timing out doesn't stop the send, so it checks this before publishing:
-    // a reply kept as a draft must never also go out.
-    var expired = false;
     try {
-      await _send(ref, reply, expired: () => expired).timeout(
-        _sendDeadline,
-        onTimeout: () {
-          expired = true;
-          throw TimeoutException('Reply not sent in time', _sendDeadline);
-        },
-      );
+      await _send(
+        ref,
+        reply,
+        connectTimeout: publishWindow,
+        mayPublish: mayPublish,
+      ).timeout(left);
     } catch (error) {
       debugPrint('[NotificationReply] not sent: $error');
-      await _keepDraft(ref, reply);
-      return false;
+      if (published) {
+        return (
+          outcome: NotificationReplyOutcome.unknown,
+          draftThreadRootId: null,
+        );
+      }
+      // A send still preparing must not publish after this.
+      tooLate = true;
+      return (
+        outcome: NotificationReplyOutcome.notSent,
+        draftThreadRootId: await _keepDraft(ref, reply),
+      );
+    } finally {
+      publishBy.cancel();
     }
     try {
       final link = reply.link;
@@ -110,18 +172,19 @@ Future<bool> sendNotificationReply(Ref ref, BuzzNotificationReply reply) async {
     } catch (error) {
       debugPrint('[NotificationReply] not marked read: $error');
     }
-    return true;
+    return (outcome: NotificationReplyOutcome.sent, draftThreadRootId: null);
   } finally {
     release();
   }
 }
 
-/// Publishes [reply] to its own community's relay, or throws, including when
-/// [expired] says the reply has already been given up on.
+/// Publishes [reply] to its own community's relay, or throws. [mayPublish]
+/// is asked right before publishing, after every wait.
 Future<void> _send(
   Ref ref,
   BuzzNotificationReply reply, {
-  required bool Function() expired,
+  required Duration connectTimeout,
+  required bool Function() mayPublish,
 }) async {
   final link = reply.link;
   final auth = await ref.read(authProvider.future);
@@ -144,28 +207,55 @@ Future<void> _send(
   }
   final connected = await ref
       .read(relaySessionProvider.notifier)
-      .connectForBackgroundWork(timeout: _prepareDeadline);
+      .connectForBackgroundWork(timeout: connectTimeout);
   if (!connected) throw StateError('Relay not reachable');
   if (ref.read(activeCommunityProvider).value?.id != link.communityId) {
     throw StateError('Selected community changed');
   }
-  if (expired()) throw StateError('Reply deadline passed');
-  // A Solo chat takes no thread replies, so the reply goes at its top level.
-  final threaded = !channel.isSolo;
+  // Only a current member can be mentioned; a sender who has left still gets
+  // the reply in the conversation.
+  final sender = reply.senderPubkey.toLowerCase();
+  final members = await ref.read(channelMembersProvider(link.channelId).future);
+  final senderIsMember = members.any(
+    (member) => member.pubkey.toLowerCase() == sender,
+  );
+  final head = _replyHead(reply, channel);
   await send(
     channelId: link.channelId,
     content: reply.text,
-    parentEventId: threaded ? link.messageId : null,
-    rootEventId: threaded ? reply.replyRootId ?? link.messageId : null,
-    mentionPubkeys: [reply.senderPubkey],
+    parentEventId: head == null ? null : link.messageId,
+    rootEventId: head,
+    mentionPubkeys: senderIsMember ? [reply.senderPubkey] : const [],
     channel: channel,
+    mayPublish: mayPublish,
   );
 }
 
-/// Keeps the reply's text in the composer its notification opens, after any
-/// draft already there, in the reply's own community.
-Future<void> _keepDraft(Ref ref, BuzzNotificationReply reply) async {
+/// The thread [reply] goes in: the notified message's thread, or a new
+/// subthread under it. A Solo chat takes no thread replies, so null there.
+String? _replyHead(BuzzNotificationReply reply, Channel channel) =>
+    channel.isSolo ? null : reply.replyRootId ?? reply.link.messageId;
+
+/// Keeps the reply's text as a draft, after any draft already there, in the
+/// reply's own community, and returns the thread it's in. It goes in the
+/// subthread under the notified message, where the reply would have gone,
+/// when the conversation is known to take threads; otherwise in the
+/// conversation the notification opens.
+Future<String?> _keepDraft(Ref ref, BuzzNotificationReply reply) async {
   final link = reply.link;
+  final channel =
+      ref.read(activeCommunityProvider).value?.id == link.communityId
+      ? ref
+            .read(channelsProvider)
+            .value
+            ?.where((channel) => channel.id == link.channelId)
+            .firstOrNull
+      : null;
+  final threadHeadId = channel == null
+      ? link.threadRootId
+      : channel.isSolo
+      ? null
+      : link.messageId;
   try {
     final communities = await ref.read(communityListProvider.future);
     final community = communities
@@ -181,12 +271,13 @@ Future<void> _keepDraft(Ref ref, BuzzNotificationReply reply) async {
             baseUrl: community.relayUrl,
             nsec: community.nsec,
           ),
-          key: composeDraftKey(link.channelId, threadHeadId: link.threadRootId),
+          key: composeDraftKey(link.channelId, threadHeadId: threadHeadId),
           channelId: link.channelId,
-          threadHeadId: link.threadRootId,
+          threadHeadId: threadHeadId,
           text: reply.text,
         );
   } catch (error) {
     debugPrint('[NotificationReply] draft not kept: $error');
   }
+  return threadHeadId;
 }
