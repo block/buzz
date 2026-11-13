@@ -4601,7 +4601,7 @@ pub(crate) mod publish_test_hooks {
         (rx, release)
     }
 
-    pub(super) async fn after_list_archived(community: CommunityId) {
+    pub(crate) async fn after_reading_archive_state(community: CommunityId) {
         let gate = {
             let mut slot = GATE.lock().unwrap();
             match slot.as_ref() {
@@ -4638,7 +4638,7 @@ pub async fn publish_nipia_archival_list(
         // stale-read/late-write ordering the drift check must catch is
         // deterministic, not scheduler-dependent. Inert in production.
         #[cfg(test)]
-        publish_test_hooks::after_list_archived(tenant.community()).await;
+        publish_test_hooks::after_reading_archive_state(tenant.community()).await;
         let mut tags: Vec<Tag> = Vec::with_capacity(archived.len() + 1);
         tags.push(Tag::parse(["-"]).map_err(|e| anyhow::anyhow!("failed to build '-' tag: {e}"))?);
 
@@ -4843,8 +4843,19 @@ async fn publish_nipia_delta(
         );
     }
 
+    // Readers take a target's newest delta for its reason and replacement, and
+    // NIP-01 breaks a same-second tie by id, not by mutation order. Force each
+    // delta strictly past the target's previous one, as the snapshot does, so
+    // an archive and its added replacement in one second keep their order.
+    let now = nostr::Timestamp::now().as_secs();
+    let created_at = latest_nipia_delta(tenant, state, target_pubkey_hex)
+        .await?
+        .map(|previous| (previous.created_at.as_secs() + 1).max(now))
+        .unwrap_or(now);
+
     let event = EventBuilder::new(Kind::Custom(kind as u16), content)
         .tags(tags)
+        .custom_created_at(nostr::Timestamp::from(created_at))
         .sign_with_keys(&state.relay_keypair)
         .map_err(|e| anyhow::anyhow!("failed to sign kind:{kind}: {e}"))?;
 
@@ -4866,6 +4877,27 @@ async fn publish_nipia_delta(
         "NIP-IA delta event published"
     );
     Ok(())
+}
+
+/// The relay's newest kind:8002 or kind:8003 delta for `target_pubkey_hex` in
+/// this community (NIP-IA), if any.
+pub async fn latest_nipia_delta(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    target_pubkey_hex: &str,
+) -> anyhow::Result<Option<Event>> {
+    let latest = state
+        .db
+        .query_events_for_event_write(&buzz_db::event::EventQuery {
+            kinds: Some(vec![KIND_IA_ARCHIVED as i32, KIND_IA_UNARCHIVED as i32]),
+            pubkey: Some(state.relay_keypair.public_key().to_bytes().to_vec()),
+            p_tag_hex: Some(target_pubkey_hex.to_string()),
+            limit: Some(1),
+            global_only: true,
+            ..buzz_db::event::EventQuery::for_community(tenant.community())
+        })
+        .await?;
+    Ok(latest.into_iter().next().map(|stored| stored.event))
 }
 
 /// Publish a kind:8002 archived-identity delta event (NIP-IA).
