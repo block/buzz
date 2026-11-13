@@ -83,16 +83,20 @@ final identityArchivesProvider = FutureProvider<Set<String>>((ref) async {
       timeout: const Duration(seconds: 3),
     );
     sync.check();
-    if (known != null && events.isEmpty) {
-      return {...known.archived}..remove(sync.pubkey);
-    }
+    // Hand back the known instance when it does not name the viewer, so an
+    // unchanged list does not rebuild every watcher.
+    Set<String> visible(Set<String> archived) => archived.contains(sync.pubkey)
+        ? ({...archived}..remove(sync.pubkey))
+        : archived;
+    if (known != null && events.isEmpty) return visible(known.archived);
     final archived = await _parseArchives(events, authority);
-    if (events.length == 1 && archived != null) {
-      cache[key] = (createdAt: events.single.createdAt, archived: archived);
-    } else {
+    if (events.length != 1 || archived == null) {
       cache.remove(key);
+      return {};
     }
-    return {...?archived}..remove(sync.pubkey);
+    final shared = Set<String>.unmodifiable(archived);
+    cache[key] = (createdAt: events.single.createdAt, archived: shared);
+    return visible(shared);
   } catch (_) {
     return {};
   } finally {

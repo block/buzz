@@ -89,17 +89,19 @@ void main() {
       final authority = nostr.Keys.generate();
       final archivedInA = 'a' * 64;
       final archivedInB = 'b' * 64;
-      NostrEvent snapshot(List<String> keys) => NostrEvent.fromJson(
-        nostr.Event.from(
-          kind: 13535,
-          content: '',
-          secretKey: authority.secret,
-          tags: [
-            ['-'],
-            for (final key in keys) ['p', key],
-          ],
-        ).toMap(),
-      );
+      NostrEvent snapshot(List<String> keys, {int? createdAt}) =>
+          NostrEvent.fromJson(
+            nostr.Event.from(
+              kind: 13535,
+              content: '',
+              secretKey: authority.secret,
+              createdAt: createdAt,
+              tags: [
+                ['-'],
+                for (final key in keys) ['p', key],
+              ],
+            ).toMap(),
+          );
       // Community A's list also names the viewer, who must stay visible.
       final relay = _ArchiveRelay(snapshot([archivedInA, viewer.public]));
       final communityB = Completer<void>();
@@ -122,7 +124,10 @@ void main() {
       );
       addTearDown(container.dispose);
       addTearDown(client.close);
-      container.listen(hiddenArchivedIdentitiesProvider, (_, _) {});
+      var hiddenChanges = 0;
+      container.listen(hiddenArchivedIdentitiesProvider, (_, _) {
+        hiddenChanges++;
+      });
       Future<Set<String>> settled() async {
         await container.read(identityArchivesProvider.future);
         await pumpEventQueue();
@@ -134,6 +139,16 @@ void main() {
       container.invalidate(identityArchivesProvider);
       expect(container.read(hiddenArchivedIdentitiesProvider), {archivedInA});
       expect(await settled(), {archivedInA});
+      // An unchanged list leaves the hidden set alone for every watcher.
+      relay.event = snapshot([
+        archivedInA,
+      ], createdAt: relay.event!.createdAt + 10);
+      container.invalidate(identityArchivesProvider);
+      expect(await settled(), {archivedInA});
+      final changes = hiddenChanges;
+      container.invalidate(identityArchivesProvider);
+      expect(await settled(), {archivedInA});
+      expect(hiddenChanges, changes);
 
       // Switch community and account: A's list no longer applies, so nobody
       // is hidden until B's list arrives.
