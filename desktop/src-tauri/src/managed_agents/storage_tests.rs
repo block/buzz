@@ -211,20 +211,20 @@ fn hydrate_fills_key_from_keyring_when_reachable() {
         FakeKeyStore::reachable().with_key(&agent_keyring_name("agent-pubkey"), "nsec1stored");
     let mut records = vec![record_with_key("")];
 
-    hydrate_keys_with(&store, &mut records);
+    hydrate_keys_with(&store, &mut records).unwrap();
 
     assert_eq!(records[0].private_key_nsec, "nsec1stored");
 }
 
 #[test]
-fn hydrate_leaves_key_empty_on_keyring_outage() {
+fn hydrate_returns_error_on_provider_outage() {
     // Outage edge (Wes storage.rs:158): when the keyring read ERRORS, the
     // key must be left empty — never silently treated as resolved — so the
     // spawn path refuses rather than launching the agent with no identity.
     let store = FakeKeyStore::unreachable();
     let mut records = vec![record_with_key("")];
 
-    hydrate_keys_with(&store, &mut records);
+    assert!(hydrate_keys_with(&store, &mut records).is_err());
 
     assert!(
         records[0].private_key_nsec.is_empty(),
@@ -262,7 +262,7 @@ fn persist_agent_keys_issues_zero_writes_when_inline_keys_already_cleared() {
     // Records whose inline key is already blank (key lives in the keyring).
     let mut records = vec![record_with_key(""), record_with_key("")];
 
-    persist_agent_keys_with(&store, &mut records);
+    persist_agent_keys_with(&store, &mut records).unwrap();
 
     assert_eq!(
         *store.write_count.borrow(),
@@ -284,7 +284,7 @@ fn persist_agent_keys_writes_once_per_record_with_inline_key() {
         record_with_pubkey_and_key("pubkey-agent-beta", "nsec1key_b"),
     ];
 
-    persist_agent_keys_with(&store, &mut records);
+    persist_agent_keys_with(&store, &mut records).unwrap();
 
     assert_eq!(
         *store.write_count.borrow(),

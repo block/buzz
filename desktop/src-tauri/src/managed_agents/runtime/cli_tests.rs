@@ -36,3 +36,42 @@ fn claude_spawn_uses_the_probed_cli_executable() {
         .get_envs()
         .any(|(key, value)| { key == "CLAUDE_CODE_EXECUTABLE" && value == Some(cli.as_os_str()) }));
 }
+
+#[test]
+fn buzz_acp_receives_only_provider_coordinates() {
+    let mut command = std::process::Command::new("buzz-acp");
+    super::super::apply_acp_secret_coordinates(
+        &mut command,
+        crate::managed_agents::DEFAULT_ACP_COMMAND,
+        "buzz-desktop-dev.test",
+        "agent-public-key",
+    );
+    let args: Vec<_> = command.get_args().collect();
+    assert_eq!(
+        args,
+        [
+            "--secret-service",
+            "buzz-desktop-dev.test",
+            "--secret-account",
+            "agent-public-key",
+        ]
+    );
+    assert_eq!(command.get_envs().count(), 0);
+}
+
+#[test]
+fn custom_acp_does_not_receive_buzz_specific_provider_flags() {
+    let mut command = std::process::Command::new("custom-acp");
+    command.arg("--existing-option");
+    super::super::apply_acp_secret_coordinates(
+        &mut command,
+        "custom-acp",
+        "buzz-desktop-dev.test",
+        "agent-public-key",
+    );
+    assert_eq!(
+        command.get_args().collect::<Vec<_>>(),
+        ["--existing-option"]
+    );
+    assert_eq!(command.get_envs().count(), 0);
+}

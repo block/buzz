@@ -136,6 +136,8 @@ Configuration (flags override env vars):
                      pairs for the desktop's active community. A bare host
                      means https://]
   BUZZ_PRIVATE_KEY   Nostr private key (hex or nsec)  [unless a Buzz desktop provides it]
+  BUZZ_SECRET_SERVICE  daz-secrets service, opt-in    [optional]
+  BUZZ_SECRET_ACCOUNT  daz-secrets account, opt-in    [optional]
   BUZZ_AUTH_TAG      NIP-OA auth tag JSON  [optional]
   BUZZ_FEDERATED_IDENTITY_TOKEN    Your NIP-FA sign-in session token  [optional]
   BUZZ_FEDERATED_IDENTITY_ADAPTER  NIP-FA adapter base URL  [optional]
@@ -159,9 +161,19 @@ struct Cli {
     #[arg(long, global = true, env = "BUZZ_RELAY_URL")]
     relay: Option<String>,
 
-    /// Nostr private key (hex or nsec). This is the CLI's identity.
+    /// Nostr private key (hex or nsec). Overrides BUZZ_PRIVATE_KEY.
     #[arg(long, env = "BUZZ_PRIVATE_KEY", hide_env_values = true)]
     private_key: Option<String>,
+
+    /// Opt in to daz-secrets: the service holding the Nostr identity.
+    /// Unset by default, so the keychain, `--private-key`/`BUZZ_PRIVATE_KEY`
+    /// and the Buzz desktop chain keep working exactly as before.
+    #[arg(long, env = credentials::SECRET_SERVICE_ENV, hide_env_values = true)]
+    secret_service: Option<String>,
+
+    /// Opt in to daz-secrets: the account holding the Nostr identity.
+    #[arg(long, env = credentials::SECRET_ACCOUNT_ENV, hide_env_values = true)]
+    secret_account: Option<String>,
 
     /// NIP-OA auth tag JSON (owner attestation). Injected into every signed event.
     #[arg(long, env = "BUZZ_AUTH_TAG", hide_env_values = true)]
@@ -2656,6 +2668,8 @@ async fn run(cli: Cli) -> Result<(), CliError> {
     let settings = credentials::Settings {
         private_key: cli.private_key,
         auth_tag: cli.auth_tag,
+        secret_service: cli.secret_service,
+        secret_account: cli.secret_account,
         ..Default::default()
     }
     .with_env_evidence();

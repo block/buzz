@@ -11,6 +11,8 @@
 //!   --channel <ID>     Channel ID for send/subscribe
 //!   --subscribe        Subscribe to a channel and print events
 //!   --kind <KIND>      Event kind [default: 9]
+//!   --secret-service <SERVICE>  daz-secrets service [default: buzz-desktop]
+//!   --secret-account <ACCOUNT>  daz-secrets account [default: identity]
 //! ```
 //!
 //! # Examples
@@ -47,10 +49,16 @@ async fn main() {
     let channel = opts.channel.as_deref().unwrap_or("default");
     let kind = opts.kind.unwrap_or(9);
 
-    let keys = match std::env::var("BUZZ_PRIVATE_KEY") {
-        Ok(sk) => Keys::parse(&sk).expect("invalid BUZZ_PRIVATE_KEY"),
-        Err(_) => Keys::generate(),
-    };
+    let service = opts.secret_service.as_deref().unwrap_or("buzz-desktop");
+    let account = opts.secret_account.as_deref().unwrap_or("identity");
+    let client =
+        daz_secrets::BlockingClient::from_default_config().expect("secret provider is unavailable");
+    let secret = client
+        .get(service, account)
+        .expect("test client identity is unavailable");
+    let secret_value = zeroize::Zeroizing::new(secret.value);
+    let encoded = std::str::from_utf8(&secret_value).expect("test client identity is not UTF-8");
+    let keys = Keys::parse(encoded.trim()).expect("test client identity is invalid");
     println!("Using pubkey: {}", keys.public_key());
 
     if opts.subscribe {
@@ -159,6 +167,8 @@ struct CliOpts {
     channel: Option<String>,
     subscribe: bool,
     kind: Option<u16>,
+    secret_service: Option<String>,
+    secret_account: Option<String>,
 }
 
 fn parse_args(args: &[String]) -> CliOpts {
@@ -168,6 +178,8 @@ fn parse_args(args: &[String]) -> CliOpts {
         channel: None,
         subscribe: false,
         kind: None,
+        secret_service: None,
+        secret_account: None,
     };
 
     let mut i = 1;
@@ -191,6 +203,14 @@ fn parse_args(args: &[String]) -> CliOpts {
             "--kind" => {
                 i += 1;
                 opts.kind = args.get(i).and_then(|s| s.parse().ok());
+            }
+            "--secret-service" => {
+                i += 1;
+                opts.secret_service = args.get(i).cloned();
+            }
+            "--secret-account" => {
+                i += 1;
+                opts.secret_account = args.get(i).cloned();
             }
             "--help" | "-h" => {
                 print_help();
@@ -220,6 +240,8 @@ OPTIONS:
     --channel <ID>     Channel ID for send/subscribe [default: default]
     --subscribe        Subscribe to a channel and print events
     --kind <KIND>      Event kind [default: 9]
+    --secret-service <SERVICE>  daz-secrets service [default: buzz-desktop]
+    --secret-account <ACCOUNT>  daz-secrets account [default: identity]
     --help             Print this help message
 
 EXAMPLES:

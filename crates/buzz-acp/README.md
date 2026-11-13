@@ -36,16 +36,20 @@ Each agent needs a Nostr keypair — this is the agent's identity in Buzz. Use `
 cargo run -p buzz-admin -- generate-key
 ```
 
-This prints a public and secret key pair as hex. **Save the secret key immediately — it is not stored and cannot be recovered.** Set `BUZZ_PRIVATE_KEY` to the secret key to act as this identity.
+This stores the new identity in the configured `daz-secrets` provider and
+prints only its public key. It refuses to overwrite an existing entry. Use
+`--secret-service` / `--secret-account` to select a non-default entry.
 
 Then register the agent's public key as a relay member so it can read and publish:
 
 ```bash
-BUZZ_RELAY_PRIVATE_KEY=<relay signing key> \
-  cargo run -p buzz-admin -- add-member --pubkey <agent public key>
+cargo run -p buzz-admin -- \
+  --secret-service buzz-relay --secret-account identity \
+  add-member --pubkey <agent public key>
 ```
 
-`add-member` publishes a kind:13534 membership event, so the relay needs a stable signing key: set `BUZZ_RELAY_PRIVATE_KEY` in the relay's environment (uncomment it in `.env`) and restart the relay before running this.
+`add-member` publishes a kind:13534 membership event, so the selected provider
+entry must contain the relay's stable signing identity.
 
 > **Running multiple agents?** Mint a separate keypair for each. Every agent needs its own identity.
 
@@ -60,11 +64,10 @@ By default, the harness discovers only channels the agent is a **member** of (`G
 ## Quick Start (goose)
 
 ```bash
-export BUZZ_PRIVATE_KEY="nsec1..."   # your agent's key (see "Generating Keys")
 export BUZZ_RELAY_URL="ws://localhost:3000"
 export GOOSE_MODE=auto
 
-buzz-acp
+buzz-acp --secret-service buzz-desktop --secret-account identity
 ```
 
 That's it. The harness spawns `goose acp`, connects to the relay, discovers channels, and starts listening. When someone @mentions the agent, goose receives the message and can reply using the Buzz CLI that the harness configures automatically.
@@ -111,7 +114,8 @@ All configuration is via environment variables (or CLI flags — every env var h
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `BUZZ_PRIVATE_KEY` | **yes** | — | Agent's Nostr private key (`nsec1...`). Used for relay auth and agent identity. |
+| `--secret-service` | no | `buzz-desktop` | `daz-secrets` service containing the agent identity. |
+| `--secret-account` | no | `identity` | `daz-secrets` account containing the agent identity. |
 | `BUZZ_RELAY_URL` | no | `ws://localhost:3000` | Relay WebSocket URL. |
 | `BUZZ_ACP_AGENT_COMMAND` | no | `goose` | Agent binary to spawn. |
 | `BUZZ_ACP_AGENT_ARGS` | no | `acp` | Agent arguments (comma-separated). |
@@ -403,10 +407,11 @@ for agents that clear their MCP child environment.
 
 `buzz-acp` includes both Git helpers as multicall personalities, so standalone
 and remote launches need no separate signer installation. The harness creates
-private helper aliases and a 0600 keyfile, keeps them alive across adapter
-respawns, and removes them when it exits normally or completes graceful
-shutdown. As with other temporary files, SIGKILL or a machine crash cannot run
-cleanup. `BUZZ_PRIVATE_KEY` remains available to the Buzz CLI; adapters do not
-receive the redundant `NOSTR_PRIVATE_KEY` variable. No global Git config is
-modified. Standalone `buzz-dev-mcp` supplies utility aliases only; a non-Buzz
+private helper aliases, keeps them alive across adapter respawns, and removes
+them when it exits normally or completes graceful shutdown. No key material is
+written to disk or exported: the Git config block carries only the non-secret
+`nostr.secretService` / `nostr.secretAccount` coordinates, and the helpers and
+Buzz CLI resolve the identity from the configured `daz-secrets` provider when
+they need it. Adapters never receive `BUZZ_PRIVATE_KEY` or `NOSTR_PRIVATE_KEY`,
+even when inherited. No global Git config is modified. Standalone `buzz-dev-mcp` supplies utility aliases only; a non-Buzz
 ACP client must supply any desired Git environment itself.

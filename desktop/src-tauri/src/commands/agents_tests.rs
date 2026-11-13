@@ -794,9 +794,9 @@ fn owner_only_access_deploy_payload_clamps_stale_access() {
     );
 }
 
-/// Runs the real create in a child process: temp app-data and nest paths,
-/// keychain use turned off so agent keys stay inline in the temp agent file,
-/// and no background work outliving the test.
+/// Runs real create in a child process with temp app-data and nest paths,
+/// a disposable real-provider namespace, and no background work outliving
+/// the test. Keys must round-trip through the provider, never the JSON file.
 #[test]
 fn create_managed_agent_persists_picked_effort_and_drops_env_aliases() {
     const CHILD: &str = "BUZZ_CREATE_EFFORT_TEST_HOME";
@@ -804,15 +804,30 @@ fn create_managed_agent_persists_picked_effort_and_drops_env_aliases() {
         return create_with_effort_in_confined_child(std::path::Path::new(&home));
     }
     let home = tempfile::tempdir().unwrap();
+    let service = format!(
+        "buzz-desktop-dev.create-effort.{}",
+        home.path().file_name().unwrap().to_str().unwrap()
+    );
     let output = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "commands::agents::tests::create_managed_agent_persists_picked_effort_and_drops_env_aliases", "--nocapture"])
+        .env("BUZZ_DEV_KEYRING_SERVICE", &service)
         .env(CHILD, home.path()).env("HOME", home.path())
         .env("XDG_DATA_HOME", home.path()).env("APPDATA", home.path())
         .env("LOCALAPPDATA", home.path())
         .env_remove("BUZZ_PRIVATE_KEY").env_remove("BUZZ_AUTH_TAG")
         .env_remove("BUZZ_RELAY_URL").env_remove("BUZZ_NETWORK_TRACE")
-        .output().unwrap();
+        .output();
+    // Child assertions can panic after writing keys. The parent always cleans
+    // this exact disposable namespace before propagating any child failure.
+    let secrets = crate::secret_store::SecretStore::keyring(&service);
+    let cleanup = secrets.delete_all_with_legacy_cleanup();
+    let output = output.unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        cleanup.is_ok() && secrets.verify_fully_wiped(),
+        "provider test namespace cleanup failed; child: {stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(
         output.status.success() && stdout.contains("1 passed"),
         "child failed: {stdout}\n{}",
@@ -822,8 +837,13 @@ fn create_managed_agent_persists_picked_effort_and_drops_env_aliases() {
 
 fn create_with_effort_in_confined_child(home: &std::path::Path) {
     use tauri::Manager;
-    crate::managed_agents::storage::NO_KEYCHAIN_FOR_TEST
-        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let service = crate::app_state::keyring_service();
+    assert_eq!(service, std::env::var("BUZZ_DEV_KEYRING_SERVICE").unwrap());
+    let secrets = crate::secret_store::SecretStore::keyring(service);
+    assert!(
+        secrets.verify_fully_wiped(),
+        "test namespace must start empty"
+    );
     crate::managed_agents::pin_nest_dir_for_test(home.join("nest"));
     // Windows known-folder APIs ignore HOME/APPDATA; an absolute mock
     // identifier replaces the app-data base on every platform.
@@ -869,15 +889,31 @@ fn create_with_effort_in_confined_child(home: &std::path::Path) {
         find(&unpicked).env_vars.contains_key(alias),
         "no pick leaves env alone"
     );
-    // The keychain step was skipped: both keys are still inline on disk.
+    // A fresh provider client must recover both keys; neither may stay inline.
     let path = crate::managed_agents::storage::managed_agents_store_path(app.handle()).unwrap();
     let raw: Vec<serde_json::Value> =
         serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
     for pubkey in [&picked, &unpicked] {
         let entry = raw.iter().find(|r| r["pubkey"] == pubkey.as_str()).unwrap();
-        assert!(entry["private_key_nsec"]
-            .as_str()
+        assert!(
+            entry.get("private_key_nsec").is_none(),
+            "serialized records must omit private keys"
+        );
+        let account = crate::managed_agents::storage::agent_keyring_name(pubkey);
+        let persisted = secrets
+            .load(&account)
             .unwrap()
-            .starts_with("nsec1"));
+            .expect("provider key exists");
+        let keys = nostr::Keys::parse(&persisted).expect("provider key is valid");
+        assert_eq!(keys.public_key().to_hex(), *pubkey);
+        assert!(
+            find(pubkey).private_key_nsec == persisted,
+            "reload hydrates provider key"
+        );
+        secrets.delete(&account).unwrap();
     }
+    assert!(
+        secrets.verify_fully_wiped(),
+        "test namespace must be cleaned"
+    );
 }

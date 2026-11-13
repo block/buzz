@@ -19,6 +19,11 @@ use nostr::{Event, EventBuilder, JsonUtil, Keys, NostrSigner, PublicKey, Tag, Un
 use sha2::{Digest, Sha256};
 
 use crate::error::CliError;
+
+/// Opt-in daz-secrets coordinates. Unset by default: the keychain, an explicit
+/// private key and the Buzz desktop chain are unchanged for existing users.
+pub const SECRET_SERVICE_ENV: &str = "BUZZ_SECRET_SERVICE";
+pub const SECRET_ACCOUNT_ENV: &str = "BUZZ_SECRET_ACCOUNT";
 pub use crate::federated_identity::{
     AdapterSession, FEDERATED_IDENTITY_ADAPTER_ENV, FEDERATED_IDENTITY_TOKEN_ENV,
 };
@@ -34,6 +39,12 @@ pub struct Settings {
     pub federated_identity_token: Option<String>,
     /// `BUZZ_FEDERATED_IDENTITY_ADAPTER` (NIP-FA adapter base URL).
     pub federated_identity_adapter: Option<String>,
+    /// `--secret-service` / `BUZZ_SECRET_SERVICE`. Opt-in: daz-secrets is only
+    /// consulted when this is set, so a default install never touches it.
+    pub secret_service: Option<String>,
+    /// `--secret-account` / `BUZZ_SECRET_ACCOUNT`. Opt-in, paired with
+    /// `secret_service`; one without the other is a configuration error.
+    pub secret_account: Option<String>,
 }
 
 impl Settings {
@@ -44,6 +55,12 @@ impl Settings {
         let non_empty = |name: &str| std::env::var(name).ok().filter(|v| !v.trim().is_empty());
         self.federated_identity_token = non_empty(FEDERATED_IDENTITY_TOKEN_ENV);
         self.federated_identity_adapter = non_empty(FEDERATED_IDENTITY_ADAPTER_ENV);
+        if self.secret_service.is_none() {
+            self.secret_service = non_empty(SECRET_SERVICE_ENV);
+        }
+        if self.secret_account.is_none() {
+            self.secret_account = non_empty(SECRET_ACCOUNT_ENV);
+        }
         self
     }
 }
@@ -72,6 +89,9 @@ pub struct Credentials {
 /// inherited or paired token.
 pub async fn resolve(settings: Settings, relay_url: &str) -> Result<Credentials, CliError> {
     if let Some(credentials) = resolve_explicit(&settings, relay_url)? {
+        return Ok(credentials);
+    }
+    if let Some(credentials) = resolve_daz_secrets(&settings)? {
         return Ok(credentials);
     }
     #[cfg(unix)]
@@ -122,6 +142,45 @@ fn resolve_explicit(settings: &Settings, relay_url: &str) -> Result<Option<Crede
     }
     let evidence = evidence_source(settings, relay_url)?;
     explicit_key(settings, evidence)
+}
+
+/// The opt-in daz-secrets link. It is consulted only when BOTH coordinates are
+/// configured, so an install that never opts in behaves exactly as before. A
+/// half-configured pair is an error rather than a silent skip, matching the
+/// federated-identity settings above.
+fn resolve_daz_secrets(settings: &Settings) -> Result<Option<Credentials>, CliError> {
+    let (Some(service), Some(account)) = (
+        settings.secret_service.as_deref(),
+        settings.secret_account.as_deref(),
+    ) else {
+        if settings.secret_service.is_some() || settings.secret_account.is_some() {
+            return Err(CliError::Auth(format!(
+                "{SECRET_SERVICE_ENV} and {SECRET_ACCOUNT_ENV} must be set together"
+            )));
+        }
+        return Ok(None);
+    };
+    let provider = daz_secrets::BlockingClient::from_default_config()
+        .map_err(|_| CliError::Auth("daz-secrets provider is unavailable".into()))?;
+    let secret = provider.get(service, account).map_err(|_| {
+        CliError::Auth(format!(
+            "Nostr identity is unavailable from daz-secrets ({service}/{account})"
+        ))
+    })?;
+    let text = std::str::from_utf8(&secret.value)
+        .map_err(|_| CliError::Auth("Nostr identity has invalid encoding".into()))?;
+    let keys = Keys::parse(text.trim())
+        .map_err(|_| CliError::Key("invalid Nostr identity in daz-secrets".into()))?;
+    let auth_tag = settings
+        .auth_tag
+        .as_deref()
+        .filter(|input| !input.is_empty())
+        .map(|input| parse_auth_tag(input, &keys.public_key()))
+        .transpose()?;
+    Ok(Some(Credentials {
+        auth_tag,
+        ..Credentials::from_keys(keys)
+    }))
 }
 
 /// The warning for headless evidence settings a desktop link leaves unused.
@@ -629,6 +688,7 @@ mod tests {
             auth_tag: None,
             federated_identity_token: token.map(str::to_owned),
             federated_identity_adapter: adapter.map(str::to_owned),
+            ..Default::default()
         }
     }
 

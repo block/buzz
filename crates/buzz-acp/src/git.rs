@@ -1,8 +1,12 @@
 //! Harness-owned, ephemeral Git identity, credentials and signing for every runtime.
+//!
+//! Private key bytes never leave the harness process: Git, the credential and
+//! signing helpers, and the Buzz CLI receive only the non-secret `daz-secrets`
+//! coordinates (`nostr.secretService` / `nostr.secretAccount`) and resolve the
+//! identity directly from the configured provider when they need it.
 use nostr::ToBech32;
 use std::path::Path;
 use tempfile::TempDir;
-use zeroize::Zeroizing;
 
 /// Keep this guard alive until the adapter pool has shut down.
 pub(crate) struct GitEnvironment {
@@ -12,11 +16,16 @@ pub(crate) struct GitEnvironment {
 
 impl GitEnvironment {
     pub(crate) fn for_config(config: &mut crate::config::Config) -> anyhow::Result<Self> {
-        let environment =
-            Self::install(&config.keys, &config.relay_url, &std::env::current_exe()?)?;
-        config
-            .persona_env_vars
-            .retain(|(name, _)| !is_managed_env(name));
+        let environment = Self::install(
+            &config.keys,
+            &config.secret_service,
+            &config.secret_account,
+            &config.relay_url,
+            &std::env::current_exe()?,
+        )?;
+        config.persona_env_vars.retain(|(name, _)| {
+            !is_managed_env(name) && !IDENTITY_SECRET_ENV.contains(&name.as_str())
+        });
         config
             .persona_env_vars
             .extend(environment.env.iter().cloned());
@@ -25,6 +34,8 @@ impl GitEnvironment {
 
     pub(crate) fn install(
         keys: &nostr::Keys,
+        secret_service: &str,
+        secret_account: &str,
         relay_url: &str,
         executable: &Path,
     ) -> anyhow::Result<Self> {
@@ -36,14 +47,13 @@ impl GitEnvironment {
         if agent {
             symlink(executable, &dir.path().join("git-sign-nostr"))?;
         }
-        let keyfile = dir.path().join(".nostr-key");
-        let secret = Zeroizing::new(keys.secret_key().to_secret_hex());
-        write_keyfile_atomic(&keyfile, secret.as_bytes())?;
+        anyhow::ensure!(
+            !secret_service.trim().is_empty() && !secret_account.trim().is_empty(),
+            "daz-secrets identity coordinates must not be empty"
+        );
         let info = KeyInfo {
-            keyfile_path: keyfile
-                .to_str()
-                .ok_or_else(|| anyhow::anyhow!("Git keyfile path is not UTF-8"))?
-                .to_owned(),
+            secret_service: secret_service.to_owned(),
+            secret_account: secret_account.to_owned(),
             pubkey_hex: keys.public_key().to_hex(),
             npub: keys.public_key().to_bech32()?,
         };
@@ -65,7 +75,7 @@ impl GitEnvironment {
             let display_name = std::env::var("BUZZ_ACP_DISPLAY_NAME").ok();
             identity_entries(&info, relay, display_name.as_deref())
         } else {
-            vec![("nostr.keyfile".into(), info.keyfile_path.clone())]
+            provider_entries(&info)
         };
         // In `user` mode nothing later overrides inherited identity or signing,
         // so drop agent mode's own managed keys, the author/committer
@@ -95,8 +105,8 @@ impl GitEnvironment {
                 .map_err(|_| anyhow::anyhow!("Git PATH is not UTF-8"))?,
         ));
         env.push(("GIT_TERMINAL_PROMPT".into(), "0".into()));
-        // CLI flags must work even when the caller did not export these variables.
-        env.push(("BUZZ_PRIVATE_KEY".into(), secret.to_string()));
+        // The Buzz CLI resolves its identity from the provider coordinates in
+        // the Git config block above; only the non-secret relay URL is exported.
         env.push(("BUZZ_RELAY_URL".into(), relay_url.to_owned()));
         // MCP children start from a cleared env; forward the resolved mode so a
         // nested harness keeps it instead of defaulting to `agent`.
@@ -109,7 +119,8 @@ impl GitEnvironment {
 }
 
 struct KeyInfo {
-    keyfile_path: String,
+    secret_service: String,
+    secret_account: String,
     pubkey_hex: String,
     npub: String,
 }
@@ -204,24 +215,13 @@ fn is_config_include(key: &str) -> bool {
     }
 }
 
-/// Write `data` to `path` with 0600 permissions set at creation time via
-/// `OpenOptions::mode()` (no window where the file is world-readable).
-/// Non-Unix: plain write — acceptable inside our 0700 tempdir.
-#[cfg(unix)]
-fn write_keyfile_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-    let mut f = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)?;
-    f.write_all(data)
-}
-
-#[cfg(not(unix))]
-fn write_keyfile_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
-    std::fs::write(path, data)
+/// Non-secret `daz-secrets` coordinates read by `git-credential-nostr`,
+/// `git-sign-nostr` and the Buzz CLI. Both identity modes need relay auth.
+fn provider_entries(info: &KeyInfo) -> Vec<(String, String)> {
+    vec![
+        ("nostr.secretService".into(), info.secret_service.clone()),
+        ("nostr.secretAccount".into(), info.secret_account.clone()),
+    ]
 }
 
 /// Stable identity contract for git attribution: the bare agent display name,
@@ -351,8 +351,8 @@ fn identity_entries(
         ("commit.gpgSign".into(), "true".into()),
         ("tag.gpgSign".into(), "true".into()),
         ("user.signingkey".into(), info.pubkey_hex.clone()),
-        ("nostr.keyfile".into(), info.keyfile_path.clone()),
     ]);
+    entries.extend(provider_entries(info));
     entries
 }
 
@@ -384,13 +384,14 @@ pub(crate) fn is_managed_env(name: &str) -> bool {
     name.starts_with("GIT_CONFIG_")
         || matches!(
             name,
-            "PATH"
-                | "GIT_TERMINAL_PROMPT"
-                | "BUZZ_PRIVATE_KEY"
-                | "BUZZ_RELAY_URL"
-                | GIT_IDENTITY_ENV
+            "PATH" | "GIT_TERMINAL_PROMPT" | "BUZZ_RELAY_URL" | GIT_IDENTITY_ENV
         )
 }
+
+/// Legacy private-key variables. Identity bytes live only in `daz-secrets`, so
+/// these are stripped from persona configuration and adapter environments
+/// rather than forwarded.
+pub(crate) const IDENTITY_SECRET_ENV: [&str; 2] = ["BUZZ_PRIVATE_KEY", "NOSTR_PRIVATE_KEY"];
 
 #[cfg(unix)]
 fn set_owner_only(path: &Path) -> std::io::Result<()> {
@@ -430,7 +431,8 @@ mod git_user_name_tests {
 
     fn key_info() -> KeyInfo {
         KeyInfo {
-            keyfile_path: "/tmp/.nostr-key".into(),
+            secret_service: "buzz-test".into(),
+            secret_account: "identity".into(),
             pubkey_hex: PUBKEY_HEX.into(),
             npub: NPUB.into(),
         }
