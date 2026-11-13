@@ -5,6 +5,7 @@ use super::{
     parse_entity_deep_link, parse_join_deep_link, parse_message_deep_link,
     parse_nostr_bind_deep_link, PendingCommunityDeepLink, PendingCommunityDeepLinks,
     PendingEntityDeepLinks, PendingNavigationDeepLink, PendingNavigationDeepLinks,
+    PendingNostrBindDeepLinks,
     ENTITY_LINK_TABS,
 };
 
@@ -277,6 +278,49 @@ fn valid_nostr_bind_url() -> Url {
         "buzz://nostr-bind?challenge_id=550e8400-e29b-41d4-a716-446655440000&nonce=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567&verification_code=123456&audience=buzz%3Anostr-identity&action=bind_nostr_identity&protocol=buzz-nostr-identity&version=1&origin=https%3A%2F%2Fexample.com&expires_at=2999-01-01T00%3A00%3A00Z&return=clipboard",
     )
     .unwrap()
+}
+
+#[test]
+fn pending_nostr_bind_links_survive_cold_launch_until_acknowledged() {
+    let queue = PendingNostrBindDeepLinks::default();
+    let first_payload = parse_nostr_bind_deep_link(&valid_nostr_bind_url()).unwrap();
+    let first = queue.enqueue(first_payload.clone()).unwrap();
+    let mut tampered_duplicate = first_payload.clone();
+    tampered_duplicate.nonce = "z".repeat(43);
+    let duplicate = queue.enqueue(tampered_duplicate).unwrap();
+    assert_eq!(duplicate, first, "first payload wins for one challenge");
+
+    let mut second_payload = first_payload;
+    second_payload.challenge_id = "550e8400-e29b-41d4-a716-446655440001".into();
+    let second = queue.enqueue(second_payload).unwrap();
+    assert_eq!(queue.first(), Some(first.clone()));
+    assert!(!queue.acknowledge(&second.id), "only the head can be removed");
+    assert!(queue.acknowledge(&first.id));
+    assert_eq!(queue.first(), Some(second.clone()));
+    assert!(queue.acknowledge(&second.id));
+    assert!(queue.first().is_none());
+}
+
+#[test]
+fn pending_nostr_bind_links_drop_expired_requests_and_cap_the_queue() {
+    let queue = PendingNostrBindDeepLinks::default();
+    let mut payload = parse_nostr_bind_deep_link(&valid_nostr_bind_url()).unwrap();
+    payload.expires_at = "2000-01-01T00:00:00Z".into();
+    assert!(queue.enqueue(payload.clone()).is_none());
+    assert!(queue.first().is_none());
+
+    payload.expires_at = "2999-01-01T00:00:00Z".into();
+    let mut ids = Vec::new();
+    for index in 0..33 {
+        payload.challenge_id = format!("550e8400-e29b-41d4-a716-{index:012}");
+        if index < 32 {
+            ids.push(queue.enqueue(payload.clone()).unwrap().id);
+        } else {
+            assert!(queue.enqueue(payload.clone()).is_none());
+        }
+    }
+    assert_eq!(queue.first().unwrap().id, ids[0], "first item is retained");
+    assert!(queue.acknowledge(&ids[0]));
 }
 
 #[test]
