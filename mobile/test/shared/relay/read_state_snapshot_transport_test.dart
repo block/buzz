@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:buzz/shared/auth/auth_provider.dart';
+import 'package:fake_async/fake_async.dart';
 import 'package:buzz/shared/hosted/builderlab_account.dart';
 import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
 import 'package:buzz/shared/relay/read_state_snapshot.dart';
@@ -500,6 +501,48 @@ void main() {
       expect(await session.fetchReadStateSnapshot(), isEmpty);
       expect(created, 2);
       await stalled.close();
+    },
+  );
+
+  test(
+    'a rate-limited snapshot holds the next request until the gate opens',
+    () {
+      fakeAsync((async) {
+        var posts = 0;
+        var limited = true;
+        final session = RelaySessionNotifier(
+          httpClient: MockClient((request) async {
+            if (request.method == 'GET') return http.Response(discovery, 200);
+            posts++;
+            if (limited) {
+              limited = false;
+              return http.Response(
+                jsonEncode({'error': 'rate-limited: slow down, retry in 60s'}),
+                429,
+              );
+            }
+            return http.Response(jsonEncode(envelope()), 200);
+          }),
+        );
+        _container(session, _Config(keys.nsec));
+        async.flushMicrotasks();
+
+        Object? firstError;
+        session.fetchReadStateSnapshot().catchError((Object error) {
+          firstError = error;
+          return <NostrEvent>[];
+        });
+        async.flushMicrotasks();
+        expect(firstError, isA<RelayException>());
+        expect(posts, 1);
+
+        // Decoding runs on another isolate, so only the send time is checked.
+        session.fetchReadStateSnapshot().ignore();
+        async.elapse(const Duration(seconds: 59));
+        expect(posts, 1);
+        async.elapse(const Duration(seconds: 2));
+        expect(posts, 2);
+      });
     },
   );
 }

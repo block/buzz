@@ -25,6 +25,12 @@ extension on RelaySessionNotifier {
     }
 
     Future<http.Response> send(http.Request request, int maxBytes) async {
+      // Honor a relay pause, as every socket send does: a background retry
+      // inside it would spend the quota user actions need.
+      if (_rateLimitGate.isActive) {
+        await _rateLimitGate.wait();
+        checkContext();
+      }
       final response = await _httpQueryClient.sendBounded(
         request,
         maxBytes: maxBytes,
