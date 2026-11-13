@@ -34,15 +34,19 @@ extension _ChannelSnapshots on ChannelsNotifier {
     }
   }
 
+  /// Also restores the scope's unread state and sets its writer,
+  /// [_saveUnreadSnapshot], under the same removal ownership.
   void Function(List<Channel>, Set<String>)? _captureSnapshotWriter(
-    String pubkey,
+    String? pubkey,
     String relay,
   ) {
+    _saveUnreadSnapshot = null;
     final storage = _snapshotStorage();
-    if (storage == null) return null;
+    if (pubkey == null || storage == null) return null;
     // Capture removal ownership before network I/O. Community removal retires
     // this token even while the active provider is still being torn down.
     final token = storage.capture(pubkey, relay);
+    _saveUnreadSnapshot = _captureUnreadSnapshot(storage, token, pubkey, relay);
     return (channels, hiddenDmIds) {
       final snapshot = ChannelListSnapshot(
         channels: [

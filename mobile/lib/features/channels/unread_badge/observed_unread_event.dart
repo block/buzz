@@ -16,6 +16,10 @@ class ObservedUnreadEvent {
   /// bounded registry as its unread evidence, so eviction and deletion agree.
   final NostrEvent? threadReply;
 
+  /// Restored without its [threadReply] payload, which the next catch-up
+  /// fetches by ID.
+  final bool threadReplyPending;
+
   const ObservedUnreadEvent({
     required this.id,
     required this.createdAt,
@@ -25,6 +29,7 @@ class ObservedUnreadEvent {
     required this.countsTowardAppBadge,
     this.channelCatchUp = false,
     this.threadReply,
+    this.threadReplyPending = false,
   });
 }
 
@@ -61,7 +66,14 @@ bool recordObservedUnreadEvent(
   int limit,
 ) {
   final eventsById = eventsByChannel.putIfAbsent(channelId, () => {});
-  if (eventsById.containsKey(event.id)) return false;
+  final existing = eventsById[event.id];
+  if (existing != null) {
+    if (!existing.threadReplyPending || event.threadReply == null) {
+      return false;
+    }
+    eventsById[event.id] = event;
+    return true;
+  }
 
   eventsById[event.id] = event;
   if (eventsById.length <= limit) return true;

@@ -12,6 +12,92 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  test(
+    'a cold start restores unread state and asks only for newer messages',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      int now() => DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      NostrEvent mention(String id, int createdAt, {String? root}) =>
+          NostrEvent(
+            id: id,
+            pubkey: 'alice',
+            createdAt: createdAt,
+            kind: EventKind.streamMessage,
+            tags: [
+              ['h', 'alpha'],
+              ['p', 'me'],
+              if (root != null) ...[
+                ['e', root, '', 'root'],
+                ['e', root, '', 'reply'],
+              ],
+            ],
+            content: 'hi @me',
+            sig: 'sig',
+          );
+      final old = mention('old', now() - 7200);
+      final reply = mention('reply', now() - 7200, root: 'a' * 64);
+      final gone = mention('gone', now() - 7200, root: 'a' * 64);
+      List<int?> unreadSince(_SnapshotSession session) => [
+        for (final filter in session.unreadFilters)
+          if (filter.kinds.contains(EventKind.streamMessage) &&
+              filter.ids == null)
+            filter.since,
+      ];
+
+      final first = _SnapshotSession(['alpha'])
+        ..unreadMessages.addAll([old, reply, gone]);
+      final firstContainer = _container(prefs, first);
+      final firstSentFrom = now();
+      await firstContainer.read(channelsProvider.future);
+      await _settle();
+      final firstSentTo = now();
+      expect(unreadSince(first), [0]);
+      expect(
+        firstContainer
+            .read(channelsProvider.notifier)
+            .observedUnreadEventsByChannel['alpha']
+            ?.keys,
+        unorderedEquals(['old', 'reply', 'gone']),
+      );
+      firstContainer.dispose();
+
+      // The relay no longer has `gone`.
+      final second = _SnapshotSession(['alpha'])
+        ..unreadMessages.addAll([old, reply, mention('new', now())]);
+      final secondContainer = _container(prefs, second);
+      addTearDown(secondContainer.dispose);
+      await secondContainer.read(channelsProvider.future);
+      await _settle();
+      expect(
+        unreadSince(second).single,
+        inInclusiveRange(
+          firstSentFrom - relayCrossDeviceSkewSeconds,
+          firstSentTo - relayCrossDeviceSkewSeconds,
+        ),
+      );
+      expect(
+        secondContainer
+            .read(channelsProvider.notifier)
+            .observedUnreadEventsByChannel['alpha']
+            ?.keys,
+        unorderedEquals(['old', 'reply', 'new']),
+      );
+      // Thread replies were saved without their payload, which Activity
+      // shows, and asked for by ID.
+      expect([
+        for (final filter in second.unreadFilters) ...?filter.ids,
+      ], unorderedEquals(['reply', 'gone']));
+      final channels = secondContainer.read(channelsProvider).requireValue;
+      expect(
+        secondContainer
+            .read(channelsProvider.notifier)
+            .observedThreadReplies(channels)
+            .map((event) => event.id),
+        ['reply'],
+      );
+    },
+  );
 
   test('fresh read retries a failed initial list', () async {
     SharedPreferences.setMockInitialValues({});
@@ -418,6 +504,8 @@ class _SnapshotSession extends RelaySessionNotifier {
   Completer<void>? gate;
   int membershipRequests = 0;
   int latestReads = 0;
+  final unreadMessages = <NostrEvent>[];
+  final unreadFilters = <NostrFilter>[];
   final listeners = <void Function(NostrEvent)>[];
   final noticeListeners = <void Function(NostrEvent)>[];
   void emit(NostrEvent event) {
@@ -452,6 +540,19 @@ class _SnapshotSession extends RelaySessionNotifier {
       if (latestTimeout) {
         throw RelayException(503, '{"error":"query timed out"}');
       }
+    }
+    if (filters.any((filter) => filter.limit == 1000)) {
+      unreadFilters.addAll(filters);
+      return [
+        for (final filter in filters)
+          if (filter.kinds.contains(EventKind.streamMessage)) ...[
+            for (final message in unreadMessages)
+              if ((filter.ids?.contains(message.id) ??
+                      message.createdAt >= (filter.since ?? 0)) &&
+                  filter.tags['#h']!.contains(message.channelId))
+                message,
+          ],
+      ];
     }
     if (filters.singleOrNull?.kinds.contains(39002) == true) {
       if (filters.single.until != null) return [];

@@ -45,6 +45,12 @@ extension _UnreadCatchUp on ChannelsNotifier {
         for (final channel in activeChannels)
           channel.id: _unreadCaughtUpByChannel[channel.id],
       };
+      final pendingRepliesByChannel = {
+        for (final channel in activeChannels)
+          if (_pendingThreadReplyIds(channel.id) case final ids
+              when ids.isNotEmpty)
+            channel.id: ids,
+      };
       final filters = [
         for (final channel in activeChannels)
           for (final kinds in [
@@ -63,6 +69,18 @@ extension _UnreadCatchUp on ChannelsNotifier {
               ),
               limit: _unreadCatchUpLimit,
             ),
+        // Replies restored from disk without their payload, which Activity
+        // shows. They are older than the window above.
+        for (final MapEntry(key: channelId, value: ids)
+            in pendingRepliesByChannel.entries)
+          NostrFilter(
+            ids: ids.toList(),
+            kinds: EventKind.channelMessageEventKinds,
+            tags: {
+              '#h': [channelId],
+            },
+            limit: ids.length,
+          ),
       ];
 
       final failedChannelIds = <String>{};
@@ -130,7 +148,13 @@ extension _UnreadCatchUp on ChannelsNotifier {
         if (channelId == null) continue;
         final channel = channelById[channelId];
         if (channel == null) continue;
-        windowSizeByChannel.update(channelId, (n) => n + 1, ifAbsent: () => 1);
+        if (pendingRepliesByChannel[channelId]?.contains(event.id) != true) {
+          windowSizeByChannel.update(
+            channelId,
+            (n) => n + 1,
+            ifAbsent: () => 1,
+          );
+        }
         if (batchDeletedIds.contains(event.id) ||
             _unscopedUnreadDeletedIds.contains(event.id) ||
             _unreadDeletedIdsByChannel[channelId]?.contains(event.id) == true) {
@@ -181,6 +205,14 @@ extension _UnreadCatchUp on ChannelsNotifier {
           recordedAtByChannel[channelId] = quiet.createdAt;
         }
       }
+      // A requested reply that is gone, or no longer earns attention, would
+      // not have been found by a full window either.
+      var droppedPending = false;
+      for (final MapEntry(key: channelId, value: ids)
+          in pendingRepliesByChannel.entries) {
+        if (failedChannelIds.contains(channelId)) continue;
+        droppedPending |= _dropPendingThreadReplies(channelId, ids);
+      }
       // Republish only when this catch-up actually changed unread state. A
       // batch that recorded nothing has nothing to show, and a failed or
       // superseded batch must not repaint another refresh's list: the retired
@@ -188,9 +220,12 @@ extension _UnreadCatchUp on ChannelsNotifier {
       // from here, so a second check would be dead code.
       // Recorded events also advance `lastMessageAt`, as live events do: a
       // deadline-unavailable latest-message batch leaves it unset.
-      if (recordedAtByChannel.isNotEmpty || appliedDeletion) {
+      if (recordedAtByChannel.isNotEmpty || appliedDeletion || droppedPending) {
         _publishUnreadCatchUp(recordedAtByChannel);
       }
+      // Saved after every settled catch-up, even one that found nothing: its
+      // cursors moved, and the next launch can start from them.
+      _saveUnreadSnapshot?.call();
     } catch (error) {
       incomplete = true;
       if (!_lifecycleRef.mounted) return;
