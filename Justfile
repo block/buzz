@@ -216,7 +216,8 @@ _ensure-migrations: _ensure-services
 
 # Run clippy on the desktop Tauri Rust crate
 # Features are additive, so a single invocation lints only one cfg graph.
-# Both graphs ship (release-windows builds without mesh-llm), so lint both:
+# Both graphs remain supported: macOS Intel ships the default graph, while
+# Windows, macOS ARM, and Linux ship mesh-llm. Lint both:
 # the default graph covers the `#[cfg(not(feature = "mesh-llm"))]` arms and
 # the feature-enabled graph covers the mesh code.
 desktop-tauri-clippy: _ensure-sidecar-stubs
