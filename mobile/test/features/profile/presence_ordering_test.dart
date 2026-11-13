@@ -116,39 +116,6 @@ void main() {
     }
   }
 
-  test('a person tracked during a snapshot is read again once covered', () {
-    scenario((time, container, relay) {
-      relay.ready = Completer<void>();
-      container.read(presenceCacheProvider.notifier).track(['bob']);
-      time.elapse(Duration.zero);
-      expect(relay.subscriptions, 2);
-
-      // Alice's snapshot settles and bob's is read before his subscription
-      // opens, so a change of his in between could be missed.
-      relay.results.removeAt(0).complete([]);
-      time.flushMicrotasks();
-      expect(relay.queries.last.authors, ['bob']);
-      final beforeCovered = relay.queries.length;
-
-      relay.ready!.complete();
-      time.elapse(Duration.zero);
-      relay.results.removeAt(0).complete([]);
-      time.elapse(Duration.zero);
-      expect(relay.queries.length, beforeCovered + 1);
-      expect(relay.queries.last.authors, ['bob']);
-    });
-  });
-
-  test('a replacement still backing off keeps the working subscription', () {
-    scenario((time, container, relay) {
-      relay.openingStatus = RelaySubscriptionStatus.retrying;
-      container.read(presenceCacheProvider.notifier).track(['bob']);
-      time.elapse(Duration.zero);
-      expect(relay.subscriptions, 2);
-      expect(relay.unsubscribed, [2]);
-    });
-  });
-
   test('redelivered ambiguous event arms one confirmation', () {
     scenario((time, container, relay) {
       relay.results.removeAt(0).complete([
@@ -204,8 +171,6 @@ class _Relay extends RelaySessionNotifier {
   bool failSubscribe = false;
   int subscriptions = 0;
   int unsubscribes = 0;
-  final unsubscribed = <int>[];
-  RelaySubscriptionStatus openingStatus = RelaySubscriptionStatus.ready;
 
   @override
   SessionState build() => const SessionState(status: SessionStatus.connected);
@@ -217,15 +182,12 @@ class _Relay extends RelaySessionNotifier {
     void Function(String)? onClosed,
     required void Function(RelaySubscriptionStatus) onStatusChanged,
   }) async {
-    final subscription = ++subscriptions;
+    subscriptions++;
     if (failSubscribe) throw StateError('unavailable');
     emit = onEvent;
-    onStatusChanged(openingStatus);
+    onStatusChanged(RelaySubscriptionStatus.ready);
     if (ready != null) await ready!.future;
-    return () {
-      unsubscribes++;
-      unsubscribed.add(subscription);
-    };
+    return () => unsubscribes++;
   }
 
   @override

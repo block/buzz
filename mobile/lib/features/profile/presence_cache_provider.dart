@@ -31,6 +31,8 @@ class PresenceCacheNotifier extends Notifier<Map<String, String>> {
   // a community's presence heartbeats arrive many times a second.
   final Set<String> _subscribedKeys = {};
   void Function()? _presenceUnsub;
+  // Closes the replacement being opened, until it is promoted or abandoned.
+  void Function()? _pendingClose;
   Timer? _poll;
   Timer? _queued;
   Timer? _resubscribe;
@@ -70,6 +72,8 @@ class PresenceCacheNotifier extends Notifier<Map<String, String>> {
       _generation++;
       _presenceUnsub?.call();
       _presenceUnsub = null;
+      _pendingClose?.call();
+      _pendingClose = null;
       _poll?.cancel();
       _queued?.cancel();
       _queued = null;
@@ -81,7 +85,10 @@ class PresenceCacheNotifier extends Notifier<Map<String, String>> {
       _poll = Timer.periodic(const Duration(seconds: 60), (_) {
         if (_presenceUnsub == null || !_subscribedKeys.containsAll(_tracked)) {
           unawaited(_subscribe(generation));
-        } else if (!_querying) {
+        }
+        // The snapshot backstop runs for a live stream even while a widening
+        // keeps failing, so expired leases are still corrected.
+        if (_presenceUnsub != null && !_querying) {
           _pending.addAll(_tracked);
           _schedule(generation);
         }
@@ -145,20 +152,69 @@ class PresenceCacheNotifier extends Notifier<Map<String, String>> {
         (_presenceUnsub != null && _subscribedKeys.containsAll(_tracked))) {
       return;
     }
+    // One subscription opens at a time. A replacement holds this until it is
+    // promoted or abandoned, so tracking bursts widen it in later rounds.
     _opening = true;
     _subscribeAttempted = true;
     final keys = _tracked.toList()..sort();
     final subscription = ++_nextSubscription;
+    // A replacement becomes active only on its own first ready: returning from
+    // subscribeWithStatus also happens on a retryable CLOSED or a timeout.
+    // Until then the active subscription and the cache stay as they are.
+    final replacing = _presenceUnsub != null;
+    var pending = replacing;
     var closed = false;
-    // Status reported before this subscription replaces the active one.
+    // Status the first subscription reports before it becomes active.
     var retrying = false;
-    // The subscription being replaced keeps delivering until this one opens.
+    void Function()? unsub;
+    void close() {
+      if (closed) return;
+      closed = true;
+      unsub?.call(); // otherwise released when subscribeWithStatus returns
+    }
+
     bool current() =>
         generation == _generation &&
         !closed &&
         subscription == _activeSubscription;
+    void promote() {
+      pending = false;
+      _pendingClose = null;
+      _opening = false;
+      final previous = _presenceUnsub;
+      final added = keys.where((key) => !_subscribedKeys.contains(key));
+      _pending.addAll(added);
+      _activeSubscription = subscription;
+      _retrying = retrying;
+      _presenceUnsub = close;
+      _subscribedKeys
+        ..clear()
+        ..addAll(keys);
+      previous?.call();
+      // Still backing off: its ready reads everything once it is live.
+      if (_retrying) {
+        _invalidateSnapshot();
+        return;
+      }
+      // Keys tracked while this one opened need a wider subscription.
+      if (!_subscribedKeys.containsAll(_tracked)) _queueResubscribe(generation);
+      // Newly covered keys are read only now, so no change between an earlier
+      // snapshot and their live coverage is lost.
+      _schedule(generation);
+    }
+
+    void abandon() {
+      pending = false;
+      _pendingClose = null;
+      _opening = false;
+      close();
+      // Keys only it would cover get a snapshot; the poll retries the widening.
+      _schedule(generation);
+    }
+
+    if (pending) _pendingClose = close;
     try {
-      final unsub = await ref
+      unsub = await ref
           .read(relaySessionProvider.notifier)
           .subscribeWithStatus(
             NostrFilter(
@@ -171,6 +227,10 @@ class PresenceCacheNotifier extends Notifier<Map<String, String>> {
             },
             onStatusChanged: (status) {
               if (generation != _generation || closed) return;
+              if (pending) {
+                status == RelaySubscriptionStatus.ready ? promote() : abandon();
+                return;
+              }
               if (subscription != _activeSubscription) {
                 retrying = status == RelaySubscriptionStatus.retrying;
                 return;
@@ -181,9 +241,12 @@ class PresenceCacheNotifier extends Notifier<Map<String, String>> {
             },
             onClosed: (_) {
               if (generation != _generation || closed) return;
+              if (pending) {
+                abandon();
+                return;
+              }
               closed = true;
               if (subscription != _activeSubscription) return;
-              _presenceUnsub?.call();
               _presenceUnsub = null;
               _subscribedKeys.clear();
               _invalidateSnapshot();
@@ -193,38 +256,17 @@ class PresenceCacheNotifier extends Notifier<Map<String, String>> {
         unsub();
         return;
       }
-      final previous = _presenceUnsub;
-      // A replacement still backing off would leave nobody live: keep the
-      // working subscription, and let the next poll try a wider one again.
-      if (retrying && previous != null) {
-        closed = true;
-        unsub();
-        return;
-      }
-      // Read newly covered keys again: an earlier snapshot of them was not
-      // backed by a live subscription.
-      _pending.addAll(keys.where((key) => !_subscribedKeys.contains(key)));
-      _activeSubscription = subscription;
-      _retrying = retrying;
-      _presenceUnsub = unsub;
-      _subscribedKeys
-        ..clear()
-        ..addAll(keys);
-      previous?.call();
-      if (_retrying) {
-        _invalidateSnapshot();
-        return;
-      }
-      // Keys tracked while this one opened need a wider subscription.
-      if (!_subscribedKeys.containsAll(_tracked)) _queueResubscribe(generation);
-      _schedule(generation);
+      // With nothing to protect, the first subscription is active once open.
+      if (!replacing) promote();
     } catch (error) {
-      if (generation == _generation) {
+      if (generation != _generation) return;
+      debugPrint('[PresenceCacheNotifier] subscription failed: $error');
+      if (replacing) {
+        if (pending) abandon();
+      } else if (subscription != _activeSubscription) {
+        _opening = false;
         _invalidateSnapshot();
-        debugPrint('[PresenceCacheNotifier] subscription failed: $error');
       }
-    } finally {
-      if (generation == _generation) _opening = false;
     }
   }
 
