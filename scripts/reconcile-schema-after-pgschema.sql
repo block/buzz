@@ -315,3 +315,30 @@ BEGIN
     END IF;
 END
 $$;
+
+-- pgschema omits multi-column CHECKs. Preserve the paired live ancestry key.
+DO $$
+BEGIN
+    PERFORM set_config('lock_timeout', '5s', true);
+    PERFORM set_config('statement_timeout', '30s', true);
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                   WHERE conrelid = 'channels'::regclass
+                     AND conname = 'channels_fork_source_paired') THEN
+        ALTER TABLE channels ADD CONSTRAINT channels_fork_source_paired CHECK (
+            (fork_source_channel_id IS NULL AND fork_source_message_id IS NULL) OR
+            (fork_source_channel_id IS NOT NULL AND fork_source_message_id IS NOT NULL
+             AND octet_length(fork_source_message_id) = 32 AND fork_source_channel_id <> id)
+        ) NOT VALID;
+    END IF;
+END $$;
+DO $$
+BEGIN
+    PERFORM set_config('lock_timeout', '5s', true);
+    PERFORM set_config('statement_timeout', '30s', true);
+    ALTER TABLE channels VALIDATE CONSTRAINT channels_fork_source_paired;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                   WHERE conrelid = 'channels'::regclass
+                     AND conname = 'channels_fork_source_paired' AND convalidated) THEN
+        RAISE EXCEPTION 'channels fork source must remain paired after pgschema apply';
+    END IF;
+END $$;

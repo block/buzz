@@ -42,6 +42,13 @@ CREATE TABLE channels (
     -- channel listings for non-members. Matters only while the channel is open.
     unlisted        BOOLEAN NOT NULL DEFAULT FALSE,
     auto_join       BOOLEAN NOT NULL DEFAULT false,
+    fork_source_channel_id UUID,
+    fork_source_message_id BYTEA,
+    CONSTRAINT channels_fork_source_paired CHECK (
+        (fork_source_channel_id IS NULL AND fork_source_message_id IS NULL) OR
+        (fork_source_channel_id IS NOT NULL AND fork_source_message_id IS NOT NULL
+         AND octet_length(fork_source_message_id) = 32 AND fork_source_channel_id <> id)
+    ),
     PRIMARY KEY (community_id, id),
     CONSTRAINT chk_channels_id_not_nil CHECK (id <> '00000000-0000-0000-0000-000000000000'::uuid)
 );

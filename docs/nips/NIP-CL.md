@@ -111,6 +111,41 @@ distinct labels, an invalid label, a reserved name, or `["t", ""]` together
 with other labels. The relay stores repeated labels once, so a repeat does
 not count toward the 8, and repeated `["t", ""]` tags clear the set like one.
 
+## Solo chat ancestry
+
+A kind:9007 creating a private stream labelled `buzz.solo` MAY carry exactly
+one `['forked_from', <source channel UUID>, <inclusive cutoff event ID>]` tag.
+The UUID MUST be canonical lowercase, hyphenated and nonzero; the event ID
+MUST be 64 lowercase hexadecimal characters. Writers place it after optional
+`about`/`ttl` and before labels and members. Content remains empty.
+
+The relay checks the creator's source read access and an accepted, undeleted
+kind:9 or kind:40002 cutoff in that channel and community within the create's
+transaction. Source and destination MUST differ. The command, channel,
+initial membership and pointer commit together, or none do. The relay rejects
+`forked_from` on metadata edits; ordinary edits preserve the stored pointer.
+
+Relay-signed kind:39000 echoes the pointer with the destination in `d`.
+The pointer is live ancestry, not a frozen transcript. Edits, deletions and
+source access loss affect later reconstructions. Destination membership grants
+no source access, and no source members, Canvas or instructions are copied.
+Readers MUST independently authorize every source history read.
+
+Creation confirmation requires both accepted creation and matching signed
+metadata. A metadata emission failure after commit is an uncertain
+acknowledgement, not rollback: retry the **identical signed create**, preserving
+the destination UUID. An exact accepted retry repairs kind:39000 without
+repeating creation notices or membership additions; another create for the same
+UUID cannot change its ancestry. Source access or cutoff changes after the
+original commit do not invalidate that stored create.
+
+NIP-11 advertises `buzz-solo-fork-v1` in `supported_extensions`. A writer MUST
+check this before sending ancestry: older relays ignore unknown creation tags.
+Operators MUST drain old serving instances before enabling fork writes through
+a load-balanced deployment. Seeing the extension on one instance does not
+establish fleet-wide support. A client MUST NOT treat missing/loading metadata
+as confirmation that a destination has no ancestry.
+
 ## Finding channels
 
 Use ordinary NIP-01 filters on the channel-state kinds.

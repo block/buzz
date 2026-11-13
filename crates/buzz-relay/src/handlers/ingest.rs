@@ -2657,6 +2657,7 @@ struct ChannelCreateRequest {
     labels: Vec<String>,
     unlisted: bool,
     members: Vec<Vec<u8>>,
+    forked_from: Option<buzz_core::channel::ChannelFork>,
 }
 
 async fn validate_event_imeta(
@@ -3391,7 +3392,22 @@ async fn ingest_event_inner(
     // dispatch below).
     let mut channel_create: Option<ChannelCreateRequest> = None;
 
+    let forked_from = buzz_core::channel::parse_channel_fork(event.tags.iter())
+        .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
+    if forked_from.is_some() && kind_u32 != KIND_NIP29_CREATE_GROUP {
+        return Err(IngestError::Rejected(
+            "invalid: forked_from is immutable and only valid on create".into(),
+        ));
+    }
     if kind_u32 == KIND_NIP29_CREATE_GROUP {
+        if let Some(fork) = forked_from {
+            check_token_channel_access(&auth, fork.channel_id).map_err(IngestError::Rejected)?;
+            if !auth.scopes().contains(&Scope::MessagesRead) {
+                return Err(IngestError::AuthFailed(
+                    "restricted: fork requires messages:read".into(),
+                ));
+            }
+        }
         // Validate name tag is present and non-empty before any DB work.
         let create_name = event.tags.iter().find_map(|t| {
             if t.kind().to_string() == "name" {
@@ -3464,6 +3480,7 @@ async fn ingest_event_inner(
                 labels,
                 unlisted,
                 members,
+                forked_from,
             });
         } else {
             // The channel is created in the same commit as its event, so a
@@ -3725,13 +3742,14 @@ async fn ingest_event_inner(
             labels: &create.labels,
             unlisted: create.unlisted,
             members: &create.members,
+            forked_from: create.forked_from,
         };
         match state
             .db
             .create_channel_with_event(tenant.community(), create.channel_id, channel, &event)
             .await
             .map_err(|e| match e {
-                buzz_db::DbError::ChannelNameTaken(_) => {
+                buzz_db::DbError::ChannelNameTaken(_) | buzz_db::DbError::InvalidData(_) => {
                     IngestError::Rejected(format!("invalid: {e}"))
                 }
                 _ => IngestError::Internal(format!("error: {}", e.kind())),
@@ -3749,6 +3767,19 @@ async fn ingest_event_inner(
             // for a taken UUID is refused. Neither writes anything, so the
             // create's side effects never run again.
             buzz_db::channel::ChannelCreate::Exists { resent } => {
+                if resent && create.forked_from.is_some() {
+                    crate::handlers::side_effects::emit_group_metadata(
+                        tenant,
+                        state,
+                        create.channel_id,
+                    )
+                    .await
+                    .map_err(|e| {
+                        IngestError::Internal(format!(
+                            "error: fork metadata confirmation failed: {e}"
+                        ))
+                    })?;
+                }
                 return Ok(IngestResult {
                     event_id: event_id_hex,
                     accepted: resent,
@@ -3930,6 +3961,19 @@ async fn ingest_event_inner(
             // the #3527 triage.
             error!(event_id = %event_id_hex, kind = kind_u32, "Side effect failed: {e}");
         }
+    }
+
+    if let Some(create) = channel_create
+        .as_ref()
+        .filter(|create| create.forked_from.is_some())
+    {
+        // Durable create may already have committed: return an uncertain acknowledgement
+        // on failure. Resending this exact command repairs only signed metadata.
+        crate::handlers::side_effects::emit_group_metadata(tenant, state, create.channel_id)
+            .await
+            .map_err(|e| {
+                IngestError::Internal(format!("error: fork metadata confirmation failed: {e}"))
+            })?;
     }
 
     // A freshly inserted reply changed its thread's counters (updated in the
