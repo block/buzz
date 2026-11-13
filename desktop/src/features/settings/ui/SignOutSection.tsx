@@ -157,7 +157,7 @@ export function SignOutSection() {
         }}
         open={isOpen}
       >
-        <AlertDialogContent>
+        <AlertDialogContent className="min-w-0 overflow-x-hidden">
           <AlertDialogHeader>
             <AlertDialogTitle>Sign out and wipe all data?</AlertDialogTitle>
             <AlertDialogDescription>
