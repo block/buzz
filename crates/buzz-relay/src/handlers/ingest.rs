@@ -508,6 +508,20 @@ pub enum IngestError {
     },
 }
 
+/// Datastore spans record only the variant: every payload is response text
+/// that can quote the event or the database error.
+impl buzz_db::error::DatastoreSpanError for IngestError {
+    fn span_error_type(&self) -> &'static str {
+        match self {
+            Self::Rejected(_) => "ingest_rejected",
+            Self::CanvasConflict(_) => "ingest_canvas_conflict",
+            Self::AuthFailed(_) => "ingest_auth_failed",
+            Self::Internal(_) => "ingest_internal",
+            Self::Ban { .. } => "ingest_ban",
+        }
+    }
+}
+
 /// Which admission outcome an [`IngestError::Ban`] carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BanRefusal {

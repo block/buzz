@@ -8,9 +8,13 @@ use syn::{
     parenthesized, parse_macro_input, Error, Ident, ItemFn, LitStr, Result, ReturnType, Token, Type,
 };
 
+/// Pools a span may name in `db.pool.role` (labels of `buzz_db::DbPoolRole`).
+const POOL_ROLES: [&str; 4] = ["writer", "reader", "audit", "search"];
+
 struct DatastoreArgs {
     name: LitStr,
     system: LitStr,
+    pool: Option<LitStr>,
     fields: Option<TokenStream2>,
 }
 
@@ -18,6 +22,7 @@ impl Parse for DatastoreArgs {
     fn parse(input: ParseStream<'_>) -> Result<Self> {
         let mut name = None;
         let mut system = None;
+        let mut pool = None;
         let mut fields = None;
 
         while !input.is_empty() {
@@ -37,6 +42,13 @@ impl Parse for DatastoreArgs {
                     input.parse::<Token![=]>()?;
                     system = Some(input.parse()?);
                 }
+                "pool" => {
+                    if pool.is_some() {
+                        return Err(Error::new(key.span(), "duplicate `pool` argument"));
+                    }
+                    input.parse::<Token![=]>()?;
+                    pool = Some(input.parse()?);
+                }
                 "fields" => {
                     if fields.is_some() {
                         return Err(Error::new(key.span(), "duplicate `fields` argument"));
@@ -48,7 +60,7 @@ impl Parse for DatastoreArgs {
                 _ => {
                     return Err(Error::new(
                         key.span(),
-                        "expected `name`, `system`, or `fields`",
+                        "expected `name`, `system`, `pool`, or `fields`",
                     ))
                 }
             }
@@ -60,6 +72,7 @@ impl Parse for DatastoreArgs {
         Ok(Self {
             name: name.ok_or_else(|| Error::new(input.span(), "missing `name`"))?,
             system: system.ok_or_else(|| Error::new(input.span(), "missing `system`"))?,
+            pool,
             fields,
         })
     }
@@ -69,7 +82,17 @@ impl Parse for DatastoreArgs {
 ///
 /// PostgreSQL spans always omit function arguments, use the `buzz_datastore`
 /// target, and expose only canonical semantic fields plus explicitly supplied
-/// safe fields. An `Err` sets `otel.status_code` without inspecting the error.
+/// safe fields. An `Err` sets `otel.status_code` and records the error's fixed
+/// classification through `buzz_db::error::DatastoreSpanError`: a constant
+/// `error.type`, and for driver errors the SQLSTATE and constraint name. The
+/// error's text is never formatted, so a function's error type must implement
+/// that trait for the function to compile.
+///
+/// `db.pool.role` is the `pool` argument (default `writer`) unless the
+/// operation took a replica route, which records the serving pool with
+/// `db.route.decision` and `db.route.reason` instead. Each is recorded once,
+/// when the operation finishes (see `buzz_db::datastore_span`).
+///
 /// The literal `name` also labels a logical-operation duration histogram. Slow
 /// completions are sampled and logged with only that name, outcome, and elapsed
 /// time; arguments, error values, and return values are never formatted.
@@ -95,6 +118,18 @@ pub fn datastore_span(args: TokenStream, item: TokenStream) -> TokenStream {
         .into();
     }
 
+    let pool = args
+        .pool
+        .unwrap_or_else(|| LitStr::new("writer", proc_macro2::Span::call_site()));
+    if !POOL_ROLES.contains(&pool.value().as_str()) {
+        return Error::new_spanned(
+            pool,
+            "unsupported pool; expected `writer`, `reader`, `audit`, or `search`",
+        )
+        .into_compile_error()
+        .into();
+    }
+
     let name = args.name;
     let extra_fields = args.fields.map(|tokens| quote!(, #tokens));
     function.attrs.push(syn::parse_quote!(
@@ -105,7 +140,13 @@ pub fn datastore_span(args: TokenStream, item: TokenStream) -> TokenStream {
             fields(
                 otel.kind = "client",
                 db.system.name = "postgresql",
-                otel.status_code = ::tracing::field::Empty
+                otel.status_code = ::tracing::field::Empty,
+                error.type = ::tracing::field::Empty,
+                db.response.status_code = ::tracing::field::Empty,
+                db.error.constraint = ::tracing::field::Empty,
+                db.pool.role = ::tracing::field::Empty,
+                db.route.decision = ::tracing::field::Empty,
+                db.route.reason = ::tracing::field::Empty
                 #extra_fields
             )
         )]
@@ -127,8 +168,13 @@ pub fn datastore_span(args: TokenStream, item: TokenStream) -> TokenStream {
     let result = format_ident!("__buzz_datastore_result_7f3a9c");
     let record_error = returns_result.then(|| {
         quote! {
-            if #result.is_err() {
-                ::tracing::Span::current().record("otel.status_code", "ERROR");
+            if let ::std::result::Result::Err(__buzz_datastore_error_7f3a9c) = &#result {
+                let __buzz_datastore_span_7f3a9c = ::tracing::Span::current();
+                __buzz_datastore_span_7f3a9c.record("otel.status_code", "ERROR");
+                ::buzz_db::datastore_span::record_error(
+                    &__buzz_datastore_span_7f3a9c,
+                    __buzz_datastore_error_7f3a9c,
+                );
             }
         }
     });
@@ -141,7 +187,13 @@ pub fn datastore_span(args: TokenStream, item: TokenStream) -> TokenStream {
     };
     function.block = Box::new(syn::parse_quote!({
         let __buzz_datastore_started_7f3a9c = ::std::time::Instant::now();
-        let #result: #return_type = (async #original_body).await;
+        let (#result, __buzz_datastore_route_7f3a9c): (#return_type, _) =
+            ::buzz_db::datastore_span::scoped(async #original_body).await;
+        ::buzz_db::datastore_span::record_route(
+            &::tracing::Span::current(),
+            #pool,
+            __buzz_datastore_route_7f3a9c,
+        );
         #record_error
         let __buzz_datastore_outcome_7f3a9c = #outcome;
         let __buzz_datastore_elapsed_7f3a9c = __buzz_datastore_started_7f3a9c.elapsed();
@@ -192,9 +244,21 @@ mod tests {
     }
 
     #[test]
+    fn parses_pool_argument() {
+        let args: DatastoreArgs =
+            syn::parse_str(r#"name = "search", system = "postgresql", pool = "search""#)
+                .expect("valid arguments");
+        assert_eq!(
+            args.pool.map(|pool| pool.value()).as_deref(),
+            Some("search")
+        );
+    }
+
+    #[test]
     fn rejects_duplicate_arguments() {
         for args in [
             r#"name = "one", name = "two", system = "postgresql""#,
+            r#"name = "one", system = "postgresql", pool = "writer", pool = "search""#,
             r#"name = "one", system = "postgresql", system = "postgresql""#,
             r#"name = "one", system = "postgresql", fields(a = 1), fields(b = 2)"#,
         ] {

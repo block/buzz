@@ -29,3 +29,15 @@ impl SearchError {
         buzz_db::error::sqlx_error_kind(e)
     }
 }
+
+impl buzz_db::error::DatastoreSpanError for SearchError {
+    fn span_error_type(&self) -> &'static str {
+        let SearchError::Db(e) = self;
+        e.span_error_type()
+    }
+
+    fn span_sqlx_error(&self) -> Option<&sqlx::Error> {
+        let SearchError::Db(e) = self;
+        Some(e)
+    }
+}
