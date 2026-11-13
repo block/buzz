@@ -1028,17 +1028,19 @@ class ComposeBar extends HookConsumerWidget {
         .where((s) => !mentionRows.unavailable.contains(s.pubkey))
         .firstOrNull;
     KeyEventResult handleHardwareKey(FocusNode _, KeyEvent event) =>
-        _handleComposerHardwareKey(
-          event,
-          controller,
-          pickerVisible: pickerVisible,
-          acceptSuggestion: topChannel != null
-              ? () => insertChannel(topChannel)
-              : topMention != null
-              ? () => insertMention(topMention)
-              : null,
-          send: send,
-        );
+        iosAttachmentPopover.isActive
+        ? KeyEventResult.handled
+        : _handleComposerHardwareKey(
+            event,
+            controller,
+            pickerVisible: pickerVisible,
+            acceptSuggestion: topChannel != null
+                ? () => insertChannel(topChannel)
+                : topMention != null
+                ? () => insertMention(topMention)
+                : null,
+            send: send,
+          );
 
     final suggestionPanel = _composerSuggestionPanel(
       channelSuggestions: channelSuggestions,

@@ -14,7 +14,11 @@ KeyEventResult _handleComposerHardwareKey(
   if (event is KeyUpEvent) return KeyEventResult.ignored;
   final keyboard = HardwareKeyboard.instance;
   final key = event.logicalKey;
-  if (key == LogicalKeyboardKey.tab && !keyboard.isShiftPressed) {
+  if (key == LogicalKeyboardKey.tab &&
+      !keyboard.isShiftPressed &&
+      !keyboard.isControlPressed &&
+      !keyboard.isAltPressed &&
+      !keyboard.isMetaPressed) {
     if (!pickerVisible) return KeyEventResult.ignored;
     if (event is KeyDownEvent) acceptSuggestion?.call();
     return KeyEventResult.handled;

@@ -2135,6 +2135,7 @@ void main() {
       Future<TextEditingController> pumpComposer(
         WidgetTester tester, {
         FocusNode? focusNode,
+        Future<List<ChannelMember>>? membersFuture,
         Future<List<UserProfile>> Function(String query)? searchPeople,
       }) async {
         sent.clear();
@@ -2150,7 +2151,7 @@ void main() {
         await tester.pumpWidget(
           _buildComposeBar(
             uploadService: _testUploadService(nostr.Keys.generate().nsec),
-            membersFuture: Future.value(members),
+            membersFuture: membersFuture ?? Future.value(members),
             cachedMembers: members,
             channels: [_makeCurrentChannel()],
             focusNode: focusNode,
@@ -2316,6 +2317,103 @@ void main() {
         expect(controller.text, 'hi @a');
         await tester.pumpWidget(const SizedBox.shrink());
         await tester.pumpAndSettle();
+      });
+
+      for (final modifier in [
+        LogicalKeyboardKey.controlLeft,
+        LogicalKeyboardKey.altLeft,
+        LogicalKeyboardKey.metaLeft,
+      ]) {
+        testWidgets(
+          'modified Tab leaves the picker draft unchanged ($modifier)',
+          (tester) async {
+            final controller = await pumpComposer(tester);
+            await tester.enterText(find.byType(TextField), 'hi @a');
+            await tester.pump();
+            expect(popover(), findsOneWidget);
+            await tester.sendKeyDownEvent(modifier);
+            await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+            await tester.sendKeyUpEvent(modifier);
+            await tester.pump();
+            expect(controller.text, 'hi @a');
+            expect(sent, isEmpty);
+            await tester.pump(mentionSearchDebounce * 2);
+          },
+        );
+      }
+
+      testWidgets(
+        'native attachment popover owns Tab and Enter until dismissal',
+        (tester) async {
+          final previousPlatform = debugDefaultTargetPlatformOverride;
+          debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+          var presentCalls = 0;
+          _setMockNativeAttachmentPopoverHandler((call) async {
+            if (call.method == 'isSupported') return true;
+            if (call.method == 'present') {
+              presentCalls += 1;
+              return true;
+            }
+            return null;
+          });
+          try {
+            final controller = await pumpComposer(tester);
+            await tester.enterText(find.byType(TextField), 'hi @a');
+            await tester.pumpAndSettle();
+            expect(popover(), findsOneWidget);
+            await tester.tap(find.byTooltip('Add attachment').hitTestable());
+            await tester.pumpAndSettle();
+            expect(presentCalls, 1);
+            for (final key in [
+              LogicalKeyboardKey.tab,
+              LogicalKeyboardKey.enter,
+            ]) {
+              await tester.sendKeyEvent(key);
+              await tester.pump();
+              expect(controller.text, 'hi @a', reason: '$key');
+              expect(sent, isEmpty);
+            }
+            await _sendNativeAttachmentPopoverCall(tester, 'dismissed');
+            await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+            await tester.pump();
+            expect(controller.text, 'hi @Alice ');
+          } finally {
+            await _sendNativeAttachmentPopoverCall(tester, 'dismissed');
+            await tester.pumpWidget(const SizedBox.shrink());
+            await tester.pumpAndSettle();
+            _setMockNativeAttachmentPopoverHandler(null);
+            debugDefaultTargetPlatformOverride = previousPlatform;
+          }
+        },
+      );
+
+      testWidgets('rapid Enter sends once while member scanning is pending', (
+        tester,
+      ) async {
+        final members = Completer<List<ChannelMember>>();
+        final controller = await pumpComposer(
+          tester,
+          membersFuture: members.future,
+        );
+        await tester.enterText(find.byType(TextField), 'hi @a');
+        await tester.pump();
+        await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+        await tester.pump();
+        expect(controller.text, 'hi @Alice ');
+        await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+        await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+        await tester.pump();
+        expect(sent, isEmpty);
+        members.complete([
+          ChannelMember(
+            pubkey: '1' * 64,
+            role: 'member',
+            joinedAt: DateTime.fromMillisecondsSinceEpoch(1000),
+            displayName: 'Alice',
+          ),
+        ]);
+        await tester.pumpAndSettle();
+        expect(sent, ['hi @Alice']);
       });
 
       testWidgets('Tab cannot edit a Solo draft frozen by Paste Image', (
