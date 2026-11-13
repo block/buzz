@@ -1,6 +1,6 @@
 # buzz-agent
 
-> Minimal, unbreakable ACP-compliant LLM agent. Stdio in, tool calls out. Non-streaming. No persistence. No cleverness.
+> Minimal, unbreakable ACP-compliant LLM agent. Stdio in, tool calls out. Streaming responses. No persistence. No cleverness.
 
 [ACP](https://agentclientprotocol.com) is the Agent Client Protocol — JSON-RPC 2.0 over stdio between a client (Zed, JetBrains, buzz-acp, …) and an agent. [MCP](https://modelcontextprotocol.io) is how the agent talks to its tools.
 
@@ -29,7 +29,9 @@
 
 A client sends `session/prompt`. The agent loops: call the LLM → get tool calls → run them via MCP → feed results back → repeat. The loop terminates when the LLM stops asking for tools, the round cap is hit, or the client cancels.
 
-The agent's **output is its tool calls**. Generated text is forwarded to the client as `agent_message_chunk` updates, but the real work happens in the tools. The LLM call is non-streaming — one HTTP POST, one response.
+The agent's **output is its tool calls**. Generated text is forwarded to the client as `agent_message_chunk` updates as it arrives. OpenAI Chat Completions, OpenAI Responses, Anthropic Messages, OpenRouter, and the corresponding Databricks routes use streamed completions. Compatible endpoints that return a regular JSON response still work. Context summaries use regular JSON responses.
+
+Each round decodes bounded SSE events into a complete provider response while passing text through a bounded channel to ACP. All text chunks in a round share a stable `messageId`. Chat Completions structured content arrays remain buffered until completion. Reasoning and signed provider content are retained for the final response and replay; reasoning is emitted after completion. Tool calls execute only after a valid terminal event, so interrupted streams never execute partial arguments or enter assistant/tool state into history. HTTP failures retain the existing retry policy; started SSE streams are not automatically replayed, because their text may already be visible. Cancellation drops the HTTP read and any blocked delta delivery.
 
 ## Quick Start
 
@@ -303,7 +305,7 @@ The trust boundary is **the operator who launched the agent**. The harness, MCP 
 | MCP child lifetime | Process group via `setpgid(0,0)` in `pre_exec`. On transport break or shutdown: `killpg(SIGKILL)`. Grandchildren die too. |
 | Server poisoning | After a timeout or transport break, the offending server is marked dead. Future calls trigger a lazy restart with exponential backoff. Other servers keep working. |
 | Frame size | `BUZZ_AGENT_MAX_LINE_BYTES` (default 4 MiB). Oversize → connection killed. |
-| LLM response size | 16 MiB hard cap. Both `Content-Length` precheck and streaming-buffer cap. |
+| LLM response size | 16 MiB hard cap for JSON bodies or cumulative SSE bytes, including event framing. |
 | Cancellation | `tokio::select! { biased; _ = cancel.changed() => ... }` at every loop boundary. Cancel always wins the race. |
 | Session isolation | Unlimited concurrent sessions by default (configurable via `BUZZ_AGENT_MAX_SESSIONS`). One prompt per session at a time. Each session gets its own MCP servers. |
 | `tool_use ↔ tool_result` pairing | Encoded in the type system. Every `ToolCall` and `ToolResult` carries a `provider_id: String` (not `Option`). |
@@ -333,7 +335,6 @@ The trust boundary is **the operator who launched the agent**. The harness, MCP 
 A short list, because the answer is mostly "no":
 
 - **Not a framework.** No plugins, no recipes, no slash commands, no modes. MCP servers can participate in agent lifecycle via [hook tools](../../docs/MCP_DRIVEN_HOOKS.md) (`_Stop`, `_PostCompact`), but these are advisory, fail-open, and budget-bounded — not a plugin system.
-- **Not streaming.** One non-streaming HTTP POST per round. The LLM's generated text is forwarded to the client as `agent_message_chunk`, but there is no token-level streaming.
 - **Not persistent.** Everything is in-memory, per-process. No SQLite. When context fills, the agent summarizes its own history and continues (context handoff). No external persistence.
 - **Not an SDK.** This is a binary. The protocol seam is stdin/stdout. Use it from any language.
 - **Not a UI.** No TUI, no web, no notifications. The client renders.

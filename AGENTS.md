@@ -115,7 +115,7 @@ crates/
   buzz-media          # Blossom/S3 media storage
   # Agent surface
   buzz-acp            # ACP harness bridging Buzz events to AI agents
-  buzz-agent          # Minimal ACP-compliant agent (non-streaming, tool-calls-as-output)
+  buzz-agent          # Minimal ACP-compliant agent (streaming, tool-calls-as-output)
   buzz-dev-mcp        # Developer MCP server — shell + file-edit tools
   buzz-persona        # Agent persona packs
   buzz-workflow       # YAML-as-code workflow engine (evalexpr conditions)

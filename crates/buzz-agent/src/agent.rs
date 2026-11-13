@@ -1,9 +1,10 @@
+mod streaming;
+
 use std::sync::Arc;
 
 use serde_json::json;
 use tokio::sync::{mpsc, watch, Semaphore};
 use tokio::task::JoinSet;
-use tracing::Instrument as _;
 
 use crate::builtin;
 use crate::config::{
@@ -403,32 +404,8 @@ impl RunCtx<'_> {
                 tools.push(builtin::load_skill_def());
             }
             round = round.saturating_add(1);
-            let response_result = tokio::select! {
-                biased;
-                _ = self.cancel.changed() => return Ok(StopReason::Cancelled),
-                r = self.llm.complete(self.cfg, self.system_prompt, self.history, &tools, self.effective_model)
-                        .instrument(tracing::info_span!("llm", session_id = %self.session_id)) => r,
-                _ = async {
-                    // Keepalive ticker: emit a lightweight session update every 30s
-                    // while waiting on the LLM provider. This resets the ACP harness
-                    // idle clock so long provider responses don't trigger timeout.
-                    let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
-                    interval.tick().await; // first tick fires immediately — skip it
-                    loop {
-                        interval.tick().await;
-                        tracing::debug!("llm keepalive tick");
-                        wire::send(
-                            self.wire,
-                            wire::session_update(
-                                self.session_id,
-                                json!({
-                                    "sessionUpdate": "keepalive",
-                                }),
-                            ),
-                        )
-                        .await;
-                    }
-                } => unreachable!(),
+            let Some(response_result) = self.complete_round(&tools, round).await else {
+                return Ok(StopReason::Cancelled);
             };
             let response = match response_result {
                 Ok(response) => response,
@@ -621,53 +598,6 @@ impl RunCtx<'_> {
                 // goose behaves the same way, which is why the tracker was
                 // written to tolerate it.
                 self.emit_usage_update().await;
-            }
-
-            // Stable per-kind message IDs for ACP v2 ContentChunk compliance.
-            // ACP v2 requires every ContentChunk to carry `messageId`; all chunks
-            // that belong to the same logical message must share the same ID, and
-            // IDs must be unique per message within the ACP session.
-            //
-            // A provider round produces at most one thought and one assistant
-            // message (the parsers collapse all provider output into one
-            // LlmResponse.reasoning string and one LlmResponse.text string).
-            // These are two *distinct* logical messages, so they get distinct IDs.
-            //
-            // `run_id` is a fresh random token per `session/prompt` invocation,
-            // so `<run_id>-thought-<round>` and `<run_id>-message-<round>` are
-            // unique within the ACP session even across multiple prompts.
-            //
-            // ACP v1 allows the field, so this is a backwards-safe addition.
-            let thought_msg_id = format!("{}-thought-{round}", self.run_id);
-            let message_msg_id = format!("{}-message-{round}", self.run_id);
-            if !response.reasoning.is_empty() {
-                wire::send(
-                    self.wire,
-                    wire::session_update(
-                        self.session_id,
-                        json!({
-                            "sessionUpdate": "agent_thought_chunk",
-                            "messageId": &thought_msg_id,
-                            "content": { "type": "text", "text": &response.reasoning }
-                        }),
-                    ),
-                )
-                .await;
-            }
-
-            if !response.text.is_empty() {
-                wire::send(
-                    self.wire,
-                    wire::session_update(
-                        self.session_id,
-                        json!({
-                            "sessionUpdate": "agent_message_chunk",
-                            "messageId": &message_msg_id,
-                            "content": { "type": "text", "text": &response.text }
-                        }),
-                    ),
-                )
-                .await;
             }
 
             // `max_tokens` describes a truncated assistant response, not turn
