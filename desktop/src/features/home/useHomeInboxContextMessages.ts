@@ -8,7 +8,7 @@ import {
 import { formatTimelineMessages } from "@/features/messages/lib/formatTimelineMessages";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { Channel, RelayEvent } from "@/shared/api/types";
-import { KIND_REACTION } from "@/shared/constants/kinds";
+import { KIND_REACTION, KIND_SYSTEM_MESSAGE } from "@/shared/constants/kinds";
 
 type UseHomeInboxContextMessagesOptions = {
   channelMessages?: RelayEvent[];
@@ -66,13 +66,25 @@ export function useHomeInboxContextMessages({
       ownerProfiles,
     );
 
-    return timelineMessages.map((message) =>
-      toInboxContextMessage(message, {
-        eventById,
-        fallbackAuthorPubkey: selectedItem.item.pubkey,
-        profiles,
-        selectedItemId: selectedEventId ?? selectedItem.id,
-      }),
+    return (
+      timelineMessages
+        // Relay system events (kind 40099) carry a JSON payload, not prose, and
+        // are signed by the relay rather than a member. The channel timeline
+        // routes them to `SystemMessageRow`; the Inbox has no such row, so an
+        // unhandled one renders as a message bubble with the raw JSON as its
+        // body and a truncated hex pubkey as its author. Drop them here so the
+        // Inbox matches the channel, which shows nothing for a payload it has no
+        // copy for. They stay in `formatTimelineMessages`' input because it
+        // harvests their `actor`/`target` pubkeys for profile lookups.
+        .filter((message) => message.kind !== KIND_SYSTEM_MESSAGE)
+        .map((message) =>
+          toInboxContextMessage(message, {
+            eventById,
+            fallbackAuthorPubkey: selectedItem.item.pubkey,
+            profiles,
+            selectedItemId: selectedEventId ?? selectedItem.id,
+          }),
+        )
     );
   }, [
     channelMessages,
