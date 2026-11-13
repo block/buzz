@@ -121,6 +121,45 @@ test("back/forward keyboard chords work while the composer has focus", async ({
 
   // preventDefault kept the chord out of the editor — no stray characters.
   await expect(page.getByTestId("message-input")).toHaveText("");
+
+  if (process.platform === "darwin") {
+    const composer = page.getByTestId("message-input");
+    await composer.fill("Keep this draft");
+    await page.keyboard.press("Meta+ArrowLeft");
+    await expect
+      .poll(() => composer.evaluate(() => window.getSelection()?.focusOffset))
+      .toBe(0);
+    await page.keyboard.press("Meta+ArrowRight");
+    await expect
+      .poll(() => composer.evaluate(() => window.getSelection()?.focusOffset))
+      .toBe("Keep this draft".length);
+    await expect(page.getByTestId("chat-title")).toHaveText("random");
+    await expect(composer).toHaveText("Keep this draft");
+
+    // Empty composers autofocus on navigation; arrows must work there too.
+    await composer.fill("");
+    await expect(composer).toHaveText("");
+    await expect(composer).toBeFocused();
+    await page.keyboard.press("Meta+ArrowLeft");
+    await expect(page.getByTestId("chat-title")).toHaveText("general");
+    await page.getByTestId("message-input").focus();
+    await page.keyboard.press("Meta+ArrowRight");
+    await expect(page.getByTestId("chat-title")).toHaveText("random");
+
+    await page.keyboard.press("Meta+ArrowLeft");
+    await expect(page.getByTestId("chat-title")).toHaveText("general");
+    const root = page.locator('[data-message-id="mock-general-welcome"]');
+    await root.hover();
+    await page.getByTestId("reply-message-mock-general-welcome").click();
+    const threadPanel = page.getByTestId("message-thread-panel");
+    await expect(threadPanel).toBeVisible();
+    await threadPanel.getByTestId("message-input").focus();
+    await page.keyboard.press("Meta+ArrowLeft");
+    await expect(threadPanel).not.toBeVisible();
+    await page.getByTestId("message-input").focus();
+    await page.keyboard.press("Meta+ArrowRight");
+    await expect(threadPanel).toBeVisible();
+  }
 });
 
 // FIXME: the forum post "Back to posts" header renders under the fixed top
