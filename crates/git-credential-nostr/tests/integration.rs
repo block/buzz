@@ -184,33 +184,68 @@ fn malformed_nip_oa_auth_tag_fails_closed() {
 }
 
 /// Old git (no `capability[]=authtype` in input) → empty line on stdout, exit 0.
+///
+/// The client cannot use an `authtype` credential, so the helper must never
+/// emit one. It also must not stay silent when the server actually challenged
+/// with `Nostr`: that case is indistinguishable from a missing helper, so it
+/// reports the git-version requirement on stderr.
 #[test]
 fn old_git_no_authtype_capability() {
-    let input = "protocol=https\n\
-                 host=relay.example.com\n\
-                 path=git/owner/repo.git/info/refs\n\
-                 \n";
+    // (challenge the server sent, hint expected on stderr)
+    let cases = [
+        (None, false),
+        (
+            Some("wwwauth[]=Nostr realm=\"buzz\", method=\"GET\"\n"),
+            true,
+        ),
+        (Some("wwwauth[]=Basic realm=\"relay\"\n"), false),
+    ];
 
     let nsec = fresh_nsec();
-    let out = run_helper(input, &[("NOSTR_PRIVATE_KEY", &nsec)]);
+    for (challenge, expects_hint) in cases {
+        let input = format!(
+            "protocol=https\n\
+             host=relay.example.com\n\
+             path=git/owner/repo.git/info/refs\n\
+             {}\
+             \n",
+            challenge.unwrap_or("")
+        );
 
-    assert!(
-        out.status.success(),
-        "expected exit 0 for old-git path, got {:?}",
-        out.status.code()
-    );
+        let out = run_helper(&input, &[("NOSTR_PRIVATE_KEY", &nsec)]);
 
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    // Output should be just a blank line — no credential data.
-    assert_eq!(
-        stdout.trim(),
-        "",
-        "expected empty output for old-git path, got:\n{stdout}"
-    );
-    assert!(
-        !stdout.contains("credential="),
-        "should not emit credential= for old git"
-    );
+        assert!(
+            out.status.success(),
+            "expected exit 0 for old-git path, got {:?}",
+            out.status.code()
+        );
+
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        // Output should be just a blank line — no credential data.
+        assert_eq!(
+            stdout.trim(),
+            "",
+            "expected empty output for old-git path, got:\n{stdout}"
+        );
+        assert!(
+            !stdout.contains("credential="),
+            "should not emit credential= for old git"
+        );
+
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if expects_hint {
+            assert!(
+                stderr.contains("did not announce the `authtype` capability"),
+                "a Nostr challenge without the capability must explain the git \
+                 version requirement on stderr, got:\n{stderr}"
+            );
+        } else {
+            assert!(
+                stderr.is_empty(),
+                "a non-Nostr remote must stay silent on stderr, got:\n{stderr}"
+            );
+        }
+    }
 }
 
 /// No key configured at all → exit 1, stderr mentions "no nostr key configured".
