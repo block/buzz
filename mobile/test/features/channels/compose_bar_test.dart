@@ -1568,6 +1568,39 @@ void main() {
       await tester.pumpAndSettle();
       expect(textField.controller!.text, 'identity A secret draft');
       expect(storedText(keysB), 'identity B text');
+
+      // Text added to this draft from elsewhere, such as an unsent
+      // notification reply, appears in the mounted composer, so the next
+      // edit keeps it. Text added to another identity's store doesn't.
+      final raw = _testPrefs.getString(
+        'compose_drafts_v1:$relayUrl:${keysA.public}',
+      )!;
+      final draft = (jsonDecode(raw) as List).first as Map<String, dynamic>;
+      final drafts = container.read(composeDraftsProvider.notifier);
+      void append(nostr.Keys keys, String text) => drafts.append(
+        config: RelayConfig(baseUrl: relayUrl, nsec: keys.nsec),
+        key: draft['key'] as String,
+        channelId: draft['channel_id'] as String,
+        threadHeadId: draft['thread_head_id'] as String?,
+        text: text,
+      );
+      append(keysB, 'reply for B');
+      append(keysA, 'notification reply');
+      await tester.pump();
+      expect(
+        textField.controller!.text,
+        'identity A secret draft\n\nnotification reply',
+      );
+      await tester.enterText(
+        find.byType(TextField),
+        '${textField.controller!.text} continued',
+      );
+      await tester.pump();
+      expect(
+        storedText(keysA),
+        'identity A secret draft\n\nnotification reply continued',
+      );
+      expect(storedText(keysB), 'identity B text\n\nreply for B');
     });
 
     testWidgets('inserts a community emoji at the cursor from the action row', (

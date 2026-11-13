@@ -9,7 +9,6 @@ import '../../shared/read_state/read_state_format.dart';
 import '../../shared/read_state/read_state_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../activity/compose_drafts_provider.dart';
-import 'channel.dart';
 import 'channels_provider.dart';
 import 'send_message_provider.dart';
 
@@ -61,59 +60,55 @@ final notificationReplySenderProvider = Provider<void>((ref) {
   unawaited(drain());
 });
 
-/// How long a reply may take to get ready to publish. iOS gives the app
-/// about 30 s and the native side gives up at 25 s, so this leaves room for
-/// the publish's own acknowledgement timeout.
+/// How long a reply may take to get ready to publish.
 const _prepareDeadline = Duration(seconds: 12);
+
+/// How long a reply may take to send, including getting ready. iOS gives the
+/// app about 30 s and the native side gives up at 25 s.
+const _sendDeadline = Duration(seconds: 20);
+
+/// How long marking the conversation read may take after a reply is sent.
+const _markReadDeadline = Duration(seconds: 3);
 
 /// Sends [reply] in a subthread under the notified message, mentioning its
 /// sender, then marks the conversation read up to that message. Returns
 /// whether it was sent; an unsent reply's text is kept as a draft where its
-/// notification opens.
+/// notification opens, in the reply's own community.
 @visibleForTesting
 Future<bool> sendNotificationReply(Ref ref, BuzzNotificationReply reply) async {
-  final link = reply.link;
+  // The background grace period would otherwise disconnect mid-reply.
+  final release = ref
+      .read(relaySessionProvider.notifier)
+      .holdForBackgroundWork(_sendDeadline + _markReadDeadline);
   try {
-    final channel = await _replyChannel(ref, reply).timeout(_prepareDeadline);
-    if (channel == null) {
-      _keepDraft(ref, reply);
+    try {
+      await _send(ref, reply).timeout(_sendDeadline);
+    } catch (error) {
+      debugPrint('[NotificationReply] not sent: $error');
+      await _keepDraft(ref, reply);
       return false;
     }
-    // A Solo chat takes no thread replies, so the reply goes at its top level.
-    final threaded = !channel.isSolo;
-    await ref
-        .read(sendMessageProvider)
-        .call(
-          channelId: link.channelId,
-          content: reply.text,
-          parentEventId: threaded ? link.messageId : null,
-          rootEventId: threaded ? reply.replyRootId ?? link.messageId : null,
-          mentionPubkeys: [reply.senderPubkey],
-          channel: channel,
-        );
-  } catch (error) {
-    debugPrint('[NotificationReply] not sent: $error');
-    _keepDraft(ref, reply);
-    return false;
+    try {
+      final link = reply.link;
+      final rootId = reply.replyRootId;
+      final readState = ref.read(readStateProvider.notifier);
+      readState.markContextRead(
+        rootId == null ? link.channelId : threadContextKey(rootId),
+        reply.messageCreatedAt,
+      );
+      // The app may be suspended right after the reply finishes.
+      await readState.flush().timeout(_markReadDeadline);
+    } catch (error) {
+      debugPrint('[NotificationReply] not marked read: $error');
+    }
+    return true;
+  } finally {
+    release();
   }
-  try {
-    final rootId = reply.replyRootId;
-    final readState = ref.read(readStateProvider.notifier);
-    readState.markContextRead(
-      rootId == null ? link.channelId : threadContextKey(rootId),
-      reply.messageCreatedAt,
-    );
-    // The app may be suspended right after the reply finishes.
-    await readState.flush();
-  } catch (error) {
-    debugPrint('[NotificationReply] not marked read: $error');
-  }
-  return true;
 }
 
-/// The channel to reply in, once the relay can take the reply; null when the
-/// reply can't be sent there.
-Future<Channel?> _replyChannel(Ref ref, BuzzNotificationReply reply) async {
+/// Publishes [reply] to its own community's relay, or throws.
+Future<void> _send(Ref ref, BuzzNotificationReply reply) async {
   final link = reply.link;
   final auth = await ref.read(authProvider.future);
   final active = await ref.read(activeCommunityProvider.future);
@@ -121,41 +116,61 @@ Future<Channel?> _replyChannel(Ref ref, BuzzNotificationReply reply) async {
   // reachable.
   if (auth.status != AuthStatus.authenticated ||
       active?.id != link.communityId) {
-    return null;
+    throw StateError('Reply is not for the selected community');
   }
+  // Taken before any wait: its delivery check then refuses to publish if the
+  // selected community changes.
+  final send = ref.read(sendMessageProvider);
   final channels = await ref.read(channelsProvider.future);
   final channel = channels
       .where((channel) => channel.id == link.channelId)
       .firstOrNull;
-  if (channel == null || !channel.isMember) return null;
-  // The app's relay connection closes in the background.
+  if (channel == null || !channel.isMember) {
+    throw StateError('Not a member of the reply channel');
+  }
   final connected = await ref
       .read(relaySessionProvider.notifier)
       .connectForBackgroundWork(timeout: _prepareDeadline);
-  return connected ? channel : null;
+  if (!connected) throw StateError('Relay not reachable');
+  if (ref.read(activeCommunityProvider).value?.id != link.communityId) {
+    throw StateError('Selected community changed');
+  }
+  // A Solo chat takes no thread replies, so the reply goes at its top level.
+  final threaded = !channel.isSolo;
+  await send(
+    channelId: link.channelId,
+    content: reply.text,
+    parentEventId: threaded ? link.messageId : null,
+    rootEventId: threaded ? reply.replyRootId ?? link.messageId : null,
+    mentionPubkeys: [reply.senderPubkey],
+    channel: channel,
+  );
 }
 
 /// Keeps the reply's text in the composer its notification opens, after any
-/// draft already there.
-void _keepDraft(Ref ref, BuzzNotificationReply reply) {
+/// draft already there, in the reply's own community.
+Future<void> _keepDraft(Ref ref, BuzzNotificationReply reply) async {
   final link = reply.link;
   try {
-    final drafts = ref.read(composeDraftsProvider.notifier);
-    final key = composeDraftKey(
-      link.channelId,
-      threadHeadId: link.threadRootId,
-    );
-    final existing = drafts.draftFor(key);
-    final existingText = existing?.text.trimRight() ?? '';
-    drafts.save(
-      key: key,
-      channelId: link.channelId,
-      threadHeadId: link.threadRootId,
-      text: existingText.isEmpty
-          ? reply.text
-          : '$existingText\n\n${reply.text}',
-      mentionKeys: existing?.mentionKeys ?? const {},
-    );
+    final communities = await ref.read(communityListProvider.future);
+    final community = communities
+        .where((community) => community.id == link.communityId)
+        .firstOrNull;
+    if (community == null) {
+      throw StateError('Community ${link.communityId} not found');
+    }
+    ref
+        .read(composeDraftsProvider.notifier)
+        .append(
+          config: RelayConfig(
+            baseUrl: community.relayUrl,
+            nsec: community.nsec,
+          ),
+          key: composeDraftKey(link.channelId, threadHeadId: link.threadRootId),
+          channelId: link.channelId,
+          threadHeadId: link.threadRootId,
+          text: reply.text,
+        );
   } catch (error) {
     debugPrint('[NotificationReply] draft not kept: $error');
   }

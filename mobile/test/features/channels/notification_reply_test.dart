@@ -11,7 +11,9 @@ import 'package:buzz/shared/relay/relay.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:buzz/shared/theme/theme_provider.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 const _push = MethodChannel('buzz/push');
 final _root = 'a' * 64;
@@ -24,6 +26,16 @@ final _community = Community(
   relayUrl: 'https://relay.example.org',
   addedAt: DateTime.utc(2026),
 );
+
+final _elsewhere = Community(
+  id: 'elsewhere',
+  name: 'Elsewhere',
+  relayUrl: 'https://other.example.org',
+  addedAt: DateTime.utc(2026),
+);
+
+const _selectedDrafts = 'compose_drafts_v1:https://relay.example.org:anon';
+const _elsewhereDrafts = 'compose_drafts_v1:https://other.example.org:anon';
 
 Channel _channel(String id, {bool solo = false, bool member = true}) => Channel(
   id: id,
@@ -74,7 +86,7 @@ void main() {
         // A Solo chat takes no thread replies.
         _reply('3', channelId: 'solo', createdAt: 3000),
         // Another community's notification can't be answered without
-        // switching; its text is kept as a draft.
+        // switching; its text is kept as a draft in that community.
         _reply('4', communityId: 'elsewhere'),
         // A send that fails keeps the text where its notification opens.
         _reply(
@@ -109,13 +121,21 @@ void main() {
         debugDefaultTargetPlatformOverride = null;
       });
 
+      SharedPreferences.setMockInitialValues({
+        _selectedDrafts:
+            '[{"key":"outside","channel_id":"outside","text":"earlier draft",'
+            '"updated_at":1}]',
+      });
+      final prefs = await SharedPreferences.getInstance();
       final sender = _RecordingSender();
-      final drafts = _Drafts();
       final session = _Session();
+      var active = _community;
       final container = ProviderContainer(
         overrides: [
+          savedPrefsProvider.overrideWithValue(prefs),
           authProvider.overrideWith(_Auth.new),
-          activeCommunityProvider.overrideWith((ref) async => _community),
+          communityListProvider.overrideWith(_Communities.new),
+          activeCommunityProvider.overrideWith((ref) async => active),
           channelsProvider.overrideWith(
             () => _Channels([
               _channel('general'),
@@ -126,7 +146,6 @@ void main() {
           ),
           sendMessageProvider.overrideWithValue(sender),
           readStateProvider.overrideWith(_ReadState.new),
-          composeDraftsProvider.overrideWith(() => drafts),
           relaySessionProvider.overrideWith(() => session),
         ],
       );
@@ -134,6 +153,7 @@ void main() {
 
       container.listen(notificationReplySenderProvider, (_, _) {});
       await pumpEventQueue();
+      final drafts = container.read(composeDraftsProvider.notifier);
 
       expect(selected, ['community']);
       expect(outcomes, {
@@ -156,7 +176,8 @@ void main() {
         threadContextKey(_root): 2000,
         'solo': 3000,
       });
-      expect(drafts.textFor(composeDraftKey('general')), 'reply 4');
+      expect(drafts.textFor(composeDraftKey('general')), isNull);
+      expect(prefs.getString(_elsewhereDrafts), contains('"text":"reply 4"'));
       expect(
         drafts.textFor(composeDraftKey('broken', threadHeadId: _root)),
         'reply 5',
@@ -189,6 +210,24 @@ void main() {
       expect(outcomes['8'], isFalse);
       expect(sender.calls.last.$2, 'reply 7');
       expect(drafts.textFor(composeDraftKey('solo')), 'reply 8');
+
+      // A community switch while the relay connects stops the reply before
+      // it reaches the other community's relay, and keeps the text in the
+      // reply's own community.
+      session.reachable = true;
+      session.onConnect = () async {
+        active = _elsewhere;
+        container.invalidate(activeCommunityProvider);
+        await container.read(activeCommunityProvider.future);
+      };
+      await signalReply(_reply('9', channelId: 'solo'));
+      expect(outcomes['9'], isFalse);
+      expect(sender.calls.last.$2, 'reply 7');
+      expect(
+        prefs.getString(_selectedDrafts),
+        contains('"text":"reply 8\\n\\nreply 9"'),
+      );
+      expect(prefs.getString(_elsewhereDrafts), isNot(contains('reply 9')));
     },
   );
 }
@@ -225,44 +264,22 @@ class _ReadState extends ReadStateNotifier {
   }
 }
 
-class _Drafts extends ComposeDraftsNotifier {
+class _Communities extends CommunityListNotifier {
   @override
-  List<ComposeDraft> build() => [
-    ComposeDraft(
-      key: composeDraftKey('outside'),
-      channelId: 'outside',
-      threadHeadId: null,
-      text: 'earlier draft',
-      updatedAt: 1,
-    ),
-  ];
-  @override
-  void save({
-    required String key,
-    required String channelId,
-    String? threadHeadId,
-    required String text,
-    Map<String, String> mentionKeys = const {},
-  }) => state = [
-    ComposeDraft(
-      key: key,
-      channelId: channelId,
-      threadHeadId: threadHeadId,
-      text: text,
-      updatedAt: 2,
-    ),
-    ...state.where((draft) => draft.key != key),
-  ];
+  Future<List<Community>> build() async => [_community, _elsewhere];
 }
 
 class _Session extends RelaySessionNotifier {
   var reachable = true;
+  Future<void> Function()? onConnect;
   @override
   SessionState build() =>
       const SessionState(status: SessionStatus.disconnected);
   @override
-  Future<bool> connectForBackgroundWork({required Duration timeout}) async =>
-      reachable;
+  Future<bool> connectForBackgroundWork({required Duration timeout}) async {
+    await onConnect?.call();
+    return reachable;
+  }
 }
 
 class _RecordingSender implements SendMessage {

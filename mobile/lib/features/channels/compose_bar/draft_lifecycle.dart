@@ -181,8 +181,21 @@ void _useComposeDraftLifecycle({
           );
     }
 
+    // Take a draft saved from elsewhere, such as an unsent notification
+    // reply, so this composer's next edit doesn't overwrite it.
+    final drafts = ref.listenManual(composeDraftsProvider, (_, _) {
+      if (!identical(currentOwner.value, owner)) return;
+      final saved = ref.read(composeDraftsProvider.notifier).draftFor(draftKey);
+      if (saved == null || saved.text == lastPersistedText) return;
+      lastPersistedText = saved.text;
+      controller.text = saved.text;
+    });
+
     controller.addListener(persistDraft);
-    return () => controller.removeListener(persistDraft);
+    return () {
+      drafts.close();
+      controller.removeListener(persistDraft);
+    };
   }, [controller, draftKey, draftIdentity, onDraftIdentityChanged]);
   _useComposerShareDelivery(
     context: context,
