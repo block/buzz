@@ -429,10 +429,14 @@ function MessageComposerImpl({
       setSpoileredAttachmentUrls(restoredSpoileredAttachmentUrls);
     }
   }, [editTarget?.id]);
+  // Key on the target id: callers rebuild the `replyTarget` object on every
+  // render, and refocusing on identity steals focus from other composers
+  // (e.g. the video review dialog) whenever the thread re-renders.
+  const replyTargetId = replyTarget?.id ?? null;
   React.useEffect(() => {
-    if (!replyTarget || composerDisabled) return;
+    if (!replyTargetId || composerDisabled) return;
     richText.focusPreserve();
-  }, [composerDisabled, replyTarget, richText.focusPreserve]);
+  }, [composerDisabled, replyTargetId, richText.focusPreserve]);
   useComposerAutofocus(richText.focus, effectiveDraftKey, composerDisabled);
   const applyAutocompleteEdit = React.useCallback(
     (edit: AutocompleteEdit) => {
