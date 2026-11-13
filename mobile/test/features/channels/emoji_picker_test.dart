@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:convert';
 
 import 'package:buzz/shared/emoji/emoji_picker.dart';
 import 'package:buzz/shared/emoji/recent_emoji_provider.dart';
@@ -7,14 +6,13 @@ import 'package:buzz/shared/custom_emoji/custom_emoji.dart';
 import 'package:buzz/shared/custom_emoji/custom_emoji_provider.dart';
 import 'package:buzz/shared/emoji/emoji_data.dart';
 import 'package:buzz/shared/emoji/emoji_data_provider.dart';
-import 'package:buzz/shared/hosted/builderlab_account.dart';
-import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:nostr/nostr.dart' as nostr;
@@ -139,31 +137,19 @@ const _relayCustomEmoji = [
   ),
 ];
 
-class _FakeRelayConfigNotifier extends RelayConfigNotifier {
-  _FakeRelayConfigNotifier(this.nsec);
-
-  final String nsec;
-
-  @override
-  RelayConfig build() =>
-      RelayConfig(baseUrl: 'https://relay.example', nsec: nsec);
-}
-
-/// A hosted relay that issues a fixed assertion.
-class _FakeHostedRelayAuth extends HostedRelayAuth {
-  _FakeHostedRelayAuth() : super(BuilderlabAccountClient(), enabled: false);
-
-  /// While set, issuance waits for it, like a slow account request.
-  Completer<void>? gate;
+/// Media downloads that answer at once, except `slow.png`, which waits until
+/// the caller aborts it.
+class _MediaClient extends http.BaseClient {
+  final requests = <http.BaseRequest>[];
 
   @override
-  Future<Map<String, String>> headers(
-    RelayConfig config, {
-    bool background = false,
-    bool fresh = false,
-  }) async {
-    await gate?.future;
-    return {'Nostr-Federated-Identity': 'Bearer hosted-token'};
+  Future<http.StreamedResponse> send(http.BaseRequest request) async {
+    requests.add(request);
+    if (request.url.path.endsWith('slow.png')) {
+      await (request as http.AbortableRequest).abortTrigger;
+      throw http.RequestAbortedException(request.url);
+    }
+    return http.StreamedResponse(Stream.value([1, 2, 3]), 200);
   }
 }
 
@@ -735,15 +721,11 @@ void main() {
       final previousPlatform = debugDefaultTargetPlatformOverride;
       debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
       final prefs = await _prefs();
-      final nsec = nostr.Keys.generate().nsec;
-      var clock = DateTime.utc(2026, 11, 5, 12);
       final mediaAuth = MediaGetAuthService(
         baseUrl: 'https://relay.example',
-        nsec: nsec,
-        now: () => clock,
+        nsec: nostr.Keys.generate().nsec,
       );
-      final hostedAuth = _FakeHostedRelayAuth();
-      addTearDown(hostedAuth.dispose);
+      final mediaClient = _MediaClient();
       MethodCall? presentation;
       final selected = <String>[];
       var dismissals = 0;
@@ -764,10 +746,7 @@ void main() {
                 ),
               ),
               mediaGetAuthServiceProvider.overrideWithValue(mediaAuth),
-              relayConfigProvider.overrideWith(
-                () => _FakeRelayConfigNotifier(nsec),
-              ),
-              hostedRelayAuthProvider.overrideWithValue(hostedAuth),
+              mediaHttpClientProvider.overrideWithValue(mediaClient),
             ],
             child: MaterialApp(
               theme: AppTheme.light(),
@@ -806,56 +785,37 @@ void main() {
         ]);
         expect(find.byType(EmojiPickerSheet), findsNothing);
 
-        final externalHeaders = await _sendNativeEmojiPickerCall(
-          tester,
-          'mediaHeaders',
-          'https://example.test/parrot.gif',
-        );
-        expect(externalHeaders, <String, String>{});
-        final relayHeaders = await _sendNativeEmojiPickerCall(
-          tester,
-          'mediaHeaders',
-          'https://relay.example/media/buzzbee.png',
-        );
-        expect(
-          (relayHeaders as Map<Object?, Object?>)['Authorization'],
-          startsWith('Nostr '),
-        );
-        // Native downloads skip the hosted HTTP client, so the bridge must
-        // carry the relay assertion a hosted relay requires for media reads.
-        expect(relayHeaders['Nostr-Federated-Identity'], 'Bearer hosted-token');
+        // The sheet loads custom emoji bytes through Flutter's media path:
+        // signed per request, then remembered by URL so reopening the sheet
+        // does not download them again.
+        // Media loads run real timers and I/O.
+        await tester.runAsync(() async {
+          final relayBytes = await _sendNativeEmojiPickerCall(
+            tester,
+            'mediaBytes',
+            {'id': 1, 'url': 'https://relay.example/media/buzzbee.png'},
+          );
+          expect(relayBytes, Uint8List.fromList([1, 2, 3]));
+          expect(
+            mediaClient.requests.single.headers['Authorization'],
+            startsWith('Nostr '),
+          );
+          await _sendNativeEmojiPickerCall(tester, 'mediaBytes', {
+            'id': 2,
+            'url': 'https://relay.example/media/buzzbee.png',
+          });
+          expect(mediaClient.requests, hasLength(1));
 
-        // A slow assertion refresh must not age the 60-second media proof:
-        // it is minted only once the assertion is in hand.
-        hostedAuth.gate = Completer<void>();
-        final slowHeaders = _sendNativeEmojiPickerCall(
-          tester,
-          'mediaHeaders',
-          'https://relay.example/media/buzzbee.png',
-        );
-        await tester.pump();
-        clock = clock.add(const Duration(seconds: 90));
-        hostedAuth.gate!.complete();
-        final refreshed = (await slowHeaders) as Map<Object?, Object?>;
-        hostedAuth.gate = null;
-        final proof =
-            jsonDecode(
-                  utf8.decode(
-                    base64Url.decode(
-                      base64Url.normalize(
-                        (refreshed['Authorization'] as String).substring(6),
-                      ),
-                    ),
-                  ),
-                )
-                as Map<String, Object?>;
-        final expiration = (proof['tags'] as List)
-            .cast<List<Object?>>()
-            .firstWhere((tag) => tag.first == 'expiration')[1];
-        expect(
-          int.parse(expiration as String),
-          greaterThan(clock.millisecondsSinceEpoch ~/ 1000),
-        );
+          // A cell that scrolls away cancels its download.
+          final slow = _sendNativeEmojiPickerCall(tester, 'mediaBytes', {
+            'id': 3,
+            'url': 'https://example.test/slow.png',
+          });
+          await tester.pump();
+          await _sendNativeEmojiPickerCall(tester, 'cancelMediaBytes', 3);
+          await expectLater(slow, throwsA(isA<PlatformException>()));
+          expect(mediaClient.requests, hasLength(2));
+        });
 
         await _sendNativeEmojiPickerCall(tester, 'skinToneChanged', 4);
         await _sendNativeEmojiPickerCall(tester, 'selected', '\u{1F525}');
