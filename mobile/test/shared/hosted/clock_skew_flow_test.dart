@@ -33,6 +33,7 @@ void main() {
   // one repeats.
   late List<Future<http.StreamedResponse> Function()> answers;
   late int issued;
+  late Object? identity;
 
   setUp(() async {
     FlutterSecureStorage.setMockInitialValues({});
@@ -49,6 +50,7 @@ void main() {
     elapsed = const Duration(seconds: 1000);
     issued = 0;
     answers = [];
+    identity = {'pubkey_hex': keys.public};
   });
 
   String jws(Map<String, Object?> claims) {
@@ -106,7 +108,7 @@ void main() {
           'expires_at': expiry.toIso8601String(),
         }),
         '/api/goose/v1/buzz/nostr-identities/current' => json({
-          'identity': {'pubkey_hex': keys.public},
+          'identity': identity,
         }),
         '/api/goose/v1/buzz/identity/assertions' =>
           await answers[issued++ < answers.length
@@ -213,7 +215,7 @@ void main() {
         'a delayed body',
         () => Stream.fromFuture(
           Future.delayed(
-            const Duration(milliseconds: 50),
+            const Duration(seconds: 3),
             () => utf8.encode('{"error":"invalid_proof"}'),
           ),
         ),
@@ -232,6 +234,25 @@ void main() {
         expect(auth.failureClockHint, 10);
       });
     }
+
+    test('the offset is read when the headers arrive, not the body', () async {
+      // 114 s off at the headers gives no hint; read 3 s later, at the body,
+      // it would be over the 115 s threshold.
+      answers = [
+        refusal(
+          DateTime.now().subtract(const Duration(seconds: 114)),
+          () => Stream.fromFuture(
+            Future.delayed(
+              const Duration(seconds: 3),
+              () => utf8.encode('{"error":"invalid_proof"}'),
+            ),
+          ),
+        ),
+      ];
+      final auth = relayAuth(account());
+      await expectLater(auth.headers(relay), throwsA(AccountFailure.denied));
+      expect(auth.failureClockHint, isNull);
+    });
 
     test('a phone clock behind the server is hinted too', () async {
       answers = [
@@ -286,6 +307,19 @@ void main() {
       await expectLater(auth.headers(relay), throwsA(AccountFailure.denied));
       expect(auth.failureClockHint, 10);
       await organizationAccount.clearLocalSession();
+      expect(auth.failureClockHint, isNull);
+    });
+
+    test('an old refusal never explains a later local denial', () async {
+      final auth = relayAuth(account());
+      answers = [refusal(fast, () => Stream.value(utf8.encode('{}')))];
+      await expectLater(auth.headers(relay), throwsA(AccountFailure.denied));
+      expect(auth.failureClockHint, 10);
+      // The key no longer matches the account's identity: denied locally,
+      // with no new 403, so no hint.
+      identity = {'pubkey_hex': List.filled(64, 'f').join()};
+      await expectLater(auth.headers(relay), throwsA(AccountFailure.denied));
+      expect(auth.failure, AccountFailure.denied);
       expect(auth.failureClockHint, isNull);
     });
   });

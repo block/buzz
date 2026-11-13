@@ -82,6 +82,9 @@ class HostedJourneyFixture {
   int discoveries = 0;
   bool expiredSession = false;
   bool denyAssertion = false;
+
+  /// The `Date` the issuer's refusal carries, when [denyAssertion] is set.
+  DateTime? denialDate;
   bool refuseUpgrade = false;
   String subject = 'journey-owner';
   String? accountEmail = 'owner@example.com';
@@ -176,7 +179,15 @@ class HostedJourneyFixture {
     } else if (path.endsWith('/identity/assertions')) {
       await beforeAssertionReturn?.call();
       if (expiredSession) return http.Response('{}', 401);
-      if (denyAssertion) return http.Response('{}', 403);
+      if (denyAssertion) {
+        return http.Response(
+          '{}',
+          403,
+          headers: {
+            if (denialDate case final date?) 'date': HttpDate.format(date),
+          },
+        );
+      }
       final body = jsonDecode(request.body) as Map;
       if (bound != null && body['nostr_pubkey'] != bound) {
         return http.Response('{}', 403);

@@ -365,6 +365,9 @@ class HostedRelayAuth extends ChangeNotifier {
     bool background,
   ) async {
     final started = ++_sequence;
+    // Only a refusal observed during this acquisition may supply its hint;
+    // one account issues for one community at a time.
+    account.lastRefusalClockHint = null;
     try {
       if (account.account == null && await account.restore() == null) {
         // A push stop pending at sign-out still gets a few attempts.

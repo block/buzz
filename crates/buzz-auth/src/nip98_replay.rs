@@ -233,6 +233,28 @@ mod tests {
         }
     }
 
+    /// Set-if-absent markers that expire `ttl` seconds after the test clock.
+    #[derive(Default)]
+    struct InMemoryGuard(std::sync::Mutex<std::collections::HashMap<String, u64>>);
+
+    impl Nip98ReplayGuard for InMemoryGuard {
+        fn try_mark_in_scope<'a>(
+            &'a self,
+            scope: &'a str,
+            event_id: &'a EventId,
+            ttl_secs: u64,
+        ) -> Pin<Box<dyn Future<Output = Result<bool, AuthError>> + Send + 'a>> {
+            let now = crate::wall_now();
+            let mut markers = self.0.lock().unwrap();
+            let key = format!("{scope}:{event_id}");
+            let fresh = markers.get(&key).is_none_or(|&expires| expires <= now);
+            if fresh {
+                markers.insert(key, now + ttl_secs);
+            }
+            Box::pin(std::future::ready(Ok(fresh)))
+        }
+    }
+
     #[test]
     fn a_duplicate_still_verifies_at_the_last_second_its_marker_must_cover() {
         // First seen at server time t, signed 120 s ahead: timestamp
@@ -250,15 +272,28 @@ mod tests {
             .sign_with_keys(&Keys::generate())
             .expect("sign");
         let json = serde_json::to_string(&event).unwrap();
-        let verify_at = |now| {
-            crate::test_clock::pinned(now, || crate::verify_nip98_event(&json, url, "POST", None))
+        let guard = InMemoryGuard::default();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let admit_at = |now| {
+            crate::test_clock::pinned(now, || {
+                crate::verify_nip98_event(&json, url, "POST", None)?;
+                rt.block_on(guard.try_mark_in_scope(
+                    "community",
+                    &event.id,
+                    DEFAULT_REPLAY_TTL_SECS,
+                ))
+            })
         };
 
-        assert!(verify_at(t).is_ok());
+        assert!(matches!(admit_at(t), Ok(true)));
         let last_valid = t + 2 * TIMESTAMP_TOLERANCE_SECS;
-        assert!(verify_at(last_valid).is_ok());
-        assert!(verify_at(last_valid + 1).is_err());
-        assert!(last_valid < t + DEFAULT_REPLAY_TTL_SECS);
+        assert!(
+            matches!(admit_at(last_valid), Ok(false)),
+            "the replay must be refused"
+        );
+        assert!(admit_at(last_valid + 1).is_err());
     }
 
     #[test]

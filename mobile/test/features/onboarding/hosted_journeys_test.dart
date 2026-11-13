@@ -961,6 +961,24 @@ void main() {
       expect((await f.storage.loadAll()).single.nsec, community.nsec);
       expect(await f.storage.loadActiveId(), community.id);
       expect((await f.store.read())!.pubkey, f.keys.public);
+      // An issuer refusal whose `Date` is 10 minutes off explains itself.
+      f.denyAssertion = true;
+      f.denialDate = DateTime.now().add(const Duration(minutes: 10));
+      f.assertionNow = f.assertionNow.add(const Duration(minutes: 6));
+      await session.reconnect();
+      await f.settle(tester);
+      expect(
+        find.text(
+          'This account cannot reconnect to this community with its saved key.',
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.textContaining("Your device's clock looks about 10 minutes off"),
+        findsOneWidget,
+      );
+      f.denyAssertion = false;
+      f.denialDate = null;
       for (final path in [
         '/status',
         '/enrollment',

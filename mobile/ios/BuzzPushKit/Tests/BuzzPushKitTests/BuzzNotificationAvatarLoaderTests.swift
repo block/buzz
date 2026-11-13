@@ -160,7 +160,7 @@ struct BuzzNotificationAvatarLoaderTests {
     let request = try #require(requests.first)
     #expect(
       request.value(forHTTPHeaderField: "Nostr-Federated-Identity")
-        == "Bearer header.payload.signature")
+        == "Bearer e30.eyJpYXQiOjB9.c2ln")
     #expect(request.value(forHTTPHeaderField: "Authorization") != nil)
   }
 
@@ -203,7 +203,7 @@ struct BuzzNotificationAvatarLoaderTests {
     }
 
     #expect(requests.all.map { $0.value(forHTTPHeaderField: "Nostr-Federated-Identity") }
-      == [nil, "Bearer header.payload.signature"])
+      == [nil, "Bearer e30.eyJpYXQiOjB9.c2ln"])
     #expect(requests.all.allSatisfy { $0.value(forHTTPHeaderField: "Authorization") != nil })
   }
 
@@ -297,7 +297,7 @@ private final class HostedIssuanceStub: URLProtocol, @unchecked Sendable {
       request.url?.path == "/api/goose/v1/buzz/nostr-identities/current"
       ? ["identity": ["pubkey_hex": account]]
       : [
-        "assertion": "header.payload.signature", "nostr_pubkey": account,
+        "assertion": "e30.eyJpYXQiOjB9.c2ln", "nostr_pubkey": account,
         "expires_at": Int(Date().timeIntervalSince1970) + 300,
       ]
     let body = try! JSONSerialization.data(withJSONObject: value)
@@ -320,7 +320,7 @@ private final class AssertionIssuanceStub: URLProtocol, @unchecked Sendable {
   override func startLoading() {
     Self.onRequest?()
     let body = try! JSONSerialization.data(withJSONObject: [
-      "assertion": "header.payload.signature",
+      "assertion": "e30.eyJpYXQiOjB9.c2ln",
       "nostr_pubkey": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
       "expires_at": Int(Date().timeIntervalSince1970) + 300,
     ])
