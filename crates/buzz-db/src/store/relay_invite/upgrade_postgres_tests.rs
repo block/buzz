@@ -463,6 +463,41 @@ async fn apply_pgschema_to_existing_database(pool: &PgPool) {
     // `.pgschemaignore` applies.
     let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let schema_file = repo_root.join("schema/schema.sql");
+    // pgschema cannot build a partitioned parent index concurrently. Exercise
+    // the shipped operator procedure before reconciling the populated schema.
+    let prebuild = tokio::process::Command::new("psql")
+        .args([
+            "-X",
+            "--set=ON_ERROR_STOP=1",
+            "--host",
+            &host,
+            "--port",
+            &port,
+            "--username",
+            &user,
+            "--dbname",
+            &database,
+            "--file",
+        ])
+        .arg(repo_root.join("scripts/maintenance/prebuild-event-reference-index.sql"))
+        .env("PGPASSWORD", &password)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let prebuild = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        prebuild.wait_with_output(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        prebuild.status.success(),
+        "reference index prebuild failed: {}",
+        String::from_utf8_lossy(&prebuild.stderr)
+    );
     let output = std::process::Command::new(repo_root.join("bin/pgschema"))
         .current_dir(&repo_root)
         .args([
