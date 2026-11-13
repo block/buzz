@@ -1030,7 +1030,7 @@ class ComposeBar extends HookConsumerWidget {
         .firstOrNull;
     final pickerQuery = (mentionQuery.value, channelQuery.value);
     KeyEventResult handleHardwareKey(FocusNode _, KeyEvent event) {
-      if (iosAttachmentPopover.isActive) {
+      if (iosAttachmentPopover.isActive || isEmojiPickerOpen.value) {
         return KeyEventResult.handled;
       }
       final currentQuery = (mentionQuery.value, channelQuery.value);

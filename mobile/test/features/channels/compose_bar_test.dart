@@ -2471,6 +2471,55 @@ void main() {
         }
       });
 
+      testWidgets('native emoji picker owns keyboard input until dismissal', (
+        tester,
+      ) async {
+        final previousPlatform = debugDefaultTargetPlatformOverride;
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+        const channel = MethodChannel('buzz/native_emoji_picker');
+        var presented = false;
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(channel, (call) async {
+              if (call.method == 'present') {
+                presented = true;
+                return true;
+              }
+              return null;
+            });
+        try {
+          final controller = await pumpComposer(tester);
+          await tester.enterText(find.byType(TextField), 'hello');
+          await tester.pumpAndSettle();
+          await tester.tap(find.byIcon(BuzzIcons.smilePlus));
+          await tester.pumpAndSettle();
+          expect(presented, isTrue);
+          for (final key in [
+            LogicalKeyboardKey.enter,
+            LogicalKeyboardKey.tab,
+          ]) {
+            await tester.sendKeyEvent(key);
+            await tester.pump();
+            expect(controller.text, 'hello');
+            expect(sent, isEmpty);
+          }
+          await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+            channel.name,
+            channel.codec.encodeMethodCall(const MethodCall('dismissed')),
+            (_) {},
+          );
+          await tester.pump();
+          await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+          await tester.pump();
+          expect(sent, ['hello']);
+        } finally {
+          await tester.pumpWidget(const SizedBox.shrink());
+          await tester.pumpAndSettle();
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+              .setMockMethodCallHandler(channel, null);
+          debugDefaultTargetPlatformOverride = previousPlatform;
+        }
+      });
+
       testWidgets('rapid Enter sends once while member scanning is pending', (
         tester,
       ) async {
