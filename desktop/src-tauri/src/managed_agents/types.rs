@@ -499,7 +499,6 @@ pub struct ManagedAgentRecord {
     pub effort_level: Option<String>,
 }
 
-#[derive(Debug)]
 pub struct ManagedAgentProcess {
     pub child: Child,
     pub log_path: PathBuf,
@@ -521,6 +520,12 @@ pub struct ManagedAgentProcess {
     /// cached availability and sets `needs_restart` on drift, catching out-of-
     /// band adapter changes that Phase-1 auto-restart doesn't cover.
     pub adapter_availability: Option<AcpAvailabilityStatus>,
+    /// The workspace relay URL this harness was actually dialed with, in the
+    /// spelling the community was configured with. The runtime-pair key is
+    /// canonical, but the relay binds communities to the literal connection
+    /// authority (`localhost` and `127.0.0.1` are distinct tenants), so
+    /// restarts must reuse this spelling rather than the key's.
+    pub dial_relay_url: String,
     /// Unpredictable identity shared only with this harness generation.
     pub start_nonce: String,
     /// Win32 Job Object owning the harness + its entire process tree. Closing
@@ -529,6 +534,26 @@ pub struct ManagedAgentProcess {
     /// if job creation/assignment failed (we fall back to `Child::kill()`).
     #[cfg(windows)]
     pub job: Option<crate::managed_agents::JobHandle>,
+}
+
+impl std::fmt::Debug for ManagedAgentProcess {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut debug = f.debug_struct("ManagedAgentProcess");
+        debug
+            .field("child", &self.child)
+            .field("log_path", &self.log_path)
+            .field("spawn_config", &self.spawn_config)
+            .field("setup_mode", &self.setup_mode)
+            .field("adapter_availability", &self.adapter_availability)
+            // `normalize_relay_url` deliberately preserves query strings, so a
+            // relay URL can carry a credential. The spawn snapshot masks its
+            // relay field; this sibling must not leak it through Debug either.
+            .field("dial_relay_url", &"••••")
+            .field("start_nonce", &self.start_nonce);
+        #[cfg(windows)]
+        debug.field("job", &self.job);
+        debug.finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]

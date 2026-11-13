@@ -131,6 +131,9 @@ pub(super) async fn start_local_agent_pairs_with_preflight(
     }
 
     let mut errors = Vec::new();
+    // `relay_urls` are the dial URLs recorded on each running pair, so a
+    // restart rejoins the exact community (and spelling) it left — including
+    // communities that are not the active workspace.
     for relay_url in relay_urls {
         if let Err(error) = crate::managed_agents::start_managed_agent_runtime_pair_lazy(
             pubkey.to_string(),
