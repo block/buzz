@@ -6,6 +6,7 @@ import 'package:nostr/nostr.dart' as nostr;
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/send_message_provider.dart';
+import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/shared/relay/relay.dart';
 
 void main() {
@@ -211,6 +212,197 @@ void main() {
       ['p', recipientOne],
       ['p', recipientTwo],
     ]);
+
+    session.accept();
+    await result;
+  });
+
+  test(
+    'resolves a plain-text @mention never tapped in the picker (non-DM channel)',
+    () async {
+      // Reproduces #7449: the compose bar always passes a concrete list to
+      // `mentionPubkeys` (never null), even when the user typed "@Name"
+      // without selecting it from the picker. That silently suppressed the
+      // text-resolution fallback.
+      final session = _PendingPublishRelaySession();
+      final signingKey = nostr.Keys.generate().nsec;
+      final sender = nostr.Keys(
+        nostr.Nip19.decode(payload: signingKey).data,
+      ).public;
+      final alice = 'n' * 64;
+      final send = SendMessage(
+        signedEventRelay: SignedEventRelay(session: session, nsec: signingKey),
+        fetchMembers: (_) async => [_member(sender), _member(alice)],
+        readUserCache: () => {
+          alice: UserProfile(pubkey: alice, displayName: 'Alice'),
+        },
+        addLocalMessage: (_, _) {},
+        completeLocalMessage: (_, _) {},
+        removeLocalMessage: (_, _) {},
+      );
+
+      final result = send(
+        channelId: _channelId,
+        content: '@Alice hi',
+        // Exactly what the compose bar sends today when nothing was
+        // tapped in the mention picker: empty, not null.
+        mentionPubkeys: const [],
+      );
+      await session.published;
+
+      expect(session.event.tags.where((tag) => tag.first == 'p').toList(), [
+        ['p', alice],
+      ]);
+
+      session.accept();
+      await result;
+    },
+  );
+
+  test(
+    'does not duplicate a pubkey tapped in the picker AND present as text',
+    () async {
+      final session = _PendingPublishRelaySession();
+      final signingKey = nostr.Keys.generate().nsec;
+      final sender = nostr.Keys(
+        nostr.Nip19.decode(payload: signingKey).data,
+      ).public;
+      final alice = 'n' * 64;
+      final send = SendMessage(
+        signedEventRelay: SignedEventRelay(session: session, nsec: signingKey),
+        fetchMembers: (_) async => [_member(sender), _member(alice)],
+        readUserCache: () => {
+          alice: UserProfile(pubkey: alice, displayName: 'Alice'),
+        },
+        addLocalMessage: (_, _) {},
+        completeLocalMessage: (_, _) {},
+        removeLocalMessage: (_, _) {},
+      );
+
+      // The picker already resolved "@Alice" to a tap-selected pubkey; the
+      // same name is also present as text. The union must not double-tag.
+      final result = send(
+        channelId: _channelId,
+        content: '@Alice hi',
+        mentionPubkeys: [alice],
+      );
+      await session.published;
+
+      expect(session.event.tags.where((tag) => tag.first == 'p').toList(), [
+        ['p', alice],
+      ]);
+
+      session.accept();
+      await result;
+    },
+  );
+
+  test(
+    'preserves a picker-tapped recipient the text resolver cannot see',
+    () async {
+      final session = _PendingPublishRelaySession();
+      final signingKey = nostr.Keys.generate().nsec;
+      final sender = nostr.Keys(
+        nostr.Nip19.decode(payload: signingKey).data,
+      ).public;
+      final alice = 'n' * 64;
+      final send = SendMessage(
+        signedEventRelay: SignedEventRelay(session: session, nsec: signingKey),
+        fetchMembers: (_) async => [_member(sender), _member(alice)],
+        // Empty cache: the text resolver has nothing to match against, so
+        // it would contribute zero pubkeys on its own. The picker's tap
+        // must still make it through untouched.
+        readUserCache: () => const {},
+        addLocalMessage: (_, _) {},
+        completeLocalMessage: (_, _) {},
+        removeLocalMessage: (_, _) {},
+      );
+
+      final result = send(
+        channelId: _channelId,
+        content: '@Alice hi',
+        mentionPubkeys: [alice],
+      );
+      await session.published;
+
+      expect(session.event.tags.where((tag) => tag.first == 'p').toList(), [
+        ['p', alice],
+      ]);
+
+      session.accept();
+      await result;
+    },
+  );
+
+  test('an ambiguous name shared by two members notifies neither via text '
+      'resolution', () async {
+    final session = _PendingPublishRelaySession();
+    final signingKey = nostr.Keys.generate().nsec;
+    final sender = nostr.Keys(
+      nostr.Nip19.decode(payload: signingKey).data,
+    ).public;
+    final aliceA = 'a' * 64;
+    final aliceB = 'b' * 64;
+    final send = SendMessage(
+      signedEventRelay: SignedEventRelay(session: session, nsec: signingKey),
+      fetchMembers: (_) async => [
+        _member(sender),
+        _member(aliceA),
+        _member(aliceB),
+      ],
+      readUserCache: () => {
+        aliceA: UserProfile(pubkey: aliceA, displayName: 'Alice'),
+        aliceB: UserProfile(pubkey: aliceB, displayName: 'Alice'),
+      },
+      addLocalMessage: (_, _) {},
+      completeLocalMessage: (_, _) {},
+      removeLocalMessage: (_, _) {},
+    );
+
+    // Two distinct members named "Alice" in the same channel: resolving
+    // to either one would be a guess, and guessing wrong pings the
+    // wrong agent/person. Neither gets tagged.
+    final result = send(
+      channelId: _channelId,
+      content: '@Alice hi',
+      mentionPubkeys: const [],
+    );
+    await session.published;
+
+    expect(session.event.tags.where((tag) => tag.first == 'p').toList(), []);
+
+    session.accept();
+    await result;
+  });
+
+  test('ignores an @name that only appears inside a code span or a quoted '
+      'line', () async {
+    final session = _PendingPublishRelaySession();
+    final signingKey = nostr.Keys.generate().nsec;
+    final sender = nostr.Keys(
+      nostr.Nip19.decode(payload: signingKey).data,
+    ).public;
+    final alice = 'n' * 64;
+    final send = SendMessage(
+      signedEventRelay: SignedEventRelay(session: session, nsec: signingKey),
+      fetchMembers: (_) async => [_member(sender), _member(alice)],
+      readUserCache: () => {
+        alice: UserProfile(pubkey: alice, displayName: 'Alice'),
+      },
+      addLocalMessage: (_, _) {},
+      completeLocalMessage: (_, _) {},
+      removeLocalMessage: (_, _) {},
+    );
+
+    final result = send(
+      channelId: _channelId,
+      content:
+          'sample: `@Alice hi` and\n> quoting @Alice from before\nno real mention here',
+      mentionPubkeys: const [],
+    );
+    await session.published;
+
+    expect(session.event.tags.where((tag) => tag.first == 'p').toList(), []);
 
     session.accept();
     await result;
