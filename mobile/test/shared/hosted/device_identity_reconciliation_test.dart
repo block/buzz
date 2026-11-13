@@ -14,8 +14,11 @@ class InventoryAccount extends BuilderlabAccountClient {
   Map<String, dynamic> recovery = {};
   final calls = <String>[];
   @override
-  BuilderlabAccount get account =>
-      BuilderlabAccount(subject: 'fixture', expiresAt: DateTime.utc(2100));
+  BuilderlabAccount get account => BuilderlabAccount(
+    subject: 'fixture',
+    email: 'owner@example.com',
+    expiresAt: DateTime.utc(2100),
+  );
   @override
   Future<BuilderlabAccount?> restore() async => account;
   @override
