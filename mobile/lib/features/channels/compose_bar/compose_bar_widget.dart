@@ -534,16 +534,17 @@ class ComposeBar extends HookConsumerWidget {
       _removePendingAttachment(attachments, draftRevision, id);
     }
 
+    bool canSend() =>
+        !(draftMembers != null && preparingAttachments.value > 0) &&
+        !interactionLocked &&
+        (controller.text.trim().isNotEmpty || hasAttachments) &&
+        !isSending.value &&
+        uploadingCount.value == 0;
+
     // Send the message.
     Future<void> send() async {
+      if (!canSend()) return;
       final text = controller.text.trim();
-      if ((draftMembers != null && preparingAttachments.value > 0) ||
-          interactionLocked ||
-          (text.isEmpty && !hasAttachments) ||
-          isSending.value ||
-          uploadingCount.value > 0) {
-        return;
-      }
       final submittedOrigin = ComposerSendOrigin.capture(sendSurfaceKey);
       Future<void> sendWithOrigin(
         String content,
@@ -1039,7 +1040,9 @@ class ComposeBar extends HookConsumerWidget {
                 : topMention != null
                 ? () => _runComposerAction(() => insertMention(topMention))
                 : null,
-            send: () async => _runComposerAction(() => unawaited(send())),
+            send: () async {
+              if (canSend()) _runComposerAction(() => unawaited(send()));
+            },
           );
 
     final suggestionPanel = _composerSuggestionPanel(

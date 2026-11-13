@@ -2260,7 +2260,21 @@ void main() {
             expect(controller.text, expected);
             expect(calls, ['HapticFeedbackType.selectionClick'], reason: draft);
           }
-          expect(sent, ['hello']);
+          for (final draft in ['', '   ']) {
+            await tester.enterText(find.byType(TextField), draft);
+            await tester.pump();
+            calls.clear();
+            for (final key in [
+              LogicalKeyboardKey.enter,
+              LogicalKeyboardKey.numpadEnter,
+            ]) {
+              await tester.sendKeyEvent(key);
+              await tester.pump();
+              expect(controller.text, draft);
+              expect(calls, isEmpty, reason: 'disabled send: $draft / $key');
+              expect(sent, ['hello']);
+            }
+          }
           await tester.pump(mentionSearchDebounce * 2);
         },
       );
