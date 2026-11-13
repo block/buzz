@@ -143,6 +143,124 @@ void main() {
     },
   );
 
+  test('a directory load keeps latest-message times', () async {
+    final session = _FakeRelaySession(
+      memberships: [_membership(_channelA, myPk)],
+      metadata: [
+        _meta(id: _channelA, name: 'general'),
+        _meta(id: _channelB, name: 'discoverable'),
+      ],
+      recentMessages: [
+        const NostrEvent(
+          id: 'm1',
+          pubkey: 'alice',
+          createdAt: 30,
+          kind: EventKind.streamMessageV2,
+          tags: [
+            ['h', _channelA],
+          ],
+          content: 'hi',
+          sig: 'sig',
+        ),
+      ],
+    );
+    final container = _buildContainer(session: session);
+    addTearDown(container.dispose);
+    bool isLatest(List<NostrFilter> batch) =>
+        batch.isNotEmpty &&
+        batch.every(
+          (filter) =>
+              filter.since == null &&
+              filter.tags.containsKey('#h') &&
+              (filter.limit == 1 || filter.limit == 20),
+        );
+    await container.read(channelsProvider.future);
+    await _settle();
+    final latestReads = session.queryBatches.where(isLatest).length;
+    expect(latestReads, isPositive);
+
+    await container.read(channelsProvider.notifier).retryDirectory();
+    await _settle();
+
+    expect(session.queryBatches.where(isLatest), hasLength(latestReads));
+    final channels = container.read(channelsProvider).requireValue;
+    expect(channels.map((channel) => channel.id), [_channelB, _channelA]);
+    expect(
+      channels.firstWhere((channel) => channel.id == _channelA).lastMessageAt,
+      DateTime.fromMillisecondsSinceEpoch(30 * 1000, isUtc: true),
+    );
+  });
+
+  for (final deadlineFirst in [false, true]) {
+    _testWithClock('a directory load dates newly listed DMs'
+        '${deadlineFirst ? ' after a latest-message deadline' : ''}', (clock) {
+      NostrEvent message(String channelId, int at, String author) => NostrEvent(
+        id: '$channelId-$at',
+        pubkey: author,
+        createdAt: at,
+        kind: EventKind.streamMessageV2,
+        tags: [
+          ['h', channelId],
+        ],
+        content: 'hello',
+        sig: 'sig',
+      );
+      final session = _FakeRelaySession(
+        memberships: [_membership(_channelA, myPk)],
+        metadata: [
+          _meta(id: _channelA, name: 'Alice', channelType: 'dm'),
+          _meta(id: _channelB, name: 'Bob', channelType: 'dm'),
+        ],
+        recentMessages: [message(_channelA, 30, 'alice')],
+        enforceHistoryLimits: true,
+      );
+      final container = _buildContainer(session: session);
+      container.listen(channelsProvider, (_, _) {});
+      clock.flushMicrotasks();
+      DateTime? latest(String id) => container
+          .read(channelsProvider)
+          .requireValue
+          .singleWhere((channel) => channel.id == id)
+          .lastMessageAt;
+
+      // Another device opened DM B with an outgoing message, which unread
+      // catch-up skips. Search's directory load discovers B first.
+      session.memberships = [
+        _membership(_channelA, myPk),
+        _membership(_channelB, myPk),
+      ];
+      session.recentMessages = [
+        message(_channelA, 30, 'alice'),
+        message(_channelB, 40, myPk),
+      ];
+      if (deadlineFirst) {
+        session.latestBatchError = RelayException(
+          503,
+          '{"error":"query timed out"}',
+        );
+      }
+      container.read(channelsProvider.notifier).retryDirectory();
+      clock.flushMicrotasks();
+      if (deadlineFirst) {
+        expect(latest(_channelB), isNull);
+        // The retry after the deadline reads the whole list again.
+        session.latestBatchError = null;
+        clock.elapse(const Duration(seconds: 10));
+      }
+
+      expect(
+        latest(_channelB),
+        DateTime.fromMillisecondsSinceEpoch(40 * 1000, isUtc: true),
+      );
+      expect(
+        latest(_channelA),
+        DateTime.fromMillisecondsSinceEpoch(30 * 1000, isUtc: true),
+      );
+      container.dispose();
+      clock.elapse(const Duration(minutes: 10));
+    });
+  }
+
   test('a directory load during the first channel load waits for it', () async {
     final session = _FakeRelaySession(
       memberships: [_membership(_channelA, myPk)],
