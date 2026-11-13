@@ -3,7 +3,13 @@ import { expect, type Locator, type Page, test } from "@playwright/test";
 import { BUZZ_APP_DOWNLOADS_MANIFEST_URL } from "../../src/app/newAppInstaller";
 import { installMockBridge } from "../helpers/bridge";
 
-type InstallerFailureReason = "network" | "storage";
+type InstallerFailureReason =
+  | "network"
+  | "storage"
+  | "protection"
+  | "permission-denied"
+  | "redirect-blocked"
+  | "rejected";
 
 type BridgeWindow = Window & {
   __BUZZ_E2E_COMMAND_PAYLOADS__?: Array<{
@@ -15,6 +21,8 @@ type BridgeWindow = Window & {
     finish: () => void;
     fail: (reason: InstallerFailureReason) => void;
     isActive: () => boolean;
+    finishOnNextCancel: () => void;
+    failNextReveal: () => void;
   };
 };
 
@@ -104,16 +112,47 @@ function failDownload(page: Page, reason: InstallerFailureReason) {
   );
 }
 
-/** Shows the banner with this machine's installer resolved. */
-async function openBannerWithInstaller(page: Page) {
+const COMMUNITY_A = {
+  id: "ws-a",
+  name: "Alpha",
+  relayUrl: "ws://localhost:3000",
+  addedAt: "2026-01-01T00:00:00.000Z",
+};
+const COMMUNITY_B = {
+  id: "ws-b",
+  name: "Bravo",
+  relayUrl: "ws://localhost:3001",
+  addedAt: "2026-01-02T00:00:00.000Z",
+};
+
+/**
+ * Shows the banner with this machine's installer resolved. With
+ * `twoCommunities`, the app has a second community to switch to.
+ */
+async function openBannerWithInstaller(
+  page: Page,
+  { twoCommunities = false } = {},
+) {
   await page.route(BUZZ_APP_DOWNLOADS_MANIFEST_URL, (route) =>
     route.fulfill(MANIFEST_RESPONSE),
   );
   await installMockBridge(
     page,
     { newAppInstallerTarget: "macos-arm64" },
-    { seedDeprecationBannerDismissed: false },
+    {
+      seedDeprecationBannerDismissed: false,
+      skipCommunitySeed: twoCommunities,
+    },
   );
+  if (twoCommunities) {
+    await page.addInitScript(
+      ({ list, active }) => {
+        window.localStorage.setItem("buzz-communities", JSON.stringify(list));
+        window.localStorage.setItem("buzz-active-community-id", active);
+      },
+      { list: [COMMUNITY_A, COMMUNITY_B], active: COMMUNITY_A.id },
+    );
+  }
   await page.goto("/");
   const download = page
     .getByTestId("deprecation-banner")
@@ -314,6 +353,26 @@ test("deprecation banner: the installer downloads in a dialog and the saved file
   await expect
     .poll(() => commandCount(page, "reveal_new_app_installer"))
     .toBe(2);
+  const revealFailed = finished.getByTestId("new-app-installer-reveal-failed");
+  await expect(revealFailed).toHaveCount(0);
+
+  // When the file manager does not open, the dialog says only that, next to
+  // the path: the file is still where it was saved.
+  await page.evaluate(() =>
+    (window as BridgeWindow).__BUZZ_E2E_INSTALLER_DOWNLOAD__?.failNextReveal(),
+  );
+  await page.keyboard.press("Enter");
+  await expect(revealFailed).toHaveText(
+    "Buzz couldn't open the folder. The installer is in the folder shown above.",
+  );
+  await expect(revealFailed).toHaveRole("alert");
+  await expect(finished.getByTestId("new-app-installer-path")).toHaveText(
+    "/Users/e2e/Downloads",
+  );
+  // A reveal that works clears the message.
+  await page.keyboard.press("Enter");
+  await expect(revealFailed).toHaveCount(0);
+  expect(await commandCount(page, "reveal_new_app_installer")).toBe(4);
 
   // Closing returns focus to the button that opened the dialog.
   await page.keyboard.press("Escape");
@@ -323,7 +382,7 @@ test("deprecation banner: the installer downloads in a dialog and the saved file
   expect(await isMockDownloadActive(page)).toBe(false);
 });
 
-test("deprecation banner: a failed download can be retried or taken to the website", async ({
+test("deprecation banner: a failed download leads with the action that can still work", async ({
   page,
 }) => {
   const download = await openBannerWithInstaller(page);
@@ -344,13 +403,30 @@ test("deprecation banner: a failed download can be retried or taken to the websi
 
   // "Try again" takes focus and starts the same download again by keyboard.
   await expect(failed.getByRole("button", { name: "Try again" })).toBeFocused();
-  await page.keyboard.press("Enter");
+  const cancelsBeforeRetry = await commandCount(
+    page,
+    "cancel_new_app_installer_download",
+  );
+  await page.keyboard.down("Enter");
   const retrying = page.getByRole("dialog", {
     name: "Downloading the new Buzz app",
   });
   await expect(retrying).toBeVisible();
   expect(await downloadRequests(page)).toEqual([ARM64_DMG_URL, ARM64_DMG_URL]);
+  // Focus follows to Cancel, the one action a running download has. Enter is
+  // still held, and its repeat must not cancel the retry it just started.
+  await expect(retrying.getByRole("button", { name: "Cancel" })).toBeFocused();
+  await page.keyboard.down("Enter");
+  await page.keyboard.up("Enter");
+  await emitProgress(page, 10 * MIB, 79 * MIB);
+  await expect(retrying.getByRole("progressbar")).toHaveAttribute(
+    "aria-valuenow",
+    "12",
+  );
   expect(await isMockDownloadActive(page)).toBe(true);
+  expect(await commandCount(page, "cancel_new_app_installer_download")).toBe(
+    cancelsBeforeRetry,
+  );
 
   // A second failure names its own cause, and the website is one click away.
   await failDownload(page, "storage");
@@ -363,6 +439,75 @@ test("deprecation banner: a failed download can be retried or taken to the websi
   await expect(page.getByRole("dialog")).toHaveCount(0);
   expect(await openedUrls(page)).toEqual([WEBSITE_URL]);
   expect(await downloadRequests(page)).toHaveLength(2);
+
+  // A failure that would repeat leads with the browser, which gets the same
+  // installer its own way. There is no "Try again" to walk back into it.
+  const retry = failed.getByRole("button", { name: "Try again" });
+  const inBrowser = failed.getByRole("button", {
+    name: "Download the installer in your browser",
+  });
+  const website = failed.getByRole("button", {
+    name: "Open buzz.xyz in your browser",
+  });
+  const description = failed.getByTestId("new-app-installer-description");
+  for (const [reason, message] of [
+    [
+      "protection",
+      "Buzz couldn't mark the installer as downloaded from the internet, so it didn't keep the file. You can download the installer in your browser instead.",
+    ],
+    [
+      "redirect-blocked",
+      "The download was sent to a site Buzz doesn't recognise, so Buzz stopped it. You can download the installer in your browser instead.",
+    ],
+  ] as const) {
+    await download.click();
+    await failDownload(page, reason);
+    await expect(description).toHaveText(message);
+    await expect(inBrowser).toBeFocused();
+    await expect(inBrowser).toHaveText("Download in browser");
+    await expect(retry).toHaveCount(0);
+    await expect(website).toBeVisible();
+    await page.keyboard.press("Enter");
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+  }
+  expect(await openedUrls(page)).toEqual([
+    WEBSITE_URL,
+    ARM64_DMG_URL,
+    ARM64_DMG_URL,
+  ]);
+
+  // Without access to the folder the browser still leads, and "Try again"
+  // stays for the user who has just granted it.
+  await download.click();
+  await failDownload(page, "permission-denied");
+  await expect(description).toContainText(
+    "Buzz isn't allowed to save to your Downloads folder.",
+  );
+  await expect(description).not.toContainText("free space");
+  await expect(inBrowser).toBeFocused();
+  await expect(website).toHaveCount(0);
+  await retry.click();
+  await expect(
+    page.getByRole("dialog", { name: "Downloading the new Buzz app" }),
+  ).toBeVisible();
+  expect(await downloadRequests(page)).toHaveLength(6);
+
+  // A link Buzz refused is never opened, in the app or the browser.
+  await failDownload(page, "rejected");
+  await expect(description).toHaveText(
+    "Buzz couldn't use the download link for this computer, so nothing was downloaded. You can get the new app from buzz.xyz.",
+  );
+  await expect(website).toBeFocused();
+  await expect(retry).toHaveCount(0);
+  await expect(inBrowser).toHaveCount(0);
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  expect(await openedUrls(page)).toEqual([
+    WEBSITE_URL,
+    ARM64_DMG_URL,
+    ARM64_DMG_URL,
+    WEBSITE_URL,
+  ]);
 });
 
 test("deprecation banner: Cancel and Escape stop a running download, a stray click does not", async ({
@@ -375,14 +520,28 @@ test("deprecation banner: Cancel and Escape stop a running download, a stray cli
     "cancel_new_app_installer_download",
   );
 
-  // Escape cancels the download; the dialog closes once it has stopped.
+  // Enter held on the banner button starts one download. Focus moves to
+  // Cancel while the key is still down, and its repeat must not cancel.
   await download.focus();
-  await page.keyboard.press("Enter");
+  await page.keyboard.down("Enter");
   const dialog = page.getByRole("dialog", {
     name: "Downloading the new Buzz app",
   });
   await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "Cancel" })).toBeFocused();
+  await page.keyboard.down("Enter");
+  await page.keyboard.up("Enter");
+  await emitProgress(page, 10 * MIB, 79 * MIB);
+  await expect(dialog.getByRole("progressbar")).toHaveAttribute(
+    "aria-valuenow",
+    "12",
+  );
   expect(await isMockDownloadActive(page)).toBe(true);
+  expect(await commandCount(page, "cancel_new_app_installer_download")).toBe(
+    cancelsAtRest,
+  );
+
+  // Escape cancels the download; the dialog closes once it has stopped.
   await page.keyboard.press("Escape");
   await expect(page.getByRole("dialog")).toHaveCount(0);
   expect(await isMockDownloadActive(page)).toBe(false);
@@ -410,9 +569,103 @@ test("deprecation banner: Cancel and Escape stop a running download, a stray cli
     cancelsAtRest + 2,
   );
 
+  // A cancel that loses the race with the final move does not close the
+  // dialog on a file the user now has: it says where the file is.
+  await download.click();
+  await expect(dialog).toBeVisible();
+  await page.evaluate(() =>
+    (
+      window as BridgeWindow
+    ).__BUZZ_E2E_INSTALLER_DOWNLOAD__?.finishOnNextCancel(),
+  );
+  await dialog.getByRole("button", { name: "Cancel" }).click();
+  const finished = page.getByRole("dialog", {
+    name: "The new Buzz app is downloaded",
+  });
+  await expect(finished).toBeVisible();
+  await expect(
+    finished.getByTestId("new-app-installer-description"),
+  ).toHaveText(
+    `${INSTALLER_FILE} is in your Downloads folder. Open it when you're ready to install.`,
+  );
+  await expect(finished.getByTestId("new-app-installer-path")).toHaveText(
+    "/Users/e2e/Downloads",
+  );
+  await expect(finished.getByRole("button", { name: "Done" })).toBeFocused();
+  expect(await commandCount(page, "cancel_new_app_installer_download")).toBe(
+    cancelsAtRest + 3,
+  );
+  await expect
+    .poll(() => commandCount(page, "reveal_new_app_installer"))
+    .toBe(1);
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+
   // Each press started exactly one download, and nothing went to the browser.
-  expect(await downloadRequests(page)).toEqual([ARM64_DMG_URL, ARM64_DMG_URL]);
+  expect(await downloadRequests(page)).toEqual([
+    ARM64_DMG_URL,
+    ARM64_DMG_URL,
+    ARM64_DMG_URL,
+  ]);
   expect(await openedUrls(page)).toEqual([]);
+});
+
+test("deprecation banner: a running download and its dialog survive a community switch", async ({
+  page,
+}) => {
+  const download = await openBannerWithInstaller(page, {
+    twoCommunities: true,
+  });
+  await download.click();
+  const dialog = page.getByRole("dialog", {
+    name: "Downloading the new Buzz app",
+  });
+  await expect(dialog).toBeVisible();
+  await emitProgress(page, 20 * MIB, 79 * MIB);
+  const cancels = await commandCount(page, "cancel_new_app_installer_download");
+
+  // The switch remounts everything under the community, the banner included.
+  // The modal keeps the pointer off the rail, so the press is dispatched
+  // straight at the element, as a deep link or a signer change would land.
+  await page
+    .getByTestId(`community-rail-button-${COMMUNITY_B.id}`)
+    .evaluate((button: HTMLElement) => button.click());
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        window.localStorage.getItem("buzz-active-community-id"),
+      ),
+    )
+    .toBe(COMMUNITY_B.id);
+  await expect(
+    page.getByTestId(`community-rail-active-${COMMUNITY_B.id}`),
+  ).toBeVisible();
+
+  // The same download is still running, in the same dialog, where it was.
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole("progressbar")).toHaveAttribute(
+    "aria-valuenow",
+    "25",
+  );
+  expect(await isMockDownloadActive(page)).toBe(true);
+  expect(await commandCount(page, "cancel_new_app_installer_download")).toBe(
+    cancels,
+  );
+  expect(await downloadRequests(page)).toEqual([ARM64_DMG_URL]);
+
+  // It keeps progressing and finishes in the new community.
+  await emitProgress(page, 60 * MIB, 79 * MIB);
+  await expect(dialog.getByRole("progressbar")).toHaveAttribute(
+    "aria-valuenow",
+    "75",
+  );
+  await finishDownload(page);
+  await expect(
+    page.getByRole("dialog", { name: "The new Buzz app is downloaded" }),
+  ).toBeVisible();
+  await expect
+    .poll(() => commandCount(page, "reveal_new_app_installer"))
+    .toBe(1);
 });
 
 test("deprecation banner: the download button opens the website while the manifest is still loading", async ({

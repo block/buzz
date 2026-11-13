@@ -23,6 +23,11 @@ const INSTALLER_EXTENSION_BY_TARGET: Record<string, string> = {
  * segment must be a plain file name: letters, digits and `._+-` only.
  */
 const INSTALLER_FILE_NAME = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$/;
+/**
+ * The release tag reaches GitHub as written, so it holds no percent escape
+ * for GitHub's router to decode: letters, digits and `._+-/` only.
+ */
+const INSTALLER_TAG = /^[A-Za-z0-9._+/-]+$/;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -78,7 +83,7 @@ export function resolveInstallerUrl(
   const separator = assetPath.lastIndexOf("/");
   const fileName = assetPath.slice(separator + 1);
   if (
-    separator < 1 ||
+    !INSTALLER_TAG.test(assetPath.slice(0, Math.max(separator, 0))) ||
     !INSTALLER_FILE_NAME.test(fileName) ||
     fileName === INSTALLER_EXTENSION_BY_TARGET[target]
   ) {

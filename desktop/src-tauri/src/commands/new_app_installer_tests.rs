@@ -154,6 +154,32 @@ fn accepts_the_installer_for_each_shipped_target() {
     )
     .expect("nested tag");
     assert_eq!(nested.file_name, "Buzz.dmg");
+    // Every character a tag may hold.
+    assert!(validate_installer_url(
+        "https://github.com/block/buzz-app/releases/download/desktop/v1.0.0-rc.1+build_2/Buzz.dmg",
+        "macos-arm64",
+    )
+    .is_some());
+}
+
+#[test]
+fn failure_reasons_reach_the_webview_under_their_kebab_names() {
+    let cases = [
+        (InstallerFailure::Busy, "busy"),
+        (InstallerFailure::Rejected, "rejected"),
+        (InstallerFailure::Network, "network"),
+        (InstallerFailure::RedirectBlocked, "redirect-blocked"),
+        (InstallerFailure::TooLarge, "too-large"),
+        (InstallerFailure::Storage, "storage"),
+        (InstallerFailure::PermissionDenied, "permission-denied"),
+        (InstallerFailure::Protection, "protection"),
+    ];
+    for (reason, name) in cases {
+        assert_eq!(
+            serde_json::to_value(reason).expect("serialize"),
+            serde_json::Value::from(name)
+        );
+    }
 }
 
 #[test]
@@ -202,6 +228,12 @@ fn rejects_every_url_that_is_not_this_machines_installer() {
             "macos-arm64",
         ),
         ("no tag segment", "https://github.com/block/buzz-app/releases/download/Buzz.dmg".into(), "macos-arm64"),
+        ("encoded separator in the tag", format!("{RELEASE}%2F..%2F..%2Fother/Buzz.dmg"), "macos-arm64"),
+        ("encoded backslash in the tag", format!("{RELEASE}%5Cother/Buzz.dmg"), "macos-arm64"),
+        ("encoded NUL in the tag", format!("{RELEASE}%00/Buzz.dmg"), "macos-arm64"),
+        ("semicolon in the tag", format!("{RELEASE};other/Buzz.dmg"), "macos-arm64"),
+        ("space in the tag", format!("{RELEASE}%20beta/Buzz.dmg"), "macos-arm64"),
+        ("at sign in the tag", format!("{RELEASE}@other/Buzz.dmg"), "macos-arm64"),
         (
             "wrong file type for the target",
             format!("{RELEASE}/Buzz_1.0.0_x64_unsigned.exe"),
@@ -359,14 +391,114 @@ async fn saves_the_whole_body_under_the_installers_name() {
         })
     );
 
+    // The saved file has the mode any new file gets under this user's umask,
+    // not the private mode of a temporary file, and it is never executable.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mode_of = |path: &Path| {
+            std::fs::metadata(path)
+                .expect("metadata")
+                .permissions()
+                .mode()
+                & 0o777
+        };
+        let ordinary = dir.path().join("ordinary-new-file");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o666)
+            .open(&ordinary)
+            .expect("ordinary file");
+        assert_eq!(mode_of(&saved), mode_of(&ordinary));
+        assert_eq!(mode_of(&saved) & 0o111, 0, "not executable");
+    }
+}
+
+#[tokio::test]
+async fn a_redirect_the_policy_refuses_is_its_own_failure() {
+    let addr = serve().await;
+    let dir = tempfile::tempdir().expect("download dir");
+
+    // 127.0.0.1 is not a release asset host, so the policy stops the redirect.
+    let result = download_installer(
+        &installer_client_builder().build().expect("client"),
+        &source_at(addr, "/redirects"),
+        dir.path(),
+        test_limits(),
+        &CancellationToken::new(),
+        |_| {},
+        |_, _| Ok(()),
+        |_| {},
+    )
+    .await;
+
+    assert_eq!(
+        result,
+        Err(TransferError::Failed(InstallerFailure::RedirectBlocked))
+    );
+    assert_eq!(file_names(dir.path()), Vec::<String>::new());
+}
+
+#[tokio::test]
+async fn a_folder_that_cannot_be_written_names_its_cause() {
+    let addr = serve().await;
+    let dir = tempfile::tempdir().expect("parent dir");
+
+    // Something that is not a folder sits where the folder should be.
+    let not_a_folder = dir.path().join("Downloads");
+    std::fs::write(&not_a_folder, b"a file").expect("file");
+    let run_in = run(addr, "/ok", &not_a_folder, &CancellationToken::new()).await;
+    assert_eq!(
+        run_in.result,
+        Err(TransferError::Failed(InstallerFailure::Storage))
+    );
+
+    // The system refuses the write: the folder is read-only for this user.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(&saved)
-            .expect("metadata")
-            .permissions()
-            .mode();
-        assert_eq!(mode & 0o777, 0o644, "readable, not executable");
+        let locked = dir.path().join("locked");
+        std::fs::create_dir(&locked).expect("locked dir");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555))
+            .expect("lock dir");
+        // A superuser ignores the mode, and then there is nothing to observe.
+        if std::fs::write(locked.join("probe"), b"").is_err() {
+            let run_in = run(addr, "/ok", &locked, &CancellationToken::new()).await;
+            assert_eq!(
+                run_in.result,
+                Err(TransferError::Failed(InstallerFailure::PermissionDenied))
+            );
+            assert_eq!(file_names(&locked), Vec::<String>::new());
+        }
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755))
+            .expect("unlock dir");
+    }
+}
+
+#[test]
+fn the_download_folder_falls_back_to_home_downloads_on_linux_only() {
+    let configured = Some(PathBuf::from("/home/sam/Transfers"));
+    let home = Some(PathBuf::from("/home/sam"));
+    // (configured, home, is_linux, expected)
+    let cases = [
+        (configured.clone(), home.clone(), true, configured.clone()),
+        (configured.clone(), None, false, configured.clone()),
+        (
+            None,
+            home.clone(),
+            true,
+            Some(PathBuf::from("/home/sam/Downloads")),
+        ),
+        (None, home.clone(), false, None),
+        (None, None, true, None),
+    ];
+    for (configured, home, is_linux, expected) in cases {
+        assert_eq!(
+            resolve_download_dir(configured.clone(), home.clone(), is_linux),
+            expected,
+            "{configured:?} {home:?} {is_linux}"
+        );
     }
 }
 
@@ -568,13 +700,100 @@ fn shutdown_cancels_and_removes_the_partial_file() {
     downloads.abort_for_shutdown();
     assert!(partial.exists());
 
+    let record = dir.path().join("app-data").join("partial-record.txt");
+    downloads.recover(record.clone());
     let active = downloads.begin().expect("download");
     downloads.set_partial(&partial);
+    assert!(record.exists());
     downloads.abort_for_shutdown();
     assert!(active.cancel.is_cancelled());
     assert!(!partial.exists());
+    // Nothing is left for the next launch to remove.
+    assert!(!record.exists());
     // The download task cleaning up afterwards finds nothing, and that is fine.
     downloads.abort_for_shutdown();
+}
+
+#[test]
+fn the_next_launch_removes_exactly_the_partial_a_dead_run_recorded() {
+    let dir = tempfile::tempdir().expect("download dir");
+    let record = dir.path().join("app-data").join("partial-record.txt");
+    let downloads_dir = dir.path().join("Downloads");
+    std::fs::create_dir(&downloads_dir).expect("download dir");
+    let partial = downloads_dir.join("Buzz_1.0.0_aarch64.dmg.aB3xYz.part");
+    // Files the cleanup has no business touching, however similar they look.
+    let bystanders = [
+        "Buzz_1.0.0_aarch64.dmg",
+        "Buzz_1.0.0_aarch64.dmg.zzzzzz.part",
+        "film.mkv.part",
+    ];
+    std::fs::write(&partial, b"half").expect("partial");
+    for name in bystanders {
+        std::fs::write(downloads_dir.join(name), b"mine").expect(name);
+    }
+
+    // A download that ends normally leaves no record behind.
+    let downloads = InstallerDownloads::default();
+    downloads.recover(record.clone());
+    let active = downloads.begin().expect("download");
+    downloads.set_partial(&partial);
+    assert_eq!(
+        std::fs::read_to_string(&record).expect("record"),
+        partial.to_str().expect("utf-8 path")
+    );
+    drop(active);
+    assert!(!record.exists());
+
+    // A run that dies mid-download does: none of its cleanup runs.
+    let active = downloads.begin().expect("download");
+    downloads.set_partial(&partial);
+    std::mem::forget(active);
+    assert!(record.exists());
+
+    // The next launch removes that file, forgets it, and touches nothing else.
+    InstallerDownloads::default().recover(record.clone());
+    assert!(!record.exists());
+    assert_eq!(file_names(&downloads_dir), bystanders);
+
+    // A record that names anything but a partial file of this module's shape
+    // is dropped without removing what it names.
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(
+        downloads_dir.join("Buzz_1.0.0_aarch64.dmg"),
+        downloads_dir.join("Buzz_1.0.0_aarch64.dmg.linked.part"),
+    )
+    .expect("symlink");
+    let not_ours = [
+        downloads_dir.join("Buzz_1.0.0_aarch64.dmg"),
+        downloads_dir.join("film.mkv.part"),
+        downloads_dir.join("Buzz_1.0.0_aarch64.dmg.linked.part"),
+        PathBuf::from("Buzz_1.0.0_aarch64.dmg.zzzzzz.part"),
+        downloads_dir.clone(),
+    ];
+    for path in not_ours {
+        // Asked of the path itself, so a removed symlink is noticed.
+        let existed = path.symlink_metadata().is_ok();
+        std::fs::write(&record, path.to_str().expect("utf-8 path")).expect("record");
+        remove_recorded_partial(&record);
+        assert!(!record.exists(), "{}", path.display());
+        assert_eq!(
+            path.symlink_metadata().is_ok(),
+            existed,
+            "{}",
+            path.display()
+        );
+        for name in bystanders {
+            assert!(
+                downloads_dir.join(name).exists(),
+                "{name} after {}",
+                path.display()
+            );
+        }
+    }
+    // Neither is a record that is not text at all.
+    std::fs::write(&record, [0xff, 0xfe, 0x00]).expect("record");
+    remove_recorded_partial(&record);
+    assert!(!record.exists());
 }
 
 #[test]

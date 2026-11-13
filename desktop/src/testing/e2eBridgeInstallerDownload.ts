@@ -23,6 +23,13 @@ declare global {
       finish: () => void;
       fail: (reason: InstallerFailureReason) => void;
       isActive: () => boolean;
+      /**
+       * Makes the next cancel lose the race with the final move: the cancel
+       * call returns, then the download settles as saved.
+       */
+      finishOnNextCancel: () => void;
+      /** Makes the next `reveal_new_app_installer` call fail. */
+      failNextReveal: () => void;
     };
   }
 }
@@ -31,6 +38,16 @@ const MOCK_DOWNLOADS_FOLDER = "/Users/e2e/Downloads";
 
 // Like the backend, the mock runs one download at a time.
 let active: ActiveDownload | null = null;
+let finishesOnNextCancel = false;
+let failsNextReveal = false;
+
+function settleAsSaved() {
+  active?.settle({
+    status: "saved",
+    fileName: active.fileName,
+    folder: MOCK_DOWNLOADS_FOLDER,
+  });
+}
 
 export function handleMockInstallerDownload(
   payload: unknown,
@@ -54,12 +71,27 @@ export function handleMockInstallerDownload(
 }
 
 export function handleMockInstallerCancel(): null {
-  active?.settle({ status: "cancelled" });
+  if (finishesOnNextCancel && active) {
+    finishesOnNextCancel = false;
+    settleAsSaved();
+  } else {
+    active?.settle({ status: "cancelled" });
+  }
   return null;
+}
+
+export function handleMockInstallerReveal(): Promise<null> {
+  if (failsNextReveal) {
+    failsNextReveal = false;
+    return Promise.reject(new Error("the file manager did not open"));
+  }
+  return Promise.resolve(null);
 }
 
 export function installMockInstallerDownloadControls() {
   active = null;
+  finishesOnNextCancel = false;
+  failsNextReveal = false;
   window.__BUZZ_E2E_INSTALLER_DOWNLOAD__ = {
     progress: (receivedBytes, totalBytes) =>
       active?.channel?.onmessage?.({
@@ -67,13 +99,14 @@ export function installMockInstallerDownloadControls() {
         receivedBytes,
         totalBytes,
       }),
-    finish: () =>
-      active?.settle({
-        status: "saved",
-        fileName: active.fileName,
-        folder: MOCK_DOWNLOADS_FOLDER,
-      }),
+    finish: settleAsSaved,
     fail: (reason) => active?.settle({ status: "failed", reason }),
     isActive: () => active !== null,
+    finishOnNextCancel: () => {
+      finishesOnNextCancel = true;
+    },
+    failNextReveal: () => {
+      failsNextReveal = true;
+    },
   };
 }

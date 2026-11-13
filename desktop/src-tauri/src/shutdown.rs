@@ -47,6 +47,10 @@ pub(crate) fn install_signal_handler(
             .shutdown_started
             .store(true, Ordering::SeqCst);
         if !shutdown_done.swap(true, Ordering::SeqCst) {
+            // This path ends in `exit`, so the download never cleans up itself.
+            if let Some(downloads) = app.try_state::<crate::commands::InstallerDownloads>() {
+                downloads.abort_for_shutdown();
+            }
             app.state::<crate::terminal_runtime::TerminalSessions>()
                 .shutdown_all();
             let _ = shutdown_managed_agents(&app);

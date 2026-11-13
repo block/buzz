@@ -11,6 +11,8 @@ export type InstallerDialogState =
   | { status: "closed" }
   | {
       status: "downloading";
+      /** The installer being downloaded. */
+      url: string;
       /** Null until the backend has accepted the URL and named the file. */
       fileName: string | null;
       receivedBytes: number;
@@ -24,10 +26,15 @@ export type InstallerDialogState =
       folder: string;
       revealFailed: boolean;
     }
-  | { status: "failed"; reason: InstallerDialogFailure };
+  | {
+      status: "failed";
+      reason: InstallerDialogFailure;
+      /** The installer that failed to download, for a retry or the browser. */
+      url: string;
+    };
 
 export type InstallerDialogAction =
-  | { type: "started" }
+  | { type: "started"; url: string }
   | { type: "event"; event: InstallerDownloadEvent }
   | {
       type: "settled";
@@ -56,6 +63,7 @@ export function reduceInstallerDialog(
       }
       return {
         status: "downloading",
+        url: action.url,
         fileName: null,
         receivedBytes: 0,
         totalBytes: null,
@@ -93,7 +101,11 @@ export function reduceInstallerDialog(
       if (action.outcome.status === "cancelled" || state.isCancelling) {
         return INSTALLER_DIALOG_CLOSED;
       }
-      return { status: "failed", reason: action.outcome.reason };
+      return {
+        status: "failed",
+        reason: action.outcome.reason,
+        url: state.url,
+      };
     case "cancelRequested":
       return state.status === "downloading"
         ? { ...state, isCancelling: true }
@@ -175,12 +187,17 @@ export function revealLabel(platform: FileManagerPlatform): string {
   }
 }
 
-const FAILURE_MESSAGES: Record<InstallerDialogFailure, string> = {
+const FAILURE_MESSAGES: Record<
+  Exclude<InstallerDialogFailure, "permission-denied">,
+  string
+> = {
   busy: "Another download of the new app is still running. Give it a moment, then try again.",
   rejected:
     "Buzz couldn't use the download link for this computer, so nothing was downloaded.",
   network:
     "The download stopped before it was complete. Check your internet connection and try again.",
+  "redirect-blocked":
+    "The download was sent to a site Buzz doesn't recognise, so Buzz stopped it.",
   "too-large":
     "The file was much bigger than the installer should be, so the download was stopped.",
   storage:
@@ -190,9 +207,55 @@ const FAILURE_MESSAGES: Record<InstallerDialogFailure, string> = {
   unknown: "Something went wrong while downloading the installer.",
 };
 
-export function failureMessage(reason: InstallerDialogFailure): string {
-  return FAILURE_MESSAGES[reason];
+export function failureMessage(
+  reason: InstallerDialogFailure,
+  platform: FileManagerPlatform,
+): string {
+  if (reason !== "permission-denied") {
+    return FAILURE_MESSAGES[reason];
+  }
+  // On macOS this is what declining the system's "access files in your
+  // Downloads folder" prompt leads to, and the prompt is not shown again.
+  return platform === "macos"
+    ? "Buzz isn't allowed to save to your Downloads folder. To allow it, open System Settings, choose Privacy & Security, then Files and Folders, and turn on Downloads Folder for Buzz."
+    : "Buzz isn't allowed to save to your Downloads folder. Check that your account can add files to that folder.";
 }
+
+/** What a failed download offers, and which of the two takes focus. */
+export type FailureAction = "retry" | "browser" | "website";
+
+/**
+ * "Try again" leads only where trying again can work. A failure that would
+ * repeat sends the same installer to the browser, which downloads it its own
+ * way; a link Buzz refused is never opened, so that one leads to the website.
+ */
+export function failureActions(reason: InstallerDialogFailure): {
+  primary: FailureAction;
+  secondary: FailureAction | null;
+} {
+  switch (reason) {
+    case "busy":
+    case "network":
+    case "storage":
+    case "unknown":
+      return { primary: "retry", secondary: "website" };
+    case "permission-denied":
+      // Once access is granted, the same download works.
+      return { primary: "browser", secondary: "retry" };
+    case "redirect-blocked":
+    case "too-large":
+    case "protection":
+      return { primary: "browser", secondary: "website" };
+    case "rejected":
+      return { primary: "website", secondary: null };
+  }
+}
+
+const FAILURE_NEXT_STEP: Record<FailureAction, string> = {
+  retry: "You can also get the new app from buzz.xyz.",
+  browser: "You can download the installer in your browser instead.",
+  website: "You can get the new app from buzz.xyz.",
+};
 
 export function dialogTitle(state: InstallerDialogState): string {
   switch (state.status) {
@@ -205,7 +268,10 @@ export function dialogTitle(state: InstallerDialogState): string {
   }
 }
 
-export function dialogDescription(state: InstallerDialogState): string {
+export function dialogDescription(
+  state: InstallerDialogState,
+  platform: FileManagerPlatform,
+): string {
   switch (state.status) {
     case "closed":
       return "";
@@ -216,19 +282,31 @@ export function dialogDescription(state: InstallerDialogState): string {
       return state.fileName
         ? `Saving ${state.fileName} to your Downloads folder.`
         : "Starting the download…";
-    case "finished":
-      return `${state.fileName} is in your ${folderName(state.folder)} folder. Open it when you're ready to install.`;
+    case "finished": {
+      const where = `${state.fileName} is in your ${folderName(state.folder)} folder.`;
+      // An AppImage is saved like any download, so it cannot run yet.
+      return state.fileName.endsWith(".AppImage")
+        ? `${where} Before you open it, make it executable: in your file manager, open its Properties and allow it to run as a program, or run chmod +x on it in a terminal.`
+        : `${where} Open it when you're ready to install.`;
+    }
     case "failed":
-      return `${failureMessage(state.reason)} You can also get the new app from buzz.xyz.`;
+      return `${failureMessage(state.reason, platform)} ${FAILURE_NEXT_STEP[failureActions(state.reason).primary]}`;
   }
 }
+
+/** Shown when the file manager did not open; the file itself is fine. */
+export const REVEAL_FAILED_MESSAGE =
+  "Buzz couldn't open the folder. The installer is in the folder shown above.";
 
 /**
  * What a screen reader is told. It changes when the download starts, at each
  * quarter of the way, and when it finishes, fails or is being cancelled, so a
  * live region holding it speaks a handful of times and not on every tick.
  */
-export function liveAnnouncement(state: InstallerDialogState): string {
+export function liveAnnouncement(
+  state: InstallerDialogState,
+  platform: FileManagerPlatform,
+): string {
   switch (state.status) {
     case "closed":
       return "";
@@ -248,6 +326,6 @@ export function liveAnnouncement(state: InstallerDialogState): string {
     case "finished":
       return `Download finished. ${state.fileName} is in your ${folderName(state.folder)} folder.`;
     case "failed":
-      return `The download didn't finish. ${failureMessage(state.reason)}`;
+      return `The download didn't finish. ${failureMessage(state.reason, platform)}`;
   }
 }

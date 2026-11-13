@@ -5,9 +5,12 @@ import {
   dialogTitle,
   downloadPercent,
   downloadProgressText,
+  type FailureAction,
   type FileManagerPlatform,
+  failureActions,
   type InstallerDialogState,
   liveAnnouncement,
+  REVEAL_FAILED_MESSAGE,
   revealLabel,
 } from "@/app/newAppInstallerDownload";
 import { isMacPlatform, isWindowsPlatform } from "@/shared/lib/platform";
@@ -36,9 +39,28 @@ type NewAppInstallerDialogProps = {
   /** Stop the running download. The dialog closes once it has stopped. */
   onCancel: () => void;
   onDismiss: () => void;
+  /** Hand the installer that failed to download to the browser. */
+  onDownloadInBrowser: () => void;
   onOpenWebsite: () => void;
   onRetry: () => void;
   onReveal: () => void;
+};
+
+const FAILURE_BUTTONS: Record<
+  FailureAction,
+  { label: string; ariaLabel?: string; testId: string }
+> = {
+  retry: { label: "Try again", testId: "new-app-installer-retry" },
+  browser: {
+    label: "Download in browser",
+    ariaLabel: "Download the installer in your browser",
+    testId: "new-app-installer-browser",
+  },
+  website: {
+    label: "Open buzz.xyz",
+    ariaLabel: "Open buzz.xyz in your browser",
+    testId: "new-app-installer-website",
+  },
 };
 
 /**
@@ -50,10 +72,12 @@ export function NewAppInstallerDialog({
   returnFocusRef,
   onCancel,
   onDismiss,
+  onDownloadInBrowser,
   onOpenWebsite,
   onRetry,
   onReveal,
 }: NewAppInstallerDialogProps) {
+  const platform = fileManagerPlatform();
   // Keep the last open state on screen while the dialog animates out.
   const [shown, setShown] = React.useState(state);
   if (state.status !== "closed" && state !== shown) {
@@ -61,15 +85,44 @@ export function NewAppInstallerDialog({
   }
   const isDownloading = state.status === "downloading";
 
-  // The focused Cancel button goes away when the download ends; move focus to
-  // the action that replaces it instead of letting it fall to the dialog.
+  // The focused button goes away whenever the status changes: Cancel when
+  // the download ends, "Try again" when it restarts. Move focus to the action
+  // that replaces it instead of letting it fall to the dialog.
+  const cancelRef = React.useRef<HTMLButtonElement>(null);
   const primaryActionRef = React.useRef<HTMLButtonElement>(null);
   const shownStatus = shown.status;
-  React.useEffect(() => {
-    if (shownStatus === "finished" || shownStatus === "failed") {
-      primaryActionRef.current?.focus();
-    }
+  const focusCurrentAction = React.useCallback(() => {
+    const action =
+      shownStatus === "downloading"
+        ? cancelRef.current
+        : primaryActionRef.current;
+    action?.focus();
+    return action !== null;
   }, [shownStatus]);
+  React.useEffect(() => {
+    focusCurrentAction();
+  }, [focusCurrentAction]);
+
+  const failure =
+    shown.status === "failed" ? failureActions(shown.reason) : null;
+  const failureHandlers: Record<FailureAction, () => void> = {
+    retry: onRetry,
+    browser: onDownloadInBrowser,
+    website: onOpenWebsite,
+  };
+  const failureButton = (action: FailureAction, isPrimary: boolean) => (
+    <Button
+      aria-label={FAILURE_BUTTONS[action].ariaLabel}
+      data-testid={FAILURE_BUTTONS[action].testId}
+      key={action}
+      onClick={failureHandlers[action]}
+      ref={isPrimary ? primaryActionRef : undefined}
+      type="button"
+      variant={isPrimary ? "default" : "outline"}
+    >
+      {FAILURE_BUTTONS[action].label}
+    </Button>
+  );
 
   return (
     <Dialog
@@ -95,6 +148,18 @@ export function NewAppInstallerDialog({
           event.preventDefault();
           returnFocusRef.current?.focus();
         }}
+        onKeyDown={(event) => {
+          // Enter still held from the press that started the download repeats
+          // onto the button focus has just moved to. It must not press it.
+          if (event.repeat && event.key === "Enter") {
+            event.preventDefault();
+          }
+        }}
+        onOpenAutoFocus={(event) => {
+          if (focusCurrentAction()) {
+            event.preventDefault();
+          }
+        }}
         onInteractOutside={(event) => {
           // A stray click beside the dialog must not cancel the download.
           if (isDownloading) {
@@ -105,7 +170,7 @@ export function NewAppInstallerDialog({
         <DialogHeader className="pr-8">
           <DialogTitle>{dialogTitle(shown)}</DialogTitle>
           <DialogDescription data-testid="new-app-installer-description">
-            {dialogDescription(shown)}
+            {dialogDescription(shown, platform)}
           </DialogDescription>
         </DialogHeader>
 
@@ -138,8 +203,12 @@ export function NewAppInstallerDialog({
               {shown.folder}
             </p>
             {shown.revealFailed ? (
-              <p className="text-sm text-destructive" role="alert">
-                Buzz couldn't show the file. It may have been moved or deleted.
+              <p
+                className="text-sm text-destructive"
+                data-testid="new-app-installer-reveal-failed"
+                role="alert"
+              >
+                {REVEAL_FAILED_MESSAGE}
               </p>
             ) : null}
           </div>
@@ -152,7 +221,7 @@ export function NewAppInstallerDialog({
           data-testid="new-app-installer-announcement"
           role="status"
         >
-          {liveAnnouncement(shown)}
+          {liveAnnouncement(shown, platform)}
         </p>
 
         <DialogFooter>
@@ -161,6 +230,7 @@ export function NewAppInstallerDialog({
               data-testid="new-app-installer-cancel"
               disabled={shown.isCancelling}
               onClick={onCancel}
+              ref={cancelRef}
               type="button"
               variant="outline"
             >
@@ -175,7 +245,7 @@ export function NewAppInstallerDialog({
                 type="button"
                 variant="outline"
               >
-                {revealLabel(fileManagerPlatform())}
+                {revealLabel(platform)}
               </Button>
               <Button
                 data-testid="new-app-installer-done"
@@ -187,25 +257,12 @@ export function NewAppInstallerDialog({
               </Button>
             </>
           ) : null}
-          {shown.status === "failed" ? (
+          {failure ? (
             <>
-              <Button
-                aria-label="Open buzz.xyz in your browser"
-                data-testid="new-app-installer-website"
-                onClick={onOpenWebsite}
-                type="button"
-                variant="outline"
-              >
-                Open buzz.xyz
-              </Button>
-              <Button
-                data-testid="new-app-installer-retry"
-                onClick={onRetry}
-                ref={primaryActionRef}
-                type="button"
-              >
-                Try again
-              </Button>
+              {failure.secondary
+                ? failureButton(failure.secondary, false)
+                : null}
+              {failureButton(failure.primary, true)}
             </>
           ) : null}
         </DialogFooter>

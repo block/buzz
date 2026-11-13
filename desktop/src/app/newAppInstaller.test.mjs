@@ -128,6 +128,21 @@ test("rejects every manifest or entry that is not a buzz-app release asset", () 
       ),
       "macos-arm64",
     ],
+    // The tag reaches GitHub as written, so nothing in it may be an escape
+    // GitHub's router could decode into another path.
+    ...[
+      "%2F..%2F..%2Fother",
+      "%5Cother",
+      "%00",
+      ";other",
+      "%20beta",
+      " beta",
+      "@other",
+    ].map((suffix) => [
+      `tag ending in ${suffix}`,
+      withDownload(`${RELEASE}${suffix}/Buzz.dmg`),
+      "macos-arm64",
+    ]),
     [
       "extension with nothing before it",
       withDownload(`${RELEASE}/.dmg`),
@@ -155,8 +170,9 @@ test("rejects every manifest or entry that is not a buzz-app release asset", () 
   }
 });
 
-test("accepts a tag that holds slashes", () => {
-  const url =
-    "https://github.com/block/buzz-app/releases/download/desktop/v1.0.0/Buzz.dmg";
-  assert.equal(resolveInstallerUrl(withDownload(url), "macos-arm64"), url);
+test("accepts a tag of slashes and the characters release tags use", () => {
+  for (const tag of ["desktop/v1.0.0", "desktop/v1.0.0-rc.1+build_2"]) {
+    const url = `https://github.com/block/buzz-app/releases/download/${tag}/Buzz.dmg`;
+    assert.equal(resolveInstallerUrl(withDownload(url), "macos-arm64"), url);
+  }
 });

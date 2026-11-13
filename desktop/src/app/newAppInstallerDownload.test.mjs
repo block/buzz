@@ -6,23 +6,26 @@ import {
   dialogTitle,
   downloadPercent,
   downloadProgressText,
+  failureActions,
   failureMessage,
   folderName,
   formatBytes,
   INSTALLER_DIALOG_CLOSED,
   liveAnnouncement,
+  REVEAL_FAILED_MESSAGE,
   reduceInstallerDialog,
   revealLabel,
 } from "./newAppInstallerDownload.ts";
 
 const FILE = "Buzz_1.0.0_aarch64.dmg";
+const URL = `https://github.com/block/buzz-app/releases/download/v1.0.0/${FILE}`;
 const MIB = 1024 * 1024;
 
 function run(actions, state = INSTALLER_DIALOG_CLOSED) {
   return actions.reduce(reduceInstallerDialog, state);
 }
 
-const started = { type: "started" };
+const started = { type: "started", url: URL };
 const named = { type: "event", event: { kind: "started", fileName: FILE } };
 const progress = (receivedBytes, totalBytes) => ({
   type: "event",
@@ -42,6 +45,7 @@ test("a download runs from start through progress to finished", () => {
   let state = run([started]);
   assert.deepEqual(state, {
     status: "downloading",
+    url: URL,
     fileName: null,
     receivedBytes: 0,
     totalBytes: null,
@@ -102,7 +106,8 @@ test("a running download cannot be dismissed, only cancelled", () => {
 
 test("a failure can be retried or dismissed", () => {
   const failure = run([started, named, failed("network")]);
-  assert.deepEqual(failure, { status: "failed", reason: "network" });
+  // The failure keeps the URL, which a retry and the browser route both need.
+  assert.deepEqual(failure, { status: "failed", reason: "network", url: URL });
   assert.equal(run([started], failure).status, "downloading");
   assert.deepEqual(
     run([{ type: "dismissed" }], failure),
@@ -170,49 +175,147 @@ test("every failure reason has its own plain-words message", () => {
     "busy",
     "rejected",
     "network",
+    "redirect-blocked",
     "too-large",
     "storage",
+    "permission-denied",
     "protection",
     "unknown",
   ];
-  const messages = reasons.map(failureMessage);
-  assert.equal(new Set(messages).size, reasons.length);
-  for (const message of messages) {
-    assert.match(message, /^[A-Z].*\.$/);
+  for (const platform of ["macos", "windows", "linux"]) {
+    const messages = reasons.map((reason) => failureMessage(reason, platform));
+    assert.equal(new Set(messages).size, reasons.length);
+    for (const message of messages) {
+      assert.match(message, /^[A-Z].*\.$/);
+    }
   }
+  // Only a dropped connection is blamed on the connection, and only a full
+  // disk on free space.
+  assert.deepEqual(
+    reasons.filter((reason) =>
+      /internet connection/.test(failureMessage(reason, "macos")),
+    ),
+    ["network"],
+  );
+  assert.deepEqual(
+    reasons.filter((reason) =>
+      /free space/.test(failureMessage(reason, "macos")),
+    ),
+    ["storage"],
+  );
+  // On macOS a declined consent prompt is not shown again, so the message
+  // says where to allow it; elsewhere there is no such setting to point at.
+  assert.match(
+    failureMessage("permission-denied", "macos"),
+    /System Settings.*Privacy & Security.*Files and Folders.*Downloads Folder/,
+  );
+  assert.doesNotMatch(
+    failureMessage("permission-denied", "linux"),
+    /System Settings/,
+  );
+});
+
+test("a failure leads with the action that can get the user the app", () => {
+  const actions = Object.fromEntries(
+    [
+      "busy",
+      "network",
+      "storage",
+      "unknown",
+      "permission-denied",
+      "redirect-blocked",
+      "too-large",
+      "protection",
+      "rejected",
+    ].map((reason) => [reason, failureActions(reason)]),
+  );
+  assert.deepEqual(actions, {
+    // A retry can work.
+    busy: { primary: "retry", secondary: "website" },
+    network: { primary: "retry", secondary: "website" },
+    storage: { primary: "retry", secondary: "website" },
+    unknown: { primary: "retry", secondary: "website" },
+    // A retry works only after the user has granted access.
+    "permission-denied": { primary: "browser", secondary: "retry" },
+    // A retry would fail the same way.
+    "redirect-blocked": { primary: "browser", secondary: "website" },
+    "too-large": { primary: "browser", secondary: "website" },
+    protection: { primary: "browser", secondary: "website" },
+    // The link was refused, so it is never opened.
+    rejected: { primary: "website", secondary: null },
+  });
+
+  const describe = (reason) =>
+    dialogDescription(run([started, failed(reason)]), "macos");
+  assert.match(
+    describe("network"),
+    /You can also get the new app from buzz\.xyz\.$/,
+  );
+  assert.match(describe("protection"), /in your browser instead\.$/);
+  assert.match(describe("permission-denied"), /in your browser instead\.$/);
+  assert.match(
+    describe("rejected"),
+    /You can get the new app from buzz\.xyz\.$/,
+  );
 });
 
 test("titles and descriptions follow the state", () => {
   const starting = run([started]);
   assert.equal(dialogTitle(starting), "Downloading the new Buzz app");
-  assert.equal(dialogDescription(starting), "Starting the download…");
+  assert.equal(dialogDescription(starting, "macos"), "Starting the download…");
 
   const running = run([named], starting);
   assert.equal(
-    dialogDescription(running),
+    dialogDescription(running, "macos"),
     `Saving ${FILE} to your Downloads folder.`,
   );
   assert.equal(
-    dialogDescription(run([{ type: "cancelRequested" }], running)),
+    dialogDescription(run([{ type: "cancelRequested" }], running), "macos"),
     "Cancelling the download…",
   );
 
   const finished = run([saved], running);
   assert.equal(dialogTitle(finished), "The new Buzz app is downloaded");
   assert.equal(
-    dialogDescription(finished),
+    dialogDescription(finished, "macos"),
     `${FILE} is in your Downloads folder. Open it when you're ready to install.`,
   );
 
+  // An AppImage is saved without the executable bit, so it cannot be opened
+  // yet: the message gives the step that makes it runnable.
+  const appImage = run([
+    started,
+    {
+      type: "settled",
+      outcome: {
+        status: "saved",
+        fileName: "Buzz_1.0.0_amd64.AppImage",
+        folder: "/home/sam/Downloads",
+      },
+    },
+  ]);
+  const appImageText = dialogDescription(appImage, "linux");
+  assert.match(
+    appImageText,
+    /^Buzz_1\.0\.0_amd64\.AppImage is in your Downloads folder\./,
+  );
+  assert.match(appImageText, /make it executable/);
+  assert.match(appImageText, /chmod \+x/);
+  assert.doesNotMatch(appImageText, /Open it when you're ready/);
+
   const failure = run([failed("network")], running);
   assert.equal(dialogTitle(failure), "The download didn't finish");
-  assert.match(dialogDescription(failure), /internet connection/);
-  assert.match(dialogDescription(failure), /buzz\.xyz\.$/);
+  assert.match(dialogDescription(failure, "macos"), /internet connection/);
+  assert.match(dialogDescription(failure, "macos"), /buzz\.xyz\.$/);
+
+  // The file is where the dialog says; only opening the folder failed.
+  assert.match(REVEAL_FAILED_MESSAGE, /couldn't open the folder/);
+  assert.doesNotMatch(REVEAL_FAILED_MESSAGE, /moved|deleted/);
 });
 
 test("a screen reader hears milestones, not every progress tick", () => {
   let state = run([started]);
-  const heard = [liveAnnouncement(state)];
+  const heard = [liveAnnouncement(state, "macos")];
   const actions = [named, progress(0, 1000)];
   // A report for every 1% of the file.
   for (let received = 10; received <= 1000; received += 10) {
@@ -221,7 +324,7 @@ test("a screen reader hears milestones, not every progress tick", () => {
   actions.push(saved);
   for (const action of actions) {
     state = reduceInstallerDialog(state, action);
-    const announcement = liveAnnouncement(state);
+    const announcement = liveAnnouncement(state, "macos");
     if (announcement !== heard.at(-1)) {
       heard.push(announcement);
     }
@@ -238,20 +341,23 @@ test("a screen reader hears milestones, not every progress tick", () => {
 
   // Without a total there is nothing to count: one announcement while it runs.
   state = run([started, named]);
-  const unsized = new Set([liveAnnouncement(state)]);
+  const unsized = new Set([liveAnnouncement(state, "macos")]);
   for (let received = 10; received <= 1000; received += 10) {
     state = reduceInstallerDialog(state, progress(received, null));
-    unsized.add(liveAnnouncement(state));
+    unsized.add(liveAnnouncement(state, "macos"));
   }
   assert.deepEqual([...unsized], [`Downloading ${FILE}.`]);
 
   assert.equal(
-    liveAnnouncement(run([started, named, { type: "cancelRequested" }])),
+    liveAnnouncement(
+      run([started, named, { type: "cancelRequested" }]),
+      "macos",
+    ),
     "Cancelling the download.",
   );
   assert.match(
-    liveAnnouncement(run([started, failed("storage")])),
+    liveAnnouncement(run([started, failed("storage")]), "macos"),
     /^The download didn't finish\. /,
   );
-  assert.equal(liveAnnouncement(INSTALLER_DIALOG_CLOSED), "");
+  assert.equal(liveAnnouncement(INSTALLER_DIALOG_CLOSED, "macos"), "");
 });

@@ -36,6 +36,7 @@ import { selectMockHistory } from "./e2eBridgeHistory.ts";
 import {
   handleMockInstallerCancel,
   handleMockInstallerDownload,
+  handleMockInstallerReveal,
   installMockInstallerDownloadControls,
 } from "./e2eBridgeInstallerDownload.ts";
 import {
@@ -14898,7 +14899,7 @@ export function maybeInstallE2eTauriMocks() {
       case "cancel_new_app_installer_download":
         return handleMockInstallerCancel();
       case "reveal_new_app_installer":
-        return null;
+        return handleMockInstallerReveal();
       case "relay_reconnect_hook":
         return null;
       case "relay_reconnect_hook_configured":

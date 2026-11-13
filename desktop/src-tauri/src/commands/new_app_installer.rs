@@ -42,6 +42,10 @@ const RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 const STALL_TIMEOUT: Duration = Duration::from_secs(30);
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
+const PARTIAL_SUFFIX: &str = ".part";
+/// File in the app data directory that names the running download's partial
+/// file, so the launch after a crash can remove exactly that file.
+const PARTIAL_RECORD_NAME: &str = "new-app-installer-partial.txt";
 
 /// Progress sent to the webview over the command's channel.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -72,10 +76,15 @@ pub enum InstallerFailure {
     Rejected,
     /// The request failed, stalled, or ended early.
     Network,
+    /// A redirect pointed outside the hosts release assets are served from, or
+    /// there were too many of them. Trying again gets the same answer.
+    RedirectBlocked,
     /// The response is larger than any installer should be.
     TooLarge,
     /// The file could not be written or moved into the Downloads folder.
     Storage,
+    /// The system refused access to the Downloads folder.
+    PermissionDenied,
     /// The file could not be marked as downloaded from the internet.
     Protection,
 }
@@ -100,6 +109,20 @@ fn fail(reason: InstallerFailure, detail: impl std::fmt::Display) -> InstallerFa
     eprintln!("buzz-desktop: new app installer download failed ({reason:?}): {detail}");
     reason
 }
+
+/// A write the system refused is told apart from every other storage error:
+/// freeing space does not fix it, granting access does.
+fn storage_failure(error: io::Error) -> InstallerFailure {
+    let reason = if error.kind() == io::ErrorKind::PermissionDenied {
+        InstallerFailure::PermissionDenied
+    } else {
+        InstallerFailure::Storage
+    };
+    fail(reason, error)
+}
+
+/// Every extension [`installer_extension`] can return.
+const INSTALLER_EXTENSIONS: [&str; 4] = [".dmg", ".exe", ".AppImage", ".deb"];
 
 /// The file extension each installer manifest key must point at.
 fn installer_extension(target: &str) -> Option<&'static str> {
@@ -142,7 +165,7 @@ pub(super) fn validate_installer_url(raw: &str, target: &str) -> Option<Installe
         .path()
         .strip_prefix(INSTALLER_PATH_PREFIX)?
         .rsplit_once('/')?;
-    if tag.is_empty() || !is_safe_file_name(file_name, extension) {
+    if !is_safe_tag(tag) || !is_safe_file_name(file_name, extension) {
         return None;
     }
     Some(InstallerSource {
@@ -150,6 +173,16 @@ pub(super) fn validate_installer_url(raw: &str, target: &str) -> Option<Installe
         extension,
         url,
     })
+}
+
+/// A release tag is sent to GitHub as written: letters, digits and `._+-/`
+/// only. It holds no percent escape, so staying inside the repository's
+/// releases does not depend on how GitHub decodes one.
+fn is_safe_tag(tag: &str) -> bool {
+    !tag.is_empty()
+        && tag.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'+' | b'-' | b'/')
+        })
 }
 
 /// A file name is used as is or not at all: letters, digits and `._+-` only,
@@ -283,7 +316,15 @@ async fn fetch_into(
     let mut response = tokio::time::timeout(limits.response_timeout, client.get(url).send())
         .await
         .map_err(|_| fail(InstallerFailure::Network, "no response in time"))?
-        .map_err(|error| fail(InstallerFailure::Network, error))?;
+        .map_err(|error| {
+            // The client's redirect policy refused the next hop.
+            let reason = if error.is_redirect() {
+                InstallerFailure::RedirectBlocked
+            } else {
+                InstallerFailure::Network
+            };
+            fail(reason, error)
+        })?;
     if response.status() != reqwest::StatusCode::OK {
         return Err(fail(InstallerFailure::Network, response.status()));
     }
@@ -312,9 +353,7 @@ async fn fetch_into(
                 format_args!("more than {} bytes received", limits.max_bytes),
             ));
         }
-        file.write_all(&chunk)
-            .await
-            .map_err(|error| fail(InstallerFailure::Storage, error))?;
+        file.write_all(&chunk).await.map_err(storage_failure)?;
         on_progress(received, total);
     }
     if received == 0 || total.is_some_and(|total| total != received) {
@@ -346,13 +385,32 @@ fn persist_without_overwrite(
                 partial = error.path;
             }
             // Dropping the error drops the partial path, which removes the file.
-            Err(error) => return Err(fail(InstallerFailure::Storage, error.error)),
+            Err(error) => return Err(storage_failure(error.error)),
         }
     }
     Err(fail(
         InstallerFailure::Storage,
         "no free file name in the Downloads folder",
     ))
+}
+
+/// Creates `dest_dir` if needed and `<file name>.<random>.part` in it.
+///
+/// On Unix the file gets the mode any new file gets under the user's umask,
+/// 0644 by default and never executable, as a browser download would. The
+/// temporary-file default is private to the user, which is wrong for a file
+/// that ends up in Downloads.
+fn create_partial(dest_dir: &Path, file_name: &str) -> io::Result<(std::fs::File, TempPath)> {
+    std::fs::create_dir_all(dest_dir)?;
+    let prefix = format!("{file_name}.");
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(&prefix).suffix(PARTIAL_SUFFIX);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        builder.permissions(std::fs::Permissions::from_mode(0o666));
+    }
+    Ok(builder.tempfile_in(dest_dir)?.into_parts())
 }
 
 /// Downloads `source` into `dest_dir` and returns the final path.
@@ -372,15 +430,19 @@ pub(super) async fn download_installer(
     mark: impl FnOnce(&Path, &Url) -> io::Result<()>,
     mut emit: impl FnMut(InstallerDownloadEvent),
 ) -> Result<PathBuf, TransferError> {
-    let storage = |error: io::Error| TransferError::Failed(fail(InstallerFailure::Storage, error));
+    let storage = |error: io::Error| TransferError::Failed(storage_failure(error));
 
-    tokio::fs::create_dir_all(dest_dir).await.map_err(storage)?;
-    let (file, partial) = tempfile::Builder::new()
-        .prefix(&format!("{}.", source.file_name))
-        .suffix(".part")
-        .tempfile_in(dest_dir)
-        .map_err(storage)?
-        .into_parts();
+    // Off the async workers: on macOS the first write to Downloads can wait on
+    // the system's consent prompt for as long as the user takes to answer it.
+    let (file, partial) = {
+        let dest_dir = dest_dir.to_path_buf();
+        let file_name = source.file_name.clone();
+        tokio::task::spawn_blocking(move || create_partial(&dest_dir, &file_name))
+            .await
+            .map_err(io::Error::other)
+            .and_then(|created| created)
+            .map_err(storage)?
+    };
     on_partial(&partial);
     let mut file = tokio::fs::File::from_std(file);
 
@@ -417,7 +479,6 @@ pub(super) async fn download_installer(
     file.flush().await.map_err(storage)?;
     file.sync_all().await.map_err(storage)?;
     drop(file);
-    make_readable_like_a_download(&partial).map_err(storage)?;
     mark(&partial, &source.url)
         .map_err(|error| TransferError::Failed(fail(InstallerFailure::Protection, error)))?;
     // Last point at which a cancel still leaves nothing behind.
@@ -425,19 +486,6 @@ pub(super) async fn download_installer(
         return Err(TransferError::Cancelled);
     }
     persist_without_overwrite(partial, dest_dir, source).map_err(TransferError::Failed)
-}
-
-/// Temporary files are created private to the user. A browser download is
-/// readable by others and not executable.
-fn make_readable_like_a_download(path: &Path) -> io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644))?;
-    }
-    #[cfg(not(unix))]
-    let _ = path;
-    Ok(())
 }
 
 const QUARANTINE_AGENT: &str = "Buzz";
@@ -514,6 +562,94 @@ pub(super) fn mark_as_downloaded(path: &Path, origin: &Url) -> io::Result<()> {
     Ok(())
 }
 
+/// The folder installers are saved to. A Linux desktop with no XDG download
+/// directory configured reports none, so `~/Downloads` is used there; it is
+/// created on first use.
+pub(super) fn resolve_download_dir(
+    configured: Option<PathBuf>,
+    home: Option<PathBuf>,
+    is_linux: bool,
+) -> Option<PathBuf> {
+    configured.or_else(|| home.filter(|_| is_linux).map(|home| home.join("Downloads")))
+}
+
+fn write_partial_record(record: &Path, partial: &Path) -> io::Result<()> {
+    let partial = partial
+        .to_str()
+        .ok_or_else(|| io::Error::other("the partial file's path is not UTF-8"))?;
+    if let Some(parent) = record.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(record, partial)
+}
+
+fn clear_partial_record(record: &Path) {
+    match std::fs::remove_file(record) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => {
+            eprintln!("buzz-desktop: could not clear the partial installer record: {error}")
+        }
+    }
+}
+
+/// Whether `path` is still a partial file of the shape this module writes:
+/// `<installer name>.<random>.part`, a regular file and not a link.
+fn is_own_partial_file(path: &Path) -> bool {
+    let Some((installer, random)) = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_suffix(PARTIAL_SUFFIX))
+        .and_then(|rest| rest.rsplit_once('.'))
+    else {
+        return false;
+    };
+    path.is_absolute()
+        && !random.is_empty()
+        && random.bytes().all(|byte| byte.is_ascii_alphanumeric())
+        && INSTALLER_EXTENSIONS
+            .iter()
+            .any(|extension| is_safe_file_name(installer, extension))
+        && std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_file())
+}
+
+/// Removes the partial file a previous run recorded and never cleaned up: a
+/// crash, a force quit or a power cut ends the app without any of its cleanup.
+///
+/// Only the recorded path is touched, and only while it is still a partial
+/// file of this module's shape. No folder is searched, so a file this app did
+/// not create is never removed.
+pub(super) fn remove_recorded_partial(record: &Path) {
+    use std::io::Read;
+
+    // A path is far shorter than this; anything longer is not a record.
+    const MAX_RECORD_BYTES: u64 = 16 * 1024;
+
+    let mut recorded = String::new();
+    match std::fs::File::open(record)
+        .and_then(|file| file.take(MAX_RECORD_BYTES).read_to_string(&mut recorded))
+    {
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return,
+        Err(error) => {
+            eprintln!("buzz-desktop: could not read the partial installer record: {error}");
+            recorded.clear();
+        }
+    }
+    let partial = PathBuf::from(recorded);
+    if is_own_partial_file(&partial) {
+        if let Err(error) = std::fs::remove_file(&partial) {
+            // The record stays, so the next launch tries again.
+            eprintln!(
+                "buzz-desktop: could not remove leftover partial installer {}: {error}",
+                partial.display()
+            );
+            return;
+        }
+    }
+    clear_partial_record(record);
+}
+
 #[derive(Default)]
 struct Slots {
     active: Option<Active>,
@@ -531,6 +667,9 @@ struct Active {
 pub struct InstallerDownloads {
     slots: Mutex<Slots>,
     client: OnceLock<Option<reqwest::Client>>,
+    /// Where the running download's partial file is recorded. Unset until
+    /// [`InstallerDownloads::recover`] runs.
+    partial_record: OnceLock<PathBuf>,
 }
 
 /// Holds the download slot; dropping it frees the slot.
@@ -541,6 +680,9 @@ pub(super) struct ActiveDownload<'a> {
 
 impl Drop for ActiveDownload<'_> {
     fn drop(&mut self) {
+        // By now the partial file is gone or has become the installer. The
+        // record goes first, while the slot still keeps the next download out.
+        self.downloads.forget_partial();
         self.downloads.slots().active = None;
     }
 }
@@ -567,9 +709,30 @@ impl InstallerDownloads {
         })
     }
 
+    /// Removes the partial file a previous run left behind, then records each
+    /// download's partial file in `record` from here on. Called once at
+    /// startup, before any download can start.
+    pub(super) fn recover(&self, record: PathBuf) {
+        remove_recorded_partial(&record);
+        let _ = self.partial_record.set(record);
+    }
+
     pub(super) fn set_partial(&self, partial: &Path) {
         if let Some(active) = self.slots().active.as_mut() {
             active.partial = Some(partial.to_path_buf());
+        }
+        if let Some(record) = self.partial_record.get() {
+            // Without the record a crash leaves this file behind; the download
+            // itself is not affected.
+            if let Err(error) = write_partial_record(record, partial) {
+                eprintln!("buzz-desktop: could not record the partial installer: {error}");
+            }
+        }
+    }
+
+    fn forget_partial(&self) {
+        if let Some(record) = self.partial_record.get() {
+            clear_partial_record(record);
         }
     }
 
@@ -581,8 +744,10 @@ impl InstallerDownloads {
         }
     }
 
-    /// Stops the running download as the app exits. The download task may
-    /// never be polled again, so the partial file is removed here.
+    /// Stops the running download as the app exits, on the normal exit path
+    /// and from the signal handler. The download task may never be polled
+    /// again, so the partial file is removed here. If that fails its record
+    /// stays, and the next launch removes the file.
     pub(crate) fn abort_for_shutdown(&self) {
         let partial = {
             let mut slots = self.slots();
@@ -597,12 +762,16 @@ impl InstallerDownloads {
                 Ok(()) => {}
                 // The download finished or cleaned up first.
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => eprintln!(
-                    "buzz-desktop: could not remove partial installer {}: {error}",
-                    partial.display()
-                ),
+                Err(error) => {
+                    eprintln!(
+                        "buzz-desktop: could not remove partial installer {}: {error}",
+                        partial.display()
+                    );
+                    return;
+                }
             }
         }
+        self.forget_partial();
     }
 
     fn client(&self) -> Option<&reqwest::Client> {
@@ -631,10 +800,12 @@ async fn run_download(
     let client = downloads
         .client()
         .ok_or(TransferError::Failed(InstallerFailure::Network))?;
-    let dest_dir = app
-        .path()
-        .download_dir()
-        .map_err(|error| TransferError::Failed(fail(InstallerFailure::Storage, error)))?;
+    let dest_dir = resolve_download_dir(
+        app.path().download_dir().ok(),
+        app.path().home_dir().ok(),
+        cfg!(target_os = "linux"),
+    )
+    .ok_or_else(|| TransferError::Failed(fail(InstallerFailure::Storage, "no Downloads folder")))?;
 
     // A closed webview cannot receive events; the transfer is cancelled through
     // the window hooks, not through a failed send.
@@ -689,6 +860,20 @@ pub async fn download_new_app_installer(
         }
         Err(TransferError::Cancelled) => InstallerDownloadOutcome::Cancelled,
         Err(TransferError::Failed(reason)) => InstallerDownloadOutcome::Failed { reason },
+    }
+}
+
+/// Removes the partial installer a crashed or force-quit run left in the
+/// Downloads folder, and starts recording each new one so the next launch can
+/// do the same. Run once from the app's setup hook.
+pub fn recover_new_app_installer_downloads(app: &AppHandle) {
+    match app.path().app_data_dir() {
+        Ok(data_dir) => app
+            .state::<InstallerDownloads>()
+            .recover(data_dir.join(PARTIAL_RECORD_NAME)),
+        Err(error) => {
+            eprintln!("buzz-desktop: partial installer downloads are not recorded: {error}");
+        }
     }
 }
 

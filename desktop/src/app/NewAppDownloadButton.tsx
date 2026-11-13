@@ -55,13 +55,23 @@ export function NewAppDownloadButton({
       <NewAppInstallerDialog
         onCancel={cancel}
         onDismiss={dismiss}
+        onDownloadInBrowser={() => {
+          // The URL the download was started with, which the resolver and
+          // the backend both accepted. The browser downloads it its own way.
+          if (state.status === "failed") {
+            void openUrl(state.url);
+          }
+          dismiss();
+        }}
         onOpenWebsite={() => {
           void openUrl(BUZZ_APP_WEBSITE_URL);
           dismiss();
         }}
         onRetry={() => {
-          if (installerUrl) {
-            start(installerUrl);
+          // From the state, not the prop: after a remount the manifest is
+          // fetched again and the prop is null until it arrives.
+          if (state.status === "failed") {
+            start(state.url);
           }
         }}
         onReveal={reveal}

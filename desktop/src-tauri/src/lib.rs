@@ -239,6 +239,7 @@ pub fn run() {
         .manage(channel_head_cache::ChannelHeadCacheStore::default())
         .setup(move |app| {
             let app_handle = app.handle().clone();
+            recover_new_app_installer_downloads(&app_handle);
             #[cfg(target_os = "macos")]
             {
                 tray_menu::init(&app_handle)?;
@@ -934,9 +935,8 @@ pub fn run() {
             ..
         } if label == "main" => {
             // Keep the webview alive so Buzz can be reopened from its tray menu.
+            // An installer download keeps running; its dialog is there on reopen.
             api.prevent_close();
-            // A hidden window cannot show the installer download's dialog.
-            app_handle.state::<InstallerDownloads>().cancel();
             if let Some(window) = app_handle.get_webview_window("main") {
                 if let Err(error) = window.hide() {
                     eprintln!("buzz-desktop: failed to hide main window: {error}");

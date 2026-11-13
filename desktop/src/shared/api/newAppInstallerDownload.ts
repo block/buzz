@@ -11,8 +11,10 @@ export type InstallerFailureReason =
   | "busy"
   | "rejected"
   | "network"
+  | "redirect-blocked"
   | "too-large"
   | "storage"
+  | "permission-denied"
   | "protection";
 
 export type InstallerDownloadOutcome =
