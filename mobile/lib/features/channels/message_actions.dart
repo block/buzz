@@ -72,6 +72,7 @@ Future<void> showMessageActions({
   required String channelId,
   required bool canManageMessage,
   List<TimelineMessage>? allMessages,
+  VoidCallback? onReply,
   List<TimelineReaction>? reactions,
   ValueChanged<String>? onToggleReaction,
   String? currentPubkey,
@@ -133,6 +134,7 @@ Future<void> showMessageActions({
                       message: message,
                       channelId: channelId,
                       allMessages: allMessages,
+                      onReply: onReply,
                       currentPubkey: currentPubkey,
                       isMember: isMember,
                       isArchived: isArchived,
@@ -657,6 +659,9 @@ class _MessageQuickActionsRow extends ConsumerWidget {
   final TimelineMessage message;
   final String channelId;
   final List<TimelineMessage>? allMessages;
+
+  /// Replies without opening [message]'s thread, for a page that already is it.
+  final VoidCallback? onReply;
   final String? currentPubkey;
   final bool isMember;
   final bool isArchived;
@@ -669,6 +674,7 @@ class _MessageQuickActionsRow extends ConsumerWidget {
     required this.message,
     required this.channelId,
     required this.allMessages,
+    required this.onReply,
     required this.currentPubkey,
     required this.isMember,
     required this.isArchived,
@@ -688,6 +694,10 @@ class _MessageQuickActionsRow extends ConsumerWidget {
           label: 'Reply',
           onTap: () {
             if (!_selectMessageAction(context)) return;
+            if (onReply != null) {
+              onReply!();
+              return;
+            }
             Navigator.of(pageContext).push(
               MaterialPageRoute<void>(
                 builder: (_) => ThreadDetailPage(

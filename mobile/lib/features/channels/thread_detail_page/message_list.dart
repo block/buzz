@@ -29,7 +29,7 @@ class _ThreadMessageList extends HookWidget {
   final bool isMember;
   final bool isArchived;
   final FocusNode composerFocusNode;
-  final VoidCallback restoreComposerFocus;
+  final VoidCallback? restoreComposerFocus;
   final Map<String, List<TimelineMessage>> childrenByParent;
 
   const _ThreadMessageList({

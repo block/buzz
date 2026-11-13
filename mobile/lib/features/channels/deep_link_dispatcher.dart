@@ -421,6 +421,13 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
         return;
       }
     }
+    // A thread already in front shows the linked message itself.
+    if (link case MessageDeepLink(:final threadRootId?, :final messageId)
+        when ref
+            .read(openThreadRoutesProvider)
+            .showInFront(threadRootId, messageId, navigator)) {
+      return;
+    }
     navigator.push(
       MaterialPageRoute<void>(
         builder: (_) =>
