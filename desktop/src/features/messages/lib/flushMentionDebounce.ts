@@ -37,6 +37,31 @@ export function isPlainSpace(
 }
 
 /**
+ * True when the open dropdown was ranked for a different query than the editor
+ * now holds: either the debounce is still pending, or it has fired but React
+ * has not rendered the new list yet. On a busy main thread the second window
+ * is wide enough that a fast "@car" + Enter commits the old list's first row.
+ */
+export function isMentionListStale(opts: {
+  debounceTimerRef: React.RefObject<ReturnType<typeof setTimeout> | null>;
+  latestValueRef: React.RefObject<string>;
+  latestCursorRef: React.RefObject<number>;
+  searchableNamesLowerRef: React.RefObject<string[]>;
+  renderedQuery: string | null;
+}): boolean {
+  if (opts.debounceTimerRef.current !== null) {
+    return true;
+  }
+  const mention = detectPrefixQuery(
+    "@",
+    opts.latestValueRef.current,
+    opts.latestCursorRef.current,
+    opts.searchableNamesLowerRef.current,
+  );
+  return mention !== null && mention.query !== opts.renderedQuery;
+}
+
+/**
  * Cancel the pending debounce timer, re-detect the prefix query from the
  * latest editor state, rank candidates, and return the top suggestion — or
  * null if no valid match is found.
