@@ -39,7 +39,18 @@ final class ShareSuggestions {
           conversationIdentifier: conversationIdentifier,
           displayName: displayName,
           recipientCount: recipientCount
-        ).donate { error in
+        ).donate { [weak self] error in
+          // A restriction confirmed while this donation was in flight purged
+          // interactions before it landed; purge again so it can't survive.
+          if let self,
+            BuzzAgeRestrictionSession.isRestricted(containerURL: self.containerURL())
+          {
+            self.cleanup().request { cleanupError in
+              if let cleanupError {
+                NSLog("Share suggestion cleanup failed: %@", String(describing: cleanupError))
+              }
+            }
+          }
           DispatchQueue.main.async {
             result(error.map {
               FlutterError(code: "donation_failed", message: $0.localizedDescription, details: nil)
@@ -47,6 +58,20 @@ final class ShareSuggestions {
           }
         }
       }
+  }
+
+  /// The age gate's durable cleanup: a failed deletion is retried at launch.
+  private func cleanup() -> BuzzInteractionCleanupRetry {
+    BuzzInteractionCleanupRetry(
+      containerURL: containerURL(),
+      deletion: BuzzInteractionDeletionDeadline(
+        timeout: 5,
+        deleteAllInteractions: { completion in INInteraction.deleteAll(completion: completion) },
+        scheduleTimeout: { delay, action in
+          DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + delay, execute: action)
+        }
+      )
+    )
   }
 
   static func interaction(

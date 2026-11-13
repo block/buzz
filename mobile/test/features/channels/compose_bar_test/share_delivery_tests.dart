@@ -92,5 +92,21 @@ void shareDeliveryTests() {
     await tester.tap(find.byIcon(BuzzIcons.arrowUp));
     await tester.pumpAndSettle();
     expect(sent, 'Fresh');
+
+    // Files that can't be copied still let the shared text through.
+    const unreadable = '33333333-3333-4333-8333-333333333333';
+    Directory('${shares.path}/$unreadable').createSync();
+    await deliver(
+      PendingShare(
+        id: unreadable,
+        target: null,
+        text: const ['Still here'],
+        files: ['${shares.path}/$unreadable/missing.png'],
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(draftText(), 'Still here');
+    expect(find.text('Couldn’t add the shared files.'), findsOneWidget);
+    expect(find.byTooltip('Remove attachment'), findsNothing);
   });
 }

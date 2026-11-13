@@ -50,16 +50,18 @@ Future<void> _deliverShare(
   ObjectRef<_ComposerVoiceNote> voiceNote,
   ValueNotifier<String?> uploadError,
 ) async {
-  final List<XFile> files;
+  var files = const <XFile>[];
+  var filesFailed = false;
   try {
     // The composer owns its copies; the app group's are deleted right away.
+    // The pending share is only a hand-off: the items stay in the app they
+    // were shared from, so a failed copy is re-shared rather than retried.
     files = await retainTemporaryImages([
       for (final path in share.files) XFile(path),
     ]);
   } catch (error) {
     debugPrint('share: could not copy shared files: $error');
-    if (context.mounted) uploadError.value = 'Couldn’t add the shared items.';
-    return;
+    filesFailed = true;
   } finally {
     unawaited(deletePendingShare(share.id));
   }
@@ -92,6 +94,7 @@ Future<void> _deliverShare(
       ),
     );
   }
+  if (filesFailed) uploadError.value = 'Couldn’t add the shared files.';
   if (files.isNotEmpty &&
       !_queueComposerImages(
         files,
