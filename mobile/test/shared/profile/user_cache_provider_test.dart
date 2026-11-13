@@ -409,7 +409,7 @@ void main() {
     addTearDown(container.dispose);
     final cache = container.read(userCacheProvider.notifier);
     final first = cache.preload(['a', 'b']);
-    await Future<void>.delayed(const Duration(milliseconds: 60));
+    await session.firstRequest.future;
     expect(session.requestCount, 1);
 
     // b is on the wire; only c is new.
@@ -527,6 +527,7 @@ class _RecordingProfileSession extends RelaySessionNotifier {
   final List<Future<List<NostrEvent>>> _results;
   NostrFilter? requestedFilter;
   int requestCount = 0;
+  final firstRequest = Completer<void>();
 
   @override
   SessionState build() => const SessionState(status: SessionStatus.connected);
@@ -538,6 +539,7 @@ class _RecordingProfileSession extends RelaySessionNotifier {
   }) async {
     requestCount++;
     requestedFilter = filter;
+    if (!firstRequest.isCompleted) firstRequest.complete();
     return _results.isEmpty ? const [] : _results.removeAt(0);
   }
 }
