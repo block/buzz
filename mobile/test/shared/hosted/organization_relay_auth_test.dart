@@ -390,6 +390,26 @@ void main() {
       );
     });
 
+    test('a push stop still gets an assertion after signing out a saved '
+        'session that was never restored', () async {
+      // An offline launch keeps the saved session without adopting it.
+      await saveSession();
+      final account = organizationClient();
+      final auth = relayAuth(account);
+      boundIdentity = {'pubkey_hex': keys.public};
+
+      await account.clearLocalSession();
+      expect(await account.restore(), isNull);
+      requests.clear();
+      tokenFor = (_) => 'push-stop-token';
+      expect(await auth.headers(relay, background: true), {
+        'Nostr-Federated-Identity': 'Bearer push-stop-token',
+      });
+      expect(requests.last.headers['X-BB-Session-Credential'], 'org-secret');
+      expect(await auth.headers(relay), isEmpty);
+      expect(account.account, isNull);
+    });
+
     test('other relays never receive the organization assertion', () async {
       await saveSession();
       final auth = relayAuth(organizationClient());
