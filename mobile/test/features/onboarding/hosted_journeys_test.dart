@@ -1807,6 +1807,43 @@ void main() {
     requiresAuthDomain: true,
   );
 
+  journey('a taken address keeps the create form open to choose another', (
+    tester,
+    f,
+  ) async {
+    await f.initialize();
+    f.takenNames.add('taken-home');
+    await f.mount(tester, addingCommunity: false);
+    await f.flow.signInAccount();
+    await f.settle(tester);
+    await f.tap(tester, 'Create a community');
+    final input = find.byKey(const Key('community-create-input'));
+    await tester.enterText(input.hitTestable(), 'taken-home');
+    await f.tap(tester, 'Continue');
+    expect(
+      find.text('This community address is already taken.').hitTestable(),
+      findsOneWidget,
+    );
+    expect(f.flow.stage, HostedFlowStage.idle);
+    expect(f.owned, isEmpty);
+    expect(await f.storage.loadAll(), isEmpty);
+    // The same address cannot be resubmitted until it is edited.
+    final continueButton = find.widgetWithText(FilledButton, 'Continue');
+    expect(tester.widget<FilledButton>(continueButton).onPressed, isNull);
+    await tester.enterText(input.hitTestable(), 'new-home');
+    await f.settle(tester);
+    expect(find.text('This community address is already taken.'), findsNothing);
+    await f.tap(tester, 'Continue');
+    expect(find.byType(ProfileSetupPage, skipOffstage: false), findsOneWidget);
+    await tester.enterText(find.byType(TextField).hitTestable(), 'Creator');
+    await f.tap(tester, 'Continue');
+    await f.tap(tester, 'Skip');
+    final saved = (await f.storage.loadAll()).single;
+    expect(saved.relayUrl, 'wss://new-home.communities.buzz.xyz');
+    expect(f.sent('/v1/buzz/communities'), hasLength(2));
+    expect(f.owned, hasLength(1));
+  });
+
   journey(
     'create survives a lost response and restart, then joins the same owned community',
     (tester, f) async {

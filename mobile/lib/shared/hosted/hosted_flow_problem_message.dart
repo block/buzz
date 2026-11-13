@@ -5,6 +5,8 @@ String hostedFlowProblemMessage(
 ) => switch (problem) {
   HostedFlowProblem.communityCreationRejected =>
     'This community could not be created. Leave setup to choose another address, or check your hosted community limit in Builderlab.',
+  HostedFlowProblem.communityNameTaken =>
+    'This community address is already taken.',
   HostedFlowProblem.unsupportedEnvironment =>
     'This community needs a different or unsupported Builderlab environment. Use an app build configured for this community.',
   HostedFlowProblem.accountSetupRequired =>

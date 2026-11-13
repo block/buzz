@@ -85,7 +85,8 @@ class BuilderlabAccountClient {
 
   /// Remote-agent registry routes, shared with desktop.
   /// Safe request diagnostics: no headers, credentials, bodies or user data.
-  ({String path, int status})? lastRejectedRequest;
+  /// [code] is the service's fixed `error.code`, when the body carries one.
+  ({String path, int status, String? code})? lastRejectedRequest;
 
   static const _beekeeperRoutes = {
     '/v3/beekeeper/get-model-catalog',
@@ -504,7 +505,11 @@ class BuilderlabAccountClient {
       if (response.statusCode == 401) throw AccountFailure.signedOut;
       if (response.statusCode == 403) throw AccountFailure.denied;
       if (const {400, 404, 409, 422}.contains(response.statusCode)) {
-        lastRejectedRequest = (path: path, status: response.statusCode);
+        lastRejectedRequest = (
+          path: path,
+          status: response.statusCode,
+          code: _errorCode(response.bodyBytes),
+        );
         throw AccountFailure.rejected;
       }
       if (response.statusCode < 200 || response.statusCode >= 300) {
@@ -519,6 +524,18 @@ class BuilderlabAccountClient {
       throw AccountFailure.invalidResponse;
     } catch (_) {
       throw AccountFailure.unavailable;
+    }
+  }
+
+  /// Rejections from routes without a JSON `error.code` carry no code.
+  static String? _errorCode(List<int> body) {
+    try {
+      return switch (jsonDecode(utf8.decode(body))) {
+        {'error': {'code': final String code}} => code,
+        _ => null,
+      };
+    } on FormatException {
+      return null;
     }
   }
 

@@ -21,6 +21,7 @@ import 'hosted_community_connection.dart';
 import 'web_connect_binding.dart';
 import 'hosted_join_policy.dart';
 
+part 'hosted_flow_creation.dart';
 part 'hosted_flow_identity_recovery.dart';
 part 'hosted_flow_backup_consent.dart';
 
@@ -62,6 +63,7 @@ enum HostedFlowProblem {
   inviteRestricted,
   inviteOwnerMismatch,
   communityCreationRejected,
+  communityNameTaken,
 }
 
 /// Resolves only after relay admission is proven and local persistence completes.
@@ -778,9 +780,8 @@ class HostedFlow extends ChangeNotifier {
       await _continueCommunities(generation, session.subject, pubkey);
       return;
     }
-    final destination = target is HostedCreateCommunity
-        ? await target.provision(account, pubkey, _isCurrent(generation))
-        : target;
+    final destination = await _destinationFor(target, pubkey, generation);
+    if (destination == null) return;
     if (_disposed || generation != _generation) return;
     await enterCommunity(
       destination,
