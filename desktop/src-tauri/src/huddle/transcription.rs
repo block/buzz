@@ -62,7 +62,15 @@ pub async fn set_huddle_transcription_enabled(
 
     if enabled {
         if let Some(manager) = models::global_model_manager() {
-            manager.start_stt_download(state.http_client.clone());
+            match super::tts_settings::current_speech_language(&state).asr_backend() {
+                super::speech_profile::AsrBackend::Kroko => {
+                    manager.start_kroko_download(state.http_client.clone());
+                    manager.start_stt_download(state.http_client.clone());
+                }
+                super::speech_profile::AsrBackend::Parakeet => {
+                    manager.start_stt_download(state.http_client.clone());
+                }
+            }
         }
         if let Err(e) = maybe_start_stt_pipeline(&state, &ephemeral_channel_id).await {
             eprintln!("buzz-desktop: STT transcript start failed: {e}");
