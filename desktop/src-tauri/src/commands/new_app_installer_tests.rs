@@ -100,6 +100,33 @@ fn file_names(dir: &Path) -> Vec<String> {
     names
 }
 
+/// Set in the copy of a test that [`rerun_with_open_umask`] starts.
+#[cfg(unix)]
+const OPEN_UMASK_ENV: &str = "BUZZ_TEST_INSTALLER_OPEN_UMASK";
+
+/// Runs `test` of this module again in its own process under a umask of 000,
+/// and fails if that run fails. A umask belongs to the whole process, so
+/// changing it here would loosen the files other tests create meanwhile.
+#[cfg(unix)]
+fn rerun_with_open_umask(test: &str) {
+    // libtest names a test by its module path without the crate name.
+    let module = module_path!().split_once("::").map_or("", |(_, rest)| rest);
+    let output = std::process::Command::new("sh")
+        .args(["-c", r#"umask 000 && exec "$0" "$@""#])
+        .arg(std::env::current_exe().expect("test binary"))
+        .args(["--exact", &format!("{module}::{test}"), "--test-threads=1"])
+        .env(OPEN_UMASK_ENV, "1")
+        .output()
+        .expect("rerun the test under an open umask");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        // "1 passed" proves the name matched a test, not nothing.
+        output.status.success() && stdout.contains("1 passed"),
+        "{test} under umask 000:\n{stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 struct Run {
     result: Result<PathBuf, TransferError>,
     events: Vec<InstallerDownloadEvent>,
@@ -391,8 +418,9 @@ async fn saves_the_whole_body_under_the_installers_name() {
         })
     );
 
-    // The saved file has the mode any new file gets under this user's umask,
-    // not the private mode of a temporary file, and it is never executable.
+    // The saved file is requested as 0644 and the umask applies on top. It is
+    // not the private mode of a temporary file. Whatever the umask, nobody but
+    // the owner can write it and nobody can execute it.
     #[cfg(unix)]
     {
         use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -407,11 +435,20 @@ async fn saves_the_whole_body_under_the_installers_name() {
         std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
-            .mode(0o666)
+            .mode(0o644)
             .open(&ordinary)
             .expect("ordinary file");
-        assert_eq!(mode_of(&saved), mode_of(&ordinary));
-        assert_eq!(mode_of(&saved) & 0o111, 0, "not executable");
+        let mode = mode_of(&saved);
+        // A stricter umask is honoured: the same bits come off as for any file.
+        assert_eq!(mode, mode_of(&ordinary), "{mode:o}");
+        assert_eq!(mode & 0o133, 0, "{mode:o}");
+        if std::env::var_os(OPEN_UMASK_ENV).is_some() {
+            // No umask at all: the mode is exactly the one requested.
+            assert_eq!(mode, 0o644, "{mode:o}");
+        } else {
+            // The default umask hides a looser request, so check without one.
+            rerun_with_open_umask("saves_the_whole_body_under_the_installers_name");
+        }
     }
 }
 
@@ -701,7 +738,7 @@ fn shutdown_cancels_and_removes_the_partial_file() {
     assert!(partial.exists());
 
     let record = dir.path().join("app-data").join("partial-record.txt");
-    downloads.recover(record.clone());
+    downloads.recover(record.clone(), Some(dir.path()));
     let active = downloads.begin().expect("download");
     downloads.set_partial(&partial);
     assert!(record.exists());
@@ -720,7 +757,8 @@ fn the_next_launch_removes_exactly_the_partial_a_dead_run_recorded() {
     let record = dir.path().join("app-data").join("partial-record.txt");
     let downloads_dir = dir.path().join("Downloads");
     std::fs::create_dir(&downloads_dir).expect("download dir");
-    let partial = downloads_dir.join("Buzz_1.0.0_aarch64.dmg.aB3xYz.part");
+    let partial_name = "Buzz_1.0.0_aarch64.dmg.aB3xYz.part";
+    let partial = downloads_dir.join(partial_name);
     // Files the cleanup has no business touching, however similar they look.
     let bystanders = [
         "Buzz_1.0.0_aarch64.dmg",
@@ -732,17 +770,20 @@ fn the_next_launch_removes_exactly_the_partial_a_dead_run_recorded() {
         std::fs::write(downloads_dir.join(name), b"mine").expect(name);
     }
 
-    // A download that ends normally leaves no record behind.
+    // A download that ends normally leaves no record behind. While it runs
+    // the record holds the partial file's name and no folder.
     let downloads = InstallerDownloads::default();
-    downloads.recover(record.clone());
+    downloads.recover(record.clone(), Some(&downloads_dir));
     let active = downloads.begin().expect("download");
     downloads.set_partial(&partial);
     assert_eq!(
         std::fs::read_to_string(&record).expect("record"),
-        partial.to_str().expect("utf-8 path")
+        partial_name
     );
+    std::fs::remove_file(&partial).expect("the download removes its partial");
     drop(active);
     assert!(!record.exists());
+    std::fs::write(&partial, b"half").expect("partial");
 
     // A run that dies mid-download does: none of its cleanup runs.
     let active = downloads.begin().expect("download");
@@ -750,50 +791,104 @@ fn the_next_launch_removes_exactly_the_partial_a_dead_run_recorded() {
     std::mem::forget(active);
     assert!(record.exists());
 
+    // Without a Downloads folder to look in, the record waits.
+    remove_recorded_partial(&record, None);
+    assert!(record.exists());
+    assert!(partial.exists());
+
     // The next launch removes that file, forgets it, and touches nothing else.
-    InstallerDownloads::default().recover(record.clone());
+    InstallerDownloads::default().recover(record.clone(), Some(&downloads_dir));
     assert!(!record.exists());
     assert_eq!(file_names(&downloads_dir), bystanders);
 
-    // A record that names anything but a partial file of this module's shape
-    // is dropped without removing what it names.
+    // A partial file of exactly this module's shape, in a folder that is not
+    // the Downloads folder. No record can reach it.
+    let elsewhere = dir.path().join("elsewhere");
+    std::fs::create_dir(&elsewhere).expect("elsewhere");
+    let outside = elsewhere.join("backup.deb.old1.part");
+    std::fs::write(&outside, b"not ours").expect("outside");
     #[cfg(unix)]
     std::os::unix::fs::symlink(
         downloads_dir.join("Buzz_1.0.0_aarch64.dmg"),
         downloads_dir.join("Buzz_1.0.0_aarch64.dmg.linked.part"),
     )
     .expect("symlink");
+    std::fs::create_dir(downloads_dir.join("Buzz_1.0.0_aarch64.dmg.folder.part")).expect("folder");
+    // A record that names anything but a partial file of this module's shape
+    // directly inside the Downloads folder is dropped, and nothing is removed.
     let not_ours = [
-        downloads_dir.join("Buzz_1.0.0_aarch64.dmg"),
-        downloads_dir.join("film.mkv.part"),
-        downloads_dir.join("Buzz_1.0.0_aarch64.dmg.linked.part"),
-        PathBuf::from("Buzz_1.0.0_aarch64.dmg.zzzzzz.part"),
-        downloads_dir.clone(),
+        // An edited record that holds a path instead of a name.
+        outside.to_str().expect("utf-8 path").to_string(),
+        "../elsewhere/backup.deb.old1.part".to_string(),
+        partial.to_str().expect("utf-8 path").to_string(),
+        // The right shape, but only the other folder has such a file.
+        "backup.deb.old1.part".to_string(),
+        // Names in the Downloads folder that are not partial files.
+        "Buzz_1.0.0_aarch64.dmg".to_string(),
+        "film.mkv.part".to_string(),
+        // The right shape, but a link and a folder, not a regular file.
+        "Buzz_1.0.0_aarch64.dmg.linked.part".to_string(),
+        "Buzz_1.0.0_aarch64.dmg.folder.part".to_string(),
+        String::new(),
     ];
-    for path in not_ours {
-        // Asked of the path itself, so a removed symlink is noticed.
-        let existed = path.symlink_metadata().is_ok();
-        std::fs::write(&record, path.to_str().expect("utf-8 path")).expect("record");
-        remove_recorded_partial(&record);
-        assert!(!record.exists(), "{}", path.display());
+    std::fs::write(&partial, b"half").expect("partial");
+    let before = (file_names(&downloads_dir), file_names(&elsewhere));
+    for recorded in not_ours {
+        std::fs::write(&record, &recorded).expect("record");
+        remove_recorded_partial(&record, Some(&downloads_dir));
+        assert!(!record.exists(), "{recorded}");
         assert_eq!(
-            path.symlink_metadata().is_ok(),
-            existed,
-            "{}",
-            path.display()
+            (file_names(&downloads_dir), file_names(&elsewhere)),
+            before,
+            "{recorded}"
         );
-        for name in bystanders {
-            assert!(
-                downloads_dir.join(name).exists(),
-                "{name} after {}",
-                path.display()
-            );
-        }
     }
     // Neither is a record that is not text at all.
     std::fs::write(&record, [0xff, 0xfe, 0x00]).expect("record");
-    remove_recorded_partial(&record);
+    remove_recorded_partial(&record, Some(&downloads_dir));
     assert!(!record.exists());
+    assert_eq!(file_names(&downloads_dir), before.0);
+}
+
+#[test]
+fn a_partial_that_cannot_be_removed_stays_recorded() {
+    let dir = tempfile::tempdir().expect("download dir");
+    let record = dir.path().join("app-data").join("partial-record.txt");
+    let downloads_dir = dir.path().join("Downloads");
+    std::fs::create_dir(&downloads_dir).expect("download dir");
+    let partial_name = "Buzz_1.0.0_aarch64.dmg.aB3xYz.part";
+    let partial = downloads_dir.join(partial_name);
+    let recorded = || std::fs::read_to_string(&record).ok();
+
+    // A folder stands in for a file the system refuses to remove, such as one
+    // a scanner holds open on Windows: removing it as a file fails everywhere.
+    std::fs::create_dir(&partial).expect("stand-in");
+    let downloads = InstallerDownloads::default();
+    downloads.recover(record.clone(), Some(&downloads_dir));
+
+    // A download ends and its own removal of the partial file fails, which
+    // nothing reports. Freeing the slot must not forget the file.
+    let active = downloads.begin().expect("download");
+    downloads.set_partial(&partial);
+    drop(active);
+    assert_eq!(recorded().as_deref(), Some(partial_name));
+
+    // The same at exit: the removal fails there, and again when the download
+    // task frees its slot afterwards.
+    let active = downloads.begin().expect("download");
+    downloads.set_partial(&partial);
+    downloads.abort_for_shutdown();
+    assert!(active.cancel.is_cancelled());
+    assert_eq!(recorded().as_deref(), Some(partial_name));
+    drop(active);
+    assert_eq!(recorded().as_deref(), Some(partial_name));
+
+    // The next launch finds the file by that record and removes it.
+    std::fs::remove_dir(&partial).expect("stand-in");
+    std::fs::write(&partial, b"half").expect("partial");
+    InstallerDownloads::default().recover(record.clone(), Some(&downloads_dir));
+    assert!(!partial.exists());
+    assert_eq!(recorded(), None);
 }
 
 #[test]
@@ -852,9 +947,20 @@ fn mark_of_the_web_write_is_verified_by_reading_it_back() {
     assert!(write_zone_identifier(&missing, &origin).is_err());
 }
 
-#[cfg(target_os = "macos")]
+// Listed on every platform, so a runner that selects this file's tests by
+// name finds it; it runs where the quarantine attribute exists.
 #[test]
+#[cfg_attr(
+    not(target_os = "macos"),
+    ignore = "the quarantine attribute exists only on macOS"
+)]
 fn macos_download_is_quarantined() {
+    #[cfg(target_os = "macos")]
+    macos_download_is_quarantined_body();
+}
+
+#[cfg(target_os = "macos")]
+fn macos_download_is_quarantined_body() {
     let dir = tempfile::tempdir().expect("dir");
     let file = dir.path().join("Buzz.dmg.part");
     std::fs::write(&file, b"installer").expect("file");

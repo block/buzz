@@ -24,6 +24,7 @@ type BridgeWindow = Window & {
     finishOnNextCancel: () => void;
     failNextReveal: () => void;
   };
+  __BUZZ_E2E_APPLY_COMMUNITY_ERROR__?: string;
 };
 
 const UPGRADE_GUIDE_URL =
@@ -159,6 +160,57 @@ async function openBannerWithInstaller(
     .getByRole("button", { name: /^Upgrade,/ });
   await expect(download).toHaveAttribute("data-download-source", "installer");
   return download;
+}
+
+/**
+ * Presses Enter on the focused dialog action and keeps it down past the
+ * close. Focus returns to the banner button while the key is still held, and
+ * the key's repeat must not press that button: no download starts, nothing
+ * more is opened, and no dialog comes back.
+ */
+async function closeDialogWithHeldEnter(page: Page, download: Locator) {
+  const requests = (await downloadRequests(page)).length;
+  await page.keyboard.down("Enter");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(download).toBeFocused();
+  const opened = await openedUrls(page);
+  await page.keyboard.down("Enter");
+  await page.keyboard.up("Enter");
+  expect(await downloadRequests(page)).toHaveLength(requests);
+  expect(await openedUrls(page)).toEqual(opened);
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+}
+
+/** Counts the banner's fetches of the installer manifest: one per mount. */
+function countManifestRequests(page: Page) {
+  let count = 0;
+  page.on("request", (request) => {
+    if (request.url() === BUZZ_APP_DOWNLOADS_MANIFEST_URL) {
+      count += 1;
+    }
+  });
+  return () => count;
+}
+
+/**
+ * Switches to `community` with a press dispatched straight at its rail
+ * button, as a deep link or a signer change would land: the open modal keeps
+ * the pointer off the rail.
+ */
+async function switchCommunityBehindDialog(
+  page: Page,
+  community: { id: string },
+) {
+  await page
+    .getByTestId(`community-rail-button-${community.id}`)
+    .evaluate((button: HTMLElement) => button.click());
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        window.localStorage.getItem("buzz-active-community-id"),
+      ),
+    )
+    .toBe(community.id);
 }
 
 async function boxOf(locator: Locator) {
@@ -467,8 +519,9 @@ test("deprecation banner: a failed download leads with the action that can still
     await expect(inBrowser).toHaveText("Download in browser");
     await expect(retry).toHaveCount(0);
     await expect(website).toBeVisible();
-    await page.keyboard.press("Enter");
-    await expect(page.getByRole("dialog")).toHaveCount(0);
+    // Enter held on "Download in browser" must not start the download again
+    // once focus is back on the banner button.
+    await closeDialogWithHeldEnter(page, download);
   }
   expect(await openedUrls(page)).toEqual([
     WEBSITE_URL,
@@ -500,8 +553,8 @@ test("deprecation banner: a failed download leads with the action that can still
   await expect(website).toBeFocused();
   await expect(retry).toHaveCount(0);
   await expect(inBrowser).toHaveCount(0);
-  await page.keyboard.press("Enter");
-  await expect(page.getByRole("dialog")).toHaveCount(0);
+  // The same for Enter held on "Open buzz.xyz".
+  await closeDialogWithHeldEnter(page, download);
   expect(await openedUrls(page)).toEqual([
     WEBSITE_URL,
     ARM64_DMG_URL,
@@ -514,7 +567,7 @@ test("deprecation banner: Cancel and Escape stop a running download, a stray cli
   page,
 }) => {
   const download = await openBannerWithInstaller(page);
-  // Mounting the banner clears any download a previous page left running.
+  // Loading the page clears any download a previous page left running.
   const cancelsAtRest = await commandCount(
     page,
     "cancel_new_app_installer_download",
@@ -598,8 +651,8 @@ test("deprecation banner: Cancel and Escape stop a running download, a stray cli
   await expect
     .poll(() => commandCount(page, "reveal_new_app_installer"))
     .toBe(1);
-  await page.keyboard.press("Enter");
-  await expect(page.getByRole("dialog")).toHaveCount(0);
+  // Enter held on Done closes the dialog and must not download a second copy.
+  await closeDialogWithHeldEnter(page, download);
 
   // Each press started exactly one download, and nothing went to the browser.
   expect(await downloadRequests(page)).toEqual([
@@ -613,9 +666,11 @@ test("deprecation banner: Cancel and Escape stop a running download, a stray cli
 test("deprecation banner: a running download and its dialog survive a community switch", async ({
   page,
 }) => {
+  const manifestRequests = countManifestRequests(page);
   const download = await openBannerWithInstaller(page, {
     twoCommunities: true,
   });
+  expect(manifestRequests()).toBe(1);
   await download.click();
   const dialog = page.getByRole("dialog", {
     name: "Downloading the new Buzz app",
@@ -625,21 +680,13 @@ test("deprecation banner: a running download and its dialog survive a community 
   const cancels = await commandCount(page, "cancel_new_app_installer_download");
 
   // The switch remounts everything under the community, the banner included.
-  // The modal keeps the pointer off the rail, so the press is dispatched
-  // straight at the element, as a deep link or a signer change would land.
-  await page
-    .getByTestId(`community-rail-button-${COMMUNITY_B.id}`)
-    .evaluate((button: HTMLElement) => button.click());
-  await expect
-    .poll(() =>
-      page.evaluate(() =>
-        window.localStorage.getItem("buzz-active-community-id"),
-      ),
-    )
-    .toBe(COMMUNITY_B.id);
+  await switchCommunityBehindDialog(page, COMMUNITY_B);
   await expect(
     page.getByTestId(`community-rail-active-${COMMUNITY_B.id}`),
   ).toBeVisible();
+  // The banner fetches the manifest once per mount, so a second fetch is the
+  // new banner: the one that started the download is gone.
+  await expect.poll(manifestRequests).toBe(2);
 
   // The same download is still running, in the same dialog, where it was.
   await expect(dialog).toBeVisible();
@@ -666,6 +713,74 @@ test("deprecation banner: a running download and its dialog survive a community 
   await expect
     .poll(() => commandCount(page, "reveal_new_app_installer"))
     .toBe(1);
+});
+
+test("deprecation banner: a download whose banner is gone keeps its dialog and its Cancel", async ({
+  page,
+}) => {
+  const download = await openBannerWithInstaller(page, {
+    twoCommunities: true,
+  });
+  await download.click();
+  const dialog = page.getByRole("dialog", {
+    name: "Downloading the new Buzz app",
+  });
+  await expect(dialog).toBeVisible();
+  await emitProgress(page, 20 * MIB, 79 * MIB);
+  const cancels = await commandCount(page, "cancel_new_app_installer_download");
+
+  // The switch fails, so the app parks on the connection-failed screen. No
+  // shell is mounted there, and so no banner.
+  await page.evaluate(() => {
+    (window as BridgeWindow).__BUZZ_E2E_APPLY_COMMUNITY_ERROR__ =
+      "relay unreachable";
+  });
+  await switchCommunityBehindDialog(page, COMMUNITY_B);
+  const connectionFailed = page.getByTestId("community-apply-error");
+  await expect(connectionFailed).toBeVisible();
+  await expect(page.getByTestId("deprecation-banner")).toHaveCount(0);
+
+  // The download is not left running out of sight: its dialog is still up,
+  // still modal, and still follows the progress.
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole("progressbar")).toHaveAttribute(
+    "aria-valuenow",
+    "25",
+  );
+  expect(await isMockDownloadActive(page)).toBe(true);
+  expect(await commandCount(page, "cancel_new_app_installer_download")).toBe(
+    cancels,
+  );
+  await emitProgress(page, 60 * MIB, 79 * MIB);
+  await expect(dialog.getByRole("progressbar")).toHaveAttribute(
+    "aria-valuenow",
+    "75",
+  );
+
+  // Cancel is still there and stops it, by keyboard.
+  const cancel = dialog.getByRole("button", { name: "Cancel" });
+  await cancel.focus();
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  expect(await isMockDownloadActive(page)).toBe(false);
+  expect(await commandCount(page, "cancel_new_app_installer_download")).toBe(
+    cancels + 1,
+  );
+  expect(await downloadRequests(page)).toEqual([ARM64_DMG_URL]);
+
+  // The screen behind the dialog works again: Retry connects, and the banner
+  // that comes back offers the download as before.
+  await page.evaluate(() => {
+    (window as BridgeWindow).__BUZZ_E2E_APPLY_COMMUNITY_ERROR__ = undefined;
+  });
+  await connectionFailed.getByRole("button", { name: "Retry" }).click();
+  await expect(
+    page.getByTestId(`community-rail-active-${COMMUNITY_B.id}`),
+  ).toBeVisible();
+  await expect(download).toHaveAttribute("data-download-source", "installer");
+  await download.click();
+  await expect(dialog).toBeVisible();
+  expect(await downloadRequests(page)).toEqual([ARM64_DMG_URL, ARM64_DMG_URL]);
 });
 
 test("deprecation banner: the download button opens the website while the manifest is still loading", async ({

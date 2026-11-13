@@ -8,6 +8,7 @@ import {
   type FailureAction,
   type FileManagerPlatform,
   failureActions,
+  ignoreRepeatedEnter,
   type InstallerDialogState,
   liveAnnouncement,
   REVEAL_FAILED_MESSAGE,
@@ -148,13 +149,9 @@ export function NewAppInstallerDialog({
           event.preventDefault();
           returnFocusRef.current?.focus();
         }}
-        onKeyDown={(event) => {
-          // Enter still held from the press that started the download repeats
-          // onto the button focus has just moved to. It must not press it.
-          if (event.repeat && event.key === "Enter") {
-            event.preventDefault();
-          }
-        }}
+        // Enter still held from the press that started the download repeats
+        // onto the button focus has just moved to. It must not press it.
+        onKeyDown={ignoreRepeatedEnter}
         onOpenAutoFocus={(event) => {
           if (focusCurrentAction()) {
             event.preventDefault();

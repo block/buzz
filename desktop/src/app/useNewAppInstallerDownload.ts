@@ -13,8 +13,9 @@ import {
 } from "@/shared/api/newAppInstallerDownload";
 
 // The download belongs to the app, not to a community, so its state lives
-// outside React and outside `resetCommunityState()`: the banner remounts on a
-// community switch or an identity change, and the dialog must still be there.
+// outside React and outside `resetCommunityState()`. The banner that starts
+// it comes and goes with the community, the identity and onboarding; the
+// dialog that shows it is mounted once, above all of that.
 let state: InstallerDialogState = INSTALLER_DIALOG_CLOSED;
 // Set synchronously, so two clicks in one tick cannot both start a download.
 let isRunning = false;
@@ -55,7 +56,18 @@ function reveal() {
   );
 }
 
-function start(url: string) {
+/**
+ * The control that offers the download: the banner's button while a banner is
+ * mounted, null otherwise. The dialog returns focus to it when it closes.
+ */
+export const newAppInstallerTriggerRef: React.RefObject<HTMLButtonElement | null> =
+  { current: null };
+
+/**
+ * Starts the in-app download of the installer at `url`, which
+ * `NewAppInstallerDownloadHost` then shows. Does nothing while one runs.
+ */
+export function startNewAppInstallerDownload(url: string) {
   if (isRunning) {
     return;
   }
@@ -94,18 +106,19 @@ function dismiss() {
 }
 
 /**
- * Runs the in-app download of the new app's installer and holds the state its
- * dialog shows. One download at a time, for the whole app.
+ * Holds the state the installer download's dialog shows, and the actions the
+ * dialog offers. One download at a time, for the whole app.
  *
- * The download outlives the component that started it: unmounting does not
- * cancel it, and the next mount shows the same dialog. The backend stops it
- * when the main window is destroyed or the app exits.
+ * `NewAppInstallerDownloadHost` is the one place that mounts this, once per
+ * main window and above everything that remounts, so a running download
+ * always has a dialog with a Cancel button. The download does not depend on
+ * the component that started it, and the backend stops it when the main
+ * window is destroyed or the app exits.
  *
  * Mounting stops a download this page knows nothing about, which is one left
  * running by a page that was reloaded. That assumes a single window mounts
- * this hook. Only the main window shows the banner today; a second window
- * with its own banner would cancel the first window's download on mount, so
- * it would need the backend to tell it about the running download instead.
+ * this hook: a second window would cancel the first window's download on
+ * mount, so the huddle window must not mount it.
  */
 export function useNewAppInstallerDownload() {
   const current = React.useSyncExternalStore(subscribe, getState);
@@ -116,5 +129,11 @@ export function useNewAppInstallerDownload() {
     }
   }, []);
 
-  return { state: current, start, cancel, dismiss, reveal };
+  return {
+    state: current,
+    start: startNewAppInstallerDownload,
+    cancel,
+    dismiss,
+    reveal,
+  };
 }

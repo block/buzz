@@ -43,8 +43,9 @@ const STALL_TIMEOUT: Duration = Duration::from_secs(30);
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 const PARTIAL_SUFFIX: &str = ".part";
-/// File in the app data directory that names the running download's partial
-/// file, so the launch after a crash can remove exactly that file.
+/// File in the app data directory that holds the file name of the running
+/// download's partial file, so the launch after a crash can remove exactly
+/// that file from the Downloads folder.
 const PARTIAL_RECORD_NAME: &str = "new-app-installer-partial.txt";
 
 /// Progress sent to the webview over the command's channel.
@@ -396,8 +397,9 @@ fn persist_without_overwrite(
 
 /// Creates `dest_dir` if needed and `<file name>.<random>.part` in it.
 ///
-/// On Unix the file gets the mode any new file gets under the user's umask,
-/// 0644 by default and never executable, as a browser download would. The
+/// On Unix the file is requested with mode 0644 and the user's umask applies
+/// on top. A stricter umask is honoured, and a looser one never makes the
+/// installer writable by anyone but its owner. It is never executable. The
 /// temporary-file default is private to the user, which is wrong for a file
 /// that ends up in Downloads.
 fn create_partial(dest_dir: &Path, file_name: &str) -> io::Result<(std::fs::File, TempPath)> {
@@ -408,7 +410,7 @@ fn create_partial(dest_dir: &Path, file_name: &str) -> io::Result<(std::fs::File
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        builder.permissions(std::fs::Permissions::from_mode(0o666));
+        builder.permissions(std::fs::Permissions::from_mode(0o644));
     }
     Ok(builder.tempfile_in(dest_dir)?.into_parts())
 }
@@ -488,11 +490,14 @@ pub(super) async fn download_installer(
     persist_without_overwrite(partial, dest_dir, source).map_err(TransferError::Failed)
 }
 
+// Written on macOS only. Tests check the value's shape on every platform.
+#[cfg(any(target_os = "macos", test))]
 const QUARANTINE_AGENT: &str = "Buzz";
 
 /// The value a non-sandboxed browser writes to `com.apple.quarantine` for a
 /// web download: flags, hex timestamp, downloading app, and an event id that
 /// is empty because no LaunchServices quarantine event is recorded.
+#[cfg(any(target_os = "macos", test))]
 pub(super) fn quarantine_value(unix_seconds: u64) -> String {
     format!("0081;{unix_seconds:08x};{QUARANTINE_AGENT};")
 }
@@ -573,14 +578,18 @@ pub(super) fn resolve_download_dir(
     configured.or_else(|| home.filter(|_| is_linux).map(|home| home.join("Downloads")))
 }
 
+/// Records the partial file by name only. The folder is not recorded: the
+/// next launch looks in the Downloads folder it resolves itself, so the record
+/// can never point the cleanup at a file anywhere else.
 fn write_partial_record(record: &Path, partial: &Path) -> io::Result<()> {
-    let partial = partial
-        .to_str()
-        .ok_or_else(|| io::Error::other("the partial file's path is not UTF-8"))?;
+    let name = partial
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| io::Error::other("the partial file's name is not UTF-8"))?;
     if let Some(parent) = record.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(record, partial)
+    std::fs::write(record, name)
 }
 
 fn clear_partial_record(record: &Path) {
@@ -593,36 +602,46 @@ fn clear_partial_record(record: &Path) {
     }
 }
 
-/// Whether `path` is still a partial file of the shape this module writes:
-/// `<installer name>.<random>.part`, a regular file and not a link.
-fn is_own_partial_file(path: &Path) -> bool {
-    let Some((installer, random)) = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .and_then(|name| name.strip_suffix(PARTIAL_SUFFIX))
+/// Whether nothing is left at `partial`: it was removed, or it was moved to
+/// the installer's final name. An error other than "not found" does not prove
+/// the file is gone.
+fn partial_is_gone(partial: &Path) -> bool {
+    matches!(
+        std::fs::symlink_metadata(partial),
+        Err(error) if error.kind() == io::ErrorKind::NotFound
+    )
+}
+
+/// Whether `name` has the shape of a partial file this module writes:
+/// `<installer name>.<random>.part`. Such a name holds only letters, digits
+/// and `._+-`, so it has no separator and names a file directly in the folder
+/// it is joined to.
+fn is_partial_file_name(name: &str) -> bool {
+    let Some((installer, random)) = name
+        .strip_suffix(PARTIAL_SUFFIX)
         .and_then(|rest| rest.rsplit_once('.'))
     else {
         return false;
     };
-    path.is_absolute()
-        && !random.is_empty()
+    !random.is_empty()
         && random.bytes().all(|byte| byte.is_ascii_alphanumeric())
         && INSTALLER_EXTENSIONS
             .iter()
             .any(|extension| is_safe_file_name(installer, extension))
-        && std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_file())
 }
 
 /// Removes the partial file a previous run recorded and never cleaned up: a
 /// crash, a force quit or a power cut ends the app without any of its cleanup.
 ///
-/// Only the recorded path is touched, and only while it is still a partial
-/// file of this module's shape. No folder is searched, so a file this app did
-/// not create is never removed.
-pub(super) fn remove_recorded_partial(record: &Path) {
+/// The record holds a file name, and only that name directly inside
+/// `download_dir` is touched, and only while it is still a regular file of
+/// this module's shape. No folder is searched and no recorded folder is
+/// trusted, so a file this app did not create is never removed. Without a
+/// Downloads folder nothing can be looked up, and the record is kept.
+pub(super) fn remove_recorded_partial(record: &Path, download_dir: Option<&Path>) {
     use std::io::Read;
 
-    // A path is far shorter than this; anything longer is not a record.
+    // A file name is far shorter than this; anything longer is not a record.
     const MAX_RECORD_BYTES: u64 = 16 * 1024;
 
     let mut recorded = String::new();
@@ -636,15 +655,23 @@ pub(super) fn remove_recorded_partial(record: &Path) {
             recorded.clear();
         }
     }
-    let partial = PathBuf::from(recorded);
-    if is_own_partial_file(&partial) {
-        if let Err(error) = std::fs::remove_file(&partial) {
-            // The record stays, so the next launch tries again.
-            eprintln!(
-                "buzz-desktop: could not remove leftover partial installer {}: {error}",
-                partial.display()
-            );
+    if is_partial_file_name(&recorded) {
+        let Some(download_dir) = download_dir else {
+            eprintln!("buzz-desktop: no Downloads folder to look for a leftover partial installer");
             return;
+        };
+        let partial = download_dir.join(&recorded);
+        // A regular file, not a link to one.
+        let is_file = std::fs::symlink_metadata(&partial).is_ok_and(|metadata| metadata.is_file());
+        if is_file {
+            if let Err(error) = std::fs::remove_file(&partial) {
+                // The record stays, so the next launch tries again.
+                eprintln!(
+                    "buzz-desktop: could not remove leftover partial installer {}: {error}",
+                    partial.display()
+                );
+                return;
+            }
         }
     }
     clear_partial_record(record);
@@ -680,9 +707,19 @@ pub(super) struct ActiveDownload<'a> {
 
 impl Drop for ActiveDownload<'_> {
     fn drop(&mut self) {
-        // By now the partial file is gone or has become the installer. The
-        // record goes first, while the slot still keeps the next download out.
-        self.downloads.forget_partial();
+        // By now the partial file has become the installer or has been
+        // removed, unless its removal failed: then the record stays, and the
+        // next launch removes the file. The record is settled first, while
+        // the slot still keeps the next download out.
+        let partial = self
+            .downloads
+            .slots()
+            .active
+            .as_ref()
+            .and_then(|active| active.partial.clone());
+        if partial.as_deref().is_none_or(partial_is_gone) {
+            self.downloads.forget_partial();
+        }
         self.downloads.slots().active = None;
     }
 }
@@ -709,11 +746,11 @@ impl InstallerDownloads {
         })
     }
 
-    /// Removes the partial file a previous run left behind, then records each
-    /// download's partial file in `record` from here on. Called once at
-    /// startup, before any download can start.
-    pub(super) fn recover(&self, record: PathBuf) {
-        remove_recorded_partial(&record);
+    /// Removes the partial file a previous run left behind in `download_dir`,
+    /// then records each download's partial file in `record` from here on.
+    /// Called once at startup, before any download can start.
+    pub(super) fn recover(&self, record: PathBuf, download_dir: Option<&Path>) {
+        remove_recorded_partial(&record, download_dir);
         let _ = self.partial_record.set(record);
     }
 
@@ -747,15 +784,16 @@ impl InstallerDownloads {
     /// Stops the running download as the app exits, on the normal exit path
     /// and from the signal handler. The download task may never be polled
     /// again, so the partial file is removed here. If that fails its record
-    /// stays, and the next launch removes the file.
+    /// stays, here and when the download task later frees its slot, and the
+    /// next launch removes the file.
     pub(crate) fn abort_for_shutdown(&self) {
         let partial = {
-            let mut slots = self.slots();
-            let Some(active) = slots.active.as_mut() else {
+            let slots = self.slots();
+            let Some(active) = slots.active.as_ref() else {
                 return;
             };
             active.cancel.cancel();
-            active.partial.take()
+            active.partial.clone()
         };
         if let Some(partial) = partial {
             match std::fs::remove_file(&partial) {
@@ -787,6 +825,15 @@ impl InstallerDownloads {
     }
 }
 
+/// The Downloads folder of the running app.
+fn download_dir(app: &AppHandle) -> Option<PathBuf> {
+    resolve_download_dir(
+        app.path().download_dir().ok(),
+        app.path().home_dir().ok(),
+        cfg!(target_os = "linux"),
+    )
+}
+
 async fn run_download(
     app: &AppHandle,
     downloads: &InstallerDownloads,
@@ -800,12 +847,9 @@ async fn run_download(
     let client = downloads
         .client()
         .ok_or(TransferError::Failed(InstallerFailure::Network))?;
-    let dest_dir = resolve_download_dir(
-        app.path().download_dir().ok(),
-        app.path().home_dir().ok(),
-        cfg!(target_os = "linux"),
-    )
-    .ok_or_else(|| TransferError::Failed(fail(InstallerFailure::Storage, "no Downloads folder")))?;
+    let dest_dir = download_dir(app).ok_or_else(|| {
+        TransferError::Failed(fail(InstallerFailure::Storage, "no Downloads folder"))
+    })?;
 
     // A closed webview cannot receive events; the transfer is cancelled through
     // the window hooks, not through a failed send.
@@ -868,9 +912,10 @@ pub async fn download_new_app_installer(
 /// do the same. Run once from the app's setup hook.
 pub fn recover_new_app_installer_downloads(app: &AppHandle) {
     match app.path().app_data_dir() {
-        Ok(data_dir) => app
-            .state::<InstallerDownloads>()
-            .recover(data_dir.join(PARTIAL_RECORD_NAME)),
+        Ok(data_dir) => app.state::<InstallerDownloads>().recover(
+            data_dir.join(PARTIAL_RECORD_NAME),
+            download_dir(app).as_deref(),
+        ),
         Err(error) => {
             eprintln!("buzz-desktop: partial installer downloads are not recorded: {error}");
         }

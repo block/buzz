@@ -1,9 +1,11 @@
-import * as React from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
-import { NewAppInstallerDialog } from "@/app/NewAppInstallerDialog";
 import { BUZZ_APP_WEBSITE_URL } from "@/app/newAppInstaller";
-import { useNewAppInstallerDownload } from "@/app/useNewAppInstallerDownload";
+import { ignoreRepeatedEnter } from "@/app/newAppInstallerDownload";
+import {
+  newAppInstallerTriggerRef,
+  startNewAppInstallerDownload,
+} from "@/app/useNewAppInstallerDownload";
 import { Button } from "@/shared/ui/button";
 
 type NewAppDownloadButtonProps = {
@@ -13,71 +15,44 @@ type NewAppDownloadButtonProps = {
 };
 
 /**
- * The banner's "Upgrade" button. With an installer URL it downloads
- * the installer inside the app and shows the progress in a dialog; without
- * one it opens the website in the browser. The click never waits on anything.
+ * The banner's "Upgrade" button. With an installer URL it starts the download
+ * inside the app, which `NewAppInstallerDownloadHost` shows in a dialog;
+ * without one it opens the website in the browser. The click never waits on
+ * anything.
  */
 export function NewAppDownloadButton({
   className,
   installerUrl,
 }: NewAppDownloadButtonProps) {
-  const { state, start, cancel, dismiss, reveal } =
-    useNewAppInstallerDownload();
-  const buttonRef = React.useRef<HTMLButtonElement>(null);
   const downloadsInApp = installerUrl !== null;
 
   return (
-    <>
-      <Button
-        aria-haspopup={downloadsInApp ? "dialog" : undefined}
-        aria-label={
-          downloadsInApp
-            ? "Upgrade, downloads the installer"
-            : "Upgrade, opens in your browser"
-        }
-        className={className}
-        data-download-source={downloadsInApp ? "installer" : "fallback"}
-        data-testid="deprecation-banner-download"
-        onClick={() => {
-          if (installerUrl) {
-            start(installerUrl);
-          } else {
-            void openUrl(BUZZ_APP_WEBSITE_URL);
-          }
-        }}
-        ref={buttonRef}
-        size="sm"
-        type="button"
-        variant="outline"
-      >
-        Upgrade
-      </Button>
-      <NewAppInstallerDialog
-        onCancel={cancel}
-        onDismiss={dismiss}
-        onDownloadInBrowser={() => {
-          // The URL the download was started with, which the resolver and
-          // the backend both accepted. The browser downloads it its own way.
-          if (state.status === "failed") {
-            void openUrl(state.url);
-          }
-          dismiss();
-        }}
-        onOpenWebsite={() => {
+    <Button
+      aria-haspopup={downloadsInApp ? "dialog" : undefined}
+      aria-label={
+        downloadsInApp
+          ? "Upgrade, downloads the installer"
+          : "Upgrade, opens in your browser"
+      }
+      className={className}
+      data-download-source={downloadsInApp ? "installer" : "fallback"}
+      data-testid="deprecation-banner-download"
+      onClick={() => {
+        if (installerUrl) {
+          startNewAppInstallerDownload(installerUrl);
+        } else {
           void openUrl(BUZZ_APP_WEBSITE_URL);
-          dismiss();
-        }}
-        onRetry={() => {
-          // From the state, not the prop: after a remount the manifest is
-          // fetched again and the prop is null until it arrives.
-          if (state.status === "failed") {
-            start(state.url);
-          }
-        }}
-        onReveal={reveal}
-        returnFocusRef={buttonRef}
-        state={state}
-      />
-    </>
+        }
+      }}
+      // Closing the dialog with Enter returns focus here with the key still
+      // down. Its repeat must not start the download again.
+      onKeyDown={ignoreRepeatedEnter}
+      ref={newAppInstallerTriggerRef}
+      size="sm"
+      type="button"
+      variant="outline"
+    >
+      Upgrade
+    </Button>
   );
 }

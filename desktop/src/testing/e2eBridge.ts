@@ -1431,6 +1431,8 @@ declare global {
       content: string;
       tags: string[][];
     }>;
+    /** While set, applying a community to the mock backend fails with this message. */
+    __BUZZ_E2E_APPLY_COMMUNITY_ERROR__?: string;
     /** Structured merge error returned by the mock native merge command. */
     __BUZZ_E2E_PROJECT_MERGE_ERROR__?: {
       code: string;
@@ -12961,6 +12963,9 @@ export function maybeInstallE2eTauriMocks() {
         return activeConfig?.mock?.linkPreviewMetadata ?? null;
       }
       case "apply_workspace": {
+        if (window.__BUZZ_E2E_APPLY_COMMUNITY_ERROR__) {
+          throw new Error(window.__BUZZ_E2E_APPLY_COMMUNITY_ERROR__);
+        }
         const applyDelayMs = activeConfig?.mock?.applyCommunityDelayMs ?? 0;
         if (applyDelayMs > 0) {
           return new Promise((resolve) =>

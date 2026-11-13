@@ -329,3 +329,18 @@ export function liveAnnouncement(
       return `The download didn't finish. ${failureMessage(state.reason, platform)}`;
   }
 }
+
+/**
+ * Keeps a held Enter from pressing a button again. The press that closes the
+ * dialog, or that starts a download, moves focus to another button while the
+ * key is still down, and the key's repeat must not press that one too.
+ */
+export function ignoreRepeatedEnter(event: {
+  key: string;
+  repeat: boolean;
+  preventDefault: () => void;
+}) {
+  if (event.repeat && event.key === "Enter") {
+    event.preventDefault();
+  }
+}
