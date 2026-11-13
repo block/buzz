@@ -235,8 +235,16 @@ class ReadStateManager {
     _initializing = initializing.future;
     try {
       final subscribed = await _startLiveSubscription();
+      // A stream already live covers what lands after the snapshot, but only
+      // on this connection: a reconnect before this ends reopens it with no
+      // replay, so that reconnect's re-sync must still run. A stream not live
+      // yet is covered by its catch-up instead.
+      final checkConnection = _liveReady
+          ? _relaySession.captureConnectionFence()
+          : null;
       final fetched = await _fetchAndMerge();
-      _initialSyncSucceeded = fetched && subscribed;
+      _initialSyncSucceeded =
+          fetched && subscribed && _connectionHeld(checkConnection);
     } finally {
       _initializing = null;
       initializing.complete();
@@ -500,6 +508,16 @@ class ReadStateManager {
       return true;
     } catch (e) {
       debugPrint('[ReadStateManager] live subscription FAILED: $e');
+      return false;
+    }
+  }
+
+  static bool _connectionHeld(void Function()? checkConnection) {
+    if (checkConnection == null) return true;
+    try {
+      checkConnection();
+      return true;
+    } on StateError {
       return false;
     }
   }

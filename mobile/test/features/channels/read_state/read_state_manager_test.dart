@@ -1059,6 +1059,48 @@ void main() {
     },
   );
 
+  test(
+    'a reconnect after the first snapshot but before initialize ends syncs again',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final keychain = nostr.Keys.generate();
+      final crypto = ReadStateCrypto.tryCreate(
+        nsec: keychain.nsec,
+        pubkey: keychain.public,
+      )!;
+      final gate = Completer<void>();
+      final relay = _FakeRelaySession()..fetchGate = gate.future;
+      final manager = ReadStateManager(
+        pubkey: keychain.public,
+        relayUrl: _relayUrl,
+        prefs: prefs,
+        crypto: crypto,
+        relaySession: relay,
+        signedEventRelay: _FakeSignedEventRelay(),
+        remoteEnabled: true,
+        onChanged: () {},
+      );
+
+      // The stream is live and the snapshot in flight when the socket drops
+      // and reconnects. The reopened REQ replays nothing, so the reconnect's
+      // re-sync must not be skipped as covered by the first sync.
+      final initializing = manager.initialize();
+      await pumpEventQueue();
+      relay.connection++;
+      final reinitializing = manager.reinitializeRemote();
+      relay.fetchGate = null;
+      gate.complete();
+      await Future.wait([initializing, reinitializing]);
+
+      expect(relay.fetchCount, 2);
+      expect(relay.subscribeCount, 2);
+      expect(relay.liveSubscriptions, 1);
+
+      manager.dispose();
+    },
+  );
+
   test('a connect during a failed initialize syncs again', () async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
@@ -1327,6 +1369,17 @@ NostrEvent _readStateEvent({
 }
 
 class _FakeRelaySession extends RelaySessionNotifier {
+  // Bumped to simulate a reconnect for [captureConnectionFence].
+  int connection = 0;
+
+  @override
+  void Function() captureConnectionFence() {
+    final captured = connection;
+    return () {
+      if (connection != captured) throw StateError('Relay connection changed');
+    };
+  }
+
   List<NostrEvent> historyEvents = [];
   Future<void>? fetchGate;
   bool failNextFetch = false;
