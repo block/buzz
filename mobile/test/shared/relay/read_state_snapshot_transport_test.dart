@@ -545,6 +545,54 @@ void main() {
       });
     },
   );
+
+  test(
+    'a snapshot paused by the rate-limit gate signs after the wait',
+    () async {
+      late RelaySessionNotifier session;
+      var gets = 0;
+      var limited = true;
+      int? limitedAt;
+      final postSignedAt = <int>[];
+      session = RelaySessionNotifier(
+        httpClient: MockClient((request) async {
+          if (request.method == 'GET') {
+            // While this snapshot's discovery is in flight, another snapshot's
+            // POST trips the rate-limit gate.
+            if (++gets == 1) {
+              await expectLater(
+                session.fetchReadStateSnapshot(),
+                throwsA(isA<RelayException>()),
+              );
+            }
+            return http.Response(discovery, 200);
+          }
+          if (limited) {
+            limited = false;
+            limitedAt = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+            return http.Response(
+              jsonEncode({'error': 'rate-limited: slow down, retry in 2s'}),
+              429,
+            );
+          }
+          final auth = request.headers['Authorization']!;
+          final event =
+              jsonDecode(utf8.decode(base64.decode(auth.substring(6))))
+                  as Map<String, dynamic>;
+          postSignedAt.add(event['created_at'] as int);
+          return http.Response(jsonEncode(envelope()), 200);
+        }),
+      );
+      _container(session, _Config(keys.nsec));
+      await pumpEventQueue();
+
+      await session.fetchReadStateSnapshot();
+
+      // Signed after the two-second pause, not before it.
+      expect(postSignedAt, hasLength(1));
+      expect(postSignedAt.single, greaterThanOrEqualTo(limitedAt! + 2));
+    },
+  );
 }
 
 class _Harness {

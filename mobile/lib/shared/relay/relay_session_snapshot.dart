@@ -24,15 +24,19 @@ extension on RelaySessionNotifier {
       }
     }
 
-    Future<http.Response> send(http.Request request, int maxBytes) async {
+    Future<http.Response> send(
+      http.Request Function() buildRequest,
+      int maxBytes,
+    ) async {
       // Honor a relay pause, as every socket send does: a background retry
-      // inside it would spend the quota user actions need.
+      // inside it would spend the quota user actions need. The request is
+      // built after the wait so its NIP-98 signature is fresh.
       if (_rateLimitGate.isActive) {
         await _rateLimitGate.wait();
         checkContext();
       }
       final response = await _httpQueryClient.sendBounded(
-        request,
+        buildRequest(),
         maxBytes: maxBytes,
         timeout: timeout,
         decorate: (client, active) => HostedRelayHttpClient(
@@ -57,13 +61,16 @@ extension on RelaySessionNotifier {
     }
 
     final origin = Uri.parse(config.baseUrl);
-    final discovery = http.Request('GET', origin.resolve('/'))
-      ..headers['Accept'] = 'application/nostr+json';
     // The relay's CDN gzips both responses. The inflated size is capped too:
     // where the query transport leaves gzip bodies compressed (see
     // RelayHttpQueryClient), the transport cap only sees the compressed
     // bytes.
-    final discovered = await send(discovery, 64 * 1024);
+    final discovered = await send(
+      () =>
+          http.Request('GET', origin.resolve('/'))
+            ..headers['Accept'] = 'application/nostr+json',
+      64 * 1024,
+    );
     final info = jsonDecode(
       relayResponseText(
         discovered.bodyBytes,
@@ -86,18 +93,20 @@ extension on RelaySessionNotifier {
       ]),
     );
     checkContext();
-    final request = http.Request('POST', url)
-      ..bodyBytes = body
-      ..headers.addAll({
-        'Content-Type': 'application/json',
-        'Authorization': buildNip98AuthHeader(
-          method: 'POST',
-          url: url.toString(),
-          bodyBytes: body,
-          nsec: nsec,
-        ),
-      });
-    final response = await send(request, readStateSnapshotMaxEnvelopeBytes);
+    final response = await send(
+      () => http.Request('POST', url)
+        ..bodyBytes = body
+        ..headers.addAll({
+          'Content-Type': 'application/json',
+          'Authorization': buildNip98AuthHeader(
+            method: 'POST',
+            url: url.toString(),
+            bodyBytes: body,
+            nsec: nsec,
+          ),
+        }),
+      readStateSnapshotMaxEnvelopeBytes,
+    );
     // Inflating, parsing and Schnorr verification must not block Flutter's
     // UI isolate.
     final events = await _snapshotDecoder((
