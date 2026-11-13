@@ -9,11 +9,16 @@ import '../theme/community_theme_preference.dart';
 import '../theme/theme_provider.dart';
 
 const _keyPrefix = 'buzz.channel-list.v1';
+const _unreadKeyPrefix = 'buzz.channel-unread.v1';
 const _version = 1;
 
 /// Snapshots beyond these bounds are not stored; the list loads from the relay.
 const maxChannelListSnapshotChannels = 2000;
 const maxChannelListSnapshotBytes = 2 * 1024 * 1024;
+
+/// Unread state beyond this size is not stored; the next launch reads each
+/// channel's full unread window from the relay instead.
+const maxChannelUnreadSnapshotBytes = 1024 * 1024;
 
 /// A disposable, relay-derived channel list for one relay and identity.
 class ChannelListSnapshot {
@@ -140,6 +145,55 @@ class ChannelListSnapshotStorage {
     return saved;
   }
 
+  /// Returns the scope's saved unread state, or null when absent or unusable.
+  /// Its shape belongs to the channel list; this only bounds and stores it.
+  Map<String, dynamic>? readUnread(String pubkey, String relayUrl) {
+    final key = _unreadKey(ChannelListSnapshotStorage.key(pubkey, relayUrl));
+    final raw = _prefs.getString(key);
+    if (raw == null) return null;
+    try {
+      if (raw.length > maxChannelUnreadSnapshotBytes ||
+          utf8.encode(raw).length > maxChannelUnreadSnapshotBytes) {
+        throw const FormatException('size');
+      }
+      final json = jsonDecode(raw) as Map<String, dynamic>;
+      if (json['v'] != _version) throw const FormatException('version');
+      return json['unread'] as Map<String, dynamic>;
+    } catch (_) {
+      _savedValues.remove(key);
+      _prefs.remove(key).ignore();
+      return null;
+    }
+  }
+
+  /// Replaces the scope's unread state under the same write permission as its
+  /// channel list. Returns false when [token] was retired, the state exceeds
+  /// [maxChannelUnreadSnapshotBytes], or storage rejected the write.
+  Future<bool> writeUnread(
+    ChannelListSnapshotToken token,
+    Map<String, dynamic> unread,
+  ) async {
+    if ((_epochs[token._key] ?? 0) != token._epoch) return false;
+    final key = _unreadKey(token._key);
+    final raw = jsonEncode({'v': _version, 'unread': unread});
+    if (utf8.encode(raw).length > maxChannelUnreadSnapshotBytes) {
+      // Older, smaller state no longer describes this scope.
+      _savedValues.remove(key);
+      await _prefs.remove(key);
+      return false;
+    }
+    if (_savedValues[key] == raw && _prefs.getString(key) == raw) return true;
+    _savedValues.remove(key);
+    final saved = await _prefs.setString(key, raw);
+    if (saved && (_epochs[token._key] ?? 0) == token._epoch) {
+      _savedValues[key] = raw;
+    }
+    return saved;
+  }
+
+  static String _unreadKey(String key) =>
+      key.replaceFirst(_keyPrefix, _unreadKeyPrefix);
+
   /// Deletes the scope's snapshot and retires its outstanding tokens.
   ///
   /// Throws on storage failure. Community sign-out treats this as best-effort;
@@ -151,7 +205,13 @@ class ChannelListSnapshotStorage {
   /// Retires and deletes snapshots without a stored community. Failed deletes
   /// remain on disk for retry at the next startup or community mutation.
   Future<void> removeOrphans(Set<String> retainedKeys) async {
-    final keys = {..._prefs.getKeys(), ..._epochs.keys};
+    final keys = {
+      ..._epochs.keys,
+      for (final key in _prefs.getKeys())
+        key.startsWith('$_unreadKeyPrefix:')
+            ? key.replaceFirst(_unreadKeyPrefix, _keyPrefix)
+            : key,
+    };
     // Start every deletion before yielding: later community additions must not
     // have a new writer retired by an older cleanup's delayed next iteration.
     await Future.wait([
@@ -164,9 +224,15 @@ class ChannelListSnapshotStorage {
   }
 
   Future<void> _removeKey(String key) async {
+    final unreadKey = _unreadKey(key);
     _savedValues.remove(key);
+    _savedValues.remove(unreadKey);
     _epochs[key] = (_epochs[key] ?? 0) + 1;
-    if (!await _prefs.remove(key)) {
+    final removed = await Future.wait([
+      _prefs.remove(key),
+      if (_prefs.containsKey(unreadKey)) _prefs.remove(unreadKey),
+    ]);
+    if (removed.contains(false)) {
       throw StateError('Channel list snapshot could not be removed.');
     }
   }

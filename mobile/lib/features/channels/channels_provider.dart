@@ -27,6 +27,7 @@ import 'unread_badge/should_notify_for_event.dart';
 part 'channel_directory.dart';
 part 'channel_unread_deletions.dart';
 part 'channel_unread_catch_up.dart';
+part 'channel_unread_snapshot.dart';
 part 'channel_snapshot.dart';
 part 'channel_member_snapshots.dart';
 part 'channels_provider_lifecycle.dart';
@@ -101,10 +102,9 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   bool _listNoticesReopened = false;
   final Set<String> _reopenedLiveChunks = {};
   final Map<String, int> _latestObservedByChannel = {};
-  // Per channel, when an earlier unread catch-up in this session was sent, and
-  // the read timestamp and mute state it used. See [_UnreadCatchUp].
-  final Map<String, ({int sentAt, int? readAt, bool muted})>
-  _unreadCaughtUpByChannel = {};
+  // Per channel, when an earlier unread catch-up was sent, and what counted as
+  // unread then. See [_UnreadCatchUp].
+  final Map<String, _UnreadCursor> _unreadCaughtUpByChannel = {};
   final Map<String, Map<String, ObservedUnreadEvent>>
   _observedUnreadEventsByChannel = {};
   final Map<String, Set<String>> _unreadDeletedIdsByChannel = {};
@@ -119,6 +119,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   bool _backgroundRefreshQueued = false;
   int _buildGeneration = 0;
   void Function(List<Channel>, Set<String>)? _saveSnapshot;
+  void Function()? _saveUnreadSnapshot;
   String? _memberSnapshotRelayBaseUrl;
   String? _memberSnapshotPubkey;
   Map<String, List<ChannelMember>> _memberSnapshotsByChannelId = const {};
@@ -239,9 +240,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       if (listed == null || !ref.exists(_openedAheadProvider)) return;
       ref.read(_openedAheadProvider.notifier).dropListed(listed);
     });
-    _saveSnapshot = pubkey == null
-        ? null
-        : _captureSnapshotWriter(pubkey, relayBaseUrl);
+    _saveSnapshot = _captureSnapshotWriter(pubkey, relayBaseUrl);
     final connected = Completer<void>();
     var connectionVersion = 0;
     final sessionState = ref.read(relaySessionProvider);

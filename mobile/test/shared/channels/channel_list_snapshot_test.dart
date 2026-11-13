@@ -145,6 +145,37 @@ void main() {
     expect(await storage.write(fresh, _snapshot()), isTrue);
   });
 
+  test('unread state shares its channel list scope and removal', () async {
+    final token = storage.capture(_pubkey, _relay);
+    final unread = {
+      'channels': {
+        'dm-1': {'sentAt': 10},
+      },
+    };
+    expect(await storage.writeUnread(token, unread), isTrue);
+    expect(storage.readUnread('abcdef', 'wss://relay.example/'), unread);
+    expect(storage.readUnread('other', _relay), isNull);
+
+    await ChannelListSnapshotStorage(prefs).remove(_pubkey, _relay);
+    expect(storage.readUnread(_pubkey, _relay), isNull);
+    expect(await storage.writeUnread(token, unread), isFalse);
+
+    // Cleanup finds a scope that has only unread state left.
+    final fresh = storage.capture(_pubkey, _relay);
+    expect(await storage.writeUnread(fresh, unread), isTrue);
+    await storage.removeOrphans({});
+    expect(storage.readUnread(_pubkey, _relay), isNull);
+    expect(await storage.writeUnread(fresh, unread), isFalse);
+  });
+
+  test('oversized unread state replaces the saved state with none', () async {
+    final token = storage.capture(_pubkey, _relay);
+    await storage.writeUnread(token, {'channels': <String, dynamic>{}});
+    final huge = {'pad': 'x' * maxChannelUnreadSnapshotBytes};
+    expect(await storage.writeUnread(token, huge), isFalse);
+    expect(storage.readUnread(_pubkey, _relay), isNull);
+  });
+
   test('corrupt, unsupported and oversized data is discarded', () async {
     final key = ChannelListSnapshotStorage.key(_pubkey, _relay);
     final tooMany = List.filled(maxChannelListSnapshotChannels + 1, '{}');

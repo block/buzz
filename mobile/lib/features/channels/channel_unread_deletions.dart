@@ -35,7 +35,12 @@ extension _UnreadDeletions on ChannelsNotifier {
       // The deleted event may have been the marker standing in for a full
       // window of quiet messages, which can hide older unread ones. Read the
       // channel's whole window again rather than only since the last read.
-      if (observed?.length != before) _unreadCaughtUpByChannel.remove(id);
+      // The cursor stays, stale, so that window replaces what it found.
+      if (observed?.length != before) {
+        if (_unreadCaughtUpByChannel[id] case final cursor?) {
+          _unreadCaughtUpByChannel[id] = cursor.withFollows(_staleFollows);
+        }
+      }
       if (observed == null || observed.isEmpty) {
         _observedUnreadEventsByChannel.remove(id);
         _latestObservedByChannel.remove(id);

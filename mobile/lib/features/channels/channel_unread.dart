@@ -61,6 +61,8 @@ Set<String> computeUnreadChannelIds({
     final observedEvents = observedEventsByChannel[channel.id];
     if (observedEvents == null) continue;
     for (final event in observedEvents.values) {
+      // Restored without its payload: no Activity row to open yet.
+      if (event.threadReplyPending) continue;
       final readAt = observedUnreadEventReadAt(
         event,
         channel.id,
