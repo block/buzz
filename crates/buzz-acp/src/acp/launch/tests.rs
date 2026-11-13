@@ -220,6 +220,7 @@ async fn spawn_child() {
                         Some(StandardAdapterKind::Codex)
                     }
                     "claude-agent-acp" => Some(StandardAdapterKind::Claude),
+                    "hermes-acp" => Some(StandardAdapterKind::Hermes),
                     _ => None,
                 };
                 assert_eq!(client.standard_adapter, adapter);
