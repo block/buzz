@@ -140,6 +140,103 @@ void main() {
     ]);
   });
 
+  test(
+    'voice discovery requires a verified explicit capability or legacy Codex',
+    () async {
+      const capability = 'huddle-voice-v1';
+      final cases = <(String, String, String, bool)>[
+        ('legacy Codex', 'buzz.codex/codex', '{"name":"Agent"}', true),
+        ('unknown runtime', 'example.agent/custom', '{"name":"Agent"}', false),
+        (
+          'custom voice',
+          'example.agent/custom',
+          '{"name":"Agent","capabilities":["$capability"]}',
+          true,
+        ),
+        (
+          'explicit removal',
+          'buzz.codex/codex',
+          '{"name":"Agent","capabilities":[]}',
+          false,
+        ),
+        (
+          'unrelated capability',
+          'buzz.codex/codex',
+          '{"name":"Agent","capabilities":["other-v1"]}',
+          false,
+        ),
+        (
+          'malformed declaration',
+          'buzz.codex/codex',
+          '{"name":"Agent","capabilities":null}',
+          false,
+        ),
+        (
+          'mixed declaration',
+          'example.agent/custom',
+          '{"name":"Agent","capabilities":["$capability",1]}',
+          false,
+        ),
+      ];
+      for (final (label, runtime, content, expected) in cases) {
+        final event = registration(
+          fakeAgent,
+          runtime: runtime,
+          content: content,
+        );
+        final found = await loadOwnedAgentDirectory(
+          fakeOwner.public,
+          (filter) async => filter.kinds.contains(30177)
+              ? [event]
+              : [signedAgentProfile(fakeAgentKeys, fakeOwner)],
+        );
+        expect(found.single.supportsHuddleVoice, expected, reason: label);
+        // A relay cannot add a capability by changing signed content or signature.
+        final forged = NostrEvent.fromJson({
+          ...event.toJson(),
+          'sig': '0' * 128,
+        });
+        final rejected = await loadOwnedAgentDirectory(
+          fakeOwner.public,
+          (filter) async => filter.kinds.contains(30177)
+              ? [forged]
+              : [signedAgentProfile(fakeAgentKeys, fakeOwner)],
+        );
+        expect(
+          rejected.single.supportsHuddleVoice,
+          false,
+          reason: '$label forged',
+        );
+      }
+      final capable = registration(
+        fakeAgent,
+        runtime: 'example.agent/custom',
+        content: '{"name":"Agent","capabilities":["$capability"]}',
+      );
+      final otherOwner = nostr.Keys('0' * 63 + '3');
+      final wrongOwner = await loadOwnedAgentDirectory(
+        fakeOwner.public,
+        (filter) async => filter.kinds.contains(30177)
+            ? [capable]
+            : [signedAgentProfile(fakeAgentKeys, otherOwner)],
+      );
+      expect(wrongOwner, isEmpty);
+      final removed = registration(
+        fakeAgent,
+        runtime: 'example.agent/custom',
+        content: '{"name":"Agent","capabilities":[]}',
+        createdAt: 2,
+      );
+      final latest = await loadOwnedAgentDirectory(
+        fakeOwner.public,
+        (filter) async => filter.kinds.contains(30177)
+            ? [capable, removed]
+            : [signedAgentProfile(fakeAgentKeys, fakeOwner)],
+      );
+      expect(latest.single.supportsHuddleVoice, false);
+    },
+  );
+
   test('a relay that never ends pagination fails within the budget', () async {
     final template = registration(fakeAgent).toJson();
     var pages = 0;

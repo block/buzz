@@ -104,6 +104,22 @@ and reconnect sign-in for a public build's `BUZZ_BUILDERLAB_RELAYS`. It
 defaults off: configure backend assertion issuance before enabling mobile
 authentication, and enable relay enforcement last.
 
+## Agent Huddle discovery
+
+Mobile offers voice in an owner’s one-to-one agent DM when the latest verified,
+owner-signed kind:30177 registration declares `content.capabilities` as a string
+array containing `huddle-voice-v1`. The agent profile must independently prove
+that same owner. Archived agents are excluded. This advertises support only;
+the hosting desktop still checks its current voice implementation, protection,
+and room access before connecting.
+
+An explicit capabilities array without that token disables voice discovery,
+including for Codex. A malformed capabilities field also disables discovery.
+Only registrations that omit the field retain the legacy `buzz.codex/codex`
+fallback. Other runtime names alone never advertise voice. The latest signed
+registration is checked again for new calls, joining existing calls, confirming
+an invitation, and recovery.
+
 ## Setup
 
 Use the Flutter SDK pinned by the repository. Activate Hermit from the repo

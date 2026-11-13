@@ -270,7 +270,7 @@ IosNavigationAction _huddleNavigationAction(
               title: 'Start a Huddle?',
               message: voiceAgent == null
                   ? 'Your microphone will turn on, and others in this conversation can join.'
-                  : 'Your microphone will turn on and your Codex agent will be invited. Keep Buzz open on the desktop running this agent.',
+                  : 'Your microphone will turn on and your agent will be invited. Keep Buzz open on the desktop running this agent.',
               confirmLabel: 'Start Huddle',
             );
             if (!confirmed || !context.mounted) return;

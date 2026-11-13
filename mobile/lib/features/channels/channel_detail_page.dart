@@ -467,7 +467,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
         ? dmVoiceAgent(
             resolvedChannel,
             ref.watch(myPubkeyProvider),
-            ref.watch(ownedCodexVoiceAgentsProvider).value ?? const {},
+            ref.watch(ownedVoiceAgentsProvider).value ?? const {},
           )
         : null;
     final showsHuddleAction =
