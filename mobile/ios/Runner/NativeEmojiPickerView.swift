@@ -442,8 +442,10 @@ struct NativeEmojiRemoteImage: View {
 
 /// SwiftUI's `Image` draws only the first frame of an animated `UIImage`;
 /// a `UIImageView` plays every frame.
+/// With Reduce Motion on it shows the first frame, following the setting live.
 private struct NativeEmojiAnimatedImage: UIViewRepresentable {
   let image: UIImage
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
   func makeUIView(context: Context) -> UIImageView {
     let view = UIImageView()
@@ -454,12 +456,15 @@ private struct NativeEmojiAnimatedImage: UIViewRepresentable {
   }
 
   func updateUIView(_ view: UIImageView, context: Context) {
-    if view.image !== image { view.image = image }
+    let shown = reduceMotion ? image.images?.first ?? image : image
+    if view.image !== shown { view.image = shown }
   }
 }
 
-/// Decoded custom emoji, keyed by URL, so reopening the picker shows them
-/// without asking Flutter again. Flutter owns the bytes and their disk cache.
+/// Decoded custom emoji, keyed by URL, so scrolling back within one picker
+/// presentation doesn't decode again. Flutter owns the bytes and their memory
+/// and disk caches, which it scopes to the signed-in identity, so this cache is
+/// emptied each time the picker opens rather than outliving an account switch.
 enum NativeEmojiRemoteImageCache {
   private static let cache: NSCache<NSString, UIImage> = {
     let cache = NSCache<NSString, UIImage>()
@@ -470,19 +475,29 @@ enum NativeEmojiRemoteImageCache {
   /// The picker's 28-point custom emoji glyph at 3x.
   private static let maximumPixelSize = 84
 
+  /// Bumped by `reset()` so a decode from an earlier presentation is not cached.
+  @MainActor private static var generation = 0
+
+  @MainActor
+  static func reset() {
+    generation += 1
+    cache.removeAllObjects()
+  }
+
   @MainActor
   static func image(for url: URL) async throws -> UIImage {
     let key = url.absoluteString as NSString
     if let cached = cache.object(forKey: key) { return cached }
+    let started = generation
     let bytes = try await NativeEmojiPickerCoordinator.mediaBytes(for: url)
     let decoded = await Task.detached(priority: .userInitiated) {
       NativeMessageImageLoader.decode(bytes, maximumPixelSize: maximumPixelSize)
     }.value
     guard let decoded else { throw NativeEmojiRemoteImageError.invalidImage }
-    let image =
-      UIAccessibility.isReduceMotionEnabled ? decoded.images?.first ?? decoded : decoded
-    cache.setObject(image, forKey: key, cost: cost(of: image))
-    return image
+    if generation == started {
+      cache.setObject(decoded, forKey: key, cost: cost(of: decoded))
+    }
+    return decoded
   }
 
   private static func cost(of image: UIImage) -> Int {
