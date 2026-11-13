@@ -91,7 +91,6 @@ final class NativeEmojiPickerCoordinator: NSObject,
     // A sheet is already owned by an earlier caller; report busy rather than a
     // successful presentation so the caller does not treat this as its own.
     guard presentedController == nil else { return false }
-    NativeEmojiRemoteImageCache.reset()
     guard
       let data = NativeEmojiPickerDataLoader.load(arguments: arguments),
       let presenter = topViewController(

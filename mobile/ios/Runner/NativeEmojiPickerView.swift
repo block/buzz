@@ -432,7 +432,7 @@ struct NativeEmojiRemoteImage: View {
     }
     .task(id: url) {
       do {
-        phase = .success(try await NativeEmojiRemoteImageCache.image(for: url))
+        phase = .success(try await NativeEmojiRemoteImageLoader.image(for: url))
       } catch {
         if !Task.isCancelled { phase = .failure }
       }
@@ -461,51 +461,20 @@ private struct NativeEmojiAnimatedImage: UIViewRepresentable {
   }
 }
 
-/// Decoded custom emoji, keyed by URL, so scrolling back within one picker
-/// presentation doesn't decode again. Flutter owns the bytes and their memory
-/// and disk caches, which it scopes to the signed-in identity, so this cache is
-/// emptied each time the picker opens rather than outliving an account switch.
-enum NativeEmojiRemoteImageCache {
-  private static let cache: NSCache<NSString, UIImage> = {
-    let cache = NSCache<NSString, UIImage>()
-    cache.totalCostLimit = 32 * 1024 * 1024
-    return cache
-  }()
-
+/// Custom emoji, decoded at the picker's glyph size. Flutter serves the bytes
+/// from its memory and disk caches, so a reopen never downloads again.
+enum NativeEmojiRemoteImageLoader {
   /// The picker's 28-point custom emoji glyph at 3x.
   private static let maximumPixelSize = 84
 
-  /// Bumped by `reset()` so a decode from an earlier presentation is not cached.
-  @MainActor private static var generation = 0
-
-  @MainActor
-  static func reset() {
-    generation += 1
-    cache.removeAllObjects()
-  }
-
   @MainActor
   static func image(for url: URL) async throws -> UIImage {
-    let key = url.absoluteString as NSString
-    if let cached = cache.object(forKey: key) { return cached }
-    let started = generation
     let bytes = try await NativeEmojiPickerCoordinator.mediaBytes(for: url)
     let decoded = await Task.detached(priority: .userInitiated) {
       NativeMessageImageLoader.decode(bytes, maximumPixelSize: maximumPixelSize)
     }.value
     guard let decoded else { throw NativeEmojiRemoteImageError.invalidImage }
-    if generation == started {
-      cache.setObject(decoded, forKey: key, cost: cost(of: decoded))
-    }
     return decoded
-  }
-
-  private static func cost(of image: UIImage) -> Int {
-    let frames = image.images ?? [image]
-    return frames.reduce(0) { total, frame in
-      guard let cgImage = frame.cgImage else { return total }
-      return total + cgImage.bytesPerRow * cgImage.height
-    }
   }
 }
 
