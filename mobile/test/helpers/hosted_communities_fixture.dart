@@ -92,6 +92,7 @@ class HostedCommunitiesFixture {
   bool rejectList = false;
   bool rejectCurrent = false;
   bool expired = false;
+  bool unavailableAccount = false;
   String subject = 'owner';
   Future<void> Function(String)? beforeAdmission;
   Future<void> Function()? beforeList;
@@ -118,6 +119,7 @@ class HostedCommunitiesFixture {
           );
         }
         if (path.endsWith('/me')) {
+          if (unavailableAccount) return http.Response('{}', 503);
           if (expired) return http.Response('{}', 401);
           return http.Response(
             jsonEncode({
